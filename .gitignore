@@ -1,0 +1,13 @@
+node_modules/
+coverage/
+dist/
+*.tsbuildinfo
+.DS_Store
+.env
+.env.*
+!.env.example
+.codeestra/worktrees/
+.codeestra/runtime/
+.codeestra/logs/
+.codeestra/*.sqlite*
+.codeestra/*.db*
