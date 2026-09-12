@@ -49,7 +49,9 @@ type CommandEnvelope<T extends string, P> = {
 | RevisionDelivered / RevisionAcknowledged | executionId, revisionId, deliveryKey, evidenceRef |
 | UserAttentionRequested | attentionId, sessionId, kind（敏感提示另存） |
 | UserAnswerRecorded / UserAnswerDelivered | attentionId, answerId；不默认广播敏感回答正文 |
-| ExecutionResultCaptured | executionId, appliedRevisionId, resultCommit |
+| ResultCommitAuthorizationRequested | executionId, revisionId, expectedHead, changeFingerprint；差异内容另按安全策略查询 |
+| ResultCommitAuthorized / ResultCommitAuthorizationInvalidated | authorizationId, executionId, revisionId, expectedHead, changeFingerprint, actor / reason |
+| ExecutionResultCaptured | executionId, appliedRevisionId, resultCommit, authorizationId |
 | ExecutionFailed / ExecutionCancelled / ExecutionSuperseded | executionId, reason, stopEvidenceRef |
 | RecoveryRequired | resourceType, resourceId, reason |
 | VerificationCompleted / VerificationInvalidated | verificationId, scope, testedCommit, revisionId/batchId, result/reason |

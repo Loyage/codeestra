@@ -1,6 +1,6 @@
 # SQLite Schema
 
-状态：逻辑 SQL 设计基线，不是已发布 migration。Phase 0/1 只落地该阶段需要的子集；未来字段与表不提前创建。Drizzle schema 必须与下面的约束等价。
+状态：逻辑 SQL 设计基线；`packages/storage/src/migration.ts` 已落地 schema version 1 的 Phase 1 子集，尚不是对外发布 migration。未来字段与表不提前创建。后续 Drizzle schema 必须与下面的约束等价。
 
 ## 1. 约定
 
@@ -24,6 +24,20 @@ CREATE TABLE projects (
   policy_version INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE project_trusts (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  repo_root TEXT NOT NULL,
+  git_common_dir TEXT NOT NULL,
+  object_format TEXT NOT NULL CHECK(object_format IN ('sha1','sha256')),
+  policy_version INTEGER NOT NULL,
+  actor TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('ACTIVE','INVALIDATED')),
+  accepted_at INTEGER NOT NULL,
+  invalidated_at INTEGER
+);
+CREATE UNIQUE INDEX one_active_project_trust
+  ON project_trusts(project_id) WHERE status='ACTIVE';
 CREATE TABLE intents (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id),
@@ -91,7 +105,9 @@ CREATE INDEX tasks_schedule ON tasks(project_id,state,priority DESC,created_at,i
 CREATE INDEX dependencies_upstream ON task_dependencies(prerequisite_task_id);
 ```
 
-创建 Task 与首 Revision 必须在同一事务，延迟 FK 于 commit 检验。Revision append-only 由 storage API 和防 UPDATE/DELETE trigger 保护（migration 测试必须覆盖）。DAG 环检测在 `BEGIN IMMEDIATE` 下读取并插入，不仅依赖自环 CHECK。
+`project_trusts` 保留用户接受时的仓库身份快照；ACTIVE/INVALIDATED 与时间戳一致性由 migration CHECK 强制。启动执行或 hooks 前重新检查 Project 当前 canonical identity，变化时使 ACTIVE trust 失效，而不是静默更新快照。
+
+创建 Task 与首 Revision 必须在同一事务，延迟 FK 于 commit 检验。Phase 1 首入口同时保存原始 Intent、IntentTarget、IntentRecorded、TaskCreated 与 command receipt；新 Task 为 DRAFT，显式 submit 前不可调度。Revision append-only 由 storage API 和防 UPDATE/DELETE trigger 保护（migration 测试必须覆盖）。DAG 环检测在 `BEGIN IMMEDIATE` 下读取并插入，不仅依赖自环 CHECK。
 
 ## 3. Git、执行、会话与交互
 
@@ -134,6 +150,25 @@ CREATE TABLE executions (
   FOREIGN KEY(task_id,workspace_id) REFERENCES workspaces(task_id,id)
 );
 CREATE UNIQUE INDEX one_held_execution ON executions(task_id) WHERE resource_held=1;
+CREATE TABLE result_commit_authorizations (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  execution_id TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  expected_head TEXT NOT NULL,
+  change_fingerprint TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('ACTIVE','CONSUMED','INVALIDATED')),
+  created_at INTEGER NOT NULL,
+  consumed_at INTEGER,
+  invalidated_at INTEGER,
+  FOREIGN KEY(task_id,execution_id) REFERENCES executions(task_id,id),
+  FOREIGN KEY(task_id,revision_id) REFERENCES task_revisions(task_id,id),
+  FOREIGN KEY(task_id,workspace_id) REFERENCES workspaces(task_id,id)
+);
+CREATE UNIQUE INDEX one_active_result_commit_authorization
+  ON result_commit_authorizations(execution_id) WHERE status='ACTIVE';
 CREATE TABLE agent_sessions (
   id TEXT PRIMARY KEY,
   execution_id TEXT NOT NULL UNIQUE REFERENCES executions(id),
@@ -184,6 +219,8 @@ CREATE TABLE attention_answers (
 活动资源唯一性以 resource_held 而非心跳超时决定。即使 Runtime 的 lease 过期，也不能在未知进程仍可能写入时抢占 workspace。终态与 resource_held=0 的一致性在正式 CHECK/事务服务中强制；确认停止前不得置 0。
 
 Agent adapter_id 的权威来源为 Execution，不在多处维护可能不一致的主 Agent。provider session ID 是否跨项目唯一由 Adapter 决定，数据库不擅自全局唯一。
+
+`result_commit_authorizations` 是一次性授权，不是长期项目权限。消费时事务需重验 execution 当前 applied revision、workspace 归属、expected HEAD 与实时 ChangeSet fingerprint；任一变化先 INVALIDATED，再请求新确认。Commit 是外部副作用，成功后再崩溃时通过 Operation 与 HEAD/OID reconcile 补记，不能仅靠数据库事务假装原子。
 
 ## 4. 影响与冲突（Phase 2）
 
@@ -279,6 +316,8 @@ CREATE INDEX verification_subject ON verification_runs(task_id,revision_id,teste
 
 应用事务还需检查：成员同项目；execution 的实际产出与 applied revision 匹配；审批引用本 batch 的 PASSED 集成验证；同一 Task 不被两个活动批次同时提升。后者 Phase 4 以 batch claims 表或等价事务锁实现，正式 migration 前补齐。
 
+Schema version 1 仅创建 TASK verification 所需列和复合外键，不创建 `integration_batches`、`integration_batch_items`、`integration_approvals` 或 INTEGRATION scope；Phase 4 migration 引入上述逻辑形态并补做 subject XOR 测试。
+
 ## 6. 操作日志、事件、幂等
 
 ```sql
@@ -332,6 +371,10 @@ CREATE INDEX delivery_retry ON event_deliveries(state,next_attempt_at);
 
 domain_events 是持久事实，event_deliveries 是可变投递 outbox。相同 command ID、不同 payload 必须拒绝。事件 version 允许同一次聚合事务产生多个事实，不能错误地对 aggregateVersion 建唯一约束。
 
+Phase 1 workspace prepare 已按此模型先事务写入 Workspace RESERVED 与 Operation PLANNED，再置 PREPARING/IN_PROGRESS 后调用 Git；成功记录 READY/SUCCEEDED 与 WorkspacePrepared。确定未进入副作用的失败可记 FAILED/RELEASED，副作用可能部分发生则保守记 RECONCILE_REQUIRED/RECOVERY_REQUIRED。Runtime 启动时已自动扫描并核对 workspace Operation，不重放 Git；其他 Operation 类型仍待实现。
+
+Execution 预留已在单事务中固定 current revision/workspace/base/adapter/attempt，将 workspace READY→IN_USE 与 Task READY→RUNNING，并写 ExecutionReserved、TaskStateChanged 和幂等回执。Agent start 仍须使用独立 Operation，不能把 CREATED Execution 当成 Session 已启动。
+
 ## 7. Self Evolution（Phase 7 预留逻辑表）
 
 - `candidate_versions(id, self_task_id FK, source_commit, artifact_ref, artifact_hash, build_manifest_json, compatibility_json, state, created_at)`。
@@ -342,6 +385,6 @@ Stable pointer/版本清单由 bootstrap 独立管理；Runtime 数据库不可�
 
 ## 8. Migration 与验收
 
-Phase 1 migration 只含实际使用表；Task 创建循环 FK、revision 不可变、活动 Execution 唯一、CAS 失败、验证 subject XOR、outbox 事务回滚、重复命令至少有真实 SQLite 测试。Phase 2/4 分阶段新增表和索引。
+Phase 1 migration 只含实际使用表；Task 创建循环 FK、revision 不可变、活动 Execution 唯一、成果 commit 授权状态/一次性活动唯一性、CAS 失败、Task verification 复合主体外键、outbox 事务回滚、重复命令至少有真实 SQLite 测试。Integration verification subject XOR 随 Phase 4 表一起加入测试。Phase 2/4 分阶段新增表和索引。
 
 升级前检查 schema version，未知较新版本拒绝写入。没有通过备份恢复验证前不执行破坏性 migration；Self Evolution 的跨版本回滚策略为单独准入门禁。

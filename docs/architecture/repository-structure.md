@@ -24,7 +24,7 @@ Scheduler、ExecutionCoordinator、IntegrationCoordinator 是 runtime 内不同�
 
 ## 2. 当前实际创建范围
 
-Phase 0 第一小步仅建立根 workspace 与 `packages/domain`。不提前创建没有实现的 app、Adapter 或 bootstrap package，也不提供空函数冒充运行时。
+当前建立根 workspace、`packages/domain`、`packages/storage`、`packages/contracts`、只读检查用 `packages/git`，以及最小 `apps/cli` / `apps/runtime` 项目接入骨架。不提前创建没有实现的 Adapter、Desktop 或 bootstrap package，也不提供空函数冒充运行时。
 
 根配置：`package.json`、`bun.lock`、`tsconfig.json`、`vitest.config.ts`、`.gitignore`、`README.md`。工具使用 Nix 提供的 Bun；项目依赖在本地 workspace 安装，不全局安装 npm 工具。
 
@@ -33,7 +33,7 @@ Domain 第一批：
 - Execution 状态迁移及终态保护；
 - 类型检查、非法输入和不变量测试。
 
-此批不包含 Task 调度、持久化、进程控制或真实暂停证明。纯函数接收的 evidence 是应用层提供的已验证事实，不能自证真实进程静止。
+Storage 第一批使用 Bun 原生 SQLite，包含 Phase 1 子集 migration、revision append-only trigger、活动资源/授权约束、CAS 与 command receipt 事务原语。CLI/Runtime 目前提供版本化本用户 IPC、后台启动、项目 inspect/trust/list，以及 Task create/list/submit；Runtime 应用服务以持久 Operation 包裹 Git owned worktree prepare，启动时核对未完成 workspace Operation，并可原子预留 Execution。仍无自动 Scheduler、Agent start/Session 或执行结果闭环。Drizzle 映射、完整 repository、进程 reconcile 和真实暂停证明尚未实现。Domain 纯函数接收的 evidence 是应用层提供的已验证事实，不能自证真实进程静止。
 
 ## 3. 依赖与测试边界
 

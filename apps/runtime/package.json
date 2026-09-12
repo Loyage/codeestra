@@ -1,0 +1,11 @@
+{
+  "name": "@codeestra/runtime",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@codeestra/contracts": "workspace:*",
+    "@codeestra/git": "workspace:*",
+    "@codeestra/storage": "workspace:*"
+  }
+}

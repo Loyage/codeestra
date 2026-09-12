@@ -1,6 +1,6 @@
 # Agent Adapter API
 
-状态：Runtime port 设计，不是 Pi SDK API 的复述。Pi 技术验证尚未执行，禁止将下面的能力宣称为 Pi 已支持。
+状态：Runtime port 设计，不是 Pi SDK API 的复述。Pi 0.84.4 首轮文档核对与受控 RPC spike 已完成，结论见 [`../spikes/pi-0.84.4.md`](../spikes/pi-0.84.4.md)；commit/trust 产品策略已确认，Pi fail-closed gate 与真实执行门禁仍未实现。
 
 ## 1. 合约草案
 
@@ -114,11 +114,11 @@ type AdapterEvent = {
 
 ## 3. Phase 1 Pi Spike 验收门禁
 
-1. 阅读当前安装版本的 Pi SDK/RPC/Session 文档与相关 examples，固定依赖版本与许可证信息。
-2. 验证启动、事件流、原生权限审批、结构化问题和真实回答通路。
-3. 验证请求中断后是否有可靠 tool/process 静止信号；不能证明则明确能力限制。
-4. 验证会话持久化引用、UI detach、Runtime 重启后的真实恢复边界。
-5. 验证 Session attach 或最小原生交互入口，不通过影子 conversation 替代。
-6. 测试修订、取消超时、启动部分失败、事件重投、孤儿进程。
+1. [已完成首轮] 阅读 Pi 0.84.4 SDK/RPC/Session/extension 文档与 examples，固定版本 0.84.4、MIT、Node `>=22.19.0`。
+2. [部分完成] 验证 RPC 启动/事件与 extension UI 权限、结构化问题、真实回答通路；仍需实现 Codeestra fail-closed gate extension。
+3. [部分完成] 内置 bash abort/process-group spike 通过；任意 extension/逃逸进程不在保证内，限定工具集仍需逐项验证。
+4. [已明确边界] 持久 conversation 可跨进程恢复；不能重接失去 stdio 的 live Pi 进程。
+5. [部分完成] Runtime 持有 RPC pipes 时可提供结构化 attach；Runtime 重启后的 live attach 不支持。
+6. [未完成] 测试修订 fallback、取消超时、启动部分失败、事件重投、孤儿进程。
 
-Phase 1 能否开始真实运行以此门禁为准。Phase 0 的纯领域代码与 fake adapter 不依赖这些未经验证能力。
+Pi 0.84.4 没有 pause/resume 与可靠 revision ACK 原语。Phase 1 运行中修订必须走停止、确认静止、旧 Execution `SUPERSEDED`、新 Execution 完整启动的 fallback。真实运行仍受 Git 授权与其余门禁约束；fake adapter 不能替代这些验收。

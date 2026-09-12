@@ -4,9 +4,9 @@ Task-first、local-first 的 AI Development Runtime。用户管理产品意图�
 
 ## 当前状态
 
-架构基线与八项用户决策已记录。已实现 **Phase 0 第一小步**：Bun workspace、严格 TypeScript、Vitest、不可变 TaskRevision、Execution 纯状态机及不变量测试。
+架构基线与已确认决策已记录。已实现 Phase 0 领域基础、Phase 1 SQLite storage 第一小步，以及最小 CLI/独立 Runtime 骨架：CLI 可自动启动后台 Runtime、显式信任项目，并按 Project ID 创建、列出和提交 Task。Task 创建会原子保存原始 Intent、首 Revision、事实事件与幂等回执；submit 使用 expected version 将 DRAFT 转为 READY。
 
-这不是可运行的 AI 编排产品。尚无 Runtime 进程、数据库 migration、真实 Pi Adapter、Git 自动操作、桌面 UI 或集成流水线。RECOVERY_REQUIRED 和 Runtime shutdown 的完整处理也未实现，不能声称支持真实会话恢复。
+这还不是完整的 AI 编排产品。尚无自动 Scheduler、fake/真实 Pi Adapter、Agent Session 启动、Git 自动成果 commit、桌面 UI 或集成流水线。Runtime 已有 Operation 包裹的 workspace prepare、启动恢复扫描和原子 Execution 预留，但尚未形成 Agent 执行闭环。
 
 ## 文档
 
@@ -23,30 +23,44 @@ Task-first、local-first 的 AI Development Runtime。用户管理产品意图�
 使用 Nix 提供工具，无需全局 npm 安装：
 
 ```sh
-nix shell nixpkgs#bun nixpkgs#nodejs_24
-bun install --frozen-lockfile
-bun run check
-bun audit
+nix shell nixpkgs#bun nixpkgs#nodejs_24 nixpkgs#just
+just install
+just verify
 ```
 
-或在已具备上述工具的环境直接执行后三条命令。`bun run check` 包含类型检查和 Vitest 单次运行，不启动监听服务器。当前 nixpkgs 没有仓库级 pin，精确可复现的 Nix devShell 是后续工程任务；项目依赖已由 `bun.lock` 固定。
+可用命令通过 `just` 或 `just --list` 查看；其中 `just check` 包含类型检查、Vitest domain 测试和 Bun 原生 SQLite 测试，`just verify` 还会执行依赖漏洞检查。也可直接使用 `bun install --frozen-lockfile`、`bun run check` 和 `bun audit`。当前 nixpkgs 没有仓库级 pin，精确可复现的 Nix devShell 是后续工程任务；项目依赖已由 `bun.lock` 固定。
+
+首次 CLI 骨架可用临时数据目录试运行：
+
+```sh
+export CODEESTRA_HOME=/tmp/codeestra-demo
+bun run codeestra status
+bun run codeestra project inspect /path/to/repo
+bun run codeestra project trust /path/to/repo
+bun run codeestra project list
+bun run codeestra task create <project-id> "Implement one focused change"
+bun run codeestra task list <project-id>
+bun run codeestra task submit <project-id> <task-id> <expected-version>
+bun run codeestra stop
+```
+
+`project trust` 会展示固定仓库身份并要求输入 `TRUST`；`--yes` 仅用于明确的非交互确认。当前不要把该入口理解为已能运行 Agent。
 
 ## 当前代码
 
 ```text
-packages/domain/
-├── src/
-│   ├── errors.ts
-│   ├── task-revision.ts
-│   ├── execution.ts
-│   └── index.ts
-└── test/
-    ├── task-revision.test.ts
-    └── execution.test.ts
+apps/
+├── cli/                # 首个用户入口；自动连接/启动 Runtime
+└── runtime/            # 本用户 Unix socket 与项目接入
+packages/
+├── contracts/          # Zod IPC 边界
+├── domain/             # 纯 TypeScript revision / Execution 领域逻辑
+├── git/                # Git 身份检查与固定基线 owned worktree prepare
+└── storage/            # Bun SQLite Phase 1 migration 与事务原语
 ```
 
 Domain 不依赖 Bun、SQLite、Tauri 或 Agent SDK。函数只计算不可变状态，不启动/暂停进程。暂停/退出证据必须由后续应用层真实核验；传入布尔值的测试不证明真实 Agent 已停止写入。
 
 ## 下一步
 
-先完成 Pi 当前版本协议与原生审批能力验证，并确认任务成果自动 commit 的授权/身份/hooks 策略，再进入 Phase 1 storage 与独立 Runtime 实现。后续阶段按 roadmap 推进，不同时搭建全部模块。
+下一纵向小步是 Execution PREPARING/STARTING、Agent start Operation 与 deterministic fake adapter 闭环；随后接入 Pi RPC framing、受控 gate extension 和成果 commit 一次性授权服务。当前 IPC 单实例竞态、非 workspace Operation reconcile 与完整崩溃恢复仍需补齐测试。

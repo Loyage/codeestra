@@ -4,17 +4,20 @@
 
 - [ADR-0001](0001-runtime-safety-baseline.md)：运行修订先暂停、依赖上游进入 main、每批 main 提升用户批准、独立本地 Runtime。
 - [ADR-0002](0002-execution-and-promotion-policy.md)：首个 Adapter 为 Pi、保留原生审批、协作取消与不抢占、Stable 切换等待排空。
+- [ADR-0003](0003-task-result-commit-policy.md)：每次成果 commit 前确认固定差异；沿用仓库 identity；trust 后执行 hooks；全基线差异配合敏感路径拒绝。
+- [ADR-0004](0004-minimum-usable-runtime.md)：CLI 首入口并自动启动独立 Runtime；项目显式一次信任；Pi 敏感操作逐次审批、未知工具拒绝。
+- [ADR-0005](0005-task-entry-and-worktree-location.md)：Task CLI 使用 Project ID，新建为 DRAFT；owned worktree 位于 Runtime 数据目录而非用户仓库。
 
-这八项由用户明确答复。用户给定的硬性原则见 `PROJECT_SPEC.md`，无需重复确认。
+以上选择均由用户明确答复。用户给定的硬性原则见 `PROJECT_SPEC.md`，无需重复确认。
 
 ## 阶段准入与待决项
 
 | 阶段 | 尚需确认/验证 | 当前处理 |
 |---|---|---|
 | Phase 0 纯领域工程 | 无影响该小步的未决产品语义 | 可实现 revision、Execution FSM 和测试骨架，不实现副作用 |
-| Phase 1 | Pi 真实审批/交互/暂停/恢复能力与接入协议 | 先做文档和真实 spike；不虚构权限审批能力 |
-| Phase 1 | Runtime 自动创建成果 commit 的授权、身份、hooks 策略 | 未确认前不自动提交任何用户项目文件 |
-| Phase 1 | 本地 IPC、进程托管与首次项目信任入口 | 技术方案需验证；涉及用户权限行为的部分再询问 |
+| Phase 1 | Pi 真实审批/交互/暂停/恢复能力与接入协议 | Pi 0.84.4 首轮 RPC spike 已完成：extension UI 可路由权限/问题，持久 conversation 可恢复；无 pause/revision ACK/live-process reconnect，见 `docs/spikes/pi-0.84.4.md`。受控 gate 与失败场景仍需实现验证 |
+| Phase 1 | Runtime 创建成果 commit 的授权、identity、hooks、staging 策略 | 已由 ADR-0003 确认；实现需精确绑定用户确认与 ChangeSet，仍不得自动 main/push |
+| Phase 1 | 本地 IPC、进程托管与首次项目信任入口 | 产品行为已由 ADR-0004 确认；本用户 IPC、单实例与后台进程托管仍需实现验证 |
 | Phase 2 | 上游被修订时依赖锁定 revision 怎样更新 | 未明确前暂停该边调度并请求澄清，不自行跟随或固定旧需求 |
 | Phase 4 | merge 形态、失败批次拆分、main 已 checkout 的安全交接 | 不自动部分提升；不更新用户工作目录；实现前确认 |
 | Phase 7 | migration/备份兼容策略、bootstrap 自身更新授权 | 禁止自动实现不可逆升级；实现前确认 |
