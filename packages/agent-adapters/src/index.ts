@@ -1,3 +1,21 @@
+export {
+  buildPiRpcArguments,
+  codeestraPermissionTitlePrefix,
+  encodePiExtensionUiResponse,
+  encodePiRpcRecord,
+  mapPiExtensionUiRequest,
+  PiRpcJsonlDecoder,
+  PiRpcProtocolError,
+  piExtensionUiResponseRecord,
+} from './pi-rpc.js';
+export { classifyPiTool } from './pi-gate-extension.js';
+export type { GateDecision } from './pi-gate-extension.js';
+export { readProcessStartToken } from './pi-identity.js';
+export { PiRpcClient, PiRpcProcessError } from './pi-process.js';
+export type { PiRpcEnvelope, PiRpcErrorCode } from './pi-process.js';
+export { PiRpcAdapter } from './pi-adapter.js';
+export type { PiRpcAdapterOptions } from './pi-adapter.js';
+
 import type {
   AdapterCapabilities,
   AgentAnswerAdapter,

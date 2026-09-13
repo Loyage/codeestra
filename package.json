@@ -8,7 +8,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:storage": "bun test packages/contracts/test packages/storage/test packages/git/test apps/runtime/test",
+    "test:storage": "bun test packages/contracts/test packages/storage/test packages/git/test packages/agent-adapters/test apps/runtime/test",
     "runtime": "bun run apps/runtime/src/main.ts",
     "codeestra": "bun run apps/cli/src/main.ts",
     "check": "bun run typecheck && bun run test && bun run test:storage"
