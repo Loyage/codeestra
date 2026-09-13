@@ -76,6 +76,13 @@ bun run codeestra open . --yes --no-open   # 注册信任并打印带 token+proj
 bun run codeestra open .                   # 同上，并直接打开浏览器
 ```
 
+模型/Provider 是 **Runtime 进程的环境变量**（`CODEESTRA_PI_PROVIDER` / `CODEESTRA_PI_MODEL`，默认走 Codex），所以切换模型要重启 Runtime：
+
+```sh
+bun run codeestra stop
+CODEESTRA_PI_PROVIDER=deepseek CODEESTRA_PI_MODEL=deepseek-flash bun run codeestra open .
+```
+
 然后在界面上：创建草稿任务 → 提交 → `Run task…`（真实 Agent，敏感工具逐次审批）→ `Prepare result commit` → `Confirm result commit` → `Verify task`。
 
 `open` 只在项目陌生、或 `.codeestra/policies/verification.json` 真的变了时才要求输入 TRUST；日常向 main 提交代码不会再要一次确认。

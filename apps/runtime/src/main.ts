@@ -27,6 +27,15 @@ import {
 interface SocketState {
   buffer: string;
   subscription: EventSubscriptionHandle | null;
+  /**
+   * Bytes the socket has not accepted yet. `end(payload)` only takes what fits in the socket
+   * buffer — 8192 bytes on this platform — and then never flushes the rest nor closes, so a
+   * client would wait forever for a response that cannot arrive. Larger payloads are queued and
+   * flushed as the socket drains.
+   */
+  pending: Uint8Array | null;
+  /** Callers waiting for `pending` to reach the socket. */
+  drainWaiters: (() => void)[];
 }
 
 const home = runtimeHome();
@@ -321,10 +330,10 @@ function openSubscription(
       // lose the frame, and the client would then never learn why the subscription stopped.
       if (frame.type === 'error') {
         ended = true;
-        socket.end(line);
+        void sendAndClose(socket, line);
         return false;
       }
-      return socket.write(line) > 0;
+      return queueWrite(socket, line);
     } catch {
       return false;
     }
@@ -334,7 +343,8 @@ function openSubscription(
     ...(request.projectId === undefined ? {} : { projectId: request.projectId }),
     ...(request.sinceSequence === undefined ? {} : { sinceSequence: request.sinceSequence }),
     send,
-    onStop: () => { if (!ended) { ended = true; socket.end(); } },
+    // Flush whatever is still queued before closing, so a slow reader never loses a frame.
+    onStop: () => { if (!ended) { ended = true; void sendAndClose(socket, ''); } },
   });
   // A rejected cursor was already reported as a terminal frame; the socket is closing.
   if (!handle.active) return;
@@ -353,7 +363,7 @@ async function handleLine(socket: Bun.Socket<SocketState>, line: string): Promis
       openSubscription(socket, request);
       return;
     }
-    socket.end(`${JSON.stringify(await dispatch(request))}\n`);
+    await sendAndClose(socket, `${JSON.stringify(await dispatch(request))}\n`);
   } catch (error) {
     // Domain, storage, Git, registry, and Adapter errors all carry a stable code; a
     // transport or system error without one is reported as an invalid request.
@@ -362,8 +372,57 @@ async function handleLine(socket: Bun.Socket<SocketState>, line: string): Promis
       ? error.code
       : 'INVALID_REQUEST';
     const message = error instanceof Error ? error.message : 'Unknown Runtime error';
-    socket.end(`${JSON.stringify(failure(requestId, code, message))}\n`);
+    await sendAndClose(socket, `${JSON.stringify(failure(requestId, code, message))}\n`);
   }
+}
+
+/** Writes queued bytes until the socket stops accepting them. */
+function flushPending(socket: Bun.Socket<SocketState>): void {
+  const state = socket.data;
+  while (state.pending !== null && state.pending.byteLength > 0) {
+    let written = 0;
+    try {
+      written = socket.write(state.pending);
+    } catch {
+      state.pending = null;
+      break;
+    }
+    if (written <= 0) return;
+    state.pending = written >= state.pending.byteLength
+      ? null : state.pending.subarray(written);
+  }
+  for (const waiter of state.drainWaiters.splice(0)) waiter();
+}
+
+/** Queues one whole frame and reports whether the socket already accepted all of it. */
+function queueWrite(socket: Bun.Socket<SocketState>, text: string): boolean {
+  const state = socket.data;
+  const bytes = Buffer.from(text, 'utf8');
+  if (state.pending === null) {
+    let written = 0;
+    try {
+      written = socket.write(bytes);
+    } catch {
+      return false;
+    }
+    if (written >= bytes.byteLength) return true;
+    state.pending = bytes.subarray(Math.max(written, 0));
+    return false;
+  }
+  state.pending = Buffer.concat([state.pending, bytes]);
+  return false;
+}
+
+/** Writes every queued byte and only then closes, so no response is lost on the way out. */
+async function sendAndClose(socket: Bun.Socket<SocketState>, text: string): Promise<void> {
+  if (text.length > 0) queueWrite(socket, text);
+  let guard = 0;
+  while (socket.data.pending !== null && guard < 10_000) {
+    guard += 1;
+    await new Promise<void>((resolveDrain) => { socket.data.drainWaiters.push(resolveDrain); });
+    flushPending(socket);
+  }
+  socket.end();
 }
 
 let shuttingDown = false;
@@ -396,7 +455,10 @@ async function shutdown(): Promise<void> {
 listener = Bun.listen<SocketState>({
   unix: socketPath,
   socket: {
-    open(socket) { socket.data = { buffer: '', subscription: null }; },
+    open(socket) {
+      socket.data = { buffer: '', subscription: null, pending: null, drainWaiters: [] };
+    },
+    drain(socket) { flushPending(socket); },
     data(socket, bytes) {
       if (socket.data.subscription !== null) {
         // One command per connection: a subscriber must not smuggle a second request in.

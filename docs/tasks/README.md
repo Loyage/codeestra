@@ -464,6 +464,39 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 - `confirmedPolicy` 目前随 `project.list` 逐个项目查询返回（项目数量级很小）；若项目数增长，应改成按需查询的命令。
 - 验证策略变更（改 `.codeestra/policies/verification.json` 并提交）会使已确认的 digest 失效，需重新 `open`/`trust` 确认——这是 ADR-0006 的预期行为，但用户会看到“策略未确认”的拒绝。
 
+## FOUNDATION-022 — 本仓库自举开发首次真实运行 + socket 大响应截断缺陷
+
+状态：已在本仓库上真实跑通“打开 → 派发 → 审批 → 成果 commit → Task 验证”，并修复一个会让 CLI 与 UI 永久挂起的传输缺陷。
+
+### 真实运行（本项目作为项目）
+
+- `codeestra open .` 注册本仓库（`a2e9d7eb-…`，main `refs/heads/main`），UI 地址带 `project=` 预选；再次运行不再要求确认（已确认策略 digest 未变）。
+- 任务 `#1`（`45357c5e-…`）：要求新建 `docs/notes/dogfooding.md`，**不得修改任何既有文件**。
+- 真实模型 `deepseek/deepseek-flash`：4 次工具调用——`bash ls`（侦察）、`bash cat .codeestra/policies/verification.json`、`write docs/notes/dogfooding.md`、`bash git status + cat`（自检），共 4 次 gate 审批（全部经 CLI `attention answer … confirm yes` 批准），最终 `stopReason: stop`；**14,270 tokens**。
+- 成果 commit `1fa3c91c`（`docs/notes/dogfooding.md`，hooks PASSED），落在 `refs/heads/task/45357c5e-…`；main 未改动。
+- `task verify` **PASSED**：在结果 commit 的隔离副本里执行策略 `install`（0.1s，exit 0）与 `check`（30.1s，exit 0），证据绑定 testedCommit `1fa3c91c`/policyDigest `7d72c822`，副本已回收。
+
+### 修复的缺陷（真实运行中发现）
+
+`Bun.listen` 的 `socket.end(payload)` 只接受能放进 socket 缓冲区的字节——本机为 **8192**——其余既不再刷新也**不关闭连接**。最小复现：服务端 `socket.end(50_012 字节)`，客户端只收到 8192 字节且永不收到 close。
+
+- 触发场景：`task verify` 的完整报告超过 8192 字节，**Runtime 已经跑完并把证据写进数据库，CLI 却永久挂起**（实测挂 20 分钟以上）；UI 的 `Verify task` 按钮同理。
+- 修复：`apps/runtime/src/main.ts` 改为按背压写入——`queueWrite` 记录未接受的字节，listener 新增 `drain` 回调在缓冲腾空时继续 flush，`sendAndClose` 等全部字节送达后才 `end()`；事件订阅的帧与终止帧走同一路径，`onStop` 先 flush 再关闭。
+- 回归测试 `apps/runtime/test/socket-response.test.ts`：断言 >8192 字节的响应完整送达（`task.list` 8 条长规范）并被解析、错误响应路径也会关闭连接；**用旧实现跑该测试失败**（`Connection closed with 8192 bytes and no complete response`），用修复实现通过。
+
+### 实际验证
+
+- `nix shell nixpkgs#bun nixpkgs#nodejs_24 nixpkgs#just -c just verify`：类型检查（含 UI）通过、212 项 Vitest 通过、**166 项 Bun tests** 通过、UI 构建成功、`bun audit` 无已知漏洞。
+- 真实复测：修复后重启 Runtime，`task verify` 从“永久挂起”变为 **31 秒返回完整报告**（install 0.1s / check 30.1s，均 exit 0，state PASSED）。
+- 未执行：浏览器自动化验证（ADR-0008 测试边界）；UI 侧的等价行为由同一 HTTP/命令面覆盖。
+
+### 剩余问题
+
+- 每次 `task verify` 都会重跑整套策略（新的 commandId → 新运行），没有“同一 commit+策略已有新鲜证据则复用”的复用判定；策略 `check` 在此仓库约 30s，可接受但应记录。
+- 模型/Provider 仍只是 Runtime 进程的环境变量，**切换模型必须重启 Runtime**（`stop` 后用带环境变量的方式重新 `open`）；UI 上不会显示当前模型。
+- 成果仍在 `refs/heads/task/<task-id>`，需人工合并（Integration 阶段未实现）。
+- 本轮为修复与验收额外产生了 4 条 verification 运行记录（同一 task/commit），未做清理；`prune`/失败现场回收仍未实现。
+
 ## NEXT — 最小可用纵向切片
 
 1. Task cancel（协作停止 + 超时转人工并保留资源）：已有一个被真实场景证明的卡死形态（RUNNING + `NOTHING_TO_COMMIT` + `resource_held=1`）。
