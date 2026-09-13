@@ -16,11 +16,11 @@ Desktop / 最小本地客户端（可断开与重连）
           ↓
   Agent Adapter Port → Pi（首个）/ Codex / Claude Code
           ↓
-  Task Verification → IntegrationBatch → Integration Verification
-                                              ↓
-                                    用户批准固定 candidate/main SHA
-                                              ↓
-                                            Main
+  Task Verification → IntegrationBatch → Integration Verification → Dev
+                                                                  ↓
+                                                用户批准固定 dev/main SHA
+                                                                  ↓
+                                       Main → CLI stop/status → Runtime 重启
 
 SQLite + Outbox + Operations + Audit + Recovery（基础设施）
 Knowledge Service（Phase 6）
@@ -52,8 +52,9 @@ Self Task → Candidate → 自托管测试 → 用户 Promotion → 排空 → 
 - 软件本体是服务，CLI 必须完备且可脚本化；UI/桌面是便利层。
 - 自动化测试与验收仅通过 CLI/命令面驱动，不获取电脑控制权。
 - 活动修订先暂停，确认新规格后恢复；无法可靠暂停/确认时保留现场并重新执行。
-- 依赖结果经集成验证且进入 main 才能释放下游。
-- main 每批提升需用户批准，main 变化使批准失效。
+- 固定 `main`/`dev` 双分支：main 运行稳定服务，功能 Task 从 dev 建基线并先集成回 dev。
+- 依赖结果经集成验证且进入下游可达的 dev 基线才能释放下游。
+- dev→main 每批提升需用户批准；dev/main 变化使批准失效；main 更新后立即以 CLI stop/status 重启并检查 Runtime。
 - Runtime 独立于窗口，关闭客户端不结束任务。
 - 首个真实 Adapter 用 Pi；不自动绕过原生审批。
 - 取消协作停止，超时需人工处理；提高优先级不抢占。
@@ -65,10 +66,10 @@ Self Task → Candidate → 自托管测试 → 用户 Promotion → 排空 → 
 |---|---|
 | Pi 是否真的具备所需审批、暂停与 attach 能力 | 先读当前版本文档并做真实 spike；能力不足回报阻塞，不用 fake 冒充验收 |
 | 修订后仍交付旧代码/证据 | revision、applied revision、commit、验证全链路固定引用；暂停和 ACK 分开 |
-| 依赖满足但上游代码不在下游 | main 祖先可达性检查；仅执行成功不满足依赖 |
+| 依赖满足但上游代码不在下游 | dev 基线祖先可达性检查；仅执行成功不满足依赖 |
 | 预测不完整造成误并行 | UNKNOWN 不并行；实际 diff 越界撤销 SAFE，暂停并报告 |
 | SQLite、Git 与进程非原子 | Operation + outbox + 幂等键 + 外部身份核对；不能盲目重试 start/promote |
-| 已 checkout main 被直接 update-ref | 拒绝使用户 index/worktree 不一致的提升；具体安全交接策略 Phase 4 前确认 |
+| 已 checkout main 被直接 update-ref | dev→main 提升时拒绝使用户 index/worktree 不一致的更新；具体安全交接策略 Phase 4 前确认；成功更新后必须重启 Runtime |
 | 宿主权限、hooks、日志秘密 | worktree 不是沙箱；保留既有原生审批与命令授权，终端输出不可信。**已实现门禁不删也不再新增**（ADR-0008）；权限管理移出当前范围，若将来需要必须重开决策 |
 | 自我升级数据不可逆 | Candidate 数据隔离；迁移/备份/bootstrap 更新策略 Phase 7 前明确批准 |
 

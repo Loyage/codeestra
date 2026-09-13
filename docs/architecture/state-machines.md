@@ -9,7 +9,7 @@
 | 源 | 触发 | Guard / 目标 |
 |---|---|---|
 | DRAFT | submit | 规格有效；依赖未满足→BLOCKED，否则 READY |
-| BLOCKED | dependencies satisfied | 上游指定结果已入 main 且当前基线可达→READY |
+| BLOCKED | dependencies satisfied | 上游指定结果已入 dev 且当前 dev 基线可达→READY |
 | READY | dependency invalidated | →BLOCKED |
 | READY | schedule | 当前 revision、依赖、冲突、容量、workspace 预留均通过→RUNNING（含 Execution 准备过程） |
 | RUNNING | agent needs input | 真实 AttentionRequest 已建立→WAITING_FOR_USER |
@@ -23,7 +23,7 @@
 | RUNNING / PAUSING / PAUSED / WAITING_FOR_USER / CANCELLING | ownership/liveness uncertain | 保持资源隔离→RECOVERY_REQUIRED |
 | FAILED | user retry | 旧执行静止、依赖重验→READY 或 BLOCKED |
 | EXECUTED | revision added | 失效旧证据和未提升批次；旧执行静止→READY 或 BLOCKED |
-| EXECUTED | integration promoted | 当前 revision 的固定候选经批准成功进入 main→SUCCEEDED |
+| EXECUTED | integrated to dev | 当前 revision 的固定候选经独立集成验证成功进入 dev→SUCCEEDED |
 | DRAFT / BLOCKED / READY / EXECUTED / FAILED | cancel | 没有活动写入或正在提升的竞争操作→CANCELLED |
 | RUNNING / PAUSING / PAUSED / WAITING_FOR_USER | cancel | →CANCELLING，协作中断 |
 | CANCELLING | confirmed stopped | →CANCELLED，保留 workspace |
@@ -33,7 +33,7 @@ READY 的等待原因单独派生为 CONFLICT / CAPACITY / DRAINING / REVISION_R
 
 Task Verification：`NOT_RUN → QUEUED → RUNNING → PASSED | FAILED | ERROR`；revision/commit/策略失效产生 `STALE`。重验创建新 VerificationRun，旧证据不改写。
 
-Phase 1 判定（ADR-0006）：全部命令 exit 0 且副本 tracked 内容未变→`PASSED`；命令非零退出或无法 spawn→`FAILED/COMMAND_FAILED`（不继续后续命令）；超时→`ERROR/COMMAND_TIMEOUT`；tracked 修改或 HEAD 移动→`ERROR/TREE_MUTATED`（不覆盖已判定的 `FAILED`）；副本无法创建→`ERROR/WORKTREE_FAILED`；Runtime 重启→`ERROR/RUNTIME_RESTARTED` 并保留副本路径。终态一旦写入，重放 completion 不改变结论。Task 自身状态不因验证而变成 SUCCEEDED：`PASSED` 只是当前 revision/commit 的 Task scope 证据，仍須经 IntegrationBatch 才能进入 main。
+Phase 1 判定（ADR-0006）：全部命令 exit 0 且副本 tracked 内容未变→`PASSED`；命令非零退出或无法 spawn→`FAILED/COMMAND_FAILED`（不继续后续命令）；超时→`ERROR/COMMAND_TIMEOUT`；tracked 修改或 HEAD 移动→`ERROR/TREE_MUTATED`（不覆盖已判定的 `FAILED`）；副本无法创建→`ERROR/WORKTREE_FAILED`；Runtime 重启→`ERROR/RUNTIME_RESTARTED` 并保留副本路径。终态一旦写入，重放 completion 不改变结论。Task 自身状态不因验证而变成 SUCCEEDED：`PASSED` 只是当前 revision/commit 的 Task scope 证据，仍须经 IntegrationBatch 进入 `dev`。
 
 Task Integration summary：`NOT_READY → ELIGIBLE → BATCHED → INTEGRATED`；失败/修订产生 `NEEDS_ATTENTION / STALE`。这些是查询投影，不是替代 Batch 的权威状态。
 
@@ -67,17 +67,24 @@ DISCONNECTED→ACTIVE/WAITING_FOR_USER/PAUSED 需 reconcile 证明真实状态�
 
 原生审批回答中 reject/deny 也属于有效回答，不能把“用户已回答”等同“用户批准”。
 
-## 4. IntegrationBatch
+## 4. IntegrationBatch / StableBranchPromotion
 
-`CREATED → PREPARING → VERIFYING → AWAITING_APPROVAL → PROMOTING → INTEGRATED`。
+IntegrationBatch：`CREATED → PREPARING → VERIFYING → INTEGRATING_DEV → INTEGRATED`。
 
-- PREPARING：从固定 expected main 创建独立 integration worktree，合并固定 source commits；冲突→CONFLICTED，其他错误→FAILED。
-- VERIFYING：在固定 candidate 上运行独立验证；失败→FAILED，成功→AWAITING_APPROVAL。
-- AWAITING_APPROVAL：用户批准精确 candidate/main/verification 后→PROMOTING。
-- PROMOTING：再次核验 main SHA、candidate、成员 revision、验证和活动 Git 操作；安全快进且核对成功后→INTEGRATED。
-- 任意提升前状态发生基线/成员/候选变化→STALE；用户取消→CANCELLED。正在提升时取消必须串行核对最终事实，不能先标 CANCELLED 再异步写 main。
-- 提升操作崩溃→RECOVERY_REQUIRED；若 main 已更新，根据固定 OID 核对补记成功，不能重复合并。
-- FAILED/CONFLICTED/STALE 的重试建立新 candidate/batch，保留旧记录与审批；不自动部分提升。
+- PREPARING：从固定 expected dev 创建独立 integration worktree，合并固定 source commits；冲突→CONFLICTED，其他错误→FAILED。
+- VERIFYING：在固定 dev candidate 上运行独立验证；失败→FAILED，成功→INTEGRATING_DEV。
+- INTEGRATING_DEV：再次核验 dev SHA、candidate、成员 revision、验证和活动 Git 操作；以 expected old OID 保护更新 dev 后→INTEGRATED。Task 此时可为 SUCCEEDED，但尚未进入稳定 main。
+- 任一更新前状态发生基线/成员/候选变化→STALE；用户取消→CANCELLED。正在更新 dev 时取消必须串行核对最终事实。
+- 更新操作崩溃→RECOVERY_REQUIRED；若 dev 已更新，根据固定 OID 核对补记成功，不能重复合并。
+- FAILED/CONFLICTED/STALE 的重试建立新 candidate/batch，保留旧记录；不自动部分集成。
+
+StableBranchPromotion：`CREATED → VERIFYING → AWAITING_APPROVAL → PROMOTING → RESTARTING → SUCCEEDED`。
+
+- 固定 expected dev SHA、expected main SHA 与独立验证证据；验证失败→FAILED。
+- AWAITING_APPROVAL：用户批准精确 dev/main/verification 三元组后→PROMOTING；dev、main 或证据变化→STALE。
+- PROMOTING：核对批准与 Git 工作区安全后执行 dev→main；main 更新成功→RESTARTING。
+- RESTARTING：在 main 工作树执行 CLI stop，再执行 status 拉起并检查 Runtime；成功响应→SUCCEEDED。失败→RECOVERY_REQUIRED 并报告，不擅自回滚。
+- 批准是唯一显式门禁；重启是批准后的自动后置步骤，不要求第二次确认。
 
 ## 5. Self Evolution
 

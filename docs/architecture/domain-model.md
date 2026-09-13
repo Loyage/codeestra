@@ -39,7 +39,7 @@ id、taskId、number、previousRevisionId、specification、constraints、intent
 
 **待用户确认的后续语义**：上游在依赖满足前又修订时，是否自动移动 requiredRevision。安全默认不是替用户选版本，而是使该边 NEEDS_REVIEW、阻止下游启动，并要求明确选择版本后再激活；Phase 1 不实现 DAG 编辑，因此不阻塞 Phase 0/1。
 
-满足条件：指定上游 revision 有成功 main 提升记录，且结果 commit 在下游选定 main 基线的祖先链中。主分支被外部重写导致不可达时重新阻塞。无法自动判断外部 revert 的语义，必须暴露此限制。
+满足条件：指定上游 revision 有成功进入 `dev` 的 IntegrationBatch 记录，且结果 commit 在下游选定 dev 基线的祖先链中。dev 被外部重写导致不可达时重新阻塞。无法自动判断外部 revert 的语义，必须暴露此限制。进入 dev 只满足开发依赖，不代表已经用户批准提升到稳定 main。
 
 ### Execution / RevisionDelivery
 
@@ -71,11 +71,13 @@ scope=TASK/INTEGRATION；subject execution/batch 二选一；revision（Task sco
 
 Phase 1 只实现 TASK scope：subject 固定 `executionId` + `revisionId`，且必须匹配 Task 当前 revision 与已捕获的 `result_commit`。命令来自 main ref 上的人工维护策略（ADR-0006），并在 trust 时一次性确认；Task branch 上的策略文件不参与判定。state 为 `QUEUED → RUNNING → PASSED | FAILED | ERROR`，新 commit 或新 policy digest 使旧 `PASSED` 变为 `STALE`（保留原结论与失效原因，不改写）。`outcomeCode` 区分 `PASSED`、`COMMAND_FAILED`、`COMMAND_TIMEOUT`、`TREE_MUTATED`、`WORKTREE_FAILED`、`RUNTIME_RESTARTED`。evidence 只含 exit code、时长、字节数、摘要、路径列表与副本处理结果，不含原始命令输出。验证证据不等于集成或发布事实。
 
-### IntegrationBatch / Item / Approval
+### IntegrationBatch / Item / StableBranchPromotion / Approval
 
-Batch 固定 project、expectedMainCommit、integrationRef、candidateCommit、state。Item 固定 executionId、revisionId、sourceCommit。Approval 固定 candidate SHA、expected main SHA、验证记录及用户身份；主分支变化、候选变化或验证失效即失效。
+IntegrationBatch 固定 project、expectedDevCommit、integrationRef、candidateCommit、state；Item 固定 executionId、revisionId、sourceCommit。Batch 经独立验证后以 expected old OID 保护更新长期 `dev`，不直接触碰 `main`。
 
-MVP 批次采用不部分提升的安全流程：任意步骤失败先停留并报告，不自行排除任务后合入剩余任务。自动拆批策略留 Phase 4 产品决策。
+StableBranchPromotion 固定 verifiedDevCommit、expectedMainCommit、verificationRunId、state 与 restart evidence。Approval 固定 dev SHA、expected main SHA、验证记录及用户身份；dev/main 变化或验证失效即失效。main 更新后 Promotion 必须进入 RESTARTING，只有 CLI stop/status 后 Runtime 恢复响应才成功。
+
+MVP 批次采用不部分集成的安全流程：任意步骤失败先停留并报告，不自行排除任务后合入剩余任务。自动拆批策略留 Phase 4 产品决策。
 
 ### CandidateVersion / PromotionRecord
 

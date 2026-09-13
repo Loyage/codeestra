@@ -22,7 +22,7 @@
 
 交付：一个项目、一个活动任务、意图/规格持久化、修订历史、独立 branch/worktree、一个真实 Adapter、执行记录、任务验证、失败/取消与重启状态核对。
 
-验收：临时真实 Git 仓库中，从创建 Task 到获得固定 revision/commit 的验证结果；不修改 main；重复命令不产生重复执行；保留失败现场；无法恢复真实 Agent 时诚实记录而非伪造 RUNNING。
+验收：临时真实 Git 仓库中，从固定 dev commit 创建 Task 到获得固定 revision/commit 的验证结果；不修改 dev/main；重复命令不产生重复执行；保留失败现场；无法恢复真实 Agent 时诚实记录而非伪造 RUNNING。
 
 Phase 1 不提供 Phase 3 的完整 attach UI。若 Agent 需要交互，必须显式报告，不允许无期限静默挂起或假装成功。具体最小交互入口由 Adapter 决策确定。
 
@@ -30,7 +30,7 @@ Phase 1 不提供 Phase 3 的完整 attach UI。若 Agent 需要交互，必须�
 
 交付：DAG 校验、依赖满足策略、影响分析、保守冲突分析、资源预留和多 worktree 调度。
 
-验收：SAFE 的独立任务并行；UNKNOWN/CONFLICTING 不并行；循环依赖拒绝；下游基线含所需上游代码。若 D02 选择必须集成后满足依赖，此阶段允许下游继续 BLOCKED，不提前偷做完整 Phase 4。
+验收：SAFE 的独立任务并行；UNKNOWN/CONFLICTING 不并行；循环依赖拒绝；下游 dev 基线含所需上游代码。ADR-0009 要求上游先进入 dev 才满足依赖；Phase 4 前允许下游继续 BLOCKED，不提前偷做完整集成。
 
 ## Phase 3 — Interactive Agent Sessions
 
@@ -40,9 +40,9 @@ Phase 1 不提供 Phase 3 的完整 attach UI。若 Agent 需要交互，必须�
 
 ## Phase 4 — Integration Pipeline
 
-交付：IntegrationBatch、集成分支、独立验证、批准/提升门禁、冲突/失败/主分支移动处理。
+交付：IntegrationBatch、Task 结果集成到长期 dev、独立验证、用户批准固定 dev/main SHA 后提升 main、main 更新后的 CLI stop/status 重启与响应检查，以及冲突/失败/ref 移动处理。
 
-验收：失败候选不改变 main；提升的 commit 与被验证 commit 一致；批次成员 revision 可追溯。
+验收：失败候选不改变 dev/main；所有完成功能先进入 dev；未获用户批准不能 dev→main；提升的 commit 与被验证 dev commit 一致；dev/main 任一移动使批准失效；main 更新后必须重启 Runtime，恢复响应前不报告成功；批次成员 revision 可追溯。
 
 ## Phase 5 — Multiple Agent Adapters
 

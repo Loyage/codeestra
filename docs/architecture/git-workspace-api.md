@@ -24,7 +24,7 @@ interface GitWorkspacePort {
   inspectRepository(root: string): Promise<RepositorySnapshot>;
   prepare(input: {
     operationId: string; projectId: string; taskId: string;
-    workspaceId: string; baseCommit: string; expectedMainCommit: string;
+    workspaceId: string; baseCommit: string; expectedDevCommit: string;
     worktreesRoot: string;
   }): Promise<WorkspaceRef>;
   inspectChanges(workspace: WorkspaceRef): Promise<ChangeSet>;
@@ -50,13 +50,18 @@ interface ChangeSet {
   treeFingerprint: string;
 }
 interface IntegrationGitPort {
-  prepareCandidate(input: {
+  prepareDevCandidate(input: {
     operationId: string; batchId: string; projectId: string;
-    expectedMainCommit: string; sourceCommits: readonly string[];
+    expectedDevCommit: string; sourceCommits: readonly string[];
   }): Promise<{ integrationRef: string; worktreePath: string; candidateCommit: string }>;
-  promote(input: {
-    operationId: string; batchId: string; approvalId: string;
-    expectedMainCommit: string; verifiedCandidateCommit: string;
+  integrateDev(input: {
+    operationId: string; batchId: string;
+    expectedDevCommit: string; verifiedCandidateCommit: string;
+  }): Promise<{ oldDevCommit: string; newDevCommit: string }>;
+  promoteMain(input: {
+    operationId: string; promotionId: string; approvalId: string;
+    expectedDevCommit: string; expectedMainCommit: string;
+    verifiedDevCommit: string;
   }): Promise<{ oldMainCommit: string; newMainCommit: string }>;
 }
 ```
@@ -65,7 +70,7 @@ interface IntegrationGitPort {
 
 ## 2. Task Workspace
 
-- prepare 以固定 main SHA 为基线，独立 `refs/heads/task/<task-id>` 与 Runtime 数据目录 `worktrees/<project-id>/<task-id>/`（ADR-0005）。ref/path 只使用校验后的内部 UUID，不把用户文本当 ref/path，也不在用户仓库根目录创建 worktree。
+- prepare 以固定 dev SHA 为基线（ADR-0009），独立 `refs/heads/task/<task-id>` 与 Runtime 数据目录 `worktrees/<project-id>/<task-id>/`（ADR-0005）。ref/path 只使用校验后的内部 UUID，不把用户文本当 ref/path，也不在用户仓库根目录创建 worktree。
 - Git 尚无首个 commit 的仓库返回 UNBORN_MAIN 并明确指引用户初始化；不擅自提交用户文件。本 Codeestra 开发仓库的初始化与产品处理外部项目是不同操作。
 - 输入路径 canonicalize、检查父路径/symlink/归属；拒绝复用外来目录、非本 Task branch 或其他 worktree 注册记录。Git 输出用 `--porcelain -z` 等机器格式解析，支持空格/换行文件名。
 - 每个 repo 的变更型 Git 操作用 Runtime 锁串行；仍假定外部用户/工具可能修改 refs，故每步重新核验预期 SHA。
@@ -84,13 +89,16 @@ interface IntegrationGitPort {
 
 ## 3. Integration
 
-1. 固定 expectedMainCommit 与有序 source commits；创建独立 integration branch/worktree。
-2. 在该工作树形成候选（第一版不自动 rebase 用户/Agent 历史；具体 merge 提交策略 Phase 4 ADR 决定）。冲突保留现场，不调用 Agent 静默替用户解决产品语义冲突。
-3. 冻结 candidate，独立 Integration Verification。
-4. 用户批准 candidate/main/verification 三元组。
-5. 提升前核对版本、成员 revision、main SHA、candidate ancestry 与工作区安全。
+项目长期保留 `main`/`dev`（ADR-0009）：`main` 是稳定运行分支，`dev` 是功能实验与集成分支。所有 Task/worktree 从固定 dev OID 建立，Integration 分为“Task 进入 dev”和“dev 提升 main”两层。
+
+1. 固定 expectedDevCommit 与有序 source commits；创建独立 integration worktree，候选目标为长期 `dev`。
+2. 在该工作树形成 dev candidate（第一版不自动 rebase 用户/Agent 历史；具体 merge commit 形态 Phase 4 实现前明确）。冲突保留现场，不调用 Agent 静默替用户解决产品语义冲突。
+3. 冻结 dev candidate，执行独立 Integration Verification；成功后以 expected old OID 保护更新 `dev`。任何完成功能都必须先完成此层，不得直接进入 `main`。
+4. 稳定提升固定 expectedDevCommit、expectedMainCommit 与 verification evidence；用户批准 dev/main/verification 三元组。
+5. 提升前核对成员 revision、dev/main SHA、dev candidate ancestry、验证证据与工作区安全；dev 或 main 移动都使批准失效。
 6. main 未被 checkout 时可使用带 expected old OID 的 ref CAS；main 被 checkout 时不得直接 update-ref 导致 index/worktree 不一致。MVP 安全回退为拒绝自动提升并要求安全交接；自动更新已 checkout main 的具体策略 Phase 4 前确认。
-7. 不强制更新、不 push、不 reset 用户目录。任何 precondition 变化使审批失效，重建候选、重验和重新审批。
+7. main 成功更新后立即在 main 工作树执行 `bun run codeestra stop`，再执行 `bun run codeestra status` 自动拉起并检查 Runtime。重启不新增确认；恢复响应前不得报告提升完成，失败时不擅自回滚。
+8. 不强制更新、不 push、不 reset 用户目录。任何 precondition 变化使审批失效，重建候选、重验和重新审批。
 
 独立 worktree 不隔离 git config、hooks、对象库、凭据和操作系统权限；hooks/filters/子模块可能执行代码或访问网络。首次项目接入必须清晰展示信任边界；只有项目 trust 后才执行 commit hooks，不偷偷禁用 hooks，也不把 trust 扩大解释为 main/push 授权。
 

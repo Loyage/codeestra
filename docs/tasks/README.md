@@ -497,8 +497,32 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 - 成果仍在 `refs/heads/task/<task-id>`，需人工合并（Integration 阶段未实现）。
 - 本轮为修复与验收额外产生了 4 条 verification 运行记录（同一 task/commit），未做清理；`prune`/失败现场回收仍未实现。
 
+## FOUNDATION-023 — 固定 main/dev 双分支与稳定服务重启规则（ADR-0009）
+
+状态：决策与开发指导已同步；本地 `dev` 已从当前本地 `main` 创建。自动 Integration/Promotion/重启编排尚未实现。
+
+用户明确要求并补充确认：
+
+1. 项目长期保留 `main` 与 `dev`；`main` 用于日常实际运行和开发辅助，`dev` 用于新功能实验。
+2. 所有功能 Task/worktree 从 `dev` 建立基线，完成功能先经验证与 IntegrationBatch 进入 `dev`，不得直接进入 `main`。
+3. `dev → main` 必须由用户批准固定 dev/main SHA 与验证证据；沿用既有一次确认门禁。
+4. main 更新后立即在 main 工作树运行 `bun run codeestra stop`，再运行 `bun run codeestra status` 拉起并检查 Runtime；重启成功前不得报告提升完成。
+5. 当前 `dev` 以本地 `main` 为初始基线，因此保留本地相对 `origin/main` 超前的 16 个提交。
+
+### 修改
+
+- 新增 Accepted ADR-0009，并标注其对 ADR-0001 D02/D03 的修订。
+- 同步 `PROJECT_SPEC.md`、`AGENTS.md`、README、架构总览、Git Workspace Integration 设计与决策索引。
+- 创建本地 `dev` 分支并切换到该分支；未 commit、未 push、未改动 `main` ref。
+
+### 验证
+
+- 文档检查与链接检查通过；`git branch --list` 同时包含 `main`、`dev`。
+- 本轮仅修改文档与创建分支，未执行代码测试；现有 Phase 1 `task.run` 仍按项目 `mainRef` 创建 worktree，尚未落实 dev 基线。自动 dev Integration、dev→main Promotion 与 Runtime 重启编排仍属后续实现，不能声称已完成。
+
 ## NEXT — 最小可用纵向切片
 
+0. 落实 ADR-0009 的 dev 基线：项目快照/Workspace 从 dev OID 建立，先补临时仓库测试；在此之前产品内 `task.run` 仍使用 mainRef，不能用于声称符合新分支规则。
 1. Task cancel（协作停止 + 超时转人工并保留资源）：已有一个被真实场景证明的卡死形态（RUNNING + `NOTHING_TO_COMMIT` + `resource_held=1`）。
 2. 长命令后台化与进度事件：让 `task.run`/`task.verify` 成为持久 Operation，界面可展示进度并允许取消。
 3. revision 投递确认，以及 Runtime 重启后对 stale ACTIVE Session 的启动 reconcile。

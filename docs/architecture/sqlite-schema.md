@@ -266,12 +266,12 @@ impact snapshot 不覆盖，缓存 key 包含 analyzer/policy/base 版本。应�
 CREATE TABLE integration_batches (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id),
-  expected_main_commit TEXT NOT NULL,
+  expected_dev_commit TEXT NOT NULL,
   integration_ref TEXT NOT NULL,
   candidate_commit TEXT,
   state TEXT NOT NULL,
   version INTEGER NOT NULL DEFAULT 0,
-  promoted_commit TEXT,
+  integrated_dev_commit TEXT,
   created_at INTEGER NOT NULL
 );
 CREATE TABLE integration_batch_items (
@@ -308,24 +308,35 @@ CREATE TABLE verification_runs (
     OR (scope='INTEGRATION' AND task_id IS NULL AND execution_id IS NULL
     AND revision_id IS NULL AND batch_id IS NOT NULL))
 );
-CREATE TABLE integration_approvals (
+CREATE TABLE stable_branch_promotions (
   id TEXT PRIMARY KEY,
-  batch_id TEXT NOT NULL REFERENCES integration_batches(id),
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  verified_dev_commit TEXT NOT NULL,
+  expected_main_commit TEXT NOT NULL,
   verification_id TEXT NOT NULL REFERENCES verification_runs(id),
-  candidate_commit TEXT NOT NULL,
+  state TEXT NOT NULL,
+  promoted_main_commit TEXT,
+  restart_evidence_ref TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE stable_promotion_approvals (
+  id TEXT PRIMARY KEY,
+  promotion_id TEXT NOT NULL REFERENCES stable_branch_promotions(id),
+  verification_id TEXT NOT NULL REFERENCES verification_runs(id),
+  dev_commit TEXT NOT NULL,
   expected_main_commit TEXT NOT NULL,
   actor TEXT NOT NULL,
   status TEXT NOT NULL CHECK(status IN ('ACTIVE','CONSUMED','INVALIDATED')),
   created_at INTEGER NOT NULL,
   invalidated_at INTEGER
 );
-CREATE UNIQUE INDEX active_batch_approval ON integration_approvals(batch_id) WHERE status='ACTIVE';
+CREATE UNIQUE INDEX active_promotion_approval ON stable_promotion_approvals(promotion_id) WHERE status='ACTIVE';
 CREATE INDEX verification_subject ON verification_runs(task_id,revision_id,tested_commit);
 ```
 
-应用事务还需检查：成员同项目；execution 的实际产出与 applied revision 匹配；审批引用本 batch 的 PASSED 集成验证；同一 Task 不被两个活动批次同时提升。后者 Phase 4 以 batch claims 表或等价事务锁实现，正式 migration 前补齐。
+应用事务还需检查：成员同项目；execution 的实际产出与 applied revision 匹配；IntegrationBatch 的 PASSED 验证绑定固定 dev candidate；稳定提升审批引用固定 dev/main SHA 与有效验证；同一 Task 不被两个活动批次同时集成。后者 Phase 4 以 batch claims 表或等价事务锁实现，正式 migration 前补齐。main 更新后 promotion 必须记录 CLI stop/status 的重启结果，未恢复响应不能进入 SUCCEEDED。
 
-Schema version 1 仅创建 TASK verification 所需列和复合外键，不创建 `integration_batches`、`integration_batch_items`、`integration_approvals` 或 INTEGRATION scope；Phase 4 migration 引入上述逻辑形态并补做 subject XOR 测试。version 6 已将 Phase 1 实际使用的 TASK scope 重建为带 evidence/policy/operation 列的形态，见第 8 节。
+Schema version 1 仅创建 TASK verification 所需列和复合外键，不创建 `integration_batches`、`integration_batch_items`、`stable_branch_promotions`、`stable_promotion_approvals` 或 INTEGRATION scope；Phase 4 migration 引入上述逻辑形态并补做 subject XOR 测试。version 6 已将 Phase 1 实际使用的 TASK scope 重建为带 evidence/policy/operation 列的形态，见第 8 节。
 
 ## 6. 操作日志、事件、幂等
 
