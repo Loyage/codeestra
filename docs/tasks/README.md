@@ -959,7 +959,7 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 
 ## FOUNDATION-039 — 长命令成为持久 Operation（进度、取消与重启 reconcile）
 
-状态：已实现并在本工作树实测通过（`bun run check` 退出码 0）。未 commit、未 push、未提升 `dev → main`、未重启 Runtime。决策见 ADR-0019（用户确认：保持同步默认 + 新增 `--background`；复用现有枚举表达取消，不改状态机；进度用查询命令 + 轮询；UI 做进度列表 + 取消按钮）。
+状态：已实现、已提交并合入 `dev`。实现提交 `af1fcdf`（分支 `lane/a1-run-operation-progress`，基线固定为 `dev@4c8bc87`，未 rebase）；集成合并 `d70bc46`（两个父：`af1fcdf` 与当时的 `dev@c7a6f93`）。未 push、未提升 `dev → main`、未重启 Runtime。决策见 ADR-0019（用户确认：保持同步默认 + 新增 `--background`；复用现有枚举表达取消，不改状态机；进度用查询命令 + 轮询；UI 做进度列表 + 取消按钮）。
 
 ### 已实现
 
@@ -973,9 +973,19 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 - Runtime：`task.status` 增加 `operations` 投影；启动时 reconcile；shutdown 先 `beginShutdown()` 再停进程组，使被关闭中断的长命令不写判定，由下次启动记 `RUNTIME_RESTARTED`。
 - UI（`App.tsx`/`types.ts`）：任务详情新增「长命令进度」区块（类型/状态/最新步骤/更新时间/全部步骤）与非终态时的「取消」按钮；「验证任务」改用后台形式并按 1.5s 轮询（仅当存在非终态 Operation），走同一命令面，不新增业务语义。
 
+### 合入 dev（含冲突处理）
+
+合入前 `dev` 已被 A3 的 ADR-0021 推进到 `c7a6f93`（`phase1SchemaVersion = 12`，并已在注释里明确把 v11 留给本格）。因此不能快进，必须在集成工作树里做一次真正的合并：
+
+- 冲突只出现在两处：schema 版本与文档索引。解决方式：`phase1SchemaVersion` 取两者最大值 **12**，并把两条 additive 迁移按升序同时保留（`if (version < 11) operationProgressMigration;` 然后 `if (version < 12) reclamationMigration;`，`packages/storage/src/database.ts` 的 `migrate()` 同步）；`docs/decisions/README.md`、`docs/tasks/README.md` 同时保留 ADR-0019/ADR-0021 两条索引与 FOUNDATION-039/041 两节。
+- 自动合并但已人工复核：`apps/runtime/src/main.ts`（两条启动 reconcile、两个服务接线都在；shutdown 顺序保持 `beginShutdown()` → 停进程组 → 等长命令作业，因此关停不会把被杀的命令写成判定）、`apps/cli/src/main.ts`（`task operation` 与 `reclaim` 分支互不遮蔽，usage 同时列出两组命令）、`packages/contracts/src/index.ts`（`task.operation.*` 在 `task.*` 区，`reclaim.*` 在 union 末尾）、`packages/storage/src/index.ts`（两个迁移导出均在）。两个父提交的行为都没有丢失。
+- 集成工作树与 dev 工作树都跑了 `bun install --frozen-lockfile` 与全量 `bun run check`，均为退出码 0：**301 项 Bun tests（A1 278 + A3 23）0 fail**、212 项 Vitest、根/UI typecheck、UI Vite 构建。两边 HEAD tree 均为 `a58a777`（doc 记录更新前）——即“被验证的树”就是 dev 当时的内容。
+- dev 工作树只执行了 `git merge --ff-only`（不在那里解决冲突）；未在那里改过源文件；`git status` 始终 clean。临时集成工作树与临时分支已回收。
+
 ### 实际验证
 
-- `bun run check` 退出码 0：根与 UI `tsc --noEmit`、**212 项 Vitest**、**Bun tests 278 项**（`test:unit` 165 + `test:e2e` 113）、UI Vite 构建。
+- 本格分支（`af1fcdf`）：`bun run check` 退出码 0 —— 根与 UI `tsc --noEmit`、**212 项 Vitest**、**Bun tests 278 项**（`test:unit` 165 + `test:e2e` 113）、UI Vite 构建。
+- 合入后 `dev` 工作树（`d70bc46`）：`bun install --frozen-lockfile` 无变化，`bun run check` 退出码 0 —— 212 项 Vitest、**301 项 Bun tests 0 fail**、UI 构建；tree `a58a777`。
 - `bun run check:fast` 退出码 0（开发循环：typecheck + UI typecheck + 212 Vitest + 165 unit）。
 - `apps/runtime/test/operation-service.test.ts` 12 项：v10→v11 迁移（含 `step_key` 唯一与旧 Operation 保留）；run 步骤序列与按事实收口（Execution 仍 `RUNNING`、不冒充成果已捕获）；provider 版本探测失败也留下 `FAILED` run 记录，且不产生 workspace/Execution；同一 run commandId 重放只留 1 条 Operation 且无重复步骤；Execution 仍活动时重启 → `RECONCILE_REQUIRED` 且 `resourceHeld` 仍为 true；未记录 Execution 的 run → `FAILED/RUNTIME_RESTARTED`；后台验证逐命令步骤 + `PASSED`；确认静止的取消 → run `ERROR/CANCELLED_BY_USER`、Operation `FAILED`、副本保留、无 `unconfirmedStops`；无法确认的取消（注入不可确认的 runner）→ Operation `RECONCILE_REQUIRED` + `CANCEL_UNCONFIRMED` 且 run 保持 `RUNNING`（不伪造终态）；取消 Agent 运行 → 协作暂停（Task `PAUSED`、Operation `FAILED/STOPPED_BY_USER`）且不被观察流覆盖；同一 verify commandId 重放只跑一次。
 - `apps/runtime/test/cli-task-run-progress.test.ts` 2 项（真实 CLI 子进程 + 真实 Runtime + 独立 `CODEESTRA_HOME` + 临时仓库 + 协议 stub provider）：`task.run` 步骤可经 CLI 读取、`--json` 可解析、`task.status.operations` 同一投影、对已终态 Operation 取消返回 `ALREADY_TERMINAL` 且不杀 Task、未知 flag 退出码 2；`task verify --background` 返回 handle（退出码 0 = 已受理，stderr 明确说明）、慢命令出现 `COMMAND:slow:STARTED`、`task operation cancel` 退出码 0、`dev` 未变、Task 仍 `EXECUTED`、验证记 `ERROR/CANCELLED_BY_USER`。
