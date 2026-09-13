@@ -24,6 +24,11 @@ type ClientRequest = RuntimeRequest extends infer Request
   ? Request extends RuntimeRequest ? Omit<Request, 'requestId' | 'schemaVersion'> : never
   : never;
 
+/** Resource kinds `reclaim` accepts; the Runtime boundary validates the same set again. */
+const reclaimKindNames = ['TASK_WORKTREE', 'VERIFICATION_COPY', 'INTEGRATION_WORKTREE'] as const;
+type ReclaimKindName = (typeof reclaimKindNames)[number];
+const maxReclaimRecordLimit = 500;
+
 const home = Bun.env.CODEESTRA_HOME
   ?? join(Bun.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'codeestra');
 const socketPath = join(home, 'runtime.sock');
@@ -582,6 +587,11 @@ function usage(): never {
   bun run codeestra attention answer <project-id> <attention-id> cancel
   bun run codeestra attention answer <project-id> <attention-id> [--choose <question>:<options>]…
     [--text <question>=<text>]… [--cancel]
+  bun run codeestra reclaim plan [--project <project-id>] [--task <task-id>]
+    [--kind <TASK_WORKTREE|VERIFICATION_COPY|INTEGRATION_WORKTREE>]… [--include-failure-scenes] [--json]
+  bun run codeestra reclaim apply [--project <project-id>] [--task <task-id>] [--kind <kind>]…
+    [--include-failure-scenes] [--json]
+  bun run codeestra reclaim records [--project <project-id>] [--task <task-id>] [--limit <n>] [--json]
 
 --reverse prints the newest transcript entry first. It is a rendering choice for the human view
 only (it is refused together with --json), and because the command face reads forward from a cursor
@@ -1142,6 +1152,56 @@ try {
       taskId,
       expectedVersion,
     }));
+  } else if (group === 'reclaim') {
+    // `reclaim` is the only destructive command face. `plan` is its read-only dry run and returns
+    // exactly the decision shape `apply` records, so a preview can never disagree with the run.
+    const [subcommand, ...flagTokens] = [action, firstArgument, ...remainingArguments]
+      .filter((token): token is string => token !== undefined);
+    if (subcommand !== 'plan' && subcommand !== 'apply' && subcommand !== 'records') usage();
+    let projectId: string | undefined;
+    let taskId: string | undefined;
+    const kinds: ReclaimKindName[] = [];
+    let includeFailureScenes = false;
+    let limit: number | undefined;
+    for (let index = 0; index < flagTokens.length; index += 1) {
+      const flag = flagTokens[index];
+      const value = flagTokens[index + 1];
+      if (flag === '--project' && value !== undefined) { projectId = value; index += 1; }
+      else if (flag === '--task' && value !== undefined) { taskId = value; index += 1; }
+      else if (flag === '--kind' && value !== undefined
+        && (reclaimKindNames as readonly string[]).includes(value)) {
+        kinds.push(value as ReclaimKindName);
+        index += 1;
+      } else if (flag === '--include-failure-scenes' && subcommand !== 'records') {
+        includeFailureScenes = true;
+      } else if (flag === '--json') {
+        // Every reclaim subcommand already prints the Runtime result verbatim; the flag is
+        // accepted so a script can state its intent without depending on that default.
+      } else if (flag === '--limit' && value !== undefined && subcommand === 'records') {
+        const parsed = Number(value);
+        if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maxReclaimRecordLimit) usage();
+        limit = parsed;
+        index += 1;
+      } else {
+        usage();
+      }
+    }
+    if (projectId === undefined) usage();
+    const shared = { projectId, ...(taskId === undefined ? {} : { taskId }) };
+    if (subcommand === 'plan') {
+      print(await call({ command: 'reclaim.plan', ...shared,
+        ...(kinds.length === 0 ? {} : { kinds }), includeFailureScenes }));
+    } else if (subcommand === 'apply') {
+      const report = await call({ command: 'reclaim.apply', commandId: crypto.randomUUID(),
+        ...shared, ...(kinds.length === 0 ? {} : { kinds }), includeFailureScenes }) as
+        { readonly outcome: string };
+      print(report);
+      // A resource that could not be removed is a real failure for scripts; retained and refused
+      // resources are intentional outcomes and stay exit code 0.
+      if (report.outcome === 'FAILED') process.exit(1);
+    } else {
+      print(await call({ command: 'reclaim.records', ...shared, limit: limit ?? 100 }));
+    }
   } else {
     usage();
   }

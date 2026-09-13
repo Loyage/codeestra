@@ -11,6 +11,7 @@ import {
   operationProgressMigration,
   phase1Migration,
   phase1SchemaVersion,
+  reclamationMigration,
   taskControlMigration,
   taskVerificationMigration,
   workspaceRetryMigration,
@@ -685,6 +686,7 @@ export class Phase1Database {
         if (version < 9) this.sqlite.exec(taskControlMigration);
         if (version < 10) this.sqlite.exec(integrationPipelineMigration);
         if (version < 11) this.sqlite.exec(operationProgressMigration);
+        if (version < 12) this.sqlite.exec(reclamationMigration);
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -5121,6 +5123,465 @@ export class Phase1Database {
       return result;
     })();
   }
+
+  // ---------------------------------------------------------------------------------------------
+  // Resource reclamation (ADR-0021). These methods only record and read; every filesystem or Git
+  // side effect is executed by the reclaim service between calls. The decision itself is kept in
+  // an append-only ledger, so `reclaim.records` can always explain what was deleted and why.
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * Every Runtime-owned resource of one project that a `reclaim` run may consider, together with
+   * the recorded ownership identity of each one. The Runtime-managed path itself is not trusted
+   * here: ownership is checked by the caller against the real filesystem and the Git worktree
+   * registry before anything is removed.
+   */
+  getReclamationCandidates(
+    projectId: string,
+    options: { readonly taskId?: string } = {},
+  ): ReclamationCandidates {
+    const project = this.sqlite.query<{
+      id: string; name: string; repo_root: string; git_common_dir: string; main_ref: string;
+      dev_ref: string; object_format: 'sha1' | 'sha256';
+    }, [string]>(`
+      SELECT p.id,p.name,p.repo_root,p.git_common_dir,p.main_ref,p.dev_ref,p.object_format
+      FROM projects p
+      JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
+      WHERE p.id=?1
+    `).get(projectId);
+    if (project === null) {
+      throw new StorageError('NOT_FOUND', 'Project or active project trust was not found');
+    }
+    const taskFilter = options.taskId === undefined ? '' : 'AND t.id=?2';
+    const taskParameters: [string] | [string, string] = options.taskId === undefined
+      ? [projectId] : [projectId, options.taskId];
+    const tasks = this.sqlite.query<{
+      id: string; display_number: number; state: TaskLifecycleState; archived_at: number | null;
+      result_commit: string | null;
+    }, [string] | [string, string]>(`
+      SELECT t.id,t.display_number,t.state,t.archived_at,
+        (SELECT e.result_commit FROM executions e
+          WHERE e.task_id=t.id AND e.state='SUCCEEDED' AND e.result_commit IS NOT NULL
+          ORDER BY e.attempt_number DESC LIMIT 1) AS result_commit
+      FROM tasks t
+      WHERE t.project_id=?1 ${taskFilter}
+      ORDER BY t.display_number
+    `).all(...taskParameters);
+    const workspaceFilter = options.taskId === undefined ? '' : 'AND w.task_id=?2';
+    const workspaces = this.sqlite.query<{
+      id: string; task_id: string; path: string; branch_ref: string; ownership_token: string;
+      base_commit: string; state: WorkspaceLifecycleState; resource_held: number;
+    }, [string] | [string, string]>(`
+      SELECT w.id,w.task_id,w.path,w.branch_ref,w.ownership_token,w.base_commit,w.state,
+        EXISTS(SELECT 1 FROM executions e WHERE e.task_id=w.task_id AND e.resource_held=1)
+          AS resource_held
+      FROM workspaces w JOIN tasks t ON t.id=w.task_id
+      WHERE t.project_id=?1 ${workspaceFilter}
+      ORDER BY w.created_at,w.id
+    `).all(...taskParameters);
+    const verificationFilter = options.taskId === undefined ? '' : 'AND task_id=?2';
+    const verificationCopies = this.sqlite.query<{
+      id: string; task_id: string; execution_id: string; tested_commit: string; copy_path: string;
+      state: VerificationState; outcome_code: string | null;
+    }, [string] | [string, string]>(`
+      SELECT id,task_id,execution_id,tested_commit,copy_path,state,outcome_code
+      FROM verification_runs
+      WHERE project_id=?1 ${verificationFilter}
+      ORDER BY queued_at DESC,id
+    `).all(...taskParameters);
+    const integrationFilter = options.taskId === undefined ? ''
+      : 'AND EXISTS(SELECT 1 FROM integration_batch_items i'
+        + ' WHERE i.batch_id=b.id AND i.task_id=?2)';
+    const integrationWorktrees = this.sqlite.query<{
+      id: string; task_id: string | null; state: IntegrationBatchState; dev_commit: string;
+      merged_commit: string | null; integrated_commit: string | null; worktree_path: string;
+      worktree_ownership_token: string; detail: string | null;
+    }, [string] | [string, string]>(`
+      SELECT b.id,
+        (SELECT i.task_id FROM integration_batch_items i WHERE i.batch_id=b.id
+          ORDER BY i.created_at,i.task_id LIMIT 1) AS task_id,
+        b.state,b.dev_commit,b.merged_commit,b.integrated_commit,b.worktree_path,
+        b.worktree_ownership_token,b.detail
+      FROM integration_batches b
+      WHERE b.project_id=?1 AND b.worktree_path IS NOT NULL ${integrationFilter}
+      ORDER BY b.created_at DESC,b.id
+    `).all(...taskParameters);
+    return {
+      project: {
+        projectId: project.id,
+        name: project.name,
+        repoRoot: project.repo_root,
+        gitCommonDir: project.git_common_dir,
+        mainRef: project.main_ref,
+        devRef: project.dev_ref,
+        objectFormat: project.object_format,
+      },
+      tasks: tasks.map((row) => ({
+        taskId: row.id,
+        displayNumber: row.display_number,
+        state: row.state,
+        archivedAt: row.archived_at,
+        resultCommit: row.result_commit,
+      })),
+      workspaces: workspaces.map((row) => ({
+        workspaceId: row.id,
+        taskId: row.task_id,
+        path: row.path,
+        branchRef: row.branch_ref,
+        ownershipToken: row.ownership_token,
+        baseCommit: row.base_commit,
+        state: row.state,
+        resourceHeld: row.resource_held === 1,
+      })),
+      verificationCopies: verificationCopies.map((row) => ({
+        verificationId: row.id,
+        taskId: row.task_id,
+        executionId: row.execution_id,
+        testedCommit: row.tested_commit,
+        copyPath: row.copy_path,
+        state: row.state,
+        outcomeCode: row.outcome_code,
+      })),
+      integrationWorktrees: integrationWorktrees
+        .filter((row): row is typeof row & { task_id: string } => row.task_id !== null)
+        .map((row) => ({
+          batchId: row.id,
+          taskId: row.task_id,
+          state: row.state,
+          devCommit: row.dev_commit,
+          mergedCommit: row.merged_commit,
+          integratedCommit: row.integrated_commit,
+          worktreePath: row.worktree_path,
+          ownershipToken: row.worktree_ownership_token,
+          detail: row.detail,
+        })),
+    };
+  }
+
+  /**
+   * Marks a workspace RELEASED after its worktree was confirmed gone. The recorded path, branch
+   * and ownership token stay in the row as the audit trail; only the live-ownership flag changes.
+   * A held Execution refuses the transition, so reclamation can never race an active Agent.
+   */
+  releaseWorkspaceForReclamation(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly workspaceId: string;
+    readonly expectedPath: string;
+    readonly eventId: string;
+    readonly reason: string;
+    readonly releasedAt: number;
+  }): Readonly<{ previousState: WorkspaceLifecycleState; changed: boolean }> {
+    return this.sqlite.transaction(() => {
+      const workspace = this.sqlite.query<{
+        id: string; path: string; state: WorkspaceLifecycleState; project_id: string;
+      }, [string, string]>(`
+        SELECT w.id,w.path,w.state,t.project_id FROM workspaces w
+        JOIN tasks t ON t.id=w.task_id
+        WHERE w.id=?1 AND w.task_id=?2
+      `).get(input.workspaceId, input.taskId);
+      if (workspace === null || workspace.project_id !== input.projectId) {
+        throw new StorageError('NOT_FOUND', 'Workspace was not found for this project and Task');
+      }
+      if (workspace.path !== input.expectedPath) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Workspace path changed before it could be released');
+      }
+      const held = this.sqlite.query<{ count: number }, [string]>(`
+        SELECT COUNT(*) AS count FROM executions WHERE task_id=?1 AND resource_held=1
+      `).get(input.taskId);
+      if ((held?.count ?? 0) > 0) {
+        throw new StorageError('INVALID_STATE', 'A held Execution still owns this workspace');
+      }
+      if (workspace.state === 'RELEASED') {
+        return { previousState: 'RELEASED' as const, changed: false };
+      }
+      const updated = this.sqlite.query(
+        "UPDATE workspaces SET state='RELEASED' WHERE id=?1 AND state<>'RELEASED'",
+      ).run(input.workspaceId);
+      if (updated.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION', 'Workspace state changed before release');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'WorkspaceReclaimed',1,'Workspace',?3,0,?4,?4,?5,?6)
+      `).run(input.eventId, input.projectId, input.workspaceId, input.workspaceId, input.releasedAt,
+        JSON.stringify({ workspaceId: input.workspaceId, taskId: input.taskId,
+          path: input.expectedPath, previousState: workspace.state, reason: input.reason }));
+      return { previousState: workspace.state, changed: true };
+    })();
+  }
+
+  /** Looks up the reclamation operation a command ID maps to, if it exists. */
+  findReclamationOperation(projectId: string, commandId: string): ReclamationOperationPlan | null {
+    const row = this.sqlite.query<{ id: string }, [string, string]>(`
+      SELECT id FROM operations
+      WHERE project_id=?1 AND kind='RECLAIM_RESOURCES' AND idempotency_key=?2
+    `).get(projectId, commandId);
+    return row === null ? null : this.reclamationOperationPlan(row.id);
+  }
+
+  /** Reserves one reclamation operation before any side effect, so a crash is always resolvable. */
+  planReclamationOperation(input: {
+    readonly operationId: string;
+    readonly projectId: string;
+    readonly commandId: string;
+    readonly request: Readonly<Record<string, unknown>>;
+    readonly createdAt: number;
+  }): ReclamationOperationPlan {
+    return this.sqlite.transaction(() => {
+      const existing = this.findReclamationOperation(input.projectId, input.commandId);
+      if (existing !== null) return existing;
+      this.sqlite.query(`
+        INSERT INTO operations(id,project_id,kind,aggregate_id,idempotency_key,state,request_json,
+          created_at,updated_at)
+        VALUES (?1,?2,'RECLAIM_RESOURCES',?2,?3,'PLANNED',?4,?5,?5)
+      `).run(input.operationId, input.projectId, input.commandId,
+        JSON.stringify(input.request), input.createdAt);
+      return this.reclamationOperationPlan(input.operationId);
+    })();
+  }
+
+  startReclamationOperation(operationId: string, startedAt: number): void {
+    const updated = this.sqlite.query(`
+      UPDATE operations SET state='IN_PROGRESS',updated_at=?1
+      WHERE id=?2 AND state='PLANNED' AND kind='RECLAIM_RESOURCES'
+    `).run(startedAt, operationId);
+    if (updated.changes !== 1) {
+      throw new StorageError('INVALID_STATE', 'Reclamation operation could not start from its recorded state');
+    }
+  }
+
+  /**
+   * Finalizes one reclamation: the per-resource ledger rows, the operation state, the replayable
+   * command receipt and the summary event all land in one transaction. If the receipt already
+   * exists the call is a no-op, so a replayed command never records a second ledger.
+   */
+  finishReclamationOperation(input: {
+    readonly operationId: string;
+    readonly projectId: string;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly state: 'SUCCEEDED' | 'FAILED';
+    readonly result: unknown;
+    readonly records: readonly ReclamationRecordInput[];
+    readonly eventId: string;
+    readonly completedAt: number;
+  }): void {
+    this.sqlite.transaction(() => {
+      const existing = this.sqlite.query<{ payload_hash: string }, [string, string]>(
+        'SELECT payload_hash FROM command_receipts WHERE project_id=?1 AND command_id=?2',
+      ).get(input.projectId, input.commandId);
+      if (existing !== null) {
+        if (existing.payload_hash !== input.payloadHash) {
+          throw new StorageError('COMMAND_CONFLICT',
+            'Command ID was already used with a different payload');
+        }
+        return;
+      }
+      for (const record of input.records) {
+        this.sqlite.query(`
+          INSERT INTO reclamation_records(id,project_id,task_id,operation_id,command_id,kind,
+            resource_id,path,ownership_token,external_ref,resource_state,outcome,reason_code,detail,
+            evidence_json,created_at)
+          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+        `).run(record.id, input.projectId, record.taskId, input.operationId, input.commandId,
+          record.kind, record.resourceId, record.path, record.ownershipToken, record.externalRef,
+          record.resourceState, record.outcome, record.reasonCode, record.detail,
+          JSON.stringify(record.evidence), input.completedAt);
+      }
+      const updated = this.sqlite.query(`
+        UPDATE operations SET state=?1,result_json=?2,updated_at=?3
+        WHERE id=?4 AND kind='RECLAIM_RESOURCES' AND state IN ('PLANNED','IN_PROGRESS')
+      `).run(input.state, JSON.stringify(input.result), input.completedAt, input.operationId);
+      if (updated.changes !== 1) {
+        throw new StorageError('INVALID_STATE', 'Reclamation operation was not in a finishable state');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'ResourcesReclaimed',1,'Operation',?3,0,?4,?4,?5,?6)
+      `).run(input.eventId, input.projectId, input.operationId, input.commandId, input.completedAt,
+        JSON.stringify(input.result));
+      this.sqlite.query(`
+        INSERT INTO command_receipts(project_id,command_id,payload_hash,result_json,created_at)
+        VALUES (?1,?2,?3,?4,?5)
+      `).run(input.projectId, input.commandId, input.payloadHash,
+        JSON.stringify(input.result), input.completedAt);
+    })();
+  }
+
+  /** Reclamation operations a restart interrupted; the Runtime reconciles them before accepting work. */
+  listIncompleteReclamationOperations(): readonly ReclamationOperationPlan[] {
+    return this.sqlite.query<{ id: string }, []>(`
+      SELECT id FROM operations WHERE kind='RECLAIM_RESOURCES'
+        AND state IN ('PLANNED','IN_PROGRESS') ORDER BY created_at,id
+    `).all().map((row) => this.reclamationOperationPlan(row.id));
+  }
+
+  /** The append-only reclamation ledger, newest first. */
+  listReclamationRecords(
+    projectId: string,
+    options: { readonly taskId?: string; readonly limit?: number } = {},
+  ): readonly ReclamationRecord[] {
+    const limit = options.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+      throw new StorageError('INVALID_STATE', 'Reclamation record limit must be between 1 and 500');
+    }
+    const filter = options.taskId === undefined ? '' : 'AND task_id=?2';
+    const parameters: [string, number] | [string, string, number] = options.taskId === undefined
+      ? [projectId, limit] : [projectId, options.taskId, limit];
+    const limitPlaceholder = options.taskId === undefined ? '?2' : '?3';
+    return this.sqlite.query<{
+      id: string; project_id: string; task_id: string; operation_id: string; command_id: string;
+      kind: ReclamationRecordInput['kind']; resource_id: string; path: string;
+      ownership_token: string | null; external_ref: string | null; resource_state: string;
+      outcome: ReclamationOutcome; reason_code: string; detail: string | null;
+      evidence_json: string; created_at: number;
+    }, [string, number] | [string, string, number]>(`
+      SELECT id,project_id,task_id,operation_id,command_id,kind,resource_id,path,ownership_token,
+        external_ref,resource_state,outcome,reason_code,detail,evidence_json,created_at
+      FROM reclamation_records
+      WHERE project_id=?1 ${filter}
+      ORDER BY created_at DESC,id DESC LIMIT ${limitPlaceholder}
+    `).all(...parameters).map((row) => ({
+      id: row.id,
+      projectId: row.project_id,
+      taskId: row.task_id,
+      operationId: row.operation_id,
+      commandId: row.command_id,
+      kind: row.kind,
+      resourceId: row.resource_id,
+      path: row.path,
+      ownershipToken: row.ownership_token,
+      externalRef: row.external_ref,
+      resourceState: row.resource_state,
+      outcome: row.outcome,
+      reasonCode: row.reason_code,
+      detail: row.detail,
+      evidence: JSON.parse(row.evidence_json) as Readonly<Record<string, unknown>>,
+      createdAt: row.created_at,
+    }));
+  }
+
+  private reclamationOperationPlan(operationId: string): ReclamationOperationPlan {
+    const row = this.sqlite.query<{
+      id: string; project_id: string; idempotency_key: string;
+      state: ReclamationOperationPlan['operationState']; request_json: string;
+      result_json: string | null;
+    }, [string]>(`
+      SELECT id,project_id,idempotency_key,state,request_json,result_json FROM operations
+      WHERE id=?1 AND kind='RECLAIM_RESOURCES'
+    `).get(operationId);
+    if (row === null) throw new StorageError('NOT_FOUND', 'Reclamation operation was not found');
+    return {
+      operationId: row.id,
+      operationState: row.state,
+      projectId: row.project_id,
+      commandId: row.idempotency_key,
+      request: JSON.parse(row.request_json) as Readonly<Record<string, unknown>>,
+      result: row.result_json === null
+        ? null
+        : JSON.parse(row.result_json) as Readonly<Record<string, unknown>>,
+    };
+  }
+}
+
+/** One Runtime-owned resource a reclamation run may consider, with its recorded ownership facts. */
+export interface ReclamationProjectRef {
+  readonly projectId: string;
+  readonly name: string;
+  readonly repoRoot: string;
+  readonly gitCommonDir: string;
+  readonly mainRef: string;
+  readonly devRef: string;
+  readonly objectFormat: 'sha1' | 'sha256';
+}
+
+export interface ReclamationTaskRef {
+  readonly taskId: string;
+  readonly displayNumber: number;
+  readonly state: TaskLifecycleState;
+  readonly archivedAt: number | null;
+  /** Result commit of the newest SUCCEEDED Execution, or null when nothing was captured. */
+  readonly resultCommit: string | null;
+}
+
+export interface ReclamationWorkspaceRef {
+  readonly workspaceId: string;
+  readonly taskId: string;
+  readonly path: string;
+  readonly branchRef: string;
+  readonly ownershipToken: string;
+  readonly baseCommit: string;
+  readonly state: WorkspaceLifecycleState;
+  /** True while an Execution of this Task still holds its resources. */
+  readonly resourceHeld: boolean;
+}
+
+export interface ReclamationVerificationRef {
+  readonly verificationId: string;
+  readonly taskId: string;
+  readonly executionId: string;
+  readonly testedCommit: string;
+  readonly copyPath: string;
+  readonly state: VerificationState;
+  readonly outcomeCode: string | null;
+}
+
+export interface ReclamationIntegrationRef {
+  readonly batchId: string;
+  readonly taskId: string;
+  readonly state: IntegrationBatchState;
+  readonly devCommit: string;
+  readonly mergedCommit: string | null;
+  readonly integratedCommit: string | null;
+  readonly worktreePath: string;
+  readonly ownershipToken: string;
+  readonly detail: string | null;
+}
+
+/** Everything a reclamation plan needs, in one read, including each resource's ownership token. */
+export interface ReclamationCandidates {
+  readonly project: ReclamationProjectRef;
+  readonly tasks: readonly ReclamationTaskRef[];
+  readonly workspaces: readonly ReclamationWorkspaceRef[];
+  readonly verificationCopies: readonly ReclamationVerificationRef[];
+  readonly integrationWorktrees: readonly ReclamationIntegrationRef[];
+}
+
+export type ReclamationOutcome = 'RECLAIMED' | 'ALREADY_ABSENT' | 'RETAINED' | 'REFUSED' | 'FAILED';
+
+export interface ReclamationRecordInput {
+  readonly id: string;
+  readonly taskId: string;
+  readonly kind: 'TASK_WORKTREE' | 'VERIFICATION_COPY' | 'INTEGRATION_WORKTREE';
+  readonly resourceId: string;
+  readonly path: string;
+  readonly ownershipToken: string | null;
+  readonly externalRef: string | null;
+  readonly resourceState: string;
+  readonly outcome: ReclamationOutcome;
+  readonly reasonCode: string;
+  readonly detail: string | null;
+  readonly evidence: Readonly<Record<string, unknown>>;
+}
+
+export interface ReclamationRecord extends ReclamationRecordInput {
+  readonly projectId: string;
+  readonly operationId: string;
+  readonly commandId: string;
+  readonly createdAt: number;
+}
+
+export interface ReclamationOperationPlan {
+  readonly operationId: string;
+  readonly operationState: 'PLANNED' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'RECONCILE_REQUIRED';
+  readonly projectId: string;
+  readonly commandId: string;
+  readonly request: Readonly<Record<string, unknown>>;
+  readonly result: Readonly<Record<string, unknown>> | null;
 }
 
 export type OperationState = 'PLANNED' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED'

@@ -18,6 +18,12 @@ import { RuntimeHttpApi } from './http-api.js';
 import { LongOperationService } from './operation-service.js';
 import { runtimeHome, runtimeSocketPath } from './paths.js';
 import { readPermissionMode, writePermissionMode, type PermissionMode } from './permission-mode.js';
+import {
+  applyReclamation,
+  listReclamationRecords,
+  planReclamation,
+  reconcileInterruptedReclamations,
+} from './reclaim-service.js';
 import { captureResultCommit, prepareResultCommit } from './result-commit-service.js';
 import { pauseOrCancelTask, resumePausedTask } from './task-control-service.js';
 import {
@@ -123,6 +129,9 @@ await reconcileInterruptedIntegrations({
     repositoryRoot, ref: devRef,
   }),
 });
+// A reclamation the Runtime was killed in the middle of is reconciled from the actual filesystem
+// state; it never deletes anything, and it leaves what is still there for the next explicit run.
+await reconcileInterruptedReclamations({ storage, runtimeHome: home });
 const verificationRunner = new VerificationRunner();
 /** Verification copies live inside the Runtime data directory, never in the user's repo. */
 const verificationCopiesRoot = join(home, 'verifications');
@@ -511,6 +520,32 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
     case 'task.integration.list':
       return success(request.requestId,
         storage.listIntegrationBatches(request.projectId, request.taskId));
+    case 'reclaim.plan':
+      return success(request.requestId, await planReclamation({
+        storage,
+        runtimeHome: home,
+        projectId: request.projectId,
+        ...(request.taskId === undefined ? {} : { taskId: request.taskId }),
+        ...(request.kinds === undefined ? {} : { kinds: request.kinds }),
+        includeFailureScenes: request.includeFailureScenes,
+      }));
+    case 'reclaim.apply':
+      return success(request.requestId, await applyReclamation({
+        storage,
+        runtimeHome: home,
+        projectId: request.projectId,
+        commandId: request.commandId,
+        ...(request.taskId === undefined ? {} : { taskId: request.taskId }),
+        ...(request.kinds === undefined ? {} : { kinds: request.kinds }),
+        includeFailureScenes: request.includeFailureScenes,
+      }));
+    case 'reclaim.records':
+      return success(request.requestId, listReclamationRecords({
+        storage,
+        projectId: request.projectId,
+        ...(request.taskId === undefined ? {} : { taskId: request.taskId }),
+        limit: request.limit,
+      }));
     case 'attention.list':
       return success(request.requestId, storage.listAttentionRequests(request.projectId));
     case 'attention.answer': {
