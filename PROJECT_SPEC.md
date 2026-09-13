@@ -1,6 +1,6 @@
 # Codeestra — 产品与架构规格
 
-状态：架构设计基线；关键决策持续以 ADR 确认。Phase 0 第一批与 Phase 1 storage/CLI-Runtime 骨架已开始，已有 Task create/list/submit、owned worktree/恢复、Execution 预留、Agent start、Adapter event 去重投影与 durable outbox、Pi RPC framing/gate 子集，以及 Runtime adapter registry、`task.run` 运行循环、事件 pump、typed answer 自动投递、Runtime shutdown 释放与 `task status`；ADR-0003 的成果 commit 已实现为两步确认（ChangeSet + 版本化敏感路径策略 + 一次性授权 + 崩溃 reconcile），Pi 0.84.4 首轮 spike 与最小可用形态策略已确认，真实 Agent 执行仍须通过其余技术准入。
+状态：架构设计基线；关键决策持续以 ADR 确认。Phase 0 第一批与 Phase 1 storage/CLI-Runtime 骨架已开始，已有 Task create/list/submit、owned worktree/恢复、Execution 预留、Agent start、Adapter event 去重投影与 durable outbox、Pi RPC framing/gate 子集，以及 Runtime adapter registry、`task.run` 运行循环、事件 pump、typed answer 自动投递、Runtime shutdown 释放与 `task status`；ADR-0003 的成果 commit 已实现为两步确认（ChangeSet + 版本化敏感路径策略 + 一次性授权 + 崩溃 reconcile），ADR-0006 的 Task verification 已实现（main ref 人工维护策略 + trust 一次性确认 + 固定 commit 的 detached 副本 + 非敏感证据），Pi 0.84.4 首轮 spike 与最小可用形态策略已确认，真实 Agent 执行仍须通过其余技术准入。
 
 ## 1. 定位与目标
 
@@ -41,6 +41,8 @@ User Intent → Task / Task DAG → Dependency Analysis → Conflict Analysis
 TaskRevision 保留原始意图来源、作者、前一 revision、规格与约束快照以及修改原因。Execution、VerificationRun 和 IntegrationBatchItem 必须指向精确 revision 与 Git commit，而不是只读取 Task 的最新文本。
 
 已完成执行不代表已验证，已验证不代表已集成，已集成不代表已发布。禁止用单个 SUCCESS 含糊表达整条流水线的完成。
+
+Task verification 在固定 commit 的隔离副本上运行项目内人工维护的 `.codeestra/policies/verification.json`：该策略只从项目 main ref 读取（Task branch 上的同名文件不参与判定），并在项目 trust 时一次性确认，内容变化后必须重新确认。验证证据绑定 revision/commit/policy digest，且不保存原始命令输出。
 
 取消、修订、重试及人工回答均需要审计；数据库变更与外部进程/Git 操作之间不能假设存在原子事务。恢复时应核对真实资源状态。
 
@@ -90,7 +92,7 @@ Phase 1 可产生待集成且有验证证据的任务结果，不以直接合并
 
 先完成规格、协作规则、领域对象、状态机、SQLite schema、事件模型、Adapter/Workspace API、Scheduler、Conflict Analyzer、模块结构、roadmap 与风险分析。通过架构准入条件后才做 Phase 0 / Phase 1 最小实现。
 
-当前已完成 Phase 0 第一批领域模型，并进入 Phase 1：已有 storage、CLI/独立 Runtime、Task 入口、owned worktree、Execution/Session 启动协调、Adapter observation/outbox、typed Attention answer Operation、Pi framing/gate 与自有子进程的 `PiRpcAdapter`，以及 adapter registry、`task.run` 运行循环、事件 pump 与 answer 自动投递，以及 ADR-0003 的成果 commit 两步确认。不实现：Task verification 与集成结果、并行调度、完整桌面交互、自动集成发布、机器知识生成、自我升级、远端 Agent、多用户、多机器调度及分布式运行。真实 Pi 工具执行、Task verification 与 main 提升仍须通过对应技术和授权门禁。
+当前已完成 Phase 0 第一批领域模型，并进入 Phase 1：已有 storage、CLI/独立 Runtime、Task 入口、owned worktree、Execution/Session 启动协调、Adapter observation/outbox、typed Attention answer Operation、Pi framing/gate 与自有子进程的 `PiRpcAdapter`，以及 adapter registry、`task.run` 运行循环、事件 pump 与 answer 自动投递，以及 ADR-0003 的成果 commit 两步确认与 ADR-0006 的 Task verification。不实现：Integration 结果、并行调度、完整桌面交互、自动集成发布、机器知识生成、自我升级、远端 Agent、多用户、多机器调度及分布式运行。真实 Pi 工具执行、Integration 验证与 main 提升仍须通过对应技术和授权门禁。
 
 ## 9. 文档导航与决策纪律
 
