@@ -4,6 +4,7 @@ import {
   agentProcessIdentitySchema,
   type AdapterCapabilities,
   type AgentAnswerAdapter,
+  type AgentConfiguration,
   type AgentAnswerRequest,
   type AgentControlReceipt,
   type AgentObservedEvent,
@@ -14,6 +15,7 @@ import {
 import { readProcessStartToken } from './pi-identity.js';
 import { PiRpcClient, PiRpcProcessError } from './pi-process.js';
 import {
+  buildPiModelArguments,
   buildPiRpcArguments,
   mapPiExtensionUiRequest,
   piExtensionUiResponseRecord,
@@ -58,6 +60,8 @@ interface LiveSession {
   readonly sessionStorageRef: string;
   readonly processIdentity: unknown;
   readonly permissionMode: 'FULL' | 'STRICT';
+  /** Effective configuration this process was launched with; part of the stop evidence. */
+  readonly agentConfig: AgentConfiguration;
 }
 
 function composeRevisionPrompt(revision: AgentStartRequest['revision']): string {
@@ -163,12 +167,17 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
   }
 
   async start(request: AgentStartRequest): Promise<AgentSessionRef> {
-    const argv = [...this.#options.launcherArgs, ...buildPiRpcArguments({
-      gateExtensionPath: this.gateExtensionPath,
-      sessionDir: this.sessionDir,
-      platform: this.#options.platform,
-      permissionMode: request.permissionMode,
-    })];
+    const agentConfig = request.agentConfig ?? {};
+    const argv = [
+      ...this.#options.launcherArgs,
+      ...buildPiRpcArguments({
+        gateExtensionPath: this.gateExtensionPath,
+        sessionDir: this.sessionDir,
+        platform: this.#options.platform,
+        permissionMode: request.permissionMode,
+      }),
+      ...buildPiModelArguments(agentConfig),
+    ];
     let child: Bun.Subprocess<'pipe', 'pipe', 'pipe'>;
     try {
       child = this.#spawn([this.#options.piExecutable, ...argv], {
@@ -210,7 +219,7 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
       await client.request({ type: 'prompt', message: composeRevisionPrompt(request.revision) });
       this.#sessions.set(request.sessionId, {
         client, providerSessionId, sessionStorageRef, processIdentity,
-        permissionMode: request.permissionMode,
+        permissionMode: request.permissionMode, agentConfig,
       });
       return {
         id: request.sessionId,
@@ -269,9 +278,9 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
 
 const evidenceRef = `pi-rpc:agent_settled:session=${live.providerSessionId}`
       + `:epoch=${live.client.epoch}:tools=${createHash('sha256')
-        .update(buildPiRpcArguments({ gateExtensionPath: this.gateExtensionPath,
+        .update([...buildPiRpcArguments({ gateExtensionPath: this.gateExtensionPath,
           sessionDir: this.sessionDir, platform: this.#options.platform,
-          permissionMode: live.permissionMode }).join(' '))
+          permissionMode: live.permissionMode }), ...buildPiModelArguments(live.agentConfig)].join(' '))
         .digest('hex').slice(0, 16)}`;
     let turnFailure: string | null = null;
     for await (const envelope of live.client.envelopes()) {

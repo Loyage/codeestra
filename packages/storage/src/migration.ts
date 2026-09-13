@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 7;
+export const phase1SchemaVersion = 8;
 
 export const phase1Migration = `
 CREATE TABLE projects (
@@ -387,6 +387,35 @@ CREATE INDEX verification_by_task ON verification_runs(project_id,task_id,queued
  * the rebuild runs with foreign keys disabled: the child REFERENCES clauses keep naming
  * `workspaces`, which resolves again once the rebuilt table is renamed back.
  */
+/**
+ * Agent configuration: one persisted override record per scope (global, or one project) per
+ * Adapter, plus the effective configuration each Execution actually started with. The Execution
+ * column is the provenance: the current configuration may change later, but an Execution keeps
+ * the values that produced its result.
+ */
+export const agentConfigurationMigration = `
+ALTER TABLE executions ADD COLUMN agent_config_json TEXT
+  CHECK(agent_config_json IS NULL OR json_valid(agent_config_json));
+
+CREATE TABLE agent_configurations (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL CHECK(scope IN ('GLOBAL','PROJECT')),
+  project_id TEXT REFERENCES projects(id),
+  adapter_id TEXT NOT NULL CHECK(length(trim(adapter_id)) > 0),
+  provider TEXT CHECK(provider IS NULL OR length(trim(provider)) > 0),
+  model TEXT CHECK(model IS NULL OR length(trim(model)) > 0),
+  thinking_level TEXT CHECK(thinking_level IS NULL OR thinking_level IN
+    ('off','minimal','low','medium','high','xhigh','max')),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= 0),
+  updated_by TEXT NOT NULL CHECK(length(trim(updated_by)) > 0),
+  CHECK((scope='GLOBAL' AND project_id IS NULL) OR (scope='PROJECT' AND project_id IS NOT NULL))
+) STRICT;
+CREATE UNIQUE INDEX one_global_agent_configuration
+  ON agent_configurations(adapter_id) WHERE scope='GLOBAL';
+CREATE UNIQUE INDEX one_project_agent_configuration
+  ON agent_configurations(project_id,adapter_id) WHERE scope='PROJECT';
+`;
+
 export const workspaceRetryMigration = `
 CREATE TABLE workspaces_v7 (
   id TEXT PRIMARY KEY,

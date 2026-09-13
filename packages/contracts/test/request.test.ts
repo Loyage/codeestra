@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { agentObservedEventSchema, maxEventReadLimit, runtimeRequestSchema,
-  runtimeStreamFrameSchema } from '../src/index.js';
+  runtimeStreamFrameSchema, thinkingLevels } from '../src/index.js';
 
 const base = {
   requestId: '11111111-1111-4111-8111-111111111111',
@@ -123,6 +123,50 @@ describe('Runtime task request boundary', () => {
       ...trust,
       expectedVerificationPolicy: { state: 'PRESENT', mainCommit: 'a'.repeat(40), digest: 'short' },
     }).success).toBe(false);
+  });
+});
+
+describe('Agent configuration request boundary', () => {
+  const command = { requestId: base.requestId, schemaVersion: 1 as const };
+
+  test('defaults the Adapter and keeps an absent field distinct from an explicit clear', () => {
+    expect(runtimeRequestSchema.parse({ ...command, command: 'agent.config.get' }))
+      .toEqual({ ...command, command: 'agent.config.get', adapterId: 'pi' });
+    const set = runtimeRequestSchema.parse({ ...command, command: 'agent.config.set', model: null });
+    expect(set).toMatchObject({ adapterId: 'pi', scope: 'GLOBAL', model: null });
+    // Absent means "leave unchanged", so the parser must not turn it into null.
+    expect(set).not.toHaveProperty('provider');
+    expect(runtimeRequestSchema.parse({ ...command, command: 'agent.config.set' }))
+      .not.toHaveProperty('model');
+  });
+
+  test('accepts every supported thinking level and rejects anything else', () => {
+    for (const thinkingLevel of thinkingLevels) {
+      expect(runtimeRequestSchema.safeParse({
+        ...command, command: 'agent.config.set', thinkingLevel,
+      }).success).toBe(true);
+    }
+    expect(runtimeRequestSchema.safeParse({
+      ...command, command: 'agent.config.set', thinkingLevel: 'extreme',
+    }).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({
+      ...command, command: 'agent.config.set', thinkingLevel: null,
+    }).success).toBe(true);
+  });
+
+  test('rejects blank values, unknown fields, and non-UUID project scopes', () => {
+    expect(runtimeRequestSchema.safeParse({
+      ...command, command: 'agent.config.set', model: '',
+    }).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({
+      ...command, command: 'agent.config.set', unknown: 'x',
+    }).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({
+      ...command, command: 'agent.config.clear', scope: 'PROJECT', projectId: 'not-a-uuid',
+    }).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({
+      ...command, command: 'agent.config.get', projectId: base.projectId,
+    }).success).toBe(true);
   });
 });
 

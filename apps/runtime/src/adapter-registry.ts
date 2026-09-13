@@ -63,13 +63,10 @@ export function createPiAdapterRegistry(input: {
     ?? resolve(import.meta.dir, '../../../packages/agent-adapters/src/pi-gate-extension.ts');
   const sessionDir = environment['CODEESTRA_PI_SESSION_DIR'] ?? join(input.runtimeHome, 'pi-sessions');
   mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
-  // Which model runs a Task is explicit rather than "whatever the provider default is today": the
-  // default can change under the user, and a Task record should not silently change meaning.
-  const launcherArgs: string[] = [];
-  const provider = environment['CODEESTRA_PI_PROVIDER'];
-  const model = environment['CODEESTRA_PI_MODEL'];
-  if (provider !== undefined && provider.trim().length > 0) launcherArgs.push('--provider', provider);
-  if (model !== undefined && model.trim().length > 0) launcherArgs.push('--model', model);
+  // Model, provider, and thinking level are not baked in here: the Runtime resolves them per
+  // Execution from the environment, project, and global Agent configuration scopes and passes
+  // the effective values in the start request. Nothing is pinned at process start, so a
+  // configuration change applies to the next Session without restarting the Runtime.
   const registry = new AdapterRegistry();
   registry.register(new PiRpcAdapter({
     piExecutable: environment['CODEESTRA_PI_EXECUTABLE'] ?? 'pi',
@@ -77,7 +74,6 @@ export function createPiAdapterRegistry(input: {
     sessionDir,
     platform: environment['CODEESTRA_PI_PLATFORM'] === 'windows' ? 'windows' : 'unix',
     environment: adapterEnvironment,
-    launcherArgs,
   }));
   return registry;
 }

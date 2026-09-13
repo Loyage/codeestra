@@ -1,6 +1,6 @@
 # SQLite Schema
 
-状态：逻辑 SQL 设计基线；`packages/storage/src/migration.ts` 已落地到 schema version 7 的 Phase 1 子集；ADR-0010 的多 process-incarnation Session、guidance/takeover/terminal 表仅是 Phase 3 逻辑设计，尚未进入 migration。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与下面的约束等价。
+状态：逻辑 SQL 设计基线；`packages/storage/src/migration.ts` 已落地到 schema version 8 的 Phase 1 子集（v8 为 ADR-0012 的 Agent 配置）；ADR-0010 的多 process-incarnation Session、guidance/takeover/terminal 表仅是 Phase 3 逻辑设计，尚未进入 migration。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与下面的约束等价。
 
 ## 1. 约定
 
@@ -143,6 +143,8 @@ CREATE TABLE executions (
   started_at INTEGER,
   ended_at INTEGER,
   error_json TEXT CHECK(error_json IS NULL OR json_valid(error_json)),
+  -- ADR-0012：本次 Execution 预留时解析出的生效配置；NULL 表示全部走 Adapter 默认。
+  agent_config_json TEXT CHECK(agent_config_json IS NULL OR json_valid(agent_config_json)),
   UNIQUE(task_id,attempt_number),
   UNIQUE(task_id,id),
   FOREIGN KEY(task_id,initial_revision_id) REFERENCES task_revisions(task_id,id),
@@ -150,6 +152,25 @@ CREATE TABLE executions (
   FOREIGN KEY(task_id,workspace_id) REFERENCES workspaces(task_id,id)
 );
 CREATE UNIQUE INDEX one_held_execution ON executions(task_id) WHERE resource_held=1;
+-- ADR-0012：每个 Adapter 一份全局默认，每个项目每个 Adapter 至多一份覆盖。字段为 NULL 表示
+-- “该作用域不覆盖此字段”，解析时继续向更低优先级回落；字段全部为空的记录会被删除。
+CREATE TABLE agent_configurations (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL CHECK(scope IN ('GLOBAL','PROJECT')),
+  project_id TEXT REFERENCES projects(id),
+  adapter_id TEXT NOT NULL,
+  provider TEXT,
+  model TEXT,
+  thinking_level TEXT CHECK(thinking_level IS NULL OR thinking_level IN
+    ('off','minimal','low','medium','high','xhigh','max')),
+  updated_at INTEGER NOT NULL,
+  updated_by TEXT NOT NULL,
+  CHECK((scope='GLOBAL' AND project_id IS NULL) OR (scope='PROJECT' AND project_id IS NOT NULL))
+);
+CREATE UNIQUE INDEX one_global_agent_configuration
+  ON agent_configurations(adapter_id) WHERE scope='GLOBAL';
+CREATE UNIQUE INDEX one_project_agent_configuration
+  ON agent_configurations(project_id,adapter_id) WHERE scope='PROJECT';
 CREATE TABLE result_commit_authorizations (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL,
@@ -467,6 +488,12 @@ Stable pointer/版本清单由 bootstrap 独立管理；Runtime 数据库不可�
 ## 8. Migration 与验收
 
 Phase 1 migration 只含实际使用表；Task 创建循环 FK、revision 不可变、活动 Execution 唯一、成果 commit 授权状态/一次性活动唯一性、CAS 失败、Task verification 复合主体外键、outbox 事务回滚、重复命令至少有真实 SQLite 测试。Integration verification subject XOR 随 Phase 4 表一起加入测试。Phase 2/4 分阶段新增表和索引。
+
+### Phase 1 Agent 配置（schema version 8，ADR-0012）
+
+- 新增 `agent_configurations`（作用域约束 + 两个部分唯一索引）与 `executions.agent_config_json`（可空、JSON 校验）。
+- 迁移为纯新增：不重建已有表，不重写历史行；旧 Execution 的该列为 NULL，表示当时没有配置记录。
+- 写路径先由 Runtime 用共享 schema 校验，数据库 CHECK 是第二层，防止越界写入让后续解析永久失败。
 
 ### Phase 1 verification（schema version 6）
 

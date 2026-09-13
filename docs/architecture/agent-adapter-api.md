@@ -40,6 +40,9 @@ interface StartRequest {
   revision: { id: string; specification: string; constraints: readonly Constraint[] };
   knowledgeSnapshotRefs: readonly string[];
   permissionMode: 'FULL' | 'STRICT';
+  // ADR-0012：本次 Execution 预留时解析出的生效配置；未设字段必须交由 Adapter 自身默认处理，
+  // Adapter 不得在 start 时重新读取全局配置，否则实际启动参数会与 Execution 记录不一致。
+  agentConfig?: { provider?: string; model?: string; thinkingLevel?: string };
   environment: Readonly<Record<string, string>>; // 允许列表，不复制全部父进程环境
 }
 interface Constraint { id: string; text: string }

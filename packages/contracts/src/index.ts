@@ -86,6 +86,32 @@ export const agentAnswerSchema = z.discriminatedUnion('type', [
 ]);
 export type AgentAnswer = z.infer<typeof agentAnswerSchema>;
 
+/** Provider thinking levels Pi accepts via `--thinking`; it clamps them to the model's ability. */
+export const thinkingLevels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+export const thinkingLevelSchema = z.enum(thinkingLevels);
+export type ThinkingLevel = z.infer<typeof thinkingLevelSchema>;
+
+/**
+ * Overrides one Agent Adapter's launch configuration at one scope. Every field is optional:
+ * an absent field means "no override here", so a lower-precedence scope still applies. This is
+ * the shape persisted per scope and the shape recorded with an Execution as its actual input.
+ */
+export const agentConfigurationSchema = z.strictObject({
+  provider: z.string().min(1).max(200).optional(),
+  model: z.string().min(1).max(200).optional(),
+  thinkingLevel: thinkingLevelSchema.optional(),
+});
+export type AgentConfiguration = z.infer<typeof agentConfigurationSchema>;
+
+/** Environment variable names that override persisted Agent configuration, highest precedence. */
+export const agentConfigurationEnvironmentVariables = Object.freeze({
+  pi: Object.freeze({
+    provider: 'CODEESTRA_PI_PROVIDER',
+    model: 'CODEESTRA_PI_MODEL',
+    thinkingLevel: 'CODEESTRA_PI_THINKING',
+  }),
+});
+
 const constraintsSchema = z.array(constraintSchema).superRefine((constraints, context) => {
   const ids = new Set<string>();
   for (const [index, constraint] of constraints.entries()) {
@@ -104,6 +130,37 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('permission.set'),
     mode: z.enum(['FULL', 'STRICT']),
+  }),
+  /**
+   * Reads the Agent configuration for one Adapter together with the effective value per field and
+   * where each field came from, so a client never has to re-implement the precedence rules.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('agent.config.get'),
+    adapterId: nonBlankString.default('pi'),
+    projectId: z.string().uuid().optional(),
+  }),
+  /**
+   * Merges overrides into one scope. An absent field is left unchanged; `null` clears it. A scope
+   * whose fields all become empty is removed, so it stops shadowing lower-precedence scopes.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('agent.config.set'),
+    adapterId: nonBlankString.default('pi'),
+    scope: z.enum(['GLOBAL', 'PROJECT']).default('GLOBAL'),
+    projectId: z.string().uuid().optional(),
+    provider: z.string().min(1).max(200).nullable().optional(),
+    model: z.string().min(1).max(200).nullable().optional(),
+    thinkingLevel: thinkingLevelSchema.nullable().optional(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('agent.config.clear'),
+    adapterId: nonBlankString.default('pi'),
+    scope: z.enum(['GLOBAL', 'PROJECT']).default('GLOBAL'),
+    projectId: z.string().uuid().optional(),
   }),
   z.strictObject({ ...requestBase, command: z.literal('project.inspect'), path: z.string().min(1) }),
   z.strictObject({
@@ -294,6 +351,11 @@ export interface AgentStartRequest {
   };
   readonly knowledgeSnapshotRefs: readonly string[];
   readonly permissionMode: 'FULL' | 'STRICT';
+  /**
+   * Effective Agent configuration for this start, resolved by the Runtime from environment,
+   * project, and global scopes. Absent or empty means the Adapter's own default is used.
+   */
+  readonly agentConfig?: AgentConfiguration;
   readonly environment: Readonly<Record<string, string>>;
 }
 export const agentStopEvidenceSchema = z.strictObject({

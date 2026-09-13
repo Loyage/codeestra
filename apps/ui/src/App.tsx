@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RuntimeClient, describeError } from './api.js';
 import type {
+  AgentConfigurationResolutionView,
   AttentionView,
   EventEnvelopeView,
   RepositoryIdentityView,
@@ -13,14 +14,24 @@ import type {
   VerificationRunView,
 } from './types.js';
 
-type Tab = 'tasks' | 'attention' | 'events' | 'project';
+type Tab = 'tasks' | 'attention' | 'events' | 'agent' | 'project';
 
 const tabLabels: Record<Tab, string> = {
   tasks: '任务',
   attention: '待处理',
   events: '事件',
+  agent: 'Agent 配置',
   project: '项目',
 };
+
+const thinkingLevels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+function sourceLabel(source: string): string {
+  if (source === 'ENVIRONMENT') return '环境变量';
+  if (source === 'PROJECT') return '项目覆盖';
+  if (source === 'GLOBAL') return '全局默认';
+  return '适配器默认';
+}
 
 const valueLabels: Record<string, string> = {
   DRAFT: '草稿',
@@ -342,7 +353,7 @@ function Console({ token, initialProjectId }: {
       </header>
 
       <nav>
-        {(['tasks', 'attention', 'events', 'project'] as const).map((name) => (
+        {(['tasks', 'attention', 'events', 'agent', 'project'] as const).map((name) => (
           <button
             key={name}
             type="button"
@@ -411,6 +422,9 @@ function Console({ token, initialProjectId }: {
             update={update}
             clear={() => update({ frames: [] })}
           />
+        ) : null}
+        {tab === 'agent' ? (
+          <AgentTab client={client} projectId={projectId} run={run} />
         ) : null}
         {tab === 'project' ? (
           <ProjectTab client={client} permissionMode={state.permissionMode} run={run}
@@ -678,8 +692,8 @@ function TasksTab(props: CommonProps & {
                 <h3>执行记录</h3>
                 <table>
                   <thead>
-                    <tr><th>#</th><th>状态</th><th>适配器</th><th>会话</th><th>占用资源</th><th>基线</th>
-                      <th>失败原因</th></tr>
+                    <tr><th>#</th><th>状态</th><th>适配器</th><th>模型/思考</th><th>会话</th><th>占用资源</th>
+                      <th>基线</th><th>失败原因</th></tr>
                   </thead>
                   <tbody>
                     {status.executions.map((execution) => (
@@ -687,6 +701,11 @@ function TasksTab(props: CommonProps & {
                         <td>{execution.attemptNumber}</td>
                         <td>{labelValue(execution.state)}</td>
                         <td>{execution.adapterId}@{execution.adapterVersion}</td>
+                        <td>
+                          {execution.agentConfig === null ? '默认'
+                            : [execution.agentConfig.model ?? execution.agentConfig.provider ?? '默认',
+                              execution.agentConfig.thinkingLevel].filter((part) => part !== null).join(' · ')}
+                        </td>
                         <td>{execution.session === null ? '—' : labelValue(execution.session.state)}</td>
                         <td>{execution.resourceHeld ? '是' : '否'}</td>
                         <td className="mono">{execution.baseCommit.slice(0, 10)}</td>
@@ -703,7 +722,7 @@ function TasksTab(props: CommonProps & {
                       </tr>
                     ))}
                     {status.executions.length === 0 ? (
-                      <tr><td colSpan={7} className="muted">暂无执行记录。</td></tr>
+                      <tr><td colSpan={8} className="muted">暂无执行记录。</td></tr>
                     ) : null}
                   </tbody>
                 </table>
@@ -873,6 +892,183 @@ function EventsTab({ frames, cursor, following, streamStatus, update, clear }: {
         ))}
       </ol>
       <div ref={endRef} />
+    </section>
+  );
+}
+
+/**
+ * Agent configuration: the Runtime resolves environment > project > global > adapter default,
+ * and this panel edits the persisted scopes through the same command plane the CLI uses. It
+ * never computes precedence itself — `effective` and `sources` come from the Runtime, so the UI
+ * cannot disagree with what a Task will actually run.
+ */
+function AgentTab({ client, projectId, run }: {
+  readonly client: RuntimeClient;
+  readonly projectId: string | null;
+  readonly run: (label: string, action: () => Promise<void>) => Promise<void>;
+}) {
+  const [config, setConfig] = useState<AgentConfigurationResolutionView | null>(null);
+  const [scope, setScope] = useState<'PROJECT' | 'GLOBAL'>('GLOBAL');
+  const [provider, setProvider] = useState('');
+  const [model, setModel] = useState('');
+  const [thinkingLevel, setThinkingLevel] = useState('');
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const reload = useCallback(async (): Promise<void> => {
+    setConfig(await client.command<AgentConfigurationResolutionView>({
+      command: 'agent.config.get',
+      ...(projectId === null ? {} : { projectId }),
+    }));
+  }, [client, projectId]);
+
+  useEffect(() => { void run('正在加载 Agent 配置', reload); }, [reload, run]);
+
+  // A project switch must not keep editing the previous project's override.
+  useEffect(() => { setScope(projectId === null ? 'GLOBAL' : 'PROJECT'); }, [projectId]);
+
+  // The form mirrors the selected scope's persisted record, so saving replaces that scope rather
+  // than merging in stale values that belong to a different scope.
+  useEffect(() => {
+    if (config === null) return;
+    const record = scope === 'PROJECT' ? config.project : config.global;
+    setProvider(record?.provider ?? '');
+    setModel(record?.model ?? '');
+    setThinkingLevel(record?.thinkingLevel ?? '');
+  }, [config, scope]);
+
+  const adapterId = config?.adapterId ?? 'pi';
+  const scopeSelector = scope === 'PROJECT'
+    ? { scope: 'PROJECT' as const, projectId }
+    : { scope: 'GLOBAL' as const };
+  const disabled = config === null || (scope === 'PROJECT' && projectId === null);
+
+  return (
+    <section className="card">
+      <h2>Agent 配置</h2>
+      <p className="muted">
+        运行时按「环境变量 → 项目覆盖 → 全局默认 → 适配器默认」逐字段解析。修改只影响此后新建的
+        会话；运行中的会话保持启动时的配置不变，且每次执行都会记录当时生效的值。
+      </p>
+      {projectId === null ? (
+        <p className="muted">未选择项目：只能编辑全局默认；选择项目后可添加项目级覆盖。</p>
+      ) : null}
+
+      {config === null ? <p className="muted">正在加载…</p> : (
+        <>
+          <h3>当前生效（{config.adapterId}）</h3>
+          <table>
+            <thead><tr><th>字段</th><th>值</th><th>来源</th></tr></thead>
+            <tbody>
+              <tr>
+                <td>Provider</td>
+                <td>{config.effective.provider ?? '适配器默认'}</td>
+                <td>{sourceLabel(config.sources.provider)}</td>
+              </tr>
+              <tr>
+                <td>模型</td>
+                <td>{config.effective.model ?? '适配器默认'}</td>
+                <td>{sourceLabel(config.sources.model)}</td>
+              </tr>
+              <tr>
+                <td>思考深度</td>
+                <td>{config.effective.thinkingLevel ?? '适配器默认'}</td>
+                <td>{sourceLabel(config.sources.thinkingLevel)}</td>
+              </tr>
+            </tbody>
+          </table>
+          {config.environment === null ? null : (
+            <p className="muted">
+              环境变量覆盖正在生效（
+              {Object.entries(config.environment)
+                .filter(([, value]) => value !== null)
+                .map(([key, value]) => `${key}=${String(value)}`).join('、')}
+              ）。它优先级最高，但只属于本次 Runtime 进程。
+            </p>
+          )}
+
+          <h3>编辑范围</h3>
+          <div className="actions">
+            <label className="inline">
+              范围
+              <select
+                value={scope}
+                onChange={(event) => setScope(event.target.value as 'PROJECT' | 'GLOBAL')}
+              >
+                <option value="PROJECT" disabled={projectId === null}>项目覆盖</option>
+                <option value="GLOBAL">全局默认</option>
+              </select>
+            </label>
+            <input
+              value={provider}
+              placeholder={`Provider（全局当前：${config.global?.provider ?? '未设置'}）`}
+              onChange={(event) => setProvider(event.target.value)}
+            />
+            <input
+              value={model}
+              placeholder={`模型（全局当前：${config.global?.model ?? '未设置'}）`}
+              onChange={(event) => setModel(event.target.value)}
+            />
+            <select
+              value={thinkingLevel}
+              onChange={(event) => setThinkingLevel(event.target.value)}
+            >
+              <option value="">思考深度：继承</option>
+              {thinkingLevels.map((level) => (
+                <option key={level} value={level}>{level}</option>
+              ))}
+            </select>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => {
+                void run('正在保存 Agent 配置', async () => {
+                  setNotice(null);
+                  setConfig(await client.command<AgentConfigurationResolutionView>({
+                    command: 'agent.config.set',
+                    adapterId,
+                    ...scopeSelector,
+                    // An empty input means "no override for this field", which is what null
+                    // clears. Values apply to the selected scope only.
+                    provider: provider.trim().length === 0 ? null : provider.trim(),
+                    model: model.trim().length === 0 ? null : model.trim(),
+                    thinkingLevel: thinkingLevel.length === 0 ? null : thinkingLevel,
+                  }));
+                  setNotice('已保存；下一次运行任务时会使用该配置。');
+                });
+              }}
+            >
+              保存此范围
+            </button>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => {
+                void run('正在清除 Agent 配置', async () => {
+                  setNotice(null);
+                  const cleared = await client.command<AgentConfigurationResolutionView
+                    & { readonly cleared: boolean }>({
+                    command: 'agent.config.clear', adapterId, ...scopeSelector,
+                  });
+                  setConfig(cleared);
+                  setNotice(cleared.cleared
+                    ? '已清除该范围的覆盖，将回落到更低优先级。'
+                    : '该范围本来就没有覆盖。');
+                });
+              }}
+            >
+              清除此范围
+            </button>
+          </div>
+          <p className="muted">
+            项目覆盖：{config.project === null ? '未设置'
+              : `${config.project.provider ?? '继承'} / ${config.project.model ?? '继承'} / ${config.project.thinkingLevel ?? '继承'}`}
+            {' · '}
+            全局默认：{config.global === null ? '未设置'
+              : `${config.global.provider ?? '继承'} / ${config.global.model ?? '继承'} / ${config.global.thinkingLevel ?? '继承'}`}
+          </p>
+          {notice === null ? null : <div className="banner notice">{notice}</div>}
+        </>
+      )}
     </section>
   );
 }

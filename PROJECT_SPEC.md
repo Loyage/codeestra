@@ -87,7 +87,7 @@ Self-hosting test 不应污染 Stable 的数据库、工作树、真实运行任
 
 优先 TypeScript、Bun、Bun workspaces、React、Vite、Tailwind、shadcn/ui、Tauri 2、SQLite、Drizzle ORM、Zod、Git CLI、Bun.spawn、Vitest。PTY 按真实交互需求单独选型；普通 stdout pipe 不能冒充 PTY。
 
-目标是本机单用户开发编排。不引入 Kubernetes、Kafka、RabbitMQ、微服务拆分或分布式基础设施。采用独立本地 Runtime，首个可用入口为自动启动该后台 Runtime 的 CLI，后续桌面作为可重连客户端；关闭客户端不终止任务和 Session。Phase 3 的原生终端接管由 Runtime 持有 PTY：Pi 在当前工具结束后的安全点从 RPC 自动进程交接到同一持久 conversation 的原生 TUI，detach 不终止 TUI，显式 release 后再交接回 RPC；两边不得同时写同一 session/worktree。**CLI 是完备、可脚本化的权威接口面（§1.1 第 2 条）；Web UI 与桌面是同一命令面的便利前端，功能是 CLI 能力的子集投影。** Runtime 默认 `FULL`：项目注册不确认，Pi 对所有已注册工具自动放行且不加工具 allowlist，验证策略变化自动执行，成果 commit 使用单步 capture；CLI 可无确认切换 `STRICT` 恢复旧门禁。项目开发固定使用 `main`/`dev` 双分支：功能从 `dev` 建基线并先集成回 `dev`；FULL 下固定证据后提升到 `main` 无需批准，更新后立即以 CLI `stop` + `status` 重启并检查 Runtime（ADR-0009/0011）。取消采用协作停止，超时请求人工处理并保留资源；优先级只影响后续调度、不抢占。
+目标是本机单用户开发编排。不引入 Kubernetes、Kafka、RabbitMQ、微服务拆分或分布式基础设施。采用独立本地 Runtime，首个可用入口为自动启动该后台 Runtime 的 CLI，后续桌面作为可重连客户端；关闭客户端不终止任务和 Session。Phase 3 的原生终端接管由 Runtime 持有 PTY：Pi 在当前工具结束后的安全点从 RPC 自动进程交接到同一持久 conversation 的原生 TUI，detach 不终止 TUI，显式 release 后再交接回 RPC；两边不得同时写同一 session/worktree。**CLI 是完备、可脚本化的权威接口面（§1.1 第 2 条）；Web UI 与桌面是同一命令面的便利前端，功能是 CLI 能力的子集投影。** Runtime 默认 `FULL`：项目注册不确认，Pi 对所有已注册工具自动放行且不加工具 allowlist，验证策略变化自动执行，成果 commit 使用单步 capture；CLI 可无确认切换 `STRICT` 恢复旧门禁。Agent 配置（provider/model/thinking level）按 ADR-0012 分全局默认与每项目覆盖持久化，逐字段按 环境变量 > 项目 > 全局 > 适配器默认 解析，仅影响新 Session，生效值随 Execution 记录。项目开发固定使用 `main`/`dev` 双分支：功能从 `dev` 建基线并先集成回 `dev`；FULL 下固定证据后提升到 `main` 无需批准，更新后立即以 CLI `stop` + `status` 重启并检查 Runtime（ADR-0009/0011）。取消采用协作停止，超时请求人工处理并保留资源；优先级只影响后续调度、不抢占。
 
 ## 7. 阶段
 
@@ -106,7 +106,7 @@ Phase 1 可产生待集成且有验证证据的任务结果，不以直接合并
 
 先完成规格、协作规则、领域对象、状态机、SQLite schema、事件模型、Adapter/Workspace API、Scheduler、Conflict Analyzer、模块结构、roadmap 与风险分析。通过架构准入条件后才做 Phase 0 / Phase 1 最小实现。
 
-当前已完成 Phase 0 第一批领域模型，并进入 Phase 1：已有 storage、CLI/独立 Runtime、Task 入口、owned worktree/Execution/Session、Pi RPC Adapter、事件与 typed Attention、成果 commit、Task verification、事件订阅和本地 Web UI。ADR-0011 已实现默认 FULL 与 CLI STRICT 开关：新项目无需 TRUST 输入，Pi 已注册工具自动允许，验证策略变化不需确认，敏感路径不拒绝，成果可用 `task result capture` 单步提交；STRICT 保留旧门禁。现有 Phase 1 `task.run` 仍从项目 `mainRef` 建 worktree，尚未实现 ADR-0009 的 dev 基线。尚未实现 Integration/dev→main、并行调度、ADR-0010 的 TUI/PTY 接管、Tauri、自我升级、多用户或分布式能力。真实 Pi 的 FULL 模式端到端仍需在临时仓库复验；本阶段验收只用 CLI/命令面，不使用 computer-use。
+当前已完成 Phase 0 第一批领域模型，并进入 Phase 1：已有 storage、CLI/独立 Runtime、Task 入口、owned worktree/Execution/Session、Pi RPC Adapter、事件与 typed Attention、成果 commit、Task verification、事件订阅和本地 Web UI。ADR-0011 已实现默认 FULL 与 CLI STRICT 开关：新项目无需 TRUST 输入，Pi 已注册工具自动允许，验证策略变化不需确认，敏感路径不拒绝，成果可用 `task result capture` 单步提交；STRICT 保留旧门禁。ADR-0012 已实现 Agent 配置：`agent.config.get/set/clear` 与 CLI `agent config …` 提供全局默认与每项目覆盖，字段为 provider/model/thinking level，解析与记录由 Runtime 单点完成，UI 只投影同一命令面。现有 Phase 1 `task.run` 仍从项目 `mainRef` 建 worktree，尚未实现 ADR-0009 的 dev 基线。尚未实现 Integration/dev→main、并行调度、ADR-0010 的 TUI/PTY 接管、Tauri、自我升级、多用户或分布式能力。真实 Pi 的 FULL 模式端到端仍需在临时仓库复验；本阶段验收只用 CLI/命令面，不使用 computer-use。
 
 ## 9. 文档导航与决策纪律
 

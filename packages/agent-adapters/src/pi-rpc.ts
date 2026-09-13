@@ -1,6 +1,6 @@
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
-import type { AgentAnswer, AgentObservedEvent } from '@codeestra/contracts';
+import type { AgentAnswer, AgentConfiguration, AgentObservedEvent } from '@codeestra/contracts';
 
 export class PiRpcProtocolError extends Error {
   constructor(
@@ -182,9 +182,22 @@ export function mapPiExtensionUiRequest(input: {
 }
 
 /**
+ * Model selection flags for one controlled launch. Only explicitly configured values are passed,
+ * so an unset field keeps Pi's own default instead of pinning a value Codeestra guessed.
+ */
+export function buildPiModelArguments(config?: AgentConfiguration): readonly string[] {
+  const arguments_: string[] = [];
+  if (config?.provider !== undefined) arguments_.push('--provider', config.provider);
+  if (config?.model !== undefined) arguments_.push('--model', config.model);
+  if (config?.thinkingLevel !== undefined) arguments_.push('--thinking', config.thinkingLevel);
+  return arguments_;
+}
+
+/**
  * Controlled launch: no project trust, no discovered extension, no ambient prompt
- * resources. Only the persisted revision is injected as Task input, so the same
- * revision always produces the same start arguments.
+ * resources. Only the persisted revision and the resolved Agent configuration are injected
+ * as Task input, so the same revision plus the same configuration always produces the same
+ * start arguments.
  */
 export function buildPiRpcArguments(input: {
   readonly gateExtensionPath: string;

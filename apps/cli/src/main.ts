@@ -155,6 +155,11 @@ function usage(): never {
   bun run codeestra stop
   bun run codeestra permission get
   bun run codeestra permission set <full|strict>
+  bun run codeestra agent config get [--project <project-id>] [--adapter <id>]
+  bun run codeestra agent config set [--project <project-id>] [--adapter <id>]
+    [--provider <name>] [--model <id>] [--thinking <off|minimal|low|medium|high|xhigh|max>]
+    [--unset provider|model|thinking]
+  bun run codeestra agent config clear [--project <project-id>] [--adapter <id>]
   bun run codeestra project inspect [path]
   bun run codeestra project policy [path]
   bun run codeestra project trust [path] [--yes]
@@ -312,6 +317,66 @@ try {
     if (firstArgument === undefined || remainingArguments.length !== 0
       || !['full', 'strict'].includes(firstArgument.toLowerCase())) usage();
     print(await call({ command: 'permission.set', mode: firstArgument.toUpperCase() as 'FULL' | 'STRICT' }));
+  } else if (group === 'agent' && action === 'config') {
+    // Agent configuration is per Adapter and per scope. Omitting --project means the global
+    // default; supplying it means that project's override. Every field is optional, so `set`
+    // merges and `--unset` clears one field without disturbing the others.
+    const subcommand = firstArgument;
+    const tokens = remainingArguments;
+    let projectId: string | undefined;
+    let adapterId = 'pi';
+    let provider: string | undefined;
+    let model: string | undefined;
+    let thinkingLevel: string | undefined;
+    const unset: string[] = [];
+    for (let index = 0; index < tokens.length; index += 1) {
+      const flag = tokens[index];
+      const value = tokens[index + 1];
+      if (flag === '--project' && value !== undefined) { projectId = value; index += 1; }
+      else if (flag === '--adapter' && value !== undefined) { adapterId = value; index += 1; }
+      else if (flag === '--provider' && value !== undefined) { provider = value; index += 1; }
+      else if (flag === '--model' && value !== undefined) { model = value; index += 1; }
+      else if (flag === '--thinking' && value !== undefined) { thinkingLevel = value; index += 1; }
+      else if (flag === '--unset' && value !== undefined) { unset.push(value); index += 1; }
+      else usage();
+    }
+    const scope = projectId === undefined ? 'GLOBAL' as const : 'PROJECT' as const;
+    if (subcommand === 'get') {
+      if (unset.length > 0 || provider !== undefined || model !== undefined
+        || thinkingLevel !== undefined) usage();
+      print(await call({
+        command: 'agent.config.get', adapterId,
+        ...(projectId === undefined ? {} : { projectId }),
+      }));
+    } else if (subcommand === 'clear') {
+      if (unset.length > 0 || provider !== undefined || model !== undefined
+        || thinkingLevel !== undefined) usage();
+      print(await call({
+        command: 'agent.config.clear', adapterId, scope,
+        ...(projectId === undefined ? {} : { projectId }),
+      }));
+    } else if (subcommand === 'set') {
+      const unsetFields = new Set(unset);
+      for (const field of unsetFields) {
+        if (field !== 'provider' && field !== 'model' && field !== 'thinking') usage();
+      }
+      if ((provider !== undefined && unsetFields.has('provider'))
+        || (model !== undefined && unsetFields.has('model'))
+        || (thinkingLevel !== undefined && unsetFields.has('thinking'))) usage();
+      print(await call({
+        command: 'agent.config.set', adapterId, scope,
+        ...(projectId === undefined ? {} : { projectId }),
+        ...(provider === undefined ? (unsetFields.has('provider') ? { provider: null } : {})
+          : { provider }),
+        ...(model === undefined ? (unsetFields.has('model') ? { model: null } : {})
+          : { model }),
+        ...(thinkingLevel === undefined ? (unsetFields.has('thinking')
+          ? { thinkingLevel: null } : {})
+          : { thinkingLevel: thinkingLevel as 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' }),
+      }));
+    } else {
+      usage();
+    }
   } else if (group === 'project' && action === 'inspect') {
     print(await call({ command: 'project.inspect', path: firstArgument ?? process.cwd() }));
   } else if (group === 'project' && action === 'list') {

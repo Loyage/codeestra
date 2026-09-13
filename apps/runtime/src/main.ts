@@ -6,6 +6,10 @@ import { runtimeRequestSchema, type RuntimeRequest, type RuntimeResponse,
 import { inspectRepository } from '@codeestra/git';
 import { Phase1Database, StorageError, type AgentAnswerPlan } from '@codeestra/storage';
 import { createPiAdapterRegistry } from './adapter-registry.js';
+import {
+  agentConfigurationPayload,
+  resolveAgentConfiguration,
+} from './agent-config-service.js';
 import { AgentRuntimeCoordinator, deriveCommandId } from './agent-runtime-service.js';
 import { EventSubscriptionHub, type EventSubscriptionHandle } from './event-subscription-service.js';
 import { RuntimeHttpApi } from './http-api.js';
@@ -71,6 +75,14 @@ const coordinator = new AgentRuntimeCoordinator({
   storage,
   registry,
   runtimeHome: home,
+  // Configuration is resolved per Execution from the live environment and persisted scopes, so a
+  // change applies to the next Agent Session without restarting the Runtime.
+  resolveAgentConfig: ({ projectId, adapterId }) => {
+    const { effective } = resolveAgentConfiguration({
+      storage, adapterId, projectId, environment: Bun.env,
+    });
+    return Object.keys(effective).length === 0 ? null : effective;
+  },
   permissionMode: () => permissionMode,
   logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
 });
@@ -96,6 +108,22 @@ let listener: ReturnType<typeof Bun.listen<SocketState>>;
 
 function success(requestId: string, result: unknown): RuntimeResponse {
   return { requestId, schemaVersion: 1, ok: true, result };
+}
+
+/** Scope and project ID must agree before anything is written; the contract cannot express it. */
+function validateAgentConfigurationScope(
+  scope: 'GLOBAL' | 'PROJECT',
+  projectId: string | null,
+): { readonly code: string; readonly message: string } | null {
+  if (scope === 'GLOBAL' && projectId !== null) {
+    return { code: 'INVALID_AGENT_CONFIGURATION',
+      message: 'A global Agent configuration cannot name a project' };
+  }
+  if (scope === 'PROJECT' && projectId === null) {
+    return { code: 'INVALID_AGENT_CONFIGURATION',
+      message: 'A project-scoped Agent configuration requires projectId' };
+  }
+  return null;
 }
 
 function failure(requestId: string, code: string, message: string): RuntimeResponse {
@@ -130,6 +158,50 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         mode: permissionMode,
         appliesTo: 'new operations and new Agent sessions',
       });
+    case 'agent.config.get':
+      return success(request.requestId, agentConfigurationPayload(resolveAgentConfiguration({
+        storage,
+        adapterId: request.adapterId,
+        projectId: request.projectId ?? null,
+        environment: Bun.env,
+      })));
+    case 'agent.config.set': {
+      const projectId = request.projectId ?? null;
+      const invalid = validateAgentConfigurationScope(request.scope, projectId);
+      if (invalid !== null) return failure(request.requestId, invalid.code, invalid.message);
+      storage.setAgentConfiguration({
+        id: crypto.randomUUID(),
+        scope: request.scope,
+        projectId,
+        adapterId: request.adapterId,
+        ...(request.provider === undefined ? {} : { provider: request.provider }),
+        ...(request.model === undefined ? {} : { model: request.model }),
+        ...(request.thinkingLevel === undefined ? {} : { thinkingLevel: request.thinkingLevel }),
+        updatedAt: Date.now(),
+        // Unlike project trust in FULL mode, changing configuration is always the user's own
+        // explicit command, so the actor is the local user in either permission mode.
+        updatedBy: 'local-user',
+      });
+      return success(request.requestId, agentConfigurationPayload(resolveAgentConfiguration({
+        storage, adapterId: request.adapterId, projectId, environment: Bun.env,
+      })));
+    }
+    case 'agent.config.clear': {
+      const projectId = request.projectId ?? null;
+      const invalid = validateAgentConfigurationScope(request.scope, projectId);
+      if (invalid !== null) return failure(request.requestId, invalid.code, invalid.message);
+      const cleared = storage.clearAgentConfiguration({
+        scope: request.scope,
+        projectId,
+        adapterId: request.adapterId,
+      });
+      return success(request.requestId, {
+        ...agentConfigurationPayload(resolveAgentConfiguration({
+          storage, adapterId: request.adapterId, projectId, environment: Bun.env,
+        })),
+        cleared,
+      });
+    }
     case 'project.inspect':
       return success(request.requestId, await inspectRepository(request.path));
     case 'project.verificationPolicy': {

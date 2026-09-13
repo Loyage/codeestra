@@ -13,6 +13,7 @@
 - [ADR-0009](0009-main-dev-promotion-and-restart.md)：固定 `main`/`dev` 双分支与提升后重启。（**Amended by ADR-0011**：FULL 不批准，STRICT 保留批准）
 - [ADR-0010](0010-live-agent-terminal-takeover.md)：运行中 Agent 支持原生终端完全接管；Pi 在结构化安全点做 RPC↔TUI/PTY 进程交接；会话指导与任务修订分流，单 writer lease，不新增确认门禁。（**Amended by ADR-0011**：FULL 下工具不确认）
 - [ADR-0011](0011-default-full-permission-mode.md)：默认开启主机级全权限模式，现有与未来常态确认归零；保留无需确认即可切换的全局 STRICT 兼容模式。
+- [ADR-0012](0012-agent-configuration-scopes.md)：Agent 配置（provider/model/thinking level）分全局默认与每项目覆盖，按 环境变量 > 项目 > 全局 > 适配器默认 逐字段解析；仅新 Session 生效，生效值写入 Execution 留痕；CLI/UI 同一命令面且不新增确认。
 
 以上选择均由用户明确答复。用户给定的硬性原则见 `PROJECT_SPEC.md`，无需重复确认。
 
@@ -34,6 +35,7 @@
 | Phase 7 | migration/备份兼容策略、bootstrap 自身更新授权 | 禁止自动实现不可逆升级；实现前确认 |
 | 任意阶段 | 权限模式 | ADR-0011 已实现默认 FULL 与 CLI STRICT 开关；FULL 常态确认预算固定为 0，不再新增确认 |
 | 任意阶段 | 新能力的 CLI 完备性 | 先判定（ADR-0008）：CLI 必须能完整完成并可脚本化驱动，UI 不得超出 CLI 能力 |
+| Phase 1 | Agent 配置的适用范围、生效时机与留痕 | 已由 ADR-0012 确认并实现：全局默认 + 每项目覆盖，逐字段优先级 环境变量 > 项目 > 全局 > 适配器默认；仅新 Session 生效；生效值写入 `executions.agent_config_json`。每任务/每 Revision 固定配置未实现，也不在未确认前自行推断 |
 
 Phase 0 不要求 Phase 7 所有发布细节已决定；Phase 1 不能以“未来会解决”绕过影响真实执行与 Git 安全的待决项。
 

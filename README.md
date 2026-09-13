@@ -38,6 +38,8 @@ CODEESTRA_HOME=/tmp/codeestra-dev bun run codeestra status
 
 架构基线与已确认决策已记录。已实现 Phase 0 领域基础、Phase 1 SQLite storage，以及最小 CLI/独立 Runtime。默认 FULL：CLI 自动启动 Runtime、无确认注册项目，并按 Project ID 创建/列出/提交/运行 Task，成果 commit 可单步 capture；STRICT 保留旧的 trust 与两步 commit。Task 创建会原子保存原始 Intent、首 Revision、事实事件与幂等回执；submit 使用 expected version 将 DRAFT 转为 READY；`task run` 串起 owned worktree、Execution 预留、Adapter start 与事件 pump；`task status` 可查看 Execution/Session 投影；`task result prepare`/`task result commit --confirm` 按 ADR-0003 在核验 HEAD/ChangeSet/静止证据后创建成果 commit。
 
+Agent 配置（ADR-0012）已实现：`agent config get/set/clear`（CLI 与 Web UI 同一命令面）持久化 provider/model/thinking level，分全局默认与每项目覆盖，按 环境变量 > 项目 > 全局 > Pi 默认 逐字段解析，只影响新 Session 并把生效值写入 Execution。
+
 这还不是完整的 AI 编排产品。尚无自动 Scheduler、长命令后台化、Task cancel/pause、revision 投递确认、桌面 UI，亦尚未实现“Task 从 dev 建基线 → 集成到 dev → 用户批准 dev→main → 自动重启 Runtime”的完整流水线。**现有 Phase 1 `task.run` 代码仍按项目 `mainRef` 创建 worktree；在 ADR-0009 的基线改造完成前，不得声称产品已自动遵守 dev 基线。**Pi 已有 LF-only RPC framing、受控启动参数、fail-closed gate extension 与自有子进程的 `PiRpcAdapter`（身份采集、attention/completion/disconnect 映射、typed answer 写入），Runtime 已接入 adapter registry、`task.run` 运行循环、事件 pump 与 answer 自动投递，并以 stub transport、deterministic fake 与脚本 Adapter 验证编排。Task verification（ADR-0006/0011）已实现：命令来自 main ref 上人工维护的策略，在固定 commit 的 detached 副本中运行且证据不含原始输出；FULL 下策略变化不确认，STRICT 下仍要求确认。`events list`/`events tail` 提供只读事件订阅长连接，可观察既有 domain event 并按排他游标重连；但 `task run`/`task verify` 仍同步占用连接，长命令进度事件尚未实现。
 
 本地 Web UI（ADR-0007）已可用：`codeestra ui` 在 `127.0.0.1` 上按需启动 HTTP + SSE，React 界面可浏览/创建/提交任务、运行 Agent、capture 成果、执行验证并查看事件流。UI 显示当前权限模式；FULL 不显示 TRUST 输入或成果二次确认，STRICT 投影旧门禁。UI 与 CLI 共用同一命令面。真实 Pi 模型/工具执行已完成首轮受控验收（FOUNDATION-019，模型可用 `CODEESTRA_PI_PROVIDER`/`CODEESTRA_PI_MODEL` 显式指定）：真实 `write` 工具调用被 fail-closed gate 拦下并在界面上逐次审批，随后成果 commit 与 Task verification PASSED，用户 main 全程未被修改。任务取消超时、gate 拒绝路径、孤儿进程 reconcile 与 Integration/main 提升仍未实现；ADR-0010 设计的原生 Pi TUI/PTY 接管、Session Guidance 与 RPC↔TUI 安全点进程交接也尚未实现，当前只支持结构化 Attention 交互，不能把日志查看声称为终端 attach；fake 不代表真实 Agent 集成通过。
@@ -71,6 +73,10 @@ export CODEESTRA_HOME=/tmp/codeestra-demo
 bun run codeestra status
 bun run codeestra permission get
 bun run codeestra permission set strict   # 可选；默认是 full，切换无需确认
+bun run codeestra agent config get                             # 当前生效的 provider/model/思考深度与来源
+bun run codeestra agent config set --model <id> --thinking <level>
+bun run codeestra agent config set --project <project-id> --model <id>
+bun run codeestra agent config clear --project <project-id>
 bun run codeestra open .        # FULL：无确认注册并在 Web UI 中打开项目
 bun run codeestra ui            # 只打开本地 Web 界面（也可用 --no-open 只打印地址）
 bun run codeestra project inspect /path/to/repo
@@ -103,12 +109,16 @@ bun run codeestra open . --no-open         # FULL 无确认注册并打印带 to
 bun run codeestra open .                   # 同上，并直接打开浏览器
 ```
 
-模型/Provider 是 **Runtime 进程的环境变量**（`CODEESTRA_PI_PROVIDER` / `CODEESTRA_PI_MODEL`，默认走 Codex），所以切换模型要重启 Runtime：
+模型、Provider 与思考深度是**持久化配置**（ADR-0012），可以热切换，不需要重启 Runtime：
 
 ```sh
-bun run codeestra stop
-CODEESTRA_PI_PROVIDER=deepseek CODEESTRA_PI_MODEL=deepseek-flash bun run codeestra open .
+bun run codeestra agent config set --model deepseek-flash --thinking high   # 全局默认
+bun run codeestra agent config get                                         # 查看生效值与来源
+bun run codeestra agent config set --project <project-id> --model deepseek-pro   # 本项目覆盖
+bun run codeestra agent config clear --project <project-id>                # 清除覆盖，回落全局
 ```
+
+优先级是逐字段的 环境变量 > 项目覆盖 > 全局默认 > Pi 默认；`CODEESTRA_PI_PROVIDER` / `CODEESTRA_PI_MODEL` / `CODEESTRA_PI_THINKING` 仍可作一次性临时覆盖（只对该 Runtime 进程生效）。配置只影响此后新建的 Session，并在每次 Execution 上记录当时生效的值（Web UI 的 **Agent 配置** 标签页与 `task status` 都可查看）。
 
 然后在界面上：创建草稿任务 → 提交 → `运行任务`（FULL 下工具自动允许）→ `提交成果` → `验证任务`。STRICT 下才显示旧的工具审批、TRUST 输入和成果二次确认。
 

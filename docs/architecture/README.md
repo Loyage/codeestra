@@ -57,6 +57,7 @@ Self Task → Candidate → 自托管测试 → 用户 Promotion → 排空 → 
 - dev→main 固定 SHA 与证据；FULL 无需批准，STRICT 保留批准；main 更新后立即以 CLI stop/status 重启并检查 Runtime。
 - Runtime 独立于窗口，关闭客户端不结束任务。
 - 首个真实 Adapter 用 Pi；FULL 自动允许全部已注册工具，STRICT 保留原生审批与未知工具拒绝。
+- Agent 配置按 Adapter 持久化，分全局默认与每项目覆盖，逐字段 环境变量 > 项目 > 全局 > 适配器默认；仅新 Session 生效，生效值随 Execution 记录（ADR-0012）。
 - 用户可从 Task 入口接管真实 Agent：Pi 在安全点从 RPC 交接到原生 TUI/PTY，普通输入是 Session Guidance，规格变化仍走 TaskRevision；任意时刻只有一个 Provider writer。
 - 取消协作停止，超时需人工处理；提高优先级不抢占。
 - Stable Promotion 排空活动任务后切换，不迁移活动 Session。

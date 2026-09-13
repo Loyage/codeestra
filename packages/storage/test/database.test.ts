@@ -736,3 +736,124 @@ describe('transaction and idempotency primitives', () => {
     expect(db.query('SELECT command_id FROM command_receipts').get()).toBeNull();
   });
 });
+
+describe('Agent configuration scopes and Execution provenance', () => {
+  function seedReadyWorkspace(): void {
+    db.query(`INSERT INTO workspaces
+      (id,task_id,branch_ref,path,ownership_token,base_commit,state,created_at)
+      VALUES ('w1','t1','refs/heads/task/t1','/work/t1','owner-1',?1,'READY',3)`).run(oid);
+  }
+
+  test('upgrades a version 7 database with the Agent configuration table and column', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'codeestra-storage-v7-'));
+    const filename = join(directory, 'runtime.sqlite');
+    try {
+      const legacy = new Database(filename, { create: true, strict: true });
+      legacy.exec('PRAGMA foreign_keys=ON;');
+      legacy.exec(phase1Migration);
+      legacy.exec(agentStartMigration);
+      legacy.exec(agentObservationMigration);
+      legacy.exec(agentAnswerMigration);
+      legacy.exec(agentDisconnectMigration);
+      legacy.exec(taskVerificationMigration);
+      legacy.exec(workspaceRetryMigration);
+      legacy.exec('PRAGMA user_version=7');
+      legacy.close();
+
+      const upgraded = new Phase1Database(filename);
+      expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version)
+        .toBe(phase1SchemaVersion);
+      expect(upgraded.sqlite.query<{ name: string }, []>(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_configurations'",
+      ).get()?.name).toBe('agent_configurations');
+      expect(upgraded.sqlite.query<{ name: string }, []>(
+        "SELECT name FROM pragma_table_info('executions')",
+      ).all().map((row) => row.name)).toContain('agent_config_json');
+      expect(upgraded.sqlite.query<Record<string, unknown>, []>('PRAGMA foreign_key_check').all())
+        .toEqual([]);
+      upgraded.close();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('keeps global and project overrides independent and merges partial updates', () => {
+    expect(storage.getAgentConfiguration('GLOBAL', null, 'pi')).toBeNull();
+    expect(storage.setAgentConfiguration({
+      id: 'cfg-global', scope: 'GLOBAL', projectId: null, adapterId: 'pi',
+      provider: 'deepseek', updatedAt: 5, updatedBy: 'local-user',
+    })).toMatchObject({ scope: 'GLOBAL', projectId: null, provider: 'deepseek',
+      model: null, thinkingLevel: null, updatedBy: 'local-user' });
+    expect(storage.setAgentConfiguration({
+      id: 'cfg-project', scope: 'PROJECT', projectId: 'p1', adapterId: 'pi',
+      model: 'deepseek-flash', thinkingLevel: 'high', updatedAt: 6, updatedBy: 'local-user',
+    })).toMatchObject({ scope: 'PROJECT', projectId: 'p1', provider: null,
+      model: 'deepseek-flash', thinkingLevel: 'high' });
+    // A partial update leaves the fields it does not name alone...
+    expect(storage.setAgentConfiguration({
+      id: 'cfg-project-2', scope: 'PROJECT', projectId: 'p1', adapterId: 'pi',
+      provider: 'deepseek', updatedAt: 7, updatedBy: 'local-user',
+    })).toMatchObject({ provider: 'deepseek', model: 'deepseek-flash', thinkingLevel: 'high' });
+    // ...and never touches the other scope.
+    expect(storage.getAgentConfiguration('GLOBAL', null, 'pi'))
+      .toMatchObject({ provider: 'deepseek', model: null });
+  });
+
+  test('clearing every field removes the override instead of shadowing lower scopes', () => {
+    storage.setAgentConfiguration({ id: 'g', scope: 'GLOBAL', projectId: null, adapterId: 'pi',
+      model: 'global-model', updatedAt: 1, updatedBy: 'local-user' });
+    storage.setAgentConfiguration({ id: 'p', scope: 'PROJECT', projectId: 'p1', adapterId: 'pi',
+      model: 'project-model', updatedAt: 2, updatedBy: 'local-user' });
+    expect(storage.setAgentConfiguration({ id: 'p2', scope: 'PROJECT', projectId: 'p1', adapterId: 'pi',
+      model: null, updatedAt: 3, updatedBy: 'local-user' })).toBeNull();
+    expect(storage.getAgentConfiguration('PROJECT', 'p1', 'pi')).toBeNull();
+    expect(storage.getAgentConfiguration('GLOBAL', null, 'pi')).not.toBeNull();
+    expect(storage.clearAgentConfiguration({ scope: 'GLOBAL', projectId: null, adapterId: 'pi' }))
+      .toBe(true);
+    expect(storage.clearAgentConfiguration({ scope: 'GLOBAL', projectId: null, adapterId: 'pi' }))
+      .toBe(false);
+  });
+
+  test('rejects scope mismatches, unknown projects, and invalid thinking levels', () => {
+    expect(() => storage.setAgentConfiguration({ id: 'a', scope: 'PROJECT', projectId: null,
+      adapterId: 'pi', updatedAt: 1, updatedBy: 'local-user' })).toThrow('requires a project');
+    expect(() => storage.setAgentConfiguration({ id: 'b', scope: 'GLOBAL', projectId: 'p1',
+      adapterId: 'pi', updatedAt: 1, updatedBy: 'local-user' })).toThrow('cannot name a project');
+    expect(() => storage.setAgentConfiguration({ id: 'c', scope: 'PROJECT', projectId: 'missing',
+      adapterId: 'pi', updatedAt: 1, updatedBy: 'local-user' }))
+      .toThrow('Trusted project was not found');
+    expect(() => storage.setAgentConfiguration({ id: 'd', scope: 'GLOBAL', projectId: null,
+      adapterId: 'pi', thinkingLevel: 'extreme', updatedAt: 1, updatedBy: 'local-user' }))
+      .toThrow('Invalid Agent configuration');
+  });
+
+  test('records the effective configuration on the Execution that used it', () => {
+    seedTask();
+    seedReadyWorkspace();
+    expect(storage.reserveExecution({
+      projectId: 'p1', taskId: 't1', expectedTaskVersion: 0, workspaceId: 'w1',
+      executionId: 'e1', commandId: 'cmd1', payloadHash: 'hash', reservationEventId: 'evt1',
+      taskEventId: 'evt2', adapterId: 'pi', adapterVersion: '0.84.4',
+      agentConfig: { provider: 'deepseek', model: 'deepseek-flash', thinkingLevel: 'high' },
+      actor: 'runtime-scheduler', createdAt: 4,
+    }).executionId).toBe('e1');
+    expect(storage.listTaskExecutions('p1', 't1')[0]?.agentConfig).toEqual({
+      provider: 'deepseek', model: 'deepseek-flash', thinkingLevel: 'high',
+    });
+  });
+
+  test('records no configuration when none was resolved', () => {
+    seedTask();
+    seedReadyWorkspace();
+    storage.reserveExecution({
+      projectId: 'p1', taskId: 't1', expectedTaskVersion: 0, workspaceId: 'w1',
+      executionId: 'e1', commandId: 'cmd1', payloadHash: 'hash', reservationEventId: 'evt1',
+      taskEventId: 'evt2', adapterId: 'pi', adapterVersion: '0.84.4',
+      actor: 'runtime-scheduler', createdAt: 4,
+    });
+    expect(storage.listTaskExecutions('p1', 't1')[0]?.agentConfig).toBeNull();
+    expect(db.query<{ agent_config_json: string | null }, []>(
+      "SELECT agent_config_json FROM executions WHERE id='e1'",
+    ).get()?.agent_config_json).toBeNull();
+  });
+});

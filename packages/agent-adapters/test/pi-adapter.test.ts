@@ -155,6 +155,34 @@ describe('Pi RPC process adapter', () => {
     await adapter.releaseSession(request.sessionId);
   });
 
+  test('applies the resolved Agent configuration to the launched provider argv', async () => {
+    const { adapter, request, report } = fixture('NORMAL_TURN');
+    const ref = await adapter.start({
+      ...request,
+      agentConfig: { provider: 'deepseek', model: 'deepseek-flash', thinkingLevel: 'high' },
+    });
+    expect(report().argv).toEqual(expect.arrayContaining([
+      '--provider', 'deepseek', '--model', 'deepseek-flash', '--thinking', 'high',
+    ]));
+    const events = [];
+    for await (const event of adapter.observe(ref)) events.push(event);
+    expect(events[0]).toMatchObject({ type: 'completed', outcome: 'SUCCESS' });
+  });
+
+  test('launches without model flags when no configuration was resolved', async () => {
+    // "No configuration" must not become "some default Codeestra picked": an unset field has to
+    // keep the provider's own default, and the argv is where that is observable.
+    const { adapter, request, report } = fixture('NORMAL_TURN');
+    const ref = await adapter.start(request);
+    const argv = report().argv;
+    expect(argv).not.toContain('--provider');
+    expect(argv).not.toContain('--model');
+    expect(argv).not.toContain('--thinking');
+    const events = [];
+    for await (const event of adapter.observe(ref)) events.push(event);
+    expect(events).toHaveLength(1);
+  });
+
   test('resolves a permission dialog into a typed Attention and an answerable completion', async () => {
     const { adapter, request, report } = fixture();
     const ref = await adapter.start(request);

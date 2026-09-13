@@ -611,6 +611,43 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 - 排查过程用的 `/tmp/ce-err-smoke-home`、`/tmp/ce-real-smoke-home` 及其临时仓库已停止 Runtime，目录保留（可随时删除）。
 - UI 的失败原因列较长时只做了自适应换行，未做折叠/详情展开；长 provider 文本仍以表格单元格展示。
 
+## FOUNDATION-028 — Agent 配置（模型、Provider、思考深度）
+
+状态：已实现并在 CLI/命令面验证（含一次真实 Runtime + 协议 stub provider 的端到端 smoke）。决策记录为 ADR-0012。真实模型下按新配置启动尚未验收。
+
+背景：FOUNDATION-022 已记录“模型/Provider 只是 Runtime 进程环境变量，切换必须重启 Runtime，UI 不显示当前模型”。本轮补齐该能力。
+
+用户本轮选择题（记录为 ADR-0012）：
+
+1. 作用域：**全局默认 + 每项目覆盖**（未选：全局单份 / 每任务覆盖 / 三层）。
+2. 可配置项：**provider + model + thinking level**（未选：再加 `--models` 轮换、再加自由额外 argv）。
+3. 生效与留痕：**仅新 Session 生效 + 记录到 Execution**（未选：不写执行历史、快照进 TaskRevision）。
+4. 配置来源：**持久化配置 + 环境变量为高优先级覆盖**（未选：env 仅作首次默认、只用持久化配置）。
+
+### 已实现
+
+- `packages/contracts`：新增 `thinkingLevels`/`agentConfigurationSchema`，以及 `agent.config.get` / `agent.config.set` / `agent.config.clear` 三个命令；`AgentStartRequest` 新增可选 `agentConfig`。`set` 用「缺省=不变、`null`=清除」区分两种意图，并导出 Pi 的环境变量名映射。
+- `packages/storage`：schema v7→v8 纯新增迁移——`agent_configurations`（作用域 CHECK + 两个部分唯一索引，GLOBAL 每 Adapter 一条、PROJECT 每项目每 Adapter 一条）与 `executions.agent_config_json`（可空、JSON 校验）；`setAgentConfiguration` 按字段合并、全空即删除记录，`clearAgentConfiguration` 返回是否删除；`reserveExecution` 写入生效配置，`listTaskExecutions` 与 `agentStartRow` 投影为 `agentConfig`（形状非法时不编造，返回 `null`）。旧 Execution 该列为 NULL，不回溯改写。
+- `apps/runtime`：新增 `agent-config-service`，逐字段按 环境变量 > 项目 > 全局 > 适配器默认 解析并给出每字段 `sources`；空白的 `CODEESTRA_PI_*` 视为未设置，非法 `CODEESTRA_PI_THINKING` 报 `INVALID_AGENT_CONFIGURATION` 而不是静默回退；`GLOBAL`/`PROJECT` 与 `projectId` 的一致性由 Runtime 在写入前校验（契约无法表达）。`task.run` 在预留 Execution 之前解析配置，因此记录值与启动值同源。
+- `packages/agent-adapters`：注册表不再把环境里的 provider/model 写死进进程参数；`PiRpcAdapter.start` 依据 `request.agentConfig` 生成 `--provider` / `--model` / `--thinking`，未设字段不传 flag，stop evidence 摘要包含模型参数。
+- CLI：`agent config get|set|clear [--project <id>] [--adapter <id>]`，`set` 支持 `--provider` / `--model` / `--thinking` 与 `--unset provider|model|thinking`；`get` 直接输出 Runtime 的 `effective` 与 `sources`。
+- Web UI：新增「Agent 配置」标签页（生效值 + 来源、环境覆盖说明、编辑项目/全局作用域、保存/清除），执行记录表新增「模型/思考」列。UI 不自行计算优先级，只投影同一命令面，未新增任何门禁。
+
+### 实际验证
+
+- `nix shell nixpkgs#bun nixpkgs#nodejs_24 nixpkgs#just -c just verify` 通过：TypeScript（Runtime/CLI）与 UI 类型检查、**212 项 Vitest**、**196 项 Bun tests**（新增 20 项）、UI Vite 构建、`bun audit` 无已知漏洞。
+- 新增/扩充断言：契约边界（默认 adapterId、缺省与 `null` 区分、7 个 thinking 等级、非法值/空值/未知字段/非 UUID 项目）；存储（v7→v8 迁移与 `foreign_key_check`、作用域独立、部分更新合并、全空删除、非法 thinking 被 schema 与列约束双重拒绝、Execution 记录与 NULL 语义）；解析（默认/项目继承全局/环境覆盖最高且 `sources` 正确/空白变量/未知 Adapter/非法环境 thinking）；Adapter argv（配置存在时三个 flag 均出现，无配置时均不出现）；注册表不再把 env 模型写进 argv。
+- CLI 端到端（真实 CLI 子进程 + 独立 `CODEESTRA_HOME` + 临时仓库）：初始默认 → 全局 set → 项目 set 仅覆盖指定字段 → `clear --project` 回落全局 → `--unset` 单字段 → `CODEESTRA_PI_MODEL` 使 `sources` 变 `ENVIRONMENT` → 非法 thinking 与不存在的项目被拒绝。
+- **真实 Runtime + 协议 stub provider smoke**（`CODEESTRA_PI_EXECUTABLE` 指向按 RPC 协议应答的脚本，记录自身 argv）：`agent config set --model deepseek-flash --thinking high` 后 `task run`，provider 实际 argv 末尾为 `--model deepseek-flash --thinking high`，`task status` 的 Execution 记录 `agentConfig: {"model":"deepseek-flash","thinkingLevel":"high"}`。**该 stub 是协议/编排替身，不构成真实 Agent 集成证据。**
+- 未执行：真实模型/Provider 下按新配置的 `task.run`（本轮未消耗真实额度）；浏览器/桌面自动化（ADR-0008）。未触碰用户仓库与用户 ref：全部在临时仓库与临时 `CODEESTRA_HOME` 上运行（smoke 目录 `/tmp/codeestra-agentcfg-smoke.WCgxk4`，可删除）。
+
+### 剩余问题
+
+- 模型/Provider 取值不在 Codeestra 侧校验（没有模型目录就不假装有）：写错时由 Pi 在启动时报错，按既有失败路径记录，不静默降级。若要做模型选择器，需要单独决定是否以及如何解析 `pi --list-models`。
+- 配置是环境级而非 TaskRevision 级：同一 revision 在不同配置下重跑会产生不同配置的 Execution 记录；要复现“完全相同的一次执行”需同时固定两者。这由 ADR-0012 明确接受，不在未确认前改成 revision 快照。
+- 环境变量覆盖若在用户 shell 中残留，会一直压过持久化配置（CLI/UI 会显示 `sources: ENVIRONMENT`，可解释但不阻止）。
+- 未提供 `agent config list`（查看所有项目的覆盖）：当前 `get` 每次只回答一个作用域，项目数量级很小；若增长再按需添加。
+
 ## NEXT — 最小可用纵向切片
 
 0. 落实 ADR-0009 的 dev 基线：项目快照/Workspace 从 dev OID 建立，先补临时仓库测试；在此之前产品内 `task.run` 仍使用 mainRef，不能用于声称符合新分支规则。

@@ -36,6 +36,36 @@ export interface TaskView {
   readonly updatedAt: number;
 }
 
+export interface AgentConfigurationView {
+  readonly provider: string | null;
+  readonly model: string | null;
+  readonly thinkingLevel: string | null;
+}
+
+/** One persisted scope; the timestamps say who last changed it. */
+export interface AgentConfigurationScopeView extends AgentConfigurationView {
+  readonly updatedAt: number;
+  readonly updatedBy: string;
+}
+
+/**
+ * The Runtime's resolution of the effective Agent configuration for one project. `sources` names
+ * the layer each field came from, so the client can explain precedence instead of guessing.
+ */
+export interface AgentConfigurationResolutionView {
+  readonly adapterId: string;
+  readonly projectId: string | null;
+  readonly global: AgentConfigurationScopeView | null;
+  readonly project: AgentConfigurationScopeView | null;
+  readonly environment: AgentConfigurationView | null;
+  readonly effective: AgentConfigurationView;
+  readonly sources: {
+    readonly provider: string;
+    readonly model: string;
+    readonly thinkingLevel: string;
+  };
+}
+
 export interface ExecutionView {
   readonly executionId: string;
   readonly taskId: string;
@@ -48,6 +78,8 @@ export interface ExecutionView {
   readonly revisionId: string;
   /** Recorded failure reason; `null` while running or when none was recorded. */
   readonly error: { readonly code: string; readonly message?: string } | null;
+  /** Effective Agent configuration recorded when the Execution was reserved. */
+  readonly agentConfig: AgentConfigurationView | null;
   readonly session: {
     readonly sessionId: string;
     readonly state: string;

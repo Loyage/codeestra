@@ -46,14 +46,17 @@ describe('production Pi adapter registry', () => {
     });
   });
 
-  test('passes an explicit provider and model to the provider argv', async () => {
+  test('does not bake the environment model into the process argv', async () => {
+    // Model selection is resolved per Execution from the persisted scopes and the environment, so
+    // the registry must not pin it at process start; otherwise changing it would require a
+    // Runtime restart and the Execution record could disagree with what was actually launched.
     const bin = temporaryDirectory('codeestra-pi-bin-');
     const home = temporaryDirectory('codeestra-pi-home-');
     const executable = join(bin, 'fake-pi');
     const reportPath = join(bin, 'argv.json');
     await Bun.write(executable, `#!/bin/sh
 echo "$@" > ${reportPath}
-if [ "$1" = "--provider" ]; then echo 0.84.4; else echo 0.84.4; fi
+echo 0.84.4
 `);
     chmodSync(executable, 0o755);
     const registry = createPiAdapterRegistry({
@@ -64,8 +67,7 @@ if [ "$1" = "--provider" ]; then echo 0.84.4; else echo 0.84.4; fi
       },
     });
     await registry.resolve('pi').probe();
-    const recorded = (await Bun.file(reportPath).text()).trim();
-    expect(recorded).toBe('--provider github-copilot --model gpt-5.6-luna --version');
+    expect((await Bun.file(reportPath).text()).trim()).toBe('--version');
   });
 
   test('registers exactly one adapter instance and rejects unknown IDs', () => {

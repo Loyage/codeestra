@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import {
   supportsProcessRelease,
   type AgentAnswerAdapter,
+  type AgentConfiguration,
 } from '@codeestra/contracts';
 import {
   Phase1Database,
@@ -43,6 +44,8 @@ export interface RunTaskResult {
   readonly adapterVersion: string;
   readonly sessionState: string;
   readonly permissionMode: 'FULL' | 'STRICT';
+  /** Effective Agent configuration this Execution was reserved with; `null` means defaults. */
+  readonly agentConfig: AgentConfiguration | null;
 }
 
 export type AnswerDeliveryOutcome = 'DELIVERED' | 'NOT_DELIVERED';
@@ -58,6 +61,14 @@ export interface AgentRuntimeCoordinatorOptions {
   readonly registry: AdapterRegistry;
   readonly runtimeHome: string;
   readonly environment?: Readonly<Record<string, string>>;
+  /**
+   * Resolves the configuration for one Execution. The Runtime supplies this so the coordinator
+   * never reads persisted configuration itself: what it reserves is exactly what it launches.
+   */
+  readonly resolveAgentConfig?: (input: {
+    readonly projectId: string;
+    readonly adapterId: string;
+  }) => AgentConfiguration | null;
   readonly permissionMode?: () => 'FULL' | 'STRICT';
   readonly now?: () => number;
   readonly randomUUID?: () => string;
@@ -75,6 +86,10 @@ export class AgentRuntimeCoordinator {
   readonly #registry: AdapterRegistry;
   readonly #runtimeHome: string;
   readonly #environment: Readonly<Record<string, string>>;
+  readonly #resolveAgentConfig: (input: {
+    readonly projectId: string;
+    readonly adapterId: string;
+  }) => AgentConfiguration | null;
   readonly #permissionMode: () => 'FULL' | 'STRICT';
   readonly #now: () => number;
   readonly #randomUUID: () => string;
@@ -87,6 +102,7 @@ export class AgentRuntimeCoordinator {
     this.#registry = options.registry;
     this.#runtimeHome = options.runtimeHome;
     this.#environment = options.environment ?? {};
+    this.#resolveAgentConfig = options.resolveAgentConfig ?? (() => null);
     this.#permissionMode = options.permissionMode ?? (() => 'FULL');
     this.#now = options.now ?? Date.now;
     this.#randomUUID = options.randomUUID ?? (() => crypto.randomUUID());
@@ -122,6 +138,12 @@ export class AgentRuntimeCoordinator {
       now: this.#now,
       randomUUID: this.#randomUUID,
     });
+    // Resolved before the reservation, so the effective configuration is part of the Execution's
+    // recorded input and the Adapter cannot be started with something else.
+    const agentConfig = this.#resolveAgentConfig({
+      projectId: input.projectId,
+      adapterId: adapter.id,
+    });
     const execution = this.#storage.reserveExecution({
       projectId: input.projectId,
       taskId: input.taskId,
@@ -134,6 +156,7 @@ export class AgentRuntimeCoordinator {
       taskEventId: this.#randomUUID(),
       adapterId: adapter.id,
       adapterVersion: probe.version,
+      agentConfig,
       actor: 'runtime-scheduler',
       createdAt: this.#now(),
     });
@@ -165,6 +188,7 @@ export class AgentRuntimeCoordinator {
       adapterVersion: started.adapterVersion,
       sessionState: started.sessionState,
       permissionMode,
+      agentConfig: started.agentConfig ?? null,
     };
   }
 

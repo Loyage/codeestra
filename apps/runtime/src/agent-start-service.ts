@@ -102,6 +102,9 @@ export async function startReservedExecution(input: {
       },
       knowledgeSnapshotRefs: [],
       permissionMode,
+      // The configuration resolved at reservation time, so the Adapter launches exactly what the
+      // Execution records as its input rather than re-reading mutable configuration here.
+      ...(plan.agentConfig === null ? {} : { agentConfig: plan.agentConfig }),
       environment: input.environment ?? {},
     });
     if (session.id !== plan.sessionId || session.executionId !== plan.executionId

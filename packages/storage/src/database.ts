@@ -2,6 +2,7 @@ import { Database } from 'bun:sqlite';
 import { z } from 'zod';
 import {
   agentAnswerMigration,
+  agentConfigurationMigration,
   agentDisconnectMigration,
   agentObservationMigration,
   agentStartMigration,
@@ -72,6 +73,8 @@ export interface AgentStartPlan {
   readonly specification: string;
   readonly constraints: readonly StoredConstraint[];
   readonly providerSessionId: string | null;
+  /** Effective Agent configuration this Execution was reserved with; `null` means defaults. */
+  readonly agentConfig: StoredAgentConfiguration | null;
 }
 
 export interface ObservableAgentSession {
@@ -196,6 +199,61 @@ function parseExecutionError(json: string | null): ExecutionError | null {
   return result.success ? result.data : null;
 }
 
+/** Thinking levels Pi accepts; the Runtime passes them through and Pi clamps to the model. */
+export const agentThinkingLevels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+export const agentThinkingLevelSchema = z.enum(agentThinkingLevels);
+export type AgentThinkingLevel = z.infer<typeof agentThinkingLevelSchema>;
+
+/**
+ * One Execution's resolved configuration. Only explicitly set fields are present, so an absent
+ * key means the Adapter's own default was used for that field rather than a value Codeestra
+ * invented.
+ */
+export const storedAgentConfigurationSchema = z.strictObject({
+  provider: z.string().min(1).max(200).optional(),
+  model: z.string().min(1).max(200).optional(),
+  thinkingLevel: agentThinkingLevelSchema.optional(),
+});
+export type StoredAgentConfiguration = z.infer<typeof storedAgentConfigurationSchema>;
+
+function parseAgentConfiguration(json: string | null): StoredAgentConfiguration | null {
+  if (json === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json) as unknown;
+  } catch {
+    // JSON-validated by the column; a parse failure means the row was edited outside this path.
+    return null;
+  }
+  const result = storedAgentConfigurationSchema.safeParse(parsed);
+  if (!result.success) return null;
+  return Object.keys(result.data).length === 0 ? null : result.data;
+}
+
+/** A persisted per-scope override; `null` fields mean "no override at this scope". */
+export interface AgentConfigurationRecord {
+  readonly scope: 'GLOBAL' | 'PROJECT';
+  readonly projectId: string | null;
+  readonly adapterId: string;
+  readonly provider: string | null;
+  readonly model: string | null;
+  readonly thinkingLevel: AgentThinkingLevel | null;
+  readonly updatedAt: number;
+  readonly updatedBy: string;
+}
+
+interface AgentConfigurationRow {
+  readonly id: string;
+  readonly scope: 'GLOBAL' | 'PROJECT';
+  readonly project_id: string | null;
+  readonly adapter_id: string;
+  readonly provider: string | null;
+  readonly model: string | null;
+  readonly thinking_level: AgentThinkingLevel | null;
+  readonly updated_at: number;
+  readonly updated_by: string;
+}
+
 /** Read-only projection of one Execution attempt and the Agent Session it started, if any. */
 export interface ExecutionSummary {
   readonly executionId: string;
@@ -209,6 +267,8 @@ export interface ExecutionSummary {
   readonly revisionId: string;
   /** Recorded reason for a terminal failure; `null` while running or when none was recorded. */
   readonly error: ExecutionError | null;
+  /** Effective Agent configuration this Execution started with, as recorded at reservation. */
+  readonly agentConfig: StoredAgentConfiguration | null;
   readonly session: {
     readonly sessionId: string;
     readonly state: AgentSessionLifecycleState;
@@ -393,6 +453,19 @@ export interface TaskSummary {
   readonly updatedAt: number;
 }
 
+function mapAgentConfigurationRow(row: AgentConfigurationRow): AgentConfigurationRecord {
+  return {
+    scope: row.scope,
+    projectId: row.project_id,
+    adapterId: row.adapter_id,
+    provider: row.provider,
+    model: row.model,
+    thinkingLevel: row.thinking_level,
+    updatedAt: row.updated_at,
+    updatedBy: row.updated_by,
+  };
+}
+
 export class Phase1Database {
   readonly sqlite: Database;
 
@@ -432,6 +505,7 @@ export class Phase1Database {
         if (version < 5) this.sqlite.exec(agentDisconnectMigration);
         if (version < 6) this.sqlite.exec(taskVerificationMigration);
         if (version < 7) this.sqlite.exec(workspaceRetryMigration);
+        if (version < 8) this.sqlite.exec(agentConfigurationMigration);
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -700,12 +774,13 @@ export class Phase1Database {
       execution_id: string; task_id: string; attempt_number: number;
       state: ExecutionLifecycleState; adapter_id: string; adapter_version: string;
       resource_held: number; base_commit: string; revision_id: string; error_json: string | null;
+      agent_config_json: string | null;
       session_id: string | null; session_state: AgentSessionLifecycleState | null;
       provider_session_id: string | null; observation_cursor: string | null;
     }, [string]>(`
       SELECT execution.id AS execution_id,execution.task_id,execution.attempt_number,execution.state,
         execution.adapter_id,execution.adapter_version,execution.resource_held,execution.base_commit,
-        execution.applied_revision_id AS revision_id,execution.error_json,
+        execution.applied_revision_id AS revision_id,execution.error_json,execution.agent_config_json,
         session.id AS session_id,session.state AS session_state,
         session.provider_session_id,session.observation_cursor
       FROM executions execution LEFT JOIN agent_sessions session ON session.execution_id=execution.id
@@ -721,6 +796,7 @@ export class Phase1Database {
       baseCommit: row.base_commit,
       revisionId: row.revision_id,
       error: parseExecutionError(row.error_json),
+      agentConfig: parseAgentConfiguration(row.agent_config_json),
       session: row.session_id === null || row.session_state === null ? null : {
         sessionId: row.session_id,
         state: row.session_state,
@@ -1302,13 +1378,15 @@ export class Phase1Database {
       session_state: AgentStartPlan['sessionState']; adapter_id: string; adapter_version: string;
       workspace_id: string; workspace_path: string; ownership_token: string; revision_id: string;
       specification: string; constraints_json: string; provider_session_id: string | null;
+      agent_config_json: string | null;
     }, [string]>(`
       SELECT operation.id AS operation_id,operation.state AS operation_state,operation.project_id,
         task.id AS task_id,task.version AS task_version,execution.id AS execution_id,
         execution.version AS execution_version,
         session.id AS session_id,session.state AS session_state,execution.adapter_id,execution.adapter_version,
         workspace.id AS workspace_id,workspace.path AS workspace_path,workspace.ownership_token,
-        revision.id AS revision_id,revision.specification,revision.constraints_json,session.provider_session_id
+        revision.id AS revision_id,revision.specification,revision.constraints_json,session.provider_session_id,
+        execution.agent_config_json
       FROM agent_sessions session JOIN executions execution ON execution.id=session.execution_id
       JOIN tasks task ON task.id=execution.task_id JOIN workspaces workspace ON workspace.id=execution.workspace_id
       JOIN task_revisions revision ON revision.id=execution.applied_revision_id
@@ -1336,6 +1414,7 @@ export class Phase1Database {
       specification: row.specification,
       constraints: JSON.parse(row.constraints_json) as readonly StoredConstraint[],
       providerSessionId: row.provider_session_id,
+      agentConfig: parseAgentConfiguration(row.agent_config_json),
     };
   }
 
@@ -2604,6 +2683,121 @@ export class Phase1Database {
       sessionState: 'EXITED', executionState: payload.outcome === 'FAILURE' ? 'FAILED' : 'RUNNING' };
   }
 
+  /** One persisted override scope, or `null` when that scope overrides nothing. */
+  getAgentConfiguration(
+    scope: 'GLOBAL' | 'PROJECT',
+    projectId: string | null,
+    adapterId: string,
+  ): AgentConfigurationRecord | null {
+    this.assertAgentConfigurationScope(scope, projectId);
+    const row = this.agentConfigurationRow(scope, projectId, adapterId);
+    return row === null ? null : mapAgentConfigurationRow(row);
+  }
+
+  /**
+   * Merges overrides into one scope: an absent field is left unchanged, `null` clears it, and a
+   * scope whose fields all become empty is removed so it stops shadowing lower-precedence scopes.
+   */
+  setAgentConfiguration(input: {
+    readonly id: string;
+    readonly scope: 'GLOBAL' | 'PROJECT';
+    readonly projectId: string | null;
+    readonly adapterId: string;
+    readonly provider?: string | null;
+    readonly model?: string | null;
+    readonly thinkingLevel?: string | null;
+    readonly updatedAt: number;
+    readonly updatedBy: string;
+  }): AgentConfigurationRecord | null {
+    this.assertAgentConfigurationScope(input.scope, input.projectId);
+    if (input.scope === 'PROJECT') this.assertTrustedProject(input.projectId as string);
+    const existing = this.agentConfigurationRow(input.scope, input.projectId, input.adapterId);
+    const merged = {
+      provider: input.provider === undefined ? existing?.provider ?? null : input.provider,
+      model: input.model === undefined ? existing?.model ?? null : input.model,
+      thinkingLevel: input.thinkingLevel === undefined
+        ? existing?.thinking_level ?? null : input.thinkingLevel,
+    };
+    const present = Object.fromEntries(
+      Object.entries(merged).filter(([, value]) => value !== null),
+    );
+    const parsed = storedAgentConfigurationSchema.safeParse(present);
+    if (!parsed.success) {
+      throw new StorageError('INVALID_STATE',
+        `Invalid Agent configuration: ${parsed.error.message}`);
+    }
+    return this.sqlite.transaction(() => {
+      if (Object.keys(parsed.data).length === 0) {
+        this.clearAgentConfiguration(input);
+        return null;
+      }
+      if (existing === null) {
+        this.sqlite.query(`
+          INSERT INTO agent_configurations(id,scope,project_id,adapter_id,provider,model,
+            thinking_level,updated_at,updated_by)
+          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+        `).run(input.id, input.scope, input.projectId, input.adapterId,
+          merged.provider, merged.model, merged.thinkingLevel, input.updatedAt, input.updatedBy);
+      } else {
+        this.sqlite.query(`
+          UPDATE agent_configurations SET provider=?1,model=?2,thinking_level=?3,
+            updated_at=?4,updated_by=?5 WHERE id=?6
+        `).run(merged.provider, merged.model, merged.thinkingLevel, input.updatedAt,
+          input.updatedBy, existing.id);
+      }
+      const saved = this.agentConfigurationRow(input.scope, input.projectId, input.adapterId);
+      if (saved === null) throw new Error('Agent configuration was not persisted');
+      return mapAgentConfigurationRow(saved);
+    })();
+  }
+
+  /** Removes one scope's override. Returns whether a record existed. */
+  clearAgentConfiguration(input: {
+    readonly scope: 'GLOBAL' | 'PROJECT';
+    readonly projectId: string | null;
+    readonly adapterId: string;
+  }): boolean {
+    this.assertAgentConfigurationScope(input.scope, input.projectId);
+    return this.sqlite.transaction(() => {
+      const row = this.agentConfigurationRow(input.scope, input.projectId, input.adapterId);
+      if (row === null) return false;
+      this.sqlite.query('DELETE FROM agent_configurations WHERE id=?1').run(row.id);
+      return true;
+    })();
+  }
+
+  private assertAgentConfigurationScope(
+    scope: 'GLOBAL' | 'PROJECT',
+    projectId: string | null,
+  ): void {
+    if (scope === 'GLOBAL' && projectId !== null) {
+      throw new StorageError('INVALID_STATE', 'Global Agent configuration cannot name a project');
+    }
+    if (scope === 'PROJECT' && projectId === null) {
+      throw new StorageError('INVALID_STATE', 'Project Agent configuration requires a project');
+    }
+  }
+
+  private assertTrustedProject(projectId: string): void {
+    const project = this.sqlite.query<{ id: string }, [string]>(`
+      SELECT p.id FROM projects p JOIN project_trusts t
+        ON t.project_id=p.id AND t.status='ACTIVE' WHERE p.id=?1
+    `).get(projectId);
+    if (project === null) throw new StorageError('NOT_FOUND', 'Trusted project was not found');
+  }
+
+  private agentConfigurationRow(
+    scope: 'GLOBAL' | 'PROJECT',
+    projectId: string | null,
+    adapterId: string,
+  ): AgentConfigurationRow | null {
+    return this.sqlite.query<AgentConfigurationRow, [string, string | null, string]>(`
+      SELECT id,scope,project_id,adapter_id,provider,model,thinking_level,updated_at,updated_by
+      FROM agent_configurations
+      WHERE scope=?1 AND adapter_id=?3 AND ((project_id IS NULL AND ?2 IS NULL) OR project_id=?2)
+    `).get(scope, projectId, adapterId);
+  }
+
   private observableAgentSessionRow(sessionId: string): (Omit<ObservableAgentSession,
     'providerSessionId'> & { readonly providerSessionId: string | null; readonly workspaceId: string }) | null {
     const row = this.sqlite.query<{
@@ -2643,6 +2837,7 @@ export class Phase1Database {
     readonly taskEventId: string;
     readonly adapterId: string;
     readonly adapterVersion: string;
+    readonly agentConfig?: StoredAgentConfiguration | null;
     readonly actor: string;
     readonly createdAt: number;
   }): ExecutionReservation {
@@ -2680,12 +2875,17 @@ export class Phase1Database {
           SELECT COALESCE(MAX(attempt_number),0)+1 AS number FROM executions WHERE task_id=?1
         `).get(input.taskId);
         if (attempt === null) throw new Error('Could not allocate an Execution attempt number');
+        const agentConfigJson = input.agentConfig === undefined || input.agentConfig === null
+            || Object.keys(input.agentConfig).length === 0
+          ? null : canonicalJson(input.agentConfig);
         database.query(`
           INSERT INTO executions(id,task_id,attempt_number,initial_revision_id,applied_revision_id,
-            workspace_id,adapter_id,adapter_version,state,resource_held,base_commit,version)
-          VALUES (?1,?2,?3,?4,?4,?5,?6,?7,'CREATED',1,?8,0)
+            workspace_id,adapter_id,adapter_version,state,resource_held,base_commit,version,
+            agent_config_json)
+          VALUES (?1,?2,?3,?4,?4,?5,?6,?7,'CREATED',1,?8,0,?9)
         `).run(input.executionId, input.taskId, attempt.number, subject.revision_id,
-          input.workspaceId, input.adapterId, input.adapterVersion, subject.base_commit);
+          input.workspaceId, input.adapterId, input.adapterVersion, subject.base_commit,
+          agentConfigJson);
         const workspaceUpdate = database.query(
           "UPDATE workspaces SET state='IN_USE' WHERE id=?1 AND state='READY'",
         ).run(input.workspaceId);
