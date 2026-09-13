@@ -2,19 +2,21 @@
 
 ## 已接受
 
-- [ADR-0001](0001-runtime-safety-baseline.md)：运行修订先暂停、依赖上游进入稳定分支、每批稳定提升用户批准、独立本地 Runtime。（**Amended by ADR-0009**：开发依赖进入 dev；稳定提升固定为 dev→main）
-- [ADR-0002](0002-execution-and-promotion-policy.md)：首个 Adapter 为 Pi、保留原生审批、协作取消与不抢占、Stable 切换等待排空。（**Amended by ADR-0008**：优先级表述；原审批与不抢占要求继续有效）
-- [ADR-0003](0003-task-result-commit-policy.md)：每次成果 commit 前确认固定差异；沿用仓库 identity；trust 后执行 hooks；全基线差异配合敏感路径拒绝。
-- [ADR-0004](0004-minimum-usable-runtime.md)：CLI 首入口并自动启动独立 Runtime；项目显式一次信任；Pi 敏感操作逐次审批、未知工具拒绝。（**Amended by ADR-0008**：CLI 定为完备命令面；信任与审批门禁保留不删）
+- [ADR-0001](0001-runtime-safety-baseline.md)：运行修订先暂停、依赖上游进入稳定分支、独立本地 Runtime。（**Amended by ADR-0009/0011**：开发依赖进入 dev；FULL 下稳定提升不批准）
+- [ADR-0002](0002-execution-and-promotion-policy.md)：首个 Adapter 为 Pi、协作取消与不抢占、Stable 切换等待排空。（**Amended by ADR-0011**：FULL 取消原生审批，STRICT 保留）
+- [ADR-0003](0003-task-result-commit-policy.md)：成果 commit 固定差异、沿用 identity、执行 hooks。（**Amended by ADR-0011**：FULL 单步且不拒绝敏感路径，STRICT 保留旧门禁）
+- [ADR-0004](0004-minimum-usable-runtime.md)：CLI 首入口并自动启动独立 Runtime。（**Amended by ADR-0011**：FULL 项目接入不确认、所有已注册工具自动允许；STRICT 保留旧门禁）
 - [ADR-0005](0005-task-entry-and-worktree-location.md)：Task CLI 使用 Project ID，新建为 DRAFT；owned worktree 位于 Runtime 数据目录而非用户仓库。（**Amended by ADR-0009**：固定基线改为 dev）
-- [ADR-0006](0006-task-verification-policy.md)：验证命令来自 main ref 上人工维护的 `.codeestra/policies/verification.json`；trust 时一次性确认策略摘要，变化需重新确认；验证在固定 commit 的 detached 副本中运行。
-- [ADR-0007](0007-local-web-ui-entry.md)：新增本地 Web UI 入口 `codeestra ui`；Runtime 按需启动 `127.0.0.1` HTTP + SSE，token 只存内存、经 0600 socket 取得、URL fragment 传递；UI 与 CLI 复用同一 dispatch，不绕过任何确认。（**Amended by ADR-0008**：UI 只是便利层，CLI 必须完备且优先）
-- [ADR-0008](0008-efficiency-first-service-form.md)：效率至上、现有门禁冻结且不新增权限管理；软件本体是服务，CLI 为完备命令面、UI 只是便利层；自动化测试仅限 CLI/命令面，不获取电脑控制权。
-- [ADR-0009](0009-main-dev-promotion-and-restart.md)：固定 `main`/`dev` 双分支；功能从 `dev` 建基线并先集成到 `dev`；`dev → main` 必须由用户批准，更新后立即以 CLI stop + status 重启 Runtime。
+- [ADR-0006](0006-task-verification-policy.md)：验证命令来自 main ref 人工策略并在固定 commit 副本运行。（**Amended by ADR-0011**：FULL 不确认策略，STRICT 保留）
+- [ADR-0007](0007-local-web-ui-entry.md)：本地 Web UI 与 CLI 复用 Runtime 命令面。（**Amended by ADR-0008/0011**：UI 是便利层；FULL 隐藏旧确认，STRICT 保留）
+- [ADR-0008](0008-efficiency-first-service-form.md)：效率至上、CLI 完备、测试仅限命令面。（**Amended by ADR-0011**：默认 FULL 零确认替代保留旧门禁）
+- [ADR-0009](0009-main-dev-promotion-and-restart.md)：固定 `main`/`dev` 双分支与提升后重启。（**Amended by ADR-0011**：FULL 不批准，STRICT 保留批准）
+- [ADR-0010](0010-live-agent-terminal-takeover.md)：运行中 Agent 支持原生终端完全接管；Pi 在结构化安全点做 RPC↔TUI/PTY 进程交接；会话指导与任务修订分流，单 writer lease，不新增确认门禁。（**Amended by ADR-0011**：FULL 下工具不确认）
+- [ADR-0011](0011-default-full-permission-mode.md)：默认开启主机级全权限模式，现有与未来常态确认归零；保留无需确认即可切换的全局 STRICT 兼容模式。
 
 以上选择均由用户明确答复。用户给定的硬性原则见 `PROJECT_SPEC.md`，无需重复确认。
 
-**优先级标注**：ADR-0008 只修订 ADR-0002/0004/0007 的优先级与入口定位表述，**未取消** ADR-0001 D03、ADR-0003、ADR-0006 的确认门禁；这些门禁继续按原条款生效。ADR-0009 进一步修订 ADR-0001 D02/D03 与 ADR-0005 的基线语义：开发依赖和 Task 基线使用 `dev`，稳定提升固定为 `dev → main`，并沿用同一次用户批准，不新增门禁。
+**优先级标注**：ADR-0011 是当前权限语义：默认 FULL，取消 ADR-0001/0002/0003/0004/0006/0008/0009/0010 中冲突的确认要求；STRICT 作为显式 opt-in 保留旧门禁。ADR-0009 的 `main`/`dev` 分支职责、固定 SHA/证据与提升后重启等正确性要求不变。
 
 ## 阶段准入与待决项
 
@@ -27,9 +29,10 @@
 | Phase 1 | Task verification 隔离副本、超时与树改动语义 | 已实现副本内 argv 直接 spawn、按进程组超时停止与 tracked 改动失败；真实命令集验证与长时任务仍未实测 |
 | Phase 1 | 本地 IPC、进程托管与首次项目信任入口 | 产品行为已由 ADR-0004 确认；本用户 0600/0700 socket IPC、单实例、后台进程托管与两步 trust 已实现。一次性命令与只读事件订阅同一 socket（见 `docs/architecture/event-model.md` §3.1）；订阅连接不持久化游标、无自动重连、无按 project 鉴权，客户端重连需自带 cursor |
 | Phase 2 | 上游被修订时依赖锁定 revision 怎样更新 | 未明确前暂停该边调度并请求澄清，不自行跟随或固定旧需求 |
+| Phase 3 | Pi 原生 TUI 接管的 PTY transport、权限模式 side channel 与 session-file 双向交接 | 产品语义已由 ADR-0010/0011 确认；实现前用真实 Pi spike 验证 RPC 安全退出→TUI resume→TUI 安全退出→RPC resume，FULL/STRICT 不因交接改变，全程不得双开 writer |
 | Phase 4 | IntegrationBatch 的具体 merge commit 形态、失败批次拆分、main 已 checkout 的安全交接 | 长期目标分支已由 ADR-0009 固定：Task 先进入 dev，dev→main 需用户批准并随后重启；其余细节不自动推断 |
 | Phase 7 | migration/备份兼容策略、bootstrap 自身更新授权 | 禁止自动实现不可逆升级；实现前确认 |
-| 任意阶段 | 新增权限门禁/沙箱/多用户与密钥托管 | 不在当前范围（ADR-0008）：已实现门禁冻结、不新增；提出时必须先给出效率成本评估 |
+| 任意阶段 | 权限模式 | ADR-0011 已实现默认 FULL 与 CLI STRICT 开关；FULL 常态确认预算固定为 0，不再新增确认 |
 | 任意阶段 | 新能力的 CLI 完备性 | 先判定（ADR-0008）：CLI 必须能完整完成并可脚本化驱动，UI 不得超出 CLI 能力 |
 
 Phase 0 不要求 Phase 7 所有发布细节已决定；Phase 1 不能以“未来会解决”绕过影响真实执行与 Git 安全的待决项。

@@ -57,6 +57,7 @@ interface LiveSession {
   readonly providerSessionId: string;
   readonly sessionStorageRef: string;
   readonly processIdentity: unknown;
+  readonly permissionMode: 'FULL' | 'STRICT';
 }
 
 function composeRevisionPrompt(revision: AgentStartRequest['revision']): string {
@@ -166,12 +167,17 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
       gateExtensionPath: this.gateExtensionPath,
       sessionDir: this.sessionDir,
       platform: this.#options.platform,
+      permissionMode: request.permissionMode,
     })];
     let child: Bun.Subprocess<'pipe', 'pipe', 'pipe'>;
     try {
       child = this.#spawn([this.#options.piExecutable, ...argv], {
         cwd: request.workspace.cwd,
-        env: { ...this.#options.environment, ...request.environment },
+        env: {
+          ...this.#options.environment,
+          ...request.environment,
+          CODEESTRA_PERMISSION_MODE: request.permissionMode,
+        },
       });
     } catch (error) {
       throw new PiRpcProcessError('PROVIDER_SPAWN_FAILED',
@@ -202,7 +208,10 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
       });
       // The first user message is what makes the persistent Pi session durable.
       await client.request({ type: 'prompt', message: composeRevisionPrompt(request.revision) });
-      this.#sessions.set(request.sessionId, { client, providerSessionId, sessionStorageRef, processIdentity });
+      this.#sessions.set(request.sessionId, {
+        client, providerSessionId, sessionStorageRef, processIdentity,
+        permissionMode: request.permissionMode,
+      });
       return {
         id: request.sessionId,
         executionId: request.executionId,
@@ -261,7 +270,8 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
 const evidenceRef = `pi-rpc:agent_settled:session=${live.providerSessionId}`
       + `:epoch=${live.client.epoch}:tools=${createHash('sha256')
         .update(buildPiRpcArguments({ gateExtensionPath: this.gateExtensionPath,
-          sessionDir: this.sessionDir, platform: this.#options.platform }).join(' '))
+          sessionDir: this.sessionDir, platform: this.#options.platform,
+          permissionMode: live.permissionMode }).join(' '))
         .digest('hex').slice(0, 16)}`;
     let turnFailure: string | null = null;
     for await (const envelope of live.client.envelopes()) {

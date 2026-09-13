@@ -6,10 +6,11 @@ import { runtimeRequestSchema, type RuntimeRequest, type RuntimeResponse,
 import { inspectRepository } from '@codeestra/git';
 import { Phase1Database, StorageError, type AgentAnswerPlan } from '@codeestra/storage';
 import { createPiAdapterRegistry } from './adapter-registry.js';
-import { AgentRuntimeCoordinator } from './agent-runtime-service.js';
+import { AgentRuntimeCoordinator, deriveCommandId } from './agent-runtime-service.js';
 import { EventSubscriptionHub, type EventSubscriptionHandle } from './event-subscription-service.js';
 import { RuntimeHttpApi } from './http-api.js';
 import { runtimeHome, runtimeSocketPath } from './paths.js';
+import { readPermissionMode, writePermissionMode, type PermissionMode } from './permission-mode.js';
 import { captureResultCommit, prepareResultCommit } from './result-commit-service.js';
 import {
   reconcileInterruptedAgentAnswers,
@@ -63,12 +64,14 @@ async function endpointIsLive(): Promise<boolean> {
 if (await endpointIsLive()) process.exit(0);
 rmSync(socketPath, { force: true });
 
+let permissionMode: PermissionMode = await readPermissionMode(home);
 const storage = new Phase1Database(join(home, 'runtime.sqlite'));
 const registry = createPiAdapterRegistry({ runtimeHome: home, environment: Bun.env });
 const coordinator = new AgentRuntimeCoordinator({
   storage,
   registry,
   runtimeHome: home,
+  permissionMode: () => permissionMode,
   logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
 });
 const subscriptions = new EventSubscriptionHub({ storage });
@@ -109,6 +112,7 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       return success(request.requestId, {
         pid: process.pid,
         status: 'READY',
+        permissionMode,
         adapters: registry.ids(),
         activeSessions: coordinator.activeSessionIds(),
         eventSubscribers: subscriptions.subscriberCount(),
@@ -117,6 +121,15 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
     case 'runtime.stop':
       setTimeout(() => { void shutdown(); }, 10);
       return success(request.requestId, { stopping: true });
+    case 'permission.get':
+      return success(request.requestId, { mode: permissionMode, default: 'FULL' });
+    case 'permission.set':
+      permissionMode = request.mode;
+      writePermissionMode(home, permissionMode);
+      return success(request.requestId, {
+        mode: permissionMode,
+        appliesTo: 'new operations and new Agent sessions',
+      });
     case 'project.inspect':
       return success(request.requestId, await inspectRepository(request.path));
     case 'project.verificationPolicy': {
@@ -170,6 +183,7 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         taskId: request.taskId,
         ...(request.executionId === undefined ? {} : { executionId: request.executionId }),
         commandId: request.commandId,
+        permissionMode,
       }));
     case 'task.verification.list':
       return success(request.requestId,
@@ -190,7 +204,35 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         ...(request.executionId === undefined ? {} : { executionId: request.executionId }),
         commandId: request.commandId,
         actor: 'local-user',
+        permissionMode,
       }));
+    case 'task.result.capture': {
+      if (permissionMode !== 'FULL') {
+        return failure(request.requestId, 'FULL_PERMISSION_REQUIRED',
+          'Single-step result capture is available only in FULL permission mode');
+      }
+      let prepareIndex = 0;
+      const prepared = await prepareResultCommit({
+        storage,
+        projectId: request.projectId,
+        taskId: request.taskId,
+        ...(request.executionId === undefined ? {} : { executionId: request.executionId }),
+        commandId: deriveCommandId(request.commandId, 'full-result-prepare'),
+        actor: 'runtime-full-permission',
+        permissionMode,
+        randomUUID: () => deriveCommandId(request.commandId, `full-result-prepare-${prepareIndex++}`),
+      });
+      let captureIndex = 0;
+      return success(request.requestId, await captureResultCommit({
+        storage,
+        projectId: request.projectId,
+        taskId: request.taskId,
+        authorizationId: prepared.authorizationId,
+        commandId: deriveCommandId(request.commandId, 'full-result-commit'),
+        permissionMode,
+        randomUUID: () => deriveCommandId(request.commandId, `full-result-commit-${captureIndex++}`),
+      }));
+    }
     case 'task.result.commit':
       return success(request.requestId, await captureResultCommit({
         storage,
@@ -198,6 +240,7 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         taskId: request.taskId,
         authorizationId: request.authorizationId,
         commandId: request.commandId,
+        permissionMode,
       }));
     case 'attention.list':
       return success(request.requestId, storage.listAttentionRequests(request.projectId));
@@ -306,9 +349,14 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
           : { state: 'ABSENT', digest: null, mainRef: actual.mainRef,
               mainCommit: policy.mainCommit },
         trustedAt: now,
-        actor: 'local-user',
+        actor: permissionMode === 'FULL' ? 'runtime-full-permission' : 'local-user',
       });
-      return success(request.requestId, { trusted: true, repository: actual, verificationPolicy: policy });
+      return success(request.requestId, {
+        trusted: true,
+        permissionMode,
+        repository: actual,
+        verificationPolicy: policy,
+      });
     }
   }
 }

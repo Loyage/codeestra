@@ -33,6 +33,7 @@ export async function startReservedExecution(input: {
   readonly prepareCommandId: string;
   readonly startCommandId: string;
   readonly environment?: Readonly<Record<string, string>>;
+  readonly permissionMode?: 'FULL' | 'STRICT';
   readonly now?: () => number;
   readonly randomUUID?: () => string;
 }): Promise<AgentStartPlan> {
@@ -48,11 +49,13 @@ export async function startReservedExecution(input: {
     changedAt: now(),
   });
   const probe = await input.adapter.probe();
+  const permissionMode = input.permissionMode ?? 'FULL';
   const startPayloadHash = hash({
     executionId: input.executionId,
     expectedVersion: preparing.version,
     adapterId: input.adapter.id,
     adapterVersion: probe.version,
+    permissionMode,
   });
   const recorded = input.storage.findAgentStart(input.projectId, input.startCommandId, startPayloadHash);
   if (recorded?.operationState === 'SUCCEEDED' || recorded?.operationState === 'FAILED') return recorded;
@@ -98,7 +101,7 @@ export async function startReservedExecution(input: {
         constraints: plan.constraints,
       },
       knowledgeSnapshotRefs: [],
-      permissionMode: 'NATIVE',
+      permissionMode,
       environment: input.environment ?? {},
     });
     if (session.id !== plan.sessionId || session.executionId !== plan.executionId

@@ -1,6 +1,6 @@
 # ADR-0008：效率优先、服务形态（CLI 完备命令面）与测试边界
 
-Status：Accepted（用户本轮明确答复四个问题：保留现有门禁只改优先级、新增本 ADR 并 supersede 相关条目、CLI 与 UI 共用同一 Runtime 命令面、测试只用 CLI/命令面且不引入电脑控制）
+Status：Accepted；**Amended by ADR-0011**：以默认 FULL 零确认替代“保留现有门禁”，CLI 完备与测试边界不变。
 
 ## Context
 

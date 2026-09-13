@@ -153,6 +153,8 @@ function usage(): never {
   bun run codeestra open [path] [--yes] [--no-open]
   bun run codeestra ui [--no-open]
   bun run codeestra stop
+  bun run codeestra permission get
+  bun run codeestra permission set <full|strict>
   bun run codeestra project inspect [path]
   bun run codeestra project policy [path]
   bun run codeestra project trust [path] [--yes]
@@ -162,7 +164,8 @@ function usage(): never {
   bun run codeestra task submit <project-id> <task-id> <expected-version>
   bun run codeestra task run <project-id> <task-id> <expected-version> [--adapter <id>]
   bun run codeestra task status <project-id> <task-id>
-  bun run codeestra task result prepare <project-id> <task-id> [execution-id]
+  bun run codeestra task result capture <project-id> <task-id> [execution-id]
+  bun run codeestra task result prepare <project-id> <task-id> [execution-id]   # strict mode
   bun run codeestra task result commit <project-id> <task-id> <authorization-id> --confirm
   bun run codeestra task verify <project-id> <task-id> [execution-id]
   bun run codeestra task verification list <project-id> <task-id>
@@ -189,6 +192,11 @@ function preselectProject(url: string, projectId: string): string {
 function launchBrowser(url: string): void {
   const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
   Bun.spawn([opener, url], { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' }).unref();
+}
+
+async function currentPermissionMode(): Promise<'FULL' | 'STRICT'> {
+  const result = await call({ command: 'permission.get' }) as { mode: 'FULL' | 'STRICT' };
+  return result.mode;
 }
 
 function describeVerificationPolicy(policy: VerificationPolicyInspection): void {
@@ -241,6 +249,7 @@ try {
       path }) as VerificationPolicyInspection;
     describeVerificationPolicy(policy);
 
+    const mode = await currentPermissionMode();
     const known = (await call({ command: 'project.list' }) as TrustedProjectListing[])
       .find((candidate) => candidate.repoRoot === identity.repoRoot);
     const confirmation = known?.confirmedPolicy ?? null;
@@ -257,12 +266,17 @@ try {
       if (known !== undefined) {
         console.error('\nThe confirmation on file no longer matches this repository: the policy at'
           + ' the main ref changed (or was never confirmed), so it needs confirming again.');
-      }      console.error('\nTrusting allows an Agent, commands, and Git hooks to run with your user'
-        + ' permissions.');
-      console.error('It does not authorize commits, main updates, pushes, or unknown tools.');
-      const confirmed = flagTokens.includes('--yes')
-        || prompt('Type TRUST to confirm:') === 'TRUST';
-      if (!confirmed) throw new Error('Project trust was not confirmed');
+      }
+      if (mode === 'FULL') {
+        console.error('\nFULL permission mode: registering this project without confirmation.');
+      } else {
+        console.error('\nSTRICT permission mode: trusting allows an Agent, commands, and Git hooks'
+          + ' to run with your user permissions.');
+        console.error('It does not authorize commits, main updates, pushes, or unknown tools.');
+        const confirmed = flagTokens.includes('--yes')
+          || prompt('Type TRUST to confirm:') === 'TRUST';
+        if (!confirmed) throw new Error('Project trust was not confirmed');
+      }
       await call({
         command: 'project.trust',
         path,
@@ -283,12 +297,21 @@ try {
     console.log(url);
     console.error('The Web UI opens on this project. The token stays in the URL fragment and in'
       + ' your browser session.');
-    console.error('Next: create a draft task, submit it, then Run task… and answer the gate'
-      + ' prompts. Results land on refs/heads/task/<task-id>; merge them yourself,'
+    console.error(mode === 'FULL'
+      ? 'Next: create a draft task, submit it, then Run task…; tools run without permission prompts.'
+      : 'Next: create a draft task, submit it, then Run task… and answer the gate prompts.');
+    console.error('Results land on refs/heads/task/<task-id>; merge them yourself,'
       + ' for example: git merge task/<task-id>');
     if (!flagTokens.includes('--no-open')) launchBrowser(url);
   } else if (group === 'stop' && action === undefined) {
     print(await call({ command: 'runtime.stop' }));
+  } else if (group === 'permission' && action === 'get'
+    && firstArgument === undefined && remainingArguments.length === 0) {
+    print(await call({ command: 'permission.get' }));
+  } else if (group === 'permission' && action === 'set') {
+    if (firstArgument === undefined || remainingArguments.length !== 0
+      || !['full', 'strict'].includes(firstArgument.toLowerCase())) usage();
+    print(await call({ command: 'permission.set', mode: firstArgument.toUpperCase() as 'FULL' | 'STRICT' }));
   } else if (group === 'project' && action === 'inspect') {
     print(await call({ command: 'project.inspect', path: firstArgument ?? process.cwd() }));
   } else if (group === 'project' && action === 'list') {
@@ -302,8 +325,12 @@ try {
     const policy = await call({ command: 'project.verificationPolicy',
       path }) as VerificationPolicyInspection;
     print(policy);
-    console.error('\nTrusting allows an Agent, commands, and Git hooks to run with your user permissions.');
-    console.error('It does not authorize commits, main updates, pushes, or unknown tools.');
+    const mode = await currentPermissionMode();
+    console.error(mode === 'FULL'
+      ? '\nFULL permission mode: the project will be registered without confirmation; Agent tools,'
+        + ' commands, verification and Git hooks run with your user permissions.'
+      : '\nSTRICT permission mode: trusting allows Agent tools, commands, and Git hooks to run with'
+        + ' your user permissions, but does not authorize commits, main updates, pushes, or unknown tools.');
     if (policy.state === 'PRESENT') {
       console.error('task verify will run these commands in an isolated copy of the tested commit:');
       for (const command of policy.policy?.commands ?? []) {
@@ -313,7 +340,8 @@ try {
     } else {
       console.error('This project has no verification policy; task verify will refuse until one is added.');
     }
-    const confirmed = Bun.argv.includes('--yes') || prompt('Type TRUST to confirm:') === 'TRUST';
+    const confirmed = mode === 'FULL' || Bun.argv.includes('--yes')
+      || prompt('Type TRUST to confirm:') === 'TRUST';
     if (!confirmed) throw new Error('Project trust was not confirmed');
     print(await call({
       command: 'project.trust',
@@ -389,7 +417,17 @@ try {
     // `task result <subcommand> …` is a three-level command, so the subcommand lands in
     // firstArgument and the project ID is the first remaining argument.
     const subcommand = firstArgument;
-    if (subcommand === 'prepare') {
+    if (subcommand === 'capture') {
+      const [projectId, taskId, executionId, ...extra] = remainingArguments;
+      if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
+      print(await call({
+        command: 'task.result.capture',
+        commandId: crypto.randomUUID(),
+        projectId,
+        taskId,
+        ...(executionId === undefined ? {} : { executionId }),
+      }));
+    } else if (subcommand === 'prepare') {
       const [projectId, taskId, executionId, ...extra] = remainingArguments;
       if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
       print(await call({

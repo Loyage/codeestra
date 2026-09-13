@@ -211,6 +211,21 @@ describe('verification refusals', () => {
     }
   });
 
+  test('full mode runs a changed main policy without asking for reconfirmation', async () => {
+    const fixture = await executedTask();
+    try {
+      await Bun.write(join(fixture.value.repo, '.codeestra/policies/verification.json'),
+        `${JSON.stringify({ version: 1, commands: [{ id: 'changed', argv: ['true'] }] })}\n`);
+      await git(fixture.value.repo, ['add', '.codeestra/policies/verification.json']);
+      await git(fixture.value.repo, ['commit', '-m', 'change verification policy']);
+      const report = await verify(fixture, { permissionMode: 'FULL' });
+      expect(report).toMatchObject({ state: 'PASSED', outcomeCode: 'PASSED' });
+      expect(report.commands).toEqual([expect.objectContaining({ id: 'changed', exitCode: 0 })]);
+    } finally {
+      fixture.value.storage.close();
+    }
+  });
+
   test('refuses when the Agent changed the policy on the Task branch', async () => {
     const fixture = await executedTask();
     try {

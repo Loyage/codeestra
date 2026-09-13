@@ -537,10 +537,49 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 - `git diff --check`：通过。
 - 未执行浏览器自动化验证（遵守 ADR-0008 测试边界）。
 
+## FOUNDATION-025 — 运行中 Agent 原生终端接管设计（ADR-0010）
+
+状态：产品语义与架构设计已确认；无代码实现，真实 Pi 双向交接 spike 尚未执行。
+
+用户选择：
+
+1. 介入体验为 Provider 原生终端/TUI 完全接管，不接受把日志浏览或仿终端聊天框称作 attach。
+2. 输入采用双通道：Session Guidance 立即指导当前 Agent但不改变验收规格；规格/约束变化必须显式生成 TaskRevision。
+3. 生效时机为安全点立即转向：不 abort 已开始的工具，在当前工具与模型轮次结束后尽快交接。
+4. Pi 当前 RPC 进程不能原地附着原生 TUI，因此采用安全点进程交接：确认 RPC 退出后以同一持久 conversation 启动 TUI/PTY，用户交还后再恢复 RPC。
+
+已同步：
+
+- 新增 Accepted ADR-0010，定义 Task-first CLI/Runtime 命令面、双通道语义、安全点竞态、RPC↔TUI successor Session、单 writer lease、detach/release 区别、权限模式 side channel 与 PTY 数据边界；ADR-0011 随后修订为 FULL 零确认、STRICT 保留 gate。
+- 更新 PROJECT_SPEC、架构总览、Domain Model、状态机、Adapter API、Event Model、SQLite 逻辑设计、Pi spike 结论、Roadmap、README 与决策索引。
+- 明确 `agent_sessions.execution_id UNIQUE` 在 Phase 3 要改为“历史多 incarnation、活动态部分唯一”；现有 schema version 7 和代码仍是单 Session，不能声称接管已实现。
+
+效率成本：无新增审批；常态入口 `task takeover attach` 一条命令。相比 RPC steer，原生 TUI 首次接管需等待当前工具安全结束并完成一次 Provider 进程切换；这是避免双 writer/会话损坏的正确性等待，不是人为门禁。
+
+验证：`git diff --check` 通过；检查 28 个 Markdown 文件，本地链接 0 断链；SQLite 文档 6 个 SQL block 在 Bun 内存库执行成功且 `foreign_key_check=0`。未执行接管代码测试，因为接管尚无代码实现。实现前必须用临时仓库与真实 Pi 依次验证 RPC 安全退出→同 session TUI resume→PTY detach/reattach→TUI 安全退出→RPC resume，并验证权限模式不因交接改变（FULL 零确认；STRICT 工具审批进入 Runtime 审计）。不得用 fake 或桌面自动化替代。
+
+## FOUNDATION-026 — 默认全权限模式（ADR-0011）
+
+状态：现有 Phase 1 门禁已切换为默认 FULL；STRICT 兼容模式保留。未来 Integration/Promotion 的零确认语义已写入规范，但对应阶段尚未实现。
+
+已实现：
+
+- 新 Runtime 无配置时默认 `FULL`；`permission get` 与 `permission set full|strict` 通过同一 Runtime 命令面查询/持久化，切换不确认，影响后续操作与新 Session。
+- Pi FULL Session 使用 `--approve`，不传 `--tools` allowlist；Codeestra gate 对所有已注册工具（含未知名称、无 UI channel、不可序列化输入）直接允许。STRICT 保留原逐次审批、未知工具拒绝与工具 allowlist。
+- FULL 项目 `open/trust` 不要求 TRUST 输入；STRICT 保留旧流程。Web UI 显示权限模式，FULL 隐藏 TRUST 输入。
+- FULL verification policy 变化后直接执行；策略仍来自 main ref、经过严格 schema、在固定 commit 副本中运行并绑定证据。STRICT 保留 digest 确认。
+- FULL 新增 `task result capture` 单步成果提交，并跳过敏感路径 deny policy；STRICT 保留 prepare + confirm 和敏感路径拒绝。Web UI 根据模式显示单步或两步流程。
+- ADR-0011 显式修订 ADR-0001/0002/0003/0004/0006/0008/0009/0010 中冲突的确认要求；FULL 下未来 dev→main/Self Promotion 也不得新增批准，但固定 SHA/证据、归属、静止、幂等和重启等正确性检查继续有效。
+
+效率成本：FULL 常态路径为 0 次确认、0 次确认等待；STRICT 是用户主动切换后的兼容路径。
+
+验证：`nix shell nixpkgs#bun nixpkgs#nodejs_24 nixpkgs#just -c just verify` 通过——212 项 domain Vitest、174 项 Bun tests、TypeScript/UI typecheck、Vite build、`bun audit` 无漏洞；另以临时 `CODEESTRA_HOME` 实测默认 FULL → set strict → 持久查询 STRICT → set full，`runtime.ping` 报告 FULL。补了本轮发现的一处诚实性缺陷：成果提交已释放 workspace 后再次 prepare 会明确拒绝（`NO_ACTIVE_EXECUTION` / `INVALID_EXECUTION_STATE`）且不留下 dangling ACTIVE 授权。未操作真实用户 ref，未使用桌面自动化。真实 Pi FULL 端到端工具执行尚未复验。
+
 ## NEXT — 最小可用纵向切片
 
 0. 落实 ADR-0009 的 dev 基线：项目快照/Workspace 从 dev OID 建立，先补临时仓库测试；在此之前产品内 `task.run` 仍使用 mainRef，不能用于声称符合新分支规则。
 1. Task cancel（协作停止 + 超时转人工并保留资源）：已有一个被真实场景证明的卡死形态（RUNNING + `NOTHING_TO_COMMIT` + `resource_held=1`）。
 2. 长命令后台化与进度事件：让 `task.run`/`task.verify` 成为持久 Operation，界面可展示进度并允许取消。
-3. revision 投递确认，以及 Runtime 重启后对 stale ACTIVE Session 的启动 reconcile。
-4. 验证副本与失败现场的回收：明确的 `prune`/归属校验与可追溯记录；同时决定 Attention 工具参数是否入库/摘要化。
+3. ADR-0010 Phase 3 技术 spike：真实 Pi session-file 双向 RPC↔TUI 恢复、PTY 生命周期、safe-point 与权限模式 side channel；通过后再落 handoff Operation、Session incarnation 和 CLI attach。
+4. revision 投递确认，以及 Runtime 重启后对 stale ACTIVE Session 的启动 reconcile。
+5. 验证副本与失败现场的回收：明确的 `prune`/归属校验与可追溯记录；同时决定 Attention 工具参数是否入库/摘要化。

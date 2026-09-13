@@ -48,6 +48,11 @@ type CommandEnvelope<T extends string, P> = {
 | AgentSessionStarted | executionId, sessionId, adapterId, providerSessionId, processIdentity |
 | AgentSessionStateChanged | sessionId, from, to, reason |
 | AgentSessionCompleted | executionId, sessionId, outcome, evidenceRef |
+| SessionGuidanceRecorded / SessionGuidanceDelivered | executionId, sessionId, guidanceId, contentHash, length, behavior / providerEntryRef；正文不进事件 |
+| TakeoverRequested / TakeoverSafePointReached | takeoverId, executionId, sourceSessionId, targetMode / evidenceRef, lastEntryRef |
+| SessionHandoffStarted / SessionHandoffCompleted | takeoverId, sourceSessionId, targetSessionId, fromMode, toMode, processEvidenceRef |
+| TerminalWriterLeaseChanged | takeoverId, sessionId, attachmentId, action；不含 PTY bytes |
+| TakeoverReleased / TakeoverFailed | takeoverId, executionId, activeSessionId, reason/evidenceRef |
 | ExecutionPauseRequested / ExecutionPaused | executionId, reason, evidenceRef（已暂停事件必填） |
 | RevisionDelivered / RevisionAcknowledged | executionId, revisionId, deliveryKey, evidenceRef |
 | UserAttentionRequested | attentionId, sessionId, kind, responseType（敏感提示另存） |
@@ -98,9 +103,13 @@ Runtime 的本地 socket 同时承载一次性命令与长连接订阅；两者�
 - 投影由 Runtime 的事件写入路径负责；订阅不引入第二个事件源，也不允许客户端写入事件。
 - 本地 Web UI 经 `RuntimeHttpApi` 的 `/api/events` 消费同一组帧（SSE 编码，`fetch` 流式读取而非 `EventSource`，因此 bearer token 不出现在 URL 中）；命令经 `/api/command` 走同一 Zod 请求 schema 与同一 dispatch，HTTP 不是第二条业务语义路径。
 
-## 4. 终端与安全
+## 4. 终端接管传输与安全
 
-原始 PTY 帧：sessionId、streamSequence、timestamp、bytes，走独立有界流/日志存储，支持背压和截断指示。输出可能含 secrets、控制序列和 prompt injection；不能作为受信命令、状态 guard 或权限批准。终端日志默认不进入业务事件 payload。
+原始 PTY 帧：takeoverId、sessionId、streamSequence、timestamp、bytes，走独立有界双工流，支持 input/output/resize、背压、writer lease 与截断指示。首版只在 Runtime 内存保留有界重连缓冲，不持久化原始 PTY 日志；detach 后 Runtime 继续持有 PTY，reattach 从可用缓冲恢复，过旧 cursor 明确返回 `TERMINAL_CURSOR_EXPIRED`。
+
+输出与用户按键可能含 secrets、控制序列和 prompt injection；不能作为受信 command、状态 guard、safe-point 证据或权限批准。结构化状态来自 Adapter/受控 gate side channel。PTY bytes 不进入 domain event、Intent、TaskRevision 或普通事件 SSE；事件只记录 attachment/lease/handoff 元数据。
+
+CLI attach 使用 versioned terminal frame 协议而非一次性 JSON response，并以本地 escape prefix 发送 detach/release 控制动作；同一动作也必须有普通 Runtime command，不能只存在于按键。Web UI/桌面如提供终端，只能复用该 transport，不直接连接 Provider PTY。客户端断开等同 detach，不停止 HUMAN_TUI Session。
 
 ## 5. 测试要求
 

@@ -13,6 +13,13 @@ const base = {
 };
 
 describe('Runtime task request boundary', () => {
+  test('accepts only the two explicit permission modes', () => {
+    const command = { requestId: base.requestId, schemaVersion: 1, command: 'permission.set' };
+    expect(runtimeRequestSchema.safeParse({ ...command, mode: 'FULL' }).success).toBe(true);
+    expect(runtimeRequestSchema.safeParse({ ...command, mode: 'STRICT' }).success).toBe(true);
+    expect(runtimeRequestSchema.safeParse({ ...command, mode: 'UNKNOWN' }).success).toBe(false);
+  });
+
   test('defaults constraints without rewriting specification text', () => {
     const request = runtimeRequestSchema.parse({ ...base, specification: '  exact spacing  ' });
     expect(request).toMatchObject({ specification: '  exact spacing  ', constraints: [] });
@@ -26,7 +33,7 @@ describe('Runtime task request boundary', () => {
     }).success).toBe(false);
   });
 
-  test('accepts a result commit request only with an explicit confirmation', () => {
+  test('keeps strict result commit confirmation while exposing full-mode single-step capture', () => {
     const taskId = '66666666-6666-4666-8666-666666666666';
     const commit = {
       requestId: base.requestId,
@@ -40,6 +47,17 @@ describe('Runtime task request boundary', () => {
     expect(runtimeRequestSchema.safeParse({ ...commit, confirm: true }).success).toBe(true);
     expect(runtimeRequestSchema.safeParse(commit).success).toBe(false);
     expect(runtimeRequestSchema.safeParse({ ...commit, confirm: false }).success).toBe(false);
+    const capture = {
+      requestId: base.requestId,
+      schemaVersion: base.schemaVersion,
+      command: 'task.result.capture' as const,
+      commandId: base.commandId,
+      projectId: base.projectId,
+      taskId,
+    };
+    expect(runtimeRequestSchema.safeParse(capture).success).toBe(true);
+    expect(runtimeRequestSchema.safeParse({ ...capture,
+      executionId: '55555555-5555-4555-8555-555555555555' }).success).toBe(true);
   });
 
   test('accepts a result prepare request with or without an explicit Execution', () => {

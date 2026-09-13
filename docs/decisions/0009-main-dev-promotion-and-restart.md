@@ -1,6 +1,6 @@
 # ADR-0009：固定 main/dev 双分支、提升授权与服务重启
 
-Status：Accepted（用户明确要求固定 `main`/`dev` 两个分支，并确认开发基线、重启方式与 `dev` 初始基线）
+Status：Accepted；**Amended by ADR-0011**：FULL 下 dev→main 无需批准，STRICT 保留批准；固定分支/SHA/证据与重启要求不变。
 
 ## Context
 

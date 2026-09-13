@@ -2130,7 +2130,7 @@ export class Phase1Database {
     readonly hookOutcome: 'PASSED' | 'REPORTED_FAILURE_AFTER_COMMIT';
     /** Bounded Git diagnostics from a commit command that reported a failure after committing. */
     readonly hookDetail: string;
-    readonly source: 'CONFIRMED' | 'RECONCILED';
+    readonly source: 'CONFIRMED' | 'AUTOMATIC_FULL' | 'RECONCILED';
     readonly eventId: string;
     readonly executionEventId: string;
     readonly taskEventId: string;

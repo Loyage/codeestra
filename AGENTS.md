@@ -15,10 +15,9 @@
 - 新增权限门禁、审批层、信任流程或沙箱属于重大决策：默认不新增；提出时必须给出效率成本评估（常态路径增加多少步/多少等待），并记录为 ADR。
 - 规格、设计和实现不一致时先明确变更，不静默重新解释规格。
 
-## 第一原则（优先级最高，见 PROJECT_SPEC §1.1 / ADR-0008）
+## 第一原则（优先级最高，见 PROJECT_SPEC §1.1 / ADR-0008/0011）
 
-- **效率至上**：用户的等待时间与操作步数是第一优化目标。安全与隔离是服务效率的约束，不是独立目标。任何门禁在常态路径上最多一次显式确认；不由 Agent 新增审批层、信任流程或沙箱。
-- **权限管理不在当前范围**：不为多用户、租户、密钥托管、路径沙箱、网络策略预留门禁；不把它们当作待实现项。已实现的门禁（项目 trust、Pi 敏感工具逐次审批、成果 commit 确认、验证策略确认、main 提升批准）**继续有效，不删不改**，但不再扩张。正确性问题不受效率优先影响（未知工具仍 fail-closed，取消超时仍转人工）。
+- **效率至上**：Runtime 默认 `FULL` 主机级全权限，项目接入、Agent 工具、成果 commit、验证策略变化与未来稳定提升的常态确认均为 0；CLI 可无确认切换 `STRICT` 恢复旧门禁。正确性核对不得包装成审批。
 - **软件本体是服务，CLI 必须完备**：新能力先问“CLI 能否完整完成并脚本化驱动（--json、稳定退出码）”。只做 UI 不做 CLI 的能力视为缺陷。Web UI / 桌面只是同一 Runtime 命令面的便利前端，不新增业务语义、不绕过门禁。
 - **测试仅限 CLI/命令面**：自动化测试与验收只用 CLI 命令与 Runtime 命令面（含其 HTTP/SSE 传输）驱动断言。
 
@@ -45,7 +44,7 @@
 - 项目必须长期保留 `main` 与 `dev` 两个分支；不得删除、重命名或用临时 integration branch 取代它们。
 - `main` 是用户日常实际运行 Codeestra、进行开发辅助工作的稳定分支；不得直接在 `main` 开发新功能。
 - `dev` 是新功能实验与集成分支。所有功能 Task/worktree 从固定 `dev` commit 建立基线；功能完成、Task verification 通过后，经 IntegrationBatch 与独立 Integration verification 进入 `dev`，不得直接进入 `main`。
-- `dev → main` 是唯一稳定提升路径。每批必须由用户批准固定 dev SHA、预期 main SHA 与验证证据；任一 ref 或证据变化使批准失效。不得把用户未回复视作批准。
+- `dev → main` 是唯一稳定提升路径。每批固定 dev SHA、预期 main SHA 与验证证据；FULL 下不批准，STRICT 下保留用户批准且 ref/证据变化使批准失效。
 - `main` 成功更新后立即在 main 工作树执行 `bun run codeestra stop`，再执行 `bun run codeestra status` 自动拉起并检查 Runtime。该后置步骤不增加第二次确认；Runtime 恢复响应前不得报告提升完成。失败时立即报告，不擅自回滚。
 - 当前没有后台监控用户在系统外手动更新 `main` 的能力；不要声称已覆盖该场景。
 
@@ -53,7 +52,7 @@
 
 - 未获授权不要 commit、push、强制更新 branch、reset --hard、clean、删除有改动的 worktree 或执行破坏性清理。
 - 不修改用户现有工作目录来为 Agent 腾出执行空间；稳定运行的 `main` 工作树与开发用 task/`dev` 工作树应分离。
-- 合入 `dev` 必须经过 IntegrationBatch 与独立集成验证；`dev` 合入 `main` 还必须遵守上节的用户批准与重启要求。
+- 合入 `dev` 必须经过 IntegrationBatch 与独立集成验证；`dev` 合入 `main` 遵守上节的权限模式与重启要求。
 - Human-authored instructions/skills/policies 不得被机器静默覆盖；修改本规格与人工规范应明确出现在交付说明中。
 - 保留失败现场；资源回收必须有归属校验与可追溯记录。
 

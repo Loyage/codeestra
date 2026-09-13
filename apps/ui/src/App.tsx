@@ -142,6 +142,7 @@ interface ConsoleState {
   error: string | null;
   notice: string | null;
   adapter: string;
+  permissionMode: 'FULL' | 'STRICT';
 }
 
 function Console({ token, initialProjectId }: {
@@ -153,7 +154,8 @@ function Console({ token, initialProjectId }: {
   const [state, setState] = useState<ConsoleState>({
     projects: [], projectId: null, tasks: [], taskId: null, status: null, attentions: [],
     frames: [], cursor: null, following: true, streamStatus: 'connecting', busy: null,
-    error: null, notice: null, adapter: 'pi', attentionToken: 0, detailToken: 0,
+    error: null, notice: null, adapter: 'pi', permissionMode: 'FULL',
+    attentionToken: 0, detailToken: 0,
   });
   const cursorRef = useRef<number | null>(null);
 
@@ -173,7 +175,10 @@ function Console({ token, initialProjectId }: {
   }, [update]);
 
   const loadProjects = useCallback(async (): Promise<void> => {
-    const projects = await client.command<TrustedProjectView[]>({ command: 'project.list' });
+    const [projects, permission] = await Promise.all([
+      client.command<TrustedProjectView[]>({ command: 'project.list' }),
+      client.command<{ mode: 'FULL' | 'STRICT' }>({ command: 'permission.get' }),
+    ]);
     const requested = state.projectId ?? initialProjectId;
     const projectId = projects.find((project) => project.id === requested)?.id
       ?? projects[0]?.id ?? null;
@@ -183,7 +188,7 @@ function Console({ token, initialProjectId }: {
     const attentions = projectId === null
       ? []
       : await client.command<AttentionView[]>({ command: 'attention.list', projectId });
-    update({ projects, projectId, tasks, attentions });
+    update({ projects, projectId, tasks, attentions, permissionMode: permission.mode });
   }, [client, initialProjectId, state.projectId, update]);
 
   const loadTaskDetail = useCallback(async (projectId: string, taskId: string): Promise<void> => {
@@ -309,7 +314,7 @@ function Console({ token, initialProjectId }: {
       <header>
         <div className="brand">
           <strong>Codeestra</strong>
-          <span className="muted">本地 Runtime 控制台</span>
+          <span className="muted">本地 Runtime 控制台 · {state.permissionMode === 'FULL' ? '全权限' : '严格'}模式</span>
         </div>
         <div className="header-controls">
           <select
@@ -375,6 +380,7 @@ function Console({ token, initialProjectId }: {
             taskId={state.taskId}
             status={state.status}
             adapter={state.adapter}
+            permissionMode={state.permissionMode}
             run={run}
             update={update}
             reloadTasks={async (id) => { await loadTaskList(id); }}
@@ -407,7 +413,8 @@ function Console({ token, initialProjectId }: {
           />
         ) : null}
         {tab === 'project' ? (
-          <ProjectTab client={client} run={run} update={update} reloadProjects={loadProjects} />
+          <ProjectTab client={client} permissionMode={state.permissionMode} run={run}
+            update={update} reloadProjects={loadProjects} />
         ) : null}
       </main>
 
@@ -432,10 +439,11 @@ function TasksTab(props: CommonProps & {
   readonly taskId: string | null;
   readonly status: TaskStatusView | null;
   readonly adapter: string;
+  readonly permissionMode: 'FULL' | 'STRICT';
   readonly reloadTasks: (projectId: string) => Promise<void>;
   readonly loadDetail: (projectId: string, taskId: string) => Promise<void>;
 }) {
-  const { client, projectId, tasks, taskId, status, adapter, run, update } = props;
+  const { client, projectId, tasks, taskId, status, adapter, permissionMode, run, update } = props;
   const [specification, setSpecification] = useState('');
   const [authorization, setAuthorization] = useState<ResultCommitAuthorizationView | null>(null);
   const [runResult, setRunResult] = useState<string | null>(null);
@@ -569,18 +577,31 @@ function TasksTab(props: CommonProps & {
               <button
                 type="button"
                 onClick={() => {
-                  void run('正在准备成果提交', async () => {
-                    const prepared = await client.command<ResultCommitAuthorizationView>({
-                      command: 'task.result.prepare',
-                      commandId: crypto.randomUUID(),
-                      projectId,
-                      taskId: task.id,
+                  if (permissionMode === 'FULL') {
+                    void run('正在提交成果', async () => {
+                      await client.command({
+                        command: 'task.result.capture',
+                        commandId: crypto.randomUUID(),
+                        projectId,
+                        taskId: task.id,
+                      });
+                      await props.reloadTasks(projectId);
+                      await props.loadDetail(projectId, task.id);
                     });
-                    setAuthorization(prepared);
-                  });
+                  } else {
+                    void run('正在准备成果提交', async () => {
+                      const prepared = await client.command<ResultCommitAuthorizationView>({
+                        command: 'task.result.prepare',
+                        commandId: crypto.randomUUID(),
+                        projectId,
+                        taskId: task.id,
+                      });
+                      setAuthorization(prepared);
+                    });
+                  }
                 }}
               >
-                准备成果提交
+                {permissionMode === 'FULL' ? '提交成果' : '准备成果提交'}
               </button>
 
               <button
@@ -602,7 +623,7 @@ function TasksTab(props: CommonProps & {
               </button>
             </div>
 
-            {authorization === null ? null : (
+            {permissionMode === 'FULL' || authorization === null ? null : (
               <div className="card nested">
                 <h3>成果提交授权</h3>
                 <p className="muted">
@@ -845,7 +866,8 @@ function EventsTab({ frames, cursor, following, streamStatus, update, clear }: {
   );
 }
 
-function ProjectTab({ client, run, reloadProjects }: CommonProps & {
+function ProjectTab({ client, permissionMode, run, reloadProjects }: CommonProps & {
+  readonly permissionMode: 'FULL' | 'STRICT';
   readonly reloadProjects: () => Promise<void>;
 }) {
   const [path, setPath] = useState('');
@@ -912,20 +934,22 @@ function ProjectTab({ client, run, reloadProjects }: CommonProps & {
 
       {identity === null || policy === null ? null : (
         <div className="card nested">
-          <h3>信任此项目</h3>
-          <p>
-            信任后，Agent、验证命令和 Git 钩子可以使用您的用户权限运行。
-            这不会授权提交、更新 main、推送或使用未知工具。
+          <h3>{permissionMode === 'FULL' ? '添加此项目' : '信任此项目'}</h3>
+          <p>{permissionMode === 'FULL'
+            ? '全权限模式已默认开启：Agent、未知工具、验证命令和 Git 钩子均以当前用户权限运行，不再请求确认。'
+            : '严格模式下，信任后 Agent、验证命令和 Git 钩子可使用您的用户权限运行，但提交和未知工具仍受门禁。'}
           </p>
-          <input
-            value={confirmation}
-            placeholder="输入 TRUST 以确认"
-            onChange={(event) => setConfirmation(event.target.value)}
-          />
+          {permissionMode === 'FULL' ? null : (
+            <input
+              value={confirmation}
+              placeholder="输入 TRUST 以确认"
+              onChange={(event) => setConfirmation(event.target.value)}
+            />
+          )}
           <button
             type="button"
             className="danger"
-            disabled={confirmation !== 'TRUST'}
+            disabled={permissionMode === 'STRICT' && confirmation !== 'TRUST'}
             onClick={() => {
               void run('正在信任项目', async () => {
                 await client.command({
@@ -941,7 +965,7 @@ function ProjectTab({ client, run, reloadProjects }: CommonProps & {
               });
             }}
           >
-            信任项目
+            {permissionMode === 'FULL' ? '添加项目' : '信任项目'}
           </button>
         </div>
       )}

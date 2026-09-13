@@ -1,6 +1,6 @@
 # ADR-0001：运行修订、依赖、集成授权与 Runtime 生命周期
 
-Status：Accepted（用户明确选择 D01=B、D02=A、D03=A、D04=A；D02/D03 的目标分支由 ADR-0009 修订）
+Status：Accepted（D01=B、D02=A、D04=A）；**Amended by ADR-0009**（D02/D03 分支语义）与 **ADR-0011**（D03 批准在 FULL 下不适用，STRICT 保留）。
 
 ## Context
 
@@ -24,7 +24,7 @@ Status：Accepted（用户明确选择 D01=B、D02=A、D03=A、D04=A；D02/D03 �
 
 选项：A 每批用户批准；B 项目预授权；C 用户手动更新。
 
-选择 A。用户批准必须绑定固定候选 SHA 与预期 main SHA；main 变化使批准失效。**ADR-0009 将候选固定为 `dev` SHA，并规定唯一稳定提升路径为 `dev → main`；main 更新后还必须立即重启并检查 Runtime。** 禁止隐式 push、覆盖用户改动或破坏性修复。无法安全提升或重启时停止并报告。
+选择 A。批准必须绑定固定候选 SHA 与预期 main SHA；main 变化使批准失效。**ADR-0009 将候选固定为 `dev` SHA，并规定唯一稳定提升路径为 `dev → main`；main 更新后还必须立即重启并检查 Runtime。ADR-0011 修订：FULL 下不需要批准（固定 SHA 与验证证据仍必须记录），STRICT 下保留本 D03。** 禁止隐式 push、覆盖用户改动或破坏性修复。无法安全提升或重启时停止并报告。
 
 ### D04：进程生命周期
 

@@ -115,7 +115,7 @@ function fixture(mode: 'SUCCEED' | 'CRASH_AFTER_PROMPT' | 'PROVIDER_ERROR' | 'NO
       constraints: [{ id: 'no-main', text: 'Never update main' }],
     },
     knowledgeSnapshotRefs: [],
-    permissionMode: 'NATIVE',
+    permissionMode: 'STRICT',
     environment: {},
   };
   const report = (): {

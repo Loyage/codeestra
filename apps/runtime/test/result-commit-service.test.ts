@@ -104,6 +104,61 @@ describe('result commit preparation', () => {
     }
   });
 
+  test('full mode permits sensitive paths and captures them without an approval step', async () => {
+    const { value, workspacePath } = await quiescentExecution();
+    try {
+      await Bun.write(join(workspacePath, '.env'), 'TOKEN=full-access\n');
+      const prepared = await prepareResultCommit({
+        storage: value.storage, projectId: value.projectId, taskId: value.taskId,
+        commandId: crypto.randomUUID(), actor: 'runtime-full-permission', permissionMode: 'FULL',
+      });
+      expect(prepared.entries).toEqual([{ status: 'ADDED', path: '.env' }]);
+      const captured = await captureResultCommit({
+        storage: value.storage, projectId: value.projectId, taskId: value.taskId,
+        authorizationId: prepared.authorizationId, commandId: crypto.randomUUID(),
+        permissionMode: 'FULL',
+      });
+      expect(captured.resultCommit).toMatch(/^[0-9a-f]{40}$/);
+      expect(captured.source).toBe('AUTOMATIC_FULL');
+      expect(value.storage.listTasks(value.projectId)[0]?.state).toBe('EXECUTED');
+    } finally {
+      value.storage.close();
+    }
+  });
+
+  test('refuses to prepare again once the result commit released the workspace', async () => {
+    const { value, workspacePath } = await quiescentExecution();
+    try {
+      await Bun.write(join(workspacePath, 'agent-output.txt'), 'work\n');
+      const prepared = await prepareResultCommit({
+        storage: value.storage, projectId: value.projectId, taskId: value.taskId,
+        commandId: crypto.randomUUID(), actor: 'runtime-full-permission', permissionMode: 'FULL',
+      });
+      await captureResultCommit({
+        storage: value.storage, projectId: value.projectId, taskId: value.taskId,
+        authorizationId: prepared.authorizationId, commandId: crypto.randomUUID(),
+        permissionMode: 'FULL',
+      });
+      // Without an explicit Execution, the released workspace hold is reported as such.
+      await expect(prepareResultCommit({
+        storage: value.storage, projectId: value.projectId, taskId: value.taskId,
+        commandId: crypto.randomUUID(), actor: 'runtime-full-permission', permissionMode: 'FULL',
+      })).rejects.toMatchObject({ code: 'NO_ACTIVE_EXECUTION' });
+      // With an explicit already-captured Execution, the refusal names the real state instead of
+      // creating an authorization that could never be consumed.
+      await expect(prepareResultCommit({
+        storage: value.storage, projectId: value.projectId, taskId: value.taskId,
+        executionId: prepared.executionId,
+        commandId: crypto.randomUUID(), actor: 'runtime-full-permission', permissionMode: 'FULL',
+      })).rejects.toMatchObject({ code: 'INVALID_EXECUTION_STATE' });
+      expect(value.storage.sqlite.query<{ count: number }, []>(
+        "SELECT count(*) AS count FROM result_commit_authorizations WHERE status='ACTIVE'",
+      ).get()?.count).toBe(0);
+    } finally {
+      value.storage.close();
+    }
+  });
+
   test('refuses a Session that never proved quiescence', async () => {
     const { value, workspacePath } = await quiescentExecution('NONE');
     try {

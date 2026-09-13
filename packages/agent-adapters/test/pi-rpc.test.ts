@@ -62,7 +62,26 @@ describe('Pi RPC JSONL framing', () => {
 });
 
 describe('Codeestra Pi gate', () => {
-  test('allows read-only tools, prompts once for known mutations, and rejects unknown tools', async () => {
+  test('full mode allows every tool without a UI channel or serializable input', async () => {
+    const previous = process.env.CODEESTRA_PERMISSION_MODE;
+    delete process.env.CODEESTRA_PERMISSION_MODE;
+    try {
+      const handler = captureGate();
+      const circular: { self?: unknown } = {};
+      circular.self = circular;
+      expect(classifyPiTool('custom-danger')).toBe('ALLOW');
+      expect(await handler(
+        { toolName: 'custom-danger', toolCallId: 'x', input: circular },
+        { mode: 'json', hasUI: false, ui: { confirm: async () => false } },
+      )).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env.CODEESTRA_PERMISSION_MODE;
+      else process.env.CODEESTRA_PERMISSION_MODE = previous;
+    }
+  });
+
+  test('strict mode allows read-only tools, prompts once for known mutations, and rejects unknown tools', async () => {
+    process.env.CODEESTRA_PERMISSION_MODE = 'STRICT';
     const handler = captureGate();
     let title = '';
     let message = '';
@@ -75,7 +94,7 @@ describe('Codeestra Pi gate', () => {
         return true;
       } },
     };
-    expect(classifyPiTool('read')).toBe('ALLOW');
+    expect(classifyPiTool('read', 'STRICT')).toBe('ALLOW');
     expect(await handler({ toolName: 'read', toolCallId: 'read-1', input: { path: 'a' } }, context))
       .toBeUndefined();
     expect(await handler({ toolName: 'write', toolCallId: 'write-1', input: { path: 'a' } }, context))
@@ -86,7 +105,8 @@ describe('Codeestra Pi gate', () => {
       .toMatchObject({ block: true, terminate: true });
   });
 
-  test('blocks sensitive calls when denied or outside the RPC permission channel', async () => {
+  test('strict mode blocks sensitive calls when denied or outside the RPC permission channel', async () => {
+    process.env.CODEESTRA_PERMISSION_MODE = 'STRICT';
     const handler = captureGate();
     const denied = await handler(
       { toolName: 'bash', toolCallId: 'bash-1', input: { command: 'true' } },
@@ -139,11 +159,22 @@ describe('Codeestra Pi gate', () => {
       gateExtensionPath: '/runtime/codeestra-gate.ts',
       sessionDir: '/runtime/pi-sessions',
       platform: 'unix',
+      permissionMode: 'STRICT',
     })).toEqual([
       '--mode', 'rpc', '--no-approve', '--no-extensions', '--extension',
       '/runtime/codeestra-gate.ts', '--no-skills', '--no-prompt-templates', '--no-themes',
       '--no-context-files', '--tools', 'read,bash,edit,write,grep,find,ls',
       '--session-dir', '/runtime/pi-sessions',
+    ]);
+    expect(buildPiRpcArguments({
+      gateExtensionPath: '/runtime/codeestra-gate.ts',
+      sessionDir: '/runtime/pi-sessions',
+      platform: 'unix',
+      permissionMode: 'FULL',
+    })).toEqual([
+      '--mode', 'rpc', '--approve', '--no-extensions', '--extension',
+      '/runtime/codeestra-gate.ts', '--no-skills', '--no-prompt-templates', '--no-themes',
+      '--no-context-files', '--session-dir', '/runtime/pi-sessions',
     ]);
   });
 });

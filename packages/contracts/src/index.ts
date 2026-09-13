@@ -99,6 +99,12 @@ const constraintsSchema = z.array(constraintSchema).superRefine((constraints, co
 export const runtimeRequestSchema = z.discriminatedUnion('command', [
   z.strictObject({ ...requestBase, command: z.literal('runtime.ping') }),
   z.strictObject({ ...requestBase, command: z.literal('runtime.stop') }),
+  z.strictObject({ ...requestBase, command: z.literal('permission.get') }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('permission.set'),
+    mode: z.enum(['FULL', 'STRICT']),
+  }),
   z.strictObject({ ...requestBase, command: z.literal('project.inspect'), path: z.string().min(1) }),
   z.strictObject({
     ...requestBase,
@@ -181,7 +187,16 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     taskId: z.string().uuid(),
     executionId: z.string().uuid().optional(),
   }),
-  // `confirm` is part of the IPC contract so an unconfirmed capture can never reach Git.
+  /** Full-mode single-step capture; strict mode rejects this command. */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.result.capture'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    executionId: z.string().uuid().optional(),
+  }),
+  // Strict mode keeps the snapshot-bound confirmation contract as an opt-in path.
   z.strictObject({
     ...requestBase,
     command: z.literal('task.result.commit'),
@@ -278,7 +293,7 @@ export interface AgentStartRequest {
     readonly constraints: readonly { readonly id: string; readonly text: string }[];
   };
   readonly knowledgeSnapshotRefs: readonly string[];
-  readonly permissionMode: 'NATIVE';
+  readonly permissionMode: 'FULL' | 'STRICT';
   readonly environment: Readonly<Record<string, string>>;
 }
 export const agentStopEvidenceSchema = z.strictObject({

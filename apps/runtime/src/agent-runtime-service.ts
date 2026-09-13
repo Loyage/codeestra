@@ -42,6 +42,7 @@ export interface RunTaskResult {
   readonly adapterId: string;
   readonly adapterVersion: string;
   readonly sessionState: string;
+  readonly permissionMode: 'FULL' | 'STRICT';
 }
 
 export type AnswerDeliveryOutcome = 'DELIVERED' | 'NOT_DELIVERED';
@@ -57,6 +58,7 @@ export interface AgentRuntimeCoordinatorOptions {
   readonly registry: AdapterRegistry;
   readonly runtimeHome: string;
   readonly environment?: Readonly<Record<string, string>>;
+  readonly permissionMode?: () => 'FULL' | 'STRICT';
   readonly now?: () => number;
   readonly randomUUID?: () => string;
   readonly shutdownGraceMs?: number;
@@ -73,6 +75,7 @@ export class AgentRuntimeCoordinator {
   readonly #registry: AdapterRegistry;
   readonly #runtimeHome: string;
   readonly #environment: Readonly<Record<string, string>>;
+  readonly #permissionMode: () => 'FULL' | 'STRICT';
   readonly #now: () => number;
   readonly #randomUUID: () => string;
   readonly #shutdownGraceMs: number;
@@ -84,6 +87,7 @@ export class AgentRuntimeCoordinator {
     this.#registry = options.registry;
     this.#runtimeHome = options.runtimeHome;
     this.#environment = options.environment ?? {};
+    this.#permissionMode = options.permissionMode ?? (() => 'FULL');
     this.#now = options.now ?? Date.now;
     this.#randomUUID = options.randomUUID ?? (() => crypto.randomUUID());
     this.#shutdownGraceMs = options.shutdownGraceMs ?? 5_000;
@@ -133,6 +137,7 @@ export class AgentRuntimeCoordinator {
       actor: 'runtime-scheduler',
       createdAt: this.#now(),
     });
+    const permissionMode = this.#permissionMode();
     const started = await startReservedExecution({
       storage: this.#storage,
       adapter,
@@ -142,6 +147,7 @@ export class AgentRuntimeCoordinator {
       prepareCommandId: deriveCommandId(input.commandId, 'prepare-execution'),
       startCommandId: deriveCommandId(input.commandId, 'start-agent'),
       environment: this.#environment,
+      permissionMode,
       now: this.#now,
       randomUUID: this.#randomUUID,
     });
@@ -158,6 +164,7 @@ export class AgentRuntimeCoordinator {
       adapterId: started.adapterId,
       adapterVersion: started.adapterVersion,
       sessionState: started.sessionState,
+      permissionMode,
     };
   }
 

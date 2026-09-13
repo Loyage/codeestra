@@ -39,7 +39,7 @@ id、taskId、number、previousRevisionId、specification、constraints、intent
 
 **待用户确认的后续语义**：上游在依赖满足前又修订时，是否自动移动 requiredRevision。安全默认不是替用户选版本，而是使该边 NEEDS_REVIEW、阻止下游启动，并要求明确选择版本后再激活；Phase 1 不实现 DAG 编辑，因此不阻塞 Phase 0/1。
 
-满足条件：指定上游 revision 有成功进入 `dev` 的 IntegrationBatch 记录，且结果 commit 在下游选定 dev 基线的祖先链中。dev 被外部重写导致不可达时重新阻塞。无法自动判断外部 revert 的语义，必须暴露此限制。进入 dev 只满足开发依赖，不代表已经用户批准提升到稳定 main。
+满足条件：指定上游 revision 有成功进入 `dev` 的 IntegrationBatch 记录，且结果 commit 在下游选定 dev 基线的祖先链中。dev 被外部重写导致不可达时重新阻塞。无法自动判断外部 revert 的语义，必须暴露此限制。进入 dev 只满足开发依赖，不代表已提升到稳定 main（FULL 下提升不需批准，STRICT 下需要）。
 
 ### Execution / RevisionDelivery
 
@@ -49,13 +49,21 @@ Execution 记录 attemptNumber、primaryAdapterId、initialRevisionId、appliedR
 
 当 Adapter 不支持可靠确认：停止旧 Execution，确认进程不再写入后建立新 Execution，其完整启动输入包含新 revision。旧分支/现场保留且记录继承来源。协作停止超时阻止新尝试。
 
-### AgentSession / AttentionRequest
+### AgentSession / SessionGuidance / TakeoverRequest / AttentionRequest
 
-Session 保存 adapterId、providerSessionId、processIdentity、capabilities snapshot、transport locator、session storage reference、state 和退出信息。PID 单独不足以证明身份；需要启动 token/时间及进程控制记录。Session 持久化不等于 OS 进程永不退出。
+Session 保存 adapterId、mode（`AUTOMATED_RPC | HUMAN_TUI`）、providerSessionId、processIdentity、capabilities snapshot、transport locator、session storage reference、state、退出信息与可选 predecessorSessionId。PID 单独不足以证明身份；需要启动 token/时间及进程控制记录。Session 持久化不等于 OS 进程永不退出。
 
-一个 Execution 一个主 Session，Session 内可有多轮交互。AttentionRequest 保存类型（PERMISSION/QUESTION/RECOVERY）、responseType（CONFIRM/VALUE）、providerRequestId、提示和状态；typed answer 另存回答者与投递 Operation。回答已写 DB 不代表 Agent 已恢复，confirmed=false 与 cancel 都是有效但语义不同的回答。
+一个 Execution 在任意时刻只有一个主活动 Session，但 ADR-0010 的 RPC↔TUI 进程交接会形成有序 Session incarnation 历史：前一进程确认退出后才创建 successor；provider conversation ID/file 可以连续，Codeestra session ID 与 OS process identity 必须更新，不能把新进程伪装成旧进程。一个 Session 内可有多轮交互。
 
-Session 身份分三层持久化：Codeestra sessionId、provider session ID/file、provider process identity（pid、executable、start token、argv hash、采集时间）。缺少 start token 时拒绝启动，因为 PID 可被复用。Runtime 丢失 RPC 管道后不重接 live process：记录 DISCONNECTED，并让 Execution/workspace 保持占用并进入 RECOVERY_REQUIRED，直到 reconcile 取得真实事实。
+SessionGuidance 表达不改变验收规格的人工指导，绑定 source（COMMAND/TUI）、execution/session/provider conversation entry、actor、hash/长度与投递状态；`task guide` 的正文需耐久保存到投递完成，TUI 已落 provider conversation 的正文只保存 entry 引用而不重复复制，二者正文都不进入 domain event。它不改变 `appliedRevisionId`、不生成 TaskRevision、不使验证自动失效。改变规格/约束必须走明确的 TaskRevision 命令；Pi 仍按不支持 revision ACK 的 fallback 新建 Execution。
+
+TakeoverRequest 是 Execution 的控制记录，不是新的调度主实体。保存 requested Session/process/cursor、状态（`REQUESTED | WAITING_FOR_ATTENTION | WAITING_FOR_SAFE_POINT | STOPPING_SOURCE | STARTING_TARGET | ACTIVE | RETURN_REQUESTED | COMPLETED | FAILED | RECOVERY_REQUIRED`）、目标 mode、writer lease 与交接 Operation。接管请求先于 settled 事实提交时，settled 作为交接安全点而非 completion；反之请求拒绝为 Execution 已非活动。attach/detach 只管理 TerminalAttachment，release 才触发 TUI→RPC 交接。
+
+AttentionRequest 保存类型（PERMISSION/QUESTION/RECOVERY）、responseType（CONFIRM/VALUE）、providerRequestId、提示和状态；typed answer 另存回答者与投递 Operation。回答已写 DB 不代表 Agent 已恢复，confirmed=false 与 cancel 都是有效但语义不同的回答。TUI gate side channel 同样建立 Attention 与 answer 事实；原生 TUI 和其他客户端竞争回答时只接受第一份合法决议。
+
+Session 身份分三层持久化：Codeestra sessionId、provider session ID/file、provider process identity（pid、executable、start token、argv hash、采集时间）。缺少 start token 时拒绝启动，因为 PID 可被复用。Runtime 丢失 RPC/PTY 控制连接后不重接 live process：记录 DISCONNECTED，并让 Execution/workspace 保持占用并进入 RECOVERY_REQUIRED，直到 reconcile 取得真实事实。
+
+TerminalAttachment 是瞬时客户端连接与单 writer lease 的记录；多个只读 attachment 可并存。PTY bytes/resize/input 走独立有界 transport，不作为领域事实，不从 ANSI 文本推断完成、审批或静止。首版只保留 Runtime 内存中的有界重连缓冲；detach 不停止 HUMAN_TUI Session。
 
 ### Workspace
 
@@ -69,7 +77,7 @@ Impact 绑定 revision、baseCommit、analyzerVersion，保存 path/directory/mo
 
 scope=TASK/INTEGRATION；subject execution/batch 二选一；revision（Task scope）、testedCommit、testedTree、policyVersion/policyDigest/mainCommit、commands、state、outcomeCode、非敏感 evidence。分支指针移动后旧测试不能代表新内容；先冻结 commit 再验证，并检测验证命令是否修改被测树。
 
-Phase 1 只实现 TASK scope：subject 固定 `executionId` + `revisionId`，且必须匹配 Task 当前 revision 与已捕获的 `result_commit`。命令来自 main ref 上的人工维护策略（ADR-0006），并在 trust 时一次性确认；Task branch 上的策略文件不参与判定。state 为 `QUEUED → RUNNING → PASSED | FAILED | ERROR`，新 commit 或新 policy digest 使旧 `PASSED` 变为 `STALE`（保留原结论与失效原因，不改写）。`outcomeCode` 区分 `PASSED`、`COMMAND_FAILED`、`COMMAND_TIMEOUT`、`TREE_MUTATED`、`WORKTREE_FAILED`、`RUNTIME_RESTARTED`。evidence 只含 exit code、时长、字节数、摘要、路径列表与副本处理结果，不含原始命令输出。验证证据不等于集成或发布事实。
+Phase 1 只实现 TASK scope：subject 固定 `executionId` + `revisionId`，且必须匹配 Task 当前 revision 与已捕获的 `result_commit`。命令来自 main ref 上的人工维护策略（ADR-0006）：FULL 下直接执行，STRICT 下在 trust 时一次性确认；Task branch 上的策略文件不参与判定。state 为 `QUEUED → RUNNING → PASSED | FAILED | ERROR`，新 commit 或新 policy digest 使旧 `PASSED` 变为 `STALE`（保留原结论与失效原因，不改写）。`outcomeCode` 区分 `PASSED`、`COMMAND_FAILED`、`COMMAND_TIMEOUT`、`TREE_MUTATED`、`WORKTREE_FAILED`、`RUNTIME_RESTARTED`。evidence 只含 exit code、时长、字节数、摘要、路径列表与副本处理结果，不含原始命令输出。验证证据不等于集成或发布事实。
 
 ### IntegrationBatch / Item / StableBranchPromotion / Approval
 

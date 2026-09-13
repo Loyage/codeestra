@@ -440,6 +440,7 @@ export async function runTaskVerification(input: {
   readonly taskId: string;
   readonly executionId?: string;
   readonly commandId: string;
+  readonly permissionMode?: 'FULL' | 'STRICT';
   readonly now?: () => number;
   readonly randomUUID?: () => string;
 }): Promise<VerificationReport> {
@@ -460,15 +461,17 @@ export async function runTaskVerification(input: {
       `No verification policy at ${candidates.mainRef}:${verificationPolicyPath}; add one and re-run project trust`);
   }
   const digest = inspection.digest as string;
-  const confirmation = input.storage.getConfirmedVerificationPolicy(input.projectId);
-  if (confirmation === null || confirmation.state !== 'PRESENT') {
-    throw new VerificationServiceError('VERIFICATION_POLICY_NOT_CONFIRMED',
-      'This project has no confirmed verification policy; run project trust to confirm it');
-  }
-  if (confirmation.digest !== digest) {
-    throw new VerificationServiceError('VERIFICATION_POLICY_NOT_CONFIRMED',
-      `The verification policy changed (confirmed ${confirmation.digest?.slice(0, 12) ?? 'none'},`
-      + ` now ${digest.slice(0, 12)}); run project trust to confirm the new policy`);
+  if ((input.permissionMode ?? 'STRICT') === 'STRICT') {
+    const confirmation = input.storage.getConfirmedVerificationPolicy(input.projectId);
+    if (confirmation === null || confirmation.state !== 'PRESENT') {
+      throw new VerificationServiceError('VERIFICATION_POLICY_NOT_CONFIRMED',
+        'This project has no confirmed verification policy; run project trust to confirm it');
+    }
+    if (confirmation.digest !== digest) {
+      throw new VerificationServiceError('VERIFICATION_POLICY_NOT_CONFIRMED',
+        `The verification policy changed (confirmed ${confirmation.digest?.slice(0, 12) ?? 'none'},`
+        + ` now ${digest.slice(0, 12)}); run project trust to confirm the new policy`);
+    }
   }
   const testedTree = await readCommitTree({
     repositoryRoot: candidates.repositoryRoot,

@@ -5,8 +5,11 @@ const automaticallyAllowedTools = new Set(['read', 'grep', 'find', 'ls']);
 const approvalRequiredTools = new Set(['bash', 'powershell', 'edit', 'write']);
 
 export type GateDecision = 'ALLOW' | 'REQUIRE_APPROVAL' | 'REJECT_UNKNOWN';
+export type PiPermissionMode = 'FULL' | 'STRICT';
 
-export function classifyPiTool(toolName: string): GateDecision {
+export function classifyPiTool(toolName: string, mode: PiPermissionMode = 'FULL'): GateDecision {
+  // Full mode deliberately permits every registered tool, including names Codeestra does not know.
+  if (mode === 'FULL') return 'ALLOW';
   if (automaticallyAllowedTools.has(toolName)) return 'ALLOW';
   if (approvalRequiredTools.has(toolName)) return 'REQUIRE_APPROVAL';
   return 'REJECT_UNKNOWN';
@@ -45,7 +48,8 @@ function serializedInput(input: unknown): string | null {
 /** Explicitly loaded with --no-extensions so no later extension can mutate an approved call. */
 export default function codeestraGate(pi: GateExtensionApi): void {
   pi.on('tool_call', async (event, context) => {
-    const decision = classifyPiTool(event.toolName);
+    const mode: PiPermissionMode = process.env.CODEESTRA_PERMISSION_MODE === 'STRICT' ? 'STRICT' : 'FULL';
+    const decision = classifyPiTool(event.toolName, mode);
     if (decision === 'ALLOW') return undefined;
     if (decision === 'REJECT_UNKNOWN') {
       return {

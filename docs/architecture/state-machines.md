@@ -59,13 +59,32 @@ Task Integration summary：`NOT_READY → ELIGIBLE → BATCHED → INTEGRATED`�
 
 成果 commit 采两步门禁：prepare 只读快照并落一次性授权（绑定 execution/revision/workspace ownership/expected HEAD/ChangeSet fingerprint/身份），confirm 重验后才 `git add`/`commit`；确认是单次能力，HEAD 或差异变化使其失效。消费后 Execution→SUCCEEDED 且 workspace IN_USE→RETAINED（保留供验证），Task 只到 EXECUTED。commit 已生成但回写失败时按 HEAD/OID 补记，不重跑 hook、不重写历史。
 
-## 3. AgentSession
+## 3. AgentSession / Takeover
 
-`CREATED → STARTING → ACTIVE`；ACTIVE↔WAITING_FOR_USER；ACTIVE/WAITING_FOR_USER→PAUSING→PAUSED→ACTIVE；活动态→STOPPING→EXITED；控制连接丢失或 Runtime 自行释放其自有 provider 进程→DISCONNECTED；身份或恢复失败→RECOVERY_REQUIRED。
+单个 process incarnation：`CREATED → STARTING → ACTIVE`；ACTIVE↔WAITING_FOR_USER；ACTIVE/WAITING_FOR_USER→PAUSING→PAUSED→ACTIVE；活动态→STOPPING→EXITED；控制连接丢失或 Runtime 自行释放其自有 provider 进程→DISCONNECTED；身份或恢复失败→RECOVERY_REQUIRED。
 
-DISCONNECTED→ACTIVE/WAITING_FOR_USER/PAUSED 需 reconcile 证明真实状态。Runtime 自行发起的释放不伪造成 provider event，而以 Runtime 来源记录并保留 Execution/workspace 占用。EXITED 不代表 Task 成功，需 exit reason、执行结果与验证。UI detach 不改变 AgentSession 状态。provider resume 若实际创建新会话，必须建立新 session/execution 关联，不伪装旧 OS 进程仍存活。
+DISCONNECTED→ACTIVE/WAITING_FOR_USER/PAUSED 需 reconcile 证明真实状态。Runtime 自行发起的释放不伪造成 provider event，而以 Runtime 来源记录并保留 Execution/workspace 占用。EXITED 不代表 Task 成功，需 exit reason、执行结果与验证。客户端 detach 不改变 AgentSession 状态。provider resume 创建新 OS 进程时必须建立 successor AgentSession 并关联 predecessor；即使 provider conversation ID 相同，也不伪装旧 OS 进程仍存活。
 
-原生审批回答中 reject/deny 也属于有效回答，不能把“用户已回答”等同“用户批准”。
+TakeoverRequest：
+
+```text
+REQUESTED
+  → WAITING_FOR_ATTENTION | WAITING_FOR_SAFE_POINT
+  → STOPPING_SOURCE → STARTING_TARGET → ACTIVE
+  → RETURN_REQUESTED → STOPPING_SOURCE → STARTING_TARGET → COMPLETED
+```
+
+- RPC→TUI 与 TUI→RPC 都使用同一交接骨架；target mode 分别为 `HUMAN_TUI` 与 `AUTOMATED_RPC`。
+- 工具或模型轮次活动时停在 `WAITING_FOR_SAFE_POINT`，不为接管 abort；Attention 正阻塞工具时显示 `WAITING_FOR_ATTENTION`。Pi 建立 handoff fence：当前 assistant turn 已开始的工具继续到结束，此后新工具调用由 gate 以 terminating result 收束，直至 `agent_settled`。
+- 请求已提交且随后收到可信 `agent_settled`（无 retry/compaction retry/queued continuation）且活动工具计数为 0 时，该 settled 被消费为 handoff safe point，不同时产生 Execution completion。若 completion 事务先提交，请求以 `EXECUTION_NOT_ACTIVE` 失败。
+- STOPPING_SOURCE 只有在 process identity 匹配且确认退出后才能进入 STARTING_TARGET。退出不确定→RECOVERY_REQUIRED，并禁止启动 target。
+- STARTING_TARGET 复核 workspace、provider conversation/session file 与受控启动参数；失败且可证实无 target 进程→FAILED，否则 RECOVERY_REQUIRED。
+- HUMAN_TUI ACTIVE 时 detach 只移除 attachment；Session 继续 ACTIVE。显式 release 才进入 RETURN_REQUESTED。
+- TUI→RPC 完成后 Runtime 投递固定 continuation guidance，随后 Execution 回到自动控制；交接本身不改变 TaskRevision。
+
+TerminalAttachment：多个 `READ_ONLY` 可并存；最多一个 `WRITER` lease。断开→DETACHED 只释放 attachment/lease，不停止 Session；竞争 writer 返回 `ATTACHMENT_BUSY`。PTY 输出和按键不驱动领域状态迁移。
+
+原生审批回答中 reject/deny 也属于有效回答，不能把“用户已回答”等同“用户批准”。TUI gate 与 Runtime Attention 并发收到答案时只允许一份从 OPEN 变为已决，迟到答案不得再次驱动工具。
 
 ## 4. IntegrationBatch / StableBranchPromotion
 
@@ -81,10 +100,10 @@ IntegrationBatch：`CREATED → PREPARING → VERIFYING → INTEGRATING_DEV → 
 StableBranchPromotion：`CREATED → VERIFYING → AWAITING_APPROVAL → PROMOTING → RESTARTING → SUCCEEDED`。
 
 - 固定 expected dev SHA、expected main SHA 与独立验证证据；验证失败→FAILED。
-- AWAITING_APPROVAL：用户批准精确 dev/main/verification 三元组后→PROMOTING；dev、main 或证据变化→STALE。
+- AWAITING_APPROVAL（仅 STRICT）：用户批准精确 dev/main/verification 三元组后→PROMOTING；dev、main 或证据变化→STALE。FULL 下固定三元组后直接进入 PROMOTING，不停留此状态。
 - PROMOTING：核对批准与 Git 工作区安全后执行 dev→main；main 更新成功→RESTARTING。
 - RESTARTING：在 main 工作树执行 CLI stop，再执行 status 拉起并检查 Runtime；成功响应→SUCCEEDED。失败→RECOVERY_REQUIRED 并报告，不擅自回滚。
-- 批准是唯一显式门禁；重启是批准后的自动后置步骤，不要求第二次确认。
+- FULL 下无显式门禁；STRICT 下批准是唯一显式门禁。重启都是提升后的自动后置步骤，不要求第二次确认。
 
 ## 5. Self Evolution
 

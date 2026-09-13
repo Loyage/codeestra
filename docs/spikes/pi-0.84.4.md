@@ -45,11 +45,12 @@ Pi extension 的 `ctx.ui.select/confirm/input/editor` 在 RPC 模式产生 `exte
 |---|---|---|
 | persistentSession | `SUPPORTED`（持久 conversation） | 保存 provider session ID 与 file；启动早期身份另持久化 |
 | structuredAttention | `SUPPORTED`（受控 extension + RPC dialog） | 映射 request ID；custom UI 不可用 |
-| nativePermissionRouting | `SUPPORTED`（Pi extension UI），非默认全工具审批 | 受控 gate extension；无 UI/未知工具 fail-closed |
+| nativePermissionRouting | `SUPPORTED`（Pi extension UI），非默认全工具审批 | 受控 gate extension；STRICT 下无 UI/未知工具 fail-closed，FULL 下全部已注册工具自动允许（ADR-0011） |
 | pauseWithQuiescence | `UNSUPPORTED` | Pi 只有 abort 当前 operation，没有 pause/resume 原语 |
 | revisionAcknowledgement | `UNSUPPORTED` | 不从自然语言推断 ACK；修订走停止并新建 Execution |
 | cooperativeStop | `REQUIRES_VALIDATION` | 内置 bash spike 通过；限定工具集逐项验证，超时进入恢复 |
-| attach | `STRUCTURED`（仅 Runtime 持有 live RPC pipes 时） | 客户端 attach 到 Codeestra Runtime，不直接重接 Pi 进程 |
+| attach | `STRUCTURED`（仅 Runtime 持有 live RPC pipes 时）；不能把原生 TUI 附着到该 RPC 进程 | 结构化客户端 attach 到 Codeestra Runtime；原生 TUI 按 ADR-0010 另做安全点进程交接，不伪装原地 attach |
+| nativeTerminalHandoff | `REQUIRES_VALIDATION`（持久 session 可跨进程恢复，但双向 RPC↔TUI 与 gate side channel 未做 spike） | Phase 3 先验证旧进程退出、同 session file TUI resume、PTY、TUI 退出与 RPC resume；全程单 writer |
 | reconnectToLiveSession | `UNSUPPORTED` | Runtime 失联后不声称恢复 live process |
 | resumeAfterExit | `SUPPORTED`（conversation resume） | 必须新建 Execution/进程，保留来源关系 |
 
@@ -60,14 +61,15 @@ Pi extension 的 `ctx.ui.select/confirm/input/editor` 在 RPC 模式产生 `exte
 3. Codeestra session identity 与 Pi session ID/file 分开保存。RPC process PID/start token、session file 和 workspace ownership 都要核对。
 4. 事件 cursor 不能只依赖瞬时 RPC event。耐久回放使用 Codeestra event ID；Pi session entries 的稳定 entry ID 可作为 conversation 增量 cursor，但 tool streaming event 仍需 Runtime 自己持久化。Phase 1 Pi cursor 采用 `pi:<epoch>:<seq>`，epoch 与一次子进程生命周期绑定；陈旧 epoch 的 cursor 被拒绝。
 5. 只允许受控工具集降低了“后代写入”风险，但不能证明任意工具静止；因此取消/失败仍需要证据或进入 recovery。
-5. 启动 timeout 不盲重试；先核对 owned process 和 session identity。
+6. RPC `steer` 可在当前 assistant turn 的工具调用结束后、下一次 LLM call 前投递 Session Guidance；`agent_settled` 明确表示无 retry、compaction retry 或 queued continuation；extension `ctx.shutdown()` 会延迟到 idle。这些原语可组成 ADR-0010 的 handoff fence 与安全退出，但不是原生 TUI attach。原生接管仍必须经真实 spike 验证：收束新工具→settled→确认 RPC 退出→同 session 启动 TUI/PTY。
+7. 启动 timeout 不盲重试；先核对 owned process 和 session identity。
 
 ## 尚未通过的门禁
 
-- 成果 commit 与项目 trust 策略已由 ADR-0003/0004 确认，但对应授权/失效服务尚未实现。
+- 成果 commit 与项目 trust 授权/失效服务已实现；ADR-0011 后 FULL 下单步 capture、无 project trust 确认，STRICT 保留旧门禁。
 - 已实现并单测 LF-only RPC framing/parser、Codeestra gate extension 与 `PiRpcAdapter`（自有子进程、受控 argv、身份采集、attention/completion/disconnect 映射、typed answer 写入）。尚未实现 Runtime 事件/回答 pump、真实事件重投与孤儿进程 reconcile。
 - adapter transport 的本机真实 Pi 0.84.4 smoke：用受控 argv 启动 `pi --mode rpc`，`get_state` 返回 provider sessionId/session file，`ps -o lstart` 取得 start token，SIGTERM 后确认进程已退出；未发送 prompt、未调用模型。
 - stub-transport 集成测试覆盖：受控 argv、身份入库字段、revision prompt 组成、permission dialog→typed Attention→confirm(false) 写回、`agent_settled`→SUCCESS、**意外退出→disconnected 而非完成**、无 live 进程/陈旧 cursor 拒绝。
 - 尚未证明 edit/write 和所有允许 extension tools 的 abort 后静止边界。
-- 受控启动使用 `--no-approve --no-extensions --extension <fixed gate> --no-skills --no-prompt-templates --no-themes --no-context-files`，避免项目动态 Pi 资源和环境 prompt 资源改变 Task 输入；项目知识将来通过 `knowledgeSnapshotRefs` 显式交付。已确认该 argv 可被真实 Pi 0.84.4 接受。环境变量 allowlist 尚未定稿。
+- 受控启动使用 `--no-extensions --extension <fixed gate> --no-skills --no-prompt-templates --no-themes --no-context-files`，避免项目动态 Pi 资源和环境 prompt 资源改变 Task 输入；FULL 使用 `--approve` 且不传 `--tools`（全部已注册工具），STRICT 使用 `--no-approve --tools read,bash,edit,write,grep,find,ls`。项目知识将来通过 `knowledgeSnapshotRefs` 显式交付。已确认该 argv 可被真实 Pi 0.84.4 接受。环境变量 allowlist 尚未定稿。
 - 用户已确认：`agent_settled` 可作为 SUCCESS 完成依据，但 evidence 必须写明依据（当前为 `pi-rpc:agent_settled:session=...:epoch=...:tools=<hash>`）；进程异常退出不声明静止，而是 DISCONNECTED + RECOVERY_REQUIRED 且保留占用。

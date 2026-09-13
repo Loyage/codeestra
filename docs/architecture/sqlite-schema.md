@@ -1,6 +1,6 @@
 # SQLite Schema
 
-状态：逻辑 SQL 设计基线；`packages/storage/src/migration.ts` 已落地 schema version 5 的 Phase 1 子集（v2 Agent Session，v3 observation/Attention，v4 typed answer/Intent target，v5 Adapter disconnect），尚不是对外发布 migration。未来字段与表不提前创建。后续 Drizzle schema 必须与下面的约束等价。
+状态：逻辑 SQL 设计基线；`packages/storage/src/migration.ts` 已落地到 schema version 7 的 Phase 1 子集；ADR-0010 的多 process-incarnation Session、guidance/takeover/terminal 表仅是 Phase 3 逻辑设计，尚未进入 migration。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与下面的约束等价。
 
 ## 1. 约定
 
@@ -171,7 +171,9 @@ CREATE UNIQUE INDEX one_active_result_commit_authorization
   ON result_commit_authorizations(execution_id) WHERE status='ACTIVE';
 CREATE TABLE agent_sessions (
   id TEXT PRIMARY KEY,
-  execution_id TEXT NOT NULL UNIQUE REFERENCES executions(id),
+  execution_id TEXT NOT NULL REFERENCES executions(id),
+  predecessor_session_id TEXT,
+  mode TEXT NOT NULL CHECK(mode IN ('AUTOMATED_RPC','HUMAN_TUI')),
   provider_session_id TEXT,
   process_identity_json TEXT CHECK(process_identity_json IS NULL OR json_valid(process_identity_json)),
   capabilities_json TEXT NOT NULL CHECK(json_valid(capabilities_json)),
@@ -180,8 +182,65 @@ CREATE TABLE agent_sessions (
   state TEXT NOT NULL,
   version INTEGER NOT NULL DEFAULT 0,
   last_observed_at INTEGER,
-  exit_json TEXT CHECK(exit_json IS NULL OR json_valid(exit_json))
+  exit_json TEXT CHECK(exit_json IS NULL OR json_valid(exit_json)),
+  UNIQUE(execution_id,id),
+  FOREIGN KEY(execution_id,predecessor_session_id)
+    REFERENCES agent_sessions(execution_id,id)
 );
+CREATE UNIQUE INDEX one_active_agent_session_per_execution
+  ON agent_sessions(execution_id)
+  WHERE state IN ('CREATED','STARTING','ACTIVE','WAITING_FOR_USER','PAUSING','PAUSED','STOPPING');
+CREATE TABLE session_guidance (
+  id TEXT PRIMARY KEY,
+  execution_id TEXT NOT NULL REFERENCES executions(id),
+  session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+  command_id TEXT UNIQUE,
+  source TEXT NOT NULL CHECK(source IN ('COMMAND','TUI')),
+  actor TEXT NOT NULL,
+  behavior TEXT NOT NULL CHECK(behavior IN ('SAFE_POINT_STEER','FOLLOW_UP','CONTINUATION')),
+  content_text TEXT,
+  content_hash TEXT NOT NULL,
+  content_length INTEGER NOT NULL CHECK(content_length >= 0),
+  provider_entry_ref TEXT,
+  status TEXT NOT NULL CHECK(status IN ('PLANNED','IN_PROGRESS','DELIVERED','FAILED','RECOVERY_REQUIRED')),
+  created_at INTEGER NOT NULL,
+  delivered_at INTEGER,
+  CHECK((source='COMMAND' AND command_id IS NOT NULL AND content_text IS NOT NULL)
+     OR (source='TUI' AND command_id IS NULL AND content_text IS NULL))
+);
+CREATE TABLE takeover_requests (
+  id TEXT PRIMARY KEY,
+  execution_id TEXT NOT NULL REFERENCES executions(id),
+  source_session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+  target_session_id TEXT REFERENCES agent_sessions(id),
+  target_mode TEXT NOT NULL CHECK(target_mode IN ('HUMAN_TUI','AUTOMATED_RPC')),
+  state TEXT NOT NULL CHECK(state IN ('REQUESTED','WAITING_FOR_ATTENTION','WAITING_FOR_SAFE_POINT',
+    'STOPPING_SOURCE','STARTING_TARGET','ACTIVE','RETURN_REQUESTED','COMPLETED','FAILED','RECOVERY_REQUIRED')),
+  requested_cursor TEXT,
+  expected_provider_session_id TEXT,
+  expected_session_storage_ref TEXT,
+  expected_last_entry_id TEXT,
+  actor TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  error_json TEXT CHECK(error_json IS NULL OR json_valid(error_json))
+);
+CREATE UNIQUE INDEX one_open_takeover_per_execution
+  ON takeover_requests(execution_id)
+  WHERE state NOT IN ('COMPLETED','FAILED');
+CREATE TABLE terminal_attachments (
+  id TEXT PRIMARY KEY,
+  takeover_id TEXT NOT NULL REFERENCES takeover_requests(id),
+  session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+  client_id TEXT NOT NULL,
+  access TEXT NOT NULL CHECK(access IN ('READ_ONLY','WRITER')),
+  status TEXT NOT NULL CHECK(status IN ('ATTACHED','DETACHED')),
+  attached_at INTEGER NOT NULL,
+  detached_at INTEGER
+);
+CREATE UNIQUE INDEX one_terminal_writer_per_session
+  ON terminal_attachments(session_id) WHERE access='WRITER' AND status='ATTACHED';
 CREATE TABLE revision_deliveries (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL,
@@ -219,7 +278,9 @@ CREATE TABLE attention_answers (
 
 活动资源唯一性以 resource_held 而非心跳超时决定。即使 Runtime 的 lease 过期，也不能在未知进程仍可能写入时抢占 workspace。终态与 resource_held=0 的一致性在正式 CHECK/事务服务中强制；确认停止前不得置 0。
 
-Agent adapter_id 的权威来源为 Execution，不在多处维护可能不一致的主 Agent。provider session ID 是否跨项目唯一由 Adapter 决定，数据库不擅自全局唯一。
+Agent adapter_id 的权威来源为 Execution，不在多处维护可能不一致的主 Agent。provider session ID 是否跨项目唯一由 Adapter 决定，数据库不擅自全局唯一。ADR-0010 允许一个 Execution 因 RPC↔TUI 进程交接拥有多条 AgentSession，但活动 Session 部分唯一；predecessor 必须属于同一 Execution。旧 process identity/退出事实保留，新进程使用新 Codeestra session ID。Phase 3 migration 实现前，现有 version 7 的 `execution_id UNIQUE` 仍代表“每 Execution 单 Session”，不能声称已支持接管。
+
+Session Guidance 不替代 TaskRevision：`task guide` 命令正文需在记录中耐久保存以支持可靠投递；TUI 已写入 provider conversation 的正文只保存 entry 引用/hash/长度，不重复复制；两者正文都不进入领域事件。TakeoverRequest 与 START/STOP successor Operation 共同保护非原子进程交接；旧进程未确认退出时状态进入 RECOVERY_REQUIRED，禁止创建第二 writer。Terminal attachment 记录连接/lease 元数据，PTY 原始字节只在 Runtime 有界内存缓冲，不入 SQLite。
 
 Agent start 已按 `CREATED→PREPARING→STARTING→RUNNING` 分步持久化：调用 Adapter 前写 Session STARTING 与 START_AGENT Operation，成功后原子记录 Session ACTIVE、Execution RUNNING 与事件。可证明未创建 Session 的失败释放 Execution 持有并保留 workspace；任何未知/可能已启动的错误保持资源并进入 RECOVERY_REQUIRED。Runtime 重启遇到 IN_PROGRESS start 不重放，只标记恢复；PLANNED 尚可安全继续。
 

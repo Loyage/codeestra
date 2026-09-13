@@ -190,23 +190,28 @@ export function buildPiRpcArguments(input: {
   readonly gateExtensionPath: string;
   readonly sessionDir: string;
   readonly platform?: 'unix' | 'windows';
+  readonly permissionMode?: 'FULL' | 'STRICT';
 }): readonly string[] {
   if (!isAbsolute(input.gateExtensionPath) || !isAbsolute(input.sessionDir)) {
     throw new PiRpcProtocolError('INVALID_OPTIONS', 'Pi gate and session paths must be absolute');
   }
+  const mode = input.permissionMode ?? 'FULL';
   const tools = input.platform === 'windows'
     ? 'read,powershell,edit,write,grep,find,ls'
     : 'read,bash,edit,write,grep,find,ls';
-  return [
+  const common = [
     '--mode', 'rpc',
-    '--no-approve',
+    // Project trust is automatic in full mode. Strict mode retains the former ignore-by-default path.
+    mode === 'FULL' ? '--approve' : '--no-approve',
     '--no-extensions',
     '--extension', input.gateExtensionPath,
     '--no-skills',
     '--no-prompt-templates',
     '--no-themes',
     '--no-context-files',
-    '--tools', tools,
-    '--session-dir', input.sessionDir,
   ];
+  // Full mode does not apply a tool allowlist: every tool registered by this controlled launch is active.
+  if (mode === 'STRICT') common.push('--tools', tools);
+  common.push('--session-dir', input.sessionDir);
+  return common;
 }

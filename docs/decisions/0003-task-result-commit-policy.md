@@ -1,6 +1,6 @@
 # ADR-0003：Task 成果 Commit 策略
 
-Status：Accepted（用户明确选择四项）
+Status：Accepted；**Amended by ADR-0011**：FULL 下单步 capture 且不应用敏感路径拒绝，STRICT 保留本 ADR 门禁。
 
 ## Context
 

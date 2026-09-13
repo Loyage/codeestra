@@ -34,15 +34,17 @@ Phase 1 不提供 Phase 3 的完整 attach UI。若 Agent 需要交互，必须�
 
 ## Phase 3 — Interactive Agent Sessions
 
-交付：真实 session 接入、Attention Inbox、WAITING_FOR_USER、回答路由、断连与恢复、运行中修订的通知与确认。
+交付：真实 session 接入、Attention Inbox、WAITING_FOR_USER、回答路由、断连与恢复、运行中修订的通知与确认；增加 Session Guidance 与原生终端接管。Pi 按 ADR-0010 在当前工具结束后的结构化安全点执行 RPC→原生 TUI/PTY 交接，detach 后保持 TUI 运行，显式 release 再交接回 RPC；CLI 提供 request/attach/status/release 与可脚本化 guidance，UI 只投影同一命令面。
 
-验收：一个 Task 等待用户时其他 Task 可继续；回答不会路由到错误会话；修订投递状态可审计。
+实现顺序：先以真实 Pi spike 验证 session-file 双向恢复、权限模式 side channel（FULL 零确认 / STRICT gate）和 PTY 生命周期；再实现 handoff Operation / Session incarnation / 单 writer lease；最后接 CLI attach 与 UI 终端。任一步都不得让两个 Provider 进程同时写同一 conversation/worktree。
+
+验收：一个 Task 等待用户时其他 Task 可继续；回答不会路由到错误会话；修订投递状态可审计；工具运行中请求接管不 abort 工具，安全点后能进入真实 Pi TUI；detach/reattach 不停止 Agent；交还后 RPC 从同一 conversation 继续；Session Guidance 不改变 TaskRevision，而 `task amend` 仍使旧验证失效；writer 竞争稳定失败；故障注入不双开进程。全部通过 CLI/Runtime/PTY framing 的 headless 命令面测试完成。
 
 ## Phase 4 — Integration Pipeline
 
-交付：IntegrationBatch、Task 结果集成到长期 dev、独立验证、用户批准固定 dev/main SHA 后提升 main、main 更新后的 CLI stop/status 重启与响应检查，以及冲突/失败/ref 移动处理。
+交付：IntegrationBatch、Task 结果集成到长期 dev、独立验证、固定 dev/main SHA 后提升 main（FULL 无需批准，STRICT 需批准）、main 更新后的 CLI stop/status 重启与响应检查，以及冲突/失败/ref 移动处理。
 
-验收：失败候选不改变 dev/main；所有完成功能先进入 dev；未获用户批准不能 dev→main；提升的 commit 与被验证 dev commit 一致；dev/main 任一移动使批准失效；main 更新后必须重启 Runtime，恢复响应前不报告成功；批次成员 revision 可追溯。
+验收：失败候选不改变 dev/main；所有完成功能先进入 dev；提升的 commit 与被验证 dev commit 一致；dev/main 任一移动使 STRICT 批准失效；main 更新后必须重启 Runtime，恢复响应前不报告成功；批次成员 revision 可追溯。
 
 ## Phase 5 — Multiple Agent Adapters
 

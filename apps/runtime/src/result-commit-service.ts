@@ -63,7 +63,7 @@ export interface CapturedResultCommit {
   readonly identity: CommitIdentity;
   readonly hookOutcome: 'PASSED' | 'REPORTED_FAILURE_AFTER_COMMIT';
   readonly hookDetail: string;
-  readonly source: 'CONFIRMED' | 'RECONCILED';
+  readonly source: 'CONFIRMED' | 'AUTOMATIC_FULL' | 'RECONCILED';
   readonly alreadyCaptured: boolean;
 }
 
@@ -137,6 +137,7 @@ export async function prepareResultCommit(input: {
   readonly executionId?: string;
   readonly commandId: string;
   readonly actor: string;
+  readonly permissionMode?: 'FULL' | 'STRICT';
   readonly now?: () => number;
   readonly randomUUID?: () => string;
 }): Promise<PreparedResultCommit> {
@@ -148,6 +149,14 @@ export async function prepareResultCommit(input: {
   if (subject.currentRevisionId !== subject.appliedRevisionId) {
     throw new ResultCommitServiceError('STALE_REVISION',
       'Task revision changed after the Execution started; a result commit needs a new Execution');
+  }
+  // A captured result commit releases the Execution's workspace hold. Preparing again would create a
+  // fresh authorization for an Execution that can never consume it, so refuse loudly instead of
+  // leaving a dangling ACTIVE authorization behind (reachable in FULL mode, where capture is one step).
+  if (subject.executionState !== 'RUNNING' || !subject.resourceHeld) {
+    throw new ResultCommitServiceError('INVALID_EXECUTION_STATE',
+      `Execution is ${subject.executionState} and no longer holds the Task workspace;`
+      + ' its result commit was already captured or the Execution ended');
   }
   if (!subject.quiescent) {
     throw new ResultCommitServiceError('AGENT_NOT_QUIESCENT',
@@ -170,7 +179,7 @@ export async function prepareResultCommit(input: {
   }
   const paths = changeSetPaths(changeSet);
   const hits = classifySensitivePaths(paths);
-  if (hits.length > 0) throw sensitivePathError(paths);
+  if ((input.permissionMode ?? 'STRICT') === 'STRICT' && hits.length > 0) throw sensitivePathError(paths);
   const identity = await resolveCommitIdentity(subject.workspacePath);
   const createdAt = now();
   const authorizationId = randomUUID();
@@ -225,6 +234,7 @@ export async function captureResultCommit(input: {
   readonly taskId: string;
   readonly authorizationId: string;
   readonly commandId: string;
+  readonly permissionMode?: 'FULL' | 'STRICT';
   readonly now?: () => number;
   readonly randomUUID?: () => string;
 }): Promise<CapturedResultCommit> {
@@ -309,7 +319,7 @@ export async function captureResultCommit(input: {
       'The worktree changed after this authorization was prepared; prepare a new result commit');
   }
   const paths = changeSetPaths(changeSet);
-  if (classifySensitivePaths(paths).length > 0) {
+  if ((input.permissionMode ?? 'STRICT') === 'STRICT' && classifySensitivePaths(paths).length > 0) {
     input.storage.invalidateResultCommitAuthorization({
       authorizationId: authorization.id,
       reason: 'ChangeSet now matches the sensitive/runtime deny policy',
@@ -415,7 +425,7 @@ export async function captureResultCommit(input: {
     identityEmail: inspected.authorEmail,
     hookOutcome: outcome.detail === undefined ? 'PASSED' : 'REPORTED_FAILURE_AFTER_COMMIT',
     hookDetail: outcome.detail ?? '',
-    source: 'CONFIRMED',
+    source: (input.permissionMode ?? 'STRICT') === 'FULL' ? 'AUTOMATIC_FULL' : 'CONFIRMED',
   });
 }
 
@@ -427,7 +437,7 @@ interface CaptureCompletion {
   readonly identityEmail: string;
   readonly hookOutcome: 'PASSED' | 'REPORTED_FAILURE_AFTER_COMMIT';
   readonly hookDetail: string;
-  readonly source: 'CONFIRMED' | 'RECONCILED';
+  readonly source: 'CONFIRMED' | 'AUTOMATIC_FULL' | 'RECONCILED';
 }
 
 function completeCapture(

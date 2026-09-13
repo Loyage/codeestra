@@ -1,6 +1,6 @@
 # ADR-0006：Task Verification 命令来源与执行授权
 
-Status：Accepted（用户明确选择两项）
+Status：Accepted；**Amended by ADR-0011**：FULL 下策略无需人工确认，STRICT 保留确认；策略来源、schema、隔离与证据语义不变。
 
 ## Context
 

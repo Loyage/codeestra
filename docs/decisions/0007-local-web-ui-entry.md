@@ -1,6 +1,6 @@
 # ADR-0007：本地 Web UI 入口（`codeestra ui`）
 
-Status：Accepted（用户本轮明确选择"本地 Web UI"，并要求首版包含运行任务/成果 commit/验证按钮）；**Amended by ADR-0008**：UI 定位为便利层——CLI 必须完备且优先，出现“仅 UI 可用”的能力视为缺陷；UI 仍走同一命令面、不绕过任何门禁。
+Status：Accepted；**Amended by ADR-0008/0011**：UI 是 CLI 命令面的便利层；FULL 下不显示 TRUST 或成果二次确认，STRICT 保留旧门禁。
 
 ## Context
 
