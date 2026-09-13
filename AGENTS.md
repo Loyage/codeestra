@@ -54,6 +54,7 @@
 - `~/Documents/codeestra-dev` 检出 `dev`：开发与集成工作树；功能改动在此进行并先合入 `dev`。
 - 两个工作树的 `node_modules`、`apps/ui/dist`、`.codeestra/` 是 gitignore 的本地状态，不共享；新工作树需要自己 `bun install --frozen-lockfile`，UI 资产需自己构建（`bun run check` 会构建）。
 - Runtime 是本用户单实例（按 `CODEESTRA_HOME` 的 socket 判定）。从 dev 工作树直接运行 `bun run codeestra …` 会连接正在运行的稳定 Runtime，即执行 `main` 代码，不会启动 dev 构建。要验证 dev 代码必须用独立的 `CODEESTRA_HOME`（例如 `CODEESTRA_HOME=/tmp/codeestra-dev bun run codeestra status`），或先停止稳定 Runtime。不要把它误认为 dev 代码已生效。
+- 提升方式取决于 `main` 是否被检出：`main` 未被任何工作树检出时，可用带 expected old OID 的 `git update-ref refs/heads/main <dev-sha> <expected-main-sha>` 做 ref CAS。**本仓库现在把 `main` 检出在稳定工作树中，因此提升必须在 main 工作树内用 `git merge --ff-only dev`**（同时推进 ref、index 与工作文件）。对已检出的 `main` 直接 `update-ref` 会让 ref 前进、而 index/工作树停留在旧提交，留下“已暂存的删除”这类不一致状态：不要这样做。
 
 ## Git 与文件安全
 
