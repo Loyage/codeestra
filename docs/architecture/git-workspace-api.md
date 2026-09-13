@@ -69,8 +69,10 @@ interface IntegrationGitPort {
 - Git 尚无首个 commit 的仓库返回 UNBORN_MAIN 并明确指引用户初始化；不擅自提交用户文件。本 Codeestra 开发仓库的初始化与产品处理外部项目是不同操作。
 - 输入路径 canonicalize、检查父路径/symlink/归属；拒绝复用外来目录、非本 Task branch 或其他 worktree 注册记录。Git 输出用 `--porcelain -z` 等机器格式解析，支持空格/换行文件名。
 - 每个 repo 的变更型 Git 操作用 Runtime 锁串行；仍假定外部用户/工具可能修改 refs，故每步重新核验预期 SHA。
-- captureResult 先确认 Agent 与工具静止，检验当前 revision/HEAD/diff。按 ADR-0003 要求用户确认绑定 task/execution/revision/workspace、expected HEAD 与 ChangeSet fingerprint；任一变化使确认失效。
-- 获得有效确认后，暂存 owned worktree 相对固定基线的全部增删改/rename；敏感与运行数据路径策略先 fail-closed，不能用 `git add .` 无边界打包密钥、日志、SQLite 或 session。只在 task branch 创建 commit，不 amend、不 main、不 push。
+- captureResult 先确认 Agent 与工具静止，检验当前 revision/HEAD/diff。按 ADR-0003 要求用户确认绑定 task/execution/revision/workspace、expected HEAD 与 ChangeSet fingerprint；任一变化使确认失效。已实现为两步：`task.result.prepare` 只读计算、展示并落一次性 ACTIVE 授权；`task.result.commit` 必须携带 `confirm` 才进入暂存与提交，Runtime 在副作用前重算并比对。
+- ChangeSet 实现在私有临时 index 上计算 worktree 完整 tree OID，因此指纹不依赖用户真实 index/暂存状态，只随内容、文件模式与 HEAD 变化；未跟踪但不被 ignore 的文件按 ADDED 计入。
+- 敏感/运行数据 deny policy 带独立版本号（当前 v1），在暂存前 fail-closed 列出命中项；当前不提供绕过参数。命中时既不暂存也不创建授权。
+- 获得有效确认后，暂存 owned worktree 相对固定基线的全部增删改/rename；敏感与运行数据路径策略先 fail-closed，不能用 `git add .` 无边界打包密钥、日志、SQLite 或 session。只在 task branch 创建 commit，不 amend、不 main、不 push。commit message 由 task display number、revision 与 execution 确定性生成，供崩溃后按 HEAD/OID 核对。
 - 使用仓库可解析的 `user.name` / `user.email`，缺失时请求配置但不代写 Git config。项目 trust 后正常执行 hooks；失败保留现场，不使用 `--no-verify`。commit 成功但回写失败先按 HEAD/OID reconcile，不能盲重试 hook。
 - 如果 Agent 已创建成果 commit，核对可达关系和差异后固定该 OID；Runtime 不重写其历史。Agent 自建 commit 是否仍满足本次用户确认，按同一 HEAD/ChangeSet 授权边界核验，不把 Agent 行为当作用户授权。
 - 验证固定 commit，在隔离验证工作树或等价受控副本运行；验证后若 tracked/untracked 变化影响被测输入，则不能直接标 PASSED。

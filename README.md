@@ -4,9 +4,9 @@ Task-first、local-first 的 AI Development Runtime。用户管理产品意图�
 
 ## 当前状态
 
-架构基线与已确认决策已记录。已实现 Phase 0 领域基础、Phase 1 SQLite storage，以及最小 CLI/独立 Runtime：CLI 可自动启动后台 Runtime、显式信任项目，并按 Project ID 创建/列出/提交/运行 Task。Task 创建会原子保存原始 Intent、首 Revision、事实事件与幂等回执；submit 使用 expected version 将 DRAFT 转为 READY；`task run` 串起 owned worktree、Execution 预留、Adapter start 与事件 pump，`task status` 可查看 Execution/Session 投影。
+架构基线与已确认决策已记录。已实现 Phase 0 领域基础、Phase 1 SQLite storage，以及最小 CLI/独立 Runtime：CLI 可自动启动后台 Runtime、显式信任项目，并按 Project ID 创建/列出/提交/运行 Task，以及对成果 commit 做两步确认。Task 创建会原子保存原始 Intent、首 Revision、事实事件与幂等回执；submit 使用 expected version 将 DRAFT 转为 READY；`task run` 串起 owned worktree、Execution 预留、Adapter start 与事件 pump；`task status` 可查看 Execution/Session 投影；`task result prepare`/`task result commit --confirm` 按 ADR-0003 在核验 HEAD/ChangeSet/静止证据后创建成果 commit。
 
-这还不是完整的 AI 编排产品。尚无自动 Scheduler、Task cancel/pause、revision 投递确认、Git 自动成果 commit、Task verification、桌面 UI 或集成流水线。Pi 已有 LF-only RPC framing、受控启动参数、fail-closed gate extension 与自有子进程的 `PiRpcAdapter`（身份采集、attention/completion/disconnect 映射、typed answer 写入），Runtime 已接入 adapter registry、`task.run` 运行循环、事件 pump 与 answer 自动投递，并以 stub transport、deterministic fake 与脚本 Adapter 验证编排。真实 Pi 模型/工具执行、任务取消超时、孤儿进程 reconcile 与成果 commit 仍未实现；fake 不代表真实 Agent 集成通过。
+这还不是完整的 AI 编排产品。尚无 Task verification、自动 Scheduler、Task cancel/pause、revision 投递确认、桌面 UI 或集成流水线。Pi 已有 LF-only RPC framing、受控启动参数、fail-closed gate extension 与自有子进程的 `PiRpcAdapter`（身份采集、attention/completion/disconnect 映射、typed answer 写入），Runtime 已接入 adapter registry、`task.run` 运行循环、事件 pump 与 answer 自动投递，并以 stub transport、deterministic fake 与脚本 Adapter 验证编排。真实 Pi 模型/工具执行、任务取消超时、孤儿进程 reconcile 与 Task verification 仍未实现；fake 不代表真实 Agent 集成通过。
 
 ## 文档
 
@@ -43,6 +43,8 @@ bun run codeestra task list <project-id>
 bun run codeestra task submit <project-id> <task-id> <expected-version>
 bun run codeestra task run <project-id> <task-id> <expected-version> [--adapter pi]
 bun run codeestra task status <project-id> <task-id>
+bun run codeestra task result prepare <project-id> <task-id> [execution-id]
+bun run codeestra task result commit <project-id> <task-id> <authorization-id> --confirm
 bun run codeestra attention list <project-id>
 bun run codeestra stop
 ```
@@ -67,4 +69,4 @@ Domain 不依赖 Bun、SQLite、Tauri 或 Agent SDK。函数只计算不可变�
 
 ## 下一步
 
-下一纵向小步是 ADR-0003 的 ChangeSet 与一次性成果 commit 确认服务，随后是 Task verification 与 outbox 长连接。当前 IPC 单实例竞态、真实进程 identity reconcile、真实 Pi 工具执行/取消超时与完整崩溃恢复仍需补齐测试。
+下一纵向小步是 Task verification：在固定 commit 的隔离副本上运行项目验证命令，并把证据绑定到 revision/commit；随后是 outbox 长连接与 Phase 1 剩余交互面。当前 IPC 单实例竞态、真实进程 identity reconcile、真实 Pi 工具执行/取消超时与完整崩溃恢复仍需补齐测试。

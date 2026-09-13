@@ -55,6 +55,8 @@ Task Integration summary：`NOT_READY → ELIGIBLE → BATCHED → INTEGRATED`�
 
 终态不可被后来迟到的 Agent 事件改回 RUNNING。新尝试新 ID；重启恢复同一已存活 session 不创建重复 execution。
 
+成果 commit 采两步门禁：prepare 只读快照并落一次性授权（绑定 execution/revision/workspace ownership/expected HEAD/ChangeSet fingerprint/身份），confirm 重验后才 `git add`/`commit`；确认是单次能力，HEAD 或差异变化使其失效。消费后 Execution→SUCCEEDED 且 workspace IN_USE→RETAINED（保留供验证），Task 只到 EXECUTED。commit 已生成但回写失败时按 HEAD/OID 补记，不重跑 hook、不重写历史。
+
 ## 3. AgentSession
 
 `CREATED → STARTING → ACTIVE`；ACTIVE↔WAITING_FOR_USER；ACTIVE/WAITING_FOR_USER→PAUSING→PAUSED→ACTIVE；活动态→STOPPING→EXITED；控制连接丢失或 Runtime 自行释放其自有 provider 进程→DISCONNECTED；身份或恢复失败→RECOVERY_REQUIRED。
