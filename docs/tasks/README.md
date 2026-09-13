@@ -957,6 +957,26 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 - 未实现：多成员批次、批级 `STALE`/`CANCELLED`、`dev → main` 提升与重启、失败现场与副本的回收策略。
 - 未用真实 provider 驱动合入（只用 stub）；未使用桌面/浏览器自动化。
 
+## FOUNDATION-040 — Pi session-file 双向交接与安全点技术 Spike（ADR-0010 Phase 3 第 1 步）
+
+状态：**技术 spike 已完成**。无生产代码修改、未 commit、未 push、未触碰 dev/main 工作树。结论见 `docs/spikes/pi-session-handoff.md`。
+
+### 已实测（真实 Pi 0.84.4 + 真实模型 deepseek-flash，spike 脚本与原始输出在 `/tmp`，不入库）
+
+- **session-file 双向恢复成立**：RPC 会话（SIGTERM 退出）→ 真实 TUI `--session <file>` 在 PTY 中恢复同一 session ID 与同一 conversation（屏幕可见 RPC 阶段内容）→ TUI 中键入真实用户消息（同一文件追加 entry）→ 客户端 detach/reattach 不停止 TUI → Ctrl+D release（`exit 0`）→ RPC `--session <file>` 恢复同一 session ID，并让模型同时复述 RPC 阶段与 TUI 阶段的 token 与 passphrase。session file 为 append-only，entry id 跨进程稳定、parent 链完整，可作跨 incarnation cursor。
+- **耐久性**：TUI 键入正文在 ≤1s 内落 provider session file，SIGKILL 后仍在；工具执行中 SIGKILL pi 后 JSONL 全部可解析、无半行、可同 ID 恢复（被打断的工具没有 toolResult）。
+- **PTY/进程生命周期**：detach 不停止 TUI；release 用 Ctrl+D（`exit 0`）；SIGTERM 给 TUI 也是 `exit 0`（**退出码不能区分正常 release**）；Runtime 关闭 master → TUI `exit 129`(SIGHUP)；Runtime 进程被 SIGKILL → TUI 随之退出；关闭 RPC stdin → pi 自行 `exit 0`（Runtime 崩溃不留孤儿 pi 进程）。
+- **关键风险**：SIGKILL provider **不会**终止已开始的工具；孤儿 bash 子进程被 reparent 到 PID 1 后继续运行并在 41s 后写入了工作区 sentinel。`--session <file>` **没有排他**：两个 writer 可并发同写一个 session file 且都不报错（entry id 仍唯一、parent 链可解析）。因此单 writer 必须由 Runtime lease 强制，且 successor 启动前要做后代进程归属核验。
+- **权限模式与安全点**：FULL 下已注册工具 0 次确认；STRICT(RPC) 下生产 gate 的 allow/deny 两条路径均实测（拒绝不挂死，`terminate` 后仍到达 `agent_settled`，**故 settled ≠ SUCCESS**）；STRICT 下把 Agent 交给原生 TUI 时**现有 gate 会直接阻断**（`cannot approve … without its RPC permission channel`），必须新增 Runtime side channel；spike 扩展证明 TUI 模式下 side channel（`hello mode=tui` → `permission_request` → typed 决议）端到端可用，原生 `ctx.ui.confirm` 对话框也可渲染（Enter=Yes，Escape=取消）。
+- **fence 语义**：在 `sleep 7; echo slept-ok` 执行中打开 fence → 该工具**不被 abort**（+6.9s `isError=False`，输出正确）；下一个工具调用被终止性 block 拦截（`CODEESTRA_HANDOFF_FENCE`）；随后立即 `agent_settled`（无额外 LLM 调用）。`steer` 也实测在当前工具结束后、下一次 LLM 调用前生效。
+- 明确列出**未验证**（完整 takeover 编排、并行工具批次下的安全点、writer lease/`ATTACHMENT_BUSY`、归属核验、跨交接模式保持、竞答协调、`ctx.shutdown()` 的 `session_shutdown` 通知不可靠、Windows/其他 provider、compaction）与**不支持/做不到**（无法 attach 到 live RPC 进程、Pi 无 pause/resume、Pi 无 session 文件锁、杀进程 ≠ 工作区静止、退出码不能判定交接正常、不能从屏幕文本推断状态）。
+
+### 边界
+
+- 本格**没有**修改 `packages/agent-adapters/src/pi-gate-extension.ts`。`STRICT + TUI` 必须改该扩展（接收 side channel 决议）才能继续验证，按 spike 规则在此停下记录，留给下一波（会与 A1 的 Operation 语义一起处理）。
+- 未使用浏览器/桌面/键鼠自动化；TUI 观测通过真实 PTY + UNIX socket 控制面 headless 驱动。
+- **未占用 ADR-0020，已释放**（未推翻 ADR-0010/0011；实现契约与风险事实见 spike §5/§6）。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。剩余：`dev → main` 提升与重启。
