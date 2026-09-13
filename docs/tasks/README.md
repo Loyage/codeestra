@@ -1000,7 +1000,7 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 
 ## FOUNDATION-040 — Pi session-file 双向交接与安全点技术 Spike（ADR-0010 Phase 3 第 1 步）
 
-状态：**技术 spike 已完成**。无生产代码修改、未 commit、未 push、未触碰 dev/main 工作树。结论见 `docs/spikes/pi-session-handoff.md`。
+状态：**技术 spike 已完成、已提交并合入 `dev`**。实现提交 `9193d95`（分支 `lane/a2-pi-session-handoff-spike`，基线固定为 `dev@4c8bc87`，未 rebase）；集成合并 `925c9d9`（两个父：`6fb9783` 与 `9193d95`）。**未修改任何生产代码**、未 push、未提升 `dev → main`、未重启 Runtime。结论见 `docs/spikes/pi-session-handoff.md`。
 
 ### 已实测（真实 Pi 0.84.4 + 真实模型 deepseek-flash，spike 脚本与原始输出在 `/tmp`，不入库）
 
@@ -1011,6 +1011,13 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 - **权限模式与安全点**：FULL 下已注册工具 0 次确认；STRICT(RPC) 下生产 gate 的 allow/deny 两条路径均实测（拒绝不挂死，`terminate` 后仍到达 `agent_settled`，**故 settled ≠ SUCCESS**）；STRICT 下把 Agent 交给原生 TUI 时**现有 gate 会直接阻断**（`cannot approve … without its RPC permission channel`），必须新增 Runtime side channel；spike 扩展证明 TUI 模式下 side channel（`hello mode=tui` → `permission_request` → typed 决议）端到端可用，原生 `ctx.ui.confirm` 对话框也可渲染（Enter=Yes，Escape=取消）。
 - **fence 语义**：在 `sleep 7; echo slept-ok` 执行中打开 fence → 该工具**不被 abort**（+6.9s `isError=False`，输出正确）；下一个工具调用被终止性 block 拦截（`CODEESTRA_HANDOFF_FENCE`）；随后立即 `agent_settled`（无额外 LLM 调用）。`steer` 也实测在当前工具结束后、下一次 LLM 调用前生效。
 - 明确列出**未验证**（完整 takeover 编排、并行工具批次下的安全点、writer lease/`ATTACHMENT_BUSY`、归属核验、跨交接模式保持、竞答协调、`ctx.shutdown()` 的 `session_shutdown` 通知不可靠、Windows/其他 provider、compaction）与**不支持/做不到**（无法 attach 到 live RPC 进程、Pi 无 pause/resume、Pi 无 session 文件锁、杀进程 ≠ 工作区静止、退出码不能判定交接正常、不能从屏幕文本推断状态）。
+
+### 合入与验证
+
+- 集成在临时集成工作树 `/tmp/a2-integration` 完成（分支 `tmp/a2-integration` 从 `dev@6fb9783` 建立，合并 `lane/a2-pi-session-handoff-spike`）；冲突只出现在 `docs/tasks/README.md` 的章节插入点（两侧都在 `## NEXT` 前插入新章节），按 **FOUNDATION-039 / 040 / 041 升序**保留三条记录，未丢弃任何一侧内容；合并结果相对 `dev` 只多出本 spike 的两个文件。
+- 合并树验证（`/tmp/a2-integration`）：`bun install --frozen-lockfile`，然后 `bun run check` **退出码 0** —— 根与 UI TypeScript、212 项 Vitest、301 项 Bun tests（0 fail，35 个文件）、UI Vite 构建。
+- `dev` 工作树只执行了 `git merge --ff-only 925c9d9`（不在那里解决冲突、不在那里编辑源文件）；临时集成工作树与临时分支已回收。
+- 本 spike 没有代码、schema、迁移或测试改动，因此合并不会改变父提交中任何行为。
 
 ### 边界
 
