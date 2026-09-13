@@ -83,7 +83,11 @@ function usage(): never {
   bun run codeestra project list
   bun run codeestra task create <project-id> <specification>
   bun run codeestra task list <project-id>
-  bun run codeestra task submit <project-id> <task-id> <expected-version>`);
+  bun run codeestra task submit <project-id> <task-id> <expected-version>
+  bun run codeestra attention list <project-id>
+  bun run codeestra attention answer <project-id> <attention-id> confirm <yes|no>
+  bun run codeestra attention answer <project-id> <attention-id> value <text>
+  bun run codeestra attention answer <project-id> <attention-id> cancel`);
   process.exit(2);
 }
 
@@ -120,6 +124,31 @@ try {
   } else if (group === 'task' && action === 'list') {
     if (firstArgument === undefined || remainingArguments.length !== 0) usage();
     print(await call({ command: 'task.list', projectId: firstArgument }));
+  } else if (group === 'attention' && action === 'list') {
+    if (firstArgument === undefined || remainingArguments.length !== 0) usage();
+    print(await call({ command: 'attention.list', projectId: firstArgument }));
+  } else if (group === 'attention' && action === 'answer') {
+    const [attentionId, answerType, ...answerArguments] = remainingArguments;
+    if (firstArgument === undefined || attentionId === undefined || answerType === undefined) usage();
+    let answer: { type: 'CONFIRM'; confirmed: boolean } | { type: 'VALUE'; value: string }
+      | { type: 'CANCEL' };
+    if (answerType === 'confirm' && answerArguments.length === 1
+      && ['yes', 'no'].includes(answerArguments[0] ?? '')) {
+      answer = { type: 'CONFIRM', confirmed: answerArguments[0] === 'yes' };
+    } else if (answerType === 'value' && answerArguments.length > 0) {
+      answer = { type: 'VALUE', value: answerArguments.join(' ') };
+    } else if (answerType === 'cancel' && answerArguments.length === 0) {
+      answer = { type: 'CANCEL' };
+    } else {
+      usage();
+    }
+    print(await call({
+      command: 'attention.answer',
+      commandId: crypto.randomUUID(),
+      projectId: firstArgument,
+      attentionId,
+      answer,
+    }));
   } else if (group === 'task' && action === 'submit') {
     const [taskId, versionText, ...extra] = remainingArguments;
     const expectedVersion = Number(versionText);

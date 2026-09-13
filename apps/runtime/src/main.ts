@@ -5,7 +5,11 @@ import { runtimeRequestSchema, type RuntimeRequest, type RuntimeResponse } from 
 import { GitInspectionError, inspectRepository } from '@codeestra/git';
 import { Phase1Database, StorageError } from '@codeestra/storage';
 import { runtimeHome, runtimeSocketPath } from './paths.js';
-import { reconcileWorkspacePreparations } from './recovery-service.js';
+import {
+  reconcileInterruptedAgentAnswers,
+  reconcileInterruptedAgentStarts,
+  reconcileWorkspacePreparations,
+} from './recovery-service.js';
 
 interface SocketState { buffer: string }
 
@@ -36,6 +40,8 @@ rmSync(socketPath, { force: true });
 
 const storage = new Phase1Database(join(home, 'runtime.sqlite'));
 await reconcileWorkspacePreparations({ storage });
+reconcileInterruptedAgentStarts({ storage });
+reconcileInterruptedAgentAnswers({ storage });
 let listener: ReturnType<typeof Bun.listen<SocketState>>;
 
 function success(requestId: string, result: unknown): RuntimeResponse {
@@ -59,6 +65,29 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       return success(request.requestId, storage.listTrustedProjects());
     case 'task.list':
       return success(request.requestId, storage.listTasks(request.projectId));
+    case 'attention.list':
+      return success(request.requestId, storage.listAttentionRequests(request.projectId));
+    case 'attention.answer': {
+      const payloadHash = createHash('sha256').update(JSON.stringify({
+        projectId: request.projectId,
+        attentionId: request.attentionId,
+        answer: request.answer,
+      })).digest('hex');
+      return success(request.requestId, storage.planAttentionAnswer({
+        projectId: request.projectId,
+        attentionId: request.attentionId,
+        commandId: request.commandId,
+        payloadHash,
+        intentId: crypto.randomUUID(),
+        answerId: crypto.randomUUID(),
+        operationId: crypto.randomUUID(),
+        answer: request.answer,
+        intentEventId: crypto.randomUUID(),
+        recordedEventId: crypto.randomUUID(),
+        actor: 'local-user',
+        recordedAt: Date.now(),
+      }));
+    }
     case 'task.submit': {
       const payloadHash = createHash('sha256').update(JSON.stringify({
         projectId: request.projectId,

@@ -1,5 +1,12 @@
 import { Database } from 'bun:sqlite';
-import { phase1Migration, phase1SchemaVersion } from './migration.js';
+import {
+  agentAnswerMigration,
+  agentDisconnectMigration,
+  agentObservationMigration,
+  agentStartMigration,
+  phase1Migration,
+  phase1SchemaVersion,
+} from './migration.js';
 
 export class StorageError extends Error {
   constructor(
@@ -13,6 +20,16 @@ export class StorageError extends Error {
 }
 
 export type CommandResult = Readonly<Record<string, unknown>>;
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (typeof value === 'object' && value !== null) {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) =>
+      `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
 export interface TrustedProject {
   readonly id: string;
   readonly name: string;
@@ -32,6 +49,100 @@ export interface StoredConstraint {
 export type TaskLifecycleState = 'DRAFT' | 'BLOCKED' | 'READY' | 'RUNNING' | 'PAUSING'
   | 'PAUSED' | 'WAITING_FOR_USER' | 'RECOVERY_REQUIRED' | 'EXECUTED' | 'FAILED'
   | 'CANCELLING' | 'CANCELLED' | 'SUCCEEDED';
+
+export interface AgentStartPlan {
+  readonly operationId: string;
+  readonly operationState: 'PLANNED' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'RECONCILE_REQUIRED';
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly taskVersion: number;
+  readonly executionId: string;
+  readonly executionVersion: number;
+  readonly sessionId: string;
+  readonly sessionState: 'STARTING' | 'ACTIVE' | 'EXITED' | 'RECOVERY_REQUIRED';
+  readonly adapterId: string;
+  readonly adapterVersion: string;
+  readonly workspaceId: string;
+  readonly workspacePath: string;
+  readonly ownershipToken: string;
+  readonly revisionId: string;
+  readonly specification: string;
+  readonly constraints: readonly StoredConstraint[];
+  readonly providerSessionId: string | null;
+}
+
+export interface ObservableAgentSession {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly taskVersion: number;
+  readonly executionId: string;
+  readonly executionVersion: number;
+  readonly executionState: 'RUNNING' | 'WAITING_FOR_USER';
+  readonly sessionId: string;
+  readonly sessionVersion: number;
+  readonly sessionState: 'ACTIVE' | 'WAITING_FOR_USER';
+  readonly adapterId: string;
+  readonly providerSessionId: string;
+  readonly cursor?: string;
+}
+
+export type StoredAgentAnswer = Readonly<
+  | { type: 'CONFIRM'; confirmed: boolean }
+  | { type: 'VALUE'; value: string }
+  | { type: 'CANCEL' }
+>;
+
+export interface AttentionSummary {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly executionId: string;
+  readonly sessionId: string;
+  readonly providerRequestId: string;
+  readonly kind: 'QUESTION' | 'PERMISSION' | 'RECOVERY';
+  readonly responseType: 'CONFIRM' | 'VALUE';
+  readonly prompt: unknown;
+  readonly status: 'OPEN' | 'ANSWER_RECORDED' | 'DELIVERED' | 'CLOSED' | 'STALE';
+  readonly createdAt: number;
+}
+
+export interface AgentAnswerPlan extends AttentionSummary {
+  readonly operationId: string;
+  readonly operationState: 'PLANNED' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'RECONCILE_REQUIRED';
+  readonly answerId: string;
+  readonly answer: StoredAgentAnswer;
+  readonly adapterId: string;
+  readonly providerSessionId: string;
+}
+
+export interface AdapterEventResult {
+  readonly duplicate: boolean;
+  readonly eventId: string;
+  readonly cursor: string;
+  readonly sessionState: 'ACTIVE' | 'WAITING_FOR_USER' | 'EXITED' | 'DISCONNECTED';
+  readonly executionState: 'RUNNING' | 'WAITING_FOR_USER' | 'FAILED' | 'RECOVERY_REQUIRED';
+  readonly attentionId?: string;
+}
+
+export interface StoredEventEnvelope {
+  readonly eventId: string;
+  readonly sequence: number;
+  readonly eventType: string;
+  readonly schemaVersion: number;
+  readonly projectId: string;
+  readonly aggregateType: string;
+  readonly aggregateId: string;
+  readonly aggregateVersion: number;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+  readonly occurredAt: number;
+  readonly payload: unknown;
+}
+
+export interface PendingEventDelivery extends StoredEventEnvelope {
+  readonly consumerId: string;
+  readonly attemptCount: number;
+}
 
 export interface ExecutionReservation {
   readonly executionId: string;
@@ -111,7 +222,11 @@ export class Phase1Database {
     }
     if (version === phase1SchemaVersion) return;
     this.sqlite.transaction(() => {
-      this.sqlite.exec(phase1Migration);
+      if (version < 1) this.sqlite.exec(phase1Migration);
+      if (version < 2) this.sqlite.exec(agentStartMigration);
+      if (version < 3) this.sqlite.exec(agentObservationMigration);
+      if (version < 4) this.sqlite.exec(agentAnswerMigration);
+      if (version < 5) this.sqlite.exec(agentDisconnectMigration);
       this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
     })();
   }
@@ -551,6 +666,1065 @@ export class Phase1Database {
     };
   }
 
+  markExecutionPreparing(input: {
+    readonly projectId: string;
+    readonly executionId: string;
+    readonly expectedExecutionVersion: number;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly eventId: string;
+    readonly changedAt: number;
+  }): Readonly<{ executionId: string; state: 'PREPARING'; version: number }> {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.changedAt,
+      apply: (database) => {
+        const execution = database.query<{ state: string; version: number }, [string, string]>(`
+          SELECT execution.state,execution.version FROM executions execution
+          JOIN tasks task ON task.id=execution.task_id
+          WHERE task.project_id=?1 AND execution.id=?2
+        `).get(input.projectId, input.executionId);
+        if (execution === null) throw new StorageError('NOT_FOUND', 'Execution was not found');
+        if (execution.version !== input.expectedExecutionVersion) {
+          throw new StorageError('CONCURRENT_MODIFICATION', 'Execution version did not match');
+        }
+        if (execution.state !== 'CREATED') {
+          throw new StorageError('INVALID_STATE', `Execution cannot prepare from ${execution.state}`);
+        }
+        const version = input.expectedExecutionVersion + 1;
+        database.query("UPDATE executions SET state='PREPARING',version=?1 WHERE id=?2")
+          .run(version, input.executionId);
+        database.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'ExecutionStateChanged',1,'Execution',?3,?4,?5,?5,?6,?7)
+        `).run(input.eventId, input.projectId, input.executionId, version, input.commandId,
+          input.changedAt, JSON.stringify({ executionId: input.executionId,
+            from: 'CREATED', to: 'PREPARING', reason: 'workspace ready' }));
+        return { executionId: input.executionId, state: 'PREPARING' as const, version };
+      },
+    });
+  }
+
+  findAgentStart(projectId: string, idempotencyKey: string, payloadHash: string): AgentStartPlan | null {
+    const operation = this.sqlite.query<{
+      id: string; state: AgentStartPlan['operationState']; request_json: string;
+    }, [string, string]>(`
+      SELECT id,state,request_json FROM operations
+      WHERE project_id=?1 AND kind='START_AGENT' AND idempotency_key=?2
+    `).get(projectId, idempotencyKey);
+    if (operation === null) return null;
+    const request = JSON.parse(operation.request_json) as { payloadHash: string; sessionId: string };
+    if (request.payloadHash !== payloadHash) {
+      throw new StorageError('COMMAND_CONFLICT', 'Agent start command ID was reused with a different payload');
+    }
+    const plan = this.agentStartRow(request.sessionId);
+    if (plan === null) throw new StorageError('INVALID_STATE', 'Agent start operation lost its Session');
+    return { ...plan, operationId: operation.id, operationState: operation.state };
+  }
+
+  listIncompleteAgentStarts(): readonly AgentStartPlan[] {
+    return this.sqlite.query<{ session_id: string }, []>(`
+      SELECT json_extract(request_json,'$.sessionId') AS session_id
+      FROM operations
+      WHERE kind='START_AGENT' AND state IN ('PLANNED','IN_PROGRESS','RECONCILE_REQUIRED')
+      ORDER BY created_at,id
+    `).all().map((row) => {
+      const plan = this.agentStartRow(row.session_id);
+      if (plan === null) throw new StorageError('INVALID_STATE', 'Agent start Operation lost its Session');
+      return plan;
+    });
+  }
+
+  planAgentStart(input: {
+    readonly operationId: string;
+    readonly idempotencyKey: string;
+    readonly payloadHash: string;
+    readonly projectId: string;
+    readonly executionId: string;
+    readonly expectedExecutionVersion: number;
+    readonly sessionId: string;
+    readonly adapterId: string;
+    readonly adapterVersion: string;
+    readonly capabilities: unknown;
+    readonly eventId: string;
+    readonly plannedAt: number;
+  }): AgentStartPlan {
+    return this.sqlite.transaction(() => {
+      const existing = this.findAgentStart(input.projectId, input.idempotencyKey, input.payloadHash);
+      if (existing !== null) return existing;
+      const subject = this.sqlite.query<{
+        task_id: string; execution_state: string; execution_version: number; adapter_id: string;
+        adapter_version: string; workspace_id: string; workspace_path: string; ownership_token: string;
+        revision_id: string; specification: string; constraints_json: string;
+      }, [string, string]>(`
+        SELECT task.id AS task_id,execution.state AS execution_state,
+          execution.version AS execution_version,execution.adapter_id,execution.adapter_version,
+          workspace.id AS workspace_id,workspace.path AS workspace_path,workspace.ownership_token,
+          revision.id AS revision_id,revision.specification,revision.constraints_json
+        FROM executions execution JOIN tasks task ON task.id=execution.task_id
+        JOIN workspaces workspace ON workspace.id=execution.workspace_id AND workspace.task_id=task.id
+        JOIN task_revisions revision ON revision.id=execution.applied_revision_id AND revision.task_id=task.id
+        WHERE task.project_id=?1 AND execution.id=?2 AND task.state='RUNNING'
+          AND workspace.state='IN_USE'
+      `).get(input.projectId, input.executionId);
+      if (subject === null) throw new StorageError('NOT_FOUND', 'Runnable Execution was not found');
+      if (subject.execution_version !== input.expectedExecutionVersion) {
+        throw new StorageError('CONCURRENT_MODIFICATION', 'Execution version did not match');
+      }
+      if (subject.execution_state !== 'PREPARING') {
+        throw new StorageError('INVALID_STATE', `Agent cannot start from ${subject.execution_state}`);
+      }
+      if (subject.adapter_id !== input.adapterId || subject.adapter_version !== input.adapterVersion) {
+        throw new StorageError(
+          'INVALID_STATE',
+          `Execution reserved ${subject.adapter_id}@${subject.adapter_version}, got ${input.adapterId}@${input.adapterVersion}`,
+        );
+      }
+      const requestJson = JSON.stringify({
+        payloadHash: input.payloadHash,
+        executionId: input.executionId,
+        expectedExecutionVersion: input.expectedExecutionVersion,
+        sessionId: input.sessionId,
+      });
+      this.sqlite.query(`
+        INSERT INTO agent_sessions(id,execution_id,capabilities_json,state,version,last_observed_at)
+        VALUES (?1,?2,?3,'STARTING',0,?4)
+      `).run(input.sessionId, input.executionId, JSON.stringify(input.capabilities), input.plannedAt);
+      this.sqlite.query(`
+        INSERT INTO operations(id,project_id,kind,aggregate_id,idempotency_key,state,
+          request_json,created_at,updated_at)
+        VALUES (?1,?2,'START_AGENT',?3,?4,'PLANNED',?5,?6,?6)
+      `).run(input.operationId, input.projectId, input.executionId, input.idempotencyKey,
+        requestJson, input.plannedAt);
+      const executionVersion = input.expectedExecutionVersion + 1;
+      this.sqlite.query("UPDATE executions SET state='STARTING',version=?1 WHERE id=?2")
+        .run(executionVersion, input.executionId);
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'ExecutionStateChanged',1,'Execution',?3,?4,?5,?5,?6,?7)
+      `).run(input.eventId, input.projectId, input.executionId, executionVersion,
+        input.idempotencyKey, input.plannedAt, JSON.stringify({ executionId: input.executionId,
+          from: 'PREPARING', to: 'STARTING', reason: 'agent start planned' }));
+      const plan = this.agentStartRow(input.sessionId);
+      if (plan === null) throw new Error('Agent start plan was not persisted');
+      return plan;
+    })();
+  }
+
+  startAgentOperation(operationId: string, startedAt: number): void {
+    const result = this.sqlite.query(`
+      UPDATE operations SET state='IN_PROGRESS',updated_at=?1 WHERE id=?2 AND state='PLANNED'
+    `).run(startedAt, operationId);
+    if (result.changes !== 1) throw new StorageError('INVALID_STATE', 'Agent start Operation was not PLANNED');
+  }
+
+  completeAgentStart(input: {
+    readonly operationId: string;
+    readonly sessionId: string;
+    readonly providerSessionId: string;
+    readonly adapterId: string;
+    readonly sessionEventId: string;
+    readonly executionEventId: string;
+    readonly processIdentity?: unknown;
+    readonly sessionStorageRef?: string;
+    readonly completedAt: number;
+  }): AgentStartPlan {
+    return this.sqlite.transaction(() => {
+      const plan = this.agentStartRow(input.sessionId);
+      if (plan === null || plan.operationId !== input.operationId
+        || plan.operationState !== 'IN_PROGRESS' || plan.sessionState !== 'STARTING'
+        || plan.adapterId !== input.adapterId) {
+        throw new StorageError('INVALID_STATE', 'Started Agent Session did not match its plan');
+      }
+      this.sqlite.query(`
+        UPDATE agent_sessions SET state='ACTIVE',provider_session_id=?1,version=version+1,
+          last_observed_at=?2,process_identity_json=?3,session_storage_ref=?4 WHERE id=?5
+      `).run(input.providerSessionId, input.completedAt,
+        input.processIdentity === undefined ? null : JSON.stringify(input.processIdentity),
+        input.sessionStorageRef ?? null, input.sessionId);
+      this.sqlite.query(`
+        UPDATE executions SET state='RUNNING',version=version+1,started_at=?1
+        WHERE id=?2 AND state='STARTING'
+      `).run(input.completedAt, plan.executionId);
+      this.sqlite.query(`
+        UPDATE operations SET state='SUCCEEDED',result_json=?1,updated_at=?2
+        WHERE id=?3 AND state='IN_PROGRESS'
+      `).run(JSON.stringify({ sessionId: input.sessionId, providerSessionId: input.providerSessionId }),
+        input.completedAt, input.operationId);
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'ExecutionStateChanged',1,'Execution',?3,?4,?5,?5,?6,?7)
+      `).run(input.executionEventId, plan.projectId, plan.executionId, plan.executionVersion + 1,
+        input.operationId, input.completedAt, JSON.stringify({ executionId: plan.executionId,
+          from: 'STARTING', to: 'RUNNING', reason: 'agent session started' }));
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'AgentSessionStarted',1,'AgentSession',?3,1,?4,?5,?6,?7)
+      `).run(input.sessionEventId, plan.projectId, input.sessionId, input.operationId,
+        input.executionEventId, input.completedAt, JSON.stringify({ executionId: plan.executionId,
+          sessionId: input.sessionId, adapterId: input.adapterId,
+          providerSessionId: input.providerSessionId }));
+      const completed = this.agentStartRow(input.sessionId);
+      if (completed === null) throw new Error('Completed Agent Session was not found');
+      return completed;
+    })();
+  }
+
+  failAgentStartBeforeSideEffect(input: {
+    readonly operationId: string;
+    readonly sessionId: string;
+    readonly executionEventId: string;
+    readonly taskEventId: string;
+    readonly error: Readonly<{ code: string; message: string }>;
+    readonly failedAt: number;
+  }): void {
+    this.sqlite.transaction(() => {
+      const plan = this.agentStartRow(input.sessionId);
+      if (plan === null || plan.operationId !== input.operationId
+        || plan.operationState !== 'IN_PROGRESS' || plan.sessionState !== 'STARTING') {
+        throw new StorageError('INVALID_STATE', 'Failed Agent start did not match its plan');
+      }
+      this.sqlite.query(`
+        UPDATE agent_sessions SET state='EXITED',version=version+1,last_observed_at=?1,exit_json=?2
+        WHERE id=?3
+      `).run(input.failedAt, JSON.stringify(input.error), input.sessionId);
+      this.sqlite.query(`
+        UPDATE executions SET state='FAILED',resource_held=0,version=version+1,ended_at=?1,error_json=?2
+        WHERE id=?3 AND state='STARTING'
+      `).run(input.failedAt, JSON.stringify(input.error), plan.executionId);
+      this.sqlite.query("UPDATE workspaces SET state='RETAINED' WHERE id=?1 AND state='IN_USE'")
+        .run(plan.workspaceId);
+      this.sqlite.query(`
+        UPDATE tasks SET state='FAILED',version=version+1,updated_at=?1
+        WHERE id=?2 AND state='RUNNING'
+      `).run(input.failedAt, plan.taskId);
+      this.sqlite.query(`
+        UPDATE operations SET state='FAILED',result_json=?1,updated_at=?2
+        WHERE id=?3 AND state='IN_PROGRESS'
+      `).run(JSON.stringify({ error: input.error }), input.failedAt, input.operationId);
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'ExecutionFailed',1,'Execution',?3,?4,?5,?5,?6,?7)
+      `).run(input.executionEventId, plan.projectId, plan.executionId, plan.executionVersion + 1,
+        input.operationId, input.failedAt, JSON.stringify({ executionId: plan.executionId,
+          reason: input.error.code, stopEvidenceRef: 'no-session-created' }));
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'TaskStateChanged',1,'Task',?3,?4,?5,?6,?7,?8)
+      `).run(input.taskEventId, plan.projectId, plan.taskId, plan.taskVersion + 1,
+        input.operationId, input.executionEventId, input.failedAt,
+        JSON.stringify({ taskId: plan.taskId, from: 'RUNNING', to: 'FAILED',
+          reason: 'agent start failed before side effect' }));
+    })();
+  }
+
+  markAgentStartUncertain(input: {
+    readonly operationId: string;
+    readonly sessionId: string;
+    readonly recoveryEventId: string;
+    readonly taskEventId: string;
+    readonly error: Readonly<{ code: string; message: string }>;
+    readonly failedAt: number;
+  }): void {
+    this.sqlite.transaction(() => {
+      const plan = this.agentStartRow(input.sessionId);
+      if (plan === null || plan.operationId !== input.operationId
+        || plan.operationState !== 'IN_PROGRESS' || plan.sessionState !== 'STARTING') {
+        throw new StorageError('INVALID_STATE', 'Uncertain Agent start did not match its plan');
+      }
+      this.sqlite.query("UPDATE agent_sessions SET state='RECOVERY_REQUIRED',version=version+1,last_observed_at=?1 WHERE id=?2")
+        .run(input.failedAt, input.sessionId);
+      this.sqlite.query("UPDATE executions SET state='RECOVERY_REQUIRED',version=version+1 WHERE id=?1")
+        .run(plan.executionId);
+      this.sqlite.query("UPDATE workspaces SET state='RECOVERY_REQUIRED' WHERE id=?1")
+        .run(plan.workspaceId);
+      this.sqlite.query("UPDATE tasks SET state='RECOVERY_REQUIRED',version=version+1,updated_at=?1 WHERE id=?2")
+        .run(input.failedAt, plan.taskId);
+      this.sqlite.query(`
+        UPDATE operations SET state='RECONCILE_REQUIRED',result_json=?1,updated_at=?2 WHERE id=?3
+      `).run(JSON.stringify({ error: input.error }), input.failedAt, input.operationId);
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'RecoveryRequired',1,'Execution',?3,?4,?5,?5,?6,?7)
+      `).run(input.recoveryEventId, plan.projectId, plan.executionId, plan.executionVersion + 1,
+        input.operationId, input.failedAt, JSON.stringify({ resourceType: 'AgentSession',
+          resourceId: input.sessionId, reason: input.error.code }));
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'TaskStateChanged',1,'Task',?3,?4,?5,?6,?7,?8)
+      `).run(input.taskEventId, plan.projectId, plan.taskId, plan.taskVersion + 1,
+        input.operationId, input.recoveryEventId, input.failedAt,
+        JSON.stringify({ taskId: plan.taskId, from: 'RUNNING', to: 'RECOVERY_REQUIRED',
+          reason: 'agent start uncertain' }));
+    })();
+  }
+
+  private agentStartRow(sessionId: string): AgentStartPlan | null {
+    const row = this.sqlite.query<{
+      operation_id: string; operation_state: AgentStartPlan['operationState']; project_id: string;
+      task_id: string; task_version: number; execution_id: string; execution_version: number; session_id: string;
+      session_state: AgentStartPlan['sessionState']; adapter_id: string; adapter_version: string;
+      workspace_id: string; workspace_path: string; ownership_token: string; revision_id: string;
+      specification: string; constraints_json: string; provider_session_id: string | null;
+    }, [string]>(`
+      SELECT operation.id AS operation_id,operation.state AS operation_state,operation.project_id,
+        task.id AS task_id,task.version AS task_version,execution.id AS execution_id,
+        execution.version AS execution_version,
+        session.id AS session_id,session.state AS session_state,execution.adapter_id,execution.adapter_version,
+        workspace.id AS workspace_id,workspace.path AS workspace_path,workspace.ownership_token,
+        revision.id AS revision_id,revision.specification,revision.constraints_json,session.provider_session_id
+      FROM agent_sessions session JOIN executions execution ON execution.id=session.execution_id
+      JOIN tasks task ON task.id=execution.task_id JOIN workspaces workspace ON workspace.id=execution.workspace_id
+      JOIN task_revisions revision ON revision.id=execution.applied_revision_id
+      JOIN operations operation ON operation.aggregate_id=execution.id AND operation.kind='START_AGENT'
+        AND json_extract(operation.request_json,'$.sessionId')=session.id
+      WHERE session.id=?1
+    `).get(sessionId);
+    if (row === null) return null;
+    return {
+      operationId: row.operation_id,
+      operationState: row.operation_state,
+      projectId: row.project_id,
+      taskId: row.task_id,
+      taskVersion: row.task_version,
+      executionId: row.execution_id,
+      executionVersion: row.execution_version,
+      sessionId: row.session_id,
+      sessionState: row.session_state,
+      adapterId: row.adapter_id,
+      adapterVersion: row.adapter_version,
+      workspaceId: row.workspace_id,
+      workspacePath: row.workspace_path,
+      ownershipToken: row.ownership_token,
+      revisionId: row.revision_id,
+      specification: row.specification,
+      constraints: JSON.parse(row.constraints_json) as readonly StoredConstraint[],
+      providerSessionId: row.provider_session_id,
+    };
+  }
+
+  getObservableAgentSession(sessionId: string): ObservableAgentSession {
+    const row = this.observableAgentSessionRow(sessionId);
+    if (row === null) throw new StorageError('NOT_FOUND', 'Observable Agent Session was not found');
+    if (row.providerSessionId === null) {
+      throw new StorageError('INVALID_STATE', 'Agent Session has no provider identity');
+    }
+    if (!['ACTIVE', 'WAITING_FOR_USER'].includes(row.sessionState)
+      || !['RUNNING', 'WAITING_FOR_USER'].includes(row.executionState)) {
+      throw new StorageError('INVALID_STATE', `Agent Session cannot be observed from ${row.sessionState}`);
+    }
+    return { ...row, providerSessionId: row.providerSessionId } as ObservableAgentSession;
+  }
+
+  recordAgentAttention(input: {
+    readonly sessionId: string;
+    readonly executionId: string;
+    readonly providerEventId: string;
+    readonly cursor: string;
+    readonly providerRequestId: string;
+    readonly kind: 'QUESTION' | 'PERMISSION';
+    readonly responseType: 'CONFIRM' | 'VALUE';
+    readonly prompt: unknown;
+    readonly attentionId: string;
+    readonly attentionEventId: string;
+    readonly executionEventId: string;
+    readonly taskEventId: string;
+    readonly observedAt: number;
+  }): AdapterEventResult {
+    return this.sqlite.transaction(() => {
+      const payload = { providerRequestId: input.providerRequestId, kind: input.kind,
+        responseType: input.responseType, prompt: input.prompt };
+      const payloadJson = JSON.stringify(payload);
+      const duplicate = this.adapterEventDuplicate(input.sessionId, input.providerEventId,
+        input.cursor, 'attention', payloadJson);
+      if (duplicate) return this.adapterEventResult(input.sessionId, input.providerEventId);
+      const subject = this.observableAgentSessionRow(input.sessionId);
+      if (subject === null || subject.executionId !== input.executionId) {
+        throw new StorageError('NOT_FOUND', 'Adapter event Session identity did not match');
+      }
+      if (subject.sessionState !== 'ACTIVE' || subject.executionState !== 'RUNNING') {
+        throw new StorageError('INVALID_STATE',
+          `Attention requires ACTIVE/RUNNING, got ${subject.sessionState}/${subject.executionState}`);
+      }
+      const promptJson = JSON.stringify(input.prompt);
+      if (promptJson === undefined) throw new StorageError('INVALID_STATE', 'Attention prompt is not JSON serializable');
+      this.insertAdapterEvent(input.sessionId, input.providerEventId, input.cursor,
+        'attention', payloadJson, input.observedAt);
+      this.sqlite.query(`
+        INSERT INTO attention_requests(id,session_id,provider_request_id,kind,prompt_json,status,created_at,response_type)
+        VALUES (?1,?2,?3,?4,?5,'OPEN',?6,?7)
+      `).run(input.attentionId, input.sessionId, input.providerRequestId, input.kind,
+        promptJson, input.observedAt, input.responseType);
+      const sessionUpdate = this.sqlite.query(`
+        UPDATE agent_sessions SET state='WAITING_FOR_USER',version=version+1,
+          observation_cursor=?1,last_observed_at=?2 WHERE id=?3 AND state='ACTIVE'
+      `).run(input.cursor, input.observedAt, input.sessionId);
+      const executionUpdate = this.sqlite.query(`
+        UPDATE executions SET state='WAITING_FOR_USER',version=version+1
+        WHERE id=?1 AND state='RUNNING'
+      `).run(input.executionId);
+      const taskUpdate = this.sqlite.query(`
+        UPDATE tasks SET state='WAITING_FOR_USER',version=version+1,updated_at=?1
+        WHERE id=?2 AND state='RUNNING'
+      `).run(input.observedAt, subject.taskId);
+      if (sessionUpdate.changes !== 1 || executionUpdate.changes !== 1 || taskUpdate.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION', 'Attention subject changed during projection');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'UserAttentionRequested',1,'Attention',?3,0,?4,?5,?6,?7)
+      `).run(input.attentionEventId, subject.projectId, input.attentionId, input.executionId,
+        input.providerEventId, input.observedAt, JSON.stringify({ attentionId: input.attentionId,
+          sessionId: input.sessionId, kind: input.kind, responseType: input.responseType,
+          providerRequestId: input.providerRequestId }));
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'ExecutionStateChanged',1,'Execution',?3,?4,?5,?6,?7,?8)
+      `).run(input.executionEventId, subject.projectId, input.executionId,
+        subject.executionVersion + 1, input.executionId, input.attentionEventId, input.observedAt,
+        JSON.stringify({ executionId: input.executionId, from: 'RUNNING',
+          to: 'WAITING_FOR_USER', reason: 'agent requested attention' }));
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'TaskStateChanged',1,'Task',?3,?4,?5,?6,?7,?8)
+      `).run(input.taskEventId, subject.projectId, subject.taskId, subject.taskVersion + 1,
+        input.executionId, input.executionEventId, input.observedAt,
+        JSON.stringify({ taskId: subject.taskId, from: 'RUNNING',
+          to: 'WAITING_FOR_USER', reason: 'agent requested attention' }));
+      return { duplicate: false as const, eventId: input.providerEventId, cursor: input.cursor,
+        sessionState: 'WAITING_FOR_USER' as const, executionState: 'WAITING_FOR_USER' as const,
+        attentionId: input.attentionId };
+    })();
+  }
+
+  listAttentionRequests(projectId: string): readonly AttentionSummary[] {
+    const trusted = this.sqlite.query<{ id: string }, [string]>(`
+      SELECT project.id FROM projects project JOIN project_trusts trust
+        ON trust.project_id=project.id AND trust.status='ACTIVE' WHERE project.id=?1
+    `).get(projectId);
+    if (trusted === null) throw new StorageError('NOT_FOUND', 'Trusted project was not found');
+    return this.sqlite.query<{
+      id: string; project_id: string; task_id: string; execution_id: string; session_id: string;
+      provider_request_id: string; kind: AttentionSummary['kind']; response_type: AttentionSummary['responseType'];
+      prompt_json: string; status: AttentionSummary['status']; created_at: number;
+    }, [string]>(`
+      SELECT attention.id,task.project_id,task.id AS task_id,execution.id AS execution_id,
+        session.id AS session_id,attention.provider_request_id,attention.kind,attention.response_type,
+        attention.prompt_json,attention.status,attention.created_at
+      FROM attention_requests attention JOIN agent_sessions session ON session.id=attention.session_id
+      JOIN executions execution ON execution.id=session.execution_id
+      JOIN tasks task ON task.id=execution.task_id
+      WHERE task.project_id=?1 ORDER BY attention.created_at,attention.id
+    `).all(projectId).map((row) => ({
+      id: row.id, projectId: row.project_id, taskId: row.task_id, executionId: row.execution_id,
+      sessionId: row.session_id, providerRequestId: row.provider_request_id, kind: row.kind,
+      responseType: row.response_type, prompt: JSON.parse(row.prompt_json) as unknown,
+      status: row.status, createdAt: row.created_at,
+    }));
+  }
+
+  planAttentionAnswer(input: {
+    readonly projectId: string;
+    readonly attentionId: string;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly intentId: string;
+    readonly answerId: string;
+    readonly operationId: string;
+    readonly answer: StoredAgentAnswer;
+    readonly intentEventId: string;
+    readonly recordedEventId: string;
+    readonly actor: string;
+    readonly recordedAt: number;
+  }): AgentAnswerPlan {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.recordedAt,
+      apply: (database) => {
+        const subject = database.query<{
+          response_type: 'CONFIRM' | 'VALUE'; attention_status: string; session_state: string;
+          execution_state: string; task_state: string;
+        }, [string, string]>(`
+          SELECT attention.response_type,attention.status AS attention_status,
+            session.state AS session_state,execution.state AS execution_state,task.state AS task_state
+          FROM attention_requests attention JOIN agent_sessions session ON session.id=attention.session_id
+          JOIN executions execution ON execution.id=session.execution_id
+          JOIN tasks task ON task.id=execution.task_id JOIN project_trusts trust
+            ON trust.project_id=task.project_id AND trust.status='ACTIVE'
+          WHERE task.project_id=?1 AND attention.id=?2
+        `).get(input.projectId, input.attentionId);
+        if (subject === null) throw new StorageError('NOT_FOUND', 'Open Attention request was not found');
+        if (subject.attention_status !== 'OPEN' || subject.session_state !== 'WAITING_FOR_USER'
+          || subject.execution_state !== 'WAITING_FOR_USER' || subject.task_state !== 'WAITING_FOR_USER') {
+          throw new StorageError('INVALID_STATE', 'Attention request is not open on a waiting Agent');
+        }
+        const compatible = input.answer.type === 'CANCEL'
+          || input.answer.type === subject.response_type;
+        if (!compatible) {
+          throw new StorageError('INVALID_STATE',
+            `${input.answer.type} answer does not match ${subject.response_type} Attention`);
+        }
+        const answerJson = JSON.stringify(input.answer);
+        database.query(`
+          INSERT INTO intents(id,project_id,idempotency_key,raw_text,kind,status,actor,created_at)
+          VALUES (?1,?2,?3,?4,'ANSWER_AGENT','APPLIED',?5,?6)
+        `).run(input.intentId, input.projectId, input.commandId, answerJson, input.actor, input.recordedAt);
+        database.query('INSERT INTO intent_attention_targets(intent_id,attention_id) VALUES (?1,?2)')
+          .run(input.intentId, input.attentionId);
+        database.query(`
+          INSERT INTO attention_answers(id,request_id,command_id,actor,answer_json,created_at)
+          VALUES (?1,?2,?3,?4,?5,?6)
+        `).run(input.answerId, input.attentionId, input.commandId, input.actor, answerJson, input.recordedAt);
+        database.query("UPDATE attention_requests SET status='ANSWER_RECORDED' WHERE id=?1 AND status='OPEN'")
+          .run(input.attentionId);
+        database.query(`
+          INSERT INTO operations(id,project_id,kind,aggregate_id,idempotency_key,state,
+            request_json,created_at,updated_at)
+          VALUES (?1,?2,'ANSWER_AGENT',?3,?4,'PLANNED',?5,?6,?6)
+        `).run(input.operationId, input.projectId, input.attentionId, input.commandId,
+          JSON.stringify({ payloadHash: input.payloadHash, attentionId: input.attentionId,
+            answerId: input.answerId }), input.recordedAt);
+        database.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'IntentRecorded',1,'Intent',?3,0,?4,?4,?5,?6)
+        `).run(input.intentEventId, input.projectId, input.intentId, input.commandId, input.recordedAt,
+          JSON.stringify({ intentId: input.intentId, kind: 'ANSWER_AGENT' }));
+        database.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'UserAnswerRecorded',1,'Attention',?3,1,?4,?5,?6,?7)
+        `).run(input.recordedEventId, input.projectId, input.attentionId, input.commandId,
+          input.intentEventId, input.recordedAt,
+          JSON.stringify({ attentionId: input.attentionId, answerId: input.answerId }));
+        const plan = this.agentAnswerRow(input.operationId);
+        if (plan === null) throw new Error('Agent answer plan was not persisted');
+        return plan;
+      },
+    });
+  }
+
+  getAgentAnswerPlan(operationId: string): AgentAnswerPlan {
+    const plan = this.agentAnswerRow(operationId);
+    if (plan === null) throw new StorageError('NOT_FOUND', 'Agent answer Operation was not found');
+    return plan;
+  }
+
+  listIncompleteAgentAnswers(): readonly AgentAnswerPlan[] {
+    return this.sqlite.query<{ id: string }, []>(`
+      SELECT id FROM operations WHERE kind='ANSWER_AGENT'
+        AND state IN ('PLANNED','IN_PROGRESS','RECONCILE_REQUIRED') ORDER BY created_at,id
+    `).all().map((row) => this.getAgentAnswerPlan(row.id));
+  }
+
+  startAgentAnswerOperation(operationId: string, startedAt: number): AgentAnswerPlan {
+    const result = this.sqlite.query(`
+      UPDATE operations SET state='IN_PROGRESS',result_json=NULL,updated_at=?1
+      WHERE id=?2 AND kind='ANSWER_AGENT' AND state='PLANNED'
+    `).run(startedAt, operationId);
+    if (result.changes !== 1) throw new StorageError('INVALID_STATE', 'Agent answer Operation was not PLANNED');
+    return this.getAgentAnswerPlan(operationId);
+  }
+
+  retryAgentAnswerAfterProvenFailure(input: {
+    readonly operationId: string;
+    readonly error: Readonly<{ code: string; message: string }>;
+    readonly failedAt: number;
+  }): void {
+    const result = this.sqlite.query(`
+      UPDATE operations SET state='PLANNED',result_json=?1,updated_at=?2
+      WHERE id=?3 AND kind='ANSWER_AGENT' AND state='IN_PROGRESS'
+    `).run(JSON.stringify({ error: input.error, deliveryMayHaveOccurred: false }),
+      input.failedAt, input.operationId);
+    if (result.changes !== 1) throw new StorageError('INVALID_STATE', 'Failed Agent answer was not IN_PROGRESS');
+  }
+
+  completeAgentAnswer(input: {
+    readonly operationId: string;
+    readonly deliveredEventId: string;
+    readonly sessionEventId: string;
+    readonly executionEventId: string;
+    readonly taskEventId: string;
+    readonly deliveredAt: number;
+  }): AgentAnswerPlan {
+    return this.sqlite.transaction(() => {
+      const plan = this.getAgentAnswerPlan(input.operationId);
+      if (plan.operationState !== 'IN_PROGRESS' || plan.status !== 'ANSWER_RECORDED') {
+        throw new StorageError('INVALID_STATE', 'Delivered Agent answer did not match its plan');
+      }
+      this.sqlite.query("UPDATE attention_requests SET status='DELIVERED' WHERE id=?1 AND status='ANSWER_RECORDED'")
+        .run(plan.id);
+      this.sqlite.query(`
+        UPDATE operations SET state='SUCCEEDED',result_json=?1,updated_at=?2
+        WHERE id=?3 AND state='IN_PROGRESS'
+      `).run(JSON.stringify({ attentionId: plan.id, answerId: plan.answerId,
+        providerRequestId: plan.providerRequestId }), input.deliveredAt, input.operationId);
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'UserAnswerDelivered',1,'Attention',?3,2,?4,?4,?5,?6)
+      `).run(input.deliveredEventId, plan.projectId, plan.id, input.operationId, input.deliveredAt,
+        JSON.stringify({ attentionId: plan.id, answerId: plan.answerId }));
+      const blockers = this.sqlite.query<{ count: number }, [string]>(`
+        SELECT count(*) AS count FROM attention_requests
+        WHERE session_id=?1 AND status IN ('OPEN','ANSWER_RECORDED')
+      `).get(plan.sessionId)?.count ?? 0;
+      if (blockers === 0) {
+        const session = this.sqlite.query<{ version: number }, [string]>(
+          "SELECT version FROM agent_sessions WHERE id=?1 AND state='WAITING_FOR_USER'",
+        ).get(plan.sessionId);
+        const execution = this.sqlite.query<{ version: number }, [string]>(
+          "SELECT version FROM executions WHERE id=?1 AND state='WAITING_FOR_USER'",
+        ).get(plan.executionId);
+        const task = this.sqlite.query<{ version: number }, [string]>(
+          "SELECT version FROM tasks WHERE id=?1 AND state='WAITING_FOR_USER'",
+        ).get(plan.taskId);
+        if (session === null || execution === null || task === null) {
+          throw new StorageError('INVALID_STATE', 'Waiting Agent aggregates did not match delivered answer');
+        }
+        this.sqlite.query("UPDATE agent_sessions SET state='ACTIVE',version=version+1,last_observed_at=?1 WHERE id=?2")
+          .run(input.deliveredAt, plan.sessionId);
+        this.sqlite.query("UPDATE executions SET state='RUNNING',version=version+1 WHERE id=?1")
+          .run(plan.executionId);
+        this.sqlite.query("UPDATE tasks SET state='RUNNING',version=version+1,updated_at=?1 WHERE id=?2")
+          .run(input.deliveredAt, plan.taskId);
+        this.sqlite.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'AgentSessionStateChanged',1,'AgentSession',?3,?4,?5,?6,?7,?8)
+        `).run(input.sessionEventId, plan.projectId, plan.sessionId, session.version + 1,
+          input.operationId, input.deliveredEventId, input.deliveredAt,
+          JSON.stringify({ sessionId: plan.sessionId, from: 'WAITING_FOR_USER', to: 'ACTIVE' }));
+        this.sqlite.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'ExecutionStateChanged',1,'Execution',?3,?4,?5,?6,?7,?8)
+        `).run(input.executionEventId, plan.projectId, plan.executionId, execution.version + 1,
+          input.operationId, input.sessionEventId, input.deliveredAt,
+          JSON.stringify({ executionId: plan.executionId, from: 'WAITING_FOR_USER', to: 'RUNNING',
+            reason: 'all Attention answers delivered' }));
+        this.sqlite.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'TaskStateChanged',1,'Task',?3,?4,?5,?6,?7,?8)
+        `).run(input.taskEventId, plan.projectId, plan.taskId, task.version + 1,
+          input.operationId, input.executionEventId, input.deliveredAt,
+          JSON.stringify({ taskId: plan.taskId, from: 'WAITING_FOR_USER', to: 'RUNNING',
+            reason: 'all Attention answers delivered' }));
+      }
+      return this.getAgentAnswerPlan(input.operationId);
+    })();
+  }
+
+  markAgentAnswerUncertain(input: {
+    readonly operationId: string;
+    readonly recoveryEventId: string;
+    readonly taskEventId: string;
+    readonly error: Readonly<{ code: string; message: string }>;
+    readonly failedAt: number;
+  }): void {
+    this.sqlite.transaction(() => {
+      const plan = this.getAgentAnswerPlan(input.operationId);
+      if (plan.operationState !== 'IN_PROGRESS') {
+        throw new StorageError('INVALID_STATE', 'Uncertain Agent answer was not IN_PROGRESS');
+      }
+      this.sqlite.query("UPDATE operations SET state='RECONCILE_REQUIRED',result_json=?1,updated_at=?2 WHERE id=?3")
+        .run(JSON.stringify({ error: input.error, deliveryMayHaveOccurred: true }),
+          input.failedAt, input.operationId);
+      this.sqlite.query("UPDATE agent_sessions SET state='RECOVERY_REQUIRED',version=version+1,last_observed_at=?1 WHERE id=?2")
+        .run(input.failedAt, plan.sessionId);
+      this.sqlite.query("UPDATE executions SET state='RECOVERY_REQUIRED',version=version+1 WHERE id=?1")
+        .run(plan.executionId);
+      this.sqlite.query("UPDATE workspaces SET state='RECOVERY_REQUIRED' WHERE id=(SELECT workspace_id FROM executions WHERE id=?1)")
+        .run(plan.executionId);
+      const taskVersion = this.sqlite.query<{ version: number }, [string]>(
+        "SELECT version FROM tasks WHERE id=?1 AND state='WAITING_FOR_USER'",
+      ).get(plan.taskId)?.version;
+      if (taskVersion === undefined) {
+        throw new StorageError('INVALID_STATE', 'Uncertain Agent answer Task was not waiting');
+      }
+      this.sqlite.query("UPDATE tasks SET state='RECOVERY_REQUIRED',version=version+1,updated_at=?1 WHERE id=?2")
+        .run(input.failedAt, plan.taskId);
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'RecoveryRequired',1,'Attention',?3,2,?4,?4,?5,?6)
+      `).run(input.recoveryEventId, plan.projectId, plan.id, input.operationId, input.failedAt,
+        JSON.stringify({ resourceType: 'AgentAnswer', resourceId: plan.answerId,
+          reason: input.error.code }));
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'TaskStateChanged',1,'Task',?3,?4,?5,?6,?7,?8)
+      `).run(input.taskEventId, plan.projectId, plan.taskId, taskVersion + 1,
+        input.operationId, input.recoveryEventId, input.failedAt,
+        JSON.stringify({ taskId: plan.taskId, from: 'WAITING_FOR_USER',
+          to: 'RECOVERY_REQUIRED', reason: 'Agent answer delivery uncertain' }));
+    })();
+  }
+
+  private agentAnswerRow(operationId: string): AgentAnswerPlan | null {
+    const row = this.sqlite.query<{
+      operation_id: string; operation_state: AgentAnswerPlan['operationState']; project_id: string;
+      attention_id: string; provider_request_id: string; kind: AgentAnswerPlan['kind'];
+      response_type: AgentAnswerPlan['responseType']; prompt_json: string; attention_status: AgentAnswerPlan['status'];
+      attention_created_at: number; answer_id: string; answer_json: string; session_id: string;
+      execution_id: string; task_id: string; adapter_id: string; provider_session_id: string | null;
+    }, [string]>(`
+      SELECT operation.id AS operation_id,operation.state AS operation_state,operation.project_id,
+        attention.id AS attention_id,attention.provider_request_id,attention.kind,attention.response_type,
+        attention.prompt_json,attention.status AS attention_status,attention.created_at AS attention_created_at,
+        answer.id AS answer_id,answer.answer_json,session.id AS session_id,execution.id AS execution_id,
+        task.id AS task_id,execution.adapter_id,session.provider_session_id
+      FROM operations operation JOIN attention_requests attention ON attention.id=operation.aggregate_id
+      JOIN attention_answers answer ON answer.request_id=attention.id
+      JOIN agent_sessions session ON session.id=attention.session_id
+      JOIN executions execution ON execution.id=session.execution_id JOIN tasks task ON task.id=execution.task_id
+      WHERE operation.id=?1 AND operation.kind='ANSWER_AGENT'
+    `).get(operationId);
+    if (row === null) return null;
+    if (row.provider_session_id === null) {
+      throw new StorageError('INVALID_STATE', 'Answer target Session has no provider identity');
+    }
+    return {
+      operationId: row.operation_id, operationState: row.operation_state,
+      id: row.attention_id, projectId: row.project_id, taskId: row.task_id,
+      executionId: row.execution_id, sessionId: row.session_id,
+      providerRequestId: row.provider_request_id, kind: row.kind, responseType: row.response_type,
+      prompt: JSON.parse(row.prompt_json) as unknown, status: row.attention_status,
+      createdAt: row.attention_created_at, answerId: row.answer_id,
+      answer: JSON.parse(row.answer_json) as StoredAgentAnswer,
+      adapterId: row.adapter_id, providerSessionId: row.provider_session_id,
+    };
+  }
+
+  recordAgentCompleted(input: {
+    readonly sessionId: string;
+    readonly executionId: string;
+    readonly providerEventId: string;
+    readonly cursor: string;
+    readonly outcome: 'SUCCESS' | 'FAILURE';
+    readonly evidence: Readonly<{ ref: string; toolsQuiescent: true; ownedWritersStopped: true }>;
+    readonly sessionEventId: string;
+    readonly executionEventId: string;
+    readonly taskEventId: string;
+    readonly observedAt: number;
+  }): AdapterEventResult {
+    return this.sqlite.transaction(() => {
+      const payloadJson = JSON.stringify({ outcome: input.outcome, evidence: input.evidence });
+      const duplicate = this.adapterEventDuplicate(input.sessionId, input.providerEventId,
+        input.cursor, 'completed', payloadJson);
+      if (duplicate) return this.adapterEventResult(input.sessionId, input.providerEventId);
+      const subject = this.observableAgentSessionRow(input.sessionId);
+      if (subject === null || subject.executionId !== input.executionId) {
+        throw new StorageError('NOT_FOUND', 'Adapter completion Session identity did not match');
+      }
+      if (subject.sessionState !== 'ACTIVE' || subject.executionState !== 'RUNNING') {
+        throw new StorageError('INVALID_STATE',
+          `Completion requires ACTIVE/RUNNING, got ${subject.sessionState}/${subject.executionState}`);
+      }
+      this.insertAdapterEvent(input.sessionId, input.providerEventId, input.cursor,
+        'completed', payloadJson, input.observedAt);
+      const sessionUpdate = this.sqlite.query(`
+        UPDATE agent_sessions SET state='EXITED',version=version+1,observation_cursor=?1,
+          last_observed_at=?2,exit_json=?3 WHERE id=?4 AND state='ACTIVE'
+      `).run(input.cursor, input.observedAt, payloadJson, input.sessionId);
+      if (sessionUpdate.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION', 'Agent Session changed during completion projection');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'AgentSessionCompleted',1,'AgentSession',?3,?4,?5,?6,?7,?8)
+      `).run(input.sessionEventId, subject.projectId, input.sessionId, subject.sessionVersion + 1,
+        input.executionId, input.providerEventId, input.observedAt,
+        JSON.stringify({ executionId: input.executionId, sessionId: input.sessionId,
+          outcome: input.outcome, evidenceRef: input.evidence.ref }));
+      if (input.outcome === 'FAILURE') {
+        const executionUpdate = this.sqlite.query(`
+          UPDATE executions SET state='FAILED',resource_held=0,version=version+1,
+            ended_at=?1,error_json=?2 WHERE id=?3 AND state='RUNNING'
+        `).run(input.observedAt, JSON.stringify({ code: 'AGENT_REPORTED_FAILURE' }), input.executionId);
+        const workspaceUpdate = this.sqlite.query(
+          "UPDATE workspaces SET state='RETAINED' WHERE id=?1 AND state='IN_USE'",
+        ).run(subject.workspaceId);
+        const taskUpdate = this.sqlite.query(`
+          UPDATE tasks SET state='FAILED',version=version+1,updated_at=?1
+          WHERE id=?2 AND state='RUNNING'
+        `).run(input.observedAt, subject.taskId);
+        if (executionUpdate.changes !== 1 || workspaceUpdate.changes !== 1 || taskUpdate.changes !== 1) {
+          throw new StorageError('CONCURRENT_MODIFICATION', 'Failure subject changed during projection');
+        }
+        this.sqlite.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'ExecutionFailed',1,'Execution',?3,?4,?5,?6,?7,?8)
+        `).run(input.executionEventId, subject.projectId, input.executionId,
+          subject.executionVersion + 1, input.executionId, input.sessionEventId, input.observedAt,
+          JSON.stringify({ executionId: input.executionId, reason: 'AGENT_REPORTED_FAILURE',
+            stopEvidenceRef: input.evidence.ref }));
+        this.sqlite.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'TaskStateChanged',1,'Task',?3,?4,?5,?6,?7,?8)
+        `).run(input.taskEventId, subject.projectId, subject.taskId, subject.taskVersion + 1,
+          input.executionId, input.executionEventId, input.observedAt,
+          JSON.stringify({ taskId: subject.taskId, from: 'RUNNING', to: 'FAILED',
+            reason: 'agent reported failure' }));
+      }
+      return { duplicate: false as const, eventId: input.providerEventId, cursor: input.cursor,
+        sessionState: 'EXITED' as const,
+        executionState: input.outcome === 'FAILURE' ? 'FAILED' as const : 'RUNNING' as const };
+    })();
+  }
+
+  /** A lost provider transport keeps Execution/workspace ownership: quiescence was never proven. */
+  recordAgentDisconnected(input: {
+    readonly sessionId: string;
+    readonly executionId: string;
+    readonly providerEventId: string;
+    readonly cursor: string;
+    readonly reason: string;
+    readonly sessionEventId: string;
+    readonly executionEventId: string;
+    readonly taskEventId: string;
+    readonly observedAt: number;
+  }): AdapterEventResult {
+    return this.sqlite.transaction(() => {
+      const payloadJson = JSON.stringify({ reason: input.reason });
+      const duplicate = this.adapterEventDuplicate(input.sessionId, input.providerEventId,
+        input.cursor, 'disconnected', payloadJson);
+      if (duplicate) return this.adapterEventResult(input.sessionId, input.providerEventId);
+      const subject = this.observableAgentSessionRow(input.sessionId);
+      if (subject === null || subject.executionId !== input.executionId) {
+        throw new StorageError('NOT_FOUND', 'Adapter disconnect Session identity did not match');
+      }
+      if (!['ACTIVE', 'WAITING_FOR_USER'].includes(subject.sessionState)
+        || !['RUNNING', 'WAITING_FOR_USER'].includes(subject.executionState)) {
+        throw new StorageError('INVALID_STATE',
+          `Disconnect requires an active Session, got ${subject.sessionState}/${subject.executionState}`);
+      }
+      this.insertAdapterEvent(input.sessionId, input.providerEventId, input.cursor,
+        'disconnected', payloadJson, input.observedAt);
+      this.sqlite.query(`
+        UPDATE agent_sessions SET state='DISCONNECTED',version=version+1,observation_cursor=?1,
+          last_observed_at=?2,exit_json=?3 WHERE id=?4 AND state IN ('ACTIVE','WAITING_FOR_USER')
+      `).run(input.cursor, input.observedAt, payloadJson, input.sessionId);
+      const executionUpdate = this.sqlite.query(`
+        UPDATE executions SET state='RECOVERY_REQUIRED',version=version+1 WHERE id=?1
+          AND state IN ('RUNNING','WAITING_FOR_USER')
+      `).run(input.executionId);
+      const workspaceUpdate = this.sqlite.query(`
+        UPDATE workspaces SET state='RECOVERY_REQUIRED' WHERE id=?1 AND state='IN_USE'
+      `).run(subject.workspaceId);
+      const taskUpdate = this.sqlite.query(`
+        UPDATE tasks SET state='RECOVERY_REQUIRED',version=version+1,updated_at=?1
+        WHERE id=?2 AND state IN ('RUNNING','WAITING_FOR_USER')
+      `).run(input.observedAt, subject.taskId);
+      if (executionUpdate.changes !== 1 || workspaceUpdate.changes !== 1 || taskUpdate.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION', 'Disconnect subject changed during projection');
+      }
+      const sessionFrom = subject.sessionState;
+      const executionFrom = subject.executionState;
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'AgentSessionStateChanged',1,'AgentSession',?3,?4,?5,?5,?6,?7)
+      `).run(input.sessionEventId, subject.projectId, input.sessionId, subject.sessionVersion + 1,
+        input.providerEventId, input.observedAt, JSON.stringify({ sessionId: input.sessionId,
+          from: sessionFrom, to: 'DISCONNECTED', reason: input.reason }));
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'ExecutionStateChanged',1,'Execution',?3,?4,?5,?6,?7,?8)
+      `).run(input.executionEventId, subject.projectId, input.executionId,
+        subject.executionVersion + 1, input.providerEventId, input.sessionEventId, input.observedAt,
+        JSON.stringify({ executionId: input.executionId, from: executionFrom,
+          to: 'RECOVERY_REQUIRED', reason: 'agent transport lost' }));
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'TaskStateChanged',1,'Task',?3,?4,?5,?6,?7,?8)
+      `).run(input.taskEventId, subject.projectId, subject.taskId, subject.taskVersion + 1,
+        input.providerEventId, input.executionEventId, input.observedAt,
+        JSON.stringify({ taskId: subject.taskId, from: 'RUNNING',
+          to: 'RECOVERY_REQUIRED', reason: 'agent transport lost' }));
+      return { duplicate: false as const, eventId: input.providerEventId, cursor: input.cursor,
+        sessionState: 'DISCONNECTED' as const, executionState: 'RECOVERY_REQUIRED' as const };
+    })();
+  }
+
+  enqueueEventDeliveries(consumerId: string): number {
+    if (consumerId.trim().length === 0) throw new StorageError('INVALID_STATE', 'Consumer ID must not be blank');
+    return this.sqlite.query(`
+      INSERT OR IGNORE INTO event_deliveries(event_id,consumer_id,state,attempt_count)
+      SELECT event_id,?1,'PENDING',0 FROM domain_events
+    `).run(consumerId).changes;
+  }
+
+  listDueEventDeliveries(consumerId: string, now: number, limit: number): readonly PendingEventDelivery[] {
+    if (!Number.isInteger(limit) || limit <= 0) throw new StorageError('INVALID_STATE', 'Delivery limit must be positive');
+    return this.sqlite.query<{
+      event_id: string; sequence: number; event_type: string; schema_version: number; project_id: string;
+      aggregate_type: string; aggregate_id: string; aggregate_version: number; correlation_id: string;
+      causation_id: string | null; occurred_at: number; payload_json: string; attempt_count: number;
+    }, [string, number, number]>(`
+      SELECT event.event_id,event.sequence,event.event_type,event.schema_version,event.project_id,
+        event.aggregate_type,event.aggregate_id,event.aggregate_version,event.correlation_id,
+        event.causation_id,event.occurred_at,event.payload_json,delivery.attempt_count
+      FROM event_deliveries delivery JOIN domain_events event ON event.event_id=delivery.event_id
+      WHERE delivery.consumer_id=?1 AND delivery.state IN ('PENDING','FAILED')
+        AND (delivery.next_attempt_at IS NULL OR delivery.next_attempt_at<=?2)
+      ORDER BY event.sequence LIMIT ?3
+    `).all(consumerId, now, limit).map((row) => ({
+      eventId: row.event_id, sequence: row.sequence, eventType: row.event_type,
+      schemaVersion: row.schema_version, projectId: row.project_id,
+      aggregateType: row.aggregate_type, aggregateId: row.aggregate_id,
+      aggregateVersion: row.aggregate_version, correlationId: row.correlation_id,
+      causationId: row.causation_id, occurredAt: row.occurred_at,
+      payload: JSON.parse(row.payload_json) as unknown, consumerId,
+      attemptCount: row.attempt_count,
+    }));
+  }
+
+  markEventDelivered(eventId: string, consumerId: string): void {
+    const result = this.sqlite.query(`
+      UPDATE event_deliveries SET state='DELIVERED',attempt_count=attempt_count+1,
+        next_attempt_at=NULL,last_error=NULL
+      WHERE event_id=?1 AND consumer_id=?2 AND state IN ('PENDING','FAILED')
+    `).run(eventId, consumerId);
+    if (result.changes !== 1) throw new StorageError('INVALID_STATE', 'Event delivery was not pending');
+  }
+
+  markEventDeliveryFailed(input: {
+    readonly eventId: string;
+    readonly consumerId: string;
+    readonly error: string;
+    readonly nextAttemptAt: number;
+  }): void {
+    const result = this.sqlite.query(`
+      UPDATE event_deliveries SET state='FAILED',attempt_count=attempt_count+1,
+        next_attempt_at=?1,last_error=?2
+      WHERE event_id=?3 AND consumer_id=?4 AND state IN ('PENDING','FAILED')
+    `).run(input.nextAttemptAt, input.error, input.eventId, input.consumerId);
+    if (result.changes !== 1) throw new StorageError('INVALID_STATE', 'Event delivery was not pending');
+  }
+
+  private adapterEventDuplicate(
+    sessionId: string,
+    providerEventId: string,
+    cursor: string,
+    eventType: 'attention' | 'completed' | 'disconnected',
+    payloadJson: string,
+  ): boolean {
+    const byId = this.sqlite.query<{
+      cursor: string; event_type: string; payload_json: string;
+    }, [string, string]>(`
+      SELECT cursor,event_type,payload_json FROM adapter_events
+      WHERE session_id=?1 AND provider_event_id=?2
+    `).get(sessionId, providerEventId);
+    if (byId !== null) {
+      if (byId.cursor !== cursor || byId.event_type !== eventType
+        || canonicalJson(JSON.parse(byId.payload_json) as unknown)
+          !== canonicalJson(JSON.parse(payloadJson) as unknown)) {
+        throw new StorageError('COMMAND_CONFLICT', 'Provider event ID was reused with different content');
+      }
+      return true;
+    }
+    const byCursor = this.sqlite.query<{ provider_event_id: string }, [string, string]>(`
+      SELECT provider_event_id FROM adapter_events WHERE session_id=?1 AND cursor=?2
+    `).get(sessionId, cursor);
+    if (byCursor !== null) {
+      throw new StorageError('COMMAND_CONFLICT', 'Provider cursor was reused by a different event');
+    }
+    return false;
+  }
+
+  private insertAdapterEvent(
+    sessionId: string,
+    providerEventId: string,
+    cursor: string,
+    eventType: 'attention' | 'completed' | 'disconnected',
+    payloadJson: string,
+    observedAt: number,
+  ): void {
+    this.sqlite.query(`
+      INSERT INTO adapter_events(session_id,provider_event_id,cursor,event_type,payload_json,observed_at)
+      VALUES (?1,?2,?3,?4,?5,?6)
+    `).run(sessionId, providerEventId, cursor, eventType, payloadJson, observedAt);
+  }
+
+  private adapterEventResult(sessionId: string, providerEventId: string): AdapterEventResult {
+    const row = this.sqlite.query<{
+      cursor: string; event_type: 'attention' | 'completed' | 'disconnected'; payload_json: string;
+      attention_id: string | null;
+    }, [string, string]>(`
+      SELECT adapter.cursor,adapter.event_type,adapter.payload_json,attention.id AS attention_id
+      FROM adapter_events adapter
+      LEFT JOIN attention_requests attention ON attention.session_id=adapter.session_id
+        AND attention.provider_request_id=json_extract(adapter.payload_json,'$.providerRequestId')
+      WHERE adapter.session_id=?1 AND adapter.provider_event_id=?2
+    `).get(sessionId, providerEventId);
+    if (row === null) throw new StorageError('INVALID_STATE', 'Recorded Adapter event was not found');
+    if (row.event_type === 'attention') {
+      if (row.attention_id === null) {
+        throw new StorageError('INVALID_STATE', 'Recorded Attention event lost its request');
+      }
+      return { duplicate: true, eventId: providerEventId, cursor: row.cursor,
+        sessionState: 'WAITING_FOR_USER', executionState: 'WAITING_FOR_USER',
+        attentionId: row.attention_id };
+    }
+    if (row.event_type === 'disconnected') {
+      return { duplicate: true, eventId: providerEventId, cursor: row.cursor,
+        sessionState: 'DISCONNECTED', executionState: 'RECOVERY_REQUIRED' };
+    }
+    const payload = JSON.parse(row.payload_json) as { outcome: 'SUCCESS' | 'FAILURE' };
+    return { duplicate: true, eventId: providerEventId, cursor: row.cursor,
+      sessionState: 'EXITED', executionState: payload.outcome === 'FAILURE' ? 'FAILED' : 'RUNNING' };
+  }
+
+  private observableAgentSessionRow(sessionId: string): (Omit<ObservableAgentSession,
+    'providerSessionId'> & { readonly providerSessionId: string | null; readonly workspaceId: string }) | null {
+    const row = this.sqlite.query<{
+      project_id: string; task_id: string; task_version: number; execution_id: string;
+      execution_version: number; execution_state: ObservableAgentSession['executionState'];
+      session_id: string; session_version: number; session_state: ObservableAgentSession['sessionState'];
+      adapter_id: string; provider_session_id: string | null; observation_cursor: string | null;
+      workspace_id: string;
+    }, [string]>(`
+      SELECT task.project_id,task.id AS task_id,task.version AS task_version,
+        execution.id AS execution_id,execution.version AS execution_version,
+        execution.state AS execution_state,session.id AS session_id,session.version AS session_version,
+        session.state AS session_state,execution.adapter_id,session.provider_session_id,
+        session.observation_cursor,execution.workspace_id
+      FROM agent_sessions session JOIN executions execution ON execution.id=session.execution_id
+      JOIN tasks task ON task.id=execution.task_id WHERE session.id=?1
+    `).get(sessionId);
+    if (row === null) return null;
+    return { projectId: row.project_id, taskId: row.task_id, taskVersion: row.task_version,
+      executionId: row.execution_id, executionVersion: row.execution_version,
+      executionState: row.execution_state, sessionId: row.session_id,
+      sessionVersion: row.session_version, sessionState: row.session_state,
+      adapterId: row.adapter_id, providerSessionId: row.provider_session_id,
+      ...(row.observation_cursor === null ? {} : { cursor: row.observation_cursor }),
+      workspaceId: row.workspace_id };
+  }
+
   reserveExecution(input: {
     readonly projectId: string;
     readonly taskId: string;
@@ -719,7 +1893,7 @@ export class Phase1Database {
     return input.expectedVersion + 1;
   }
 
-  executeCommand<T extends CommandResult>(input: {
+  executeCommand<T extends object>(input: {
     readonly projectId: string;
     readonly commandId: string;
     readonly payloadHash: string;

@@ -28,6 +28,17 @@
         "@codeestra/git": "workspace:*",
         "@codeestra/storage": "workspace:*",
       },
+      "devDependencies": {
+        "@codeestra/agent-adapters": "workspace:*",
+      },
+    },
+    "packages/agent-adapters": {
+      "name": "@codeestra/agent-adapters",
+      "version": "0.0.0",
+      "dependencies": {
+        "@codeestra/contracts": "workspace:*",
+        "zod": "^4.3.6",
+      },
     },
     "packages/contracts": {
       "name": "@codeestra/contracts",
@@ -53,6 +64,8 @@
     },
   },
   "packages": {
+    "@codeestra/agent-adapters": ["@codeestra/agent-adapters@workspace:packages/agent-adapters"],
+
     "@codeestra/cli": ["@codeestra/cli@workspace:apps/cli"],
 
     "@codeestra/contracts": ["@codeestra/contracts@workspace:packages/contracts"],

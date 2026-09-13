@@ -3,7 +3,15 @@ import { Database } from 'bun:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Phase1Database, StorageError, phase1SchemaVersion } from '../src/index.js';
+import {
+  agentAnswerMigration,
+  agentObservationMigration,
+  agentStartMigration,
+  Phase1Database,
+  StorageError,
+  phase1Migration,
+  phase1SchemaVersion,
+} from '../src/index.js';
 
 const oid = 'a'.repeat(40);
 let storage: Phase1Database;
@@ -74,6 +82,101 @@ describe('Phase 1 migration', () => {
       reopened.close();
 
       expect(() => new Phase1Database(filename)).toThrow(StorageError);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('upgrades a version 1 database with the additive Agent Session migration', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'codeestra-storage-v1-'));
+    const filename = join(directory, 'runtime.sqlite');
+    try {
+      const legacy = new Database(filename, { create: true, strict: true });
+      legacy.exec(phase1Migration);
+      legacy.exec('PRAGMA user_version=1');
+      legacy.close();
+      const upgraded = new Phase1Database(filename);
+      expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version)
+        .toBe(phase1SchemaVersion);
+      expect(upgraded.sqlite.query<{ name: string }, []>(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_sessions'",
+      ).get()?.name).toBe('agent_sessions');
+      upgraded.close();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('upgrades a version 2 database with Adapter event and Attention tables', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'codeestra-storage-v2-'));
+    const filename = join(directory, 'runtime.sqlite');
+    try {
+      const legacy = new Database(filename, { create: true, strict: true });
+      legacy.exec(phase1Migration);
+      legacy.exec(agentStartMigration);
+      legacy.exec('PRAGMA user_version=2');
+      legacy.close();
+      const upgraded = new Phase1Database(filename);
+      expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version)
+        .toBe(phase1SchemaVersion);
+      const tables = upgraded.sqlite.query<{ name: string }, []>(`
+        SELECT name FROM sqlite_master WHERE type='table'
+          AND name IN ('adapter_events','attention_requests') ORDER BY name
+      `).all().map((row) => row.name);
+      expect(tables).toEqual(['adapter_events', 'attention_requests']);
+      upgraded.close();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('upgrades a version 3 database with typed Attention answers', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'codeestra-storage-v3-'));
+    const filename = join(directory, 'runtime.sqlite');
+    try {
+      const legacy = new Database(filename, { create: true, strict: true });
+      legacy.exec(phase1Migration);
+      legacy.exec(agentStartMigration);
+      legacy.exec(agentObservationMigration);
+      legacy.exec('PRAGMA user_version=3');
+      legacy.close();
+      const upgraded = new Phase1Database(filename);
+      expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version)
+        .toBe(phase1SchemaVersion);
+      expect(upgraded.sqlite.query<{ name: string }, []>(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='attention_answers'",
+      ).get()?.name).toBe('attention_answers');
+      const columns = upgraded.sqlite.query<{ name: string }, []>(
+        "SELECT name FROM pragma_table_info('attention_requests')",
+      ).all().map((row) => row.name);
+      expect(columns).toContain('response_type');
+      upgraded.close();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('upgrades a version 4 database with the Adapter disconnect event type', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'codeestra-storage-v4-'));
+    const filename = join(directory, 'runtime.sqlite');
+    try {
+      const legacy = new Database(filename, { create: true, strict: true });
+      legacy.exec(phase1Migration);
+      legacy.exec(agentStartMigration);
+      legacy.exec(agentObservationMigration);
+      legacy.exec(agentAnswerMigration);
+      legacy.exec('PRAGMA user_version=4');
+      legacy.close();
+      const upgraded = new Phase1Database(filename);
+      expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version)
+        .toBe(phase1SchemaVersion);
+      const definition = upgraded.sqlite.query<{ sql: string }, []>(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='adapter_events'",
+      ).get()?.sql ?? '';
+      expect(definition).toContain("'disconnected'");
+      expect(definition).toContain('PRIMARY KEY(session_id,provider_event_id)');
+      expect(definition).toContain('UNIQUE(session_id,cursor)');
+      upgraded.close();
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

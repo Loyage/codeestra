@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 1;
+export const phase1SchemaVersion = 5;
 
 export const phase1Migration = `
 CREATE TABLE projects (
@@ -230,4 +230,91 @@ CREATE TABLE command_receipts (
   created_at INTEGER NOT NULL CHECK(created_at >= 0),
   PRIMARY KEY(project_id,command_id)
 ) STRICT, WITHOUT ROWID;
+`;
+
+export const agentStartMigration = `
+CREATE TABLE agent_sessions (
+  id TEXT PRIMARY KEY,
+  execution_id TEXT NOT NULL UNIQUE REFERENCES executions(id),
+  provider_session_id TEXT,
+  process_identity_json TEXT CHECK(process_identity_json IS NULL OR json_valid(process_identity_json)),
+  capabilities_json TEXT NOT NULL CHECK(json_valid(capabilities_json)),
+  transport_locator TEXT,
+  session_storage_ref TEXT,
+  state TEXT NOT NULL CHECK(state IN ('CREATED','STARTING','ACTIVE','WAITING_FOR_USER','PAUSING',
+    'PAUSED','STOPPING','EXITED','DISCONNECTED','RECOVERY_REQUIRED')),
+  version INTEGER NOT NULL DEFAULT 0 CHECK(version >= 0),
+  last_observed_at INTEGER,
+  exit_json TEXT CHECK(exit_json IS NULL OR json_valid(exit_json))
+) STRICT;
+`;
+
+export const agentObservationMigration = `
+ALTER TABLE agent_sessions ADD COLUMN observation_cursor TEXT;
+
+CREATE TABLE adapter_events (
+  session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+  provider_event_id TEXT NOT NULL,
+  cursor TEXT NOT NULL,
+  event_type TEXT NOT NULL CHECK(event_type IN ('attention','completed')),
+  payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+  observed_at INTEGER NOT NULL CHECK(observed_at >= 0),
+  PRIMARY KEY(session_id,provider_event_id),
+  UNIQUE(session_id,cursor)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE attention_requests (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+  provider_request_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('PERMISSION','QUESTION','RECOVERY')),
+  prompt_json TEXT NOT NULL CHECK(json_valid(prompt_json)),
+  status TEXT NOT NULL CHECK(status IN ('OPEN','ANSWER_RECORDED','DELIVERED','CLOSED','STALE')),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  UNIQUE(session_id,provider_request_id)
+) STRICT;
+CREATE INDEX open_attention_requests ON attention_requests(session_id,status);
+`;
+
+export const agentAnswerMigration = `
+ALTER TABLE attention_requests ADD COLUMN response_type TEXT NOT NULL DEFAULT 'VALUE'
+  CHECK(response_type IN ('CONFIRM','VALUE'));
+UPDATE attention_requests SET response_type='CONFIRM'
+  WHERE kind='PERMISSION' OR json_extract(prompt_json,'$.method')='confirm';
+UPDATE adapter_events SET payload_json=json_set(payload_json,'$.responseType',
+  CASE WHEN json_extract(payload_json,'$.kind')='PERMISSION'
+    OR json_extract(payload_json,'$.prompt.method')='confirm' THEN 'CONFIRM' ELSE 'VALUE' END)
+  WHERE event_type='attention' AND json_type(payload_json,'$.responseType') IS NULL;
+
+CREATE TABLE attention_answers (
+  id TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL UNIQUE REFERENCES attention_requests(id),
+  command_id TEXT NOT NULL UNIQUE,
+  actor TEXT NOT NULL CHECK(length(trim(actor)) > 0),
+  answer_json TEXT NOT NULL CHECK(json_valid(answer_json)),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0)
+) STRICT;
+
+CREATE TABLE intent_attention_targets (
+  intent_id TEXT PRIMARY KEY REFERENCES intents(id),
+  attention_id TEXT NOT NULL REFERENCES attention_requests(id)
+) STRICT;
+`;
+
+// `event_type` is part of a table CHECK, so the Adapter event set is extended by rebuild.
+export const agentDisconnectMigration = `
+CREATE TABLE adapter_events_v5 (
+  session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+  provider_event_id TEXT NOT NULL,
+  cursor TEXT NOT NULL,
+  event_type TEXT NOT NULL CHECK(event_type IN ('attention','completed','disconnected')),
+  payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+  observed_at INTEGER NOT NULL CHECK(observed_at >= 0),
+  PRIMARY KEY(session_id,provider_event_id),
+  UNIQUE(session_id,cursor)
+) STRICT, WITHOUT ROWID;
+INSERT INTO adapter_events_v5(session_id,provider_event_id,cursor,event_type,payload_json,observed_at)
+  SELECT session_id,provider_event_id,cursor,event_type,payload_json,observed_at FROM adapter_events;
+DROP TABLE adapter_events;
+ALTER TABLE adapter_events_v5 RENAME TO adapter_events;
 `;

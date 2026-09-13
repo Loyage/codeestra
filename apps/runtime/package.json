@@ -3,6 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "devDependencies": {
+    "@codeestra/agent-adapters": "workspace:*"
+  },
   "dependencies": {
     "@codeestra/contracts": "workspace:*",
     "@codeestra/git": "workspace:*",
