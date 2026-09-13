@@ -92,6 +92,23 @@ export interface ObservableAgentSession {
   readonly cursor?: string;
 }
 
+/**
+ * Everything a transcript read needs about one recorded Agent Session, including the provider's
+ * own session file path. The path stays inside the Runtime: it is never part of a client response.
+ */
+export interface SessionTranscriptTarget {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly taskDisplayNumber: number;
+  readonly executionId: string;
+  readonly attemptNumber: number;
+  readonly executionState: ExecutionLifecycleState;
+  readonly sessionId: string;
+  readonly sessionState: AgentSessionLifecycleState;
+  readonly providerSessionId: string | null;
+  readonly sessionStorageRef: string | null;
+}
+
 export type StoredAgentAnswer = Readonly<
   | { type: 'CONFIRM'; confirmed: boolean }
   | { type: 'VALUE'; value: string }
@@ -1429,6 +1446,41 @@ export class Phase1Database {
       throw new StorageError('INVALID_STATE', `Agent Session cannot be observed from ${row.sessionState}`);
     }
     return { ...row, providerSessionId: row.providerSessionId } as ObservableAgentSession;
+  }
+
+  /**
+   * Resolves one recorded Agent Session for a read-only transcript view. Unlike
+   * `getObservableAgentSession` this works for finished Sessions too: a transcript is history, so
+   * it is readable long after the execution stopped being observable in the live sense.
+   */
+  getSessionTranscriptTarget(sessionId: string): SessionTranscriptTarget {
+    const row = this.sqlite.query<{
+      project_id: string; task_id: string; display_number: number; execution_id: string;
+      attempt_number: number; execution_state: ExecutionLifecycleState; session_id: string;
+      session_state: AgentSessionLifecycleState; provider_session_id: string | null;
+      session_storage_ref: string | null;
+    }, [string]>(`
+      SELECT task.project_id,task.id AS task_id,task.display_number,execution.id AS execution_id,
+        execution.attempt_number,execution.state AS execution_state,session.id AS session_id,
+        session.state AS session_state,session.provider_session_id,session.session_storage_ref
+      FROM agent_sessions session
+      JOIN executions execution ON execution.id=session.execution_id
+      JOIN tasks task ON task.id=execution.task_id
+      WHERE session.id=?1
+    `).get(sessionId);
+    if (row === null) throw new StorageError('NOT_FOUND', 'Agent Session was not found');
+    return {
+      projectId: row.project_id,
+      taskId: row.task_id,
+      taskDisplayNumber: row.display_number,
+      executionId: row.execution_id,
+      attemptNumber: row.attempt_number,
+      executionState: row.execution_state,
+      sessionId: row.session_id,
+      sessionState: row.session_state,
+      providerSessionId: row.provider_session_id,
+      sessionStorageRef: row.session_storage_ref,
+    };
   }
 
   recordAgentAttention(input: {

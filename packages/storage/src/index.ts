@@ -4,7 +4,7 @@ export type {
   AgentStartPlan, AgentThinkingLevel, AttentionSummary,
   CommandResult, ConfirmedVerificationPolicy, ExecutionError, ExecutionLifecycleState,
   ExecutionReservation,
-  ExecutionSummary, ObservableAgentSession,
+  ExecutionSummary, ObservableAgentSession, SessionTranscriptTarget,
   StoredAgentConfiguration,
   PendingEventDelivery, ResultCommitAuthorization, ResultCommitCapturePlan, ResultCommitSubject,
   StoredAgentAnswer, StoredConstraint, StoredEventEnvelope, StoredVerificationCommand,

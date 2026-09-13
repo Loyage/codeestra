@@ -648,6 +648,47 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 - 环境变量覆盖若在用户 shell 中残留，会一直压过持久化配置（CLI/UI 会显示 `sources: ENVIRONMENT`，可解释但不阻止）。
 - 未提供 `agent config list`（查看所有项目的覆盖）：当前 `get` 每次只回答一个作用域，项目数量级很小；若增长再按需添加。
 
+## FOUNDATION-029 — 只读 Agent 执行过程视图（Web UI + CLI）
+
+状态：已实现并在命令面（真实 CLI 子进程 + 临时 `CODEESTRA_HOME` + 协议 stub provider 写出真实形状的会话文件）与 HTTP 传输上验证。决策记录为 ADR-0013。**真实模型下的 UI 目视确认尚未做（需用户在场）。**
+
+### 背景与用户本轮确认
+
+用户要求“在 Web UI 看到 Agent 执行过程的详细内容”。现状是 UI 的「事件」页只有 domain event 元数据：看不到 Agent 说了什么、调用了哪些工具、工具返回了什么、花了多少 token。
+
+四题确认（选项均为推荐项，已写入 ADR-0013）：
+
+1. 数据来源：**读取 Pi 的持久 session 文件**（未选：把 RPC 事件投影入库实时推送 / A+B 组合 / 完整 PTY 原生终端接管）。
+2. 内容：**工具调用与返回 + 助手文本 + thinking + token 用量与成本**（全选）。
+3. 敏感内容：**截断展示 + 可展开全文**（未选：原样全量 / 只显示元数据 / 按类型脱敏）。
+4. 实时性：**运行中自动刷新（增量轮询）**（未选：新增 SSE 帧 / 手动刷新 / 只做历史回看）。
+
+### 已实现
+
+- `packages/contracts`：新增 `session.transcript`（`afterEntryId` 排他游标 + `limit` ≤200）与 `session.transcript.part`（取回单个完整内容块）两个只读命令，以及共享视图类型 `SessionTranscriptEntry`/`SessionTranscriptPart`/`SessionTranscriptUsage`/`SessionTranscriptView`/`SessionTranscriptPartView` 与边界常量（预览 4000 字符、单块硬上限 200000）。
+- `packages/storage`：新增 `getSessionTranscriptTarget(sessionId)`：由 Session 反查出 project/task/attempt/执行与会话状态以及 **provider 会话文件路径**（仅 Runtime 可见）。与 `getObservableAgentSession` 不同，已结束的 Session 也可读——transcript 是历史投影，不要求 live 可观察。
+- `apps/runtime/src/session-transcript-service.ts`：流式逐行读取 provider JSONL，归一条目（user / assistant / toolResult / model_change / thinking_level_change / 其他），丢弃 `thinkingSignature` 等 provider 回放产物，保留 `usage`（含 `totalTokens` 与 `cost.total`）与 `stopReason`；`SESSION_FILE_NOT_OWNED`/`SESSION_FILE_UNREADABLE`/`TRANSCRIPT_CURSOR_UNKNOWN`/`TRANSCRIPT_ENTRY_UNKNOWN`/`TRANSCRIPT_PART_UNKNOWN` 为稳定错误码。未知条目类型、未知消息角色与无法解析的行都显式报告（`note`/`unparsedLines`），不静默丢弃。
+- 路径归属：只允许 Runtime 自己的 Pi session 目录（`CODEESTRA_PI_SESSION_DIR` 或 `<CODEESTRA_HOME>/pi-sessions`，即 `adapter-registry` 新增的 `piSessionDirectory()` 单一来源）内的普通文件；判定在 `realpath` 后的规范路径上做，因此配置目录位于符号链接下（macOS `/tmp`）仍可读，而目录内指向外部的符号链接被拒绝。Runtime 是唯一读者，**不把文件路径回传给客户端**。
+- `apps/runtime/src/main.ts` 接入两个命令；`apps/cli/src/main.ts` 新增 `task transcript`（组合 `task.status` 解析 Session，不新增第二条语义路径）、`session transcript`、`session transcript part`，默认人类可读渲染（工具名/参数/输出/thinking/用量），`--json` 输出原始视图。
+- `apps/ui`：任务详情新增「Agent 执行过程」面板，按 Execution 选择（默认最新一个真的启动过 Session 的尝试），展示工具调用/返回、助手文本、thinking、token 与成本；长内容折叠、点“展开全文”经 `session.transcript.part` 取回完整块；运行中每 1.5s 增量读取（以最后一个 entry ID 为游标），游标失效时明确提示并从头重读一次；Session 已 `EXITED` 即停止轮询（Execution 在成果 commit 前仍持资源，但文件不会再变）。
+
+### 实际验证
+
+- `bun run check`：TypeScript（Runtime/CLI）、UI 类型检查、212 项 domain Vitest、**207 项 Bun tests**（新增 11 项）、UI Vite 构建全部通过。
+- 新增 9 项服务单测：真实 Pi 会话文件形状的归一化（thinking 签名丢弃、toolCall 参数、`totalTokens`/`cost.total` 映射、toolResult 的 `isError`、未知条目类型的 `note`、1 行非法 JSON 计入 `unparsedLines`）；排他游标分页不重不漏与 `hasMore`；截断预览与 `session.transcript.part` 返回同源完整内容；单块超过硬上限时报 `truncated:true` 且 `fullChars` 为真实长度；未知游标 `TRANSCRIPT_CURSOR_UNKNOWN`；未知 entry/part 的稳定错误码；文件缺失/未记录路径返回 `fileAvailable:false` 与说明；目录外路径、目录内符号链接逃逸、非普通文件全部 `SESSION_FILE_NOT_OWNED`；配置目录位于符号链接下仍可读（macOS `/tmp` 回归）。
+- 新增 2 项 CLI 端到端（真实 CLI 子进程 + 独立 `CODEESTRA_HOME` + 临时仓库 + 协议 stub provider 写出真实形状会话文件）：`task transcript --json` 与人类可读输出（含 `TOOL_CALL write` 与工具输出）、`session transcript --after` 续读、`session transcript part` 展开、不存在 Session 的退出码 1；以及**直接篡改数据库**把 `session_storage_ref` 指到目录外后 `task transcript` 必须 `SESSION_FILE_NOT_OWNED` 且不把该路径回显给调用方。
+- HTTP/SSE 传输（Web UI 实际使用的路径）头less 实测：无 token / 错 token 均 401，`session.transcript` 与 `session.transcript.part` 返回与 socket 相同的结果，`events.subscribe` 仍为 `NOT_AVAILABLE_OVER_HTTP`(400)。
+- 临时 `CODEESTRA_HOME` 上的 CLI smoke：`task transcript` 人类可读输出正确显示模型切换、任务输入、assistant 的 thinking+toolCall+usage、8400 字符的工具返回预览与“已截断”提示，并给出完整块的获取命令；`session transcript part` 取回 8400 字符且 `truncated=false`；`--after` 续读不重不漏；未知游标退出码 1。smoke 目录与临时 home 已删除。
+
+### 未执行 / 剩余问题
+
+- **未用真实模型端到端做 UI 目视确认**（ADR-0008 禁用桌面/浏览器自动化），渲染正确性由类型检查 + Vite 构建 + HTTP 断言覆盖，视觉确认留给用户；本机稳定 Runtime 未被触碰（全部在临时 `CODEESTRA_HOME` 上运行）。
+- 粒度是 provider 写入会话文件的粒度（一条消息一次），不是 token 级流式；需要 token 级实时就要做 ADR-0013 选项 B（新增事件与保留策略），未预先承诺。
+- 该视图会展示工具参数与工具输出（可能含密钥、大段文件内容），缓解手段是客户端截断与按需展开、以及 Runtime 不持久化；没有脱敏规则。这与 FOUNDATION-019 记录的 Attention `prompt_json` 入库问题是同一类未决问题。
+- 该面板是观察而非控制：运行中的任务不能从这里发 guidance 或接管终端；那是 ADR-0010 的范围。
+- `usage`/`cost` 是 provider 自报值，Codeestra 不做计费校验。
+- Session file 被 provider 重写（而非追加）时会让已发出的游标失效；面板已明确提示并从头重读一次，但没有跨“文件被替换”的稳定历史。
+
 ## NEXT — 最小可用纵向切片
 
 0. 落实 ADR-0009 的 dev 基线：项目快照/Workspace 从 dev OID 建立，先补临时仓库测试；在此之前产品内 `task.run` 仍使用 mainRef，不能用于声称符合新分支规则。

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RuntimeClient, describeError } from './api.js';
+import { TranscriptPanel } from './transcript.js';
 import type {
   AgentConfigurationResolutionView,
   AttentionView,
@@ -462,7 +463,17 @@ function TasksTab(props: CommonProps & {
   const [authorization, setAuthorization] = useState<ResultCommitAuthorizationView | null>(null);
   const [runResult, setRunResult] = useState<string | null>(null);
   const [verifyReport, setVerifyReport] = useState<VerificationRunView | null>(null);
+  /** Empty means "the newest Execution that actually started a Session". */
+  const [transcriptExecutionId, setTranscriptExecutionId] = useState<string | null>(null);
   const task = tasks.find((candidate) => candidate.id === taskId) ?? null;
+  useEffect(() => { setTranscriptExecutionId(null); }, [taskId]);
+  // A failed start can leave an Execution without a Session; such an attempt has no process to
+  // show, so only attempts with a recorded Session are offered here.
+  const transcriptExecutions = (status?.executions ?? [])
+    .filter((execution) => execution.session !== null);
+  const transcriptExecution = transcriptExecutions
+    .find((execution) => execution.executionId === transcriptExecutionId)
+    ?? transcriptExecutions[0] ?? null;
 
   if (projectId === null) {
     return <p className="muted">请先在<strong>项目</strong>标签页中信任一个项目。</p>;
@@ -748,6 +759,39 @@ function TasksTab(props: CommonProps & {
                     ) : null}
                   </tbody>
                 </table>
+
+                <h3>Agent 执行过程</h3>
+                {transcriptExecution === null || transcriptExecution.session === null ? (
+                  <p className="muted">
+                    这个任务还没有启动过 Agent 会话，因此没有执行过程可显示。
+                  </p>
+                ) : (
+                  <>
+                    <div className="actions">
+                      <label htmlFor="transcript-execution">执行</label>
+                      <select
+                        id="transcript-execution"
+                        value={transcriptExecution.executionId}
+                        onChange={(event) => { setTranscriptExecutionId(event.target.value); }}
+                      >
+                        {transcriptExecutions.map((execution) => (
+                          <option key={execution.executionId} value={execution.executionId}>
+                            第 {execution.attemptNumber} 次 · {labelValue(execution.state)}
+                            {execution.session === null ? '' : ` · 会话${labelValue(execution.session.state)}`}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <TranscriptPanel
+                      key={transcriptExecution.session.sessionId}
+                      client={client}
+                      sessionId={transcriptExecution.session.sessionId}
+                      executionState={transcriptExecution.state}
+                      sessionState={transcriptExecution.session.state}
+                      run={run}
+                    />
+                  </>
+                )}
               </>
             )}
           </>

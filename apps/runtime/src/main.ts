@@ -5,7 +5,7 @@ import { runtimeRequestSchema, type RuntimeRequest, type RuntimeResponse,
   type RuntimeStreamFrame } from '@codeestra/contracts';
 import { inspectRepository } from '@codeestra/git';
 import { Phase1Database, StorageError, type AgentAnswerPlan } from '@codeestra/storage';
-import { createPiAdapterRegistry } from './adapter-registry.js';
+import { createPiAdapterRegistry, piSessionDirectory } from './adapter-registry.js';
 import {
   agentConfigurationPayload,
   resolveAgentConfiguration,
@@ -16,6 +16,10 @@ import { RuntimeHttpApi } from './http-api.js';
 import { runtimeHome, runtimeSocketPath } from './paths.js';
 import { readPermissionMode, writePermissionMode, type PermissionMode } from './permission-mode.js';
 import { captureResultCommit, prepareResultCommit } from './result-commit-service.js';
+import {
+  readSessionTranscript,
+  readSessionTranscriptPart,
+} from './session-transcript-service.js';
 import {
   reconcileInterruptedAgentAnswers,
   reconcileInterruptedAgentStarts,
@@ -45,6 +49,11 @@ interface SocketState {
 
 const home = runtimeHome();
 const socketPath = runtimeSocketPath(home);
+/**
+ * The only directory a transcript read may read from. It is the same directory the Pi Adapter
+ * writes provider session files into, so a recorded path is checked against one owner, not two.
+ */
+const piSessionDir = piSessionDirectory({ runtimeHome: home, environment: Bun.env });
 mkdirSync(home, { recursive: true, mode: 0o700 });
 chmodSync(home, 0o700);
 
@@ -260,6 +269,22 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
     case 'task.verification.list':
       return success(request.requestId,
         storage.listVerificationRuns(request.projectId, request.taskId));
+    // Transcript reads are a view over the provider's own session file. They never write, never
+    // change Task/Execution state, and are readable after the Session has long since exited.
+    case 'session.transcript':
+      return success(request.requestId, await readSessionTranscript({
+        target: storage.getSessionTranscriptTarget(request.sessionId),
+        sessionDir: piSessionDir,
+        limit: request.limit,
+        ...(request.afterEntryId === undefined ? {} : { afterEntryId: request.afterEntryId }),
+      }));
+    case 'session.transcript.part':
+      return success(request.requestId, await readSessionTranscriptPart({
+        target: storage.getSessionTranscriptTarget(request.sessionId),
+        sessionDir: piSessionDir,
+        entryId: request.entryId,
+        partIndex: request.partIndex,
+      }));
     case 'task.run':
       return success(request.requestId, await coordinator.runTask({
         projectId: request.projectId,

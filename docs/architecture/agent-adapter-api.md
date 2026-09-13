@@ -136,7 +136,7 @@ type AdapterEvent = {
 - Runtime 仅能对当前持有 live provider 进程的 Session 投递 answer；无法投递时保留 ANSWER_RECORDED，不重放、不声称已投递。Runtime 自行释放的 provider 进程在投影中标记为 Runtime 来源的断连，而非伪造 provider event。
 - 不能确认工具/后代进程静止就返回 UNKNOWN 并保留执行资源，不用 session 的 stdout 安静作为停止证据。
 - resume 是已暂停且仍可控的同一会话恢复。退出后 provider resume 另建 Execution，保留来源，不混淆两种恢复。
-- attach 必须操作对应真实会话；若只能提供日志浏览，应明确命名 read-only log view，不宣称 attach。
+- attach 必须操作对应真实会话；若只能提供日志浏览，应明确命名 read-only log view，不宣称 attach。ADR-0013 的 `session.transcript`/`session.transcript.part` 就属于后者：它直接读取 provider 持久会话文件的只读视图，既不建立 writer lease，也不要求 live 进程，因此不得被描述为 attach、steering 或终端接管。
 - Session Guidance 与 TaskRevision 是两条显式通道：Pi 的 `SAFE_POINT_STEER` 映射 RPC `steer`，在当前 assistant turn 的工具调用结束后、下一次 LLM call 前生效；它不修改 `appliedRevisionId`。Task 修订不得降级为 guidance。
 - 原生 TUI 接管不是 attach 到现有 RPC 进程。Runtime 先记录 handoff，并让 Pi gate 建立 fence：当前 assistant turn 已开始的工具继续完成，之后的新 Agent 工具调用被 terminating result 收束；以 `agent_settled` + 活动工具计数 0 作为结构化 safe point。随后确认旧 process incarnation 退出，再用相同 provider session file 启动 `HUMAN_TUI` successor；交还时反向执行。旧进程退出未确认时不得 startSuccessor。
 - 一个 Session 同时最多一个交互写入租约，多个客户端可以只读；用户输入、自动 guidance/修订与权限回答由 coordinator 串行路由。writer 竞争明确返回 `ATTACHMENT_BUSY`。

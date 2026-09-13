@@ -45,6 +45,18 @@ export class AdapterRegistry {
 }
 
 /**
+ * The directory the Pi Adapter is allowed to keep provider session files in. It is also the
+ * ownership boundary for transcript reads, so both the writer and the reader must agree on it.
+ */
+export function piSessionDirectory(input: {
+  readonly runtimeHome: string;
+  readonly environment?: Readonly<Record<string, string | undefined>>;
+}): string {
+  return (input.environment ?? {})['CODEESTRA_PI_SESSION_DIR']
+    ?? join(input.runtimeHome, 'pi-sessions');
+}
+
+/**
  * Phase 1 production registry. Pi is the only registered Adapter; a deterministic fake is
  * never registered here because a fake Session must not be reported as a real execution.
  */
@@ -61,7 +73,7 @@ export function createPiAdapterRegistry(input: {
   }
   const gateExtensionPath = environment['CODEESTRA_PI_GATE_EXTENSION']
     ?? resolve(import.meta.dir, '../../../packages/agent-adapters/src/pi-gate-extension.ts');
-  const sessionDir = environment['CODEESTRA_PI_SESSION_DIR'] ?? join(input.runtimeHome, 'pi-sessions');
+  const sessionDir = piSessionDirectory({ runtimeHome: input.runtimeHome, environment });
   mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
   // Model, provider, and thinking level are not baked in here: the Runtime resolves them per
   // Execution from the environment, project, and global Agent configuration scopes and passes

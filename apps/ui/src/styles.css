@@ -131,3 +131,23 @@ pre.spec { max-height: 10rem; }
 .events li span:nth-child(2) { width: 12rem; }
 
 details summary { cursor: pointer; color: var(--muted); }
+
+/* Agent 执行过程：只读观察面板，不是业务状态展示。 */
+.transcript { margin-top: 0.5rem; }
+.transcript-entries { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.5rem; }
+.transcript-entry {
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2);
+  padding: 0.5rem 0.65rem;
+}
+.transcript-entry > header {
+  display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; font-size: 0.8rem;
+}
+.transcript-entry.kind-user { border-left: 3px solid var(--accent); }
+.transcript-entry.kind-assistant { border-left: 3px solid #4a7a5a; }
+.transcript-entry.kind-tool_result { border-left: 3px solid #6a5a2a; }
+.transcript-entry.kind-other { opacity: 0.85; }
+.transcript-part { margin-top: 0.4rem; }
+.part-head { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; font-size: 0.78rem; }
+.transcript-part pre { max-height: 18rem; font-size: 0.8rem; }
+.transcript-part.part-thinking pre { border-style: dashed; font-style: italic; }
+.transcript-part.part-tool_call pre { border-color: #4a5a7a; }

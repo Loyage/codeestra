@@ -71,6 +71,107 @@ export type RuntimeStreamFrame = z.infer<typeof runtimeStreamFrameSchema>;
 /** Upper bound for one event read, so a client cannot ask the Runtime to buffer unbounded rows. */
 export const maxEventReadLimit = 500;
 
+/**
+ * Bounds for the read-only Agent session transcript view. A transcript read is a view over the
+ * provider's own durable session file, not a Codeestra event: nothing here is written to SQLite,
+ * and no business state is ever derived from it.
+ */
+export const maxTranscriptEntryReadLimit = 200;
+export const defaultTranscriptEntryReadLimit = 100;
+/** Characters of one part returned by a list read; longer parts are truncated but still fetchable. */
+export const transcriptPartPreviewChars = 4_000;
+/** Hard ceiling for one part fetch, so a single response stays bounded. */
+export const maxTranscriptPartChars = 200_000;
+
+/**
+ * One content block of a transcript entry. `text` is a bounded preview: `truncated` says whether
+ * `session.transcript.part` can return more of the same block, and `fullChars` is its real length.
+ */
+export interface SessionTranscriptPart {
+  readonly partIndex: number;
+  readonly type: 'TEXT' | 'THINKING' | 'TOOL_CALL' | 'IMAGE' | 'OTHER';
+  readonly text: string;
+  readonly truncated: boolean;
+  readonly fullChars: number;
+  /** Tool name for a TOOL_CALL part; `null` for every other part type. */
+  readonly name: string | null;
+  readonly toolCallId: string | null;
+}
+
+/** Provider-reported token accounting for one assistant message; absent fields stay null. */
+export interface SessionTranscriptUsage {
+  readonly input: number | null;
+  readonly output: number | null;
+  readonly cacheRead: number | null;
+  readonly cacheWrite: number | null;
+  readonly reasoning: number | null;
+  readonly total: number | null;
+  readonly cost: number | null;
+}
+
+/**
+ * One entry of the provider's session file, normalized for display. Unrecognized entry types are
+ * reported as OTHER with a `note` instead of being silently dropped.
+ */
+export interface SessionTranscriptEntry {
+  readonly entryId: string;
+  readonly parentId: string | null;
+  readonly timestamp: string | null;
+  readonly kind: 'USER' | 'ASSISTANT' | 'TOOL_RESULT' | 'MODEL_CHANGE' | 'THINKING_LEVEL_CHANGE'
+    | 'OTHER';
+  readonly role: string | null;
+  readonly provider: string | null;
+  readonly model: string | null;
+  readonly stopReason: string | null;
+  readonly toolName: string | null;
+  readonly toolCallId: string | null;
+  readonly isError: boolean | null;
+  readonly usage: SessionTranscriptUsage | null;
+  readonly parts: readonly SessionTranscriptPart[];
+  readonly note: string | null;
+}
+
+/**
+ * One window of a Session's transcript. The Runtime is the only reader of the provider session
+ * file: clients never learn the file path, so this view carries identity and content, not locations.
+ */
+export interface SessionTranscriptView {
+  readonly sessionId: string;
+  readonly executionId: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly taskDisplayNumber: number;
+  readonly attemptNumber: number;
+  readonly executionState: string;
+  readonly sessionState: string;
+  readonly providerSessionId: string | null;
+  /** False when the provider never created a durable session file, or it is gone. */
+  readonly fileAvailable: boolean;
+  /** Honest explanation when `fileAvailable` is false, or a bounded read caveat otherwise. */
+  readonly note: string | null;
+  readonly entries: readonly SessionTranscriptEntry[];
+  /** Exclusive cursor for the next read: the last entry ID returned, or the requested cursor. */
+  readonly cursor: string | null;
+  readonly hasMore: boolean;
+  /** Lines scanned in this read that were not valid session entries; never silently ignored. */
+  readonly unparsedLines: number;
+  readonly partPreviewChars: number;
+}
+
+/** One whole content block, fetched on demand after a truncated list read. */
+export interface SessionTranscriptPartView {
+  readonly sessionId: string;
+  readonly entryId: string;
+  readonly partIndex: number;
+  readonly type: SessionTranscriptPart['type'];
+  readonly name: string | null;
+  readonly toolCallId: string | null;
+  readonly text: string;
+  readonly fullChars: number;
+  /** True when `maxTranscriptPartChars` itself cut the block, so the client must say so. */
+  readonly truncated: boolean;
+}
+
 const requestBase = {
   requestId: z.string().uuid(),
   schemaVersion: z.literal(1),
@@ -276,6 +377,27 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     command: z.literal('task.verification.list'),
     projectId: z.string().uuid(),
     taskId: z.string().uuid(),
+  }),
+  /**
+   * Reads a window of the provider's own session file for one Agent Session. This is a read-only
+   * observation of what the Agent did; it is not an event log and carries no delivery guarantees.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('session.transcript'),
+    sessionId: z.string().uuid(),
+    /** Exclusive cursor: an entry ID returned by a previous read. */
+    afterEntryId: z.string().min(1).max(200).optional(),
+    limit: z.number().int().min(1).max(maxTranscriptEntryReadLimit)
+      .default(defaultTranscriptEntryReadLimit),
+  }),
+  /** Fetches one content block whole after a list read reported it as truncated. */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('session.transcript.part'),
+    sessionId: z.string().uuid(),
+    entryId: z.string().min(1).max(200),
+    partIndex: z.number().int().nonnegative().max(500),
   }),
   z.strictObject({
     ...requestBase,

@@ -119,6 +119,78 @@ export interface TaskStatusView {
   readonly verifications: readonly VerificationRunView[];
 }
 
+/**
+ * The Runtime's read-only view of the provider's own session file. It is an observation of what
+ * the Agent did, not a Codeestra event: nothing here is authoritative business state.
+ */
+export interface SessionTranscriptPart {
+  readonly partIndex: number;
+  readonly type: 'TEXT' | 'THINKING' | 'TOOL_CALL' | 'IMAGE' | 'OTHER';
+  /** Bounded preview; `truncated` means `session.transcript.part` returns more. */
+  readonly text: string;
+  readonly truncated: boolean;
+  readonly fullChars: number;
+  readonly name: string | null;
+  readonly toolCallId: string | null;
+}
+
+export interface SessionTranscriptUsage {
+  readonly input: number | null;
+  readonly output: number | null;
+  readonly cacheRead: number | null;
+  readonly cacheWrite: number | null;
+  readonly reasoning: number | null;
+  readonly total: number | null;
+  readonly cost: number | null;
+}
+
+export interface SessionTranscriptEntry {
+  readonly entryId: string;
+  readonly parentId: string | null;
+  readonly timestamp: string | null;
+  readonly kind: 'USER' | 'ASSISTANT' | 'TOOL_RESULT' | 'MODEL_CHANGE' | 'THINKING_LEVEL_CHANGE'
+    | 'OTHER';
+  readonly role: string | null;
+  readonly provider: string | null;
+  readonly model: string | null;
+  readonly stopReason: string | null;
+  readonly toolName: string | null;
+  readonly toolCallId: string | null;
+  readonly isError: boolean | null;
+  readonly usage: SessionTranscriptUsage | null;
+  readonly parts: readonly SessionTranscriptPart[];
+  readonly note: string | null;
+}
+
+export interface SessionTranscriptView {
+  readonly sessionId: string;
+  readonly executionId: string;
+  readonly taskDisplayNumber: number;
+  readonly attemptNumber: number;
+  readonly executionState: string;
+  readonly sessionState: string;
+  readonly providerSessionId: string | null;
+  readonly fileAvailable: boolean;
+  readonly note: string | null;
+  readonly entries: readonly SessionTranscriptEntry[];
+  readonly cursor: string | null;
+  readonly hasMore: boolean;
+  readonly unparsedLines: number;
+  readonly partPreviewChars: number;
+}
+
+export interface SessionTranscriptPartView {
+  readonly sessionId: string;
+  readonly entryId: string;
+  readonly partIndex: number;
+  readonly type: SessionTranscriptPart['type'];
+  readonly name: string | null;
+  readonly toolCallId: string | null;
+  readonly text: string;
+  readonly fullChars: number;
+  readonly truncated: boolean;
+}
+
 export interface AttentionView {
   readonly id: string;
   readonly projectId: string;

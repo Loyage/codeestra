@@ -1,7 +1,9 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { maxEventReadLimit, runtimeResponseSchema, runtimeStreamFrameSchema,
+import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxTranscriptEntryReadLimit,
+  runtimeResponseSchema, runtimeStreamFrameSchema,
   type RepositoryIdentity, type RuntimeRequest, type RuntimeResponse,
+  type SessionTranscriptView,
   type VerificationPolicyInspection } from '@codeestra/contracts';
 
 /** The subset of `project.list` this client reads. */
@@ -88,6 +90,130 @@ function print(value: unknown): void {
 }
 
 /**
+ * Renders one transcript window for a human. This is an observation view of what the Agent did, so
+ * it is printed as text; `--json` prints the Runtime's view verbatim for scripts. Truncated blocks
+ * say so and name the exact command that returns the whole block.
+ */
+function printTranscript(view: SessionTranscriptView, sessionId: string): void {
+  const header = view.fileAvailable
+    ? `task #${view.taskDisplayNumber} · 第 ${view.attemptNumber} 次执行 · 会话 ${view.sessionState}`
+      + ` · 执行 ${view.executionState}`
+    : `task #${view.taskDisplayNumber} · 第 ${view.attemptNumber} 次执行 · 无会话文件`;
+  console.error(header);
+  if (view.note !== null) console.error(view.note);
+  if (!view.fileAvailable) return;
+  console.error(`${view.entries.length} 条记录${view.hasMore ? '（还有更多，用 --after 继续）' : ''}`);
+  if (view.unparsedLines > 0) console.error(`注意：本次扫描中有 ${view.unparsedLines} 行不是有效条目`);
+  for (const entry of view.entries) {
+    console.log(`\n=== ${entry.entryId} [${entry.kind}] ${entry.timestamp ?? ''}`.trimEnd());
+    const meta = [
+      entry.role === null ? null : `role=${entry.role}`,
+      entry.provider === null && entry.model === null ? null
+        : `model=${entry.provider ?? '?'}/${entry.model ?? '?'}`,
+      entry.stopReason === null ? null : `stop=${entry.stopReason}`,
+      entry.toolName === null ? null : `tool=${entry.toolName}`,
+      entry.isError === null ? null : `isError=${String(entry.isError)}`,
+      entry.usage === null ? null
+        : `tokens in=${String(entry.usage.input)} out=${String(entry.usage.output)}`
+          + ` total=${String(entry.usage.total)} reasoning=${String(entry.usage.reasoning)}`
+          + ` cost=${String(entry.usage.cost)}`,
+      entry.note,
+    ].filter((value): value is string => value !== null && value !== undefined);
+    if (meta.length > 0) console.log(`  ${meta.join(' · ')}`);
+    for (const part of entry.parts) {
+      const label = part.name === null ? part.type : `${part.type} ${part.name}`;
+      console.log(`  --- [${label}] ${part.fullChars} 字符`);
+      for (const line of part.text.split('\n')) console.log(`  ${line}`);
+      if (part.truncated) {
+        console.log(`  （已截断：仅显示前 ${view.partPreviewChars} 字符；完整内容：`
+          + `codeestra session transcript part ${sessionId} ${entry.entryId} ${part.partIndex}）`);
+      }
+    }
+  }
+}
+
+interface TranscriptFlags {
+  readonly executionId?: string;
+  readonly afterEntryId?: string;
+  readonly limit?: number;
+  readonly json: boolean;
+}
+
+function parseTranscriptFlags(flags: readonly string[]): TranscriptFlags {
+  let executionId: string | undefined;
+  let afterEntryId: string | undefined;
+  let limit: number | undefined;
+  let json = false;
+  for (let index = 0; index < flags.length; index += 1) {
+    const flag = flags[index];
+    const value = flags[index + 1];
+    if (flag === '--json') {
+      json = true;
+    } else if (flag === '--execution' && value !== undefined) {
+      executionId = value;
+      index += 1;
+    } else if (flag === '--after' && value !== undefined) {
+      afterEntryId = value;
+      index += 1;
+    } else if (flag === '--limit' && value !== undefined) {
+      const parsed = Number(value);
+      if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maxTranscriptEntryReadLimit) usage();
+      limit = parsed;
+      index += 1;
+    } else {
+      usage();
+    }
+  }
+  return { ...(executionId === undefined ? {} : { executionId }),
+    ...(afterEntryId === undefined ? {} : { afterEntryId }),
+    ...(limit === undefined ? {} : { limit }), json };
+}
+
+/** The subset of `task.status` this client reads to find an execution's Agent session. */
+interface TaskStatusExecutions {
+  readonly executions: readonly {
+    readonly executionId: string;
+    readonly attemptNumber: number;
+    readonly session: { readonly sessionId: string } | null;
+  }[];
+}
+
+/**
+ * Resolves which Session a Task transcript shows, then reads it. The Runtime stays the only place
+ * that knows the provider file path; this command only composes `task.status` and
+ * `session.transcript`.
+ */
+async function transcriptForTask(
+  projectId: string,
+  taskId: string,
+  flags: TranscriptFlags,
+): Promise<void> {
+  const status = await call({ command: 'task.status', projectId, taskId }) as TaskStatusExecutions;
+  const requested = flags.executionId === undefined ? null : flags.executionId;
+  const candidates = status.executions.filter((execution) => execution.session !== null);
+  const execution = requested === null
+    ? candidates[0]
+    : candidates.find((candidate) => candidate.executionId === requested);
+  if (execution === undefined || execution.session === null) {
+    if (requested !== null) {
+      const known = status.executions.some((candidate) => candidate.executionId === requested);
+      throw new Error(known
+        ? `EXECUTION_HAS_NO_SESSION: 该执行（${requested}）没有启动 Agent 会话，因此没有执行过程`
+        : 'NOT_FOUND: 该任务下没有这个执行');
+    }
+    throw new Error('NOT_FOUND: 该任务还没有启动过 Agent 会话，因此没有执行过程');
+  }
+  const view = await call({
+    command: 'session.transcript',
+    sessionId: execution.session.sessionId,
+    ...(flags.afterEntryId === undefined ? {} : { afterEntryId: flags.afterEntryId }),
+    limit: flags.limit ?? defaultTranscriptEntryReadLimit,
+  }) as SessionTranscriptView;
+  if (flags.json) print(view);
+  else printTranscript(view, execution.session.sessionId);
+}
+
+/**
  * Follows the Runtime event log. stdout carries one JSON event envelope per line so it stays
  * script-friendly; subscription metadata goes to stderr.
  */
@@ -169,6 +295,10 @@ function usage(): never {
   bun run codeestra task submit <project-id> <task-id> <expected-version>
   bun run codeestra task run <project-id> <task-id> <expected-version> [--adapter <id>]
   bun run codeestra task status <project-id> <task-id>
+  bun run codeestra task transcript <project-id> <task-id> [--execution <id>] [--after <entry-id>]
+    [--limit <n>] [--json]
+  bun run codeestra session transcript <session-id> [--after <entry-id>] [--limit <n>] [--json]
+  bun run codeestra session transcript part <session-id> <entry-id> <part-index>
   bun run codeestra task result capture <project-id> <task-id> [execution-id]
   bun run codeestra task result prepare <project-id> <task-id> [execution-id]   # strict mode
   bun run codeestra task result commit <project-id> <task-id> <authorization-id> --confirm
@@ -433,6 +563,35 @@ try {
     const [taskId, ...extra] = remainingArguments;
     if (firstArgument === undefined || taskId === undefined || extra.length !== 0) usage();
     print(await call({ command: 'task.status', projectId: firstArgument, taskId }));
+  } else if (group === 'task' && action === 'transcript') {
+    const [taskId, ...flags] = remainingArguments;
+    if (firstArgument === undefined || taskId === undefined) usage();
+    await transcriptForTask(firstArgument, taskId, parseTranscriptFlags(flags));
+  } else if (group === 'session' && action === 'transcript') {
+    // `session transcript part <session-id> <entry-id> <part-index>` is a three-level command, so
+    // the subcommand lands in firstArgument and the session ID is the first remaining argument.
+    if (firstArgument === 'part') {
+      const [sessionId, entryId, partIndexText, ...extra] = remainingArguments;
+      const partIndex = Number(partIndexText);
+      if (sessionId === undefined || entryId === undefined || partIndexText === undefined
+        || extra.length !== 0 || !Number.isSafeInteger(partIndex) || partIndex < 0) usage();
+      print(await call({ command: 'session.transcript.part', sessionId, entryId, partIndex }));
+    } else {
+      const sessionId = firstArgument;
+      if (sessionId === undefined) usage();
+      const flags = parseTranscriptFlags(remainingArguments);
+      // `--execution` only means something when a Task is resolved; refusing it here keeps the flag
+      // from being accepted and then silently ignored.
+      if (flags.executionId !== undefined) usage();
+      const view = await call({
+        command: 'session.transcript',
+        sessionId,
+        ...(flags.afterEntryId === undefined ? {} : { afterEntryId: flags.afterEntryId }),
+        limit: flags.limit ?? defaultTranscriptEntryReadLimit,
+      }) as SessionTranscriptView;
+      if (flags.json) print(view);
+      else printTranscript(view, sessionId);
+    }
   } else if (group === 'task' && action === 'run') {
     const [taskId, versionText, ...extra] = remainingArguments;
     const expectedTaskVersion = Number(versionText);

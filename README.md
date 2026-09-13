@@ -40,9 +40,11 @@ CODEESTRA_HOME=/tmp/codeestra-dev bun run codeestra status
 
 Agent 配置（ADR-0012）已实现：`agent config get/set/clear`（CLI 与 Web UI 同一命令面）持久化 provider/model/thinking level，分全局默认与每项目覆盖，按 环境变量 > 项目 > 全局 > Pi 默认 逐字段解析，只影响新 Session 并把生效值写入 Execution。
 
+Agent 执行过程可见（ADR-0013）已实现：`task transcript` / `session transcript` / `session transcript part` 只读读取 Provider 自己的持久会话文件，展示工具调用与工具返回、助手文本、thinking 与 token/成本；默认截断展示并可按需取回完整内容，运行中的 Session 由 Web UI 自动增量轮询。它**不是事件、不是 attach、不是终端接管**，不入库、不改动任何业务状态，也不新增确认。file 路径只在 Runtime 内部使用，客户端拿不到；只允许读取 Runtime 自己的 Pi session 目录（符号链接逃逸被拒绝）。token 级实时流（需新增事件与存储）与 ADR-0010 的原生终端接管仍未实现。
+
 这还不是完整的 AI 编排产品。尚无自动 Scheduler、长命令后台化、Task cancel/pause、revision 投递确认、桌面 UI，亦尚未实现“Task 从 dev 建基线 → 集成到 dev → 用户批准 dev→main → 自动重启 Runtime”的完整流水线。**现有 Phase 1 `task.run` 代码仍按项目 `mainRef` 创建 worktree；在 ADR-0009 的基线改造完成前，不得声称产品已自动遵守 dev 基线。**Pi 已有 LF-only RPC framing、受控启动参数、fail-closed gate extension 与自有子进程的 `PiRpcAdapter`（身份采集、attention/completion/disconnect 映射、typed answer 写入），Runtime 已接入 adapter registry、`task.run` 运行循环、事件 pump 与 answer 自动投递，并以 stub transport、deterministic fake 与脚本 Adapter 验证编排。Task verification（ADR-0006/0011）已实现：命令来自 main ref 上人工维护的策略，在固定 commit 的 detached 副本中运行且证据不含原始输出；FULL 下策略变化不确认，STRICT 下仍要求确认。`events list`/`events tail` 提供只读事件订阅长连接，可观察既有 domain event 并按排他游标重连；但 `task run`/`task verify` 仍同步占用连接，长命令进度事件尚未实现。
 
-本地 Web UI（ADR-0007）已可用：`codeestra ui` 在 `127.0.0.1` 上按需启动 HTTP + SSE，React 界面可浏览/创建/提交任务、运行 Agent、capture 成果、执行验证并查看事件流。UI 显示当前权限模式；FULL 不显示 TRUST 输入或成果二次确认，STRICT 投影旧门禁。UI 与 CLI 共用同一命令面。真实 Pi 模型/工具执行已完成首轮受控验收（FOUNDATION-019，模型可用 `CODEESTRA_PI_PROVIDER`/`CODEESTRA_PI_MODEL` 显式指定）：真实 `write` 工具调用被 fail-closed gate 拦下并在界面上逐次审批，随后成果 commit 与 Task verification PASSED，用户 main 全程未被修改。任务取消超时、gate 拒绝路径、孤儿进程 reconcile 与 Integration/main 提升仍未实现；ADR-0010 设计的原生 Pi TUI/PTY 接管、Session Guidance 与 RPC↔TUI 安全点进程交接也尚未实现，当前只支持结构化 Attention 交互，不能把日志查看声称为终端 attach；fake 不代表真实 Agent 集成通过。
+本地 Web UI（ADR-0007）已可用：`codeestra ui` 在 `127.0.0.1` 上按需启动 HTTP + SSE，React 界面可浏览/创建/提交任务、运行 Agent、capture 成果、执行验证、查看事件流与 **Agent 执行过程面板**。任务详情里的「Agent 执行过程」按 Execution 展示 Provider 会话文件的内容（工具调用/返回、助手文本、thinking、token 与成本），长内容折叠可展开，运行中自动刷新；数据经 `/api/command` 上的 `session.transcript`（与 CLI 同一命令面）获取。UI 显示当前权限模式；FULL 不显示 TRUST 输入或成果二次确认，STRICT 投影旧门禁。UI 与 CLI 共用同一命令面。真实 Pi 模型/工具执行已完成首轮受控验收（FOUNDATION-019，模型可用 `CODEESTRA_PI_PROVIDER`/`CODEESTRA_PI_MODEL` 显式指定）：真实 `write` 工具调用被 fail-closed gate 拦下并在界面上逐次审批，随后成果 commit 与 Task verification PASSED，用户 main 全程未被修改。任务取消超时、gate 拒绝路径、孤儿进程 reconcile 与 Integration/main 提升仍未实现；ADR-0010 设计的原生 Pi TUI/PTY 接管、Session Guidance 与 RPC↔TUI 安全点进程交接也尚未实现，当前只支持结构化 Attention 交互，不能把日志查看声称为终端 attach；fake 不代表真实 Agent 集成通过。
 
 ## 文档
 
@@ -87,6 +89,9 @@ bun run codeestra task list <project-id>
 bun run codeestra task submit <project-id> <task-id> <expected-version>
 bun run codeestra task run <project-id> <task-id> <expected-version> [--adapter pi]
 bun run codeestra task status <project-id> <task-id>
+bun run codeestra task transcript <project-id> <task-id> [--execution <id>] [--after <entry-id>] [--limit <n>] [--json]
+bun run codeestra session transcript <session-id> [--after <entry-id>] [--limit <n>] [--json]
+bun run codeestra session transcript part <session-id> <entry-id> <part-index>
 bun run codeestra task result capture <project-id> <task-id> [execution-id] # FULL 单步
 bun run codeestra task result prepare <project-id> <task-id> [execution-id] # STRICT
 bun run codeestra task result commit <project-id> <task-id> <authorization-id> --confirm # STRICT

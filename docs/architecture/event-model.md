@@ -109,6 +109,16 @@ Runtime 的本地 socket 同时承载一次性命令与长连接订阅；两者�
 
 输出与用户按键可能含 secrets、控制序列和 prompt injection；不能作为受信 command、状态 guard、safe-point 证据或权限批准。结构化状态来自 Adapter/受控 gate side channel。PTY bytes 不进入 domain event、Intent、TaskRevision 或普通事件 SSE；事件只记录 attachment/lease/handoff 元数据。
 
+### 4.1 只读会话过程视图（ADR-0013）
+
+除事件与 PTY transport 之外，还存在第三条只读通道：`session.transcript` / `session.transcript.part` 直接读取 **Provider 自己的持久会话文件**（`agent_sessions.session_storage_ref`，位于 Runtime 的 `--session-dir` 下），用于展示工具调用与返回、助手文本、thinking 与 token/成本。
+
+- 它不是 domain event、不是 outbox 投递、不是 attach：不写事件、不写 `event_deliveries`、不改变任何 Task/Execution/Session 状态，也不从文件重建业务状态；因此它不提供任何“已交付”证据。
+- 它是查询而非事实：内容不写入 SQLite，进程重启后仍然可读（因为它读的是 provider 的文件而不是 Codeestra 的投影）。
+- 它与 §4 的边界不冲突：原始终端数据仍只存在于 provider 文件中，Codeestra 只做有界的只读展示（默认 4000 字符预览，完整块需显式取回，单块硬上限 200000 字符），不把 PTY 字节、工具参数或输出写进事件。
+- 文件路径是 Runtime 内部信息：命令响应不携带路径，只允许读取 Runtime 自己 session 目录内、经 `realpath` 规范后的普通文件（符号链接逃逸被拒绝）。
+- 游标是 provider 自己的 entry ID，排他；文件中不存在该 entry 时返回 `TRANSCRIPT_CURSOR_UNKNOWN`，不静默夹到尾部。
+
 CLI attach 使用 versioned terminal frame 协议而非一次性 JSON response，并以本地 escape prefix 发送 detach/release 控制动作；同一动作也必须有普通 Runtime command，不能只存在于按键。Web UI/桌面如提供终端，只能复用该 transport，不直接连接 Provider PTY。客户端断开等同 detach，不停止 HUMAN_TUI Session。
 
 ## 5. 测试要求
