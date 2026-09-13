@@ -95,6 +95,27 @@ describe('codeestra open', () => {
     expect(stopped.exitCode).toBe(0);
   }, 60_000);
 
+  test('opening another worktree of an already trusted repository is idempotent', async () => {
+    const { repository, home, assets } = await fixture();
+    const alternate = `${repository}-dev-worktree`;
+    const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
+    try {
+      expect((await cli(['open', repository, '--yes', '--no-open'], environment)).exitCode).toBe(0);
+      await git(repository, ['worktree', 'add', '-q', '-b', 'dev', alternate, 'main']);
+      const opened = await cli(['open', alternate, '--no-open'], environment);
+      expect(opened.exitCode).toBe(0);
+      expect(opened.stderr).toContain('Already trusted');
+      expect(opened.stdout).toContain('project=');
+      const listed = await cli(['project', 'list'], environment);
+      const projects = JSON.parse(listed.stdout) as readonly { readonly repoRoot: string }[];
+      expect(projects).toHaveLength(1);
+      expect(projects[0]?.repoRoot).toBe(await realpath(repository));
+    } finally {
+      await git(repository, ['worktree', 'remove', '-f', alternate]).catch(() => {});
+      await cli(['stop'], environment);
+    }
+  }, 60_000);
+
   test('does not ask for a second confirmation while the confirmed policy still matches', async () => {
     const { repository, home, assets } = await fixture();
     const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };

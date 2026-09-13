@@ -13,6 +13,7 @@ interface TrustedProjectListing {
   readonly id: string;
   readonly name: string;
   readonly repoRoot: string;
+  readonly gitCommonDir: string;
   /** The active policy confirmation, or null when trust never confirmed one. */
   readonly confirmedPolicy:
     { readonly state: 'ABSENT' | 'PRESENT'; readonly digest: string | null;
@@ -480,7 +481,11 @@ try {
 
     const mode = await currentPermissionMode();
     const known = (await call({ command: 'project.list' }) as TrustedProjectListing[])
-      .find((candidate) => candidate.repoRoot === identity.repoRoot);
+      // A repository can have several worktrees (for example the stable main tree and this dev
+      // tree). The Runtime identifies one Project by the Git common directory, not by a worktree
+      // checkout path, so opening another owned worktree must remain idempotent.
+      .find((candidate) => candidate.repoRoot === identity.repoRoot
+        || candidate.gitCommonDir === identity.gitCommonDir);
     const confirmation = known?.confirmedPolicy ?? null;
     // One confirmation per project on the normal path. The rule mirrors the gate task verify
     // applies: the confirmed *policy digest* is what must still match, so committing to the main
@@ -517,7 +522,8 @@ try {
     }
 
     const projects = await call({ command: 'project.list' }) as TrustedProjectListing[];
-    const project = projects.find((candidate) => candidate.repoRoot === identity.repoRoot);
+    const project = projects.find((candidate) => candidate.repoRoot === identity.repoRoot
+      || candidate.gitCommonDir === identity.gitCommonDir);
     if (project === undefined) throw new Error('The trusted project was not listed');
     console.error(`\nTrusted project ${project.id} (${project.name}).`);
 
