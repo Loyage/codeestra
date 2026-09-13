@@ -19,6 +19,21 @@ Task-first、local-first 的 AI Development Runtime。用户管理产品意图�
 
 `dev → main` 必须固定 dev/main SHA 与验证证据；默认 FULL 无需批准，STRICT 保留批准。`main` 更新后立即在 main 工作树执行 `bun run codeestra stop`，再执行 `bun run codeestra status` 重新拉起并检查 Runtime；重启成功前不得报告提升完成。详见 ADR-0009。
 
+### 本机工作树
+
+| 目录 | 分支 | 用途 |
+|---|---|---|
+| `~/Documents/codeestra` | `main` | 稳定工作树：日常运行 Runtime、用 Codeestra 辅助开发 |
+| `~/Documents/codeestra-dev` | `dev` | 开发工作树：新功能实验与集成 |
+
+两个工作树的 `node_modules`、`apps/ui/dist`、`.codeestra/` 是 gitignore 的本地状态，互不共享；在 dev 工作树里首次使用要执行 `bun install --frozen-lockfile`（`bun run check` 会顺带构建 UI 资产）。
+
+**单实例注意**：Runtime 按 `CODEESTRA_HOME` 每用户只跑一个。在 dev 工作树运行 `bun run codeestra …` 时，如果稳定 Runtime 已在运行，命令会打到稳定 Runtime（即 `main` 代码），不会启动 dev 构建。要跑 dev 代码请换一个数据目录，例如：
+
+```sh
+CODEESTRA_HOME=/tmp/codeestra-dev bun run codeestra status
+```
+
 ## 当前状态
 
 架构基线与已确认决策已记录。已实现 Phase 0 领域基础、Phase 1 SQLite storage，以及最小 CLI/独立 Runtime。默认 FULL：CLI 自动启动 Runtime、无确认注册项目，并按 Project ID 创建/列出/提交/运行 Task，成果 commit 可单步 capture；STRICT 保留旧的 trust 与两步 commit。Task 创建会原子保存原始 Intent、首 Revision、事实事件与幂等回执；submit 使用 expected version 将 DRAFT 转为 READY；`task run` 串起 owned worktree、Execution 预留、Adapter start 与事件 pump；`task status` 可查看 Execution/Session 投影；`task result prepare`/`task result commit --confirm` 按 ADR-0003 在核验 HEAD/ChangeSet/静止证据后创建成果 commit。

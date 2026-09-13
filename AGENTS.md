@@ -48,6 +48,13 @@
 - `main` 成功更新后立即在 main 工作树执行 `bun run codeestra stop`，再执行 `bun run codeestra status` 自动拉起并检查 Runtime。该后置步骤不增加第二次确认；Runtime 恢复响应前不得报告提升完成。失败时立即报告，不擅自回滚。
 - 当前没有后台监控用户在系统外手动更新 `main` 的能力；不要声称已覆盖该场景。
 
+### 本机工作树布局
+
+- `~/Documents/codeestra` 检出 `main`：稳定工作树，用于运行稳定服务与以 Codeestra 辅助开发；不得在此分支上开发新功能。
+- `~/Documents/codeestra-dev` 检出 `dev`：开发与集成工作树；功能改动在此进行并先合入 `dev`。
+- 两个工作树的 `node_modules`、`apps/ui/dist`、`.codeestra/` 是 gitignore 的本地状态，不共享；新工作树需要自己 `bun install --frozen-lockfile`，UI 资产需自己构建（`bun run check` 会构建）。
+- Runtime 是本用户单实例（按 `CODEESTRA_HOME` 的 socket 判定）。从 dev 工作树直接运行 `bun run codeestra …` 会连接正在运行的稳定 Runtime，即执行 `main` 代码，不会启动 dev 构建。要验证 dev 代码必须用独立的 `CODEESTRA_HOME`（例如 `CODEESTRA_HOME=/tmp/codeestra-dev bun run codeestra status`），或先停止稳定 Runtime。不要把它误认为 dev 代码已生效。
+
 ## Git 与文件安全
 
 - 未获授权不要 commit、push、强制更新 branch、reset --hard、clean、删除有改动的 worktree 或执行破坏性清理。
