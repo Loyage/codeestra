@@ -15,7 +15,7 @@
 | 阶段 | 尚需确认/验证 | 当前处理 |
 |---|---|---|
 | Phase 0 纯领域工程 | 无影响该小步的未决产品语义 | 可实现 revision、Execution FSM 和测试骨架，不实现副作用 |
-| Phase 1 | Pi 真实审批/交互/暂停/恢复能力与接入协议 | Pi 0.84.4 首轮 RPC spike 已完成：extension UI 可路由权限/问题，持久 conversation 可恢复；无 pause/revision ACK/live-process reconnect，见 `docs/spikes/pi-0.84.4.md`。受控 gate/framing、typed answer Operation 与真实子进程 `PiRpcAdapter` 已实现；真实工具执行、取消超时与孤儿进程 reconcile 仍需验证 |
+| Phase 1 | Pi 真实审批/交互/暂停/恢复能力与接入协议 | Pi 0.84.4 首轮 RPC spike 已完成：extension UI 可路由权限/问题，持久 conversation 可恢复；无 pause/revision ACK/live-process reconnect，见 `docs/spikes/pi-0.84.4.md`。受控 gate/framing、typed answer Operation、真实子进程 `PiRpcAdapter`、Runtime adapter registry、`task.run` 运行循环、事件 pump 与 answer 自动投递已实现；真实工具执行、取消超时、禁用工具集静止性与孤儿进程 reconcile 仍需验证 |
 | Phase 1 | Runtime 创建成果 commit 的授权、identity、hooks、staging 策略 | 已由 ADR-0003 确认；实现需精确绑定用户确认与 ChangeSet，仍不得自动 main/push |
 | Phase 1 | 本地 IPC、进程托管与首次项目信任入口 | 产品行为已由 ADR-0004 确认；本用户 IPC、单实例与后台进程托管仍需实现验证 |
 | Phase 2 | 上游被修订时依赖锁定 revision 怎样更新 | 未明确前暂停该边调度并请求澄清，不自行跟随或固定旧需求 |

@@ -57,9 +57,9 @@ Task Integration summary：`NOT_READY → ELIGIBLE → BATCHED → INTEGRATED`�
 
 ## 3. AgentSession
 
-`CREATED → STARTING → ACTIVE`；ACTIVE↔WAITING_FOR_USER；ACTIVE/WAITING_FOR_USER→PAUSING→PAUSED→ACTIVE；活动态→STOPPING→EXITED；控制连接丢失→DISCONNECTED；身份或恢复失败→RECOVERY_REQUIRED。
+`CREATED → STARTING → ACTIVE`；ACTIVE↔WAITING_FOR_USER；ACTIVE/WAITING_FOR_USER→PAUSING→PAUSED→ACTIVE；活动态→STOPPING→EXITED；控制连接丢失或 Runtime 自行释放其自有 provider 进程→DISCONNECTED；身份或恢复失败→RECOVERY_REQUIRED。
 
-DISCONNECTED→ACTIVE/WAITING_FOR_USER/PAUSED 需 reconcile 证明真实状态。EXITED 不代表 Task 成功，需 exit reason、执行结果与验证。UI detach 不改变 AgentSession 状态。provider resume 若实际创建新会话，必须建立新 session/execution 关联，不伪装旧 OS 进程仍存活。
+DISCONNECTED→ACTIVE/WAITING_FOR_USER/PAUSED 需 reconcile 证明真实状态。Runtime 自行发起的释放不伪造成 provider event，而以 Runtime 来源记录并保留 Execution/workspace 占用。EXITED 不代表 Task 成功，需 exit reason、执行结果与验证。UI detach 不改变 AgentSession 状态。provider resume 若实际创建新会话，必须建立新 session/execution 关联，不伪装旧 OS 进程仍存活。
 
 原生审批回答中 reject/deny 也属于有效回答，不能把“用户已回答”等同“用户批准”。
 
