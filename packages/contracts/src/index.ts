@@ -302,6 +302,16 @@ export const agentStopEvidenceSchema = z.strictObject({
   ownedWritersStopped: z.literal(true),
 });
 export type AgentStopEvidence = z.infer<typeof agentStopEvidenceSchema>;
+/**
+ * Provider-classified reason for a FAILURE completion. Adapters that can tell why a turn failed
+ * report it here so the Runtime can persist a bounded, displayable reason instead of leaving the
+ * provider text buried inside an evidence reference.
+ */
+export const agentTurnFailureSchema = z.strictObject({
+  code: z.string().min(1),
+  message: z.string().min(1),
+});
+export type AgentTurnFailure = z.infer<typeof agentTurnFailureSchema>;
 const observedEventBase = {
   sessionId: z.string().min(1),
   executionId: z.string().min(1),
@@ -321,6 +331,8 @@ export const agentObservedEventSchema = z.discriminatedUnion('type', [
     ...observedEventBase,
     type: z.literal('completed'),
     outcome: z.enum(['SUCCESS', 'FAILURE']),
+    /** Only meaningful with `outcome: 'FAILURE'`; absent means the adapter reported no reason. */
+    failure: agentTurnFailureSchema.optional(),
     evidence: agentStopEvidenceSchema,
   }),
   z.strictObject({

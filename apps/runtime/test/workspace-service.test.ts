@@ -457,6 +457,9 @@ describe('Agent start coordinator with deterministic fake', () => {
       expect(value.storage.sqlite.query<{ state: string }, []>('SELECT state FROM workspaces').get()?.state)
         .toBe('RETAINED');
       expect(value.storage.listTasks(value.projectId)[0]?.state).toBe('FAILED');
+      // A failure that never produced a Session still has to say why through the command surface.
+      expect(value.storage.listTaskExecutions(value.projectId, value.taskId)[0]?.error)
+        .toMatchObject({ code: 'AGENT_START_FAILED' });
     } finally {
       value.storage.close();
     }
@@ -837,6 +840,8 @@ describe('Agent observation and durable event delivery', () => {
       const adapter = new DeterministicFakeAdapter('SUCCEED', [{
         type: 'completed', eventId: 'provider-completed-1', cursor: 'cursor-1',
         outcome: 'FAILURE', evidenceRef: 'fake-quiescence-1',
+        failure: { code: 'PROVIDER_TURN_FAILED',
+          message: 'error: Codex error: The usage limit has been reached' },
       }]);
       const started = await startReservedExecution({
         storage: value.storage, adapter, projectId: value.projectId,
@@ -855,6 +860,44 @@ describe('Agent observation and durable event delivery', () => {
       expect(value.storage.sqlite.query<{ state: string }, []>('SELECT state FROM workspaces').get()?.state)
         .toBe('RETAINED');
       expect(value.storage.listTasks(value.projectId)[0]?.state).toBe('FAILED');
+      // `task status` returns this projection verbatim, so the reason must survive it.
+      expect(value.storage.listTaskExecutions(value.projectId, value.taskId)[0]?.error).toEqual({
+        code: 'AGENT_REPORTED_FAILURE',
+        message: 'error: Codex error: The usage limit has been reached',
+      });
+      const failureEvent = value.storage.listEventsAfter({ sinceSequence: 0, limit: 500 })
+        .find((event) => event.eventType === 'ExecutionFailed');
+      expect(failureEvent?.payload).toMatchObject({ reason: 'AGENT_REPORTED_FAILURE',
+        failure: { code: 'PROVIDER_TURN_FAILED' } });
+    } finally {
+      value.storage.close();
+    }
+  });
+
+  test('rejects a SUCCESS completion that carries a failure reason', async () => {
+    const value = await fixture();
+    try {
+      const execution = await reserveExecutionForAgent(value);
+      const adapter = new DeterministicFakeAdapter('SUCCEED', [{
+        type: 'completed', eventId: 'provider-completed-1', cursor: 'cursor-1',
+        outcome: 'SUCCESS', evidenceRef: 'fake-quiescence-1',
+        failure: { code: 'PROVIDER_TURN_FAILED', message: 'contradictory provider event' },
+      }]);
+      const started = await startReservedExecution({
+        storage: value.storage, adapter, projectId: value.projectId,
+        executionId: execution.executionId, expectedExecutionVersion: 0,
+        prepareCommandId: '11000000-0000-4000-8000-000000000011',
+        startCommandId: '12000000-0000-4000-8000-000000000012',
+        now: () => 20, randomUUID: uuidSequence(100),
+      });
+      await expect(observeAgentEvents({
+        storage: value.storage, adapter, sessionId: started.sessionId,
+        now: () => 30, randomUUID: uuidSequence(300),
+      })).rejects.toMatchObject({ code: 'INVALID_ADAPTER_EVENT' });
+      // The contradictory event must not have been projected: the Session is still the live one.
+      expect(value.storage.sqlite.query<{ state: string }, []>('SELECT state FROM agent_sessions').get()?.state)
+        .toBe('ACTIVE');
+      expect(value.storage.listTaskExecutions(value.projectId, value.taskId)[0]?.error).toBeNull();
     } finally {
       value.storage.close();
     }

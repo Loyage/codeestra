@@ -314,6 +314,9 @@ const evidenceRef = `pi-rpc:agent_settled:session=${live.providerSessionId}`
           // A settled run whose last assistant message ended in an error is a failure: the Agent
           // did not finish the work, so the Runtime must not treat this Execution as successful.
           outcome: turnFailure === null ? 'SUCCESS' : 'FAILURE',
+          ...(turnFailure === null
+            ? {}
+            : { failure: { code: 'PROVIDER_TURN_FAILED', message: turnFailure } }),
           evidence: {
             ref: turnFailure === null ? evidenceRef : `${evidenceRef}:turn=${turnFailure}`,
             toolsQuiescent: true,

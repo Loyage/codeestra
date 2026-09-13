@@ -1,7 +1,8 @@
 export { Phase1Database, StorageError } from './database.js';
 export type {
   AdapterEventResult, AgentAnswerPlan, AgentSessionLifecycleState, AgentStartPlan, AttentionSummary,
-  CommandResult, ConfirmedVerificationPolicy, ExecutionLifecycleState, ExecutionReservation,
+  CommandResult, ConfirmedVerificationPolicy, ExecutionError, ExecutionLifecycleState,
+  ExecutionReservation,
   ExecutionSummary, ObservableAgentSession,
   PendingEventDelivery, ResultCommitAuthorization, ResultCommitCapturePlan, ResultCommitSubject,
   StoredAgentAnswer, StoredConstraint, StoredEventEnvelope, StoredVerificationCommand,

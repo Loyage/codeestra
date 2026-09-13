@@ -1,4 +1,5 @@
 import { Database } from 'bun:sqlite';
+import { z } from 'zod';
 import {
   agentAnswerMigration,
   agentDisconnectMigration,
@@ -171,6 +172,30 @@ export type AgentSessionLifecycleState = 'CREATED' | 'STARTING' | 'ACTIVE' | 'WA
 export type WorkspaceLifecycleState = 'RESERVED' | 'PREPARING' | 'READY' | 'IN_USE'
   | 'RECOVERY_REQUIRED' | 'RETAINED' | 'RELEASED';
 
+/**
+ * Bounded failure reason persisted with a terminal Execution. `code` is the Runtime's own
+ * classification; `message` is the provider's own text when an adapter reported one.
+ */
+export const executionErrorSchema = z.object({
+  code: z.string().min(1),
+  message: z.string().min(1).optional(),
+});
+export type ExecutionError = z.infer<typeof executionErrorSchema>;
+
+function parseExecutionError(json: string | null): ExecutionError | null {
+  if (json === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json) as unknown;
+  } catch {
+    // The column is JSON-validated by the schema; a parse failure means the row was edited
+    // outside this code path. Report the Execution without inventing a reason.
+    return null;
+  }
+  const result = executionErrorSchema.safeParse(parsed);
+  return result.success ? result.data : null;
+}
+
 /** Read-only projection of one Execution attempt and the Agent Session it started, if any. */
 export interface ExecutionSummary {
   readonly executionId: string;
@@ -182,6 +207,8 @@ export interface ExecutionSummary {
   readonly resourceHeld: boolean;
   readonly baseCommit: string;
   readonly revisionId: string;
+  /** Recorded reason for a terminal failure; `null` while running or when none was recorded. */
+  readonly error: ExecutionError | null;
   readonly session: {
     readonly sessionId: string;
     readonly state: AgentSessionLifecycleState;
@@ -672,13 +699,13 @@ export class Phase1Database {
     return this.sqlite.query<{
       execution_id: string; task_id: string; attempt_number: number;
       state: ExecutionLifecycleState; adapter_id: string; adapter_version: string;
-      resource_held: number; base_commit: string; revision_id: string;
+      resource_held: number; base_commit: string; revision_id: string; error_json: string | null;
       session_id: string | null; session_state: AgentSessionLifecycleState | null;
       provider_session_id: string | null; observation_cursor: string | null;
     }, [string]>(`
       SELECT execution.id AS execution_id,execution.task_id,execution.attempt_number,execution.state,
         execution.adapter_id,execution.adapter_version,execution.resource_held,execution.base_commit,
-        execution.applied_revision_id AS revision_id,
+        execution.applied_revision_id AS revision_id,execution.error_json,
         session.id AS session_id,session.state AS session_state,
         session.provider_session_id,session.observation_cursor
       FROM executions execution LEFT JOIN agent_sessions session ON session.execution_id=execution.id
@@ -693,6 +720,7 @@ export class Phase1Database {
       resourceHeld: row.resource_held === 1,
       baseCommit: row.base_commit,
       revisionId: row.revision_id,
+      error: parseExecutionError(row.error_json),
       session: row.session_id === null || row.session_state === null ? null : {
         sessionId: row.session_id,
         state: row.session_state,
@@ -1718,13 +1746,16 @@ export class Phase1Database {
     readonly cursor: string;
     readonly outcome: 'SUCCESS' | 'FAILURE';
     readonly evidence: Readonly<{ ref: string; toolsQuiescent: true; ownedWritersStopped: true }>;
+    /** Bounded provider-classified reason; only recorded for a FAILURE outcome. */
+    readonly failure?: Readonly<{ code: string; message: string }>;
     readonly sessionEventId: string;
     readonly executionEventId: string;
     readonly taskEventId: string;
     readonly observedAt: number;
   }): AdapterEventResult {
     return this.sqlite.transaction(() => {
-      const payloadJson = JSON.stringify({ outcome: input.outcome, evidence: input.evidence });
+      const payloadJson = JSON.stringify({ outcome: input.outcome, evidence: input.evidence,
+        ...(input.failure === undefined ? {} : { failure: input.failure }) });
       const duplicate = this.adapterEventDuplicate(input.sessionId, input.providerEventId,
         input.cursor, 'completed', payloadJson);
       if (duplicate) return this.adapterEventResult(input.sessionId, input.providerEventId);
@@ -1757,7 +1788,9 @@ export class Phase1Database {
         const executionUpdate = this.sqlite.query(`
           UPDATE executions SET state='FAILED',resource_held=0,version=version+1,
             ended_at=?1,error_json=?2 WHERE id=?3 AND state='RUNNING'
-        `).run(input.observedAt, JSON.stringify({ code: 'AGENT_REPORTED_FAILURE' }), input.executionId);
+        `).run(input.observedAt, JSON.stringify({ code: 'AGENT_REPORTED_FAILURE',
+          ...(input.failure === undefined ? {} : { message: input.failure.message }) }),
+        input.executionId);
         const workspaceUpdate = this.sqlite.query(
           "UPDATE workspaces SET state='RETAINED' WHERE id=?1 AND state='IN_USE'",
         ).run(subject.workspaceId);
@@ -1775,7 +1808,8 @@ export class Phase1Database {
         `).run(input.executionEventId, subject.projectId, input.executionId,
           subject.executionVersion + 1, input.executionId, input.sessionEventId, input.observedAt,
           JSON.stringify({ executionId: input.executionId, reason: 'AGENT_REPORTED_FAILURE',
-            stopEvidenceRef: input.evidence.ref }));
+            stopEvidenceRef: input.evidence.ref,
+            ...(input.failure === undefined ? {} : { failure: input.failure }) }));
         this.sqlite.query(`
           INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
             aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)

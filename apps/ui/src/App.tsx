@@ -678,7 +678,8 @@ function TasksTab(props: CommonProps & {
                 <h3>执行记录</h3>
                 <table>
                   <thead>
-                    <tr><th>#</th><th>状态</th><th>适配器</th><th>会话</th><th>占用资源</th><th>基线</th></tr>
+                    <tr><th>#</th><th>状态</th><th>适配器</th><th>会话</th><th>占用资源</th><th>基线</th>
+                      <th>失败原因</th></tr>
                   </thead>
                   <tbody>
                     {status.executions.map((execution) => (
@@ -689,10 +690,20 @@ function TasksTab(props: CommonProps & {
                         <td>{execution.session === null ? '—' : labelValue(execution.session.state)}</td>
                         <td>{execution.resourceHeld ? '是' : '否'}</td>
                         <td className="mono">{execution.baseCommit.slice(0, 10)}</td>
+                        <td>
+                          {execution.error === null ? '—' : (
+                            <>
+                              <span className="mono">{execution.error.code}</span>
+                              {execution.error.message === undefined ? null : (
+                                <div className="muted">{execution.error.message}</div>
+                              )}
+                            </>
+                          )}
+                        </td>
                       </tr>
                     ))}
                     {status.executions.length === 0 ? (
-                      <tr><td colSpan={6} className="muted">暂无执行记录。</td></tr>
+                      <tr><td colSpan={7} className="muted">暂无执行记录。</td></tr>
                     ) : null}
                   </tbody>
                 </table>

@@ -222,6 +222,8 @@ describe('Pi RPC process adapter', () => {
     for await (const event of adapter.observe(ref)) events.push(event);
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ type: 'completed', outcome: 'FAILURE' });
+    expect(events[0]).toMatchObject({ failure: { code: 'PROVIDER_TURN_FAILED',
+      message: 'error: Codex error: The usage limit has been reached' } });
     expect((events[0] as { evidence: { ref: string } }).evidence.ref)
       .toContain('turn=error: Codex error: The usage limit has been reached');
     expect(adapter.unconfirmedStops()).toEqual([]);
@@ -237,6 +239,7 @@ describe('Pi RPC process adapter', () => {
       type: 'completed', outcome: 'SUCCESS',
       evidence: { toolsQuiescent: true, ownedWritersStopped: true },
     });
+    expect(events[0]).not.toHaveProperty('failure');
     expect((events[0] as { evidence: { ref: string } }).evidence.ref)
       .toContain('pi-rpc:agent_settled:session=stub-session-1');
   });

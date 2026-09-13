@@ -575,6 +575,42 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 
 验证：`nix shell nixpkgs#bun nixpkgs#nodejs_24 nixpkgs#just -c just verify` 通过——212 项 domain Vitest、174 项 Bun tests、TypeScript/UI typecheck、Vite build、`bun audit` 无漏洞；另以临时 `CODEESTRA_HOME` 实测默认 FULL → set strict → 持久查询 STRICT → set full，`runtime.ping` 报告 FULL。补了本轮发现的一处诚实性缺陷：成果提交已释放 workspace 后再次 prepare 会明确拒绝（`NO_ACTIVE_EXECUTION` / `INVALID_EXECUTION_STATE`）且不留下 dangling ACTIVE 授权。未操作真实用户 ref，未使用桌面自动化。真实 Pi FULL 端到端工具执行尚未复验。
 
+## FOUNDATION-027 — 失败原因结构化入库并在 CLI/Web UI 显示
+
+状态：已实现并在命令面（CLI + Runtime HTTP/SSE 传输）验证。触发场景：用户在 Web UI 提交任务后只看到「失败」，没有任何原因。
+
+### 背景（用户报告）
+
+2026-09-13 用户从 Web UI 提交的两个任务（#3「继续开发」、#4「检查为什么失败」）都显示失败。真实原因是 Agent 侧：pi 0.84.4 以 provider `openai-codex` / model `gpt-5.6-sol` 启动后，assistant 轮次以 `stopReason: "error"`、`errorMessage: "Codex error: The usage limit has been reached"` 结束（Codex 用量接口确认 Plus 计划 5 小时窗口 100%）。Runtime 的行为**是正确的**（FOUNDATION-019 修复 #5 已按 stopReason 分类为 FAILURE），但原因只存在于 `ExecutionFailed` 事件的 `stopEvidenceRef` 字符串尾部和 pi session 文件里：`executions.error_json` 只有 `{"code":"AGENT_REPORTED_FAILURE"}`，`listTaskExecutions` 投影不读 `error_json`，UI 执行表也没有原因列。
+
+### 用户本轮确认（数据语义选择题）
+
+从「结构化 code+message 入库显示」「只投影事件链（不改入库语义）」「显示 code + 从证据串提取 turn 原因」中选定**结构化 code+message 入库并显示**。代价是 provider 错误原文进数据库；边界为适配器已截断到 160 字符、空白折叠为单行，且只在 FAILURE 时写入。
+
+### 已实现
+
+- `packages/contracts`：`completed` 观察事件新增可选 `failure: { code, message }`（`agentTurnFailureSchema`，strict）。仅描述 provider 侧分类，缺失表示适配器没有给出原因。
+- `packages/agent-adapters`：`PiRpcAdapter` 在上轮 stopReason 分类为失败时一并发出 `failure: { code: 'PROVIDER_TURN_FAILED', message: <provider 原文> }`；成功轮次不带该字段。deterministic fake 支持透传 `failure`。
+- `packages/storage`：`recordAgentCompletion` 接受 `failure`，FAILURE 分支把 `{ code: 'AGENT_REPORTED_FAILURE', message }` 写入 `executions.error_json`（无原因时退回只有 `code`，不编造 message），并把 `failure` 一并写入 `ExecutionFailed` 事件载荷（`stopEvidenceRef` 保留为审计证据链）。`ExecutionSummary` 新增 `error: { code, message? } | null`，由 `error_json` 经 Zod（`executionErrorSchema`）校验后投影；未知形状不编造原因。
+- `apps/runtime`：`task.status` 原样返回该投影，因此 CLI 与 UI 无需新增命令语义；观察服务拒绝「`outcome: SUCCESS` 却带 failure」的自相矛盾事件（`INVALID_ADAPTER_EVENT`），不静默忽略。
+- `apps/ui`：执行记录表新增「失败原因」列（code + provider 原文）；无原因显示 `—`。
+- 失败但未产生 Session 的路径（`markAgentStartFailed`，例如 `PROVIDER_VERSION_UNAVAILABLE`）本来就把 `{ code, message }` 写进 `error_json`，现在同样通过投影暴露。
+
+### 实际验证
+
+- `bun run check`：TypeScript（Runtime/CLI）、UI 类型检查、212 项 domain Vitest、**176 项 Bun tests**（新增 1 项、扩充 3 项）、UI Vite 构建 全部通过。新增/扩充断言：provider 错误轮次带结构化 `failure` 且成功轮次不带；`SUCCESS`+`failure` 被拒绝且不投影（Session 保持 ACTIVE、`error` 仍为 null）；FAILURE completion 的 `error` 同时出现在 `task.status` 投影与 `ExecutionFailed` 事件载荷；预启动失败路径的 `error` 暴露；契约边界对 `failure` 的 strict 校验。
+- **真实 provider 端到端（命令面）**：临时 `CODEESTRA_HOME=/tmp/ce-real-smoke-home` + 临时仓库 + 真实 Pi 0.84.4（默认 provider/model，未设 `CODEESTRA_PI_PROVIDER/MODEL`）。`task run` 后 pi 轮次以 `stopReason: "error"`（本轮为 `errorMessage: "fetch failed"`，沙箱 WebSocket 传输失败）结束，`task status` 返回 `taskState FAILED`、Execution `FAILED`、`error: { "code": "AGENT_REPORTED_FAILURE", "message": "error: fetch failed" }`；同一 Runtime 的 HTTP `/api/command`（`codeestra ui` 的 token）返回相同 payload，页面资产 200。两个任务均如此。
+- 脚本 provider 端到端（同一命令面、可复现的 quota 文本）：临时 `CODEESTRA_HOME=/tmp/ce-err-smoke-home` + `CODEESTRA_PI_EXECUTABLE` 指向一个按 RPC 协议应答 `get_state`/`prompt` 并发出 `message_end(stopReason=error)` + `agent_settled` 的脚本，`task status` 返回 `error.message = "error: Codex error: The usage limit has been reached"`。**这是协议/编排替身，不是真实 Agent 集成证据**；同一路径的真实 provider 证据见上一条。
+- 未执行：真实 Codex quota 报错复测（额度仍为 100%，`task run` 会立刻失败但该请求走 WebSocket，本沙箱下表现为 `fetch failed`）；浏览器截图/桌面自动化（遵守 ADR-0008，UI 渲染仅由类型检查 + Vite 构建覆盖，视觉确认留给用户）。
+- 未触碰用户 ref：全程只在临时仓库与临时 `CODEESTRA_HOME` 上运行；稳定 Runtime（pid 75937，`~/Documents/codeestra`）仅做只读查询，未停止、未改动。
+
+### 剩余问题
+
+- provider 错误原文现在会入库（≤160 字符、单行）。这与 FOUNDATION-019 记录的「Attention `prompt_json` 是否摘要化」是同一类未决问题，后续可一并决定。
+- 历史 Execution 的 `error_json` 里没有 message（旧代码写入），升级后这些执行只显示 `AGENT_REPORTED_FAILURE` 而无原文；不回溯改写历史。
+- 排查过程用的 `/tmp/ce-err-smoke-home`、`/tmp/ce-real-smoke-home` 及其临时仓库已停止 Runtime，目录保留（可随时删除）。
+- UI 的失败原因列较长时只做了自适应换行，未做折叠/详情展开；长 provider 文本仍以表格单元格展示。
+
 ## NEXT — 最小可用纵向切片
 
 0. 落实 ADR-0009 的 dev 基线：项目快照/Workspace 从 dev OID 建立，先补临时仓库测试；在此之前产品内 `task.run` 仍使用 mainRef，不能用于声称符合新分支规则。

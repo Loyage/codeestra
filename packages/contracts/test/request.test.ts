@@ -231,4 +231,22 @@ describe('Adapter event boundary', () => {
       evidence: { ...event.evidence, toolsQuiescent: false },
     }).success).toBe(false);
   });
+
+  test('accepts a bounded provider failure reason on a FAILURE completion only', () => {
+    const event = {
+      sessionId: 'session', executionId: 'execution', eventId: 'provider-event', cursor: 'cursor',
+      type: 'completed', outcome: 'FAILURE',
+      failure: { code: 'PROVIDER_TURN_FAILED',
+        message: 'error: Codex error: The usage limit has been reached' },
+      evidence: { ref: 'evidence', toolsQuiescent: true, ownedWritersStopped: true },
+    };
+    const parsed = agentObservedEventSchema.safeParse(event);
+    expect(parsed.success).toBe(true);
+    expect(agentObservedEventSchema.safeParse({
+      ...event, failure: { code: 'PROVIDER_TURN_FAILED' },
+    }).success).toBe(false);
+    expect(agentObservedEventSchema.safeParse({
+      ...event, failure: { ...event.failure, detail: 'extra' },
+    }).success).toBe(false);
+  });
 });

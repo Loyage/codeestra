@@ -83,6 +83,10 @@ export async function observeAgentEvents(input: {
         observedAt: now(),
       });
     } else {
+      if (event.outcome === 'SUCCESS' && event.failure !== undefined) {
+        throw new AgentObservationServiceError('INVALID_ADAPTER_EVENT',
+          'A SUCCESS completion must not carry a failure reason');
+      }
       result = input.storage.recordAgentCompleted({
         sessionId: event.sessionId,
         executionId: event.executionId,
@@ -90,6 +94,7 @@ export async function observeAgentEvents(input: {
         cursor: event.cursor,
         outcome: event.outcome,
         evidence: event.evidence,
+        ...(event.failure === undefined ? {} : { failure: event.failure }),
         sessionEventId: randomUUID(),
         executionEventId: randomUUID(),
         taskEventId: randomUUID(),

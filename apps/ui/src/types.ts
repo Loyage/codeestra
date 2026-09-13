@@ -46,6 +46,8 @@ export interface ExecutionView {
   readonly resourceHeld: boolean;
   readonly baseCommit: string;
   readonly revisionId: string;
+  /** Recorded failure reason; `null` while running or when none was recorded. */
+  readonly error: { readonly code: string; readonly message?: string } | null;
   readonly session: {
     readonly sessionId: string;
     readonly state: string;

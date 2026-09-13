@@ -58,7 +58,8 @@ export type FakeObservedEvent = Readonly<
   ({ eventId: string; cursor: string } & (
     | { type: 'attention'; providerRequestId: string; kind: 'QUESTION' | 'PERMISSION';
       responseType: 'CONFIRM' | 'VALUE'; prompt: unknown }
-    | { type: 'completed'; outcome: 'SUCCESS' | 'FAILURE'; evidenceRef: string }
+    | { type: 'completed'; outcome: 'SUCCESS' | 'FAILURE'; evidenceRef: string;
+      failure?: { code: string; message: string } }
     | { type: 'disconnected'; reason: string }
   ))
 >;
@@ -124,6 +125,7 @@ export class DeterministicFakeAdapter implements AgentAnswerAdapter {
         yield { ...identity, type: event.type, reason: event.reason };
       } else {
         yield { ...identity, type: event.type, outcome: event.outcome,
+          ...(event.failure === undefined ? {} : { failure: event.failure }),
           evidence: { ref: event.evidenceRef, toolsQuiescent: true, ownedWritersStopped: true } };
       }
     }
