@@ -78,6 +78,8 @@ bun run codeestra open .                   # 同上，并直接打开浏览器
 
 然后在界面上：创建草稿任务 → 提交 → `Run task…`（真实 Agent，敏感工具逐次审批）→ `Prepare result commit` → `Confirm result commit` → `Verify task`。
 
+`open` 只在项目陌生、或 `.codeestra/policies/verification.json` 真的变了时才要求输入 TRUST；日常向 main 提交代码不会再要一次确认。
+
 验证副本是固定 commit 的 `git worktree --detach`，**不含被 gitignore 的 `node_modules`**，所以策略的第一条命令是 `bun install --frozen-lockfile`（需要网络/缓存），第二条是 `bun run check`。
 
 成果落在内部 `refs/heads/task/<task-id>` 上，**没有 Integration 阶段**，需要人工合并：

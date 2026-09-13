@@ -9,6 +9,10 @@ interface TrustedProjectListing {
   readonly id: string;
   readonly name: string;
   readonly repoRoot: string;
+  /** The active policy confirmation, or null when trust never confirmed one. */
+  readonly confirmedPolicy:
+    { readonly state: 'ABSENT' | 'PRESENT'; readonly digest: string | null;
+      readonly mainRef: string; readonly mainCommit: string } | null;
 }
 
 type ClientRequest = RuntimeRequest extends infer Request
@@ -237,20 +241,37 @@ try {
       path }) as VerificationPolicyInspection;
     describeVerificationPolicy(policy);
 
-    console.error('\nTrusting allows an Agent, commands, and Git hooks to run with your user'
-      + ' permissions.');
-    console.error('It does not authorize commits, main updates, pushes, or unknown tools.');
-    const confirmed = flagTokens.includes('--yes')
-      || prompt('Type TRUST to confirm:') === 'TRUST';
-    if (!confirmed) throw new Error('Project trust was not confirmed');
-    await call({
-      command: 'project.trust',
-      path,
-      expectedIdentity: identity,
-      expectedVerificationPolicy: policy.state === 'PRESENT'
-        ? { state: 'PRESENT', mainCommit: policy.mainCommit, digest: policy.digest as string }
-        : { state: 'ABSENT', mainCommit: policy.mainCommit },
-    });
+    const known = (await call({ command: 'project.list' }) as TrustedProjectListing[])
+      .find((candidate) => candidate.repoRoot === identity.repoRoot);
+    const confirmation = known?.confirmedPolicy ?? null;
+    // One confirmation per project on the normal path. The rule mirrors the gate task verify
+    // applies: the confirmed *policy digest* is what must still match, so committing to the main
+    // ref without touching the policy file never asks for a new confirmation.
+    const alreadyConfirmed = confirmation !== null
+      && confirmation.state === policy.state
+      && (policy.state !== 'PRESENT' || confirmation.digest === policy.digest);
+    if (alreadyConfirmed) {
+      console.error(`\nAlready trusted as ${String(known?.name)}; the policy at the main ref is the`
+        + ' confirmed one, so nothing needs confirming again.');
+    } else {
+      if (known !== undefined) {
+        console.error('\nThe confirmation on file no longer matches this repository: the policy at'
+          + ' the main ref changed (or was never confirmed), so it needs confirming again.');
+      }      console.error('\nTrusting allows an Agent, commands, and Git hooks to run with your user'
+        + ' permissions.');
+      console.error('It does not authorize commits, main updates, pushes, or unknown tools.');
+      const confirmed = flagTokens.includes('--yes')
+        || prompt('Type TRUST to confirm:') === 'TRUST';
+      if (!confirmed) throw new Error('Project trust was not confirmed');
+      await call({
+        command: 'project.trust',
+        path,
+        expectedIdentity: identity,
+        expectedVerificationPolicy: policy.state === 'PRESENT'
+          ? { state: 'PRESENT', mainCommit: policy.mainCommit, digest: policy.digest as string }
+          : { state: 'ABSENT', mainCommit: policy.mainCommit },
+      });
+    }
 
     const projects = await call({ command: 'project.list' }) as TrustedProjectListing[];
     const project = projects.find((candidate) => candidate.repoRoot === identity.repoRoot);

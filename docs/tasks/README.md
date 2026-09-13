@@ -444,13 +444,15 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 
 - `.codeestra/policies/verification.json`（人工维护，位于 main ref，Task 分支无法改写判它的命令）：两条命令——`install`（`bun install --frozen-lockfile`）与 `check`（`bun run check`）。**为什么需要 install**：验证副本是 `git worktree add --detach` 的固定 commit，不含被 gitignore 的 `node_modules`，因此任何依赖 `node_modules` 的策略命令必须先装依赖。
 - `codeestra open [path] [--yes] [--no-open]`（`apps/cli/src/main.ts`）：inspect 仓库 → 打印身份与将要执行的验证命令 → 走与 UI 相同的 TRUST 确认门禁 → `project.trust` → 启动/复用 Web UI → 输出把该项目放进 URL fragment 的地址并按需打开浏览器。它**只组合既有命令**（`project.inspect/verificationPolicy/trust/list`、`runtime.ui`），未新增任何只有 UI 或只有 CLI 可用的路径，也未新增门禁。
+- **一次确认**：`project.list` 增加 `confirmedPolicy`（ADR-0006 的有效策略确认）；`open` 在“已信任且已确认的策略 digest 与 main ref 当前策略一致”时**不再要求确认**，只在项目陌生或策略文件真的变了时走 TRUST 门禁。判定规则与 `task verify` 的门禁一致（比 digest，不比 main commit），所以日常向 main 提交代码不会反复要求确认——符合 ADR-0008“常态路径上任何门禁最多一次显式确认”。
 - 预选实现：URL fragment 增加 `project=<id>`（token 仍只在 fragment，绝不进 query/日志）；`apps/ui/src/main.tsx` 一次性解析 fragment 后清空地址栏，`App`/`Console` 用 `initialProjectId` 选中该项目，若该项目不存在则回退到列表首项。
 - `CODEESTRA_UI_DIST` 环境变量：UI 静态资产根可配置（打包安装与测试都需要），默认仍是 `apps/ui/dist`。
 - 端到端测试 `apps/runtime/test/cli-open.test.ts`（Bun test，CLI 子进程 + 独立 temp home/仓库/资产）：断言 `open` 打印策略命令、项目出现在 `project list`（repoRoot 为规范路径）、URL 的 fragment 同时含 token 与 project 且 query 为空、host 为 `127.0.0.1`；断言无确认时**拒绝信任**且 `project list` 仍为空。
 
 ### 实际验证
 
-- `nix shell nixpkgs#bun nixpkgs#nodejs_24 nixpkgs#just -c just verify`：TypeScript 与 UI 类型检查通过、**212 项 Vitest** 通过、**161 项 Bun tests** 通过（含新增 2 项 `cli-open`）、UI Vite 构建成功、`bun audit` 无已知漏洞。
+- `nix shell nixpkgs#bun nixpkgs#nodejs_24 nixpkgs#just -c just verify`：TypeScript 与 UI 类型检查通过、**212 项 Vitest** 通过、**164 项 Bun tests** 通过（含新增 5 项 `cli-open`）、UI Vite 构建成功、`bun audit` 无已知漏洞。
+- `cli-open` 的 5 项断言覆盖：首次信任并预选、已确认时不再要求确认、main ref 前进但策略未变时仍不要求确认、策略文件变更后要求重新确认、无确认时拒绝信任且 `project list` 仍为空（stdin 为 /dev/null，任何多余的提问都会变成失败而不是挂起）。
 - 真实注册（默认 `CODEESTRA_HOME`）：`codeestra open . --yes --no-open` 输出 URL 的 fragment 含本项目 id；`codeestra project list` 显示本仓库；`task verify` 的策略来源为 main ref 上的 `digest`。
 - 该策略命令的实际可行性由真实 `task verify` 运行确认（见下条“剩余问题”中记录的耗时与网络依赖）。
 
@@ -459,6 +461,7 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 - 验证副本没有 `node_modules`，所以 `install` 依赖网络（bun 缓存可加速）；离线环境会失败并记为 `COMMAND_FAILED`。后续可考虑“验证副本复用主仓库依赖”的可配置策略，但那会改变隔离语义，需先决策。
 - 无 Integration 阶段：成果只在 `refs/heads/task/<task-id>`，需要人工 `git merge task/<task-id>`；main 提升的授权门禁仍未实现。
 - `open` 只预选项目，不预选/创建任务；界面内建任务仍需手填规范。
+- `confirmedPolicy` 目前随 `project.list` 逐个项目查询返回（项目数量级很小）；若项目数增长，应改成按需查询的命令。
 - 验证策略变更（改 `.codeestra/policies/verification.json` 并提交）会使已确认的 digest 失效，需重新 `open`/`trust` 确认——这是 ADR-0006 的预期行为，但用户会看到“策略未确认”的拒绝。
 
 ## NEXT — 最小可用纵向切片

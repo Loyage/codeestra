@@ -118,7 +118,12 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       }));
     }
     case 'project.list':
-      return success(request.requestId, storage.listTrustedProjects());
+      // `confirmedPolicy` is the active ADR-0006 confirmation, so a client can tell whether the
+      // policy at the main ref still matches what a human confirmed without re-confirming blindly.
+      return success(request.requestId, storage.listTrustedProjects().map((project) => ({
+        ...project,
+        confirmedPolicy: storage.getConfirmedVerificationPolicy(project.id),
+      })));
     case 'events.list': {
       const events = storage.listEventsAfter({
         sinceSequence: request.sinceSequence,

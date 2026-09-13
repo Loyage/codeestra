@@ -94,6 +94,54 @@ describe('codeestra open', () => {
     expect(stopped.exitCode).toBe(0);
   }, 60_000);
 
+  test('does not ask for a second confirmation while the confirmed policy still matches', async () => {
+    const { repository, home, assets } = await fixture();
+    const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
+    expect((await cli(['open', repository, '--yes', '--no-open'], environment)).exitCode).toBe(0);
+
+    // stdin is /dev/null: anything that still asked for TRUST would fail instead of reopening.
+    const again = await cli(['open', repository, '--no-open'], environment);
+    expect(again.exitCode).toBe(0);
+    expect(again.stderr).toContain('Already trusted');
+    expect(again.stdout).toContain('project=');
+    await cli(['stop'], environment);
+  }, 60_000);
+
+  test('does not ask again when the main ref moves without touching the policy', async () => {
+    const { repository, home, assets } = await fixture();
+    const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
+    expect((await cli(['open', repository, '--yes', '--no-open'], environment)).exitCode).toBe(0);
+
+    // Ordinary development: commit code to the main ref, which is not a policy change.
+    await Bun.write(join(repository, 'README.md'), 'fixture\nsecond line\n');
+    await git(repository, ['add', '.']);
+    await git(repository, ['commit', '-q', '-m', 'develop']);
+
+    const again = await cli(['open', repository, '--no-open'], environment);
+    expect(again.exitCode).toBe(0);
+    expect(again.stderr).toContain('Already trusted');
+    await cli(['stop'], environment);
+  }, 60_000);
+
+  test('asks again once the policy at the main ref changes', async () => {
+    const { repository, home, assets } = await fixture();
+    const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
+    expect((await cli(['open', repository, '--yes', '--no-open'], environment)).exitCode).toBe(0);
+
+    await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'), JSON.stringify({
+      version: 1,
+      commands: [{ id: 'check', argv: ['bun', 'run', 'typecheck'], cwd: '.', timeoutSeconds: 60 }],
+    }, null, 2));
+    await git(repository, ['add', '.']);
+    await git(repository, ['commit', '-q', '-m', 'change the policy']);
+
+    const stale = await cli(['open', repository, '--no-open'], environment);
+    expect(stale.exitCode).toBe(1);
+    expect(stale.stderr).toContain('no longer matches this repository');
+    expect(stale.stderr).toContain('Project trust was not confirmed');
+    await cli(['stop'], environment);
+  }, 60_000);
+
   test('refuses to trust without the confirmation gate', async () => {
     const { repository, home, assets } = await fixture();
     const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
