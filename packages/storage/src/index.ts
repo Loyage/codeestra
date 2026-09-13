@@ -9,6 +9,9 @@ export type {
   IntegrationBatchState, IntegrationBatchSummary, IntegrationCandidates,
   IntegrationItemState, IntegrationVerificationPlan, IntegrationVerificationSummary, MergeStrategy,
   PendingEventDelivery, ResultCommitAuthorization, ResultCommitCapturePlan, ResultCommitSubject,
+  ReclamationCandidates, ReclamationIntegrationRef, ReclamationOperationPlan, ReclamationOutcome,
+  ReclamationProjectRef, ReclamationRecord, ReclamationRecordInput, ReclamationTaskRef,
+  ReclamationVerificationRef, ReclamationWorkspaceRef,
   StoredAgentAnswer, StoredConstraint, StoredEventEnvelope, StoredVerificationCommand,
   TaskLifecycleState, TaskResumeRequest, TaskStopRequest, TaskSummary,
   TrustedProject, VerificationCandidateExecution, VerificationCandidates, VerificationEvidence,
@@ -18,7 +21,8 @@ export type {
 export {
   agentAnswerMigration, agentConfigurationMigration, agentDisconnectMigration,
   agentObservationMigration, agentStartMigration, integrationPipelineMigration,
-  phase1Migration, phase1SchemaVersion, taskControlMigration, taskVerificationMigration,
+  phase1Migration, phase1SchemaVersion, reclamationMigration, taskControlMigration,
+  taskVerificationMigration,
   workspaceRetryMigration,
 } from './migration.js';
 export { agentThinkingLevelSchema, agentThinkingLevels, storedAgentConfigurationSchema }

@@ -247,6 +247,15 @@ const constraintsSchema = z.array(constraintSchema).superRefine((constraints, co
   }
 });
 
+/**
+ * Runtime-owned resources a reclamation run may consider. Each kind is deleted only after its
+ * path, its recorded ownership identity and its Git worktree registration all agree.
+ */
+export const reclaimKindSchema = z.enum([
+  'TASK_WORKTREE', 'VERIFICATION_COPY', 'INTEGRATION_WORKTREE',
+]);
+export type ReclaimKind = z.infer<typeof reclaimKindSchema>;
+
 export const runtimeRequestSchema = z.discriminatedUnion('command', [
   z.strictObject({ ...requestBase, command: z.literal('runtime.ping') }),
   z.strictObject({ ...requestBase, command: z.literal('runtime.stop') }),
@@ -502,6 +511,40 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     projectId: z.string().uuid(),
     attentionId: z.string().uuid(),
     answer: agentAnswerSchema,
+  }),
+  /**
+   * Read-only preview of what a reclamation would remove and why. This is the dry run: it
+   * performs no deletion, writes nothing, and returns the same decision shape as `reclaim.apply`.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('reclaim.plan'),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid().optional(),
+    kinds: z.array(reclaimKindSchema).min(1).optional(),
+    /** Failure scenes (failed/conflicted runs, dirty or unmerged worktrees) are retained by default. */
+    includeFailureScenes: z.boolean().default(false),
+  }),
+  /**
+   * Executes one reclamation. It removes only Runtime-owned resources whose ownership was verified,
+   * keeps every failure scene unless `includeFailureScenes` is set, and never deletes a branch.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('reclaim.apply'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid().optional(),
+    kinds: z.array(reclaimKindSchema).min(1).optional(),
+    includeFailureScenes: z.boolean().default(false),
+  }),
+  /** The append-only ledger of reclamation decisions, newest first. */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('reclaim.records'),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid().optional(),
+    limit: z.number().int().min(1).max(500).default(100),
   }),
 ]);
 export type RuntimeRequest = z.infer<typeof runtimeRequestSchema>;

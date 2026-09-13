@@ -957,6 +957,65 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 - 未实现：多成员批次、批级 `STALE`/`CANCELLED`、`dev → main` 提升与重启、失败现场与副本的回收策略。
 - 未用真实 provider 驱动合入（只用 stub）；未使用桌面/浏览器自动化。
 
+## FOUNDATION-041 — 验证副本与失败现场的回收（`reclaim`，ADR-0021）
+
+状态：已实现并通过 CLI/命令面测试；未用真实 provider 驱动回收（回收不依赖 provider），未使用桌面/浏览器自动化。**本轮占用 schema v12；v11 保留给 A1 格，未使用。**
+
+用户本轮选择（记录为 ADR-0021）：
+
+1. 回收范围 = Runtime 自己拥有的三类资源（Task worktree / 验证副本 / integration worktree），不是整个数据目录。
+2. 失败现场默认保留，`--include-failure-scenes` 才显式回收。
+3. 命令面 = 只读预览 `reclaim plan` + 执行 `reclaim apply` + 账本 `reclaim records`，预览与执行共用同一决策结构。
+4. 不新增确认门禁（显式用户命令；FULL 零确认预算保持 0，STRICT 也不新增）。
+5. 审计入 append-only 表 `reclamation_records`（schema v12）。
+
+### 已实现
+
+- `packages/git/src/reclaim.ts`（新）：`inspectOwnedPath`（realpath 归属判定 + symlink 拒绝）、`inspectOwnedWorktreeRegistration`（`git worktree list --porcelain -z` 注册证据）、`inspectWorktreeState`（tracked/untracked 脏度）、`removeOwnedWorktree`（删除前逐一复核 owned root / 注册路径 / branch 或 detached HEAD；缺失目录时仅 `git worktree prune`；`git worktree remove --force` 不可用时在已证明归属的路径上有界回退 `rmSync`）。**不删 branch、不 `git clean`、不 `reset --hard`。**
+- `apps/runtime/src/reclaim-service.ts`（新）：
+  - `planReclamation`：只读预览，逐资源给出 `RECLAIM`/`RETAIN`/`REFUSE`/`ALREADY_ABSENT` 与 reason/evidence。
+  - `applyReclamation`：把目标列表与 payload 哈希在副作用前写入 `operations`（`kind='RECLAIM_RESOURCES'`），逐资源重新校验后删除，并把每次判断落入账本；`outcome` 为 `FAILED` 仅当有资源真的删除失败。
+  - `reconcileInterruptedReclamations`：启动时按真实状态收敛被中断的 operation（消失的记 `RECLAIMED/RECONCILED_INTERRUPTED` 并补做 workspace→`RELEASED`；仍在的记 `RETAINED/INTERRUPTED_UNFINISHED`），自身不删除任何东西。
+  - `listReclamationRecords`：账本查询（先校验项目处于 ACTIVE trust）。
+- `packages/storage`：`phase1SchemaVersion` 10 → 12；新增 additive `reclamationMigration`（`reclamation_records` + 索引 + `UNIQUE(operation_id,kind,resource_id)`）；新增只读/记账方法 `getReclamationCandidates`、`releaseWorkspaceForReclamation`、`planReclamationOperation`/`startReclamationOperation`/`finishReclamationOperation`/`findReclamationOperation`/`listIncompleteReclamationOperations`、`listReclamationRecords`。
+- `packages/contracts`：`reclaim.plan` / `reclaim.apply` / `reclaim.records` 三个严格请求（union 末尾追加）。
+- `apps/cli/src/main.ts`：`reclaim plan|apply|records`（JSON 输出；`apply` 仅在 `outcome=FAILED` 时退出码 1；未知/未信任项目 `NOT_FOUND` 退出码 1）；usage 追加命令行。
+- `apps/runtime/src/main.ts`：新服务接线 + 启动 reconcile（只做新服务接线与一行 reconcile）。
+
+### 归属与安全判定（删除前全部满足）
+
+1. 路径绝对且 realpath 后严格位于对应 owned root 内；资源路径本身是 symlink → `SYMLINK_ESCAPE` 拒绝（不跟随）。
+2. 路径必须在 `git worktree list --porcelain -z` 注册，且注册路径与记录一致；有目录但无注册 → `UNREGISTERED_DIRECTORY` 拒绝。
+3. Task worktree 注册 branch 必须等于 `workspaces.branch_ref`；detached 副本 HEAD 必须等于记录承诺的 commit（验证副本 = `tested_commit`，integration ∈ {`dev_commit`,`merged_commit`,`integrated_commit`}）。
+4. held Execution（`resource_held=1`）或 Task 处于运行/暂停/等待/回收确认状态 → `ACTIVE_EXECUTION`/`TASK_NOT_TERMINAL` 拒绝，`--include-failure-scenes` 也不能覆盖。
+5. 删除对象只由 `workspaces` / `verification_runs` / `integration_batches` 记录决定，不凭显示名、CLI 路径或未校验 ref。
+
+### Attention 工具参数结论（ADR-0021 D05）
+
+本轮明确决定：**`attention_requests.prompt_json` 继续原样保存 provider dialog 的完整工具参数，不做 Runtime 侧摘要化**。理由：审批绑定的是精确输入（标题含 input SHA-256），截断/摘要会让审计无法复现“当时批准了什么”并削弱 fail-closed gate 证据链；本机单用户 FULL 信任边界内数据库目录 0700/socket 0600 与用户可见的工具调用同一信任级；由 Runtime 改写 provider 原始材料属“机器替代叙述”。后果：参数可能含敏感内容并随 `runtime.sqlite` 长期保留，本轮不提供脱敏/加密/轮转；若将来要最小化存储需另立 ADR（不在本能力内隐式改变）。
+
+### 实际验证
+
+- `bun run check:fast` 通过；`bun run check` 通过（见下方结果）。
+- `packages/git/test/reclaim.test.ts`：15 项通过 —— 归属内路径解析、symlink 不跟随、注册/分支/HEAD 读取、未注册目录识别、相对路径拒绝、注册 worktree 删除且 branch 保留、重复回收 `ALREADY_ABSENT`、stale 注册 prune、owned root 之外拒绝、symlink escape 拒绝、未注册目录拒绝、branch 不匹配拒绝、detached 副本 commit 校验、脏 worktree 判定、缺失路径不算 clean。
+- `apps/runtime/test/cli-reclaim.test.ts`：8 项通过 ——
+  - `reclaim plan` 只读（不删除、不写账本）且与 `apply` 同构；`apply` 回收 EXECUTED+已合入+clean 的 Task worktree、branch/用户仓库不被触碰、workspace 变 `RELEASED`；重复 `apply` 幂等（`alreadyAbsent=1`）；`reclaim records` 可查归属证据。
+  - 失败现场默认 `RETAIN/FAILURE_SCENE`，`--include-failure-scenes` 才回收，且仍保留 branch。
+  - 记录路径实为 Runtime 之外目录时 `REFUSE/PATH_OUTSIDE_OWNED_ROOT`，外来目录与其文件未被删除。
+  - held Execution 时 `REFUSE/ACTIVE_EXECUTION`，worktree 原样保留。
+  - 未知项目 `NOT_FOUND` 且退出码 1（plan/records 均是）。
+  - 崩溃 reconcile：副作用已发生但未记账的 operation 由启动 reconcile 收敛为 `SUCCEEDED`、workspace `RELEASED`、账本记 `RECLAIMED/RECONCILED_INTERRUPTED`，且不再次删除。
+  - schema：v10 库 additive 升级到 v12、`reclamation_records` 存在、`foreign_key_check` 无违规、非法 outcome 被 CHECK 拒绝。
+- 所有测试只用临时 Git 仓库与临时 `CODEESTRA_HOME`；未对任何真实用户仓库执行破坏性操作，未使用 computer-use/桌面自动化。
+
+### 未验证 / 剩余问题
+
+- 未在真实 provider 长跑后回收（正确性不依赖 provider，但未做端到端长时场景）。
+- 未注册目录（DB 写入前崩溃或用户手工放置）只报 `UNREGISTERED_DIRECTORY`/`ALREADY_ABSENT`，不自动清理；需要人工确认后处理，本轮无“清理一切”开关。
+- 未做跨项目一次回收（`--project` 必填）、并发多次 `apply` 压力测试、磁盘配额/轮转。
+- 副本失败现场当前由 `verification-service` 在 run 结束时删除；本能力回收的是它留下的残留（删除失败、Runtime 中断）。未修改 A1 格领地文件。
+- Attention 参数保留决策未做敏感性扫描（例如真实 Agent 在参数里写入密钥的形态）。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。剩余：`dev → main` 提升与重启。
@@ -964,5 +1023,5 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 2. 长命令后台化与进度事件：让 `task.run`/`task.verify` 成为持久 Operation，界面可展示进度并允许取消。
 3. ADR-0010 Phase 3 技术 spike：真实 Pi session-file 双向 RPC↔TUI 恢复、PTY 生命周期、safe-point 与权限模式 side channel；通过后再落 handoff Operation、Session incarnation 和 CLI attach。
 4. revision 投递确认，以及 Runtime 重启后对 stale ACTIVE Session 的启动 reconcile。
-5. 验证副本与失败现场的回收：明确的 `prune`/归属校验与可追溯记录；同时决定 Attention 工具参数是否入库/摘要化。
+5. ~~验证副本与失败现场的回收~~：已由 ADR-0021/FOUNDATION-041 完成（`reclaim plan/apply/records`、归属校验、append-only 账本、启动 reconcile、默认保留失败现场、不新增确认）；同轮决定 Attention 工具参数继续原样入库。剩余：未注册目录的人工处理与跨项目批量回收。
 6. 识别「Agent 不用工具、在散文里提问并结束轮次」的形态（FOUNDATION-030 剩余的一半）：要么把它变成 Attention，要么至少不得记为未加说明的 `SUCCESS`。

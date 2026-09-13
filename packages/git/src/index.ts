@@ -56,6 +56,19 @@ export type {
   VerificationCopy,
   VerificationCopyInspection,
 } from './verification.js';
+export {
+  inspectOwnedPath,
+  inspectOwnedWorktreeRegistration,
+  inspectWorktreeState,
+  removeOwnedWorktree,
+} from './reclaim.js';
+export type {
+  OwnedPathInspection,
+  OwnedWorktreeRegistration,
+  OwnedWorktreeRemoval,
+  OwnedWorktreeRemovalOutcome,
+  OwnedWorktreeState,
+} from './reclaim.js';
 
 async function git(cwd: string, args: readonly string[]): Promise<string> {
   const process = Bun.spawn(['git', '-C', cwd, ...args], {

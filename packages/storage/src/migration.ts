@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 10;
+export const phase1SchemaVersion = 12;
 
 export const phase1Migration = `
 CREATE TABLE projects (
@@ -578,4 +578,37 @@ DROP TABLE workspaces;
 ALTER TABLE workspaces_v7 RENAME TO workspaces;
 CREATE UNIQUE INDEX one_live_workspace ON workspaces(task_id) WHERE state <> 'RELEASED';
 CREATE UNIQUE INDEX one_live_workspace_path ON workspaces(path) WHERE state <> 'RELEASED';
+`;
+
+/**
+ * Resource reclamation (ADR-0021). One append-only ledger row per resource a `reclaim.apply`
+ * examined: what was reclaimed, the ownership evidence that authorized it, and the outcome. Rows
+ * are never updated or deleted, so a later attempt adds new rows instead of rewriting history.
+ *
+ * Schema version 12 is reserved for this migration. Version 11 is reserved by the concurrent A1
+ * lane; when both land, both `version <` steps must be kept and run in ascending order.
+ */
+export const reclamationMigration = `
+CREATE TABLE reclamation_records (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  operation_id TEXT NOT NULL REFERENCES operations(id),
+  command_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('TASK_WORKTREE','VERIFICATION_COPY','INTEGRATION_WORKTREE')),
+  resource_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  ownership_token TEXT,
+  external_ref TEXT,
+  resource_state TEXT NOT NULL,
+  outcome TEXT NOT NULL CHECK(outcome IN ('RECLAIMED','ALREADY_ABSENT','RETAINED','REFUSED','FAILED')),
+  reason_code TEXT NOT NULL CHECK(length(trim(reason_code)) > 0),
+  detail TEXT,
+  evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0)
+) STRICT;
+CREATE INDEX reclamation_records_by_project ON reclamation_records(project_id,created_at,id);
+CREATE INDEX reclamation_records_by_task ON reclamation_records(project_id,task_id,created_at,id);
+CREATE UNIQUE INDEX one_reclamation_record_per_resource
+  ON reclamation_records(operation_id,kind,resource_id);
 `;
