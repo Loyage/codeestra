@@ -57,6 +57,54 @@ describe('Runtime task request boundary', () => {
     }).success).toBe(true);
     expect(runtimeRequestSchema.safeParse({ ...prepare, executionId: 'not-a-uuid' }).success).toBe(false);
   });
+
+  test('accepts a verification request with or without an explicit Execution', () => {
+    const verify = {
+      requestId: base.requestId,
+      schemaVersion: base.schemaVersion,
+      command: 'task.verify' as const,
+      commandId: base.commandId,
+      projectId: base.projectId,
+      taskId: '66666666-6666-4666-8666-666666666666',
+    };
+    expect(runtimeRequestSchema.safeParse(verify).success).toBe(true);
+    expect(runtimeRequestSchema.safeParse({
+      ...verify,
+      executionId: '55555555-5555-4555-8555-555555555555',
+    }).success).toBe(true);
+    expect(runtimeRequestSchema.safeParse({ ...verify, executionId: 'not-a-uuid' }).success).toBe(false);
+  });
+
+  test('requires an explicit verification policy confirmation when trusting a project', () => {
+    const trust = {
+      requestId: base.requestId,
+      schemaVersion: base.schemaVersion,
+      command: 'project.trust' as const,
+      path: '/repo',
+      expectedIdentity: {
+        repoRoot: '/repo', gitCommonDir: '/repo/.git', mainRef: 'refs/heads/main',
+        objectFormat: 'sha1', headCommit: 'a'.repeat(40),
+      },
+    };
+    expect(runtimeRequestSchema.safeParse(trust).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({
+      ...trust,
+      expectedVerificationPolicy: { state: 'ABSENT', mainCommit: 'a'.repeat(40) },
+    }).success).toBe(true);
+    expect(runtimeRequestSchema.safeParse({
+      ...trust,
+      expectedVerificationPolicy: { state: 'PRESENT', mainCommit: 'a'.repeat(40), digest: 'b'.repeat(64) },
+    }).success).toBe(true);
+    // A PRESENT confirmation without a digest cannot be represented.
+    expect(runtimeRequestSchema.safeParse({
+      ...trust,
+      expectedVerificationPolicy: { state: 'PRESENT', mainCommit: 'a'.repeat(40) },
+    }).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({
+      ...trust,
+      expectedVerificationPolicy: { state: 'PRESENT', mainCommit: 'a'.repeat(40), digest: 'short' },
+    }).success).toBe(false);
+  });
 });
 
 describe('Adapter event boundary', () => {

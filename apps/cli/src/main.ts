@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { runtimeResponseSchema, type RepositoryIdentity, type RuntimeRequest, type RuntimeResponse } from '@codeestra/contracts';
+import { runtimeResponseSchema, type RepositoryIdentity, type RuntimeRequest, type RuntimeResponse,
+  type VerificationPolicyInspection } from '@codeestra/contracts';
 
 type ClientRequest = RuntimeRequest extends infer Request
   ? Request extends RuntimeRequest ? Omit<Request, 'requestId' | 'schemaVersion'> : never
@@ -79,6 +80,7 @@ function usage(): never {
   bun run codeestra status
   bun run codeestra stop
   bun run codeestra project inspect [path]
+  bun run codeestra project policy [path]
   bun run codeestra project trust [path] [--yes]
   bun run codeestra project list
   bun run codeestra task create <project-id> <specification>
@@ -88,6 +90,8 @@ function usage(): never {
   bun run codeestra task status <project-id> <task-id>
   bun run codeestra task result prepare <project-id> <task-id> [execution-id]
   bun run codeestra task result commit <project-id> <task-id> <authorization-id> --confirm
+  bun run codeestra task verify <project-id> <task-id> [execution-id]
+  bun run codeestra task verification list <project-id> <task-id>
   bun run codeestra attention list <project-id>
   bun run codeestra attention answer <project-id> <attention-id> confirm <yes|no>
   bun run codeestra attention answer <project-id> <attention-id> value <text>
@@ -106,15 +110,36 @@ try {
     print(await call({ command: 'project.inspect', path: firstArgument ?? process.cwd() }));
   } else if (group === 'project' && action === 'list') {
     print(await call({ command: 'project.list' }));
+  } else if (group === 'project' && action === 'policy') {
+    print(await call({ command: 'project.verificationPolicy', path: firstArgument ?? process.cwd() }));
   } else if (group === 'project' && action === 'trust') {
     const path = firstArgument !== undefined && firstArgument !== '--yes' ? firstArgument : process.cwd();
     const identity = await call({ command: 'project.inspect', path }) as RepositoryIdentity;
     print(identity);
+    const policy = await call({ command: 'project.verificationPolicy',
+      path }) as VerificationPolicyInspection;
+    print(policy);
     console.error('\nTrusting allows an Agent, commands, and Git hooks to run with your user permissions.');
     console.error('It does not authorize commits, main updates, pushes, or unknown tools.');
+    if (policy.state === 'PRESENT') {
+      console.error('task verify will run these commands in an isolated copy of the tested commit:');
+      for (const command of policy.policy?.commands ?? []) {
+        console.error(`  ${command.id}: ${command.argv.join(' ')}`
+          + ` (cwd ${command.cwd}, timeout ${command.timeoutSeconds}s)`);
+      }
+    } else {
+      console.error('This project has no verification policy; task verify will refuse until one is added.');
+    }
     const confirmed = Bun.argv.includes('--yes') || prompt('Type TRUST to confirm:') === 'TRUST';
     if (!confirmed) throw new Error('Project trust was not confirmed');
-    print(await call({ command: 'project.trust', path, expectedIdentity: identity }));
+    print(await call({
+      command: 'project.trust',
+      path,
+      expectedIdentity: identity,
+      expectedVerificationPolicy: policy.state === 'PRESENT'
+        ? { state: 'PRESENT', mainCommit: policy.mainCommit, digest: policy.digest as string }
+        : { state: 'ABSENT', mainCommit: policy.mainCommit },
+    }));
   } else if (group === 'task' && action === 'create') {
     if (firstArgument === undefined || remainingArguments.length === 0) usage();
     print(await call({
@@ -159,6 +184,24 @@ try {
       expectedTaskVersion,
       adapterId,
     }));
+  } else if (group === 'task' && action === 'verify') {
+    const [taskId, executionId, ...extra] = remainingArguments;
+    if (firstArgument === undefined || taskId === undefined || extra.length !== 0) usage();
+    const report = await call({
+      command: 'task.verify',
+      commandId: crypto.randomUUID(),
+      projectId: firstArgument,
+      taskId,
+      ...(executionId === undefined ? {} : { executionId }),
+    }) as { state: string };
+    print(report);
+    if (report.state !== 'PASSED') process.exit(1);
+  } else if (group === 'task' && action === 'verification') {
+    // `task verification <subcommand> …` lands the subcommand in firstArgument.
+    const [projectId, taskId, ...extra] = remainingArguments;
+    if (firstArgument !== 'list' || projectId === undefined || taskId === undefined
+      || extra.length !== 0) usage();
+    print(await call({ command: 'task.verification.list', projectId, taskId }));
   } else if (group === 'task' && action === 'result') {
     // `task result <subcommand> …` is a three-level command, so the subcommand lands in
     // firstArgument and the project ID is the first remaining argument.

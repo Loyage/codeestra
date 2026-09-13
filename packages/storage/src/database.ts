@@ -6,6 +6,7 @@ import {
   agentStartMigration,
   phase1Migration,
   phase1SchemaVersion,
+  taskVerificationMigration,
 } from './migration.js';
 
 export class StorageError extends Error {
@@ -269,6 +270,82 @@ export interface ResultCommitSubject {
   readonly sessionState: AgentSessionLifecycleState | null;
 }
 
+/** The verification policy confirmation that established project trust. */
+export interface VerificationPolicyConfirmationInput {
+  readonly state: 'ABSENT' | 'PRESENT';
+  readonly digest: string | null;
+  readonly mainRef: string;
+  readonly mainCommit: string;
+}
+
+/** Read projection of an active confirmation, including who confirmed it and when. */
+export interface ConfirmedVerificationPolicy extends VerificationPolicyConfirmationInput {
+  readonly actor: string;
+  readonly confirmedAt: number;
+}
+
+export type VerificationState = 'QUEUED' | 'RUNNING' | 'PASSED' | 'FAILED' | 'ERROR' | 'STALE';
+
+/** One command of a confirmed policy, as it was frozen into a run. */
+export interface StoredVerificationCommand {
+  readonly id: string;
+  readonly argv: readonly string[];
+  readonly cwd: string;
+  readonly timeoutSeconds: number;
+}
+
+/** Non-secret evidence: exit facts, digests, and paths, never captured command output. */
+export type VerificationEvidence = Readonly<Record<string, unknown>>;
+
+export interface VerificationCandidateExecution {
+  readonly executionId: string;
+  readonly attemptNumber: number;
+  readonly state: ExecutionLifecycleState;
+  readonly appliedRevisionId: string;
+  readonly resultCommit: string | null;
+  readonly baseCommit: string;
+}
+
+/** Read-only facts the verification service needs before it may run anything. */
+export interface VerificationCandidates {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly taskDisplayNumber: number;
+  readonly taskState: TaskLifecycleState;
+  readonly currentRevisionId: string;
+  readonly repositoryRoot: string;
+  readonly gitCommonDir: string;
+  readonly mainRef: string;
+  readonly objectFormat: 'sha1' | 'sha256';
+  readonly executions: readonly VerificationCandidateExecution[];
+}
+
+export interface VerificationRunSummary {
+  readonly verificationId: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly executionId: string;
+  readonly revisionId: string;
+  readonly testedCommit: string;
+  readonly testedTree: string;
+  readonly policyVersion: string;
+  readonly policyDigest: string;
+  readonly mainCommit: string;
+  readonly commands: readonly StoredVerificationCommand[];
+  readonly copyPath: string;
+  readonly state: VerificationState;
+  readonly outcomeCode: string | null;
+  readonly evidence: VerificationEvidence | null;
+  readonly queuedAt: number;
+  readonly startedAt: number | null;
+  readonly endedAt: number | null;
+}
+
+export interface VerificationRunPlan extends VerificationRunSummary {
+  readonly operationId: string;
+  readonly operationState: 'PLANNED' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'RECONCILE_REQUIRED';
+}
+
 export interface TaskSummary {
   readonly id: string;
   readonly projectId: string;
@@ -320,32 +397,99 @@ export class Phase1Database {
       if (version < 3) this.sqlite.exec(agentObservationMigration);
       if (version < 4) this.sqlite.exec(agentAnswerMigration);
       if (version < 5) this.sqlite.exec(agentDisconnectMigration);
+      if (version < 6) this.sqlite.exec(taskVerificationMigration);
       this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
     })();
   }
 
-  trustProject(input: TrustedProject & { readonly trustId: string; readonly actor: string }): void {
+  /** Records the explicit confirmation that established project trust, including the
+   * verification policy the user saw. Re-trusting an identical repository supersedes the
+   * previous trust and policy confirmation instead of rewriting them. */
+  trustProject(input: TrustedProject & {
+    readonly trustId: string;
+    readonly actor: string;
+    readonly verificationPolicyConfirmationId: string;
+    readonly verificationPolicy: VerificationPolicyConfirmationInput;
+  }): void {
     this.sqlite.transaction(() => {
-      this.sqlite.query(`
-        INSERT INTO projects(id,name,repo_root,git_common_dir,main_ref,object_format,policy_version,created_at)
-        VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
-      `).run(input.id, input.name, input.repoRoot, input.gitCommonDir, input.mainRef,
-        input.objectFormat, input.policyVersion, input.trustedAt);
+      const existing = this.sqlite.query<{
+        id: string; repo_root: string; git_common_dir: string; main_ref: string;
+        object_format: 'sha1' | 'sha256';
+      }, [string]>(`
+        SELECT id,repo_root,git_common_dir,main_ref,object_format FROM projects WHERE repo_root=?1
+      `).get(input.repoRoot);
+      let projectId = input.id;
+      if (existing === null) {
+        this.sqlite.query(`
+          INSERT INTO projects(id,name,repo_root,git_common_dir,main_ref,object_format,policy_version,created_at)
+          VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+        `).run(input.id, input.name, input.repoRoot, input.gitCommonDir, input.mainRef,
+          input.objectFormat, input.policyVersion, input.trustedAt);
+      } else {
+        if (existing.repo_root !== input.repoRoot || existing.git_common_dir !== input.gitCommonDir
+          || existing.object_format !== input.objectFormat) {
+          throw new StorageError('INVALID_STATE', 'Repository identity does not match the trusted project');
+        }
+        projectId = existing.id;
+        this.sqlite.query(`
+          UPDATE project_trusts SET status='INVALIDATED',invalidated_at=?1
+          WHERE project_id=?2 AND status='ACTIVE'
+        `).run(input.trustedAt, projectId);
+        this.sqlite.query(`
+          UPDATE project_verification_policy_confirmations SET status='SUPERSEDED',superseded_at=?1
+          WHERE project_id=?2 AND status='ACTIVE'
+        `).run(input.trustedAt, projectId);
+      }
       this.sqlite.query(`
         INSERT INTO project_trusts
           (id,project_id,repo_root,git_common_dir,object_format,policy_version,actor,status,accepted_at)
         VALUES (?1,?2,?3,?4,?5,?6,?7,'ACTIVE',?8)
-      `).run(input.trustId, input.id, input.repoRoot, input.gitCommonDir, input.objectFormat,
+      `).run(input.trustId, projectId, input.repoRoot, input.gitCommonDir, input.objectFormat,
         input.policyVersion, input.actor, input.trustedAt);
+      this.sqlite.query(`
+        INSERT INTO project_verification_policy_confirmations
+          (id,project_id,policy_state,policy_digest,main_ref,main_commit,actor,status,confirmed_at)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,'ACTIVE',?8)
+      `).run(input.verificationPolicyConfirmationId, projectId, input.verificationPolicy.state,
+        input.verificationPolicy.digest, input.verificationPolicy.mainRef,
+        input.verificationPolicy.mainCommit, input.actor, input.trustedAt);
     })();
   }
 
   invalidateProjectTrust(projectId: string, invalidatedAt: number): void {
-    const result = this.sqlite.query(`
-      UPDATE project_trusts SET status='INVALIDATED',invalidated_at=?1
-      WHERE project_id=?2 AND status='ACTIVE'
-    `).run(invalidatedAt, projectId);
-    if (result.changes !== 1) throw new StorageError('NOT_FOUND', 'Active project trust was not found');
+    this.sqlite.transaction(() => {
+      const result = this.sqlite.query(`
+        UPDATE project_trusts SET status='INVALIDATED',invalidated_at=?1
+        WHERE project_id=?2 AND status='ACTIVE'
+      `).run(invalidatedAt, projectId);
+      if (result.changes !== 1) throw new StorageError('NOT_FOUND', 'Active project trust was not found');
+      this.sqlite.query(`
+        UPDATE project_verification_policy_confirmations SET status='SUPERSEDED',superseded_at=?1
+        WHERE project_id=?2 AND status='ACTIVE'
+      `).run(invalidatedAt, projectId);
+    })();
+  }
+
+  /** Active confirmation for a trusted project, or null when trust never confirmed one. */
+  getConfirmedVerificationPolicy(projectId: string): ConfirmedVerificationPolicy | null {
+    const row = this.sqlite.query<{
+      policy_state: 'ABSENT' | 'PRESENT'; policy_digest: string | null; main_ref: string;
+      main_commit: string; actor: string; confirmed_at: number;
+    }, [string]>(`
+      SELECT c.policy_state,c.policy_digest,c.main_ref,c.main_commit,c.actor,c.confirmed_at
+      FROM project_verification_policy_confirmations c
+      JOIN project_trusts trust ON trust.project_id=c.project_id AND trust.status='ACTIVE'
+      WHERE c.project_id=?1 AND c.status='ACTIVE'
+    `).get(projectId);
+    if (row === null) return null;
+    return {
+      state: row.policy_state,
+      digest: row.policy_digest,
+      mainRef: row.main_ref,
+      mainCommit: row.main_commit,
+      actor: row.actor,
+      confirmedAt: row.confirmed_at,
+    };
   }
 
   getTrustedProject(projectId: string): TrustedProject {
@@ -2539,6 +2683,309 @@ export class Phase1Database {
         return { taskId: input.taskId, state: 'READY' as const, version };
       },
     });
+  }
+
+  /** Task, revision, repository facts and Execution attempts for verification decisions. */
+  getVerificationCandidates(projectId: string, taskId: string): VerificationCandidates {
+    const task = this.sqlite.query<{
+      id: string; project_id: string; display_number: number; state: TaskLifecycleState;
+      current_revision_id: string; repo_root: string; git_common_dir: string; main_ref: string;
+      object_format: 'sha1' | 'sha256';
+    }, [string, string]>(`
+      SELECT task.id,task.project_id,task.display_number,task.state,task.current_revision_id,
+             p.repo_root,p.git_common_dir,p.main_ref,p.object_format
+      FROM tasks task
+      JOIN projects p ON p.id=task.project_id
+      JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
+      WHERE task.project_id=?1 AND task.id=?2
+    `).get(projectId, taskId);
+    if (task === null) {
+      throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
+    }
+    const executions = this.sqlite.query<{
+      id: string; attempt_number: number; state: ExecutionLifecycleState;
+      applied_revision_id: string; result_commit: string | null; base_commit: string;
+    }, [string]>(`
+      SELECT id,attempt_number,state,applied_revision_id,result_commit,base_commit
+      FROM executions WHERE task_id=?1 ORDER BY attempt_number DESC
+    `).all(taskId).map((row) => ({
+      executionId: row.id,
+      attemptNumber: row.attempt_number,
+      state: row.state,
+      appliedRevisionId: row.applied_revision_id,
+      resultCommit: row.result_commit,
+      baseCommit: row.base_commit,
+    }));
+    return {
+      projectId: task.project_id,
+      taskId: task.id,
+      taskDisplayNumber: task.display_number,
+      taskState: task.state,
+      currentRevisionId: task.current_revision_id,
+      repositoryRoot: task.repo_root,
+      gitCommonDir: task.git_common_dir,
+      mainRef: task.main_ref,
+      objectFormat: task.object_format,
+      executions,
+    };
+  }
+
+  /**
+   * Records one verification run as QUEUED together with its Operation and command receipt.
+   * Replaying the same command returns the recorded run instead of queuing a second one; a
+   * different payload under the same command ID is rejected.
+   */
+  beginVerificationRun(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly executionId: string;
+    readonly revisionId: string;
+    readonly testedCommit: string;
+    readonly testedTree: string;
+    readonly policyVersion: string;
+    readonly policyDigest: string;
+    readonly mainCommit: string;
+    readonly commands: readonly StoredVerificationCommand[];
+    readonly copyPath: string;
+    readonly verificationId: string;
+    readonly operationId: string;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly queuedAt: number;
+  }): Readonly<{ plan: VerificationRunPlan; created: boolean }> {
+    return this.sqlite.transaction(() => {
+      const existing = this.sqlite.query<{ payload_hash: string; result_json: string }, [string, string]>(
+        'SELECT payload_hash,result_json FROM command_receipts WHERE project_id=?1 AND command_id=?2',
+      ).get(input.projectId, input.commandId);
+      if (existing !== null) {
+        if (existing.payload_hash !== input.payloadHash) {
+          throw new StorageError('COMMAND_CONFLICT',
+            'Command ID was already used with a different payload');
+        }
+        const recorded = JSON.parse(existing.result_json) as { verificationId: string };
+        return { plan: this.verificationRunPlan(recorded.verificationId), created: false };
+      }
+      const task = this.sqlite.query<{ state: TaskLifecycleState; current_revision_id: string }, [string, string]>(
+        `SELECT t.state,t.current_revision_id FROM tasks t
+         JOIN project_trusts trust ON trust.project_id=t.project_id AND trust.status='ACTIVE'
+         WHERE t.project_id=?1 AND t.id=?2`,
+      ).get(input.projectId, input.taskId);
+      if (task === null) {
+        throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
+      }
+      if (task.state !== 'EXECUTED') {
+        throw new StorageError('INVALID_STATE',
+          `Task is ${task.state}; verification needs an EXECUTED Task with a captured result commit`);
+      }
+      if (task.current_revision_id !== input.revisionId) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Task revision changed before verification was queued');
+      }
+      const execution = this.sqlite.query<{
+        state: ExecutionLifecycleState; applied_revision_id: string; result_commit: string | null;
+      }, [string, string]>(`
+        SELECT state,applied_revision_id,result_commit FROM executions WHERE task_id=?1 AND id=?2
+      `).get(input.taskId, input.executionId);
+      if (execution === null) {
+        throw new StorageError('NOT_FOUND', 'Execution was not found for this Task');
+      }
+      if (execution.state !== 'SUCCEEDED' || execution.result_commit !== input.testedCommit
+        || execution.applied_revision_id !== input.revisionId) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Execution evidence changed before verification was queued');
+      }
+      this.sqlite.query(`
+        INSERT INTO operations(id,project_id,kind,aggregate_id,idempotency_key,state,request_json,
+          created_at,updated_at)
+        VALUES (?1,?2,'RUN_TASK_VERIFICATION',?3,?4,'PLANNED',?5,?6,?6)
+      `).run(input.operationId, input.projectId, input.verificationId, input.commandId,
+        JSON.stringify({ verificationId: input.verificationId, taskId: input.taskId,
+          executionId: input.executionId, testedCommit: input.testedCommit,
+          policyDigest: input.policyDigest }), input.queuedAt);
+      this.sqlite.query(`
+        INSERT INTO verification_runs(id,project_id,task_id,execution_id,revision_id,operation_id,
+          command_id,tested_commit,tested_tree,policy_version,policy_digest,main_commit,commands_json,
+          copy_path,state,queued_at)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'QUEUED',?15)
+      `).run(input.verificationId, input.projectId, input.taskId, input.executionId, input.revisionId,
+        input.operationId, input.commandId, input.testedCommit, input.testedTree, input.policyVersion,
+        input.policyDigest, input.mainCommit, JSON.stringify(input.commands), input.copyPath,
+        input.queuedAt);
+      this.sqlite.query(`
+        INSERT INTO command_receipts(project_id,command_id,payload_hash,result_json,created_at)
+        VALUES (?1,?2,?3,?4,?5)
+      `).run(input.projectId, input.commandId, input.payloadHash,
+        JSON.stringify({ verificationId: input.verificationId }), input.queuedAt);
+      return { plan: this.verificationRunPlan(input.verificationId), created: true };
+    })();
+  }
+
+  /** QUEUED → RUNNING with its Operation IN_PROGRESS, before any command is spawned. */
+  startVerificationRun(input: {
+    readonly verificationId: string;
+    readonly startedAt: number;
+  }): VerificationRunPlan {
+    return this.sqlite.transaction(() => {
+      const run = this.verificationRunPlan(input.verificationId);
+      if (run.state !== 'QUEUED') return run;
+      const updated = this.sqlite.query(`
+        UPDATE verification_runs SET state='RUNNING',started_at=?1
+        WHERE id=?2 AND state='QUEUED'
+      `).run(input.startedAt, input.verificationId);
+      const operation = this.sqlite.query(`
+        UPDATE operations SET state='IN_PROGRESS',updated_at=?1 WHERE id=?2 AND state='PLANNED'
+      `).run(input.startedAt, run.operationId);
+      if (updated.changes !== 1 || operation.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION', 'Verification run changed while starting');
+      }
+      return this.verificationRunPlan(input.verificationId);
+    })();
+  }
+
+  /** Records the terminal state, its non-secret evidence, and the VerificationCompleted event. */
+  completeVerificationRun(input: {
+    readonly verificationId: string;
+    readonly state: 'PASSED' | 'FAILED' | 'ERROR';
+    readonly outcomeCode: string;
+    readonly evidence: VerificationEvidence;
+    readonly eventId: string;
+    readonly completedAt: number;
+  }): VerificationRunPlan {
+    return this.sqlite.transaction(() => {
+      const run = this.verificationRunPlan(input.verificationId);
+      if (run.state !== 'QUEUED' && run.state !== 'RUNNING') return run;
+      const updated = this.sqlite.query(`
+        UPDATE verification_runs SET state=?1,outcome_code=?2,evidence_json=?3,ended_at=?4
+        WHERE id=?5 AND state IN ('QUEUED','RUNNING')
+      `).run(input.state, input.outcomeCode, JSON.stringify(input.evidence),
+        input.completedAt, input.verificationId);
+      const operationState = input.state === 'PASSED' ? 'SUCCEEDED' : 'FAILED';
+      const operation = this.sqlite.query(`
+        UPDATE operations SET state=?1,result_json=?2,updated_at=?3
+        WHERE id=?4 AND state IN ('PLANNED','IN_PROGRESS')
+      `).run(operationState, JSON.stringify({ verificationId: input.verificationId,
+        state: input.state, outcomeCode: input.outcomeCode }), input.completedAt, run.operationId);
+      if (updated.changes !== 1 || operation.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION', 'Verification run changed while completing');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'VerificationCompleted',1,'VerificationRun',?3,0,?4,?5,?6,?7)
+      `).run(input.eventId, run.projectId, input.verificationId, input.eventId, null, input.completedAt,
+        JSON.stringify({ verificationId: input.verificationId, taskId: run.taskId,
+          executionId: run.executionId, revisionId: run.revisionId, testedCommit: run.testedCommit,
+          testedTree: run.testedTree, policyVersion: run.policyVersion,
+          policyDigest: run.policyDigest, mainCommit: run.mainCommit,
+          state: input.state, outcomeCode: input.outcomeCode, evidence: input.evidence }));
+      return this.verificationRunPlan(input.verificationId);
+    })();
+  }
+
+  /**
+   * Marks successful runs whose tested commit or confirmed policy no longer applies as STALE.
+   * Old evidence is never rewritten: a stale run keeps its outcome and gains a stale reason.
+   */
+  markVerificationsStale(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly testedCommit: string;
+    readonly policyDigest: string;
+    readonly reason: string;
+    readonly eventId: string;
+    readonly invalidatedAt: number;
+  }): number {
+    return this.sqlite.transaction(() => {
+      const stale = this.sqlite.query<{ id: string }, [string, string, string, string]>(`
+        SELECT id FROM verification_runs
+        WHERE project_id=?1 AND task_id=?2 AND state='PASSED'
+          AND (tested_commit<>?3 OR policy_digest<>?4)
+      `).all(input.projectId, input.taskId, input.testedCommit, input.policyDigest);
+      if (stale.length === 0) return 0;
+      for (const row of stale) {
+        this.sqlite.query(`
+          UPDATE verification_runs
+          SET state='STALE',
+              evidence_json=json_set(COALESCE(evidence_json,'{}'),'$.staleReason',?1,
+                '$.staleAt',?2)
+          WHERE id=?3 AND state='PASSED'
+        `).run(input.reason, input.invalidatedAt, row.id);
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'VerificationInvalidated',1,'Task',?3,0,?1,NULL,?4,?5)
+      `).run(input.eventId, input.projectId, input.taskId, input.invalidatedAt,
+        JSON.stringify({ taskId: input.taskId, reason: input.reason,
+          verificationIds: stale.map((row) => row.id), testedCommit: input.testedCommit,
+          policyDigest: input.policyDigest }));
+      return stale.length;
+    })();
+  }
+
+  listVerificationRuns(projectId: string, taskId: string): readonly VerificationRunSummary[] {
+    return this.sqlite.query<{ id: string }, [string, string]>(`
+      SELECT id FROM verification_runs WHERE project_id=?1 AND task_id=?2
+      ORDER BY queued_at DESC,id
+    `).all(projectId, taskId).map((row) => this.verificationRunPlan(row.id));
+  }
+
+  getVerificationRun(projectId: string, verificationId: string): VerificationRunSummary {
+    const plan = this.verificationRunPlan(verificationId);
+    if (plan.projectId !== projectId) {
+      throw new StorageError('NOT_FOUND', 'Verification run was not found for this project');
+    }
+    return plan;
+  }
+
+  /** Runs a previous Runtime left QUEUED or RUNNING; a restart reconciles them explicitly. */
+  listIncompleteVerificationRuns(): readonly VerificationRunPlan[] {
+    return this.sqlite.query<{ id: string }, []>(`
+      SELECT id FROM verification_runs WHERE state IN ('QUEUED','RUNNING') ORDER BY queued_at,id
+    `).all().map((row) => this.verificationRunPlan(row.id));
+  }
+
+  private verificationRunPlan(verificationId: string): VerificationRunPlan {
+    const row = this.sqlite.query<{
+      id: string; project_id: string; task_id: string; execution_id: string; revision_id: string;
+      operation_id: string; operation_state: VerificationRunPlan['operationState'];
+      tested_commit: string; tested_tree: string; policy_version: string; policy_digest: string;
+      main_commit: string; commands_json: string; copy_path: string; state: VerificationState;
+      outcome_code: string | null; evidence_json: string | null; queued_at: number;
+      started_at: number | null; ended_at: number | null;
+    }, [string]>(`
+      SELECT r.id,r.project_id,r.task_id,r.execution_id,r.revision_id,r.operation_id,
+             o.state AS operation_state,r.tested_commit,r.tested_tree,r.policy_version,
+             r.policy_digest,r.main_commit,r.commands_json,r.copy_path,r.state,r.outcome_code,
+             r.evidence_json,r.queued_at,r.started_at,r.ended_at
+      FROM verification_runs r JOIN operations o ON o.id=r.operation_id
+      WHERE r.id=?1
+    `).get(verificationId);
+    if (row === null) throw new StorageError('NOT_FOUND', 'Verification run was not found');
+    return {
+      verificationId: row.id,
+      projectId: row.project_id,
+      taskId: row.task_id,
+      executionId: row.execution_id,
+      revisionId: row.revision_id,
+      operationId: row.operation_id,
+      operationState: row.operation_state,
+      testedCommit: row.tested_commit,
+      testedTree: row.tested_tree,
+      policyVersion: row.policy_version,
+      policyDigest: row.policy_digest,
+      mainCommit: row.main_commit,
+      commands: JSON.parse(row.commands_json) as readonly StoredVerificationCommand[],
+      copyPath: row.copy_path,
+      state: row.state,
+      outcomeCode: row.outcome_code,
+      evidence: row.evidence_json === null
+        ? null
+        : JSON.parse(row.evidence_json) as VerificationEvidence,
+      queuedAt: row.queued_at,
+      startedAt: row.started_at,
+      endedAt: row.ended_at,
+    };
   }
 
   updateTaskPriority(input: {

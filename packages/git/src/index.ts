@@ -29,6 +29,18 @@ export {
   sensitivePathPolicyVersion,
 } from './sensitive-paths.js';
 export type { SensitivePathHit } from './sensitive-paths.js';
+export {
+  createVerificationCopy,
+  inspectVerificationCopy,
+  readCommitTree,
+  readRefFile,
+  removeVerificationCopy,
+} from './verification.js';
+export type {
+  RefFileContent,
+  VerificationCopy,
+  VerificationCopyInspection,
+} from './verification.js';
 
 async function git(cwd: string, args: readonly string[]): Promise<string> {
   const process = Bun.spawn(['git', '-C', cwd, ...args], {

@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 5;
+export const phase1SchemaVersion = 6;
 
 export const phase1Migration = `
 CREATE TABLE projects (
@@ -317,4 +317,63 @@ INSERT INTO adapter_events_v5(session_id,provider_event_id,cursor,event_type,pay
   SELECT session_id,provider_event_id,cursor,event_type,payload_json,observed_at FROM adapter_events;
 DROP TABLE adapter_events;
 ALTER TABLE adapter_events_v5 RENAME TO adapter_events;
+`;
+
+/**
+ * Task verification: the confirmation a user gave for a project's verification policy, and
+ * the verification runs themselves. `verification_runs` is rebuilt because every column a
+ * run needs is mandatory evidence, and SQLite cannot add NOT NULL columns to a live table.
+ */
+export const taskVerificationMigration = `
+CREATE TABLE project_verification_policy_confirmations (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  policy_state TEXT NOT NULL CHECK(policy_state IN ('ABSENT','PRESENT')),
+  policy_digest TEXT,
+  main_ref TEXT NOT NULL CHECK(length(trim(main_ref)) > 0),
+  main_commit TEXT NOT NULL,
+  actor TEXT NOT NULL CHECK(length(trim(actor)) > 0),
+  status TEXT NOT NULL CHECK(status IN ('ACTIVE','SUPERSEDED')),
+  confirmed_at INTEGER NOT NULL CHECK(confirmed_at >= 0),
+  superseded_at INTEGER,
+  CHECK((policy_state='ABSENT' AND policy_digest IS NULL)
+    OR (policy_state='PRESENT' AND policy_digest IS NOT NULL)),
+  CHECK((status='ACTIVE' AND superseded_at IS NULL)
+    OR (status='SUPERSEDED' AND superseded_at IS NOT NULL))
+) STRICT;
+CREATE UNIQUE INDEX one_active_verification_policy
+  ON project_verification_policy_confirmations(project_id) WHERE status='ACTIVE';
+
+CREATE TABLE verification_runs_v6 (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT NOT NULL,
+  execution_id TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  operation_id TEXT NOT NULL UNIQUE REFERENCES operations(id),
+  command_id TEXT NOT NULL,
+  tested_commit TEXT NOT NULL,
+  tested_tree TEXT NOT NULL,
+  policy_version TEXT NOT NULL,
+  policy_digest TEXT NOT NULL,
+  main_commit TEXT NOT NULL,
+  commands_json TEXT NOT NULL CHECK(json_valid(commands_json) AND json_type(commands_json)='array'),
+  copy_path TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('QUEUED','RUNNING','PASSED','FAILED','ERROR','STALE')),
+  outcome_code TEXT,
+  evidence_json TEXT CHECK(evidence_json IS NULL OR json_valid(evidence_json)),
+  queued_at INTEGER NOT NULL CHECK(queued_at >= 0),
+  started_at INTEGER,
+  ended_at INTEGER,
+  UNIQUE(project_id,command_id),
+  CHECK(ended_at IS NULL OR started_at IS NULL OR ended_at >= started_at),
+  CHECK((state IN ('QUEUED','RUNNING') AND ended_at IS NULL AND outcome_code IS NULL)
+    OR (state IN ('PASSED','FAILED','ERROR','STALE') AND ended_at IS NOT NULL AND outcome_code IS NOT NULL)),
+  FOREIGN KEY(task_id,execution_id) REFERENCES executions(task_id,id),
+  FOREIGN KEY(task_id,revision_id) REFERENCES task_revisions(task_id,id)
+) STRICT;
+DROP TABLE verification_runs;
+ALTER TABLE verification_runs_v6 RENAME TO verification_runs;
+CREATE INDEX verification_subject ON verification_runs(task_id,revision_id,tested_commit);
+CREATE INDEX verification_by_task ON verification_runs(project_id,task_id,queued_at);
 `;

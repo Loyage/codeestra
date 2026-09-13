@@ -67,7 +67,9 @@ Impact 绑定 revision、baseCommit、analyzerVersion，保存 path/directory/mo
 
 ### VerificationRun
 
-scope=TASK/INTEGRATION；subject execution/batch 二选一；revision（Task scope）、testedCommit、treeFingerprint、policyVersion、commands、status、exit evidence。分支指针移动后旧测试不能代表新内容；先冻结 commit 再验证，并检测验证命令是否修改被测树。
+scope=TASK/INTEGRATION；subject execution/batch 二选一；revision（Task scope）、testedCommit、testedTree、policyVersion/policyDigest/mainCommit、commands、state、outcomeCode、非敏感 evidence。分支指针移动后旧测试不能代表新内容；先冻结 commit 再验证，并检测验证命令是否修改被测树。
+
+Phase 1 只实现 TASK scope：subject 固定 `executionId` + `revisionId`，且必须匹配 Task 当前 revision 与已捕获的 `result_commit`。命令来自 main ref 上的人工维护策略（ADR-0006），并在 trust 时一次性确认；Task branch 上的策略文件不参与判定。state 为 `QUEUED → RUNNING → PASSED | FAILED | ERROR`，新 commit 或新 policy digest 使旧 `PASSED` 变为 `STALE`（保留原结论与失效原因，不改写）。`outcomeCode` 区分 `PASSED`、`COMMAND_FAILED`、`COMMAND_TIMEOUT`、`TREE_MUTATED`、`WORKTREE_FAILED`、`RUNTIME_RESTARTED`。evidence 只含 exit code、时长、字节数、摘要、路径列表与副本处理结果，不含原始命令输出。验证证据不等于集成或发布事实。
 
 ### IntegrationBatch / Item / Approval
 

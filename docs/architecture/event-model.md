@@ -58,6 +58,8 @@ type CommandEnvelope<T extends string, P> = {
 | ExecutionFailed / ExecutionCancelled / ExecutionSuperseded | executionId, reason, stopEvidenceRef |
 | RecoveryRequired | resourceType, resourceId, reason |
 | VerificationCompleted / VerificationInvalidated | verificationId, scope, testedCommit, revisionId/batchId, result/reason |
+
+Phase 1（ADR-0006）实际写入：`VerificationCompleted` 的 aggregate 为 `VerificationRun`，payload 携带 verificationId、taskId、executionId、revisionId、testedCommit、testedTree、policyVersion、policyDigest、mainCommit、state、outcomeCode 与非敏感 evidence；不写入命令原始输出。`VerificationInvalidated` 的 aggregate 为 `Task`，payload 携带 taskId、reason、verificationIds、testedCommit 与 policyDigest，旧 run 记录只追加 stale 原因，不重写历史。
 | IntegrationCandidateCreated | batchId, expectedMainCommit, candidateCommit, itemIds |
 | IntegrationApproved / IntegrationApprovalInvalidated | approvalId, batchId, candidateCommit, expectedMainCommit |
 | IntegrationPromoted | batchId, previousMainCommit, promotedCommit, approvalId |

@@ -1,4 +1,7 @@
 import { z } from 'zod';
+import { verificationPolicyConfirmationSchema } from './verification-policy.js';
+
+export * from './verification-policy.js';
 
 export const repositoryIdentitySchema = z.strictObject({
   repoRoot: z.string().min(1),
@@ -40,9 +43,15 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
   z.strictObject({ ...requestBase, command: z.literal('project.inspect'), path: z.string().min(1) }),
   z.strictObject({
     ...requestBase,
+    command: z.literal('project.verificationPolicy'),
+    path: z.string().min(1),
+  }),
+  z.strictObject({
+    ...requestBase,
     command: z.literal('project.trust'),
     path: z.string().min(1),
     expectedIdentity: repositoryIdentitySchema,
+    expectedVerificationPolicy: verificationPolicyConfirmationSchema,
   }),
   z.strictObject({ ...requestBase, command: z.literal('project.list') }),
   z.strictObject({
@@ -99,6 +108,20 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     taskId: z.string().uuid(),
     authorizationId: z.string().uuid(),
     confirm: z.literal(true),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.verify'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    executionId: z.string().uuid().optional(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.verification.list'),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
   }),
   z.strictObject({
     ...requestBase,

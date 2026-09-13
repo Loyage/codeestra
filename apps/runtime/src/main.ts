@@ -12,8 +12,14 @@ import {
   reconcileInterruptedAgentAnswers,
   reconcileInterruptedAgentStarts,
   reconcileInterruptedResultCommits,
+  reconcileInterruptedVerifications,
   reconcileWorkspacePreparations,
 } from './recovery-service.js';
+import {
+  VerificationRunner,
+  inspectVerificationPolicy,
+  runTaskVerification,
+} from './verification-service.js';
 
 interface SocketState { buffer: string }
 
@@ -54,6 +60,10 @@ await reconcileWorkspacePreparations({ storage });
 reconcileInterruptedAgentStarts({ storage });
 reconcileInterruptedAgentAnswers({ storage });
 await reconcileInterruptedResultCommits({ storage });
+reconcileInterruptedVerifications({ storage });
+const verificationRunner = new VerificationRunner();
+/** Verification copies live inside the Runtime data directory, never in the user's repo. */
+const verificationCopiesRoot = join(home, 'verifications');
 let listener: ReturnType<typeof Bun.listen<SocketState>>;
 
 function success(requestId: string, result: unknown): RuntimeResponse {
@@ -78,6 +88,13 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       return success(request.requestId, { stopping: true });
     case 'project.inspect':
       return success(request.requestId, await inspectRepository(request.path));
+    case 'project.verificationPolicy': {
+      const identity = await inspectRepository(request.path);
+      return success(request.requestId, await inspectVerificationPolicy({
+        repositoryRoot: identity.repoRoot,
+        mainRef: identity.mainRef,
+      }));
+    }
     case 'project.list':
       return success(request.requestId, storage.listTrustedProjects());
     case 'task.list':
@@ -88,8 +105,22 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       return success(request.requestId, {
         task,
         executions: storage.listTaskExecutions(request.projectId, request.taskId),
+        verifications: storage.listVerificationRuns(request.projectId, request.taskId),
       });
     }
+    case 'task.verify':
+      return success(request.requestId, await runTaskVerification({
+        storage,
+        runner: verificationRunner,
+        copiesRoot: verificationCopiesRoot,
+        projectId: request.projectId,
+        taskId: request.taskId,
+        ...(request.executionId === undefined ? {} : { executionId: request.executionId }),
+        commandId: request.commandId,
+      }));
+    case 'task.verification.list':
+      return success(request.requestId,
+        storage.listVerificationRuns(request.projectId, request.taskId));
     case 'task.run':
       return success(request.requestId, await coordinator.runTask({
         projectId: request.projectId,
@@ -193,6 +224,18 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       if (JSON.stringify(actual) !== JSON.stringify(request.expectedIdentity)) {
         return failure(request.requestId, 'REPOSITORY_CHANGED', 'Repository identity changed after confirmation');
       }
+      const policy = await inspectVerificationPolicy({
+        repositoryRoot: actual.repoRoot,
+        mainRef: actual.mainRef,
+      });
+      const expected = request.expectedVerificationPolicy;
+      const policyMatches = policy.state === expected.state
+        && policy.mainCommit === expected.mainCommit
+        && (expected.state !== 'PRESENT' || policy.digest === expected.digest);
+      if (!policyMatches) {
+        return failure(request.requestId, 'VERIFICATION_POLICY_CHANGED',
+          'The verification policy at the main ref changed after confirmation; inspect it again');
+      }
       const now = Date.now();
       storage.trustProject({
         id: crypto.randomUUID(),
@@ -203,10 +246,16 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         mainRef: actual.mainRef,
         objectFormat: actual.objectFormat,
         policyVersion: 1,
+        verificationPolicyConfirmationId: crypto.randomUUID(),
+        verificationPolicy: policy.state === 'PRESENT'
+          ? { state: 'PRESENT', digest: policy.digest as string, mainRef: actual.mainRef,
+              mainCommit: policy.mainCommit }
+          : { state: 'ABSENT', digest: null, mainRef: actual.mainRef,
+              mainCommit: policy.mainCommit },
         trustedAt: now,
         actor: 'local-user',
       });
-      return success(request.requestId, { trusted: true, repository: actual });
+      return success(request.requestId, { trusted: true, repository: actual, verificationPolicy: policy });
     }
   }
 }
@@ -242,6 +291,16 @@ async function shutdown(): Promise<void> {
   } catch (error) {
     console.error('[runtime] shutdown could not release every Agent Session',
       error instanceof Error ? error.message : String(error));
+  }
+  try {
+    await verificationRunner.close();
+  } catch (error) {
+    console.error('[runtime] shutdown could not stop every verification command',
+      error instanceof Error ? error.message : String(error));
+  }
+  if (verificationRunner.unconfirmedStops.length > 0) {
+    console.error('[runtime] verification commands did not confirm their stop',
+      verificationRunner.unconfirmedStops.join(','));
   }
   storage.close();
   rmSync(socketPath, { force: true });

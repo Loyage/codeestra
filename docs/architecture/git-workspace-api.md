@@ -76,6 +76,10 @@ interface IntegrationGitPort {
 - 使用仓库可解析的 `user.name` / `user.email`，缺失时请求配置但不代写 Git config。项目 trust 后正常执行 hooks；失败保留现场，不使用 `--no-verify`。commit 成功但回写失败先按 HEAD/OID reconcile，不能盲重试 hook。
 - 如果 Agent 已创建成果 commit，核对可达关系和差异后固定该 OID；Runtime 不重写其历史。Agent 自建 commit 是否仍满足本次用户确认，按同一 HEAD/ChangeSet 授权边界核验，不把 Agent 行为当作用户授权。
 - 验证固定 commit，在隔离验证工作树或等价受控副本运行；验证后若 tracked/untracked 变化影响被测输入，则不能直接标 PASSED。
+- Verification 副本实现（ADR-0006）：在 Runtime 数据目录 `<CODEESTRA_HOME>/verifications/<project-id>/<verification-id>/` 以 `git worktree add --detach <path> <testedCommit>` 创建 detached 副本，不使用也不修改 Task worktree；path 段只接受 UUID，root 先 realpath 再创建，父目录 symlink 与越界路径拒绝。命令在副本内以 argv 数组直接 spawn，附加 `CI=1`，每个命令独立进程组以便超时按组停止。
+- verification policy 通过 `readRefFile` 从配置 main ref 读取 `.codeestra/policies/verification.json`，返回值携带解析到的 commit 作为证据；缺失文件不是错误，但会使验证 fail-closed 拒绝。
+- 副本改动检测用 `git status --porcelain=v1 -z --untracked-files=no`（不过 trim，首列可能是空格）与 `git ls-files --others --exclude-standard -z`：tracked 修改或 HEAD 移动使本次验证为 `ERROR/TREE_MUTATED`；新建的未忽略文件只记入证据。
+- 副本删除用 `git worktree remove --force` + `git worktree prune`，并再次核对路径位于 copies root 内；Runtime 重启对未完成 run 保留副本路径而不是在可能有孤儿进程组时删除现场。
 - release 只处理确认归属且已静止、无未保存改动的 worktree；取消/失败不自动调用。保留 branch/证据，不自动 prune 用户资源。
 
 ## 3. Integration
@@ -94,4 +98,4 @@ interface IntegrationGitPort {
 
 Operation 在副作用前写 PLANNED；外部资源带 operation/ownership identity。Phase 1 workspace prepare 已在 Runtime 启动时使用 `git worktree list --porcelain -z`、canonical path、ref 与 HEAD reconcile：固定 base 的 owned 资源补记成功，确认完全缺失则记失败，任何 identity/HEAD 不确定均保留恢复态；不重放 `git worktree add`。进程归属核对随 Agent start Operation 实现。
 
-测试至少覆盖：路径逃逸、恶意 ref、空仓库、dirty 用户目录、重复 prepare、分支存在但归属不符、Agent 未退出、验证后 diff 变化、main 移动、提升成功但 DB 未记录、取消与提升竞争。全部用临时 Git 仓库，禁止破坏实际项目。
+测试至少覆盖：路径逃逸、恶意 ref、空仓库、dirty 用户目录、重复 prepare、分支存在但归属不符、Agent 未退出、验证后 diff 变化、main 移动、提升成功但 DB 未记录、取消与提升竞争。全部用临时 Git 仓库，禁止破坏实际项目。Phase 1 verification 已覆盖：副本在固定 commit 创建且用户仓库保持 clean、缺失/复用/非 UUID 路径拒绝、tracked 改动与 HEAD 移动检测、副本删除后无 worktree 残留、policy 越界（绝对路径/`~`/`..` cwd）拒绝。

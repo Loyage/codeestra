@@ -72,6 +72,49 @@ export function reconcileInterruptedAgentAnswers(input: {
   });
 }
 
+export interface VerificationRecoveryResult {
+  readonly verificationId: string;
+  readonly outcome: 'RECOVERED_FAILED';
+  readonly copyPath: string;
+}
+
+/**
+ * A Runtime restart cannot prove whether verification commands finished, so an unfinished
+ * run is recorded as ERROR and its copy is kept: an orphaned process group may still own it,
+ * and deleting the scene of the crash would hide that fact.
+ */
+export function reconcileInterruptedVerifications(input: {
+  readonly storage: Phase1Database;
+  readonly now?: () => number;
+  readonly randomUUID?: () => string;
+}): readonly VerificationRecoveryResult[] {
+  const now = input.now ?? Date.now;
+  const randomUUID = input.randomUUID ?? (() => crypto.randomUUID());
+  return input.storage.listIncompleteVerificationRuns().map((run) => {
+    input.storage.completeVerificationRun({
+      verificationId: run.verificationId,
+      state: 'ERROR',
+      outcomeCode: 'RUNTIME_RESTARTED',
+      evidence: {
+        testedCommit: run.testedCommit,
+        testedTree: run.testedTree,
+        policyVersion: run.policyVersion,
+        policyDigest: run.policyDigest,
+        mainCommit: run.mainCommit,
+        previousState: run.state,
+        copyPath: run.copyPath,
+      },
+      eventId: randomUUID(),
+      completedAt: now(),
+    });
+    return {
+      verificationId: run.verificationId,
+      outcome: 'RECOVERED_FAILED' as const,
+      copyPath: run.copyPath,
+    };
+  });
+}
+
 export interface ResultCommitRecoveryResult {
   readonly operationId: string;
   readonly authorizationId: string;

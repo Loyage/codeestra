@@ -33,6 +33,8 @@ READY 的等待原因单独派生为 CONFLICT / CAPACITY / DRAINING / REVISION_R
 
 Task Verification：`NOT_RUN → QUEUED → RUNNING → PASSED | FAILED | ERROR`；revision/commit/策略失效产生 `STALE`。重验创建新 VerificationRun，旧证据不改写。
 
+Phase 1 判定（ADR-0006）：全部命令 exit 0 且副本 tracked 内容未变→`PASSED`；命令非零退出或无法 spawn→`FAILED/COMMAND_FAILED`（不继续后续命令）；超时→`ERROR/COMMAND_TIMEOUT`；tracked 修改或 HEAD 移动→`ERROR/TREE_MUTATED`（不覆盖已判定的 `FAILED`）；副本无法创建→`ERROR/WORKTREE_FAILED`；Runtime 重启→`ERROR/RUNTIME_RESTARTED` 并保留副本路径。终态一旦写入，重放 completion 不改变结论。Task 自身状态不因验证而变成 SUCCEEDED：`PASSED` 只是当前 revision/commit 的 Task scope 证据，仍須经 IntegrationBatch 才能进入 main。
+
 Task Integration summary：`NOT_READY → ELIGIBLE → BATCHED → INTEGRATED`；失败/修订产生 `NEEDS_ATTENTION / STALE`。这些是查询投影，不是替代 Batch 的权威状态。
 
 ## 2. Execution

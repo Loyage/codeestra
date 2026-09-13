@@ -1,6 +1,12 @@
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import {
+  parseVerificationPolicy,
+  verificationPolicyDigest,
+  verificationPolicyPath,
+  type VerificationCommand,
+} from '@codeestra/contracts';
 import { inspectRepository } from '@codeestra/git';
 import { Phase1Database } from '@codeestra/storage';
 
@@ -30,7 +36,20 @@ export interface AgentFixture {
   readonly projectId: string;
   readonly taskId: string;
   readonly revisionId: string;
+  /** Main commit that carries the committed verification policy. */
+  readonly mainCommit: string;
+  readonly verificationPolicy: { readonly state: 'ABSENT' | 'PRESENT'; readonly digest: string | null };
 }
+
+export interface AgentFixtureOptions {
+  /** Commands committed to `.codeestra/policies/verification.json` before trust. */
+  readonly verificationCommands?: readonly VerificationCommand[];
+  /** Omit the policy file entirely, so the project has no verification policy. */
+  readonly withoutVerificationPolicy?: boolean;
+}
+
+const defaultVerificationCommands = [{ id: 'smoke', argv: ['echo', 'verification-ok'],
+  cwd: '.', timeoutSeconds: 60 }];
 
 const projectId = '10000000-0000-4000-8000-000000000001';
 const taskId = '20000000-0000-4000-8000-000000000002';
@@ -40,7 +59,7 @@ export const fixtureRevisionId = '60000000-0000-4000-8000-000000000006';
  * Temporary Git repository plus an in-memory Runtime database with one READY Task.
  * Every path lives under the OS temp directory; no user repository is touched.
  */
-export async function createAgentFixture(): Promise<AgentFixture> {
+export async function createAgentFixture(options: AgentFixtureOptions = {}): Promise<AgentFixture> {
   const repo = mkdtempSync(join(tmpdir(), 'codeestra-agent-repo-'));
   const home = mkdtempSync(join(tmpdir(), 'codeestra-agent-home-'));
   directories.push(repo, home);
@@ -50,6 +69,14 @@ export async function createAgentFixture(): Promise<AgentFixture> {
   await git(repo, ['config', 'user.email', 'test@example.invalid']);
   await Bun.write(join(repo, 'README.md'), 'temporary repository\n');
   await git(repo, ['add', 'README.md']);
+  let verificationPolicy: AgentFixture['verificationPolicy'] = { state: 'ABSENT', digest: null };
+  if (options.withoutVerificationPolicy !== true) {
+    const commands = options.verificationCommands ?? defaultVerificationCommands;
+    const policy = parseVerificationPolicy(JSON.stringify({ version: 1, commands }));
+    await Bun.write(join(repo, verificationPolicyPath), `${JSON.stringify(policy, null, 2)}\n`);
+    verificationPolicy = { state: 'PRESENT', digest: verificationPolicyDigest(policy) };
+    await git(repo, ['add', verificationPolicyPath]);
+  }
   await git(repo, ['commit', '-m', 'initial']);
   const identity = await inspectRepository(repo);
   const storage = new Phase1Database();
@@ -62,6 +89,13 @@ export async function createAgentFixture(): Promise<AgentFixture> {
     mainRef: identity.mainRef,
     objectFormat: identity.objectFormat,
     policyVersion: 1,
+    verificationPolicyConfirmationId: 'b0000000-0000-4000-8000-00000000000b',
+    verificationPolicy: {
+      state: verificationPolicy.state,
+      digest: verificationPolicy.digest,
+      mainRef: identity.mainRef,
+      mainCommit: identity.headCommit,
+    },
     trustedAt: 1,
     actor: 'local-user',
   });
@@ -91,7 +125,7 @@ export async function createAgentFixture(): Promise<AgentFixture> {
     submittedAt: 3,
   });
   return { storage, repo: identity.repoRoot, home: realpathSync(home), projectId, taskId,
-    revisionId: fixtureRevisionId };
+    revisionId: fixtureRevisionId, mainCommit: identity.headCommit, verificationPolicy };
 }
 
 export async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {

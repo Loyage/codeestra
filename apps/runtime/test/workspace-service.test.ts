@@ -57,6 +57,13 @@ async function fixture(): Promise<{
     mainRef: identity.mainRef,
     objectFormat: identity.objectFormat,
     policyVersion: 1,
+    verificationPolicyConfirmationId: 'b0000000-0000-4000-8000-00000000000b',
+    verificationPolicy: {
+      state: 'ABSENT',
+      digest: null,
+      mainRef: identity.mainRef,
+      mainCommit: identity.headCommit,
+    },
     trustedAt: 1,
     actor: 'local-user',
   });

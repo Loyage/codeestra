@@ -325,7 +325,7 @@ CREATE INDEX verification_subject ON verification_runs(task_id,revision_id,teste
 
 应用事务还需检查：成员同项目；execution 的实际产出与 applied revision 匹配；审批引用本 batch 的 PASSED 集成验证；同一 Task 不被两个活动批次同时提升。后者 Phase 4 以 batch claims 表或等价事务锁实现，正式 migration 前补齐。
 
-Schema version 1 仅创建 TASK verification 所需列和复合外键，不创建 `integration_batches`、`integration_batch_items`、`integration_approvals` 或 INTEGRATION scope；Phase 4 migration 引入上述逻辑形态并补做 subject XOR 测试。
+Schema version 1 仅创建 TASK verification 所需列和复合外键，不创建 `integration_batches`、`integration_batch_items`、`integration_approvals` 或 INTEGRATION scope；Phase 4 migration 引入上述逻辑形态并补做 subject XOR 测试。version 6 已将 Phase 1 实际使用的 TASK scope 重建为带 evidence/policy/operation 列的形态，见第 8 节。
 
 ## 6. 操作日志、事件、幂等
 
@@ -395,5 +395,32 @@ Stable pointer/版本清单由 bootstrap 独立管理；Runtime 数据库不可�
 ## 8. Migration 与验收
 
 Phase 1 migration 只含实际使用表；Task 创建循环 FK、revision 不可变、活动 Execution 唯一、成果 commit 授权状态/一次性活动唯一性、CAS 失败、Task verification 复合主体外键、outbox 事务回滚、重复命令至少有真实 SQLite 测试。Integration verification subject XOR 随 Phase 4 表一起加入测试。Phase 2/4 分阶段新增表和索引。
+
+### Phase 1 verification（schema version 6）
+
+```sql
+CREATE TABLE project_verification_policy_confirmations (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  policy_state TEXT NOT NULL CHECK(policy_state IN ('ABSENT','PRESENT')),
+  policy_digest TEXT,
+  main_ref TEXT NOT NULL,
+  main_commit TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('ACTIVE','SUPERSEDED')),
+  confirmed_at INTEGER NOT NULL,
+  superseded_at INTEGER,
+  CHECK((policy_state='ABSENT' AND policy_digest IS NULL)
+    OR (policy_state='PRESENT' AND policy_digest IS NOT NULL)),
+  CHECK((status='ACTIVE' AND superseded_at IS NULL)
+    OR (status='SUPERSEDED' AND superseded_at IS NOT NULL))
+) STRICT;
+CREATE UNIQUE INDEX one_active_verification_policy
+  ON project_verification_policy_confirmations(project_id) WHERE status='ACTIVE';
+```
+
+`verification_runs` 在 version 6 重建（旧表在 Phase 1 从未写入）：新增 `project_id`、`operation_id`（UNIQUE FK `operations`）、`command_id`、`tested_tree`、`policy_digest`、`main_commit`、`copy_path`、`outcome_code`、`evidence_json`、`queued_at`；`tree_fingerprint` 替换为 `tested_tree`；`UNIQUE(project_id,command_id)` 保证同 command 只排队一次；CHECK 约束终态必须有 `ended_at` 与 `outcome_code`，非终态两者必为 NULL。`project_trusts` 不变：确认单独成表，重新 trust 时旧 trust 与旧确认分别置 INVALIDATED/SUPERSEDED，`invalidateProjectTrust` 同时废止确认。
+
+验证命令内容本身**不落库为可执行配置**：`commands_json` 只保存当次冻结的策略快照供审计，执行的策略每次从 main ref 重读并与确认摘要比对。
 
 升级前检查 schema version，未知较新版本拒绝写入。没有通过备份恢复验证前不执行破坏性 migration；Self Evolution 的跨版本回滚策略为单独准入门禁。
