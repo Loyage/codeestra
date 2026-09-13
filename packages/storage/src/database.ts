@@ -159,6 +159,32 @@ export interface ExecutionReservation {
   readonly state: 'CREATED';
 }
 
+export type ExecutionLifecycleState = 'CREATED' | 'PREPARING' | 'STARTING' | 'RUNNING'
+  | 'WAITING_FOR_USER' | 'PAUSING' | 'PAUSED' | 'STOPPING' | 'RECOVERY_REQUIRED' | 'SUCCEEDED'
+  | 'FAILED' | 'CANCELLED' | 'SUPERSEDED';
+
+export type AgentSessionLifecycleState = 'CREATED' | 'STARTING' | 'ACTIVE' | 'WAITING_FOR_USER'
+  | 'PAUSING' | 'PAUSED' | 'STOPPING' | 'EXITED' | 'DISCONNECTED' | 'RECOVERY_REQUIRED';
+
+/** Read-only projection of one Execution attempt and the Agent Session it started, if any. */
+export interface ExecutionSummary {
+  readonly executionId: string;
+  readonly taskId: string;
+  readonly attemptNumber: number;
+  readonly state: ExecutionLifecycleState;
+  readonly adapterId: string;
+  readonly adapterVersion: string;
+  readonly resourceHeld: boolean;
+  readonly baseCommit: string;
+  readonly revisionId: string;
+  readonly session: {
+    readonly sessionId: string;
+    readonly state: AgentSessionLifecycleState;
+    readonly providerSessionId: string | null;
+    readonly cursor: string | null;
+  } | null;
+}
+
 export interface WorkspacePreparationPlan {
   readonly operationId: string;
   readonly operationState: 'PLANNED' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'RECONCILE_REQUIRED';
@@ -401,6 +427,50 @@ export class Phase1Database {
       },
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+    }));
+  }
+
+  /** Execution attempts for one Task, newest first, with the current Agent Session if one exists. */
+  listTaskExecutions(projectId: string, taskId: string): readonly ExecutionSummary[] {
+    const project = this.sqlite.query<{ id: string }, [string]>(`
+      SELECT p.id FROM projects p JOIN project_trusts t
+        ON t.project_id=p.id AND t.status='ACTIVE' WHERE p.id=?1
+    `).get(projectId);
+    if (project === null) throw new StorageError('NOT_FOUND', 'Trusted project was not found');
+    const task = this.sqlite.query<{ id: string }, [string, string]>(
+      'SELECT id FROM tasks WHERE project_id=?1 AND id=?2',
+    ).get(projectId, taskId);
+    if (task === null) throw new StorageError('NOT_FOUND', 'Task was not found');
+    return this.sqlite.query<{
+      execution_id: string; task_id: string; attempt_number: number;
+      state: ExecutionLifecycleState; adapter_id: string; adapter_version: string;
+      resource_held: number; base_commit: string; revision_id: string;
+      session_id: string | null; session_state: AgentSessionLifecycleState | null;
+      provider_session_id: string | null; observation_cursor: string | null;
+    }, [string]>(`
+      SELECT execution.id AS execution_id,execution.task_id,execution.attempt_number,execution.state,
+        execution.adapter_id,execution.adapter_version,execution.resource_held,execution.base_commit,
+        execution.applied_revision_id AS revision_id,
+        session.id AS session_id,session.state AS session_state,
+        session.provider_session_id,session.observation_cursor
+      FROM executions execution LEFT JOIN agent_sessions session ON session.execution_id=execution.id
+      WHERE execution.task_id=?1 ORDER BY execution.attempt_number DESC
+    `).all(taskId).map((row) => ({
+      executionId: row.execution_id,
+      taskId: row.task_id,
+      attemptNumber: row.attempt_number,
+      state: row.state,
+      adapterId: row.adapter_id,
+      adapterVersion: row.adapter_version,
+      resourceHeld: row.resource_held === 1,
+      baseCommit: row.base_commit,
+      revisionId: row.revision_id,
+      session: row.session_id === null || row.session_state === null ? null : {
+        sessionId: row.session_id,
+        state: row.session_state,
+        providerSessionId: row.provider_session_id,
+        cursor: row.observation_cursor,
+      },
     }));
   }
 
@@ -1566,6 +1636,84 @@ export class Phase1Database {
           to: 'RECOVERY_REQUIRED', reason: 'agent transport lost' }));
       return { duplicate: false as const, eventId: input.providerEventId, cursor: input.cursor,
         sessionState: 'DISCONNECTED' as const, executionState: 'RECOVERY_REQUIRED' as const };
+    })();
+  }
+
+  /**
+   * Projects a disconnect the Runtime caused itself, for example by releasing its own provider
+   * process during shutdown. It is not a provider event, so no Adapter event or cursor is written,
+   * and it never claims the Execution succeeded.
+   */
+  recordRuntimeDisconnect(input: {
+    readonly sessionId: string;
+    readonly reason: string;
+    readonly sessionEventId: string;
+    readonly executionEventId: string;
+    readonly taskEventId: string;
+    readonly recoveryEventId: string;
+    readonly recoveredAt: number;
+  }): void {
+    this.sqlite.transaction(() => {
+      const subject = this.observableAgentSessionRow(input.sessionId);
+      if (subject === null) throw new StorageError('NOT_FOUND', 'Runtime disconnect Session was not found');
+      if (!['ACTIVE', 'WAITING_FOR_USER'].includes(subject.sessionState)
+        || !['RUNNING', 'WAITING_FOR_USER'].includes(subject.executionState)) {
+        throw new StorageError('INVALID_STATE',
+          `Runtime disconnect requires an active Session, got ${subject.sessionState}/${subject.executionState}`);
+      }
+      const sessionUpdate = this.sqlite.query(`
+        UPDATE agent_sessions SET state='DISCONNECTED',version=version+1,last_observed_at=?1,exit_json=?2
+        WHERE id=?3 AND state IN ('ACTIVE','WAITING_FOR_USER')
+      `).run(input.recoveredAt, JSON.stringify({ reason: input.reason }), input.sessionId);
+      const executionUpdate = this.sqlite.query(`
+        UPDATE executions SET state='RECOVERY_REQUIRED',version=version+1
+        WHERE id=?1 AND state IN ('RUNNING','WAITING_FOR_USER')
+      `).run(subject.executionId);
+      const workspaceUpdate = this.sqlite.query(
+        "UPDATE workspaces SET state='RECOVERY_REQUIRED' WHERE id=?1 AND state='IN_USE'",
+      ).run(subject.workspaceId);
+      const taskUpdate = this.sqlite.query(`
+        UPDATE tasks SET state='RECOVERY_REQUIRED',version=version+1,updated_at=?1
+        WHERE id=?2 AND state IN ('RUNNING','WAITING_FOR_USER')
+      `).run(input.recoveredAt, subject.taskId);
+      if (sessionUpdate.changes !== 1 || executionUpdate.changes !== 1
+        || workspaceUpdate.changes !== 1 || taskUpdate.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION', 'Runtime disconnect subject changed during projection');
+      }
+      // Session, Execution, and Task states move together in this FSM, so the Execution
+      // state is the honest `from` value for the Task transition as well.
+      const taskFrom = subject.executionState === 'WAITING_FOR_USER' ? 'WAITING_FOR_USER' : 'RUNNING';
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'RecoveryRequired',1,'AgentSession',?3,?4,?5,?5,?6,?7)
+      `).run(input.recoveryEventId, subject.projectId, input.sessionId, subject.sessionVersion + 1,
+        input.sessionId, input.recoveredAt, JSON.stringify({ resourceType: 'AgentSession',
+          resourceId: input.sessionId, reason: input.reason }));
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'AgentSessionStateChanged',1,'AgentSession',?3,?4,?5,?6,?7,?8)
+      `).run(input.sessionEventId, subject.projectId, input.sessionId, subject.sessionVersion + 1,
+        input.recoveryEventId, input.recoveryEventId, input.recoveredAt,
+        JSON.stringify({ sessionId: input.sessionId, from: subject.sessionState,
+          to: 'DISCONNECTED', reason: input.reason }));
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'ExecutionStateChanged',1,'Execution',?3,?4,?5,?6,?7,?8)
+      `).run(input.executionEventId, subject.projectId, subject.executionId,
+        subject.executionVersion + 1, input.recoveryEventId, input.sessionEventId, input.recoveredAt,
+        JSON.stringify({ executionId: subject.executionId, from: subject.executionState,
+          to: 'RECOVERY_REQUIRED', reason: input.reason }));
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'TaskStateChanged',1,'Task',?3,?4,?5,?6,?7,?8)
+      `).run(input.taskEventId, subject.projectId, subject.taskId, subject.taskVersion + 1,
+        input.recoveryEventId, input.executionEventId, input.recoveredAt,
+        JSON.stringify({ taskId: subject.taskId, from: taskFrom,
+          to: 'RECOVERY_REQUIRED', reason: input.reason }));
     })();
   }
 

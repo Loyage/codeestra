@@ -69,6 +69,21 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
   }),
   z.strictObject({
     ...requestBase,
+    command: z.literal('task.run'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    expectedTaskVersion: z.number().int().nonnegative(),
+    adapterId: nonBlankString.default('pi'),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.status'),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+  }),
+  z.strictObject({
+    ...requestBase,
     command: z.literal('attention.list'),
     projectId: z.string().uuid(),
   }),
@@ -207,4 +222,19 @@ export interface AgentObserveAdapter extends AgentStartAdapter {
 /** Answer control is separate so start/observe-only Adapters do not claim unsupported control. */
 export interface AgentAnswerAdapter extends AgentObserveAdapter {
   answer(session: AgentSessionRef, request: AgentAnswerRequest): Promise<AgentControlReceipt>;
+}
+
+/**
+ * Optional capability: an Adapter that owns provider processes can be asked to release one
+ * cooperatively. Absence means the Runtime cannot confirm a provider stop and must not
+ * pretend that it did.
+ */
+export interface AgentProcessRelease {
+  releaseSession(sessionId: string): Promise<{ readonly exited: boolean; readonly pid: number } | null>;
+}
+
+export function supportsProcessRelease(
+  adapter: object,
+): adapter is AgentProcessRelease {
+  return 'releaseSession' in adapter && typeof adapter.releaseSession === 'function';
 }

@@ -7,6 +7,7 @@ import {
   type AgentAnswerRequest,
   type AgentControlReceipt,
   type AgentObservedEvent,
+  type AgentProcessRelease,
   type AgentSessionRef,
   type AgentStartRequest,
 } from '@codeestra/contracts';
@@ -82,7 +83,7 @@ function requiredString(value: unknown, field: string): string {
  * only observe or answer a Session whose process it still holds; a lost process is
  * reported as disconnected instead of being reattached or replayed.
  */
-export class PiRpcAdapter implements AgentAnswerAdapter {
+export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
   readonly id = 'pi';
   readonly #sessions = new Map<string, LiveSession>();
   readonly #unconfirmedStops: number[] = [];
@@ -142,7 +143,15 @@ export class PiRpcAdapter implements AgentAnswerAdapter {
         `Could not launch ${this.#options.piExecutable}: ${error instanceof Error ? error.message : String(error)}`,
         false, false);
     }
-    const [exitCode, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+    let exitCode: number;
+    let stdout: string;
+    try {
+      [exitCode, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+    } catch (error) {
+      throw new PiRpcProcessError('PROVIDER_VERSION_UNAVAILABLE',
+        `Could not run ${this.#options.piExecutable} --version: ${error instanceof Error ? error.message : String(error)}`,
+        false, false);
+    }
     const match = /^(\d+\.\d+\.\d+)/.exec(stdout.trim());
     if (exitCode !== 0 || match === null) {
       throw new PiRpcProcessError('PROVIDER_VERSION_UNAVAILABLE',
@@ -302,7 +311,7 @@ export class PiRpcAdapter implements AgentAnswerAdapter {
   }
 
   /** Called by the Runtime to release a live child it no longer tracks. */
-  async dispose(sessionId: string): Promise<{ readonly exited: boolean; readonly pid: number } | null> {
+  async releaseSession(sessionId: string): Promise<{ readonly exited: boolean; readonly pid: number } | null> {
     const live = this.#sessions.get(sessionId);
     if (live === undefined) return null;
     this.#sessions.delete(sessionId);

@@ -2,8 +2,10 @@ import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, rmSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { runtimeRequestSchema, type RuntimeRequest, type RuntimeResponse } from '@codeestra/contracts';
-import { GitInspectionError, inspectRepository } from '@codeestra/git';
-import { Phase1Database, StorageError } from '@codeestra/storage';
+import { inspectRepository } from '@codeestra/git';
+import { Phase1Database, StorageError, type AgentAnswerPlan } from '@codeestra/storage';
+import { createPiAdapterRegistry } from './adapter-registry.js';
+import { AgentRuntimeCoordinator } from './agent-runtime-service.js';
 import { runtimeHome, runtimeSocketPath } from './paths.js';
 import {
   reconcileInterruptedAgentAnswers,
@@ -39,6 +41,13 @@ if (await endpointIsLive()) process.exit(0);
 rmSync(socketPath, { force: true });
 
 const storage = new Phase1Database(join(home, 'runtime.sqlite'));
+const registry = createPiAdapterRegistry({ runtimeHome: home, environment: Bun.env });
+const coordinator = new AgentRuntimeCoordinator({
+  storage,
+  registry,
+  runtimeHome: home,
+  logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
+});
 await reconcileWorkspacePreparations({ storage });
 reconcileInterruptedAgentStarts({ storage });
 reconcileInterruptedAgentAnswers({ storage });
@@ -55,9 +64,14 @@ function failure(requestId: string, code: string, message: string): RuntimeRespo
 async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
   switch (request.command) {
     case 'runtime.ping':
-      return success(request.requestId, { pid: process.pid, status: 'READY' });
+      return success(request.requestId, {
+        pid: process.pid,
+        status: 'READY',
+        adapters: registry.ids(),
+        activeSessions: coordinator.activeSessionIds(),
+      });
     case 'runtime.stop':
-      setTimeout(() => shutdown(), 10);
+      setTimeout(() => { void shutdown(); }, 10);
       return success(request.requestId, { stopping: true });
     case 'project.inspect':
       return success(request.requestId, await inspectRepository(request.path));
@@ -65,6 +79,22 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       return success(request.requestId, storage.listTrustedProjects());
     case 'task.list':
       return success(request.requestId, storage.listTasks(request.projectId));
+    case 'task.status': {
+      const task = storage.listTasks(request.projectId).find((candidate) => candidate.id === request.taskId);
+      if (task === undefined) throw new StorageError('NOT_FOUND', 'Task was not found');
+      return success(request.requestId, {
+        task,
+        executions: storage.listTaskExecutions(request.projectId, request.taskId),
+      });
+    }
+    case 'task.run':
+      return success(request.requestId, await coordinator.runTask({
+        projectId: request.projectId,
+        taskId: request.taskId,
+        expectedTaskVersion: request.expectedTaskVersion,
+        commandId: request.commandId,
+        adapterId: request.adapterId,
+      }));
     case 'attention.list':
       return success(request.requestId, storage.listAttentionRequests(request.projectId));
     case 'attention.answer': {
@@ -73,7 +103,7 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         attentionId: request.attentionId,
         answer: request.answer,
       })).digest('hex');
-      return success(request.requestId, storage.planAttentionAnswer({
+      const planned: AgentAnswerPlan = storage.planAttentionAnswer({
         projectId: request.projectId,
         attentionId: request.attentionId,
         commandId: request.commandId,
@@ -86,7 +116,17 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         recordedEventId: crypto.randomUUID(),
         actor: 'local-user',
         recordedAt: Date.now(),
-      }));
+      });
+      const delivery = await coordinator.deliverAnswer(planned.operationId);
+      return success(request.requestId, {
+        attentionId: planned.id,
+        answerId: planned.answerId,
+        operationId: planned.operationId,
+        operationState: delivery.plan.operationState,
+        status: delivery.plan.status,
+        delivery: delivery.delivery,
+        ...(delivery.error === undefined ? {} : { error: delivery.error }),
+      });
     }
     case 'task.submit': {
       const payloadHash = createHash('sha256').update(JSON.stringify({
@@ -161,7 +201,10 @@ async function handleLine(socket: Bun.Socket<SocketState>, line: string): Promis
     const request = runtimeRequestSchema.parse(raw);
     socket.end(`${JSON.stringify(await dispatch(request))}\n`);
   } catch (error) {
-    const code = error instanceof GitInspectionError || error instanceof StorageError
+    // Domain, storage, Git, registry, and Adapter errors all carry a stable code; a
+    // transport or system error without one is reported as an invalid request.
+    const code = typeof error === 'object' && error !== null && 'code' in error
+      && typeof error.code === 'string' && error.code.length > 0
       ? error.code
       : 'INVALID_REQUEST';
     const message = error instanceof Error ? error.message : 'Unknown Runtime error';
@@ -169,8 +212,17 @@ async function handleLine(socket: Bun.Socket<SocketState>, line: string): Promis
   }
 }
 
-function shutdown(): void {
+let shuttingDown = false;
+async function shutdown(): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
   listener.stop(true);
+  try {
+    await coordinator.close();
+  } catch (error) {
+    console.error('[runtime] shutdown could not release every Agent Session',
+      error instanceof Error ? error.message : String(error));
+  }
   storage.close();
   rmSync(socketPath, { force: true });
 }
@@ -194,5 +246,5 @@ listener = Bun.listen<SocketState>({
   },
 });
 chmodSync(socketPath, 0o600);
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+process.on('SIGTERM', () => { void shutdown(); });
+process.on('SIGINT', () => { void shutdown(); });

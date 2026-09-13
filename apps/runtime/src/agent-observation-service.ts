@@ -21,6 +21,8 @@ export async function observeAgentEvents(input: {
   readonly sessionId: string;
   readonly now?: () => number;
   readonly randomUUID?: () => string;
+  /** Awaited after each accepted projection, before the next provider event is consumed. */
+  readonly onProjected?: (result: AdapterEventResult) => void | Promise<void>;
 }): Promise<readonly AdapterEventResult[]> {
   const now = input.now ?? Date.now;
   const randomUUID = input.randomUUID ?? (() => crypto.randomUUID());
@@ -51,8 +53,9 @@ export async function observeAgentEvents(input: {
         'Adapter event identity did not match the persisted Session',
       );
     }
+    let result: AdapterEventResult;
     if (event.type === 'attention') {
-      results.push(input.storage.recordAgentAttention({
+      result = input.storage.recordAgentAttention({
         sessionId: event.sessionId,
         executionId: event.executionId,
         providerEventId: event.eventId,
@@ -66,9 +69,9 @@ export async function observeAgentEvents(input: {
         executionEventId: randomUUID(),
         taskEventId: randomUUID(),
         observedAt: now(),
-      }));
+      });
     } else if (event.type === 'disconnected') {
-      results.push(input.storage.recordAgentDisconnected({
+      result = input.storage.recordAgentDisconnected({
         sessionId: event.sessionId,
         executionId: event.executionId,
         providerEventId: event.eventId,
@@ -78,9 +81,9 @@ export async function observeAgentEvents(input: {
         executionEventId: randomUUID(),
         taskEventId: randomUUID(),
         observedAt: now(),
-      }));
+      });
     } else {
-      results.push(input.storage.recordAgentCompleted({
+      result = input.storage.recordAgentCompleted({
         sessionId: event.sessionId,
         executionId: event.executionId,
         providerEventId: event.eventId,
@@ -91,8 +94,10 @@ export async function observeAgentEvents(input: {
         executionEventId: randomUUID(),
         taskEventId: randomUUID(),
         observedAt: now(),
-      }));
+      });
     }
+    results.push(result);
+    await input.onProjected?.(result);
   }
   return results;
 }

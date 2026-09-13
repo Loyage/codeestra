@@ -1,0 +1,346 @@
+import { createHash } from 'node:crypto';
+import {
+  supportsProcessRelease,
+  type AgentAnswerAdapter,
+} from '@codeestra/contracts';
+import {
+  Phase1Database,
+  type AgentAnswerPlan,
+  type ObservableAgentSession,
+} from '@codeestra/storage';
+import type { AdapterRegistry } from './adapter-registry.js';
+import { deliverAgentAnswer } from './agent-answer-service.js';
+import { observeAgentEvents } from './agent-observation-service.js';
+import { startReservedExecution } from './agent-start-service.js';
+import { prepareTaskWorkspace } from './workspace-service.js';
+
+/**
+ * Derived command IDs make one `task.run` command ID cover its whole chain. Replaying the
+ * same command therefore reaches each already-recorded receipt instead of repeating a Git,
+ * Execution, or Adapter side effect. Format is version-4 shaped so the IPC schema accepts it.
+ */
+export function deriveCommandId(runCommandId: string, purpose: string): string {
+  const digest = createHash('sha256')
+    .update(`codeestra:task.run:${purpose}:${runCommandId}`)
+    .digest();
+  const bytes = Buffer.from(digest.subarray(0, 16));
+  bytes[6] = ((bytes[6] as number) & 0x0f) | 0x40;
+  bytes[8] = ((bytes[8] as number) & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+export interface RunTaskResult {
+  readonly executionId: string;
+  readonly sessionId: string;
+  readonly taskId: string;
+  readonly taskVersion: number;
+  readonly attemptNumber: number;
+  readonly workspaceId: string;
+  readonly workspacePath: string;
+  readonly baseCommit: string;
+  readonly adapterId: string;
+  readonly adapterVersion: string;
+  readonly sessionState: string;
+}
+
+export type AnswerDeliveryOutcome = 'DELIVERED' | 'NOT_DELIVERED';
+
+export interface AnswerDeliveryResult {
+  readonly plan: AgentAnswerPlan;
+  readonly delivery: AnswerDeliveryOutcome;
+  readonly error?: Readonly<{ code: string; message: string }>;
+}
+
+export interface AgentRuntimeCoordinatorOptions {
+  readonly storage: Phase1Database;
+  readonly registry: AdapterRegistry;
+  readonly runtimeHome: string;
+  readonly environment?: Readonly<Record<string, string>>;
+  readonly now?: () => number;
+  readonly randomUUID?: () => string;
+  readonly shutdownGraceMs?: number;
+  readonly logger?: (message: string, detail?: Readonly<Record<string, unknown>>) => void;
+}
+
+/**
+ * Owns the Runtime side of one Execution attempt: workspace, Execution reservation, Agent
+ * start, the observation stream, and automatic delivery of recorded answers. It never
+ * reattaches a lost provider process and never fabricates a Session state it cannot observe.
+ */
+export class AgentRuntimeCoordinator {
+  readonly #storage: Phase1Database;
+  readonly #registry: AdapterRegistry;
+  readonly #runtimeHome: string;
+  readonly #environment: Readonly<Record<string, string>>;
+  readonly #now: () => number;
+  readonly #randomUUID: () => string;
+  readonly #shutdownGraceMs: number;
+  readonly #logger: (message: string, detail?: Readonly<Record<string, unknown>>) => void;
+  readonly #pumps = new Map<string, Promise<void>>();
+
+  constructor(options: AgentRuntimeCoordinatorOptions) {
+    this.#storage = options.storage;
+    this.#registry = options.registry;
+    this.#runtimeHome = options.runtimeHome;
+    this.#environment = options.environment ?? {};
+    this.#now = options.now ?? Date.now;
+    this.#randomUUID = options.randomUUID ?? (() => crypto.randomUUID());
+    this.#shutdownGraceMs = options.shutdownGraceMs ?? 5_000;
+    this.#logger = options.logger ?? (() => {});
+  }
+
+  activeSessionIds(): readonly string[] {
+    return [...this.#pumps.keys()];
+  }
+
+  /**
+   * Reserve the workspace and Execution, start one Agent Session, and begin observing it.
+   * The observation loop runs in the background; `settle()` awaits it and is intended for
+   * tests, shutdown, and other points where the Runtime must know the stream has ended.
+   */
+  async runTask(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly expectedTaskVersion: number;
+    readonly commandId: string;
+    readonly adapterId: string;
+  }): Promise<RunTaskResult> {
+    const adapter = this.#registry.resolve(input.adapterId);
+    const probe = await adapter.probe();
+    const workspace = await prepareTaskWorkspace({
+      storage: this.#storage,
+      runtimeHome: this.#runtimeHome,
+      commandId: deriveCommandId(input.commandId, 'workspace'),
+      projectId: input.projectId,
+      taskId: input.taskId,
+      expectedTaskVersion: input.expectedTaskVersion,
+      now: this.#now,
+      randomUUID: this.#randomUUID,
+    });
+    const execution = this.#storage.reserveExecution({
+      projectId: input.projectId,
+      taskId: input.taskId,
+      expectedTaskVersion: input.expectedTaskVersion,
+      workspaceId: workspace.workspaceId,
+      executionId: deriveCommandId(input.commandId, 'execution'),
+      commandId: deriveCommandId(input.commandId, 'reserve-execution'),
+      payloadHash: deriveCommandId(input.commandId, 'reserve-payload'),
+      reservationEventId: this.#randomUUID(),
+      taskEventId: this.#randomUUID(),
+      adapterId: adapter.id,
+      adapterVersion: probe.version,
+      actor: 'runtime-scheduler',
+      createdAt: this.#now(),
+    });
+    const started = await startReservedExecution({
+      storage: this.#storage,
+      adapter,
+      projectId: input.projectId,
+      executionId: execution.executionId,
+      expectedExecutionVersion: 0,
+      prepareCommandId: deriveCommandId(input.commandId, 'prepare-execution'),
+      startCommandId: deriveCommandId(input.commandId, 'start-agent'),
+      environment: this.#environment,
+      now: this.#now,
+      randomUUID: this.#randomUUID,
+    });
+    this.#ensurePump(started.sessionId);
+    return {
+      executionId: execution.executionId,
+      sessionId: started.sessionId,
+      taskId: execution.taskId,
+      taskVersion: execution.taskVersion,
+      attemptNumber: execution.attemptNumber,
+      workspaceId: execution.workspaceId,
+      workspacePath: execution.workspacePath,
+      baseCommit: execution.baseCommit,
+      adapterId: started.adapterId,
+      adapterVersion: started.adapterVersion,
+      sessionState: started.sessionState,
+    };
+  }
+
+  /**
+   * Deliver one recorded answer to the Adapter that currently observes its Session. An
+   * answer recorded while no live provider process is held stays recorded instead of
+   * being replayed or reported as delivered.
+   */
+  async deliverAnswer(operationId: string): Promise<AnswerDeliveryResult> {
+    const plan = this.#storage.getAgentAnswerPlan(operationId);
+    if (plan.operationState === 'SUCCEEDED') return { plan, delivery: 'DELIVERED' };
+    if (!this.#pumps.has(plan.sessionId)) {
+      return {
+        plan,
+        delivery: 'NOT_DELIVERED',
+        error: {
+          code: 'NO_LIVE_SESSION',
+          message: 'No live Agent Session is held for this answer; it stays recorded',
+        },
+      };
+    }
+    let adapter: AgentAnswerAdapter;
+    try {
+      adapter = this.#registry.resolve(plan.adapterId);
+    } catch (error) {
+      return {
+        plan,
+        delivery: 'NOT_DELIVERED',
+        error: { code: 'UNKNOWN_ADAPTER', message: error instanceof Error ? error.message : String(error) },
+      };
+    }
+    try {
+      const delivered = await deliverAgentAnswer({
+        storage: this.#storage,
+        adapter,
+        operationId,
+        now: this.#now,
+        randomUUID: this.#randomUUID,
+      });
+      return { plan: delivered, delivery: 'DELIVERED' };
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error
+        ? String(error.code)
+        : 'AGENT_ANSWER_FAILED';
+      return {
+        plan: this.#storage.getAgentAnswerPlan(operationId),
+        delivery: 'NOT_DELIVERED',
+        error: { code, message: error instanceof Error ? error.message : String(error) },
+      };
+    }
+  }
+
+  /** Awaits observation streams started so far. Streams that never end are not forced to end. */
+  async settle(): Promise<void> {
+    while (this.#pumps.size > 0) {
+      await Promise.allSettled([...this.#pumps.values()]);
+    }
+  }
+
+  /**
+   * Cooperatively release every provider process this Runtime still holds. A stop the
+   * Adapter cannot confirm is logged, never assumed. A released Session is projected as
+   * recovery-required because this Runtime can no longer observe the provider, and the
+   * projection is attributed to the Runtime rather than fabricated as a provider event.
+   */
+  async close(): Promise<void> {
+    for (const sessionId of [...this.#pumps.keys()]) {
+      let session: ObservableAgentSession;
+      try {
+        session = this.#storage.getObservableAgentSession(sessionId);
+      } catch (error) {
+        this.#logger('Agent Session could not be read for release', {
+          sessionId,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+        continue;
+      }
+      try {
+        const adapter = this.#registry.resolve(session.adapterId);
+        if (supportsProcessRelease(adapter)) {
+          const released = await adapter.releaseSession(sessionId);
+          if (released !== null && !released.exited) {
+            this.#logger('provider process could not be confirmed stopped', {
+              sessionId,
+              pid: released.pid,
+            });
+          }
+        }
+      } catch (error) {
+        this.#logger('provider process release was not possible', {
+          sessionId,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+      try {
+        this.#storage.recordRuntimeDisconnect({
+          sessionId,
+          reason: 'Runtime shutdown released the provider process',
+          sessionEventId: this.#randomUUID(),
+          executionEventId: this.#randomUUID(),
+          taskEventId: this.#randomUUID(),
+          recoveryEventId: this.#randomUUID(),
+          recoveredAt: this.#now(),
+        });
+      } catch (error) {
+        this.#logger('Runtime shutdown disconnect could not be projected', {
+          sessionId,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    // A provider that cannot be released may never end its stream; shutdown stays bounded
+    // and reports the remaining Sessions rather than blocking the Runtime forever.
+    const settled = await Promise.race([
+      this.settle().then(() => true),
+      Bun.sleep(this.#shutdownGraceMs).then(() => false),
+    ]);
+    if (!settled) {
+      this.#logger('Agent observation streams did not end before the shutdown deadline', {
+        sessions: this.activeSessionIds(),
+      });
+    }
+  }
+
+  #ensurePump(sessionId: string): void {
+    if (this.#pumps.has(sessionId)) return;
+    let session: ObservableAgentSession;
+    try {
+      session = this.#storage.getObservableAgentSession(sessionId);
+    } catch (error) {
+      this.#logger('Agent Session could not be observed', {
+        sessionId,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    const pump = this.#pumpSession(session).finally(() => {
+      this.#pumps.delete(sessionId);
+    });
+    this.#pumps.set(sessionId, pump);
+  }
+
+  async #pumpSession(session: ObservableAgentSession): Promise<void> {
+    let adapter: AgentAnswerAdapter;
+    try {
+      adapter = this.#registry.resolve(session.adapterId);
+    } catch (error) {
+      this.#logger('Agent Session has no registered Adapter', {
+        sessionId: session.sessionId,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    try {
+      await observeAgentEvents({
+        storage: this.#storage,
+        adapter,
+        sessionId: session.sessionId,
+        now: this.#now,
+        randomUUID: this.#randomUUID,
+        onProjected: async () => {
+          await this.#deliverPlannedAnswers(session.sessionId);
+        },
+      });
+    } catch (error) {
+      this.#logger('Agent observation ended with an error', {
+        sessionId: session.sessionId,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /** Safety net for answers recorded while the stream was between events. */
+  async #deliverPlannedAnswers(sessionId: string): Promise<void> {
+    for (const plan of this.#storage.listIncompleteAgentAnswers()) {
+      if (plan.sessionId !== sessionId || plan.operationState !== 'PLANNED') continue;
+      const result = await this.deliverAnswer(plan.operationId);
+      if (result.delivery === 'NOT_DELIVERED') {
+        this.#logger('recorded Agent answer could not be delivered', {
+          operationId: plan.operationId,
+          code: result.error?.code ?? 'UNKNOWN',
+        });
+      }
+    }
+  }
+}

@@ -64,7 +64,7 @@ function temporaryDirectory(): string {
 
 afterEach(async () => {
   for (const adapter of adapters.splice(0)) {
-    for (const session of ['session-under-test']) await adapter.dispose(session);
+    for (const session of ['session-under-test']) await adapter.releaseSession(session);
   }
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
@@ -142,7 +142,7 @@ describe('Pi RPC process adapter', () => {
     expect(observed.commands.map((command) => command.type)).toEqual(['get_state', 'prompt']);
     expect(observed.commands[1]?.message).toContain(request.revision.id);
     expect(observed.commands[1]?.message).toContain('Never update main');
-    await adapter.dispose(request.sessionId);
+    await adapter.releaseSession(request.sessionId);
   });
 
   test('resolves a permission dialog into a typed Attention and an answerable completion', async () => {

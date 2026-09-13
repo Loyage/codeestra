@@ -84,6 +84,8 @@ function usage(): never {
   bun run codeestra task create <project-id> <specification>
   bun run codeestra task list <project-id>
   bun run codeestra task submit <project-id> <task-id> <expected-version>
+  bun run codeestra task run <project-id> <task-id> <expected-version> [--adapter <id>]
+  bun run codeestra task status <project-id> <task-id>
   bun run codeestra attention list <project-id>
   bun run codeestra attention answer <project-id> <attention-id> confirm <yes|no>
   bun run codeestra attention answer <project-id> <attention-id> value <text>
@@ -124,6 +126,37 @@ try {
   } else if (group === 'task' && action === 'list') {
     if (firstArgument === undefined || remainingArguments.length !== 0) usage();
     print(await call({ command: 'task.list', projectId: firstArgument }));
+  } else if (group === 'task' && action === 'status') {
+    const [taskId, ...extra] = remainingArguments;
+    if (firstArgument === undefined || taskId === undefined || extra.length !== 0) usage();
+    print(await call({ command: 'task.status', projectId: firstArgument, taskId }));
+  } else if (group === 'task' && action === 'run') {
+    const [taskId, versionText, ...extra] = remainingArguments;
+    const expectedTaskVersion = Number(versionText);
+    if (firstArgument === undefined || taskId === undefined || versionText === undefined
+      || !Number.isSafeInteger(expectedTaskVersion) || expectedTaskVersion < 0) usage();
+    let adapterId = 'pi';
+    const argumentsWithoutAdapter: string[] = [];
+    for (let index = 0; index < extra.length; index += 1) {
+      const argument = extra[index];
+      if (argument === '--adapter') {
+        const value = extra[index + 1];
+        if (value === undefined) usage();
+        adapterId = value;
+        index += 1;
+      } else {
+        argumentsWithoutAdapter.push(argument as string);
+      }
+    }
+    if (argumentsWithoutAdapter.length !== 0) usage();
+    print(await call({
+      command: 'task.run',
+      commandId: crypto.randomUUID(),
+      projectId: firstArgument,
+      taskId,
+      expectedTaskVersion,
+      adapterId,
+    }));
   } else if (group === 'attention' && action === 'list') {
     if (firstArgument === undefined || remainingArguments.length !== 0) usage();
     print(await call({ command: 'attention.list', projectId: firstArgument }));
