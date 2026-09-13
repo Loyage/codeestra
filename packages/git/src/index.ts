@@ -1,16 +1,34 @@
 import { lstat, mkdir, realpath } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { RepositoryIdentity } from '@codeestra/contracts';
+import { GitInspectionError } from './errors.js';
 
-export type GitErrorCode = 'INVALID_REPOSITORY' | 'UNBORN_MAIN' | 'COMMAND_FAILED'
-  | 'STALE_BASE' | 'REF_CONFLICT' | 'FOREIGN_RESOURCE' | 'UNSAFE_CHECKOUT';
-
-export class GitInspectionError extends Error {
-  constructor(readonly code: GitErrorCode, message: string, readonly reconcileRequired = false) {
-    super(message);
-    this.name = 'GitInspectionError';
-  }
-}
+export { GitInspectionError } from './errors.js';
+export type { GitErrorCode } from './errors.js';
+export {
+  changeSetPaths,
+  createResultCommit,
+  inspectChangeSet,
+  inspectResultCommit,
+  readHeadCommit,
+  resolveCommitIdentity,
+  sameChangeSetEntries,
+  stageResultChangeSet,
+} from './result-commit.js';
+export type {
+  ChangeSet,
+  ChangeSetEntry,
+  ChangeSetStatus,
+  CommitIdentity,
+  InspectedResultCommit,
+  ResultCommitOutcome,
+} from './result-commit.js';
+export {
+  classifySensitivePath,
+  classifySensitivePaths,
+  sensitivePathPolicyVersion,
+} from './sensitive-paths.js';
+export type { SensitivePathHit } from './sensitive-paths.js';
 
 async function git(cwd: string, args: readonly string[]): Promise<string> {
   const process = Bun.spawn(['git', '-C', cwd, ...args], {
