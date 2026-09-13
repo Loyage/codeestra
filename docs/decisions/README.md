@@ -21,6 +21,7 @@
 - [ADR-0016](0016-task-pause-cancel-archive.md)：Task 暂停 / 终止 / 归档。暂停为协作停止（Task `PAUSED`、Execution `SUPERSEDED`、workspace 保留），恢复在同一工作树新建 Execution 并以 `--session` 复用 provider conversation；终止是终态 `CANCELLED`，不自动重开；删除是归档软删除，只写 `tasks.archived_at`，不删除任何审计、不回收 worktree/branch。均不新增确认。
 - [ADR-0017](0017-new-task-dock.md)：新建任务改为页面底部常驻停靠条（收起：单行输入 + 创建；展开：多行规格正文、约束列表、任务类型），已选项目时在所有标签页可用。展开面板的每个字段都有对应 CLI 参数（`task create --constraint/--kind`），不存在仅 UI 可用的能力；`SELF` 在 UI 禁用、在 CLI 以 `TASK_KIND_UNSUPPORTED` 拒绝，Runtime 边界仍未收紧（已知缺口）。
 - [ADR-0018](0018-task-result-integration-into-dev.md)：Task 成果合入 `dev` 的 IntegrationBatch 第一小步——在 Runtime 数据目录的 detached worktree 里合并，先跑独立集成验证，PASSED 后才用 CAS 推进 `dev` ref；任何失败保留现场且不推进 `dev`；同时把 Task worktree 基线修正为固定 `dev`（`projects.dev_ref`，仓库无 dev 时 trust 明确拒绝）。不含 `dev → main` 提升与重启。
+- [ADR-0019](0019-long-command-operations.md)：`task.run`/`task.verify` 成为持久 Operation——步骤级进度（`operation_progress`，v11）作为**事实**记录，CLI 新增 `task.verify --background` 与 `task.operation.list/get/cancel`（`--json`、稳定退出码），UI 投影同一命令面；取消先确认进程静止才落终态，未确认则 Operation `RECONCILE_REQUIRED` 并保留占用；重启按已记录的 Session/Execution/ref 事实 reconcile。复用现有枚举表达取消（不改状态机），不新增任何确认。
 
 以上选择均由用户明确答复。用户给定的硬性原则见 `PROJECT_SPEC.md`，无需重复确认。
 
@@ -45,6 +46,7 @@
 | Phase 1 | Agent 配置的适用范围、生效时机与留痕 | 已由 ADR-0012 确认并实现：全局默认 + 每项目覆盖，逐字段优先级 环境变量 > 项目 > 全局 > 适配器默认；仅新 Session 生效；生效值写入 `executions.agent_config_json`。每任务/每 Revision 固定配置未实现，也不在未确认前自行推断 |
 | Phase 1 | Agent 执行过程的可见性 | 已由 ADR-0013 确认并实现：`session.transcript`/`session.transcript.part` 只读读取 provider 会话文件，不入库、不是事件也不宣称 attach；运行中由 UI 增量轮询。token 级实时（新增事件/存储）与原生终端接管（ADR-0010 Phase 3）仍未实现 |
 | Phase 1 | Agent 需要决策时能否结构化提问 | 已由 ADR-0014 确认并实现：Codeestra 自有扩展注册 `ask_user_question`，一份问卷 = 一个 provider dialog = 一条 `QUESTION` Attention = 一次 answer Operation；结构化回答经 Runtime 按被问问卷校验后才记录；合法选项越界返回 `INVALID_QUESTIONNAIRE_ANSWER:*` 而非静默取消。未做：把“Agent 结束轮次并在散文里提问”识别为等待人工，以及真实模型经 Runtime 的端到端验收 |
+| Phase 1 | 长命令的进度、取消与重启 reconcile | 已由 ADR-0019 确认并实现：`task.run`/`task.verify` 记录持久 Operation 与步骤级进度（`operation_progress`，schema v11），CLI `task.verify --background` + `task.operation.list/get/cancel`（`--json`、稳定退出码），取消确认静止后才落状态、未确认则 `RECONCILE_REQUIRED` 并保留占用，重启按事实 reconcile。未做：verification run 的独立 `CANCELLED` 状态（状态机变更，保留后续决策）、取消后副本的 prune、token 级进度事件 |
 
 Phase 0 不要求 Phase 7 所有发布细节已决定；Phase 1 不能以“未来会解决”绕过影响真实执行与 Git 安全的待决项。
 

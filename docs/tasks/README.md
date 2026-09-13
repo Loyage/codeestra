@@ -957,11 +957,42 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 - 未实现：多成员批次、批级 `STALE`/`CANCELLED`、`dev → main` 提升与重启、失败现场与副本的回收策略。
 - 未用真实 provider 驱动合入（只用 stub）；未使用桌面/浏览器自动化。
 
+## FOUNDATION-039 — 长命令成为持久 Operation（进度、取消与重启 reconcile）
+
+状态：已实现并在本工作树实测通过（`bun run check` 退出码 0）。未 commit、未 push、未提升 `dev → main`、未重启 Runtime。决策见 ADR-0019（用户确认：保持同步默认 + 新增 `--background`；复用现有枚举表达取消，不改状态机；进度用查询命令 + 轮询；UI 做进度列表 + 取消按钮）。
+
+### 已实现
+
+- `packages/storage`：schema **v11** 新增 `operation_progress(operation_id, sequence, step_key, step, state, detail_json, recorded_at)`，`UNIQUE(operation_id, step_key)` 使步骤幂等；**v11 已被本轮占用，未释放**（并发 lane 的 ADR-0021 保留 v12，合并后 `phase1SchemaVersion = 12`）。追加方法：`beginRunOperation`、`recordOperationProgress`（第一个步骤把 Operation 从 `PLANNED` 推进到 `IN_PROGRESS`，并同时充当 heartbeat）、`getOperation`、`listTaskOperations`、`findActiveRunOperation`、`listIncompleteRunOperations`、`completeOperation`、`getVerificationRunPlan`；未改动任何既有方法签名。
+- `apps/runtime/src/operation-service.ts`（新增）：run Operation 生命周期（`beginTaskRunOperation`/`recordRunStep`/`settleRunOperation`）、按事实的重启 reconcile（`reconcileRunOperations`）、后台验证作业（`LongOperationService.startVerification`）、取消编排（`cancel`）、任务级查询（`listForTask`/`get`）。
+- `verification-service.ts`：拆出 `queueTaskVerification`（校验 + 建 run + `QUEUED→RUNNING`，不 spawn 任何命令）与 `executeQueuedVerification`（逐命令跑策略并落证据），`runTaskVerification` 组合两者因此既有调用者行为不变；`executeVerificationPolicy` 支持 `isCancelled`/`onCommandStart`/`onCommandEnd`/`onCopyCreated` 并在取消时不判定、不删除副本；`VerificationRunner.stopOwned` 按进程组停止并报告是否确认退出。
+- `agent-runtime-service.ts`：`task.run` 在任何 Git/provider 副作用前创建 `RUN_TASK` Operation，并记录 `RUN_REQUESTED → WORKSPACE_PREPARED → EXECUTION_RESERVED → AGENT_SESSION_STARTED`；观察流结束后 `settleRunOperation` **只按已记录的 Session/Execution 状态**收口（正常 settle → `SUCCEEDED/AGENT_SETTLED`；未知或断连 → `RECONCILE_REQUIRED`）；失败路径记 `RUN_FAILED` 并按错误码收口。
+- `recovery-service.ts`：新增 `reconcileInterruptedRunOperations`（启动时调用）。
+- `packages/contracts`（仅 `task.*` 区）：`task.verify` 增 `background`（默认 `false`），新增 `task.operation.list`/`task.operation.get`/`task.operation.cancel`。
+- CLI：`task verify … [--background]`、`task operation list|get|cancel … [--json]`；`--background` 的退出码 0 表示「已受理」而非「验证通过」；`task operation cancel` 在 `stop === 'UNCERTAIN'` 时退出码 1；usage 的 task 段同步更新（末尾行未动）。
+- Runtime：`task.status` 增加 `operations` 投影；启动时 reconcile；shutdown 先 `beginShutdown()` 再停进程组，使被关闭中断的长命令不写判定，由下次启动记 `RUNTIME_RESTARTED`。
+- UI（`App.tsx`/`types.ts`）：任务详情新增「长命令进度」区块（类型/状态/最新步骤/更新时间/全部步骤）与非终态时的「取消」按钮；「验证任务」改用后台形式并按 1.5s 轮询（仅当存在非终态 Operation），走同一命令面，不新增业务语义。
+
+### 实际验证
+
+- `bun run check` 退出码 0：根与 UI `tsc --noEmit`、**212 项 Vitest**、**Bun tests 278 项**（`test:unit` 165 + `test:e2e` 113）、UI Vite 构建。
+- `bun run check:fast` 退出码 0（开发循环：typecheck + UI typecheck + 212 Vitest + 165 unit）。
+- `apps/runtime/test/operation-service.test.ts` 12 项：v10→v11 迁移（含 `step_key` 唯一与旧 Operation 保留）；run 步骤序列与按事实收口（Execution 仍 `RUNNING`、不冒充成果已捕获）；provider 版本探测失败也留下 `FAILED` run 记录，且不产生 workspace/Execution；同一 run commandId 重放只留 1 条 Operation 且无重复步骤；Execution 仍活动时重启 → `RECONCILE_REQUIRED` 且 `resourceHeld` 仍为 true；未记录 Execution 的 run → `FAILED/RUNTIME_RESTARTED`；后台验证逐命令步骤 + `PASSED`；确认静止的取消 → run `ERROR/CANCELLED_BY_USER`、Operation `FAILED`、副本保留、无 `unconfirmedStops`；无法确认的取消（注入不可确认的 runner）→ Operation `RECONCILE_REQUIRED` + `CANCEL_UNCONFIRMED` 且 run 保持 `RUNNING`（不伪造终态）；取消 Agent 运行 → 协作暂停（Task `PAUSED`、Operation `FAILED/STOPPED_BY_USER`）且不被观察流覆盖；同一 verify commandId 重放只跑一次。
+- `apps/runtime/test/cli-task-run-progress.test.ts` 2 项（真实 CLI 子进程 + 真实 Runtime + 独立 `CODEESTRA_HOME` + 临时仓库 + 协议 stub provider）：`task.run` 步骤可经 CLI 读取、`--json` 可解析、`task.status.operations` 同一投影、对已终态 Operation 取消返回 `ALREADY_TERMINAL` 且不杀 Task、未知 flag 退出码 2；`task verify --background` 返回 handle（退出码 0 = 已受理，stderr 明确说明）、慢命令出现 `COMMAND:slow:STARTED`、`task operation cancel` 退出码 0、`dev` 未变、Task 仍 `EXECUTED`、验证记 `ERROR/CANCELLED_BY_USER`。
+- 资源归属：测试全部使用临时仓库与临时 `CODEESTRA_HOME`（真实仓库未被写入，fixture 测试断言 `git status --porcelain` 为空）；运行后检查无残留临时目录与孤儿 Runtime。
+- **未执行**：真实 provider 下的后台验证/取消复验（本轮只用协议 stub 与注入的 fake）；浏览器/桌面/键鼠自动化（仓库禁止）；UI 视觉、键盘焦点、窄屏效果仍待用户人工确认——`bun run check` 通过不构成 UI 验收。未触碰 `main`、未重启任何运行中的 Runtime。
+
+### 交付边界与剩余问题
+
+- 改动文件：`packages/storage/src/{migration,database,index}.ts`、`packages/contracts/src/index.ts`、`apps/runtime/src/{operation-service,verification-service,agent-runtime-service,recovery-service,main}.ts`、`apps/cli/src/main.ts`、`apps/ui/src/{App.tsx,types.ts}`、`package.json`（仅把两个新测试文件加入既有 `test:unit`/`test:e2e` 分层清单）、`docs/decisions/0019-*.md`、`docs/decisions/README.md`、本文件。未修改 `PROJECT_SPEC.md`、`AGENTS.md`、状态机与事件模型文档。
+- 明确未做（不得当作已完成）：verification run 的独立 `CANCELLED` 状态（状态机变更，ADR-0019 D05 保留后续决策）；被取消验证副本的 `prune`/回收；token 级进度事件；`task.run` 的「排队后立刻返回」（现状仍在 Session 启动后返回）；多任务批级进度视图。
+- 取舍：取消 Agent 运行的 Operation 是**协作暂停**（可 `task resume`），唯一终态停止仍是 `task cancel`；被取消的验证副本与既有失败现场一样保留在 `<CODEESTRA_HOME>/verifications/...`，尚无自动回收。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。剩余：`dev → main` 提升与重启。
 1. 真实验证 ADR-0016：在一次性临时仓库中用真实 Pi 跑「启动 → 暂停 → 恢复 → 终止」，核对 provider 进程确实退出、`--session` 确实续接同一 conversation、超时进入 `RECOVERY_REQUIRED`；脚本 Adapter 不能替代该验收。
-2. 长命令后台化与进度事件：让 `task.run`/`task.verify` 成为持久 Operation，界面可展示进度并允许取消。
+2. ~~长命令后台化与进度事件~~：已由 FOUNDATION-039 / ADR-0019 完成持久 Operation、步骤级进度、`--background` 与 `task.operation.cancel`（CLI + 同一命令面 + UI）。剩余：token 级实时进度事件、verification run 的独立 `CANCELLED` 状态、取消后验证副本的回收。
 3. ADR-0010 Phase 3 技术 spike：真实 Pi session-file 双向 RPC↔TUI 恢复、PTY 生命周期、safe-point 与权限模式 side channel；通过后再落 handoff Operation、Session incarnation 和 CLI attach。
 4. revision 投递确认，以及 Runtime 重启后对 stale ACTIVE Session 的启动 reconcile。
 5. 验证副本与失败现场的回收：明确的 `prune`/归属校验与可追溯记录；同时决定 Attention 工具参数是否入库/摘要化。

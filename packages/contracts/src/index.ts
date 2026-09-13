@@ -443,12 +443,42 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     projectId: z.string().uuid(),
     taskId: z.string().uuid(),
     executionId: z.string().uuid().optional(),
+    /** Return a durable Operation handle instead of blocking until the policy has run (ADR-0019). */
+    background: z.boolean().default(false),
   }),
   z.strictObject({
     ...requestBase,
     command: z.literal('task.verification.list'),
     projectId: z.string().uuid(),
     taskId: z.string().uuid(),
+  }),
+  /**
+   * Long-command Operations for one Task: the Agent run and every verification run, with the steps
+   * the Runtime actually reached. Read-only; progress is a fact, never a prediction (ADR-0019).
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.operation.list'),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.operation.get'),
+    projectId: z.string().uuid(),
+    operationId: z.string().uuid(),
+  }),
+  /**
+   * Cancels one long-command Operation. The Runtime only records a terminal state after the owned
+   * process group has been confirmed stopped; an unconfirmed stop keeps ownership and needs a human.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.operation.cancel'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    operationId: z.string().uuid(),
   }),
   /**
    * Integrates one Task's captured result commit into the project's long-lived `dev` branch.

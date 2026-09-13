@@ -133,6 +133,24 @@ export class VerificationRunner {
     this.#active.delete(verificationId);
   }
 
+  /**
+   * Stops the process group one verification currently owns and reports whether it exited.
+   * `held: false` means no command was running at that instant. An unconfirmed stop is added to
+   * `unconfirmedStops` and the ownership entry is kept: the caller must not claim the run is
+   * static, and a later attempt may still find the process alive.
+   */
+  async stopOwned(verificationId: string): Promise<{ readonly held: boolean; readonly stopped: boolean }> {
+    const child = this.#active.get(verificationId);
+    if (child === undefined) return { held: false, stopped: true };
+    const exited = await killProcessGroup(child, stopGraceMs);
+    if (exited) {
+      this.#active.delete(verificationId);
+      return { held: true, stopped: true };
+    }
+    this.#unconfirmed.push(verificationId);
+    return { held: true, stopped: false };
+  }
+
   /** Stops every owned child group; a child that ignores SIGKILL is reported, not assumed gone. */
   async close(): Promise<readonly string[]> {
     const stopped: string[] = [];
@@ -441,6 +459,19 @@ export interface VerificationExecution {
   readonly copyCreated: boolean;
   readonly copyRemoval: { readonly removed: boolean | null; readonly detail: string | null };
   readonly failureDetail: string | null;
+  /** True when a cancel was observed at a step boundary; the caller owns the terminal record. */
+  readonly cancelled: boolean;
+}
+
+/**
+ * Callbacks a long-command Operation uses to publish real progress. They are optional so a direct
+ * call (and every existing test) keeps running without an Operation attached.
+ */
+export interface VerificationExecutionCallbacks {
+  readonly onCommandStart?: (command: StoredVerificationCommand) => void;
+  readonly onCommandEnd?: (outcome: VerificationCommandOutcome) => void;
+  readonly onCopyCreated?: (path: string) => void;
+  readonly isCancelled?: () => boolean;
 }
 
 /**
@@ -456,7 +487,7 @@ export async function executeVerificationPolicy(input: {
   readonly testedCommit: string;
   readonly commands: readonly StoredVerificationCommand[];
   readonly runner: VerificationRunner;
-}): Promise<VerificationExecution> {
+} & VerificationExecutionCallbacks): Promise<VerificationExecution> {
   let copy;
   try {
     copy = await createVerificationCopy({
@@ -477,19 +508,28 @@ export async function executeVerificationPolicy(input: {
       copyCreated: false,
       copyRemoval: { removed: null, detail: null },
       failureDetail: detail,
+      cancelled: false,
     };
   }
+  input.onCopyCreated?.(copy.path);
 
   const outcomes: VerificationCommandOutcome[] = [];
   let treeEvidence: VerificationTreeEvidence | null = null;
   let terminalState: 'PASSED' | 'FAILED' | 'ERROR' = 'PASSED';
   let outcomeCode = 'PASSED';
+  let cancelled = false;
   try {
     for (const command of input.commands) {
+      // A cancel is only honored at a step boundary: a command that already started is allowed to
+      // die from its own process-group stop, never to be silently rewritten as a judged failure.
+      if (input.isCancelled?.() === true) { cancelled = true; break; }
+      input.onCommandStart?.(command);
       const outcome = await runCommand({
         verificationId: input.runId, command, copyPath: copy.path, runner: input.runner,
       });
       outcomes.push(outcome);
+      input.onCommandEnd?.(outcome);
+      if (input.isCancelled?.() === true) { cancelled = true; break; }
       if (outcome.timedOut) {
         terminalState = 'ERROR';
         outcomeCode = 'COMMAND_TIMEOUT';
@@ -511,7 +551,9 @@ export async function executeVerificationPolicy(input: {
       untrackedFiles: inspectionCopy.untrackedFiles,
       clean: inspectionCopy.clean,
     };
-    if (!inspectionCopy.clean && terminalState === 'PASSED') {
+    // A cancelled run's tree is evidence, not a verdict: a half-written command must not be
+    // reported as "the policy mutated the tree it was judging".
+    if (!cancelled && !inspectionCopy.clean && terminalState === 'PASSED') {
       terminalState = 'ERROR';
       outcomeCode = 'TREE_MUTATED';
     }
@@ -536,14 +578,22 @@ export async function executeVerificationPolicy(input: {
     });
   }
 
-  const removal = await removeVerificationCopy({
-    repositoryRoot: input.repositoryRoot,
-    copiesRoot: input.copiesRoot,
-    path: copy.path,
-  }).catch((error: unknown) => ({
-    removed: false,
-    detail: error instanceof Error ? error.message : String(error),
-  }));
+  // A cancelled run may still own a process group, so its copy is kept as the scene of the stop
+  // instead of being deleted under a writer the Runtime could not confirm was gone.
+  const removal = cancelled
+    ? { removed: false, detail: 'the run was cancelled; the copy is retained for inspection' }
+    : await removeVerificationCopy({
+        repositoryRoot: input.repositoryRoot,
+        copiesRoot: input.copiesRoot,
+        path: copy.path,
+      }).catch((error: unknown) => ({
+        removed: false,
+        detail: error instanceof Error ? error.message : String(error),
+      }));
+  if (cancelled) {
+    terminalState = 'ERROR';
+    outcomeCode = 'CANCELLED_BY_USER';
+  }
 
   return {
     outcomes,
@@ -554,17 +604,38 @@ export async function executeVerificationPolicy(input: {
     copyCreated: true,
     copyRemoval: removal,
     failureDetail: null,
+    cancelled,
   };
 }
 
+export interface QueuedTaskVerification {
+  readonly verificationId: string;
+  readonly operationId: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly executionId: string;
+  readonly revisionId: string;
+  readonly testedCommit: string;
+  readonly testedTree: string;
+  readonly policyVersion: string;
+  readonly policyDigest: string;
+  readonly mainCommit: string;
+  readonly repositoryRoot: string;
+  readonly commands: readonly StoredVerificationCommand[];
+  readonly copyPath: string;
+  readonly staleEvidenceInvalidated: number;
+  /** Set when this command ID already recorded a run: its result is reported instead of re-running. */
+  readonly replay: VerificationReport | null;
+}
+
 /**
- * Runs the confirmed verification policy against one frozen result commit in an isolated
- * detached copy of that commit. Nothing is staged, committed, or pushed, and the Task
- * worktree is never used, so verification cannot see uncommitted Agent edits.
+ * Validates one verification request and records it as `QUEUED → RUNNING` together with its
+ * Operation. This part is fast and durable: everything that needs a repository, policy, or
+ * confirmation is checked before a single command is spawned, so the caller can hand back a
+ * handle and let the commands run in the background without inventing any state in between.
  */
-export async function runTaskVerification(input: {
+export async function queueTaskVerification(input: {
   readonly storage: Phase1Database;
-  readonly runner: VerificationRunner;
   readonly copiesRoot: string;
   readonly projectId: string;
   readonly taskId: string;
@@ -573,7 +644,7 @@ export async function runTaskVerification(input: {
   readonly permissionMode?: 'FULL' | 'STRICT';
   readonly now?: () => number;
   readonly randomUUID?: () => string;
-}): Promise<VerificationReport> {
+}): Promise<QueuedTaskVerification> {
   const now = input.now ?? Date.now;
   const randomUUID = input.randomUUID ?? (() => crypto.randomUUID());
   const candidates = input.storage.getVerificationCandidates(input.projectId, input.taskId);
@@ -641,14 +712,31 @@ export async function runTaskVerification(input: {
     throw error;
   }
   if (!begun.created) {
-    return reportFromPlan(begun.plan, {
-      commands: replayCommands(begun.plan),
-      tree: null,
-      copyRemoved: null,
-      copyDetail: 'this command already recorded a verification run',
+    return {
+      verificationId: begun.plan.verificationId,
+      operationId: begun.plan.operationId,
+      projectId: input.projectId,
+      taskId: input.taskId,
+      executionId: selected.executionId,
+      revisionId: selected.revisionId,
+      testedCommit: selected.testedCommit,
+      testedTree,
+      policyVersion: verificationPolicyVersion,
+      policyDigest: digest,
+      mainCommit: inspection.mainCommit,
+      repositoryRoot: candidates.repositoryRoot,
+      commands,
+      copyPath: begun.plan.copyPath,
       staleEvidenceInvalidated: 0,
-      alreadyCompleted: true,
-    });
+      replay: reportFromPlan(begun.plan, {
+        commands: replayCommands(begun.plan),
+        tree: null,
+        copyRemoved: null,
+        copyDetail: 'this command already recorded a verification run',
+        staleEvidenceInvalidated: 0,
+        alreadyCompleted: true,
+      }),
+    };
   }
   const stale = input.storage.markVerificationsStale({
     projectId: input.projectId,
@@ -660,28 +748,115 @@ export async function runTaskVerification(input: {
     invalidatedAt: now(),
   });
   input.storage.startVerificationRun({ verificationId, startedAt: now() });
-
-  const execution = await executeVerificationPolicy({
-    repositoryRoot: candidates.repositoryRoot,
-    copiesRoot: input.copiesRoot,
+  return {
+    verificationId,
+    operationId,
     projectId: input.projectId,
-    runId: verificationId,
+    taskId: input.taskId,
+    executionId: selected.executionId,
+    revisionId: selected.revisionId,
     testedCommit: selected.testedCommit,
+    testedTree,
+    policyVersion: verificationPolicyVersion,
+    policyDigest: digest,
+    mainCommit: inspection.mainCommit,
+    repositoryRoot: candidates.repositoryRoot,
     commands,
-    runner: input.runner,
+    copyPath,
+    staleEvidenceInvalidated: stale,
+    replay: null,
+  };
+}
+
+/**
+ * A cancelled run waits briefly for the cancel path to record the terminal state, then reports
+ * whatever the Runtime actually recorded. It never turns an unconfirmed stop into a verdict.
+ */
+async function reportCancelledVerification(input: {
+  readonly storage: Phase1Database;
+  readonly projectId: string;
+  readonly verificationId: string;
+  readonly outcomes: readonly VerificationCommandOutcome[];
+  readonly tree: VerificationTreeEvidence | null;
+  readonly copyRemoved: boolean | null;
+  readonly copyDetail: string | null;
+  readonly staleEvidenceInvalidated: number;
+}): Promise<VerificationReport> {
+  const waitMs = 2_000;
+  const deadline = Date.now() + waitMs;
+  let plan = input.storage.getVerificationRunPlan(input.projectId, input.verificationId);
+  while ((plan.state === 'QUEUED' || plan.state === 'RUNNING') && Date.now() < deadline) {
+    await Bun.sleep(25);
+    plan = input.storage.getVerificationRunPlan(input.projectId, input.verificationId);
+  }
+  return reportFromPlan(plan, {
+    commands: input.outcomes,
+    tree: input.tree,
+    copyRemoved: input.copyRemoved,
+    copyDetail: input.copyDetail,
+    staleEvidenceInvalidated: input.staleEvidenceInvalidated,
+    alreadyCompleted: false,
   });
+}
+
+/**
+ * Runs a queued verification's policy commands in its isolated copy and records the terminal
+ * state. When a cancel is observed at a step boundary the loop stops without writing a verdict:
+ * the cancel path owns that record, so a killed process is never relabeled as a judged failure.
+ */
+export async function executeQueuedVerification(input: {
+  readonly storage: Phase1Database;
+  readonly runner: VerificationRunner;
+  readonly copiesRoot: string;
+  readonly queued: QueuedTaskVerification;
+  readonly callbacks?: VerificationExecutionCallbacks;
+  readonly now?: () => number;
+  readonly randomUUID?: () => string;
+}): Promise<VerificationReport> {
+  const now = input.now ?? Date.now;
+  const randomUUID = input.randomUUID ?? (() => crypto.randomUUID());
+  const queued = input.queued;
+  const execution = await executeVerificationPolicy({
+    repositoryRoot: queued.repositoryRoot,
+    copiesRoot: input.copiesRoot,
+    projectId: queued.projectId,
+    runId: queued.verificationId,
+    testedCommit: queued.testedCommit,
+    commands: queued.commands,
+    runner: input.runner,
+    ...(input.callbacks?.onCommandStart === undefined
+      ? {} : { onCommandStart: input.callbacks.onCommandStart }),
+    ...(input.callbacks?.onCommandEnd === undefined
+      ? {} : { onCommandEnd: input.callbacks.onCommandEnd }),
+    ...(input.callbacks?.onCopyCreated === undefined
+      ? {} : { onCopyCreated: input.callbacks.onCopyCreated }),
+    ...(input.callbacks?.isCancelled === undefined
+      ? {} : { isCancelled: input.callbacks.isCancelled }),
+  });
+  if (execution.cancelled) {
+    return reportCancelledVerification({
+      storage: input.storage,
+      projectId: queued.projectId,
+      verificationId: queued.verificationId,
+      outcomes: execution.outcomes,
+      tree: execution.tree,
+      copyRemoved: execution.copyRemoval.removed,
+      copyDetail: execution.copyRemoval.detail,
+      staleEvidenceInvalidated: queued.staleEvidenceInvalidated,
+    });
+  }
   if (!execution.copyCreated) {
     const detail = execution.failureDetail ?? 'the verification copy could not be created';
     const plan = input.storage.completeVerificationRun({
-      verificationId,
+      verificationId: queued.verificationId,
       state: 'ERROR',
       outcomeCode: 'WORKTREE_FAILED',
       evidence: {
-        testedCommit: selected.testedCommit,
-        testedTree,
-        policyVersion: verificationPolicyVersion,
-        policyDigest: digest,
-        mainCommit: inspection.mainCommit,
+        testedCommit: queued.testedCommit,
+        testedTree: queued.testedTree,
+        policyVersion: queued.policyVersion,
+        policyDigest: queued.policyDigest,
+        mainCommit: queued.mainCommit,
         failureDetail: detail,
       },
       eventId: randomUUID(),
@@ -692,7 +867,7 @@ export async function runTaskVerification(input: {
       tree: null,
       copyRemoved: null,
       copyDetail: detail,
-      staleEvidenceInvalidated: stale,
+      staleEvidenceInvalidated: queued.staleEvidenceInvalidated,
       alreadyCompleted: false,
     });
   }
@@ -701,15 +876,15 @@ export async function runTaskVerification(input: {
   const removal = execution.copyRemoval;
 
   const plan = input.storage.completeVerificationRun({
-    verificationId,
+    verificationId: queued.verificationId,
     state: execution.terminalState,
     outcomeCode: execution.outcomeCode,
     evidence: {
-      testedCommit: selected.testedCommit,
-      testedTree,
-      policyVersion: verificationPolicyVersion,
-      policyDigest: digest,
-      mainCommit: inspection.mainCommit,
+      testedCommit: queued.testedCommit,
+      testedTree: queued.testedTree,
+      policyVersion: queued.policyVersion,
+      policyDigest: queued.policyDigest,
+      mainCommit: queued.mainCommit,
       commands: outcomes.map(commandEvidence),
       tree: treeEvidence === null ? null : {
         headCommit: treeEvidence.headCommit,
@@ -729,7 +904,39 @@ export async function runTaskVerification(input: {
     tree: treeEvidence,
     copyRemoved: removal.removed,
     copyDetail: removal.detail,
-    staleEvidenceInvalidated: stale,
+    staleEvidenceInvalidated: queued.staleEvidenceInvalidated,
     alreadyCompleted: false,
+  });
+}
+
+/**
+ * Runs the confirmed verification policy against one frozen result commit in an isolated
+ * detached copy of that commit. Nothing is staged, committed, or pushed, and the Task
+ * worktree is never used, so verification cannot see uncommitted Agent edits.
+ *
+ * This is the direct (queue-and-await) form. A long-command Operation uses
+ * `queueTaskVerification` + `executeQueuedVerification` so the caller can return a handle first.
+ */
+export async function runTaskVerification(input: {
+  readonly storage: Phase1Database;
+  readonly runner: VerificationRunner;
+  readonly copiesRoot: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly executionId?: string;
+  readonly commandId: string;
+  readonly permissionMode?: 'FULL' | 'STRICT';
+  readonly now?: () => number;
+  readonly randomUUID?: () => string;
+}): Promise<VerificationReport> {
+  const queued = await queueTaskVerification(input);
+  if (queued.replay !== null) return queued.replay;
+  return executeQueuedVerification({
+    storage: input.storage,
+    runner: input.runner,
+    copiesRoot: input.copiesRoot,
+    queued,
+    ...(input.now === undefined ? {} : { now: input.now }),
+    ...(input.randomUUID === undefined ? {} : { randomUUID: input.randomUUID }),
   });
 }

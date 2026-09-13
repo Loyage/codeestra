@@ -9,6 +9,7 @@ import {
   type AgentConfigurationResolutionView,
   type AttentionView,
   type EventEnvelopeView,
+  type OperationView,
   type QuestionnaireView,
   type RepositoryIdentityView,
   type ResultCommitAuthorizationView,
@@ -90,7 +91,30 @@ const valueLabels: Record<string, string> = {
   MERGED: '已合并',
   FAST_FORWARD: '快进',
   MERGE_COMMIT: '合并提交',
+  PLANNED: '已计划',
+  IN_PROGRESS: '进行中',
+  INFO: '信息',
+  CANCELLED_BY_USER: '已取消（用户）',
 };
+
+/**
+ * Long commands are labelled by what they cover. `RUN_TASK_VERIFICATION` is called what it is: the
+ * same policy the Task verification uses, run on the merged commit.
+ */
+function operationKindLabel(kind: string): string {
+  if (kind === 'RUN_TASK') return 'Agent 运行';
+  if (kind === 'RUN_TASK_VERIFICATION') return '任务验证';
+  return kind;
+}
+
+/** The newest recorded step, as one line — never a progress estimate the Runtime cannot know. */
+function operationLatestStep(operation: OperationView): string {
+  const step = operation.steps.at(-1);
+  if (step === undefined) return '还没有记录步骤';
+  const detail = step.detail === null ? '' : ` ${JSON.stringify(step.detail)}`;
+  const rendered = `${step.step} · ${labelValue(step.state)}${detail}`;
+  return rendered.length > 160 ? `${rendered.slice(0, 160)}…` : rendered;
+}
 
 /**
  * Integration batches reuse two state names from the Execution vocabulary, where they mean
@@ -356,6 +380,21 @@ function Console({ token, initialProjectId }: {
     }
   }, [state.projectId, state.detailToken, loadTaskList, update]);
 
+  // A long command records a step when the Runtime reaches it, which is not a domain event, so
+  // while one is still running the Task detail is polled instead of waiting for an event that will
+  // never arrive. It stops as soon as every Operation is terminal.
+  const activeOperationCount = state.status?.operations.filter((operation) =>
+    operation.state === 'PLANNED' || operation.state === 'IN_PROGRESS').length ?? 0;
+  useEffect(() => {
+    const projectId = state.projectId;
+    const taskId = state.taskId;
+    if (activeOperationCount === 0 || projectId === null || taskId === null) return undefined;
+    const timer = setInterval(() => {
+      void loadTaskDetail(projectId, taskId).catch(() => { /* the next tick retries */ });
+    }, 1_500);
+    return () => { clearInterval(timer); };
+  }, [activeOperationCount, state.projectId, state.taskId, loadTaskDetail]);
+
   // Event stream: reconnects from the last delivered cursor, so a dropped connection or a
   // restarted Runtime resumes without gaps or duplicates.
   useEffect(() => {
@@ -615,6 +654,7 @@ function TasksTab(props: CommonProps & {
   }, [taskId]);
   const latestExecution = status?.executions[0] ?? null;
   const integrationBatches = status?.integrations ?? [];
+  const operations = status?.operations ?? [];
   const integratedBatch = integrationBatches.find((batch) => batch.state === 'INTEGRATED') ?? null;
   const inFlightIntegration = integrationBatches.find((batch) =>
     ['CREATED', 'PREPARING', 'VERIFYING', 'INTEGRATING_DEV', 'RECOVERY_REQUIRED']
@@ -954,17 +994,21 @@ function TasksTab(props: CommonProps & {
                 type="button"
                 className={task.state === 'EXECUTED' ? 'primary' : ''}
                 disabled={busy || task.state !== 'EXECUTED'}
-                title="提交成果后，在固定 commit 上独立运行验证"
+                title="提交成果后，在固定 commit 上独立运行验证；后台运行，可在此查看进度并取消"
                 onClick={() => {
-                  void run('正在执行验证', async () => {
-                    const report = await client.command<VerificationRunView>({
+                  void run('正在排队验证', async () => {
+                    // The UI asks for the background form so the long command does not block the
+                    // page; progress and cancel stay on the same command face as the CLI.
+                    const started = await client.command<{ verificationId: string }>({
                       command: 'task.verify',
                       commandId: crypto.randomUUID(),
                       projectId,
                       taskId: task.id,
+                      background: true,
                     });
-                    if (selectedRef.current === task.id) setVerifyReport(report);
+                    if (selectedRef.current === task.id) setVerifyReport(null);
                     await props.loadDetail(projectId, task.id);
+                    if (selectedRef.current === task.id) setRunResult(JSON.stringify(started));
                   });
                 }}
               >
@@ -999,6 +1043,83 @@ function TasksTab(props: CommonProps & {
                 合入 dev
               </button>
             </div>
+            {operations.length === 0 ? null : (
+              <section className="card nested">
+                <h3>长命令进度 <span className="muted hint">Runtime 记录的事实步骤</span></h3>
+                <p className="muted">
+                  进度只显示 Runtime 实际到达的步骤，不是预估百分比。取消是协作停止：确认进程
+                  静止后才落状态，无法确认时会保留占用并需要人工处理。
+                </p>
+                <div className="table-scroll"><table>
+                  <thead>
+                    <tr><th>类型</th><th>状态</th><th>最新步骤</th><th>更新时间</th><th>操作</th></tr>
+                  </thead>
+                  <tbody>
+                    {operations.map((operation) => {
+                      const active = operation.state === 'PLANNED'
+                        || operation.state === 'IN_PROGRESS';
+                      return (
+                        <tr key={operation.operationId}>
+                          <td>{operationKindLabel(operation.kind)}
+                            <div className="muted mono">{operation.operationId.slice(0, 8)}</div></td>
+                          <td>{labelValue(operation.state)}
+                            {operation.cancelRequestedAt === null ? null : (
+                              <div className="muted">已请求取消</div>
+                            )}</td>
+                          <td>{operationLatestStep(operation)}
+                            {operation.result === null ? null : (
+                              <div className="muted mono">{JSON.stringify(operation.result)}</div>
+                            )}</td>
+                          <td>{new Date(operation.updatedAt).toLocaleTimeString('zh-CN')}</td>
+                          <td>{active ? (
+                            <button
+                              type="button"
+                              disabled={busy}
+                              title="取消这个长命令：只在该进程组确认静止后才记录终态；运行类会协作暂停任务"
+                              onClick={() => {
+                                void run('正在取消长命令', async () => {
+                                  await client.command({
+                                    command: 'task.operation.cancel',
+                                    commandId: crypto.randomUUID(),
+                                    projectId,
+                                    taskId: task.id,
+                                    operationId: operation.operationId,
+                                  });
+                                  await props.reloadTasks(projectId);
+                                  await props.loadDetail(projectId, task.id);
+                                });
+                              }}
+                            >
+                              取消
+                            </button>
+                          ) : '—'}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table></div>
+                <details>
+                  <summary>全部步骤</summary>
+                  {operations.map((operation) => (
+                    <div key={operation.operationId}>
+                      <h4>{operationKindLabel(operation.kind)} · {operation.operationId.slice(0, 8)}</h4>
+                      {operation.steps.length === 0 ? <p className="muted">还没有记录步骤。</p> : (
+                        <ol>
+                          {operation.steps.map((step) => (
+                            <li key={step.stepKey}>
+                              <code>{step.step}</code> {labelValue(step.state)}
+                              {' · '}{new Date(step.recordedAt).toLocaleTimeString('zh-CN')}
+                              {step.detail === null ? null
+                                : <span className="muted"> {JSON.stringify(step.detail)}</span>}
+                            </li>
+                          ))}
+                        </ol>
+                      )}
+                    </div>
+                  ))}
+                </details>
+              </section>
+            )}
             {waiting === 0 ? null : (
               <AttentionTab key={task.id} client={client} projectId={projectId}
                 attentions={taskAttentions} run={props.run} update={update} reload={props.reloadAttentions} />

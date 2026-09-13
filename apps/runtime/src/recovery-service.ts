@@ -1,5 +1,9 @@
 import { inspectResultCommit, readHeadCommit, reconcileWorkspace } from '@codeestra/git';
 import { Phase1Database } from '@codeestra/storage';
+import {
+  reconcileRunOperations,
+  type RunOperationRecoveryResult,
+} from './operation-service.js';
 import { resultCommitMessage } from './result-commit-service.js';
 
 export interface AgentStartRecoveryResult {
@@ -204,6 +208,27 @@ export async function reconcileInterruptedIntegrations(input: {
       worktreePath: batch.worktreePath, mergedCommit: batch.mergedCommit });
   }
   return results;
+}
+
+/**
+ * Reconciles long-command Operations a restart interrupted (ADR-0019). The decision is made from
+ * recorded facts, never from "the Runtime is up again":
+ *
+ * - a run whose Execution is still active becomes `RECONCILE_REQUIRED` — the provider process may
+ *   or may not exist, so nothing is claimed and ownership is untouched;
+ * - a run with a terminal Execution is closed from that state;
+ * - a run that never recorded an Execution is closed as failed without replaying any Git side
+ *   effect (the workspace reconcile owns those).
+ *
+ * Verification runs are covered by `reconcileInterruptedVerifications`, which already completes
+ * their Operation as `ERROR(RUNTIME_RESTARTED)` while keeping the copy.
+ */
+export function reconcileInterruptedRunOperations(input: {
+  readonly storage: Phase1Database;
+  readonly now?: () => number;
+}): readonly RunOperationRecoveryResult[] {
+  const now = input.now ?? Date.now;
+  return reconcileRunOperations({ storage: input.storage, recordedAt: now() });
 }
 
 export interface ResultCommitRecoveryResult {

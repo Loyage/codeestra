@@ -460,6 +460,77 @@ async function tailEvents(command: ClientRequest): Promise<void> {
   });
 }
 
+/** One recorded boundary of a long command, as the Runtime projects it. */
+interface OperationProgressView {
+  readonly sequence: number;
+  readonly stepKey: string;
+  readonly step: string;
+  readonly state: string;
+  readonly detail: Readonly<Record<string, unknown>> | null;
+  readonly recordedAt: number;
+}
+
+interface OperationView {
+  readonly operationId: string;
+  readonly projectId: string;
+  readonly kind: string;
+  readonly aggregateId: string;
+  readonly taskId: string | null;
+  readonly state: string;
+  readonly result: Readonly<Record<string, unknown>> | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly cancelRequestedAt: number | null;
+  readonly steps: readonly OperationProgressView[];
+}
+
+/** `--json` is the only flag these reads accept; anything else is a usage error. */
+function jsonOnlyFlag(flags: readonly string[]): boolean {
+  if (flags.some((flag) => flag !== '--json')) usage();
+  return flags.length > 0;
+}
+
+function stepSummary(step: OperationProgressView): string {
+  const detail = step.detail;
+  if (detail === null) return '';
+  if (Array.isArray(detail['argv'])) {
+    return `${(detail['argv'] as readonly string[]).join(' ')} (cwd ${String(detail['cwd'] ?? '.')})`;
+  }
+  if ('durationMs' in detail) {
+    return `exit ${detail['exitCode'] === null ? 'unknown' : String(detail['exitCode'])}`
+      + `${detail['timedOut'] === true ? ' · 超时' : ''} · ${String(detail['durationMs'])}ms`;
+  }
+  if (typeof detail['executionId'] === 'string') {
+    return `${detail['executionId'].slice(0, 8)}${'attemptNumber' in detail
+      ? ` · 第 ${String(detail['attemptNumber'])} 次` : ''}`;
+  }
+  const rendered = JSON.stringify(detail);
+  return rendered.length > 200 ? `${rendered.slice(0, 200)}…` : rendered;
+}
+
+function printOperation(operation: OperationView): void {
+  console.log(`=== ${operation.kind} ${operation.operationId.slice(0, 8)} ${operation.state}`
+    + `${operation.cancelRequestedAt === null ? '' : ' · 已请求取消'}`);
+  console.log(`  created ${new Date(operation.createdAt).toLocaleString('zh-CN')}`
+    + ` · updated ${new Date(operation.updatedAt).toLocaleString('zh-CN')}`);
+  if (operation.result !== null) console.log(`  result ${JSON.stringify(operation.result)}`);
+  if (operation.steps.length === 0) console.log('  （还没有记录任何步骤）');
+  for (const step of operation.steps) {
+    console.log(`  ${String(step.sequence).padStart(2, ' ')} ${step.step.padEnd(16, ' ')}`
+      + ` ${step.state.padEnd(9, ' ')} ${stepSummary(step)}`);
+  }
+}
+
+/**
+ * Long-command Operations are a fact list, so the human view prints every step in order and
+ * `--json` prints the Runtime's projection verbatim for scripts.
+ */
+function printOperations(operations: readonly OperationView[], json: boolean): void {
+  if (json) { print(operations); return; }
+  if (operations.length === 0) { console.log('这个任务没有长命令记录。'); return; }
+  for (const operation of operations) printOperation(operation);
+}
+
 function usage(): never {
   console.error(`Usage:
   bun run codeestra status
@@ -496,8 +567,11 @@ function usage(): never {
   bun run codeestra task result capture <project-id> <task-id> [execution-id]
   bun run codeestra task result prepare <project-id> <task-id> [execution-id]   # strict mode
   bun run codeestra task result commit <project-id> <task-id> <authorization-id> --confirm
-  bun run codeestra task verify <project-id> <task-id> [execution-id]
+  bun run codeestra task verify <project-id> <task-id> [execution-id] [--background]
   bun run codeestra task verification list <project-id> <task-id>
+  bun run codeestra task operation list <project-id> <task-id> [--json]
+  bun run codeestra task operation get <project-id> <operation-id> [--json]
+  bun run codeestra task operation cancel <project-id> <task-id> <operation-id> [--json]
   bun run codeestra task integrate <project-id> <task-id> <expected-version>
   bun run codeestra task integration list <project-id> <task-id>
   bun run codeestra events list [--project <project-id>] [--since <sequence>] [--limit <n>]
@@ -511,7 +585,11 @@ function usage(): never {
 
 --reverse prints the newest transcript entry first. It is a rendering choice for the human view
 only (it is refused together with --json), and because the command face reads forward from a cursor
-it may read up to ${maxTranscriptReverseReads} pages to reach the newest entries.`);
+it may read up to ${maxTranscriptReverseReads} pages to reach the newest entries.
+
+task verify --background returns a durable Operation handle instead of waiting for the policy to
+finish; follow it with task operation list and stop it with task operation cancel. Exit code 0 there
+means "the Operation was recorded and started", not "the verification passed".`);
   process.exit(2);
 }
 
@@ -866,23 +944,79 @@ try {
       adapterId,
     }));
   } else if (group === 'task' && action === 'verify') {
-    const [taskId, executionId, ...extra] = remainingArguments;
-    if (firstArgument === undefined || taskId === undefined || extra.length !== 0) usage();
+    const [taskId, ...rest] = remainingArguments;
+    if (firstArgument === undefined || taskId === undefined) usage();
+    let background = false;
+    const positionals: string[] = [];
+    for (const token of rest) {
+      if (token === '--background') background = true;
+      else if (token.startsWith('--')) usage();
+      else positionals.push(token);
+    }
+    if (positionals.length > 1) usage();
+    const executionId = positionals[0];
     const report = await call({
       command: 'task.verify',
       commandId: crypto.randomUUID(),
       projectId: firstArgument,
       taskId,
+      background,
       ...(executionId === undefined ? {} : { executionId }),
-    }) as { state: string };
+    }) as { state: string; operationId?: string; verificationId?: string; message?: string };
     print(report);
-    if (report.state !== 'PASSED') process.exit(1);
+    if (background) {
+      // The Operation is durable and may still be running: exit 0 means "accepted", and the verdict
+      // must be read from task operation list instead of being assumed here.
+      console.error('验证已在后台开始；用 `task operation list` 查看进度，'
+        + '`task operation cancel` 取消。此处退出码 0 表示已受理，不代表验证通过。');
+    } else if (report.state !== 'PASSED') {
+      process.exit(1);
+    }
   } else if (group === 'task' && action === 'verification') {
     // `task verification <subcommand> …` lands the subcommand in firstArgument.
     const [projectId, taskId, ...extra] = remainingArguments;
     if (firstArgument !== 'list' || projectId === undefined || taskId === undefined
       || extra.length !== 0) usage();
     print(await call({ command: 'task.verification.list', projectId, taskId }));
+  } else if (group === 'task' && action === 'operation') {
+    // `task operation <subcommand> …` is a three-level command, so the subcommand lands in
+    // firstArgument and the project ID is the first remaining argument.
+    const subcommand = firstArgument;
+    if (subcommand === 'list') {
+      const [projectId, taskId, ...flags] = remainingArguments;
+      if (projectId === undefined || taskId === undefined) usage();
+      const json = jsonOnlyFlag(flags);
+      const listed = await call({ command: 'task.operation.list', projectId, taskId });
+      printOperations(listed as OperationView[], json);
+    } else if (subcommand === 'get') {
+      const [projectId, operationId, ...flags] = remainingArguments;
+      if (projectId === undefined || operationId === undefined) usage();
+      const json = jsonOnlyFlag(flags);
+      const read = await call({ command: 'task.operation.get', projectId, operationId });
+      if (json) print(read); else printOperation(read as OperationView);
+    } else if (subcommand === 'cancel') {
+      const [projectId, taskId, operationId, ...flags] = remainingArguments;
+      if (projectId === undefined || taskId === undefined || operationId === undefined) usage();
+      const json = jsonOnlyFlag(flags);
+      const outcome = await call({
+        command: 'task.operation.cancel',
+        commandId: crypto.randomUUID(),
+        projectId,
+        taskId,
+        operationId,
+      }) as { stop: string; state: string; kind: string; detail: string };
+      if (json) {
+        print(outcome);
+      } else {
+        console.log(`${outcome.kind} ${operationId.slice(0, 8)} → ${outcome.state}`);
+        console.log(`  ${outcome.stop}：${outcome.detail}`);
+      }
+      // An unconfirmed stop is a real failure for scripts: the process may still be running and the
+      // Operation was left for a human, so the exit code must not report success.
+      if (outcome.stop === 'UNCERTAIN') process.exit(1);
+    } else {
+      usage();
+    }
   } else if (group === 'task' && action === 'integrate') {
     const [taskId, versionText, ...extra] = remainingArguments;
     const expectedVersion = Number(versionText);

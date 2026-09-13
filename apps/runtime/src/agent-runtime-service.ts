@@ -13,6 +13,12 @@ import type { AdapterRegistry } from './adapter-registry.js';
 import { deliverAgentAnswer } from './agent-answer-service.js';
 import { observeAgentEvents } from './agent-observation-service.js';
 import { startReservedExecution } from './agent-start-service.js';
+import {
+  beginTaskRunOperation,
+  operationSteps,
+  recordRunStep,
+  settleRunOperation,
+} from './operation-service.js';
 import { prepareTaskWorkspace } from './workspace-service.js';
 
 /**
@@ -134,78 +140,159 @@ export class AgentRuntimeCoordinator {
     };
   }): Promise<RunTaskResult> {
     const adapter = this.#registry.resolve(input.adapterId);
-    const probe = await adapter.probe();
-    const workspace = await prepareTaskWorkspace({
+    // The run Operation is created before any Git or provider side effect, so a cancel or a
+    // restart can find the run while it is still happening — and so a run that fails during the
+    // version probe is still a recorded attempt rather than a silent rejection. Its command ID is
+    // the idempotency key.
+    const operationId = deriveCommandId(input.commandId, 'run-operation');
+    beginTaskRunOperation({
       storage: this.#storage,
-      runtimeHome: this.#runtimeHome,
-      commandId: deriveCommandId(input.commandId, 'workspace'),
       projectId: input.projectId,
       taskId: input.taskId,
-      expectedTaskVersion: input.expectedTaskVersion,
-      now: this.#now,
-      randomUUID: this.#randomUUID,
-    });
-    // Resolved before the reservation, so the effective configuration is part of the Execution's
-    // recorded input and the Adapter cannot be started with something else.
-    const agentConfig = this.#resolveAgentConfig({
-      projectId: input.projectId,
+      operationId,
+      commandId: input.commandId,
       adapterId: adapter.id,
-    });
-    const execution = this.#storage.reserveExecution({
-      projectId: input.projectId,
-      taskId: input.taskId,
       expectedTaskVersion: input.expectedTaskVersion,
-      workspaceId: workspace.workspaceId,
-      executionId: deriveCommandId(input.commandId, 'execution'),
-      commandId: deriveCommandId(input.commandId, 'reserve-execution'),
-      payloadHash: deriveCommandId(input.commandId, 'reserve-payload'),
-      reservationEventId: this.#randomUUID(),
-      taskEventId: this.#randomUUID(),
-      adapterId: adapter.id,
-      adapterVersion: probe.version,
-      agentConfig,
-      ...(input.resume === undefined
-        ? {} : { resumeFromExecutionId: input.resume.resumeFromExecutionId }),
-      actor: 'runtime-scheduler',
       createdAt: this.#now(),
     });
-    const permissionMode = this.#permissionMode();
-    const started = await startReservedExecution({
-      storage: this.#storage,
-      adapter,
-      projectId: input.projectId,
-      executionId: execution.executionId,
-      expectedExecutionVersion: 0,
-      prepareCommandId: deriveCommandId(input.commandId, 'prepare-execution'),
-      startCommandId: deriveCommandId(input.commandId, 'start-agent'),
-      environment: this.#environment,
-      permissionMode,
-      ...(input.resume === undefined ? {} : {
-        resume: {
-          predecessorSessionId: input.resume.predecessorSessionId,
-          sessionStorageRef: input.resume.predecessorSessionStorageRef,
-          providerSessionId: input.resume.predecessorProviderSessionId,
+    try {
+      const probe = await adapter.probe();
+      const workspace = await prepareTaskWorkspace({
+        storage: this.#storage,
+        runtimeHome: this.#runtimeHome,
+        commandId: deriveCommandId(input.commandId, 'workspace'),
+        projectId: input.projectId,
+        taskId: input.taskId,
+        expectedTaskVersion: input.expectedTaskVersion,
+        now: this.#now,
+        randomUUID: this.#randomUUID,
+      });
+      recordRunStep({
+        storage: this.#storage,
+        operationId,
+        stepKey: operationSteps.workspacePrepared,
+        step: 'WORKSPACE',
+        state: 'SUCCEEDED',
+        detail: {
+          workspaceId: workspace.workspaceId,
+          workspacePath: workspace.path,
+          baseCommit: workspace.baseCommit,
         },
-      }),
-      now: this.#now,
-      randomUUID: this.#randomUUID,
-    });
-    this.#ensurePump(started.sessionId);
-    return {
-      executionId: execution.executionId,
-      sessionId: started.sessionId,
-      taskId: execution.taskId,
-      taskVersion: execution.taskVersion,
-      attemptNumber: execution.attemptNumber,
-      workspaceId: execution.workspaceId,
-      workspacePath: execution.workspacePath,
-      baseCommit: execution.baseCommit,
-      adapterId: started.adapterId,
-      adapterVersion: started.adapterVersion,
-      sessionState: started.sessionState,
-      permissionMode,
-      agentConfig: started.agentConfig ?? null,
-    };
+        recordedAt: this.#now(),
+      });
+      // Resolved before the reservation, so the effective configuration is part of the Execution's
+      // recorded input and the Adapter cannot be started with something else.
+      const agentConfig = this.#resolveAgentConfig({
+        projectId: input.projectId,
+        adapterId: adapter.id,
+      });
+      const execution = this.#storage.reserveExecution({
+        projectId: input.projectId,
+        taskId: input.taskId,
+        expectedTaskVersion: input.expectedTaskVersion,
+        workspaceId: workspace.workspaceId,
+        executionId: deriveCommandId(input.commandId, 'execution'),
+        commandId: deriveCommandId(input.commandId, 'reserve-execution'),
+        payloadHash: deriveCommandId(input.commandId, 'reserve-payload'),
+        reservationEventId: this.#randomUUID(),
+        taskEventId: this.#randomUUID(),
+        adapterId: adapter.id,
+        adapterVersion: probe.version,
+        agentConfig,
+        ...(input.resume === undefined
+          ? {} : { resumeFromExecutionId: input.resume.resumeFromExecutionId }),
+        actor: 'runtime-scheduler',
+        createdAt: this.#now(),
+      });
+      recordRunStep({
+        storage: this.#storage,
+        operationId,
+        stepKey: operationSteps.executionReserved,
+        step: 'EXECUTION',
+        state: 'SUCCEEDED',
+        detail: {
+          executionId: execution.executionId,
+          attemptNumber: execution.attemptNumber,
+          taskVersion: execution.taskVersion,
+        },
+        recordedAt: this.#now(),
+      });
+      const permissionMode = this.#permissionMode();
+      const started = await startReservedExecution({
+        storage: this.#storage,
+        adapter,
+        projectId: input.projectId,
+        executionId: execution.executionId,
+        expectedExecutionVersion: 0,
+        prepareCommandId: deriveCommandId(input.commandId, 'prepare-execution'),
+        startCommandId: deriveCommandId(input.commandId, 'start-agent'),
+        environment: this.#environment,
+        permissionMode,
+        ...(input.resume === undefined ? {} : {
+          resume: {
+            predecessorSessionId: input.resume.predecessorSessionId,
+            sessionStorageRef: input.resume.predecessorSessionStorageRef,
+            providerSessionId: input.resume.predecessorProviderSessionId,
+          },
+        }),
+        now: this.#now,
+        randomUUID: this.#randomUUID,
+      });
+      recordRunStep({
+        storage: this.#storage,
+        operationId,
+        stepKey: operationSteps.agentSessionStarted,
+        step: 'AGENT_SESSION',
+        state: 'SUCCEEDED',
+        detail: {
+          sessionId: started.sessionId,
+          adapterId: started.adapterId,
+          adapterVersion: started.adapterVersion,
+          sessionState: started.sessionState,
+        },
+        recordedAt: this.#now(),
+      });
+      this.#ensurePump(started.sessionId);
+      return {
+        executionId: execution.executionId,
+        sessionId: started.sessionId,
+        taskId: execution.taskId,
+        taskVersion: execution.taskVersion,
+        attemptNumber: execution.attemptNumber,
+        workspaceId: execution.workspaceId,
+        workspacePath: execution.workspacePath,
+        baseCommit: execution.baseCommit,
+        adapterId: started.adapterId,
+        adapterVersion: started.adapterVersion,
+        sessionState: started.sessionState,
+        permissionMode,
+        agentConfig: started.agentConfig ?? null,
+      };
+    } catch (error) {
+      // A run that never reached a Session is closed from the error it actually produced. The
+      // workspace and Agent start Operations keep their own, more specific recovery records.
+      const code = typeof error === 'object' && error !== null && 'code' in error
+        ? String(error.code)
+        : 'RUN_FAILED';
+      const message = error instanceof Error ? error.message : String(error);
+      recordRunStep({
+        storage: this.#storage,
+        operationId,
+        stepKey: 'RUN_FAILED',
+        step: 'RUN',
+        state: 'FAILED',
+        detail: { code, message },
+        recordedAt: this.#now(),
+      });
+      this.#storage.completeOperation({
+        operationId,
+        state: code === 'RECOVERY_REQUIRED' || code === 'RECONCILE_REQUIRED'
+          ? 'RECONCILE_REQUIRED' : 'FAILED',
+        result: { code, message },
+        completedAt: this.#now(),
+      });
+      throw error;
+    }
   }
 
   /**
@@ -406,6 +493,7 @@ export class AgentRuntimeCoordinator {
       });
       return;
     }
+    let observed = false;
     try {
       await observeAgentEvents({
         storage: this.#storage,
@@ -417,8 +505,26 @@ export class AgentRuntimeCoordinator {
           await this.#deliverPlannedAnswers(session.sessionId);
         },
       });
+      observed = true;
     } catch (error) {
       this.#logger('Agent observation ended with an error', {
+        sessionId: session.sessionId,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+    // The stream ending is a fact, but it is not a verdict: the run Operation is closed from the
+    // recorded Session and Execution states, so an unknown end becomes RECONCILE_REQUIRED.
+    try {
+      settleRunOperation({
+        storage: this.#storage,
+        projectId: session.projectId,
+        taskId: session.taskId,
+        executionId: session.executionId,
+        observed,
+        recordedAt: this.#now(),
+      });
+    } catch (error) {
+      this.#logger('run Operation could not be settled from facts', {
         sessionId: session.sessionId,
         reason: error instanceof Error ? error.message : String(error),
       });

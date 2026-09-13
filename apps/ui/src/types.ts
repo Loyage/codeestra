@@ -157,6 +157,34 @@ export interface TaskStatusView {
   readonly executions: readonly ExecutionView[];
   readonly verifications: readonly VerificationRunView[];
   readonly integrations: readonly IntegrationBatchView[];
+  /**
+   * Long-command Operations (ADR-0019): the Agent run and every verification run, with the steps
+   * the Runtime actually recorded. Progress is a fact list, not a predicted percentage.
+   */
+  readonly operations: readonly OperationView[];
+}
+
+export interface OperationProgressView {
+  readonly sequence: number;
+  readonly stepKey: string;
+  readonly step: string;
+  readonly state: string;
+  readonly detail: Readonly<Record<string, unknown>> | null;
+  readonly recordedAt: number;
+}
+
+export interface OperationView {
+  readonly operationId: string;
+  readonly projectId: string;
+  readonly kind: string;
+  readonly aggregateId: string;
+  readonly taskId: string | null;
+  readonly state: string;
+  readonly result: Readonly<Record<string, unknown>> | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly cancelRequestedAt: number | null;
+  readonly steps: readonly OperationProgressView[];
 }
 
 /**

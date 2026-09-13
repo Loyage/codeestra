@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 10;
+export const phase1SchemaVersion = 11;
 
 export const phase1Migration = `
 CREATE TABLE projects (
@@ -578,4 +578,29 @@ DROP TABLE workspaces;
 ALTER TABLE workspaces_v7 RENAME TO workspaces;
 CREATE UNIQUE INDEX one_live_workspace ON workspaces(task_id) WHERE state <> 'RELEASED';
 CREATE UNIQUE INDEX one_live_workspace_path ON workspaces(path) WHERE state <> 'RELEASED';
+`;
+
+/**
+ * Long-command Operations (ADR-0019). `task.run` and `task.verify` record what they are doing as
+ * durable, ordered steps so a long command has observable progress, can be cancelled from another
+ * client, and can be reconciled from facts after a Runtime restart.
+ *
+ * A step is written at a boundary the Runtime actually reached — never a predicted percentage and
+ * never a step it did not finish — so the rows are evidence, not a progress bar estimate.
+ *
+ * `step_key` makes every step idempotent: replaying the same command ID cannot append the same
+ * step twice, which is what keeps a replayed run or verification from looking like new work.
+ */
+export const operationProgressMigration = `
+CREATE TABLE operation_progress (
+  operation_id TEXT NOT NULL REFERENCES operations(id),
+  sequence INTEGER NOT NULL CHECK(sequence >= 0),
+  step_key TEXT NOT NULL CHECK(length(trim(step_key)) > 0),
+  step TEXT NOT NULL CHECK(length(trim(step)) > 0),
+  state TEXT NOT NULL CHECK(state IN ('STARTED','SUCCEEDED','FAILED','CANCELLED','INFO')),
+  detail_json TEXT CHECK(detail_json IS NULL OR json_valid(detail_json)),
+  recorded_at INTEGER NOT NULL CHECK(recorded_at >= 0),
+  PRIMARY KEY(operation_id,sequence),
+  UNIQUE(operation_id,step_key)
+) STRICT, WITHOUT ROWID;
 `;

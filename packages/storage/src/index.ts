@@ -4,7 +4,8 @@ export type {
   AgentStartPlan, AgentThinkingLevel, AttentionSummary,
   CommandResult, ConfirmedVerificationPolicy, ExecutionError, ExecutionLifecycleState,
   ExecutionReservation,
-  ExecutionSummary, ObservableAgentSession, SessionTranscriptTarget,
+  ExecutionSummary, ObservableAgentSession, OperationProgressEntry, OperationProgressState,
+  OperationState, OperationSummary, SessionTranscriptTarget,
   StoredAgentConfiguration, IntegrationBatchItemSummary, IntegrationBatchPlan,
   IntegrationBatchState, IntegrationBatchSummary, IntegrationCandidates,
   IntegrationItemState, IntegrationVerificationPlan, IntegrationVerificationSummary, MergeStrategy,
@@ -18,6 +19,7 @@ export type {
 export {
   agentAnswerMigration, agentConfigurationMigration, agentDisconnectMigration,
   agentObservationMigration, agentStartMigration, integrationPipelineMigration,
+  operationProgressMigration,
   phase1Migration, phase1SchemaVersion, taskControlMigration, taskVerificationMigration,
   workspaceRetryMigration,
 } from './migration.js';

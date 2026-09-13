@@ -8,6 +8,7 @@ import {
   agentObservationMigration,
   agentStartMigration,
   integrationPipelineMigration,
+  operationProgressMigration,
   phase1Migration,
   phase1SchemaVersion,
   taskControlMigration,
@@ -683,6 +684,7 @@ export class Phase1Database {
         if (version < 8) this.sqlite.exec(agentConfigurationMigration);
         if (version < 9) this.sqlite.exec(taskControlMigration);
         if (version < 10) this.sqlite.exec(integrationPipelineMigration);
+        if (version < 11) this.sqlite.exec(operationProgressMigration);
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -4101,6 +4103,18 @@ export class Phase1Database {
     return plan;
   }
 
+  /**
+   * The same run including its Operation identity and state. A cancel needs both to report what it
+   * actually recorded, and the summary projection deliberately hides the Operation.
+   */
+  getVerificationRunPlan(projectId: string, verificationId: string): VerificationRunPlan {
+    const plan = this.verificationRunPlan(verificationId);
+    if (plan.projectId !== projectId) {
+      throw new StorageError('NOT_FOUND', 'Verification run was not found for this project');
+    }
+    return plan;
+  }
+
   /** Runs a previous Runtime left QUEUED or RUNNING; a restart reconciles them explicitly. */
   listIncompleteVerificationRuns(): readonly VerificationRunPlan[] {
     return this.sqlite.query<{ id: string }, []>(`
@@ -4874,6 +4888,195 @@ export class Phase1Database {
     };
   }
 
+  /**
+   * Creates one long-command Operation, or returns the one the same command already created.
+   * `idempotencyKey` is the command ID, so a replayed `task.run` reaches its recorded Operation
+   * instead of starting a second one.
+   */
+  beginRunOperation(input: {
+    readonly operationId: string;
+    readonly projectId: string;
+    readonly kind: string;
+    readonly aggregateId: string;
+    readonly idempotencyKey: string;
+    readonly request: Readonly<Record<string, unknown>>;
+    readonly createdAt: number;
+  }): Readonly<{ operation: OperationSummary; created: boolean }> {
+    return this.sqlite.transaction(() => {
+      const existing = this.sqlite.query<{ id: string }, [string, string, string]>(`
+        SELECT id FROM operations WHERE project_id=?1 AND kind=?2 AND idempotency_key=?3
+      `).get(input.projectId, input.kind, input.idempotencyKey);
+      if (existing !== null) {
+        return { operation: this.operationSummary(existing.id), created: false };
+      }
+      this.sqlite.query(`
+        INSERT INTO operations(id,project_id,kind,aggregate_id,idempotency_key,state,request_json,
+          created_at,updated_at)
+        VALUES (?1,?2,?3,?4,?5,'PLANNED',?6,?7,?7)
+      `).run(input.operationId, input.projectId, input.kind, input.aggregateId,
+        input.idempotencyKey, JSON.stringify(input.request), input.createdAt);
+      return { operation: this.operationSummary(input.operationId), created: true };
+    })();
+  }
+
+  /**
+   * Appends one progress step. `step_key` is unique per Operation, so replaying a command that
+   * already recorded this step is a no-op rather than a duplicated fact. The return value says
+   * whether a row was written, so a caller can tell "this happened now" from "this already
+   * happened" instead of pretending to redo work.
+   */
+  recordOperationProgress(input: {
+    readonly operationId: string;
+    readonly stepKey: string;
+    readonly step: string;
+    readonly state: OperationProgressState;
+    readonly detail?: Readonly<Record<string, unknown>>;
+    readonly recordedAt: number;
+  }): Readonly<{ recorded: boolean; sequence: number }> {
+    return this.sqlite.transaction(() => {
+      const operation = this.sqlite.query<{ id: string }, [string]>(
+        'SELECT id FROM operations WHERE id=?1').get(input.operationId);
+      if (operation === null) throw new StorageError('NOT_FOUND', 'Operation was not found');
+      const existing = this.sqlite.query<{ sequence: number }, [string, string]>(
+        'SELECT sequence FROM operation_progress WHERE operation_id=?1 AND step_key=?2',
+      ).get(input.operationId, input.stepKey);
+      if (existing !== null) return { recorded: false, sequence: existing.sequence };
+      const next = this.sqlite.query<{ next: number }, [string]>(`
+        SELECT COALESCE(MAX(sequence) + 1, 0) AS next FROM operation_progress WHERE operation_id=?1
+      `).get(input.operationId)?.next ?? 0;
+      this.sqlite.query(`
+        INSERT INTO operation_progress(operation_id,sequence,step_key,step,state,detail_json,recorded_at)
+        VALUES (?1,?2,?3,?4,?5,?6,?7)
+      `).run(input.operationId, next, input.stepKey, input.step, input.state,
+        input.detail === undefined ? null : JSON.stringify(input.detail), input.recordedAt);
+      // Progress doubles as a heartbeat, so a reader can tell "still moving" from "stuck" without
+      // the Runtime inventing a percentage it cannot know. The first recorded step also moves the
+      // Operation out of PLANNED: recording a step means the work itself has begun.
+      this.sqlite.query(`
+        UPDATE operations
+        SET updated_at=max(updated_at,?1),
+            state=CASE WHEN state='PLANNED' THEN 'IN_PROGRESS' ELSE state END
+        WHERE id=?2
+      `).run(input.recordedAt, input.operationId);
+      return { recorded: true, sequence: next };
+    })();
+  }
+
+  getOperation(projectId: string, operationId: string): OperationSummary {
+    const summary = this.operationSummary(operationId);
+    if (summary.projectId !== projectId) {
+      throw new StorageError('NOT_FOUND', 'Operation was not found for this project');
+    }
+    return summary;
+  }
+
+  /**
+   * The long-command Operations belonging to one Task: the Agent run plus every verification run.
+   * Sub-operations of a run (workspace, Agent start, result capture) are not listed; they are
+   * already covered by the run's own steps.
+   */
+  listTaskOperations(projectId: string, taskId: string): readonly OperationSummary[] {
+    return this.sqlite.query<{ id: string }, [string, string]>(`
+      SELECT o.id FROM operations o
+      WHERE o.project_id=?1 AND (
+        (o.kind='RUN_TASK' AND o.aggregate_id=?2)
+        OR (o.kind='RUN_TASK_VERIFICATION' AND o.id IN (
+          SELECT r.operation_id FROM verification_runs r
+          WHERE r.project_id=?1 AND r.task_id=?2))
+      )
+      ORDER BY o.created_at DESC, o.id
+    `).all(projectId, taskId).map((row) => this.operationSummary(row.id));
+  }
+
+  /** The run Operation this Task is currently inside, if any. */
+  findActiveRunOperation(projectId: string, taskId: string): OperationSummary | null {
+    const row = this.sqlite.query<{ id: string }, [string, string]>(`
+      SELECT id FROM operations
+      WHERE project_id=?1 AND kind='RUN_TASK' AND aggregate_id=?2
+        AND state IN ('PLANNED','IN_PROGRESS')
+      ORDER BY created_at DESC, id LIMIT 1
+    `).get(projectId, taskId);
+    return row === null ? null : this.operationSummary(row.id);
+  }
+
+  /** Runs a previous Runtime left unfinished; startup reconcile decides what the facts allow. */
+  listIncompleteRunOperations(): readonly OperationSummary[] {
+    return this.sqlite.query<{ id: string }, []>(`
+      SELECT id FROM operations WHERE kind='RUN_TASK' AND state IN ('PLANNED','IN_PROGRESS')
+      ORDER BY created_at, id
+    `).all().map((row) => this.operationSummary(row.id));
+  }
+
+  /**
+   * Terminal write for a long-command Operation. A second writer (a cancel racing the run loop)
+   * finds the Operation already terminal and returns the recorded outcome instead of overwriting it.
+   */
+  completeOperation(input: {
+    readonly operationId: string;
+    readonly state: 'SUCCEEDED' | 'FAILED' | 'RECONCILE_REQUIRED';
+    readonly result: Readonly<Record<string, unknown>>;
+    readonly completedAt: number;
+  }): OperationSummary {
+    return this.sqlite.transaction(() => {
+      const current = this.operationSummary(input.operationId);
+      if (current.state !== 'PLANNED' && current.state !== 'IN_PROGRESS') return current;
+      const updated = this.sqlite.query(`
+        UPDATE operations SET state=?1,result_json=?2,updated_at=?3
+        WHERE id=?4 AND state IN ('PLANNED','IN_PROGRESS')
+      `).run(input.state, JSON.stringify(input.result), input.completedAt, input.operationId);
+      if (updated.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION', 'Operation changed while completing');
+      }
+      return this.operationSummary(input.operationId);
+    })();
+  }
+
+  private operationSummary(operationId: string): OperationSummary {
+    const row = this.sqlite.query<{
+      id: string; project_id: string; kind: string; aggregate_id: string; state: OperationState;
+      request_json: string; result_json: string | null; created_at: number; updated_at: number;
+    }, [string]>(`
+      SELECT id,project_id,kind,aggregate_id,state,request_json,result_json,created_at,updated_at
+      FROM operations WHERE id=?1
+    `).get(operationId);
+    if (row === null) throw new StorageError('NOT_FOUND', 'Operation was not found');
+    const request = JSON.parse(row.request_json) as Record<string, unknown>;
+    const requestTaskId = typeof request['taskId'] === 'string' ? request['taskId'] as string : null;
+    const steps = this.sqlite.query<{
+      sequence: number; step_key: string; step: string; state: OperationProgressState;
+      detail_json: string | null; recorded_at: number;
+    }, [string]>(`
+      SELECT sequence,step_key,step,state,detail_json,recorded_at FROM operation_progress
+      WHERE operation_id=?1 ORDER BY sequence
+    `).all(operationId).map((step) => ({
+      sequence: step.sequence,
+      stepKey: step.step_key,
+      step: step.step,
+      state: step.state,
+      detail: step.detail_json === null
+        ? null
+        : JSON.parse(step.detail_json) as Readonly<Record<string, unknown>>,
+      recordedAt: step.recorded_at,
+    }));
+    const cancelStep = steps.find((step) => step.stepKey === 'CANCEL_REQUESTED');
+    return {
+      operationId: row.id,
+      projectId: row.project_id,
+      kind: row.kind,
+      aggregateId: row.aggregate_id,
+      // A run owns its Task directly; a verification Operation names it in its request payload.
+      taskId: requestTaskId ?? (row.kind === 'RUN_TASK' ? row.aggregate_id : null),
+      state: row.state,
+      result: row.result_json === null
+        ? null
+        : JSON.parse(row.result_json) as Readonly<Record<string, unknown>>,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      cancelRequestedAt: cancelStep?.recordedAt ?? null,
+      steps,
+    };
+  }
+
   updateTaskPriority(input: {
     readonly taskId: string;
     readonly expectedVersion: number;
@@ -4918,4 +5121,38 @@ export class Phase1Database {
       return result;
     })();
   }
+}
+
+export type OperationState = 'PLANNED' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED'
+  | 'RECONCILE_REQUIRED';
+
+export type OperationProgressState = 'STARTED' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'INFO';
+
+/** One recorded boundary of a long command. Ordered by `sequence`, unique by `stepKey`. */
+export interface OperationProgressEntry {
+  readonly sequence: number;
+  readonly stepKey: string;
+  readonly step: string;
+  readonly state: OperationProgressState;
+  readonly detail: Readonly<Record<string, unknown>> | null;
+  readonly recordedAt: number;
+}
+
+/**
+ * A long-command Operation as it is projected to clients: its durable state, its ordered steps,
+ * and whether a cancel has been requested. It carries facts only — never a predicted remaining
+ * time or a percentage the Runtime cannot know.
+ */
+export interface OperationSummary {
+  readonly operationId: string;
+  readonly projectId: string;
+  readonly kind: string;
+  readonly aggregateId: string;
+  readonly taskId: string | null;
+  readonly state: OperationState;
+  readonly result: Readonly<Record<string, unknown>> | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly cancelRequestedAt: number | null;
+  readonly steps: readonly OperationProgressEntry[];
 }

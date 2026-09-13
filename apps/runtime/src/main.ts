@@ -15,6 +15,7 @@ import { AgentRuntimeCoordinator, deriveCommandId } from './agent-runtime-servic
 import { EventSubscriptionHub, type EventSubscriptionHandle } from './event-subscription-service.js';
 import { integrateTaskResult } from './integration-service.js';
 import { RuntimeHttpApi } from './http-api.js';
+import { LongOperationService } from './operation-service.js';
 import { runtimeHome, runtimeSocketPath } from './paths.js';
 import { readPermissionMode, writePermissionMode, type PermissionMode } from './permission-mode.js';
 import { captureResultCommit, prepareResultCommit } from './result-commit-service.js';
@@ -28,13 +29,13 @@ import {
   reconcileInterruptedAgentStarts,
   reconcileInterruptedIntegrations,
   reconcileInterruptedResultCommits,
+  reconcileInterruptedRunOperations,
   reconcileInterruptedVerifications,
   reconcileWorkspacePreparations,
 } from './recovery-service.js';
 import {
   VerificationRunner,
   inspectVerificationPolicy,
-  runTaskVerification,
 } from './verification-service.js';
 
 interface SocketState {
@@ -127,6 +128,17 @@ const verificationRunner = new VerificationRunner();
 const verificationCopiesRoot = join(home, 'verifications');
 /** Detached worktrees an integration merge happens in; never a user's checkout. */
 const integrationWorktreesRoot = join(home, 'integrations');
+// Long commands (task.run / task.verify) are durable Operations: their progress is recorded as
+// facts, a cancel stops the owned process group and confirms it, and a restart reconciles them.
+const longOperations = new LongOperationService({
+  storage,
+  runner: verificationRunner,
+  coordinator,
+  copiesRoot: verificationCopiesRoot,
+  permissionMode: () => permissionMode,
+  logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
+});
+reconcileInterruptedRunOperations({ storage });
 let listener: ReturnType<typeof Bun.listen<SocketState>>;
 
 function success(requestId: string, result: unknown): RuntimeResponse {
@@ -314,6 +326,9 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         executions: storage.listTaskExecutions(request.projectId, request.taskId),
         verifications: storage.listVerificationRuns(request.projectId, request.taskId),
         integrations: storage.listIntegrationBatches(request.projectId, request.taskId),
+        // Long-command progress travels with the Task detail so the UI gets it in the same read
+        // the CLI gets from task.operation.list; both are the same projection.
+        operations: storage.listTaskOperations(request.projectId, request.taskId),
       });
     }
     case 'task.pause':
@@ -382,20 +397,35 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         unarchivedAt: Date.now(),
       }));
     }
-    case 'task.verify':
-      return success(request.requestId, await runTaskVerification({
-        storage,
-        runner: verificationRunner,
-        copiesRoot: verificationCopiesRoot,
+    case 'task.verify': {
+      // The Operation (and the verification run) exists before any command is spawned, so the
+      // background form can return a handle and a cancel or a restart can still find the run.
+      const started = await longOperations.startVerification({
         projectId: request.projectId,
         taskId: request.taskId,
         ...(request.executionId === undefined ? {} : { executionId: request.executionId }),
         commandId: request.commandId,
-        permissionMode,
-      }));
+        background: request.background,
+      });
+      return success(request.requestId, started.background ? started.handle : started.report);
+    }
     case 'task.verification.list':
       return success(request.requestId,
         storage.listVerificationRuns(request.projectId, request.taskId));
+    case 'task.operation.list':
+      return success(request.requestId,
+        longOperations.listForTask(request.projectId, request.taskId));
+    case 'task.operation.get':
+      return success(request.requestId,
+        longOperations.get(request.projectId, request.operationId));
+    case 'task.operation.cancel':
+      return success(request.requestId, await longOperations.cancel({
+        projectId: request.projectId,
+        taskId: request.taskId,
+        operationId: request.operationId,
+        commandId: request.commandId,
+        actor: 'local-user',
+      }));
     // Transcript reads are a view over the provider's own session file. They never write, never
     // change Task/Execution state, and are readable after the Session has long since exited.
     case 'session.transcript':
@@ -741,6 +771,9 @@ async function shutdown(): Promise<void> {
   listener.stop(true);
   subscriptions.close();
   httpApi.stop();
+  // Signal first: an in-flight long command stops at its next step boundary without writing a
+  // verdict, so a restart cannot turn a killed command into a judged failure.
+  longOperations.beginShutdown();
   try {
     await coordinator.close();
   } catch (error) {
@@ -757,6 +790,9 @@ async function shutdown(): Promise<void> {
     console.error('[runtime] verification commands did not confirm their stop',
       verificationRunner.unconfirmedStops.join(','));
   }
+  // The jobs were already told to stop before their command groups were killed, so none of them
+  // writes a verdict on the way down: the next start records RUNTIME_RESTARTED from the facts.
+  await longOperations.close();
   storage.close();
   rmSync(socketPath, { force: true });
 }
