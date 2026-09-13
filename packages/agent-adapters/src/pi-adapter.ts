@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { isAbsolute } from 'node:path';
+import { isAbsolute, relative, resolve } from 'node:path';
 import {
   agentProcessIdentitySchema,
   type AdapterCapabilities,
@@ -75,6 +75,18 @@ function composeRevisionPrompt(revision: AgentStartRequest['revision']): string 
     }
   }
   return lines.join('\n');
+}
+
+/**
+ * A resumed Execution continues the same persistent conversation, so re-sending the whole
+ * specification would ask the Agent to redo work it already did. The continuation stays bounded
+ * and never invents progress the Runtime did not observe.
+ */
+function composeResumePrompt(revision: AgentStartRequest['revision']): string {
+  return [
+    `Codeestra: this execution was paused and has now resumed (revision ${revision.id}).`,
+    'Continue the task from where you stopped; do not repeat work that is already done.',
+  ].join('\n');
 }
 
 function requiredString(value: unknown, field: string): string {
@@ -173,6 +185,17 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
 
   async start(request: AgentStartRequest): Promise<AgentSessionRef> {
     const agentConfig = request.agentConfig ?? {};
+    // A resumed conversation file must be one this Runtime's session directory owns; a recorded
+    // path is never trusted just because a database column returned it.
+    if (request.resume !== undefined) {
+      const root = resolve(this.sessionDir);
+      const candidate = resolve(request.resume.sessionStorageRef);
+      const inside = relative(root, candidate);
+      if (inside.length === 0 || inside.startsWith('..') || isAbsolute(inside)) {
+        throw new PiRpcProcessError('PROVIDER_SPAWN_FAILED',
+          'The resumed session file is not inside the Runtime Pi session directory', false, false);
+      }
+    }
     const argv = [
       ...this.#options.launcherArgs,
       ...buildPiRpcArguments({
@@ -181,6 +204,7 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
         sessionDir: this.sessionDir,
         platform: this.#options.platform,
         permissionMode: request.permissionMode,
+        ...(request.resume === undefined ? {} : { resumeSessionFile: request.resume.sessionStorageRef }),
       }),
       ...buildPiModelArguments(agentConfig),
     ];
@@ -221,8 +245,14 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
         argvHash: createHash('sha256').update(JSON.stringify(argv)).digest('hex'),
         capturedAt: this.#now(),
       });
-      // The first user message is what makes the persistent Pi session durable.
-      await client.request({ type: 'prompt', message: composeRevisionPrompt(request.revision) });
+      // The first user message is what makes the persistent Pi session durable. A resumed
+      // Execution reopens the predecessor's conversation and only sends a continuation.
+      await client.request({
+        type: 'prompt',
+        message: request.resume === undefined
+          ? composeRevisionPrompt(request.revision)
+          : composeResumePrompt(request.revision),
+      });
       this.#sessions.set(request.sessionId, {
         client, providerSessionId, sessionStorageRef, processIdentity,
         permissionMode: request.permissionMode, agentConfig,

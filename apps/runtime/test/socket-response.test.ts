@@ -167,7 +167,7 @@ describe('Runtime socket responses', () => {
       });
     }
 
-    const reply = await send(harness, { command: 'task.list', projectId });
+    const reply = await send(harness, { command: 'task.list', projectId, includeArchived: false });
     const response = reply.response as { ok: boolean; result: readonly { id: string }[] };
     expect(response.ok).toBe(true);
     expect(response.result).toHaveLength(8);
@@ -178,7 +178,7 @@ describe('Runtime socket responses', () => {
     const harness = await startRuntime();
     // Parsing an unknown project is cheap, and the failure path writes through the same socket
     // helper: a truncated error reply would leave the client without any diagnosis.
-    const reply = await send(harness, { command: 'task.list', projectId: 'not-a-project' });
+    const reply = await send(harness, { command: 'task.list', projectId: 'not-a-project', includeArchived: false });
     const response = reply.response as { ok: boolean; error?: { code: string } };
     expect(response.ok).toBe(false);
     expect(reply.closed).toBe(true);

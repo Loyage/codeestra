@@ -788,10 +788,98 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 - 提升后在 main 工作树执行 `bun install --frozen-lockfile`（无变化）、`bun run build:ui`，随后执行 `bun run codeestra stop` → `bun run codeestra status`；Runtime 已恢复 `READY`（PID `92408`、`FULL`、`adapters: ["pi"]`、`activeSessions: []`）。
 - 仍需人工确认：主题切换与系统变化、窄屏、焦点顺序、快速切项目/任务、问卷回答、终态执行过程分页。长命令后台化、取消/暂停、原生接管及 Integration/main 后续能力继续属于 NEXT，不在本轮提前实现。
 
+## FOUNDATION-033 — Task 暂停 / 终止 / 归档（ADR-0016）
+
+状态：CLI/命令面与 Web UI 已实现并通过命令面测试；未做真实 provider 的暂停/恢复端到端复验，不声称真实取消超时已验收。
+
+用户本轮明确选择（记录于 ADR-0016）：1) 暂停 = 暂停运行中的执行（协作停止 + 确认静止，恢复时新建 Execution 复用 provider conversation）；2) `CANCELLED` 为终态，重开必须新建任务；3) 删除 = 归档软删除并保留 worktree/branch；4) CLI 与 Web UI 同批。
+
+### 已实现
+
+- 新增命令面：`task.pause` / `task.resume` / `task.cancel` / `task.archive` / `task.unarchive`（CLI + HTTP 走同一 Zod 命令面）。`task list` 增 `includeArchived`（默认隐藏归档），`task list --all` 显式包含；`task status` 按 ID 仍可读归档任务。
+- schema v9：`tasks.archived_at`、`executions.resume_from_execution_id`，并重建 `executions` 以把 `stop_reason` CHECK 扩为 `USER_CANCEL|USER_PAUSE|REVISION_RESTART|SHUTDOWN`；v8→v9 保留既有行且 `foreign_key_check` 无违规。
+- 终止：无活动 Execution 的状态直接 `CANCELLED`；有活动 Execution 的状态先 `CANCELLING` 并把 Execution 置 `STOPPING (USER_CANCEL)`，Adapter 确认自有进程退出后才落 `CANCELLED`、`resource_held=0`、workspace `RETAINED`；未确认则 `RECOVERY_REQUIRED` 并保留全部占用。
+- 暂停/恢复：`PAUSING → PAUSED`（Execution `SUPERSEDED (USER_PAUSE)`、Session `EXITED`、workspace 保留）；`task resume` 在同一 retained worktree 上 `PAUSED → READY`，新建 Execution 并以 `--session <file>` 复用前任会话，启动消息是有界的继续指令而非重发规格；新 Execution 记录 `resume_from_execution_id`。
+- 归档：只写 `archived_at`，不删除任何 Task/Revision/Execution/Session/事件行，也不回收 worktree/branch；活动 Execution（`RUNNING/PAUSING/PAUSED/WAITING_FOR_USER/CANCELLING`）或 `RECOVERY_REQUIRED` 时拒绝归档；重复归档幂等。
+- Web UI：任务详情新增暂停/继续/终止/归档/取消归档按钮与「显示已归档」开关；UI 仍只投影同一命令面，`task.list` 以 `includeArchived: true` 读取后由前端开关控制展示，不新增 Runtime 语义或确认。
+
+### 实际验证
+
+- `bun run check`：TypeScript（Runtime/CLI）与 UI TypeScript、**212 项 Vitest**、**239 项 Bun tests**、UI Vite 构建全部通过（0 fail）。
+- 新增命令面/存储测试：v8→v9 迁移保留行且拒绝非法 `stop_reason`；归档不销毁行、默认列表隐藏、幂等、活动任务拒绝；`READY` 直接终止且不重开；运行中终止在确认后 `CANCELLED`（`resource_held=0`、workspace `RETAINED`）；暂停后恢复复用同一 workspace、新 Execution 携带 `resume_from_execution_id` 且 Adapter 收到 `resume.sessionStorageRef`；停止不可确认时 `RECOVERY_REQUIRED` 并保留占用。
+- 新增 CLI 测试（真实 Runtime + 临时 Git 仓库，无 provider）：`task cancel` 终态与重复执行的幂等、`task archive/unarchive` + `--all`、过期 version 返回 `CONCURRENT_MODIFICATION` 且退出码 1。
+- 新增脚本 Adapter 测试覆盖 pause/resume/cancel 的命令编排；**脚本 Adapter 不证明真实 Pi 进程已静止**，真实 provider 的暂停/恢复与取消超时仍需一次性临时仓库中有人在场时复验。
+- 未使用桌面/键鼠自动化；浏览器视觉与键盘操作仍待用户人工确认。
+
+### 交付边界
+
+- 新增 ADR-0016，并同步 `docs/decisions/README.md`、`PROJECT_SPEC.md`（§2 不变量 24、§6）与本任务记录。
+- 本轮不提供物理删除或 purge；「归档 + 归属校验后回收 worktree/branch」作为独立高风险能力留给后续决策。
+- 未 commit、未 push、未提升到 `main`；未重启任何运行中的 Runtime。
+
+## FOUNDATION-034 — 底部新建任务停靠条（ADR-0017）
+
+状态：前端已实现；类型检查、构建、命令面回归与构建资产 HTTP smoke 通过。**浏览器视觉、停靠行为、键盘焦点与窄屏布局尚待用户人工确认**，不把命令面验证等同 UI 渲染验收。
+
+用户本轮明确选择：常驻所有标签页、收起为单行输入 + 创建按钮、展开提供详细设定并补 CLI 对等参数、SELF 显式标记未实现。因 dev 工作树存在并发未提交改动（FOUNDATION-033），先只落 UI 骨架（不碰 `apps/cli/src/main.ts`），随后按用户要求补齐 CLI 对等参数并开放约束与类型字段。记录于 ADR-0017。
+
+### 已实现
+
+- `apps/ui/src/new-task-dock.tsx`（新增）：底部停靠条。收起为单行输入 + `＋ 创建草稿` + `展开 ⌃`（回车提交）；展开为多行规格输入、约束列表（逐条添加/删除）与任务类型；`⌘/Ctrl + Enter` 创建、`Esc` 收起，切换形态后把焦点移到对应的输入。创建成功后清空输入与约束并收起；失败的创建保留输入（不丢草稿）。空白约束行在发送前丢弃，Runtime 仍会再校验。
+- `apps/ui/src/App.tsx`：停靠条挂在 `.workspace-shell` 末尾，已选项目时在所有标签页渲染；按 `projectId` 重建（切项目不沿用上一项目的草稿）；创建后加载任务列表、选中新草稿、切到任务工作台，并以 `createToken` 让工作台清空搜索与状态筛选，保证新草稿一定可见。任务列表卡片内的旧输入框与其 `specification` 状态已删除，`usePendingAction` 的 `'create'` 键随之下移到达停靠条（任务内操作仍按 task 键隔离）。
+- `apps/ui/src/styles.css`：`.new-task-dock` 用 `position: sticky; bottom: 0.75rem` 的正常流定位，滚动时贴在视口底部且不覆盖上方内容，页面无需预留高度；`.workspace-shell` 增加 0.75rem 底部内边距；≤1100px 收窄边距，≤620px 收起条换行、展开标题纵向排列。
+- `apps/cli/src/main.ts`：`task create <project-id> <specification> [--constraint <text>]… [--kind DEVELOPMENT]`。约束 ID 由客户端生成（一个 revision 内唯一非空）；未知 `--flag`、空 `--constraint`、缺失值均为 usage 错误（退出码 2）；无参数的多词规格仍按原样拼接，旧用法不变。`--kind SELF` 以 `TASK_KIND_UNSUPPORTED`（退出码 1）拒绝，不静默降级为 DEVELOPMENT。
+- 停靠条提交字段与 CLI 逐字段一致：`specification`、`constraints[]`、`kind`；类型字段只提供 `DEVELOPMENT`，`SELF` 在选择器中可见但禁用并附原因。因此不存在仅 UI 可用的能力（`PROJECT_SPEC.md` §1.1、ADR-0008）。
+
+### 实际验证
+
+- `bun run check` 退出码 0：根与 UI 的 `tsc --noEmit`、vitest **212 项**、Bun tests **244 项**、UI Vite 构建全部通过。本次最终检查在同时含 FOUNDATION-033 未提交 UI 改动（`types.ts` 的 `archivedAt`、任务暂停/终止/归档操作）的工作树上运行，因此计数含该任务新增的测试；确认两边的 UI 改动共存且可共存编译（`NewTaskDock`/`createToken` 与 `task.pause`/`task.cancel`/`task.archive` 同时在位）。
+- 新增 `bun test apps/runtime/test/cli-task-create.test.ts`（4 项，均在临时仓库 + 独立 `CODEESTRA_HOME`）：`--constraint` 重复传入的文本与唯一非空 ID 进入 revision 并可由 `task.list` 读回；无参数的多词规格仍按原样拼接且约束为空；`--kind SELF` 退出码 1、stderr 含 `TASK_KIND_UNSUPPORTED` 且任务列表仍为空；未知 flag、空白约束、缺失值退出码 2 且不创建任何任务。
+- HTTP smoke（临时 `CODEESTRA_HOME` + 真实 `apps/ui/dist`，由真实 Runtime 托管；回环请求绕开本机代理）：`/`、JS、CSS 均 200；bundle 含 `new-task-dock`、展开面板文案、约束编辑器与类型字段标记；构建 CSS 的 `.new-task-dock` 规则含 `position:sticky` 与 `bottom:.75rem`、约束行样式在位；旧 `task-composer` 在 JS 与 CSS 中均已消失；无令牌 `POST /api/command` 401、带令牌 `project.list` ok。
+- 该检查发现并修正一个真实缺陷：`.new-task-dock form`（0,1,1）压过 `.new-task-bar`（0,1,0）的 `flex-direction: row`，收起条会变成纵向排列；规则改为 `.new-task-dock .new-task-bar`，并在构建产物中断言该选择器存在。
+- 命令面回归：`bun test apps/runtime/test/http-api.test.ts` 6 项、`apps/runtime/test/cli-attention.test.ts` 3 项（含用 UI 自身 HTTP 客户端创建草稿、读取任务并投递回答）全部通过。
+- 未执行：浏览器/桌面/键鼠自动化（仓库禁止）。因此“停靠条是否真的贴底、展开与收起的键盘路径、窄屏换行、任务详情是否被遮挡”仅由用户人工确认，本条不声称已验证；`bun run check` 通过不能证明排版与焦点正确。
+
+### 交付边界与剩余问题
+
+- 新增 ADR-0017，并同步 `docs/decisions/README.md` 与本任务记录；**未修改 `PROJECT_SPEC.md` 或 `AGENTS.md`**。
+- 未 commit、未 push、未提升到 `main`；未重启任何运行中的 Runtime。修改了 `apps/cli/src/main.ts` 的 `task create` 分支与 usage 文本（该文件同时在 FOUNDATION-033 的未提交改动范围内；两处改动在最终检查中已验证共存），未触碰 FOUNDATION-033 的其他改动。
+- 剩余问题（需显式跟踪，不得当作已完成）：1）**契约与 Runtime 仍接受 `kind: 'SELF'`**（`packages/contracts` enum、数据库 CHECK 都包含它），绕过 CLI/UI 直接调用命令面仍可创建行为与 DEVELOPMENT 无异的 SELF 任务；本轮只在两个客户端边界拒绝，未收紧 Runtime 边界（那属改动契约与服务语义的独立决策）；2）SELF 在 Runtime 中仍无区别行为（无隔离 Self worktree、无 Candidate/Stable 隔离），Phase 7 前不得在 UI 或 CLI 开放；3）停靠条的展开/收起状态与草稿约束不跨页面刷新保留，每次载入均为收起。
+- 资源回收（已做归属校验）：HTTP smoke 前两次因本机代理导致 `fetch` 失败并在 `stop` 之前中断，留下两个 `CODEESTRA_HOME=/tmp/ce-ui-dock-smoke-home`（已随临时目录删除）的孤儿 Runtime（pid `47624`、`48276`，经 `ps eww` 核对环境变量确认归属）。已 SIGTERM 确认退出。
+- 本轮自查发现并修正的测试缺陷：新增的 `cli-task-create.test.ts` 最初漏了仓库惯例的 `await cli(['stop'])`，每轮泄漏一个 Runtime daemon（三轮共 12 个，`CODEESTRA_HOME` 前缀 `codeestra-task-create-home-*`，经 `ps eww` 核对归属后已 SIGTERM 回收，均在数秒内退出）。已改为在 `afterEach` 中先停 Runtime、再删临时目录；重跑该文件与完整 `bun run check` 后确认 0 个残留进程、0 个残留临时目录。同时观察到同一工作树另一个任务的测试 Runtime（`CODEESTRA_HOME` 为 `/var/folders/.../codeestra-transcript-home-*`）正在运行，已确认不属于本轮、未做任何操作。
+
+## FOUNDATION-035 — 执行过程面板折叠为单行时间线 + 正序/倒序排列
+
+状态：前端与 CLI 展示层已实现；UI 类型检查、构建、构建产物断言、CLI 端到端测试通过。**渲染与交互的目视确认尚待用户人工确认**（ADR-0008 禁用浏览器/桌面自动化），未把构建通过当作 UI 验收。
+
+用户本轮明确选择：**执行过程面板默认只以一行显示基本内容，想看细节自己点开**（参考 deepseek harness 的形态）。跟进要求：**增加正序/倒序编排的可选项**。两轮共四题确认：1）**除用户输入外全部折叠**（未选：只折叠工具类与思考 / 全部条目都折叠）；2）**点一行展开整条**（未选：每个 part 各自一行独立展开）；3）倒序时**自动加载到最新**（未选：只反转已加载内容 / 新增尾部游标命令）；4）**同时加 CLI flag**（未选：只做 UI）。
+
+### 已实现
+
+- `apps/ui/src/transcript.tsx`：新增 `entrySummary(entry)`——折叠行取“可见文本 → 工具调用名+参数 → thinking → 首块”中第一个有内容者，经 `oneLine()` 把换行/连续空白压成一行，超过 160 字符截断加省略号；工具返回的条目额外用 `entry.toolName` 作前缀。条目新增 `open` 状态：**USER 条目默认展开**（可点收起），其余条目默认折叠为一行；折叠行是带 `aria-expanded` 的 `<button>`，包含折叠箭头、类型徽标（任务输入 / Agent / 工具返回 / …）、单行摘要与右侧元信息（`工具报错`↔`工具成功`、`N 段`、时间）。
+- 展开后的内容与改动前一致：原来 header 里的诊断字段（role、provider/model、`stop=`、`tool=`、usage/成本、entryId）移到 `.entry-detail`，各 part 的「展开全文 / 收起」（按需经 `session.transcript.part` 取回完整块）与“已截断，仅显示前 N 字符”提示保持不变。切换 Session 时同时清空 `open` 状态。
+- 排列选项：面板动作行新增「排列」选择器（`正序（最早在前）`/`倒序（最新在前）`），偏好以 `codeestra.transcript.order` 存 `localStorage`（与主题同样只属展示偏好，存储不可用时回落 `forward`）。倒序只是把同一批已读取条目反向渲染（`[...entries].reverse()`），不改数组本身，也不改后端的文件顺序。
+- 倒序的取数语义：命令面只有正向 `afterEntryId` 游标，所以倒序必须读到文件末尾才能保证顶部是最新条目。`read` 在倒序下会连续分页直到 `hasMore === false`，上限 `maxReverseReads = 50` 页；到上限就显式提示“仍可能有更新的记录未显示”，并把页脚按钮改为「加载更新的记录」（文案也随排列切换），不静默地把旧条目排在顶部。切换为倒序时立即触发一次追赶，不等轮询节拍。
+- `apps/cli/src/main.ts`：新增 `--reverse`（`task transcript` 与 `session transcript` 都可），只影响人类可读渲染（最新在前），条目内容与截断提示不变；因为只有正向游标，`--reverse` 同样连续分页到末尾（同一 50 页上限，到上限时 stderr 明确提示并给出 `--after <cursor>` 续读方式）。`--reverse` 与 `--json` 同时使用是 usage 错误（退出码 2）——`--json` 一直承诺“Runtime 视图原样输出”，不静默重排数据；`session transcript` 仍拒绝 `--execution`。usage 文本与文件头也注明倒序的含义与页数上限。
+- `apps/ui/src/styles.css`：`.entry-line` / `.entry-summary`（`white-space: nowrap` + `text-overflow: ellipsis`）/ `.entry-meta` / `.entry-detail` 规则；折叠条目减为 `padding: 0.2rem 0.6rem`；`.entry-line` 覆写全局 `button` 的边框/背景/内边距使其成为列表行；类型徽标沿用左侧色条配色。
+
+### 实际验证
+
+- `bun run check` 退出码 0：根与 UI `tsc --noEmit`、vitest **212 项**、Bun tests **245 项**（本次新增 1 项）、UI Vite 构建（22 modules，CSS 14.40 kB、JS 278.14 kB）。
+- 新增命令面端到端（`apps/runtime/test/cli-transcript.test.ts`，协议 stub provider 写出真实会话文件——**不是真实 Agent 集成证据**）：`task transcript --reverse` 退出码 0、stderr 含“倒序：最新在前”、六个 `=== <id>` 在 stdout 中的位置严格递减（真的最新在前）、工具调用与工具输出仍完整；`session transcript --limit 2 --reverse` 在三页内读完全部 6 条（证明倒序确实连续分页）、无上限提示；`task transcript --reverse --json` 退出码 2 且 stdout 为空。
+- 构建产物断言（headless，命令面可复现）：`apps/ui/dist/assets/*.css` 中存在 `.entry-line`、`.entry-line:hover:not(:disabled)`、`.entry-line .caret`、`.entry-line .kind-chip`、`.entry-summary{...text-overflow:ellipsis...}`、`.entry-detail`、`.transcript-entry.collapsed{padding:.2rem .6rem}` 与 `.transcript-entry.kind-user .kind-chip`/`.kind-tool_result .kind-chip`；JS bundle 中存在 `entry-summary`、`kind-chip`、`entry-detail`、`工具报错`。
+- 未执行：浏览器/桌面/键鼠自动化（仓库禁止）。折叠行的实际排版、摘要是否溢出、点击展开与键盘焦点行为、排列选择器的交互仅由用户人工确认；本机稳定 Runtime 未被触碰。
+
+### 交付边界与剩余问题
+
+- 改动范围：`apps/ui/src/transcript.tsx`、`apps/ui/src/styles.css`、`apps/cli/src/main.ts`（transcript 渲染与 flag 解析）、`apps/runtime/test/cli-transcript.test.ts`。未改 `packages/contracts`、未改 Runtime 命令语义（没有新增尾部游标），因此未新增 ADR：`--reverse` 是只读视图的渲染顺序，不是新的业务能力。
+- 未 commit、未 push、未提升到 `main`；未重启任何运行中的 Runtime。
+- 未做（需显式跟踪）：1）倒序在超长会话下最多读 50 页，超过则顶部可能不是真正最新的一条（已明确提示，未静默）；若今后要一次拿到尾部，需要为 `session.transcript` 增加尾部游标（本轮用户已选不这样做）。2）UI 只有 50 页上限提示，没有“继续追赶直到最新”的一键操作（页脚按钮每次再读最多 50 页）。3）面板仍不提供“全部展开/全部折叠”批量控制；折叠状态与排列偏好中的折叠状态不跨刷新保留，排列偏好跨刷新保留。
+
 ## NEXT — 最小可用纵向切片
 
 0. 落实 ADR-0009 的 dev 基线：项目快照/Workspace 从 dev OID 建立，先补临时仓库测试；在此之前产品内 `task.run` 仍使用 mainRef，不能用于声称符合新分支规则。
-1. Task cancel（协作停止 + 超时转人工并保留资源）：已有一个被真实场景证明的卡死形态（RUNNING + `NOTHING_TO_COMMIT` + `resource_held=1`）。
+1. 真实验证 ADR-0016：在一次性临时仓库中用真实 Pi 跑「启动 → 暂停 → 恢复 → 终止」，核对 provider 进程确实退出、`--session` 确实续接同一 conversation、超时进入 `RECOVERY_REQUIRED`；脚本 Adapter 不能替代该验收。
 2. 长命令后台化与进度事件：让 `task.run`/`task.verify` 成为持久 Operation，界面可展示进度并允许取消。
 3. ADR-0010 Phase 3 技术 spike：真实 Pi session-file 双向 RPC↔TUI 恢复、PTY 生命周期、safe-point 与权限模式 side channel；通过后再落 handoff Operation、Session incarnation 和 CLI attach。
 4. revision 投递确认，以及 Runtime 重启后对 stale ACTIVE Session 的启动 reconcile。

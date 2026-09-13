@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   agentAnswerMigration,
+  agentConfigurationMigration,
   agentDisconnectMigration,
   agentObservationMigration,
   agentStartMigration,
@@ -855,5 +856,252 @@ describe('Agent configuration scopes and Execution provenance', () => {
     expect(db.query<{ agent_config_json: string | null }, []>(
       "SELECT agent_config_json FROM executions WHERE id='e1'",
     ).get()?.agent_config_json).toBeNull();
+  });
+});
+
+describe('Task pause, cancel, and archive', () => {
+  function seedReadyWorkspace(): void {
+    db.query(`INSERT INTO workspaces
+      (id,task_id,branch_ref,path,ownership_token,base_commit,state,created_at)
+      VALUES ('w1','t1','refs/heads/task/t1','/work/t1','owner-1',?1,'READY',3)`).run(oid);
+  }
+
+  function reserveRunningExecution(executionId = 'e1'): void {
+    storage.reserveExecution({
+      projectId: 'p1', taskId: 't1', expectedTaskVersion: 0, workspaceId: 'w1',
+      executionId, commandId: `cmd-${executionId}`, payloadHash: `hash-${executionId}`,
+      reservationEventId: `evt-${executionId}`, taskEventId: `evt-task-${executionId}`,
+      adapterId: 'pi', adapterVersion: '0.84.4', actor: 'runtime-scheduler', createdAt: 4,
+    });
+  }
+
+  test('upgrades a version 8 database, preserving executions and admitting USER_PAUSE', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'codeestra-storage-v8-'));
+    const filename = join(directory, 'runtime.sqlite');
+    try {
+      const legacy = new Database(filename, { create: true, strict: true });
+      legacy.exec('PRAGMA foreign_keys=ON;');
+      legacy.exec(phase1Migration);
+      legacy.exec(agentStartMigration);
+      legacy.exec(agentObservationMigration);
+      legacy.exec(agentAnswerMigration);
+      legacy.exec(agentDisconnectMigration);
+      legacy.exec(taskVerificationMigration);
+      legacy.exec(workspaceRetryMigration);
+      legacy.exec(agentConfigurationMigration);
+      legacy.exec('PRAGMA user_version=8');
+      legacy.query(`INSERT INTO projects
+        (id,name,repo_root,git_common_dir,main_ref,object_format,created_at)
+        VALUES ('p1','Project','/repo','/repo/.git','refs/heads/main','sha1',1)`).run();
+      legacy.query(`INSERT INTO project_trusts
+        (id,project_id,repo_root,git_common_dir,object_format,policy_version,actor,status,accepted_at)
+        VALUES ('trust1','p1','/repo','/repo/.git','sha1',1,'user','ACTIVE',1)`).run();
+      legacy.transaction(() => {
+        legacy.query(`INSERT INTO tasks
+          (id,project_id,display_number,kind,current_revision_id,state,created_at,updated_at)
+          VALUES ('t1','p1',1,'DEVELOPMENT','r1','RUNNING',2,2)`).run();
+        legacy.query(`INSERT INTO task_revisions
+          (id,task_id,number,previous_revision_id,specification,constraints_json,actor,reason,created_at)
+          VALUES ('r1','t1',1,NULL,'Do work','[]','user','initial',2)`).run();
+      })();
+      legacy.query(`INSERT INTO workspaces
+        (id,task_id,branch_ref,path,ownership_token,base_commit,state,created_at)
+        VALUES ('w1','t1','refs/heads/task/t1','/work/t1','owner-1',?1,'IN_USE',3)`).run(oid);
+      legacy.query(`INSERT INTO executions
+        (id,task_id,attempt_number,initial_revision_id,applied_revision_id,workspace_id,
+         adapter_id,adapter_version,state,resource_held,base_commit,started_at)
+        VALUES ('e1','t1',1,'r1','r1','w1','pi','0.84.4','RUNNING',1,?1,4)`).run(oid);
+      legacy.query(`INSERT INTO agent_sessions
+        (id,execution_id,provider_session_id,session_storage_ref,state,capabilities_json,version)
+        VALUES ('s1','e1','prov-1','/sessions/prov-1.jsonl','ACTIVE','{}',0)`).run();
+      legacy.close();
+
+      const upgraded = new Phase1Database(filename);
+      expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version)
+        .toBe(phase1SchemaVersion);
+      expect(upgraded.sqlite.query<{ name: string }, []>(
+        "SELECT name FROM pragma_table_info('tasks')",
+      ).all().map((row) => row.name)).toContain('archived_at');
+      expect(upgraded.sqlite.query<{ name: string }, []>(
+        "SELECT name FROM pragma_table_info('executions')",
+      ).all().map((row) => row.name)).toContain('resume_from_execution_id');
+      const preserved = upgraded.sqlite.query<{
+        state: string; resource_held: number; base_commit: string; resume_from_execution_id: string | null;
+      }, []>("SELECT state,resource_held,base_commit,resume_from_execution_id FROM executions WHERE id='e1'")
+        .get();
+      expect(preserved).toEqual({ state: 'RUNNING', resource_held: 1, base_commit: oid,
+        resume_from_execution_id: null });
+      expect(upgraded.sqlite.query<Record<string, unknown>, []>('PRAGMA foreign_key_check').all())
+        .toEqual([]);
+      // A Session that referenced the rebuilt Execution still resolves to it.
+      expect(upgraded.sqlite.query<{ session_ref: string | null; execution_ref: string | null }, []>(`
+        SELECT session.session_storage_ref AS session_ref, execution.id AS execution_ref
+        FROM agent_sessions session JOIN executions execution ON execution.id=session.execution_id
+        WHERE session.id='s1'
+      `).get()).toEqual({ session_ref: '/sessions/prov-1.jsonl', execution_ref: 'e1' });
+      // The rebuilt CHECK admits the new stop reason but still refuses unknown values.
+      upgraded.sqlite.query("UPDATE executions SET stop_reason='USER_PAUSE' WHERE id='e1'").run();
+      expect(() => upgraded.sqlite.query("UPDATE executions SET stop_reason='NOPE' WHERE id='e1'").run())
+        .toThrow();
+      upgraded.close();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('archives without destroying rows and hides the Task from the default list', () => {
+    seedTask();
+    const archived = storage.archiveTask({
+      projectId: 'p1', taskId: 't1', expectedVersion: 0, commandId: 'c1', payloadHash: 'h1',
+      eventId: 'e1', actor: 'local-user', archivedAt: 10,
+    });
+    expect(archived).toEqual({ taskId: 't1', state: 'READY', version: 1, archived: true });
+    expect(storage.listTasks('p1')).toHaveLength(0);
+    expect(storage.listTasks('p1', { includeArchived: true })).toHaveLength(1);
+    expect(storage.getTask('p1', 't1')?.archivedAt).toBe(10);
+    // Replaying the same command returns the recorded result without a second version bump.
+    expect(storage.archiveTask({
+      projectId: 'p1', taskId: 't1', expectedVersion: 0, commandId: 'c1', payloadHash: 'h1',
+      eventId: 'e1', actor: 'local-user', archivedAt: 11,
+    }).version).toBe(1);
+    // The Task, its revision, and its events are all still present.
+    expect(db.query<{ count: number }, []>(
+      "SELECT COUNT(*) AS count FROM task_revisions WHERE task_id='t1'",
+    ).get()?.count).toBe(1);
+    expect(db.query<{ count: number }, []>(
+      "SELECT COUNT(*) AS count FROM domain_events WHERE event_type='TaskArchived'",
+    ).get()?.count).toBe(1);
+
+    const unarchived = storage.unarchiveTask({
+      projectId: 'p1', taskId: 't1', expectedVersion: 1, commandId: 'c2', payloadHash: 'h2',
+      eventId: 'e2', actor: 'local-user', unarchivedAt: 12,
+    });
+    expect(unarchived).toEqual({ taskId: 't1', state: 'READY', version: 2, archived: false });
+    expect(storage.listTasks('p1')).toHaveLength(1);
+    expect(storage.getTask('p1', 't1')?.archivedAt).toBeNull();
+  });
+
+  test('refuses to archive a Task that still holds an Execution', () => {
+    seedTask();
+    seedReadyWorkspace();
+    reserveRunningExecution();
+    expect(() => storage.archiveTask({
+      projectId: 'p1', taskId: 't1', expectedVersion: 1, commandId: 'c1', payloadHash: 'h1',
+      eventId: 'e1', actor: 'local-user', archivedAt: 10,
+    })).toThrow(StorageError);
+    expect(storage.getTask('p1', 't1')?.state).toBe('RUNNING');
+  });
+
+  test('cancels a READY Task without an Execution and keeps it terminal', () => {
+    seedTask();
+    const cancelled = storage.requestTaskStop({
+      projectId: 'p1', taskId: 't1', expectedVersion: 0, kind: 'CANCEL', commandId: 'c1',
+      payloadHash: 'h1', taskEventId: 'evt1', executionEventId: 'evt2', actor: 'local-user',
+      requestedAt: 10,
+    });
+    expect(cancelled).toMatchObject({ state: 'CANCELLED', terminal: true, executionId: null });
+    expect(storage.getTask('p1', 't1')?.state).toBe('CANCELLED');
+    // CANCELLED does not reopen: submitting again is refused.
+    expect(() => storage.submitTask({
+      projectId: 'p1', taskId: 't1', expectedVersion: cancelled.version, commandId: 'c2',
+      payloadHash: 'h2', eventId: 'evt3', actor: 'local-user', submittedAt: 11,
+    })).toThrow(StorageError);
+  });
+
+  test('cancels a running Task only after quiescence is confirmed', () => {
+    seedTask();
+    seedReadyWorkspace();
+    reserveRunningExecution();
+    const requested = storage.requestTaskStop({
+      projectId: 'p1', taskId: 't1', expectedVersion: 1, kind: 'CANCEL', commandId: 'c1',
+      payloadHash: 'h1', taskEventId: 'evt1', executionEventId: 'evt2', actor: 'local-user',
+      requestedAt: 10,
+    });
+    expect(requested).toMatchObject({ state: 'CANCELLING', terminal: false, executionId: 'e1' });
+    expect(db.query<{ state: string; stop_reason: string; resource_held: number }, []>(
+      "SELECT state,stop_reason,resource_held FROM executions WHERE id='e1'",
+    ).get()).toEqual({ state: 'STOPPING', stop_reason: 'USER_CANCEL', resource_held: 1 });
+
+    const confirmed = storage.confirmTaskStopped({
+      projectId: 'p1', taskId: 't1', kind: 'CANCEL', executionId: 'e1', sessionId: null,
+      evidenceRef: 'pid 42 exited', taskEventId: 'evt3', executionEventId: 'evt4',
+      sessionEventId: 'evt5', stoppedAt: 11,
+    });
+    expect(confirmed.state).toBe('CANCELLED');
+    expect(db.query<{ state: string; resource_held: number }, []>(
+      "SELECT state,resource_held FROM executions WHERE id='e1'",
+    ).get()).toEqual({ state: 'CANCELLED', resource_held: 0 });
+    expect(db.query<{ state: string }, []>("SELECT state FROM workspaces WHERE id='w1'").get()?.state)
+      .toBe('RETAINED');
+  });
+
+  test('pauses a running Task and resumes it in a new Execution over the same workspace', () => {
+    seedTask();
+    seedReadyWorkspace();
+    reserveRunningExecution();
+    storage.sqlite.query(`INSERT INTO agent_sessions
+      (id,execution_id,provider_session_id,session_storage_ref,state,capabilities_json,version)
+      VALUES ('s1','e1','prov-1','/sessions/prov-1.jsonl','ACTIVE','{}',0)`).run();
+
+    const requested = storage.requestTaskStop({
+      projectId: 'p1', taskId: 't1', expectedVersion: 1, kind: 'PAUSE', commandId: 'c1',
+      payloadHash: 'h1', taskEventId: 'evt1', executionEventId: 'evt2', actor: 'local-user',
+      requestedAt: 10,
+    });
+    expect(requested).toMatchObject({ state: 'PAUSING', executionId: 'e1', sessionId: 's1' });
+    const confirmed = storage.confirmTaskStopped({
+      projectId: 'p1', taskId: 't1', kind: 'PAUSE', executionId: 'e1', sessionId: 's1',
+      evidenceRef: 'pid 42 exited', taskEventId: 'evt3', executionEventId: 'evt4',
+      sessionEventId: 'evt5', stoppedAt: 11,
+    });
+    expect(confirmed.state).toBe('PAUSED');
+    expect(db.query<{ state: string; stop_reason: string; resource_held: number }, []>(
+      "SELECT state,stop_reason,resource_held FROM executions WHERE id='e1'",
+    ).get()).toEqual({ state: 'SUPERSEDED', stop_reason: 'USER_PAUSE', resource_held: 0 });
+    expect(db.query<{ state: string }, []>("SELECT state FROM agent_sessions WHERE id='s1'").get()?.state)
+      .toBe('EXITED');
+
+    const resumed = storage.resumeTask({
+      projectId: 'p1', taskId: 't1', expectedVersion: confirmed.version, commandId: 'c2',
+      payloadHash: 'h2', taskEventId: 'evt6', resumedAt: 12,
+    });
+    expect(resumed).toMatchObject({
+      state: 'READY', resumeFromExecutionId: 'e1', predecessorSessionId: 's1',
+      predecessorSessionStorageRef: '/sessions/prov-1.jsonl', workspaceId: 'w1',
+    });
+    expect(storage.findReusableWorkspace('t1')?.workspaceId).toBe('w1');
+    storage.reserveExecution({
+      projectId: 'p1', taskId: 't1', expectedTaskVersion: resumed.version, workspaceId: 'w1',
+      executionId: 'e2', commandId: 'c3', payloadHash: 'h3', reservationEventId: 'evt7',
+      taskEventId: 'evt8', adapterId: 'pi', adapterVersion: '0.84.4',
+      resumeFromExecutionId: 'e1', actor: 'runtime-scheduler', createdAt: 13,
+    });
+    expect(storage.listTaskExecutions('p1', 't1').find((row) => row.executionId === 'e2'))
+      .toMatchObject({ state: 'CREATED', resumeFromExecutionId: 'e1' });
+  });
+
+  test('keeps every resource when a stop cannot be confirmed', () => {
+    seedTask();
+    seedReadyWorkspace();
+    reserveRunningExecution();
+    storage.sqlite.query(`INSERT INTO agent_sessions
+      (id,execution_id,provider_session_id,session_storage_ref,state,capabilities_json,version)
+      VALUES ('s1','e1','prov-1','/sessions/prov-1.jsonl','ACTIVE','{}',0)`).run();
+    storage.requestTaskStop({
+      projectId: 'p1', taskId: 't1', expectedVersion: 1, kind: 'CANCEL', commandId: 'c1',
+      payloadHash: 'h1', taskEventId: 'evt1', executionEventId: 'evt2', actor: 'local-user',
+      requestedAt: 10,
+    });
+    storage.markTaskStopUncertain({
+      projectId: 'p1', taskId: 't1', executionId: 'e1', sessionId: 's1',
+      evidenceRef: 'pid 42 did not confirm exit', taskEventId: 'evt3', executionEventId: 'evt4',
+      sessionEventId: 'evt5', recoveredAt: 11,
+    });
+    expect(storage.getTask('p1', 't1')?.state).toBe('RECOVERY_REQUIRED');
+    expect(db.query<{ state: string; resource_held: number }, []>(
+      "SELECT state,resource_held FROM executions WHERE id='e1'",
+    ).get()).toEqual({ state: 'RECOVERY_REQUIRED', resource_held: 1 });
+    expect(db.query<{ state: string }, []>("SELECT state FROM agent_sessions WHERE id='s1'").get()?.state)
+      .toBe('RECOVERY_REQUIRED');
   });
 });

@@ -8,7 +8,7 @@ export type {
   StoredAgentConfiguration,
   PendingEventDelivery, ResultCommitAuthorization, ResultCommitCapturePlan, ResultCommitSubject,
   StoredAgentAnswer, StoredConstraint, StoredEventEnvelope, StoredVerificationCommand,
-  TaskLifecycleState, TaskSummary,
+  TaskLifecycleState, TaskResumeRequest, TaskStopRequest, TaskSummary,
   TrustedProject, VerificationCandidateExecution, VerificationCandidates, VerificationEvidence,
   VerificationRunPlan, VerificationRunSummary, VerificationState,
   WorkspaceLifecycleState, WorkspacePreparationPlan,
@@ -16,7 +16,8 @@ export type {
 export {
   agentAnswerMigration, agentConfigurationMigration, agentDisconnectMigration,
   agentObservationMigration, agentStartMigration,
-  phase1Migration, phase1SchemaVersion, taskVerificationMigration, workspaceRetryMigration,
+  phase1Migration, phase1SchemaVersion, taskControlMigration, taskVerificationMigration,
+  workspaceRetryMigration,
 } from './migration.js';
 export { agentThinkingLevelSchema, agentThinkingLevels, storedAgentConfigurationSchema }
   from './database.js';

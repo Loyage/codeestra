@@ -70,6 +70,30 @@ export async function prepareTaskWorkspace(input: {
     );
   }
 
+  // A resumed Execution continues in the workspace it already owns. Reusing it avoids a second
+  // worktree and keeps the paused Task's uncommitted work in place; the path/ownership token are
+  // already recorded, so no Git side effect runs here.
+  const reusable = input.storage.findReusableWorkspace(input.taskId);
+  if (reusable !== null) {
+    const project = input.storage.getTrustedProject(input.projectId);
+    return {
+      operationId: `reused:${reusable.workspaceId}`,
+      operationState: 'SUCCEEDED' as const,
+      projectId: input.projectId,
+      taskId: input.taskId,
+      workspaceId: reusable.workspaceId,
+      workspaceState: 'READY' as const,
+      repoRoot: project.repoRoot,
+      gitCommonDir: project.gitCommonDir,
+      mainRef: project.mainRef,
+      objectFormat: project.objectFormat,
+      baseCommit: reusable.baseCommit,
+      ownershipToken: reusable.ownershipToken,
+      branchRef: reusable.branchRef,
+      path: reusable.path,
+    };
+  }
+
   const project = input.storage.getTrustedProject(input.projectId);
   let repository;
   try {

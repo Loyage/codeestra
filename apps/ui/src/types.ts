@@ -34,6 +34,8 @@ export interface TaskView {
   readonly currentRevision: TaskRevisionView;
   readonly createdAt: number;
   readonly updatedAt: number;
+  /** Set when the Task is archived; the Runtime keeps every row and the owned worktree. */
+  readonly archivedAt: number | null;
 }
 
 export interface AgentConfigurationView {

@@ -230,4 +230,26 @@ describe('Codeestra Pi gate', () => {
       '--no-context-files', '--session-dir', '/runtime/pi-sessions',
     ]);
   });
+
+  test('reopens a specific persistent session file when resuming', () => {
+    const gate = '/runtime/codeestra-gate.ts';
+    const question = '/runtime/codeestra-question.ts';
+    const argv = buildPiRpcArguments({
+      gateExtensionPath: gate,
+      questionExtensionPath: question,
+      sessionDir: '/runtime/pi-sessions',
+      platform: 'unix',
+      permissionMode: 'FULL',
+      resumeSessionFile: '/runtime/pi-sessions/conversation-1.jsonl',
+    });
+    expect(argv.slice(-2)).toEqual(['--session', '/runtime/pi-sessions/conversation-1.jsonl']);
+    expect(argv[argv.indexOf('--session-dir') + 1]).toBe('/runtime/pi-sessions');
+    // A relative resume path is refused before any process is launched.
+    expect(() => buildPiRpcArguments({
+      gateExtensionPath: gate,
+      questionExtensionPath: question,
+      sessionDir: '/runtime/pi-sessions',
+      resumeSessionFile: 'conversation-1.jsonl',
+    })).toThrow();
+  });
 });

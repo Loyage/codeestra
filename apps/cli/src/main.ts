@@ -5,7 +5,7 @@ import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOpt
   maxTranscriptEntryReadLimit,
   runtimeResponseSchema, runtimeStreamFrameSchema,
   type QuestionnaireAnswer, type RepositoryIdentity, type RuntimeRequest, type RuntimeResponse,
-  type SessionTranscriptView,
+  type SessionTranscriptEntry, type SessionTranscriptView,
   type VerificationPolicyInspection } from '@codeestra/contracts';
 
 /** The subset of `project.list` this client reads. */
@@ -186,8 +186,12 @@ function parseAttentionAnswer(answerType: string | undefined, rest: readonly str
  * Renders one transcript window for a human. This is an observation view of what the Agent did, so
  * it is printed as text; `--json` prints the Runtime's view verbatim for scripts. Truncated blocks
  * say so and name the exact command that returns the whole block.
+ *
+ * `reverse` prints the newest entry first. That is a rendering choice only: the entries are the
+ * same ones the forward read returned, and their text is unchanged.
  */
-function printTranscript(view: SessionTranscriptView, sessionId: string): void {
+function printTranscript(read: TranscriptRead, sessionId: string, reverse: boolean): void {
+  const { view } = read;
   const header = view.fileAvailable
     ? `task #${view.taskDisplayNumber} · 第 ${view.attemptNumber} 次执行 · 会话 ${view.sessionState}`
       + ` · 执行 ${view.executionState}`
@@ -195,9 +199,16 @@ function printTranscript(view: SessionTranscriptView, sessionId: string): void {
   console.error(header);
   if (view.note !== null) console.error(view.note);
   if (!view.fileAvailable) return;
-  console.error(`${view.entries.length} 条记录${view.hasMore ? '（还有更多，用 --after 继续）' : ''}`);
+  console.error(`${read.entries.length} 条记录${reverse ? '（倒序：最新在前）' : ''}`
+    + `${view.hasMore ? '（还有更新的记录，用 --after 继续）' : ''}`);
+  if (read.incomplete) {
+    // Saying this out loud matters: at the cap the first printed entry is not the newest one.
+    console.error(`注意：倒序只读取了 ${maxTranscriptReverseReads} 页就到上限，可能有更新的记录`
+      + `未显示；用 --after ${view.cursor ?? ''} 继续`);
+  }
   if (view.unparsedLines > 0) console.error(`注意：本次扫描中有 ${view.unparsedLines} 行不是有效条目`);
-  for (const entry of view.entries) {
+  const ordered = reverse ? [...read.entries].reverse() : read.entries;
+  for (const entry of ordered) {
     console.log(`\n=== ${entry.entryId} [${entry.kind}] ${entry.timestamp ?? ''}`.trimEnd());
     const meta = [
       entry.role === null ? null : `role=${entry.role}`,
@@ -230,6 +241,43 @@ interface TranscriptFlags {
   readonly afterEntryId?: string;
   readonly limit?: number;
   readonly json: boolean;
+  readonly reverse: boolean;
+}
+
+/**
+ * One transcript read as the CLI needs it: the last window read (for header facts) plus the entries
+ * to print. Forward rendering uses exactly one window.
+ */
+interface TranscriptRead {
+  readonly view: SessionTranscriptView;
+  readonly entries: readonly SessionTranscriptEntry[];
+  /** `--reverse` hit the page cap: entries newer than the ones read exist and were not fetched. */
+  readonly incomplete: boolean;
+}
+
+/**
+ * How many paged reads `--reverse` may chain. The command face only has a forward cursor, so the
+ * newest entries are only reachable by reading everything before them; the cap keeps one command
+ * from turning a long session into an unbounded loop, and `incomplete` says when it was hit.
+ */
+const maxTranscriptReverseReads = 50;
+
+async function readTranscript(sessionId: string, flags: TranscriptFlags): Promise<TranscriptRead> {
+  const limit = flags.limit ?? defaultTranscriptEntryReadLimit;
+  const readPage = async (afterEntryId: string | undefined): Promise<SessionTranscriptView> =>
+    await call({ command: 'session.transcript', sessionId,
+      ...(afterEntryId === undefined ? {} : { afterEntryId }), limit }) as SessionTranscriptView;
+  const first = await readPage(flags.afterEntryId);
+  if (!flags.reverse) return { view: first, entries: first.entries, incomplete: false };
+  const entries: SessionTranscriptEntry[] = [...first.entries];
+  let view = first;
+  let reads = 1;
+  while (view.hasMore && view.cursor !== null && reads < maxTranscriptReverseReads) {
+    view = await readPage(view.cursor);
+    entries.push(...view.entries);
+    reads += 1;
+  }
+  return { view, entries, incomplete: view.hasMore };
 }
 
 function parseTranscriptFlags(flags: readonly string[]): TranscriptFlags {
@@ -237,11 +285,14 @@ function parseTranscriptFlags(flags: readonly string[]): TranscriptFlags {
   let afterEntryId: string | undefined;
   let limit: number | undefined;
   let json = false;
+  let reverse = false;
   for (let index = 0; index < flags.length; index += 1) {
     const flag = flags[index];
     const value = flags[index + 1];
     if (flag === '--json') {
       json = true;
+    } else if (flag === '--reverse') {
+      reverse = true;
     } else if (flag === '--execution' && value !== undefined) {
       executionId = value;
       index += 1;
@@ -259,7 +310,55 @@ function parseTranscriptFlags(flags: readonly string[]): TranscriptFlags {
   }
   return { ...(executionId === undefined ? {} : { executionId }),
     ...(afterEntryId === undefined ? {} : { afterEntryId }),
-    ...(limit === undefined ? {} : { limit }), json };
+    ...(limit === undefined ? {} : { limit }), json, reverse };
+}
+
+interface TaskCreateInput {
+  readonly specification: string;
+  /** Mutable array: the IPC request type is not readonly. */
+  readonly constraints: { readonly id: string; readonly text: string }[];
+  readonly kind: 'DEVELOPMENT';
+}
+
+/**
+ * `task create` keeps its free-form specification, so only `--constraint` and `--kind` are read as
+ * flags. Constraint IDs are generated here because the Runtime treats them as the stable identity
+ * of a constraint inside one revision and requires them to be unique and non-blank.
+ *
+ * `SELF` is refused instead of silently becoming a development task: the Runtime has no
+ * Self-Evolution behaviour (no isolated self worktree, no candidate/stable separation), so accepting
+ * the kind would claim a capability that does not exist.
+ */
+function parseTaskCreateFlags(tokens: readonly string[]): TaskCreateInput {
+  const specification: string[] = [];
+  const constraints: { id: string; text: string }[] = [];
+  let kind: 'DEVELOPMENT' = 'DEVELOPMENT';
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index] as string;
+    const value = tokens[index + 1];
+    if (token === '--constraint') {
+      if (value === undefined || value.trim().length === 0) usage();
+      constraints.push({ id: crypto.randomUUID(), text: value.trim() });
+      index += 1;
+    } else if (token === '--kind') {
+      if (value === undefined) usage();
+      if (value === 'SELF') {
+        throw new Error('TASK_KIND_UNSUPPORTED: SELF（自演进）尚未实现：Runtime 没有隔离的 self'
+          + ' worktree，也没有 Candidate/Stable 隔离；请使用 DEVELOPMENT');
+      }
+      if (value !== 'DEVELOPMENT') usage();
+      kind = value;
+      index += 1;
+    } else if (token.startsWith('--')) {
+      // An unknown flag is a mistake, not part of the specification; the specification itself can
+      // always be passed first or quoted.
+      usage();
+    } else {
+      specification.push(token);
+    }
+  }
+  if (specification.length === 0) usage();
+  return { specification: specification.join(' '), constraints, kind };
 }
 
 /** The subset of `task.status` this client reads to find an execution's Agent session. */
@@ -296,14 +395,9 @@ async function transcriptForTask(
     }
     throw new Error('NOT_FOUND: 该任务还没有启动过 Agent 会话，因此没有执行过程');
   }
-  const view = await call({
-    command: 'session.transcript',
-    sessionId: execution.session.sessionId,
-    ...(flags.afterEntryId === undefined ? {} : { afterEntryId: flags.afterEntryId }),
-    limit: flags.limit ?? defaultTranscriptEntryReadLimit,
-  }) as SessionTranscriptView;
-  if (flags.json) print(view);
-  else printTranscript(view, execution.session.sessionId);
+  const read = await readTranscript(execution.session.sessionId, flags);
+  if (flags.json) print(read.view);
+  else printTranscript(read, execution.session.sessionId, flags.reverse);
 }
 
 /**
@@ -383,14 +477,21 @@ function usage(): never {
   bun run codeestra project policy [path]
   bun run codeestra project trust [path] [--yes]
   bun run codeestra project list
-  bun run codeestra task create <project-id> <specification>
-  bun run codeestra task list <project-id>
+  bun run codeestra task create <project-id> <specification> [--constraint <text>]…
+    [--kind DEVELOPMENT]
+  bun run codeestra task list <project-id> [--all]
   bun run codeestra task submit <project-id> <task-id> <expected-version>
   bun run codeestra task run <project-id> <task-id> <expected-version> [--adapter <id>]
+  bun run codeestra task pause <project-id> <task-id> <expected-version>
+  bun run codeestra task resume <project-id> <task-id> <expected-version>
+  bun run codeestra task cancel <project-id> <task-id> <expected-version>
+  bun run codeestra task archive <project-id> <task-id> <expected-version>
+  bun run codeestra task unarchive <project-id> <task-id> <expected-version>
   bun run codeestra task status <project-id> <task-id>
   bun run codeestra task transcript <project-id> <task-id> [--execution <id>] [--after <entry-id>]
-    [--limit <n>] [--json]
-  bun run codeestra session transcript <session-id> [--after <entry-id>] [--limit <n>] [--json]
+    [--limit <n>] [--reverse] [--json]
+  bun run codeestra session transcript <session-id> [--after <entry-id>] [--limit <n>] [--reverse]
+    [--json]
   bun run codeestra session transcript part <session-id> <entry-id> <part-index>
   bun run codeestra task result capture <project-id> <task-id> [execution-id]
   bun run codeestra task result prepare <project-id> <task-id> [execution-id]   # strict mode
@@ -404,7 +505,11 @@ function usage(): never {
   bun run codeestra attention answer <project-id> <attention-id> value <text>
   bun run codeestra attention answer <project-id> <attention-id> cancel
   bun run codeestra attention answer <project-id> <attention-id> [--choose <question>:<options>]…
-    [--text <question>=<text>]… [--cancel]`);
+    [--text <question>=<text>]… [--cancel]
+
+--reverse prints the newest transcript entry first. It is a rendering choice for the human view
+only (it is refused together with --json), and because the command face reads forward from a cursor
+it may read up to ${maxTranscriptReverseReads} pages to reach the newest entries.`);
   process.exit(2);
 }
 
@@ -648,17 +753,53 @@ try {
     }));
   } else if (group === 'task' && action === 'create') {
     if (firstArgument === undefined || remainingArguments.length === 0) usage();
+    const input = parseTaskCreateFlags(remainingArguments);
     print(await call({
       command: 'task.create',
       commandId: crypto.randomUUID(),
       projectId: firstArgument,
-      specification: remainingArguments.join(' '),
-      constraints: [],
-      kind: 'DEVELOPMENT',
+      specification: input.specification,
+      constraints: input.constraints,
+      kind: input.kind,
     }));
   } else if (group === 'task' && action === 'list') {
-    if (firstArgument === undefined || remainingArguments.length !== 0) usage();
-    print(await call({ command: 'task.list', projectId: firstArgument }));
+    const includeArchived = remainingArguments.length === 1 && remainingArguments[0] === '--all';
+    if (firstArgument === undefined
+      || (remainingArguments.length !== 0 && !includeArchived)) usage();
+    print(await call({ command: 'task.list', projectId: firstArgument, includeArchived }));
+  } else if (group === 'task' && (action === 'pause'
+    || action === 'cancel' || action === 'archive' || action === 'unarchive')) {
+    const [taskId, versionText, ...extra] = remainingArguments;
+    const expectedVersion = Number(versionText);
+    if (firstArgument === undefined || taskId === undefined || versionText === undefined
+      || extra.length !== 0 || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
+    const command = action === 'pause' ? 'task.pause' as const
+      : action === 'cancel' ? 'task.cancel' as const
+      : action === 'archive' ? 'task.archive' as const
+      : 'task.unarchive' as const;
+    const result = await call({
+      command,
+      commandId: crypto.randomUUID(),
+      projectId: firstArgument,
+      taskId,
+      expectedVersion,
+    }) as { state: string; stop?: string };
+    print(result);
+    // A stop the Runtime could not prove is a real failure for scripts, not a success.
+    if (result.stop === 'UNCERTAIN') process.exit(1);
+  } else if (group === 'task' && action === 'resume') {
+    const [taskId, versionText, ...extra] = remainingArguments;
+    const expectedVersion = Number(versionText);
+    if (firstArgument === undefined || taskId === undefined || versionText === undefined
+      || extra.length !== 0 || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
+    print(await call({
+      command: 'task.resume',
+      commandId: crypto.randomUUID(),
+      projectId: firstArgument,
+      taskId,
+      expectedVersion,
+      adapterId: 'pi',
+    }));
   } else if (group === 'task' && action === 'status') {
     const [taskId, ...extra] = remainingArguments;
     if (firstArgument === undefined || taskId === undefined || extra.length !== 0) usage();
@@ -666,7 +807,9 @@ try {
   } else if (group === 'task' && action === 'transcript') {
     const [taskId, ...flags] = remainingArguments;
     if (firstArgument === undefined || taskId === undefined) usage();
-    await transcriptForTask(firstArgument, taskId, parseTranscriptFlags(flags));
+    const parsed = parseTranscriptFlags(flags);
+    if (parsed.reverse && parsed.json) usage();
+    await transcriptForTask(firstArgument, taskId, parsed);
   } else if (group === 'session' && action === 'transcript') {
     // `session transcript part <session-id> <entry-id> <part-index>` is a three-level command, so
     // the subcommand lands in firstArgument and the session ID is the first remaining argument.
@@ -681,16 +824,13 @@ try {
       if (sessionId === undefined) usage();
       const flags = parseTranscriptFlags(remainingArguments);
       // `--execution` only means something when a Task is resolved; refusing it here keeps the flag
-      // from being accepted and then silently ignored.
+      // from being accepted and then silently ignored. `--reverse` is a rendering choice for the
+      // human view, so it is refused together with `--json` instead of reordering data silently.
       if (flags.executionId !== undefined) usage();
-      const view = await call({
-        command: 'session.transcript',
-        sessionId,
-        ...(flags.afterEntryId === undefined ? {} : { afterEntryId: flags.afterEntryId }),
-        limit: flags.limit ?? defaultTranscriptEntryReadLimit,
-      }) as SessionTranscriptView;
-      if (flags.json) print(view);
-      else printTranscript(view, sessionId);
+      if (flags.reverse && flags.json) usage();
+      const read = await readTranscript(sessionId, flags);
+      if (flags.json) print(read.view);
+      else printTranscript(read, sessionId, flags.reverse);
     }
   } else if (group === 'task' && action === 'run') {
     const [taskId, versionText, ...extra] = remainingArguments;

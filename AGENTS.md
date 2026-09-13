@@ -56,6 +56,27 @@
 - Runtime 是本用户单实例（按 `CODEESTRA_HOME` 的 socket 判定）。从 dev 工作树直接运行 `bun run codeestra …` 会连接正在运行的稳定 Runtime，即执行 `main` 代码，不会启动 dev 构建。要验证 dev 代码必须用独立的 `CODEESTRA_HOME`（例如 `CODEESTRA_HOME=/tmp/codeestra-dev bun run codeestra status`），或先停止稳定 Runtime。不要把它误认为 dev 代码已生效。
 - 提升方式取决于 `main` 是否被检出：`main` 未被任何工作树检出时，可用带 expected old OID 的 `git update-ref refs/heads/main <dev-sha> <expected-main-sha>` 做 ref CAS。**本仓库现在把 `main` 检出在稳定工作树中，因此提升必须在 main 工作树内用 `git merge --ff-only dev`**（同时推进 ref、index 与工作文件）。对已检出的 `main` 直接 `update-ref` 会让 ref 前进、而 index/工作树停留在旧提交，留下“已暂存的删除”这类不一致状态：不要这样做。
 
+### 重启 main 稳定服务（给 dev Agent 的操作规程）
+
+当用户在 `dev` 会话中说“重启 main 的服务”“让 main 更新生效”或同义指令时，必须操作 **main 工作树**，不能在当前 dev 工作树直接运行这些命令。除非用户明确要求跳过，使用以下完整流程；即使本次看似没有依赖或 UI 变化，也允许重复执行 install/build 以避免遗漏 gitignore 的工作树本地资产：
+
+```bash
+cd /Users/loyage/Documents/codeestra
+bun install --frozen-lockfile
+bun run build:ui
+bun run codeestra stop
+bun run codeestra status
+```
+
+执行要求：
+
+1. 先确认 main 工作树路径和分支；不要把 dev 的未提交改动复制到 main，也不要借重启之名执行 merge、commit、reset、clean 或 push。
+2. 命令必须按顺序执行并检查退出码；前一步失败就停止并报告，不继续声称已重启成功。
+3. `stop` 会使运行中的 Runtime/Session 中断；这是 main 更新后的既定后置步骤，不额外请求确认。不要手工 kill 未核验归属的进程。
+4. 只有 `status` 返回 `status: "READY"` 且 `uiRunning: true`，才可报告 main 稳定服务已恢复。
+5. Runtime 重启会更换 Web UI 内存 token，旧的带 token URL 会失效。用户需要 UI 时，在 main 工作树执行 `bun run codeestra ui`；只需返回链接时执行 `bun run codeestra ui --no-open`，不要在文档、日志或提交中记录实际 token。
+6. 从 dev 工作树运行不带独立 `CODEESTRA_HOME` 的 CLI 只是在连接 main 的稳定 Runtime；它不能证明 dev 代码已运行。重启 main 后也只能说明 main 当前代码已生效，不能把尚未合入 main 的 dev 改动说成已部署。
+
 ## Git 与文件安全
 
 - 未获授权不要 commit、push、强制更新 branch、reset --hard、clean、删除有改动的 worktree 或执行破坏性清理。

@@ -125,6 +125,13 @@ export class AgentRuntimeCoordinator {
     readonly expectedTaskVersion: number;
     readonly commandId: string;
     readonly adapterId: string;
+    /** Present when this attempt continues a paused Execution through provider conversation resume. */
+    readonly resume?: {
+      readonly resumeFromExecutionId: string;
+      readonly predecessorSessionId: string;
+      readonly predecessorSessionStorageRef: string;
+      readonly predecessorProviderSessionId: string | null;
+    };
   }): Promise<RunTaskResult> {
     const adapter = this.#registry.resolve(input.adapterId);
     const probe = await adapter.probe();
@@ -157,6 +164,8 @@ export class AgentRuntimeCoordinator {
       adapterId: adapter.id,
       adapterVersion: probe.version,
       agentConfig,
+      ...(input.resume === undefined
+        ? {} : { resumeFromExecutionId: input.resume.resumeFromExecutionId }),
       actor: 'runtime-scheduler',
       createdAt: this.#now(),
     });
@@ -171,6 +180,13 @@ export class AgentRuntimeCoordinator {
       startCommandId: deriveCommandId(input.commandId, 'start-agent'),
       environment: this.#environment,
       permissionMode,
+      ...(input.resume === undefined ? {} : {
+        resume: {
+          predecessorSessionId: input.resume.predecessorSessionId,
+          sessionStorageRef: input.resume.predecessorSessionStorageRef,
+          providerSessionId: input.resume.predecessorProviderSessionId,
+        },
+      }),
       now: this.#now,
       randomUUID: this.#randomUUID,
     });
@@ -238,6 +254,54 @@ export class AgentRuntimeCoordinator {
         delivery: 'NOT_DELIVERED',
         error: { code, message: error instanceof Error ? error.message : String(error) },
       };
+    }
+  }
+
+  /**
+   * Cooperatively release the provider process that owns one Execution. Returns whether the
+   * Runtime could confirm the process exited; an unconfirmable stop must become
+   * RECOVERY_REQUIRED rather than a claimed pause/cancel. The Session row is left for the caller to
+   * project, so the confirmation and the state transition stay one decision.
+   */
+  async releaseExecutionProcess(executionId: string): Promise<{
+    readonly sessionId: string | null;
+    readonly released: boolean;
+    readonly detail: string;
+  }> {
+    const session = this.#storage.findAgentSessionByExecution(executionId);
+    if (session === null) {
+      return { sessionId: null, released: true, detail: 'no Agent Session was recorded' };
+    }
+    if (session.state === 'EXITED') {
+      return { sessionId: session.sessionId, released: true, detail: 'Session had already exited' };
+    }
+    let adapter: AgentAnswerAdapter;
+    try {
+      adapter = this.#registry.resolve(session.adapterId);
+    } catch (error) {
+      return { sessionId: session.sessionId, released: false,
+        detail: error instanceof Error ? error.message : String(error) };
+    }
+    if (!supportsProcessRelease(adapter)) {
+      return { sessionId: session.sessionId, released: false,
+        detail: `Adapter ${session.adapterId} cannot confirm a provider stop` };
+    }
+    try {
+      const released = await adapter.releaseSession(session.sessionId);
+      if (released === null) {
+        return { sessionId: session.sessionId, released: true,
+          detail: 'no live provider process was held' };
+      }
+      return {
+        sessionId: session.sessionId,
+        released: released.exited,
+        detail: released.exited
+          ? `provider process ${released.pid} exited`
+          : `provider process ${released.pid} did not confirm exit`,
+      };
+    } catch (error) {
+      return { sessionId: session.sessionId, released: false,
+        detail: error instanceof Error ? error.message : String(error) };
     }
   }
 

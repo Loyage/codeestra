@@ -262,6 +262,44 @@ describe('codeestra transcript', () => {
     }
   }, 120_000);
 
+  test('prints the newest entry first with --reverse and reads as many pages as that needs',
+    async () => {
+      const { environment, projectId, taskId, sessionId } = await runOneTask();
+      try {
+        const fileOrder = ['stub-model', 'stub-user', 'stub-assistant', 'stub-tool-result',
+          'stub-final', 'stub-compaction'];
+        const reverse = await cli(['task', 'transcript', projectId, taskId, '--reverse'],
+          environment);
+        expect(reverse.exitCode).toBe(0);
+        expect(reverse.stderr).toContain('倒序：最新在前');
+        const positions = fileOrder.map((id) => reverse.stdout.indexOf(`=== ${id} `));
+        expect(positions.every((position) => position >= 0)).toBe(true);
+        expect(positions).toEqual([...positions].sort((left, right) => right - left));
+        // The same entries are rendered, so this is a reordering and not a different view.
+        expect(reverse.stdout).toContain('TOOL_CALL write');
+        expect(reverse.stdout).toContain('Successfully wrote 13 bytes to greeting.txt');
+
+        // One page holds two entries, so reaching the newest one takes chained reads; the header
+        // still reports every entry the command read.
+        const drained = await cli(['session', 'transcript', sessionId, '--limit', '2', '--reverse'],
+          environment);
+        expect(drained.exitCode).toBe(0);
+        expect(drained.stderr).toContain('6 条记录');
+        expect(drained.stderr).not.toContain('上限');
+        expect(drained.stdout.indexOf('=== stub-compaction '))
+          .toBeLessThan(drained.stdout.indexOf('=== stub-model '));
+
+        // --reverse is a rendering choice for the human view: with --json it is refused instead of
+        // being accepted and silently ignored.
+        const refused = await cli(['task', 'transcript', projectId, taskId, '--reverse', '--json'],
+          environment);
+        expect(refused.exitCode).toBe(2);
+        expect(refused.stdout).toBe('');
+      } finally {
+        await cli(['stop'], environment);
+      }
+    }, 120_000);
+
   test('refuses a recorded session file outside the Runtime session directory', async () => {
     const { home, environment, projectId, taskId, sessionId } = await runOneTask();
     // The Runtime is stopped first so the tampered row is what a fresh Runtime reads.

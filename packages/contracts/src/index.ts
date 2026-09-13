@@ -319,6 +319,8 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.list'),
     projectId: z.string().uuid(),
+    /** Archived Tasks are hidden unless a client explicitly asks for the full history. */
+    includeArchived: z.boolean().default(false),
   }),
   z.strictObject({
     ...requestBase,
@@ -342,6 +344,51 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     command: z.literal('task.status'),
     projectId: z.string().uuid(),
     taskId: z.string().uuid(),
+  }),
+  /** Cooperatively stops the running Agent and leaves the Task resumable in its workspace. */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.pause'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    expectedVersion: z.number().int().nonnegative(),
+  }),
+  /** PAUSED Task back to READY and immediately starts a new Execution in the same workspace. */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.resume'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    expectedVersion: z.number().int().nonnegative(),
+    adapterId: nonBlankString.default('pi'),
+  }),
+  /** Terminal stop: a running Agent is stopped cooperatively, everything else ends immediately. */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.cancel'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    expectedVersion: z.number().int().nonnegative(),
+  }),
+  /** Soft delete: hides the Task from the default list without destroying any row or worktree. */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.archive'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    expectedVersion: z.number().int().nonnegative(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.unarchive'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    expectedVersion: z.number().int().nonnegative(),
   }),
   z.strictObject({
     ...requestBase,
@@ -484,6 +531,16 @@ export interface AgentStartRequest {
    * project, and global scopes. Absent or empty means the Adapter's own default is used.
    */
   readonly agentConfig?: AgentConfiguration;
+  /**
+   * Set when this Execution continues an earlier paused one. Pi has no in-place resume, so the
+   * adapter reopens the predecessor's persistent session file and sends a bounded continuation
+   * instead of the full revision prompt.
+   */
+  readonly resume?: {
+    readonly predecessorSessionId: string;
+    readonly sessionStorageRef: string;
+    readonly providerSessionId: string | null;
+  };
   readonly environment: Readonly<Record<string, string>>;
 }
 export const agentStopEvidenceSchema = z.strictObject({

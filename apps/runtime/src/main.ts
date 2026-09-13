@@ -17,6 +17,7 @@ import { RuntimeHttpApi } from './http-api.js';
 import { runtimeHome, runtimeSocketPath } from './paths.js';
 import { readPermissionMode, writePermissionMode, type PermissionMode } from './permission-mode.js';
 import { captureResultCommit, prepareResultCommit } from './result-commit-service.js';
+import { pauseOrCancelTask, resumePausedTask } from './task-control-service.js';
 import {
   readSessionTranscript,
   readSessionTranscriptPart,
@@ -278,15 +279,83 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       // dispatcher; reaching here would mean the request was routed incorrectly.
       throw new Error('events.subscribe must be handled as a streaming connection');
     case 'task.list':
-      return success(request.requestId, storage.listTasks(request.projectId));
+      return success(request.requestId, storage.listTasks(request.projectId, {
+        includeArchived: request.includeArchived,
+      }));
     case 'task.status': {
-      const task = storage.listTasks(request.projectId).find((candidate) => candidate.id === request.taskId);
-      if (task === undefined) throw new StorageError('NOT_FOUND', 'Task was not found');
+      const task = storage.getTask(request.projectId, request.taskId);
+      if (task === null) throw new StorageError('NOT_FOUND', 'Task was not found');
       return success(request.requestId, {
         task,
         executions: storage.listTaskExecutions(request.projectId, request.taskId),
         verifications: storage.listVerificationRuns(request.projectId, request.taskId),
       });
+    }
+    case 'task.pause':
+      return success(request.requestId, await pauseOrCancelTask({
+        storage,
+        coordinator,
+        kind: 'PAUSE',
+        projectId: request.projectId,
+        taskId: request.taskId,
+        expectedVersion: request.expectedVersion,
+        commandId: request.commandId,
+        actor: 'local-user',
+      }));
+    case 'task.cancel':
+      return success(request.requestId, await pauseOrCancelTask({
+        storage,
+        coordinator,
+        kind: 'CANCEL',
+        projectId: request.projectId,
+        taskId: request.taskId,
+        expectedVersion: request.expectedVersion,
+        commandId: request.commandId,
+        actor: 'local-user',
+      }));
+    case 'task.resume':
+      return success(request.requestId, await resumePausedTask({
+        storage,
+        coordinator,
+        projectId: request.projectId,
+        taskId: request.taskId,
+        expectedVersion: request.expectedVersion,
+        commandId: request.commandId,
+        adapterId: request.adapterId,
+      }));
+    case 'task.archive': {
+      const payloadHash = createHash('sha256').update(JSON.stringify({
+        projectId: request.projectId,
+        taskId: request.taskId,
+        expectedVersion: request.expectedVersion,
+      })).digest('hex');
+      return success(request.requestId, storage.archiveTask({
+        projectId: request.projectId,
+        taskId: request.taskId,
+        expectedVersion: request.expectedVersion,
+        commandId: request.commandId,
+        payloadHash,
+        eventId: crypto.randomUUID(),
+        actor: 'local-user',
+        archivedAt: Date.now(),
+      }));
+    }
+    case 'task.unarchive': {
+      const payloadHash = createHash('sha256').update(JSON.stringify({
+        projectId: request.projectId,
+        taskId: request.taskId,
+        expectedVersion: request.expectedVersion,
+      })).digest('hex');
+      return success(request.requestId, storage.unarchiveTask({
+        projectId: request.projectId,
+        taskId: request.taskId,
+        expectedVersion: request.expectedVersion,
+        commandId: request.commandId,
+        payloadHash,
+        eventId: crypto.randomUUID(),
+        actor: 'local-user',
+        unarchivedAt: Date.now(),
+      }));
     }
     case 'task.verify':
       return success(request.requestId, await runTaskVerification({

@@ -18,6 +18,8 @@
 - [ADR-0014](0014-agent-structured-question-channel.md)：Agent 结构化提问通道。Codeestra 自有扩展注册 `ask_user_question`，一份问卷编码进一个 provider dialog = 一条 Attention；回答是结构化 `QUESTIONNAIRE` 而非字符串，Runtime 在记录前按被问的问卷校验，非法答案报错而不得降级为拒绝；受控启动不变，STRICT 允许该工具。
 
 - [ADR-0015](0015-task-workbench-and-themes.md)：任务工作台重构，集中任务操作、待回答问题与执行过程；支持跟随系统/浅色/深色主题。只调整便利前端，不新增 Runtime 语义或确认步骤。
+- [ADR-0016](0016-task-pause-cancel-archive.md)：Task 暂停 / 终止 / 归档。暂停为协作停止（Task `PAUSED`、Execution `SUPERSEDED`、workspace 保留），恢复在同一工作树新建 Execution 并以 `--session` 复用 provider conversation；终止是终态 `CANCELLED`，不自动重开；删除是归档软删除，只写 `tasks.archived_at`，不删除任何审计、不回收 worktree/branch。均不新增确认。
+- [ADR-0017](0017-new-task-dock.md)：新建任务改为页面底部常驻停靠条（收起：单行输入 + 创建；展开：多行规格正文、约束列表、任务类型），已选项目时在所有标签页可用。展开面板的每个字段都有对应 CLI 参数（`task create --constraint/--kind`），不存在仅 UI 可用的能力；`SELF` 在 UI 禁用、在 CLI 以 `TASK_KIND_UNSUPPORTED` 拒绝，Runtime 边界仍未收紧（已知缺口）。
 
 以上选择均由用户明确答复。用户给定的硬性原则见 `PROJECT_SPEC.md`，无需重复确认。
 
@@ -28,7 +30,7 @@
 | 阶段 | 尚需确认/验证 | 当前处理 |
 |---|---|---|
 | Phase 0 纯领域工程 | 无影响该小步的未决产品语义 | 可实现 revision、Execution FSM 和测试骨架，不实现副作用 |
-| Phase 1 | Pi 真实审批/交互/暂停/恢复能力与接入协议 | Pi 0.84.4 首轮 RPC spike 已完成：extension UI 可路由权限/问题，持久 conversation 可恢复；无 pause/revision ACK/live-process reconnect，见 `docs/spikes/pi-0.84.4.md`。受控 gate/framing、typed answer Operation、真实子进程 `PiRpcAdapter`、Runtime adapter registry、`task.run` 运行循环、事件 pump 与 answer 自动投递已实现；FOUNDATION-019 已在真实模型（deepseek-flash）下验收 gate 逐次审批、真实工具写入、成果 commit 与 Task verification；取消超时、禁止工具的静止性、gate 拒绝路径与孤儿进程 reconcile 仍需验证 |
+| Phase 1 | Pi 真实审批/交互/暂停/恢复能力与接入协议 | Pi 0.84.4 首轮 RPC spike 已完成：extension UI 可路由权限/问题，持久 conversation 可恢复；无 pause/revision ACK/live-process reconnect，见 `docs/spikes/pi-0.84.4.md`。受控 gate/framing、typed answer Operation、真实子进程 `PiRpcAdapter`、Runtime adapter registry、`task.run` 运行循环、事件 pump 与 answer 自动投递已实现；FOUNDATION-019 已在真实模型（deepseek-flash）下验收 gate 逐次审批、真实工具写入、成果 commit 与 Task verification；取消超时、禁止工具的静止性、gate 拒绝路径与孤儿进程 reconcile 仍需验证。ADR-0016 已实现用户级暂停/终止/归档 CLI 与 UI；其中暂停/终止的 provider 进程释放只由脚本 Adapter 与真实 `releaseSession` 覆盖，超时→`RECOVERY_REQUIRED` 路径仍需真实 provider 复验 |
 | Phase 1 | Runtime 创建成果 commit 的授权、identity、hooks、staging 策略 | 已由 ADR-0003 确认，并以两步 prepare/confirm、版本化敏感路径 deny policy、ChangeSet tree 指纹与 HEAD/OID reconcile 实现；Task verification 已由 ADR-0006 实现；Integration 提升仍未实现 |
 | Phase 1 | Task verification 的命令来源与执行授权 | 已由 ADR-0006 确认，并以 v6 schema、`project.verificationPolicy`/`task.verify` IPC、detached 副本、policy digest 绑定与证据记录实现；Integration verification 仍未实现 |
 | Phase 1 | Task verification 隔离副本、超时与树改动语义 | 已实现副本内 argv 直接 spawn、按进程组超时停止与 tracked 改动失败；真实命令集验证与长时任务仍未实测 |

@@ -42,9 +42,22 @@ Status：Accepted；**Amended by ADR-0011**：FULL 下 dev→main 无需批准�
 
 ### D03：`main` 更新后立即重启 Runtime
 
-- 成功更新 `main` 后，提升操作尚未完成；必须立即在 `main` 工作树执行 `bun run codeestra stop`，随后执行 `bun run codeestra status`，由 CLI 重新拉起 Runtime 并检查其可响应。
-- 重启不再请求第二次确认，它是用户批准提升后的自动后置步骤。
-- 只有 `main` 更新与重启/响应检查都成功，才能报告本次提升完成。重启或检查失败时保留事实并立即报告，不谎称服务已更新可用，也不擅自回滚或重写分支。
+- 成功更新 `main` 后，提升操作尚未完成；必须立即在 **main 工作树**完成依赖/本地 UI 资产同步，再执行 CLI stop/status。对于本机固定布局，标准操作为：
+
+  ```bash
+  cd /Users/loyage/Documents/codeestra
+  bun install --frozen-lockfile
+  bun run build:ui
+  bun run codeestra stop
+  bun run codeestra status
+  ```
+
+  `node_modules` 与 `apps/ui/dist` 是各工作树独立且被 gitignore 的本地状态，因此不能用 dev 工作树已安装或已构建来代替 main 的 install/build。即使无法预先确定本次是否修改依赖或 UI，也可重复执行完整流程以避免漏更稳定资产。
+- 来自 dev 会话的 Agent 收到“重启 main 服务”或同义指令时，也必须显式切换到 main 工作树执行上述流程；不能在 dev 目录直接执行后把连接到单实例稳定 Runtime 误报为 dev 或 main 新代码已生效。
+- 各步按顺序检查退出码，失败即停止并报告；不得借重启执行未经授权的 merge、commit、reset、clean、push 或手工清理未知进程。
+- 重启不再请求第二次确认，它是用户批准提升后的自动后置步骤。`stop` 导致活动 Runtime/Session 中断属于该已接受语义。
+- 只有 `status` 返回 `status: "READY"` 且 `uiRunning: true`，才能报告本次提升与稳定服务恢复完成。重启或检查失败时保留事实并立即报告，不谎称服务已更新可用，也不擅自回滚或重写分支。
+- Runtime 重启会更换 Web UI 内存 token，旧 URL 随即失效；需要 UI 时在 main 工作树执行 `bun run codeestra ui`，只需生成链接则执行 `bun run codeestra ui --no-open`。实际 token 不得写入文档、日志或提交。
 - 本要求适用于由项目工作流执行的每次 `main` 更新；当前不声称已实现对用户在系统外手动修改 `main` 的后台监控。
 
 ## Consequences

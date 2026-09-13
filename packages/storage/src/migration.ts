@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 8;
+export const phase1SchemaVersion = 9;
 
 export const phase1Migration = `
 CREATE TABLE projects (
@@ -393,6 +393,55 @@ CREATE INDEX verification_by_task ON verification_runs(project_id,task_id,queued
  * column is the provenance: the current configuration may change later, but an Execution keeps
  * the values that produced its result.
  */
+export const taskControlMigration = `
+ALTER TABLE tasks ADD COLUMN archived_at INTEGER CHECK(archived_at IS NULL OR archived_at >= 0);
+CREATE INDEX tasks_project_archived ON tasks(project_id,archived_at);
+
+-- SQLite cannot widen a CHECK constraint in place, so the executions table is rebuilt to admit
+-- the new USER_PAUSE stop reason and to record which predecessor an Execution resumed from.
+CREATE TABLE executions_v9 (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  attempt_number INTEGER NOT NULL CHECK(attempt_number > 0),
+  initial_revision_id TEXT NOT NULL,
+  applied_revision_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  adapter_id TEXT NOT NULL,
+  adapter_version TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('CREATED','PREPARING','STARTING','RUNNING','WAITING_FOR_USER',
+    'PAUSING','PAUSED','STOPPING','RECOVERY_REQUIRED','SUCCEEDED','FAILED','CANCELLED','SUPERSEDED')),
+  resource_held INTEGER NOT NULL CHECK(resource_held IN (0,1)),
+  base_commit TEXT NOT NULL,
+  result_commit TEXT,
+  stop_reason TEXT CHECK(stop_reason IN ('USER_CANCEL','USER_PAUSE','REVISION_RESTART','SHUTDOWN')),
+  version INTEGER NOT NULL DEFAULT 0 CHECK(version >= 0),
+  started_at INTEGER,
+  ended_at INTEGER,
+  error_json TEXT CHECK(error_json IS NULL OR json_valid(error_json)),
+  agent_config_json TEXT CHECK(agent_config_json IS NULL OR json_valid(agent_config_json)),
+  -- Provider conversation resume uses a fresh Execution; this is the Execution it continued.
+  resume_from_execution_id TEXT REFERENCES executions(id),
+  UNIQUE(task_id,attempt_number),
+  UNIQUE(task_id,id),
+  CHECK((state IN ('SUCCEEDED','FAILED','CANCELLED','SUPERSEDED') AND resource_held=0)
+    OR (state NOT IN ('SUCCEEDED','FAILED','CANCELLED','SUPERSEDED') AND resource_held=1)),
+  CHECK((state='SUCCEEDED' AND result_commit IS NOT NULL) OR (state<>'SUCCEEDED' AND result_commit IS NULL)),
+  CHECK(ended_at IS NULL OR started_at IS NULL OR ended_at >= started_at),
+  FOREIGN KEY(task_id,initial_revision_id) REFERENCES task_revisions(task_id,id),
+  FOREIGN KEY(task_id,applied_revision_id) REFERENCES task_revisions(task_id,id),
+  FOREIGN KEY(task_id,workspace_id) REFERENCES workspaces(task_id,id)
+) STRICT;
+INSERT INTO executions_v9(id,task_id,attempt_number,initial_revision_id,applied_revision_id,
+  workspace_id,adapter_id,adapter_version,state,resource_held,base_commit,result_commit,
+  stop_reason,version,started_at,ended_at,error_json,agent_config_json,resume_from_execution_id)
+  SELECT id,task_id,attempt_number,initial_revision_id,applied_revision_id,workspace_id,
+    adapter_id,adapter_version,state,resource_held,base_commit,result_commit,stop_reason,version,
+    started_at,ended_at,error_json,agent_config_json,NULL FROM executions;
+DROP TABLE executions;
+ALTER TABLE executions_v9 RENAME TO executions;
+CREATE UNIQUE INDEX one_held_execution ON executions(task_id) WHERE resource_held=1;
+`;
+
 export const agentConfigurationMigration = `
 ALTER TABLE executions ADD COLUMN agent_config_json TEXT
   CHECK(agent_config_json IS NULL OR json_valid(agent_config_json));

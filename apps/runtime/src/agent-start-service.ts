@@ -34,6 +34,12 @@ export async function startReservedExecution(input: {
   readonly startCommandId: string;
   readonly environment?: Readonly<Record<string, string>>;
   readonly permissionMode?: 'FULL' | 'STRICT';
+  /** Present when this Execution continues a paused one through provider conversation resume. */
+  readonly resume?: {
+    readonly predecessorSessionId: string;
+    readonly sessionStorageRef: string;
+    readonly providerSessionId: string | null;
+  };
   readonly now?: () => number;
   readonly randomUUID?: () => string;
 }): Promise<AgentStartPlan> {
@@ -102,6 +108,7 @@ export async function startReservedExecution(input: {
       },
       knowledgeSnapshotRefs: [],
       permissionMode,
+      ...(input.resume === undefined ? {} : { resume: input.resume }),
       // The configuration resolved at reservation time, so the Adapter launches exactly what the
       // Execution records as its input rather than re-reading mutable configuration here.
       ...(plan.agentConfig === null ? {} : { agentConfig: plan.agentConfig }),

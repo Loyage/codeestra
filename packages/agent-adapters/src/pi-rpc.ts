@@ -253,11 +253,17 @@ export function buildPiRpcArguments(input: {
   readonly sessionDir: string;
   readonly platform?: 'unix' | 'windows';
   readonly permissionMode?: 'FULL' | 'STRICT';
+  /** Reopen this persistent session file instead of starting a fresh conversation. */
+  readonly resumeSessionFile?: string;
 }): readonly string[] {
   if (!isAbsolute(input.gateExtensionPath) || !isAbsolute(input.questionExtensionPath)
     || !isAbsolute(input.sessionDir)) {
     throw new PiRpcProtocolError('INVALID_OPTIONS',
       'Pi gate, question extension, and session paths must be absolute');
+  }
+  if (input.resumeSessionFile !== undefined && !isAbsolute(input.resumeSessionFile)) {
+    throw new PiRpcProtocolError('INVALID_OPTIONS',
+      'A resumed Pi session file must be an absolute path inside the Runtime session directory');
   }
   const mode = input.permissionMode ?? 'FULL';
   const tools = input.platform === 'windows'
@@ -279,5 +285,8 @@ export function buildPiRpcArguments(input: {
   // Full mode does not apply a tool allowlist: every tool registered by this controlled launch is active.
   if (mode === 'STRICT') common.push('--tools', tools);
   common.push('--session-dir', input.sessionDir);
+  // Resume is an explicit provider conversation reopen, not a second writer on a live process:
+  // the paused Execution's process is already confirmed exited before this argv is built.
+  if (input.resumeSessionFile !== undefined) common.push('--session', input.resumeSessionFile);
   return common;
 }

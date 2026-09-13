@@ -9,6 +9,7 @@ import {
   agentStartMigration,
   phase1Migration,
   phase1SchemaVersion,
+  taskControlMigration,
   taskVerificationMigration,
   workspaceRetryMigration,
 } from './migration.js';
@@ -54,6 +55,14 @@ export interface StoredConstraint {
 export type TaskLifecycleState = 'DRAFT' | 'BLOCKED' | 'READY' | 'RUNNING' | 'PAUSING'
   | 'PAUSED' | 'WAITING_FOR_USER' | 'RECOVERY_REQUIRED' | 'EXECUTED' | 'FAILED'
   | 'CANCELLING' | 'CANCELLED' | 'SUCCEEDED';
+
+/**
+ * States that own a workspace and may hold a provider process. Archiving one would hide a Task
+ * whose Execution still consumes Git/resources, so it must be cancelled first.
+ */
+const ACTIVE_TASK_STATES: ReadonlySet<TaskLifecycleState> = new Set([
+  'RUNNING', 'PAUSING', 'PAUSED', 'WAITING_FOR_USER', 'CANCELLING', 'RECOVERY_REQUIRED',
+]);
 
 export interface AgentStartPlan {
   readonly operationId: string;
@@ -183,6 +192,32 @@ export interface ExecutionReservation {
   readonly state: 'CREATED';
 }
 
+/** Result of requesting a Task stop (pause or cancel). */
+export interface TaskStopRequest {
+  readonly taskId: string;
+  /** `PAUSING`/`CANCELLING` when a provider process must be released; a terminal state otherwise. */
+  readonly state: TaskLifecycleState;
+  readonly version: number;
+  readonly executionId: string | null;
+  readonly sessionId: string | null;
+  /** True when the Task reached its terminal state without an Execution to stop. */
+  readonly terminal: boolean;
+}
+
+/** Result of a Task resume that hands off to a new Execution in the retained workspace. */
+export interface TaskResumeRequest {
+  readonly taskId: string;
+  readonly state: 'READY';
+  readonly version: number;
+  readonly workspaceId: string;
+  readonly workspacePath: string;
+  readonly baseCommit: string;
+  readonly resumeFromExecutionId: string;
+  readonly predecessorSessionId: string;
+  readonly predecessorSessionStorageRef: string;
+  readonly predecessorProviderSessionId: string | null;
+}
+
 export type ExecutionLifecycleState = 'CREATED' | 'PREPARING' | 'STARTING' | 'RUNNING'
   | 'WAITING_FOR_USER' | 'PAUSING' | 'PAUSED' | 'STOPPING' | 'RECOVERY_REQUIRED' | 'SUCCEEDED'
   | 'FAILED' | 'CANCELLED' | 'SUPERSEDED';
@@ -285,6 +320,10 @@ export interface ExecutionSummary {
   readonly revisionId: string;
   /** Recorded reason for a terminal failure; `null` while running or when none was recorded. */
   readonly error: ExecutionError | null;
+  /** Why a terminal Execution stopped; `null` while active or when none applies. */
+  readonly stopReason: 'USER_CANCEL' | 'USER_PAUSE' | 'REVISION_RESTART' | 'SHUTDOWN' | null;
+  /** The Execution this attempt continued through provider conversation resume, if any. */
+  readonly resumeFromExecutionId: string | null;
   /** Effective Agent configuration this Execution started with, as recorded at reservation. */
   readonly agentConfig: StoredAgentConfiguration | null;
   readonly session: {
@@ -469,6 +508,8 @@ export interface TaskSummary {
   };
   readonly createdAt: number;
   readonly updatedAt: number;
+  /** Set when the Task is archived (soft-deleted); archived Tasks keep every row and worktree. */
+  readonly archivedAt: number | null;
 }
 
 function mapAgentConfigurationRow(row: AgentConfigurationRow): AgentConfigurationRecord {
@@ -512,7 +553,7 @@ export class Phase1Database {
     if (version === phase1SchemaVersion) return;
     // Rebuilding a table that other tables reference by name requires foreign keys to be off;
     // they are re-enabled and verified before the connection is used.
-    const rebuildsTable = version < 7;
+    const rebuildsTable = version < 9;
     if (rebuildsTable) this.sqlite.exec('PRAGMA foreign_keys=OFF;');
     try {
       this.sqlite.transaction(() => {
@@ -524,6 +565,7 @@ export class Phase1Database {
         if (version < 6) this.sqlite.exec(taskVerificationMigration);
         if (version < 7) this.sqlite.exec(workspaceRetryMigration);
         if (version < 8) this.sqlite.exec(agentConfigurationMigration);
+        if (version < 9) this.sqlite.exec(taskControlMigration);
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -735,29 +777,62 @@ export class Phase1Database {
           },
           createdAt: input.createdAt,
           updatedAt: input.createdAt,
+          archivedAt: null,
         };
       },
     });
   }
 
-  listTasks(projectId: string): readonly TaskSummary[] {
+  listTasks(projectId: string, options?: { readonly includeArchived?: boolean }): readonly TaskSummary[] {
     const project = this.sqlite.query<{ id: string }, [string]>(`
       SELECT p.id FROM projects p JOIN project_trusts t
         ON t.project_id=p.id AND t.status='ACTIVE' WHERE p.id=?1
     `).get(projectId);
     if (project === null) throw new StorageError('NOT_FOUND', 'Trusted project was not found');
+    const archivedClause = options?.includeArchived === true ? '' : 'AND t.archived_at IS NULL';
     return this.sqlite.query<{
       id: string; project_id: string; display_number: number; kind: 'DEVELOPMENT' | 'SELF';
       state: TaskLifecycleState; priority: number; version: number; revision_id: string; revision_number: number;
       specification: string; constraints_json: string; revision_created_at: number;
-      created_at: number; updated_at: number;
+      created_at: number; updated_at: number; archived_at: number | null;
     }, [string]>(`
       SELECT t.id,t.project_id,t.display_number,t.kind,t.state,t.priority,t.version,
         r.id AS revision_id,r.number AS revision_number,r.specification,r.constraints_json,
-        r.created_at AS revision_created_at,t.created_at,t.updated_at
+        r.created_at AS revision_created_at,t.created_at,t.updated_at,t.archived_at
       FROM tasks t JOIN task_revisions r ON r.task_id=t.id AND r.id=t.current_revision_id
-      WHERE t.project_id=?1 ORDER BY t.display_number
-    `).all(projectId).map((row) => ({
+      WHERE t.project_id=?1 ${archivedClause} ORDER BY t.display_number
+    `).all(projectId).map((row) => this.mapTaskSummary(row));
+  }
+
+  /** One Task by ID regardless of archive state; `task status` must still read an archived Task. */
+  getTask(projectId: string, taskId: string): TaskSummary | null {
+    const project = this.sqlite.query<{ id: string }, [string]>(`
+      SELECT p.id FROM projects p JOIN project_trusts t
+        ON t.project_id=p.id AND t.status='ACTIVE' WHERE p.id=?1
+    `).get(projectId);
+    if (project === null) throw new StorageError('NOT_FOUND', 'Trusted project was not found');
+    const row = this.sqlite.query<{
+      id: string; project_id: string; display_number: number; kind: 'DEVELOPMENT' | 'SELF';
+      state: TaskLifecycleState; priority: number; version: number; revision_id: string; revision_number: number;
+      specification: string; constraints_json: string; revision_created_at: number;
+      created_at: number; updated_at: number; archived_at: number | null;
+    }, [string, string]>(`
+      SELECT t.id,t.project_id,t.display_number,t.kind,t.state,t.priority,t.version,
+        r.id AS revision_id,r.number AS revision_number,r.specification,r.constraints_json,
+        r.created_at AS revision_created_at,t.created_at,t.updated_at,t.archived_at
+      FROM tasks t JOIN task_revisions r ON r.task_id=t.id AND r.id=t.current_revision_id
+      WHERE t.project_id=?1 AND t.id=?2
+    `).get(projectId, taskId);
+    return row === null ? null : this.mapTaskSummary(row);
+  }
+
+  private mapTaskSummary(row: {
+    id: string; project_id: string; display_number: number; kind: 'DEVELOPMENT' | 'SELF';
+    state: TaskLifecycleState; priority: number; version: number; revision_id: string; revision_number: number;
+    specification: string; constraints_json: string; revision_created_at: number;
+    created_at: number; updated_at: number; archived_at: number | null;
+  }): TaskSummary {
+    return {
       id: row.id,
       projectId: row.project_id,
       displayNumber: row.display_number,
@@ -774,7 +849,8 @@ export class Phase1Database {
       },
       createdAt: row.created_at,
       updatedAt: row.updated_at,
-    }));
+      archivedAt: row.archived_at,
+    };
   }
 
   /** Execution attempts for one Task, newest first, with the current Agent Session if one exists. */
@@ -792,13 +868,15 @@ export class Phase1Database {
       execution_id: string; task_id: string; attempt_number: number;
       state: ExecutionLifecycleState; adapter_id: string; adapter_version: string;
       resource_held: number; base_commit: string; revision_id: string; error_json: string | null;
-      agent_config_json: string | null;
+      agent_config_json: string | null; stop_reason: ExecutionSummary['stopReason'];
+      resume_from_execution_id: string | null;
       session_id: string | null; session_state: AgentSessionLifecycleState | null;
       provider_session_id: string | null; observation_cursor: string | null;
     }, [string]>(`
       SELECT execution.id AS execution_id,execution.task_id,execution.attempt_number,execution.state,
         execution.adapter_id,execution.adapter_version,execution.resource_held,execution.base_commit,
         execution.applied_revision_id AS revision_id,execution.error_json,execution.agent_config_json,
+        execution.stop_reason,execution.resume_from_execution_id,
         session.id AS session_id,session.state AS session_state,
         session.provider_session_id,session.observation_cursor
       FROM executions execution LEFT JOIN agent_sessions session ON session.execution_id=execution.id
@@ -814,6 +892,8 @@ export class Phase1Database {
       baseCommit: row.base_commit,
       revisionId: row.revision_id,
       error: parseExecutionError(row.error_json),
+      stopReason: row.stop_reason,
+      resumeFromExecutionId: row.resume_from_execution_id,
       agentConfig: parseAgentConfiguration(row.agent_config_json),
       session: row.session_id === null || row.session_state === null ? null : {
         sessionId: row.session_id,
@@ -1447,6 +1527,35 @@ export class Phase1Database {
       throw new StorageError('INVALID_STATE', `Agent Session cannot be observed from ${row.sessionState}`);
     }
     return { ...row, providerSessionId: row.providerSessionId } as ObservableAgentSession;
+  }
+
+  /**
+   * The Session recorded for one Execution in any lifecycle state. Stopping needs the Session
+   * identity even after it exited, when `getObservableAgentSession` would refuse to answer.
+   */
+  findAgentSessionByExecution(executionId: string): {
+    readonly sessionId: string;
+    readonly adapterId: string;
+    readonly state: AgentSessionLifecycleState;
+    readonly sessionStorageRef: string | null;
+    readonly providerSessionId: string | null;
+  } | null {
+    const row = this.sqlite.query<{
+      id: string; adapter_id: string; state: AgentSessionLifecycleState;
+      session_storage_ref: string | null; provider_session_id: string | null;
+    }, [string]>(`
+      SELECT session.id,session.state,session.session_storage_ref,session.provider_session_id,
+        execution.adapter_id
+      FROM agent_sessions session JOIN executions execution ON execution.id=session.execution_id
+      WHERE session.execution_id=?1
+    `).get(executionId);
+    return row === null ? null : {
+      sessionId: row.id,
+      adapterId: row.adapter_id,
+      state: row.state,
+      sessionStorageRef: row.session_storage_ref,
+      providerSessionId: row.provider_session_id,
+    };
   }
 
   /**
@@ -2925,6 +3034,8 @@ export class Phase1Database {
     readonly adapterId: string;
     readonly adapterVersion: string;
     readonly agentConfig?: StoredAgentConfiguration | null;
+    /** Set when this attempt continues an earlier paused Execution's conversation. */
+    readonly resumeFromExecutionId?: string;
     readonly actor: string;
     readonly createdAt: number;
   }): ExecutionReservation {
@@ -2968,11 +3079,11 @@ export class Phase1Database {
         database.query(`
           INSERT INTO executions(id,task_id,attempt_number,initial_revision_id,applied_revision_id,
             workspace_id,adapter_id,adapter_version,state,resource_held,base_commit,version,
-            agent_config_json)
-          VALUES (?1,?2,?3,?4,?4,?5,?6,?7,'CREATED',1,?8,0,?9)
+            agent_config_json,resume_from_execution_id)
+          VALUES (?1,?2,?3,?4,?4,?5,?6,?7,'CREATED',1,?8,0,?9,?10)
         `).run(input.executionId, input.taskId, attempt.number, subject.revision_id,
           input.workspaceId, input.adapterId, input.adapterVersion, subject.base_commit,
-          agentConfigJson);
+          agentConfigJson, input.resumeFromExecutionId ?? null);
         const workspaceUpdate = database.query(
           "UPDATE workspaces SET state='IN_USE' WHERE id=?1 AND state='READY'",
         ).run(input.workspaceId);
@@ -2993,7 +3104,9 @@ export class Phase1Database {
           VALUES (?1,?2,'ExecutionReserved',1,'Execution',?3,0,?4,?4,?5,?6)
         `).run(input.reservationEventId, input.projectId, input.executionId, input.commandId,
           input.createdAt, JSON.stringify({ executionId: input.executionId, taskId: input.taskId,
-            revisionId: subject.revision_id, workspaceId: input.workspaceId }));
+            revisionId: subject.revision_id, workspaceId: input.workspaceId,
+            ...(input.resumeFromExecutionId === undefined
+              ? {} : { resumeFromExecutionId: input.resumeFromExecutionId }) }));
         database.query(`
           INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
             aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
@@ -3068,6 +3181,541 @@ export class Phase1Database {
         return { taskId: input.taskId, state: 'READY' as const, version };
       },
     });
+  }
+
+  /**
+   * Soft-delete: sets `archived_at` only. Every Task/Revision/Execution/Session/event row and the
+   * owned worktree/branch stay untouched; `unarchiveTask` is the exact inverse.
+   */
+  archiveTask(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly expectedVersion: number;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly eventId: string;
+    readonly actor: string;
+    readonly archivedAt: number;
+  }): Readonly<{ taskId: string; state: TaskLifecycleState; version: number; archived: boolean }> {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.archivedAt,
+      apply: (database) => this.setTaskArchived(database, { ...input, archived: true }),
+    });
+  }
+
+  unarchiveTask(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly expectedVersion: number;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly eventId: string;
+    readonly actor: string;
+    readonly unarchivedAt: number;
+  }): Readonly<{ taskId: string; state: TaskLifecycleState; version: number; archived: boolean }> {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.unarchivedAt,
+      apply: (database) => this.setTaskArchived(database, { ...input, archivedAt: input.unarchivedAt,
+        archived: false }),
+    });
+  }
+
+  private setTaskArchived(database: Database, input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly expectedVersion: number;
+    readonly eventId: string;
+    readonly actor: string;
+    readonly archivedAt: number;
+    readonly archived: boolean;
+  }): Readonly<{ taskId: string; state: TaskLifecycleState; version: number; archived: boolean }> {
+    const task = database.query<{
+      state: TaskLifecycleState; version: number; archived_at: number | null;
+    }, [string, string]>(`
+      SELECT t.state,t.version,t.archived_at FROM tasks t
+      JOIN project_trusts trust ON trust.project_id=t.project_id AND trust.status='ACTIVE'
+      WHERE t.project_id=?1 AND t.id=?2
+    `).get(input.projectId, input.taskId);
+    if (task === null) throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
+    // Idempotent on replay: archiving an archived Task (or unarchiving a live one) succeeds without
+    // a second version bump, so a retried command never rewrites already-true state.
+    const already = input.archived ? task.archived_at !== null : task.archived_at === null;
+    if (already) {
+      return { taskId: input.taskId, state: task.state, version: task.version, archived: input.archived };
+    }
+    if (task.version !== input.expectedVersion) {
+      throw new StorageError('CONCURRENT_MODIFICATION', 'Task version did not match');
+    }
+    if (input.archived && ACTIVE_TASK_STATES.has(task.state)) {
+      throw new StorageError('INVALID_STATE',
+        `Task cannot be archived while it is ${task.state}; cancel it first`);
+    }
+    const version = task.version + 1;
+    const update = database.query(`
+      UPDATE tasks SET archived_at=?1,version=?2,updated_at=?3
+      WHERE project_id=?4 AND id=?5 AND version=?6
+    `).run(input.archived ? input.archivedAt : null, version, input.archivedAt,
+      input.projectId, input.taskId, input.expectedVersion);
+    if (update.changes !== 1) {
+      throw new StorageError('CONCURRENT_MODIFICATION', 'Task changed during archive');
+    }
+    database.query(`
+      INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+        aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+      VALUES (?1,?2,?3,1,'Task',?4,?5,?6,?6,?7,?8)
+    `).run(input.eventId, input.projectId, input.archived ? 'TaskArchived' : 'TaskUnarchived',
+      input.taskId, version, input.actor, input.archivedAt,
+      JSON.stringify({ taskId: input.taskId, from: task.state, to: task.state,
+        reason: input.archived ? 'archived' : 'unarchived', actor: input.actor }));
+    return { taskId: input.taskId, state: task.state, version, archived: input.archived };
+  }
+
+  /**
+   * Records a user stop request. `PAUSE` is only meaningful for a running Agent; `CANCEL` also
+   * terminalizes a Task that holds no provider process. The caller must then confirm quiescence
+   * through `confirmTaskStopped` or record uncertainty through `markTaskStopUncertain`.
+   */
+  requestTaskStop(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly expectedVersion: number;
+    readonly kind: 'PAUSE' | 'CANCEL';
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly taskEventId: string;
+    readonly executionEventId: string;
+    readonly actor: string;
+    readonly requestedAt: number;
+  }): TaskStopRequest {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.requestedAt,
+      apply: (database) => {
+        const task = database.query<{ state: TaskLifecycleState; version: number }, [string, string]>(`
+          SELECT t.state,t.version FROM tasks t
+          JOIN project_trusts trust ON trust.project_id=t.project_id AND trust.status='ACTIVE'
+          WHERE t.project_id=?1 AND t.id=?2
+        `).get(input.projectId, input.taskId);
+        if (task === null) throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
+        if (task.version !== input.expectedVersion) {
+          throw new StorageError('CONCURRENT_MODIFICATION', 'Task version did not match');
+        }
+        // A repeat of a stop that already reached its terminal state is a no-op, so a caller does
+        // not have to guess whether the first request landed.
+        if (input.kind === 'CANCEL' && task.state === 'CANCELLED') {
+          return { taskId: input.taskId, state: 'CANCELLED', version: task.version,
+            executionId: null, sessionId: null, terminal: true };
+        }
+        if (input.kind === 'PAUSE' && task.state === 'PAUSED') {
+          return { taskId: input.taskId, state: 'PAUSED', version: task.version,
+            executionId: null, sessionId: null, terminal: false };
+        }
+        const held = database.query<{
+          execution_id: string; execution_state: ExecutionLifecycleState; session_id: string | null;
+        }, [string]>(`
+          SELECT execution.id AS execution_id,execution.state AS execution_state,session.id AS session_id
+          FROM executions execution LEFT JOIN agent_sessions session ON session.execution_id=execution.id
+          WHERE execution.task_id=?1 AND execution.resource_held=1
+        `).get(input.taskId) ?? null;
+
+        const toCancelling = input.kind === 'CANCEL'
+          && ['RUNNING', 'WAITING_FOR_USER', 'PAUSING'].includes(task.state);
+        const toPausing = input.kind === 'PAUSE'
+          && ['RUNNING', 'WAITING_FOR_USER'].includes(task.state);
+        const toCancelled = input.kind === 'CANCEL'
+          && ['DRAFT', 'BLOCKED', 'READY', 'EXECUTED', 'FAILED', 'PAUSED'].includes(task.state);
+
+        if (toCancelling || toPausing) {
+          if (held === null) {
+            throw new StorageError('INVALID_STATE',
+              `Task is ${task.state} but holds no Execution to stop`);
+          }
+          const taskState = toPausing ? 'PAUSING' : 'CANCELLING';
+          const stopReason = toPausing ? 'USER_PAUSE' : 'USER_CANCEL';
+          const version = task.version + 1;
+          const taskUpdate = database.query(`
+            UPDATE tasks SET state=?1,version=?2,updated_at=?3
+            WHERE project_id=?4 AND id=?5 AND version=?6 AND state=?7
+          `).run(taskState, version, input.requestedAt, input.projectId, input.taskId,
+            input.expectedVersion, task.state);
+          if (taskUpdate.changes !== 1) {
+            throw new StorageError('CONCURRENT_MODIFICATION', 'Task changed during stop request');
+          }
+          const executionUpdate = database.query(`
+            UPDATE executions SET state='STOPPING',stop_reason=?1,version=version+1
+            WHERE id=?2 AND state IN ('CREATED','PREPARING','STARTING','RUNNING',
+              'WAITING_FOR_USER','PAUSING','PAUSED','STOPPING')
+          `).run(stopReason, held.execution_id);
+          if (executionUpdate.changes !== 1) {
+            throw new StorageError('CONCURRENT_MODIFICATION', 'Execution changed during stop request');
+          }
+          database.query(`
+            INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+              aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+            VALUES (?1,?2,'TaskStateChanged',1,'Task',?3,?4,?5,?5,?6,?7)
+          `).run(input.taskEventId, input.projectId, input.taskId, version, input.commandId,
+            input.requestedAt, JSON.stringify({ taskId: input.taskId, from: task.state, to: taskState,
+              reason: toPausing ? 'pause requested' : 'cancel requested', actor: input.actor }));
+          database.query(`
+            INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+              aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+            VALUES (?1,?2,'ExecutionStateChanged',1,'Execution',?3,?4,?5,?6,?7,?8)
+          `).run(input.executionEventId, input.projectId, held.execution_id, 0, input.commandId,
+            input.taskEventId, input.requestedAt,
+            JSON.stringify({ executionId: held.execution_id, from: held.execution_state,
+              to: 'STOPPING', stopReason }));
+          return { taskId: input.taskId, state: taskState as TaskLifecycleState, version,
+            executionId: held.execution_id, sessionId: held.session_id, terminal: false };
+        }
+
+        if (toCancelled) {
+          if (held !== null) {
+            throw new StorageError('INVALID_STATE',
+              `Task is ${task.state} but still holds a live Execution`);
+          }
+          const version = task.version + 1;
+          const taskUpdate = database.query(`
+            UPDATE tasks SET state='CANCELLED',version=?1,updated_at=?2
+            WHERE project_id=?3 AND id=?4 AND version=?5 AND state=?6
+          `).run(version, input.requestedAt, input.projectId, input.taskId,
+            input.expectedVersion, task.state);
+          if (taskUpdate.changes !== 1) {
+            throw new StorageError('CONCURRENT_MODIFICATION', 'Task changed during cancel');
+          }
+          database.query(`
+            INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+              aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+            VALUES (?1,?2,'TaskStateChanged',1,'Task',?3,?4,?5,?5,?6,?7)
+          `).run(input.taskEventId, input.projectId, input.taskId, version, input.commandId,
+            input.requestedAt, JSON.stringify({ taskId: input.taskId, from: task.state,
+              to: 'CANCELLED', reason: 'cancelled', actor: input.actor }));
+          return { taskId: input.taskId, state: 'CANCELLED', version, executionId: null,
+            sessionId: null, terminal: true };
+        }
+
+        // Replaying the exact same command already produced the requested in-progress state.
+        const expectedState = input.kind === 'PAUSE' ? 'PAUSING' : 'CANCELLING';
+        if (task.state === expectedState) {
+          return { taskId: input.taskId, state: task.state, version: task.version,
+            executionId: held?.execution_id ?? null, sessionId: held?.session_id ?? null,
+            terminal: false };
+        }
+        throw new StorageError('INVALID_STATE',
+          `Task cannot be ${input.kind === 'PAUSE' ? 'paused' : 'cancelled'} from ${task.state}`);
+      },
+    });
+  }
+
+  /**
+   * Confirms a stop after the Adapter proved the owned provider process exited. A pause ends in
+   * `PAUSED`/`SUPERSEDED`; a cancel ends in `CANCELLED`/`CANCELLED`. The workspace is retained
+   * in both cases: cancellation never implicitly cleans up Git resources.
+   */
+  confirmTaskStopped(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly kind: 'PAUSE' | 'CANCEL';
+    readonly executionId: string | null;
+    readonly sessionId: string | null;
+    readonly evidenceRef: string;
+    readonly taskEventId: string;
+    readonly executionEventId: string;
+    readonly sessionEventId: string;
+    readonly stoppedAt: number;
+  }): Readonly<{ taskId: string; state: TaskLifecycleState; version: number }> {
+    return this.sqlite.transaction(() => {
+      const task = this.sqlite.query<{
+        state: TaskLifecycleState; version: number;
+      }, [string, string]>(`
+        SELECT t.state,t.version FROM tasks t
+        JOIN project_trusts trust ON trust.project_id=t.project_id AND trust.status='ACTIVE'
+        WHERE t.project_id=?1 AND t.id=?2
+      `).get(input.projectId, input.taskId);
+      if (task === null) throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
+      const target: TaskLifecycleState = input.kind === 'PAUSE' ? 'PAUSED' : 'CANCELLED';
+      const from = input.kind === 'PAUSE' ? 'PAUSING' : 'CANCELLING';
+      if (task.state === target) {
+        return { taskId: input.taskId, state: task.state, version: task.version };
+      }
+      if (task.state !== from) {
+        throw new StorageError('INVALID_STATE',
+          `Stop confirmation requires ${from}, got ${task.state}`);
+      }
+      const version = task.version + 1;
+      const taskUpdate = this.sqlite.query(`
+        UPDATE tasks SET state=?1,version=?2,updated_at=?3
+        WHERE project_id=?4 AND id=?5 AND version=?6 AND state=?7
+      `).run(target, version, input.stoppedAt, input.projectId, input.taskId,
+        task.version, from);
+      if (taskUpdate.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION', 'Task changed during stop confirmation');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'TaskStateChanged',1,'Task',?3,?4,?5,?5,?6,?7)
+      `).run(input.taskEventId, input.projectId, input.taskId, version, input.evidenceRef,
+        input.stoppedAt, JSON.stringify({ taskId: input.taskId, from, to: target,
+          reason: input.kind === 'PAUSE' ? 'paused' : 'cancelled', evidenceRef: input.evidenceRef }));
+
+      if (input.executionId !== null) {
+        const executionTarget = input.kind === 'PAUSE' ? 'SUPERSEDED' : 'CANCELLED';
+        const execution = this.sqlite.query<{ state: ExecutionLifecycleState; version: number }, [string, string]>(`
+          SELECT state,version FROM executions WHERE id=?1 AND task_id=?2
+        `).get(input.executionId, input.taskId);
+        if (execution === null) {
+          throw new StorageError('NOT_FOUND', 'Execution to stop was not found');
+        }
+        if (execution.state !== executionTarget) {
+          const update = this.sqlite.query(`
+            UPDATE executions SET state=?1,resource_held=0,version=version+1,ended_at=?2
+            WHERE id=?3 AND state='STOPPING'
+          `).run(executionTarget, input.stoppedAt, input.executionId);
+          if (update.changes !== 1) {
+            throw new StorageError('CONCURRENT_MODIFICATION', 'Execution changed during stop confirmation');
+          }
+          this.sqlite.query(`
+            INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+              aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+            VALUES (?1,?2,'ExecutionStateChanged',1,'Execution',?3,?4,?5,?6,?7,?8)
+          `).run(input.executionEventId, input.projectId, input.executionId, execution.version + 1,
+            input.evidenceRef, input.taskEventId, input.stoppedAt,
+            JSON.stringify({ executionId: input.executionId, from: 'STOPPING', to: executionTarget,
+              stopReason: input.kind === 'PAUSE' ? 'USER_PAUSE' : 'USER_CANCEL',
+              evidenceRef: input.evidenceRef }));
+        }
+        this.sqlite.query<unknown, [string]>(
+          "UPDATE workspaces SET state='RETAINED' WHERE task_id=?1 AND state='IN_USE'",
+        ).run(input.taskId);
+      }
+
+      if (input.sessionId !== null) {
+        const session = this.sqlite.query<{ state: AgentSessionLifecycleState; version: number }, [string]>(`
+          SELECT state,version FROM agent_sessions WHERE id=?1
+        `).get(input.sessionId);
+        if (session !== null && session.state !== 'EXITED') {
+          const update = this.sqlite.query(`
+            UPDATE agent_sessions SET state='EXITED',version=version+1,last_observed_at=?1,exit_json=?2
+            WHERE id=?3 AND state IN ('CREATED','STARTING','ACTIVE','WAITING_FOR_USER',
+              'PAUSING','PAUSED','STOPPING')
+          `).run(input.stoppedAt, JSON.stringify({ reason: 'runtime-initiated stop',
+            kind: input.kind, evidenceRef: input.evidenceRef }), input.sessionId);
+          if (update.changes === 1) {
+            this.sqlite.query(`
+              INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+                aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+              VALUES (?1,?2,'AgentSessionStateChanged',1,'AgentSession',?3,?4,?5,?6,?7,?8)
+            `).run(input.sessionEventId, input.projectId, input.sessionId, session.version + 1,
+              input.evidenceRef, input.executionEventId, input.stoppedAt,
+              JSON.stringify({ sessionId: input.sessionId, from: session.state, to: 'EXITED',
+                reason: 'runtime-initiated stop', evidenceRef: input.evidenceRef }));
+          }
+        }
+      }
+      return { taskId: input.taskId, state: target, version };
+    })();
+  }
+
+  /** The stop could not be proven: keep every resource and require an audited reconcile. */
+  markTaskStopUncertain(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly executionId: string | null;
+    readonly sessionId: string | null;
+    readonly evidenceRef: string;
+    readonly taskEventId: string;
+    readonly executionEventId: string;
+    readonly sessionEventId: string;
+    readonly recoveredAt: number;
+  }): void {
+    this.sqlite.transaction(() => {
+      const task = this.sqlite.query<{ state: TaskLifecycleState; version: number }, [string, string]>(`
+        SELECT t.state,t.version FROM tasks t
+        JOIN project_trusts trust ON trust.project_id=t.project_id AND trust.status='ACTIVE'
+        WHERE t.project_id=?1 AND t.id=?2
+      `).get(input.projectId, input.taskId);
+      if (task === null) throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
+      if (!['PAUSING', 'CANCELLING'].includes(task.state)) {
+        throw new StorageError('INVALID_STATE',
+          `Uncertain stop requires PAUSING/CANCELLING, got ${task.state}`);
+      }
+      const version = task.version + 1;
+      const taskUpdate = this.sqlite.query(`
+        UPDATE tasks SET state='RECOVERY_REQUIRED',version=?1,updated_at=?2
+        WHERE project_id=?3 AND id=?4 AND version=?5
+      `).run(version, input.recoveredAt, input.projectId, input.taskId, task.version);
+      if (taskUpdate.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION', 'Task changed during uncertain stop');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'RecoveryRequired',1,'Task',?3,?4,?5,?5,?6,?7)
+      `).run(input.taskEventId, input.projectId, input.taskId, version, input.evidenceRef,
+        input.recoveredAt, JSON.stringify({ taskId: input.taskId, from: task.state,
+          to: 'RECOVERY_REQUIRED', reason: 'provider stop could not be confirmed',
+          evidenceRef: input.evidenceRef }));
+      if (input.executionId !== null) {
+        const execution = this.sqlite.query<{ version: number }, [string]>(`
+          SELECT version FROM executions WHERE id=?1
+        `).get(input.executionId);
+        this.sqlite.query(`
+          UPDATE executions SET state='RECOVERY_REQUIRED',version=version+1
+          WHERE id=?1 AND state='STOPPING'
+        `).run(input.executionId);
+        this.sqlite.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'ExecutionStateChanged',1,'Execution',?3,?4,?5,?6,?7,?8)
+        `).run(input.executionEventId, input.projectId, input.executionId,
+          (execution?.version ?? 0) + 1, input.evidenceRef,
+          input.taskEventId, input.recoveredAt,
+          JSON.stringify({ executionId: input.executionId, from: 'STOPPING',
+            to: 'RECOVERY_REQUIRED', reason: 'provider stop could not be confirmed',
+            evidenceRef: input.evidenceRef }));
+      }
+      if (input.sessionId !== null) {
+        const session = this.sqlite.query<{ state: AgentSessionLifecycleState; version: number }, [string]>(`
+          SELECT state,version FROM agent_sessions WHERE id=?1
+        `).get(input.sessionId);
+        const update = this.sqlite.query(`
+          UPDATE agent_sessions SET state='RECOVERY_REQUIRED',version=version+1
+          WHERE id=?1 AND state IN ('CREATED','STARTING','ACTIVE','WAITING_FOR_USER','STOPPING')
+        `).run(input.sessionId);
+        if (session !== null && update.changes === 1) {
+          this.sqlite.query(`
+            INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+              aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+            VALUES (?1,?2,'AgentSessionStateChanged',1,'AgentSession',?3,?4,?5,?6,?7,?8)
+          `).run(input.sessionEventId, input.projectId, input.sessionId, session.version + 1,
+            input.evidenceRef, input.executionEventId, input.recoveredAt,
+            JSON.stringify({ sessionId: input.sessionId, from: session.state,
+              to: 'RECOVERY_REQUIRED', reason: 'provider stop could not be confirmed',
+              evidenceRef: input.evidenceRef }));
+        }
+      }
+    })();
+  }
+
+  /**
+   * Moves a `PAUSED` Task back to `READY` in its retained workspace and identifies the paused
+   * Execution whose provider conversation the next attempt continues.
+   */
+  resumeTask(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly expectedVersion: number;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly taskEventId: string;
+    readonly resumedAt: number;
+  }): TaskResumeRequest {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.resumedAt,
+      apply: (database) => {
+        const task = database.query<{ state: TaskLifecycleState; version: number }, [string, string]>(`
+          SELECT t.state,t.version FROM tasks t
+          JOIN project_trusts trust ON trust.project_id=t.project_id AND trust.status='ACTIVE'
+          WHERE t.project_id=?1 AND t.id=?2
+        `).get(input.projectId, input.taskId);
+        if (task === null) throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
+        if (task.state === 'READY' || task.state === 'RUNNING') {
+          throw new StorageError('INVALID_STATE',
+            `Task is already ${task.state}; only a PAUSED Task can resume`);
+        }
+        if (task.state !== 'PAUSED') {
+          throw new StorageError('INVALID_STATE', `Task cannot be resumed from ${task.state}`);
+        }
+        if (task.version !== input.expectedVersion) {
+          throw new StorageError('CONCURRENT_MODIFICATION', 'Task version did not match');
+        }
+        const workspace = database.query<{
+          id: string; path: string; base_commit: string;
+        }, [string]>(`
+          SELECT id,path,base_commit FROM workspaces
+          WHERE task_id=?1 AND state='RETAINED'
+        `).get(input.taskId);
+        if (workspace === null) {
+          throw new StorageError('INVALID_STATE', 'Paused Task has no retained workspace to resume in');
+        }
+        const predecessor = database.query<{
+          execution_id: string; session_id: string; session_storage_ref: string | null;
+          provider_session_id: string | null;
+        }, [string]>(`
+          SELECT execution.id AS execution_id,session.id AS session_id,
+            session.session_storage_ref,session.provider_session_id
+          FROM executions execution
+          JOIN agent_sessions session ON session.execution_id=execution.id
+          WHERE execution.task_id=?1 AND execution.stop_reason='USER_PAUSE'
+            AND execution.state='SUPERSEDED'
+          ORDER BY execution.attempt_number DESC LIMIT 1
+        `).get(input.taskId);
+        if (predecessor === null || predecessor.session_storage_ref === null) {
+          throw new StorageError('INVALID_STATE',
+            'Paused Task has no recorded provider conversation to resume');
+        }
+        const version = task.version + 1;
+        const taskUpdate = database.query(`
+          UPDATE tasks SET state='READY',version=?1,updated_at=?2
+          WHERE project_id=?3 AND id=?4 AND version=?5 AND state='PAUSED'
+        `).run(version, input.resumedAt, input.projectId, input.taskId, input.expectedVersion);
+        if (taskUpdate.changes !== 1) {
+          throw new StorageError('CONCURRENT_MODIFICATION', 'Task changed during resume');
+        }
+        database.query("UPDATE workspaces SET state='READY' WHERE id=?1 AND state='RETAINED'")
+          .run(workspace.id);
+        database.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'TaskStateChanged',1,'Task',?3,?4,?5,?5,?6,?7)
+        `).run(input.taskEventId, input.projectId, input.taskId, version, input.commandId,
+          input.resumedAt, JSON.stringify({ taskId: input.taskId, from: 'PAUSED', to: 'READY',
+            reason: 'resumed', resumeFromExecutionId: predecessor.execution_id }));
+        return {
+          taskId: input.taskId,
+          state: 'READY' as const,
+          version,
+          workspaceId: workspace.id,
+          workspacePath: workspace.path,
+          baseCommit: workspace.base_commit,
+          resumeFromExecutionId: predecessor.execution_id,
+          predecessorSessionId: predecessor.session_id,
+          predecessorSessionStorageRef: predecessor.session_storage_ref,
+          predecessorProviderSessionId: predecessor.provider_session_id,
+        };
+      },
+    });
+  }
+
+  /** The READY workspace a resumed Execution reuses instead of preparing a second worktree. */
+  findReusableWorkspace(taskId: string): {
+    readonly workspaceId: string; readonly path: string; readonly branchRef: string;
+    readonly baseCommit: string; readonly ownershipToken: string;
+  } | null {
+    const row = this.sqlite.query<{
+      id: string; path: string; branch_ref: string; base_commit: string; ownership_token: string;
+    }, [string]>(`
+      SELECT id,path,branch_ref,base_commit,ownership_token FROM workspaces
+      WHERE task_id=?1 AND state='READY' ORDER BY created_at DESC LIMIT 1
+    `).get(taskId);
+    return row === null ? null : {
+      workspaceId: row.id,
+      path: row.path,
+      branchRef: row.branch_ref,
+      baseCommit: row.base_commit,
+      ownershipToken: row.ownership_token,
+    };
   }
 
   /** Task, revision, repository facts and Execution attempts for verification decisions. */
