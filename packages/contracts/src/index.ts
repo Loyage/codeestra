@@ -1,6 +1,8 @@
 import { z } from 'zod';
+import { questionnaireAnswerSchema } from './questionnaire.js';
 import { verificationPolicyConfirmationSchema } from './verification-policy.js';
 
+export * from './questionnaire.js';
 export * from './verification-policy.js';
 
 export const repositoryIdentitySchema = z.strictObject({
@@ -183,6 +185,10 @@ const constraintSchema = z.strictObject({ id: z.string().min(1), text: nonBlankS
 export const agentAnswerSchema = z.discriminatedUnion('type', [
   z.strictObject({ type: z.literal('CONFIRM'), confirmed: z.boolean() }),
   z.strictObject({ type: z.literal('VALUE'), value: z.string() }),
+  // A structured answer to a questionnaire Attention. It is its own answer type rather than a
+  // VALUE string so the answer stays validated data on the public command face, and only the
+  // Adapter encodes it for its own provider dialog.
+  z.strictObject({ type: z.literal('QUESTIONNAIRE'), answer: questionnaireAnswerSchema }),
   z.strictObject({ type: z.literal('CANCEL') }),
 ]);
 export type AgentAnswer = z.infer<typeof agentAnswerSchema>;

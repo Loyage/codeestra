@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, rmSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
-import { runtimeRequestSchema, type RuntimeRequest, type RuntimeResponse,
+import { runtimeRequestSchema, validateQuestionnaireAnswer, questionnairePromptSchema,
+  type RuntimeRequest, type RuntimeResponse,
   type RuntimeStreamFrame } from '@codeestra/contracts';
 import { inspectRepository } from '@codeestra/git';
 import { Phase1Database, StorageError, type AgentAnswerPlan } from '@codeestra/storage';
@@ -137,6 +138,38 @@ function validateAgentConfigurationScope(
 
 function failure(requestId: string, code: string, message: string): RuntimeResponse {
   return { requestId, schemaVersion: 1, ok: false, error: { code, message } };
+}
+
+/** A rejected command carries a stable code so a script can branch on it. */
+class RuntimeCommandError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = 'RuntimeCommandError';
+  }
+}
+
+/**
+ * A structured answer is only meaningful for the exact questionnaire that produced the Attention.
+ * A `VALUE` answer is left alone: it is the raw-dialog escape hatch used when an Attention is a
+ * plain provider question rather than a Codeestra questionnaire. Storage re-checks the pairing.
+ */
+function assertQuestionnaireAnswerFits(
+  request: Extract<RuntimeRequest, { command: 'attention.answer' }>,
+): void {
+  if (request.answer.type !== 'QUESTIONNAIRE') return;
+  const attention = storage.getAttentionRequest(request.projectId, request.attentionId);
+  if (attention === null) {
+    throw new RuntimeCommandError('NOT_FOUND', 'Open Attention request was not found');
+  }
+  const prompt = questionnairePromptSchema.safeParse(attention.prompt);
+  if (!prompt.success) {
+    throw new RuntimeCommandError('NOT_A_QUESTIONNAIRE',
+      'This Attention does not carry a Codeestra questionnaire; answer it with a VALUE or CANCEL');
+  }
+  const problem = validateQuestionnaireAnswer(prompt.data.questionnaire, request.answer.answer);
+  if (problem !== null) {
+    throw new RuntimeCommandError(`INVALID_QUESTIONNAIRE_ANSWER:${problem.code}`, problem.message);
+  }
 }
 
 async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
@@ -342,6 +375,7 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
     case 'attention.list':
       return success(request.requestId, storage.listAttentionRequests(request.projectId));
     case 'attention.answer': {
+      assertQuestionnaireAnswerFits(request);
       const payloadHash = createHash('sha256').update(JSON.stringify({
         projectId: request.projectId,
         attentionId: request.attentionId,

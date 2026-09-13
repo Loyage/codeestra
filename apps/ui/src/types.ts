@@ -204,6 +204,53 @@ export interface AttentionView {
   readonly createdAt: number;
 }
 
+/**
+ * A Codeestra questionnaire as this client renders it. The Runtime already validated the shape
+ * before storing it; this client still re-checks structurally instead of trusting `prompt`, and
+ * falls back to the raw prompt view when the shape is not one it knows.
+ */
+export interface QuestionnaireOptionView {
+  readonly label: string;
+  readonly description: string;
+}
+
+export interface QuestionnaireQuestionView {
+  readonly question: string;
+  readonly header: string;
+  readonly multiSelect: boolean;
+  readonly options: readonly QuestionnaireOptionView[];
+}
+
+export interface QuestionnaireView {
+  readonly questions: readonly QuestionnaireQuestionView[];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export function questionnaireFromPrompt(prompt: unknown): QuestionnaireView | null {
+  if (!isRecord(prompt) || prompt['kind'] !== 'codeestra.questionnaire') return null;
+  const questionnaire = prompt['questionnaire'];
+  if (!isRecord(questionnaire) || !Array.isArray(questionnaire['questions'])) return null;
+  const questions: QuestionnaireQuestionView[] = [];
+  for (const candidate of questionnaire['questions']) {
+    if (!isRecord(candidate) || typeof candidate['question'] !== 'string'
+      || typeof candidate['header'] !== 'string' || typeof candidate['multiSelect'] !== 'boolean'
+      || !Array.isArray(candidate['options'])) return null;
+    const options: QuestionnaireOptionView[] = [];
+    for (const option of candidate['options']) {
+      if (!isRecord(option) || typeof option['label'] !== 'string'
+        || typeof option['description'] !== 'string') return null;
+      options.push({ label: option['label'], description: option['description'] });
+    }
+    if (options.length < 2) return null;
+    questions.push({ question: candidate['question'], header: candidate['header'],
+      multiSelect: candidate['multiSelect'], options });
+  }
+  return questions.length === 0 ? null : { questions };
+}
+
 export interface RepositoryIdentityView {
   readonly repoRoot: string;
   readonly gitCommonDir: string;

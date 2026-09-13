@@ -1,5 +1,6 @@
 import { Database } from 'bun:sqlite';
 import { z } from 'zod';
+import type { AgentAnswer } from '@codeestra/contracts';
 import {
   agentAnswerMigration,
   agentConfigurationMigration,
@@ -109,11 +110,11 @@ export interface SessionTranscriptTarget {
   readonly sessionStorageRef: string | null;
 }
 
-export type StoredAgentAnswer = Readonly<
-  | { type: 'CONFIRM'; confirmed: boolean }
-  | { type: 'VALUE'; value: string }
-  | { type: 'CANCEL' }
->;
+/**
+ * The answer as persisted for one Attention. It is the public command answer type rather than a
+ * second, hand-maintained union: a stored answer must be exactly what a client was allowed to send.
+ */
+export type StoredAgentAnswer = Readonly<AgentAnswer>;
 
 export interface AttentionSummary {
   readonly id: string;
@@ -1593,6 +1594,34 @@ export class Phase1Database {
     }));
   }
 
+  /**
+   * One Attention of a trusted project. Used to decide whether an answer is even well-formed for
+   * the request it targets *before* anything is recorded.
+   */
+  getAttentionRequest(projectId: string, attentionId: string): AttentionSummary | null {
+    const row = this.sqlite.query<{
+      id: string; project_id: string; task_id: string; execution_id: string; session_id: string;
+      provider_request_id: string; kind: AttentionSummary['kind']; response_type: AttentionSummary['responseType'];
+      prompt_json: string; status: AttentionSummary['status']; created_at: number;
+    }, [string, string]>(`
+      SELECT attention.id,task.project_id,task.id AS task_id,execution.id AS execution_id,
+        session.id AS session_id,attention.provider_request_id,attention.kind,attention.response_type,
+        attention.prompt_json,attention.status,attention.created_at
+      FROM attention_requests attention JOIN agent_sessions session ON session.id=attention.session_id
+      JOIN executions execution ON execution.id=session.execution_id
+      JOIN tasks task ON task.id=execution.task_id JOIN project_trusts trust
+        ON trust.project_id=task.project_id AND trust.status='ACTIVE'
+      WHERE task.project_id=?1 AND attention.id=?2
+    `).get(projectId, attentionId);
+    if (row === null) return null;
+    return {
+      id: row.id, projectId: row.project_id, taskId: row.task_id, executionId: row.execution_id,
+      sessionId: row.session_id, providerRequestId: row.provider_request_id, kind: row.kind,
+      responseType: row.response_type, prompt: JSON.parse(row.prompt_json) as unknown,
+      status: row.status, createdAt: row.created_at,
+    };
+  }
+
   planAttentionAnswer(input: {
     readonly projectId: string;
     readonly attentionId: string;
@@ -1615,9 +1644,10 @@ export class Phase1Database {
       apply: (database) => {
         const subject = database.query<{
           response_type: 'CONFIRM' | 'VALUE'; attention_status: string; session_state: string;
-          execution_state: string; task_state: string;
+          execution_state: string; task_state: string; prompt_kind: string | null;
         }, [string, string]>(`
           SELECT attention.response_type,attention.status AS attention_status,
+            json_extract(attention.prompt_json,'$.kind') AS prompt_kind,
             session.state AS session_state,execution.state AS execution_state,task.state AS task_state
           FROM attention_requests attention JOIN agent_sessions session ON session.id=attention.session_id
           JOIN executions execution ON execution.id=session.execution_id
@@ -1630,8 +1660,13 @@ export class Phase1Database {
           || subject.execution_state !== 'WAITING_FOR_USER' || subject.task_state !== 'WAITING_FOR_USER') {
           throw new StorageError('INVALID_STATE', 'Attention request is not open on a waiting Agent');
         }
+        // A structured answer is a VALUE answer, and only for an Attention that actually carries a
+        // Codeestra questionnaire prompt. Both halves are checked here, not only by the caller, so
+        // an answer can never be stored against a request it does not fit.
         const compatible = input.answer.type === 'CANCEL'
-          || input.answer.type === subject.response_type;
+          || input.answer.type === subject.response_type
+          || (input.answer.type === 'QUESTIONNAIRE' && subject.response_type === 'VALUE'
+            && subject.prompt_kind === 'codeestra.questionnaire');
         if (!compatible) {
           throw new StorageError('INVALID_STATE',
             `${input.answer.type} answer does not match ${subject.response_type} Attention`);

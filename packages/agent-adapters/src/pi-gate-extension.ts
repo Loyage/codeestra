@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto';
 const codeestraPermissionTitlePrefix = 'CODEESTRA_PERMISSION';
 
-const automaticallyAllowedTools = new Set(['read', 'grep', 'find', 'ls']);
+/** The question tool is a user-facing read of intent, not a side effect: STRICT never blocks it. */
+const askUserQuestionTool = 'ask_user_question';
+
+const automaticallyAllowedTools = new Set(['read', 'grep', 'find', 'ls', askUserQuestionTool]);
 const approvalRequiredTools = new Set(['bash', 'powershell', 'edit', 'write']);
 
 export type GateDecision = 'ALLOW' | 'REQUIRE_APPROVAL' | 'REJECT_UNKNOWN';

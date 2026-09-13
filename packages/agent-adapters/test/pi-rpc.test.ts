@@ -7,6 +7,7 @@ import {
   encodePiRpcRecord,
   mapPiExtensionUiRequest,
   PiRpcJsonlDecoder,
+  piExtensionUiResponseRecord,
 } from '../src/pi-rpc.js';
 
 type GateResult = { block: true; reason: string; terminate: true } | undefined;
@@ -70,6 +71,8 @@ describe('Codeestra Pi gate', () => {
       const circular: { self?: unknown } = {};
       circular.self = circular;
       expect(classifyPiTool('custom-danger')).toBe('ALLOW');
+      // The question tool changes no file and runs no command: STRICT must never gate it either.
+      expect(classifyPiTool('ask_user_question', 'STRICT')).toBe('ALLOW');
       expect(await handler(
         { toolName: 'custom-danger', toolCallId: 'x', input: circular },
         { mode: 'json', hasUI: false, ui: { confirm: async () => false } },
@@ -78,6 +81,42 @@ describe('Codeestra Pi gate', () => {
       if (previous === undefined) delete process.env.CODEESTRA_PERMISSION_MODE;
       else process.env.CODEESTRA_PERMISSION_MODE = previous;
     }
+  });
+
+  test('maps a Codeestra questionnaire dialog to one structured Attention', () => {
+    const questionnaire = {
+      questions: [{ question: 'Which scope?', header: 'Scope', multiSelect: false,
+        options: [{ label: 'Global', description: 'everywhere' },
+          { label: 'Project', description: 'this project only' }] }],
+    };
+    const mapped = mapPiExtensionUiRequest({
+      sessionId: 'session-1', executionId: 'execution-1', cursor: 'rpc:9',
+      record: { type: 'extension_ui_request', id: 'question-1', method: 'select',
+        title: `CODEESTRA_QUESTIONNAIRE:v1:${JSON.stringify(questionnaire)}`,
+        options: ['Q1 [Scope] Which scope?', '   1. Global — everywhere'] },
+    });
+    // One dialog, one Attention, with the questionnaire decoded rather than left as raw text.
+    expect(mapped).toMatchObject({ type: 'attention', kind: 'QUESTION', responseType: 'VALUE',
+      providerRequestId: 'question-1',
+      prompt: { kind: 'codeestra.questionnaire', version: 1, questionnaire } });
+  });
+
+  test('encodes a structured answer for the provider dialog', () => {
+    const record = piExtensionUiResponseRecord({
+      providerRequestId: 'question-1', responseType: 'VALUE',
+      answer: { type: 'QUESTIONNAIRE', answer: { version: 1, answers: [
+        { type: 'CHOICES', questionIndex: 0, choiceIndexes: [1] },
+      ] } },
+    });
+    expect(record['type']).toBe('extension_ui_response');
+    expect(record['id']).toBe('question-1');
+    expect(JSON.parse(String(record['value']))).toEqual({ version: 1, answers: [
+      { type: 'CHOICES', questionIndex: 0, choiceIndexes: [1] }] });
+    expect(() => piExtensionUiResponseRecord({
+      providerRequestId: 'question-1', responseType: 'CONFIRM',
+      answer: { type: 'QUESTIONNAIRE', answer: { version: 1, answers: [
+        { type: 'CHOICES', questionIndex: 0, choiceIndexes: [0] }] } },
+    })).toThrow('does not match CONFIRM');
   });
 
   test('strict mode allows read-only tools, prompts once for known mutations, and rejects unknown tools', async () => {
@@ -148,32 +187,46 @@ describe('Codeestra Pi gate', () => {
       record: { type: 'extension_ui_request', id: 'notice', method: 'notify' },
       sessionId: 'session-1', executionId: 'execution-1', cursor: 'rpc:3',
     })).toBeNull();
-    expect(() => mapPiExtensionUiRequest({
+    // An unknown method is not a question this build can answer. Ignoring it keeps a future Pi
+    // from ending an Execution that is mid-flight; it must not throw out of the observe loop.
+    expect(mapPiExtensionUiRequest({
       record: { type: 'extension_ui_request', id: 'bad', method: 'future-dialog' },
       sessionId: 'session-1', executionId: 'execution-1', cursor: 'rpc:4',
-    })).toThrow('Invalid Pi extension UI request');
+    })).toBeNull();
+    // A dialog whose fields do not match this build's schema is still a dialog the provider waits
+    // on, so it is surfaced leniently instead of being dropped (which would hang the Agent).
+    const lenient = mapPiExtensionUiRequest({
+      record: { type: 'extension_ui_request', id: 'lenient', method: 'select', options: 'nope' },
+      sessionId: 'session-1', executionId: 'execution-1', cursor: 'rpc:5',
+    });
+    expect(lenient).toMatchObject({ type: 'attention', kind: 'QUESTION', responseType: 'VALUE',
+      providerRequestId: 'lenient', prompt: { method: 'select', options: [] } });
   });
 
   test('builds a controlled RPC launch without discovered extensions or unknown tools', () => {
+    const gate = '/runtime/codeestra-gate.ts';
+    const question = '/runtime/codeestra-question.ts';
     expect(buildPiRpcArguments({
-      gateExtensionPath: '/runtime/codeestra-gate.ts',
+      gateExtensionPath: gate,
+      questionExtensionPath: question,
       sessionDir: '/runtime/pi-sessions',
       platform: 'unix',
       permissionMode: 'STRICT',
     })).toEqual([
-      '--mode', 'rpc', '--no-approve', '--no-extensions', '--extension',
-      '/runtime/codeestra-gate.ts', '--no-skills', '--no-prompt-templates', '--no-themes',
-      '--no-context-files', '--tools', 'read,bash,edit,write,grep,find,ls',
+      '--mode', 'rpc', '--no-approve', '--no-extensions', '--extension', gate,
+      '--extension', question, '--no-skills', '--no-prompt-templates', '--no-themes',
+      '--no-context-files', '--tools', 'read,bash,edit,write,grep,find,ls,ask_user_question',
       '--session-dir', '/runtime/pi-sessions',
     ]);
     expect(buildPiRpcArguments({
-      gateExtensionPath: '/runtime/codeestra-gate.ts',
+      gateExtensionPath: gate,
+      questionExtensionPath: question,
       sessionDir: '/runtime/pi-sessions',
       platform: 'unix',
       permissionMode: 'FULL',
     })).toEqual([
-      '--mode', 'rpc', '--approve', '--no-extensions', '--extension',
-      '/runtime/codeestra-gate.ts', '--no-skills', '--no-prompt-templates', '--no-themes',
+      '--mode', 'rpc', '--approve', '--no-extensions', '--extension', gate,
+      '--extension', question, '--no-skills', '--no-prompt-templates', '--no-themes',
       '--no-context-files', '--session-dir', '/runtime/pi-sessions',
     ]);
   });

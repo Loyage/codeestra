@@ -39,6 +39,8 @@ export interface PiRpcAdapterOptions {
   /** Arguments placed before the Pi argv, e.g. a launcher such as `run <script>`. */
   readonly launcherArgs?: readonly string[];
   readonly gateExtensionPath: string;
+  /** Codeestra's own question extension, loaded alongside the gate under `--no-extensions`. */
+  readonly questionExtensionPath: string;
   readonly sessionDir: string;
   readonly platform?: 'unix' | 'windows';
   readonly environment?: Readonly<Record<string, string>>;
@@ -101,11 +103,13 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
   #version: string | null = null;
 
   constructor(options: PiRpcAdapterOptions) {
-    if (!isAbsolute(options.gateExtensionPath) || !isAbsolute(options.sessionDir)) {
+    if (!isAbsolute(options.gateExtensionPath) || !isAbsolute(options.questionExtensionPath)
+      || !isAbsolute(options.sessionDir)) {
       throw new PiRpcProcessError('PROVIDER_SPAWN_FAILED',
-        'Pi gate extension and session directory paths must be absolute', false, false);
+        'Pi gate and question extension paths and the session directory must be absolute', false, false);
     }
     this.gateExtensionPath = options.gateExtensionPath;
+    this.questionExtensionPath = options.questionExtensionPath;
     this.sessionDir = options.sessionDir;
     this.#options = {
       piExecutable: options.piExecutable ?? 'pi',
@@ -129,6 +133,7 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
   }
 
   readonly gateExtensionPath: string;
+  readonly questionExtensionPath: string;
   readonly sessionDir: string;
   readonly maxRecordBytes: number | undefined;
 
@@ -172,6 +177,7 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
       ...this.#options.launcherArgs,
       ...buildPiRpcArguments({
         gateExtensionPath: this.gateExtensionPath,
+        questionExtensionPath: this.questionExtensionPath,
         sessionDir: this.sessionDir,
         platform: this.#options.platform,
         permissionMode: request.permissionMode,
@@ -279,6 +285,7 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
 const evidenceRef = `pi-rpc:agent_settled:session=${live.providerSessionId}`
       + `:epoch=${live.client.epoch}:tools=${createHash('sha256')
         .update([...buildPiRpcArguments({ gateExtensionPath: this.gateExtensionPath,
+          questionExtensionPath: this.questionExtensionPath,
           sessionDir: this.sessionDir, platform: this.#options.platform,
           permissionMode: live.permissionMode }), ...buildPiModelArguments(live.agentConfig)].join(' '))
         .digest('hex').slice(0, 16)}`;

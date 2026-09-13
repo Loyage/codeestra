@@ -1,18 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RuntimeClient, describeError } from './api.js';
 import { TranscriptPanel } from './transcript.js';
-import type {
-  AgentConfigurationResolutionView,
-  AttentionView,
-  EventEnvelopeView,
-  RepositoryIdentityView,
-  ResultCommitAuthorizationView,
-  StreamFrame,
-  TaskStatusView,
-  TaskView,
-  TrustedProjectView,
-  VerificationPolicyView,
-  VerificationRunView,
+import {
+  questionnaireFromPrompt,
+  type AgentConfigurationResolutionView,
+  type AttentionView,
+  type EventEnvelopeView,
+  type QuestionnaireView,
+  type RepositoryIdentityView,
+  type ResultCommitAuthorizationView,
+  type StreamFrame,
+  type TaskStatusView,
+  type TaskView,
+  type TrustedProjectView,
+  type VerificationPolicyView,
+  type VerificationRunView,
 } from './types.js';
 
 type Tab = 'tasks' | 'attention' | 'events' | 'agent' | 'project';
@@ -801,6 +803,104 @@ function TasksTab(props: CommonProps & {
   );
 }
 
+/**
+ * One answer this form can produce. Questions left untouched are reported to the Agent as
+ * unanswered, not as declined, so an empty submission is impossible: the button stays disabled.
+ */
+type QuestionnaireInputAnswer =
+  | { readonly type: 'CHOICES'; readonly questionIndex: number; readonly choiceIndexes: readonly number[] }
+  | { readonly type: 'TEXT'; readonly questionIndex: number; readonly text: string };
+
+/**
+ * One questionnaire Attention. Each question is answered either by picking options or by writing a
+ * custom answer; the two are mutually exclusive per question, so what will be sent is never
+ * ambiguous.
+ */
+function QuestionnaireCard(props: {
+  readonly questionnaire: QuestionnaireView;
+  readonly busy: boolean;
+  readonly onSubmit: (answers: readonly QuestionnaireInputAnswer[]) => void;
+  readonly onCancel: () => void;
+}) {
+  const { questionnaire, busy, onSubmit, onCancel } = props;
+  const [choices, setChoices] = useState<ReadonlyArray<readonly number[]>>(
+    () => questionnaire.questions.map(() => []));
+  const [texts, setTexts] = useState<readonly string[]>(() => questionnaire.questions.map(() => ''));
+
+  const setChoice = (questionIndex: number, optionIndex: number, multiSelect: boolean) => {
+    setChoices((previous) => previous.map((selected, index) => {
+      if (index !== questionIndex) return selected;
+      if (!multiSelect) return [optionIndex];
+      return selected.includes(optionIndex)
+        ? selected.filter((candidate) => candidate !== optionIndex)
+        : [...selected, optionIndex];
+    }));
+    setTexts((previous) => previous.map((text, index) => (index === questionIndex ? '' : text)));
+  };
+  const setText = (questionIndex: number, text: string) => {
+    setTexts((previous) => previous.map((value, index) => (index === questionIndex ? text : value)));
+    setChoices((previous) => previous.map((selected, index) => (index === questionIndex ? [] : selected)));
+  };
+  const answered: QuestionnaireInputAnswer[] = [];
+  questionnaire.questions.forEach((_question, questionIndex) => {
+    const text = (texts[questionIndex] ?? '').trim();
+    if (text.length > 0) {
+      answered.push({ type: 'TEXT', questionIndex, text });
+      return;
+    }
+    const selected = choices[questionIndex] ?? [];
+    if (selected.length > 0) {
+      answered.push({ type: 'CHOICES', questionIndex, choiceIndexes: [...selected] });
+    }
+  });
+
+  return (
+    <div>
+      {questionnaire.questions.map((question, questionIndex) => (
+        <div key={`${question.header}-${questionIndex}`} className="question">
+          <h3>{questionIndex + 1}. [{question.header}] {question.question}
+            {question.multiSelect ? ' （可多选）' : ''}</h3>
+          <ul className="options">
+            {question.options.map((option, optionIndex) => {
+              const selected = (choices[questionIndex] ?? []).includes(optionIndex);
+              return (
+                <li key={option.label}>
+                  <label className="inline">
+                    <input
+                      type={question.multiSelect ? 'checkbox' : 'radio'}
+                      name={`${question.header}-${questionIndex}`}
+                      checked={selected}
+                      disabled={busy}
+                      onChange={() => setChoice(questionIndex, optionIndex, question.multiSelect)}
+                    />
+                    <span><strong>{optionIndex + 1}. {option.label}</strong> — {option.description}</span>
+                  </label>
+                </li>
+              );
+            })}
+          </ul>
+          <input
+            value={texts[questionIndex] ?? ''}
+            placeholder="或用自己的话回答（会覆盖上面的选择）"
+            disabled={busy}
+            onChange={(event) => setText(questionIndex, event.target.value)}
+          />
+        </div>
+      ))}
+      <div className="actions">
+        <button
+          type="button"
+          disabled={busy || answered.length === 0}
+          onClick={() => onSubmit(answered)}
+        >
+          {answered.length === 0 ? '请至少回答一个问题' : `发送 ${answered.length} 个回答`}
+        </button>
+        <button type="button" className="danger" disabled={busy} onClick={onCancel}>拒绝回答</button>
+      </div>
+    </div>
+  );
+}
+
 function AttentionTab(props: CommonProps & {
   readonly projectId: string | null;
   readonly attentions: readonly AttentionView[];
@@ -818,7 +918,9 @@ function AttentionTab(props: CommonProps & {
       </p>
       <button type="button" onClick={() => { void run('正在刷新待处理请求', reload); }}>刷新</button>
       <ul className="list">
-        {open.map((attention) => (
+        {open.map((attention) => {
+          const questionnaire = questionnaireFromPrompt(attention.prompt);
+          return (
           <li key={attention.id} className="card nested">
             <div className="row-head">
               <span className={`state state-${attention.kind.toLowerCase()}`}>
@@ -827,8 +929,33 @@ function AttentionTab(props: CommonProps & {
               <span className="muted mono">{labelValue(attention.responseType)}</span>
               <span className="muted">{new Date(attention.createdAt).toLocaleTimeString('zh-CN')}</span>
             </div>
-            <pre>{JSON.stringify(attention.prompt, null, 2)}</pre>
-            {attention.responseType === 'CONFIRM' ? (
+            {questionnaire !== null ? (
+              <QuestionnaireCard
+                questionnaire={questionnaire}
+                busy={false}
+                onSubmit={(answers) => {
+                  void run('正在回答', async () => {
+                    await client.command({
+                      command: 'attention.answer', commandId: crypto.randomUUID(),
+                      projectId, attentionId: attention.id,
+                      answer: { type: 'QUESTIONNAIRE', answer: { version: 1, answers: [...answers] } },
+                    });
+                    await reload();
+                  });
+                }}
+                onCancel={() => {
+                  void run('正在取消请求', async () => {
+                    await client.command({
+                      command: 'attention.answer', commandId: crypto.randomUUID(),
+                      projectId, attentionId: attention.id, answer: { type: 'CANCEL' },
+                    });
+                    await reload();
+                  });
+                }}
+              />
+            ) : null}
+            {questionnaire === null ? <pre>{JSON.stringify(attention.prompt, null, 2)}</pre> : null}
+            {questionnaire !== null ? null : attention.responseType === 'CONFIRM' ? (
               <div className="actions">
                 <button type="button" onClick={() => {
                   void run('正在回答', async () => {
@@ -870,17 +997,20 @@ function AttentionTab(props: CommonProps & {
                 }}>发送</button>
               </div>
             )}
-            <button type="button" onClick={() => {
-              void run('正在取消请求', async () => {
-                await client.command({
-                  command: 'attention.answer', commandId: crypto.randomUUID(),
-                  projectId, attentionId: attention.id, answer: { type: 'CANCEL' },
+            {questionnaire === null ? (
+              <button type="button" onClick={() => {
+                void run('正在取消请求', async () => {
+                  await client.command({
+                    command: 'attention.answer', commandId: crypto.randomUUID(),
+                    projectId, attentionId: attention.id, answer: { type: 'CANCEL' },
+                  });
+                  await reload();
                 });
-                await reload();
-              });
-            }}>取消此请求</button>
+              }}>取消此请求</button>
+            ) : null}
           </li>
-        ))}
+          );
+        })}
         {open.length === 0 ? <li className="muted">目前没有待处理请求。</li> : null}
       </ul>
       <details>

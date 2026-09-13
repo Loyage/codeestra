@@ -689,6 +689,44 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 - `usage`/`cost` 是 provider 自报值，Codeestra 不做计费校验。
 - Session file 被 provider 重写（而非追加）时会让已发出的游标失效；面板已明确提示并从头重读一次，但没有跨“文件被替换”的稳定历史。
 
+## FOUNDATION-030 — Agent 结构化提问通道（ADR-0014）
+
+状态：已实现并在 CLI/命令面（含 Runtime socket 与 HTTP 同一 dispatch）验证；**真实 Pi 0.84.4 + 真实模型的一次性探针已确认扩展在受控启动下可加载、可注册、可往返**，但真实模型经 Runtime 的完整 `task run` 与 UI 目视确认尚未做。
+
+背景（用户报告）：pi 的 `@juicesharp/rpiv-ask-user-question` 与 Codeestra 配合得不好。查明的原因不是扩展写得不好，而是三件结构性事实：受控启动 `--no-extensions` 从不加载它；即使实测加载，一份问卷会变成 N 个 `select` dialog（N 条 Attention、N 次 `WAITING_FOR_USER`、N 次 CLI 往返）；而且 RPC 路径下选项被编码成 `"2. bun — …"` 字符串，回答只要不是整数序号（例如 `banana`）就被当成 Esc，**整份问卷作废**且模型只看到 `User declined to answer questions`，Codeestra 侧那些 Attention 却已是 `DELIVERED`。
+
+用户本轮选择题（记录为 ADR-0014）：
+
+1. 痛点：**Agent 根本问不了**（未选：能问但答起来很坑 / 两者都要）。
+2. 方向：**Codeestra 自有问卷工具**（未选：直接加载第三方 rpiv + 只改呈现 / 不加工具纯提示词约定）。
+
+### 已实现
+
+- `packages/contracts/src/questionnaire.ts`：结构化问卷契约（1–4 题、每题 2–4 个带描述选项、`multiSelect`、每题自由文本）、存储用 `prompt` 判别形状、回答 schema、唯一一份校验规则（越界/重复题号/重复选项/单选多选），错误文案按用户在界面看到的 1 基编号；dialog title 编解码（`CODEESTRA_QUESTIONNAIRE:v1:<json>`）与回答 payload 编解码。`agentAnswerSchema` 新增 `{ type: 'QUESTIONNAIRE', answer }`：结构化回答是它自己的类型，不是一段字符串。
+- `packages/agent-adapters/src/pi-question-extension.ts`：Codeestra 自己的扩展，注册同名工具 `ask_user_question`（promptSnippet/promptGuidelines 告诉模型何时问、一次问完）。无 UI、参数非法、回答读不懂三种情况分别返回可区分的错误；**读不懂不是拒绝**。它只依赖 `@codeestra/contracts`，在真实 pi 进程内加载已实测。
+- `pi-rpc.ts`：`buildPiRpcArguments` 现在加载 gate + question 两个 Codeestra 扩展（仍是 `--no-extensions`），STRICT 的 `--tools` 增加该工具；问卷 title 被解码成 `prompt.kind = "codeestra.questionnaire"` 的**单条** `QUESTION` Attention；`QUESTIONNAIRE` 回答在 Adapter 里被编码成 provider dialog 接受的字符串（线格式属于 Adapter）。
+- `pi-gate-extension.ts`：`ask_user_question` 在 STRICT 下也无需审批（它只读用户意图，不产生副作用）。
+- `apps/runtime`：`adapter-registry` 解析 `CODEESTRA_PI_QUESTION_EXTENSION`（默认仓库内扩展）；`attention.answer` 在**记录任何东西之前**按被问的那份问卷校验，失败返回 `INVALID_QUESTIONNAIRE_ANSWER:<PROBLEM>` / `NOT_A_QUESTIONNAIRE`，状态不动。
+- `packages/storage`：`StoredAgentAnswer` 改为直接引用契约类型（删掉了手抄的第二份 answer union），`planAttentionAnswer` 额外要求「结构化回答只能落在真正带问卷 prompt 的 VALUE Attention 上」（含 `json_extract` 判别）；新增 `getAttentionRequest` 供上述前置校验。
+- CLI：`attention answer` 新增 `--choose <题>:<选项>[,<选项>]`、`--text <题>=<文本>`、`--cancel`，原有 `confirm/value/cancel` 位置参数不变；契约硬上限在 CLI 拦，具体题目范围在 Runtime 拦。
+- Web UI：问卷渲染为单选/多选 + 每题自由文本（二选一互斥），提交发送结构化回答。
+- 健壮性附带修复（原代码会把执行打断）：`mapPiExtensionUiRequest` 对未知 `extension_ui_request` method 不再抛 `PiRpcProtocolError`（未知 method 忽略；字段不匹配的 dialog 按可回答的问题降级上报，既不挂住 Agent 也不中断执行）。
+
+### 实际验证
+
+- `bun run check`：TypeScript（Runtime/CLI）与 UI 类型检查、**212 项 Vitest**、**224 项 Bun tests**（较上一轮 207 新增 17 项：契约 6、扩展 7、Adapter 2、CLI 端到端 2）、UI Vite 构建全部通过。
+- 命令面端到端（`apps/runtime/test/cli-attention.test.ts`，协议 stub provider —— **不是真实 Agent 集成证据**）：`task run` 阻塞 → `attention list` 出现一条带 `codeestra.questionnaire` 的 Attention（整份问卷一条）→ `--choose 1:9` 被 CLI 拒绝、`--choose 1:3` 被 Runtime 以 `INVALID_QUESTIONNAIRE_ANSWER:CHOICE_INDEX_OUT_OF_RANGE` 拒绝且 Attention 仍为 `OPEN` → `--choose 1:2 --choose 2:1,2` 被接受、投递，stub 收到精确的结构化 payload，`task run` 退出码 0、Session `EXITED`。对照用例：dialog 标题是普通文本时，结构化回答被 `NOT_A_QUESTIONNAIRE` 拒绝，而原始 `value` 路径仍可用。
+- **真实 Pi 0.84.4 + 真实模型探针**（一次性脚本 `/tmp/rpiv-probe/probe5.ts`，非仓库内测试）：用与 Codeestra 完全相同的 argv 启动真实 `pi`，让它调用 `ask_user_question` 提两个问题——只产生**一个** `extension_ui_request`，title 为 `CODEESTRA_QUESTIONNAIRE:v1:…`；以编码回答响应后工具返回 `The user answered 2 of 2 questions.` 并逐题列出所选与所写内容。
+- 未执行：真实模型经 Codeestra Runtime 的完整 `task run`（会消耗真实额度）；浏览器/桌面自动化（ADR-0008 测试边界）。全程未触碰用户 ref，稳定 Runtime 未被干扰。
+
+### 剩余问题
+
+- **散文提问仍未识别**：模型不用工具、而是结束轮次在正文里问问题时，Codeestra 仍会把它记为 `SUCCESS`。这是本次报告痛点的另一半，需要单独决定（识别 + 恢复会话）后才能声称解决。
+- 问卷对话没有 rpiv TUI 的 Tab 栏、Submit 复核页、逐题备注与并排 preview；这些是原生宿主 dialog 的能力，Codeestra 的选择是 CLI/Web UI 而不新增宿主语义。
+- `attention_requests.prompt_json` 现在承载结构化问卷（Codeestra 生成、受控，非 provider 原文），与 FOUNDATION-019 记录的「Attention prompt 是否摘要化」是同一类未决问题。
+- 问卷的 `waiting` 没有超时：没人回答就一直 `WAITING_FOR_USER`（与既有 Attention 行为一致）；取消仍靠人显式 `--cancel`。
+- `packages/storage` 现在正式依赖 `@codeestra/contracts`（bun.lock 随之更新）。
+
 ## NEXT — 最小可用纵向切片
 
 0. 落实 ADR-0009 的 dev 基线：项目快照/Workspace 从 dev OID 建立，先补临时仓库测试；在此之前产品内 `task.run` 仍使用 mainRef，不能用于声称符合新分支规则。
@@ -697,3 +735,4 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 3. ADR-0010 Phase 3 技术 spike：真实 Pi session-file 双向 RPC↔TUI 恢复、PTY 生命周期、safe-point 与权限模式 side channel；通过后再落 handoff Operation、Session incarnation 和 CLI attach。
 4. revision 投递确认，以及 Runtime 重启后对 stale ACTIVE Session 的启动 reconcile。
 5. 验证副本与失败现场的回收：明确的 `prune`/归属校验与可追溯记录；同时决定 Attention 工具参数是否入库/摘要化。
+6. 识别「Agent 不用工具、在散文里提问并结束轮次」的形态（FOUNDATION-030 剩余的一半）：要么把它变成 Attention，要么至少不得记为未加说明的 `SUCCESS`。

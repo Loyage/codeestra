@@ -73,6 +73,10 @@ export function createPiAdapterRegistry(input: {
   }
   const gateExtensionPath = environment['CODEESTRA_PI_GATE_EXTENSION']
     ?? resolve(import.meta.dir, '../../../packages/agent-adapters/src/pi-gate-extension.ts');
+  // The question channel is Codeestra's own extension too: the controlled launch never loads an
+  // ambient user extension, so the Agent's ability to ask is reproducible per revision.
+  const questionExtensionPath = environment['CODEESTRA_PI_QUESTION_EXTENSION']
+    ?? resolve(import.meta.dir, '../../../packages/agent-adapters/src/pi-question-extension.ts');
   const sessionDir = piSessionDirectory({ runtimeHome: input.runtimeHome, environment });
   mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
   // Model, provider, and thinking level are not baked in here: the Runtime resolves them per
@@ -83,6 +87,7 @@ export function createPiAdapterRegistry(input: {
   registry.register(new PiRpcAdapter({
     piExecutable: environment['CODEESTRA_PI_EXECUTABLE'] ?? 'pi',
     gateExtensionPath,
+    questionExtensionPath,
     sessionDir,
     platform: environment['CODEESTRA_PI_PLATFORM'] === 'windows' ? 'windows' : 'unix',
     environment: adapterEnvironment,

@@ -49,6 +49,7 @@ User Intent → Task / Task DAG → Dependency Analysis → Conflict Analysis
 20. Runtime 保持本机单用户模型，不提供 RBAC、多用户/租户、路径沙箱、网络策略或密钥托管。权限模式只分为默认 `FULL` 与显式 opt-in 的 `STRICT`；FULL 使用当前用户可获得的全部主机权限。
 21. 人工介入采用双通道：Session Guidance 进入真实 provider conversation、立即影响当前执行但不修改验收规格；改变规格/约束必须显式生成 TaskRevision。Pi 接管等待当前工具完成后的结构化安全点，不为接管强杀工具；接管、detach、交还与 writer lease 全部经 CLI/Runtime 命令面表达，不新增确认门禁。
 22. Agent 执行过程可以只读观察（ADR-0013）：`session.transcript` 直接读取 Provider 自己的持久会话文件并展示工具调用与返回、助手文本、thinking 与 token/成本。该视图不写数据库、不产生 domain event、不构成投递或业务事实、不是 attach 也不是终端接管；provider 文件路径不离开 Runtime，只允许读取 Runtime 自己 session 目录内经规范化的普通文件。
+23. Agent 可以结构化提问（ADR-0014）：Codeestra 自有的受控扩展向 Agent 提供 `ask_user_question`（1–4 题，每题 2–4 个带描述的可选项，可多选，可用自己的话回答）。一份问卷整体对应**一个** Provider dialog、**一条** `QUESTION` Attention 与**一次** answer Operation；回答以结构化 `QUESTIONNAIRE` 表达，Runtime 必须按被问的那份问卷校验后才记录。选项越界、重复题号或单选多选个数不符都必须返回稳定错误码并保持请求 OPEN，**不得**降级为“用户拒绝回答”或静默作废已答内容；只有用户明确的 `CANCEL` 才是拒绝。提问不是审批：FULL 不新增确认，STRICT 也不把它当作需要审批的副作用工具。该通道不改变受控启动策略（仍以 `--no-extensions` 只加载 Codeestra 自己的扩展）。
 
 ## 3. 任务修订与执行证据
 

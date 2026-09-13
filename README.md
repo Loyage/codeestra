@@ -42,6 +42,8 @@ Agent 配置（ADR-0012）已实现：`agent config get/set/clear`（CLI 与 Web
 
 Agent 执行过程可见（ADR-0013）已实现：`task transcript` / `session transcript` / `session transcript part` 只读读取 Provider 自己的持久会话文件，展示工具调用与工具返回、助手文本、thinking 与 token/成本；默认截断展示并可按需取回完整内容，运行中的 Session 由 Web UI 自动增量轮询。它**不是事件、不是 attach、不是终端接管**，不入库、不改动任何业务状态，也不新增确认。file 路径只在 Runtime 内部使用，客户端拿不到；只允许读取 Runtime 自己的 Pi session 目录（符号链接逃逸被拒绝）。token 级实时流（需新增事件与存储）与 ADR-0010 的原生终端接管仍未实现。
 
+Agent 结构化提问（ADR-0014）已实现：受控启动额外加载 Codeestra 自己的 question 扩展，Agent 可用 `ask_user_question` 一次提 1–4 个带描述可选项的问题（可多选、可用自己的话回答）。**一份问卷 = 一个 provider dialog = 一条 `QUESTION` Attention = 一次 answer Operation**，回答以结构化 `QUESTIONNAIRE` 投递；Runtime 在记录前按被问的那份问卷校验，越界/重复/单选多选不符都返回 `INVALID_QUESTIONNAIRE_ANSWER:*` 并保持请求 OPEN，**绝不降级为“用户拒绝”或静默作废已答内容**（这正是第三方 TUI 问卷在 RPC 下的失败模式）。CLI 用 `attention answer … --choose/--text`，Web UI 用单选/多选 + 自由文本框。未实现：识别“Agent 不用工具、在正文里提问并结束轮次”的形态（仍会被记为 `SUCCESS`）。
+
 这还不是完整的 AI 编排产品。尚无自动 Scheduler、长命令后台化、Task cancel/pause、revision 投递确认、桌面 UI，亦尚未实现“Task 从 dev 建基线 → 集成到 dev → 用户批准 dev→main → 自动重启 Runtime”的完整流水线。**现有 Phase 1 `task.run` 代码仍按项目 `mainRef` 创建 worktree；在 ADR-0009 的基线改造完成前，不得声称产品已自动遵守 dev 基线。**Pi 已有 LF-only RPC framing、受控启动参数、fail-closed gate extension 与自有子进程的 `PiRpcAdapter`（身份采集、attention/completion/disconnect 映射、typed answer 写入），Runtime 已接入 adapter registry、`task.run` 运行循环、事件 pump 与 answer 自动投递，并以 stub transport、deterministic fake 与脚本 Adapter 验证编排。Task verification（ADR-0006/0011）已实现：命令来自 main ref 上人工维护的策略，在固定 commit 的 detached 副本中运行且证据不含原始输出；FULL 下策略变化不确认，STRICT 下仍要求确认。`events list`/`events tail` 提供只读事件订阅长连接，可观察既有 domain event 并按排他游标重连；但 `task run`/`task verify` 仍同步占用连接，长命令进度事件尚未实现。
 
 本地 Web UI（ADR-0007）已可用：`codeestra ui` 在 `127.0.0.1` 上按需启动 HTTP + SSE，React 界面可浏览/创建/提交任务、运行 Agent、capture 成果、执行验证、查看事件流与 **Agent 执行过程面板**。任务详情里的「Agent 执行过程」按 Execution 展示 Provider 会话文件的内容（工具调用/返回、助手文本、thinking、token 与成本），长内容折叠可展开，运行中自动刷新；数据经 `/api/command` 上的 `session.transcript`（与 CLI 同一命令面）获取。UI 显示当前权限模式；FULL 不显示 TRUST 输入或成果二次确认，STRICT 投影旧门禁。UI 与 CLI 共用同一命令面。真实 Pi 模型/工具执行已完成首轮受控验收（FOUNDATION-019，模型可用 `CODEESTRA_PI_PROVIDER`/`CODEESTRA_PI_MODEL` 显式指定）：真实 `write` 工具调用被 fail-closed gate 拦下并在界面上逐次审批，随后成果 commit 与 Task verification PASSED，用户 main 全程未被修改。任务取消超时、gate 拒绝路径、孤儿进程 reconcile 与 Integration/main 提升仍未实现；ADR-0010 设计的原生 Pi TUI/PTY 接管、Session Guidance 与 RPC↔TUI 安全点进程交接也尚未实现，当前只支持结构化 Attention 交互，不能把日志查看声称为终端 attach；fake 不代表真实 Agent 集成通过。
@@ -98,12 +100,16 @@ bun run codeestra task result commit <project-id> <task-id> <authorization-id> -
 bun run codeestra task verify <project-id> <task-id> [execution-id]
 bun run codeestra task verification list <project-id> <task-id>
 bun run codeestra attention list <project-id>
+bun run codeestra attention answer <project-id> <attention-id> confirm <yes|no> | value <text> | cancel
+bun run codeestra attention answer <project-id> <attention-id> [--choose <题>:<选项>[,<选项>]]… [--text <题>=<文本>]… [--cancel]
 bun run codeestra events list [--project <project-id>] [--since <sequence>] [--limit <n>]
 bun run codeestra events tail [--project <project-id>] [--since <sequence>]
 bun run codeestra stop
 ```
 
-默认 FULL 下 `project trust/open` 不要求输入 `TRUST`；切到 STRICT 后恢复该确认，`--yes` 可用于严格模式的非交互确认。`task run` 默认使用 Pi，需本机 `pi` 可用（可用 `CODEESTRA_PI_EXECUTABLE`、`CODEESTRA_PI_GATE_EXTENSION`、`CODEESTRA_PI_SESSION_DIR` 覆盖）。该入口会真实启动 provider 进程；未通过技术准入前不要把它理解为已验收的真实 Agent 执行。
+默认 FULL 下 `project trust/open` 不要求输入 `TRUST`；切到 STRICT 后恢复该确认，`--yes` 可用于严格模式的非交互确认。`task run` 默认使用 Pi，需本机 `pi` 可用（可用 `CODEESTRA_PI_EXECUTABLE`、`CODEESTRA_PI_GATE_EXTENSION`、`CODEESTRA_PI_QUESTION_EXTENSION`、`CODEESTRA_PI_SESSION_DIR` 覆盖）。该入口会真实启动 provider 进程；未通过技术准入前不要把它理解为已验收的真实 Agent 执行。
+
+Agent 可以用 `ask_user_question` 工具一次提出 1–4 个带可选项的问题（ADR-0014）：整份问卷对应一条 `attention list` 里的 `QUESTION` 请求，用 `attention answer … --choose/--text` 回答；越界的选项号会被拒绝并保持请求 OPEN，不会被当成拒绝回答。提问只暂停自己的 Task，且不新增任何确认门禁。
 
 ## 在本仓库上开发（自举）
 

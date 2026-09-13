@@ -10,6 +10,10 @@ export {
 } from './pi-rpc.js';
 export { classifyPiTool } from './pi-gate-extension.js';
 export type { GateDecision } from './pi-gate-extension.js';
+export {
+  codeestraAskUserQuestionToolName,
+  registerAskUserQuestionTool,
+} from './pi-question-extension.js';
 export { readProcessStartToken } from './pi-identity.js';
 export { PiRpcClient, PiRpcProcessError } from './pi-process.js';
 export type { PiRpcEnvelope, PiRpcErrorCode } from './pi-process.js';

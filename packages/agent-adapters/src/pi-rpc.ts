@@ -1,6 +1,12 @@
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
+import {
+  decodeQuestionnaireDialogTitle,
+  questionnairePromptSchema,
+  serializeQuestionnaireAnswer,
+} from '@codeestra/contracts';
 import type { AgentAnswer, AgentConfiguration, AgentObservedEvent } from '@codeestra/contracts';
+import { codeestraAskUserQuestionToolName } from './pi-question-extension.js';
 
 export class PiRpcProtocolError extends Error {
   constructor(
@@ -126,6 +132,12 @@ export function piExtensionUiResponseRecord(input: {
   if (input.responseType === 'VALUE' && input.answer.type === 'VALUE') {
     return { type: 'extension_ui_response', id: input.providerRequestId, value: input.answer.value };
   }
+  // A questionnaire answer is structured on the command face; the provider dialog only accepts a
+  // string, so the Adapter — which owns this dialog's wire format — encodes it here.
+  if (input.responseType === 'VALUE' && input.answer.type === 'QUESTIONNAIRE') {
+    return { type: 'extension_ui_response', id: input.providerRequestId,
+      value: serializeQuestionnaireAnswer(input.answer.answer) };
+  }
   throw new PiRpcProtocolError('INVALID_RECORD',
     `${input.answer.type} answer does not match ${input.responseType} Pi dialog`);
 }
@@ -151,6 +163,37 @@ const extensionUiRequestSchema = z.discriminatedUnion('method', [
   }),
 ]);
 
+/** The Pi extension UI methods that block on a user answer. Everything else is fire-and-forget. */
+const piDialogMethods = ['select', 'confirm', 'input', 'editor'] as const;
+type PiDialogMethod = (typeof piDialogMethods)[number];
+
+function isPiDialogMethod(method: unknown): method is PiDialogMethod {
+  return typeof method === 'string' && (piDialogMethods as readonly string[]).includes(method);
+}
+
+/**
+ * A dialog request whose fields did not match the expected shape is still a dialog the provider is
+ * blocked on, so it is surfaced as a question rather than dropped (dropping would hang the Agent)
+ * or thrown (throwing would end the observation stream and fail the Execution). Only the fields a
+ * client needs to answer it are kept.
+ */
+function lenientDialogRequest(
+  record: Readonly<Record<string, unknown>>,
+  id: string,
+  method: PiDialogMethod,
+): Readonly<Record<string, unknown>> {
+  const request: Record<string, unknown> = { type: 'extension_ui_request', id, method };
+  for (const field of ['title', 'message', 'placeholder', 'prefill'] as const) {
+    const value = record[field];
+    if (typeof value === 'string') request[field] = value;
+  }
+  const options = record['options'];
+  request['options'] = Array.isArray(options)
+    ? options.filter((option): option is string => typeof option === 'string')
+    : [];
+  return request;
+}
+
 export function mapPiExtensionUiRequest(input: {
   readonly record: Readonly<Record<string, unknown>>;
   readonly sessionId: string;
@@ -158,26 +201,31 @@ export function mapPiExtensionUiRequest(input: {
   readonly cursor: string;
 }): AgentObservedEvent | null {
   if (input.record.type !== 'extension_ui_request') return null;
-  if (typeof input.record.method === 'string'
-    && ['notify', 'setStatus', 'setWidget', 'setTitle', 'set_editor_text'].includes(input.record.method)) {
-    return null;
-  }
+  const method = input.record.method;
+  // Fire-and-forget methods, and any method this build does not know, are not questions: a future
+  // Pi is free to add them without ending an Execution that is mid-flight.
+  if (!isPiDialogMethod(method)) return null;
+  const id = input.record.id;
+  if (typeof id !== 'string' || id.length === 0) return null;
   const parsed = extensionUiRequestSchema.safeParse(input.record);
-  if (!parsed.success) {
-    throw new PiRpcProtocolError('INVALID_RECORD', `Invalid Pi extension UI request: ${parsed.error.message}`);
-  }
-  const request = parsed.data;
-  const permission = request.title?.startsWith(`${codeestraPermissionTitlePrefix}:`) === true;
+  const request = parsed.success ? parsed.data : lenientDialogRequest(input.record, id, method);
+  const title = typeof request['title'] === 'string' ? request['title'] : undefined;
+  const permission = title?.startsWith(`${codeestraPermissionTitlePrefix}:`) === true;
+  const questionnaire = !permission && method === 'select' && title !== undefined
+    ? decodeQuestionnaireDialogTitle(title)
+    : null;
   return {
     sessionId: input.sessionId,
     executionId: input.executionId,
-    eventId: `pi-ui:${request.id}`,
+    eventId: `pi-ui:${id}`,
     cursor: input.cursor,
     type: 'attention',
-    providerRequestId: request.id,
+    providerRequestId: id,
     kind: permission ? 'PERMISSION' : 'QUESTION',
-    responseType: request.method === 'confirm' ? 'CONFIRM' : 'VALUE',
-    prompt: request,
+    responseType: method === 'confirm' ? 'CONFIRM' : 'VALUE',
+    prompt: questionnaire === null
+      ? request
+      : questionnairePromptSchema.parse({ kind: 'codeestra.questionnaire', version: 1, questionnaire }),
   };
 }
 
@@ -201,23 +249,28 @@ export function buildPiModelArguments(config?: AgentConfiguration): readonly str
  */
 export function buildPiRpcArguments(input: {
   readonly gateExtensionPath: string;
+  readonly questionExtensionPath: string;
   readonly sessionDir: string;
   readonly platform?: 'unix' | 'windows';
   readonly permissionMode?: 'FULL' | 'STRICT';
 }): readonly string[] {
-  if (!isAbsolute(input.gateExtensionPath) || !isAbsolute(input.sessionDir)) {
-    throw new PiRpcProtocolError('INVALID_OPTIONS', 'Pi gate and session paths must be absolute');
+  if (!isAbsolute(input.gateExtensionPath) || !isAbsolute(input.questionExtensionPath)
+    || !isAbsolute(input.sessionDir)) {
+    throw new PiRpcProtocolError('INVALID_OPTIONS',
+      'Pi gate, question extension, and session paths must be absolute');
   }
   const mode = input.permissionMode ?? 'FULL';
   const tools = input.platform === 'windows'
-    ? 'read,powershell,edit,write,grep,find,ls'
-    : 'read,bash,edit,write,grep,find,ls';
+    ? `read,powershell,edit,write,grep,find,ls,${codeestraAskUserQuestionToolName}`
+    : `read,bash,edit,write,grep,find,ls,${codeestraAskUserQuestionToolName}`;
   const common = [
     '--mode', 'rpc',
     // Project trust is automatic in full mode. Strict mode retains the former ignore-by-default path.
     mode === 'FULL' ? '--approve' : '--no-approve',
     '--no-extensions',
     '--extension', input.gateExtensionPath,
+    // Codeestra owns the question channel too: no ambient user extension decides how the Agent asks.
+    '--extension', input.questionExtensionPath,
     '--no-skills',
     '--no-prompt-templates',
     '--no-themes',

@@ -8,6 +8,7 @@ import { PiRpcAdapter } from '../src/pi-adapter.js';
 import { PiRpcProcessError } from '../src/pi-process.js';
 
 const gateExtensionPath = fileURLToPath(new URL('../src/pi-gate-extension.ts', import.meta.url));
+const questionExtensionPath = fileURLToPath(new URL('../src/pi-question-extension.ts', import.meta.url));
 
 const stubSource = `
 import { writeFileSync } from 'node:fs';
@@ -98,6 +99,7 @@ function fixture(mode: 'SUCCEED' | 'CRASH_AFTER_PROMPT' | 'PROVIDER_ERROR' | 'NO
     piExecutable: process.execPath,
     launcherArgs: [stubPath],
     gateExtensionPath,
+    questionExtensionPath,
     sessionDir,
     environment: { CODEESTRA_STUB_REPORT: reportPath, CODEESTRA_STUB_MODE: mode },
     requestTimeoutMs: 5_000,
@@ -304,10 +306,13 @@ describe('Pi RPC process adapter', () => {
   });
 
   test('rejects relative gate and session paths before launching anything', () => {
-    expect(() => new PiRpcAdapter({ gateExtensionPath: 'gate.ts', sessionDir: '/tmp/sessions' }))
-      .toThrow('must be absolute');
-    expect(() => new PiRpcAdapter({ gateExtensionPath: '/tmp/gate.ts', sessionDir: 'sessions' }))
-      .toThrow('must be absolute');
+    expect(() => new PiRpcAdapter({ gateExtensionPath: 'gate.ts', questionExtensionPath,
+      sessionDir: '/tmp/sessions' })).toThrow('must be absolute');
+    expect(() => new PiRpcAdapter({ gateExtensionPath: '/tmp/gate.ts', questionExtensionPath: 'q.ts',
+      sessionDir: '/tmp/sessions' })).toThrow('must be absolute');
+    expect(() => new PiRpcAdapter({ gateExtensionPath: '/tmp/gate.ts', questionExtensionPath,
+      sessionDir: 'sessions' })).toThrow('must be absolute');
     expect(existsSync(gateExtensionPath)).toBe(true);
+    expect(existsSync(questionExtensionPath)).toBe(true);
   });
 });

@@ -73,6 +73,9 @@
     "packages/storage": {
       "name": "@codeestra/storage",
       "version": "0.0.0",
+      "dependencies": {
+        "@codeestra/contracts": "workspace:*",
+      },
     },
   },
   "packages": {

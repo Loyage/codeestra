@@ -1,8 +1,10 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxTranscriptEntryReadLimit,
+import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOptions,
+  maxQuestionnaireQuestions,
+  maxTranscriptEntryReadLimit,
   runtimeResponseSchema, runtimeStreamFrameSchema,
-  type RepositoryIdentity, type RuntimeRequest, type RuntimeResponse,
+  type QuestionnaireAnswer, type RepositoryIdentity, type RuntimeRequest, type RuntimeResponse,
   type SessionTranscriptView,
   type VerificationPolicyInspection } from '@codeestra/contracts';
 
@@ -87,6 +89,96 @@ async function call(command: ClientRequest): Promise<unknown> {
 
 function print(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
+}
+
+/**
+ * An Attention answer as the Runtime command face accepts it. A questionnaire answer stays
+ * structured here rather than pre-serialized, so a bad option number is rejected by the Runtime
+ * with a code the caller can act on instead of reaching the Agent as an opaque string.
+ */
+type AttentionAnswerInput =
+  | { readonly type: 'CONFIRM'; readonly confirmed: boolean }
+  | { readonly type: 'VALUE'; readonly value: string }
+  | { readonly type: 'QUESTIONNAIRE'; readonly answer: QuestionnaireAnswer }
+  | { readonly type: 'CANCEL' };
+
+/**
+ * Parse both accepted answer syntaxes. The positional form (`confirm yes|no` / `value <text>` /
+ * `cancel`) is unchanged; the flag form is `--choose <question>:<options>` (repeatable),
+ * `--text <question>=<text>` (repeatable), `--cancel`. Question and option numbers are 1-based,
+ * matching how the questions and options are displayed.
+ */
+function parseAttentionAnswer(answerType: string | undefined, rest: readonly string[]): AttentionAnswerInput {
+  if (answerType === 'confirm' && rest.length === 1 && ['yes', 'no'].includes(rest[0] ?? '')) {
+    return { type: 'CONFIRM', confirmed: rest[0] === 'yes' };
+  }
+  if (answerType === 'value' && rest.length > 0) return { type: 'VALUE', value: rest.join(' ') };
+  if (answerType === 'cancel' && rest.length === 0) return { type: 'CANCEL' };
+
+  const tokens = [answerType, ...rest];
+  if (answerType === undefined) usage();
+  const choices = new Map<number, number[]>();
+  const texts = new Map<number, string>();
+  let cancel = false;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const flag = tokens[index];
+    const value = tokens[index + 1];
+    if (flag === '--cancel' && value === undefined) {
+      cancel = true;
+      continue;
+    }
+    if (flag === '--choose' && value !== undefined) {
+      const match = /^(\d+):(\d+(?:,\d+)*)$/.exec(value);
+      if (match === null) {
+        throw new Error('--choose expects <question>:<options>, for example --choose 1:2 or --choose 2:1,3');
+      }
+      const question = Number(match[1]) - 1;
+      const options = (match[2] as string).split(',').map((option) => Number(option) - 1);
+      // The contract's hard limits are checked here so an impossible-by-definition option number is
+      // a readable CLI error, not an opaque boundary rejection. Whether the number exists in *this*
+      // questionnaire is decided by the Runtime, which is the only side that has the questions.
+      if (question < 0 || question >= maxQuestionnaireQuestions
+        || options.some((option) => option < 0 || option >= maxQuestionnaireOptions)) {
+        throw new Error(`Question ${question + 1} cannot be one of at most ${maxQuestionnaireQuestions}`
+          + ` questions with at most ${maxQuestionnaireOptions} options each`);
+      }
+      if (choices.has(question) || texts.has(question)) {
+        throw new Error(`Question ${question + 1} was answered twice`);
+      }
+      choices.set(question, options);
+      index += 1;
+      continue;
+    }
+    if (flag === '--text' && value !== undefined) {
+      const separator = value.indexOf('=');
+      const question = Number(value.slice(0, separator)) - 1;
+      const text = value.slice(separator + 1);
+      if (separator <= 0 || !Number.isInteger(question) || text.length === 0) {
+        throw new Error('--text expects <question>=<text>, for example --text 1="use the existing helper"');
+      }
+      if (choices.has(question) || texts.has(question)) {
+        throw new Error(`Question ${question + 1} was answered twice`);
+      }
+      texts.set(question, text);
+      index += 1;
+      continue;
+    }
+    usage();
+  }
+  if (cancel) {
+    if (choices.size > 0 || texts.size > 0) throw new Error('--cancel cannot be combined with an answer');
+    return { type: 'CANCEL' };
+  }
+  const answers: QuestionnaireAnswer['answers'][number][] = [];
+  for (const [questionIndex, choiceIndexes] of choices) {
+    answers.push({ type: 'CHOICES', questionIndex, choiceIndexes });
+  }
+  for (const [questionIndex, text] of texts) {
+    answers.push({ type: 'TEXT', questionIndex, text });
+  }
+  if (answers.length === 0) usage();
+  answers.sort((left, right) => left.questionIndex - right.questionIndex);
+  return { type: 'QUESTIONNAIRE', answer: { version: 1, answers } };
 }
 
 /**
@@ -309,7 +401,9 @@ function usage(): never {
   bun run codeestra attention list <project-id>
   bun run codeestra attention answer <project-id> <attention-id> confirm <yes|no>
   bun run codeestra attention answer <project-id> <attention-id> value <text>
-  bun run codeestra attention answer <project-id> <attention-id> cancel`);
+  bun run codeestra attention answer <project-id> <attention-id> cancel
+  bun run codeestra attention answer <project-id> <attention-id> [--choose <question>:<options>]…
+    [--text <question>=<text>]… [--cancel]`);
   process.exit(2);
 }
 
@@ -721,25 +815,13 @@ try {
     print(await call({ command: 'attention.list', projectId: firstArgument }));
   } else if (group === 'attention' && action === 'answer') {
     const [attentionId, answerType, ...answerArguments] = remainingArguments;
-    if (firstArgument === undefined || attentionId === undefined || answerType === undefined) usage();
-    let answer: { type: 'CONFIRM'; confirmed: boolean } | { type: 'VALUE'; value: string }
-      | { type: 'CANCEL' };
-    if (answerType === 'confirm' && answerArguments.length === 1
-      && ['yes', 'no'].includes(answerArguments[0] ?? '')) {
-      answer = { type: 'CONFIRM', confirmed: answerArguments[0] === 'yes' };
-    } else if (answerType === 'value' && answerArguments.length > 0) {
-      answer = { type: 'VALUE', value: answerArguments.join(' ') };
-    } else if (answerType === 'cancel' && answerArguments.length === 0) {
-      answer = { type: 'CANCEL' };
-    } else {
-      usage();
-    }
+    if (firstArgument === undefined || attentionId === undefined) usage();
     print(await call({
       command: 'attention.answer',
       commandId: crypto.randomUUID(),
       projectId: firstArgument,
       attentionId,
-      answer,
+      answer: parseAttentionAnswer(answerType, answerArguments),
     }));
   } else if (group === 'task' && action === 'submit') {
     const [taskId, versionText, ...extra] = remainingArguments;
