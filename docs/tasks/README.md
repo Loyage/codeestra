@@ -784,8 +784,9 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 ### 交付边界
 
 - 新增 ADR-0015、同步决策索引与本任务记录；**未修改 `PROJECT_SPEC.md` 或 `AGENTS.md`**。
-- 改动仅在开发工作树，未 commit、push 或提升 main；稳定 Runtime 未重启，也不会自动看到 dev 新资产。
-- 仍需人工确认：主题切换与系统变化、窄屏、焦点顺序、快速切项目/任务、问卷回答、终态执行过程分页。长命令后台化、取消/暂停、原生接管及 Integration/main 提升继续属于 NEXT，不在本轮提前实现。
+- 本轮实现已提交为 `548e45627941d5e1013423bdf1fef2b87426b492`，并按用户授权在 main 工作树以 `git merge --ff-only dev` 完成提升；未 push。`main` 与 `dev` 当前同一 SHA。
+- 提升后在 main 工作树执行 `bun install --frozen-lockfile`（无变化）、`bun run build:ui`，随后执行 `bun run codeestra stop` → `bun run codeestra status`；Runtime 已恢复 `READY`（PID `92408`、`FULL`、`adapters: ["pi"]`、`activeSessions: []`）。
+- 仍需人工确认：主题切换与系统变化、窄屏、焦点顺序、快速切项目/任务、问卷回答、终态执行过程分页。长命令后台化、取消/暂停、原生接管及 Integration/main 后续能力继续属于 NEXT，不在本轮提前实现。
 
 ## NEXT — 最小可用纵向切片
 
