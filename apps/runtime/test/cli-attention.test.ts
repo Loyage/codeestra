@@ -3,6 +3,8 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { encodeQuestionnaireDialogTitle, type Questionnaire } from '@codeestra/contracts';
+import { RuntimeClient } from '../../ui/src/api.js';
+import type { AttentionView, TaskStatusView, TaskView } from '../../ui/src/types.js';
 import { cleanupTemporaryDirectories, registerTemporaryDirectory } from './support/agent-fixture.js';
 
 const repositoryRoot = join(import.meta.dir, '..', '..', '..');
@@ -242,6 +244,70 @@ describe('codeestra attention answer', () => {
       await cli(['stop'], environment);
     }
   });
+
+  test('workbench HTTP client reads tasks and answers while a task awaits user input', async () => {
+    const { environment, projectId, taskId, run } =
+      await startQuestionnaireTask(encodeQuestionnaireDialogTitle(questionnaire));
+    try {
+      await waitForAttention(environment, projectId);
+      const opened = await cli(['ui', '--no-open'], environment);
+      expect(opened.exitCode).toBe(0);
+      const endpoint = new URL(opened.stdout.trim());
+      const token = new URLSearchParams(endpoint.hash.slice(1)).get('token');
+      expect(token).not.toBeNull();
+      const client = new RuntimeClient(endpoint.origin, token!);
+      const [status, attentions] = await Promise.all([
+        client.command<TaskStatusView>({ command: 'task.status', projectId, taskId }),
+        client.command<AttentionView[]>({ command: 'attention.list', projectId }),
+      ]);
+      expect(status.task.state).toBe('WAITING_FOR_USER');
+      const attention = attentions.find((item) => item.taskId === taskId && item.status === 'OPEN')!;
+      expect(attention).toBeDefined();
+
+      // The UI's actual transport can still create/read another draft while the run is blocked.
+      const draft = await client.command<TaskView>({ command: 'task.create', projectId,
+        commandId: crypto.randomUUID(), specification: '另一个任务 · 不自动运行',
+        constraints: [], kind: 'DEVELOPMENT' });
+      expect(draft.state).toBe('DRAFT');
+      expect(draft.currentRevision.number).toBe(1);
+      const detail = await client.command<TaskStatusView>({ command: 'task.status', projectId,
+        taskId: draft.id });
+      expect(detail.task.id).not.toBe(taskId);
+      expect(detail.executions).toHaveLength(0);
+      await expect(client.command({ command: 'task.verify', projectId, taskId: draft.id,
+        commandId: crypto.randomUUID() })).rejects.toThrow('captured result');
+
+      await expect(client.command({ command: 'attention.answer', projectId, attentionId: attention.id,
+        commandId: crypto.randomUUID(), answer: { type: 'QUESTIONNAIRE', answer: { version: 1,
+          answers: [{ type: 'CHOICES', questionIndex: 0, choiceIndexes: [2] }] } },
+      })).rejects.toThrow('Question 1 has no option 3');
+      expect((await client.command<AttentionView[]>({ command: 'attention.list', projectId }))
+        .find((item) => item.id === attention.id)?.status).toBe('OPEN');
+      await client.command({ command: 'attention.answer', projectId, attentionId: attention.id,
+        commandId: crypto.randomUUID(), answer: { type: 'QUESTIONNAIRE', answer: { version: 1,
+          answers: [{ type: 'CHOICES', questionIndex: 0, choiceIndexes: [1] },
+            { type: 'TEXT', questionIndex: 1, text: '只验证命令面' }] } },
+      });
+      expect(await run.exited).toBe(0);
+      // task.run may already have returned WAITING_FOR_USER; answer delivery is not completion.
+      // Wait for the independently projected provider exit through the command face, not a delay.
+      let ended = await client.command<TaskStatusView>({ command: 'task.status', projectId, taskId });
+      const deadline = Date.now() + 5_000;
+      while (ended.executions[0]?.session?.state !== 'EXITED' && Date.now() < deadline) {
+        await Bun.sleep(50);
+        ended = await client.command<TaskStatusView>({ command: 'task.status', projectId, taskId });
+      }
+      expect(ended.executions[0]?.session?.state).toBe('EXITED');
+      // Session exit isn't a captured result, a verification pass, or a release.
+      expect(ended.task.state).toBe('RUNNING');
+      expect(ended.verifications).toHaveLength(0);
+      expect((await client.command<TaskView[]>({ command: 'task.list', projectId }))
+        .find((item) => item.id === draft.id)?.state).toBe('DRAFT');
+    } finally {
+      run.kill('SIGTERM');
+      await cli(['stop'], environment);
+    }
+  }, 30_000);
 
   test('refuses a structured answer for an Attention that is not a questionnaire', async () => {
     // The same stub, but its dialog carries an ordinary title: the Attention is a plain provider

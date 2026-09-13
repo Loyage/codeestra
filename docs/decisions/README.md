@@ -17,6 +17,8 @@
 - [ADR-0013](0013-read-only-agent-transcript-view.md)：Agent 执行过程以只读视图呈现（`session.transcript` / `session.transcript.part`），来源是 provider 自己的会话文件；不入库、不是事件、不是 attach 也不新增门禁；长内容截断并可展开全文。
 - [ADR-0014](0014-agent-structured-question-channel.md)：Agent 结构化提问通道。Codeestra 自有扩展注册 `ask_user_question`，一份问卷编码进一个 provider dialog = 一条 Attention；回答是结构化 `QUESTIONNAIRE` 而非字符串，Runtime 在记录前按被问的问卷校验，非法答案报错而不得降级为拒绝；受控启动不变，STRICT 允许该工具。
 
+- [ADR-0015](0015-task-workbench-and-themes.md)：任务工作台重构，集中任务操作、待回答问题与执行过程；支持跟随系统/浅色/深色主题。只调整便利前端，不新增 Runtime 语义或确认步骤。
+
 以上选择均由用户明确答复。用户给定的硬性原则见 `PROJECT_SPEC.md`，无需重复确认。
 
 **优先级标注**：ADR-0011 是当前权限语义：默认 FULL，取消 ADR-0001/0002/0003/0004/0006/0008/0009/0010 中冲突的确认要求；STRICT 作为显式 opt-in 保留旧门禁。ADR-0009 的 `main`/`dev` 分支职责、固定 SHA/证据与提升后重启等正确性要求不变。

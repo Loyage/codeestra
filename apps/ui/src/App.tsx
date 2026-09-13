@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { ThemeSelector } from './theme.js';
+import { usePendingAction } from './use-pending-action.js';
 import { RuntimeClient, describeError } from './api.js';
 import { TranscriptPanel } from './transcript.js';
 import {
@@ -20,9 +22,9 @@ import {
 type Tab = 'tasks' | 'attention' | 'events' | 'agent' | 'project';
 
 const tabLabels: Record<Tab, string> = {
-  tasks: '任务',
+  tasks: '任务工作台',
   attention: '待处理',
-  events: '事件',
+  events: '运行事件',
   agent: 'Agent 配置',
   project: '项目',
 };
@@ -102,6 +104,7 @@ export function App({ initialToken, initialProjectId, tokenKey }: {
   if (token === null) {
     return (
       <div className="centered">
+        <div className="theme-corner"><ThemeSelector /></div>
         <TokenForm onSubmit={(value) => {
           window.sessionStorage.setItem(tokenKey, value);
           setToken(value);
@@ -129,6 +132,7 @@ function TokenForm({ onSubmit }: { readonly onSubmit: (token: string) => void })
       </p>
       <input
         type="password"
+        aria-label="Runtime 令牌"
         value={value}
         placeholder="Runtime 令牌"
         onChange={(event) => setValue(event.target.value)}
@@ -172,28 +176,45 @@ function Console({ token, initialProjectId }: {
     attentionToken: 0, detailToken: 0,
   });
   const cursorRef = useRef<number | null>(null);
+  const selectionRef = useRef({ projectId: state.projectId, taskId: state.taskId });
+  const operationsRef = useRef(new Map<symbol, string>());
+  const detailRequestRef = useRef(0);
+  const listRequestRef = useRef(0);
 
   const update = useCallback((patch: Partial<ConsoleState>) => {
+    if ('projectId' in patch) {
+      selectionRef.current.projectId = patch.projectId ?? null;
+      listRequestRef.current += 1;
+      detailRequestRef.current += 1;
+    }
+    if ('taskId' in patch) {
+      selectionRef.current.taskId = patch.taskId ?? null;
+      detailRequestRef.current += 1;
+    }
     setState((previous) => ({ ...previous, ...patch }));
   }, []);
 
   const run = useCallback(async (label: string, action: () => Promise<void>): Promise<void> => {
-    update({ busy: label, error: null });
+    const operation = Symbol(label);
+    operationsRef.current.set(operation, label);
+    update({ busy: label, error: null, notice: null });
     try {
       await action();
     } catch (error) {
-      update({ error: describeError(error) });
+      update({ error: `${label}：${describeError(error)}` });
     } finally {
-      update({ busy: null });
+      operationsRef.current.delete(operation);
+      update({ busy: [...operationsRef.current.values()].at(-1) ?? null });
     }
   }, [update]);
 
   const loadProjects = useCallback(async (): Promise<void> => {
+    const requestedProject = selectionRef.current.projectId;
     const [projects, permission] = await Promise.all([
       client.command<TrustedProjectView[]>({ command: 'project.list' }),
       client.command<{ mode: 'FULL' | 'STRICT' }>({ command: 'permission.get' }),
     ]);
-    const requested = state.projectId ?? initialProjectId;
+    const requested = requestedProject ?? initialProjectId;
     const projectId = projects.find((project) => project.id === requested)?.id
       ?? projects[0]?.id ?? null;
     const tasks = projectId === null
@@ -202,18 +223,32 @@ function Console({ token, initialProjectId }: {
     const attentions = projectId === null
       ? []
       : await client.command<AttentionView[]>({ command: 'attention.list', projectId });
-    update({ projects, projectId, tasks, attentions, permissionMode: permission.mode });
-  }, [client, initialProjectId, state.projectId, update]);
+    if (selectionRef.current.projectId !== requestedProject) return;
+    update({ projects, projectId, tasks, attentions, permissionMode: permission.mode,
+      ...(projectId === requestedProject ? {} : { taskId: null, status: null }) });
+  }, [client, initialProjectId, update]);
 
   const loadTaskDetail = useCallback(async (projectId: string, taskId: string): Promise<void> => {
+    const request = ++detailRequestRef.current;
     const status = await client.command<TaskStatusView>({ command: 'task.status', projectId, taskId });
-    update({ status, tasks: state.tasks.map((task) => (task.id === taskId ? status.task : task)) });
-  }, [client, state.tasks, update]);
+    if (request !== detailRequestRef.current || selectionRef.current.projectId !== projectId
+      || selectionRef.current.taskId !== taskId) return;
+    setState((previous) => ({ ...previous,
+      status: previous.status !== null && previous.status.task.version > status.task.version
+        ? previous.status : status,
+      tasks: previous.tasks.map((task) => (task.id === taskId && task.version <= status.task.version
+        ? status.task : task)) }));
+  }, [client]);
 
   const loadTaskList = useCallback(async (projectId: string): Promise<void> => {
+    const request = ++listRequestRef.current;
     const tasks = await client.command<TaskView[]>({ command: 'task.list', projectId });
-    update({ tasks });
-  }, [client, update]);
+    if (request !== listRequestRef.current || selectionRef.current.projectId !== projectId) return;
+    setState((previous) => ({ ...previous, tasks: tasks.map((task) => {
+      const known = previous.tasks.find((candidate) => candidate.id === task.id);
+      return known !== undefined && known.version > task.version ? known : task;
+    }) }));
+  }, [client]);
 
   useEffect(() => {
     // Runs once on mount; later reloads are explicit user actions.
@@ -228,6 +263,7 @@ function Console({ token, initialProjectId }: {
       return;
     }
     if (frame.type === 'heartbeat') {
+      cursorRef.current = frame.cursor;
       setState((previous) => ({ ...previous, cursor: frame.cursor, streamStatus: 'live' }));
       return;
     }
@@ -249,7 +285,7 @@ function Console({ token, initialProjectId }: {
       || frame.event.eventType === 'UserAnswerDelivered';
     const invalidatesDetail = invalidatesAttention
       || frame.event.eventType.startsWith('Execution')
-      || frame.event.eventType.startsWith('TaskState')
+      || frame.event.eventType.startsWith('Task')
       || frame.event.eventType.startsWith('AgentSession')
       || frame.event.eventType.startsWith('Verification')
       || frame.event.eventType.startsWith('ResultCommit');
@@ -267,9 +303,15 @@ function Console({ token, initialProjectId }: {
   useEffect(() => {
     const projectId = state.projectId;
     if (projectId === null) return;
+    let disposed = false;
     void client.command<AttentionView[]>({ command: 'attention.list', projectId })
-      .then((attentions) => { update({ attentions }); })
-      .catch(() => { /* Failures surface through the command banner. */ });
+      .then((attentions) => {
+        if (!disposed && selectionRef.current.projectId === projectId) update({ attentions });
+      })
+      .catch((error: unknown) => {
+        if (!disposed) update({ error: `待处理请求刷新失败：${describeError(error)}` });
+      });
+    return () => { disposed = true; };
   }, [client, state.projectId, state.attentionToken, update]);
 
   // Keep the selected task detail (Execution/Session/verifications) live as well.
@@ -277,16 +319,21 @@ function Console({ token, initialProjectId }: {
     const projectId = state.projectId;
     const taskId = state.taskId;
     if (projectId === null || taskId === null) return;
-    void client.command<TaskStatusView>({ command: 'task.status', projectId, taskId })
-      .then((status) => {
-        setState((previous) => ({
-          ...previous,
-          status,
-          tasks: previous.tasks.map((task) => (task.id === taskId ? status.task : task)),
-        }));
-      })
-      .catch(() => { /* Failures surface through the command banner. */ });
-  }, [client, state.projectId, state.taskId, state.detailToken]);
+    let disposed = false;
+    void loadTaskDetail(projectId, taskId)
+      .catch((error: unknown) => {
+        if (!disposed) update({ error: `任务详情刷新失败：${describeError(error)}` });
+      });
+    return () => { disposed = true; };
+  }, [loadTaskDetail, state.projectId, state.taskId, state.detailToken, update]);
+
+  useEffect(() => {
+    if (state.projectId !== null) {
+      void loadTaskList(state.projectId).catch((error: unknown) => {
+        update({ error: `任务列表刷新失败：${describeError(error)}` });
+      });
+    }
+  }, [state.projectId, state.detailToken, loadTaskList, update]);
 
   // Event stream: reconnects from the last delivered cursor, so a dropped connection or a
   // restarted Runtime resumes without gaps or duplicates.
@@ -322,26 +369,28 @@ function Console({ token, initialProjectId }: {
 
   const projectId = state.projectId;
   const selectedTask = state.tasks.find((task) => task.id === state.taskId) ?? null;
+  const reloadAttentions = async (): Promise<void> => {
+    if (projectId === null) return;
+    const attentions = await client.command<AttentionView[]>({ command: 'attention.list', projectId });
+    if (selectionRef.current.projectId === projectId) update({ attentions });
+  };
 
   return (
     <div className="app">
-      <header>
+      <a className="skip-link" href="#workspace">跳转到工作区</a>
+      <header className="app-header">
         <div className="brand">
-          <strong>Codeestra</strong>
-          <span className="muted">本地 Runtime 控制台 · {state.permissionMode === 'FULL' ? '全权限' : '严格'}模式</span>
+          <span className="brand-mark" aria-hidden="true">C</span>
+          <div><strong>Codeestra</strong><span className="brand-caption">让意图成为成果</span></div>
         </div>
         <div className="header-controls">
           <select
+            aria-label="当前项目"
             value={projectId ?? ''}
             onChange={(event) => {
               const next = event.target.value === '' ? null : event.target.value;
-              update({ projectId: next, taskId: null, status: null });
-              if (next !== null) void run('正在加载任务', async () => {
-                await loadTaskList(next);
-                const attentions = await client.command<AttentionView[]>(
-                  { command: 'attention.list', projectId: next });
-                update({ attentions });
-              });
+              update({ projectId: next, taskId: null, status: null, tasks: [], attentions: [],
+                error: null, notice: null });
             }}
           >
             <option value="">未选择项目</option>
@@ -349,18 +398,27 @@ function Console({ token, initialProjectId }: {
               <option key={project.id} value={project.id}>{project.name}</option>
             ))}
           </select>
-          <button type="button" onClick={() => { void run('正在刷新', loadProjects); }}>
+          <button type="button" onClick={() => { void run('正在刷新', async () => {
+            await loadProjects();
+            const selection = selectionRef.current;
+            if (selection.projectId !== null && selection.taskId !== null) {
+              await loadTaskDetail(selection.projectId, selection.taskId);
+            }
+          }); }}>
             刷新
           </button>
         </div>
       </header>
 
-      <nav>
-        {(['tasks', 'attention', 'events', 'agent', 'project'] as const).map((name) => (
+      <aside className="sidebar">
+      <nav aria-label="主导航">
+        <span className="nav-caption">工作空间</span>
+        {(['tasks', 'attention', 'project', 'agent', 'events'] as const).map((name) => (
           <button
             key={name}
             type="button"
             className={tab === name ? 'tab active' : 'tab'}
+            aria-current={tab === name ? 'page' : undefined}
             onClick={() => setTab(name)}
           >
             {tabLabels[name]}
@@ -369,26 +427,44 @@ function Console({ token, initialProjectId }: {
               : null}
           </button>
         ))}
-        {state.busy === null ? null : <span className="muted busy">{state.busy}…</span>}
       </nav>
+      <div className="sidebar-bottom">
+        <ThemeSelector />
+        <span className="muted">{state.permissionMode === 'FULL' ? 'FULL · 全权限，零确认' : 'STRICT · 严格模式'}</span>
+        <span className={`connection ${state.streamStatus === 'live' ? 'live' : ''}`}>
+          <span aria-hidden="true">●</span> 事件流 · {streamStatusLabel(state.streamStatus)}
+        </span>
+      </div>
+      </aside>
+
+      <div className="workspace-shell">
+      <div className="page-heading">
+        <div><span className="eyebrow">{state.projects.find((project) => project.id === projectId)?.name ?? '开始使用'}</span>
+          <h1>{tabLabels[tab]}</h1></div>
+        <span className="muted busy" role="status">{state.busy === null ? '本地运行 · 关闭页面不影响任务' : `${state.busy}…`}</span>
+      </div>
 
       {state.error === null ? null : (
-        <div className="banner error">
+        <div className="banner error" role="alert">
           {state.error}
           <button type="button" onClick={() => update({ error: null })}>关闭</button>
         </div>
       )}
       {state.notice === null ? null : (
-        <div className="banner notice">
+        <div className="banner notice" role="status">
           {state.notice}
           <button type="button" onClick={() => update({ notice: null })}>关闭</button>
         </div>
       )}
 
-      <main>
-        {tab === 'tasks' ? (
+      <main id="workspace" tabIndex={-1}>
+        <div hidden={tab !== 'tasks'}>
           <TasksTab
+            key={projectId ?? 'no-project'}
             client={client}
+            attentions={state.attentions}
+            reloadAttentions={reloadAttentions}
+            openProjects={() => setTab('project')}
             projectId={projectId}
             tasks={state.tasks}
             taskId={state.taskId}
@@ -396,24 +472,22 @@ function Console({ token, initialProjectId }: {
             adapter={state.adapter}
             permissionMode={state.permissionMode}
             run={run}
-            update={update}
+            update={(patch) => { if (selectionRef.current.projectId === projectId) update(patch); }}
             reloadTasks={async (id) => { await loadTaskList(id); }}
             loadDetail={loadTaskDetail}
           />
-        ) : null}
+        </div>
         {tab === 'attention' ? (
           <AttentionTab
+            key={projectId}
             client={client}
+            tasks={state.tasks}
+            selectTask={(taskId) => { update({ taskId, status: null }); setTab('tasks'); }}
             projectId={projectId}
             attentions={state.attentions}
             run={run}
             update={update}
-            reload={async () => {
-              if (projectId === null) return;
-              const attentions = await client.command<AttentionView[]>(
-                { command: 'attention.list', projectId });
-              update({ attentions });
-            }}
+            reload={reloadAttentions}
           />
         ) : null}
         {tab === 'events' ? (
@@ -427,7 +501,7 @@ function Console({ token, initialProjectId }: {
           />
         ) : null}
         {tab === 'agent' ? (
-          <AgentTab client={client} projectId={projectId} run={run} />
+          <AgentTab key={projectId} client={client} projectId={projectId} run={run} />
         ) : null}
         {tab === 'project' ? (
           <ProjectTab client={client} permissionMode={state.permissionMode} run={run}
@@ -440,6 +514,7 @@ function Console({ token, initialProjectId }: {
         停止前一直有效。
         {selectedTask === null ? null : ` 当前选择：任务 #${selectedTask.displayNumber}。`}
       </footer>
+      </div>
     </div>
   );
 }
@@ -457,10 +532,21 @@ function TasksTab(props: CommonProps & {
   readonly status: TaskStatusView | null;
   readonly adapter: string;
   readonly permissionMode: 'FULL' | 'STRICT';
+  readonly attentions: readonly AttentionView[];
+  readonly reloadAttentions: () => Promise<void>;
+  readonly openProjects: () => void;
   readonly reloadTasks: (projectId: string) => Promise<void>;
   readonly loadDetail: (projectId: string, taskId: string) => Promise<void>;
 }) {
-  const { client, projectId, tasks, taskId, status, adapter, permissionMode, run, update } = props;
+  const { client, projectId, tasks, taskId, status, adapter, permissionMode, update } = props;
+  const actions = usePendingAction(props.run);
+  const run: CommonProps['run'] = (label, action) => actions.run(
+    label === '正在创建任务' ? 'create' : taskId ?? 'none', label, action);
+  const busy = actions.pending.has(taskId ?? 'none');
+  const selectedRef = useRef(taskId);
+  selectedRef.current = taskId;
+  const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState('all');
   const [specification, setSpecification] = useState('');
   const [authorization, setAuthorization] = useState<ResultCommitAuthorizationView | null>(null);
   const [runResult, setRunResult] = useState<string | null>(null);
@@ -468,7 +554,32 @@ function TasksTab(props: CommonProps & {
   /** Empty means "the newest Execution that actually started a Session". */
   const [transcriptExecutionId, setTranscriptExecutionId] = useState<string | null>(null);
   const task = tasks.find((candidate) => candidate.id === taskId) ?? null;
-  useEffect(() => { setTranscriptExecutionId(null); }, [taskId]);
+  useEffect(() => {
+    setTranscriptExecutionId(null);
+    setAuthorization(null);
+    setRunResult(null);
+    setVerifyReport(null);
+  }, [taskId]);
+  const latestExecution = status?.executions[0] ?? null;
+  const canCapture = task?.state === 'RUNNING'
+    && latestExecution?.state === 'RUNNING' && latestExecution.resourceHeld
+    && latestExecution.session?.state === 'EXITED';
+  const taskAttentions = props.attentions.filter((attention) => attention.taskId === taskId);
+  const waiting = taskAttentions.filter((attention) => attention.status === 'OPEN').length;
+  const visibleTasks = tasks.filter((candidate) => {
+    const matchesText = `${candidate.displayNumber} ${candidate.currentRevision.specification}`
+      .toLocaleLowerCase().includes(query.toLocaleLowerCase().trim());
+    return matchesText && (filter === 'all' || candidate.state === filter);
+  });
+  const nextStep = task === null ? '' : waiting > 0 ? 'Agent 需要你的回答，请在下方处理后继续。'
+    : task.state === 'DRAFT' ? '先提交为就绪，再启动 Agent。创建草稿不会自动运行。'
+    : task.state === 'READY' ? '任务已就绪，可以启动 Agent。当前不支持取消或暂停。'
+    : canCapture ? 'Agent 会话已退出。若有代码变更，可提交成果，然后独立验证。'
+    : task.state === 'EXECUTED' ? '成果已提交，可运行任务验证。验证通过不代表已集成或发布。'
+    : task.state === 'RUNNING' ? '查看下方执行过程；需要回答时会在这里显示。'
+    : task.state === 'RECOVERY_REQUIRED' ? '执行状态需要人工检查，请展开执行与验证记录查看原因；不会自动重试。'
+    : task.state === 'FAILED' ? '本次执行失败，请查看执行记录中的错误原因。'
+    : `当前状态：${labelValue(task.state)}。详情以 Runtime 记录为准。`;
   // A failed start can leave an Execution without a Session; such an attempt has no process to
   // show, so only attempts with a recorded Session are offered here.
   const transcriptExecutions = (status?.executions ?? [])
@@ -478,48 +589,77 @@ function TasksTab(props: CommonProps & {
     ?? transcriptExecutions[0] ?? null;
 
   if (projectId === null) {
-    return <p className="muted">请先在<strong>项目</strong>标签页中信任一个项目。</p>;
+    return <section className="card empty-state">
+      <span className="empty-symbol" aria-hidden="true">＋</span>
+      <h2>从一个项目开始</h2>
+      <p className="muted">添加本地 Git 仓库，然后描述你想完成的改动。</p>
+      <button className="primary" type="button" onClick={props.openProjects}>前往添加项目</button>
+    </section>;
   }
 
   return (
-    <div className="columns">
-      <section className="card">
-        <h2>任务</h2>
-        <ul className="list">
-          {tasks.map((candidate) => (
+    <>
+    <div className="task-overview" aria-label="项目任务概况">
+      <div><strong>{tasks.length}</strong><span>全部任务</span></div>
+      <div><strong>{tasks.filter((item) => item.state === 'RUNNING').length}</strong><span>运行中</span></div>
+      <div><strong>{props.attentions.filter((item) => item.status === 'OPEN').length}</strong><span>待处理请求</span></div>
+      <div><strong>{tasks.filter((item) => item.state === 'EXECUTED').length}</strong><span>已提交成果 · 非已发布</span></div>
+    </div>
+    <div className="columns task-workspace">
+      <section className="card task-list">
+        <div className="section-heading"><h2>任务列表</h2><span className="muted">{visibleTasks.length} / {tasks.length}</span></div>
+        <div className="task-filters">
+          <input type="search" aria-label="搜索任务" placeholder="搜索任务内容或编号" value={query}
+            onChange={(event) => setQuery(event.target.value)} />
+          <select aria-label="按任务状态筛选" value={filter} onChange={(event) => setFilter(event.target.value)}>
+            <option value="all">全部状态</option>
+            {[...new Set([...tasks.map((item) => item.state), ...(filter === 'all' ? [] : [filter])])].map((value) => (
+              <option key={value} value={value}>{labelValue(value)}</option>
+            ))}
+          </select>
+        </div>
+        <ul className="list task-rows">
+          {visibleTasks.map((candidate) => (
             <li key={candidate.id}>
               <button
                 type="button"
                 className={candidate.id === taskId ? 'row active' : 'row'}
+                aria-current={candidate.id === taskId ? 'true' : undefined}
                 onClick={() => {
-                  update({ taskId: candidate.id, status: null });
-                  void run('正在加载任务', () => props.loadDetail(projectId, candidate.id));
+                  if (candidate.id !== taskId) update({ taskId: candidate.id, status: null });
                 }}
               >
-                <span>#{candidate.displayNumber}</span>
+                <span className="muted task-number">#{candidate.displayNumber}</span>
                 <span className={`state state-${candidate.state.toLowerCase()}`}>
                   {labelValue(candidate.state)}
                 </span>
-                <span className="truncate">{candidate.currentRevision.specification}</span>
-                <span className="muted">v{candidate.version}</span>
+                <span className="task-title">{candidate.currentRevision.specification}</span>
+                <span className="muted task-revision">规格 r{candidate.currentRevision.number}</span>
               </button>
             </li>
           ))}
-          {tasks.length === 0 ? <li className="muted">暂无任务。</li> : null}
+          {visibleTasks.length === 0 ? <li className="list-empty muted">
+            {tasks.length === 0 ? '还没有任务，在下方创建第一个草稿。' : '没有匹配的任务。'}
+            {tasks.length === 0 ? null : <button type="button" onClick={() => { setQuery(''); setFilter('all'); }}>清除筛选</button>}
+          </li> : null}
         </ul>
-        <h3>新建任务</h3>
+        <div className="task-composer">
+        <h3><label htmlFor="task-specification">新建任务</label></h3>
         <textarea
-          rows={3}
+          id="task-specification"
+          rows={4}
+          disabled={actions.pending.has('create')}
           value={specification}
           placeholder="描述一项具体的改动"
           onChange={(event) => setSpecification(event.target.value)}
         />
         <button
           type="button"
-          disabled={specification.trim().length === 0}
+          className="primary"
+          disabled={actions.pending.has('create') || specification.trim().length === 0}
           onClick={() => {
             void run('正在创建任务', async () => {
-              await client.command({
+              const created = await client.command<TaskView>({
                 command: 'task.create',
                 commandId: crypto.randomUUID(),
                 projectId,
@@ -528,18 +668,26 @@ function TasksTab(props: CommonProps & {
                 kind: 'DEVELOPMENT',
               });
               setSpecification('');
+              setQuery('');
+              setFilter('all');
               await props.reloadTasks(projectId);
+              if (selectedRef.current === taskId) update({ taskId: created.id, status: null });
             });
           }}
         >
-          创建草稿
+          {actions.pending.has('create') ? '正在创建…' : '＋ 创建草稿'}
         </button>
+        <p className="muted hint">草稿不会自动启动 Agent。</p>
+        </div>
       </section>
 
-      <section className="card grow">
-        {task === null ? <p className="muted">请选择一个任务。</p> : (
+      <section className="card grow task-detail">
+        {task === null ? <div className="empty-state"><span className="empty-symbol" aria-hidden="true">↗</span>
+          <h2>选择任务，继续推进</h2><p className="muted">任务的操作、问题与执行过程会集中显示在这里。</p></div> : (
           <>
-            <h2>#{task.displayNumber} · {labelValue(task.state)} · v{task.version}</h2>
+            <div className="section-heading"><h2>任务 #{task.displayNumber}</h2>
+              <span className={`state state-${task.state.toLowerCase()}`}>{labelValue(task.state)}</span></div>
+            <p className="muted hint">规格 r{task.currentRevision.number} · 状态版本 v{task.version}</p>
             <pre className="spec">{task.currentRevision.specification}</pre>
             {task.currentRevision.constraints.length === 0 ? null : (
               <ul>
@@ -549,10 +697,12 @@ function TasksTab(props: CommonProps & {
               </ul>
             )}
 
-            <div className="actions">
+            <div className="next-step"><span className="eyebrow">下一步</span><p>{nextStep}</p></div>
+            <div className="actions task-actions" aria-label="任务操作">
               <button
                 type="button"
-                disabled={task.state !== 'DRAFT'}
+                className={task.state === 'DRAFT' ? 'primary' : ''}
+                disabled={busy || task.state !== 'DRAFT'}
                 onClick={() => {
                   void run('正在提交', async () => {
                     await client.command({
@@ -567,7 +717,7 @@ function TasksTab(props: CommonProps & {
                   });
                 }}
               >
-                提交（转为就绪）
+                提交为就绪
               </button>
 
               <label className="inline">
@@ -581,7 +731,8 @@ function TasksTab(props: CommonProps & {
               </label>
               <button
                 type="button"
-                disabled={task.state !== 'READY'}
+                className={task.state === 'READY' ? 'primary' : ''}
+                disabled={busy || task.state !== 'READY'}
                 onClick={() => {
                   void run('正在运行任务（暂不支持取消）', async () => {
                     const result = await client.command<unknown>({
@@ -592,17 +743,20 @@ function TasksTab(props: CommonProps & {
                       expectedTaskVersion: task.version,
                       adapterId: adapter,
                     });
-                    setRunResult(JSON.stringify(result, null, 2));
+                    if (selectedRef.current === task.id) setRunResult(JSON.stringify(result, null, 2));
                     await props.reloadTasks(projectId);
                     await props.loadDetail(projectId, task.id);
                   });
                 }}
               >
-                运行任务…
+                启动 Agent
               </button>
 
               <button
                 type="button"
+                className={canCapture ? 'primary' : ''}
+                disabled={busy || !canCapture}
+                title={canCapture ? '提交工作树中的成果，Runtime 会再次核对静止证据与差异' : '等待 Agent 退出且可捕获成果后使用'}
                 onClick={() => {
                   if (permissionMode === 'FULL') {
                     void run('正在提交成果', async () => {
@@ -623,7 +777,7 @@ function TasksTab(props: CommonProps & {
                         projectId,
                         taskId: task.id,
                       });
-                      setAuthorization(prepared);
+                      if (selectedRef.current === task.id) setAuthorization(prepared);
                     });
                   }
                 }}
@@ -633,6 +787,9 @@ function TasksTab(props: CommonProps & {
 
               <button
                 type="button"
+                className={task.state === 'EXECUTED' ? 'primary' : ''}
+                disabled={busy || task.state !== 'EXECUTED'}
+                title="提交成果后，在固定 commit 上独立运行验证"
                 onClick={() => {
                   void run('正在执行验证', async () => {
                     const report = await client.command<VerificationRunView>({
@@ -641,7 +798,7 @@ function TasksTab(props: CommonProps & {
                       projectId,
                       taskId: task.id,
                     });
-                    setVerifyReport(report);
+                    if (selectedRef.current === task.id) setVerifyReport(report);
                     await props.loadDetail(projectId, task.id);
                   });
                 }}
@@ -650,7 +807,14 @@ function TasksTab(props: CommonProps & {
               </button>
             </div>
 
-            {permissionMode === 'FULL' || authorization === null ? null : (
+            {busy ? <p className="muted" role="status">此任务命令正在执行；仍可查看过程、回答问题或切换任务。</p> : null}
+            {waiting === 0 ? null : (
+              <AttentionTab key={task.id} client={client} projectId={projectId}
+                attentions={taskAttentions} run={props.run} update={update} reload={props.reloadAttentions} />
+            )}
+
+            {permissionMode === 'FULL' || authorization === null
+              || authorization.taskVersion !== task.version ? null : (
               <div className="card nested">
                 <h3>成果提交授权</h3>
                 <p className="muted">
@@ -664,7 +828,7 @@ function TasksTab(props: CommonProps & {
                 </dl>
                 <button
                   type="button"
-                  disabled={!authorization.quiescent}
+                  disabled={busy || !authorization.quiescent}
                   onClick={() => {
                     void run('正在提交成果', async () => {
                       await client.command({
@@ -675,7 +839,7 @@ function TasksTab(props: CommonProps & {
                         authorizationId: authorization.id,
                         confirm: true,
                       });
-                      setAuthorization(null);
+                      if (selectedRef.current === task.id) setAuthorization(null);
                       await props.reloadTasks(projectId);
                       await props.loadDetail(projectId, task.id);
                     });
@@ -687,23 +851,35 @@ function TasksTab(props: CommonProps & {
             )}
 
             {runResult === null ? null : (
-              <details open>
-                <summary>最近一次任务运行</summary>
+              <details>
+                <summary>最近一次任务运行 · 原始响应</summary>
                 <pre>{runResult}</pre>
               </details>
             )}
             {verifyReport === null ? null : (
-              <details open>
+              <details>
                 <summary>最近一次验证：{labelValue(verifyReport.state)}
                   {verifyReport.outcomeCode === null ? '' : `（${labelValue(verifyReport.outcomeCode)}）`}</summary>
                 <pre>{JSON.stringify(verifyReport.evidence, null, 2)}</pre>
               </details>
             )}
 
-            {status === null ? <p className="muted">正在加载详情…</p> : (
+            {status === null ? <p className="muted" role="status">正在加载详情…</p> : (
               <>
+                {latestExecution?.error == null ? null : <p className="error" role="alert">
+                  执行失败：{latestExecution.error.code} {latestExecution.error.message ?? ''}
+                </p>}
+                {status.verifications[0] === undefined ? null : <div className="verification-summary">
+                  <span>最近验证</span>
+                  <span className={`state state-${status.verifications[0].state.toLowerCase()}`}>
+                    {labelValue(status.verifications[0].state)}</span>
+                  <code>{status.verifications[0].testedCommit.slice(0, 10)}</code>
+                  <span className="muted">{status.verifications[0].outcomeCode ?? '等待结果'} · 不代表集成或发布</span>
+                </div>}
+                <details className="execution-evidence">
+                <summary>执行与验证记录 · {status.executions.length} 次执行 / {status.verifications.length} 次验证</summary>
                 <h3>执行记录</h3>
-                <table>
+                <div className="table-scroll"><table>
                   <thead>
                     <tr><th>#</th><th>状态</th><th>适配器</th><th>模型/思考</th><th>会话</th><th>占用资源</th>
                       <th>基线</th><th>失败原因</th></tr>
@@ -738,10 +914,10 @@ function TasksTab(props: CommonProps & {
                       <tr><td colSpan={8} className="muted">暂无执行记录。</td></tr>
                     ) : null}
                   </tbody>
-                </table>
+                </table></div>
 
                 <h3>验证记录</h3>
-                <table>
+                <div className="table-scroll"><table>
                   <thead>
                     <tr><th>状态</th><th>结果</th><th>提交</th><th>策略</th><th>结束时间</th></tr>
                   </thead>
@@ -760,9 +936,11 @@ function TasksTab(props: CommonProps & {
                       <tr><td colSpan={5} className="muted">暂无验证记录。</td></tr>
                     ) : null}
                   </tbody>
-                </table>
+                </table></div>
+                </details>
 
-                <h3>Agent 执行过程</h3>
+                <section className="process-panel">
+                <h3>Agent 执行过程 <span className="muted hint">只读观察</span></h3>
                 {transcriptExecution === null || transcriptExecution.session === null ? (
                   <p className="muted">
                     这个任务还没有启动过 Agent 会话，因此没有执行过程可显示。
@@ -790,16 +968,18 @@ function TasksTab(props: CommonProps & {
                       sessionId={transcriptExecution.session.sessionId}
                       executionState={transcriptExecution.state}
                       sessionState={transcriptExecution.session.state}
-                      run={run}
+                      run={props.run}
                     />
                   </>
                 )}
+                </section>
               </>
             )}
           </>
         )}
       </section>
     </div>
+    </>
   );
 }
 
@@ -823,6 +1003,7 @@ function QuestionnaireCard(props: {
   readonly onCancel: () => void;
 }) {
   const { questionnaire, busy, onSubmit, onCancel } = props;
+  const formId = useId();
   const [choices, setChoices] = useState<ReadonlyArray<readonly number[]>>(
     () => questionnaire.questions.map(() => []));
   const [texts, setTexts] = useState<readonly string[]>(() => questionnaire.questions.map(() => ''));
@@ -865,10 +1046,10 @@ function QuestionnaireCard(props: {
               const selected = (choices[questionIndex] ?? []).includes(optionIndex);
               return (
                 <li key={option.label}>
-                  <label className="inline">
+                  <label className={`question-option ${selected ? 'selected' : ''}`}>
                     <input
                       type={question.multiSelect ? 'checkbox' : 'radio'}
-                      name={`${question.header}-${questionIndex}`}
+                      name={`${formId}-${questionIndex}`}
                       checked={selected}
                       disabled={busy}
                       onChange={() => setChoice(questionIndex, optionIndex, question.multiSelect)}
@@ -880,6 +1061,7 @@ function QuestionnaireCard(props: {
             })}
           </ul>
           <input
+            aria-label={`第 ${questionIndex + 1} 题：自定义回答`}
             value={texts[questionIndex] ?? ''}
             placeholder="或用自己的话回答（会覆盖上面的选择）"
             disabled={busy}
@@ -890,6 +1072,7 @@ function QuestionnaireCard(props: {
       <div className="actions">
         <button
           type="button"
+          className="primary"
           disabled={busy || answered.length === 0}
           onClick={() => onSubmit(answered)}
         >
@@ -905,24 +1088,33 @@ function AttentionTab(props: CommonProps & {
   readonly projectId: string | null;
   readonly attentions: readonly AttentionView[];
   readonly reload: () => Promise<void>;
+  readonly tasks?: readonly TaskView[];
+  readonly selectTask?: (taskId: string) => void;
 }) {
-  const { client, projectId, attentions, run, reload } = props;
+  const { client, projectId, attentions, reload } = props;
+  const actions = usePendingAction(props.run);
   const [answers, setAnswers] = useState<Record<string, string>>({});
   if (projectId === null) return <p className="muted">请选择一个项目。</p>;
   const open = attentions.filter((attention) => attention.status === 'OPEN');
   return (
     <section className="card">
-      <h2>待处理请求</h2>
-      <p className="muted">
-        在此等待的 Agent 只会暂停自己的任务。回答会记录为意图和类型化操作；敏感文本绝不会写入事件。
-      </p>
-      <button type="button" onClick={() => { void run('正在刷新待处理请求', reload); }}>刷新</button>
+      <div className="section-heading"><h2>需要你的回答 <span className="badge">{open.length}</span></h2>
+        <button type="button" disabled={actions.pending.has('reload')}
+          onClick={() => { void actions.run('reload', '正在刷新待处理请求', reload); }}>刷新</button></div>
+      <p className="muted hint">只暂停对应任务。回答提交后由 Runtime 投递给 Agent，不需要离开工作台。</p>
       <ul className="list">
         {open.map((attention) => {
           const questionnaire = questionnaireFromPrompt(attention.prompt);
+          const busy = actions.pending.has(attention.id);
+          const run: CommonProps['run'] = (label, action) => actions.run(attention.id, label, action);
+          const task = props.tasks?.find((item) => item.id === attention.taskId);
           return (
-          <li key={attention.id} className="card nested">
+          <li key={attention.id} className="card nested attention-card">
+            <fieldset disabled={busy} aria-label="回答 Agent 请求" aria-busy={busy}>
             <div className="row-head">
+              {props.selectTask === undefined ? null : <button type="button" onClick={() => props.selectTask?.(attention.taskId)}>
+                {task === undefined ? '查看关联任务' : `任务 #${task.displayNumber}`}
+              </button>}
               <span className={`state state-${attention.kind.toLowerCase()}`}>
                 {labelValue(attention.kind)}
               </span>
@@ -932,7 +1124,7 @@ function AttentionTab(props: CommonProps & {
             {questionnaire !== null ? (
               <QuestionnaireCard
                 questionnaire={questionnaire}
-                busy={false}
+                busy={busy}
                 onSubmit={(answers) => {
                   void run('正在回答', async () => {
                     await client.command({
@@ -981,6 +1173,7 @@ function AttentionTab(props: CommonProps & {
             ) : (
               <div className="actions">
                 <input
+                  aria-label="回答内容"
                   value={answers[attention.id] ?? ''}
                   placeholder="输入回答"
                   onChange={(event) => setAnswers({ ...answers, [attention.id]: event.target.value })}
@@ -1006,8 +1199,10 @@ function AttentionTab(props: CommonProps & {
                   });
                   await reload();
                 });
-              }}>取消此请求</button>
+              }}>拒绝回答此请求</button>
             ) : null}
+            {busy ? <p className="muted" role="status">正在发送回答…</p> : null}
+            </fieldset>
           </li>
           );
         })}
@@ -1040,7 +1235,7 @@ function EventsTab({ frames, cursor, following, streamStatus, update, clear }: {
   useEffect(() => { endRef.current?.scrollIntoView({ block: 'end' }); }, [frames]);
   return (
     <section className="card">
-      <h2>事件流</h2>
+      <h2>Runtime 事件流 · 全部项目</h2>
       <div className="actions">
         <span className={streamStatus === 'live' ? 'state state-ready' : 'state'}>
           {streamStatusLabel(streamStatus)}
@@ -1081,6 +1276,7 @@ function AgentTab({ client, projectId, run }: {
   readonly projectId: string | null;
   readonly run: (label: string, action: () => Promise<void>) => Promise<void>;
 }) {
+  const actions = usePendingAction(run);
   const [config, setConfig] = useState<AgentConfigurationResolutionView | null>(null);
   const [scope, setScope] = useState<'PROJECT' | 'GLOBAL'>('GLOBAL');
   const [provider, setProvider] = useState('');
@@ -1114,7 +1310,8 @@ function AgentTab({ client, projectId, run }: {
   const scopeSelector = scope === 'PROJECT'
     ? { scope: 'PROJECT' as const, projectId }
     : { scope: 'GLOBAL' as const };
-  const disabled = config === null || (scope === 'PROJECT' && projectId === null);
+  const saving = actions.pending.has('config');
+  const disabled = saving || config === null || (scope === 'PROJECT' && projectId === null);
 
   return (
     <section className="card">
@@ -1161,6 +1358,7 @@ function AgentTab({ client, projectId, run }: {
           )}
 
           <h3>编辑范围</h3>
+          <fieldset disabled={saving} aria-busy={saving}>
           <div className="actions">
             <label className="inline">
               范围
@@ -1173,16 +1371,19 @@ function AgentTab({ client, projectId, run }: {
               </select>
             </label>
             <input
+              aria-label="Agent Provider"
               value={provider}
               placeholder={`Provider（全局当前：${config.global?.provider ?? '未设置'}）`}
               onChange={(event) => setProvider(event.target.value)}
             />
             <input
+              aria-label="Agent 模型"
               value={model}
               placeholder={`模型（全局当前：${config.global?.model ?? '未设置'}）`}
               onChange={(event) => setModel(event.target.value)}
             />
             <select
+              aria-label="思考深度"
               value={thinkingLevel}
               onChange={(event) => setThinkingLevel(event.target.value)}
             >
@@ -1195,7 +1396,7 @@ function AgentTab({ client, projectId, run }: {
               type="button"
               disabled={disabled}
               onClick={() => {
-                void run('正在保存 Agent 配置', async () => {
+                void actions.run('config', '正在保存 Agent 配置', async () => {
                   setNotice(null);
                   setConfig(await client.command<AgentConfigurationResolutionView>({
                     command: 'agent.config.set',
@@ -1217,7 +1418,7 @@ function AgentTab({ client, projectId, run }: {
               type="button"
               disabled={disabled}
               onClick={() => {
-                void run('正在清除 Agent 配置', async () => {
+                void actions.run('config', '正在清除 Agent 配置', async () => {
                   setNotice(null);
                   const cleared = await client.command<AgentConfigurationResolutionView
                     & { readonly cleared: boolean }>({
@@ -1233,6 +1434,7 @@ function AgentTab({ client, projectId, run }: {
               清除此范围
             </button>
           </div>
+          </fieldset>
           <p className="muted">
             项目覆盖：{config.project === null ? '未设置'
               : `${config.project.provider ?? '继承'} / ${config.project.model ?? '继承'} / ${config.project.thinkingLevel ?? '继承'}`}
@@ -1251,30 +1453,36 @@ function ProjectTab({ client, permissionMode, run, reloadProjects }: CommonProps
   readonly permissionMode: 'FULL' | 'STRICT';
   readonly reloadProjects: () => Promise<void>;
 }) {
+  const actions = usePendingAction(run);
+  const busy = actions.pending.size > 0;
   const [path, setPath] = useState('');
   const [identity, setIdentity] = useState<RepositoryIdentityView | null>(null);
   const [policy, setPolicy] = useState<VerificationPolicyView | null>(null);
   const [confirmation, setConfirmation] = useState('');
   return (
     <section className="card">
-      <h2>项目</h2>
+      <h2>添加本地项目</h2>
+      <p className="muted">输入 Git 仓库的绝对路径，检查仓库与验证策略后添加。不会修改仓库文件。</p>
+      <fieldset disabled={busy} aria-busy={busy}>
       <div className="actions">
         <input
+          aria-label="Git 仓库绝对路径"
           value={path}
           placeholder="/仓库/路径"
-          onChange={(event) => setPath(event.target.value)}
+          onChange={(event) => {
+            setPath(event.target.value); setIdentity(null); setPolicy(null); setConfirmation('');
+          }}
         />
-        <button type="button" onClick={() => {
-          void run('正在检查', async () => {
-            setIdentity(await client.command<RepositoryIdentityView>({ command: 'project.inspect', path }));
+        <button className="primary" type="button" disabled={path.trim().length === 0} onClick={() => {
+          void actions.run('project', '正在检查项目与策略', async () => {
+            setIdentity(null); setPolicy(null); setConfirmation('');
+            const [identity, policy] = await Promise.all([
+              client.command<RepositoryIdentityView>({ command: 'project.inspect', path }),
+              client.command<VerificationPolicyView>({ command: 'project.verificationPolicy', path }),
+            ]);
+            setIdentity(identity); setPolicy(policy);
           });
-        }}>检查</button>
-        <button type="button" onClick={() => {
-          void run('正在读取策略', async () => {
-            setPolicy(await client.command<VerificationPolicyView>(
-              { command: 'project.verificationPolicy', path }));
-          });
-        }}>验证策略</button>
+        }}>检查项目</button>
       </div>
 
       {identity === null ? null : (
@@ -1322,6 +1530,7 @@ function ProjectTab({ client, permissionMode, run, reloadProjects }: CommonProps
           </p>
           {permissionMode === 'FULL' ? null : (
             <input
+              aria-label="输入 TRUST 以确认信任"
               value={confirmation}
               placeholder="输入 TRUST 以确认"
               onChange={(event) => setConfirmation(event.target.value)}
@@ -1329,10 +1538,10 @@ function ProjectTab({ client, permissionMode, run, reloadProjects }: CommonProps
           )}
           <button
             type="button"
-            className="danger"
+            className="primary"
             disabled={permissionMode === 'STRICT' && confirmation !== 'TRUST'}
             onClick={() => {
-              void run('正在信任项目', async () => {
+              void actions.run('project', '正在添加项目', async () => {
                 await client.command({
                   command: 'project.trust',
                   path,
@@ -1350,6 +1559,7 @@ function ProjectTab({ client, permissionMode, run, reloadProjects }: CommonProps
           </button>
         </div>
       )}
+      </fieldset>
     </section>
   );
 }

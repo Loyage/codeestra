@@ -81,8 +81,9 @@ export function TranscriptPanel({ client, sessionId, executionState, sessionStat
   const [notice, setNotice] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Record<string, string>>({});
   const cursorRef = useRef<string | null>(null);
+  const inFlightRef = useRef<Promise<void> | null>(null);
 
-  const read = useCallback(async (recovered: boolean): Promise<void> => {
+  const readPage = useCallback(async (recovered: boolean): Promise<void> => {
     try {
       const next = await client.command<SessionTranscriptView>({
         command: 'session.transcript',
@@ -104,12 +105,19 @@ export function TranscriptPanel({ client, sessionId, executionState, sessionStat
         // say so instead of silently showing a different region than the user was reading.
         cursorRef.current = null;
         setNotice('会话文件游标已失效，已从头重新读取。');
-        await read(true);
+        await readPage(true);
         return;
       }
       setError(message);
     }
   }, [client, sessionId]);
+
+  const read = useCallback((recovered: boolean): Promise<void> => {
+    if (inFlightRef.current !== null) return inFlightRef.current;
+    const request = readPage(recovered).finally(() => { inFlightRef.current = null; });
+    inFlightRef.current = request;
+    return request;
+  }, [readPage]);
 
   useEffect(() => {
     // One initial read per Session. Kept separate from the polling effect so that a Session ending
@@ -124,7 +132,15 @@ export function TranscriptPanel({ client, sessionId, executionState, sessionStat
   }, [read]);
 
   useEffect(() => {
-    if (!active) return undefined;
+    if (!active) {
+      // Catch the final provider messages even if EXITED arrives between polling ticks.
+      let disposed = false;
+      void (async () => {
+        await inFlightRef.current;
+        if (!disposed) await read(false);
+      })();
+      return () => { disposed = true; };
+    }
     const timer = setInterval(() => { void read(false); }, pollIntervalMs);
     return () => { clearInterval(timer); };
   }, [active, read]);
@@ -151,7 +167,7 @@ export function TranscriptPanel({ client, sessionId, executionState, sessionStat
           内容来自 Provider 自己的会话文件，只读展示；不会写入数据库，也不改动任务状态。
         </span>
       </div>
-      {error === null ? null : <p className="error">{error}</p>}
+      {error === null ? null : <p className="error" role="alert">{error}</p>}
       {notice === null ? null : <p className="muted">{notice}</p>}
       {view !== null && !view.fileAvailable ? (
         <p className="muted">{view.note ?? '没有可显示的执行过程。'}</p>
@@ -229,7 +245,10 @@ export function TranscriptPanel({ client, sessionId, executionState, sessionStat
         })}
       </div>
       {view !== null && view.hasMore ? (
-        <p className="muted">还有更早的记录未显示；此面板会从游标继续读取。</p>
+        <div className="actions">
+          <button type="button" onClick={() => { void read(false); }}>加载后续记录</button>
+          <span className="muted">还有记录未显示，按会话顺序从当前游标继续读取。</span>
+        </div>
       ) : null}
     </div>
   );
