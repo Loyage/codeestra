@@ -41,9 +41,19 @@ for await (const chunk of Bun.stdin.stream()) {
         sessionId: 'stub-session-1', sessionFile: join(process.cwd(), 'session.jsonl'), messageCount: 0 } });
     } else if (record.type === 'prompt') {
       emit({ id: record.id, type: 'response', command: 'prompt', success: true });
-      if (mode === 'CRASH_AFTER_PROMPT') setTimeout(() => process.exit(3), 10);
-      else emit({ type: 'extension_ui_request', id: 'stub-request-1', method: 'confirm',
-        title: 'CODEESTRA_PERMISSION:call-1:write:abc', message: 'Allow once?' });
+      if (mode === 'CRASH_AFTER_PROMPT') { setTimeout(() => process.exit(3), 10); }
+      else if (mode === 'PROVIDER_ERROR') {
+        emit({ type: 'message_end', message: { role: 'assistant', content: [], stopReason: 'error',
+          errorMessage: 'Codex error: The usage limit has been reached' } });
+        emit({ type: 'agent_settled' });
+      } else if (mode === 'NORMAL_TURN') {
+        emit({ type: 'message_end', message: { role: 'assistant',
+          content: [{ type: 'text', text: 'done' }], stopReason: 'stop' } });
+        emit({ type: 'agent_settled' });
+      } else {
+        emit({ type: 'extension_ui_request', id: 'stub-request-1', method: 'confirm',
+          title: 'CODEESTRA_PERMISSION:call-1:write:abc', message: 'Allow once?' });
+      }
     } else if (record.type === 'extension_ui_response') {
       received.uiResponses.push(record);
       save();
@@ -76,7 +86,7 @@ function withTimeout<T>(value: Promise<T>, label: string): Promise<T> {
   ]);
 }
 
-function fixture(mode: 'SUCCEED' | 'CRASH_AFTER_PROMPT' = 'SUCCEED') {
+function fixture(mode: 'SUCCEED' | 'CRASH_AFTER_PROMPT' | 'PROVIDER_ERROR' | 'NORMAL_TURN' = 'SUCCEED') {
   const root = temporaryDirectory();
   const stubPath = join(root, 'stub-pi.ts');
   const reportPath = join(root, 'report.json');
@@ -201,6 +211,34 @@ describe('Pi RPC process adapter', () => {
       operationId: 'operation', answerId: 'answer', attentionId: 'attention',
       providerRequestId: 'request', responseType: 'CONFIRM', answer: { type: 'CANCEL' },
     })).rejects.toMatchObject({ code: 'LIVE_SESSION_UNAVAILABLE', deliveryMayHaveOccurred: true });
+  });
+
+  test('reports a provider error turn as a FAILURE completion instead of success', async () => {
+    // A settled run whose assistant message ended with a provider error (for example an exhausted
+    // usage limit) did not finish the work, so the Runtime must not see a SUCCESS completion.
+    const { adapter, request } = fixture('PROVIDER_ERROR');
+    const ref = await adapter.start(request);
+    const events = [];
+    for await (const event of adapter.observe(ref)) events.push(event);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: 'completed', outcome: 'FAILURE' });
+    expect((events[0] as { evidence: { ref: string } }).evidence.ref)
+      .toContain('turn=error: Codex error: The usage limit has been reached');
+    expect(adapter.unconfirmedStops()).toEqual([]);
+  });
+
+  test('reports a normally finished turn as SUCCESS', async () => {
+    const { adapter, request } = fixture('NORMAL_TURN');
+    const ref = await adapter.start(request);
+    const events = [];
+    for await (const event of adapter.observe(ref)) events.push(event);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: 'completed', outcome: 'SUCCESS',
+      evidence: { toolsQuiescent: true, ownedWritersStopped: true },
+    });
+    expect((events[0] as { evidence: { ref: string } }).evidence.ref)
+      .toContain('pi-rpc:agent_settled:session=stub-session-1');
   });
 
   test('reports a lost provider process as disconnected instead of claiming completion', async () => {

@@ -1,6 +1,6 @@
 # ADR-0002：首个 Adapter、权限、取消与版本切换
 
-Status：Accepted（用户明确选择四项 A）
+Status：Accepted（用户明确选择四项 A）；**Amended by ADR-0008**：审批/取消/不抢占要求全部保留，“保留原生审批”的优先级降为效率原则之下，且不得再新增审批层。
 
 ## Context / Options
 

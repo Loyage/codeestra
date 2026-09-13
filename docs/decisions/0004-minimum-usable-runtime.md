@@ -1,6 +1,6 @@
 # ADR-0004：最小可用 Runtime 形态
 
-Status：Accepted（用户明确选择四项；Phase 1 工具分类与回答接口已补充确认）
+Status：Accepted（用户明确选择四项；Phase 1 工具分类与回答接口已补充确认）；**Amended by ADR-0008**：CLI 明确为完备命令面（UI 只是便利层）；项目信任与逐次审批门禁保留不删，但不再新增任何权限门禁，权限管理（多用户/沙箱/密钥）移出当前范围。
 
 ## Context
 

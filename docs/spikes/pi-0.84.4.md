@@ -1,6 +1,6 @@
 # Pi 0.84.4 Adapter Spike
 
-状态：已完成文档核对、受控本机 RPC spike、adapter transport smoke，以及真实 `PiRpcAdapter` 子进程实现；Runtime 事件/回答 pump 与 Git 授权服务尚未实现。
+状态：已完成文档核对、受控本机 RPC spike、adapter transport smoke、真实 `PiRpcAdapter` 子进程实现，以及 FOUNDATION-019 的真实模型/工具受控验收（deepseek-flash：真实 `write` 调用被 fail-closed gate 拦下并在 UI 逐次审批，随后成果 commit 与 Task verification PASSED）。Runtime 事件/回答 pump 与 Git 授权服务已在其后实现；本文中“未以真实模型运行”的记录仅代表当时状态，已由 FOUNDATION-019 取代；取消超时与孤儿进程 reconcile 仍未验收。
 
 ## 范围与环境
 

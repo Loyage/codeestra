@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { agentObservedEventSchema, runtimeRequestSchema } from '../src/index.js';
+import { agentObservedEventSchema, maxEventReadLimit, runtimeRequestSchema,
+  runtimeStreamFrameSchema } from '../src/index.js';
 
 const base = {
   requestId: '11111111-1111-4111-8111-111111111111',
@@ -103,6 +104,87 @@ describe('Runtime task request boundary', () => {
     expect(runtimeRequestSchema.safeParse({
       ...trust,
       expectedVerificationPolicy: { state: 'PRESENT', mainCommit: 'a'.repeat(40), digest: 'short' },
+    }).success).toBe(false);
+  });
+});
+
+describe('Runtime event subscription boundary', () => {
+  const list = {
+    requestId: '11111111-1111-4111-8111-111111111111',
+    schemaVersion: 1 as const,
+    command: 'events.list' as const,
+  };
+
+  test('defaults the event read cursor and limit without inventing a project filter', () => {
+    expect(runtimeRequestSchema.parse(list)).toEqual({ ...list, sinceSequence: 0, limit: 100 });
+    expect(runtimeRequestSchema.parse({ ...list, sinceSequence: 7, limit: 5 })).toMatchObject({
+      sinceSequence: 7, limit: 5,
+    });
+  });
+
+  test('rejects cursors, limits, and project filters outside the contract', () => {
+    expect(runtimeRequestSchema.safeParse({ ...list, sinceSequence: -1 }).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({ ...list, sinceSequence: 1.5 }).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({ ...list, limit: 0 }).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({ ...list, limit: maxEventReadLimit + 1 }).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({ ...list, projectId: 'not-a-uuid' }).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({
+      ...list, command: 'events.subscribe', unknownField: true,
+    }).success).toBe(false);
+  });
+
+  test('distinguishes a from-now subscription from an explicit cursor', () => {
+    const subscribe = {
+      requestId: list.requestId,
+      schemaVersion: 1 as const,
+      command: 'events.subscribe' as const,
+    };
+    // An absent cursor means "from the current tail", so it must stay absent rather than default to 0.
+    expect(runtimeRequestSchema.parse(subscribe)).toEqual(subscribe);
+    expect(runtimeRequestSchema.parse({ ...subscribe, sinceSequence: 0 }))
+      .toMatchObject({ sinceSequence: 0 });
+    expect(runtimeRequestSchema.safeParse({ ...subscribe, sinceSequence: -1 }).success).toBe(false);
+  });
+});
+
+describe('Runtime stream frames', () => {
+  const envelope = {
+    eventId: 'event-1', sequence: 4, eventType: 'TaskCreated', schemaVersion: 1,
+    projectId: 'project-1', aggregateType: 'Task', aggregateId: 'task-1', aggregateVersion: 0,
+    correlationId: 'correlation-1', causationId: null, occurredAt: 5, payload: { taskId: 'task-1' },
+  };
+
+  test('accepts the frames a subscriber can receive', () => {
+    expect(runtimeStreamFrameSchema.safeParse({
+      schemaVersion: 1, type: 'subscribed', requestId: '11111111-1111-4111-8111-111111111111',
+      cursor: 0, projectId: null,
+    }).success).toBe(true);
+    expect(runtimeStreamFrameSchema.safeParse({
+      schemaVersion: 1, type: 'event', cursor: 4, event: envelope,
+    }).success).toBe(true);
+    expect(runtimeStreamFrameSchema.safeParse({
+      schemaVersion: 1, type: 'heartbeat', cursor: 4,
+    }).success).toBe(true);
+    expect(runtimeStreamFrameSchema.safeParse({
+      schemaVersion: 1, type: 'error', code: 'INVALID_CURSOR', message: 'ahead of the log',
+    }).success).toBe(true);
+  });
+
+  test('refuses a frame whose cursor or envelope cannot be trusted', () => {
+    expect(runtimeStreamFrameSchema.safeParse({
+      schemaVersion: 1, type: 'event', cursor: 0, event: envelope,
+    }).success).toBe(false);
+    expect(runtimeStreamFrameSchema.safeParse({
+      schemaVersion: 1, type: 'event', cursor: 4, event: { ...envelope, sequence: 0 },
+    }).success).toBe(false);
+    expect(runtimeStreamFrameSchema.safeParse({
+      schemaVersion: 1, type: 'event', cursor: 4,
+    }).success).toBe(false);
+    // A frame type the Runtime never sends must not be accepted from a peer either.
+    expect(runtimeStreamFrameSchema.safeParse({ schemaVersion: 1, type: 'snapshot', cursor: 4 }).success)
+      .toBe(false);
+    expect(runtimeStreamFrameSchema.safeParse({
+      schemaVersion: 1, type: 'heartbeat', cursor: 4, extra: true,
     }).success).toBe(false);
   });
 });

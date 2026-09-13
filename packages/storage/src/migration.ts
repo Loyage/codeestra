@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 6;
+export const phase1SchemaVersion = 7;
 
 export const phase1Migration = `
 CREATE TABLE projects (
@@ -324,8 +324,7 @@ ALTER TABLE adapter_events_v5 RENAME TO adapter_events;
  * the verification runs themselves. `verification_runs` is rebuilt because every column a
  * run needs is mandatory evidence, and SQLite cannot add NOT NULL columns to a live table.
  */
-export const taskVerificationMigration = `
-CREATE TABLE project_verification_policy_confirmations (
+export const taskVerificationMigration = `CREATE TABLE project_verification_policy_confirmations (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id),
   policy_state TEXT NOT NULL CHECK(policy_state IN ('ABSENT','PRESENT')),
@@ -376,4 +375,35 @@ DROP TABLE verification_runs;
 ALTER TABLE verification_runs_v6 RENAME TO verification_runs;
 CREATE INDEX verification_subject ON verification_runs(task_id,revision_id,tested_commit);
 CREATE INDEX verification_by_task ON verification_runs(project_id,task_id,queued_at);
+`;
+
+/**
+ * A failed workspace preparation is recorded as a RELEASED workspace so its history is kept, but
+ * the previous `path UNIQUE` column constraint also blocked every later attempt for the same
+ * Task and path — the documented "fix the conflict and retry" flow could not work. The invariant
+ * that matters is "one *live* workspace per path", which is expressed as a partial unique index.
+ *
+ * `executions` and the result-commit authorizations reference `workspaces(task_id,id)` by name, so
+ * the rebuild runs with foreign keys disabled: the child REFERENCES clauses keep naming
+ * `workspaces`, which resolves again once the rebuilt table is renamed back.
+ */
+export const workspaceRetryMigration = `
+CREATE TABLE workspaces_v7 (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  branch_ref TEXT NOT NULL,
+  path TEXT NOT NULL,
+  ownership_token TEXT NOT NULL UNIQUE,
+  base_commit TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('RESERVED','PREPARING','READY','IN_USE',
+    'RECOVERY_REQUIRED','RETAINED','RELEASED')),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  UNIQUE(task_id,id)
+) STRICT;
+INSERT INTO workspaces_v7(id,task_id,branch_ref,path,ownership_token,base_commit,state,created_at)
+  SELECT id,task_id,branch_ref,path,ownership_token,base_commit,state,created_at FROM workspaces;
+DROP TABLE workspaces;
+ALTER TABLE workspaces_v7 RENAME TO workspaces;
+CREATE UNIQUE INDEX one_live_workspace ON workspaces(task_id) WHERE state <> 'RELEASED';
+CREATE UNIQUE INDEX one_live_workspace_path ON workspaces(path) WHERE state <> 'RELEASED';
 `;

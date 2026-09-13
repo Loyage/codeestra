@@ -12,5 +12,5 @@ export type {
 } from './database.js';
 export {
   agentAnswerMigration, agentDisconnectMigration, agentObservationMigration, agentStartMigration,
-  phase1Migration, phase1SchemaVersion, taskVerificationMigration,
+  phase1Migration, phase1SchemaVersion, taskVerificationMigration, workspaceRetryMigration,
 } from './migration.js';

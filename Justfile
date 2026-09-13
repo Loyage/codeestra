@@ -16,7 +16,15 @@ typecheck:
 test:
     bun run test
 
-# 类型检查与测试
+# UI 类型检查
+ui-typecheck:
+    bun run --cwd apps/ui typecheck
+
+# 构建 UI 静态资产（Runtime 从 apps/ui/dist 托管）
+ui-build:
+    bun run --cwd apps/ui build
+
+# 类型检查、测试与 UI 构建
 check:
     bun run check
 

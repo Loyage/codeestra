@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "id": "install",
+      "argv": ["bun", "install", "--frozen-lockfile"],
+      "cwd": ".",
+      "timeoutSeconds": 600
+    },
+    {
+      "id": "check",
+      "argv": ["bun", "run", "check"],
+      "cwd": ".",
+      "timeoutSeconds": 1800
+    }
+  ]
+}

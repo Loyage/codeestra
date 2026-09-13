@@ -12,6 +12,65 @@ export const repositoryIdentitySchema = z.strictObject({
 });
 export type RepositoryIdentity = z.infer<typeof repositoryIdentitySchema>;
 
+/**
+ * Read cursor over the append-only event log. `sequence` is the only ordering guarantee;
+ * it is a per-database counter, not a distributed clock. Readers resume with an exclusive
+ * cursor so a reconnect neither skips nor repeats events.
+ */
+export const eventEnvelopeSchema = z.strictObject({
+  eventId: z.string().min(1),
+  sequence: z.number().int().positive(),
+  eventType: z.string().min(1),
+  schemaVersion: z.number().int().positive(),
+  projectId: z.string().min(1),
+  aggregateType: z.string().min(1),
+  aggregateId: z.string().min(1),
+  aggregateVersion: z.number().int().nonnegative(),
+  correlationId: z.string().min(1),
+  causationId: z.string().min(1).nullable(),
+  occurredAt: z.number().int().nonnegative(),
+  payload: z.unknown(),
+});
+export type EventEnvelope = z.infer<typeof eventEnvelopeSchema>;
+
+/**
+ * Frames of a long-lived subscription connection. A subscription is not a durable consumer:
+ * `event_deliveries` stays the at-least-once outbox, while a subscriber that dies simply
+ * reconnects with its last cursor.
+ */
+export const runtimeStreamFrameSchema = z.discriminatedUnion('type', [
+  z.strictObject({
+    schemaVersion: z.literal(1),
+    type: z.literal('subscribed'),
+    requestId: z.string().uuid(),
+    /** Sequence this subscriber is caught up to; events arrive only above it. */
+    cursor: z.number().int().nonnegative(),
+    projectId: z.string().uuid().nullable(),
+  }),
+  z.strictObject({
+    schemaVersion: z.literal(1),
+    type: z.literal('event'),
+    cursor: z.number().int().positive(),
+    event: eventEnvelopeSchema,
+  }),
+  z.strictObject({
+    schemaVersion: z.literal(1),
+    type: z.literal('heartbeat'),
+    cursor: z.number().int().nonnegative(),
+  }),
+  /** Terminal frame: the Runtime stops the subscription after reporting it. */
+  z.strictObject({
+    schemaVersion: z.literal(1),
+    type: z.literal('error'),
+    code: z.string().min(1),
+    message: z.string(),
+  }),
+]);
+export type RuntimeStreamFrame = z.infer<typeof runtimeStreamFrameSchema>;
+
+/** Upper bound for one event read, so a client cannot ask the Runtime to buffer unbounded rows. */
+export const maxEventReadLimit = 500;
+
 const requestBase = {
   requestId: z.string().uuid(),
   schemaVersion: z.literal(1),
@@ -54,6 +113,29 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     expectedVerificationPolicy: verificationPolicyConfirmationSchema,
   }),
   z.strictObject({ ...requestBase, command: z.literal('project.list') }),
+  /**
+   * Lazily starts the local UI HTTP service bound to 127.0.0.1 and returns its address. The token
+   * only ever lives in Runtime memory and is handed out over this socket; it is never persisted.
+   */
+  z.strictObject({ ...requestBase, command: z.literal('runtime.ui') }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('events.list'),
+    projectId: z.string().uuid().optional(),
+    /** Exclusive cursor; defaults to 0, which reads the log from its beginning. */
+    sinceSequence: z.number().int().nonnegative().default(0),
+    limit: z.number().int().min(1).max(maxEventReadLimit).default(100),
+  }),
+  /**
+   * Opens a streaming connection. Without `sinceSequence` the Runtime starts from the current
+   * tail, so a client takes a snapshot first and then subscribes without a message gap.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('events.subscribe'),
+    projectId: z.string().uuid().optional(),
+    sinceSequence: z.number().int().nonnegative().optional(),
+  }),
   z.strictObject({
     ...requestBase,
     command: z.literal('task.create'),

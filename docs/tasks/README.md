@@ -303,9 +303,167 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 
 限制：未以真实 Pi 产出变更后跑完整 prepare→commit→verify 手动验收（正链路由脚本与临时仓库测试覆盖）；无沙箱/网络隔离；无 `integration verification`、无 main 提升；副本目录尚无 `task verification prune`，失败现场需人工清理；同一 Task 并发触发多次验证会各自创建副本并行执行（互不干扰但会重复运行命令），Phase 1 不做去重。
 
+## FOUNDATION-017 — 只读事件订阅长连接
+
+状态：Runtime 订阅传输、Hub 与 CLI `events list`/`events tail` 已实现并通过真实 socket 测试；长命令进度可见性本轮明确不做。
+
+用户本轮选择：下一步切片为「事件订阅基础」；verification「进度可见」暂不改（不新增进度事件、不改 `task.verify` 同步语义）。
+
+已实现：
+- `packages/contracts` 新增 `events.list`（`sinceSequence` 默认 0、`limit` ≤500）与 `events.subscribe`（`sinceSequence` 缺省表示“从当前尾部开始”，不默认成 0），以及严格流帧 schema：`subscribed` / `event` / `heartbeat` / `error`；帧的 `cursor` 与事件 envelope 均受校验。
+- `packages/storage` 新增只读游标读取：`listEventsAfter`（排他游标、可选 project 过滤、1..500 上限、非法游标/上限拒绝）与 `latestEventSequence`。不写 `event_deliveries`，不改变任何业务状态。
+- `apps/runtime/src/event-subscription-service.ts`：共享轮询的 `EventSubscriptionHub`，一帧 `subscribed` 后按 sequence 交付 `event`，定期 `heartbeat`，`error` 为终止帧；订阅只持有 socket 与游标，不重放 command。
+- 游标语义：排他；显式游标超前于日志时回 `INVALID_CURSOR` 并终止（不静默夹到尾部）；客户端断开或发送能力失败即移除订阅；日志读取失败回 `EVENT_READ_FAILED` 并移除，不假装仍在跟踪。project 过滤只影响交付，游标仍会前进（读到不满一批即证明已读到尾部），因此过滤订阅重连同样不漏不重。
+- Runtime socket 现在同时承载一次性命令与长连接：`events.subscribe` 不走一次性 dispatch，订阅建立后同一连接再发 command 属违约并直接关闭；`runtime.ping` 报告 `eventSubscribers`；shutdown 关闭 hub 且订阅 socket 随 listener 停止。终止帧与 `socket.end()` 同次刷出，避免客户端只看到断电而拿不到原因。
+- CLI 新增 `events list [--project] [--since] [--limit]` 与 `events tail [--project] [--since]`；`tail` 的 stdout 每行一个 event envelope（供脚本消费），订阅元信息与错误走 stderr，游标失效以退出码 1 报告。
+
+实际验证：
+- 新增 20 项测试：contracts 5 项（请求默认值/越界拒绝、流帧校验）、storage 5 项（顺序/排他游标/项目过滤/上限与游标拒绝/空日志为 0）、hub 8 项（快照游标、显式重放与 resume 不漏不重、项目过滤下游标仍前进、`INVALID_CURSOR` 不夹断、对端掉线移除、heartbeat、定时轮询自动交付、读取失败终止）、真实 socket 集成 2 项（同 socket 并发一次性命令、连接后新事件实时到达并以记录的游标 resume 无重复；`INVALID_CURSOR` 只关闭该连接且不留下订阅）。
+- `nix shell nixpkgs#bun nixpkgs#nodejs_24 nixpkgs#just -c just verify`：TypeScript、212 项 domain 测试与 144 项 Bun tests 通过，`bun audit` 无已知漏洞。
+- 临时 `CODEESTRA_HOME` + 临时 Git 仓库 CLI smoke：`events list --since 0` 返回 2 条事件与 `cursor`/`hasMore`；后台 `events tail` 打印 `Subscribed at cursor 2`，随后新 Task 的两条事件以 sequence 3/4 实时流出；`events tail --since 9999` 打印 `INVALID_CURSOR` 且退出码 1；`status` 显示 `eventSubscribers` 计数；smoke 后已停止 Runtime 并清理临时目录。
+- 校验中发现并修复两处真实缺陷：`socket.end()` 与终止帧的写出顺序（原先可能丢掉错误帧，客户端看到“无输出的成功”）；CLI `tail` 先 `socket.end()` 再报告错误，会被同步触发的 close 覆盖成退出码 0。
+
+限制：这是一条只读观察通道，不构成“已交付”证据，也不替代 outbox 的至少一次投递。CLI 不持久化游标、无自动重连（重连需显式 `--since`）；订阅无按 project 的鉴权，边界仍是 0600 socket；`heartbeat` 间隔固定 15s 且未写入业务事件；长命令（`task.run`/`task.verify`）仍同步占用连接，其进度事件需扩事件目录与后台 Operation，本轮未做。
+
+## FOUNDATION-018 — 本地 Web UI 入口（`codeestra ui`）
+
+状态：ADR-0007 已确认并实现；HTTP/SSE 边界、CLI 入口、React 界面与真实浏览器验证均已完成。真实 Pi 工具执行仍未验收。
+
+用户本轮选择：“可以运行的、有 UI 界面的软件”“先让我有一个可操作的东西” → 本地 Web UI（不是 Tauri/终端 TUI），且首版包含跑 Agent 的按钮。
+
+已实现：
+- `apps/runtime/src/http-api.ts`：按需启动、只绑 `127.0.0.1` 的 HTTP 服务。`/api/command` 复用同一 `dispatch` 与同一 Zod 请求 schema（HTTP 不新增业务语义）；`/api/events` 把 `EventSubscriptionHub` 的帧以 SSE 形式输出（`fetch` 流式读取，因此 token 从不进 URL）。
+- 安全边界：每次启动随机 token（`randomBytes(32)`），只存 Runtime 内存，经既有 0600 socket 由 `runtime.ui` 下发，不写盘、不进事件与日志；`Authorization: Bearer` 常量时间比较；无 CORS 头，存在 `Origin` 时要求同源；POST 必须 `application/json`；所有响应 `no-store` + `nosniff`；静态资产路径拒绝 `..`/绝对路径；`events.subscribe` 与 `runtime.ui` 不能经 HTTP 调用。
+- `runtime.ui` 幂等（重复调用返回同一地址与 token），未调用时不监听任何端口；shutdown 停止 HTTP 服务与订阅。资产未构建时报 `UI_ASSETS_MISSING` 并提示构建命令，不回退到伪界面。
+- `apps/ui`（React 19 + Vite）：项目 inspect/trust（两步确认 + 策略展示）、任务 create/list/submit/status（含 Execution/Session 与验证记录）、Attention Inbox（allow/deny/value/cancel）、`task run`、`task result prepare` + `commit --confirm`（展示 expected HEAD/指纹/静止证据）、`task verify`、实时事件流（自跟踪 cursor）。token 经 URL fragment 传入并立即 `replaceState` 清除，存入 `sessionStorage`。
+- CLI：`codeestra ui [--no-open]` 打印地址并可选打开浏览器；`runtime.ping` 增 `uiRunning`。
+- 构建与校验：`bun run check` 现含 `apps/ui` 类型检查与 Vite 构建；`just` 增 `ui-typecheck`/`ui-build`。
+
+实际验证：
+- 新增 5 项 HTTP 边界测试：无/错 token 401、异源 POST 403（同源 200）、非 JSON 415、未知命令与 HTTP 上禁止的流式/UI 启动命令 400、静态资产与 SPA 回退、无资产时 `UI_ASSETS_MISSING`、`stop()` 释放端口、SSE 帧与 `INVALID_CURSOR` 终止帧、start 幂等且 token 不出现在服务器可见的 URL 部分。
+- `nix shell nixpkgs#bun nixpkgs#nodejs_24 nixpkgs#just -c just verify`：TypeScript（Runtime/CLI）、212 项 domain 测试、149 项 Bun tests、UI 类型检查与 Vite 构建、`bun audit` 无已知漏洞。
+- 临时 `CODEESTRA_HOME` + 临时仓库 HTTP smoke：页面 200（`<title>Codeestra</title>`）、JS 资产 200、无 token 的 `/api/command` 401、带 token 的 `task.list` 返回任务、`/api/events?sinceSequence=0` 输出 `subscribed` 与事件帧；未构建资产时 `codeestra ui` 报 `UI_ASSETS_MISSING` 且退出码 1。
+- **真实浏览器验证**（Zen + Orca computer-use，截图证据）：页面渲染项目选择器/任务列表/新建表单；在界面上输入规格并点击 `Create draft` 后 `#2 DRAFT` 出现且事件流显示 `live cursor 4` 与对应 `TaskCreated` 帧——即 UI → HTTP → Runtime → SQLite → 事件 → SSE → UI 的真实闭环。
+
+> 注（ADR-0008）：本条记录的 computer-use 浏览器验证是历史证据，今后不再采用该方式复现；UI 验收改为 headless 命令面/HTTP 断言加用户在场人工确认。
+- 浏览器验证时发现并修复两个真实缺陷：Bun 默认 `idleTimeout` 10s 会在 15s 心跳之间断开 SSE（改为 120s，并在流开头发送注释帧立即 flush）；UI 原先把一次断流当成终止错误，现改为按最后 cursor 自动重连（最多 5 次退避），只有终止性 `error` 帧才停止跟随。
+
+限制：UI 不新增可绕过门禁的旁路，trust/成果 commit 仍需显式确认；没有 cancel/pause 按钮（Task cancel 仍是 NEXT 项），运行中的任务只能靠停止 Runtime 释放。token 只在 Runtime 进程存活期间有效，重启即失效；订阅无按 project 鉴权（边界仍是本机 127.0.0.1 + token）。curl 等客户端访问回环地址时需自行绕过系统代理（本机 `http_proxy` 未含回环例外，浏览器默认绕过）。真实 Pi 模型与工具执行、gate 审批、取消超时仍未验收——界面上的“Run task”按钮会直接触发它们，因此首次真实运行仍应在一次性仓库中有人在场时进行。
+
+## FOUNDATION-019 — 真实 Pi 端到端受控验收（deepseek-flash）
+
+状态：真实模型 + 真实工具执行 + 真实 gate 审批 + 成果 commit + Task verification 全链路已跑通并有证据；过程中发现并修复 7 个真缺陷。
+
+用户本轮决定：用本 UI 做受控真实验收；因 Codex 额度耗尽，重试模型选定 `deepseek/deepseek-flash`；模型选择先只做环境开关（`CODEESTRA_PI_PROVIDER` / `CODEESTRA_PI_MODEL`），暂不写入领域记录。
+
+### 已验收（有证据）
+
+环境：临时 `CODEESTRA_HOME` + 临时 Git 仓库（含人工维护的 `.codeestra/policies/verification.json`），headless 驱动真实 Pi 0.84.4；模型 `deepseek/deepseek-flash`。
+
+- 真实模型与工具：pi session 文件记录 `model_change: deepseek deepseek-flash`；assistant 第一条 `stopReason: toolUse`（2336 tokens）发起 `write {"path":"hello.txt","content":"hello from codeestra\n"}`，第二条 `stopReason: stop`（2377 tokens）。**文件只在人工批准后写入**，内容与要求一致。
+- fail-closed gate + typed Attention：`UserAttentionRequested`（kind PERMISSION、responseType CONFIRM），title 形如 `CODEESTRA_PERMISSION:<toolCallId>:write:<input sha256>`，并在界面上逐次审批（Allow）后交付；事件序列 `UserAttentionRequested → IntentRecorded(ANSWER_AGENT) → UserAnswerRecorded → UserAnswerDelivered → Session ACTIVE → Execution/Task RUNNING`。
+- 状态与事件：Task #1 共 21 条事件，从 `TaskCreated` 到 `VerificationCompleted`；最终 `task #1 EXECUTED v5`、Execution `SUCCEEDED`（resources released、Session EXITED）、`VerificationCompleted PASSED` 绑定 tested commit `2e9a494e`/tree `a782ba57`/policyDigest（证据含每条命令 exitCode/duration/digest，不含原始输出）。
+- 成果 commit：authorization 只列出 `ADDED hello.txt`；commit `2e9a494e` 沿用仓库 identity、`hookOutcome: PASSED`（未 `--no-verify`）。
+- 隔离性：用户仓库 main 全程停在 base `0c537b6`、`git status` clean；成果只落在内部 `refs/heads/task/<task-id>`，未合并、未 push。
+- UI 闭环：在界面上选择任务→`Run task…`→无需手点 Refresh 就看到 Attention 徽标与卡片→`Allow`；浏览器截图与事件日志互相印证。
+- 失败面：Task #2 的验证以 `FAILED/COMMAND_FAILED` 结束（`test -f hello.txt` 退出 1），因为它的分支不含 Task #1 的成果。这正是“Task 验证 ≠ 集成验证、上游成果未集成前下游无法通过”的预期行为，而非回归。
+
+### 本轮发现并修复的缺陷
+
+| # | 缺陷 | 后果 | 修复 |
+|---|---|---|---|
+| 1 | `createPiAdapterRegistry` 读了 `environment` 却未传给 `PiRpcAdapter` | 生产 Runtime **从来无法启动 Pi**（env 为空、无 PATH）；此前“真实 Pi transport smoke”是直接构造 adapter，绕过了该装配路径 | 传递 `environment` + registry 回归测试（修复前失败/修复后通过） |
+| 2 | worktree 归属校验要求传入 root 字符串等于 realpath | macOS `/tmp`→`/private/tmp` 等符号链接祖先直接误报 `UNSAFE_CHECKOUT`；验证副本路径同源问题 | `packages/git` 先解析一次规范 root，再用规范路径做包含判定与记录；新增符号链接根测试 |
+| 3 | service 预留路径（非规范）与 `prepareWorkspace` 返回路径（规范）不一致 | `INVALID_STATE: Prepared workspace did not match its reservation` | workspace service 统一规范化 worktrees root 后再预留；路径两处同源 |
+| 4 | `workspaces.path` 无条件 UNIQUE | **失败一次就永久无法重试**（“修好冲突再重试”的已声明流程不可用） | schema v7：改为部分唯一索引（仅约束非 RELEASED）；真实 v6→v7 迁移测试 + `foreign_key_check` |
+| 5 | `agent_settled` 一律记 SUCCESS | **模型报错/空跑被记为“任务完成”**（诚实性缺陷） | 按 `message_end`/`turn_end` 的 assistant `stopReason` 分类：非 `stop`/`toolUse` 记 `FAILURE` 并附 provider 原文（截断）；新增两条 stub-transport 测试 |
+| 6 | Bun `idleTimeout` 默认 10s，而 Hub 心跳 15s | UI 上运行长任务会先被断连，丢掉响应 | `idleTimeout: 120` + 命令响应保活字节（首个间隔内完成则不插入任何填充）+ UI 按 cursor 自动重连退避；新增慢命令测试 |
+| 7 | UI 不随事件刷新 Attention/任务详情 | Agent 已阻塞等审批，界面却显示“Nothing is waiting for you” | 订阅流命中 Attention/Execution/Task/Session/Verification 事件时自动刷新对应视图（浏览器验证：徽标与卡片自动出现） |
+
+### 实际验证
+
+- `nix shell nixpkgs#bun nixpkgs#nodejs_24 nixpkgs#just -c just verify`：TypeScript、212 项 domain 测试、**158 项 Bun tests**、UI 类型检查与 Vite 构建、`bun audit` 无已知漏洞。
+- 验收环境与证据保留在 `/tmp/codeestra-ds-home.pI0P`（含 pi session、verifications 副本、runtime.sqlite）与 `/tmp/codeestra-acceptance-evidence/`（首轮失败证据：`errorMessage: Codex error: The usage limit has been reached`、`stopReason: error`）。两者均为临时目录，可随时删除。
+
+### 仍未验收 / 已知限制
+
+- gate 的**拒绝路径**未在真实 provider 下验证（本轮只走了 Allow）；未知工具、无 UI channel 仍只有单测覆盖。
+- 无 Task cancel/pause：首轮环境中失败后无变更的 Execution **永久卡在 RUNNING**（`task result prepare` 返回 `NOTHING_TO_COMMIT`，且 `resource_held=1`），目前只能停止 Runtime；这直接说明 cancel 是下一个必需能力。
+- 无 Integration/main 提升：Task #2 因缺少 Task #1 的成果而验证失败，属预期；跨任务累积需要 Phase 4。
+- Attention 的 `prompt_json` 会把工具输入原样入库（本例是文件内容），与“终端输出不入库”的策略不同；工具参数可能含敏感数据，需在后续决定是否摘要化。
+- 长命令仍为同步请求（保活让它不至于断连，但浏览器无法在请求内展示“取消”）；未做孤儿进程 reconcile 与真实取消超时。
+
+## FOUNDATION-020 — 效率优先 / 服务形态（CLI 完备）/ 测试边界（ADR-0008）
+
+状态：决策已确认并已同步全部相关文档；无代码改动（本轮不删除任何门禁、不改测试）。
+
+用户本轮提出三条原则，经四题选择题确认后记录为 ADR-0008（选项：1a / 2a / 3a / 4a）：
+
+1. 效率至上：用户效率是第一目标；安全次要。**保留现有门禁只改优先级表述**——项目 trust、Pi 敏感工具逐次审批与 fail-closed、成果 commit 确认、验证策略确认、main 提升批准全部继续有效，但不再新增任何门禁；权限管理（RBAC/多用户/租户/密钥托管/路径沙箱/网络策略/供应链）明确移出当前范围，不预留。常态路径上任何门禁最多一次显式确认。
+2. 软件本体是服务，CLI 完备：Runtime 是本体；“CLI 接口”定义为 versioned command/query/event 面；每个能力必须能只靠 CLI 完成并可脚本化驱动（含 `--json`、稳定退出码）。Web UI 与未来桌面只是同一命令面的便利前端，**不采用 UI spawn CLI 子进程**的实现方式；“只有 UI 能做”视为缺陷。
+3. 测试边界：自动化测试与验收只用 CLI/命令面（含其 HTTP/SSE 传输）断言；**不使用 computer-use、OS 级键鼠/窗口自动化、桌面应用操作与真实桌面会话**；开发 Agent 不为验证取得用户电脑控制权；产品内 Agent 也不新增屏幕/桌面控制类工具。
+
+### 修改的文件
+
+- 新增 `docs/decisions/0008-efficiency-first-service-form.md`（Status: Accepted；amend ADR-0002/0004/0007 的优先级与入口定位，不取消 ADR-0001 D03 / 0003 / 0006 门禁）。
+- `docs/decisions/README.md`：新增索引项与“优先级标注”说明；ADR-0002/0004/0007 标 Amended。
+- ADR-0002 / 0004 / 0007：Status 行加 Amended 说明；ADR-0007 另注今后验收方式变更。
+- `PROJECT_SPEC.md`：新增 §1.1 “第一原则”；§2 新增不变量 18/19/20；§6 补 CLI 完备与 UI 便利层；§8 补“不实现权限管理”与验收方式；§9 标注第一原则优先级最高。
+- `AGENTS.md`：新增“第一原则”章节；决策规则新增“新增门禁需效率成本评估”；实现与验证新增“不获取电脑控制权”与产品内 Agent 工具边界。
+- `README.md`：顶部新增“第一原则”三条；UI 描述改为共享命令面的便利层。
+- `docs/architecture/README.md`：总体架构补服务形态；已确认语义与风险表补 ADR-0008。
+- `docs/architecture/repository-structure.md`：补入口分层（runtime=本体、cli=完备命令面、ui/desktop=便利前端）与测试边界。
+- `docs/roadmap/mvp.md`：新增“排序原则”节；非目标补权限管理与桌面/键鼠自动化测试。
+- `docs/tasks/README.md`：FOUNDATION-018 的 computer-use 浏览器验证标为历史证据。
+
+### 实际验证
+
+- 代码检索：`grep -rn "computer-use\|Playwright\|playwright\|osascript\|screencapture"`（排除 node_modules）仅命中文档（PROJECT_SPEC/ADR-0008/AGENTS/README 的规则文本与 FOUNDATION-018 的历史记录），**仓库内无桌面自动化或键鼠控制的测试代码/脚本**；本轮未新增依赖。
+- CLI 完备性核查：对 `PROJECT_SPEC.md` §2 第 12/13 条与 ADR-0003/0006 描述的能力逐个对照 README §本地检查 中的命令清单，`project inspect/trust/list`、`task create/list/submit/run/status/result prepare|commit/verify`、`task verification list`、`attention list`（及 answer 路径）、`events list/tail`、`ui`、`stop` 均存在 CLI 入口，未发现仅 UI 可用能力。
+- 回归确认：`bun run check` 通过——TypeScript（Runtime/CLI）与 UI 类型检查通过、212 项 domain Vitest 通过、**159 项 Bun tests** 全部通过、UI Vite 构建成功。本轮无代码改动，此结果只证明既有门禁/测试未被文档变更影响。
+- 未执行：真实 Pi 端到端验收、真实浏览器/桌面验证——本轮为文档级决策记录，不含运行时变更。
+
+### 剩余问题
+
+- 门禁的实际“一次确认”预算目前靠约定而非测试约束；若出现第二道确认，需当作回归开缺陷。
+- CLI `--json` 覆盖度尚未系统核查（当前仅部分命令提供），是 D03 完备性的下一批具体工作项。
+- ADR-0007 列出的 UI 验证项（token/Origin/SSE）今后改用 headless 断言重写，现有实现未变。
+
+## FOUNDATION-021 — 在 Web UI 中打开本项目开发（`codeestra open` + 本仓库验证策略）
+
+状态：已实现并在 CLI/命令面验证（按 ADR-0008 的测试边界，不使用电脑控制/浏览器自动化）；本仓库已注册为真实可信项目。
+
+用户本轮要求“在 Web UI 中打开本项目进行开发”，四题确认选择（均为推荐项）：
+
+1. 提交策略：**一个完整提交**——把本轮全部未提交工作与验证策略文件写入 main。Agent 的 worktree 从 main ref 创建，不提交则 Agent 看不到 `apps/ui`、事件订阅与验收修复。
+2. 验证策略：**`bun run check`**（typecheck + UI typecheck + 212 项 Vitest + Bun tests + UI 构建）。
+3. 入口形态：**新增 `codeestra open [path]`**（ADR-0008：CLI 完备命令面，UI 只是便利层）。
+4. 成果回收：**先手动 merge**（Integration/main 提升仍留后续阶段）。
+
+### 已实现
+
+- `.codeestra/policies/verification.json`（人工维护，位于 main ref，Task 分支无法改写判它的命令）：两条命令——`install`（`bun install --frozen-lockfile`）与 `check`（`bun run check`）。**为什么需要 install**：验证副本是 `git worktree add --detach` 的固定 commit，不含被 gitignore 的 `node_modules`，因此任何依赖 `node_modules` 的策略命令必须先装依赖。
+- `codeestra open [path] [--yes] [--no-open]`（`apps/cli/src/main.ts`）：inspect 仓库 → 打印身份与将要执行的验证命令 → 走与 UI 相同的 TRUST 确认门禁 → `project.trust` → 启动/复用 Web UI → 输出把该项目放进 URL fragment 的地址并按需打开浏览器。它**只组合既有命令**（`project.inspect/verificationPolicy/trust/list`、`runtime.ui`），未新增任何只有 UI 或只有 CLI 可用的路径，也未新增门禁。
+- 预选实现：URL fragment 增加 `project=<id>`（token 仍只在 fragment，绝不进 query/日志）；`apps/ui/src/main.tsx` 一次性解析 fragment 后清空地址栏，`App`/`Console` 用 `initialProjectId` 选中该项目，若该项目不存在则回退到列表首项。
+- `CODEESTRA_UI_DIST` 环境变量：UI 静态资产根可配置（打包安装与测试都需要），默认仍是 `apps/ui/dist`。
+- 端到端测试 `apps/runtime/test/cli-open.test.ts`（Bun test，CLI 子进程 + 独立 temp home/仓库/资产）：断言 `open` 打印策略命令、项目出现在 `project list`（repoRoot 为规范路径）、URL 的 fragment 同时含 token 与 project 且 query 为空、host 为 `127.0.0.1`；断言无确认时**拒绝信任**且 `project list` 仍为空。
+
+### 实际验证
+
+- `nix shell nixpkgs#bun nixpkgs#nodejs_24 nixpkgs#just -c just verify`：TypeScript 与 UI 类型检查通过、**212 项 Vitest** 通过、**161 项 Bun tests** 通过（含新增 2 项 `cli-open`）、UI Vite 构建成功、`bun audit` 无已知漏洞。
+- 真实注册（默认 `CODEESTRA_HOME`）：`codeestra open . --yes --no-open` 输出 URL 的 fragment 含本项目 id；`codeestra project list` 显示本仓库；`task verify` 的策略来源为 main ref 上的 `digest`。
+- 该策略命令的实际可行性由真实 `task verify` 运行确认（见下条“剩余问题”中记录的耗时与网络依赖）。
+
+### 剩余问题
+
+- 验证副本没有 `node_modules`，所以 `install` 依赖网络（bun 缓存可加速）；离线环境会失败并记为 `COMMAND_FAILED`。后续可考虑“验证副本复用主仓库依赖”的可配置策略，但那会改变隔离语义，需先决策。
+- 无 Integration 阶段：成果只在 `refs/heads/task/<task-id>`，需要人工 `git merge task/<task-id>`；main 提升的授权门禁仍未实现。
+- `open` 只预选项目，不预选/创建任务；界面内建任务仍需手填规范。
+- 验证策略变更（改 `.codeestra/policies/verification.json` 并提交）会使已确认的 digest 失效，需重新 `open`/`trust` 确认——这是 ADR-0006 的预期行为，但用户会看到“策略未确认”的拒绝。
+
 ## NEXT — 最小可用纵向切片
 
-1. 接入 outbox 长连接/事件订阅，使 CLI 或后续客户端能持续观察 Runtime 事件，并让长命令（含验证）可见进度。
-2. 继续验证允许工具集、取消超时、真实事件重投与孤儿进程 reconcile；真实 Pi 与 fake 分别验收。
-3. Phase 1 剩余交互面：Task cancel/pause、revision 投递确认，以及 Runtime 重启后对 stale ACTIVE Session 的启动 reconcile。
-4. 验证副本与失败现场的回收：明确的 `prune`/归属校验与可追溯记录，避免长期堆积。
+1. Task cancel（协作停止 + 超时转人工并保留资源）：已有一个被真实场景证明的卡死形态（RUNNING + `NOTHING_TO_COMMIT` + `resource_held=1`）。
+2. 长命令后台化与进度事件：让 `task.run`/`task.verify` 成为持久 Operation，界面可展示进度并允许取消。
+3. revision 投递确认，以及 Runtime 重启后对 stale ACTIVE Session 的启动 reconcile。
+4. 验证副本与失败现场的回收：明确的 `prune`/归属校验与可追溯记录；同时决定 Attention 工具参数是否入库/摘要化。

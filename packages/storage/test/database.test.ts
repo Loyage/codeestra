@@ -12,6 +12,8 @@ import {
   StorageError,
   phase1Migration,
   phase1SchemaVersion,
+  taskVerificationMigration,
+  workspaceRetryMigration,
 } from '../src/index.js';
 
 const oid = 'a'.repeat(40);
@@ -282,6 +284,73 @@ describe('Phase 1 migration', () => {
   });
 });
 
+describe('workspace retry after a released preparation', () => {
+  test('upgrades a version 6 database so a released workspace path can be reused', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'codeestra-storage-v6-'));
+    const filename = join(directory, 'runtime.sqlite');
+    try {
+      const legacy = new Database(filename, { create: true, strict: true });
+      legacy.exec('PRAGMA foreign_keys=ON;');
+      legacy.exec(phase1Migration);
+      legacy.exec(agentStartMigration);
+      legacy.exec(agentObservationMigration);
+      legacy.exec(agentAnswerMigration);
+      legacy.exec(agentDisconnectMigration);
+      legacy.exec(taskVerificationMigration);
+      legacy.exec('PRAGMA user_version=6');
+      // One Task whose preparation failed and was released, keeping the path in history.
+      legacy.query(`INSERT INTO projects
+        (id,name,repo_root,git_common_dir,main_ref,object_format,created_at)
+        VALUES ('p1','Project','/repo','/repo/.git','refs/heads/main','sha1',1)`).run();
+      legacy.query(`INSERT INTO project_trusts
+        (id,project_id,repo_root,git_common_dir,object_format,policy_version,actor,status,accepted_at)
+        VALUES ('trust1','p1','/repo','/repo/.git','sha1',1,'user','ACTIVE',1)`).run();
+      legacy.transaction(() => {
+        legacy.query(`INSERT INTO tasks
+          (id,project_id,display_number,kind,current_revision_id,state,created_at,updated_at)
+          VALUES ('t1','p1',1,'DEVELOPMENT','r1','READY',2,2)`).run();
+        legacy.query(`INSERT INTO task_revisions
+          (id,task_id,number,previous_revision_id,specification,constraints_json,actor,reason,created_at)
+          VALUES ('r1','t1',1,NULL,'Do work','[]','user','initial',2)`).run();
+      })();
+      legacy.query(`INSERT INTO workspaces
+        (id,task_id,branch_ref,path,ownership_token,base_commit,state,created_at)
+        VALUES ('w1','t1','refs/heads/task/t1','/work/t1','owner-1',?1,'RELEASED',3)`).run(oid);
+      // The version 6 constraint rejected any second row for the same path.
+      expect(() => legacy.query(`INSERT INTO workspaces
+        (id,task_id,branch_ref,path,ownership_token,base_commit,state,created_at)
+        VALUES ('w2','t1','refs/heads/task/t1','/work/t1','owner-2',?1,'RESERVED',4)`).run(oid))
+        .toThrow();
+      legacy.close();
+
+      const upgraded = new Phase1Database(filename);
+      expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version)
+        .toBe(phase1SchemaVersion);
+      // A new live workspace may reuse the released path...
+      upgraded.sqlite.query(`INSERT INTO workspaces
+        (id,task_id,branch_ref,path,ownership_token,base_commit,state,created_at)
+        VALUES ('w2','t1','refs/heads/task/t1','/work/t1','owner-2',?1,'RESERVED',4)`).run(oid);
+      // ...but only one live workspace may hold it at a time.
+      expect(() => upgraded.sqlite.query(`INSERT INTO workspaces
+        (id,task_id,branch_ref,path,ownership_token,base_commit,state,created_at)
+        VALUES ('w3','t1','refs/heads/task/t1','/work/t1','owner-3',?1,'READY',5)`).run(oid))
+        .toThrow();
+      expect(upgraded.sqlite.query<{ count: number }, []>(
+        "SELECT count(*) AS count FROM pragma_index_list('workspaces') WHERE name='one_live_workspace_path'",
+      ).get()?.count).toBe(1);
+      expect(upgraded.sqlite.query<Record<string, unknown>, []>('PRAGMA foreign_key_check').all())
+        .toEqual([]);
+      upgraded.close();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('keeps the workspace history of a released path', () => {
+    expect(workspaceRetryMigration).toContain("WHERE state <> 'RELEASED'");
+  });
+});
+
 describe('project trust and verification policy confirmation', () => {
   let trust: Phase1Database;
   let trustDb: Database;
@@ -484,6 +553,66 @@ describe('task verification runs', () => {
     storage.startVerificationRun({ verificationId: 'v1', startedAt: 11 });
     expect(storage.listIncompleteVerificationRuns().map((run) => run.state)).toEqual(['RUNNING']);
     expect(() => storage.getVerificationRun('p-other', 'v1')).toThrow(StorageError);
+  });
+});
+
+describe('event log read cursor', () => {
+  function createTask(suffix: string, projectId = 'p1'): void {
+    storage.createTask({
+      projectId, commandId: `command-${suffix}`, payloadHash: `hash-${suffix}`,
+      intentId: `intent-${suffix}`, taskId: `task-${suffix}`, revisionId: `revision-${suffix}`,
+      intentEventId: `intent-event-${suffix}`, taskEventId: `task-event-${suffix}`,
+      specification: `Task ${suffix}`, constraints: [], kind: 'DEVELOPMENT',
+      actor: 'local-user', createdAt: 10,
+    });
+  }
+
+  test('reports an empty log as cursor zero', () => {
+    expect(storage.latestEventSequence()).toBe(0);
+    expect(storage.listEventsAfter({ sinceSequence: 0, limit: 10 })).toEqual([]);
+  });
+
+  test('reads events in sequence order with parsed payloads', () => {
+    createTask('one');
+    expect(storage.latestEventSequence()).toBe(2);
+    const events = storage.listEventsAfter({ sinceSequence: 0, limit: 10 });
+    expect(events.map((event) => event.sequence)).toEqual([1, 2]);
+    expect(events.map((event) => event.eventType)).toEqual(['IntentRecorded', 'TaskCreated']);
+    expect(events[1]?.payload).toMatchObject({ taskId: 'task-one', revisionId: 'revision-one' });
+    expect(events[0]?.schemaVersion).toBe(1);
+  });
+
+  test('treats the cursor as exclusive so a reader resumes without a gap', () => {
+    createTask('one');
+    const first = storage.listEventsAfter({ sinceSequence: 0, limit: 1 });
+    expect(first.map((event) => event.sequence)).toEqual([1]);
+    const resumed = storage.listEventsAfter({ sinceSequence: first[0]?.sequence ?? 0, limit: 10 });
+    expect(resumed.map((event) => event.sequence)).toEqual([2]);
+    // A cursor ahead of the log is queried, not clamped: the caller decides it must re-snapshot.
+    expect(storage.listEventsAfter({ sinceSequence: 99, limit: 10 })).toEqual([]);
+  });
+
+  test('filters by project without letting a filtered reader stall', () => {
+    db.query(`INSERT INTO projects
+      (id,name,repo_root,git_common_dir,main_ref,object_format,created_at)
+      VALUES ('p2','Other','/other','/other/.git','refs/heads/main','sha1',1)`).run();
+    db.query(`INSERT INTO project_trusts
+      (id,project_id,repo_root,git_common_dir,object_format,policy_version,actor,status,accepted_at)
+      VALUES ('trust2','p2','/other','/other/.git','sha1',1,'user','ACTIVE',1)`).run();
+    createTask('one');
+    createTask('two', 'p2');
+    createTask('three');
+    const events = storage.listEventsAfter({ sinceSequence: 0, limit: 10, projectId: 'p1' });
+    expect(events.map((event) => event.sequence)).toEqual([1, 2, 5, 6]);
+    expect(events.every((event) => event.projectId === 'p1')).toBe(true);
+  });
+
+  test('bounds the read window and rejects invalid cursors or limits', () => {
+    createTask('one');
+    expect(storage.listEventsAfter({ sinceSequence: 0, limit: 1 })).toHaveLength(1);
+    expect(() => storage.listEventsAfter({ sinceSequence: -1, limit: 10 })).toThrow(StorageError);
+    expect(() => storage.listEventsAfter({ sinceSequence: 0, limit: 0 })).toThrow(StorageError);
+    expect(() => storage.listEventsAfter({ sinceSequence: 0, limit: 501 })).toThrow(StorageError);
   });
 });
 

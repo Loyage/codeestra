@@ -228,25 +228,30 @@ export async function prepareWorkspace(input: {
   if (!isAbsolute(input.worktreesRoot)) {
     throw new GitInspectionError('UNSAFE_CHECKOUT', 'Runtime worktrees root must be absolute');
   }
-  const worktreesRoot = resolve(input.worktreesRoot);
-  const projectDirectory = join(worktreesRoot, input.projectId);
-  const path = join(projectDirectory, input.taskId);
-  await assertDirectoryNotSymlink(worktreesRoot);
+  const requestedRoot = resolve(input.worktreesRoot);
+  await assertDirectoryNotSymlink(requestedRoot);
+  const projectDirectory = join(requestedRoot, input.projectId);
+  const requestedPath = join(projectDirectory, input.taskId);
   await assertDirectoryNotSymlink(projectDirectory);
   try {
-    await lstat(path);
-    throw new GitInspectionError('FOREIGN_RESOURCE', `Workspace path already exists: ${path}`);
+    await lstat(requestedPath);
+    throw new GitInspectionError('FOREIGN_RESOURCE', `Workspace path already exists: ${requestedPath}`);
   } catch (error) {
     if (error instanceof GitInspectionError) throw error;
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
   await mkdir(projectDirectory, { recursive: true, mode: 0o700 });
-  const canonicalRoot = await realpath(worktreesRoot);
+  // An ancestor of the Runtime data directory may itself be a symlink (on macOS `/tmp` resolves to
+  // `/private/tmp`, and state directories are often symlinked). Resolve the root once and run every
+  // containment check, the worktree creation, and the recorded path against the canonical root; the
+  // recorded path then also matches what `git worktree list --porcelain` reports during reconcile.
+  const worktreesRoot = await realpath(requestedRoot);
   const canonicalParent = await realpath(projectDirectory);
-  if (canonicalRoot !== worktreesRoot || canonicalParent !== projectDirectory
-    || !canonicalParent.startsWith(`${canonicalRoot}/`)) {
+  if (canonicalParent !== join(worktreesRoot, input.projectId)
+    || !canonicalParent.startsWith(`${worktreesRoot}/`)) {
     throw new GitInspectionError('UNSAFE_CHECKOUT', 'Workspace parent escaped the Runtime worktrees root');
   }
+  const path = join(worktreesRoot, input.projectId, input.taskId);
 
   const shortBranch = branchRef.slice('refs/heads/'.length);
   const process = Bun.spawn([

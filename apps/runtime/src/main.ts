@@ -1,11 +1,14 @@
 import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, rmSync } from 'node:fs';
-import { basename, join } from 'node:path';
-import { runtimeRequestSchema, type RuntimeRequest, type RuntimeResponse } from '@codeestra/contracts';
+import { basename, join, resolve } from 'node:path';
+import { runtimeRequestSchema, type RuntimeRequest, type RuntimeResponse,
+  type RuntimeStreamFrame } from '@codeestra/contracts';
 import { inspectRepository } from '@codeestra/git';
 import { Phase1Database, StorageError, type AgentAnswerPlan } from '@codeestra/storage';
 import { createPiAdapterRegistry } from './adapter-registry.js';
 import { AgentRuntimeCoordinator } from './agent-runtime-service.js';
+import { EventSubscriptionHub, type EventSubscriptionHandle } from './event-subscription-service.js';
+import { RuntimeHttpApi } from './http-api.js';
 import { runtimeHome, runtimeSocketPath } from './paths.js';
 import { captureResultCommit, prepareResultCommit } from './result-commit-service.js';
 import {
@@ -21,7 +24,10 @@ import {
   runTaskVerification,
 } from './verification-service.js';
 
-interface SocketState { buffer: string }
+interface SocketState {
+  buffer: string;
+  subscription: EventSubscriptionHandle | null;
+}
 
 const home = runtimeHome();
 const socketPath = runtimeSocketPath(home);
@@ -56,6 +62,16 @@ const coordinator = new AgentRuntimeCoordinator({
   runtimeHome: home,
   logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
 });
+const subscriptions = new EventSubscriptionHub({ storage });
+/** Built UI assets. The HTTP service is only started when a client asks for it. */
+const uiAssetsRoot = Bun.env.CODEESTRA_UI_DIST === undefined
+  ? resolve(import.meta.dir, '../../../apps/ui/dist')
+  : resolve(Bun.env.CODEESTRA_UI_DIST);
+const httpApi = new RuntimeHttpApi({
+  assetsRoot: uiAssetsRoot,
+  subscriptions,
+  dispatch: (request) => dispatch(request),
+});
 await reconcileWorkspacePreparations({ storage });
 reconcileInterruptedAgentStarts({ storage });
 reconcileInterruptedAgentAnswers({ storage });
@@ -76,12 +92,18 @@ function failure(requestId: string, code: string, message: string): RuntimeRespo
 
 async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
   switch (request.command) {
+    case 'runtime.ui': {
+      const endpoint = httpApi.start();
+      return success(request.requestId, { url: endpoint.url, running: true });
+    }
     case 'runtime.ping':
       return success(request.requestId, {
         pid: process.pid,
         status: 'READY',
         adapters: registry.ids(),
         activeSessions: coordinator.activeSessionIds(),
+        eventSubscribers: subscriptions.subscriberCount(),
+        uiRunning: httpApi.running,
       });
     case 'runtime.stop':
       setTimeout(() => { void shutdown(); }, 10);
@@ -97,6 +119,23 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
     }
     case 'project.list':
       return success(request.requestId, storage.listTrustedProjects());
+    case 'events.list': {
+      const events = storage.listEventsAfter({
+        sinceSequence: request.sinceSequence,
+        limit: request.limit,
+        ...(request.projectId === undefined ? {} : { projectId: request.projectId }),
+      });
+      return success(request.requestId, {
+        events,
+        // Exclusive cursor for the next read: the last event returned, or the cursor we asked from.
+        cursor: events.at(-1)?.sequence ?? request.sinceSequence,
+        hasMore: events.length === request.limit,
+      });
+    }
+    case 'events.subscribe':
+      // Streaming subscriptions are opened by the connection handler, not by the one-shot
+      // dispatcher; reaching here would mean the request was routed incorrectly.
+      throw new Error('events.subscribe must be handled as a streaming connection');
     case 'task.list':
       return success(request.requestId, storage.listTasks(request.projectId));
     case 'task.status': {
@@ -260,6 +299,43 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
   }
 }
 
+/**
+ * Opens a streaming subscription instead of a one-shot response. The connection stays open until
+ * the client disconnects, the cursor is rejected, or the Runtime stops.
+ */
+function openSubscription(
+  socket: Bun.Socket<SocketState>,
+  request: Extract<RuntimeRequest, { command: 'events.subscribe' }>,
+): void {
+  let ended = false;
+  const send = (frame: RuntimeStreamFrame): boolean => {
+    if (ended) return false;
+    const line = `${JSON.stringify(frame)}\n`;
+    try {
+      // A terminal frame is flushed as part of the close: a bare write followed by end() can
+      // lose the frame, and the client would then never learn why the subscription stopped.
+      if (frame.type === 'error') {
+        ended = true;
+        socket.end(line);
+        return false;
+      }
+      return socket.write(line) > 0;
+    } catch {
+      return false;
+    }
+  };
+  const handle = subscriptions.subscribe({
+    requestId: request.requestId,
+    ...(request.projectId === undefined ? {} : { projectId: request.projectId }),
+    ...(request.sinceSequence === undefined ? {} : { sinceSequence: request.sinceSequence }),
+    send,
+    onStop: () => { if (!ended) { ended = true; socket.end(); } },
+  });
+  // A rejected cursor was already reported as a terminal frame; the socket is closing.
+  if (!handle.active) return;
+  socket.data.subscription = handle;
+}
+
 async function handleLine(socket: Bun.Socket<SocketState>, line: string): Promise<void> {
   let requestId = 'unknown';
   try {
@@ -268,6 +344,10 @@ async function handleLine(socket: Bun.Socket<SocketState>, line: string): Promis
       requestId = raw.requestId;
     }
     const request = runtimeRequestSchema.parse(raw);
+    if (request.command === 'events.subscribe') {
+      openSubscription(socket, request);
+      return;
+    }
     socket.end(`${JSON.stringify(await dispatch(request))}\n`);
   } catch (error) {
     // Domain, storage, Git, registry, and Adapter errors all carry a stable code; a
@@ -286,6 +366,8 @@ async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   listener.stop(true);
+  subscriptions.close();
+  httpApi.stop();
   try {
     await coordinator.close();
   } catch (error) {
@@ -309,8 +391,13 @@ async function shutdown(): Promise<void> {
 listener = Bun.listen<SocketState>({
   unix: socketPath,
   socket: {
-    open(socket) { socket.data = { buffer: '' }; },
+    open(socket) { socket.data = { buffer: '', subscription: null }; },
     data(socket, bytes) {
+      if (socket.data.subscription !== null) {
+        // One command per connection: a subscriber must not smuggle a second request in.
+        socket.end();
+        return;
+      }
       socket.data.buffer += new TextDecoder().decode(bytes);
       const newline = socket.data.buffer.indexOf('\n');
       if (newline === -1) {
@@ -321,6 +408,7 @@ listener = Bun.listen<SocketState>({
       socket.data.buffer = socket.data.buffer.slice(newline + 1);
       void handleLine(socket, line);
     },
+    close(socket) { socket.data.subscription?.close(); },
     error() {},
   },
 });

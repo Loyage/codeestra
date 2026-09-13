@@ -81,6 +81,21 @@ Phase 1（ADR-0006）实际写入：`VerificationCompleted` 的 aggregate 为 `V
 9. Phase 1 observation 子集以 `(session_id, provider_event_id)` 去重，并要求同一 Session 的 cursor 唯一；相同 ID/同内容返回既有投影，相同 ID 或 cursor 携带不同内容时 fail-closed。opaque cursor 持久化在 Session，重启后从该 cursor 继续。
 10. 当前 durable delivery worker 为消费者补齐 `event_deliveries`，按 sequence 投递并持久化 attempt/退避。它提供至少一次而非恰好一次；消费者必须按 eventId 幂等。
 
+## 3.1 订阅传输（Phase 1 已实现）
+
+Runtime 的本地 socket 同时承载一次性命令与长连接订阅；两者都在同一条连接协议内，不在每次请求后强制关闭的路径上混用。
+
+- 一次性命令：一条连接一个 command，Runtime 回一条 response 后关闭。`events.list` 属于此类，`sinceSequence` 默认 0、`limit` 上限 500，返回 `{ events, cursor, hasMore }`，`cursor` 为下一次读取的排他游标（无事件时等于请求游标）。
+- 长连接：`events.subscribe` 建立订阅连接，Runtime 先回一帧 `subscribed`，其中 `cursor` 是快照游标；后续 `event` 帧按 sequence 递增推送，`heartbeat` 帧定期报告当前 cursor，`error` 帧是终止帧（发出后 Runtime 关闭该连接）。客户端 stdout 只承载 `event` 帧的 event envelope，便于脚本消费。
+- 省略 `sinceSequence` 表示"从当前尾部开始"，因此客户端应先取快照再订阅，两者之间不漏消息；显式给出 `sinceSequence` 时从该游标之后重放并继续跟随，游标排他，所以重连既不跳过也不重复边界事件。
+- 游标超前于日志（例如数据库被替换或客户端记错状态）时返回 `INVALID_CURSOR` 终止帧，不静默夹到尾部：客户端必须重新取快照。
+- 订阅只读：不写事件、不写 `event_deliveries`、不重放任何 command，也不改变 Task/Execution 状态；崩溃或断开只影响该订阅，重连凭 cursor 继续。因此订阅不构成"已交付"证据，投递语义仍由 outbox 与消费者幂等决定。
+- 读取失败（如日志不可读）是终止性错误：Runtime 发出 `EVENT_READ_FAILED` 终止帧并移除该订阅，不假装仍在跟踪。
+- 订阅连接是一条命令一条连接：客户端在订阅建立后继续发送 command 属于协议违约，Runtime 直接关闭该连接。
+- 可选 `projectId` 过滤只影响交付；游标仍会前进，因此过滤订阅的 resume 语义与全量订阅一致。Phase 1 未实现按 project 的权限隔离——本地单用户 socket 权限（0600）是这一层的边界。
+- 投影由 Runtime 的事件写入路径负责；订阅不引入第二个事件源，也不允许客户端写入事件。
+- 本地 Web UI 经 `RuntimeHttpApi` 的 `/api/events` 消费同一组帧（SSE 编码，`fetch` 流式读取而非 `EventSource`，因此 bearer token 不出现在 URL 中）；命令经 `/api/command` 走同一 Zod 请求 schema 与同一 dispatch，HTTP 不是第二条业务语义路径。
+
 ## 4. 终端与安全
 
 原始 PTY 帧：sessionId、streamSequence、timestamp、bytes，走独立有界流/日志存储，支持背压和截断指示。输出可能含 secrets、控制序列和 prompt injection；不能作为受信命令、状态 guard 或权限批准。终端日志默认不进入业务事件 payload。

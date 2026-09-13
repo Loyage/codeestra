@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { mkdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   GitInspectionError,
@@ -24,6 +25,19 @@ function workspacePayloadHash(input: {
   readonly expectedTaskVersion: number;
 }): string {
   return createHash('sha256').update(JSON.stringify(input)).digest('hex');
+}
+
+/**
+ * The worktrees root is resolved once, before it is recorded. The Runtime data directory may sit
+ * behind a symlinked ancestor (on macOS `/tmp` resolves to `/private/tmp`, and state directories are
+ * often symlinked), so the reserved path and the path Git reports must be the same canonical string;
+ * otherwise the recorded reservation and the prepared worktree disagree and reconcile sees a
+ * mismatch. Resolving here also makes the same home spelled two ways yield one workspace path.
+ */
+async function canonicalWorktreesRoot(runtimeHome: string): Promise<string> {
+  const requested = join(runtimeHome, 'worktrees');
+  await mkdir(requested, { recursive: true, mode: 0o700 });
+  return await realpath(requested);
 }
 
 export async function prepareTaskWorkspace(input: {
@@ -78,7 +92,7 @@ export async function prepareTaskWorkspace(input: {
   const workspaceId = randomUUID();
   const ownershipToken = randomUUID();
   const branchRef = `refs/heads/task/${input.taskId}`;
-  const worktreesRoot = join(input.runtimeHome, 'worktrees');
+  const worktreesRoot = await canonicalWorktreesRoot(input.runtimeHome);
   const path = join(worktreesRoot, input.projectId, input.taskId);
   const plan = input.storage.reserveWorkspacePreparation({
     operationId,

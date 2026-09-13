@@ -1,6 +1,6 @@
 # Codeestra — 产品与架构规格
 
-状态：架构设计基线；关键决策持续以 ADR 确认。Phase 0 第一批与 Phase 1 storage/CLI-Runtime 骨架已开始，已有 Task create/list/submit、owned worktree/恢复、Execution 预留、Agent start、Adapter event 去重投影与 durable outbox、Pi RPC framing/gate 子集，以及 Runtime adapter registry、`task.run` 运行循环、事件 pump、typed answer 自动投递、Runtime shutdown 释放与 `task status`；ADR-0003 的成果 commit 已实现为两步确认（ChangeSet + 版本化敏感路径策略 + 一次性授权 + 崩溃 reconcile），ADR-0006 的 Task verification 已实现（main ref 人工维护策略 + trust 一次性确认 + 固定 commit 的 detached 副本 + 非敏感证据），Pi 0.84.4 首轮 spike 与最小可用形态策略已确认，真实 Agent 执行仍须通过其余技术准入。
+状态：架构设计基线；关键决策持续以 ADR 确认。**三条第一原则（效率至上、CLI 完备的服务形态、测试仅限 CLI/命令面且不获取电脑控制权）见 §1.1，优先级最高（ADR-0008）。** Phase 0 第一批与 Phase 1 storage/CLI-Runtime 骨架已开始，已有 Task create/list/submit、owned worktree/恢复、Execution 预留、Agent start、Adapter event 去重投影与 durable outbox、Pi RPC framing/gate 子集，以及 Runtime adapter registry、`task.run` 运行循环、事件 pump、typed answer 自动投递、Runtime shutdown 释放与 `task status`；ADR-0003 的成果 commit 已实现为两步确认（ChangeSet + 版本化敏感路径策略 + 一次性授权 + 崩溃 reconcile），ADR-0006 的 Task verification 已实现（main ref 人工维护策略 + trust 一次性确认 + 固定 commit 的 detached 副本 + 非敏感证据），事件日志的只读长连接订阅（`events.subscribe`/`events.list` 与排他 sequence 游标、显式游标失效）已实现但仍限于观察，本地 Web UI 入口（ADR-0007：`codeestra ui`、127.0.0.1 + 内存 token + SSE、React/Vite 资产由 Runtime 托管）已实现，`task.run`/`task.verify` 仍是同步命令、长命令进度不因此可见，Pi 0.84.4 首轮 spike 与最小可用形态策略已确认；真实模型与工具执行已完成首轮受控验收（deepseek-flash：真实 `write` 工具调用、fail-closed gate 审批、成果 commit 与 Task verification PASSED，证据见 FOUNDATION-019），但取消超时、gate 拒绝路径、Integration/main 提升与多任务并行仍未验收；`codeestra open` 与 UI 预选已在 CLI/命令面验证，但未用浏览器自动化验证（ADR-0008 测试边界）。
 
 ## 1. 定位与目标
 
@@ -15,6 +15,14 @@ User Intent → Task / Task DAG → Dependency Analysis → Conflict Analysis
 → Scheduler → Git Worktree → Coding Agent → Task Verification
 → Integration Branch → Integration Verification → Main
 ```
+
+### 1.1 第一原则（其他条款从属于此）
+
+以下三条是用户确认的最高原则（ADR-0008），本文件其余条款、ADR 与实现选择都在其下解释：
+
+1. **效率至上。** 用户从意图到可用结果的等待时间与操作步数优先于其他考虑。安全性与隔离是服务于效率的约束，不是独立目标；任何门禁在常态路径上最多一次显式确认，不得要求用户常驻监视。**权限管理（RBAC、多用户/租户、密钥托管、路径沙箱、网络策略、供应链与发布签名）当前不作考虑，既不新增也不预留门禁。** 已实现的门禁（§2 第 12/13 条、ADR-0001 D03、ADR-0003、ADR-0004、ADR-0006）继续生效且不再扩张；今后新增安全机制必须先证明不降低吞吐。正确性问题（如未知工具 fail-closed）不受此条影响，不得以“提速”为由放松。
+2. **软件本体是服务，CLI 是完备命令面。** 独立本地 Runtime 是软件本体，拥有完备的 CLI 交互能力：每个能力都必须能只靠 CLI 完成，并可脚本化驱动（机器可读输出、稳定退出码）。Web UI 与未来桌面只是方便交互的前端，走同一 versioned command/query/event 面与同一确认门禁，不新增业务语义、不绕过门禁、不直接访问 SQLite。出现“只有 UI 能做、CLI 不能做”的能力视为缺陷而非设计选择。
+3. **自动化测试仅限 CLI/命令面，不获取电脑控制权。** 项目内测试与验收的驱动方式仅限 CLI 命令与 Runtime 命令面（含承载它的 HTTP/SSE 传输）；禁止 computer-use、OS 级键鼠/窗口自动化、桌面应用操作与真实桌面会话，开发 Agent 不得为验证而取得用户电脑控制权。产品内 Agent 同样不新增屏幕读取、桌面操作或键鼠控制类工具。
 
 ## 2. 核心不变量
 
@@ -35,6 +43,9 @@ User Intent → Task / Task DAG → Dependency Analysis → Conflict Analysis
 15. Human-authored knowledge 和 machine-generated knowledge 分离；Agent 不能静默覆盖人工维护的知识文件。
 16. Self Task 原则上可修改全部 Codeestra 源码，但只能在隔离开发环境形成 Candidate。运行中的 Stable 不被直接覆盖；Promotion 必须由用户发起。
 17. 独立且极小的 `codeestra-bootstrap` 提供 list versions、launch version、switch version、health check、rollback，作为恢复入口。
+18. 能力完备性以 CLI 为准：任何领域能力都必须有对应的 CLI 命令路径；UI/桌面只是同一命令面的前端。不得存在仅 UI 可用的能力。
+19. 自动化测试与验收只通过 CLI/命令面驱动；不引入桌面或键鼠控制自动化。门禁冻结：不得新增超出 §1.1 第 1 条预算的确认步骤。
+20. 权限管理不在当前范围内；Runtime 保持本机单用户模型，不为多用户、沙箱或密钥托管预留门禁。
 
 ## 3. 任务修订与执行证据
 
@@ -73,7 +84,7 @@ Self-hosting test 不应污染 Stable 的数据库、工作树、真实运行任
 
 优先 TypeScript、Bun、Bun workspaces、React、Vite、Tailwind、shadcn/ui、Tauri 2、SQLite、Drizzle ORM、Zod、Git CLI、Bun.spawn、Vitest。PTY 按真实交互需求单独选型；普通 stdout pipe 不能冒充 PTY。
 
-目标是本机单用户开发编排。不引入 Kubernetes、Kafka、RabbitMQ、微服务拆分或分布式基础设施。采用独立本地 Runtime，首个可用入口为自动启动该后台 Runtime 的 CLI，后续桌面作为可重连客户端；关闭客户端不终止任务和 Session。项目首次接入显式一次信任。Phase 1 首个真实 Adapter 为 Pi；内置 read/grep/find/ls 直接允许，write/edit/bash/powershell 逐次审批，未知工具 fail-closed；实际协议能力必须验证。取消采用协作停止，超时请求人工处理并保留资源；优先级只影响后续调度、不抢占。
+目标是本机单用户开发编排。不引入 Kubernetes、Kafka、RabbitMQ、微服务拆分或分布式基础设施。采用独立本地 Runtime，首个可用入口为自动启动该后台 Runtime 的 CLI，后续桌面作为可重连客户端；关闭客户端不终止任务和 Session。**CLI 是完备、可脚本化的权威接口面（§1.1 第 2 条）；Web UI 与桌面是同一命令面的便利前端，功能是 CLI 能力的子集投影。** 项目首次接入显式一次信任。Phase 1 首个真实 Adapter 为 Pi；内置 read/grep/find/ls 直接允许，write/edit/bash/powershell 逐次审批，未知工具 fail-closed；实际协议能力必须验证。取消采用协作停止，超时请求人工处理并保留资源；优先级只影响后续调度、不抢占。
 
 ## 7. 阶段
 
@@ -92,7 +103,7 @@ Phase 1 可产生待集成且有验证证据的任务结果，不以直接合并
 
 先完成规格、协作规则、领域对象、状态机、SQLite schema、事件模型、Adapter/Workspace API、Scheduler、Conflict Analyzer、模块结构、roadmap 与风险分析。通过架构准入条件后才做 Phase 0 / Phase 1 最小实现。
 
-当前已完成 Phase 0 第一批领域模型，并进入 Phase 1：已有 storage、CLI/独立 Runtime、Task 入口、owned worktree、Execution/Session 启动协调、Adapter observation/outbox、typed Attention answer Operation、Pi framing/gate 与自有子进程的 `PiRpcAdapter`，以及 adapter registry、`task.run` 运行循环、事件 pump 与 answer 自动投递，以及 ADR-0003 的成果 commit 两步确认与 ADR-0006 的 Task verification。不实现：Integration 结果、并行调度、完整桌面交互、自动集成发布、机器知识生成、自我升级、远端 Agent、多用户、多机器调度及分布式运行。真实 Pi 工具执行、Integration 验证与 main 提升仍须通过对应技术和授权门禁。
+当前已完成 Phase 0 第一批领域模型，并进入 Phase 1：已有 storage、CLI/独立 Runtime、Task 入口、owned worktree、Execution/Session 启动协调、Adapter observation/outbox、typed Attention answer Operation、Pi framing/gate 与自有子进程的 `PiRpcAdapter`，以及 adapter registry、`task.run` 运行循环、事件 pump 与 answer 自动投递，以及 ADR-0003 的成果 commit 两步确认与 ADR-0006 的 Task verification，只读事件订阅长连接，以及 ADR-0007 的本地 Web UI 入口（含运行任务/成果 commit/验证按钮，但仍是同一套 Runtime 语义与确认门禁），以及 ADR-0008 要求的“在 Web UI 中打开某个仓库开发”的 CLI 完备入口 `codeestra open`（inspect → 策略 → TRUST → 启动 UI 并预选该项目，只组合既有命令）。不实现：Integration 结果、并行调度、Tauri 桌面壳与完整桌面交互、自动集成发布、机器知识生成、自我升级、远端 Agent、多用户、多机器调度、分布式运行及权限管理（ADR-0008）。真实 Pi 模型/工具执行已完成首轮受控验收（FOUNDATION-019），但取消超时、gate 拒绝路径、Integration 验证与 main 提升仍须通过对应技术和授权门禁。本阶段验收按 §1.1 第 3 条执行：只用 CLI/命令面断言，不再用 computer-use 驱动真实浏览器或桌面（FOUNDATION-018 的该方式为历史证据，不再复现）。
 
 ## 9. 文档导航与决策纪律
 
@@ -101,4 +112,4 @@ Phase 1 可产生待集成且有验证证据的任务结果，不以直接合并
 - [当前任务进度](docs/tasks/README.md)
 - [MVP roadmap](docs/roadmap/mvp.md)
 
-本文件是长期产品与架构依据；具体设计不得违背本文件。未确认提案不是已接受决策。若用户改变既有决策，应同步修改规格、ADR、技术设计及对应测试要求。
+本文件是长期产品与架构依据；具体设计不得违背本文件。**§1.1 的三条第一原则（ADR-0008）优先级最高**：效率至上、CLI 完备的服务形态、测试仅限 CLI/命令面且不获取电脑控制权。未确认提案不是已接受决策。若用户改变既有决策，应同步修改规格、ADR、技术设计及对应测试要求。

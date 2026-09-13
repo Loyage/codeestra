@@ -7,6 +7,7 @@ import {
   phase1Migration,
   phase1SchemaVersion,
   taskVerificationMigration,
+  workspaceRetryMigration,
 } from './migration.js';
 
 export class StorageError extends Error {
@@ -391,15 +392,31 @@ export class Phase1Database {
       throw new StorageError('UNSUPPORTED_SCHEMA', `Database schema ${version} is newer than ${phase1SchemaVersion}`);
     }
     if (version === phase1SchemaVersion) return;
-    this.sqlite.transaction(() => {
-      if (version < 1) this.sqlite.exec(phase1Migration);
-      if (version < 2) this.sqlite.exec(agentStartMigration);
-      if (version < 3) this.sqlite.exec(agentObservationMigration);
-      if (version < 4) this.sqlite.exec(agentAnswerMigration);
-      if (version < 5) this.sqlite.exec(agentDisconnectMigration);
-      if (version < 6) this.sqlite.exec(taskVerificationMigration);
-      this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
-    })();
+    // Rebuilding a table that other tables reference by name requires foreign keys to be off;
+    // they are re-enabled and verified before the connection is used.
+    const rebuildsTable = version < 7;
+    if (rebuildsTable) this.sqlite.exec('PRAGMA foreign_keys=OFF;');
+    try {
+      this.sqlite.transaction(() => {
+        if (version < 1) this.sqlite.exec(phase1Migration);
+        if (version < 2) this.sqlite.exec(agentStartMigration);
+        if (version < 3) this.sqlite.exec(agentObservationMigration);
+        if (version < 4) this.sqlite.exec(agentAnswerMigration);
+        if (version < 5) this.sqlite.exec(agentDisconnectMigration);
+        if (version < 6) this.sqlite.exec(taskVerificationMigration);
+        if (version < 7) this.sqlite.exec(workspaceRetryMigration);
+        this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
+      })();
+      if (rebuildsTable) {
+        const violations = this.sqlite.query<Record<string, unknown>, []>('PRAGMA foreign_key_check').all();
+        if (violations.length > 0) {
+          throw new StorageError('INVALID_STATE',
+            `Schema migration left ${violations.length} foreign key violation(s)`);
+        }
+      }
+    } finally {
+      if (rebuildsTable) this.sqlite.exec('PRAGMA foreign_keys=ON;');
+    }
   }
 
   /** Records the explicit confirmation that established project trust, including the
@@ -2375,6 +2392,53 @@ export class Phase1Database {
       resultCommit: recorded?.resultCommit ?? null,
       resultTree: recorded?.resultTree ?? null,
     };
+  }
+
+  /**
+   * Highest committed sequence, or 0 for an empty log. A new subscriber stores this as its
+   * snapshot cursor, so events committed after the snapshot are never missed.
+   */
+  latestEventSequence(): number {
+    const row = this.sqlite.query<{ sequence: number | null }, []>(
+      'SELECT MAX(sequence) AS sequence FROM domain_events').get();
+    return row?.sequence ?? 0;
+  }
+
+  /**
+   * Ordered read over the append-only event log. `sinceSequence` is exclusive, so a reader that
+   * persists the last delivered cursor resumes with neither a gap nor a duplicate at the boundary.
+   * This is a subscription read, not a durable consumer: `event_deliveries` remains the
+   * at-least-once outbox.
+   */
+  listEventsAfter(input: {
+    readonly sinceSequence: number;
+    readonly limit: number;
+    readonly projectId?: string;
+  }): readonly StoredEventEnvelope[] {
+    if (!Number.isInteger(input.sinceSequence) || input.sinceSequence < 0) {
+      throw new StorageError('INVALID_STATE', 'Event cursor must be a non-negative integer');
+    }
+    if (!Number.isInteger(input.limit) || input.limit <= 0 || input.limit > 500) {
+      throw new StorageError('INVALID_STATE', 'Event read limit must be between 1 and 500');
+    }
+    return this.sqlite.query<{
+      event_id: string; sequence: number; event_type: string; schema_version: number; project_id: string;
+      aggregate_type: string; aggregate_id: string; aggregate_version: number; correlation_id: string;
+      causation_id: string | null; occurred_at: number; payload_json: string;
+    }, [number, string | null, number]>(`
+      SELECT event_id,sequence,event_type,schema_version,project_id,aggregate_type,aggregate_id,
+        aggregate_version,correlation_id,causation_id,occurred_at,payload_json
+      FROM domain_events
+      WHERE sequence>?1 AND (?2 IS NULL OR project_id=?2)
+      ORDER BY sequence LIMIT ?3
+    `).all(input.sinceSequence, input.projectId ?? null, input.limit).map((row) => ({
+      eventId: row.event_id, sequence: row.sequence, eventType: row.event_type,
+      schemaVersion: row.schema_version, projectId: row.project_id,
+      aggregateType: row.aggregate_type, aggregateId: row.aggregate_id,
+      aggregateVersion: row.aggregate_version, correlationId: row.correlation_id,
+      causationId: row.causation_id, occurredAt: row.occurred_at,
+      payload: JSON.parse(row.payload_json) as unknown,
+    }));
   }
 
   enqueueEventDeliveries(consumerId: string): number {

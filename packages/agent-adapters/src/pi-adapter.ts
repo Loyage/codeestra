@@ -241,11 +241,29 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
       throw new PiRpcProcessError('CURSOR_EPOCH_MISMATCH',
         'Observation cursor belongs to a different Pi process epoch', true, true);
     }
-    const evidenceRef = `pi-rpc:agent_settled:session=${live.providerSessionId}`
+    function assistantTurnFailure(record: Record<string, unknown>): string | null | undefined {
+  if (record['type'] !== 'message_end' && record['type'] !== 'turn_end') return undefined;
+  const message = record['message'];
+  if (typeof message !== 'object' || message === null) return undefined;
+  const entry = message as Record<string, unknown>;
+  if (entry['role'] !== 'assistant') return undefined;
+  const stopReason = typeof entry['stopReason'] === 'string' ? entry['stopReason'] : null;
+  // A settled run is only a normal finish when its last assistant message ended normally.
+  // Anything else (`error`, `aborted`, `length`, or an unknown reason) is reported as a failure
+  // with the provider's own bounded text, so a failed model call is never recorded as success.
+  if (stopReason === 'stop' || stopReason === 'toolUse') return null;
+  const raw = typeof entry['errorMessage'] === 'string' ? entry['errorMessage'] : '';
+  const detail = raw.replace(/\s+/g, ' ').trim().slice(0, 160);
+  const reason = stopReason ?? 'unknown';
+  return detail.length === 0 ? reason : `${reason}: ${detail}`;
+}
+
+const evidenceRef = `pi-rpc:agent_settled:session=${live.providerSessionId}`
       + `:epoch=${live.client.epoch}:tools=${createHash('sha256')
         .update(buildPiRpcArguments({ gateExtensionPath: this.gateExtensionPath,
           sessionDir: this.sessionDir, platform: this.#options.platform }).join(' '))
         .digest('hex').slice(0, 16)}`;
+    let turnFailure: string | null = null;
     for await (const envelope of live.client.envelopes()) {
       if (envelope.kind === 'disconnected') {
         this.#sessions.delete(session.id);
@@ -259,6 +277,8 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
         };
         return;
       }
+      const failure = assistantTurnFailure(envelope.record);
+      if (failure !== undefined) turnFailure = failure;
       const attention = mapPiExtensionUiRequest({
         record: envelope.record,
         sessionId: session.id,
@@ -281,8 +301,14 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
           eventId: `pi-settled:${envelope.cursor}`,
           cursor: envelope.cursor,
           type: 'completed',
-          outcome: 'SUCCESS',
-          evidence: { ref: evidenceRef, toolsQuiescent: true, ownedWritersStopped: true },
+          // A settled run whose last assistant message ended in an error is a failure: the Agent
+          // did not finish the work, so the Runtime must not treat this Execution as successful.
+          outcome: turnFailure === null ? 'SUCCESS' : 'FAILURE',
+          evidence: {
+            ref: turnFailure === null ? evidenceRef : `${evidenceRef}:turn=${turnFailure}`,
+            toolsQuiescent: true,
+            ownedWritersStopped: true,
+          },
         };
         return;
       }

@@ -30,6 +30,8 @@ Self Task → Candidate → 自托管测试 → 用户 Promotion → 排空 → 
 
 这是模块分层，不是微服务。Domain 不依赖具体运行时、数据库、UI 或 Agent。Git worktree 隔离工作目录，不提供 OS 权限沙箱。
 
+服务形态：独立本地 Runtime 是软件本体；**CLI 是完备、权威、可脚本化的命令面**，Web UI 与未来桌面只是同一 versioned command/query/event 面的便利前端（不新增业务语义、不绕过门禁、不直接访问 SQLite）。“只有 UI 能做、CLI 不能做”的能力视为缺陷。
+
 ## 设计导航
 
 - [Domain Model](domain-model.md)
@@ -46,6 +48,9 @@ Self Task → Candidate → 自托管测试 → 用户 Promotion → 排空 → 
 
 ## 已确认的重要语义
 
+- 效率至上；现有门禁冻结且不新增权限管理（多用户/租户/沙箱/密钥托管不预留门禁）。
+- 软件本体是服务，CLI 必须完备且可脚本化；UI/桌面是便利层。
+- 自动化测试与验收仅通过 CLI/命令面驱动，不获取电脑控制权。
 - 活动修订先暂停，确认新规格后恢复；无法可靠暂停/确认时保留现场并重新执行。
 - 依赖结果经集成验证且进入 main 才能释放下游。
 - main 每批提升需用户批准，main 变化使批准失效。
@@ -64,7 +69,7 @@ Self Task → Candidate → 自托管测试 → 用户 Promotion → 排空 → 
 | 预测不完整造成误并行 | UNKNOWN 不并行；实际 diff 越界撤销 SAFE，暂停并报告 |
 | SQLite、Git 与进程非原子 | Operation + outbox + 幂等键 + 外部身份核对；不能盲目重试 start/promote |
 | 已 checkout main 被直接 update-ref | 拒绝使用户 index/worktree 不一致的提升；具体安全交接策略 Phase 4 前确认 |
-| 宿主权限、hooks、日志秘密 | worktree 不是沙箱；保留原生审批，明确项目信任与命令授权，终端输出不可信 |
+| 宿主权限、hooks、日志秘密 | worktree 不是沙箱；保留既有原生审批与命令授权，终端输出不可信。**已实现门禁不删也不再新增**（ADR-0008）；权限管理移出当前范围，若将来需要必须重开决策 |
 | 自我升级数据不可逆 | Candidate 数据隔离；迁移/备份/bootstrap 更新策略 Phase 7 前明确批准 |
 
 ## 设计成熟度
