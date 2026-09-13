@@ -166,6 +166,9 @@ export type ExecutionLifecycleState = 'CREATED' | 'PREPARING' | 'STARTING' | 'RU
 export type AgentSessionLifecycleState = 'CREATED' | 'STARTING' | 'ACTIVE' | 'WAITING_FOR_USER'
   | 'PAUSING' | 'PAUSED' | 'STOPPING' | 'EXITED' | 'DISCONNECTED' | 'RECOVERY_REQUIRED';
 
+export type WorkspaceLifecycleState = 'RESERVED' | 'PREPARING' | 'READY' | 'IN_USE'
+  | 'RECOVERY_REQUIRED' | 'RETAINED' | 'RELEASED';
+
 /** Read-only projection of one Execution attempt and the Agent Session it started, if any. */
 export interface ExecutionSummary {
   readonly executionId: string;
@@ -185,6 +188,48 @@ export interface ExecutionSummary {
   } | null;
 }
 
+export interface ResultCommitAuthorization {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly taskDisplayNumber: number;
+  readonly taskVersion: number;
+  readonly taskState: TaskLifecycleState;
+  readonly currentRevisionId: string;
+  readonly executionId: string;
+  readonly executionState: ExecutionLifecycleState;
+  readonly appliedRevisionId: string;
+  readonly resourceHeld: boolean;
+  readonly workspaceId: string;
+  readonly workspacePath: string;
+  readonly workspaceBranchRef: string;
+  readonly workspaceState: WorkspaceLifecycleState;
+  readonly baseCommit: string;
+  readonly expectedHead: string;
+  readonly changeFingerprint: string;
+  readonly status: 'ACTIVE' | 'CONSUMED' | 'INVALIDATED';
+  readonly createdAt: number;
+  /** Recorded result commit once the authorization was consumed. */
+  readonly resultCommit: string | null;
+  /** True only when a SUCCESS completion proved tools and owned writers stopped. */
+  readonly quiescent: boolean;
+  readonly sessionState: AgentSessionLifecycleState | null;
+}
+
+export interface ResultCommitCapturePlan {
+  readonly operationId: string;
+  readonly operationState: 'PLANNED' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'RECONCILE_REQUIRED';
+  readonly authorizationId: string;
+  readonly executionId: string;
+  readonly taskId: string;
+  readonly expectedHead: string;
+  readonly changeFingerprint: string;
+  readonly authorization: ResultCommitAuthorization;
+  /** Recorded commit and tree when the capture already succeeded. */
+  readonly resultCommit: string | null;
+  readonly resultTree: string | null;
+}
+
 export interface WorkspacePreparationPlan {
   readonly operationId: string;
   readonly operationState: 'PLANNED' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'RECONCILE_REQUIRED';
@@ -200,6 +245,28 @@ export interface WorkspacePreparationPlan {
   readonly ownershipToken: string;
   readonly branchRef: string;
   readonly path: string;
+}
+
+/** Internal projection used while a result commit is being authorized or captured. */
+export interface ResultCommitSubject {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly taskDisplayNumber: number;
+  readonly taskVersion: number;
+  readonly taskState: TaskLifecycleState;
+  readonly currentRevisionId: string;
+  readonly executionId: string;
+  readonly executionVersion: number;
+  readonly executionState: ExecutionLifecycleState;
+  readonly appliedRevisionId: string;
+  readonly resourceHeld: boolean;
+  readonly workspaceId: string;
+  readonly workspacePath: string;
+  readonly workspaceBranchRef: string;
+  readonly workspaceState: WorkspaceLifecycleState;
+  readonly baseCommit: string;
+  readonly quiescent: boolean;
+  readonly sessionState: AgentSessionLifecycleState | null;
 }
 
 export interface TaskSummary {
@@ -1715,6 +1782,455 @@ export class Phase1Database {
         JSON.stringify({ taskId: subject.taskId, from: taskFrom,
           to: 'RECOVERY_REQUIRED', reason: input.reason }));
     })();
+  }
+
+  /**
+   * Records one-shot authorization to create a result commit for a quiescent Execution.
+   * Any previous ACTIVE authorization for the same Execution is invalidated, because a new
+   * preparation always describes a fresh HEAD/ChangeSet snapshot.
+   */
+  prepareResultCommitAuthorization(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly executionId: string;
+    readonly authorizationId: string;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly expectedHead: string;
+    readonly changeFingerprint: string;
+    readonly policyVersion: number;
+    readonly eventId: string;
+    readonly invalidatedEventId: string;
+    readonly actor: string;
+    readonly createdAt: number;
+  }): ResultCommitAuthorization {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.createdAt,
+      apply: (database) => {
+        const subject = this.resultCommitSubject(input.projectId, input.taskId, input.executionId);
+        if (subject.currentRevisionId !== subject.appliedRevisionId) {
+          throw new StorageError('INVALID_STATE',
+            'Task revision changed after the Execution started; a result commit needs a new Execution');
+        }
+        if (!subject.quiescent) {
+          throw new StorageError('INVALID_STATE',
+            'Agent tools and owned writers are not proven stopped; result commit is not allowed yet');
+        }
+        const previous = database.query<{ id: string }, [string]>(`
+          SELECT id FROM result_commit_authorizations
+          WHERE execution_id=?1 AND status='ACTIVE'
+        `).get(input.executionId);
+        if (previous !== null) {
+          database.query(`
+            UPDATE result_commit_authorizations SET status='INVALIDATED',invalidated_at=?1
+            WHERE id=?2 AND status='ACTIVE'
+          `).run(input.createdAt, previous.id);
+          database.query(`
+            INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+              aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+            VALUES (?1,?2,'ResultCommitAuthorizationInvalidated',1,'Execution',?3,0,?4,?4,?5,?6)
+          `).run(input.invalidatedEventId, input.projectId, input.executionId, input.authorizationId,
+            input.createdAt, JSON.stringify({ authorizationId: previous.id,
+              executionId: input.executionId, reason: 'superseded by a new preparation' }));
+        }
+        database.query(`
+          INSERT INTO result_commit_authorizations(id,task_id,execution_id,revision_id,workspace_id,
+            expected_head,change_fingerprint,actor,status,created_at)
+          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'ACTIVE',?9)
+        `).run(input.authorizationId, input.taskId, input.executionId, subject.appliedRevisionId,
+          subject.workspaceId, input.expectedHead, input.changeFingerprint, input.actor, input.createdAt);
+        database.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'ResultCommitAuthorized',1,'Execution',?3,0,?4,?4,?5,?6)
+        `).run(input.eventId, input.projectId, input.executionId, input.commandId, input.createdAt,
+          JSON.stringify({ authorizationId: input.authorizationId, executionId: input.executionId,
+            revisionId: subject.appliedRevisionId, workspaceId: subject.workspaceId,
+            expectedHead: input.expectedHead, changeFingerprint: input.changeFingerprint,
+            policyVersion: input.policyVersion }));
+        const authorization = this.resultCommitAuthorizationRow(input.authorizationId);
+        if (authorization === null) throw new Error('Result commit authorization was not persisted');
+        return authorization;
+      },
+    });
+  }
+
+  getResultCommitAuthorization(authorizationId: string): ResultCommitAuthorization {
+    const authorization = this.resultCommitAuthorizationRow(authorizationId);
+    if (authorization === null) throw new StorageError('NOT_FOUND', 'Result commit authorization was not found');
+    return authorization;
+  }
+
+  invalidateResultCommitAuthorization(input: {
+    readonly authorizationId: string;
+    readonly reason: string;
+    readonly eventId: string;
+    readonly invalidatedAt: number;
+  }): void {
+    this.sqlite.transaction(() => {
+      const row = this.sqlite.query<{ project_id: string; execution_id: string }, [string]>(`
+        SELECT task.project_id,authorization.execution_id FROM result_commit_authorizations authorization
+        JOIN tasks task ON task.id=authorization.task_id WHERE authorization.id=?1
+      `).get(input.authorizationId);
+      if (row === null) throw new StorageError('NOT_FOUND', 'Result commit authorization was not found');
+      const updated = this.sqlite.query(`
+        UPDATE result_commit_authorizations SET status='INVALIDATED',invalidated_at=?1
+        WHERE id=?2 AND status='ACTIVE'
+      `).run(input.invalidatedAt, input.authorizationId);
+      if (updated.changes !== 1) {
+        throw new StorageError('INVALID_STATE', 'Result commit authorization was not ACTIVE');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'ResultCommitAuthorizationInvalidated',1,'Execution',?3,0,?4,?4,?5,?6)
+      `).run(input.eventId, row.project_id, row.execution_id, input.authorizationId, input.invalidatedAt,
+        JSON.stringify({ authorizationId: input.authorizationId, executionId: row.execution_id,
+          reason: input.reason }));
+    })();
+  }
+
+  /**
+   * Persists the capture Operation before the Runtime runs `git add`/`git commit`. The
+   * Operation is never replayed: a replay returns a finished Operation, and an interrupted
+   * one is reported for reconciliation instead of running the commit side effect twice.
+   */
+  startResultCommitCapture(input: {
+    readonly operationId: string;
+    readonly commandId: string;
+    readonly authorizationId: string;
+    readonly expectedHead: string;
+    readonly changeFingerprint: string;
+    readonly startedAt: number;
+  }): ResultCommitCapturePlan {
+    return this.sqlite.transaction(() => {
+      const authorization = this.resultCommitAuthorizationRow(input.authorizationId);
+      if (authorization === null) {
+        throw new StorageError('NOT_FOUND', 'Result commit authorization was not found');
+      }
+      const existing = this.sqlite.query<{ id: string }, [string, string]>(`
+        SELECT id FROM operations WHERE project_id=?1 AND kind='CAPTURE_RESULT' AND idempotency_key=?2
+      `).get(authorization.projectId, input.commandId);
+      if (existing !== null) {
+        const plan = this.resultCommitCapturePlan(existing.id);
+        if (plan.operationState === 'SUCCEEDED' || plan.operationState === 'FAILED') return plan;
+        throw new StorageError('INVALID_STATE',
+          `Result commit capture is ${plan.operationState}; reconcile it instead of replaying the commit`);
+      }
+      if (authorization.status !== 'ACTIVE') {
+        throw new StorageError('INVALID_STATE',
+          `Result commit authorization is ${authorization.status}; prepare a new one`);
+      }
+      if (authorization.expectedHead !== input.expectedHead
+        || authorization.changeFingerprint !== input.changeFingerprint) {
+        throw new StorageError('INVALID_STATE', 'Capture does not match its authorization snapshot');
+      }
+      const subject = this.resultCommitSubject(authorization.projectId, authorization.taskId,
+        authorization.executionId);
+      if (!subject.quiescent) {
+        throw new StorageError('INVALID_STATE', 'Agent is no longer proven quiescent');
+      }
+      if (subject.currentRevisionId !== subject.appliedRevisionId) {
+        throw new StorageError('INVALID_STATE', 'Task revision changed after the Execution started');
+      }
+      this.sqlite.query(`
+        INSERT INTO operations(id,project_id,kind,aggregate_id,idempotency_key,state,
+          request_json,created_at,updated_at)
+        VALUES (?1,?2,'CAPTURE_RESULT',?3,?4,'IN_PROGRESS',?5,?6,?6)
+      `).run(input.operationId, authorization.projectId, authorization.executionId, input.commandId,
+        JSON.stringify({ authorizationId: input.authorizationId, executionId: authorization.executionId,
+          taskId: authorization.taskId, expectedHead: input.expectedHead,
+          changeFingerprint: input.changeFingerprint }), input.startedAt);
+      return this.resultCommitCapturePlan(input.operationId);
+    })();
+  }
+
+  listIncompleteResultCommitCaptures(): readonly ResultCommitCapturePlan[] {
+    return this.sqlite.query<{ id: string }, []>(`
+      SELECT id FROM operations WHERE kind='CAPTURE_RESULT'
+        AND state IN ('PLANNED','IN_PROGRESS','RECONCILE_REQUIRED') ORDER BY created_at,id
+    `).all().map((row) => this.resultCommitCapturePlan(row.id));
+  }
+
+  /**
+   * Consumes the authorization and fixes the created commit on the Execution. The Execution
+   * becomes SUCCEEDED, the workspace is retained for verification, and the Task only reaches
+   * EXECUTED: a result commit is not a verification and not an integration.
+   */
+  completeResultCommitCapture(input: {
+    readonly operationId: string;
+    readonly resultCommit: string;
+    readonly resultTree: string;
+    readonly identityName: string;
+    readonly identityEmail: string;
+    readonly hookOutcome: 'PASSED' | 'REPORTED_FAILURE_AFTER_COMMIT';
+    /** Bounded Git diagnostics from a commit command that reported a failure after committing. */
+    readonly hookDetail: string;
+    readonly source: 'CONFIRMED' | 'RECONCILED';
+    readonly eventId: string;
+    readonly executionEventId: string;
+    readonly taskEventId: string;
+    readonly completedAt: number;
+  }): ResultCommitCapturePlan {
+    return this.sqlite.transaction(() => {
+      const existing = this.resultCommitCapturePlan(input.operationId);
+      if (existing.operationState === 'SUCCEEDED') return existing;
+      if (existing.operationState !== 'IN_PROGRESS') {
+        throw new StorageError('INVALID_STATE',
+          `Result commit capture cannot complete from ${existing.operationState}`);
+      }
+      const authorization = this.resultCommitAuthorizationRow(existing.authorizationId);
+      if (authorization === null) {
+        throw new StorageError('NOT_FOUND', 'Result commit authorization was not found');
+      }
+      if (authorization.status !== 'ACTIVE') {
+        throw new StorageError('INVALID_STATE',
+          `Result commit authorization is ${authorization.status}`);
+      }
+      if (authorization.expectedHead !== existing.expectedHead
+        || authorization.changeFingerprint !== existing.changeFingerprint) {
+        throw new StorageError('INVALID_STATE', 'Capture snapshot no longer matches its authorization');
+      }
+      const subject = this.resultCommitSubject(authorization.projectId,
+        authorization.taskId, authorization.executionId);
+      if (subject.currentRevisionId !== subject.appliedRevisionId) {
+        throw new StorageError('INVALID_STATE', 'Task revision changed before the result commit was recorded');
+      }
+      if (subject.executionState !== 'RUNNING' || !subject.resourceHeld
+        || subject.workspaceState !== 'IN_USE' || subject.taskState !== 'RUNNING') {
+        throw new StorageError('INVALID_STATE',
+          `Execution is ${subject.executionState}/${subject.workspaceState}/${subject.taskState}; cannot record a result commit`);
+      }
+      this.sqlite.query(`
+        UPDATE result_commit_authorizations SET status='CONSUMED',consumed_at=?1
+        WHERE id=?2 AND status='ACTIVE'
+      `).run(input.completedAt, authorization.id);
+      const executionUpdate = this.sqlite.query(`
+        UPDATE executions SET state='SUCCEEDED',resource_held=0,result_commit=?1,version=version+1,
+          ended_at=?2 WHERE id=?3 AND state='RUNNING' AND resource_held=1
+      `).run(input.resultCommit, input.completedAt, authorization.executionId);
+      const workspaceUpdate = this.sqlite.query(
+        "UPDATE workspaces SET state='RETAINED' WHERE id=?1 AND state='IN_USE'",
+      ).run(authorization.workspaceId);
+      const taskUpdate = this.sqlite.query(`
+        UPDATE tasks SET state='EXECUTED',version=version+1,updated_at=?1
+        WHERE id=?2 AND state='RUNNING'
+      `).run(input.completedAt, authorization.taskId);
+      if (executionUpdate.changes !== 1 || workspaceUpdate.changes !== 1 || taskUpdate.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION', 'Result commit subject changed during capture');
+      }
+      this.sqlite.query(`
+        UPDATE operations SET state='SUCCEEDED',result_json=?1,updated_at=?2
+        WHERE id=?3 AND state='IN_PROGRESS'
+      `).run(JSON.stringify({ resultCommit: input.resultCommit, resultTree: input.resultTree,
+        authorizationId: authorization.id }), input.completedAt, input.operationId);
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'ResultCommitCreated',1,'Execution',?3,?4,?5,?6,?7,?8)
+      `).run(input.eventId, authorization.projectId, authorization.executionId,
+        subject.executionVersion + 1, input.operationId, null, input.completedAt,
+        JSON.stringify({ authorizationId: authorization.id, executionId: authorization.executionId,
+          revisionId: authorization.appliedRevisionId, baseCommit: authorization.baseCommit,
+          resultCommit: input.resultCommit, resultTree: input.resultTree,
+          identity: { name: input.identityName, email: input.identityEmail },
+          hookOutcome: input.hookOutcome, hookDetail: input.hookDetail, source: input.source }));
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'ExecutionStateChanged',1,'Execution',?3,?4,?5,?6,?7,?8)
+      `).run(input.executionEventId, authorization.projectId, authorization.executionId,
+        subject.executionVersion + 1, input.operationId, input.eventId, input.completedAt,
+        JSON.stringify({ executionId: authorization.executionId, from: 'RUNNING',
+          to: 'SUCCEEDED', reason: 'result commit captured' }));
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'TaskStateChanged',1,'Task',?3,?4,?5,?6,?7,?8)
+      `).run(input.taskEventId, authorization.projectId, authorization.taskId,
+        subject.taskVersion + 1, input.operationId, input.executionEventId, input.completedAt,
+        JSON.stringify({ taskId: authorization.taskId, from: 'RUNNING', to: 'EXECUTED',
+          reason: 'result commit captured' }));
+      return this.resultCommitCapturePlan(input.operationId);
+    })();
+  }
+
+  failResultCommitCapture(input: {
+    readonly operationId: string;
+    readonly error: Readonly<{ code: string; message: string }>;
+    readonly reconcileRequired: boolean;
+    readonly failedAt: number;
+  }): void {
+    const state = input.reconcileRequired ? 'RECONCILE_REQUIRED' : 'FAILED';
+    const result = this.sqlite.query(`
+      UPDATE operations SET state=?1,result_json=?2,updated_at=?3
+      WHERE id=?4 AND state IN ('PLANNED','IN_PROGRESS','RECONCILE_REQUIRED')
+    `).run(state, JSON.stringify({ error: input.error }), input.failedAt, input.operationId);
+    if (result.changes !== 1) {
+      throw new StorageError('INVALID_STATE', 'Result commit capture failure did not match its state');
+    }
+  }
+
+  /** Public projection of one Execution's result-commit subject, including quiescence proof. */
+  getResultCommitSubject(projectId: string, taskId: string, executionId: string): ResultCommitSubject {
+    return this.resultCommitSubject(projectId, taskId, executionId);
+  }
+
+  private resultCommitSubject(
+    projectId: string,
+    taskId: string,
+    executionId: string,
+  ): ResultCommitSubject {
+    const row = this.sqlite.query<{
+      project_id: string; task_id: string; display_number: number; task_version: number;
+      task_state: TaskLifecycleState; current_revision_id: string; execution_id: string;
+      execution_version: number; execution_state: ExecutionLifecycleState;
+      applied_revision_id: string; resource_held: number;
+      workspace_id: string; workspace_path: string; workspace_branch_ref: string;
+      workspace_state: WorkspaceLifecycleState; base_commit: string;
+      session_state: AgentSessionLifecycleState | null; quiescent: number;
+    }, [string, string, string]>(`
+      SELECT task.project_id,task.id AS task_id,task.display_number,task.version AS task_version,
+        task.state AS task_state,task.current_revision_id,execution.id AS execution_id,
+        execution.version AS execution_version,execution.state AS execution_state,
+        execution.applied_revision_id,execution.resource_held,
+        workspace.id AS workspace_id,workspace.path AS workspace_path,
+        workspace.branch_ref AS workspace_branch_ref,workspace.state AS workspace_state,
+        workspace.base_commit,session.state AS session_state,
+        CASE WHEN session.state='EXITED' AND json_extract(session.exit_json,'$.outcome')='SUCCESS'
+          AND json_extract(session.exit_json,'$.evidence.toolsQuiescent')=1
+          AND json_extract(session.exit_json,'$.evidence.ownedWritersStopped')=1
+          THEN 1 ELSE 0 END AS quiescent
+      FROM tasks task
+      JOIN project_trusts trust ON trust.project_id=task.project_id AND trust.status='ACTIVE'
+      JOIN executions execution ON execution.task_id=task.id AND execution.id=?3
+      JOIN workspaces workspace ON workspace.id=execution.workspace_id
+      LEFT JOIN agent_sessions session ON session.execution_id=execution.id
+      WHERE task.project_id=?1 AND task.id=?2
+    `).get(projectId, taskId, executionId);
+    if (row === null) {
+      throw new StorageError('NOT_FOUND', 'Trusted Task, Execution, or workspace was not found');
+    }
+    return {
+      projectId: row.project_id,
+      taskId: row.task_id,
+      taskDisplayNumber: row.display_number,
+      taskVersion: row.task_version,
+      taskState: row.task_state,
+      currentRevisionId: row.current_revision_id,
+      executionId: row.execution_id,
+      executionVersion: row.execution_version,
+      executionState: row.execution_state,
+      appliedRevisionId: row.applied_revision_id,
+      resourceHeld: row.resource_held === 1,
+      workspaceId: row.workspace_id,
+      workspacePath: row.workspace_path,
+      workspaceBranchRef: row.workspace_branch_ref,
+      workspaceState: row.workspace_state,
+      baseCommit: row.base_commit,
+      quiescent: row.quiescent === 1,
+      sessionState: row.session_state,
+    };
+  }
+
+  private resultCommitAuthorizationRow(
+    authorizationId: string,
+    database: Database = this.sqlite,
+  ): ResultCommitAuthorization | null {
+    const row = database.query<{
+      id: string; project_id: string; task_id: string; display_number: number; task_version: number;
+      task_state: TaskLifecycleState; current_revision_id: string; execution_id: string;
+      execution_state: ExecutionLifecycleState; applied_revision_id: string; resource_held: number;
+      workspace_id: string; workspace_path: string; workspace_branch_ref: string;
+      workspace_state: WorkspaceLifecycleState; base_commit: string;
+      expected_head: string; change_fingerprint: string; status: ResultCommitAuthorization['status'];
+      created_at: number; result_commit: string | null;
+      session_state: AgentSessionLifecycleState | null; quiescent: number;
+    }, [string]>(`
+      SELECT authorization.id,task.project_id,task.id AS task_id,task.display_number,
+        task.version AS task_version,task.state AS task_state,task.current_revision_id,
+        authorization.execution_id,execution.state AS execution_state,execution.applied_revision_id,
+        execution.resource_held,authorization.workspace_id,workspace.path AS workspace_path,
+        workspace.branch_ref AS workspace_branch_ref,workspace.state AS workspace_state,
+        workspace.base_commit,authorization.expected_head,authorization.change_fingerprint,
+        authorization.status,authorization.created_at,execution.result_commit,
+        session.state AS session_state,
+        CASE WHEN session.state='EXITED' AND json_extract(session.exit_json,'$.outcome')='SUCCESS'
+          AND json_extract(session.exit_json,'$.evidence.toolsQuiescent')=1
+          AND json_extract(session.exit_json,'$.evidence.ownedWritersStopped')=1
+          THEN 1 ELSE 0 END AS quiescent
+      FROM result_commit_authorizations authorization
+      JOIN tasks task ON task.id=authorization.task_id
+      JOIN executions execution ON execution.id=authorization.execution_id
+      JOIN workspaces workspace ON workspace.id=authorization.workspace_id
+      LEFT JOIN agent_sessions session ON session.execution_id=execution.id
+      WHERE authorization.id=?1
+    `).get(authorizationId);
+    if (row === null) return null;
+    return {
+      id: row.id,
+      projectId: row.project_id,
+      taskId: row.task_id,
+      taskDisplayNumber: row.display_number,
+      taskVersion: row.task_version,
+      taskState: row.task_state,
+      currentRevisionId: row.current_revision_id,
+      executionId: row.execution_id,
+      executionState: row.execution_state,
+      appliedRevisionId: row.applied_revision_id,
+      resourceHeld: row.resource_held === 1,
+      workspaceId: row.workspace_id,
+      workspacePath: row.workspace_path,
+      workspaceBranchRef: row.workspace_branch_ref,
+      workspaceState: row.workspace_state,
+      baseCommit: row.base_commit,
+      expectedHead: row.expected_head,
+      changeFingerprint: row.change_fingerprint,
+      status: row.status,
+      createdAt: row.created_at,
+      resultCommit: row.result_commit,
+      quiescent: row.quiescent === 1,
+      sessionState: row.session_state,
+    };
+  }
+
+  private resultCommitCapturePlan(
+    operationId: string,
+    database: Database = this.sqlite,
+  ): ResultCommitCapturePlan {
+    const row = database.query<{
+      id: string; state: ResultCommitCapturePlan['operationState']; request_json: string;
+      result_json: string | null;
+    }, [string]>(`
+      SELECT id,state,request_json,result_json FROM operations WHERE id=?1 AND kind='CAPTURE_RESULT'
+    `).get(operationId);
+    if (row === null) throw new StorageError('NOT_FOUND', 'Result commit capture Operation was not found');
+    const request = JSON.parse(row.request_json) as {
+      authorizationId: string; executionId: string; taskId: string;
+      expectedHead: string; changeFingerprint: string;
+    };
+    const recorded = row.result_json === null
+      ? null
+      : JSON.parse(row.result_json) as { resultCommit?: string; resultTree?: string };
+    const authorization = this.resultCommitAuthorizationRow(request.authorizationId, database);
+    if (authorization === null) {
+      throw new StorageError('INVALID_STATE', 'Result commit capture lost its authorization');
+    }
+    return {
+      operationId: row.id,
+      operationState: row.state,
+      authorizationId: request.authorizationId,
+      executionId: request.executionId,
+      taskId: request.taskId,
+      expectedHead: request.expectedHead,
+      changeFingerprint: request.changeFingerprint,
+      authorization,
+      resultCommit: recorded?.resultCommit ?? null,
+      resultTree: recorded?.resultTree ?? null,
+    };
   }
 
   enqueueEventDeliveries(consumerId: string): number {

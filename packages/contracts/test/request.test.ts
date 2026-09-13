@@ -24,6 +24,39 @@ describe('Runtime task request boundary', () => {
       constraints: [{ id: 'same', text: 'first' }, { id: 'same', text: 'second' }],
     }).success).toBe(false);
   });
+
+  test('accepts a result commit request only with an explicit confirmation', () => {
+    const taskId = '66666666-6666-4666-8666-666666666666';
+    const commit = {
+      requestId: base.requestId,
+      schemaVersion: base.schemaVersion,
+      command: 'task.result.commit' as const,
+      commandId: base.commandId,
+      projectId: base.projectId,
+      taskId,
+      authorizationId: '44444444-4444-4444-8444-444444444444',
+    };
+    expect(runtimeRequestSchema.safeParse({ ...commit, confirm: true }).success).toBe(true);
+    expect(runtimeRequestSchema.safeParse(commit).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({ ...commit, confirm: false }).success).toBe(false);
+  });
+
+  test('accepts a result prepare request with or without an explicit Execution', () => {
+    const prepare = {
+      requestId: base.requestId,
+      schemaVersion: base.schemaVersion,
+      command: 'task.result.prepare' as const,
+      commandId: base.commandId,
+      projectId: base.projectId,
+      taskId: '66666666-6666-4666-8666-666666666666',
+    };
+    expect(runtimeRequestSchema.safeParse(prepare).success).toBe(true);
+    expect(runtimeRequestSchema.safeParse({
+      ...prepare,
+      executionId: '55555555-5555-4555-8555-555555555555',
+    }).success).toBe(true);
+    expect(runtimeRequestSchema.safeParse({ ...prepare, executionId: 'not-a-uuid' }).success).toBe(false);
+  });
 });
 
 describe('Adapter event boundary', () => {

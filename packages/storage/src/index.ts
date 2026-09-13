@@ -2,9 +2,10 @@ export { Phase1Database, StorageError } from './database.js';
 export type {
   AdapterEventResult, AgentAnswerPlan, AgentSessionLifecycleState, AgentStartPlan, AttentionSummary,
   CommandResult, ExecutionLifecycleState, ExecutionReservation, ExecutionSummary, ObservableAgentSession,
-  PendingEventDelivery, StoredAgentAnswer, StoredConstraint, StoredEventEnvelope,
+  PendingEventDelivery, ResultCommitAuthorization, ResultCommitCapturePlan, ResultCommitSubject,
+  StoredAgentAnswer, StoredConstraint, StoredEventEnvelope,
   TaskLifecycleState, TaskSummary,
-  TrustedProject, WorkspacePreparationPlan,
+  TrustedProject, WorkspaceLifecycleState, WorkspacePreparationPlan,
 } from './database.js';
 export {
   agentAnswerMigration, agentDisconnectMigration, agentObservationMigration, agentStartMigration,

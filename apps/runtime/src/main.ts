@@ -7,9 +7,11 @@ import { Phase1Database, StorageError, type AgentAnswerPlan } from '@codeestra/s
 import { createPiAdapterRegistry } from './adapter-registry.js';
 import { AgentRuntimeCoordinator } from './agent-runtime-service.js';
 import { runtimeHome, runtimeSocketPath } from './paths.js';
+import { captureResultCommit, prepareResultCommit } from './result-commit-service.js';
 import {
   reconcileInterruptedAgentAnswers,
   reconcileInterruptedAgentStarts,
+  reconcileInterruptedResultCommits,
   reconcileWorkspacePreparations,
 } from './recovery-service.js';
 
@@ -51,6 +53,7 @@ const coordinator = new AgentRuntimeCoordinator({
 await reconcileWorkspacePreparations({ storage });
 reconcileInterruptedAgentStarts({ storage });
 reconcileInterruptedAgentAnswers({ storage });
+await reconcileInterruptedResultCommits({ storage });
 let listener: ReturnType<typeof Bun.listen<SocketState>>;
 
 function success(requestId: string, result: unknown): RuntimeResponse {
@@ -94,6 +97,23 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         expectedTaskVersion: request.expectedTaskVersion,
         commandId: request.commandId,
         adapterId: request.adapterId,
+      }));
+    case 'task.result.prepare':
+      return success(request.requestId, await prepareResultCommit({
+        storage,
+        projectId: request.projectId,
+        taskId: request.taskId,
+        ...(request.executionId === undefined ? {} : { executionId: request.executionId }),
+        commandId: request.commandId,
+        actor: 'local-user',
+      }));
+    case 'task.result.commit':
+      return success(request.requestId, await captureResultCommit({
+        storage,
+        projectId: request.projectId,
+        taskId: request.taskId,
+        authorizationId: request.authorizationId,
+        commandId: request.commandId,
       }));
     case 'attention.list':
       return success(request.requestId, storage.listAttentionRequests(request.projectId));

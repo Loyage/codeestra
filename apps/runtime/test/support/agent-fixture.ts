@@ -45,9 +45,12 @@ export async function createAgentFixture(): Promise<AgentFixture> {
   const home = mkdtempSync(join(tmpdir(), 'codeestra-agent-home-'));
   directories.push(repo, home);
   await git(repo, ['init', '-b', 'main']);
+  // Repository-local identity only: the fixture never writes global Git config.
+  await git(repo, ['config', 'user.name', 'Test']);
+  await git(repo, ['config', 'user.email', 'test@example.invalid']);
   await Bun.write(join(repo, 'README.md'), 'temporary repository\n');
   await git(repo, ['add', 'README.md']);
-  await git(repo, ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'initial']);
+  await git(repo, ['commit', '-m', 'initial']);
   const identity = await inspectRepository(repo);
   const storage = new Phase1Database();
   storage.trustProject({

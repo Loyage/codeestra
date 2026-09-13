@@ -84,6 +84,24 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
   }),
   z.strictObject({
     ...requestBase,
+    command: z.literal('task.result.prepare'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    executionId: z.string().uuid().optional(),
+  }),
+  // `confirm` is part of the IPC contract so an unconfirmed capture can never reach Git.
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.result.commit'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    authorizationId: z.string().uuid(),
+    confirm: z.literal(true),
+  }),
+  z.strictObject({
+    ...requestBase,
     command: z.literal('attention.list'),
     projectId: z.string().uuid(),
   }),

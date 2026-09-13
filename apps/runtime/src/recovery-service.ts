@@ -1,5 +1,6 @@
-import { reconcileWorkspace } from '@codeestra/git';
+import { inspectResultCommit, readHeadCommit, reconcileWorkspace } from '@codeestra/git';
 import { Phase1Database } from '@codeestra/storage';
+import { resultCommitMessage } from './result-commit-service.js';
 
 export interface AgentStartRecoveryResult {
   readonly operationId: string;
@@ -69,6 +70,14 @@ export function reconcileInterruptedAgentAnswers(input: {
     }
     return { operationId: plan.operationId, attentionId: plan.id, outcome: 'RECOVERY_REQUIRED' as const };
   });
+}
+
+export interface ResultCommitRecoveryResult {
+  readonly operationId: string;
+  readonly authorizationId: string;
+  readonly executionId: string;
+  readonly outcome: 'SAFE_TO_RESUME' | 'RECOVERED_SUCCEEDED' | 'FAILED_NO_COMMIT' | 'RECOVERY_REQUIRED';
+  readonly resultCommit?: string;
 }
 
 /** Reconcile persisted workspace operations without replaying `git worktree add`. */
@@ -141,6 +150,97 @@ export async function reconcileWorkspacePreparations(input: {
       outcome: 'RECOVERY_REQUIRED',
       evidenceRef,
     });
+  }
+  return results;
+}
+
+/**
+ * Reconciles a result commit that the Runtime was creating when it stopped. A commit that
+ * exists on top of the authorized head with the deterministic message is adopted without
+ * running hooks again; an unchanged head only fails a DB-recorded Operation; anything else
+ * keeps the worktree untouched and asks for a manual decision.
+ */
+export async function reconcileInterruptedResultCommits(input: {
+  readonly storage: Phase1Database;
+  readonly now?: () => number;
+  readonly randomUUID?: () => string;
+}): Promise<readonly ResultCommitRecoveryResult[]> {
+  const now = input.now ?? Date.now;
+  const randomUUID = input.randomUUID ?? (() => crypto.randomUUID());
+  const results: ResultCommitRecoveryResult[] = [];
+  for (const plan of input.storage.listIncompleteResultCommitCaptures()) {
+    const base = {
+      operationId: plan.operationId,
+      authorizationId: plan.authorizationId,
+      executionId: plan.executionId,
+    };
+    if (plan.operationState === 'PLANNED') {
+      results.push({ ...base, outcome: 'SAFE_TO_RESUME' });
+      continue;
+    }
+    const authorization = plan.authorization;
+    const message = resultCommitMessage({
+      taskDisplayNumber: authorization.taskDisplayNumber,
+      revisionId: authorization.appliedRevisionId,
+      executionId: authorization.executionId,
+    });
+    try {
+      const inspected = await inspectResultCommit({
+        workspacePath: authorization.workspacePath,
+        expectedHead: authorization.expectedHead,
+        expectedMessage: message,
+      });
+      if (inspected !== null) {
+        input.storage.completeResultCommitCapture({
+          operationId: plan.operationId,
+          resultCommit: inspected.commit,
+          resultTree: inspected.tree,
+          identityName: inspected.authorName,
+          identityEmail: inspected.authorEmail,
+          hookOutcome: 'PASSED',
+          hookDetail: 'reconciled an existing result commit after a Runtime restart',
+          source: 'RECONCILED',
+          eventId: randomUUID(),
+          executionEventId: randomUUID(),
+          taskEventId: randomUUID(),
+          completedAt: now(),
+        });
+        results.push({ ...base, outcome: 'RECOVERED_SUCCEEDED', resultCommit: inspected.commit });
+        continue;
+      }
+      const head = await readHeadCommit(authorization.workspacePath);
+      if (head === authorization.expectedHead) {
+        input.storage.failResultCommitCapture({
+          operationId: plan.operationId,
+          error: { code: 'RUNTIME_RESTARTED', message: 'Runtime restarted before the result commit was created' },
+          reconcileRequired: false,
+          failedAt: now(),
+        });
+        results.push({ ...base, outcome: 'FAILED_NO_COMMIT' });
+        continue;
+      }
+      input.storage.failResultCommitCapture({
+        operationId: plan.operationId,
+        error: { code: 'UNEXPECTED_HEAD', message: `HEAD moved to ${head} without a matching result commit` },
+        reconcileRequired: true,
+        failedAt: now(),
+      });
+      input.storage.invalidateResultCommitAuthorization({
+        authorizationId: authorization.id,
+        reason: 'HEAD moved without a matching result commit',
+        eventId: randomUUID(),
+        invalidatedAt: now(),
+      });
+      results.push({ ...base, outcome: 'RECOVERY_REQUIRED' });
+    } catch (error) {
+      input.storage.failResultCommitCapture({
+        operationId: plan.operationId,
+        error: { code: 'RECONCILE_FAILED', message: error instanceof Error ? error.message : String(error) },
+        reconcileRequired: true,
+        failedAt: now(),
+      });
+      results.push({ ...base, outcome: 'RECOVERY_REQUIRED' });
+    }
   }
   return results;
 }

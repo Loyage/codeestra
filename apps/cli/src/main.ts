@@ -86,6 +86,8 @@ function usage(): never {
   bun run codeestra task submit <project-id> <task-id> <expected-version>
   bun run codeestra task run <project-id> <task-id> <expected-version> [--adapter <id>]
   bun run codeestra task status <project-id> <task-id>
+  bun run codeestra task result prepare <project-id> <task-id> [execution-id]
+  bun run codeestra task result commit <project-id> <task-id> <authorization-id> --confirm
   bun run codeestra attention list <project-id>
   bun run codeestra attention answer <project-id> <attention-id> confirm <yes|no>
   bun run codeestra attention answer <project-id> <attention-id> value <text>
@@ -157,6 +159,35 @@ try {
       expectedTaskVersion,
       adapterId,
     }));
+  } else if (group === 'task' && action === 'result') {
+    // `task result <subcommand> …` is a three-level command, so the subcommand lands in
+    // firstArgument and the project ID is the first remaining argument.
+    const subcommand = firstArgument;
+    if (subcommand === 'prepare') {
+      const [projectId, taskId, executionId, ...extra] = remainingArguments;
+      if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
+      print(await call({
+        command: 'task.result.prepare',
+        commandId: crypto.randomUUID(),
+        projectId,
+        taskId,
+        ...(executionId === undefined ? {} : { executionId }),
+      }));
+    } else if (subcommand === 'commit') {
+      const [projectId, taskId, authorizationId, ...extra] = remainingArguments;
+      if (projectId === undefined || taskId === undefined || authorizationId === undefined) usage();
+      if (!extra.includes('--confirm') || extra.some((argument) => argument !== '--confirm')) usage();
+      print(await call({
+        command: 'task.result.commit',
+        commandId: crypto.randomUUID(),
+        projectId,
+        taskId,
+        authorizationId,
+        confirm: true,
+      }));
+    } else {
+      usage();
+    }
   } else if (group === 'attention' && action === 'list') {
     if (firstArgument === undefined || remainingArguments.length !== 0) usage();
     print(await call({ command: 'attention.list', projectId: firstArgument }));
