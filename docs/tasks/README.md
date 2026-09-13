@@ -788,6 +788,32 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 - 提升后在 main 工作树执行 `bun install --frozen-lockfile`（无变化）、`bun run build:ui`，随后执行 `bun run codeestra stop` → `bun run codeestra status`；Runtime 已恢复 `READY`（PID `92408`、`FULL`、`adapters: ["pi"]`、`activeSessions: []`）。
 - 仍需人工确认：主题切换与系统变化、窄屏、焦点顺序、快速切项目/任务、问卷回答、终态执行过程分页。长命令后台化、取消/暂停、原生接管及 Integration/main 后续能力继续属于 NEXT，不在本轮提前实现。
 
+## FOUNDATION-033 — 任务列表与任务详情分页
+
+状态：前端已实现；类型检查、Vitest/Bun 测试与 Vite 构建通过。**浏览器视觉与键盘操作待用户人工确认**。
+
+用户要求把任务列表与任务详情拆成两个页面：列表页只显示列表，点击某个任务才进入详情。
+
+### 已实现
+
+- `apps/ui/src/App.tsx`：`TasksTab` 拆成两条渲染路径。`task === null` 时只渲染任务概况、搜索/状态筛选、任务列表与新建草稿；选中任务（`taskId` 命中列表项）时渲染独立详情页，并在顶部提供「← 返回任务列表」。
+- 列表行增加「查看详情 →」提示，点击行即进入详情页；从待处理页的「查看关联任务」也直接进入对应详情。
+- 详情页保留原有全部能力：下一步提示、命令操作、任务内问卷、执行/验证证据、只读 Agent 执行过程；未新增取消、暂停、自动集成或发布能力。
+- 页面标题在任务页随视图切换为「任务列表 / 任务详情」；切换项目仍清空选择回到列表。创建草稿成功后进入该草稿详情（沿用原「创建后选中」行为）。
+- `apps/ui/src/styles.css`：移除双栏 `.columns`/`.task-workspace` 布局（含两处响应式覆盖），任务列表改为整页宽度并把列表最大高度提高到 60vh；新增 `.back-link` 与 `.task-open` 样式。
+
+### 实际验证
+
+- `bun run --cwd apps/ui typecheck`：通过。
+- `bun run check`：Runtime/CLI 与 UI TypeScript、**212 项 Vitest、226 项 Bun tests**、Vite 构建全部通过（0 fail）；`bun run --cwd apps/ui build` 产出 `dist/assets/index-BNVX8BYE.js`、`index-CdaUrOdv.css`。
+- 本轮仅改前端呈现与页面切换，未改变任何 Runtime 命令、契约或数据语义，因此未新增命令面测试。
+- 未操作浏览器/桌面；构建与类型检查不能证明排版、焦点顺序或窄屏视觉正确。
+
+### 交付边界
+
+- 未修改 `PROJECT_SPEC.md`、`AGENTS.md` 或任何 ADR；未提交、未 push、未提升 `dev → main`，也未重启 Runtime。
+- 仍需人工确认：列表/详情切换、返回按钮、窄屏单列、搜索与筛选后进入详情、从待处理页跳转详情。
+
 ## NEXT — 最小可用纵向切片
 
 0. 落实 ADR-0009 的 dev 基线：项目快照/Workspace 从 dev OID 建立，先补临时仓库测试；在此之前产品内 `task.run` 仍使用 mainRef，不能用于声称符合新分支规则。
