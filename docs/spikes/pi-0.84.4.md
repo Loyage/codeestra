@@ -1,6 +1,6 @@
 # Pi 0.84.4 Adapter Spike
 
-状态：已完成文档核对与受控本机 RPC spike；成果 commit 与项目 trust 产品策略已确认，尚未实现 Codeestra Adapter、fail-closed gate 或 Git 授权服务。
+状态：已完成文档核对、受控本机 RPC spike、adapter transport smoke，以及真实 `PiRpcAdapter` 子进程实现；Runtime 事件/回答 pump 与 Git 授权服务尚未实现。
 
 ## 范围与环境
 
@@ -58,12 +58,16 @@ Pi extension 的 `ctx.ui.select/confirm/input/editor` 在 RPC 模式产生 `exte
 1. Phase 1 使用 RPC 子进程，而非把 Agent SDK 与 Runtime 放入同一故障域。
 2. Pi adapter 不实现 `requestPause/applyRevision/resume`；运行中修订采用 ADR-0001 fallback：协作停止、确认静止、旧 Execution `SUPERSEDED`、新 Execution 使用完整 revision 启动。
 3. Codeestra session identity 与 Pi session ID/file 分开保存。RPC process PID/start token、session file 和 workspace ownership 都要核对。
-4. 事件 cursor 不能只依赖瞬时 RPC event。耐久回放使用 Codeestra event ID；Pi session entries 的稳定 entry ID 可作为 conversation 增量 cursor，但 tool streaming event 仍需 Runtime 自己持久化。
+4. 事件 cursor 不能只依赖瞬时 RPC event。耐久回放使用 Codeestra event ID；Pi session entries 的稳定 entry ID 可作为 conversation 增量 cursor，但 tool streaming event 仍需 Runtime 自己持久化。Phase 1 Pi cursor 采用 `pi:<epoch>:<seq>`，epoch 与一次子进程生命周期绑定；陈旧 epoch 的 cursor 被拒绝。
+5. 只允许受控工具集降低了“后代写入”风险，但不能证明任意工具静止；因此取消/失败仍需要证据或进入 recovery。
 5. 启动 timeout 不盲重试；先核对 owned process 和 session identity。
 
 ## 尚未通过的门禁
 
 - 成果 commit 与项目 trust 策略已由 ADR-0003/0004 确认，但对应授权/失效服务尚未实现。
-- 尚未实现并测试 Codeestra gate extension、RPC framing/parser、重复事件/command receipt、启动部分失败与孤儿进程 reconcile。
+- 已实现并单测 LF-only RPC framing/parser、Codeestra gate extension 与 `PiRpcAdapter`（自有子进程、受控 argv、身份采集、attention/completion/disconnect 映射、typed answer 写入）。尚未实现 Runtime 事件/回答 pump、真实事件重投与孤儿进程 reconcile。
+- adapter transport 的本机真实 Pi 0.84.4 smoke：用受控 argv 启动 `pi --mode rpc`，`get_state` 返回 provider sessionId/session file，`ps -o lstart` 取得 start token，SIGTERM 后确认进程已退出；未发送 prompt、未调用模型。
+- stub-transport 集成测试覆盖：受控 argv、身份入库字段、revision prompt 组成、permission dialog→typed Attention→confirm(false) 写回、`agent_settled`→SUCCESS、**意外退出→disconnected 而非完成**、无 live 进程/陈旧 cursor 拒绝。
 - 尚未证明 edit/write 和所有允许 extension tools 的 abort 后静止边界。
-- 首次项目 trust 与环境变量 allowlist 尚未定稿。
+- 受控启动使用 `--no-approve --no-extensions --extension <fixed gate> --no-skills --no-prompt-templates --no-themes --no-context-files`，避免项目动态 Pi 资源和环境 prompt 资源改变 Task 输入；项目知识将来通过 `knowledgeSnapshotRefs` 显式交付。已确认该 argv 可被真实 Pi 0.84.4 接受。环境变量 allowlist 尚未定稿。
+- 用户已确认：`agent_settled` 可作为 SUCCESS 完成依据，但 evidence 必须写明依据（当前为 `pi-rpc:agent_settled:session=...:epoch=...:tools=<hash>`）；进程异常退出不声明静止，而是 DISCONNECTED + RECOVERY_REQUIRED 且保留占用。

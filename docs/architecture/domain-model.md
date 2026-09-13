@@ -53,7 +53,9 @@ Execution 记录 attemptNumber、primaryAdapterId、initialRevisionId、appliedR
 
 Session 保存 adapterId、providerSessionId、processIdentity、capabilities snapshot、transport locator、session storage reference、state 和退出信息。PID 单独不足以证明身份；需要启动 token/时间及进程控制记录。Session 持久化不等于 OS 进程永不退出。
 
-一个 Execution 一个主 Session，Session 内可有多轮交互。AttentionRequest 保存类型（PERMISSION/QUESTION/RECOVERY）、providerRequestId、提示、状态、回答者和实际回答投递状态。回答已写 DB 不代表 Agent 已恢复。
+一个 Execution 一个主 Session，Session 内可有多轮交互。AttentionRequest 保存类型（PERMISSION/QUESTION/RECOVERY）、responseType（CONFIRM/VALUE）、providerRequestId、提示和状态；typed answer 另存回答者与投递 Operation。回答已写 DB 不代表 Agent 已恢复，confirmed=false 与 cancel 都是有效但语义不同的回答。
+
+Session 身份分三层持久化：Codeestra sessionId、provider session ID/file、provider process identity（pid、executable、start token、argv hash、采集时间）。缺少 start token 时拒绝启动，因为 PID 可被复用。Runtime 丢失 RPC 管道后不重接 live process：记录 DISCONNECTED，并让 Execution/workspace 保持占用并进入 RECOVERY_REQUIRED，直到 reconcile 取得真实事实。
 
 ### Workspace
 

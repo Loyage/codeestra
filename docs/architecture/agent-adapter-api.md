@@ -1,6 +1,6 @@
 # Agent Adapter API
 
-状态：Runtime port 设计，不是 Pi SDK API 的复述。Pi 0.84.4 首轮文档核对与受控 RPC spike 已完成，结论见 [`../spikes/pi-0.84.4.md`](../spikes/pi-0.84.4.md)；commit/trust 产品策略已确认，Pi fail-closed gate 与真实执行门禁仍未实现。
+状态：Runtime port 设计，不是 Pi SDK API 的复述。当前代码导出 start/observation/typed-answer 子集与 deterministic fake、以及真实 `PiRpcAdapter`（自有子进程、身份采集、attention/completion/disconnect 映射、typed answer 写入）；pause/revision/stop control 尚未落地。Runtime 尚未接入 adapter registry 与事件 pump（提交/回答仍由 CLI 显式触发）。Pi 0.84.4 首轮文档核对、受控 RPC spike 与 adapter transport smoke 已完成，结论见 [`../spikes/pi-0.84.4.md`](../spikes/pi-0.84.4.md)；commit/trust 产品策略已确认，真实工具执行/取消门禁仍未验收。
 
 ## 1. 合约草案
 
@@ -97,12 +97,14 @@ type AdapterEvent = {
 );
 ```
 
-这是设计层类型；正式导出前通过 Pi spike 校验错误分类、实际流控与可用能力。PTY 原始字节、resize、input 路由是独立 TerminalTransport 合约，不混入 AdapterEvent。
+这是完整设计层类型；当前 `packages/contracts` 只导出 `AgentStartAdapter` / `AgentObserveAdapter` 及 attention/completed event 子集，不用尚未实现的方法冒充完整 Adapter。观察事件经 Zod 校验；只有显式 `toolsQuiescent=true` 与 `ownedWritersStopped=true` 的 completion evidence 才能释放失败 Execution 的资源。`packages/agent-adapters` 的 deterministic fake 只验证协议与编排行为，不执行命令，也不能作为 Pi 验收。PTY 原始字节、resize、input 路由是独立 TerminalTransport 合约，不混入 AdapterEvent。
 
 ## 2. 语义
 
 - ACCEPTED 仅表示控制请求已受理，不代表已经暂停、回答生效或取消完成。
 - start timeout 不能盲重试，可能已创建真实进程。通过 operation/session identity 核对。
+- provider 进程身份必须包含 PID 以外的 start token；只有 PID 可用时拒绝启动。丢失 stdio 后不得重接或重放，而是记录 DISCONNECTED 并保留 Execution/workspace 占用。
+- 完成证据必须能说明依据。Phase 1 Pi 将 `agent_settled`（且仅允许受控工具集）作为 SUCCESS 依据，并把该依据写入 evidence ref；进程异常退出或 stdout 流损坏不产生完成，而是断连恢复。
 - 不支持暂停时按 ADR-0001 协作停止→确认静止→旧 Execution SUPERSEDED→新 Execution。运行中修订保留完整快照与投递审计。
 - 无可靠 ACK 时不能通过匹配“好的”判断约束已应用；完整新启动输入是回退路径。
 - 不能确认工具/后代进程静止就返回 UNKNOWN 并保留执行资源，不用 session 的 stdout 安静作为停止证据。
@@ -115,10 +117,10 @@ type AdapterEvent = {
 ## 3. Phase 1 Pi Spike 验收门禁
 
 1. [已完成首轮] 阅读 Pi 0.84.4 SDK/RPC/Session/extension 文档与 examples，固定版本 0.84.4、MIT、Node `>=22.19.0`。
-2. [部分完成] 验证 RPC 启动/事件与 extension UI 权限、结构化问题、真实回答通路；仍需实现 Codeestra fail-closed gate extension。
+2. [部分完成] RPC framing、Codeestra fail-closed gate extension、真实 `PiRpcAdapter` 子进程（受控 argv、get_state 身份、prompt 注入 revision、attention/completion/disconnect 映射、typed answer 写入）与持久 answer Operation 已实现；仍需 Runtime adapter registry、事件/回答 pump 与真实工具执行验收。
 3. [部分完成] 内置 bash abort/process-group spike 通过；任意 extension/逃逸进程不在保证内，限定工具集仍需逐项验证。
 4. [已明确边界] 持久 conversation 可跨进程恢复；不能重接失去 stdio 的 live Pi 进程。
-5. [部分完成] Runtime 持有 RPC pipes 时可提供结构化 attach；Runtime 重启后的 live attach 不支持。
-6. [未完成] 测试修订 fallback、取消超时、启动部分失败、事件重投、孤儿进程。
+5. [部分完成] Runtime 持有 RPC pipes 时可提供结构化 attach；Runtime 重启后的 live attach 不支持。当前 adapter 明确拒绝无 live 进程的 observe/answer。
+6. [部分完成] fake 已覆盖启动部分失败、answer 投递失败与 provider event/outbox 重投；Pi adapter 已覆盖受控 argv/身份/断连/答案往返的 stub-transport 测试；真实 Pi 的修订 fallback、取消超时、事件重投与孤儿进程仍未完成。
 
 Pi 0.84.4 没有 pause/resume 与可靠 revision ACK 原语。Phase 1 运行中修订必须走停止、确认静止、旧 Execution `SUPERSEDED`、新 Execution 完整启动的 fallback。真实运行仍受 Git 授权与其余门禁约束；fake adapter 不能替代这些验收。

@@ -6,7 +6,7 @@ Task-first、local-first 的 AI Development Runtime。用户管理产品意图�
 
 架构基线与已确认决策已记录。已实现 Phase 0 领域基础、Phase 1 SQLite storage 第一小步，以及最小 CLI/独立 Runtime 骨架：CLI 可自动启动后台 Runtime、显式信任项目，并按 Project ID 创建、列出和提交 Task。Task 创建会原子保存原始 Intent、首 Revision、事实事件与幂等回执；submit 使用 expected version 将 DRAFT 转为 READY。
 
-这还不是完整的 AI 编排产品。尚无自动 Scheduler、fake/真实 Pi Adapter、Agent Session 启动、Git 自动成果 commit、桌面 UI 或集成流水线。Runtime 已有 Operation 包裹的 workspace prepare、启动恢复扫描和原子 Execution 预留，但尚未形成 Agent 执行闭环。
+这还不是完整的 AI 编排产品。尚无自动 Scheduler、Runtime 侧真实 Pi 进程/事件 pump、pause/revision/stop control、Git 自动成果 commit、桌面 UI 或集成流水线。Runtime 已有 workspace/Execution/Agent start 协调、Adapter event 投影、typed Attention answer Operation/reconcile 与 durable outbox；Pi 已有 LF-only RPC framing、受控启动参数、fail-closed gate extension 与自有子进程的 `PiRpcAdapter`（身份采集、attention/completion/disconnect 映射、typed answer 写入），并以 stub transport + deterministic fake 验证编排。尚未实现 Runtime adapter registry/事件 pump、真实 Pi 进程恢复与成果 commit。尚未实现真实 Pi 进程生命周期，fake 不代表真实 Agent 集成通过。
 
 ## 文档
 
@@ -53,7 +53,8 @@ apps/
 ├── cli/                # 首个用户入口；自动连接/启动 Runtime
 └── runtime/            # 本用户 Unix socket 与项目接入
 packages/
-├── contracts/          # Zod IPC 边界
+├── agent-adapters/     # deterministic start-only fake；不代表真实集成
+├── contracts/          # Zod IPC 边界与 start-only Adapter port
 ├── domain/             # 纯 TypeScript revision / Execution 领域逻辑
 ├── git/                # Git 身份检查与固定基线 owned worktree prepare
 └── storage/            # Bun SQLite Phase 1 migration 与事务原语
@@ -63,4 +64,4 @@ Domain 不依赖 Bun、SQLite、Tauri 或 Agent SDK。函数只计算不可变�
 
 ## 下一步
 
-下一纵向小步是 Execution PREPARING/STARTING、Agent start Operation 与 deterministic fake adapter 闭环；随后接入 Pi RPC framing、受控 gate extension 和成果 commit 一次性授权服务。当前 IPC 单实例竞态、非 workspace Operation reconcile 与完整崩溃恢复仍需补齐测试。
+下一纵向小步是 Pi 子进程 spawn、RPC pipe/event pump 与 provider process/session identity 持久化；随后实现成果 commit 一次性授权服务。当前 IPC 单实例竞态、真实进程 identity reconcile 与完整崩溃恢复仍需补齐测试。

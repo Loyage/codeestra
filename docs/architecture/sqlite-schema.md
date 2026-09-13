@@ -1,6 +1,6 @@
 # SQLite Schema
 
-状态：逻辑 SQL 设计基线；`packages/storage/src/migration.ts` 已落地 schema version 1 的 Phase 1 子集，尚不是对外发布 migration。未来字段与表不提前创建。后续 Drizzle schema 必须与下面的约束等价。
+状态：逻辑 SQL 设计基线；`packages/storage/src/migration.ts` 已落地 schema version 5 的 Phase 1 子集（v2 Agent Session，v3 observation/Attention，v4 typed answer/Intent target，v5 Adapter disconnect），尚不是对外发布 migration。未来字段与表不提前创建。后续 Drizzle schema 必须与下面的约束等价。
 
 ## 1. 约定
 
@@ -201,6 +201,7 @@ CREATE TABLE attention_requests (
   session_id TEXT NOT NULL REFERENCES agent_sessions(id),
   provider_request_id TEXT NOT NULL,
   kind TEXT NOT NULL CHECK(kind IN ('PERMISSION','QUESTION','RECOVERY')),
+  response_type TEXT NOT NULL CHECK(response_type IN ('CONFIRM','VALUE')),
   prompt_json TEXT NOT NULL CHECK(json_valid(prompt_json)),
   status TEXT NOT NULL CHECK(status IN ('OPEN','ANSWER_RECORDED','DELIVERED','CLOSED','STALE')),
   created_at INTEGER NOT NULL,
@@ -208,7 +209,7 @@ CREATE TABLE attention_requests (
 );
 CREATE TABLE attention_answers (
   id TEXT PRIMARY KEY,
-  request_id TEXT NOT NULL REFERENCES attention_requests(id),
+  request_id TEXT NOT NULL UNIQUE REFERENCES attention_requests(id),
   command_id TEXT NOT NULL UNIQUE,
   actor TEXT NOT NULL,
   answer_json TEXT NOT NULL CHECK(json_valid(answer_json)),
@@ -219,6 +220,14 @@ CREATE TABLE attention_answers (
 活动资源唯一性以 resource_held 而非心跳超时决定。即使 Runtime 的 lease 过期，也不能在未知进程仍可能写入时抢占 workspace。终态与 resource_held=0 的一致性在正式 CHECK/事务服务中强制；确认停止前不得置 0。
 
 Agent adapter_id 的权威来源为 Execution，不在多处维护可能不一致的主 Agent。provider session ID 是否跨项目唯一由 Adapter 决定，数据库不擅自全局唯一。
+
+Agent start 已按 `CREATED→PREPARING→STARTING→RUNNING` 分步持久化：调用 Adapter 前写 Session STARTING 与 START_AGENT Operation，成功后原子记录 Session ACTIVE、Execution RUNNING 与事件。可证明未创建 Session 的失败释放 Execution 持有并保留 workspace；任何未知/可能已启动的错误保持资源并进入 RECOVERY_REQUIRED。Runtime 重启遇到 IN_PROGRESS start 不重放，只标记恢复；PLANNED 尚可安全继续。
+
+v3 的 `adapter_events` 以 Session/provider event ID 为主键并约束 Session/cursor 唯一；同一 provider identity 的内容变化被拒绝。Attention 投影在同一事务写 Adapter event、OPEN request、Session/Execution/Task WAITING_FOR_USER 与领域事件。成功 completion 只令 Session EXITED，Execution 保持 RUNNING等待固定成果 commit；失败 completion 只有在结构化 quiescence evidence 通过边界校验后才释放 Execution 并保留 workspace。
+
+v4 为 Attention 保存 Adapter 声明的 `response_type`，并增加一请求一回答、Intent→Attention target。`attention.answer` 原子记录 ANSWER_AGENT Intent、typed answer、PLANNED Operation、receipt 与不含正文的 `UserAnswerRecorded`；只有 Operation 进入 IN_PROGRESS 后才调用 Adapter。明确未投递失败可回到 PLANNED 重试；任何可能已投递或 Runtime 中断都不得重放，而是保持 ownership 并进入 RECOVERY_REQUIRED。Adapter 确认接收后记录 `UserAnswerDelivered`；仅在没有其他阻塞 Attention 时恢复 Session/Execution/Task。
+
+v5 允许 `adapter_events.event_type='disconnected'`（表 CHECK 变更需重建表，约束与唯一索引保持不变）。Agent start 现在同时持久化 provider session ID、`session_storage_ref` 与 `process_identity_json`（pid、executable、start token、argv hash、capturedAt）；缺少 start token 时拒绝启动，因为 PID 可被复用。断连投影在同一事务写 Session `DISCONNECTED`、Execution/Task/workspace `RECOVERY_REQUIRED`（resource_held 保持 1）与状态事件；不声称静止，也不释放占用。
 
 `result_commit_authorizations` 是一次性授权，不是长期项目权限。消费时事务需重验 execution 当前 applied revision、workspace 归属、expected HEAD 与实时 ChangeSet fingerprint；任一变化先 INVALIDATED，再请求新确认。Commit 是外部副作用，成功后再崩溃时通过 Operation 与 HEAD/OID reconcile 补记，不能仅靠数据库事务假装原子。
 
@@ -371,9 +380,9 @@ CREATE INDEX delivery_retry ON event_deliveries(state,next_attempt_at);
 
 domain_events 是持久事实，event_deliveries 是可变投递 outbox。相同 command ID、不同 payload 必须拒绝。事件 version 允许同一次聚合事务产生多个事实，不能错误地对 aggregateVersion 建唯一约束。
 
-Phase 1 workspace prepare 已按此模型先事务写入 Workspace RESERVED 与 Operation PLANNED，再置 PREPARING/IN_PROGRESS 后调用 Git；成功记录 READY/SUCCEEDED 与 WorkspacePrepared。确定未进入副作用的失败可记 FAILED/RELEASED，副作用可能部分发生则保守记 RECONCILE_REQUIRED/RECOVERY_REQUIRED。Runtime 启动时已自动扫描并核对 workspace Operation，不重放 Git；其他 Operation 类型仍待实现。
+Phase 1 workspace prepare 已按此模型先事务写入 Workspace RESERVED 与 Operation PLANNED，再置 PREPARING/IN_PROGRESS 后调用 Git；成功记录 READY/SUCCEEDED 与 WorkspacePrepared。确定未进入副作用的失败可记 FAILED/RELEASED，副作用可能部分发生则保守记 RECONCILE_REQUIRED/RECOVERY_REQUIRED。Runtime 启动时自动扫描 workspace 与 Agent start Operation，不盲目重放外部副作用。
 
-Execution 预留已在单事务中固定 current revision/workspace/base/adapter/attempt，将 workspace READY→IN_USE 与 Task READY→RUNNING，并写 ExecutionReserved、TaskStateChanged 和幂等回执。Agent start 仍须使用独立 Operation，不能把 CREATED Execution 当成 Session 已启动。
+Execution 预留在单事务中固定 current revision/workspace/base/adapter/attempt，将 workspace READY→IN_USE 与 Task READY→RUNNING。Event delivery worker 为消费者补齐 outbox 行，按 sequence 处理 PENDING/到期 FAILED，并持久化 attempt、错误与下一重试时间；它是至少一次投递，消费者仍须按 eventId 去重。
 
 ## 7. Self Evolution（Phase 7 预留逻辑表）
 

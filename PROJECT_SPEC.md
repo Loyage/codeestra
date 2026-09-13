@@ -1,6 +1,6 @@
 # Codeestra — 产品与架构规格
 
-状态：架构设计基线；关键决策持续以 ADR 确认。Phase 0 第一批与 Phase 1 storage/CLI-Runtime 骨架已开始，已有 Task create/list/submit、Operation 驱动的 owned worktree prepare、启动恢复扫描与 Execution 原子预留；Pi 0.84.4 首轮 spike、成果 commit 及最小可用形态策略已确认，真实 Agent 执行仍须通过其余技术准入。
+状态：架构设计基线；关键决策持续以 ADR 确认。Phase 0 第一批与 Phase 1 storage/CLI-Runtime 骨架已开始，已有 Task create/list/submit、owned worktree/恢复、Execution 预留、Agent start、Adapter event 去重投影与 durable outbox、Pi RPC framing/gate 子集；Pi 0.84.4 首轮 spike、成果 commit 及最小可用形态策略已确认，真实 Agent 执行仍须通过其余技术准入。
 
 ## 1. 定位与目标
 
@@ -71,7 +71,7 @@ Self-hosting test 不应污染 Stable 的数据库、工作树、真实运行任
 
 优先 TypeScript、Bun、Bun workspaces、React、Vite、Tailwind、shadcn/ui、Tauri 2、SQLite、Drizzle ORM、Zod、Git CLI、Bun.spawn、Vitest。PTY 按真实交互需求单独选型；普通 stdout pipe 不能冒充 PTY。
 
-目标是本机单用户开发编排。不引入 Kubernetes、Kafka、RabbitMQ、微服务拆分或分布式基础设施。采用独立本地 Runtime，首个可用入口为自动启动该后台 Runtime 的 CLI，后续桌面作为可重连客户端；关闭客户端不终止任务和 Session。项目首次接入显式一次信任。Phase 1 首个真实 Adapter 为 Pi，对敏感工具逐次审批、未知工具 fail-closed；实际协议能力必须验证。取消采用协作停止，超时请求人工处理并保留资源；优先级只影响后续调度、不抢占。
+目标是本机单用户开发编排。不引入 Kubernetes、Kafka、RabbitMQ、微服务拆分或分布式基础设施。采用独立本地 Runtime，首个可用入口为自动启动该后台 Runtime 的 CLI，后续桌面作为可重连客户端；关闭客户端不终止任务和 Session。项目首次接入显式一次信任。Phase 1 首个真实 Adapter 为 Pi；内置 read/grep/find/ls 直接允许，write/edit/bash/powershell 逐次审批，未知工具 fail-closed；实际协议能力必须验证。取消采用协作停止，超时请求人工处理并保留资源；优先级只影响后续调度、不抢占。
 
 ## 7. 阶段
 
@@ -90,7 +90,7 @@ Phase 1 可产生待集成且有验证证据的任务结果，不以直接合并
 
 先完成规格、协作规则、领域对象、状态机、SQLite schema、事件模型、Adapter/Workspace API、Scheduler、Conflict Analyzer、模块结构、roadmap 与风险分析。通过架构准入条件后才做 Phase 0 / Phase 1 最小实现。
 
-当前已完成 Phase 0 第一批领域模型，并进入 Phase 1：已有 storage、CLI/独立 Runtime、Task 入口、owned worktree 与 Execution 预留基础。不实现：真实 Adapter 执行闭环、并行调度、完整桌面交互、自动集成发布、机器知识生成、自我升级、远端 Agent、多用户、多机器调度及分布式运行。真实 Pi 与成果 commit 仍须通过对应技术和授权门禁。
+当前已完成 Phase 0 第一批领域模型，并进入 Phase 1：已有 storage、CLI/独立 Runtime、Task 入口、owned worktree、Execution/Session 启动协调、Adapter observation/outbox、typed Attention answer Operation、Pi framing/gate 与自有子进程的 `PiRpcAdapter`。不实现：真实 Adapter 执行闭环、并行调度、完整桌面交互、自动集成发布、机器知识生成、自我升级、远端 Agent、多用户、多机器调度及分布式运行。真实 Pi 与成果 commit 仍须通过对应技术和授权门禁。
 
 ## 9. 文档导航与决策纪律
 

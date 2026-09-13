@@ -24,7 +24,7 @@ Scheduler、ExecutionCoordinator、IntegrationCoordinator 是 runtime 内不同�
 
 ## 2. 当前实际创建范围
 
-当前建立根 workspace、`packages/domain`、`packages/storage`、`packages/contracts`、只读检查用 `packages/git`，以及最小 `apps/cli` / `apps/runtime` 项目接入骨架。不提前创建没有实现的 Adapter、Desktop 或 bootstrap package，也不提供空函数冒充运行时。
+当前建立根 workspace、`packages/domain`、`packages/storage`、`packages/contracts`、`packages/git`、含 start-only fake 的 `packages/agent-adapters`，以及最小 `apps/cli` / `apps/runtime` 骨架。不提前创建 Desktop 或 bootstrap package，也不提供空函数冒充运行时。
 
 根配置：`package.json`、`bun.lock`、`tsconfig.json`、`vitest.config.ts`、`.gitignore`、`README.md`。工具使用 Nix 提供的 Bun；项目依赖在本地 workspace 安装，不全局安装 npm 工具。
 
@@ -33,7 +33,7 @@ Domain 第一批：
 - Execution 状态迁移及终态保护；
 - 类型检查、非法输入和不变量测试。
 
-Storage 第一批使用 Bun 原生 SQLite，包含 Phase 1 子集 migration、revision append-only trigger、活动资源/授权约束、CAS 与 command receipt 事务原语。CLI/Runtime 目前提供版本化本用户 IPC、后台启动、项目 inspect/trust/list，以及 Task create/list/submit；Runtime 应用服务以持久 Operation 包裹 Git owned worktree prepare，启动时核对未完成 workspace Operation，并可原子预留 Execution。仍无自动 Scheduler、Agent start/Session 或执行结果闭环。Drizzle 映射、完整 repository、进程 reconcile 和真实暂停证明尚未实现。Domain 纯函数接收的 evidence 是应用层提供的已验证事实，不能自证真实进程静止。
+Storage 使用 Bun 原生 SQLite，包含 Phase 1 子集 migration、revision append-only trigger、活动资源/授权约束、CAS 与 command receipt。CLI/Runtime 提供版本化本用户 IPC、项目接入和 Task create/list/submit；应用服务以 Operation 包裹 owned worktree 与 Agent start，启动时保守处理未完成操作，并可原子预留 Execution。deterministic fake 已覆盖 Session 启动、Attention/completion observation、typed answer 投递/reconcile、provider event 去重、明确 pre-start/pre-delivery 失败与不确定副作用；真实 `PiRpcAdapter` 另外自有 `pi --mode rpc` 子进程、采集 provider 身份、映射 attention/completion/disconnect 与写入 typed answer；durable worker 提供按 eventId 幂等要求的至少一次 outbox 投递。Pi 子集另有 LF-only RPC framing、固定 allowlist 启动参数和 fail-closed gate；尚无自动 Scheduler、Runtime adapter registry/事件 pump、真实 Pi 进程恢复、pause/revision/stop control 或成果 commit 闭环。Drizzle 映射、完整 repository、真实进程 reconcile 和暂停证明尚未实现。Domain 纯函数接收的 evidence 是应用层提供的已验证事实，不能自证真实进程静止。
 
 ## 3. 依赖与测试边界
 

@@ -43,11 +43,14 @@ type CommandEnvelope<T extends string, P> = {
 | DependencyAdded / DependencyNeedsReview | dependentId, prerequisiteId, requiredRevisionId |
 | ImpactAssessed / ConflictAssessed | assessmentId, revision/base references, verdict/reasons |
 | ExecutionReserved | executionId, taskId, revisionId, workspaceId |
+| ExecutionStateChanged | executionId, from, to, reason |
 | WorkspacePrepared | workspaceId, branch, baseCommit |
-| AgentSessionStarted | executionId, sessionId, adapterId |
+| AgentSessionStarted | executionId, sessionId, adapterId, providerSessionId, processIdentity |
+| AgentSessionStateChanged | sessionId, from, to, reason |
+| AgentSessionCompleted | executionId, sessionId, outcome, evidenceRef |
 | ExecutionPauseRequested / ExecutionPaused | executionId, reason, evidenceRef（已暂停事件必填） |
 | RevisionDelivered / RevisionAcknowledged | executionId, revisionId, deliveryKey, evidenceRef |
-| UserAttentionRequested | attentionId, sessionId, kind（敏感提示另存） |
+| UserAttentionRequested | attentionId, sessionId, kind, responseType（敏感提示另存） |
 | UserAnswerRecorded / UserAnswerDelivered | attentionId, answerId；不默认广播敏感回答正文 |
 | ResultCommitAuthorizationRequested | executionId, revisionId, expectedHead, changeFingerprint；差异内容另按安全策略查询 |
 | ResultCommitAuthorized / ResultCommitAuthorizationInvalidated | authorizationId, executionId, revisionId, expectedHead, changeFingerprint, actor / reason |
@@ -73,6 +76,8 @@ type CommandEnvelope<T extends string, P> = {
 6. 订阅断开不影响 Runtime；重连带 cursor。游标失效则明确要求重新取快照。
 7. 迟到的旧 Session/Execution 事件被审计但不能覆盖新尝试。重复外部事件以 provider event ID 或 adapter 本地持久序号去重；不支持可靠去重的输入需要 reconcile。
 8. 不做无限立即重试。退避、次数、最近错误可见；失败投递不能让其他任务全局停机。
+9. Phase 1 observation 子集以 `(session_id, provider_event_id)` 去重，并要求同一 Session 的 cursor 唯一；相同 ID/同内容返回既有投影，相同 ID 或 cursor 携带不同内容时 fail-closed。opaque cursor 持久化在 Session，重启后从该 cursor 继续。
+10. 当前 durable delivery worker 为消费者补齐 `event_deliveries`，按 sequence 投递并持久化 attempt/退避。它提供至少一次而非恰好一次；消费者必须按 eventId 幂等。
 
 ## 4. 终端与安全
 
