@@ -520,6 +520,23 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 - 文档检查与链接检查通过；`git branch --list` 同时包含 `main`、`dev`。
 - 本轮仅修改文档与创建分支，未执行代码测试；现有 Phase 1 `task.run` 仍按项目 `mainRef` 创建 worktree，尚未落实 dev 基线。自动 dev Integration、dev→main Promotion 与 Runtime 重启编排仍属后续实现，不能声称已完成。
 
+## FOUNDATION-024 — Web UI 中文化
+
+状态：已完成。
+
+### 修改
+
+- 将 `apps/ui` 的导航、任务、待处理请求、事件流、项目接入、操作提示和客户端错误文案改为中文。
+- 为任务、执行、会话、验证和待处理请求的常见状态增加中文显示名称，同时保留协议中的原始英文枚举值不变。
+- 页面语言声明改为 `zh-CN`，时间使用中文区域格式。
+
+### 验证
+
+- `bun run --cwd apps/ui typecheck`：通过。
+- `bun run --cwd apps/ui build`：通过。
+- `git diff --check`：通过。
+- 未执行浏览器自动化验证（遵守 ADR-0008 测试边界）。
+
 ## NEXT — 最小可用纵向切片
 
 0. 落实 ADR-0009 的 dev 基线：项目快照/Workspace 从 dev OID 建立，先补临时仓库测试；在此之前产品内 `task.run` 仍使用 mainRef，不能用于声称符合新分支规则。

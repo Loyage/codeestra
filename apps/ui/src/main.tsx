@@ -27,7 +27,7 @@ function readFragment(): { readonly token: string | null; readonly projectId: st
 }
 
 const container = document.getElementById('root');
-if (container === null) throw new Error('The UI shell has no root element');
+if (container === null) throw new Error('UI 外壳缺少根元素');
 
 const fragment = readFragment();
 

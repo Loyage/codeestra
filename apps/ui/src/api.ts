@@ -34,16 +34,16 @@ export class RuntimeClient {
         ...command,
       }),
     });
-    if (response.status === 401) throw new UiError('UNAUTHORIZED', 'The Runtime rejected this token');
+    if (response.status === 401) throw new UiError('UNAUTHORIZED', 'Runtime 拒绝了此令牌');
     let body: unknown;
     try {
       body = await response.json();
     } catch {
-      throw new UiError('INVALID_RESPONSE', `The Runtime returned ${response.status} without JSON`);
+      throw new UiError('INVALID_RESPONSE', `Runtime 返回了状态码 ${response.status}，但响应不是 JSON`);
     }
     const envelope = body as { ok?: boolean; result?: unknown; error?: CommandFailure };
     if (envelope.ok === true) return envelope.result as T;
-    const failure = envelope.error ?? { code: 'UNKNOWN', message: 'The Runtime returned no error detail' };
+    const failure = envelope.error ?? { code: 'UNKNOWN', message: 'Runtime 未返回错误详情' };
     throw new UiError(failure.code, failure.message);
   }
 
@@ -62,7 +62,7 @@ export class RuntimeClient {
       signal,
     });
     if (!response.ok || response.body === null) {
-      throw new UiError('EVENT_STREAM_FAILED', `The Runtime refused the event stream (${response.status})`);
+      throw new UiError('EVENT_STREAM_FAILED', `Runtime 拒绝了事件流请求（${response.status}）`);
     }
     const reader = response.body.getReader();
     const decoder = new TextDecoder();

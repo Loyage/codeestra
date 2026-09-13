@@ -15,6 +15,70 @@ import type {
 
 type Tab = 'tasks' | 'attention' | 'events' | 'project';
 
+const tabLabels: Record<Tab, string> = {
+  tasks: '任务',
+  attention: '待处理',
+  events: '事件',
+  project: '项目',
+};
+
+const valueLabels: Record<string, string> = {
+  DRAFT: '草稿',
+  READY: '就绪',
+  RUNNING: '运行中',
+  WAITING_FOR_USER: '等待用户',
+  BLOCKED: '已阻塞',
+  COMPLETED: '已完成',
+  FAILED: '失败',
+  CANCELLED: '已取消',
+  RECOVERY_REQUIRED: '需要恢复',
+  PAUSING: '正在暂停',
+  PAUSED: '已暂停',
+  EXECUTED: '已执行',
+  CANCELLING: '正在取消',
+  SUCCEEDED: '已成功',
+  CREATED: '已创建',
+  PREPARING: '准备中',
+  STARTING: '正在启动',
+  STOPPING: '正在停止',
+  SUPERSEDED: '已取代',
+  EXITED: '已退出',
+  DISCONNECTED: '已断开',
+  RESERVED: '已预留',
+  IN_USE: '使用中',
+  RETAINED: '已保留',
+  RELEASED: '已释放',
+  QUEUED: '排队中',
+  PASSED: '已通过',
+  ERROR: '错误',
+  STALE: '已过期',
+  ACTIVE: '有效',
+  CONSUMED: '已使用',
+  INVALIDATED: '已失效',
+  OPEN: '待处理',
+  ANSWERED: '已回答',
+  ANSWER_RECORDED: '已记录回答',
+  DELIVERED: '已送达',
+  CLOSED: '已关闭',
+  QUESTION: '问题',
+  PERMISSION: '权限请求',
+  RECOVERY: '恢复',
+  CONFIRM: '确认',
+  VALUE: '文本',
+};
+
+function labelValue(value: string): string {
+  return valueLabels[value] ?? value;
+}
+
+function streamStatusLabel(status: string): string {
+  if (status === 'connecting') return '连接中';
+  if (status === 'live') return '实时';
+  if (status === 'stopped') return '已停止';
+  const match = /^reconnecting \((\d+)\)$/.exec(status);
+  return match === null ? status : `正在重连（第 ${match[1]} 次）`;
+}
+
 export function App({ initialToken, initialProjectId, tokenKey }: {
   readonly initialToken: string | null;
   readonly initialProjectId: string | null;
@@ -46,16 +110,16 @@ function TokenForm({ onSubmit }: { readonly onSubmit: (token: string) => void })
     >
       <h1>Codeestra</h1>
       <p className="muted">
-        This page needs the token the Runtime printed. Run <code>codeestra ui</code> again and open
-        the address it shows, or paste the token from the <code>#token=…</code> fragment here.
+        此页面需要 Runtime 输出的令牌。请再次运行 <code>codeestra ui</code> 并打开所显示的地址，
+        或在此粘贴 <code>#token=…</code> 片段中的令牌。
       </p>
       <input
         type="password"
         value={value}
-        placeholder="Runtime token"
+        placeholder="Runtime 令牌"
         onChange={(event) => setValue(event.target.value)}
       />
-      <button type="submit">Connect</button>
+      <button type="submit">连接</button>
     </form>
   );
 }
@@ -134,7 +198,7 @@ function Console({ token, initialProjectId }: {
 
   useEffect(() => {
     // Runs once on mount; later reloads are explicit user actions.
-    void run('Loading projects', loadProjects);
+    void run('正在加载项目', loadProjects);
   }, []);
 
 
@@ -245,7 +309,7 @@ function Console({ token, initialProjectId }: {
       <header>
         <div className="brand">
           <strong>Codeestra</strong>
-          <span className="muted">local runtime console</span>
+          <span className="muted">本地 Runtime 控制台</span>
         </div>
         <div className="header-controls">
           <select
@@ -253,7 +317,7 @@ function Console({ token, initialProjectId }: {
             onChange={(event) => {
               const next = event.target.value === '' ? null : event.target.value;
               update({ projectId: next, taskId: null, status: null });
-              if (next !== null) void run('Loading tasks', async () => {
+              if (next !== null) void run('正在加载任务', async () => {
                 await loadTaskList(next);
                 const attentions = await client.command<AttentionView[]>(
                   { command: 'attention.list', projectId: next });
@@ -261,13 +325,13 @@ function Console({ token, initialProjectId }: {
               });
             }}
           >
-            <option value="">No project</option>
+            <option value="">未选择项目</option>
             {state.projects.map((project) => (
               <option key={project.id} value={project.id}>{project.name}</option>
             ))}
           </select>
-          <button type="button" onClick={() => { void run('Refreshing', loadProjects); }}>
-            Refresh
+          <button type="button" onClick={() => { void run('正在刷新', loadProjects); }}>
+            刷新
           </button>
         </div>
       </header>
@@ -280,7 +344,7 @@ function Console({ token, initialProjectId }: {
             className={tab === name ? 'tab active' : 'tab'}
             onClick={() => setTab(name)}
           >
-            {name}
+            {tabLabels[name]}
             {name === 'attention' && state.attentions.some((item) => item.status === 'OPEN')
               ? <span className="badge">{state.attentions.filter((item) => item.status === 'OPEN').length}</span>
               : null}
@@ -292,13 +356,13 @@ function Console({ token, initialProjectId }: {
       {state.error === null ? null : (
         <div className="banner error">
           {state.error}
-          <button type="button" onClick={() => update({ error: null })}>dismiss</button>
+          <button type="button" onClick={() => update({ error: null })}>关闭</button>
         </div>
       )}
       {state.notice === null ? null : (
         <div className="banner notice">
           {state.notice}
-          <button type="button" onClick={() => update({ notice: null })}>dismiss</button>
+          <button type="button" onClick={() => update({ notice: null })}>关闭</button>
         </div>
       )}
 
@@ -348,9 +412,9 @@ function Console({ token, initialProjectId }: {
       </main>
 
       <footer className="muted">
-        Closing this page does not stop the Runtime or any Task. Task cancel/pause is not implemented
-        yet, and the token is valid until the Runtime stops.
-        {selectedTask === null ? null : ` Selected task #${selectedTask.displayNumber}.`}
+        关闭此页面不会停止 Runtime 或任何任务。目前尚未实现任务取消或暂停；令牌在 Runtime
+        停止前一直有效。
+        {selectedTask === null ? null : ` 当前选择：任务 #${selectedTask.displayNumber}。`}
       </footer>
     </div>
   );
@@ -379,13 +443,13 @@ function TasksTab(props: CommonProps & {
   const task = tasks.find((candidate) => candidate.id === taskId) ?? null;
 
   if (projectId === null) {
-    return <p className="muted">Trust a project in the <strong>project</strong> tab first.</p>;
+    return <p className="muted">请先在<strong>项目</strong>标签页中信任一个项目。</p>;
   }
 
   return (
     <div className="columns">
       <section className="card">
-        <h2>Tasks</h2>
+        <h2>任务</h2>
         <ul className="list">
           {tasks.map((candidate) => (
             <li key={candidate.id}>
@@ -394,30 +458,32 @@ function TasksTab(props: CommonProps & {
                 className={candidate.id === taskId ? 'row active' : 'row'}
                 onClick={() => {
                   update({ taskId: candidate.id, status: null });
-                  void run('Loading task', () => props.loadDetail(projectId, candidate.id));
+                  void run('正在加载任务', () => props.loadDetail(projectId, candidate.id));
                 }}
               >
                 <span>#{candidate.displayNumber}</span>
-                <span className={`state state-${candidate.state.toLowerCase()}`}>{candidate.state}</span>
+                <span className={`state state-${candidate.state.toLowerCase()}`}>
+                  {labelValue(candidate.state)}
+                </span>
                 <span className="truncate">{candidate.currentRevision.specification}</span>
                 <span className="muted">v{candidate.version}</span>
               </button>
             </li>
           ))}
-          {tasks.length === 0 ? <li className="muted">No tasks yet.</li> : null}
+          {tasks.length === 0 ? <li className="muted">暂无任务。</li> : null}
         </ul>
-        <h3>New task</h3>
+        <h3>新建任务</h3>
         <textarea
           rows={3}
           value={specification}
-          placeholder="Describe one focused change"
+          placeholder="描述一项具体的改动"
           onChange={(event) => setSpecification(event.target.value)}
         />
         <button
           type="button"
           disabled={specification.trim().length === 0}
           onClick={() => {
-            void run('Creating task', async () => {
+            void run('正在创建任务', async () => {
               await client.command({
                 command: 'task.create',
                 commandId: crypto.randomUUID(),
@@ -431,14 +497,14 @@ function TasksTab(props: CommonProps & {
             });
           }}
         >
-          Create draft
+          创建草稿
         </button>
       </section>
 
       <section className="card grow">
-        {task === null ? <p className="muted">Select a task.</p> : (
+        {task === null ? <p className="muted">请选择一个任务。</p> : (
           <>
-            <h2>#{task.displayNumber} · {task.state} · v{task.version}</h2>
+            <h2>#{task.displayNumber} · {labelValue(task.state)} · v{task.version}</h2>
             <pre className="spec">{task.currentRevision.specification}</pre>
             {task.currentRevision.constraints.length === 0 ? null : (
               <ul>
@@ -453,7 +519,7 @@ function TasksTab(props: CommonProps & {
                 type="button"
                 disabled={task.state !== 'DRAFT'}
                 onClick={() => {
-                  void run('Submitting', async () => {
+                  void run('正在提交', async () => {
                     await client.command({
                       command: 'task.submit',
                       commandId: crypto.randomUUID(),
@@ -466,11 +532,11 @@ function TasksTab(props: CommonProps & {
                   });
                 }}
               >
-                Submit (READY)
+                提交（转为就绪）
               </button>
 
               <label className="inline">
-                adapter
+                适配器
                 <select
                   value={adapter}
                   onChange={(event) => update({ adapter: event.target.value })}
@@ -482,7 +548,7 @@ function TasksTab(props: CommonProps & {
                 type="button"
                 disabled={task.state !== 'READY'}
                 onClick={() => {
-                  void run('Running task (no cancel yet)', async () => {
+                  void run('正在运行任务（暂不支持取消）', async () => {
                     const result = await client.command<unknown>({
                       command: 'task.run',
                       commandId: crypto.randomUUID(),
@@ -497,13 +563,13 @@ function TasksTab(props: CommonProps & {
                   });
                 }}
               >
-                Run task…
+                运行任务…
               </button>
 
               <button
                 type="button"
                 onClick={() => {
-                  void run('Preparing result commit', async () => {
+                  void run('正在准备成果提交', async () => {
                     const prepared = await client.command<ResultCommitAuthorizationView>({
                       command: 'task.result.prepare',
                       commandId: crypto.randomUUID(),
@@ -514,13 +580,13 @@ function TasksTab(props: CommonProps & {
                   });
                 }}
               >
-                Prepare result commit
+                准备成果提交
               </button>
 
               <button
                 type="button"
                 onClick={() => {
-                  void run('Running verification', async () => {
+                  void run('正在执行验证', async () => {
                     const report = await client.command<VerificationRunView>({
                       command: 'task.verify',
                       commandId: crypto.randomUUID(),
@@ -532,28 +598,27 @@ function TasksTab(props: CommonProps & {
                   });
                 }}
               >
-                Verify task
+                验证任务
               </button>
             </div>
 
             {authorization === null ? null : (
               <div className="card nested">
-                <h3>Result commit authorization</h3>
+                <h3>成果提交授权</h3>
                 <p className="muted">
-                  Confirm only after checking the differences you expect. Any change to HEAD or the
-                  change set invalidates this authorization.
+                  请在确认差异符合预期后再继续。HEAD 或变更集发生任何变化都会使此授权失效。
                 </p>
                 <dl className="kv">
-                  <dt>expected HEAD</dt><dd className="mono">{authorization.expectedHead}</dd>
-                  <dt>change fingerprint</dt><dd className="mono">{authorization.changeFingerprint}</dd>
-                  <dt>quiescent</dt><dd>{authorization.quiescent ? 'yes' : 'no'}</dd>
-                  <dt>workspace</dt><dd className="mono">{authorization.workspacePath}</dd>
+                  <dt>预期 HEAD</dt><dd className="mono">{authorization.expectedHead}</dd>
+                  <dt>变更指纹</dt><dd className="mono">{authorization.changeFingerprint}</dd>
+                  <dt>已静止</dt><dd>{authorization.quiescent ? '是' : '否'}</dd>
+                  <dt>工作区</dt><dd className="mono">{authorization.workspacePath}</dd>
                 </dl>
                 <button
                   type="button"
                   disabled={!authorization.quiescent}
                   onClick={() => {
-                    void run('Committing result', async () => {
+                    void run('正在提交成果', async () => {
                       await client.command({
                         command: 'task.result.commit',
                         commandId: crypto.randomUUID(),
@@ -568,67 +633,67 @@ function TasksTab(props: CommonProps & {
                     });
                   }}
                 >
-                  Confirm result commit
+                  确认成果提交
                 </button>
               </div>
             )}
 
             {runResult === null ? null : (
               <details open>
-                <summary>Last task run</summary>
+                <summary>最近一次任务运行</summary>
                 <pre>{runResult}</pre>
               </details>
             )}
             {verifyReport === null ? null : (
               <details open>
-                <summary>Last verification: {verifyReport.state}
-                  {verifyReport.outcomeCode === null ? '' : ` (${verifyReport.outcomeCode})`}</summary>
+                <summary>最近一次验证：{labelValue(verifyReport.state)}
+                  {verifyReport.outcomeCode === null ? '' : `（${labelValue(verifyReport.outcomeCode)}）`}</summary>
                 <pre>{JSON.stringify(verifyReport.evidence, null, 2)}</pre>
               </details>
             )}
 
-            {status === null ? <p className="muted">Loading detail…</p> : (
+            {status === null ? <p className="muted">正在加载详情…</p> : (
               <>
-                <h3>Executions</h3>
+                <h3>执行记录</h3>
                 <table>
                   <thead>
-                    <tr><th>#</th><th>state</th><th>adapter</th><th>session</th><th>held</th><th>base</th></tr>
+                    <tr><th>#</th><th>状态</th><th>适配器</th><th>会话</th><th>占用资源</th><th>基线</th></tr>
                   </thead>
                   <tbody>
                     {status.executions.map((execution) => (
                       <tr key={execution.executionId}>
                         <td>{execution.attemptNumber}</td>
-                        <td>{execution.state}</td>
+                        <td>{labelValue(execution.state)}</td>
                         <td>{execution.adapterId}@{execution.adapterVersion}</td>
-                        <td>{execution.session === null ? '—' : execution.session.state}</td>
-                        <td>{execution.resourceHeld ? 'yes' : 'no'}</td>
+                        <td>{execution.session === null ? '—' : labelValue(execution.session.state)}</td>
+                        <td>{execution.resourceHeld ? '是' : '否'}</td>
                         <td className="mono">{execution.baseCommit.slice(0, 10)}</td>
                       </tr>
                     ))}
                     {status.executions.length === 0 ? (
-                      <tr><td colSpan={6} className="muted">No executions yet.</td></tr>
+                      <tr><td colSpan={6} className="muted">暂无执行记录。</td></tr>
                     ) : null}
                   </tbody>
                 </table>
 
-                <h3>Verifications</h3>
+                <h3>验证记录</h3>
                 <table>
                   <thead>
-                    <tr><th>state</th><th>outcome</th><th>commit</th><th>policy</th><th>ended</th></tr>
+                    <tr><th>状态</th><th>结果</th><th>提交</th><th>策略</th><th>结束时间</th></tr>
                   </thead>
                   <tbody>
                     {status.verifications.map((verification) => (
                       <tr key={verification.verificationId}>
-                        <td>{verification.state}</td>
-                        <td>{verification.outcomeCode ?? '—'}</td>
+                        <td>{labelValue(verification.state)}</td>
+                        <td>{verification.outcomeCode === null ? '—' : labelValue(verification.outcomeCode)}</td>
                         <td className="mono">{verification.testedCommit.slice(0, 10)}</td>
                         <td className="mono">{verification.policyDigest.slice(0, 10)}</td>
                         <td>{verification.endedAt === null ? '—'
-                          : new Date(verification.endedAt).toLocaleTimeString()}</td>
+                          : new Date(verification.endedAt).toLocaleTimeString('zh-CN')}</td>
                       </tr>
                     ))}
                     {status.verifications.length === 0 ? (
-                      <tr><td colSpan={5} className="muted">No verification runs yet.</td></tr>
+                      <tr><td colSpan={5} className="muted">暂无验证记录。</td></tr>
                     ) : null}
                   </tbody>
                 </table>
@@ -648,29 +713,30 @@ function AttentionTab(props: CommonProps & {
 }) {
   const { client, projectId, attentions, run, reload } = props;
   const [answers, setAnswers] = useState<Record<string, string>>({});
-  if (projectId === null) return <p className="muted">Select a project.</p>;
+  if (projectId === null) return <p className="muted">请选择一个项目。</p>;
   const open = attentions.filter((attention) => attention.status === 'OPEN');
   return (
     <section className="card">
-      <h2>Attention inbox</h2>
+      <h2>待处理请求</h2>
       <p className="muted">
-        An Agent waiting here pauses only its own Task. Answers are recorded as Intent plus a typed
-        Operation; sensitive text is never written into events.
+        在此等待的 Agent 只会暂停自己的任务。回答会记录为意图和类型化操作；敏感文本绝不会写入事件。
       </p>
-      <button type="button" onClick={() => { void run('Refreshing attentions', reload); }}>Refresh</button>
+      <button type="button" onClick={() => { void run('正在刷新待处理请求', reload); }}>刷新</button>
       <ul className="list">
         {open.map((attention) => (
           <li key={attention.id} className="card nested">
             <div className="row-head">
-              <span className={`state state-${attention.kind.toLowerCase()}`}>{attention.kind}</span>
-              <span className="muted mono">{attention.responseType}</span>
-              <span className="muted">{new Date(attention.createdAt).toLocaleTimeString()}</span>
+              <span className={`state state-${attention.kind.toLowerCase()}`}>
+                {labelValue(attention.kind)}
+              </span>
+              <span className="muted mono">{labelValue(attention.responseType)}</span>
+              <span className="muted">{new Date(attention.createdAt).toLocaleTimeString('zh-CN')}</span>
             </div>
             <pre>{JSON.stringify(attention.prompt, null, 2)}</pre>
             {attention.responseType === 'CONFIRM' ? (
               <div className="actions">
                 <button type="button" onClick={() => {
-                  void run('Answering', async () => {
+                  void run('正在回答', async () => {
                     await client.command({
                       command: 'attention.answer', commandId: crypto.randomUUID(),
                       projectId, attentionId: attention.id,
@@ -678,9 +744,9 @@ function AttentionTab(props: CommonProps & {
                     });
                     await reload();
                   });
-                }}>Allow</button>
+                }}>允许</button>
                 <button type="button" className="danger" onClick={() => {
-                  void run('Answering', async () => {
+                  void run('正在回答', async () => {
                     await client.command({
                       command: 'attention.answer', commandId: crypto.randomUUID(),
                       projectId, attentionId: attention.id,
@@ -688,46 +754,47 @@ function AttentionTab(props: CommonProps & {
                     });
                     await reload();
                   });
-                }}>Deny</button>
+                }}>拒绝</button>
               </div>
             ) : (
               <div className="actions">
                 <input
                   value={answers[attention.id] ?? ''}
-                  placeholder="Answer text"
+                  placeholder="输入回答"
                   onChange={(event) => setAnswers({ ...answers, [attention.id]: event.target.value })}
                 />
                 <button type="button" onClick={() => {
                   const value = answers[attention.id] ?? '';
-                  void run('Answering', async () => {
+                  void run('正在回答', async () => {
                     await client.command({
                       command: 'attention.answer', commandId: crypto.randomUUID(),
                       projectId, attentionId: attention.id, answer: { type: 'VALUE', value },
                     });
                     await reload();
                   });
-                }}>Send</button>
+                }}>发送</button>
               </div>
             )}
             <button type="button" onClick={() => {
-              void run('Cancelling attention', async () => {
+              void run('正在取消请求', async () => {
                 await client.command({
                   command: 'attention.answer', commandId: crypto.randomUUID(),
                   projectId, attentionId: attention.id, answer: { type: 'CANCEL' },
                 });
                 await reload();
               });
-            }}>Cancel this request</button>
+            }}>取消此请求</button>
           </li>
         ))}
-        {open.length === 0 ? <li className="muted">Nothing is waiting for you.</li> : null}
+        {open.length === 0 ? <li className="muted">目前没有待处理请求。</li> : null}
       </ul>
       <details>
-        <summary className="muted">{attentions.length - open.length} answered or closed</summary>
+        <summary className="muted">{attentions.length - open.length} 个已回答或已关闭</summary>
         <ul className="list">
           {attentions.filter((attention) => attention.status !== 'OPEN').map((attention) => (
             <li key={attention.id} className="muted">
-              {attention.kind} · {attention.status} · {new Date(attention.createdAt).toLocaleTimeString()}
+              {labelValue(attention.kind)} · {labelValue(attention.status)} ·{' '}
+              {new Date(attention.createdAt).toLocaleTimeString('zh-CN')}
             </li>
           ))}
         </ul>
@@ -748,18 +815,20 @@ function EventsTab({ frames, cursor, following, streamStatus, update, clear }: {
   useEffect(() => { endRef.current?.scrollIntoView({ block: 'end' }); }, [frames]);
   return (
     <section className="card">
-      <h2>Event stream</h2>
+      <h2>事件流</h2>
       <div className="actions">
-        <span className={streamStatus === 'live' ? 'state state-ready' : 'state'}>{streamStatus}</span>
-        <span className="muted">cursor {cursor ?? '—'}</span>
+        <span className={streamStatus === 'live' ? 'state state-ready' : 'state'}>
+          {streamStatusLabel(streamStatus)}
+        </span>
+        <span className="muted">游标 {cursor ?? '—'}</span>
         <button type="button" onClick={() => update({ following: !following })}>
-          {following ? 'Stop' : 'Follow'}
+          {following ? '停止跟随' : '继续跟随'}
         </button>
-        <button type="button" onClick={clear}>Clear</button>
+        <button type="button" onClick={clear}>清空</button>
       </div>
       <p className="muted">
-        Frames come from the same subscription the CLI uses. A cursor is exclusive, so reconnecting
-        with the cursor shown here repeats nothing and skips nothing.
+        帧来自 CLI 使用的同一订阅。游标采用排他语义，因此使用此处显示的游标重连时，
+        既不会重复也不会遗漏事件。
       </p>
       <ol className="events">
         {frames.map((event) => (
@@ -785,72 +854,72 @@ function ProjectTab({ client, run, reloadProjects }: CommonProps & {
   const [confirmation, setConfirmation] = useState('');
   return (
     <section className="card">
-      <h2>Project</h2>
+      <h2>项目</h2>
       <div className="actions">
         <input
           value={path}
-          placeholder="/path/to/repository"
+          placeholder="/仓库/路径"
           onChange={(event) => setPath(event.target.value)}
         />
         <button type="button" onClick={() => {
-          void run('Inspecting', async () => {
+          void run('正在检查', async () => {
             setIdentity(await client.command<RepositoryIdentityView>({ command: 'project.inspect', path }));
           });
-        }}>Inspect</button>
+        }}>检查</button>
         <button type="button" onClick={() => {
-          void run('Reading policy', async () => {
+          void run('正在读取策略', async () => {
             setPolicy(await client.command<VerificationPolicyView>(
               { command: 'project.verificationPolicy', path }));
           });
-        }}>Verification policy</button>
+        }}>验证策略</button>
       </div>
 
       {identity === null ? null : (
         <dl className="kv">
-          <dt>repo root</dt><dd className="mono">{identity.repoRoot}</dd>
-          <dt>main ref</dt><dd className="mono">{identity.mainRef}</dd>
-          <dt>object format</dt><dd>{identity.objectFormat}</dd>
+          <dt>仓库根目录</dt><dd className="mono">{identity.repoRoot}</dd>
+          <dt>main 引用</dt><dd className="mono">{identity.mainRef}</dd>
+          <dt>对象格式</dt><dd>{identity.objectFormat}</dd>
           <dt>HEAD</dt><dd className="mono">{identity.headCommit}</dd>
         </dl>
       )}
 
       {policy === null ? null : (
         <>
-          <h3>Verification policy</h3>
+          <h3>验证策略</h3>
           {policy.state === 'ABSENT'
             ? <p className="muted">
-                No policy at the main ref. Trust is possible, but verification will refuse until
-                .codeestra/policies/verification.json exists.
+                main 引用上没有策略。您仍可信任此项目，但在
+                .codeestra/policies/verification.json 存在之前，验证会被拒绝。
               </p>
             : (
               <table>
-                <thead><tr><th>id</th><th>command</th><th>cwd</th><th>timeout</th></tr></thead>
+                <thead><tr><th>ID</th><th>命令</th><th>工作目录</th><th>超时</th></tr></thead>
                 <tbody>
                   {policy.policy?.commands.map((command) => (
                     <tr key={command.id}>
                       <td>{command.id}</td>
                       <td className="mono">{command.argv.join(' ')}</td>
                       <td className="mono">{command.cwd}</td>
-                      <td>{command.timeoutSeconds}s</td>
+                      <td>{command.timeoutSeconds} 秒</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             )}
-          <p className="muted mono">main {policy.mainCommit.slice(0, 12)} · digest {policy.digest?.slice(0, 12) ?? '—'}</p>
+          <p className="muted mono">main {policy.mainCommit.slice(0, 12)} · 摘要 {policy.digest?.slice(0, 12) ?? '—'}</p>
         </>
       )}
 
       {identity === null || policy === null ? null : (
         <div className="card nested">
-          <h3>Trust this project</h3>
+          <h3>信任此项目</h3>
           <p>
-            Trusting lets an Agent, verification commands and Git hooks run with your user
-            permissions. It does not authorize commits, main updates, pushes, or unknown tools.
+            信任后，Agent、验证命令和 Git 钩子可以使用您的用户权限运行。
+            这不会授权提交、更新 main、推送或使用未知工具。
           </p>
           <input
             value={confirmation}
-            placeholder="Type TRUST to confirm"
+            placeholder="输入 TRUST 以确认"
             onChange={(event) => setConfirmation(event.target.value)}
           />
           <button
@@ -858,7 +927,7 @@ function ProjectTab({ client, run, reloadProjects }: CommonProps & {
             className="danger"
             disabled={confirmation !== 'TRUST'}
             onClick={() => {
-              void run('Trusting', async () => {
+              void run('正在信任项目', async () => {
                 await client.command({
                   command: 'project.trust',
                   path,
@@ -872,7 +941,7 @@ function ProjectTab({ client, run, reloadProjects }: CommonProps & {
               });
             }}
           >
-            Trust project
+            信任项目
           </button>
         </div>
       )}
