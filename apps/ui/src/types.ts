@@ -78,6 +78,8 @@ export interface ExecutionView {
   readonly resourceHeld: boolean;
   readonly baseCommit: string;
   readonly revisionId: string;
+  /** The captured result commit of this attempt; null until a result commit is recorded. */
+  readonly resultCommit: string | null;
   /** Recorded failure reason; `null` while running or when none was recorded. */
   readonly error: { readonly code: string; readonly message?: string } | null;
   /** Effective Agent configuration recorded when the Execution was reserved. */
@@ -115,10 +117,46 @@ export interface VerificationRunView {
   readonly endedAt: number | null;
 }
 
+/** One member of an IntegrationBatch; this round always carries exactly one Task. */
+export interface IntegrationBatchItemView {
+  readonly taskId: string;
+  readonly taskVersion: number;
+  readonly revisionId: string;
+  readonly executionId: string;
+  readonly candidateCommit: string;
+  readonly devCommit: string;
+  readonly state: string;
+  readonly integratedCommit: string | null;
+  readonly detail: string | null;
+  readonly createdAt: number;
+  readonly completedAt: number | null;
+}
+
+/**
+ * A Task result entering the long-lived `dev` branch. `integratedCommit` is only set once the ref
+ * actually moved; every other state means `dev` was left untouched.
+ */
+export interface IntegrationBatchView {
+  readonly batchId: string;
+  readonly devRef: string;
+  readonly devCommit: string;
+  readonly state: string;
+  readonly integratedCommit: string | null;
+  readonly mergeStrategy: 'FAST_FORWARD' | 'MERGE_COMMIT' | null;
+  readonly worktreePath: string | null;
+  readonly verificationId: string | null;
+  readonly outcomeCode: string | null;
+  readonly detail: string | null;
+  readonly createdAt: number;
+  readonly completedAt: number | null;
+  readonly items: readonly IntegrationBatchItemView[];
+}
+
 export interface TaskStatusView {
   readonly task: TaskView;
   readonly executions: readonly ExecutionView[];
   readonly verifications: readonly VerificationRunView[];
+  readonly integrations: readonly IntegrationBatchView[];
 }
 
 /**

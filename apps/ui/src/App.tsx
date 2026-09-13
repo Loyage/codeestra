@@ -82,7 +82,24 @@ const valueLabels: Record<string, string> = {
   RECOVERY: '恢复',
   CONFIRM: '确认',
   VALUE: '文本',
+  PREPARED: '已准备',
+  VERIFYING: '正在集成验证',
+  INTEGRATING_DEV: '正在更新 dev',
+  INTEGRATED: '已合入 dev',
+  CONFLICTED: '合并冲突',
+  MERGED: '已合并',
+  FAST_FORWARD: '快进',
+  MERGE_COMMIT: '合并提交',
 };
+
+/**
+ * Integration batches reuse two state names from the Execution vocabulary, where they mean
+ * something else: a batch's `PREPARING` is the merge, not a process start.
+ */
+function integrationStateLabel(state: string): string {
+  if (state === 'PREPARING') return '正在合并';
+  return labelValue(state);
+}
 
 function labelValue(value: string): string {
   return valueLabels[value] ?? value;
@@ -597,6 +614,19 @@ function TasksTab(props: CommonProps & {
     setVerifyReport(null);
   }, [taskId]);
   const latestExecution = status?.executions[0] ?? null;
+  const integrationBatches = status?.integrations ?? [];
+  const integratedBatch = integrationBatches.find((batch) => batch.state === 'INTEGRATED') ?? null;
+  const inFlightIntegration = integrationBatches.find((batch) =>
+    ['CREATED', 'PREPARING', 'VERIFYING', 'INTEGRATING_DEV', 'RECOVERY_REQUIRED']
+      .includes(batch.state)) ?? null;
+  // Integration needs a PASSED Task verification of exactly this revision and result commit, and
+  // needs `dev` to be advanceable: the Runtime still refuses if the ref moved or is checked out.
+  const passedVerification = status?.verifications.find((verification) =>
+    verification.state === 'PASSED'
+    && verification.revisionId === task?.currentRevision.id
+    && verification.testedCommit === latestExecution?.resultCommit) ?? null;
+  const canIntegrate = task?.state === 'EXECUTED' && passedVerification !== null
+    && integratedBatch === null && inFlightIntegration === null;
   const canCapture = task?.state === 'RUNNING'
     && latestExecution?.state === 'RUNNING' && latestExecution.resourceHeld
     && latestExecution.session?.state === 'EXITED';
@@ -614,7 +644,12 @@ function TasksTab(props: CommonProps & {
     : task.state === 'DRAFT' ? '先提交为就绪，再启动 Agent。创建草稿不会自动运行。'
     : task.state === 'READY' ? '任务已就绪，可以启动 Agent；也可以用「终止」直接放弃它。'
     : canCapture ? 'Agent 会话已退出。若有代码变更，可提交成果，然后独立验证。'
-    : task.state === 'EXECUTED' ? '成果已提交，可运行任务验证。验证通过不代表已集成或发布。'
+    : task.state === 'EXECUTED' ? (integratedBatch === null
+      ? (passedVerification === null
+        ? '成果已提交。先在固定 commit 上运行任务验证；验证通过后才能合入 dev。'
+        : '验证已通过，可以合入 dev。合入会产生独立集成验证，并只在通过后移动 dev 引用。')
+      : '已合入 dev。dev → main 的稳定提升是另一条流程，不在这一步内。')
+    : task.state === 'SUCCEEDED' ? '成果已合入 dev；这不等于已提升到稳定的 main。'
     : task.state === 'RUNNING' ? '查看下方执行过程；可暂停（保留现场、稍后继续）或终止。'
     : task.state === 'PAUSED' ? '任务已暂停，provider 进程已确认退出；「继续」会在同一工作树新建一次执行并复用该会话。'
     : task.state === 'CANCELLED' ? '任务已终止，不会自动重开；需要重做请新建任务。'
@@ -935,9 +970,35 @@ function TasksTab(props: CommonProps & {
               >
                 验证任务
               </button>
+              <button
+                type="button"
+                className={canIntegrate ? 'primary' : ''}
+                disabled={busy || !canIntegrate}
+                title={canIntegrate
+                  ? '把这次任务的成果 commit 合入 dev：先在独立工作树里合并，再跑独立集成验证，通过后才移动 dev 引用'
+                  : '需要 EXECUTED 任务、该成果 commit 的验证已通过、且没有进行中或已完成的合入'}
+                onClick={() => {
+                  void run('正在合入 dev（独立集成验证可能需要一段时间）', async () => {
+                    const report = await client.command<{ state: string }>({
+                      command: 'task.integrate',
+                      commandId: crypto.randomUUID(),
+                      projectId,
+                      taskId: task.id,
+                      expectedVersion: task.version,
+                    });
+                    if (selectedRef.current === task.id) setVerifyReport(null);
+                    await props.reloadTasks(projectId);
+                    await props.loadDetail(projectId, task.id);
+                    if (report.state !== 'INTEGRATED') {
+                      throw new Error(`合入未完成：${labelValue(report.state)}`
+                        + '（dev 未被改动，请看下方集成记录）');
+                    }
+                  });
+                }}
+              >
+                合入 dev
+              </button>
             </div>
-
-            {busy ? <p className="muted" role="status">此任务命令正在执行；仍可查看过程、回答问题或切换任务。</p> : null}
             {waiting === 0 ? null : (
               <AttentionTab key={task.id} client={client} projectId={projectId}
                 attentions={taskAttentions} run={props.run} update={update} reload={props.reloadAttentions} />
@@ -1007,7 +1068,7 @@ function TasksTab(props: CommonProps & {
                   <span className="muted">{status.verifications[0].outcomeCode ?? '等待结果'} · 不代表集成或发布</span>
                 </div>}
                 <details className="execution-evidence">
-                <summary>执行与验证记录 · {status.executions.length} 次执行 / {status.verifications.length} 次验证</summary>
+                <summary>执行、验证与集成记录 · {status.executions.length} 次执行 / {status.verifications.length} 次验证 / {integrationBatches.length} 次合入</summary>
                 <h3>执行记录</h3>
                 <div className="table-scroll"><table>
                   <thead>
@@ -1067,6 +1128,40 @@ function TasksTab(props: CommonProps & {
                     ) : null}
                   </tbody>
                 </table></div>
+                <h3>集成记录 · dev</h3>
+                <div className="table-scroll"><table>
+                  <thead>
+                    <tr><th>状态</th><th>结果</th><th>候选 commit</th><th>dev 基线</th><th>合入后 dev</th>
+                      <th>方式</th><th>集成验证</th><th>结束时间</th></tr>
+                  </thead>
+                  <tbody>
+                    {integrationBatches.map((batch) => (
+                      <tr key={batch.batchId}>
+                        <td>{integrationStateLabel(batch.state)}</td>
+                        <td>{batch.outcomeCode === null ? '—' : labelValue(batch.outcomeCode)}</td>
+                        <td className="mono">{batch.items[0]?.candidateCommit.slice(0, 10) ?? '—'}</td>
+                        <td className="mono">{batch.devCommit.slice(0, 10)}</td>
+                        <td className="mono">{batch.integratedCommit === null ? '未改动'
+                          : batch.integratedCommit.slice(0, 10)}</td>
+                        <td>{batch.mergeStrategy === null ? '—' : labelValue(batch.mergeStrategy)}</td>
+                        <td className="mono">{batch.verificationId === null ? '—'
+                          : batch.verificationId.slice(0, 8)}</td>
+                        <td>{batch.completedAt === null ? '—'
+                          : new Date(batch.completedAt).toLocaleTimeString('zh-CN')}</td>
+                      </tr>
+                    ))}
+                    {integrationBatches.length === 0 ? (
+                      <tr><td colSpan={8} className="muted">还没有合入记录；成果不会自动进入 dev。</td></tr>
+                    ) : null}
+                  </tbody>
+                </table></div>
+                {integrationBatches.some((batch) => batch.detail !== null) ? (
+                  <ul className="muted">
+                    {integrationBatches.filter((batch) => batch.detail !== null).map((batch) => (
+                      <li key={batch.batchId}>{integrationStateLabel(batch.state)}：{batch.detail}</li>
+                    ))}
+                  </ul>
+                ) : null}
                 </details>
 
                 <section className="process-panel">

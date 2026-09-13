@@ -13,6 +13,7 @@ import {
   StorageError,
   phase1Migration,
   phase1SchemaVersion,
+  taskControlMigration,
   taskVerificationMigration,
   workspaceRetryMigration,
 } from '../src/index.js';
@@ -285,6 +286,65 @@ describe('Phase 1 migration', () => {
   });
 });
 
+describe('integration pipeline schema (ADR-0018)', () => {
+  test('upgrades a version 9 database and keeps existing projects on the dev baseline', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'codeestra-storage-v9-'));
+    const filename = join(directory, 'runtime.sqlite');
+    try {
+      const legacy = new Database(filename, { create: true, strict: true });
+      legacy.exec('PRAGMA foreign_keys=ON;');
+      legacy.exec(phase1Migration);
+      legacy.exec(agentStartMigration);
+      legacy.exec(agentObservationMigration);
+      legacy.exec(agentAnswerMigration);
+      legacy.exec(agentDisconnectMigration);
+      legacy.exec(taskVerificationMigration);
+      legacy.exec(workspaceRetryMigration);
+      legacy.exec(agentConfigurationMigration);
+      legacy.exec(taskControlMigration);
+      legacy.exec('PRAGMA user_version=9');
+      legacy.query(`INSERT INTO projects
+        (id,name,repo_root,git_common_dir,main_ref,object_format,created_at)
+        VALUES ('p1','Project','/repo','/repo/.git','refs/heads/main','sha1',1)`).run();
+      legacy.query(`INSERT INTO project_trusts
+        (id,project_id,repo_root,git_common_dir,object_format,policy_version,actor,status,accepted_at)
+        VALUES ('trust1','p1','/repo','/repo/.git','sha1',1,'user','ACTIVE',1)`).run();
+      legacy.transaction(() => {
+        legacy.query(`INSERT INTO tasks
+          (id,project_id,display_number,kind,current_revision_id,state,created_at,updated_at)
+          VALUES ('t1','p1',1,'DEVELOPMENT','r1','EXECUTED',2,2)`).run();
+        legacy.query(`INSERT INTO task_revisions
+          (id,task_id,number,previous_revision_id,specification,constraints_json,actor,reason,created_at)
+          VALUES ('r1','t1',1,NULL,'Do work','[]','user','initial',2)`).run();
+      })();
+      legacy.close();
+
+      const upgraded = new Phase1Database(filename);
+      expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version)
+        .toBe(phase1SchemaVersion);
+      // An existing project keeps working and gains the documented dev baseline.
+      expect(upgraded.getTrustedProject('p1').devRef).toBe('refs/heads/dev');
+      const tables = upgraded.sqlite.query<{ name: string }, []>(`
+        SELECT name FROM sqlite_master WHERE type='table' AND name IN
+          ('integration_batches','integration_batch_items','integration_verification_runs') ORDER BY name
+      `).all().map((row) => row.name);
+      expect(tables).toEqual([
+        'integration_batch_items', 'integration_batches', 'integration_verification_runs']);
+      upgraded.sqlite.query(`INSERT INTO integration_batches
+        (id,project_id,dev_ref,dev_commit,state,merged_commit,worktree_ownership_token,created_at)
+        VALUES ('b1','p1','refs/heads/dev',?1,'CREATED',NULL,'owner',5)`).run(oid);
+      // The batch states are the documented ones; an invented state is rejected by the schema.
+      expect(() => upgraded.sqlite.query(
+        "UPDATE integration_batches SET state='PREPARED' WHERE id='b1'",
+      ).run()).toThrow();
+      upgraded.sqlite.query("UPDATE integration_batches SET state='PREPARING' WHERE id='b1'").run();
+      upgraded.close();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('workspace retry after a released preparation', () => {
   test('upgrades a version 6 database so a released workspace path can be reused', () => {
     const directory = mkdtempSync(join(tmpdir(), 'codeestra-storage-v6-'));
@@ -369,6 +429,7 @@ describe('project trust and verification policy confirmation', () => {
     repoRoot: '/repo',
     gitCommonDir: '/repo/.git',
     mainRef: 'refs/heads/main',
+    devRef: 'refs/heads/dev',
     objectFormat: 'sha1' as const,
     policyVersion: 1,
     verificationPolicyConfirmationId: 'confirm-new',

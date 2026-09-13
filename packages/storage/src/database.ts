@@ -7,6 +7,7 @@ import {
   agentDisconnectMigration,
   agentObservationMigration,
   agentStartMigration,
+  integrationPipelineMigration,
   phase1Migration,
   phase1SchemaVersion,
   taskControlMigration,
@@ -41,7 +42,10 @@ export interface TrustedProject {
   readonly name: string;
   readonly repoRoot: string;
   readonly gitCommonDir: string;
+  /** Ref whose committed verification policy governs this project (ADR-0006). */
   readonly mainRef: string;
+  /** Ref every Task worktree is based on and every result is integrated into (ADR-0009). */
+  readonly devRef: string;
   readonly objectFormat: 'sha1' | 'sha256';
   readonly policyVersion: number;
   readonly trustedAt: number;
@@ -318,6 +322,8 @@ export interface ExecutionSummary {
   readonly resourceHeld: boolean;
   readonly baseCommit: string;
   readonly revisionId: string;
+  /** The captured result commit of this attempt; null until a result commit is recorded. */
+  readonly resultCommit: string | null;
   /** Recorded reason for a terminal failure; `null` while running or when none was recorded. */
   readonly error: ExecutionError | null;
   /** Why a terminal Execution stopped; `null` while active or when none applies. */
@@ -386,6 +392,8 @@ export interface WorkspacePreparationPlan {
   readonly repoRoot: string;
   readonly gitCommonDir: string;
   readonly mainRef: string;
+  /** Fixed base ref for the worktree this plan prepares; the base commit is read from it. */
+  readonly devRef: string;
   readonly objectFormat: 'sha1' | 'sha256';
   readonly baseCommit: string;
   readonly ownershipToken: string;
@@ -491,6 +499,114 @@ export interface VerificationRunPlan extends VerificationRunSummary {
   readonly operationState: 'PLANNED' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'RECONCILE_REQUIRED';
 }
 
+/**
+ * Integration pipeline projections (ADR-0018). A batch fixes the `dev` baseline, carries the
+ * candidate result commit, and records the merge and the independent integration verification
+ * that allowed the `dev` ref to advance. `integratedCommit` is null until the ref actually moved.
+ *
+ * The states follow `docs/architecture/state-machines.md` §4: `CREATED → PREPARING → VERIFYING →
+ * INTEGRATING_DEV → INTEGRATED`, with `CONFLICTED`/`FAILED`/`RECOVERY_REQUIRED` as the other ends.
+ * `INTEGRATING_DEV` exists because a crash between the ref write and the record is only resolvable
+ * by comparing the recorded `mergedCommit` against the ref that was actually written.
+ */
+export type IntegrationBatchState = 'CREATED' | 'PREPARING' | 'VERIFYING' | 'INTEGRATING_DEV'
+  | 'INTEGRATED' | 'CONFLICTED' | 'FAILED' | 'RECOVERY_REQUIRED';
+export type IntegrationItemState = 'PREPARED' | 'MERGED' | 'INTEGRATED' | 'FAILED' | 'CONFLICTED';
+export type MergeStrategy = 'FAST_FORWARD' | 'MERGE_COMMIT';
+
+export interface IntegrationBatchItemSummary {
+  readonly batchId: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly taskVersion: number;
+  readonly revisionId: string;
+  readonly executionId: string;
+  readonly candidateCommit: string;
+  readonly devCommit: string;
+  readonly state: IntegrationItemState;
+  readonly integratedCommit: string | null;
+  readonly detail: string | null;
+  readonly createdAt: number;
+  readonly completedAt: number | null;
+}
+
+export interface IntegrationBatchSummary {
+  readonly batchId: string;
+  readonly projectId: string;
+  readonly devRef: string;
+  readonly devCommit: string;
+  readonly state: IntegrationBatchState;
+  readonly integratedCommit: string | null;
+  readonly mergeStrategy: MergeStrategy | null;
+  /** The merge Git produced, recorded before the ref moves; null until a merge was recorded. */
+  readonly mergedCommit: string | null;
+  readonly worktreePath: string | null;
+  readonly verificationId: string | null;
+  readonly outcomeCode: string | null;
+  readonly detail: string | null;
+  readonly createdAt: number;
+  readonly completedAt: number | null;
+  readonly items: readonly IntegrationBatchItemSummary[];
+}
+
+/** Read-only facts the integration service needs before it may touch any ref. */
+export interface IntegrationCandidates {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly taskDisplayNumber: number;
+  readonly taskState: TaskLifecycleState;
+  readonly taskVersion: number;
+  readonly currentRevisionId: string;
+  readonly repositoryRoot: string;
+  readonly gitCommonDir: string;
+  readonly mainRef: string;
+  readonly devRef: string;
+  readonly objectFormat: 'sha1' | 'sha256';
+  readonly executions: readonly VerificationCandidateExecution[];
+  /** Task verification runs for this Task, newest first. */
+  readonly verificationRuns: readonly VerificationRunSummary[];
+  readonly batches: readonly IntegrationBatchSummary[];
+}
+
+/** Plan for the merge side effect: reserved before anything is written to Git. */
+export interface IntegrationBatchPlan extends IntegrationBatchSummary {
+  readonly operationId: string;
+  readonly operationState: 'PLANNED' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'RECONCILE_REQUIRED';
+  readonly worktreeOwnershipToken: string;
+  readonly repositoryRoot: string;
+  readonly mainRef: string;
+  readonly objectFormat: 'sha1' | 'sha256';
+  readonly item: IntegrationBatchItemSummary;
+}
+
+export interface IntegrationVerificationSummary {
+  readonly verificationId: string;
+  readonly batchId: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly executionId: string;
+  readonly revisionId: string;
+  readonly testedCommit: string;
+  readonly testedTree: string;
+  readonly devCommit: string;
+  readonly policyVersion: string;
+  readonly policyDigest: string;
+  readonly mainCommit: string;
+  readonly commands: readonly StoredVerificationCommand[];
+  readonly copyPath: string;
+  readonly state: VerificationState;
+  readonly outcomeCode: string | null;
+  readonly evidence: VerificationEvidence | null;
+  readonly queuedAt: number;
+  readonly startedAt: number | null;
+  readonly endedAt: number | null;
+}
+
+export interface IntegrationVerificationPlan extends IntegrationVerificationSummary {
+  readonly operationId: string;
+  readonly operationState: 'PLANNED' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'RECONCILE_REQUIRED';
+}
+
 export interface TaskSummary {
   readonly id: string;
   readonly projectId: string;
@@ -566,6 +682,7 @@ export class Phase1Database {
         if (version < 7) this.sqlite.exec(workspaceRetryMigration);
         if (version < 8) this.sqlite.exec(agentConfigurationMigration);
         if (version < 9) this.sqlite.exec(taskControlMigration);
+        if (version < 10) this.sqlite.exec(integrationPipelineMigration);
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -599,9 +716,10 @@ export class Phase1Database {
       let projectId = input.id;
       if (existing === null) {
         this.sqlite.query(`
-          INSERT INTO projects(id,name,repo_root,git_common_dir,main_ref,object_format,policy_version,created_at)
-          VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
-        `).run(input.id, input.name, input.repoRoot, input.gitCommonDir, input.mainRef,
+          INSERT INTO projects(id,name,repo_root,git_common_dir,main_ref,dev_ref,object_format,
+            policy_version,created_at)
+          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+        `).run(input.id, input.name, input.repoRoot, input.gitCommonDir, input.mainRef, input.devRef,
           input.objectFormat, input.policyVersion, input.trustedAt);
       } else {
         if (existing.repo_root !== input.repoRoot || existing.git_common_dir !== input.gitCommonDir
@@ -609,6 +727,11 @@ export class Phase1Database {
           throw new StorageError('INVALID_STATE', 'Repository identity does not match the trusted project');
         }
         projectId = existing.id;
+        // Re-trusting refreshes the baseline ref name as well: it is part of what the user
+        // confirmed, and a later integration record must not point at a stale ref name.
+        this.sqlite.query(`
+          UPDATE projects SET dev_ref=?1 WHERE id=?2
+        `).run(input.devRef, projectId);
         this.sqlite.query(`
           UPDATE project_trusts SET status='INVALIDATED',invalidated_at=?1
           WHERE project_id=?2 AND status='ACTIVE'
@@ -679,9 +802,9 @@ export class Phase1Database {
   listTrustedProjects(): readonly TrustedProject[] {
     return this.sqlite.query<{
       id: string; name: string; repo_root: string; git_common_dir: string; main_ref: string;
-      object_format: 'sha1' | 'sha256'; policy_version: number; accepted_at: number;
+      dev_ref: string; object_format: 'sha1' | 'sha256'; policy_version: number; accepted_at: number;
     }, []>(`
-      SELECT p.id,p.name,p.repo_root,p.git_common_dir,p.main_ref,p.object_format,
+      SELECT p.id,p.name,p.repo_root,p.git_common_dir,p.main_ref,p.dev_ref,p.object_format,
              p.policy_version,t.accepted_at
       FROM projects p JOIN project_trusts t ON t.project_id=p.id AND t.status='ACTIVE'
       ORDER BY t.accepted_at,p.id
@@ -691,6 +814,7 @@ export class Phase1Database {
       repoRoot: row.repo_root,
       gitCommonDir: row.git_common_dir,
       mainRef: row.main_ref,
+      devRef: row.dev_ref,
       objectFormat: row.object_format,
       policyVersion: row.policy_version,
       trustedAt: row.accepted_at,
@@ -867,7 +991,8 @@ export class Phase1Database {
     return this.sqlite.query<{
       execution_id: string; task_id: string; attempt_number: number;
       state: ExecutionLifecycleState; adapter_id: string; adapter_version: string;
-      resource_held: number; base_commit: string; revision_id: string; error_json: string | null;
+      resource_held: number; base_commit: string; revision_id: string;
+      result_commit: string | null; error_json: string | null;
       agent_config_json: string | null; stop_reason: ExecutionSummary['stopReason'];
       resume_from_execution_id: string | null;
       session_id: string | null; session_state: AgentSessionLifecycleState | null;
@@ -875,7 +1000,8 @@ export class Phase1Database {
     }, [string]>(`
       SELECT execution.id AS execution_id,execution.task_id,execution.attempt_number,execution.state,
         execution.adapter_id,execution.adapter_version,execution.resource_held,execution.base_commit,
-        execution.applied_revision_id AS revision_id,execution.error_json,execution.agent_config_json,
+        execution.applied_revision_id AS revision_id,execution.result_commit,execution.error_json,
+        execution.agent_config_json,
         execution.stop_reason,execution.resume_from_execution_id,
         session.id AS session_id,session.state AS session_state,
         session.provider_session_id,session.observation_cursor
@@ -891,6 +1017,7 @@ export class Phase1Database {
       resourceHeld: row.resource_held === 1,
       baseCommit: row.base_commit,
       revisionId: row.revision_id,
+      resultCommit: row.result_commit,
       error: parseExecutionError(row.error_json),
       stopReason: row.stop_reason,
       resumeFromExecutionId: row.resume_from_execution_id,
@@ -962,9 +1089,9 @@ export class Phase1Database {
 
       const subject = this.sqlite.query<{
         state: TaskLifecycleState; version: number; repo_root: string; git_common_dir: string;
-        main_ref: string; object_format: 'sha1' | 'sha256';
+        main_ref: string; dev_ref: string; object_format: 'sha1' | 'sha256';
       }, [string, string]>(`
-        SELECT task.state,task.version,p.repo_root,p.git_common_dir,p.main_ref,p.object_format
+        SELECT task.state,task.version,p.repo_root,p.git_common_dir,p.main_ref,p.dev_ref,p.object_format
         FROM tasks task JOIN projects p ON p.id=task.project_id
         JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
         WHERE task.project_id=?1 AND task.id=?2
@@ -1007,6 +1134,7 @@ export class Phase1Database {
         repoRoot: subject.repo_root,
         gitCommonDir: subject.git_common_dir,
         mainRef: subject.main_ref,
+        devRef: subject.dev_ref,
         objectFormat: subject.object_format,
         baseCommit: input.baseCommit,
         ownershipToken: input.ownershipToken,
@@ -1134,13 +1262,14 @@ export class Phase1Database {
     const row = this.sqlite.query<{
       operation_id: string; operation_state: WorkspacePreparationPlan['operationState']; project_id: string;
       task_id: string; workspace_id: string; workspace_state: WorkspacePreparationPlan['workspaceState'];
-      repo_root: string; git_common_dir: string; main_ref: string; object_format: 'sha1' | 'sha256';
+      repo_root: string; git_common_dir: string; main_ref: string; dev_ref: string;
+      object_format: 'sha1' | 'sha256';
       base_commit: string; ownership_token: string; branch_ref: string; path: string;
     }, [string]>(`
       SELECT operation.id AS operation_id,operation.state AS operation_state,
         operation.project_id,workspace.task_id,workspace.id AS workspace_id,
-        workspace.state AS workspace_state,p.repo_root,p.git_common_dir,p.main_ref,p.object_format,
-        workspace.base_commit,workspace.ownership_token,workspace.branch_ref,workspace.path
+        workspace.state AS workspace_state,p.repo_root,p.git_common_dir,p.main_ref,p.dev_ref,
+        p.object_format,workspace.base_commit,workspace.ownership_token,workspace.branch_ref,workspace.path
       FROM workspaces workspace JOIN tasks task ON task.id=workspace.task_id
       JOIN projects p ON p.id=task.project_id
       JOIN operations operation ON operation.aggregate_id=task.id AND operation.kind='PREPARE_WORKSPACE'
@@ -1158,6 +1287,7 @@ export class Phase1Database {
       repoRoot: row.repo_root,
       gitCommonDir: row.git_common_dir,
       mainRef: row.main_ref,
+      devRef: row.dev_ref,
       objectFormat: row.object_format,
       baseCommit: row.base_commit,
       ownershipToken: row.ownership_token,
@@ -4005,6 +4135,729 @@ export class Phase1Database {
       operationState: row.operation_state,
       testedCommit: row.tested_commit,
       testedTree: row.tested_tree,
+      policyVersion: row.policy_version,
+      policyDigest: row.policy_digest,
+      mainCommit: row.main_commit,
+      commands: JSON.parse(row.commands_json) as readonly StoredVerificationCommand[],
+      copyPath: row.copy_path,
+      state: row.state,
+      outcomeCode: row.outcome_code,
+      evidence: row.evidence_json === null
+        ? null
+        : JSON.parse(row.evidence_json) as VerificationEvidence,
+      queuedAt: row.queued_at,
+      startedAt: row.started_at,
+      endedAt: row.ended_at,
+    };
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Integration pipeline (ADR-0018). These methods only record what happened; every Git side
+  // effect is executed by the integration service between calls, so a crash always leaves a
+  // batch in a state that can be reconciled without guessing what `dev` points at.
+  // ---------------------------------------------------------------------------------------------
+
+  /** Task, revision, refs and existing integration history for one Task's integration decision. */
+  getIntegrationCandidates(projectId: string, taskId: string): IntegrationCandidates {
+    const task = this.sqlite.query<{
+      id: string; project_id: string; display_number: number; state: TaskLifecycleState;
+      version: number; current_revision_id: string; repo_root: string; git_common_dir: string;
+      main_ref: string; dev_ref: string; object_format: 'sha1' | 'sha256';
+    }, [string, string]>(`
+      SELECT task.id,task.project_id,task.display_number,task.state,task.version,
+             task.current_revision_id,p.repo_root,p.git_common_dir,p.main_ref,p.dev_ref,p.object_format
+      FROM tasks task
+      JOIN projects p ON p.id=task.project_id
+      JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
+      WHERE task.project_id=?1 AND task.id=?2
+    `).get(projectId, taskId);
+    if (task === null) {
+      throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
+    }
+    const executions = this.sqlite.query<{
+      id: string; attempt_number: number; state: ExecutionLifecycleState;
+      applied_revision_id: string; result_commit: string | null; base_commit: string;
+    }, [string]>(`
+      SELECT id,attempt_number,state,applied_revision_id,result_commit,base_commit
+      FROM executions WHERE task_id=?1 ORDER BY attempt_number DESC
+    `).all(taskId).map((row) => ({
+      executionId: row.id,
+      attemptNumber: row.attempt_number,
+      state: row.state,
+      appliedRevisionId: row.applied_revision_id,
+      resultCommit: row.result_commit,
+      baseCommit: row.base_commit,
+    }));
+    return {
+      projectId: task.project_id,
+      taskId: task.id,
+      taskDisplayNumber: task.display_number,
+      taskState: task.state,
+      taskVersion: task.version,
+      currentRevisionId: task.current_revision_id,
+      repositoryRoot: task.repo_root,
+      gitCommonDir: task.git_common_dir,
+      mainRef: task.main_ref,
+      devRef: task.dev_ref,
+      objectFormat: task.object_format,
+      executions,
+      verificationRuns: this.listVerificationRuns(projectId, taskId),
+      batches: this.listIntegrationBatches(projectId, taskId),
+    };
+  }
+
+  /**
+   * Reserves one IntegrationBatch for one Task and fixes the `dev` baseline it was prepared
+   * against. The Task must still be EXECUTED at the exact revision and commit the batch carries.
+   */
+  beginIntegrationBatch(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly executionId: string;
+    readonly batchId: string;
+    readonly operationId: string;
+    readonly worktreeOwnershipToken: string;
+    readonly expectedVersion: number;
+    readonly devRef: string;
+    readonly devCommit: string;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly createdEventId: string;
+    readonly actor: string;
+    readonly createdAt: number;
+  }): Readonly<{ plan: IntegrationBatchPlan; created: boolean }> {
+    return this.sqlite.transaction(() => {
+      const existing = this.sqlite.query<{ payload_hash: string; result_json: string }, [string, string]>(
+        'SELECT payload_hash,result_json FROM command_receipts WHERE project_id=?1 AND command_id=?2',
+      ).get(input.projectId, input.commandId);
+      if (existing !== null) {
+        if (existing.payload_hash !== input.payloadHash) {
+          throw new StorageError('COMMAND_CONFLICT',
+            'Command ID was already used with a different payload');
+        }
+        const recorded = JSON.parse(existing.result_json) as { batchId: string };
+        return { plan: this.integrationBatchPlan(recorded.batchId), created: false };
+      }
+      const task = this.sqlite.query<{
+        state: TaskLifecycleState; version: number; current_revision_id: string; dev_ref: string;
+      }, [string, string]>(`
+        SELECT t.state,t.version,t.current_revision_id,p.dev_ref FROM tasks t
+        JOIN projects p ON p.id=t.project_id
+        JOIN project_trusts trust ON trust.project_id=t.project_id AND trust.status='ACTIVE'
+        WHERE t.project_id=?1 AND t.id=?2
+      `).get(input.projectId, input.taskId);
+      if (task === null) {
+        throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
+      }
+      if (task.version !== input.expectedVersion) {
+        throw new StorageError('CONCURRENT_MODIFICATION', 'Task version did not match');
+      }
+      if (task.state !== 'EXECUTED') {
+        throw new StorageError('INVALID_STATE',
+          `Task is ${task.state}; integration needs an EXECUTED Task with a captured result commit`);
+      }
+      if (task.dev_ref !== input.devRef) {
+        throw new StorageError('CONCURRENT_MODIFICATION', 'Project baseline ref changed before integration');
+      }
+      const execution = this.sqlite.query<{
+        state: ExecutionLifecycleState; applied_revision_id: string; result_commit: string | null;
+      }, [string, string]>(`
+        SELECT state,applied_revision_id,result_commit FROM executions WHERE task_id=?1 AND id=?2
+      `).get(input.taskId, input.executionId);
+      if (execution === null) {
+        throw new StorageError('NOT_FOUND', 'Execution was not found for this Task');
+      }
+      if (execution.state !== 'SUCCEEDED' || execution.result_commit === null
+        || execution.applied_revision_id !== task.current_revision_id) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Execution evidence changed before integration was prepared');
+      }
+      this.sqlite.query(`
+        INSERT INTO operations(id,project_id,kind,aggregate_id,idempotency_key,state,request_json,
+          created_at,updated_at)
+        VALUES (?1,?2,'INTEGRATE_TASK_RESULT',?3,?4,'PLANNED',?5,?6,?6)
+      `).run(input.operationId, input.projectId, input.batchId, input.commandId,
+        JSON.stringify({ batchId: input.batchId, taskId: input.taskId,
+          executionId: input.executionId, devRef: input.devRef, devCommit: input.devCommit }),
+        input.createdAt);
+      this.sqlite.query(`
+        INSERT INTO integration_batches(id,project_id,dev_ref,dev_commit,state,
+          worktree_ownership_token,created_at)
+        VALUES (?1,?2,?3,?4,'CREATED',?5,?6)
+      `).run(input.batchId, input.projectId, input.devRef, input.devCommit,
+        input.worktreeOwnershipToken, input.createdAt);
+      this.sqlite.query(`
+        INSERT INTO integration_batch_items(batch_id,project_id,task_id,revision_id,execution_id,
+          candidate_commit,dev_commit,state,created_at)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,'PREPARED',?8)
+      `).run(input.batchId, input.projectId, input.taskId, task.current_revision_id,
+        input.executionId, execution.result_commit, input.devCommit, input.createdAt);
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'IntegrationBatchCreated',1,'IntegrationBatch',?3,0,?4,?4,?5,?6)
+      `).run(input.createdEventId, input.projectId, input.batchId, input.commandId, input.createdAt,
+        JSON.stringify({ batchId: input.batchId, taskId: input.taskId,
+          executionId: input.executionId, revisionId: task.current_revision_id,
+          candidateCommit: execution.result_commit, devRef: input.devRef,
+          devCommit: input.devCommit, actor: input.actor }));
+      this.sqlite.query(`
+        INSERT INTO command_receipts(project_id,command_id,payload_hash,result_json,created_at)
+        VALUES (?1,?2,?3,?4,?5)
+      `).run(input.projectId, input.commandId, input.payloadHash,
+        JSON.stringify({ batchId: input.batchId }), input.createdAt);
+      return { plan: this.integrationBatchPlan(input.batchId), created: true };
+    })();
+  }
+
+  /** CREATED → PREPARING, with the retained integration worktree recorded before Git is touched. */
+  startIntegrationMerge(input: {
+    readonly batchId: string;
+    readonly worktreePath: string;
+    readonly startedAt: number;
+  }): IntegrationBatchPlan {
+    return this.sqlite.transaction(() => {
+      const batch = this.integrationBatchPlan(input.batchId);
+      if (batch.state !== 'CREATED') return batch;
+      const updated = this.sqlite.query(`
+        UPDATE integration_batches SET state='PREPARING',worktree_path=?1
+        WHERE id=?2 AND state='CREATED'
+      `).run(input.worktreePath, input.batchId);
+      const operation = this.sqlite.query(`
+        UPDATE operations SET state='IN_PROGRESS',updated_at=?1
+        WHERE id=?2 AND state='PLANNED'
+      `).run(input.startedAt, batch.operationId);
+      if (updated.changes !== 1 || operation.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION', 'Integration batch changed while starting its merge');
+      }
+      return this.integrationBatchPlan(input.batchId);
+    })();
+  }
+
+  /** Records the merge Git produced. The `dev` ref is still untouched at this point. */
+  recordIntegrationMerge(input: {
+    readonly batchId: string;
+    readonly mergeStrategy: MergeStrategy;
+    readonly mergedCommit: string;
+    readonly mergedAt: number;
+  }): IntegrationBatchPlan {
+    return this.sqlite.transaction(() => {
+      const batch = this.integrationBatchPlan(input.batchId);
+      if (batch.state !== 'PREPARING' || batch.mergeStrategy !== null) return batch;
+      const updated = this.sqlite.query(`
+        UPDATE integration_batches SET merge_strategy=?1,merged_commit=?2
+        WHERE id=?3 AND state='PREPARING' AND merge_strategy IS NULL
+      `).run(input.mergeStrategy, input.mergedCommit, input.batchId);
+      const item = this.sqlite.query(`
+        UPDATE integration_batch_items SET state='MERGED'
+        WHERE batch_id=?1 AND state='PREPARED'
+      `).run(input.batchId);
+      if (updated.changes !== 1 || item.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION', 'Integration batch changed while recording its merge');
+      }
+      return this.integrationBatchPlan(input.batchId);
+    })();
+  }
+
+  /**
+   * Queues one independent integration verification on the merged commit together with its
+   * Operation. It is a separate record from Task verification: the tested commit is the
+   * integration result, and the fixed `dev` baseline is part of its evidence.
+   */
+  beginIntegrationVerification(input: {
+    readonly batchId: string;
+    readonly verificationId: string;
+    readonly operationId: string;
+    readonly commandId: string;
+    readonly testedCommit: string;
+    readonly testedTree: string;
+    readonly policyVersion: string;
+    readonly policyDigest: string;
+    readonly mainCommit: string;
+    readonly commands: readonly StoredVerificationCommand[];
+    readonly copyPath: string;
+    readonly queuedAt: number;
+  }): Readonly<{ plan: IntegrationVerificationPlan; created: boolean }> {
+    return this.sqlite.transaction(() => {
+      const existing = this.sqlite.query<{ id: string }, [string]>(`
+        SELECT id FROM integration_verification_runs WHERE batch_id=?1
+      `).get(input.batchId);
+      if (existing !== null) {
+        return { plan: this.integrationVerificationPlan(existing.id), created: false };
+      }
+      const batch = this.integrationBatchPlan(input.batchId);
+      if (batch.state !== 'PREPARING' || batch.mergeStrategy === null) {
+        throw new StorageError('INVALID_STATE',
+          `Integration batch is ${batch.state}; verification needs a recorded merge`);
+      }
+      if (batch.item.state !== 'MERGED') {
+        throw new StorageError('INVALID_STATE',
+          `Integration item is ${batch.item.state}; verification needs a merged candidate`);
+      }
+      this.sqlite.query(`
+        INSERT INTO operations(id,project_id,kind,aggregate_id,idempotency_key,state,request_json,
+          created_at,updated_at)
+        VALUES (?1,?2,'RUN_INTEGRATION_VERIFICATION',?3,?4,'PLANNED',?5,?6,?6)
+      `).run(input.operationId, batch.projectId, input.verificationId, input.commandId,
+        JSON.stringify({ verificationId: input.verificationId, batchId: input.batchId,
+          testedCommit: input.testedCommit, devCommit: batch.devCommit,
+          policyDigest: input.policyDigest }), input.queuedAt);
+      this.sqlite.query(`
+        INSERT INTO integration_verification_runs(id,batch_id,project_id,task_id,execution_id,
+          revision_id,operation_id,command_id,tested_commit,tested_tree,dev_commit,policy_version,
+          policy_digest,main_commit,commands_json,copy_path,state,queued_at)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,'QUEUED',?17)
+      `).run(input.verificationId, input.batchId, batch.projectId, batch.item.taskId,
+        batch.item.executionId, batch.item.revisionId, input.operationId, input.commandId,
+        input.testedCommit, input.testedTree, batch.devCommit, input.policyVersion,
+        input.policyDigest, input.mainCommit, JSON.stringify(input.commands), input.copyPath,
+        input.queuedAt);
+      const updated = this.sqlite.query(`
+        UPDATE integration_batches SET state='VERIFYING',verification_id=?1
+        WHERE id=?2 AND state='PREPARING'
+      `).run(input.verificationId, input.batchId);
+      if (updated.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Integration batch changed while queuing its verification');
+      }
+      return { plan: this.integrationVerificationPlan(input.verificationId), created: true };
+    })();
+  }
+
+  /** QUEUED → RUNNING with its Operation IN_PROGRESS, before any command is spawned. */
+  startIntegrationVerification(input: {
+    readonly verificationId: string;
+    readonly startedAt: number;
+  }): IntegrationVerificationPlan {
+    return this.sqlite.transaction(() => {
+      const run = this.integrationVerificationPlan(input.verificationId);
+      if (run.state !== 'QUEUED') return run;
+      const updated = this.sqlite.query(`
+        UPDATE integration_verification_runs SET state='RUNNING',started_at=?1
+        WHERE id=?2 AND state='QUEUED'
+      `).run(input.startedAt, input.verificationId);
+      const operation = this.sqlite.query(`
+        UPDATE operations SET state='IN_PROGRESS',updated_at=?1 WHERE id=?2 AND state='PLANNED'
+      `).run(input.startedAt, run.operationId);
+      if (updated.changes !== 1 || operation.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Integration verification changed while starting');
+      }
+      return this.integrationVerificationPlan(input.verificationId);
+    })();
+  }
+
+  completeIntegrationVerification(input: {
+    readonly verificationId: string;
+    readonly state: 'PASSED' | 'FAILED' | 'ERROR';
+    readonly outcomeCode: string;
+    readonly evidence: VerificationEvidence;
+    readonly eventId: string;
+    readonly completedAt: number;
+  }): IntegrationVerificationPlan {
+    return this.sqlite.transaction(() => {
+      const run = this.integrationVerificationPlan(input.verificationId);
+      if (run.state !== 'QUEUED' && run.state !== 'RUNNING') return run;
+      const updated = this.sqlite.query(`
+        UPDATE integration_verification_runs
+        SET state=?1,outcome_code=?2,evidence_json=?3,ended_at=?4
+        WHERE id=?5 AND state IN ('QUEUED','RUNNING')
+      `).run(input.state, input.outcomeCode, JSON.stringify(input.evidence), input.completedAt,
+        input.verificationId);
+      const operation = this.sqlite.query(`
+        UPDATE operations SET state=?1,result_json=?2,updated_at=?3
+        WHERE id=?4 AND state IN ('PLANNED','IN_PROGRESS')
+      `).run(input.state === 'PASSED' ? 'SUCCEEDED' : 'FAILED',
+        JSON.stringify({ verificationId: input.verificationId, state: input.state,
+          outcomeCode: input.outcomeCode }), input.completedAt, run.operationId);
+      if (updated.changes !== 1 || operation.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Integration verification changed while completing');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'IntegrationVerificationCompleted',1,'IntegrationBatch',?3,0,?4,?4,?5,?6)
+      `).run(input.eventId, run.projectId, run.batchId, input.eventId, input.completedAt,
+        JSON.stringify({ batchId: run.batchId, verificationId: input.verificationId,
+          taskId: run.taskId, executionId: run.executionId, revisionId: run.revisionId,
+          testedCommit: run.testedCommit, testedTree: run.testedTree, devCommit: run.devCommit,
+          policyVersion: run.policyVersion, policyDigest: run.policyDigest,
+          mainCommit: run.mainCommit, state: input.state, outcomeCode: input.outcomeCode,
+          evidence: input.evidence }));
+      return this.integrationVerificationPlan(input.verificationId);
+    })();
+  }
+
+  /**
+   * Records that `dev` now contains the batch's candidate. The Task only reaches SUCCEEDED here:
+   * a captured result commit is not an integration, and verification does not move a ref.
+   */
+  completeIntegrationBatch(input: {
+    readonly batchId: string;
+    readonly integratedCommit: string;
+    readonly worktreeDetail: string;
+    readonly completedEventId: string;
+    readonly taskEventId: string;
+    readonly completedAt: number;
+  }): IntegrationBatchPlan {
+    return this.sqlite.transaction(() => {
+      const batch = this.integrationBatchPlan(input.batchId);
+      if (batch.state === 'INTEGRATED') return batch;
+      if (batch.state !== 'VERIFYING' && batch.state !== 'INTEGRATING_DEV') {
+        throw new StorageError('INVALID_STATE',
+          `Integration batch is ${batch.state}; only a verified batch can be completed`);
+      }
+      const verification = this.integrationVerificationPlan(batch.verificationId as string);
+      if (verification.state !== 'PASSED') {
+        throw new StorageError('INVALID_STATE',
+          `Integration verification is ${verification.state}; the dev ref cannot advance`);
+      }
+      const item = this.sqlite.query(`
+        UPDATE integration_batch_items SET state='INTEGRATED',integrated_commit=?1,completed_at=?2
+        WHERE batch_id=?3 AND state='MERGED'
+      `).run(input.integratedCommit, input.completedAt, input.batchId);
+      const updated = this.sqlite.query(`
+        UPDATE integration_batches SET state='INTEGRATED',integrated_commit=?1,detail=?2,completed_at=?3
+        WHERE id=?4 AND state IN ('VERIFYING','INTEGRATING_DEV')
+      `).run(input.integratedCommit, input.worktreeDetail, input.completedAt, input.batchId);
+      const task = this.sqlite.query(`
+        UPDATE tasks SET state='SUCCEEDED',version=version+1,updated_at=?1
+        WHERE id=?2 AND project_id=?3 AND state='EXECUTED' AND version=?4
+      `).run(input.completedAt, batch.item.taskId, batch.projectId, batch.item.taskVersion);
+      const operation = this.sqlite.query(`
+        UPDATE operations SET state='SUCCEEDED',result_json=?1,updated_at=?2
+        WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS')
+      `).run(JSON.stringify({ batchId: input.batchId, state: 'INTEGRATED',
+        integratedCommit: input.integratedCommit }), input.completedAt, batch.operationId);
+      if (item.changes !== 1 || updated.changes !== 1 || task.changes !== 1 || operation.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Integration batch or Task changed while completing the integration');
+      }
+      const taskVersion = batch.item.taskVersion + 1;
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'TaskStateChanged',1,'Task',?3,?4,?5,?6,?7,?8)
+      `).run(input.taskEventId, batch.projectId, batch.item.taskId, taskVersion,
+        input.completedEventId, input.completedEventId, input.completedAt,
+        JSON.stringify({ taskId: batch.item.taskId, from: 'EXECUTED', to: 'SUCCEEDED',
+          reason: 'result integrated into dev', actor: 'runtime-integration' }));
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'IntegrationCompleted',1,'IntegrationBatch',?3,0,?4,?4,?5,?6)
+      `).run(input.completedEventId, batch.projectId, input.batchId, input.completedEventId,
+        input.completedAt, JSON.stringify({ batchId: input.batchId, taskId: batch.item.taskId,
+          executionId: batch.item.executionId, revisionId: batch.item.revisionId,
+          candidateCommit: batch.item.candidateCommit, devRef: batch.devRef,
+          devCommit: batch.devCommit, integratedCommit: input.integratedCommit,
+          mergeStrategy: batch.mergeStrategy, verificationId: batch.verificationId,
+          worktree: input.worktreeDetail }));
+      return this.integrationBatchPlan(input.batchId);
+    })();
+  }
+
+  /**
+   * Terminal failure of a batch. `dev` is untouched by definition: the service only calls this
+   * when the ref was not advanced, and the failed merge/verification evidence stays attached.
+   */
+  failIntegrationBatch(input: {
+    readonly batchId: string;
+    readonly state: 'FAILED' | 'CONFLICTED';
+    readonly outcomeCode: string;
+    readonly detail: string;
+    readonly mergeStrategy?: MergeStrategy;
+    readonly mergedCommit?: string;
+    readonly eventId: string;
+    readonly failedAt: number;
+  }): IntegrationBatchPlan {
+    return this.sqlite.transaction(() => {
+      const batch = this.integrationBatchPlan(input.batchId);
+      if (batch.state === 'INTEGRATED' || batch.state === 'FAILED'
+        || batch.state === 'CONFLICTED' || batch.state === 'RECOVERY_REQUIRED') {
+        return batch;
+      }
+      if (input.mergeStrategy !== undefined && batch.mergeStrategy === null) {
+        this.sqlite.query(`UPDATE integration_batches SET merge_strategy=?1 WHERE id=?2`)
+          .run(input.mergeStrategy, input.batchId);
+      }
+      const item = this.sqlite.query(`
+        UPDATE integration_batch_items SET state=?1,detail=?2,completed_at=?3
+        WHERE batch_id=?4 AND state IN ('PREPARED','MERGED')
+      `).run(input.state === 'CONFLICTED' ? 'CONFLICTED' : 'FAILED', input.detail, input.failedAt,
+        input.batchId);
+      const updated = this.sqlite.query(`
+        UPDATE integration_batches
+        SET state=?1,outcome_code=?2,detail=?3,completed_at=?4
+        WHERE id=?5 AND state IN ('CREATED','PREPARING','VERIFYING','INTEGRATING_DEV','RECOVERY_REQUIRED')
+      `).run(input.state, input.outcomeCode, input.detail, input.failedAt, input.batchId);
+      const operation = this.sqlite.query(`
+        UPDATE operations SET state='FAILED',result_json=?1,updated_at=?2
+        WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS','RECONCILE_REQUIRED')
+      `).run(JSON.stringify({ batchId: input.batchId, state: input.state,
+        outcomeCode: input.outcomeCode, mergedCommit: input.mergedCommit ?? null }),
+        input.failedAt, batch.operationId);
+      if (item.changes !== 1 || updated.changes !== 1 || operation.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Integration batch changed while recording its failure');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'IntegrationFailed',1,'IntegrationBatch',?3,0,?4,?4,?5,?6)
+      `).run(input.eventId, batch.projectId, input.batchId, input.eventId, input.failedAt,
+        JSON.stringify({ batchId: input.batchId, taskId: batch.item.taskId,
+          candidateCommit: batch.item.candidateCommit, devRef: batch.devRef,
+          devCommit: batch.devCommit, state: input.state, outcomeCode: input.outcomeCode,
+          detail: input.detail, mergeStrategy: input.mergeStrategy ?? batch.mergeStrategy,
+          mergedCommit: input.mergedCommit ?? null }));
+      return this.integrationBatchPlan(input.batchId);
+    })();
+  }
+
+  /**
+   * Reconciliation entry for a batch a restart found in flight. The caller has already read the
+   * `dev` ref, so the record states what was observed instead of assuming the ref did not move.
+   * `RECOVERY_REQUIRED` is terminal and blocks a new attempt until a human resolves it.
+   */
+  markIntegrationRecoveryRequired(input: {
+    readonly batchId: string;
+    readonly outcomeCode: 'RECONCILE_REQUIRED' | 'DEV_REF_OBSERVED';
+    readonly reason: string;
+    readonly eventId: string;
+    readonly at: number;
+  }): IntegrationBatchPlan {
+    return this.sqlite.transaction(() => {
+      const batch = this.integrationBatchPlan(input.batchId);
+      if (!['CREATED', 'PREPARING', 'VERIFYING', 'INTEGRATING_DEV'].includes(batch.state)) return batch;
+      const item = this.sqlite.query(`
+        UPDATE integration_batch_items SET detail=?1
+        WHERE batch_id=?2 AND state IN ('PREPARED','MERGED')
+      `).run(input.reason, input.batchId);
+      const updated = this.sqlite.query(`
+        UPDATE integration_batches SET state='RECOVERY_REQUIRED',outcome_code=?1,detail=?2,completed_at=?3
+        WHERE id=?4 AND state IN ('CREATED','PREPARING','VERIFYING','INTEGRATING_DEV')
+      `).run(input.outcomeCode, input.reason, input.at, input.batchId);
+      const operation = this.sqlite.query(`
+        UPDATE operations SET state='RECONCILE_REQUIRED',result_json=?1,updated_at=?2
+        WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS')
+      `).run(JSON.stringify({ batchId: input.batchId, state: 'RECOVERY_REQUIRED',
+        outcomeCode: input.outcomeCode }), input.at, batch.operationId);
+      if (item.changes !== 1 || updated.changes !== 1 || operation.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Integration batch changed while recording its recovery');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'IntegrationReconcileRequired',1,'IntegrationBatch',?3,0,?1,?1,?4,?5)
+      `).run(input.eventId, batch.projectId, input.batchId, input.at,
+        JSON.stringify({ batchId: input.batchId, taskId: batch.item.taskId,
+          candidateCommit: batch.item.candidateCommit, devRef: batch.devRef,
+          devCommit: batch.devCommit, mergedCommit: batch.mergedCommit,
+          previousState: batch.state, outcomeCode: input.outcomeCode, reason: input.reason }));
+      return this.integrationBatchPlan(input.batchId);
+    })();
+  }
+
+  /**
+   * VERIFYING/INTEGRATING_DEV → INTEGRATING_DEV: recorded immediately before the ref write, so an
+   * interrupted update is identifiable and resolvable by comparing `merged_commit` with `dev`.
+   */
+  startIntegrationDevUpdate(input: {
+    readonly batchId: string;
+    readonly updatedAt: number;
+  }): IntegrationBatchPlan {
+    return this.sqlite.transaction(() => {
+      const batch = this.integrationBatchPlan(input.batchId);
+      if (batch.state !== 'VERIFYING') return batch;
+      const verification = batch.verificationId === null
+        ? null
+        : this.integrationVerificationPlan(batch.verificationId);
+      if (verification === null || verification.state !== 'PASSED') {
+        throw new StorageError('INVALID_STATE',
+          `Integration verification is ${verification?.state ?? 'missing'}; the dev ref cannot advance`);
+      }
+      if (batch.mergedCommit === null) {
+        throw new StorageError('INVALID_STATE', 'Integration batch has no recorded merge to apply');
+      }
+      const updated = this.sqlite.query(`
+        UPDATE integration_batches SET state='INTEGRATING_DEV'
+        WHERE id=?1 AND state='VERIFYING'
+      `).run(input.batchId);
+      const operation = this.sqlite.query(`
+        UPDATE operations SET updated_at=?1 WHERE id=?2 AND state='IN_PROGRESS'
+      `).run(input.updatedAt, batch.operationId);
+      if (updated.changes !== 1 || operation.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Integration batch changed while starting its dev update');
+      }
+      return this.integrationBatchPlan(input.batchId);
+    })();
+  }
+
+  listIntegrationBatches(projectId: string, taskId?: string): readonly IntegrationBatchSummary[] {
+    const rows = taskId === undefined
+      ? this.sqlite.query<{ id: string }, [string]>(`
+          SELECT batch.id FROM integration_batches batch
+          WHERE batch.project_id=?1 ORDER BY batch.created_at DESC,batch.id
+        `).all(projectId)
+      : this.sqlite.query<{ id: string }, [string, string]>(`
+          SELECT batch.id FROM integration_batches batch
+          JOIN integration_batch_items item ON item.batch_id=batch.id
+          WHERE batch.project_id=?1 AND item.task_id=?2 ORDER BY batch.created_at DESC,batch.id
+        `).all(projectId, taskId);
+    return rows.map((row) => this.integrationBatchSummary(row.id));
+  }
+
+  getIntegrationBatch(projectId: string, batchId: string): IntegrationBatchSummary {
+    const summary = this.integrationBatchSummary(batchId);
+    if (summary.projectId !== projectId) {
+      throw new StorageError('NOT_FOUND', 'Integration batch was not found for this project');
+    }
+    return summary;
+  }
+
+  /** Batches a previous Runtime left in flight; a restart reconciles them explicitly. */
+  listIncompleteIntegrationBatches(): readonly IntegrationBatchPlan[] {
+    return this.sqlite.query<{ id: string }, []>(`
+      SELECT id FROM integration_batches
+      WHERE state IN ('CREATED','PREPARING','VERIFYING','INTEGRATING_DEV') ORDER BY created_at,id
+    `).all().map((row) => this.integrationBatchPlan(row.id));
+  }
+
+  listIncompleteIntegrationVerifications(): readonly IntegrationVerificationPlan[] {
+    return this.sqlite.query<{ id: string }, []>(`
+      SELECT id FROM integration_verification_runs
+      WHERE state IN ('QUEUED','RUNNING') ORDER BY queued_at,id
+    `).all().map((row) => this.integrationVerificationPlan(row.id));
+  }
+
+  private integrationBatchSummary(batchId: string): IntegrationBatchSummary {
+    const row = this.sqlite.query<{
+      id: string; project_id: string; dev_ref: string; dev_commit: string;
+      state: IntegrationBatchState; integrated_commit: string | null;
+      merge_strategy: MergeStrategy | null; merged_commit: string | null;
+      worktree_path: string | null;
+      verification_id: string | null; outcome_code: string | null; detail: string | null;
+      created_at: number; completed_at: number | null;
+    }, [string]>(`
+      SELECT id,project_id,dev_ref,dev_commit,state,integrated_commit,merge_strategy,merged_commit,
+             worktree_path,verification_id,outcome_code,detail,created_at,completed_at
+      FROM integration_batches WHERE id=?1
+    `).get(batchId);
+    if (row === null) throw new StorageError('NOT_FOUND', 'Integration batch was not found');
+    return {
+      batchId: row.id,
+      projectId: row.project_id,
+      devRef: row.dev_ref,
+      devCommit: row.dev_commit,
+      state: row.state,
+      integratedCommit: row.integrated_commit,
+      mergeStrategy: row.merge_strategy,
+      mergedCommit: row.merged_commit,
+      worktreePath: row.worktree_path,
+      verificationId: row.verification_id,
+      outcomeCode: row.outcome_code,
+      detail: row.detail,
+      createdAt: row.created_at,
+      completedAt: row.completed_at,
+      items: this.integrationBatchItemSummaries(batchId),
+    };
+  }
+
+  private integrationBatchItemSummaries(batchId: string): readonly IntegrationBatchItemSummary[] {
+    return this.sqlite.query<{
+      batch_id: string; project_id: string; task_id: string; task_version: number;
+      revision_id: string; execution_id: string;
+      candidate_commit: string; dev_commit: string; state: IntegrationItemState;
+      integrated_commit: string | null; detail: string | null;
+      created_at: number; completed_at: number | null;
+    }, [string]>(`
+      SELECT item.batch_id,item.project_id,item.task_id,task.version AS task_version,
+             item.revision_id,item.execution_id,item.candidate_commit,item.dev_commit,item.state,
+             item.integrated_commit,item.detail,item.created_at,item.completed_at
+      FROM integration_batch_items item JOIN tasks task ON task.id=item.task_id
+      WHERE item.batch_id=?1 ORDER BY item.task_id
+    `).all(batchId).map((row) => ({
+      batchId: row.batch_id,
+      projectId: row.project_id,
+      taskId: row.task_id,
+      taskVersion: row.task_version,
+      revisionId: row.revision_id,
+      executionId: row.execution_id,
+      candidateCommit: row.candidate_commit,
+      devCommit: row.dev_commit,
+      state: row.state,
+      integratedCommit: row.integrated_commit,
+      detail: row.detail,
+      createdAt: row.created_at,
+      completedAt: row.completed_at,
+    }));
+  }
+
+  private integrationBatchPlan(batchId: string): IntegrationBatchPlan {
+    const summary = this.integrationBatchSummary(batchId);
+    const item = summary.items[0];
+    const operation = this.sqlite.query<{
+      id: string; state: IntegrationBatchPlan['operationState'];
+    }, [string]>(`
+      SELECT id,state FROM operations WHERE kind='INTEGRATE_TASK_RESULT' AND aggregate_id=?1
+    `).get(batchId);
+    const project = this.sqlite.query<{
+      repo_root: string; main_ref: string; object_format: 'sha1' | 'sha256';
+      ownership_token: string;
+    }, [string]>(`
+      SELECT p.repo_root,p.main_ref,p.object_format,batch.worktree_ownership_token
+      FROM integration_batches batch
+      JOIN projects p ON p.id=batch.project_id
+      WHERE batch.id=?1
+    `).get(batchId);
+    if (item === undefined || operation === null || project === null) {
+      throw new StorageError('NOT_FOUND', 'Integration batch is missing its item, operation, or project');
+    }
+    return {
+      ...summary,
+      operationId: operation.id,
+      operationState: operation.state,
+      worktreeOwnershipToken: project.ownership_token,
+      repositoryRoot: project.repo_root,
+      mainRef: project.main_ref,
+      objectFormat: project.object_format,
+      item,
+    };
+  }
+
+  private integrationVerificationPlan(verificationId: string): IntegrationVerificationPlan {
+    const row = this.sqlite.query<{
+      id: string; batch_id: string; project_id: string; task_id: string; execution_id: string;
+      revision_id: string; operation_id: string; operation_state: IntegrationVerificationPlan['operationState'];
+      tested_commit: string; tested_tree: string; dev_commit: string; policy_version: string;
+      policy_digest: string; main_commit: string; commands_json: string; copy_path: string;
+      state: VerificationState; outcome_code: string | null; evidence_json: string | null;
+      queued_at: number; started_at: number | null; ended_at: number | null;
+    }, [string]>(`
+      SELECT r.id,r.batch_id,r.project_id,r.task_id,r.execution_id,r.revision_id,r.operation_id,
+        o.state AS operation_state,r.tested_commit,r.tested_tree,r.dev_commit,r.policy_version,
+        r.policy_digest,r.main_commit,r.commands_json,r.copy_path,r.state,r.outcome_code,
+        r.evidence_json,r.queued_at,r.started_at,r.ended_at
+      FROM integration_verification_runs r JOIN operations o ON o.id=r.operation_id
+      WHERE r.id=?1
+    `).get(verificationId);
+    if (row === null) throw new StorageError('NOT_FOUND', 'Integration verification was not found');
+    return {
+      verificationId: row.id,
+      batchId: row.batch_id,
+      projectId: row.project_id,
+      taskId: row.task_id,
+      executionId: row.execution_id,
+      revisionId: row.revision_id,
+      operationId: row.operation_id,
+      operationState: row.operation_state,
+      testedCommit: row.tested_commit,
+      testedTree: row.tested_tree,
+      devCommit: row.dev_commit,
       policyVersion: row.policy_version,
       policyDigest: row.policy_digest,
       mainCommit: row.main_commit,

@@ -78,6 +78,9 @@ export async function createAgentFixture(options: AgentFixtureOptions = {}): Pro
     await git(repo, ['add', verificationPolicyPath]);
   }
   await git(repo, ['commit', '-m', 'initial']);
+  // ADR-0009: every Task worktree is based on the long-lived `dev` branch, so the fixture repo has
+  // one. It starts at the same commit as `main` and is never checked out here.
+  await git(repo, ['branch', 'dev']);
   const identity = await inspectRepository(repo);
   const storage = new Phase1Database();
   storage.trustProject({
@@ -87,6 +90,7 @@ export async function createAgentFixture(options: AgentFixtureOptions = {}): Pro
     repoRoot: identity.repoRoot,
     gitCommonDir: identity.gitCommonDir,
     mainRef: identity.mainRef,
+    devRef: 'refs/heads/dev',
     objectFormat: identity.objectFormat,
     policyVersion: 1,
     verificationPolicyConfirmationId: 'b0000000-0000-4000-8000-00000000000b',

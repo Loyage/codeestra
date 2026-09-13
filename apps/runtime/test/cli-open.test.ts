@@ -63,6 +63,8 @@ async function fixture(): Promise<{ repository: string; home: string; assets: st
   await git(repository, ['init', '-q', '-b', 'main']);
   await git(repository, ['add', '.']);
   await git(repository, ['commit', '-q', '-m', 'fixture']);
+  // ADR-0009: the long-lived dev branch is the baseline every workspace is created from.
+  await git(repository, ['branch', 'dev']);
   return { repository, home, assets };
 }
 
@@ -101,7 +103,7 @@ describe('codeestra open', () => {
     const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
     try {
       expect((await cli(['open', repository, '--yes', '--no-open'], environment)).exitCode).toBe(0);
-      await git(repository, ['worktree', 'add', '-q', '-b', 'dev', alternate, 'main']);
+      await git(repository, ['worktree', 'add', '-q', '-b', 'alternate', alternate, 'main']);
       const opened = await cli(['open', alternate, '--no-open'], environment);
       expect(opened.exitCode).toBe(0);
       expect(opened.stderr).toContain('Already trusted');

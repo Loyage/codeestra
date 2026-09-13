@@ -94,15 +94,42 @@ describe('Runtime task request boundary', () => {
     expect(runtimeRequestSchema.safeParse({ ...verify, executionId: 'not-a-uuid' }).success).toBe(false);
   });
 
+  test('requires a Task version for integration and accepts a plain integration read', () => {
+    const integration = {
+      requestId: base.requestId,
+      schemaVersion: base.schemaVersion,
+      command: 'task.integrate' as const,
+      commandId: base.commandId,
+      projectId: base.projectId,
+      taskId: '66666666-6666-4666-8666-666666666666',
+      expectedVersion: 3,
+    };
+    expect(runtimeRequestSchema.safeParse(integration).success).toBe(true);
+    // Integration changes the Task state, so it must carry the optimistic-concurrency version.
+    const { expectedVersion: _dropped, ...withoutVersion } = integration;
+    expect(runtimeRequestSchema.safeParse(withoutVersion).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({ ...integration, expectedVersion: -1 }).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({
+      requestId: base.requestId,
+      schemaVersion: base.schemaVersion,
+      command: 'task.integration.list',
+      projectId: base.projectId,
+      taskId: '66666666-6666-4666-8666-666666666666',
+    }).success).toBe(true);
+  });
+
   test('requires an explicit verification policy confirmation when trusting a project', () => {
     const trust = {
       requestId: base.requestId,
       schemaVersion: base.schemaVersion,
       command: 'project.trust' as const,
       path: '/repo',
+      // The identity a client echoes back is what `project.inspect` returned, so it also pins the
+      // development baseline every Task worktree would be created from (ADR-0018).
       expectedIdentity: {
         repoRoot: '/repo', gitCommonDir: '/repo/.git', mainRef: 'refs/heads/main',
         objectFormat: 'sha1', headCommit: 'a'.repeat(40),
+        devRef: 'refs/heads/dev', devCommit: 'a'.repeat(40), devRefPresent: true,
       },
     };
     expect(runtimeRequestSchema.safeParse(trust).success).toBe(false);
@@ -113,6 +140,22 @@ describe('Runtime task request boundary', () => {
     expect(runtimeRequestSchema.safeParse({
       ...trust,
       expectedVerificationPolicy: { state: 'PRESENT', mainCommit: 'a'.repeat(40), digest: 'b'.repeat(64) },
+    }).success).toBe(true);
+    // A baseline that was never part of what the user reviewed cannot be confirmed silently.
+    const identityWithoutBaseline = {
+      repoRoot: '/repo', gitCommonDir: '/repo/.git', mainRef: 'refs/heads/main',
+      objectFormat: 'sha1', headCommit: 'a'.repeat(40),
+    };
+    expect(runtimeRequestSchema.safeParse({
+      ...trust,
+      expectedIdentity: identityWithoutBaseline,
+      expectedVerificationPolicy: { state: 'ABSENT', mainCommit: 'a'.repeat(40) },
+    }).success).toBe(false);
+    // A missing dev branch is representable (the Runtime then refuses trust with DEV_REF_MISSING).
+    expect(runtimeRequestSchema.safeParse({
+      ...trust,
+      expectedIdentity: { ...trust.expectedIdentity, devCommit: null, devRefPresent: false },
+      expectedVerificationPolicy: { state: 'ABSENT', mainCommit: 'a'.repeat(40) },
     }).success).toBe(true);
     // A PRESENT confirmation without a digest cannot be represented.
     expect(runtimeRequestSchema.safeParse({

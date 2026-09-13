@@ -901,9 +901,65 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 - 未修改 `PROJECT_SPEC.md`、`AGENTS.md` 或任何 ADR；未提交、未 push、未提升 `dev → main`，也未重启 Runtime。
 - 仍需人工确认：列表/详情切换、返回按钮、窄屏单列、搜索与筛选后进入详情、从待处理页跳转详情。
 
+## FOUNDATION-037 — 检查分层：加快开发循环
+
+状态：已实现并在本工作树实测通过。未 commit、未 push、未提升 `dev → main`、未重启 Runtime。
+
+用户要求减少检查规模、加快研发速度，主要去掉耗时长或必要性不强的检查。先测量再决定：`bun run check` 约 52s，其中 Bun 测试 46.8s（245 项）、根 typecheck 2.2s、UI typecheck 1.8s、Vitest 212 项 0.5s、UI 构建 0.5s。慢测试的成本是分散的：约 120 项 Runtime/CLI 用例各 300–500ms（每例都建临时仓库 + worktree + Runtime + SQLite），另有 6 例 1.2–1.8s；`bun test --concurrency`/`--max-concurrency` 无收益（文件已并行，8 核 44s）。因此删除个别用例最多省约 3s，真正的杠杆是把进程级 e2e 从开发循环里移出。
+
+### 已实现
+
+- `package.json`：新增 `check:fast`（根 typecheck + UI typecheck + Vitest + `test:unit`）与 `test:unit`/`test:e2e`。`test:unit` 用 `--path-ignore-patterns='**/{...12 个文件...}.test.ts'` 跑「全部 Bun 测试减去 e2e」，`test:e2e` 显式列出这 12 个进程级文件；两者相加 = 245 项，无重复、无遗漏。
+- `check` 保持分层前的相同覆盖：typecheck + UI typecheck + Vitest + `test:storage`（Bun 测试目录整体）+ UI 构建；fast 档的 `test:unit` 只是它的子集，所以开发循环与提交门禁可以用同一个 245 项用例口径对齐。
+- `Justfile`：新增 `check-fast`、`test-e2e`；`verify` 不再跑 `bun audit`（网络相关、与本次改动无关），`audit` 保留为独立目标。
+- `README.md`「本地检查」：说明两层检查各自的耗时、覆盖与用途，以及 audit 已移出 verify。
+
+### 实际验证
+
+- `bun run check:fast`：退出码 0，约 10.3s（typecheck、UI typecheck、Vitest 212 项、`test:unit` 163 项 / 17 文件 0 fail）。
+- `bun run test:e2e`：82 项 / 12 文件 0 fail，38.6s。
+- `bun run test:unit` + `bun run test:e2e` 的用例数 163 + 82 = **245**，与 `bun run test:storage` 的 245 项一致，证明分层没有漏跑或重跑。
+- `bun run check`：退出码 0，46.3s，245 项 Bun 测试 0 fail、212 项 Vitest、根与 UI typecheck、Vite 构建全部通过。
+- 未改 `.codeestra/policies/verification.json`：task verification 仍跑全量 `bun run check`，证据强度不变；因策略文件内容未变，`policyDigest` 不变，STRICT 下不产生额外确认。
+- 未使用桌面/浏览器自动化，未操作真实用户仓库。
+
+### 剩余问题
+
+- 完整 `check` 仍约 46s，其中 38.6s 是进程级 e2e。若要再压，方向是复用 fixture（12 个文件各自重建临时仓库/worktree/Runtime）或将 `task verify` 加同一 commit+policy digest 的新鲜证据复用（行为改动，需 ADR），不是再删用例。
+- 已发现既有 flakiness（非本轮引入）：`apps/runtime/test/cli-attention.test.ts:248`（workbench HTTP client）在与其它文件组成子集运行时会因 `envelope` 为 null 失败，单独跑整套 12 文件 e2e 时通过。未修，仅记录。
+
+## FOUNDATION-038 — Task 成果合入 dev（IntegrationBatch 第一小步）
+
+状态：已实现并在本工作树实测通过。未 commit、未 push、未提升 `dev → main`、未重启 Runtime。决策见 ADR-0018。
+
+### 已实现
+
+- `packages/contracts`：新增 `task.integrate`（`expectedVersion` CAS）与 `task.integration.list`；`devBranchRef = 'refs/heads/dev'`；`project.trust.expectedIdentity` 改为 `projectIdentitySchema`（identity + `devRef`/`devCommit`/`devRefPresent`），因此确认信任同时确认了看到的 dev 基线。
+- `packages/storage`：schema v10 `integrationPipelineMigration`（`integration_batches`、`integration_batch_items`、`integration_verification_runs`、`projects.dev_ref`）。批次状态按 `docs/architecture/state-machines.md` §4 命名：`CREATED → PREPARING → VERIFYING → INTEGRATING_DEV → INTEGRATED`，另有 `CONFLICTED/FAILED/RECOVERY_REQUIRED`；`merged_commit` 在 ref 更新前落库，作为崩溃恢复的判定依据。`ExecutionSummary` 增加 `resultCommit`（UI 用它精确判断能否合入）。
+- `packages/git`：新增 `integration.ts`（`readLocalRefCommit`/`listCheckedOutRefs`/`isAncestor`/`createIntegrationWorktree`/`mergeResultCommit`/`advanceLocalRef`/`removeIntegrationWorktree`）与 `inspectBaseRef`；`prepareWorkspace` 参数由 `mainRef`/`expectedMainCommit` 更名为 `baseRef`/`expectedBaseCommit`。
+- `apps/runtime/src/integration-service.ts`：前置校验（EXECUTED + 当前 revision 的成果 commit + 该 revision/commit 的 Task 验证 PASSED）、dev ref 读取与「未被任何工作树检出」校验、独立 integration worktree 合并（能 ff 就 ff，否则 `--no-ff` 并核对第一父为固定基线、候选为后代）、独立集成验证（独立记录，绑 candidate/merged commit/dev 基线/policy digest/main commit/Task 验证 ID）、`INTEGRATING_DEV` 后 CAS 推进 `dev`、最后才 `EXECUTED → SUCCEEDED`。失败一律保留现场且不推进 `dev`；成功才尝试删除 integration worktree（不加 force）。
+- `apps/runtime/src/verification-service.ts`：抽出 `executeVerificationPolicy` 供 Task 验证与集成验证共用（行为不变，既有验证用例仍通过）。
+- `apps/runtime/src/recovery-service.ts`：`reconcileInterruptedIntegrations` 以 ref 事实恢复——`INTEGRATING_DEV` 且 `dev` 已等于 `merged_commit` 时核验后补记 `INTEGRATED`（不二次写 ref），否则 `RECOVERY_REQUIRED` 并写明观察到的 ref；`CREATED/PREPARING/VERIFYING` 记为 `RECOVERY_REQUIRED` 并明确“dev 未被推进”；未完成集成验证记 `ERROR(RUNTIME_RESTARTED)` 且保留副本。
+- CLI/UI：`task integrate`（仅 `INTEGRATED` 退出码 0）、`task integration list`、`task status.integrations` 投影；UI 任务详情新增「合入 dev」按钮（仅在该成果 commit 的验证 PASSED 且无进行中/已合入批次时可用）与集成记录表；不新增确认步骤。
+
+### 实际验证
+
+- `bun run typecheck`、`bun run typecheck:ui`：退出码 0。
+- `bun test apps/runtime/test/integration-service.test.ts`：15 项全部通过（ff 合入、dev 前移时的合并提交、未通过 Task 验证时拒绝且不建批、dev 被检出时拒绝、合并冲突保留 `MERGE_HEAD` 现场、集成验证失败保留合并工作树、集成过程中 dev 被移动时 `DEV_REF_MOVED`、同 commandId 重放不重复合入、STRICT 策略确认匹配/不匹配、`commit-msg` hook 拒绝记为 `FAILED/MERGE_FAILED` 而非冲突、无 identity 仍可 ff，以及三条崩溃恢复用例）。
+- `bun test apps/runtime/test/cli-integrate.test.ts`：2 项通过（真实 CLI + 真实 Runtime + 协议 stub provider，临时仓库）：`create → submit → run → result capture → verify → integrate` 后 `dev` 前进到成果 commit、`main` 不变、Task `SUCCEEDED`、`task integration list`/`task status.integrations` 一致；验证未通过时 `task integrate` 退出码 1 且 `dev` 不变。
+- `packages/storage/test/database.test.ts` 新增 v9 → v10 升级用例；`packages/contracts/test/request.test.ts` 新增 `task.integrate`/`task.integration.list` 请求边界用例。
+- `bun run check` 退出码 0：根/UI typecheck、Vitest 212 项、Bun 测试 264 项（`test:unit` 165 + `test:e2e` 99）、Vite 构建。受影响既有用例只做与“仓库必须有 dev 分支/基线 ref 改名/inspect 结果类型”有关的最小调整。
+
+### 剩余问题
+
+- `dev` 已被检出时无法一键合入（本机开发工作树就是该情形）：Runtime 拒绝并提示在 dev 工作树自行合并；选项“允许改动已检出的 dev 工作树”被明确否决。
+- 集成验证与 Task 验证使用同一份项目策略，只是独立记录；更强的独立验证器不在本轮。
+- 未实现：多成员批次、批级 `STALE`/`CANCELLED`、`dev → main` 提升与重启、失败现场与副本的回收策略。
+- 未用真实 provider 驱动合入（只用 stub）；未使用桌面/浏览器自动化。
+
 ## NEXT — 最小可用纵向切片
 
-0. 落实 ADR-0009 的 dev 基线：项目快照/Workspace 从 dev OID 建立，先补临时仓库测试；在此之前产品内 `task.run` 仍使用 mainRef，不能用于声称符合新分支规则。
+0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。剩余：`dev → main` 提升与重启。
 1. 真实验证 ADR-0016：在一次性临时仓库中用真实 Pi 跑「启动 → 暂停 → 恢复 → 终止」，核对 provider 进程确实退出、`--session` 确实续接同一 conversation、超时进入 `RECOVERY_REQUIRED`；脚本 Adapter 不能替代该验收。
 2. 长命令后台化与进度事件：让 `task.run`/`task.verify` 成为持久 Operation，界面可展示进度并允许取消。
 3. ADR-0010 Phase 3 技术 spike：真实 Pi session-file 双向 RPC↔TUI 恢复、PTY 生命周期、safe-point 与权限模式 side channel；通过后再落 handoff Operation、Session incarnation 和 CLI attach。

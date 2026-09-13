@@ -4,7 +4,7 @@ import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOpt
   maxQuestionnaireQuestions,
   maxTranscriptEntryReadLimit,
   runtimeResponseSchema, runtimeStreamFrameSchema,
-  type QuestionnaireAnswer, type RepositoryIdentity, type RuntimeRequest, type RuntimeResponse,
+  type ProjectIdentity, type QuestionnaireAnswer, type RuntimeRequest, type RuntimeResponse,
   type SessionTranscriptEntry, type SessionTranscriptView,
   type VerificationPolicyInspection } from '@codeestra/contracts';
 
@@ -498,6 +498,8 @@ function usage(): never {
   bun run codeestra task result commit <project-id> <task-id> <authorization-id> --confirm
   bun run codeestra task verify <project-id> <task-id> [execution-id]
   bun run codeestra task verification list <project-id> <task-id>
+  bun run codeestra task integrate <project-id> <task-id> <expected-version>
+  bun run codeestra task integration list <project-id> <task-id>
   bun run codeestra events list [--project <project-id>] [--since <sequence>] [--limit <n>]
   bun run codeestra events tail [--project <project-id>] [--since <sequence>]
   bun run codeestra attention list <project-id>
@@ -576,10 +578,14 @@ try {
       || flagTokens.some((flag) => flag !== '--yes' && flag !== '--no-open')) usage();
     const path = pathTokens[0] ?? process.cwd();
 
-    const identity = await call({ command: 'project.inspect', path }) as RepositoryIdentity;
+    const identity = await call({ command: 'project.inspect', path }) as ProjectIdentity;
     console.error(`Repository: ${identity.repoRoot}`);
     console.error(`  main ref: ${identity.mainRef} · ${identity.objectFormat}`);
     console.error(`  HEAD: ${identity.headCommit}`);
+    // The baseline is part of what trust confirms, so it is never implicit.
+    console.error(`  dev baseline: ${identity.devRefPresent && identity.devCommit !== null
+      ? `${identity.devRef} · ${identity.devCommit}`
+      : `${identity.devRef} · 缺失（必须先创建 dev 分支）`}`);
     const policy = await call({ command: 'project.verificationPolicy',
       path }) as VerificationPolicyInspection;
     describeVerificationPolicy(policy);
@@ -720,7 +726,7 @@ try {
     print(await call({ command: 'project.verificationPolicy', path: firstArgument ?? process.cwd() }));
   } else if (group === 'project' && action === 'trust') {
     const path = firstArgument !== undefined && firstArgument !== '--yes' ? firstArgument : process.cwd();
-    const identity = await call({ command: 'project.inspect', path }) as RepositoryIdentity;
+    const identity = await call({ command: 'project.inspect', path }) as ProjectIdentity;
     print(identity);
     const policy = await call({ command: 'project.verificationPolicy',
       path }) as VerificationPolicyInspection;
@@ -877,6 +883,27 @@ try {
     if (firstArgument !== 'list' || projectId === undefined || taskId === undefined
       || extra.length !== 0) usage();
     print(await call({ command: 'task.verification.list', projectId, taskId }));
+  } else if (group === 'task' && action === 'integrate') {
+    const [taskId, versionText, ...extra] = remainingArguments;
+    const expectedVersion = Number(versionText);
+    if (firstArgument === undefined || taskId === undefined || versionText === undefined
+      || extra.length !== 0 || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
+    const report = await call({
+      command: 'task.integrate',
+      commandId: crypto.randomUUID(),
+      projectId: firstArgument,
+      taskId,
+      expectedVersion,
+    }) as { state: string };
+    print(report);
+    // Only INTEGRATED means the dev ref moved. Everything else keeps `dev` untouched and needs a
+    // human, so the exit code must not report success for it.
+    if (report.state !== 'INTEGRATED') process.exit(1);
+  } else if (group === 'task' && action === 'integration') {
+    const [projectId, taskId, ...extra] = remainingArguments;
+    if (firstArgument !== 'list' || projectId === undefined || taskId === undefined
+      || extra.length !== 0) usage();
+    print(await call({ command: 'task.integration.list', projectId, taskId }));
   } else if (group === 'task' && action === 'result') {
     // `task result <subcommand> …` is a three-level command, so the subcommand lands in
     // firstArgument and the project ID is the first remaining argument.

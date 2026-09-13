@@ -115,6 +115,97 @@ export function reconcileInterruptedVerifications(input: {
   });
 }
 
+export interface IntegrationRecoveryResult {
+  readonly batchId: string;
+  readonly outcome: 'RECOVERED_INTEGRATED' | 'RECOVERY_REQUIRED';
+  readonly worktreePath: string | null;
+  readonly mergedCommit: string | null;
+}
+
+/**
+ * A Runtime restart cannot prove whether an integration finished its merge, its verification, or
+ * its ref update.
+ *
+ * - A batch interrupted before the ref write is recorded as `RECOVERY_REQUIRED` with that fact
+ *   stated explicitly; nothing is replayed.
+ * - A batch interrupted *during* the ref write is resolved by reading the `dev` ref: when it
+ *   already points at the recorded merge commit, the integration is completed from that fact
+ *   (the ref is never updated twice); otherwise nothing was integrated and the batch needs a
+ *   human.
+ *
+ * Interrupted integration verifications are recorded as `ERROR(RUNTIME_RESTARTED)` with the copy
+ * path kept, like Task verification.
+ */
+export async function reconcileInterruptedIntegrations(input: {
+  readonly storage: Phase1Database;
+  readonly readRefCommit: (batch: { readonly devRef: string; readonly repositoryRoot: string }) => Promise<string | null>;
+  readonly now?: () => number;
+  readonly randomUUID?: () => string;
+}): Promise<readonly IntegrationRecoveryResult[]> {
+  const now = input.now ?? Date.now;
+  const randomUUID = input.randomUUID ?? (() => crypto.randomUUID());
+  for (const run of input.storage.listIncompleteIntegrationVerifications()) {
+    input.storage.completeIntegrationVerification({
+      verificationId: run.verificationId,
+      state: 'ERROR',
+      outcomeCode: 'RUNTIME_RESTARTED',
+      evidence: {
+        testedCommit: run.testedCommit,
+        testedTree: run.testedTree,
+        devCommit: run.devCommit,
+        policyVersion: run.policyVersion,
+        policyDigest: run.policyDigest,
+        mainCommit: run.mainCommit,
+        previousState: run.state,
+        copyPath: run.copyPath,
+      },
+      eventId: randomUUID(),
+      completedAt: now(),
+    });
+  }
+  const results: IntegrationRecoveryResult[] = [];
+  for (const batch of input.storage.listIncompleteIntegrationBatches()) {
+    const observed = await input.readRefCommit({
+      devRef: batch.devRef, repositoryRoot: batch.repositoryRoot,
+    }).catch(() => null);
+    if (batch.state === 'INTEGRATING_DEV' && batch.mergedCommit !== null
+      && observed === batch.mergedCommit) {
+      // The ref write did happen; the integration is completed from the observed ref instead of
+      // being repeated or reported as failed.
+      input.storage.completeIntegrationBatch({
+        batchId: batch.batchId,
+        integratedCommit: batch.mergedCommit,
+        worktreeDetail: `reconciled after a restart: ${batch.devRef} already pointed at the`
+          + ' recorded merge commit'
+          + (batch.worktreePath === null ? '' : `; integration worktree at ${batch.worktreePath}`),
+        completedEventId: randomUUID(),
+        taskEventId: randomUUID(),
+        completedAt: now(),
+      });
+      results.push({ batchId: batch.batchId, outcome: 'RECOVERED_INTEGRATED',
+        worktreePath: batch.worktreePath, mergedCommit: batch.mergedCommit });
+      continue;
+    }
+    const reason = batch.state === 'INTEGRATING_DEV'
+      ? `Runtime restarted during the dev ref update: ${batch.devRef} is at`
+        + ` ${observed ?? 'an unreadable value'} while the recorded merge is`
+        + ` ${batch.mergedCommit ?? 'missing'}; nothing was integrated by this batch`
+      : `Runtime restarted while the integration was ${batch.state};`
+        + ' the dev ref was not advanced'
+        + (batch.worktreePath === null ? '' : `; integration worktree retained at ${batch.worktreePath}`);
+    input.storage.markIntegrationRecoveryRequired({
+      batchId: batch.batchId,
+      outcomeCode: batch.state === 'INTEGRATING_DEV' ? 'DEV_REF_OBSERVED' : 'RECONCILE_REQUIRED',
+      reason,
+      eventId: randomUUID(),
+      at: now(),
+    });
+    results.push({ batchId: batch.batchId, outcome: 'RECOVERY_REQUIRED',
+      worktreePath: batch.worktreePath, mergedCommit: batch.mergedCommit });
+  }
+  return results;
+}
+
 export interface ResultCommitRecoveryResult {
   readonly operationId: string;
   readonly authorizationId: string;

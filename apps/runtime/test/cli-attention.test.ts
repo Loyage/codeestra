@@ -135,6 +135,8 @@ async function startQuestionnaireTask(title: string): Promise<{
   await git(repository, ['init', '-q', '-b', 'main']);
   await git(repository, ['add', '.']);
   await git(repository, ['commit', '-q', '-m', 'fixture']);
+  // ADR-0009: the long-lived dev branch is the baseline every workspace is created from.
+  await git(repository, ['branch', 'dev']);
 
   const reportPath = join(tools, 'report.json');
   const stubPath = join(tools, 'stub-pi.ts');

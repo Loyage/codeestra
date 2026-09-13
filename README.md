@@ -65,10 +65,17 @@ Agent 结构化提问（ADR-0014）已实现：受控启动额外加载 Codeestr
 ```sh
 nix shell nixpkgs#bun nixpkgs#nodejs_24 nixpkgs#just
 just install
-just verify
+just check-fast   # 开发循环（约 10s）
+just verify       # 提交前的完整门禁（约 46s），再加 just audit 查依赖漏洞
 ```
 
-可用命令通过 `just` 或 `just --list` 查看；其中 `just check` 包含类型检查、Vitest domain 测试和 Bun 原生 SQLite 测试，`just verify` 还会执行依赖漏洞检查。也可直接使用 `bun install --frozen-lockfile`、`bun run check` 和 `bun audit`。当前 nixpkgs 没有仓库级 pin，精确可复现的 Nix devShell 是后续工程任务；项目依赖已由 `bun.lock` 固定。
+可用命令通过 `just` 或 `just --list` 查看。检查分两层：
+
+- `just check-fast`（约 10s）：类型检查、Vitest domain 测试与快速 Bun 单测（契约/存储/Git/Adapter 与不启进程的 Runtime 服务测试）。开发循环用这一个。
+- `just check`（约 46s）：在 `check-fast` 之上再跑进程级 e2e（`test:e2e`，12 个文件、Runtime/CLI 命令面）并构建 UI 资产；成果提交与 `.codeestra/policies/verification.json` 的 `check` 命令用它。两层合并覆盖全部 245 项 Bun 测试，`check` 不因分层而降低覆盖。
+- `just audit`：依赖漏洞检查需要网络且与本次代码改动无关，已从 `just verify` 移出，按需单独运行。
+
+也可直接使用 `bun install --frozen-lockfile`、`bun run check:fast`、`bun run check`、`bun run test:e2e` 和 `bun audit`。当前 nixpkgs 没有仓库级 pin，精确可复现的 Nix devShell 是后续工程任务；项目依赖已由 `bun.lock` 固定。
 
 首次试运行可用临时数据目录（默认数据目录是 `$XDG_STATE_HOME/codeestra` 或 `~/.local/state/codeestra`）：
 
@@ -99,6 +106,8 @@ bun run codeestra task result prepare <project-id> <task-id> [execution-id] # ST
 bun run codeestra task result commit <project-id> <task-id> <authorization-id> --confirm # STRICT
 bun run codeestra task verify <project-id> <task-id> [execution-id]
 bun run codeestra task verification list <project-id> <task-id>
+bun run codeestra task integrate <project-id> <task-id> <expected-version>
+bun run codeestra task integration list <project-id> <task-id>
 bun run codeestra attention list <project-id>
 bun run codeestra attention answer <project-id> <attention-id> confirm <yes|no> | value <text> | cancel
 bun run codeestra attention answer <project-id> <attention-id> [--choose <题>:<选项>[,<选项>]]… [--text <题>=<文本>]… [--cancel]

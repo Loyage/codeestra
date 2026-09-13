@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 9;
+export const phase1SchemaVersion = 10;
 
 export const phase1Migration = `
 CREATE TABLE projects (
@@ -463,6 +463,100 @@ CREATE UNIQUE INDEX one_global_agent_configuration
   ON agent_configurations(adapter_id) WHERE scope='GLOBAL';
 CREATE UNIQUE INDEX one_project_agent_configuration
   ON agent_configurations(project_id,adapter_id) WHERE scope='PROJECT';
+`;
+
+/**
+ * Integration pipeline (ADR-0018): a Task's captured result commit enters the long-lived `dev`
+ * branch through an IntegrationBatch. A batch records the fixed `dev` baseline it was prepared
+ * against, the candidate commit, the merge it produced, and the independent integration
+ * verification that had to PASS before the `dev` ref was advanced. A failure never moves `dev`.
+ *
+ * `integration_batch_items` is keyed by (batch, task) so the same batch shape can carry more than
+ * one Task later; this round creates exactly one member per batch.
+ *
+ * `projects.dev_ref` is the branch a new Task worktree is based on. It is stored instead of being
+ * derived so an integration record is self-describing: every base and target SHA can be checked
+ * against the ref name it came from.
+ */
+export const integrationPipelineMigration = `
+ALTER TABLE projects ADD COLUMN dev_ref TEXT NOT NULL DEFAULT 'refs/heads/dev';
+
+CREATE TABLE integration_batches (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  dev_ref TEXT NOT NULL CHECK(length(trim(dev_ref)) > 0),
+  dev_commit TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('CREATED','PREPARING','VERIFYING','INTEGRATING_DEV',
+    'INTEGRATED','CONFLICTED','FAILED','RECOVERY_REQUIRED')),
+  integrated_commit TEXT,
+  merge_strategy TEXT CHECK(merge_strategy IS NULL OR merge_strategy IN ('FAST_FORWARD','MERGE_COMMIT')),
+  /** The merge Git produced before any ref moved; the recovery proof for an interrupted update. */
+  merged_commit TEXT,
+  worktree_path TEXT,
+  worktree_ownership_token TEXT NOT NULL,
+  verification_id TEXT,
+  outcome_code TEXT,
+  detail TEXT,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  completed_at INTEGER,
+  CHECK(integrated_commit IS NULL OR state='INTEGRATED'),
+  CHECK(completed_at IS NULL OR completed_at >= created_at)
+) STRICT;
+CREATE INDEX integration_batches_by_project ON integration_batches(project_id,created_at,id);
+
+CREATE TABLE integration_batch_items (
+  batch_id TEXT NOT NULL REFERENCES integration_batches(id),
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  execution_id TEXT NOT NULL,
+  candidate_commit TEXT NOT NULL,
+  dev_commit TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('PREPARED','MERGED','INTEGRATED','FAILED','CONFLICTED')),
+  integrated_commit TEXT,
+  detail TEXT,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  completed_at INTEGER,
+  PRIMARY KEY(batch_id,task_id),
+  FOREIGN KEY(task_id,revision_id) REFERENCES task_revisions(task_id,id),
+  FOREIGN KEY(task_id,execution_id) REFERENCES executions(task_id,id),
+  CHECK(integrated_commit IS NULL OR state='INTEGRATED')
+) STRICT;
+CREATE INDEX integration_items_by_task ON integration_batch_items(project_id,task_id,created_at);
+
+CREATE TABLE integration_verification_runs (
+  id TEXT PRIMARY KEY,
+  batch_id TEXT NOT NULL REFERENCES integration_batches(id),
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT NOT NULL,
+  execution_id TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  operation_id TEXT NOT NULL UNIQUE REFERENCES operations(id),
+  command_id TEXT NOT NULL,
+  tested_commit TEXT NOT NULL,
+  tested_tree TEXT NOT NULL,
+  dev_commit TEXT NOT NULL,
+  policy_version TEXT NOT NULL,
+  policy_digest TEXT NOT NULL,
+  main_commit TEXT NOT NULL,
+  commands_json TEXT NOT NULL CHECK(json_valid(commands_json) AND json_type(commands_json)='array'),
+  copy_path TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('QUEUED','RUNNING','PASSED','FAILED','ERROR','STALE')),
+  outcome_code TEXT,
+  evidence_json TEXT CHECK(evidence_json IS NULL OR json_valid(evidence_json)),
+  queued_at INTEGER NOT NULL CHECK(queued_at >= 0),
+  started_at INTEGER,
+  ended_at INTEGER,
+  UNIQUE(project_id,command_id),
+  UNIQUE(batch_id),
+  CHECK(ended_at IS NULL OR started_at IS NULL OR ended_at >= started_at),
+  CHECK((state IN ('QUEUED','RUNNING') AND ended_at IS NULL AND outcome_code IS NULL)
+    OR (state IN ('PASSED','FAILED','ERROR','STALE') AND ended_at IS NOT NULL AND outcome_code IS NOT NULL)),
+  FOREIGN KEY(task_id,execution_id) REFERENCES executions(task_id,id),
+  FOREIGN KEY(task_id,revision_id) REFERENCES task_revisions(task_id,id)
+) STRICT;
+CREATE INDEX integration_verification_by_task
+  ON integration_verification_runs(project_id,task_id,queued_at);
 `;
 
 export const workspaceRetryMigration = `

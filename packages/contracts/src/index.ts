@@ -15,6 +15,24 @@ export const repositoryIdentitySchema = z.strictObject({
 export type RepositoryIdentity = z.infer<typeof repositoryIdentitySchema>;
 
 /**
+ * What `project.inspect` reports and what `project.trust` must echo back: the repository identity
+ * plus the development baseline a Task worktree would start from. Confirming trust therefore also
+ * confirms the exact `dev` commit, and a baseline that moved between inspect and trust is refused.
+ */
+export const projectIdentitySchema = repositoryIdentitySchema.extend({
+  devRef: z.string().min(1),
+  devCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/).nullable(),
+  devRefPresent: z.boolean(),
+});
+export type ProjectIdentity = z.infer<typeof projectIdentitySchema>;
+
+/**
+ * The long-lived branch every Task worktree is based on and every finished Task is integrated
+ * into (ADR-0009). The name is fixed: `main` is never a development baseline.
+ */
+export const devBranchRef = 'refs/heads/dev';
+
+/**
  * Read cursor over the append-only event log. `sequence` is the only ordering guarantee;
  * it is a per-database counter, not a distributed clock. Readers resume with an exclusive
  * cursor so a reconnect neither skips nor repeats events.
@@ -279,7 +297,8 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('project.trust'),
     path: z.string().min(1),
-    expectedIdentity: repositoryIdentitySchema,
+    /** The exact `project.inspect` result the user reviewed, including the dev baseline. */
+    expectedIdentity: projectIdentitySchema,
     expectedVerificationPolicy: verificationPolicyConfirmationSchema,
   }),
   z.strictObject({ ...requestBase, command: z.literal('project.list') }),
@@ -428,6 +447,25 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
   z.strictObject({
     ...requestBase,
     command: z.literal('task.verification.list'),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+  }),
+  /**
+   * Integrates one Task's captured result commit into the project's long-lived `dev` branch.
+   * Independent integration verification must PASS on the merged commit before the `dev` ref is
+   * advanced; a failure never changes `dev`.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.integrate'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    expectedVersion: z.number().int().nonnegative(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.integration.list'),
     projectId: z.string().uuid(),
     taskId: z.string().uuid(),
   }),

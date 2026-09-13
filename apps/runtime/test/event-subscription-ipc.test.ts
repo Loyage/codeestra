@@ -3,7 +3,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { runtimeStreamFrameSchema, type RuntimeRequest, type RuntimeStreamFrame,
-  type RepositoryIdentity } from '@codeestra/contracts';
+  type ProjectIdentity } from '@codeestra/contracts';
 import { git, registerTemporaryDirectory } from './support/agent-fixture.js';
 
 /**
@@ -40,6 +40,8 @@ async function startRuntime(): Promise<RuntimeHarness> {
   await Bun.write(join(repo, 'README.md'), 'temporary repository\n');
   await git(repo, ['add', 'README.md']);
   await git(repo, ['commit', '-m', 'initial']);
+  // ADR-0009: trust requires the long-lived dev branch; it is the workspace baseline.
+  await git(repo, ['branch', 'dev']);
   const child = Bun.spawn([process.execPath, 'run', runtimeEntry], {
     stdin: 'ignore', stdout: 'ignore', stderr: 'ignore',
     env: { ...Bun.env, CODEESTRA_HOME: home },
@@ -161,7 +163,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<voi
 async function trustedProject(harness: RuntimeHarness): Promise<string> {
   const identity = (await call(harness, {
     command: 'project.inspect', path: harness.repo,
-  })) as unknown as RepositoryIdentity;
+  })) as unknown as ProjectIdentity;
   await call(harness, {
     command: 'project.trust',
     path: harness.repo,

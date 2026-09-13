@@ -428,6 +428,136 @@ function replayCommands(plan: VerificationRunPlan): readonly VerificationCommand
 }
 
 /**
+ * One execution of a verification policy: an isolated detached copy of one fixed commit, its
+ * policy commands, the resulting tree evidence, and the copy removal outcome. It records nothing;
+ * Task verification and integration verification each store this under their own entity.
+ */
+export interface VerificationExecution {
+  readonly outcomes: readonly VerificationCommandOutcome[];
+  readonly tree: VerificationTreeEvidence | null;
+  readonly terminalState: 'PASSED' | 'FAILED' | 'ERROR';
+  readonly outcomeCode: string;
+  readonly copyPath: string;
+  readonly copyCreated: boolean;
+  readonly copyRemoval: { readonly removed: boolean | null; readonly detail: string | null };
+  readonly failureDetail: string | null;
+}
+
+/**
+ * Runs the confirmed policy against one frozen commit in a detached copy. Nothing is staged,
+ * committed, or pushed, and no Task worktree is used, so verification cannot see uncommitted
+ * Agent edits.
+ */
+export async function executeVerificationPolicy(input: {
+  readonly repositoryRoot: string;
+  readonly copiesRoot: string;
+  readonly projectId: string;
+  readonly runId: string;
+  readonly testedCommit: string;
+  readonly commands: readonly StoredVerificationCommand[];
+  readonly runner: VerificationRunner;
+}): Promise<VerificationExecution> {
+  let copy;
+  try {
+    copy = await createVerificationCopy({
+      repositoryRoot: input.repositoryRoot,
+      copiesRoot: input.copiesRoot,
+      projectId: input.projectId,
+      verificationId: input.runId,
+      testedCommit: input.testedCommit,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      outcomes: [],
+      tree: null,
+      terminalState: 'ERROR',
+      outcomeCode: 'WORKTREE_FAILED',
+      copyPath: '',
+      copyCreated: false,
+      copyRemoval: { removed: null, detail: null },
+      failureDetail: detail,
+    };
+  }
+
+  const outcomes: VerificationCommandOutcome[] = [];
+  let treeEvidence: VerificationTreeEvidence | null = null;
+  let terminalState: 'PASSED' | 'FAILED' | 'ERROR' = 'PASSED';
+  let outcomeCode = 'PASSED';
+  try {
+    for (const command of input.commands) {
+      const outcome = await runCommand({
+        verificationId: input.runId, command, copyPath: copy.path, runner: input.runner,
+      });
+      outcomes.push(outcome);
+      if (outcome.timedOut) {
+        terminalState = 'ERROR';
+        outcomeCode = 'COMMAND_TIMEOUT';
+        break;
+      }
+      if (outcome.exitCode !== 0) {
+        terminalState = 'FAILED';
+        outcomeCode = 'COMMAND_FAILED';
+        break;
+      }
+    }
+    const inspectionCopy = await inspectVerificationCopy({
+      path: copy.path,
+      testedCommit: input.testedCommit,
+    });
+    treeEvidence = {
+      headCommit: inspectionCopy.headCommit,
+      trackedModifications: inspectionCopy.trackedModifications,
+      untrackedFiles: inspectionCopy.untrackedFiles,
+      clean: inspectionCopy.clean,
+    };
+    if (!inspectionCopy.clean && terminalState === 'PASSED') {
+      terminalState = 'ERROR';
+      outcomeCode = 'TREE_MUTATED';
+    }
+  } catch (error) {
+    terminalState = 'ERROR';
+    outcomeCode = 'VERIFICATION_FAILED';
+    outcomes.push({
+      id: 'internal',
+      argv: [],
+      cwd: '.',
+      timeoutSeconds: 0,
+      exitCode: null,
+      timedOut: false,
+      durationMs: 0,
+      stdoutBytes: 0,
+      stderrBytes: 0,
+      stdoutDigest: sha256(''),
+      stderrDigest: sha256(''),
+      stdoutTail: '',
+      stderrTail: '',
+      failureDetail: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  const removal = await removeVerificationCopy({
+    repositoryRoot: input.repositoryRoot,
+    copiesRoot: input.copiesRoot,
+    path: copy.path,
+  }).catch((error: unknown) => ({
+    removed: false,
+    detail: error instanceof Error ? error.message : String(error),
+  }));
+
+  return {
+    outcomes,
+    tree: treeEvidence,
+    terminalState,
+    outcomeCode,
+    copyPath: copy.path,
+    copyCreated: true,
+    copyRemoval: removal,
+    failureDetail: null,
+  };
+}
+
+/**
  * Runs the confirmed verification policy against one frozen result commit in an isolated
  * detached copy of that commit. Nothing is staged, committed, or pushed, and the Task
  * worktree is never used, so verification cannot see uncommitted Agent edits.
@@ -531,17 +661,17 @@ export async function runTaskVerification(input: {
   });
   input.storage.startVerificationRun({ verificationId, startedAt: now() });
 
-  let copy;
-  try {
-    copy = await createVerificationCopy({
-      repositoryRoot: candidates.repositoryRoot,
-      copiesRoot: input.copiesRoot,
-      projectId: input.projectId,
-      verificationId,
-      testedCommit: selected.testedCommit,
-    });
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+  const execution = await executeVerificationPolicy({
+    repositoryRoot: candidates.repositoryRoot,
+    copiesRoot: input.copiesRoot,
+    projectId: input.projectId,
+    runId: verificationId,
+    testedCommit: selected.testedCommit,
+    commands,
+    runner: input.runner,
+  });
+  if (!execution.copyCreated) {
+    const detail = execution.failureDetail ?? 'the verification copy could not be created';
     const plan = input.storage.completeVerificationRun({
       verificationId,
       state: 'ERROR',
@@ -566,76 +696,14 @@ export async function runTaskVerification(input: {
       alreadyCompleted: false,
     });
   }
-
-  const outcomes: VerificationCommandOutcome[] = [];
-  let treeEvidence: VerificationTreeEvidence | null = null;
-  let terminalState: 'PASSED' | 'FAILED' | 'ERROR' = 'PASSED';
-  let outcomeCode = 'PASSED';
-  try {
-    for (const command of commands) {
-      const outcome = await runCommand({
-        verificationId, command, copyPath: copy.path, runner: input.runner,
-      });
-      outcomes.push(outcome);
-      if (outcome.timedOut) {
-        terminalState = 'ERROR';
-        outcomeCode = 'COMMAND_TIMEOUT';
-        break;
-      }
-      if (outcome.exitCode !== 0) {
-        terminalState = 'FAILED';
-        outcomeCode = 'COMMAND_FAILED';
-        break;
-      }
-    }
-    const inspectionCopy = await inspectVerificationCopy({
-      path: copy.path,
-      testedCommit: selected.testedCommit,
-    });
-    treeEvidence = {
-      headCommit: inspectionCopy.headCommit,
-      trackedModifications: inspectionCopy.trackedModifications,
-      untrackedFiles: inspectionCopy.untrackedFiles,
-      clean: inspectionCopy.clean,
-    };
-    if (!inspectionCopy.clean && terminalState === 'PASSED') {
-      terminalState = 'ERROR';
-      outcomeCode = 'TREE_MUTATED';
-    }
-  } catch (error) {
-    terminalState = 'ERROR';
-    outcomeCode = 'VERIFICATION_FAILED';
-    outcomes.push({
-      id: 'internal',
-      argv: [],
-      cwd: '.',
-      timeoutSeconds: 0,
-      exitCode: null,
-      timedOut: false,
-      durationMs: 0,
-      stdoutBytes: 0,
-      stderrBytes: 0,
-      stdoutDigest: sha256(''),
-      stderrDigest: sha256(''),
-      stdoutTail: '',
-      stderrTail: '',
-      failureDetail: error instanceof Error ? error.message : String(error),
-    });
-  }
-
-  const removal = await removeVerificationCopy({
-    repositoryRoot: candidates.repositoryRoot,
-    copiesRoot: input.copiesRoot,
-    path: copy.path,
-  }).catch((error: unknown) => ({
-    removed: false,
-    detail: error instanceof Error ? error.message : String(error),
-  }));
+  const outcomes = execution.outcomes;
+  const treeEvidence = execution.tree;
+  const removal = execution.copyRemoval;
 
   const plan = input.storage.completeVerificationRun({
     verificationId,
-    state: terminalState,
-    outcomeCode,
+    state: execution.terminalState,
+    outcomeCode: execution.outcomeCode,
     evidence: {
       testedCommit: selected.testedCommit,
       testedTree,

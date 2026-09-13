@@ -44,6 +44,8 @@ async function fixture(): Promise<{
   await Bun.write(join(repo, 'README.md'), 'temporary repository\n');
   await run(repo, ['add', 'README.md']);
   await run(repo, ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'initial']);
+  // The baseline for every workspace is the long-lived `dev` branch (ADR-0009).
+  await run(repo, ['branch', 'dev']);
   const identity = await inspectRepository(repo);
   const storage = new Phase1Database();
   const projectId = '10000000-0000-4000-8000-000000000001';
@@ -55,6 +57,7 @@ async function fixture(): Promise<{
     repoRoot: identity.repoRoot,
     gitCommonDir: identity.gitCommonDir,
     mainRef: identity.mainRef,
+    devRef: 'refs/heads/dev',
     objectFormat: identity.objectFormat,
     policyVersion: 1,
     verificationPolicyConfirmationId: 'b0000000-0000-4000-8000-00000000000b',
@@ -312,12 +315,12 @@ describe('workspace preparation service', () => {
         repositoryRoot: crashed.plan.repoRoot,
         worktreesRoot: crashed.worktreesRoot,
         projectId: crashed.plan.projectId,
-        mainRef: crashed.plan.mainRef,
+        baseRef: crashed.plan.devRef,
         taskId: crashed.plan.taskId,
         workspaceId: crashed.plan.workspaceId,
         ownershipToken: crashed.plan.ownershipToken,
         baseCommit: crashed.plan.baseCommit,
-        expectedMainCommit: crashed.plan.baseCommit,
+        expectedBaseCommit: crashed.plan.baseCommit,
       });
       const results = await reconcileWorkspacePreparations({
         storage: value.storage,
@@ -343,12 +346,12 @@ describe('workspace preparation service', () => {
         repositoryRoot: crashed.plan.repoRoot,
         worktreesRoot: crashed.worktreesRoot,
         projectId: crashed.plan.projectId,
-        mainRef: crashed.plan.mainRef,
+        baseRef: crashed.plan.devRef,
         taskId: crashed.plan.taskId,
         workspaceId: crashed.plan.workspaceId,
         ownershipToken: crashed.plan.ownershipToken,
         baseCommit: crashed.plan.baseCommit,
-        expectedMainCommit: crashed.plan.baseCommit,
+        expectedBaseCommit: crashed.plan.baseCommit,
       });
       await Bun.write(join(prepared.path, 'changed.txt'), 'external change\n');
       await run(prepared.path, ['add', 'changed.txt']);

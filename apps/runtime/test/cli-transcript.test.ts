@@ -161,6 +161,8 @@ async function runOneTask(): Promise<{
   await git(repository, ['init', '-q', '-b', 'main']);
   await git(repository, ['add', '.']);
   await git(repository, ['commit', '-q', '-m', 'fixture']);
+  // ADR-0009: the long-lived dev branch is the baseline every workspace is created from.
+  await git(repository, ['branch', 'dev']);
 
   // A shim executable keeps the production Adapter path untouched: the Runtime still launches
   // `pi <controlled argv>`, only the program behind that name is replaceable in a test.

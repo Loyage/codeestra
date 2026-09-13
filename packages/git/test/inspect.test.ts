@@ -63,12 +63,12 @@ describe('inspectRepository', () => {
       repositoryRoot: directory,
       worktreesRoot: realpathSync(worktreesRoot),
       projectId,
-      mainRef: identity.mainRef,
+      baseRef: identity.mainRef,
       taskId,
       workspaceId: '33333333-3333-4333-8333-333333333333',
       ownershipToken: '44444444-4444-4444-8444-444444444444',
       baseCommit: identity.headCommit,
-      expectedMainCommit: identity.headCommit,
+      expectedBaseCommit: identity.headCommit,
     });
 
     expect(workspace.path).toBe(realpathSync(join(worktreesRoot, projectId, taskId)));
@@ -90,12 +90,12 @@ describe('inspectRepository', () => {
       repositoryRoot: directory,
       worktreesRoot: realpathSync(worktreesRoot),
       projectId,
-      mainRef: identity.mainRef,
+      baseRef: identity.mainRef,
       taskId,
       workspaceId: '66666666-6666-4666-8666-666666666666',
       ownershipToken: '77777777-7777-4777-8777-777777777777',
       baseCommit: identity.headCommit,
-      expectedMainCommit: identity.headCommit,
+      expectedBaseCommit: identity.headCommit,
     })).rejects.toMatchObject({ code: 'REF_CONFLICT' });
   });
 
@@ -123,12 +123,12 @@ describe('inspectRepository', () => {
       repositoryRoot: directory,
       worktreesRoot: requestedRoot,
       projectId,
-      mainRef: identity.mainRef,
+      baseRef: identity.mainRef,
       taskId,
       workspaceId: '33333333-3333-4333-8333-333333333333',
       ownershipToken: '44444444-4444-4444-8444-444444444444',
       baseCommit: identity.headCommit,
-      expectedMainCommit: identity.headCommit,
+      expectedBaseCommit: identity.headCommit,
     });
 
     // The recorded path is canonical, which is also what `git worktree list` reports.
@@ -156,12 +156,12 @@ describe('inspectRepository', () => {
       repositoryRoot: directory,
       worktreesRoot: realpathSync(directory),
       projectId: '88888888-8888-4888-8888-888888888888',
-      mainRef: identity.mainRef,
+      baseRef: identity.mainRef,
       taskId: '11111111-1111-4111-8111-111111111111',
       workspaceId: '33333333-3333-4333-8333-333333333333',
       ownershipToken: '44444444-4444-4444-8444-444444444444',
       baseCommit: stale,
-      expectedMainCommit: stale,
+      expectedBaseCommit: stale,
     })).rejects.toMatchObject({ code: 'STALE_BASE' });
     expect(await output(directory, ['branch', '--list', 'task/*'])).toBe('');
   });

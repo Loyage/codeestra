@@ -3,7 +3,7 @@ import { mkdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   GitInspectionError,
-  inspectConfiguredMain,
+  inspectBaseRef,
   prepareWorkspace,
 } from '@codeestra/git';
 import {
@@ -86,6 +86,7 @@ export async function prepareTaskWorkspace(input: {
       repoRoot: project.repoRoot,
       gitCommonDir: project.gitCommonDir,
       mainRef: project.mainRef,
+      devRef: project.devRef,
       objectFormat: project.objectFormat,
       baseCommit: reusable.baseCommit,
       ownershipToken: reusable.ownershipToken,
@@ -96,8 +97,13 @@ export async function prepareTaskWorkspace(input: {
 
   const project = input.storage.getTrustedProject(input.projectId);
   let repository;
+  let baseCommit;
   try {
-    repository = await inspectConfiguredMain(project.repoRoot, project.mainRef);
+    // Every new Task worktree is based on the project's fixed `dev` ref, never on `main` and
+    // never on whichever branch happens to be checked out where the project was trusted.
+    const inspected = await inspectBaseRef(project.repoRoot, project.devRef);
+    repository = inspected.repository;
+    baseCommit = inspected.commit;
   } catch (error) {
     input.storage.invalidateProjectTrust(input.projectId, now());
     if (error instanceof GitInspectionError) {
@@ -129,7 +135,7 @@ export async function prepareTaskWorkspace(input: {
     ownershipToken,
     branchRef,
     path,
-    baseCommit: repository.headCommit,
+    baseCommit,
     createdAt: now(),
   });
   if (plan.operationState === 'SUCCEEDED' || plan.operationState === 'FAILED') return plan;
@@ -147,12 +153,12 @@ export async function prepareTaskWorkspace(input: {
       repositoryRoot: plan.repoRoot,
       worktreesRoot,
       projectId: plan.projectId,
-      mainRef: plan.mainRef,
+      baseRef: plan.devRef,
       taskId: plan.taskId,
       workspaceId: plan.workspaceId,
       ownershipToken: plan.ownershipToken,
       baseCommit: plan.baseCommit,
-      expectedMainCommit: plan.baseCommit,
+      expectedBaseCommit: plan.baseCommit,
     });
     input.storage.completeWorkspacePreparation({
       operationId: plan.operationId,

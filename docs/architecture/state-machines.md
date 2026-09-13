@@ -37,6 +37,8 @@ Phase 1 判定（ADR-0006）：全部命令 exit 0 且副本 tracked 内容未�
 
 Task Integration summary：`NOT_READY → ELIGIBLE → BATCHED → INTEGRATED`；失败/修订产生 `NEEDS_ATTENTION / STALE`。这些是查询投影，不是替代 Batch 的权威状态。
 
+Task worktree 基线（ADR-0009/ADR-0018）：新 Task 的 workspace 从 `projects.dev_ref`（默认 `refs/heads/dev`）的当前 OID 建立；仓库没有 `dev` 时 `project.trust` 以 `DEV_REF_MISSING` 拒绝，不静默回退到其他分支。已有 workspace 不回改基线。
+
 ## 2. Execution
 
 状态：`CREATED, PREPARING, STARTING, RUNNING, WAITING_FOR_USER, PAUSING, PAUSED, STOPPING, RECOVERY_REQUIRED, SUCCEEDED, FAILED, CANCELLED, SUPERSEDED`。
@@ -88,14 +90,18 @@ TerminalAttachment：多个 `READ_ONLY` 可并存；最多一个 `WRITER` lease�
 
 ## 4. IntegrationBatch / StableBranchPromotion
 
-IntegrationBatch：`CREATED → PREPARING → VERIFYING → INTEGRATING_DEV → INTEGRATED`。
+实现状态（ADR-0018）：**已实现单成员合入**（`task.integrate` / `task.integration.list`，CLI + 同一命令面 + UI）。已实现的状态为 `CREATED → PREPARING → VERIFYING → INTEGRATING_DEV → INTEGRATED`，另有 `CONFLICTED / FAILED / RECOVERY_REQUIRED`；多成员批次、`STALE`、`CANCELLED` 与 `StableBranchPromotion` 段仍属后续阶段合约。
 
-- PREPARING：从固定 expected dev 创建独立 integration worktree，合并固定 source commits；冲突→CONFLICTED，其他错误→FAILED。
-- VERIFYING：在固定 dev candidate 上运行独立验证；失败→FAILED，成功→INTEGRATING_DEV。
-- INTEGRATING_DEV：再次核验 dev SHA、candidate、成员 revision、验证和活动 Git 操作；以 expected old OID 保护更新 dev 后→INTEGRATED。Task 此时可为 SUCCEEDED，但尚未进入稳定 main。
-- 任一更新前状态发生基线/成员/候选变化→STALE；用户取消→CANCELLED。正在更新 dev 时取消必须串行核对最终事实。
-- 更新操作崩溃→RECOVERY_REQUIRED；若 dev 已更新，根据固定 OID 核对补记成功，不能重复合并。
-- FAILED/CONFLICTED/STALE 的重试建立新 candidate/batch，保留旧记录；不自动部分集成。
+- CREATED：固定 `dev` 基线 OID、候选 result commit、revision 与 execution，并确认该 revision+commit 的 Task 验证为 `PASSED`；DEV_REF_MISSING / DEV_REF_CHECKED_OUT / TASK_VERIFICATION_NOT_PASSED 在写入任何 Git 副作用前拒绝。
+- PREPARING：在 Runtime 数据目录的 detached integration worktree 中合并固定候选；能 ff 就 `--ff-only`，否则 `--no-ff`（第一父为固定基线，候选必须是其后代）；冲突→CONFLICTED，其他错误→FAILED。合并产生的提交写入 `merged_commit`，此时 `dev` 仍未被触及。
+- VERIFYING：在 `merged_commit` 的 detached 副本上运行独立集成验证（独立实体 `integration_verification_runs`，绑定 candidate/merged commit/固定 dev 基线/policy digest/main commit 与 Task 验证 ID）；失败→FAILED。
+- INTEGRATING_DEV：已核验集成验证 PASSED 后记录，随后以 `merged_commit` 与记录基线作 CAS 更新 `dev`。该状态存在的原因是：崩溃可能发生在 ref 写入前后，只有拿记录的 `merged_commit` 与 ref 实际值对比才能判定。
+- INTEGRATED：ref 已更新才写入 `integrated_commit`，此时才 `EXECUTED → SUCCEEDED`。成功后才尝试 `git worktree remove`（不加 force）。
+- 恢复：未完成集成验证→`ERROR(RUNTIME_RESTARTED)` 并保留副本；`CREATED/PREPARING/VERIFYING`→`RECOVERY_REQUIRED`（明确 dev 未被推进）；`INTEGRATING_DEV`→ref 等于 `merged_commit` 则核验后补记 INTEGRATED（不二次写 ref），否则 `RECOVERY_REQUIRED/DEV_REF_OBSERVED` 并写明观察值。`RECOVERY_REQUIRED` 阻止新尝试直到人工处理；不自动部分集成。
+
+未实现（不得声称）：`STALE` 判定、批级 `CANCELLED`、多成员批次、任务集合级集成。
+
+StableBranchPromotion：`CREATED → VERIFYING → AWAITING_APPROVAL → PROMOTING → RESTARTING → SUCCEEDED`。
 
 StableBranchPromotion：`CREATED → VERIFYING → AWAITING_APPROVAL → PROMOTING → RESTARTING → SUCCEEDED`。
 

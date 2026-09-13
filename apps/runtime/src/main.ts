@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, rmSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
-import { runtimeRequestSchema, validateQuestionnaireAnswer, questionnairePromptSchema,
+import { devBranchRef, runtimeRequestSchema, validateQuestionnaireAnswer, questionnairePromptSchema,
   type RuntimeRequest, type RuntimeResponse,
   type RuntimeStreamFrame } from '@codeestra/contracts';
-import { inspectRepository } from '@codeestra/git';
+import { inspectRepository, readLocalRefCommit } from '@codeestra/git';
 import { Phase1Database, StorageError, type AgentAnswerPlan } from '@codeestra/storage';
 import { createPiAdapterRegistry, piSessionDirectory } from './adapter-registry.js';
 import {
@@ -13,6 +13,7 @@ import {
 } from './agent-config-service.js';
 import { AgentRuntimeCoordinator, deriveCommandId } from './agent-runtime-service.js';
 import { EventSubscriptionHub, type EventSubscriptionHandle } from './event-subscription-service.js';
+import { integrateTaskResult } from './integration-service.js';
 import { RuntimeHttpApi } from './http-api.js';
 import { runtimeHome, runtimeSocketPath } from './paths.js';
 import { readPermissionMode, writePermissionMode, type PermissionMode } from './permission-mode.js';
@@ -25,6 +26,7 @@ import {
 import {
   reconcileInterruptedAgentAnswers,
   reconcileInterruptedAgentStarts,
+  reconcileInterruptedIntegrations,
   reconcileInterruptedResultCommits,
   reconcileInterruptedVerifications,
   reconcileWorkspacePreparations,
@@ -112,9 +114,19 @@ reconcileInterruptedAgentStarts({ storage });
 reconcileInterruptedAgentAnswers({ storage });
 await reconcileInterruptedResultCommits({ storage });
 reconcileInterruptedVerifications({ storage });
+await reconcileInterruptedIntegrations({
+  storage,
+  // Proving an interrupted ref write needs the ref itself: a batch whose recorded merge is already
+  // at `dev` is completed from that fact instead of being retried or reported as failed.
+  readRefCommit: async ({ devRef, repositoryRoot }) => readLocalRefCommit({
+    repositoryRoot, ref: devRef,
+  }),
+});
 const verificationRunner = new VerificationRunner();
 /** Verification copies live inside the Runtime data directory, never in the user's repo. */
 const verificationCopiesRoot = join(home, 'verifications');
+/** Detached worktrees an integration merge happens in; never a user's checkout. */
+const integrationWorktreesRoot = join(home, 'integrations');
 let listener: ReturnType<typeof Bun.listen<SocketState>>;
 
 function success(requestId: string, result: unknown): RuntimeResponse {
@@ -245,8 +257,20 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         cleared,
       });
     }
-    case 'project.inspect':
-      return success(request.requestId, await inspectRepository(request.path));
+    case 'project.inspect': {
+      const identity = await inspectRepository(request.path);
+      // The baseline ref is reported together with the repository identity so a client can see
+      // which commit new Task worktrees would start from (ADR-0009) before trusting the project.
+      const baseline = await readLocalRefCommit({
+        repositoryRoot: identity.repoRoot, ref: devBranchRef,
+      });
+      return success(request.requestId, {
+        ...identity,
+        devRef: devBranchRef,
+        devCommit: baseline,
+        devRefPresent: baseline !== null,
+      });
+    }
     case 'project.verificationPolicy': {
       const identity = await inspectRepository(request.path);
       return success(request.requestId, await inspectVerificationPolicy({
@@ -289,6 +313,7 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         task,
         executions: storage.listTaskExecutions(request.projectId, request.taskId),
         verifications: storage.listVerificationRuns(request.projectId, request.taskId),
+        integrations: storage.listIntegrationBatches(request.projectId, request.taskId),
       });
     }
     case 'task.pause':
@@ -441,6 +466,21 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         commandId: request.commandId,
         permissionMode,
       }));
+    case 'task.integrate':
+      return success(request.requestId, await integrateTaskResult({
+        storage,
+        runner: verificationRunner,
+        copiesRoot: verificationCopiesRoot,
+        worktreesRoot: integrationWorktreesRoot,
+        projectId: request.projectId,
+        taskId: request.taskId,
+        expectedVersion: request.expectedVersion,
+        commandId: request.commandId,
+        permissionMode,
+      }));
+    case 'task.integration.list':
+      return success(request.requestId,
+        storage.listIntegrationBatches(request.projectId, request.taskId));
     case 'attention.list':
       return success(request.requestId, storage.listAttentionRequests(request.projectId));
     case 'attention.answer': {
@@ -516,9 +556,27 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       }));
     }
     case 'project.trust': {
-      const actual = await inspectRepository(request.path);
+      const identity = await inspectRepository(request.path);
+      const baselineCommit = await readLocalRefCommit({
+        repositoryRoot: identity.repoRoot, ref: devBranchRef,
+      });
+      // The client echoes exactly what `project.inspect` reported, so this comparison also pins the
+      // development baseline the user saw instead of only the repository identity.
+      const actual = {
+        ...identity,
+        devRef: devBranchRef,
+        devCommit: baselineCommit,
+        devRefPresent: baselineCommit !== null,
+      };
       if (JSON.stringify(actual) !== JSON.stringify(request.expectedIdentity)) {
         return failure(request.requestId, 'REPOSITORY_CHANGED', 'Repository identity changed after confirmation');
+      }
+      // `dev` is the development baseline every Task worktree and every integration target uses.
+      // Refusing trust without it is explicit: silently falling back to another branch would make
+      // "integrated into dev" mean something different per project.
+      if (baselineCommit === null) {
+        return failure(request.requestId, 'DEV_REF_MISSING',
+          `This repository has no ${devBranchRef}; create the long-lived dev branch before trusting it`);
       }
       const policy = await inspectVerificationPolicy({
         repositoryRoot: actual.repoRoot,
@@ -540,6 +598,7 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         repoRoot: actual.repoRoot,
         gitCommonDir: actual.gitCommonDir,
         mainRef: actual.mainRef,
+        devRef: devBranchRef,
         objectFormat: actual.objectFormat,
         policyVersion: 1,
         verificationPolicyConfirmationId: crypto.randomUUID(),
@@ -554,7 +613,9 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       return success(request.requestId, {
         trusted: true,
         permissionMode,
-        repository: actual,
+        repository: identity,
+        devRef: devBranchRef,
+        devCommit: baselineCommit,
         verificationPolicy: policy,
       });
     }

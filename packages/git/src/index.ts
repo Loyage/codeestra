@@ -30,6 +30,21 @@ export {
 } from './sensitive-paths.js';
 export type { SensitivePathHit } from './sensitive-paths.js';
 export {
+  advanceLocalRef,
+  createIntegrationWorktree,
+  isAncestor,
+  listCheckedOutRefs,
+  mergeResultCommit,
+  readLocalRefCommit,
+  removeIntegrationWorktree,
+} from './integration.js';
+export type {
+  CheckedOutRef,
+  IntegrationWorktree,
+  MergeOutcome,
+  MergeResult,
+} from './integration.js';
+export {
   createVerificationCopy,
   inspectVerificationCopy,
   readCommitTree,
@@ -104,15 +119,25 @@ export async function inspectRepository(path: string): Promise<RepositoryIdentit
   return { repoRoot, gitCommonDir, mainRef, objectFormat, headCommit };
 }
 
-export async function inspectConfiguredMain(path: string, mainRef: string): Promise<RepositoryIdentity> {
-  if (!mainRef.startsWith('refs/heads/')) {
-    throw new GitInspectionError('INVALID_REPOSITORY', 'Configured main ref must be a local branch');
+/**
+ * Reads the repository identity plus the commit of one local branch. The branch is reported
+ * separately so a baseline ref is never confused with the ref whose policy governs a project:
+ * `dev` is the development baseline, while the verification policy lives on `main` (ADR-0009).
+ */
+export async function inspectBaseRef(path: string, baseRef: string): Promise<{
+  readonly repository: RepositoryIdentity;
+  readonly commit: string;
+}> {
+  if (!baseRef.startsWith('refs/heads/')) {
+    throw new GitInspectionError('INVALID_REPOSITORY', 'Configured base ref must be a local branch');
   }
   const repository = await inspectRepository(path);
-  const headCommit = await git(repository.repoRoot, ['rev-parse', '--verify', mainRef]);
-  return { ...repository, mainRef, headCommit };
+  if (!await refExists(repository.repoRoot, baseRef)) {
+    throw new GitInspectionError('MISSING_BASE_REF', `Configured base ref ${baseRef} does not exist`);
+  }
+  const commit = await git(repository.repoRoot, ['rev-parse', '--verify', baseRef]);
+  return { repository, commit };
 }
-
 export interface WorkspaceReconciliation {
   readonly state: 'OWNED' | 'MISSING' | 'FOREIGN' | 'UNCERTAIN';
   readonly headCommit?: string;
@@ -194,12 +219,13 @@ export async function prepareWorkspace(input: {
   readonly repositoryRoot: string;
   readonly worktreesRoot: string;
   readonly projectId: string;
-  readonly mainRef: string;
+  /** The fixed baseline ref the worktree is created from (ADR-0009: the project's `dev` ref). */
+  readonly baseRef: string;
   readonly taskId: string;
   readonly workspaceId: string;
   readonly ownershipToken: string;
   readonly baseCommit: string;
-  readonly expectedMainCommit: string;
+  readonly expectedBaseCommit: string;
 }): Promise<PreparedWorkspace> {
   const stableId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   for (const [name, value] of [['operationId', input.operationId], ['projectId', input.projectId],
@@ -208,17 +234,17 @@ export async function prepareWorkspace(input: {
     if (!stableId.test(value)) throw new GitInspectionError('FOREIGN_RESOURCE', `${name} must be a UUID`);
   }
   const repository = await inspectRepository(input.repositoryRoot);
-  if (!input.mainRef.startsWith('refs/heads/')) {
-    throw new GitInspectionError('STALE_BASE', 'Configured main ref must be a local branch');
+  if (!input.baseRef.startsWith('refs/heads/')) {
+    throw new GitInspectionError('STALE_BASE', 'Configured base ref must be a local branch');
   }
   const expectedOidLength = repository.objectFormat === 'sha1' ? 40 : 64;
   const oidPattern = new RegExp(`^[0-9a-f]{${expectedOidLength}}$`);
-  if (!oidPattern.test(input.baseCommit) || !oidPattern.test(input.expectedMainCommit)) {
+  if (!oidPattern.test(input.baseCommit) || !oidPattern.test(input.expectedBaseCommit)) {
     throw new GitInspectionError('STALE_BASE', `Expected ${repository.objectFormat} object IDs`);
   }
-  const mainCommit = await git(repository.repoRoot, ['rev-parse', '--verify', input.mainRef]);
-  if (mainCommit !== input.expectedMainCommit || input.baseCommit !== input.expectedMainCommit) {
-    throw new GitInspectionError('STALE_BASE', 'Main or requested base changed before workspace preparation');
+  const baseCommit = await git(repository.repoRoot, ['rev-parse', '--verify', input.baseRef]);
+  if (baseCommit !== input.expectedBaseCommit || input.baseCommit !== input.expectedBaseCommit) {
+    throw new GitInspectionError('STALE_BASE', 'Base ref or requested base changed before workspace preparation');
   }
 
   const branchRef = `refs/heads/task/${input.taskId}`;

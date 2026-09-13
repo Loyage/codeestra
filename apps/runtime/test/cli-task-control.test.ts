@@ -58,6 +58,8 @@ async function trustedProject(): Promise<{ environment: Record<string, string>; 
   await git(repository, ['init', '-q', '-b', 'main']);
   await git(repository, ['add', '.']);
   await git(repository, ['commit', '-q', '-m', 'fixture']);
+  // ADR-0009: the long-lived dev branch is the baseline every workspace is created from.
+  await git(repository, ['branch', 'dev']);
   const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
   const opened = await cli(['open', repository, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);

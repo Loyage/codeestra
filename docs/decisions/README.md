@@ -20,6 +20,7 @@
 - [ADR-0015](0015-task-workbench-and-themes.md)：任务工作台重构，集中任务操作、待回答问题与执行过程；支持跟随系统/浅色/深色主题。只调整便利前端，不新增 Runtime 语义或确认步骤。
 - [ADR-0016](0016-task-pause-cancel-archive.md)：Task 暂停 / 终止 / 归档。暂停为协作停止（Task `PAUSED`、Execution `SUPERSEDED`、workspace 保留），恢复在同一工作树新建 Execution 并以 `--session` 复用 provider conversation；终止是终态 `CANCELLED`，不自动重开；删除是归档软删除，只写 `tasks.archived_at`，不删除任何审计、不回收 worktree/branch。均不新增确认。
 - [ADR-0017](0017-new-task-dock.md)：新建任务改为页面底部常驻停靠条（收起：单行输入 + 创建；展开：多行规格正文、约束列表、任务类型），已选项目时在所有标签页可用。展开面板的每个字段都有对应 CLI 参数（`task create --constraint/--kind`），不存在仅 UI 可用的能力；`SELF` 在 UI 禁用、在 CLI 以 `TASK_KIND_UNSUPPORTED` 拒绝，Runtime 边界仍未收紧（已知缺口）。
+- [ADR-0018](0018-task-result-integration-into-dev.md)：Task 成果合入 `dev` 的 IntegrationBatch 第一小步——在 Runtime 数据目录的 detached worktree 里合并，先跑独立集成验证，PASSED 后才用 CAS 推进 `dev` ref；任何失败保留现场且不推进 `dev`；同时把 Task worktree 基线修正为固定 `dev`（`projects.dev_ref`，仓库无 dev 时 trust 明确拒绝）。不含 `dev → main` 提升与重启。
 
 以上选择均由用户明确答复。用户给定的硬性原则见 `PROJECT_SPEC.md`，无需重复确认。
 

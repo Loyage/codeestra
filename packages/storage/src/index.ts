@@ -5,7 +5,9 @@ export type {
   CommandResult, ConfirmedVerificationPolicy, ExecutionError, ExecutionLifecycleState,
   ExecutionReservation,
   ExecutionSummary, ObservableAgentSession, SessionTranscriptTarget,
-  StoredAgentConfiguration,
+  StoredAgentConfiguration, IntegrationBatchItemSummary, IntegrationBatchPlan,
+  IntegrationBatchState, IntegrationBatchSummary, IntegrationCandidates,
+  IntegrationItemState, IntegrationVerificationPlan, IntegrationVerificationSummary, MergeStrategy,
   PendingEventDelivery, ResultCommitAuthorization, ResultCommitCapturePlan, ResultCommitSubject,
   StoredAgentAnswer, StoredConstraint, StoredEventEnvelope, StoredVerificationCommand,
   TaskLifecycleState, TaskResumeRequest, TaskStopRequest, TaskSummary,
@@ -15,7 +17,7 @@ export type {
 } from './database.js';
 export {
   agentAnswerMigration, agentConfigurationMigration, agentDisconnectMigration,
-  agentObservationMigration, agentStartMigration,
+  agentObservationMigration, agentStartMigration, integrationPipelineMigration,
   phase1Migration, phase1SchemaVersion, taskControlMigration, taskVerificationMigration,
   workspaceRetryMigration,
 } from './migration.js';
