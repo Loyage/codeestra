@@ -727,6 +727,37 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 - 问卷的 `waiting` 没有超时：没人回答就一直 `WAITING_FOR_USER`（与既有 Attention 行为一致）；取消仍靠人显式 `--cancel`。
 - `packages/storage` 现在正式依赖 `@codeestra/contracts`（bun.lock 随之更新）。
 
+## FOUNDATION-031 — dev → main 稳定提升（结构化提问通道，ADR-0009/0014）
+
+状态：已提升并在 main 工作树重启验证 Runtime 恢复响应。用户本轮明确授权 commit 并合并到 main。
+
+提升记录（ADR-0009 要求的固定 SHA / 权限模式 / 验证证据）：
+
+| 项 | 值 |
+|---|---|
+| 权限模式 | `FULL`（默认；ADR-0011 下无批准步骤） |
+| 提升前 main | `714e9e426aaee69424ceb3d804f9a5ddc2293eb5` |
+| 被提升的 dev 提交（实现提交） | `8a52a37c547067d83f6f9b40080b9749d6f4e548`（feat(runtime): structured Agent question channel (ADR-0014)） |
+| 验证证据 | 在该提交上工作树干净；`bun run check` 退出码 0——TypeScript（Runtime/CLI）与 UI 类型检查通过、**212 项 Vitest**、**224 项 Bun tests**、UI Vite 构建成功；`bun audit` 无已知漏洞 |
+| 提升方式 | main 工作树内 `git merge --ff-only dev`（`main` 被检出在 `~/Documents/codeestra`，不得用 `update-ref` 直接推进） |
+| 取消/回滚 | 未执行任何回滚；未 push；未触碰用户仓库与 ref |
+
+提升后的后续步骤（缺一不可，否则 stable Runtime 跑不起来）：
+
+1. main 工作树 `bun install --frozen-lockfile`——本轮新增 `packages/storage` → `@codeestra/contracts` 依赖，缺该链接时 stable Runtime 会在导入 storage 时直接失败（已实际确认：安装前该链接不存在）。
+2. main 工作树 `bun run build:ui`——`apps/ui/dist` 是 gitignore 的本地资产，不重建则 UI 仍是旧版（无问卷表单）。
+3. `bun run codeestra stop`：旧 Runtime pid `65678` 在 3 秒内退出。
+4. `bun run codeestra status`：新 Runtime pid `64518` 返回 `status: READY`、`permissionMode: FULL`、`adapters: ["pi"]`、`activeSessions: []`。**Runtime 恢复响应后**才在本条声明提升完成。
+5. 已校验 main 工作树里 `packages/agent-adapters/src/pi-question-extension.ts` 存在、默认解析路径指向该文件、且 `packages/agent-adapters/node_modules/@codeestra/contracts` 链接可解析（扩展在 provider 进程内靠该链接加载契约）。
+
+资源回收（归属校验后执行，不属于本轮改动但已记录）：
+
+- 本轮命令面端到端测试残留的协议 stub 与临时 Runtime：pid `5568`（`/tmp/codeestra-question-tools-*/stub-pi.ts`）、pid `5459`（其临时 `CODEESTRA_HOME` 已被测试清理）。已 SIGTERM。
+- 上一轮（FOUNDATION-029）遗留的 transcript smoke Runtime：pid `41447`，`CODEESTRA_HOME=/private/tmp/ce-transcript-smoke.gIHmeF/home`，临时目录，SIGTERM 未退出后 SIGKILL。经归属核对确认它不连着任何用户数据。
+- 未触碰 stable Runtime（pid `65678`）以外的用户状态，且它已按 ADR-0009 流程被主动重启为新 pid `64518`。
+
+本记录提交随后以同样的 `--ff-only` 方式提升到 main，因此 `main` 与 `dev` 在本条写完后再次相同；以 `git rev-parse main dev` 核对，本条不写死自身 OID。
+
 ## NEXT — 最小可用纵向切片
 
 0. 落实 ADR-0009 的 dev 基线：项目快照/Workspace 从 dev OID 建立，先补临时仓库测试；在此之前产品内 `task.run` 仍使用 mainRef，不能用于声称符合新分支规则。
