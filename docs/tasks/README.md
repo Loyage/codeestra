@@ -875,6 +875,31 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 - 改动范围：`apps/ui/src/transcript.tsx`、`apps/ui/src/styles.css`、`apps/cli/src/main.ts`（transcript 渲染与 flag 解析）、`apps/runtime/test/cli-transcript.test.ts`。未改 `packages/contracts`、未改 Runtime 命令语义（没有新增尾部游标），因此未新增 ADR：`--reverse` 是只读视图的渲染顺序，不是新的业务能力。
 - 未 commit、未 push、未提升到 `main`；未重启任何运行中的 Runtime。
 - 未做（需显式跟踪）：1）倒序在超长会话下最多读 50 页，超过则顶部可能不是真正最新的一条（已明确提示，未静默）；若今后要一次拿到尾部，需要为 `session.transcript` 增加尾部游标（本轮用户已选不这样做）。2）UI 只有 50 页上限提示，没有“继续追赶直到最新”的一键操作（页脚按钮每次再读最多 50 页）。3）面板仍不提供“全部展开/全部折叠”批量控制；折叠状态与排列偏好中的折叠状态不跨刷新保留，排列偏好跨刷新保留。
+## FOUNDATION-036 — 任务列表与任务详情分页
+
+状态：前端已实现；类型检查、Vitest/Bun 测试与 Vite 构建通过。**浏览器视觉与键盘操作待用户人工确认**。
+
+用户要求把任务列表与任务详情拆成两个页面：列表页只显示列表，点击某个任务才进入详情。
+
+### 已实现
+
+- `apps/ui/src/App.tsx`：`TasksTab` 拆成两条渲染路径。`task === null` 时只渲染任务概况、搜索/状态筛选、任务列表与新建草稿；选中任务（`taskId` 命中列表项）时渲染独立详情页，并在顶部提供「← 返回任务列表」。
+- 列表行增加「查看详情 →」提示，点击行即进入详情页；从待处理页的「查看关联任务」也直接进入对应详情。
+- 详情页保留原有全部能力：下一步提示、命令操作、任务内问卷、执行/验证证据、只读 Agent 执行过程；未新增取消、暂停、自动集成或发布能力。
+- 页面标题在任务页随视图切换为「任务列表 / 任务详情」；切换项目仍清空选择回到列表。创建草稿成功后进入该草稿详情（沿用原「创建后选中」行为）。
+- `apps/ui/src/styles.css`：移除双栏 `.columns`/`.task-workspace` 布局（含两处响应式覆盖），任务列表改为整页宽度并把列表最大高度提高到 60vh；新增 `.back-link` 与 `.task-open` 样式。
+
+### 实际验证
+
+- `bun run --cwd apps/ui typecheck`：通过。
+- `bun run check`：Runtime/CLI 与 UI TypeScript、**212 项 Vitest、226 项 Bun tests**、Vite 构建全部通过（0 fail）；`bun run --cwd apps/ui build` 产出 `dist/assets/index-BNVX8BYE.js`、`index-CdaUrOdv.css`。
+- 本轮仅改前端呈现与页面切换，未改变任何 Runtime 命令、契约或数据语义，因此未新增命令面测试。
+- 未操作浏览器/桌面；构建与类型检查不能证明排版、焦点顺序或窄屏视觉正确。
+
+### 交付边界
+
+- 未修改 `PROJECT_SPEC.md`、`AGENTS.md` 或任何 ADR；未提交、未 push、未提升 `dev → main`，也未重启 Runtime。
+- 仍需人工确认：列表/详情切换、返回按钮、窄屏单列、搜索与筛选后进入详情、从待处理页跳转详情。
 
 ## NEXT — 最小可用纵向切片
 

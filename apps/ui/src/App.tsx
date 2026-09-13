@@ -444,7 +444,9 @@ function Console({ token, initialProjectId }: {
       <div className="workspace-shell">
       <div className="page-heading">
         <div><span className="eyebrow">{state.projects.find((project) => project.id === projectId)?.name ?? '开始使用'}</span>
-          <h1>{tabLabels[tab]}</h1></div>
+          <h1>{tab === 'tasks'
+            ? (selectedTask === null ? '任务列表' : '任务详情')
+            : tabLabels[tab]}</h1></div>
         <span className="muted busy" role="status">{state.busy === null ? '本地运行 · 关闭页面不影响任务' : `${state.busy}…`}</span>
       </div>
 
@@ -636,15 +638,15 @@ function TasksTab(props: CommonProps & {
     </section>;
   }
 
-  return (
-    <>
-    <div className="task-overview" aria-label="项目任务概况">
+  if (task === null) {
+    return (
+      <>
+      <div className="task-overview" aria-label="项目任务概况">
       <div><strong>{liveTasks.length}</strong><span>全部任务</span></div>
       <div><strong>{liveTasks.filter((item) => item.state === 'RUNNING').length}</strong><span>运行中</span></div>
       <div><strong>{props.attentions.filter((item) => item.status === 'OPEN').length}</strong><span>待处理请求</span></div>
       <div><strong>{liveTasks.filter((item) => item.state === 'EXECUTED').length}</strong><span>已提交成果 · 非已发布</span></div>
-    </div>
-    <div className="columns task-workspace">
+      </div>
       <section className="card task-list">
         <div className="section-heading"><h2>任务列表</h2><span className="muted">{visibleTasks.length} / {liveTasks.length}</span></div>
         <div className="task-filters">
@@ -679,6 +681,7 @@ function TasksTab(props: CommonProps & {
                 </span>
                 <span className="task-title">{candidate.currentRevision.specification}</span>
                 <span className="muted task-revision">规格 r{candidate.currentRevision.number}{candidate.archivedAt === null ? '' : ' · 已归档'}</span>
+                <span className="muted task-open">查看详情 →</span>
               </button>
             </li>
           ))}
@@ -688,12 +691,20 @@ function TasksTab(props: CommonProps & {
           </li> : null}
         </ul>
       </section>
+      </>
+    );
+  }
 
+  return (
       <section className="card grow task-detail">
-        {task === null ? <div className="empty-state"><span className="empty-symbol" aria-hidden="true">↗</span>
-          <h2>选择任务，继续推进</h2><p className="muted">任务的操作、问题与执行过程会集中显示在这里。</p></div> : (
-          <>
-            <div className="section-heading"><h2>任务 #{task.displayNumber}</h2>
+        <button
+          type="button"
+          className="back-link"
+          onClick={() => update({ taskId: null, status: null })}
+        >
+          ← 返回任务列表
+        </button>
+        <div className="section-heading"><h2>任务 #{task.displayNumber}</h2>
               <span className={`state state-${task.state.toLowerCase()}`}>{labelValue(task.state)}</span>
               {task.archivedAt === null ? null : <span className="muted">已归档</span>}</div>
             <p className="muted hint">规格 r{task.currentRevision.number} · 状态版本 v{task.version}</p>
@@ -1094,11 +1105,7 @@ function TasksTab(props: CommonProps & {
                 </section>
               </>
             )}
-          </>
-        )}
       </section>
-    </div>
-    </>
   );
 }
 
