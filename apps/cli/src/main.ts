@@ -3,11 +3,15 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOptions,
   maxQuestionnaireQuestions,
+  maxSlotReservationReadLimit,
   maxTranscriptEntryReadLimit,
   runtimePingResultSchema,
   runtimeResponseSchema, runtimeStopResultSchema, runtimeStreamFrameSchema,
-  type ProjectIdentity, type QuestionnaireAnswer, type RuntimeRequest, type RuntimeResponse,
+  type ProjectIdentity, type QuestionnaireAnswer, type RuntimeRequest,
+  type RuntimeResponse,
   type SessionTranscriptEntry, type SessionTranscriptView,
+  type SlotReservationAcquisitionView,
+  type SlotReservationReconcileReport, type SlotReservationReleaseView,
   type VerificationPolicyInspection } from '@codeestra/contracts';
 import {
   inspectRuntimeHome,
@@ -754,6 +758,43 @@ function printPromotion(promotion: PromotionReportView): void {
   if (promotion.detail !== null) console.log(`  ${promotion.detail}`);
 }
 
+/**
+ * Splits one command's tokens into positionals and flags. A flag that is not in either list is a
+ * usage error rather than a silently ignored argument, and a `--flag` that needs a value must have
+ * one (never swallowing the next flag).
+ */
+function splitFlagTokens(
+  tokens: readonly string[],
+  valuedFlags: readonly string[],
+  bareFlags: readonly string[],
+): { readonly positionals: readonly string[];
+  readonly flags: ReadonlyMap<string, string>; readonly bare: ReadonlySet<string> } {
+  const positionals: string[] = [];
+  const flags = new Map<string, string>();
+  const bare = new Set<string>();
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === undefined) continue;
+    if (!token.startsWith('--')) {
+      positionals.push(token);
+      continue;
+    }
+    if (bareFlags.includes(token)) {
+      bare.add(token);
+      continue;
+    }
+    if (valuedFlags.includes(token) && !flags.has(token)) {
+      const value = tokens[index + 1];
+      if (value === undefined || value.startsWith('--')) usage();
+      flags.set(token, value);
+      index += 1;
+      continue;
+    }
+    usage();
+  }
+  return { positionals, flags, bare };
+}
+
 function usage(): never {
   console.error(`Usage:
   bun run codeestra status
@@ -837,6 +878,18 @@ function usage(): never {
   bun run codeestra reclaim apply [--project <project-id>] [--task <task-id>] [--kind <kind>]…
     [--include-failure-scenes] [--json]
   bun run codeestra reclaim records [--project <project-id>] [--task <task-id>] [--limit <n>] [--json]
+  bun run codeestra scheduler capacity get <project-id> [--adapter <id>] [--json]
+  bun run codeestra scheduler capacity set <project-id> --limit <n> [--adapter <id>] [--json]
+  bun run codeestra scheduler capacity clear <project-id> --adapter <id> [--json]
+  bun run codeestra scheduler reservations list <project-id> [--task <task-id>]
+    [--include-released] [--limit <n>] [--json]
+  bun run codeestra scheduler reservations acquire <project-id> <task-id> <expected-task-version>
+    --revision <revision-id> [--adapter <id>] [--json]
+  bun run codeestra scheduler reservations release <project-id> <reservation-id> --reason <text>
+    [--json]
+  bun run codeestra scheduler reservations prepare-workspace <project-id> <reservation-id>
+    <expected-task-version> [--json]
+  bun run codeestra scheduler reservations reconcile <project-id> [--json]
   bun run codeestra promotion prepare <project-id> <batch-id> <expected-dev-commit> <expected-main-commit>
   bun run codeestra promotion approve <project-id> <promotion-id>
   bun run codeestra promotion promote <project-id> <promotion-id> [--json]
@@ -863,6 +916,29 @@ main inside the worktree that has it checked out and then runs there: bun instal
 bun run build:ui, bun run codeestra stop, bun run codeestra status. The restart is recorded only when
 every step exits 0 and the restarted Runtime answers READY. STRICT additionally needs promotion
 approve for that exact triple; a dev/main/evidence move makes it invalid. Only SUCCEEDED exits 0.
+
+scheduler capacity get reports the concurrency facts a scheduler uses: the project-wide limit (and
+where it came from), each Adapter's limit and occupancy, the stable reason code a new acquisition
+would get right now, and whether the Runtime is draining. capacity set/clear writes one limit;
+get reads the stored value back, an invalid limit (0, negative, above the ceiling) or an unknown
+Adapter is refused with its own stable code instead of being clamped. The default is 2 concurrent
+Tasks; an Adapter with no override follows the project limit.
+
+scheduler reservations acquire is the reservation primitive: it re-checks the Task version, the
+assessed revision, the dependency facts and both capacity dimensions inside one immediate
+transaction, then records a reservation together with the evidence of who created it (Runtime boot,
+pid, OS start token). Exit code 0 means a slot is held, 3 means a *capacity wait* (the reason code
+says which limit), and 1 means a refusal (unmet dependencies, a stale revision, an already-held
+slot, ...). Exit code 3 is never BLOCKED: BLOCKED means unmet dependencies only.
+
+scheduler reservations list shows the active reservations of a project with their holder evidence and
+their append-only history (--include-released keeps the audit rows). release is explicit and requires
+--reason; nothing releases a slot because a heartbeat expired, a client disappeared or a user waited.
+A release refused with SLOT_HOLDER_STILL_RUNNING means the recorded holder process is provably still
+alive and was not signalled. prepare-workspace prepares the Task worktree for one reservation and
+binds it, and reconcile re-checks every active reservation's recorded holder against the real process
+table: a holder proven gone is released and recorded, while a holder that is alive or unverifiable
+keeps the slot (RECOVERY_REQUIRED) — no process is signalled and no resource is deleted.
 
 stop asks the Runtime that owns this CODEESTRA_HOME to shut down and then checks the process it
 named until it is gone (default 10s, bounded by --wait). It reports STOPPED (exit 0), NOT_EXITED
@@ -2085,6 +2161,141 @@ try {
     } else if (subcommand === 'list') {
       if (trailing.length !== 0) usage();
       print(await call({ command: 'promotion.list', projectId, limit: limit ?? 20 }));
+    } else {
+      usage();
+    }
+  } else if (group === 'scheduler') {
+    // Capacity and slot reservations (FOUNDATION-054 / ADR-0032). This is the only scheduler command
+    // group in this lane: candidate ordering, ticks and `task schedule *` belong to the scheduling
+    // engine, and `project impact *` to the analyzer. A capacity wait is reported as a wait (exit
+    // code 3, never as BLOCKED) with its stable reason code; a refusal to grant a slot is a real
+    // error with a stable code and exit code 1.
+    const [subcommand, ...tokens] = [action, firstArgument, ...remainingArguments]
+      .filter((token): token is string => token !== undefined);
+    if (subcommand === 'capacity') {
+      const split = splitFlagTokens(tokens, ['--adapter', '--limit'], ['--json']);
+      const [capacityAction, projectId, ...extra] = split.positionals;
+      if (capacityAction === undefined || projectId === undefined || extra.length !== 0) usage();
+      const adapterId = split.flags.get('--adapter');
+      const limitText = split.flags.get('--limit');
+      if (capacityAction === 'get') {
+        if (limitText !== undefined) usage();
+        print(await call({
+          command: 'scheduler.capacity.get',
+          projectId,
+          ...(adapterId === undefined ? {} : { adapterId }),
+        }));
+      } else if (capacityAction === 'set') {
+        const limit = Number(limitText);
+        if (limitText === undefined || !Number.isSafeInteger(limit)) usage();
+        print(await call({
+          command: 'scheduler.capacity.set',
+          commandId: crypto.randomUUID(),
+          projectId,
+          limit,
+          ...(adapterId === undefined ? {} : { adapterId }),
+        }));
+      } else if (capacityAction === 'clear') {
+        if (limitText !== undefined || adapterId === undefined) usage();
+        print(await call({
+          command: 'scheduler.capacity.clear',
+          commandId: crypto.randomUUID(),
+          projectId,
+          adapterId,
+        }));
+      } else {
+        usage();
+      }
+    } else if (subcommand === 'reservations') {
+      const split = splitFlagTokens(tokens,
+        ['--task', '--revision', '--adapter', '--reason', '--limit'],
+        ['--include-released', '--json']);
+      const [reservationAction, projectId, ...extra] = split.positionals;
+      if (reservationAction === undefined || projectId === undefined) usage();
+      const limitText = split.flags.get('--limit');
+      const limit = limitText === undefined ? undefined : Number(limitText);
+      if (limitText !== undefined && (!Number.isSafeInteger(limit) || (limit as number) < 1
+        || (limit as number) > maxSlotReservationReadLimit)) usage();
+      if (reservationAction === 'list') {
+        if (extra.length !== 0) usage();
+        print(await call({
+          command: 'scheduler.reservations.list',
+          projectId,
+          includeReleased: split.bare.has('--include-released'),
+          ...(split.flags.get('--task') === undefined ? {} : { taskId: split.flags.get('--task') }),
+          ...(limit === undefined ? {} : { limit }),
+        }));
+      } else if (reservationAction === 'get') {
+        const [reservationId, ...rest] = extra;
+        if (reservationId === undefined || rest.length !== 0) usage();
+        print(await call({ command: 'scheduler.reservations.get', projectId, reservationId }));
+      } else if (reservationAction === 'acquire') {
+        const [taskId, versionText, ...rest] = extra;
+        const expectedTaskVersion = Number(versionText);
+        const revisionId = split.flags.get('--revision');
+        if (taskId === undefined || versionText === undefined || rest.length !== 0
+          || revisionId === undefined || !Number.isSafeInteger(expectedTaskVersion)
+          || expectedTaskVersion < 0) usage();
+        const result = await call({
+          command: 'scheduler.reservations.acquire',
+          commandId: crypto.randomUUID(),
+          projectId,
+          taskId,
+          expectedTaskVersion,
+          revisionId,
+          adapterId: split.flags.get('--adapter') ?? 'pi',
+        }) as SlotReservationAcquisitionView;
+        print(result);
+        // A granted slot is a fact; a *wait* is a fact too, but a script needs to tell them apart
+        // without parsing JSON, so a wait exits 3 and a refusal exits 1.
+        if (result.outcome !== 'RESERVED') {
+          const label = result.outcome === 'DRAINING' ? 'draining' : 'capacity wait';
+          console.error(`[scheduler] ${label}: ${result.wait?.code ?? 'unknown'}`
+            + ` (${result.wait?.detail ?? 'no detail'})`);
+          process.exit(3);
+        }
+      } else if (reservationAction === 'release') {
+        const [reservationId, ...rest] = extra;
+        const reason = split.flags.get('--reason');
+        if (reservationId === undefined || rest.length !== 0 || reason === undefined) usage();
+        const result = await call({
+          command: 'scheduler.reservations.release',
+          commandId: crypto.randomUUID(),
+          projectId,
+          reservationId,
+          reason,
+        }) as SlotReservationReleaseView;
+        print(result);
+        if (!result.released) {
+          // Nothing was released because it already was: an honest no-op, not a failure.
+          console.error('[scheduler] the reservation was already released');
+        }
+      } else if (reservationAction === 'prepare-workspace') {
+        const [reservationId, versionText, ...rest] = extra;
+        const expectedTaskVersion = Number(versionText);
+        if (reservationId === undefined || versionText === undefined || rest.length !== 0
+          || !Number.isSafeInteger(expectedTaskVersion) || expectedTaskVersion < 0) usage();
+        print(await call({
+          command: 'scheduler.reservations.workspace.prepare',
+          commandId: crypto.randomUUID(),
+          projectId,
+          reservationId,
+          expectedTaskVersion,
+        }));
+      } else if (reservationAction === 'reconcile') {
+        if (extra.length !== 0) usage();
+        const report = await call({
+          command: 'scheduler.reservations.reconcile',
+          commandId: crypto.randomUUID(),
+          projectId,
+        }) as SlotReservationReconcileReport;
+        print(report);
+        // A reconcile that decided to keep a slot occupied is a *successful* reconcile: the recorded
+        // fact is the outcome, and an unverifiable holder is never reported as a failure to release.
+        if (report.outcomes.some((outcome) => outcome.outcome === 'FAILED')) process.exit(1);
+      } else {
+        usage();
+      }
     } else {
       usage();
     }

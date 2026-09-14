@@ -1,7 +1,13 @@
-export { Phase1Database, StorageError, TaskDependencyError } from './database.js';
+export { Phase1Database, SlotReservationError, StorageError, TaskDependencyError,
+  maxSlotReservationReadLimit, slotDependencyFingerprint } from './database.js';
 export type {
   AdapterEventResult, AgentAnswerPlan, AgentConfigurationRecord, AgentSessionLifecycleState,
   AgentStartPlan, AgentThinkingLevel, AttentionSummary,
+  AdapterSlotLimitRecord, ExecutionSlotAcquisition, ExecutionSlotReservationRecord,
+  ProjectCapacityChange, ProjectCapacityClearance, ProjectCapacityRecord,
+  SlotHolderObservationKind, SlotOccupancy, SlotOccupant, SlotReservationAcquireInput,
+  SlotReservationDetail, SlotReservationEventKind, SlotReservationReconcileOutcome,
+  SlotReservationReleaseKind, SlotReservationReleaseResult, SlotReservationState,
   CommandResult, ConfirmedVerificationPolicy, ExecutionError, ExecutionLifecycleState,
   ExecutionReservation,
   ExecutionSummary, ObservableAgentSession, OperationProgressEntry, OperationProgressState,
@@ -41,7 +47,8 @@ export type {
 } from './database.js';
 export {
   agentAnswerMigration, agentConfigurationMigration, agentDisconnectMigration,
-  agentObservationMigration, agentStartMigration, integrationPipelineMigration,
+  agentObservationMigration, agentStartMigration, capacitySlotReservationMigration,
+  integrationPipelineMigration,
   operationProgressMigration,
   phase1Migration, phase1SchemaVersion, reclamationMigration, sessionHandoffMigration,
   sessionTerminalMigration,

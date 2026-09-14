@@ -22,8 +22,17 @@ import { RuntimeHttpApi } from './http-api.js';
 import {
   acquireRuntimeOwnership,
   probeRuntimeEndpoint,
+  readProcessStartToken,
   releaseRuntimeOwnership,
 } from './lifecycle.js';
+import {
+  RuntimeDrainState,
+  clearAdapterCapacity,
+  inspectProjectCapacity,
+  setProjectCapacity,
+} from './capacity-service.js';
+import { SlotReservationService } from './slot-reservation-service.js';
+import { prepareReservedWorkspace } from './workspace-service.js';
 import { LongOperationService } from './operation-service.js';
 import { runtimeHome, runtimeSocketPath } from './paths.js';
 import { SessionHandoffService } from './session-handoff-service.js';
@@ -223,6 +232,22 @@ const revisionDeliveries = new RevisionDeliveryService({
   coordinator,
   logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
 });
+/**
+ * Capacity and slot reservations (FOUNDATION-054 / ADR-0032). The drain fact is Runtime-owned: it
+ * becomes true when this Runtime starts shutting down and in-memory only, because a persisted
+ * "draining" flag would survive a crash and silently refuse every future reservation.
+ */
+const drain = new RuntimeDrainState();
+const slotReservations = new SlotReservationService({
+  storage,
+  bootId,
+  pid: process.pid,
+  // The identity of *this* Runtime process, read once. Every reservation records it, and a later
+  // generation compares the same token before it believes a recorded holder is gone.
+  startToken: await readProcessStartToken(process.pid),
+  draining: () => drain.state(),
+  logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
+});
 /** Built UI assets. The HTTP service is only started when a client asks for it. */
 const uiAssetsRoot = Bun.env.CODEESTRA_UI_DIST === undefined
   ? resolve(import.meta.dir, '../../../apps/ui/dist')
@@ -303,6 +328,23 @@ const longOperations = new LongOperationService({
   logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
 });
 reconcileInterruptedRunOperations({ storage });
+// Appended last on purpose: a slot reservation is judged from the *converged* picture of everything
+// else, because other reconciles above may have just projected a Session/Execution as
+// RECOVERY_REQUIRED while its slot is still held (that is why a held Execution keeps counting against
+// capacity). It changes no existing ordering — the revision delivery reconcile above stays where D1
+// deliberately put it, before the handoff and terminal convergence. And it is honest about limits:
+// only a holder proven gone is released; an unverifiable one stays occupied as RECOVERY_REQUIRED, and
+// no recorded process is signalled.
+const slotReconcileReport = await slotReservations.reconcile({
+  commandId: bootId,
+  actor: 'runtime-startup',
+});
+for (const outcome of slotReconcileReport.outcomes) {
+  if (outcome.outcome === 'SKIPPED_HELD_BY_RUNTIME') continue;
+  console.error(`[runtime] slot reservation ${outcome.reservationId} (${outcome.taskId})`
+    + ` reconcile: ${outcome.previousState} -> ${outcome.state} (${outcome.outcome},`
+    + ` ${outcome.observation ?? 'no observation'})`, outcome.detail);
+}
 let listener: ReturnType<typeof Bun.listen<SocketState>>;
 
 function success(requestId: string, result: unknown): RuntimeResponse {
@@ -878,6 +920,98 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         ...(request.taskId === undefined ? {} : { taskId: request.taskId }),
         limit: request.limit,
       }));
+    /**
+     * Capacity and slot reservations (FOUNDATION-054 / ADR-0032). The command face mirrors the
+     * primitive exactly: `capacity get` is the queryable capacity fact (limits, sources, occupancy,
+     * the stable wait reason and the Runtime's draining fact), `set`/`clear` change a limit and read
+     * it back, and the reservation commands acquire, release, prepare a workspace for and reconcile
+     * one reservation. An acquisition that finds no slot is a *wait*, returned as a value with its
+     * reason code — never as `BLOCKED`, which means unmet dependencies only.
+     */
+    case 'scheduler.capacity.get':
+      return success(request.requestId, inspectProjectCapacity({
+        storage,
+        projectId: request.projectId,
+        knownAdapterIds: registry.ids(),
+        draining: drain.state(),
+      }));
+    case 'scheduler.capacity.set': {
+      const mutation = setProjectCapacity({
+        storage,
+        projectId: request.projectId,
+        adapterId: request.adapterId,
+        limit: request.limit,
+        actor: 'local-user',
+        commandId: request.commandId,
+        knownAdapterIds: registry.ids(),
+        draining: drain.state(),
+      });
+      return success(request.requestId, { changed: mutation.changed, capacity: mutation.view });
+    }
+    case 'scheduler.capacity.clear': {
+      const mutation = clearAdapterCapacity({
+        storage,
+        projectId: request.projectId,
+        adapterId: request.adapterId,
+        actor: 'local-user',
+        commandId: request.commandId,
+        knownAdapterIds: registry.ids(),
+        draining: drain.state(),
+      });
+      return success(request.requestId, { changed: mutation.changed, capacity: mutation.view });
+    }
+    case 'scheduler.reservations.list':
+      return success(request.requestId, {
+        projectId: request.projectId,
+        reservations: slotReservations.list({
+          projectId: request.projectId,
+          ...(request.taskId === undefined ? {} : { taskId: request.taskId }),
+          includeReleased: request.includeReleased,
+          ...(request.limit === undefined ? {} : { limit: request.limit }),
+        }),
+      });
+    case 'scheduler.reservations.get':
+      return success(request.requestId,
+        slotReservations.get(request.projectId, request.reservationId));
+    case 'scheduler.reservations.acquire':
+      return success(request.requestId, await slotReservations.acquire({
+        projectId: request.projectId,
+        taskId: request.taskId,
+        expectedTaskVersion: request.expectedTaskVersion,
+        revisionId: request.revisionId,
+        adapterId: request.adapterId,
+        actor: 'local-user',
+        commandId: request.commandId,
+      }));
+    case 'scheduler.reservations.release':
+      return success(request.requestId, await slotReservations.release({
+        projectId: request.projectId,
+        reservationId: request.reservationId,
+        reason: request.reason,
+        actor: 'local-user',
+        commandId: request.commandId,
+      }));
+    case 'scheduler.reservations.workspace.prepare':
+      return success(request.requestId, {
+        workspace: await prepareReservedWorkspace({
+          storage,
+          runtimeHome: home,
+          bootId,
+          commandId: request.commandId,
+          projectId: request.projectId,
+          reservationId: request.reservationId,
+          expectedTaskVersion: request.expectedTaskVersion,
+          actor: 'local-user',
+        }),
+      });
+    case 'scheduler.reservations.reconcile': {
+      const report = await slotReservations.reconcile({
+        projectId: request.projectId,
+        commandId: request.commandId,
+        actor: 'local-user',
+      });
+      return success(request.requestId, report);
+    }
     case 'promotion.prepare':
       return success(request.requestId, await prepareStablePromotion({
         storage,
@@ -1291,6 +1425,9 @@ let shuttingDown = false;
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
+  // Draining starts before anything else is torn down: the socket may still deliver a request that
+  // was already in flight, and a reservation must not be granted by a Runtime that is stopping.
+  drain.begin('RUNTIME_SHUTDOWN');
   listener.stop(true);
   subscriptions.close();
   // Terminals this Runtime owns are ended first, while the database is still open: the recorded

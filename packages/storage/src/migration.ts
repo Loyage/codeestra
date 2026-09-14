@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 19;
+export const phase1SchemaVersion = 21;
 
 
 export const phase1Migration = `
@@ -1111,4 +1111,123 @@ CREATE TABLE agent_session_startup_reconciliations (
 ) STRICT;
 CREATE INDEX startup_reconciliations_by_session
   ON agent_session_startup_reconciliations(session_id,recorded_at,id);
+`;
+
+/**
+ * Capacity and resource reservations (Phase 2, FOUNDATION-054 / ADR-0032).
+ *
+ * `project_capacity_limits` and `project_adapter_slot_limits` are the capacity configuration: one
+ * project-wide concurrency limit (absent row = the documented default) plus optional per-Adapter
+ * overrides. An override row exists only when it was set explicitly, so "follow the project limit"
+ * stays a *derived* fact rather than a copied number: changing the global limit moves every
+ * Adapter that never had an override, and `capacity get` can report each limit's source.
+ *
+ * `execution_slot_reservations` is the reservation primitive (scheduler.md §3): one row that
+ * expresses, for one Task, the execution right, the Adapter slot, and — once the workspace exists —
+ * the workspace. It is not OS isolation: an external process is not stopped by this table, which is
+ * why every row records the *evidence* of who created it (Runtime boot identity + process id + OS
+ * start token) and why the startup reconcile checks the real writer before it decides anything.
+ *
+ * Two partial unique indexes make the invariants schema facts instead of conventions:
+ *
+ * - one active reservation per Task, so two ticks or two start requests can never hold two;
+ * - one active reservation per workspace, so one worktree is never claimed by two Tasks.
+ *
+ * `execution_slot_reservation_events` is the append-only history: the reservation row holds the
+ * current state that is compared and swapped, while every observation — including a reconcile that
+ * decided to keep the slot occupied — is appended here and never rewritten. `command_id` makes each
+ * decision idempotent per caller command, so re-running a reconcile inside one boot appends nothing.
+ *
+ * Schema version 21 is reserved for this migration. Version 20 belongs to the parallel impact
+ * snapshot lane (E1) and version 16 stays permanently unused (a database may already be stamped
+ * 17–20 and would skip a later `version < 16` step), so this migration only adds
+ * `if (version < 21)` after the existing ascending steps and never inserts an earlier number.
+ */
+export const capacitySlotReservationMigration = `
+CREATE TABLE project_capacity_limits (
+  project_id TEXT PRIMARY KEY REFERENCES projects(id),
+  global_limit INTEGER NOT NULL CHECK(global_limit > 0),
+  version INTEGER NOT NULL DEFAULT 0 CHECK(version >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= 0),
+  updated_by TEXT NOT NULL CHECK(length(trim(updated_by)) > 0)
+) STRICT;
+
+CREATE TABLE project_adapter_slot_limits (
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  adapter_id TEXT NOT NULL CHECK(length(trim(adapter_id)) > 0),
+  slot_limit INTEGER NOT NULL CHECK(slot_limit > 0),
+  version INTEGER NOT NULL DEFAULT 0 CHECK(version >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= 0),
+  updated_by TEXT NOT NULL CHECK(length(trim(updated_by)) > 0),
+  PRIMARY KEY(project_id,adapter_id)
+) STRICT;
+
+CREATE TABLE execution_slot_reservations (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  revision_id TEXT NOT NULL,
+  task_version INTEGER NOT NULL CHECK(task_version >= 0),
+  adapter_id TEXT NOT NULL CHECK(length(trim(adapter_id)) > 0),
+  workspace_id TEXT,
+  -- The impact snapshot the acquirer assessed against. No snapshot store exists in this baseline
+  -- (the analyzer lane owns it), so the column records the caller's assertion for audit; the
+  -- generation recheck becomes a comparison once that store lands.
+  impact_snapshot_id TEXT,
+  dependency_fingerprint TEXT NOT NULL CHECK(length(trim(dependency_fingerprint)) > 0),
+  assessed_dev_commit TEXT,
+  state TEXT NOT NULL CHECK(state IN ('RESERVED','RELEASED','RECOVERY_REQUIRED')),
+  version INTEGER NOT NULL DEFAULT 0 CHECK(version >= 0),
+  -- The command that created this reservation; a replayed command is answered from its receipt.
+  command_id TEXT NOT NULL CHECK(length(trim(command_id)) > 0),
+  holder_boot_id TEXT NOT NULL CHECK(length(trim(holder_boot_id)) > 0),
+  holder_pid INTEGER NOT NULL CHECK(holder_pid > 0),
+  holder_start_token TEXT,
+  holder_actor TEXT NOT NULL CHECK(length(trim(holder_actor)) > 0),
+  reserved_at INTEGER NOT NULL CHECK(reserved_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= reserved_at),
+  released_at INTEGER,
+  release_reason TEXT,
+  release_kind TEXT CHECK(release_kind IS NULL OR release_kind IN
+    ('EXPLICIT','RECONCILED_HOLDER_EXITED','RECONCILED_PROCESS_ID_REUSED')),
+  release_observation TEXT CHECK(release_observation IS NULL OR release_observation IN
+    ('HOLDER_STOPPED','HOLDER_PROCESS_ID_REUSED','HOLDER_STILL_RUNNING',
+      'HOLDER_OWNERSHIP_UNVERIFIABLE','PROCESS_IDENTITY_MISSING')),
+  detail TEXT,
+  UNIQUE(project_id,command_id),
+  UNIQUE(task_id,id),
+  FOREIGN KEY(task_id,revision_id) REFERENCES task_revisions(task_id,id),
+  FOREIGN KEY(task_id,workspace_id) REFERENCES workspaces(task_id,id),
+  CHECK((state='RESERVED' AND released_at IS NULL AND release_reason IS NULL AND release_kind IS NULL)
+    OR (state='RELEASED' AND released_at IS NOT NULL AND release_reason IS NOT NULL
+      AND release_kind IS NOT NULL)
+    OR (state='RECOVERY_REQUIRED' AND released_at IS NULL AND release_reason IS NULL
+      AND release_kind IS NULL))
+) STRICT;
+CREATE UNIQUE INDEX one_active_slot_reservation ON execution_slot_reservations(task_id)
+  WHERE state IN ('RESERVED','RECOVERY_REQUIRED');
+CREATE UNIQUE INDEX one_active_workspace_reservation
+  ON execution_slot_reservations(project_id,workspace_id)
+  WHERE state IN ('RESERVED','RECOVERY_REQUIRED') AND workspace_id IS NOT NULL;
+CREATE INDEX slot_reservations_by_project
+  ON execution_slot_reservations(project_id,reserved_at DESC,id);
+CREATE INDEX slot_reservations_by_task
+  ON execution_slot_reservations(task_id,reserved_at DESC,id);
+CREATE INDEX active_slot_reservations_by_adapter
+  ON execution_slot_reservations(project_id,adapter_id)
+  WHERE state IN ('RESERVED','RECOVERY_REQUIRED');
+
+CREATE TABLE execution_slot_reservation_events (
+  reservation_id TEXT NOT NULL REFERENCES execution_slot_reservations(id),
+  sequence INTEGER NOT NULL CHECK(sequence > 0),
+  kind TEXT NOT NULL CHECK(kind IN ('RESERVED','RELEASED','RECONCILE_OBSERVED')),
+  domain_event_id TEXT,
+  command_id TEXT NOT NULL CHECK(length(trim(command_id)) > 0),
+  actor TEXT NOT NULL CHECK(length(trim(actor)) > 0),
+  detail TEXT NOT NULL CHECK(length(trim(detail)) > 0),
+  evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
+  occurred_at INTEGER NOT NULL CHECK(occurred_at >= 0),
+  PRIMARY KEY(reservation_id,sequence),
+  UNIQUE(reservation_id,command_id)
+) STRICT, WITHOUT ROWID;
 `;
