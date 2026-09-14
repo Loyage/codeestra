@@ -59,6 +59,13 @@ interface OperationPayload {
   readonly steps: readonly OperationProgressPayload[];
 }
 
+interface EventEnvelopePayload {
+  readonly sequence: number;
+  readonly eventType: string;
+  readonly aggregateId: string;
+  readonly payload: Readonly<Record<string, unknown>>;
+}
+
 interface TaskStatusPayload {
   readonly task: { readonly id: string; readonly state: string; readonly version: number };
   readonly executions: readonly { readonly state: string;
@@ -204,6 +211,16 @@ async function executedTask(fixtureValue: {
   return taskId;
 }
 
+/** The append-only event log as the CLI reads it: the same cursor read `events list` performs. */
+async function events(environment: Record<string, string>, projectId: string)
+  : Promise<readonly EventEnvelopePayload[]> {
+  const read = await cli(['events', 'list', '--project', projectId, '--since', '0', '--limit', '500'],
+    environment);
+  expect(read.exitCode).toBe(0);
+  const parsed = JSON.parse(read.stdout) as { readonly events: readonly EventEnvelopePayload[] };
+  return parsed.events;
+}
+
 describe('codeestra task operation progress', () => {
   test('records task.run progress as durable steps and reports them through the CLI', async () => {
     const fixtureValue = await fixture([
@@ -255,6 +272,27 @@ describe('codeestra task operation progress', () => {
       expect(JSON.parse(cancelled.stdout)).toMatchObject({ stop: 'ALREADY_TERMINAL', state: 'SUCCEEDED' });
       expect((await status(environment, projectId, taskId)).task.state).toBe('EXECUTED');
       expect(await git(repository, ['status', '--porcelain'])).toBe('');
+      // Progress is a fact on the append-only event log, so it is readable by any client that reads
+      // events — no separate progress query, and no polling response to invent.
+      const log = await events(environment, projectId);
+      const progressed = log.filter((event) => event.eventType === 'OperationProgressed'
+        && event.aggregateId === run.operationId);
+      expect(progressed.map((event) => event.payload['stepKey'])).toEqual(stepKeys);
+      // `stepSequence` is monotonic per Operation, so a consumer can order or drop stale progress.
+      expect(progressed.map((event) => event.payload['progressSequence']))
+        .toEqual(progressed.map((_event, index) => index));
+      const settled = log.filter((event) => event.eventType === 'OperationSettled'
+        && event.aggregateId === run.operationId);
+      expect(settled).toHaveLength(1);
+      // The settle fact says the run ended, never that anything passed: the result capture and the
+      // verification are separate facts this event must not impersonate.
+      expect(settled[0]?.payload).toMatchObject({
+        kind: 'RUN_TASK', operationState: 'SUCCEEDED', verdict: false });
+      for (const event of [...progressed, ...settled]) {
+        expect(event.payload['verdict']).toBe(false);
+        expect(event.payload['state']).toBeUndefined();
+      }
+
       // Unknown flags are usage errors for scripts, never silently ignored.
       const bogus = await cli(['task', 'operation', 'list', projectId, taskId, '--bogus'], environment);
       expect(bogus.exitCode).toBe(2);
@@ -298,14 +336,35 @@ describe('codeestra task operation progress', () => {
         stop: 'CANCELLED', kind: 'RUN_TASK_VERIFICATION', state: 'FAILED' });
 
       const after = await status(environment, projectId, taskId);
+      // ADR-0027: the cancelled run is its own state, so a reader never has to read ERROR and guess.
       const verification = after.verifications
-        .find((row) => row.state === 'ERROR');
+        .find((row) => row.state === 'CANCELLED');
       expect(verification?.outcomeCode).toBe('CANCELLED_BY_USER');
       // A cancelled verification never moves `dev`, and the Task is not terminated by it.
       expect(await git(repository, ['rev-parse', 'refs/heads/dev'])).toBe(devBefore);
       expect(after.task.state).toBe('EXECUTED');
       expect((await operations(environment, projectId, taskId))
         .find((operation) => operation.operationId === handle.operationId)?.state).toBe('FAILED');
+
+      // The same state through the read-only verification projection, and the same progress through
+      // the event log: a cancelled run is cancelled everywhere, never folded back into a failure.
+      const listed = await cli(['task', 'verification', 'list', projectId, taskId], environment);
+      expect(listed.exitCode).toBe(0);
+      const listedRuns = JSON.parse(listed.stdout) as readonly { readonly state: string }[];
+      expect(listedRuns.map((row) => row.state)).toEqual(['CANCELLED']);
+      const log = await events(environment, projectId);
+      const verificationProgress = log.filter((event) =>
+        event.eventType === 'OperationProgressed' && event.aggregateId === handle.operationId);
+      expect(verificationProgress.map((event) => event.payload['stepKey'])).toEqual([
+        'VERIFICATION_QUEUED', 'VERIFICATION_COPY_CREATED', 'COMMAND:slow:STARTED',
+        'CANCEL_REQUESTED']);
+      const settled = log.filter((event) => event.eventType === 'OperationSettled'
+        && event.aggregateId === handle.operationId);
+      // The cancel path publishes the settle fact with the recorded terminal state of the run.
+      expect(settled).toHaveLength(1);
+      expect(settled[0]?.payload).toMatchObject({
+        kind: 'RUN_TASK_VERIFICATION', operationState: 'FAILED', verdict: false });
+      expect(JSON.stringify(settled[0]?.payload)).not.toContain('PASSED');
     } finally {
       await cli(['stop'], environment);
     }

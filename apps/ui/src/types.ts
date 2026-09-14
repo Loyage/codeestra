@@ -185,6 +185,50 @@ export interface OperationView {
   readonly updatedAt: number;
   readonly cancelRequestedAt: number | null;
   readonly steps: readonly OperationProgressView[];
+  /**
+   * UI-only, not part of the Runtime projection: the newest `OUTPUT` progress event this client
+   * received over the stream, so a running command shows that it is producing output without
+   * polling. `null`/absent means no output event has arrived (yet).
+   */
+  readonly liveOutput?: LiveOutputProgressView | null;
+}
+
+/** Liveness facts of the newest output-progress event; sizes and elapsed time, never output text. */
+export interface LiveOutputProgressView {
+  readonly progressSequence: number;
+  readonly commandId: string | null;
+  readonly stream: string | null;
+  readonly stdoutBytes: number | null;
+  readonly stderrBytes: number | null;
+  readonly elapsedMs: number | null;
+  readonly receivedAt: number;
+}
+
+/** Phases of a long-command progress event; `SETTLED` is the Operation's terminal transition. */
+export type OperationProgressPhaseView = 'STEP' | 'OUTPUT' | 'CANCEL' | 'SETTLED';
+
+/**
+ * A long-command progress event as this client reads it off the stream.
+ *
+ * The Runtime sends an event payload as `unknown`, so this client re-checks the shape instead of
+ * trusting it. `verdict` must be literally `false`: a progress event says what the Runtime reached,
+ * never that anything passed, so a client that received only progress still shows an accepted long
+ * command as accepted (the judgement of a verification lives in `VerificationCompleted`).
+ */
+export interface OperationProgressEventView {
+  readonly operationId: string;
+  readonly projectId: string;
+  readonly taskId: string | null;
+  readonly kind: string;
+  readonly progressSequence: number;
+  readonly dedupKey: string;
+  readonly phase: OperationProgressPhaseView;
+  readonly stepKey: string | null;
+  readonly step: string | null;
+  readonly stepState: string | null;
+  readonly stepSequence: number | null;
+  readonly operationState: string | null;
+  readonly detail: Readonly<Record<string, unknown>> | null;
 }
 
 /**
@@ -295,6 +339,49 @@ export interface QuestionnaireView {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function optionalString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+function optionalNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Reads one `OperationProgressed` / `OperationSettled` payload. Returns `null` for anything this
+ * client does not understand, including a payload that claims a verdict: unrecognized progress is
+ * ignored rather than guessed at, and a progress event can never mark a long command as passed.
+ */
+export function operationProgressFromEvent(payload: unknown): OperationProgressEventView | null {
+  if (!isRecord(payload)) return null;
+  const operationId = payload['operationId'];
+  const progressSequence = payload['progressSequence'];
+  const dedupKey = payload['dedupKey'];
+  const phase = payload['phase'];
+  if (typeof operationId !== 'string' || typeof dedupKey !== 'string') return null;
+  if (typeof progressSequence !== 'number' || !Number.isInteger(progressSequence)) return null;
+  if (phase !== 'STEP' && phase !== 'OUTPUT' && phase !== 'CANCEL' && phase !== 'SETTLED') {
+    return null;
+  }
+  if (payload['verdict'] !== false) return null;
+  const detail = payload['detail'];
+  return {
+    operationId,
+    projectId: typeof payload['projectId'] === 'string' ? payload['projectId'] : '',
+    taskId: optionalString(payload['taskId']),
+    kind: optionalString(payload['kind']) ?? '',
+    progressSequence,
+    dedupKey,
+    phase,
+    stepKey: optionalString(payload['stepKey']),
+    step: optionalString(payload['step']),
+    stepState: optionalString(payload['stepState']),
+    stepSequence: optionalNumber(payload['stepSequence']),
+    operationState: optionalString(payload['operationState']),
+    detail: isRecord(detail) ? detail : null,
+  };
 }
 
 export function questionnaireFromPrompt(prompt: unknown): QuestionnaireView | null {

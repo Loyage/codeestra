@@ -5,10 +5,13 @@ import { RuntimeClient, describeError } from './api.js';
 import { TranscriptPanel } from './transcript.js';
 import { NewTaskDock } from './new-task-dock.js';
 import {
+  operationProgressFromEvent,
   questionnaireFromPrompt,
   type AgentConfigurationResolutionView,
   type AttentionView,
   type EventEnvelopeView,
+  type LiveOutputProgressView,
+  type OperationProgressEventView,
   type OperationView,
   type QuestionnaireView,
   type RepositoryIdentityView,
@@ -95,6 +98,10 @@ const valueLabels: Record<string, string> = {
   IN_PROGRESS: '进行中',
   INFO: '信息',
   CANCELLED_BY_USER: '已取消（用户）',
+  STEP: '步骤',
+  OUTPUT: '输出',
+  SETTLED: '已结束',
+  STARTED: '已开始',
 };
 
 /**
@@ -107,6 +114,16 @@ function operationKindLabel(kind: string): string {
   return kind;
 }
 
+/**
+ * A long-command Operation's own state as this client shows it. A cancel is recorded the ADR-0019
+ * way (`FAILED` + `cancelled: true`) because a user stop is not a success — but showing it as
+ * “failed” would misreport why it ended, so the recorded flag wins over the state word.
+ */
+function operationStateLabel(operation: OperationView): string {
+  if (operation.result?.['cancelled'] === true) return '已取消（用户）';
+  return labelValue(operation.state);
+}
+
 /** The newest recorded step, as one line — never a progress estimate the Runtime cannot know. */
 function operationLatestStep(operation: OperationView): string {
   const step = operation.steps.at(-1);
@@ -114,6 +131,76 @@ function operationLatestStep(operation: OperationView): string {
   const detail = step.detail === null ? '' : ` ${JSON.stringify(step.detail)}`;
   const rendered = `${step.step} · ${labelValue(step.state)}${detail}`;
   return rendered.length > 160 ? `${rendered.slice(0, 160)}…` : rendered;
+}
+
+/** Sub-step liveness from the newest `OUTPUT` event: sizes and elapsed time only, never output. */
+function liveOutputLabel(live: LiveOutputProgressView): string {
+  const parts: string[] = [];
+  if (live.commandId !== null) parts.push(`命令 ${live.commandId}`);
+  if (live.stream !== null) parts.push(live.stream);
+  if (live.stdoutBytes !== null || live.stderrBytes !== null) {
+    parts.push(`stdout ${live.stdoutBytes ?? 0} B / stderr ${live.stderrBytes ?? 0} B`);
+  }
+  if (live.elapsedMs !== null) parts.push(`已运行 ${(live.elapsedMs / 1000).toFixed(1)}s`);
+  parts.push('仍在输出');
+  return parts.join(' · ');
+}
+
+/**
+ * Applies one progress event to the Operation it belongs to. Steps are merged by `stepKey` and only
+ * appended when they are newer than the last one already held, so a re-delivered or out-of-order
+ * event cannot duplicate or rewind the list. `phase: 'OUTPUT'` only refreshes the liveness line: it
+ * is not a step and it is definitely not a result.
+ */
+function applyOperationProgress(
+  operations: readonly OperationView[],
+  progress: OperationProgressEventView,
+  receivedAt: number,
+): readonly OperationView[] | null {
+  const known = operations.findIndex((operation) => operation.operationId === progress.operationId);
+  if (known === -1) return null;
+  const operation = operations[known] as OperationView;
+  if (progress.phase === 'OUTPUT') {
+    const previous = operation.liveOutput;
+    if (previous !== null && previous !== undefined
+      && previous.progressSequence >= progress.progressSequence) return operations;
+    const detail = progress.detail ?? {};
+    const live: LiveOutputProgressView = {
+      progressSequence: progress.progressSequence,
+      commandId: typeof detail['commandId'] === 'string' ? detail['commandId'] : null,
+      stream: typeof detail['stream'] === 'string' ? detail['stream'] : null,
+      stdoutBytes: typeof detail['stdoutBytes'] === 'number' ? detail['stdoutBytes'] : null,
+      stderrBytes: typeof detail['stderrBytes'] === 'number' ? detail['stderrBytes'] : null,
+      elapsedMs: typeof detail['elapsedMs'] === 'number' ? detail['elapsedMs'] : null,
+      receivedAt,
+    };
+    const next = [...operations];
+    next[known] = { ...operation, liveOutput: live };
+    return next;
+  }
+  const latestStep = operation.steps.at(-1);
+  if (latestStep !== undefined && progress.stepKey !== null
+    && latestStep.stepKey === progress.stepKey) return operations;
+  const next = [...operations];
+  if (progress.phase === 'SETTLED') {
+    next[known] = { ...operation,
+      state: progress.operationState ?? operation.state,
+      updatedAt: receivedAt,
+    };
+    return next;
+  }
+  next[known] = { ...operation,
+    updatedAt: receivedAt,
+    steps: [...operation.steps, {
+      sequence: progress.stepSequence ?? operation.steps.length,
+      stepKey: progress.stepKey ?? progress.dedupKey,
+      step: progress.step ?? progress.phase,
+      state: progress.stepState ?? 'INFO',
+      detail: progress.detail,
+      recordedAt: receivedAt,
+    }],
+  };
+  return next;
 }
 
 /**
@@ -334,14 +421,48 @@ function Console({ token, initialProjectId }: {
       || frame.event.eventType.startsWith('AgentSession')
       || frame.event.eventType.startsWith('Verification')
       || frame.event.eventType.startsWith('ResultCommit');
-    setState((previous) => ({
-      ...previous,
-      cursor: frame.cursor,
-      streamStatus: 'live',
-      frames: [...previous.frames, frame.event].slice(-300),
-      attentionToken: invalidatesAttention ? previous.attentionToken + 1 : previous.attentionToken,
-      detailToken: invalidatesDetail ? previous.detailToken + 1 : previous.detailToken,
-    }));
+    // Long-command progress arrives as an event, so the Task detail is updated from the stream
+    // instead of being polled. An Operation this client does not know yet (another client queued
+    // it) triggers exactly one detail reload, after which its events merge in place.
+    const progress = frame.event.eventType === 'OperationProgressed'
+      || frame.event.eventType === 'OperationSettled'
+      ? operationProgressFromEvent(frame.event.payload)
+      : null;
+    setState((previous) => {
+      let status = previous.status;
+      let needsReload = false;
+      // Progress for another Task in the same project must not reload the selected detail: a chatty
+      // command elsewhere would otherwise turn every step event into a read of this Task.
+      const belongsHere = progress !== null
+        && (previous.projectId === null || progress.projectId === previous.projectId)
+        && (progress.taskId === null || status === null || progress.taskId === status.task.id);
+      if (belongsHere && progress !== null) {
+        if (status === null) {
+          needsReload = true;
+        } else {
+          const merged = applyOperationProgress(status.operations, progress, frame.event.occurredAt);
+          if (merged === null) needsReload = true;
+          else status = { ...status, operations: merged };
+        }
+        // A settled Operation carries the terminal state but not the full projection (the recorded
+        // result, the verification row), so it is reconciled by one read of the same detail
+        // projection every client uses — not by a timer.
+        if (progress.phase === 'SETTLED') needsReload = true;
+      }
+      const reloadAttention = invalidatesAttention
+        ? previous.attentionToken + 1 : previous.attentionToken;
+      const reloadDetail = invalidatesDetail || needsReload
+        ? previous.detailToken + 1 : previous.detailToken;
+      return {
+        ...previous,
+        cursor: frame.cursor,
+        streamStatus: 'live',
+        frames: [...previous.frames, frame.event].slice(-300),
+        status,
+        attentionToken: reloadAttention,
+        detailToken: reloadDetail,
+      };
+    });
   }, []);
 
   // Refresh the Attention inbox whenever the stream says it changed.
@@ -380,20 +501,26 @@ function Console({ token, initialProjectId }: {
     }
   }, [state.projectId, state.detailToken, loadTaskList, update]);
 
-  // A long command records a step when the Runtime reaches it, which is not a domain event, so
-  // while one is still running the Task detail is polled instead of waiting for an event that will
-  // never arrive. It stops as soon as every Operation is terminal.
+  // Long-command progress is event-driven: `OperationProgressed`/`OperationSettled` frames update
+  // the Task detail directly, so while the stream is live nothing is polled.
+  //
+  // Tradeoff (ADR-0027 D06): a fallback poll is kept, but only while the stream is *not* live. The
+  // event stream is best-effort — a subscriber whose connection stopped or that was opened while the
+  // Runtime was restarting would otherwise freeze on stale progress until the user refreshed by
+  // hand. Five seconds instead of the previous 1.5 s keeps that safety net from re-creating the
+  // polling load the events exist to remove.
   const activeOperationCount = state.status?.operations.filter((operation) =>
     operation.state === 'PLANNED' || operation.state === 'IN_PROGRESS').length ?? 0;
+  const fallbackPolling = activeOperationCount > 0 && state.streamStatus !== 'live';
   useEffect(() => {
     const projectId = state.projectId;
     const taskId = state.taskId;
-    if (activeOperationCount === 0 || projectId === null || taskId === null) return undefined;
+    if (!fallbackPolling || projectId === null || taskId === null) return undefined;
     const timer = setInterval(() => {
       void loadTaskDetail(projectId, taskId).catch(() => { /* the next tick retries */ });
-    }, 1_500);
+    }, 5_000);
     return () => { clearInterval(timer); };
-  }, [activeOperationCount, state.projectId, state.taskId, loadTaskDetail]);
+  }, [fallbackPolling, state.projectId, state.taskId, loadTaskDetail]);
 
   // Event stream: reconnects from the last delivered cursor, so a dropped connection or a
   // restarted Runtime resumes without gaps or duplicates.
@@ -1047,8 +1174,10 @@ function TasksTab(props: CommonProps & {
               <section className="card nested">
                 <h3>长命令进度 <span className="muted hint">Runtime 记录的事实步骤</span></h3>
                 <p className="muted">
-                  进度只显示 Runtime 实际到达的步骤，不是预估百分比。取消是协作停止：确认进程
-                  静止后才落状态，无法确认时会保留占用并需要人工处理。
+                  进度只显示 Runtime 实际到达的步骤，不是预估百分比；运行中的命令会随
+                  `OperationProgressed` 事件实时刷新（事件流中断时退回每 5 秒轮询）。
+                  取消是协作停止：确认进程静止后才落状态，无法确认时会保留占用并需要人工处理。
+                  验证被取消时记的是 `CANCELLED`，不是命令失败。
                 </p>
                 <div className="table-scroll"><table>
                   <thead>
@@ -1062,11 +1191,16 @@ function TasksTab(props: CommonProps & {
                         <tr key={operation.operationId}>
                           <td>{operationKindLabel(operation.kind)}
                             <div className="muted mono">{operation.operationId.slice(0, 8)}</div></td>
-                          <td>{labelValue(operation.state)}
+                          <td>{operationStateLabel(operation)}
                             {operation.cancelRequestedAt === null ? null : (
                               <div className="muted">已请求取消</div>
                             )}</td>
                           <td>{operationLatestStep(operation)}
+                            {operation.liveOutput === null || operation.liveOutput === undefined
+                              ? null
+                              : <div className="muted">
+                                  {liveOutputLabel(operation.liveOutput)}
+                                </div>}
                             {operation.result === null ? null : (
                               <div className="muted mono">{JSON.stringify(operation.result)}</div>
                             )}</td>

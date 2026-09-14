@@ -25,6 +25,8 @@ export type {
   TaskDependencyBlockReason, TaskDependencyFact, TaskDependencyMutation, TaskDependencyRecord,
   TaskDependencyRemoval, TaskDependencyStateChange,
   TaskLifecycleState, TaskResumeRequest, TaskStopRequest, TaskSummary,
+  OperationProgressEventStep, OperationProgressEventSummary, OperationProgressPhase,
+  RecordOperationProgressEventResult,
   TrustedProject, VerificationCandidateExecution, VerificationCandidates, VerificationEvidence,
   VerificationRunPlan, VerificationRunSummary, VerificationState,
   WorkspaceLifecycleState, WorkspacePreparationPlan,
@@ -35,6 +37,7 @@ export {
   operationProgressMigration,
   phase1Migration, phase1SchemaVersion, reclamationMigration, sessionHandoffMigration,
   stablePromotionMigration, taskControlMigration, taskDependenciesMigration, taskVerificationMigration,
+  verificationProgressMigration,
 
   workspaceRetryMigration,
 } from './migration.js';

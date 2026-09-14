@@ -351,13 +351,15 @@ async function buildPlan(input: ReclaimPlanInput): Promise<BuiltPlan> {
       } else if (!registration.detached || registration.headCommit !== copy.testedCommit) {
         targets.push(refusal('HEAD_MISMATCH',
           'The copy is not the detached checkout of the commit its verification tested'));
-      } else if ((copy.state === 'FAILED' || copy.state === 'ERROR') && !includeFailureScenes) {
+      } else if ((copy.state === 'FAILED' || copy.state === 'ERROR'
+        || copy.state === 'CANCELLED') && !includeFailureScenes) {
         targets.push({ ...base, action: 'RETAIN', reasonCode: 'FAILURE_SCENE',
           detail: `Retained as a failure scene: verification ended ${copy.state}`
             + `${copy.outcomeCode === null ? '' : ` (${copy.outcomeCode})`}` });
       } else {
         targets.push({ ...base, action: 'RECLAIM',
           reasonCode: copy.state === 'FAILED' || copy.state === 'ERROR'
+            || copy.state === 'CANCELLED'
             ? 'FAILURE_SCENE_INCLUDED' : 'COMPLETED_VERIFICATION',
           detail: 'The recorded copy still exists and its ownership matches its verification record' });
       }

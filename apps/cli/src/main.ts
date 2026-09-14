@@ -523,7 +523,12 @@ function stepSummary(step: OperationProgressView): string {
 }
 
 function printOperation(operation: OperationView): void {
-  console.log(`=== ${operation.kind} ${operation.operationId.slice(0, 8)} ${operation.state}`
+  // A cancelled Operation is recorded the ADR-0019 way (`FAILED` + `cancelled: true`): printing only
+  // the state word would report a user stop as a failed command.
+  const state = operation.result?.['cancelled'] === true
+    ? `${operation.state} · 已取消（用户）`
+    : operation.state;
+  console.log(`=== ${operation.kind} ${operation.operationId.slice(0, 8)} ${state}`
     + `${operation.cancelRequestedAt === null ? '' : ' · 已请求取消'}`);
   console.log(`  created ${new Date(operation.createdAt).toLocaleString('zh-CN')}`
     + ` · updated ${new Date(operation.updatedAt).toLocaleString('zh-CN')}`);
@@ -788,6 +793,11 @@ it may read up to ${maxTranscriptReverseReads} pages to reach the newest entries
 task verify --background returns a durable Operation handle instead of waiting for the policy to
 finish; follow it with task operation list and stop it with task operation cancel. Exit code 0 there
 means "the Operation was recorded and started", not "the verification passed".
+
+Long-command progress is published as domain events: every step and every observed output chunk of
+a running verification, and the Operation's settle, arrive on the same stream as everything else
+(events tail; the Web UI shows them live). A progress event never carries a verdict — a passed
+verification is only ever reported by VerificationCompleted and by the run's own state.
 
 promotion prepare fixes the verified dev commit, the expected old main commit and the integration
 verification of that commit; it writes nothing to Git. In FULL mode promotion promote fast-forwards

@@ -1449,12 +1449,62 @@ CLI usage 两段并存、`docs/tasks` 按 042/043/044 升序）。
    （已在「实际验证」里人工复测）；旧 Runtime 与新 Runtime 真正同时启动、以及旧 Runtime 先于新 Runtime 持有的
    `session-handoff.sock` 冲突未验证。
 7. 未做并发压力测试（数十个 home 同时 stop/status）与长时间运行下的 boot 记录规模测试。
+## FOUNDATION-047 — verification run 的 `CANCELLED` 状态与长命令实时进度事件（ADR-0027，schema v17）
+
+状态：**已实现、已跑全量检查并提交 lane commit `8629e28`**。分支 `lane/c3-verification-progress`，基线固定为 `dev@abec3f3daf7af995e34f2053966f7a70eedd2352`（`phase1SchemaVersion = 15`），未 rebase；正在 `dev` 工作树进行独立集成验证，尚未生成 merge commit。未 push、未提升 `main`、未重启稳定 Runtime。决策见 ADR-0027；本格只做 ADR-0019 明确留下的两项（「未实现（不得声称）」第 1、2 条），不新增任何确认门禁。
+
+### 已实现
+
+- `packages/storage`：schema **v17** 占用（新迁移 `verificationProgressMigration`）：
+  - **重建** `verification_runs`（`verification_runs_v17` → 复制全部列/行 → `DROP` → `RENAME` → 重建 `verification_subject`/`verification_by_task` 索引），state CHECK 加入 `CANCELLED`，终态一致性 CHECK 扩充为「`PASSED`/`FAILED`/`ERROR`/`CANCELLED`/`STALE` 必须同时有 `ended_at` 与 `outcome_code`」。无表引用 `verification_runs`，因此无需关闭外键；迁移后 `PRAGMA foreign_key_check` 为空。
+  - 新表 `operation_progress_events(operation_id, progress_sequence, event_id, dedup_key, phase, detail_json, recorded_at)`，`PRIMARY KEY(operation_id,progress_sequence)`、`UNIQUE(operation_id,dedup_key)`、`event_id UNIQUE`、`phase ∈ STEP|OUTPUT|CANCEL|SETTLED`，append-only。
+  - `VerificationState` 增加 `'CANCELLED'`；`completeVerificationRun` 接受 `'CANCELLED'`，并在同一事务里写 `OperationSettled`；Operation 侧仍是 ADR-0019 词汇（`FAILED` + `cancelled: true`）。
+  - 新增 `recordOperationProgressEvent`（幂等、单调、终态拒绝、与步骤行同事务）、`listOperationProgressEvents`（按 `progressSequence` 的排他游标读取）、私有 `publishOperationSettled`；`completeOperation` 对**曾发布过进度**的 Operation 追加发布 `OperationSettled`（从未发布进度的子 Operation 不进入进度流）。未改动任何既有方法签名；`migrate()` 只追加 `if (version < 17)`。
+- `apps/runtime/src/verification-service.ts`：`VerificationExecutionCallbacks` 增加 `onOutput(chunk)`（`commandId`/`stream`/`chunkBytes`/`streamBytes`/`elapsedMs`，**只有大小与耗时**），`captureStream` 按块回调，`runCommand`/`executeVerificationPolicy`/`executeQueuedVerification` 透传；取消路径与副本保留语义不变。
+- `apps/runtime/src/operation-service.ts`：`recordRunStep` 改为「步骤行 + 进度事件」同事务发布；`#launchVerification` 增加输出块事件并按命令最小间隔合并（`outputProgressIntervalMs`，默认 100ms；每个命令的首块总是发布，块计数按命令而非按 stream）；`#cancelVerification` 落 `CANCELLED`/`CANCELLED_BY_USER`（未确认静止仍 `RECONCILE_REQUIRED` + run 保持 `RUNNING`）；`#cancelRun`/`reconcileRunOperations`/`#completeIfOpen` 的终态写入都会发布 settle 事实。
+- `apps/runtime/src/reclaim-service.ts`（**领地外的最小改动**）：`CANCELLED` 视同 `FAILED`/`ERROR` 的 failure scene，默认 `RETAIN/FAILURE_SCENE`，`--include-failure-scenes` 才 `FAILURE_SCENE_INCLUDED`；仍然 `QUEUED`/`RUNNING` 一律 `REFUSE/ACTIVE_VERIFICATION`。
+- `apps/ui/src/{App.tsx,types.ts}`：新增进度事件的结构化校验（**拒绝任何 `verdict !== false` 的 payload**）与增量合并（`STEP`/`CANCEL` 按 `stepKey` 合并去重、`OUTPUT` 只刷新「最新输出」一行、`SETTLED` 更新状态并触发一次同命令面详情读取）；轮询从「常态 1.5s」改为「仅当存在非终态 Operation **且事件流不是 `live`** 时 5s 兜底」；Operation 行按 `result.cancelled` 显示「已取消（用户）」，`tasks verification` 表的 `CANCELLED` 用「已取消」+ 新增 `.state-cancelled`（warn 色）区别于 `FAILED`/`ERROR` 的 danger 色。`apps/ui/src/styles.css` 只加这一条规则。
+- `apps/cli/src/main.ts`：`task operation list|get` 人类视图对取消的 Operation 打印「已取消（用户）」；`usage()` 增加一段说明「进度是事件，从 `events tail` 读，进度事件不携带判定」。
+- `packages/contracts`：**未改动**。命令面没有新 flag/新命令，事件 payload 沿用既有 `payload: unknown` 约定（`OperationProgressed`/`OperationSettled` 的类型在 Runtime 写出侧定义、在读侧结构化校验），因此没有需要追加的请求/响应 schema。
+- `apps/runtime/src/main.ts`：**未改动**（进度事件由 storage/operation-service 写出，`task.status` 与 dispatch 分支无需变化）。**未改** `lifecycle.ts`、`session-handoff-service.ts`、`terminal-service.ts`、`agent-runtime-service.ts`、`agent-observation-service.ts`。
+- `package.json`：只把两个新测试文件加入既有 `test:unit` 忽略清单与 `test:e2e` 清单（沿用 FOUNDATION-039 的分层做法）。
+
+### 命令面已实测（CLI + 真实 Runtime + 独立 `CODEESTRA_HOME`）
+
+- `bun test apps/runtime/test/cli-task-run-progress.test.ts`（真实 CLI 子进程 + 真实 Runtime + 临时仓库 + 协议 stub provider，2 项通过）：`task.run` 的进度事件经 `events list` 可读、`progressSequence` 单调、无 `state` 字段、settle 为 `verdict: false`；`task verify --background` → `task operation cancel` 后 `task status.verifications` 与 `task verification list` 都读到 `CANCELLED`（不再需要从 `ERROR` 猜），`events list` 读到 `VERIFICATION_QUEUED`/`VERIFICATION_COPY_CREATED`/`COMMAND:slow:STARTED`/`CANCEL_REQUESTED` 与一次 `OperationSettled`，`dev` 未移动、Task 仍 `EXECUTED`。
+- 手工隔离复验（`CODEESTRA_HOME=/tmp/ce-c3`，临时仓库 + `dev` 分支 + 真实 Runtime 进程；用失败的 `pi` stub 让 `task.run` 在版本探测处结束，避免真实模型）：
+  - 新库 `PRAGMA user_version = 17`、`verification_runs` 的 CHECK 含 `CANCELLED`、`operation_progress_events` 存在、`foreign_key_check` 为空；
+  - `events tail --project <id>`（真实 socket 订阅）收到：`seq=4 OperationProgressed progressSequence=0 stepKey=RUN_REQUESTED verdict=false` → `seq=5 … stepKey=RUN_FAILED verdict=false` → `seq=6 OperationSettled operationState=FAILED verdict=false`；
+  - `task operation list` 人类视图按序打印两条步骤，`task status` 的 `operations` 投影给出同一份数据。
+- 以上均为 CLI/命令面与 socket/HTTP-SSE 断言；未使用浏览器/桌面/键鼠自动化。UI 的视觉、键盘焦点、窄屏与取消按钮观感**仍需用户人工确认**（`bun run check` 通过不等于 UI 验收）。
+
+### 实际跑过的检查与结果
+
+- `bun run check:fast` 退出码 0（根 typecheck + UI typecheck + 231 项 Vitest + 229 项 unit Bun tests 0 fail）。
+- `bun run check` 退出码 0：根与 UI `tsc --noEmit`、231 项 Vitest、**389 项 Bun tests 0 fail**（46 个文件）、UI Vite 构建成功。本格未改 `packages/domain`/`packages/contracts`，Vitest 数量与本格无关。
+- 新增/更新的测试：
+  - `apps/runtime/test/verification-cancel.test.ts`（4 项通过）：v16→v17 迁移保留行/索引/`foreign_key_check`；`CANCELLED` 缺少 `ended_at`/`outcome_code` 被拒、`QUEUED` 带终态事实被拒；已在 17 时不重跑；确认静止 → `CANCELLED` + 副本保留 + `listVerificationRuns` 表达 + `reclaim` 默认保留/显式才回收；未确认静止 → run 仍 `RUNNING` + Operation `RECONCILE_REQUIRED` + `reclaim` `REFUSE/ACTIVE_VERIFICATION`。
+  - `apps/runtime/test/operation-progress-events.test.ts`（8 项通过）：顺序/幂等/排他游标/终态后不再发布（步骤仍记录）/订阅可达/HTTP-SSE 可达；验证输出块事件（间隔 0）字节递增且不含输出文本；默认间隔合并为 1 条而终止步骤带真实总字节数；后台受理后进度里没有 `PASSED`；`task.run` 五步 + 一次 settle 且无 `PASSED`；未发布进度的 Operation 不进入进度流。
+  - 更新既有测试：`operation-service.test.ts`（取消确认 → `CANCELLED`）、`cli-task-run-progress.test.ts`（按 `CANCELLED` 读取 + `events list` 断言）、`packages/storage/test/task-dependencies.test.ts`（把 `phase1SchemaVersion` 的字面量 15 改为 `≥ 15`，与 A1 的既有写法一致）。
+- **未执行**：真实 provider 下的后台验证/取消复验（本轮只用协议 stub 与注入的 fake）；浏览器/桌面/键鼠自动化（仓库禁止）；UI 目视确认。
+
+### 交付边界与剩余问题
+
+- **占用了 schema v17**。合并时必须保留 C2 的 `if (version < 16)` 与本次的 `if (version < 17)` 两条升序分支，`phase1SchemaVersion` 取最大值 **17**；`migration.ts` 的既有段落未被移动。
+- **领地外的最小改动（需在交付说明中保留）**：`apps/runtime/src/reclaim-service.ts`（加 `CANCELLED` 到 failure scene，1 处分支）、`packages/storage/src/index.ts`（导出新迁移）、`packages/storage/src/database.ts` 的既有 `completeOperation`（对发布过进度的 Operation 追加 settle 事件，见 ADR-0027 D04）、`apps/ui/src/styles.css`（1 条 `.state-cancelled`）、`package.json`（测试分层清单）、以及 3 个既有测试文件的断言更新（其中 `task-dependencies.test.ts` 的字面量版本断言在 C2 的 v16 合入后必然失败）。
+- **剩余（不得声称已完成）**：
+  - `task.run` 的进度是步骤级 + settle，不含 provider 事件级进度；provider token/PTY 字节按 event-model §4 与 ADR-0013 永不进入 domain event（细粒度通道仍是只读的 `session.transcript`）。要加 provider 事件级进度需要 `agent-runtime-service.ts`/`agent-observation-service.ts`（C4 槽位），本格未改。
+  - `integration_verification_runs` 没有 `CANCELLED` 状态（其 Operation kind 不可经 `task.operation.cancel` 触达）。
+  - 重启时仍 `RUNNING` 的 run（含取消未确认）记 `ERROR/RUNTIME_RESTARTED`，不是 `CANCELLED`——重启无法证明静止。
+  - 默认 100ms 合并会丢弃部分输出块观测（活跃度事实，不是完整输出日志）。
+  - **`docs/architecture/state-machines.md` §1 的 Task Verification 状态列表与 `docs/architecture/event-model.md` §2 的事件目录尚未同步 `CANCELLED` 与 `OperationProgressed`/`OperationSettled`**；按 ADR-0019 的先例本格不动架构文档，已在 ADR-0027 显式记录该不一致，需一次 doc-sync。
+  - 事件量未做并发/压力测量；未测多客户端同时订阅同一长命令的负载。
 
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、UI 投影。
 1. 真实验证 ADR-0016：在一次性临时仓库中用真实 Pi 跑「启动 → 暂停 → 恢复 → 终止」，核对 provider 进程确实退出、`--session` 确实续接同一 conversation、超时进入 `RECOVERY_REQUIRED`；脚本 Adapter 不能替代该验收。
-2. ~~长命令后台化与进度事件~~：已由 FOUNDATION-039 / ADR-0019 完成持久 Operation、步骤级进度、`--background` 与 `task.operation.cancel`（CLI + 同一命令面 + UI）。剩余：token 级实时进度事件、verification run 的独立 `CANCELLED` 状态、取消后验证副本的回收。
+2. ~~长命令后台化与进度事件~~：已由 FOUNDATION-039 / ADR-0019 完成持久 Operation、步骤级进度、`--background` 与 `task.operation.cancel`（CLI + 同一命令面 + UI）。~~剩余：token 级实时进度事件、verification run 的独立 `CANCELLED` 状态、取消后验证副本的回收~~：已由 FOUNDATION-047 / ADR-0027 完成（`CANCELLED` 一等终态 + 重建表、被取消副本仍走 ADR-0021 `reclaim`、进度改为 `OperationProgressed`/`OperationSettled` 领域事件并经 `events list/tail` 与 UI 实时可见）。剩余：`task.run` 的 provider 事件级进度（PTY/token 字节不进事件，见 ADR-0027 D05）、架构文档的 doc-sync。
 3. ~~ADR-0010 Phase 3 技术 spike~~：已由 FOUNDATION-040 完成（真实 Pi session-file 双向 RPC↔TUI 恢复、PTY 生命周期、safe-point fence 与权限模式 side channel，见 `docs/spikes/pi-session-handoff.md`）。~~handoff Operation / Session incarnation~~：Runtime 侧契约与状态已由 ADR-0023 / FOUNDATION-043 完成（STRICT 权限转既有 Attention、incarnation 绑定 + 原子拒绝过期决议、单 writer lease 的 `ATTACHMENT_BUSY`、安全点与 predecessor 归属核验、重启按事实 reconcile），并已合入 `dev`；`session handoff status/request/cancel/writer/admit` 的 `--json` 退出码稳定。剩余：**PTY transport 与 successor 进程启动、detach/reattach 编排、跨交接模式保持、并行工具批次安全点、CLI attach 与 UI 终端**（`session handoff admit` 目前只判定不启动，能力投影写 `terminalTransport: UNIMPLEMENTED`）。
 4. revision 投递确认，以及 Runtime 重启后对 stale ACTIVE Session 的启动 reconcile。
 5. ~~验证副本与失败现场的回收~~：已由 ADR-0021/FOUNDATION-041 完成（`reclaim plan/apply/records`、归属校验、append-only 账本、启动 reconcile、默认保留失败现场、不新增确认）；同轮决定 Attention 工具参数继续原样入库。剩余：未注册目录的人工处理与跨项目批量回收。

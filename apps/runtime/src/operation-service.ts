@@ -14,6 +14,7 @@ import {
   queueTaskVerification,
   type QueuedTaskVerification,
   type VerificationExecutionCallbacks,
+  type VerificationOutputChunk,
   type VerificationReport,
 } from './verification-service.js';
 
@@ -64,15 +65,23 @@ export interface RunOperationStepInput {
   readonly recordedAt: number;
 }
 
-/** Appends one run step. Idempotent by `stepKey`, so a replayed command re-records nothing. */
+/**
+ * Appends one run step and publishes the matching progress event in the same transaction.
+ *
+ * The step stays idempotent by `stepKey` and the event stays idempotent by its dedup key, so
+ * replaying a command re-records nothing and re-publishes nothing. A step that arrives after the
+ * Operation already settled is still recorded as a fact but publishes no event: progress must never
+ * make a finished Operation look like it is still moving, and it must never look like a verdict.
+ */
 export function recordRunStep(input: RunOperationStepInput): void {
-  input.storage.recordOperationProgress({
+  input.storage.recordOperationProgressEvent({
     operationId: input.operationId,
-    stepKey: input.stepKey,
-    step: input.step,
-    state: input.state,
-    ...(input.detail === undefined ? {} : { detail: input.detail }),
+    eventId: crypto.randomUUID(),
+    phase: input.stepKey.startsWith('CANCEL') ? 'CANCEL' : 'STEP',
+    dedupKey: `STEP:${input.stepKey}`,
+    detail: input.detail ?? {},
     recordedAt: input.recordedAt,
+    step: { stepKey: input.stepKey, step: input.step, state: input.state },
   });
 }
 
@@ -213,7 +222,8 @@ export function reconcileRunOperations(input: {
       input.storage.completeOperation({
         operationId: operation.operationId,
         state: 'RECONCILE_REQUIRED',
-        result: { code: 'RUNTIME_RESTARTED', message: 'The Operation has no Task to reconcile against' },
+        result: { code: 'RUNTIME_RESTARTED', message: 'The Operation has no Task to reconcile against',
+          reconciled: true },
         completedAt: input.recordedAt,
       });
       results.push({ operationId: operation.operationId, outcome: 'RECOVERY_REQUIRED' });
@@ -231,6 +241,7 @@ export function reconcileRunOperations(input: {
           code: 'RUNTIME_RESTARTED',
           message: 'The Runtime restarted before this run recorded an Execution;'
             + ' any Git side effect is owned by the workspace reconcile, not replayed from here',
+          reconciled: true,
         },
         completedAt: input.recordedAt,
       });
@@ -251,6 +262,7 @@ export function reconcileRunOperations(input: {
           message: `The Runtime restarted while Execution ${executionId} was`
             + ` ${execution?.state ?? 'unreadable'}; provider process liveness is unknown and`
             + ' ownership is retained',
+          reconciled: true,
         },
         completedAt: input.recordedAt,
       });
@@ -265,6 +277,7 @@ export function reconcileRunOperations(input: {
         code: succeeded ? 'RECOVERED_SUCCEEDED' : 'RECOVERED_FAILED',
         message: `The Runtime restarted after Execution ${executionId} reached ${execution.state}`,
         executionState: execution.state,
+        reconciled: true,
       },
       completedAt: input.recordedAt,
     });
@@ -319,6 +332,11 @@ export interface LongOperationServiceOptions {
   readonly now?: () => number;
   readonly randomUUID?: () => string;
   readonly shutdownGraceMs?: number;
+  /**
+   * Minimum spacing between two output-progress events of the same command. 0 publishes every
+   * chunk; the default bounds a chatty command's event volume without hiding that it is alive.
+   */
+  readonly outputProgressIntervalMs?: number;
   readonly logger?: (message: string, detail?: Readonly<Record<string, unknown>>) => void;
 }
 
@@ -337,6 +355,7 @@ export class LongOperationService {
   readonly #now: () => number;
   readonly #randomUUID: () => string;
   readonly #shutdownGraceMs: number;
+  readonly #outputProgressIntervalMs: number;
   readonly #logger: (message: string, detail?: Readonly<Record<string, unknown>>) => void;
   readonly #jobs = new Map<string, VerificationJob>();
   #closing = false;
@@ -350,6 +369,7 @@ export class LongOperationService {
     this.#now = options.now ?? Date.now;
     this.#randomUUID = options.randomUUID ?? (() => crypto.randomUUID());
     this.#shutdownGraceMs = options.shutdownGraceMs ?? 5_000;
+    this.#outputProgressIntervalMs = options.outputProgressIntervalMs ?? 100;
     this.#logger = options.logger ?? (() => {});
   }
 
@@ -412,6 +432,59 @@ export class LongOperationService {
     return { background: false, report: job.report ?? this.#report(queued) };
   }
 
+  /**
+   * Publishes one coalesced output-progress event for a running command. Every call still advances
+   * the chunk index, so a skipped chunk can never reuse a `dedup_key` of a published one. The event
+   * carries counters and elapsed time only, so it is liveness evidence, not command output.
+   */
+  #publishOutput(
+    operationId: string,
+    chunk: VerificationOutputChunk,
+    state: Map<string, {
+      chunkIndex: number; lastPublishedAt: number;
+      stdoutBytes: number; stderrBytes: number;
+    }>,
+  ): void {
+    const current = state.get(chunk.commandId)
+      ?? { chunkIndex: 0, lastPublishedAt: 0, stdoutBytes: 0, stderrBytes: 0 };
+    const chunkIndex = current.chunkIndex;
+    current.chunkIndex += 1;
+    if (chunk.stream === 'STDOUT') current.stdoutBytes = chunk.streamBytes;
+    else current.stderrBytes = chunk.streamBytes;
+    state.set(chunk.commandId, current);
+    const nowMs = this.#now();
+    if (chunkIndex !== 0 && nowMs - current.lastPublishedAt < this.#outputProgressIntervalMs) {
+      return;
+    }
+    current.lastPublishedAt = nowMs;
+    try {
+      this.#storage.recordOperationProgressEvent({
+        operationId,
+        eventId: this.#randomUUID(),
+        phase: 'OUTPUT',
+        dedupKey: `OUTPUT:${chunk.commandId}:${chunkIndex}`,
+        detail: {
+          commandId: chunk.commandId,
+          stream: chunk.stream,
+          chunkIndex,
+          chunkBytes: chunk.chunkBytes,
+          streamBytes: chunk.streamBytes,
+          stdoutBytes: current.stdoutBytes,
+          stderrBytes: current.stderrBytes,
+          elapsedMs: chunk.elapsedMs,
+        },
+        recordedAt: nowMs,
+      });
+    } catch (error) {
+      // A reader that is already gone must not fail a command that is running correctly.
+      this.#logger('output progress could not be published', {
+        operationId,
+        commandId: chunk.commandId,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   #handle(
     queued: QueuedTaskVerification,
     state: string,
@@ -462,6 +535,17 @@ export class LongOperationService {
   }
 
   #launchVerification(queued: QueuedTaskVerification): VerificationJob {
+    // Output progress is coalesced per command: one event per chunk would let a chatty 60s command
+    // publish thousands of facts for a single reader to skip past. A command's first chunk is always
+    // published (so a command that produced anything is visible immediately), the terminal step
+    // carries the final byte counts, and the floor only bounds the rate in between. The counter is
+    // per command rather than per stream, so the first stderr chunk may be coalesced away — the
+    // liveness of the command is what a reader needs, not a per-stream guarantee. No output bytes
+    // ever reach an event: only sizes and elapsed time do.
+    const outputState = new Map<string, {
+      chunkIndex: number; lastPublishedAt: number;
+      stdoutBytes: number; stderrBytes: number;
+    }>();
     const callbacks: VerificationExecutionCallbacks = {
       // A closing Runtime is treated as a cancel: the job stops at the next step boundary without
       // writing a verdict, and startup reconcile records RUNTIME_RESTARTED from the facts.
@@ -479,6 +563,8 @@ export class LongOperationService {
         });
       },
       onCommandStart: (command) => {
+        outputState.set(command.id, { chunkIndex: 0, lastPublishedAt: 0,
+          stdoutBytes: 0, stderrBytes: 0 });
         recordRunStep({
           storage: this.#storage,
           operationId: queued.operationId,
@@ -495,6 +581,7 @@ export class LongOperationService {
         });
       },
       onCommandEnd: (outcome) => {
+        outputState.delete(outcome.id);
         recordRunStep({
           storage: this.#storage,
           operationId: queued.operationId,
@@ -512,6 +599,7 @@ export class LongOperationService {
           recordedAt: this.#now(),
         });
       },
+      onOutput: (chunk) => { this.#publishOutput(queued.operationId, chunk, outputState); },
     };
     const job: VerificationJob = {
       operationId: queued.operationId,
@@ -581,10 +669,12 @@ export class LongOperationService {
    * Cancels one long-command Operation.
    *
    * A verification is abandoned: its command group is stopped and only after that stop is confirmed
-   * is the run recorded as `ERROR/CANCELLED_BY_USER`. An Agent run is stopped through the Task's own
-   * cooperative pause path — the same path `task pause` uses — because cancelling an Operation must
-   * not destroy the Task; `task cancel` remains the terminal command. A stop that cannot be
-   * confirmed makes the Operation `RECONCILE_REQUIRED` and keeps every resource.
+   * is the run recorded as `CANCELLED/CANCELLED_BY_USER` — a terminal state of its own, so a run the
+   * user stopped reads as cancelled rather than as a failed command. An Agent run is stopped through
+   * the Task's own cooperative pause path — the same path `task pause` uses — because cancelling an
+   * Operation must not destroy the Task; `task cancel` remains the terminal command. A stop that
+   * cannot be confirmed makes the Operation `RECONCILE_REQUIRED`, leaves the verification run
+   * `RUNNING` and keeps every resource: the Runtime never claims a stop it did not prove.
    */
   async cancel(input: {
     readonly projectId: string;
@@ -675,7 +765,7 @@ export class LongOperationService {
     }
     const completed = this.#storage.completeVerificationRun({
       verificationId,
-      state: 'ERROR',
+      state: 'CANCELLED',
       outcomeCode: 'CANCELLED_BY_USER',
       evidence: {
         testedCommit: plan.testedCommit,
@@ -692,7 +782,7 @@ export class LongOperationService {
       completedAt: this.#now(),
     });
     const settled = this.#storage.getOperation(operation.projectId, operation.operationId);
-    if (completed.state !== 'ERROR' || completed.outcomeCode !== 'CANCELLED_BY_USER') {
+    if (completed.state !== 'CANCELLED' || completed.outcomeCode !== 'CANCELLED_BY_USER') {
       // The run finished on its own before the stop; its own verdict stands.
       return {
         operationId: operation.operationId,
@@ -774,6 +864,7 @@ export class LongOperationService {
           ? 'The Operation was cancelled; the Task had no running provider process'
           : 'The Operation was cancelled; the Task was paused cooperatively and can resume',
         cancelledBy: actor,
+        cancelled: true,
         taskState: stopped.state,
       },
       completedAt: this.#now(),

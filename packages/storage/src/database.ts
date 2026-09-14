@@ -1,4 +1,5 @@
 import { Database } from 'bun:sqlite';
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import {
   DependencyGraphError,
@@ -23,6 +24,7 @@ import {
   taskControlMigration,
   taskDependenciesMigration,
   taskVerificationMigration,
+  verificationProgressMigration,
   workspaceRetryMigration,
 } from './migration.js';
 
@@ -48,6 +50,24 @@ function canonicalJson(value: unknown): string {
   }
   return JSON.stringify(value) ?? 'null';
 }
+
+/**
+ * The Task a long-command Operation belongs to. A run owns its Task directly; a verification
+ * Operation names it in the request payload it was created with. Kept in one place so the event
+ * payload and the Operation projection can never disagree about which Task progress belongs to.
+ */
+function operationTaskId(
+  kind: string,
+  aggregateId: string,
+  requestJson: string,
+): string | null {
+  try {
+    const request = JSON.parse(requestJson) as Record<string, unknown>;
+    if (typeof request['taskId'] === 'string') return request['taskId'] as string;
+  } catch { /* A malformed request payload must not break a progress write. */ }
+  return kind === 'RUN_TASK' ? aggregateId : null;
+}
+
 export interface TrustedProject {
   readonly id: string;
   readonly name: string;
@@ -448,7 +468,14 @@ export interface ConfirmedVerificationPolicy extends VerificationPolicyConfirmat
   readonly confirmedAt: number;
 }
 
-export type VerificationState = 'QUEUED' | 'RUNNING' | 'PASSED' | 'FAILED' | 'ERROR' | 'STALE';
+/**
+ * Task verification states. `CANCELLED` is a terminal state of its own (ADR-0027): a run the user
+ * stopped is not a failed command, so it must not be recorded as `ERROR` with a borrowed outcome
+ * code. `CANCELLED` is only ever written after the owned command group was confirmed stopped; an
+ * unconfirmed stop leaves the run `RUNNING` (see `LongOperationService.cancel`).
+ */
+export type VerificationState = 'QUEUED' | 'RUNNING' | 'PASSED' | 'FAILED' | 'ERROR'
+  | 'CANCELLED' | 'STALE';
 
 /** One command of a confirmed policy, as it was frozen into a run. */
 export interface StoredVerificationCommand {
@@ -818,6 +845,7 @@ export class Phase1Database {
         if (version < 13) this.sqlite.exec(stablePromotionMigration);
         if (version < 14) this.sqlite.exec(sessionHandoffMigration);
         if (version < 15) this.sqlite.exec(taskDependenciesMigration);
+        if (version < 17) this.sqlite.exec(verificationProgressMigration);
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -4140,10 +4168,16 @@ export class Phase1Database {
     })();
   }
 
-  /** Records the terminal state, its non-secret evidence, and the VerificationCompleted event. */
+  /**
+   * Records the terminal state, its non-secret evidence, the `VerificationCompleted` event, and the
+   * `OperationSettled` progress event of the Operation that owns this run. `CANCELLED` is a terminal
+   * state of its own, so a stopped run keeps its judgement distinct from a failed command; the
+   * Operation keeps the ADR-0019 vocabulary (`FAILED` + `cancelled: true`) because a user stop is
+   * not a success.
+   */
   completeVerificationRun(input: {
     readonly verificationId: string;
-    readonly state: 'PASSED' | 'FAILED' | 'ERROR';
+    readonly state: 'PASSED' | 'FAILED' | 'ERROR' | 'CANCELLED';
     readonly outcomeCode: string;
     readonly evidence: VerificationEvidence;
     readonly eventId: string;
@@ -4158,11 +4192,13 @@ export class Phase1Database {
       `).run(input.state, input.outcomeCode, JSON.stringify(input.evidence),
         input.completedAt, input.verificationId);
       const operationState = input.state === 'PASSED' ? 'SUCCEEDED' : 'FAILED';
+      const operationResult = { verificationId: input.verificationId,
+        state: input.state, outcomeCode: input.outcomeCode,
+        cancelled: input.state === 'CANCELLED' };
       const operation = this.sqlite.query(`
         UPDATE operations SET state=?1,result_json=?2,updated_at=?3
         WHERE id=?4 AND state IN ('PLANNED','IN_PROGRESS')
-      `).run(operationState, JSON.stringify({ verificationId: input.verificationId,
-        state: input.state, outcomeCode: input.outcomeCode }), input.completedAt, run.operationId);
+      `).run(operationState, JSON.stringify(operationResult), input.completedAt, run.operationId);
       if (updated.changes !== 1 || operation.changes !== 1) {
         throw new StorageError('CONCURRENT_MODIFICATION', 'Verification run changed while completing');
       }
@@ -4176,6 +4212,14 @@ export class Phase1Database {
           testedTree: run.testedTree, policyVersion: run.policyVersion,
           policyDigest: run.policyDigest, mainCommit: run.mainCommit,
           state: input.state, outcomeCode: input.outcomeCode, evidence: input.evidence }));
+      // The Operation this run owns settled in the same transaction, so a subscriber learns both
+      // facts from the same event log without polling the projection.
+      this.publishOperationSettled({
+        operationId: run.operationId,
+        operationState,
+        detail: operationResult,
+        recordedAt: input.completedAt,
+      });
       return this.verificationRunPlan(input.verificationId);
     })();
   }
@@ -5723,10 +5767,14 @@ export class Phase1Database {
   }
 
   /**
-   * Appends one progress step. `step_key` is unique per Operation, so replaying a command that
-   * already recorded this step is a no-op rather than a duplicated fact. The return value says
-   * whether a row was written, so a caller can tell "this happened now" from "this already
-   * happened" instead of pretending to redo work.
+   * Appends one progress step **without** publishing a progress event. `step_key` is unique per
+   * Operation, so replaying a command that already recorded this step is a no-op rather than a
+   * duplicated fact. The return value says whether a row was written, so a caller can tell "this
+   * happened now" from "this already happened" instead of pretending to redo work.
+   *
+   * A long command should use `recordOperationProgressEvent` instead: that form writes the step and
+   * the `OperationProgressed` fact in one transaction, which is what makes progress streamable. This
+   * primitive is for recording a boundary that deliberately stays off the event stream.
    */
   recordOperationProgress(input: {
     readonly operationId: string;
@@ -5763,6 +5811,158 @@ export class Phase1Database {
       `).run(input.recordedAt, input.operationId);
       return { recorded: true, sequence: next };
     })();
+  }
+
+  /**
+   * Publishes one progress event for a long command, optionally together with the durable step it
+   * describes, in a single transaction.
+   *
+   * Three invariants are enforced here instead of being left to callers:
+   *
+   * 1. **No progress after a verdict.** Once the Operation is terminal nothing more is published, so
+   *    a late callback from a command that was killed during a cancel cannot make a settled
+   *    Operation look like it is still moving. The step row (if any) is still recorded — it is a
+   *    fact about what the Runtime reached — but the event is refused.
+   * 2. **Idempotent.** `dedup_key` is unique per Operation, so replaying the same boundary publishes
+   *    a single fact. A caller that re-emits gets `eventRecorded: false` and the already-assigned
+   *    `progressSequence`, never a duplicate.
+   * 3. **Orderable.** `progressSequence` is monotonic per Operation, so a consumer that receives
+   *    events out of order can keep the highest one and ignore stale progress of the same Operation
+   *    (the global cursor is `domain_events.sequence`, which is assigned here as well).
+   *
+   * The published payload never contains a verdict; `verdict: false` is written down so a consumer
+   * can assert that instead of inferring it.
+   */
+  recordOperationProgressEvent(input: {
+    readonly operationId: string;
+    readonly eventId: string;
+    readonly phase: OperationProgressPhase;
+    readonly dedupKey: string;
+    readonly detail: Readonly<Record<string, unknown>>;
+    readonly recordedAt: number;
+    readonly step?: OperationProgressEventStep;
+  }): RecordOperationProgressEventResult {
+    if (input.phase === 'SETTLED') {
+      throw new StorageError('INVALID_STATE',
+        'A settled Operation event is written by the terminal write itself, not by a progress call');
+    }
+    return this.sqlite.transaction(() => {
+      const operation = this.sqlite.query<{
+        id: string; project_id: string; kind: string; aggregate_id: string; request_json: string;
+      }, [string]>(`
+        SELECT id,project_id,kind,aggregate_id,request_json FROM operations WHERE id=?1
+      `).get(input.operationId);
+      if (operation === null) throw new StorageError('NOT_FOUND', 'Operation was not found');
+      let stepRecorded = false;
+      let stepSequence: number | null = null;
+      if (input.step !== undefined) {
+        const existingStep = this.sqlite.query<{ sequence: number }, [string, string]>(
+          'SELECT sequence FROM operation_progress WHERE operation_id=?1 AND step_key=?2',
+        ).get(input.operationId, input.step.stepKey);
+        if (existingStep === null) {
+          stepSequence = this.sqlite.query<{ next: number }, [string]>(`
+            SELECT COALESCE(MAX(sequence) + 1, 0) AS next FROM operation_progress WHERE operation_id=?1
+          `).get(input.operationId)?.next ?? 0;
+          this.sqlite.query(`
+            INSERT INTO operation_progress(operation_id,sequence,step_key,step,state,detail_json,recorded_at)
+            VALUES (?1,?2,?3,?4,?5,?6,?7)
+          `).run(input.operationId, stepSequence, input.step.stepKey, input.step.step,
+            input.step.state, JSON.stringify(input.detail), input.recordedAt);
+          stepRecorded = true;
+        } else {
+          stepSequence = existingStep.sequence;
+        }
+      }
+      // Progress doubles as a heartbeat. The first recorded step also moves the Operation out of
+      // PLANNED: recording progress means the work itself has begun.
+      this.sqlite.query(`
+        UPDATE operations
+        SET updated_at=max(updated_at,?1),
+            state=CASE WHEN state='PLANNED' THEN 'IN_PROGRESS' ELSE state END
+        WHERE id=?2
+      `).run(input.recordedAt, input.operationId);
+      const operationState = this.sqlite.query<{ state: OperationState }, [string]>(
+        'SELECT state FROM operations WHERE id=?1').get(input.operationId)?.state ?? 'FAILED';
+      if (operationState !== 'PLANNED' && operationState !== 'IN_PROGRESS') {
+        return { stepRecorded, eventRecorded: false, progressSequence: null,
+          eventSequence: null, refused: 'TERMINAL' as const };
+      }
+      const existingEvent = this.sqlite.query<{ progress_sequence: number; event_id: string }, [string, string]>(`
+        SELECT progress_sequence,event_id FROM operation_progress_events
+        WHERE operation_id=?1 AND dedup_key=?2
+      `).get(input.operationId, input.dedupKey);
+      if (existingEvent !== null) {
+        const published = this.sqlite.query<{ sequence: number }, [string]>(
+          'SELECT sequence FROM domain_events WHERE event_id=?1').get(existingEvent.event_id);
+        return { stepRecorded, eventRecorded: false,
+          progressSequence: existingEvent.progress_sequence,
+          eventSequence: published?.sequence ?? null, refused: null };
+      }
+      const progressSequence = this.sqlite.query<{ next: number }, [string]>(`
+        SELECT COALESCE(MAX(progress_sequence) + 1, 0) AS next FROM operation_progress_events
+        WHERE operation_id=?1
+      `).get(input.operationId)?.next ?? 0;
+      this.sqlite.query(`
+        INSERT INTO operation_progress_events(operation_id,progress_sequence,event_id,dedup_key,phase,
+          detail_json,recorded_at)
+        VALUES (?1,?2,?3,?4,?5,?6,?7)
+      `).run(input.operationId, progressSequence, input.eventId, input.dedupKey, input.phase,
+        JSON.stringify(input.detail), input.recordedAt);
+      const taskId = operationTaskId(operation.kind, operation.aggregate_id, operation.request_json);
+      const inserted = this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'OperationProgressed',1,'Operation',?3,?4,?5,NULL,?6,?7)
+      `).run(input.eventId, operation.project_id, input.operationId, progressSequence,
+        input.operationId, input.recordedAt, JSON.stringify({
+          operationId: input.operationId,
+          projectId: operation.project_id,
+          taskId,
+          kind: operation.kind,
+          progressSequence,
+          dedupKey: input.dedupKey,
+          phase: input.phase,
+          verdict: false,
+          ...(input.step === undefined ? {} : {
+            stepKey: input.step.stepKey,
+            step: input.step.step,
+            stepState: input.step.state,
+            stepSequence,
+          }),
+          detail: input.detail,
+        }));
+      return { stepRecorded, eventRecorded: true, progressSequence,
+        eventSequence: Number(inserted.lastInsertRowid), refused: null };
+    })();
+  }
+
+  /**
+   * The published progress projection of one Operation, ordered by its own monotonic sequence.
+   * `afterProgressSequence` is exclusive, so a consumer can resume from the last one it projected.
+   */
+  listOperationProgressEvents(
+    operationId: string,
+    options: { readonly afterProgressSequence?: number } = {},
+  ): readonly OperationProgressEventSummary[] {
+    return this.sqlite.query<{
+      progress_sequence: number; event_id: string; phase: OperationProgressPhase;
+      dedup_key: string; detail_json: string; recorded_at: number; sequence: number;
+    }, [string, number]>(`
+      SELECT p.progress_sequence,p.event_id,p.phase,p.dedup_key,p.detail_json,p.recorded_at,
+        e.sequence
+      FROM operation_progress_events p JOIN domain_events e ON e.event_id=p.event_id
+      WHERE p.operation_id=?1 AND p.progress_sequence>?2
+      ORDER BY p.progress_sequence
+    `).all(operationId, options.afterProgressSequence ?? -1).map((row) => ({
+      operationId,
+      progressSequence: row.progress_sequence,
+      eventId: row.event_id,
+      eventSequence: row.sequence,
+      phase: row.phase,
+      dedupKey: row.dedup_key,
+      detail: JSON.parse(row.detail_json) as Readonly<Record<string, unknown>>,
+      recordedAt: row.recorded_at,
+    }));
   }
 
   getOperation(projectId: string, operationId: string): OperationSummary {
@@ -5830,8 +6030,80 @@ export class Phase1Database {
       if (updated.changes !== 1) {
         throw new StorageError('CONCURRENT_MODIFICATION', 'Operation changed while completing');
       }
+      // A long command that published progress also publishes its settle, in the same transaction,
+      // so an event-driven client learns it ended without polling. Operations that never published
+      // progress (workspace preparation, Agent start, result commit, ...) stay out of the progress
+      // stream: this event exists to close a stream that was opened, not to announce every write.
+      if (this.sqlite.query<{ count: number }, [string]>(
+        'SELECT COUNT(*) AS count FROM operation_progress_events WHERE operation_id=?1',
+      ).get(input.operationId)?.count !== 0) {
+        this.publishOperationSettled({
+          operationId: input.operationId,
+          operationState: input.state,
+          detail: input.result,
+          recordedAt: input.completedAt,
+        });
+      }
       return this.operationSummary(input.operationId);
     })();
+  }
+
+  /**
+   * Appends the `OperationSettled` fact for one Operation. The event ID is derived from the
+   * Operation, not random, so a retried terminal write can only ever publish the same fact; the
+   * `dedup_key` row makes the retry a no-op.
+   */
+  private publishOperationSettled(input: {
+    readonly operationId: string;
+    readonly operationState: OperationState;
+    readonly detail: Readonly<Record<string, unknown>>;
+    readonly recordedAt: number;
+  }): Readonly<{ eventRecorded: boolean; eventSequence: number | null }> {
+    const operation = this.sqlite.query<{
+      project_id: string; kind: string; aggregate_id: string; request_json: string;
+    }, [string]>(`
+      SELECT project_id,kind,aggregate_id,request_json FROM operations WHERE id=?1
+    `).get(input.operationId);
+    if (operation === null) throw new StorageError('NOT_FOUND', 'Operation was not found');
+    const existing = this.sqlite.query<{ event_id: string }, [string]>(`
+      SELECT event_id FROM operation_progress_events WHERE operation_id=?1 AND dedup_key='SETTLED'
+    `).get(input.operationId);
+    if (existing !== null) {
+      const published = this.sqlite.query<{ sequence: number }, [string]>(
+        'SELECT sequence FROM domain_events WHERE event_id=?1').get(existing.event_id);
+      return { eventRecorded: false, eventSequence: published?.sequence ?? null };
+    }
+    const eventId = createHash('sha256').update(`OperationSettled:${input.operationId}`).digest('hex');
+    const progressSequence = this.sqlite.query<{ next: number }, [string]>(`
+      SELECT COALESCE(MAX(progress_sequence) + 1, 0) AS next FROM operation_progress_events
+      WHERE operation_id=?1
+    `).get(input.operationId)?.next ?? 0;
+    this.sqlite.query(`
+      INSERT INTO operation_progress_events(operation_id,progress_sequence,event_id,dedup_key,phase,
+        detail_json,recorded_at)
+      VALUES (?1,?2,?3,'SETTLED','SETTLED',?4,?5)
+    `).run(input.operationId, progressSequence, eventId, JSON.stringify(input.detail),
+      input.recordedAt);
+    const taskId = operationTaskId(operation.kind, operation.aggregate_id, operation.request_json);
+    const inserted = this.sqlite.query(`
+      INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+        aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+      VALUES (?1,?2,'OperationSettled',1,'Operation',?3,?4,?5,NULL,?6,?7)
+    `).run(eventId, operation.project_id, input.operationId, progressSequence, input.operationId,
+      input.recordedAt, JSON.stringify({
+        operationId: input.operationId,
+        projectId: operation.project_id,
+        taskId,
+        kind: operation.kind,
+        progressSequence,
+        dedupKey: 'SETTLED',
+        phase: 'SETTLED',
+        // Not a verdict: this says the long command ended, never that anything passed.
+        verdict: false,
+        operationState: input.operationState,
+        detail: input.detail,
+      }));
+    return { eventRecorded: true, eventSequence: Number(inserted.lastInsertRowid) };
   }
 
   private operationSummary(operationId: string): OperationSummary {
@@ -5843,8 +6115,6 @@ export class Phase1Database {
       FROM operations WHERE id=?1
     `).get(operationId);
     if (row === null) throw new StorageError('NOT_FOUND', 'Operation was not found');
-    const request = JSON.parse(row.request_json) as Record<string, unknown>;
-    const requestTaskId = typeof request['taskId'] === 'string' ? request['taskId'] as string : null;
     const steps = this.sqlite.query<{
       sequence: number; step_key: string; step: string; state: OperationProgressState;
       detail_json: string | null; recorded_at: number;
@@ -5868,7 +6138,7 @@ export class Phase1Database {
       kind: row.kind,
       aggregateId: row.aggregate_id,
       // A run owns its Task directly; a verification Operation names it in its request payload.
-      taskId: requestTaskId ?? (row.kind === 'RUN_TASK' ? row.aggregate_id : null),
+      taskId: operationTaskId(row.kind, row.aggregate_id, row.request_json),
       state: row.state,
       result: row.result_json === null
         ? null
@@ -7542,6 +7812,51 @@ export interface OperationProgressEntry {
   readonly state: OperationProgressState;
   readonly detail: Readonly<Record<string, unknown>> | null;
   readonly recordedAt: number;
+}
+
+/**
+ * What kind of progress one published event describes. `STEP` and `CANCEL` are the durable
+ * boundaries; `OUTPUT` is sub-step liveness while a command is producing output; `SETTLED` is the
+ * Operation's terminal transition. None of them is a verdict — see `OperationProgressEventSummary`.
+ */
+export type OperationProgressPhase = 'STEP' | 'OUTPUT' | 'CANCEL' | 'SETTLED';
+
+/**
+ * One published progress event as this Runtime recorded it. `progressSequence` is monotonic per
+ * Operation, so a consumer can order two events of the same Operation and ignore one that arrived
+ * late; `eventSequence` is the global event-log cursor `domain_events` assigned to the same fact.
+ *
+ * A progress event never carries a verdict: it says what the Runtime reached, not whether anything
+ * passed. The judgement of a verification lives in `VerificationCompleted` alone, which is why
+ * `verdict` is always false here.
+ */
+export interface OperationProgressEventSummary {
+  readonly operationId: string;
+  readonly progressSequence: number;
+  readonly eventId: string;
+  readonly eventSequence: number;
+  readonly phase: OperationProgressPhase;
+  readonly dedupKey: string;
+  readonly detail: Readonly<Record<string, unknown>>;
+  readonly recordedAt: number;
+}
+
+/** The step a progress event also recorded, when it recorded one. */
+export interface OperationProgressEventStep {
+  readonly stepKey: string;
+  readonly step: string;
+  readonly state: OperationProgressState;
+}
+
+export interface RecordOperationProgressEventResult {
+  /** True when this call appended the durable step row (false when that boundary already existed). */
+  readonly stepRecorded: boolean;
+  /** True when this call published the event (false when it was already published, or refused). */
+  readonly eventRecorded: boolean;
+  readonly progressSequence: number | null;
+  readonly eventSequence: number | null;
+  /** Set when no event was published because the Operation already reached a terminal state. */
+  readonly refused: 'TERMINAL' | null;
 }
 
 /**

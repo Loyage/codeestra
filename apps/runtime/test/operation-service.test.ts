@@ -470,7 +470,8 @@ describe('verification Operation', () => {
       expect(outcome.stop).toBe('CANCELLED');
       expect(outcome.state).toBe('FAILED');
       const run = fixture.value.storage.getVerificationRun(fixture.value.projectId, verificationId);
-      expect(run.state).toBe('ERROR');
+      // ADR-0027: a user stop is a terminal state of its own, not a borrowed ERROR verdict.
+      expect(run.state).toBe('CANCELLED');
       expect(run.outcomeCode).toBe('CANCELLED_BY_USER');
       expect(run.evidence).toMatchObject({ cancelledBy: 'local-user', stoppedProcessGroup: true });
       // The Runtime keeps the scene of a cancelled run instead of deleting a copy it may still write.
