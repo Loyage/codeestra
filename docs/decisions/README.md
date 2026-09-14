@@ -23,6 +23,7 @@
 - [ADR-0018](0018-task-result-integration-into-dev.md)：Task 成果合入 `dev` 的 IntegrationBatch 第一小步——在 Runtime 数据目录的 detached worktree 里合并，先跑独立集成验证，PASSED 后才用 CAS 推进 `dev` ref；任何失败保留现场且不推进 `dev`；同时把 Task worktree 基线修正为固定 `dev`（`projects.dev_ref`，仓库无 dev 时 trust 明确拒绝）。不含 `dev → main` 提升与重启。
 - [ADR-0019](0019-long-command-operations.md)：`task.run`/`task.verify` 成为持久 Operation——步骤级进度（`operation_progress`，v11）作为**事实**记录，CLI 新增 `task.verify --background` 与 `task.operation.list/get/cancel`（`--json`、稳定退出码），UI 投影同一命令面；取消先确认进程静止才落终态，未确认则 Operation `RECONCILE_REQUIRED` 并保留占用；重启按已记录的 Session/Execution/ref 事实 reconcile。复用现有枚举表达取消（不改状态机），不新增任何确认。
 - [ADR-0021](0021-resource-reclamation.md)：验证副本与失败现场的回收（`reclaim plan/apply/records`）。只删 Runtime 注册过的三类资源（Task worktree / 验证副本 / integration worktree），删除前逐一校验 owned root 归属、symlink escape、worktree 注册、branch/HEAD 与 held Execution；默认保留失败现场，`--include-failure-scenes` 才显式回收；append-only 账本入 schema v12；不新增确认。同轮决定：Attention 工具参数继续原样入库，不摘要化。
+- [ADR-0024](0024-task-dependency-dag-and-blocked.md)：任务依赖、DAG 环校验与 `BLOCKED` 语义（Phase 2 第一小步）。依赖成为一等公民：schema v15 的 `task_dependencies`（同项目双端点、钉上游 revision、边不可改）、纯领域图模块（构造/环检测/传递闭包）、`task depends add|remove|list`（`--json`、稳定退出码、零确认）；满足条件沿用 ADR-0009「上游 revision 有 INTEGRATED 批次且其提交仍可从当前 `dev` 到达」，否则下游 `BLOCKED`；环在 storage 写事务内检验并拒绝且不写入；`BLOCKED` 只表示依赖未满足。明确不含并行调度、Conflict Analyzer、多成员批次。
 
 以上选择均由用户明确答复。用户给定的硬性原则见 `PROJECT_SPEC.md`，无需重复确认。
 
@@ -38,7 +39,8 @@
 | Phase 1 | Task verification 的命令来源与执行授权 | 已由 ADR-0006 确认，并以 v6 schema、`project.verificationPolicy`/`task.verify` IPC、detached 副本、policy digest 绑定与证据记录实现；Integration verification 仍未实现 |
 | Phase 1 | Task verification 隔离副本、超时与树改动语义 | 已实现副本内 argv 直接 spawn、按进程组超时停止与 tracked 改动失败；真实命令集验证与长时任务仍未实测 |
 | Phase 1 | 本地 IPC、进程托管与首次项目信任入口 | 产品行为已由 ADR-0004 确认；本用户 0600/0700 socket IPC、单实例、后台进程托管与两步 trust 已实现。一次性命令与只读事件订阅同一 socket（见 `docs/architecture/event-model.md` §3.1）；订阅连接不持久化游标、无自动重连、无按 project 鉴权，客户端重连需自带 cursor |
-| Phase 2 | 上游被修订时依赖锁定 revision 怎样更新 | 未明确前暂停该边调度并请求澄清，不自行跟随或固定旧需求 |
+| Phase 2 | 上游被修订时依赖锁定 revision 怎样更新 | 未明确前**继续钉旧 revision 并按 ADR-0024 保持 `BLOCKED`**（上游新 revision 未进 `dev` 就不会释放依赖）；不自行跟随、不改写已有边。自动改钉、边 `NEEDS_REVIEW` 与「选择版本后激活」仍未实现 |
+| Phase 2 | 依赖编辑、环校验与 `BLOCKED` 语义 | 已由 ADR-0024 确认并实现：schema v15 `task_dependencies`、纯领域图（环/闭包）、`task depends add\|remove\|list`（`--json`、稳定退出码、零确认）、上游进 `dev` 自动解除下游阻塞、`dev` 重写重新阻塞。未做：并行 worktree 调度、资源预留、Conflict Analyzer、多成员批次 |
 | Phase 3 | Pi 原生 TUI 接管的 PTY transport、权限模式 side channel 与 session-file 双向交接 | 产品语义已由 ADR-0010/0011 确认；实现前用真实 Pi spike 验证 RPC 安全退出→TUI resume→TUI 安全退出→RPC resume，FULL/STRICT 不因交接改变，全程不得双开 writer |
 | Phase 4 | IntegrationBatch 的具体 merge commit 形态、失败批次拆分、main 已 checkout 的安全交接 | 长期目标分支已由 ADR-0009 固定：Task 先进入 dev，dev→main 需用户批准并随后重启；其余细节不自动推断 |
 | Phase 7 | migration/备份兼容策略、bootstrap 自身更新授权 | 禁止自动实现不可逆升级；实现前确认 |

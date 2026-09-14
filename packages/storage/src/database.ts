@@ -1,5 +1,11 @@
 import { Database } from 'bun:sqlite';
 import { z } from 'zod';
+import {
+  DependencyGraphError,
+  createDependencyGraph,
+  wouldCreateCycle,
+  type DependencyEdge,
+} from '@codeestra/domain';
 import type { AgentAnswer } from '@codeestra/contracts';
 import {
   agentAnswerMigration,
@@ -13,6 +19,7 @@ import {
   phase1SchemaVersion,
   reclamationMigration,
   taskControlMigration,
+  taskDependenciesMigration,
   taskVerificationMigration,
   workspaceRetryMigration,
 } from './migration.js';
@@ -687,6 +694,7 @@ export class Phase1Database {
         if (version < 10) this.sqlite.exec(integrationPipelineMigration);
         if (version < 11) this.sqlite.exec(operationProgressMigration);
         if (version < 12) this.sqlite.exec(reclamationMigration);
+        if (version < 15) this.sqlite.exec(taskDependenciesMigration);
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -5486,6 +5494,386 @@ export class Phase1Database {
         : JSON.parse(row.result_json) as Readonly<Record<string, unknown>>,
     };
   }
+
+  // ---------------------------------------------------------------------------------------------
+  // Task dependencies (ADR-0024). These methods own the persisted graph and its integrity: the
+  // ordered pair is unique, both endpoints must be Tasks of one project, the pinned revision must
+  // belong to the prerequisite, and an edge that would introduce a cycle is refused before anything
+  // is written. The cycle reasoning runs through the pure domain graph *inside* the write
+  // transaction, so two edges that are each legal cannot be committed together into a cycle.
+  //
+  // Whether an edge is satisfied is deliberately not decided here: these methods expose the
+  // recorded integration fact (`integratedCommit`), while the Git question — is that commit still
+  // reachable from the project's current `dev` ref — belongs to the scheduler, which has the
+  // repository.
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * Every dependency edge of one project, optionally narrowed to one dependent or one prerequisite.
+   * Read-only; it verifies the project is trusted but never touches the graph.
+   */
+  listTaskDependencyFacts(
+    projectId: string,
+    options: { readonly taskId?: string; readonly prerequisiteTaskId?: string } = {},
+  ): readonly TaskDependencyFact[] {
+    this.getTrustedProject(projectId);
+    const filters: string[] = [];
+    const parameters: [string, ...string[]] = [projectId];
+    if (options.taskId !== undefined) {
+      parameters.push(options.taskId);
+      filters.push(`AND dependency.dependent_task_id=?${parameters.length}`);
+    }
+    if (options.prerequisiteTaskId !== undefined) {
+      parameters.push(options.prerequisiteTaskId);
+      filters.push(`AND dependency.prerequisite_task_id=?${parameters.length}`);
+    }
+    // The correlated subqueries pick the newest integration fact for the exact pinned revision. A
+    // batch that is not INTEGRATED, or an item that never produced a merged commit, is not a fact at
+    // all, so the edge reads as "not integrated" instead of guessing.
+    return this.sqlite.query<{
+      project_id: string; dependent_task_id: string; dependent_display_number: number;
+      dependent_state: TaskLifecycleState; prerequisite_task_id: string;
+      prerequisite_display_number: number; prerequisite_state: TaskLifecycleState;
+      required_revision_id: string; required_revision_number: number; created_by: string;
+      created_at: number; integrated_commit: string | null; integration_batch_id: string | null;
+    }, [string, ...string[]]>(`
+      SELECT dependency.project_id,dependency.dependent_task_id,
+        dependent.display_number AS dependent_display_number,
+        dependent.state AS dependent_state,
+        dependency.prerequisite_task_id,
+        prerequisite.display_number AS prerequisite_display_number,
+        prerequisite.state AS prerequisite_state,
+        dependency.required_revision_id,revision.number AS required_revision_number,
+        dependency.created_by,dependency.created_at,
+        (SELECT item.integrated_commit FROM integration_batch_items item
+          JOIN integration_batches batch ON batch.id=item.batch_id
+          WHERE item.task_id=dependency.prerequisite_task_id
+            AND item.revision_id=dependency.required_revision_id
+            AND item.state='INTEGRATED' AND item.integrated_commit IS NOT NULL
+            AND batch.state='INTEGRATED'
+          ORDER BY item.created_at DESC,item.batch_id DESC LIMIT 1) AS integrated_commit,
+        (SELECT item.batch_id FROM integration_batch_items item
+          JOIN integration_batches batch ON batch.id=item.batch_id
+          WHERE item.task_id=dependency.prerequisite_task_id
+            AND item.revision_id=dependency.required_revision_id
+            AND item.state='INTEGRATED' AND item.integrated_commit IS NOT NULL
+            AND batch.state='INTEGRATED'
+          ORDER BY item.created_at DESC,item.batch_id DESC LIMIT 1) AS integration_batch_id
+      FROM task_dependencies dependency
+      JOIN tasks dependent ON dependent.id=dependency.dependent_task_id
+      JOIN tasks prerequisite ON prerequisite.id=dependency.prerequisite_task_id
+      JOIN task_revisions revision ON revision.task_id=dependency.prerequisite_task_id
+        AND revision.id=dependency.required_revision_id
+      WHERE dependency.project_id=?1 ${filters.join(' ')}
+      ORDER BY dependent.display_number,dependent.id,prerequisite.display_number,prerequisite.id
+    `).all(...parameters).map((row) => ({
+      projectId: row.project_id,
+      dependentTaskId: row.dependent_task_id,
+      dependentDisplayNumber: row.dependent_display_number,
+      dependentState: row.dependent_state,
+      prerequisiteTaskId: row.prerequisite_task_id,
+      prerequisiteDisplayNumber: row.prerequisite_display_number,
+      prerequisiteState: row.prerequisite_state,
+      requiredRevisionId: row.required_revision_id,
+      requiredRevisionNumber: row.required_revision_number,
+      createdBy: row.created_by,
+      createdAt: row.created_at,
+      integratedCommit: row.integrated_commit,
+      integrationBatchId: row.integration_batch_id,
+    }));
+  }
+
+  /**
+   * Adds one dependency edge, or reports that the identical edge already exists. The pin defaults to
+   * the prerequisite's current revision; an existing edge with a *different* pin is refused instead
+   * of being retargeted, because edges are immutable (see the `task_dependencies_no_update` trigger).
+   */
+  addTaskDependency(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly prerequisiteTaskId: string;
+    readonly requiredRevisionId?: string | null;
+    readonly expectedVersion: number;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly eventId: string;
+    readonly actor: string;
+    readonly createdAt: number;
+  }): TaskDependencyMutation {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.createdAt,
+      apply: (database) => {
+        const dependent = database.query<{
+          state: TaskLifecycleState; version: number;
+        }, [string, string]>(`
+          SELECT task.state,task.version FROM tasks task
+          JOIN project_trusts trust ON trust.project_id=task.project_id AND trust.status='ACTIVE'
+          WHERE task.project_id=?1 AND task.id=?2
+        `).get(input.projectId, input.taskId);
+        if (dependent === null) {
+          throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
+        }
+        if (dependent.version !== input.expectedVersion) {
+          throw new StorageError('CONCURRENT_MODIFICATION', 'Task version did not match');
+        }
+        if (!taskDependencyEditableStates.has(dependent.state)) {
+          throw new StorageError('INVALID_STATE',
+            `Dependencies cannot be edited while the Task is ${dependent.state}`);
+        }
+        if (input.taskId === input.prerequisiteTaskId) {
+          throw new TaskDependencyError('SELF_DEPENDENCY', 'A Task cannot depend on itself');
+        }
+        const prerequisite = database.query<{
+          current_revision_id: string;
+        }, [string, string]>(`
+          SELECT current_revision_id FROM tasks WHERE project_id=?1 AND id=?2
+        `).get(input.projectId, input.prerequisiteTaskId);
+        if (prerequisite === null) {
+          throw new StorageError('NOT_FOUND', 'Prerequisite Task was not found in this project');
+        }
+        const pinnedRevisionId = input.requiredRevisionId ?? prerequisite.current_revision_id;
+        const revision = database.query<{ id: string }, [string, string]>(`
+          SELECT id FROM task_revisions WHERE task_id=?1 AND id=?2
+        `).get(input.prerequisiteTaskId, pinnedRevisionId);
+        if (revision === null) {
+          throw new StorageError('NOT_FOUND',
+            'The pinned revision does not belong to the prerequisite Task');
+        }
+        const existing = database.query<{
+          required_revision_id: string;
+        }, [string, string]>(`
+          SELECT required_revision_id FROM task_dependencies
+          WHERE dependent_task_id=?1 AND prerequisite_task_id=?2
+        `).get(input.taskId, input.prerequisiteTaskId);
+        if (existing !== null) {
+          if (existing.required_revision_id !== pinnedRevisionId) {
+            throw new StorageError('INVALID_STATE',
+              'This dependency already exists with a different pinned revision; remove it first');
+          }
+          return {
+            projectId: input.projectId,
+            taskId: input.taskId,
+            prerequisiteTaskId: input.prerequisiteTaskId,
+            requiredRevisionId: pinnedRevisionId,
+            taskState: dependent.state,
+            version: dependent.version,
+            added: false,
+          };
+        }
+        const edges = database.query<{
+          dependent_task_id: string; prerequisite_task_id: string; required_revision_id: string;
+        }, [string]>(`
+          SELECT dependent_task_id,prerequisite_task_id,required_revision_id
+          FROM task_dependencies WHERE project_id=?1
+        `).all(input.projectId).map((row): DependencyEdge => ({
+          dependentTaskId: row.dependent_task_id,
+          prerequisiteTaskId: row.prerequisite_task_id,
+          requiredRevisionId: row.required_revision_id,
+        }));
+        const cycle = wouldCreateCycle(dependencyGraphOf(edges), {
+          dependentTaskId: input.taskId,
+          prerequisiteTaskId: input.prerequisiteTaskId,
+          requiredRevisionId: pinnedRevisionId,
+        });
+        if (cycle !== null) {
+          throw new TaskDependencyError('DEPENDENCY_CYCLE',
+            `Adding this dependency would create a cycle: ${cycle.join(' -> ')}`);
+        }
+        database.query(`
+          INSERT INTO task_dependencies(dependent_task_id,prerequisite_task_id,project_id,
+            required_revision_id,created_by,created_at)
+          VALUES (?1,?2,?3,?4,?5,?6)
+        `).run(input.taskId, input.prerequisiteTaskId, input.projectId, pinnedRevisionId,
+          input.actor, input.createdAt);
+        const version = dependent.version + 1;
+        const update = database.query(`
+          UPDATE tasks SET version=?1,updated_at=?2
+          WHERE project_id=?3 AND id=?4 AND version=?5
+        `).run(version, input.createdAt, input.projectId, input.taskId, input.expectedVersion);
+        if (update.changes !== 1) {
+          throw new StorageError('CONCURRENT_MODIFICATION', 'Task changed during the dependency edit');
+        }
+        database.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'TaskDependencyAdded',1,'Task',?3,?4,?5,?5,?6,?7)
+        `).run(input.eventId, input.projectId, input.taskId, version, input.commandId,
+          input.createdAt, JSON.stringify({ taskId: input.taskId,
+            prerequisiteTaskId: input.prerequisiteTaskId, requiredRevisionId: pinnedRevisionId,
+            actor: input.actor }));
+        return {
+          projectId: input.projectId,
+          taskId: input.taskId,
+          prerequisiteTaskId: input.prerequisiteTaskId,
+          requiredRevisionId: pinnedRevisionId,
+          taskState: dependent.state,
+          version,
+          added: true,
+        };
+      },
+    });
+  }
+
+  /**
+   * Removes one dependency edge. A removal that finds nothing is refused rather than reported as a
+   * success: a script that meant to remove a real edge must learn that the graph was not what it
+   * assumed. Replaying the *same* command ID returns the recorded removal instead.
+   */
+  removeTaskDependency(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly prerequisiteTaskId: string;
+    readonly expectedVersion: number;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly eventId: string;
+    readonly actor: string;
+    readonly removedAt: number;
+  }): TaskDependencyRemoval {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.removedAt,
+      apply: (database) => {
+        const dependent = database.query<{
+          state: TaskLifecycleState; version: number;
+        }, [string, string]>(`
+          SELECT task.state,task.version FROM tasks task
+          JOIN project_trusts trust ON trust.project_id=task.project_id AND trust.status='ACTIVE'
+          WHERE task.project_id=?1 AND task.id=?2
+        `).get(input.projectId, input.taskId);
+        if (dependent === null) {
+          throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
+        }
+        if (dependent.version !== input.expectedVersion) {
+          throw new StorageError('CONCURRENT_MODIFICATION', 'Task version did not match');
+        }
+        if (!taskDependencyEditableStates.has(dependent.state)) {
+          throw new StorageError('INVALID_STATE',
+            `Dependencies cannot be edited while the Task is ${dependent.state}`);
+        }
+        const removed = database.query(`
+          DELETE FROM task_dependencies WHERE dependent_task_id=?1 AND prerequisite_task_id=?2
+        `).run(input.taskId, input.prerequisiteTaskId);
+        if (removed.changes !== 1) {
+          throw new StorageError('NOT_FOUND', 'Dependency edge was not found');
+        }
+        const version = dependent.version + 1;
+        const update = database.query(`
+          UPDATE tasks SET version=?1,updated_at=?2
+          WHERE project_id=?3 AND id=?4 AND version=?5
+        `).run(version, input.removedAt, input.projectId, input.taskId, input.expectedVersion);
+        if (update.changes !== 1) {
+          throw new StorageError('CONCURRENT_MODIFICATION', 'Task changed during the dependency edit');
+        }
+        database.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'TaskDependencyRemoved',1,'Task',?3,?4,?5,?5,?6,?7)
+        `).run(input.eventId, input.projectId, input.taskId, version, input.commandId,
+          input.removedAt, JSON.stringify({ taskId: input.taskId,
+            prerequisiteTaskId: input.prerequisiteTaskId, actor: input.actor }));
+        return {
+          projectId: input.projectId,
+          taskId: input.taskId,
+          prerequisiteTaskId: input.prerequisiteTaskId,
+          taskState: dependent.state,
+          version,
+          removed: true,
+        };
+      },
+    });
+  }
+
+  /**
+   * Applies the dependency verdict the scheduler computed: READY when every edge is satisfied,
+   * BLOCKED otherwise. Only these two states may change here, and BLOCKED requires a named reason —
+   * an unexplained "blocked" is exactly the state machine's forbidden bucket for conflicts,
+   * capacity, and failures (§2.10). A no-op writes no event and does not move the version.
+   */
+  applyTaskDependencyState(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly expectedVersion: number;
+    readonly target: 'READY' | 'BLOCKED';
+    readonly reasons: readonly TaskDependencyBlockReason[];
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly eventId: string;
+    readonly actor: string;
+    readonly at: number;
+  }): TaskDependencyStateChange {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.at,
+      apply: (database) => {
+        const task = database.query<{
+          state: TaskLifecycleState; version: number;
+        }, [string, string]>(`
+          SELECT task.state,task.version FROM tasks task
+          JOIN project_trusts trust ON trust.project_id=task.project_id AND trust.status='ACTIVE'
+          WHERE task.project_id=?1 AND task.id=?2
+        `).get(input.projectId, input.taskId);
+        if (task === null) {
+          throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
+        }
+        if (task.version !== input.expectedVersion) {
+          throw new StorageError('CONCURRENT_MODIFICATION', 'Task version did not match');
+        }
+        if (task.state !== 'READY' && task.state !== 'BLOCKED') {
+          throw new StorageError('INVALID_STATE',
+            `Dependency state only moves between READY and BLOCKED; the Task is ${task.state}`);
+        }
+        if (input.target === 'READY' && input.reasons.length > 0) {
+          throw new StorageError('INVALID_STATE',
+            'A Task cannot become READY while an unmet dependency is still named');
+        }
+        if (input.target === 'BLOCKED' && input.reasons.length === 0) {
+          throw new StorageError('INVALID_STATE',
+            'A Task cannot become BLOCKED without naming the unmet dependency');
+        }
+        if (task.state === input.target) {
+          return {
+            taskId: input.taskId,
+            state: task.state,
+            version: task.version,
+            changed: false,
+            reasons: input.reasons,
+          };
+        }
+        const version = task.version + 1;
+        const update = database.query(`
+          UPDATE tasks SET state=?1,version=?2,updated_at=?3
+          WHERE project_id=?4 AND id=?5 AND version=?6 AND state=?7
+        `).run(input.target, version, input.at, input.projectId, input.taskId,
+          input.expectedVersion, task.state);
+        if (update.changes !== 1) {
+          throw new StorageError('CONCURRENT_MODIFICATION', 'Task changed during the dependency verdict');
+        }
+        database.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'TaskStateChanged',1,'Task',?3,?4,?5,?5,?6,?7)
+        `).run(input.eventId, input.projectId, input.taskId, version, input.commandId, input.at,
+          JSON.stringify({ taskId: input.taskId, from: task.state, to: input.target,
+            reason: input.target === 'BLOCKED' ? 'dependency unmet' : 'dependencies satisfied',
+            dependencies: input.reasons, actor: input.actor }));
+        return {
+          taskId: input.taskId,
+          state: input.target,
+          version,
+          changed: true,
+          reasons: input.reasons,
+        };
+      },
+    });
+  }
 }
 
 /** One Runtime-owned resource a reclamation run may consider, with its recorded ownership facts. */
@@ -5616,4 +6004,103 @@ export interface OperationSummary {
   readonly updatedAt: number;
   readonly cancelRequestedAt: number | null;
   readonly steps: readonly OperationProgressEntry[];
+}
+
+/**
+ * One persisted dependency edge projected for clients: the pinned upstream revision and the display
+ * identity of both endpoints. `integratedCommit` is the recorded fact that the pinned revision has
+ * been merged into `dev`; it is not yet a satisfied dependency, because reachability from the
+ * project's current `dev` ref is a Git question the scheduler answers.
+ */
+export interface TaskDependencyRecord {
+  readonly projectId: string;
+  readonly dependentTaskId: string;
+  readonly dependentDisplayNumber: number;
+  readonly dependentState: TaskLifecycleState;
+  readonly prerequisiteTaskId: string;
+  readonly prerequisiteDisplayNumber: number;
+  readonly prerequisiteState: TaskLifecycleState;
+  readonly requiredRevisionId: string;
+  readonly requiredRevisionNumber: number;
+  readonly createdBy: string;
+  readonly createdAt: number;
+}
+
+export interface TaskDependencyFact extends TaskDependencyRecord {
+  /** Merged commit of an INTEGRATED batch for the pinned revision, or null when none exists. */
+  readonly integratedCommit: string | null;
+  readonly integrationBatchId: string | null;
+}
+
+export interface TaskDependencyMutation {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly prerequisiteTaskId: string;
+  readonly requiredRevisionId: string;
+  readonly taskState: TaskLifecycleState;
+  readonly version: number;
+  /** False when the identical edge already existed: the graph did not change, so no version bump. */
+  readonly added: boolean;
+}
+
+export interface TaskDependencyRemoval {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly prerequisiteTaskId: string;
+  readonly taskState: TaskLifecycleState;
+  readonly version: number;
+  readonly removed: boolean;
+}
+
+/** Why one edge is not satisfied. Bounded codes, never a paraphrase of an upstream message. */
+export interface TaskDependencyBlockReason {
+  readonly code: 'UPSTREAM_NOT_INTEGRATED' | 'DEV_BASELINE_MISSING' | 'DEV_REF_UNREADABLE'
+    | 'NOT_REACHABLE_FROM_DEV';
+  readonly prerequisiteTaskId: string;
+  readonly requiredRevisionId: string;
+  readonly detail: string | null;
+}
+
+export interface TaskDependencyStateChange {
+  readonly taskId: string;
+  readonly state: TaskLifecycleState;
+  readonly version: number;
+  readonly changed: boolean;
+  readonly reasons: readonly TaskDependencyBlockReason[];
+}
+
+/**
+ * A Task's dependency edges may only be edited while a dependency could still be honoured by the
+ * next attempt. A running or paused Task keeps the set it was scheduled with; a finished Task keeps
+ * the set its evidence was produced under. `EXECUTED` is excluded on purpose: a result commit was
+ * already captured, so a dependency added afterwards could not have shaped it, and this step does
+ * not implement "invalidate the captured evidence when a dependency changes" — that belongs with the
+ * not-yet-implemented revision path (`EXECUTED | revision added | →READY | BLOCKED`).
+ */
+const taskDependencyEditableStates: ReadonlySet<TaskLifecycleState> = new Set([
+  'DRAFT', 'BLOCKED', 'READY', 'FAILED',
+]);
+
+/** Domain graph construction with the storage error code callers can branch on. */
+function dependencyGraphOf(edges: readonly DependencyEdge[]) {
+  try {
+    return createDependencyGraph(edges);
+  } catch (error) {
+    if (error instanceof DependencyGraphError) {
+      throw new StorageError('INVALID_STATE', `Stored dependency graph is invalid: ${error.message}`);
+    }
+    throw error;
+  }
+}
+
+/**
+ * A rejected dependency edit carries its own stable code instead of reusing `StorageError`'s closed
+ * set: a caller (or a script) must be able to tell "the graph would have become cyclic" from
+ * "the version did not match", and a cycle is not an invalid stored state — it is a refused edit.
+ */
+export class TaskDependencyError extends Error {
+  constructor(readonly code: 'DEPENDENCY_CYCLE' | 'SELF_DEPENDENCY', message: string) {
+    super(message);
+    this.name = 'TaskDependencyError';
+  }
 }

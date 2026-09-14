@@ -25,6 +25,13 @@ import {
   reconcileInterruptedReclamations,
 } from './reclaim-service.js';
 import { captureResultCommit, prepareResultCommit } from './result-commit-service.js';
+import {
+  assertDependenciesSatisfied,
+  assertTaskRunnable,
+  inspectTaskDependencies,
+  reconcileDependentTasks,
+  reconcileTaskDependencyState,
+} from './scheduler.js';
 import { pauseOrCancelTask, resumePausedTask } from './task-control-service.js';
 import {
   readSessionTranscript,
@@ -363,6 +370,13 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         actor: 'local-user',
       }));
     case 'task.resume':
+      // Resuming starts a new Execution in the retained workspace, so it is a start path and honours
+      // the same dependency gate. The Task stays PAUSED and nothing is written when it is blocked.
+      await assertDependenciesSatisfied({
+        storage,
+        projectId: request.projectId,
+        taskId: request.taskId,
+      });
       return success(request.requestId, await resumePausedTask({
         storage,
         coordinator,
@@ -451,14 +465,25 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         entryId: request.entryId,
         partIndex: request.partIndex,
       }));
-    case 'task.run':
-      return success(request.requestId, await coordinator.runTask({
+    case 'task.run': {
+      // The dependency gate runs before anything is reserved: an unmet dependency must not create an
+      // Execution or occupy a worktree. A Task that just became READY is runnable in this same call.
+      const runnable = await assertTaskRunnable({
+        storage,
         projectId: request.projectId,
         taskId: request.taskId,
         expectedTaskVersion: request.expectedTaskVersion,
         commandId: request.commandId,
+        actor: 'local-user',
+      });
+      return success(request.requestId, await coordinator.runTask({
+        projectId: request.projectId,
+        taskId: request.taskId,
+        expectedTaskVersion: runnable.expectedTaskVersion,
+        commandId: request.commandId,
         adapterId: request.adapterId,
       }));
+    }
     case 'task.result.prepare':
       return success(request.requestId, await prepareResultCommit({
         storage,
@@ -505,8 +530,8 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         commandId: request.commandId,
         permissionMode,
       }));
-    case 'task.integrate':
-      return success(request.requestId, await integrateTaskResult({
+    case 'task.integrate': {
+      const report = await integrateTaskResult({
         storage,
         runner: verificationRunner,
         copiesRoot: verificationCopiesRoot,
@@ -516,10 +541,120 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         expectedVersion: request.expectedVersion,
         commandId: request.commandId,
         permissionMode,
-      }));
+      });
+      // `dev` just moved, so a downstream Task that was BLOCKED may now be satisfied. The verdict is
+      // recomputed here instead of in a background loop, and a dependent that could not be updated is
+      // reported in the response rather than swallowed — the integration itself already succeeded.
+      return success(request.requestId, {
+        ...report,
+        dependencyReconcile: report.state === 'INTEGRATED'
+          ? await reconcileDependentTasks({
+            storage,
+            projectId: request.projectId,
+            taskId: request.taskId,
+            commandId: request.commandId,
+            actor: 'local-user',
+          })
+          : null,
+      });
+    }
     case 'task.integration.list':
       return success(request.requestId,
         storage.listIntegrationBatches(request.projectId, request.taskId));
+    case 'task.depends.add': {
+      const payloadHash = createHash('sha256').update(JSON.stringify({
+        command: 'task.depends.add',
+        projectId: request.projectId,
+        taskId: request.taskId,
+        prerequisiteTaskId: request.prerequisiteTaskId,
+        requiredRevisionId: request.requiredRevisionId ?? null,
+      })).digest('hex');
+      const mutation = storage.addTaskDependency({
+        projectId: request.projectId,
+        taskId: request.taskId,
+        prerequisiteTaskId: request.prerequisiteTaskId,
+        ...(request.requiredRevisionId === undefined
+          ? {} : { requiredRevisionId: request.requiredRevisionId }),
+        expectedVersion: request.expectedVersion,
+        commandId: request.commandId,
+        payloadHash,
+        eventId: crypto.randomUUID(),
+        actor: 'local-user',
+        createdAt: Date.now(),
+      });
+      // Adding an edge never changes the Task state by itself: the dependency verdict does, and it
+      // is computed in the same command so the response is exactly the state the user will observe.
+      const reconcile = await reconcileTaskDependencyState({
+        storage,
+        projectId: request.projectId,
+        taskId: request.taskId,
+        commandId: request.commandId,
+        actor: 'local-user',
+      });
+      return success(request.requestId, {
+        projectId: request.projectId,
+        taskId: request.taskId,
+        prerequisiteTaskId: request.prerequisiteTaskId,
+        requiredRevisionId: mutation.requiredRevisionId,
+        added: mutation.added,
+        taskState: reconcile.state,
+        taskVersion: reconcile.version,
+        dependencyReconcile: reconcile,
+        // The same projection `task.depends.list` returns, so a client never has to re-derive the
+        // graph from a command result.
+        dependencies: await inspectTaskDependencies({
+          storage,
+          projectId: request.projectId,
+          taskId: request.taskId,
+        }),
+      });
+    }
+    case 'task.depends.remove': {
+      const payloadHash = createHash('sha256').update(JSON.stringify({
+        command: 'task.depends.remove',
+        projectId: request.projectId,
+        taskId: request.taskId,
+        prerequisiteTaskId: request.prerequisiteTaskId,
+      })).digest('hex');
+      const removal = storage.removeTaskDependency({
+        projectId: request.projectId,
+        taskId: request.taskId,
+        prerequisiteTaskId: request.prerequisiteTaskId,
+        expectedVersion: request.expectedVersion,
+        commandId: request.commandId,
+        payloadHash,
+        eventId: crypto.randomUUID(),
+        actor: 'local-user',
+        removedAt: Date.now(),
+      });
+      const reconcile = await reconcileTaskDependencyState({
+        storage,
+        projectId: request.projectId,
+        taskId: request.taskId,
+        commandId: request.commandId,
+        actor: 'local-user',
+      });
+      return success(request.requestId, {
+        projectId: request.projectId,
+        taskId: request.taskId,
+        prerequisiteTaskId: request.prerequisiteTaskId,
+        removed: removal.removed,
+        taskState: reconcile.state,
+        taskVersion: reconcile.version,
+        dependencyReconcile: reconcile,
+        dependencies: await inspectTaskDependencies({
+          storage,
+          projectId: request.projectId,
+          taskId: request.taskId,
+        }),
+      });
+    }
+    case 'task.depends.list':
+      return success(request.requestId, await inspectTaskDependencies({
+        storage,
+        projectId: request.projectId,
+        ...(request.taskId === undefined ? {} : { taskId: request.taskId }),
+      }));
     case 'reclaim.plan':
       return success(request.requestId, await planReclamation({
         storage,
@@ -586,7 +721,7 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         taskId: request.taskId,
         expectedVersion: request.expectedVersion,
       })).digest('hex');
-      return success(request.requestId, storage.submitTask({
+      const submitted = storage.submitTask({
         projectId: request.projectId,
         taskId: request.taskId,
         expectedVersion: request.expectedVersion,
@@ -595,7 +730,23 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         eventId: crypto.randomUUID(),
         actor: 'local-user',
         submittedAt: Date.now(),
-      }));
+      });
+      // Submitting records the specification-valid transition (DRAFT → READY); the dependency gate is
+      // enforced immediately afterwards in the same command, so a Task whose upstream has not reached
+      // `dev` is never observably READY and can never be scheduled (§2.5, state-machines §1).
+      const dependencies = await reconcileTaskDependencyState({
+        storage,
+        projectId: request.projectId,
+        taskId: request.taskId,
+        commandId: request.commandId,
+        actor: 'local-user',
+      });
+      return success(request.requestId, {
+        ...submitted,
+        state: dependencies.state,
+        version: dependencies.version,
+        dependencyState: dependencies,
+      });
     }
     case 'task.create': {
       const payloadHash = createHash('sha256').update(JSON.stringify({

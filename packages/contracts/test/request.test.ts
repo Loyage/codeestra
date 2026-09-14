@@ -118,6 +118,53 @@ describe('Runtime task request boundary', () => {
     }).success).toBe(true);
   });
 
+  test('requires a Task version for a dependency edit and allows an unpinned add', () => {
+    const taskId = '66666666-6666-4666-8666-666666666666';
+    const prerequisiteTaskId = '77777777-7777-4777-8777-777777777777';
+    const add = {
+      requestId: base.requestId,
+      schemaVersion: base.schemaVersion,
+      command: 'task.depends.add' as const,
+      commandId: base.commandId,
+      projectId: base.projectId,
+      taskId,
+      prerequisiteTaskId,
+      expectedVersion: 1,
+    };
+    // The pin is optional: absent means "the upstream's current revision".
+    expect(runtimeRequestSchema.safeParse(add).success).toBe(true);
+    expect(runtimeRequestSchema.safeParse({ ...add, requiredRevisionId: crypto.randomUUID() }).success)
+      .toBe(true);
+    // Editing the graph moves the Task version, so the CAS field is mandatory.
+    const { expectedVersion: _dropped, ...withoutVersion } = add;
+    expect(runtimeRequestSchema.safeParse(withoutVersion).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({ ...add, expectedVersion: -1 }).success).toBe(false);
+    // `remove` has nothing left to pin, so the field is not part of its contract at all.
+    expect(runtimeRequestSchema.safeParse({
+      requestId: base.requestId,
+      schemaVersion: base.schemaVersion,
+      command: 'task.depends.remove',
+      commandId: base.commandId,
+      projectId: base.projectId,
+      taskId,
+      prerequisiteTaskId,
+      expectedVersion: 2,
+    }).success).toBe(true);
+    // `list` is read-only and works for one Task or the whole project.
+    expect(runtimeRequestSchema.safeParse({
+      requestId: base.requestId, schemaVersion: base.schemaVersion,
+      command: 'task.depends.list', projectId: base.projectId,
+    }).success).toBe(true);
+    expect(runtimeRequestSchema.safeParse({
+      requestId: base.requestId, schemaVersion: base.schemaVersion,
+      command: 'task.depends.list', projectId: base.projectId, taskId,
+    }).success).toBe(true);
+    expect(runtimeRequestSchema.safeParse({
+      requestId: base.requestId, schemaVersion: base.schemaVersion,
+      command: 'task.depends.list', projectId: base.projectId, expectedVersion: 0,
+    }).success).toBe(false);
+  });
+
   test('requires an explicit verification policy confirmation when trusting a project', () => {
     const trust = {
       requestId: base.requestId,
