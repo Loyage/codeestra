@@ -1088,6 +1088,8 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 
 状态：已实现并通过 CLI/命令面测试（真实临时仓库 + 临时 `CODEESTRA_HOME` + 协议 stub provider）；未用真实 provider 驱动依赖解阻塞，未使用桌面/浏览器/键鼠自动化。**本轮占用 schema v15；v13 保留给 B1 格、v14 保留给 B2 格，均未占用。**
 
+集成记录：lane commit `bf4c3ef`（`lane/b3-task-dependencies`）→ dev merge `7b99b57`（`--no-ff`）。合并后在 `~/Documents/codeestra-dev` 执行 `bun install --frozen-lockfile` 与 `bun run check`，退出码 0（Vitest 231、Bun 320 = `test:unit` 199 + `test:e2e` 121、Vite 构建），合并后工作树与本 lane commit 的 tree 完全一致。未 push、未提升 `main`、未重启稳定 Runtime。合并时 dev 工作树没有本地 `runtime.sqlite`，因此不存在「旧库被标成 15 而跳过 v13/v14」的既有实例；B1/B2 合入时仍需按 ADR-0024 D04 同时保留三段升序分支并取最大常量。
+
 上游语义由 ADR-0009 与用户本轮派单固定：**上游成果先进入 `dev` 才满足依赖**；仅 Task verification PASSED 不释放依赖；DAG 变更必须检验环；`BLOCKED` 只表示依赖未满足。决策记录为 ADR-0024（依赖满足定义、环校验策略、`BLOCKED` 迁移点、幂等与拒绝规则、命令面）。
 
 ### 已实现
