@@ -21,6 +21,7 @@ import {
   taskControlMigration,
   taskDependenciesMigration,
   taskVerificationMigration,
+  verificationProgressMigration,
   workspaceRetryMigration,
 } from '@codeestra/storage';
 import { AdapterRegistry } from '../src/adapter-registry.js';
@@ -124,8 +125,9 @@ describe('CANCELLED as a first-class verification state (ADR-0027)', () => {
     const legacy = new Database(filename, { create: true, strict: true });
     legacy.exec('PRAGMA foreign_keys=ON;');
     applyThroughVersion15(legacy);
-    // Version 16 is reserved by the concurrent C2 lane. Stamping it means "that lane's step already
-    // ran, this one has not", which is exactly the state this migration will find after it lands.
+    // Version 16 is unused: the native-terminal migration of the C2 lane landed after this one as
+    // version 18, so a database stamped 16 has neither step yet. That is what a database created
+    // before either of them looks like.
     legacy.exec('PRAGMA user_version=16');
     legacy.query(`INSERT INTO projects
       (id,name,repo_root,git_common_dir,main_ref,dev_ref,object_format,created_at)
@@ -163,7 +165,7 @@ describe('CANCELLED as a first-class verification state (ADR-0027)', () => {
     try {
       expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version')
         .get()?.user_version).toBe(phase1SchemaVersion);
-      expect(phase1SchemaVersion).toBe(17);
+      expect(phase1SchemaVersion).toBe(18);
       // The rebuilt table kept the existing row, identity, evidence columns and timestamps.
       const run = upgraded.getVerificationRun('p1', 'v1');
       expect(run.state).toBe('RUNNING');
@@ -182,6 +184,10 @@ describe('CANCELLED as a first-class verification state (ADR-0027)', () => {
         SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='verification_runs'
           AND name IN ('verification_subject','verification_by_task') ORDER BY name
       `).all().map((row) => row.name)).toEqual(['verification_by_task', 'verification_subject']);
+      // The v18 step (the C2 lane's native terminal tables) ran in the same upgrade.
+      expect(upgraded.sqlite.query<{ name: string }, []>(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='session_terminals'",
+      ).get()?.name).toBe('session_terminals');
 
       // CANCELLED is a legal terminal state, and like every terminal state it needs both facts.
       expect(() => upgraded.sqlite.query(
@@ -202,18 +208,48 @@ describe('CANCELLED as a first-class verification state (ADR-0027)', () => {
     }
   });
 
-  test('does not re-run the rebuild for a database already at 17', () => {
-    const directory = mkdtempSync(join(tmpdir(), 'codeestra-storage-v17-'));
+  test('does not re-run the rebuild for a database already at the current version', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'codeestra-storage-current-'));
     registerTemporaryDirectory(directory);
     const filename = join(directory, 'runtime.sqlite');
     const first = new Phase1Database(filename);
     first.close();
     const second = new Phase1Database(filename);
     try {
+      // The constant is the newest additive version; a database stamped with it must not run any
+      // `version <` step again, the rebuild of `verification_runs` included.
       expect(second.sqlite.query<{ user_version: number }, []>('PRAGMA user_version')
-        .get()?.user_version).toBe(17);
+        .get()?.user_version).toBe(phase1SchemaVersion);
     } finally {
       second.close();
+    }
+  });
+
+  test('applies only the later migration to a database stamped 17', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'codeestra-storage-v17-'));
+    registerTemporaryDirectory(directory);
+    const filename = join(directory, 'runtime.sqlite');
+    // A database written by this lane before the C2 lane's version 18 step existed: the
+    // verification rebuild has run, the native-terminal migration has not.
+    const legacy = new Database(filename, { create: true, strict: true });
+    legacy.exec('PRAGMA foreign_keys=ON;');
+    applyThroughVersion15(legacy);
+    legacy.exec(verificationProgressMigration);
+    legacy.exec('PRAGMA user_version=17');
+    legacy.close();
+
+    const upgraded = new Phase1Database(filename);
+    try {
+      expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version')
+        .get()?.user_version).toBe(phase1SchemaVersion);
+      expect(phase1SchemaVersion).toBe(18);
+      expect(upgraded.sqlite.query<{ name: string }, []>(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='session_terminals'",
+      ).get()?.name).toBe('session_terminals');
+      expect(upgraded.sqlite.query<Record<string, unknown>, []>('PRAGMA foreign_key_check').all())
+        .toEqual([]);
+    } finally {
+      upgraded.close();
     }
   });
 });

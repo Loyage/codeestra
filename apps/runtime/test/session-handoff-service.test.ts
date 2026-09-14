@@ -210,9 +210,18 @@ describe('session handoff service', () => {
       expect(status.writerLease?.holderKind).toBe('AUTOMATED_RPC');
       expect(status.capabilities).toMatchObject({
         singleWriterLease: 'IMPLEMENTED',
-        nativeTerminalAttach: 'UNSUPPORTED',
-        terminalTransport: 'UNIMPLEMENTED',
-        successorProcessStart: 'UNIMPLEMENTED',
+        strictPermissionOverSideChannel: 'IMPLEMENTED',
+        nativeTerminalAttach: 'IMPLEMENTED',
+        ptyTransport: 'IMPLEMENTED',
+        successorProcessStart: 'IMPLEMENTED',
+        releaseBackToAutomation: 'IMPLEMENTED',
+        // Two different claims, reported separately: this Runtime can attach to a native terminal it
+        // started, and still cannot attach to a running `pi --mode rpc` process.
+        attachToLiveRpcProcess: 'UNSUPPORTED',
+        crossHandoffPermissionModeMatrix: 'PARTIAL',
+        parallelToolBatchSafePoint: 'UNVERIFIED',
+        ptyResize: 'UNSUPPORTED',
+        windows: 'UNSUPPORTED',
       });
 
       // A second holder never waits: it is told the Session already has a writer.
@@ -497,9 +506,7 @@ describe('session handoff service', () => {
       expect(fence.active).toBe(true);
 
       // Before the fence is acknowledged there is no safe point, and admission says so.
-      expect((await harness.service.admitSuccessor({
-        projectId: harness.projectId, sessionId: harness.sessionId,
-      })).code).toBe('SAFE_POINT_NOT_REACHED');
+      expect((await harness.service.admitSuccessor({ projectId: harness.projectId, sessionId: harness.sessionId, commandId: crypto.randomUUID() })).code).toBe('SAFE_POINT_NOT_REACHED');
 
       channel.send({ kind: 'fence_ack', active: true });
       channel.send({ kind: 'tool_start', toolCallId: 'call-running', toolName: 'bash' });
@@ -522,36 +529,31 @@ describe('session handoff service', () => {
       });
 
       // The recorded predecessor is still running: no successor may start.
-      const alive = await harness.service.admitSuccessor({
-        projectId: harness.projectId, sessionId: harness.sessionId,
-      });
+      const alive = await harness.service.admitSuccessor({ projectId: harness.projectId, sessionId: harness.sessionId, commandId: crypto.randomUUID() });
       expect(alive).toMatchObject({ admitted: false, code: 'PREDECESSOR_NOT_STOPPED',
         predecessorObservation: 'ALIVE', successorStarted: false });
 
       // The provider is gone but the recorded tool child is still alive (the orphan case).
       harness.rows.current = harness.rows.current.filter((row) => row.pid !== providerPid);
-      const orphan = await harness.service.admitSuccessor({
-        projectId: harness.projectId, sessionId: harness.sessionId,
-      });
+      const orphan = await harness.service.admitSuccessor({ projectId: harness.projectId, sessionId: harness.sessionId, commandId: crypto.randomUUID() });
       expect(orphan).toMatchObject({ admitted: false, code: 'PREDECESSOR_DESCENDANTS_ALIVE',
         predecessorObservation: 'DESCENDANTS_ALIVE' });
       expect(orphan.detail).toContain(String(toolChildPid));
 
-      // Nothing left in the recorded tree: the Runtime-side preconditions hold, and it still does
-      // not start a process, because this version has no terminal transport.
+      // Nothing left in the recorded tree, but this service has no terminal transport: an admitted
+      // handoff that cannot be carried out is refused, never reported as a started successor.
       harness.rows.current = [];
-      const admitted = await harness.service.admitSuccessor({
-        projectId: harness.projectId, sessionId: harness.sessionId,
-      });
-      expect(admitted).toMatchObject({ admitted: true, code: 'ADMITTED',
+      const admitted = await harness.service.admitSuccessor({ projectId: harness.projectId, sessionId: harness.sessionId, commandId: crypto.randomUUID() });
+      expect(admitted).toMatchObject({ admitted: false, code: 'TERMINAL_TRANSPORT_UNAVAILABLE',
         predecessorObservation: 'STOPPED', successorMode: 'HUMAN_TUI',
-        successorStarted: false, terminalTransport: 'UNIMPLEMENTED' });
+        successorStarted: false, terminalTransport: 'NONE', successorIncarnation: null });
       const after = statusOf(harness);
-      expect(after.handoff?.state).toBe('ADMITTED');
-      // The denial/history is auditable: the newest permission record keeps its decision.
-      expect(after.lastPermission).toBeNull();
-      // The writer lease was not moved: the predecessor incarnation still owns the Session.
+      // The predecessor is untouched: no incarnation was ended, no successor recorded, no lease moved.
+      expect(after.handoff?.state).toBe('AT_SAFE_POINT');
+      expect(after.incarnations).toHaveLength(1);
+      expect(after.incarnation?.state).toBe('FENCED');
       expect(after.writerLease?.incarnationId).toBe(after.incarnation?.incarnationId);
+      expect(after.lastPermission).toBeNull();
     } finally {
       channel.close();
       harness.service.close();
@@ -573,9 +575,7 @@ describe('session handoff service', () => {
       await waitFor(() => statusOf(harness).handoff?.state === 'AT_SAFE_POINT');
       // The provider tree was captured while the provider was alive; now the table itself is gone.
       harness.rows.fail = true;
-      const admission = await harness.service.admitSuccessor({
-        projectId: harness.projectId, sessionId: harness.sessionId,
-      });
+      const admission = await harness.service.admitSuccessor({ projectId: harness.projectId, sessionId: harness.sessionId, commandId: crypto.randomUUID() });
       expect(admission).toMatchObject({ admitted: false, code: 'PREDECESSOR_UNVERIFIED',
         predecessorObservation: 'UNVERIFIABLE' });
       expect(admission.detail).toContain('process table');

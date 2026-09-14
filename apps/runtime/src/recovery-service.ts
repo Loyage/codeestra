@@ -560,3 +560,50 @@ export function reconcileSessionHandoffs(input: {
   }
   return results;
 }
+
+/**
+ * Terminals this Runtime no longer holds, reconciled from that fact (ADR-0026).
+ *
+ * After a restart the Runtime holds no PTY host and no provider process, so every terminal row that
+ * still says RUNNING is converged to RECOVERY_REQUIRED. The recorded helper/provider PIDs are
+ * reported rather than killed: the Runtime cannot prove they are still the processes it recorded
+ * (a PID is reusable), and destroying a possibly-live provider would be an unrecoverable action
+ * taken on a guess. The PTY host's own rule — a closed control pipe means "no writer is left to
+ * control this terminal" — is what terminates the provider in practice; this function never claims
+ * that it did.
+ */
+export function reconcileSessionTerminals(input: {
+  readonly storage: Phase1Database;
+  readonly now?: () => number;
+}): {
+  readonly reconciled: readonly string[];
+  /** Terminals whose recorded processes were never signalled by this Runtime generation. */
+  readonly maybeStillRunning: readonly { readonly terminalId: string;
+    readonly helperPid: number | null; readonly providerPid: number | null }[];
+} {
+  const now = input.now ?? Date.now;
+  const reconciled: string[] = [];
+  const maybeStillRunning: { terminalId: string; helperPid: number | null;
+    providerPid: number | null }[] = [];
+  for (const terminal of input.storage.listLiveSessionTerminals()) {
+    input.storage.markSessionTerminalEnded({
+      terminalId: terminal.id,
+      state: 'RECOVERY_REQUIRED',
+      exitCode: null,
+      exitSignal: null,
+      at: now(),
+      detail: 'RUNTIME_RESTARTED: this Runtime no longer holds this terminal; the recorded PTY host'
+        + ' and provider processes were not signalled by this generation',
+    });
+    input.storage.releaseSessionTerminalAttachments({
+      terminalId: terminal.id,
+      cursor: 0,
+      reason: 'RUNTIME_RESTARTED',
+      at: now(),
+    });
+    reconciled.push(terminal.id);
+    maybeStillRunning.push({ terminalId: terminal.id, helperPid: terminal.helperPid,
+      providerPid: terminal.providerPid });
+  }
+  return { reconciled, maybeStillRunning };
+}

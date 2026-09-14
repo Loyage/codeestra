@@ -63,6 +63,11 @@ export type HandoffChannelFrame =
   | { readonly kind: 'tool_end'; readonly toolCallId: string; readonly toolName: string;
       readonly isError: boolean }
   | { readonly kind: 'agent_settled' }
+  /**
+   * The provider's own shutdown notification. It is supporting evidence only: FOUNDATION-040 measured
+   * that it is not reliably delivered, so no release decision may depend on it.
+   */
+  | { readonly kind: 'session_shutdown'; readonly mode: string }
   | { readonly kind: 'permission_request'; readonly requestId: string; readonly toolCallId: string;
       readonly toolName: string; readonly inputJson: string; readonly inputFingerprint: string;
       readonly mode: string };
@@ -371,7 +376,11 @@ export default function codeestraGate(pi: GateExtensionApi): void {
   };
 
   pi.on('session_start', (_event, context) => { void ensureOpen(context); });
-  pi.on('session_shutdown', () => { channel.close(); });
+  pi.on('session_shutdown', (_event, context) => {
+    // Best-effort: sent before the connection is closed, and never required by the Runtime.
+    channel.notify({ kind: 'session_shutdown', mode: context.mode });
+    channel.close();
+  });
   // The safe point needs structured tool facts, and in a human terminal there is no RPC event
   // stream to read them from, so the extension reports them on the same channel it approves on.
   pi.on('tool_execution_start', (event) => {

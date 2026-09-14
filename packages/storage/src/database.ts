@@ -20,6 +20,7 @@ import {
   phase1SchemaVersion,
   reclamationMigration,
   sessionHandoffMigration,
+  sessionTerminalMigration,
   stablePromotionMigration,
   taskControlMigration,
   taskDependenciesMigration,
@@ -846,6 +847,7 @@ export class Phase1Database {
         if (version < 14) this.sqlite.exec(sessionHandoffMigration);
         if (version < 15) this.sqlite.exec(taskDependenciesMigration);
         if (version < 17) this.sqlite.exec(verificationProgressMigration);
+        if (version < 18) this.sqlite.exec(sessionTerminalMigration);
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -7701,7 +7703,413 @@ export class Phase1Database {
     if (row === null) throw new StorageError('INVALID_STATE', 'Session writer lease was not persisted');
     return mapSessionWriterLeaseRow(row);
   }
+
+  // -------------------------------------------------------------------------------------------
+  // Native terminal transport (ADR-0026): one PTY-hosted provider terminal per incarnation, the
+  // client attachments over its projected stream, and the evidence an explicit release is decided
+  // from. The exit code is stored for audit only; it never decides whether a release succeeded.
+  // -------------------------------------------------------------------------------------------
+
+  getSessionTerminal(terminalId: string): SessionTerminalRecord | null {
+    const row = this.sqlite.query<SessionTerminalRow, [string]>(
+      `${sessionTerminalSelect} WHERE id=?1`,
+    ).get(terminalId);
+    return row === null ? null : mapSessionTerminalRow(row);
+  }
+
+  getSessionTerminalByIncarnation(incarnationId: string): SessionTerminalRecord | null {
+    const row = this.sqlite.query<SessionTerminalRow, [string]>(
+      `${sessionTerminalSelect} WHERE incarnation_id=?1`,
+    ).get(incarnationId);
+    return row === null ? null : mapSessionTerminalRow(row);
+  }
+
+  /** The terminal of one Session that still claims to be running, if any. */
+  getRunningSessionTerminal(sessionId: string): SessionTerminalRecord | null {
+    const row = this.sqlite.query<SessionTerminalRow, [string]>(
+      `${sessionTerminalSelect} WHERE session_id=?1 AND state='RUNNING'`,
+    ).get(sessionId);
+    return row === null ? null : mapSessionTerminalRow(row);
+  }
+
+  listSessionTerminals(sessionId: string): readonly SessionTerminalRecord[] {
+    return this.sqlite.query<SessionTerminalRow, [string]>(
+      `${sessionTerminalSelect} WHERE session_id=?1 ORDER BY created_at,id`,
+    ).all(sessionId).map(mapSessionTerminalRow);
+  }
+
+  /** Terminals that still claim to run; the Runtime must reconcile these after a restart. */
+  listLiveSessionTerminals(): readonly SessionTerminalRecord[] {
+    return this.sqlite.query<SessionTerminalRow, []>(
+      `${sessionTerminalSelect} WHERE state='RUNNING' ORDER BY created_at,id`,
+    ).all().map(mapSessionTerminalRow);
+  }
+
+  /**
+   * Records one PTY-hosted terminal for an incarnation. Replaying the same incarnation returns the
+   * recorded terminal: a replayed `session handoff admit` must not start a second provider on the
+   * same conversation.
+   */
+  recordSessionTerminal(input: {
+    readonly id: string;
+    readonly sessionId: string;
+    readonly incarnationId: string;
+    readonly helperPid: number | null;
+    readonly helperStartToken: string | null;
+    readonly providerPid: number | null;
+    readonly ptySlave: string | null;
+    readonly windowSize: SessionTerminalWindowSize;
+    readonly sessionFile: string | null;
+    readonly entriesAtStart: number | null;
+    readonly lastEntryIdAtStart: string | null;
+    readonly createdAt: number;
+  }): SessionTerminalWrite {
+    return this.sqlite.transaction(() => {
+      const existing = this.getSessionTerminalByIncarnation(input.incarnationId);
+      if (existing !== null) return { terminal: existing, replayed: true };
+      const running = this.getRunningSessionTerminal(input.sessionId);
+      if (running !== null) {
+        throw new StorageError('INVALID_STATE',
+          `TERMINAL_ALREADY_RUNNING: terminal ${running.id} is still RUNNING for this Session`);
+      }
+      this.sqlite.query(`
+        INSERT INTO session_terminals(id,session_id,incarnation_id,helper_pid,helper_start_token,
+          provider_pid,pty_slave,window_size,state,session_file,entries_at_start,
+          last_entry_id_at_start,created_at)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'RUNNING',?9,?10,?11,?12)
+      `).run(input.id, input.sessionId, input.incarnationId, input.helperPid,
+        input.helperStartToken, input.providerPid, input.ptySlave, input.windowSize,
+        input.sessionFile, input.entriesAtStart, input.lastEntryIdAtStart, input.createdAt);
+      const terminal = this.getSessionTerminal(input.id);
+      if (terminal === null) {
+        throw new StorageError('INVALID_STATE', 'Session terminal was not persisted');
+      }
+      return { terminal, replayed: false };
+    })();
+  }
+
+  /**
+   * Records the explicit release request (the byte the Runtime wrote, the CLI command that asked for
+   * it) together with the provider session-file facts observed at that moment. The optional
+   * side-channel acknowledgement is recorded when it arrives, never required: FOUNDATION-040 measured
+   * that the extension's shutdown notification is not reliably delivered.
+   */
+  markSessionTerminalReleaseRequested(input: {
+    readonly terminalId: string;
+    readonly commandId: string;
+    readonly releaseByte: string;
+    readonly requestedAt: number;
+    readonly entriesAtRelease: number | null;
+    readonly lastEntryIdAtRelease: string | null;
+    readonly detail: string;
+  }): SessionTerminalRecord {
+    return this.sqlite.transaction(() => {
+      const terminal = this.getSessionTerminal(input.terminalId);
+      if (terminal === null) throw new StorageError('NOT_FOUND', 'Session terminal was not found');
+      if (terminal.state !== 'RUNNING') {
+        if (terminal.releaseCommandId === input.commandId) return terminal;
+        throw new StorageError('INVALID_STATE',
+          `TERMINAL_NOT_RUNNING: this terminal is ${terminal.state}`);
+      }
+      this.sqlite.query(`
+        UPDATE session_terminals SET release_command_id=?1,release_requested_at=?2,release_byte=?3,
+          entries_at_release=?4,last_entry_id_at_release=?5,release_detail=?6
+        WHERE id=?7
+      `).run(input.commandId, input.requestedAt, input.releaseByte, input.entriesAtRelease,
+        input.lastEntryIdAtRelease, input.detail, input.terminalId);
+      const updated = this.getSessionTerminal(input.terminalId);
+      if (updated === null) throw new StorageError('NOT_FOUND', 'Session terminal was not found');
+      return updated;
+    })();
+  }
+
+  markSessionTerminalProviderShutdownReported(input: {
+    readonly terminalId: string;
+    readonly at: number;
+  }): boolean {
+    const result = this.sqlite.query(`
+      UPDATE session_terminals SET provider_shutdown_reported_at=?1
+      WHERE id=?2 AND provider_shutdown_reported_at IS NULL
+    `).run(input.at, input.terminalId);
+    return result.changes === 1;
+  }
+
+  /**
+   * Ends a terminal. `RELEASED` means the provider exited after the explicit release; `STOPPED`
+   * means it was ended by the Runtime (a kill, a restart, or a runtime that no longer holds it);
+   * `RECOVERY_REQUIRED` means no exit was observed and the Runtime refuses to guess.
+   */
+  markSessionTerminalEnded(input: {
+    readonly terminalId: string;
+    readonly state: 'RELEASED' | 'STOPPED' | 'RECOVERY_REQUIRED';
+    readonly exitCode: number | null;
+    readonly exitSignal: string | null;
+    readonly at: number;
+    readonly detail: string;
+  }): SessionTerminalRecord {
+    return this.sqlite.transaction(() => {
+      const terminal = this.getSessionTerminal(input.terminalId);
+      if (terminal === null) throw new StorageError('NOT_FOUND', 'Session terminal was not found');
+      if (terminal.state !== 'RUNNING') return terminal;
+      this.sqlite.query(`
+        UPDATE session_terminals SET state=?1,exit_code=?2,exit_signal=?3,exit_reported_at=?4,
+          ended_at=?5,release_detail=COALESCE(release_detail,'')||?6
+        WHERE id=?7 AND state='RUNNING'
+      `).run(input.state, input.exitCode, input.exitSignal, input.at, input.at,
+        terminal.releaseDetail === null ? input.detail : `; ${input.detail}`, input.terminalId);
+      const updated = this.getSessionTerminal(input.terminalId);
+      if (updated === null) throw new StorageError('NOT_FOUND', 'Session terminal was not found');
+      return updated;
+    })();
+  }
+
+  listSessionTerminalAttachments(sessionId: string): readonly SessionTerminalAttachmentRecord[] {
+    return this.sqlite.query<SessionTerminalAttachmentRow, [string]>(`
+      SELECT id,terminal_id,session_id,kind,holder_ref,state,cursor_at_attach,cursor_at_detach,
+        command_id,attached_at,detached_at,detached_reason
+      FROM session_terminal_attachments WHERE session_id=?1 ORDER BY attached_at,id
+    `).all(sessionId).map(mapSessionTerminalAttachmentRow);
+  }
+
+  getAttachedSessionTerminalWriter(terminalId: string): SessionTerminalAttachmentRecord | null {
+    const row = this.sqlite.query<SessionTerminalAttachmentRow, [string]>(`
+      SELECT id,terminal_id,session_id,kind,holder_ref,state,cursor_at_attach,cursor_at_detach,
+        command_id,attached_at,detached_at,detached_reason
+      FROM session_terminal_attachments
+      WHERE terminal_id=?1 AND state='ATTACHED' AND kind='WRITER'
+    `).get(terminalId);
+    return row === null ? null : mapSessionTerminalAttachmentRow(row);
+  }
+
+  /**
+   * Attaches one client to a running terminal. A second WRITER never queues: it is refused with
+   * `ATTACHMENT_BUSY` and the current holder named, which a script can assert on. Replaying the same
+   * command ID returns the recorded attachment.
+   */
+  attachSessionTerminal(input: {
+    readonly id: string;
+    readonly terminalId: string;
+    readonly sessionId: string;
+    readonly kind: SessionTerminalAttachmentKind;
+    readonly holderRef: string;
+    readonly commandId: string;
+    readonly cursor: number;
+    readonly attachedAt: number;
+  }): SessionTerminalAttachmentAcquisition {
+    return this.sqlite.transaction(() => {
+      const replayed = this.sqlite.query<SessionTerminalAttachmentRow, [string, string]>(`
+        SELECT id,terminal_id,session_id,kind,holder_ref,state,cursor_at_attach,cursor_at_detach,
+          command_id,attached_at,detached_at,detached_reason
+        FROM session_terminal_attachments WHERE terminal_id=?1 AND command_id=?2
+      `).get(input.terminalId, input.commandId);
+      if (replayed !== null) {
+        return { attached: true as const, code: 'REPLAYED' as const,
+          attachment: mapSessionTerminalAttachmentRow(replayed), holder: null };
+      }
+      const terminal = this.getSessionTerminal(input.terminalId);
+      if (terminal === null) throw new StorageError('NOT_FOUND', 'Session terminal was not found');
+      if (terminal.state !== 'RUNNING') {
+        return { attached: false as const, code: 'TERMINAL_NOT_RUNNING' as const, attachment: null,
+          holder: null };
+      }
+      if (input.kind === 'WRITER') {
+        const writer = this.getAttachedSessionTerminalWriter(input.terminalId);
+        if (writer !== null) {
+          return { attached: false as const, code: 'ATTACHMENT_BUSY' as const, attachment: null,
+            holder: { holderRef: writer.holderRef, attachedAt: writer.attachedAt } };
+        }
+      }
+      this.sqlite.query(`
+        INSERT INTO session_terminal_attachments(id,terminal_id,session_id,kind,holder_ref,state,
+          cursor_at_attach,command_id,attached_at)
+        VALUES (?1,?2,?3,?4,?5,'ATTACHED',?6,?7,?8)
+      `).run(input.id, input.terminalId, input.sessionId, input.kind, input.holderRef, input.cursor,
+        input.commandId, input.attachedAt);
+      const attachment = this.sqlite.query<SessionTerminalAttachmentRow, [string]>(`
+        SELECT id,terminal_id,session_id,kind,holder_ref,state,cursor_at_attach,cursor_at_detach,
+          command_id,attached_at,detached_at,detached_reason
+        FROM session_terminal_attachments WHERE id=?1
+      `).get(input.id);
+      if (attachment === null) {
+        throw new StorageError('INVALID_STATE', 'Session terminal attachment was not persisted');
+      }
+      return { attached: true as const, code: 'ATTACHED' as const,
+        attachment: mapSessionTerminalAttachmentRow(attachment), holder: null };
+    })();
+  }
+
+  /** Detaches an attachment by holder. Detaching never stops the terminal or the provider. */
+  detachSessionTerminal(input: {
+    readonly sessionId: string;
+    readonly holderRef: string;
+    readonly cursor: number;
+    readonly reason: string;
+    readonly at: number;
+  }): { readonly detached: boolean; readonly code: 'DETACHED' | 'NOT_ATTACHED';
+    readonly attachment: SessionTerminalAttachmentRecord | null } {
+    return this.sqlite.transaction(() => {
+      const row = this.sqlite.query<{ id: string }, [string, string]>(`
+        SELECT attachment.id AS id FROM session_terminal_attachments attachment
+        JOIN session_terminals terminal ON terminal.id=attachment.terminal_id
+        WHERE attachment.session_id=?1 AND attachment.holder_ref=?2
+          AND attachment.state='ATTACHED' AND terminal.state='RUNNING'
+      `).get(input.sessionId, input.holderRef);
+      if (row === null) return { detached: false, code: 'NOT_ATTACHED' as const, attachment: null };
+      this.sqlite.query(`
+        UPDATE session_terminal_attachments SET state='DETACHED',cursor_at_detach=?1,
+          detached_at=?2,detached_reason=?3
+        WHERE id=?4 AND state='ATTACHED'
+      `).run(input.cursor, input.at, input.reason, row.id);
+      const attachment = this.sqlite.query<SessionTerminalAttachmentRow, [string]>(`
+        SELECT id,terminal_id,session_id,kind,holder_ref,state,cursor_at_attach,cursor_at_detach,
+          command_id,attached_at,detached_at,detached_reason
+        FROM session_terminal_attachments WHERE id=?1
+      `).get(row.id);
+      return { detached: true, code: 'DETACHED' as const,
+        attachment: attachment === null ? null : mapSessionTerminalAttachmentRow(attachment) };
+    })();
+  }
+
+  /** Detaches every attachment of one terminal (used when that terminal ends). */
+  releaseSessionTerminalAttachments(input: {
+    readonly terminalId: string;
+    readonly cursor: number;
+    readonly reason: string;
+    readonly at: number;
+  }): number {
+    const result = this.sqlite.query(`
+      UPDATE session_terminal_attachments SET state='DETACHED',cursor_at_detach=?1,
+        detached_at=?2,detached_reason=?3
+      WHERE terminal_id=?4 AND state='ATTACHED'
+    `).run(input.cursor, input.at, input.reason, input.terminalId);
+    return result.changes;
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Small additions the terminal handoff needs from the session-handoff contract. They are appended
+  // here (rather than inside the FOUNDATION-043 block) so a concurrent lane's copy of that block
+  // cannot conflict with them.
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * Ends one incarnation with an exit fact, and stops it from being the current incarnation in the
+   * same statement. This is the prerequisite for recording a successor: `recordSessionIncarnation`
+   * refuses while any incarnation is still ACTIVE/FENCED, and a decision that was still routable to
+   * this incarnation must become unroutable (`STALE_INCARNATION`) the moment it is superseded.
+   */
+  markSessionIncarnationExited(input: {
+    readonly incarnationId: string;
+    readonly at: number;
+    readonly exit: Readonly<Record<string, unknown>>;
+    readonly detail: string;
+  }): SessionIncarnationRecord {
+    return this.sqlite.transaction(() => {
+      const incarnation = this.getSessionIncarnation(input.incarnationId);
+      if (incarnation === null) throw new StorageError('NOT_FOUND', 'Session incarnation was not found');
+      if (incarnation.state === 'EXITED') return incarnation;
+      this.sqlite.query(`
+        UPDATE session_incarnations SET state='EXITED',ended_at=?1,exit_json=?2
+        WHERE id=?3 AND state IN ('ACTIVE','FENCED')
+      `).run(input.at, JSON.stringify({ ...input.exit, detail: input.detail }), input.incarnationId);
+      this.sqlite.query(`
+        UPDATE agent_sessions SET current_incarnation_id=NULL
+        WHERE id=?1 AND current_incarnation_id=?2
+      `).run(incarnation.sessionId, input.incarnationId);
+      const updated = this.getSessionIncarnation(input.incarnationId);
+      if (updated === null) throw new StorageError('NOT_FOUND', 'Session incarnation was not found');
+      return updated;
+    })();
+  }
+
+  /**
+   * A safe point that was not reached through the RPC fence: the terminal's own release. The fence
+   * exists to stop an *automation* process from starting new tools after the request; a human
+   * terminal that is explicitly released does not need one, and the facts used instead are the
+   * provider exit, the ownership observation and the provider session file (see `TerminalService`).
+   */
+  markSessionTerminalHandoffSafePoint(input: {
+    readonly requestId: string;
+    readonly at: number;
+    readonly detail: string;
+  }): SessionHandoffRequestRecord {
+    const result = this.sqlite.query(`
+      UPDATE session_handoff_requests SET state='AT_SAFE_POINT',safe_point_at=?1,detail=?2,updated_at=?1
+      WHERE id=?3 AND state IN ('REQUESTED','FENCED') AND fence_active=0
+    `).run(input.at, input.detail, input.requestId);
+    if (result.changes !== 1) {
+      throw new StorageError('INVALID_STATE',
+        'Terminal release safe point did not match an unfenced open handoff request');
+    }
+    return this.getSessionHandoffRequest(input.requestId) as SessionHandoffRequestRecord;
+  }
+
+  /**
+   * Merges a *refreshed* process tree into a recorded incarnation.
+   *
+   * The tree captured at launch can only see what was already running then, and a tool the provider
+   * starts later is exactly the process FOUNDATION-040 measured surviving a provider kill. Refresh
+   * points (the settled fact after a handoff fence, and the last moment before an explicit release)
+   * capture the union, which is what a later ownership check must compare against. Descendants are
+   * merged by PID: an entry is never removed, because "this pid once belonged to this Session" is
+   * the fact that makes a reused pid distinguishable from a surviving tool.
+   */
+  mergeSessionIncarnationProcessTree(input: {
+    readonly incarnationId: string;
+    readonly tree: ProviderProcessTreeLike;
+  }): SessionIncarnationRecord {
+    return this.sqlite.transaction(() => {
+      const incarnation = this.getSessionIncarnation(input.incarnationId);
+      if (incarnation === null) throw new StorageError('NOT_FOUND', 'Session incarnation was not found');
+      const existing = incarnation.processTree === null || typeof incarnation.processTree !== 'object'
+        ? null
+        : incarnation.processTree as Partial<ProviderProcessTreeLike>;
+      const byPid = new Map<number, ProviderProcessRefLike>();
+      for (const descendant of existing?.descendants ?? []) {
+        if (typeof descendant?.pid === 'number') byPid.set(descendant.pid, descendant);
+      }
+      for (const descendant of input.tree.descendants) {
+        const known = byPid.get(descendant.pid);
+        // A later capture can only add detail (a token that could not be read before); it never
+        // overwrites a known identity with an unknown one.
+        byPid.set(descendant.pid, known === undefined
+          ? descendant
+          : { ...known, startToken: known.startToken ?? descendant.startToken });
+      }
+      const merged = {
+        ...input.tree,
+        startToken: existing?.startToken ?? input.tree.startToken,
+        descendants: [...byPid.values()],
+        note: existing === null
+          ? input.tree.note
+          : `${existing.note ?? ''} | refreshed: ${input.tree.note}`.trim(),
+      };
+      this.sqlite.query('UPDATE session_incarnations SET process_tree_json=?1 WHERE id=?2')
+        .run(JSON.stringify(merged), input.incarnationId);
+      const updated = this.getSessionIncarnation(input.incarnationId);
+      if (updated === null) throw new StorageError('NOT_FOUND', 'Session incarnation was not found');
+      return updated;
+    })();
+  }
+
+  /**
+   * Everything one Agent Session's start was composed from (workspace, ownership token, revision,
+   * adapter, effective Agent configuration). A successor process launched outside the normal start
+   * path must use exactly these, otherwise "the same execution continues" would be a claim about
+   * different inputs.
+   */
+  getAgentStartPlanForSession(sessionId: string): AgentStartPlan | null {
+    return this.agentStartRow(sessionId);
+  }
 }
+
+const sessionTerminalSelect = `
+  SELECT id,session_id,incarnation_id,helper_pid,helper_start_token,provider_pid,pty_slave,
+    window_size,state,release_command_id,release_requested_at,release_byte,
+    provider_shutdown_reported_at,exit_code,exit_signal,exit_reported_at,session_file,
+    entries_at_start,last_entry_id_at_start,entries_at_release,last_entry_id_at_release,
+    release_detail,created_at,ended_at
+  FROM session_terminals
+`;
 
 /** One Runtime-owned resource a reclamation run may consider, with its recorded ownership facts. */
 export interface ReclamationProjectRef {
@@ -8089,6 +8497,93 @@ export interface SessionPermissionRequestRecord {
   readonly decidedBy: string | null;
 }
 
+/**
+ * One PTY-hosted provider terminal (ADR-0026). The Runtime holds the helper process (which owns the
+ * terminal); the provider runs on that terminal. `exitCode` is audit data only: a native terminal
+ * released with Ctrl+D and one killed by SIGTERM both exit 0 (FOUNDATION-040), so no decision may
+ * branch on it.
+ */
+/** The shape of a captured provider process tree, as stored (structurally compatible with the
+ * Agent adapter's `ProviderProcessTree`, without making storage depend on that package). */
+export interface ProviderProcessRefLike {
+  readonly pid: number;
+  readonly startToken: string | null;
+  readonly command: string;
+}
+
+export interface ProviderProcessTreeLike {
+  readonly pid: number;
+  readonly startToken: string;
+  readonly pgid: number | null;
+  readonly descendants: readonly ProviderProcessRefLike[];
+  readonly capturedAt: number;
+  readonly note: string;
+}
+
+export type SessionTerminalState = 'RUNNING' | 'RELEASED' | 'STOPPED' | 'RECOVERY_REQUIRED';
+export type SessionTerminalWindowSize = 'APPLIED' | 'NOT_APPLIED';
+
+export interface SessionTerminalRecord {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly incarnationId: string;
+  readonly helperPid: number | null;
+  readonly helperStartToken: string | null;
+  readonly providerPid: number | null;
+  readonly ptySlave: string | null;
+  readonly windowSize: SessionTerminalWindowSize;
+  readonly state: SessionTerminalState;
+  readonly releaseCommandId: string | null;
+  readonly releaseRequestedAt: number | null;
+  /** The byte the Runtime wrote to ask the provider to release (audit, not a success criterion). */
+  readonly releaseByte: string | null;
+  readonly providerShutdownReportedAt: number | null;
+  readonly exitCode: number | null;
+  readonly exitSignal: string | null;
+  readonly exitReportedAt: number | null;
+  readonly sessionFile: string | null;
+  readonly entriesAtStart: number | null;
+  readonly lastEntryIdAtStart: string | null;
+  readonly entriesAtRelease: number | null;
+  readonly lastEntryIdAtRelease: string | null;
+  readonly releaseDetail: string | null;
+  readonly createdAt: number;
+  readonly endedAt: number | null;
+}
+
+export interface SessionTerminalWrite {
+  readonly terminal: SessionTerminalRecord;
+  readonly replayed: boolean;
+}
+
+export type SessionTerminalAttachmentKind = 'WRITER' | 'OBSERVER';
+export type SessionTerminalAttachmentState = 'ATTACHED' | 'DETACHED';
+
+export interface SessionTerminalAttachmentRecord {
+  readonly id: string;
+  readonly terminalId: string;
+  readonly sessionId: string;
+  readonly kind: SessionTerminalAttachmentKind;
+  readonly holderRef: string;
+  readonly state: SessionTerminalAttachmentState;
+  readonly cursorAtAttach: number;
+  readonly cursorAtDetach: number | null;
+  readonly commandId: string;
+  readonly attachedAt: number;
+  readonly detachedAt: number | null;
+  readonly detachedReason: string | null;
+}
+
+export type SessionTerminalAttachmentCode = 'ATTACHED' | 'REPLAYED' | 'ATTACHMENT_BUSY'
+  | 'TERMINAL_NOT_RUNNING';
+
+export interface SessionTerminalAttachmentAcquisition {
+  readonly attached: boolean;
+  readonly code: SessionTerminalAttachmentCode;
+  readonly attachment: SessionTerminalAttachmentRecord | null;
+  readonly holder: { readonly holderRef: string; readonly attachedAt: number } | null;
+}
+
 export type SessionPermissionClaimCode = 'CLAIMED' | 'STALE_INCARNATION' | 'ALREADY_DECIDING'
   | 'ALREADY_DECIDED' | 'NOT_FOUND';
 
@@ -8203,5 +8698,72 @@ function mapSessionPermissionRequestRow(
     requestedAt: row.requested_at,
     decidedAt: row.decided_at,
     decidedBy: row.decided_by,
+  };
+}
+
+interface SessionTerminalRow {
+  id: string; session_id: string; incarnation_id: string; helper_pid: number | null;
+  helper_start_token: string | null; provider_pid: number | null; pty_slave: string | null;
+  window_size: SessionTerminalWindowSize; state: SessionTerminalState;
+  release_command_id: string | null; release_requested_at: number | null; release_byte: string | null;
+  provider_shutdown_reported_at: number | null; exit_code: number | null; exit_signal: string | null;
+  exit_reported_at: number | null; session_file: string | null; entries_at_start: number | null;
+  last_entry_id_at_start: string | null; entries_at_release: number | null;
+  last_entry_id_at_release: string | null; release_detail: string | null;
+  created_at: number; ended_at: number | null;
+}
+
+function mapSessionTerminalRow(row: SessionTerminalRow): SessionTerminalRecord {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    incarnationId: row.incarnation_id,
+    helperPid: row.helper_pid,
+    helperStartToken: row.helper_start_token,
+    providerPid: row.provider_pid,
+    ptySlave: row.pty_slave,
+    windowSize: row.window_size,
+    state: row.state,
+    releaseCommandId: row.release_command_id,
+    releaseRequestedAt: row.release_requested_at,
+    releaseByte: row.release_byte,
+    providerShutdownReportedAt: row.provider_shutdown_reported_at,
+    exitCode: row.exit_code,
+    exitSignal: row.exit_signal,
+    exitReportedAt: row.exit_reported_at,
+    sessionFile: row.session_file,
+    entriesAtStart: row.entries_at_start,
+    lastEntryIdAtStart: row.last_entry_id_at_start,
+    entriesAtRelease: row.entries_at_release,
+    lastEntryIdAtRelease: row.last_entry_id_at_release,
+    releaseDetail: row.release_detail,
+    createdAt: row.created_at,
+    endedAt: row.ended_at,
+  };
+}
+
+interface SessionTerminalAttachmentRow {
+  id: string; terminal_id: string; session_id: string; kind: SessionTerminalAttachmentKind;
+  holder_ref: string; state: SessionTerminalAttachmentState; cursor_at_attach: number;
+  cursor_at_detach: number | null; command_id: string; attached_at: number;
+  detached_at: number | null; detached_reason: string | null;
+}
+
+function mapSessionTerminalAttachmentRow(
+  row: SessionTerminalAttachmentRow,
+): SessionTerminalAttachmentRecord {
+  return {
+    id: row.id,
+    terminalId: row.terminal_id,
+    sessionId: row.session_id,
+    kind: row.kind,
+    holderRef: row.holder_ref,
+    state: row.state,
+    cursorAtAttach: row.cursor_at_attach,
+    cursorAtDetach: row.cursor_at_detach,
+    commandId: row.command_id,
+    attachedAt: row.attached_at,
+    detachedAt: row.detached_at,
+    detachedReason: row.detached_reason,
   };
 }

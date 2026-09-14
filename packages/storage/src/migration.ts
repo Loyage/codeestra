@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 17;
+export const phase1SchemaVersion = 18;
 
 
 export const phase1Migration = `
@@ -879,9 +879,9 @@ END;
  * a duplicated fact), and a row for every published event so a projection can be read by
  * `progress_sequence` as well as by the global event cursor.
  *
- * Schema version 17 is reserved for this migration. It reached dev before the C2 lane's originally
- * reserved version 16 migration, so version 16 remains unused: a database may already be stamped 17
- * and would skip a later `version < 16` step. Any later C2 schema change must use a version above 17.
+ * Schema version 17 is reserved for this migration. The C2 lane's native-terminal migration landed
+ * after it, so that one is version 18 (below) and version 16 stays unused: a database may already be
+ * stamped 17 and would skip a later `version < 16` step.
  */
 export const verificationProgressMigration = `
 CREATE TABLE verification_runs_v17 (
@@ -935,4 +935,75 @@ CREATE TABLE operation_progress_events (
   PRIMARY KEY(operation_id,progress_sequence),
   UNIQUE(operation_id,dedup_key)
 ) STRICT, WITHOUT ROWID;
+`;
+
+/**
+ * Native terminal transport (ADR-0026). `session_terminals` records one PTY-hosted provider terminal:
+ * the PTY host helper and the provider it owns, the bounded terminal projection facts, and the
+ * evidence an explicit release is decided from — the release protocol that was written, the fact
+ * that the provider process exited, and the provider's own session file before and after. The exit
+ * code is stored as audit data only: FOUNDATION-040 measured that Ctrl+D and SIGTERM both exit 0, so
+ * no decision may branch on it.
+ *
+ * `session_terminal_attachments` is the client-facing half: at most one ATTACHED WRITER per terminal
+ * (enforced by a partial unique index) and any number of detached records, so a second writer gets a
+ * stable `ATTACHMENT_BUSY` instead of queueing. Terminal bytes are deliberately not persisted
+ * anywhere: the projection lives in Runtime memory only (ADR-0010 D06).
+ *
+ * Schema version 18 is reserved for this migration: the C3 lane's version 17 migration (above)
+ * reached dev first, and 16 is intentionally unused for the same reason it stayed unused there.
+ * Every `version <` step is kept and runs in ascending order.
+ */
+export const sessionTerminalMigration = `
+CREATE TABLE session_terminals (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+  incarnation_id TEXT NOT NULL REFERENCES session_incarnations(id),
+  helper_pid INTEGER CHECK(helper_pid IS NULL OR helper_pid > 0),
+  helper_start_token TEXT,
+  provider_pid INTEGER CHECK(provider_pid IS NULL OR provider_pid > 0),
+  pty_slave TEXT,
+  window_size TEXT NOT NULL CHECK(window_size IN ('APPLIED','NOT_APPLIED')),
+  state TEXT NOT NULL CHECK(state IN ('RUNNING','RELEASED','STOPPED','RECOVERY_REQUIRED')),
+  release_command_id TEXT,
+  release_requested_at INTEGER,
+  release_byte TEXT,
+  provider_shutdown_reported_at INTEGER,
+  exit_code INTEGER,
+  exit_signal TEXT,
+  exit_reported_at INTEGER,
+  session_file TEXT,
+  entries_at_start INTEGER,
+  last_entry_id_at_start TEXT,
+  entries_at_release INTEGER,
+  last_entry_id_at_release TEXT,
+  release_detail TEXT,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  ended_at INTEGER,
+  UNIQUE(session_id,incarnation_id),
+  CHECK((state='RUNNING') = (ended_at IS NULL))
+) STRICT;
+CREATE UNIQUE INDEX one_running_session_terminal
+  ON session_terminals(session_id) WHERE state='RUNNING';
+
+CREATE TABLE session_terminal_attachments (
+  id TEXT PRIMARY KEY,
+  terminal_id TEXT NOT NULL REFERENCES session_terminals(id),
+  session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+  kind TEXT NOT NULL CHECK(kind IN ('WRITER','OBSERVER')),
+  holder_ref TEXT NOT NULL CHECK(length(trim(holder_ref)) > 0),
+  state TEXT NOT NULL CHECK(state IN ('ATTACHED','DETACHED')),
+  cursor_at_attach INTEGER NOT NULL CHECK(cursor_at_attach >= 0),
+  cursor_at_detach INTEGER,
+  command_id TEXT NOT NULL CHECK(length(trim(command_id)) > 0),
+  attached_at INTEGER NOT NULL CHECK(attached_at >= 0),
+  detached_at INTEGER,
+  detached_reason TEXT,
+  UNIQUE(terminal_id,command_id),
+  CHECK((state='DETACHED') = (detached_at IS NOT NULL))
+) STRICT;
+CREATE UNIQUE INDEX one_writer_terminal_attachment
+  ON session_terminal_attachments(terminal_id) WHERE state='ATTACHED' AND kind='WRITER';
+CREATE INDEX session_terminal_attachments_by_session
+  ON session_terminal_attachments(session_id,attached_at);
 `;

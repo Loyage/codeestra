@@ -38,6 +38,13 @@ export function deriveCommandId(runCommandId: string, purpose: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+export class AgentRuntimeServiceError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = 'AgentRuntimeServiceError';
+  }
+}
+
 export interface RunTaskResult {
   readonly executionId: string;
   readonly sessionId: string;
@@ -462,6 +469,131 @@ export class AgentRuntimeCoordinator {
     }
   }
 
+  /**
+   * Holds back the Agent's `completed` event while a handoff request is open.
+   *
+   * ADR-0010 D03: the settled fact that follows a handoff fence is the takeover's *safe point*, not
+   * the completion of the Execution, because the conversation continues under a successor
+   * incarnation. Pi's own definition of `agent_settled` (no retry, no queued continuation) is
+   * exactly the "no new tools, nothing left running in this process" fact the handoff needs, so the
+   * Runtime records the safe point from the side channel and does not project a completion here.
+   */
+  #handoffSafeAdapter(
+    adapter: AgentAnswerAdapter,
+    sessionId: string,
+    onSuppressed: () => void,
+  ): AgentAnswerAdapter {
+    const storage = this.#storage;
+    return {
+      id: adapter.id,
+      probe: () => adapter.probe(),
+      start: (request) => adapter.start(request),
+      answer: (session, request) => adapter.answer(session, request),
+      observe: async function* observe(session, cursor) {
+        for await (const event of adapter.observe(session, cursor)) {
+          if (event.type === 'completed' && storage.getOpenSessionHandoffRequest(sessionId) !== null) {
+            onSuppressed();
+            continue;
+          }
+          yield event;
+        }
+      },
+    };
+  }
+
+  /**
+   * Starts the RPC successor that takes a conversation back from a released native terminal
+   * (ADR-0010 D04 step 6, ADR-0026). It reuses the *recorded* start plan of the Session — the same
+   * workspace, ownership token, revision and Agent configuration — and reopens the same provider
+   * session file, so "the same Execution continues" is a statement about identical inputs.
+   *
+   * The observation loop is started here, because this coordinator is what owns provider processes
+   * and their event projection; the caller only records the resulting incarnation.
+   */
+  async startAutomationSuccessor(input: {
+    readonly sessionId: string;
+    readonly commandId: string;
+    readonly reason: string;
+  }): Promise<{
+    readonly adapterId: string;
+    readonly projectId: string;
+    readonly sessionId: string;
+    readonly executionId: string;
+    readonly providerSessionId: string | null;
+    readonly sessionStorageRef: string | null;
+    readonly providerPid: number | null;
+    readonly processIdentity: unknown;
+  }> {
+    const plan = this.#storage.getAgentStartPlanForSession(input.sessionId);
+    if (plan === null) {
+      throw new AgentRuntimeServiceError('SESSION_PLAN_UNAVAILABLE',
+        'The Session start plan could not be reconstructed; refusing to start a successor with'
+        + ' different inputs');
+    }
+    const identity = this.#storage.getAgentSessionIdentity(input.sessionId);
+    if (identity === null) {
+      throw new AgentRuntimeServiceError('SESSION_NOT_FOUND', 'Agent Session was not found');
+    }
+    if (identity.sessionStorageRef === null) {
+      throw new AgentRuntimeServiceError('SESSION_FILE_UNRECORDED',
+        'The Session has no recorded provider session file to reopen');
+    }
+    const adapter = this.#registry.resolve(plan.adapterId);
+    const permissionMode = this.#permissionMode();
+    const started = await adapter.start({
+      operationId: deriveCommandId(input.commandId, 'successor'),
+      sessionId: plan.sessionId,
+      executionId: plan.executionId,
+      workspace: {
+        id: plan.workspaceId,
+        cwd: plan.workspacePath,
+        ownershipToken: plan.ownershipToken,
+      },
+      revision: {
+        id: plan.revisionId,
+        specification: plan.specification,
+        constraints: plan.constraints.map((constraint) => ({
+          id: constraint.id, text: constraint.text,
+        })),
+      },
+      knowledgeSnapshotRefs: [],
+      permissionMode,
+      resume: {
+        predecessorSessionId: plan.sessionId,
+        sessionStorageRef: identity.sessionStorageRef,
+        providerSessionId: identity.providerSessionId,
+      },
+      ...(plan.agentConfig === null ? {} : { agentConfig: plan.agentConfig }),
+      environment: this.#environment,
+    });
+    if (started.sessionStorageRef !== undefined && started.sessionStorageRef !== null
+      && started.sessionStorageRef !== identity.sessionStorageRef) {
+      // A successor that reopened a different conversation must not stay alive: it would be a second
+      // conversation claiming this Execution's identity.
+      if (supportsProcessRelease(adapter)) {
+        await adapter.releaseSession(plan.sessionId).catch(() => null);
+      }
+      throw new AgentRuntimeServiceError('SESSION_FILE_CHANGED',
+        `The automation successor reopened ${started.sessionStorageRef} instead of`
+        + ` ${identity.sessionStorageRef}`);
+    }
+    this.#ensurePump(plan.sessionId);
+    const processIdentity = started.processIdentity;
+    const providerPid = typeof processIdentity === 'object' && processIdentity !== null
+      && typeof (processIdentity as { pid?: unknown }).pid === 'number'
+      ? (processIdentity as { pid: number }).pid : null;
+    return {
+      adapterId: plan.adapterId,
+      projectId: plan.projectId,
+      sessionId: plan.sessionId,
+      executionId: plan.executionId,
+      providerSessionId: started.providerSessionId ?? null,
+      sessionStorageRef: started.sessionStorageRef ?? null,
+      providerPid,
+      processIdentity: processIdentity ?? null,
+    };
+  }
+
   #ensurePump(sessionId: string): void {
     if (this.#pumps.has(sessionId)) return;
     let session: ObservableAgentSession;
@@ -492,10 +624,12 @@ export class AgentRuntimeCoordinator {
       return;
     }
     let observed = false;
+    let suppressedCompletion = false;
     try {
       await observeAgentEvents({
         storage: this.#storage,
-        adapter,
+        adapter: this.#handoffSafeAdapter(adapter, session.sessionId,
+          () => { suppressedCompletion = true; }),
         sessionId: session.sessionId,
         now: this.#now,
         randomUUID: this.#randomUUID,
@@ -509,6 +643,16 @@ export class AgentRuntimeCoordinator {
         sessionId: session.sessionId,
         reason: error instanceof Error ? error.message : String(error),
       });
+    }
+    if (suppressedCompletion) {
+      // The Agent settled while a handoff was open: that settled fact is the takeover's safe point,
+      // and the conversation continues under the successor incarnation (ADR-0010 D03). The run is
+      // therefore *not* over and its Operation is deliberately left open instead of being closed
+      // from a Session state that the successor will change again.
+      this.#logger('a settled fact was treated as a handoff safe point, not as a completion', {
+        sessionId: session.sessionId,
+      });
+      return;
     }
     // The stream ending is a fact, but it is not a verdict: the run Operation is closed from the
     // recorded Session and Execution states, so an unknown end becomes RECONCILE_REQUIRED.
