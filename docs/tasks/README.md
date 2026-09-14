@@ -2959,6 +2959,35 @@ Adapter **报不出事实时不猜**：`facts` 字段整体缺席表示“未知
 - **多成员 IntegrationBatch**、**非 Git 共享资源**、**impact snapshot 的快照代重检**仍未做。
 - **F2 把「文档与实现不一致」的清单交给了用户裁决**（未静默改写规格），这些待裁决项仍未决。
 
+## 第一次真实 `dev → main` 提升（`main` `ac1ebc3` → `7c02878`，54 个提交）
+
+状态：**已执行并成功**（用户显式授权）。这是 ADR-0022 的能力就绪后、也是本项目历史上**第一次**把 `dev` 真实提升到 `main` 并重启稳定服务。
+
+| 项 | 值 |
+|---|---|
+| 提升前 `main` | `ac1ebc32ad891db9b875aa08afc6985b70d03ead` |
+| 提升后 `main` | `7c02878f400f289e0ff484552d7a4a1420aa944b`（= 当时的 `dev`） |
+| 推进的提交数 | 54 |
+| 方式 | 在已检出的 main 工作树内 `git merge --ff-only dev`（同时推进 ref/index/工作文件） |
+| `main` 工作树 state | 提升前 clean，提升后 clean；`phase1SchemaVersion = 21` |
+| 稳定 Runtime（提升前） | boot `3cdf511d…` / pid `12056` 的**前一代**：pid `12276` 持有 socket 与 lock |
+
+### 重启序列与证据（AGENTS.md 「重启 main 稳定服务」规程）
+
+在 `/Users/loyage/Documents/codeestra` 按顺序执行，每步都检查退出码，前一步失败不继续：
+
+1. `bun install --frozen-lockfile` → 退出码 0（「Checked 65 installs across 84 packages (no changes)」）。
+2. `bun run build:ui` → 退出码 0（`dist/index.html` + `index-CpBl2CLg.css` + `index-B6uql77h.js`）。
+3. `bun run codeestra stop` → 退出码 0；**持有 socket/lock 的 pid 12276 确认退出**，旧 `runtime.sock` 与 lock 随之消失。
+4. `bun run codeestra status` → 新 boot `3cdf511d-0b5c-4a38-8f4a-3338a8c4abe6` / pid **12056**，`status: "READY"`、`permissionMode: "FULL"`、`adapters: ["pi","codex"]`、`activeSessions: []`、lock `holderAlive: true` 且 `holderIdentityMatches: true`。
+5. `bun run codeestra ui --no-open` → 退出码 0；再次 `status` 得 `uiRunning: true`（AGENTS.md 要求 READY + uiRunning 两者同时成立才可报告恢复）。UI 链接与内存 token 只在终端与浏览器会话中存在，**未写入任何文档/日志/提交**。
+
+### 记录与诚实边界
+
+- **没有产生领域 `PromotionRecord` 行**：本次走的是 AGENTS.md 规定的「main 工作树内 `git merge --ff-only dev`」手动路径，而不是产品命令 `promotion prepare/approve/promote`。因此提升的 traceability 只在 Git 历史 + 本节，`promotion list` 看不到这次提升。若要两边一致，需后续在产品路径上补做一次提升（或决定不再需要）。
+- 提升包含 Wave A–E 全部提交 + Wave F 的 051/055/056/057，包含 schema 从 v11 到 v21 的十一个 additive 迁移（含 v16 永久空号），**没有**在 `main` 工作树上额外跑完整 `bun run check`（按用户本轮选择：只走既定序列）；`dev` 上的最终树已在提升前跑过完整 `check`（272 Vitest + 567 Bun tests，0 fail，0 孤儿进程，0 夹具）。
+- **提升后发现一个悬而未决的旧进程**：pid `65545`（`bun run …/codeestra/apps/runtime/src/main.ts`，**启动于 9月13日 22:02**，早于 ADR-0025 的 Runtime 生命周期记录）仍存活。证据：它**不持有** socket、lock 或 `runtime.sqlite`（`lsof` 为空），因此任何客户端都到不了它，`stop` 也无从命名它；但它是 pid `71909`（一个自 9月13日 22:06 起存活的 `pi` 进程，`cwd` 在 `~/.local/state/codeestra/worktrees/<old-id>/.orca-worktree-trash/…`）的父进程。**未动它们**：处理一个仍托管旧 Agent 子进程的进程需要用户决定，不能凭「看起来没用」就 SIGTERM。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、~~UI 投影~~（已由 FOUNDATION-050 完成 promotion/dependency 投影）。
