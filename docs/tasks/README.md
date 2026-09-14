@@ -2447,6 +2447,129 @@ scheduler reservations reconcile <project-id> [--json]
 - **架构文档 doc-sync 仍未做**：`sqlite-schema.md` 停在 v18，`state-machines.md`、`event-model.md` 缺 `CANCELLED`/`OperationProgressed`/`OperationSettled`，`agent-adapter.md` 缺 `controlledConfiguration`。
 - **UI**：`project impact *` 与 `scheduler capacity|reservations *` 只有 CLI/命令面完备，没有任何 UI 投影（`apps/ui/**` 本波未动）。
 
+## FOUNDATION-057 — CLI 类测试不再留下孤儿 Runtime 与临时夹具（Wave F / F4）
+
+状态：**已实现、已自查**（未 commit、未 push、未提升 `main`、未重启稳定 Runtime、未触碰稳定工作树
+`/Users/loyage/Documents/codeestra`）。lane 分支 `lane/f4-test-runtime-leak`，基线**固定**
+`dev@866fa027c7457cba640865f1eb7ecfe52a2863d6`（未 rebase、未合并新 dev、未 pull）。**未新增 ADR**：本格只在
+`apps/runtime/test/**` 内提供测试基础设施，**生产代码（`apps/runtime/src/**`、`apps/cli/src/main.ts`）一行未改**，
+不改变任何 Runtime/CLI 语义；对「CLI `ensureRuntime` 在测试模式下是否应更可停」的判断是**不改，理由见下**。
+
+### 根因（文件 + 具体原因，均为实测复现）
+
+1. **`apps/cli/src/main.ts:87` 的 `ensureRuntime()` 是「后台自启动」而不是「测试知道自己启动了它」。** 任何一条
+   只读命令（`status`、`project list`、`scheduler capacity get` …）在第一跳 `runtime.ping` 失败后都会用
+   `Bun.spawn([...runtimeEntry])` + `child.unref()` 起一个 Runtime，`CODEESTRA_HOME` 由环境继承。这个子进程与测试
+   进程**立即解除父子关系**（父 CLI 退出后归 launchd），所以：测试进程无法 `await` 它，不知道它存在，也无法通过
+   子进程句柄回收它。这是「测试里跑 CLI = 可能凭空多一个 Runtime」的来源。
+2. **停 Runtime 的动作写在测试体最后一行，而不是 teardown。** 除 `cli-capacity-slots` 之外的 CLI 测试都是
+   `test()` 结尾 `await cli(['stop'], environment)`，`afterEach` 里只 `cleanupTemporaryDirectories()`。任何早于该行的
+   断言失败、超时或异常都会跳过 `stop`；而 `afterEach` 仍然把 home 目录删掉，于是留下「进程还活着、home 已被 unlink
+   的不可达孤儿」——正是 FOUNDATION-046/054 手工清理时最难归属的形态。**实测**：给 `cli-open.test.ts` 第一个测试插入
+   一条必失败断言后，多出 **1 个**孤儿 Runtime，其 home 已被删除。
+3. **`cli-capacity-slots.test.ts`（6 个 test / 1 次 `stop`）在成功路径上每次都漏。** 只有第 6 个测试调了
+   `cli(['stop'])`，而那之后它还继续跑 CLI 命令（`sessions reservations list/get`、`reconcile`、`acquire`），
+   `ensureRuntime()` 又起了一个新的 Runtime。所以**绿灯跑完也固定漏 6 个**。
+4. **`socket-response.test.ts` / `event-subscription-ipc.test.ts` 登记了临时目录却从不调用清理。** 两者的
+   `afterEach` 只有 `child.kill('SIGKILL')`；`registerTemporaryDirectory()` 注册的 repo/home 只有在**同一个 bun 进程里
+   后面还有别的文件**调用 `cleanupTemporaryDirectories()` 时才会被顺手删掉（registry 是模块级共享的）。单独跑这两个文件
+   （或任何以它们结尾的文件选择，例如只跑 `apps/runtime/test/socket-response`）→ **8 个夹具目录 100% 残留**。
+5. **`cleanupTemporaryDirectories()` 的顺序与注册表语义都不安全。** 它先 `splice(0)` 再 `rmSync`：删除失败不会重试；
+   它也不区分「这个 home 里还有活着的 Runtime」，因此会主动制造「home 被删的孤儿」。
+6. **没有任何断言检查「跑完有没有多出进程/目录」。** 所以上述泄漏不会让任何测试变红，只能靠人工 `ps`/`ls` 发现。
+
+### 机制：`apps/runtime/test/support/runtime-reclamation.ts`（新，供所有 CLI/e2e 测试复用）
+
+- **登记**：`registerTemporaryDirectory`（原在 `agent-fixture.ts`，现由本模块拥有并再导出）、`registerRuntimeHome(home)`、
+  `registerRuntimeProcess(pid, home)`（测试自己 `Bun.spawn` 的子进程）。
+- **发现**：teardown 时对每个已登记夹具目录检查它自己与它的 `home/` 子目录是否存在 `runtime.lock` —— 活着的 Runtime
+  一定有锁，干净停掉的没有。因此**测试不需要显式说「我启动过 Runtime」**，「CLI 偷偷起了一个」也能被找到
+  （自检里已断言：只登记目录、没有显式登记 Runtime 的情况下仍能停掉它）。
+- **归属校验（三重证据，全部成立才允许发信号）**：`runtime.lock`/boot 记录里的 **`cwd` 必须是本工作树**、**`argv` 必须
+  指向本工作树的 `apps/runtime/src/main.ts`**、**记录的 OS start token 必须与当前 pid 的 start token 相等**；
+  另外 home 必须在本机临时目录内，且 pid 不能是测试进程自身/其父进程/1。任何一条无法证明 → 记入 `unattributed` 并
+  **不发信号**（对「看起来是本工作树的 Runtime 但证明不了」的情形打印一行告警）。
+- **回收**：`SIGTERM`（Runtime 自己的有序 shutdown）→ 轮询等待退出（zombie 视为已退出，`UNKNOWN` 按「仍活着」失败关闭），
+  宽限 15s。**从不 `SIGKILL`**；宽限内不退出 → 记入 `unconfirmed`、**保留它的 home 目录**并在 stderr 打印路径，
+  然后按 `strict`（默认开）让该文件的 teardown 失败——让泄漏可见而不是被整理掉。
+- **夹具回收**：停止进程之后才删除登记目录；`preserveFailureEvidence(reason)` 是唯一的「保留现场」通道，会打印所有保留
+  路径并写进报告；`unconfirmed` 进程的 home 也会被保留。成功与失败路径都会执行。
+- **`CODEESTRA_HOME` 安全底线**：`normalizeRuntimeEnvironment()`/`runCli()` 是测试跑 CLI 的唯一入口，它要求显式给出
+  `CODEESTRA_HOME`、必须是本机临时目录（`isTemporaryPath`，`/var` 与 `/private/var` 归一），否则抛错。缺省值不存在——
+  忘记设置会**报错**而不是连到开发者真实 home；`~/.local/state/codeestra` 与稳定工作树一律被拒（自检已断言）。
+- **兼容**：`agent-fixture.ts` 的 `registerTemporaryDirectory`/`cleanupTemporaryDirectories` 保留并改为委托同一注册表；
+  `cleanupTemporaryDirectories()` 现在遇到仍带 `runtime.lock` 的目录会**保留并告警**（提示改用
+  `reclaimTestResources()`），不再主动制造「home 被删的孤儿」。只跑夹具、不起 Runtime 的服务类测试无需改动。
+- **生产代码为什么没改**：`ensureRuntime()` 的 `unref()` 行为是产品语义（CLI 必须能自成服务，FULL 下 0 确认），
+  改它（如增加 `--no-daemon`/测试开关）会动到命令面语义；本格的实测已证明**测试侧可以完备地发现并停掉这个进程**
+  （启动后必写 `runtime.lock`，含 pid/startToken/argv/cwd），所以按「先报告再动」的纪律**不改运行时而在此报告**：
+  如果将来要让 `ensureRuntime` 在测试模式下同步可控（例如把子进程 handle 写进一个可读的记录），那需要一次独立决策。
+
+### 改动前后实测数字（本机另有 F1/F3 两个 lane 同时在跑测试，故所有测量都用**独立 `TMPDIR`** 隔离，
+归属判据始终是「argv 指向本工作树的 Runtime 入口 + cwd = 本工作树」）
+
+| 测量 | 改动前（`866fa02`，`TMPDIR=/tmp/f4-b-tmp`） | 改动后（本格最终树，`TMPDIR=/tmp/f4-final-tmp`） |
+|---|---|---|
+| `bun run check` 退出码 | 0（532 pass / 0 fail，61 文件） | **0（538 pass / 0 fail，62 文件）** |
+| 新增孤儿 Runtime | **6**（全部来自 `cli-capacity-slots`，其中 5 个 home 已被删） | **0** |
+| 残留临时夹具目录 | **0**（全量 check 中被后续文件的顺手清理掩盖） | **0** |
+| 单独跑 `socket-response` + `event-subscription-ipc` | 残留夹具目录 **8**（100%） | （已并入上表全量验证；见下自检） |
+| 故意让 `cli-open` 第一个测试断言失败 | 新增孤儿 Runtime **1**（home 已被删）、夹具 0 | 新增孤儿 Runtime **0**、夹具 **0** |
+| `bun run check:fast` | — | **退出码 0**（根 + UI typecheck、265 vitest、336 bun unit / 33 文件、0 fail） |
+
+### 失败路径验证（deliberate failure probe，探针文件用完即删）
+
+- **探针 A（默认回收）**：一个用 `runCli(['status'])` 偷偷起了 Runtime、随后断言失败的测试 → 跑完 `orphan_count=0`，
+  夹具目录 0，Runtime 收到 `SIGTERM` 后自行退出。
+- **探针 B（显式保留现场）**：同一形态但调用 `preserveFailureEvidence(...)` → 目录保留、`[test-reclamation] keeping
+  evidence (…): /tmp/f4-probe/codeestra-f4probe-b-m85EBv` 打到 stderr，`detect` 也列得出来（**人能找得到**）。
+- **失败路径下测试仍然失败**（2 fail），没有被 teardown 掩盖；本格没有放宽任何断言、没有新增跳过/重试。
+
+### 自检（不靠自觉）
+
+`apps/runtime/test/test-resource-reclamation.test.ts`（6 项，in `test:storage`/`test:e2e`，不进 `check:fast`）断言：
+① 没有/非临时/稳定 home 的 CLI 调用被拒；② 只登记目录也能发现并停掉 CLI 偷偷起的 Runtime，且 home 被删、
+`inspectRuntimeHome` 变 `NOT_RUNNING`；③ 无法归属的活进程被如实报告、**从不发信号**（`sleep` 仍在）；④ 永远不会把
+测试进程自己当成 Runtime；⑤ `preserveFailureEvidence` 保留现场并打印；⑥ 报告的 `unconfirmed` 为空。
+**边界**：它证明的是「机制正确」，不能阻止别人新增一个**完全不用**本辅助的 CLI 测试文件（没有全局钩子；bun 的
+`--preload` 全局 afterAll 会改测试配置语义，本格不做）。
+
+### 被改动的测试文件清单（只动 teardown 与 CLI 启动入口，断言/覆盖未动）
+
+- 新：`apps/runtime/test/support/runtime-reclamation.ts`、`apps/runtime/test/test-resource-reclamation.test.ts`。
+- 改：16 个 `apps/runtime/test/cli-*.test.ts`（`afterEach` 改为 `reclaimTestResources()`；本地 `cli()` 改为
+  `runCli(args, environment, { entry: cliEntry })`）、`apps/runtime/test/socket-response.test.ts`、
+  `apps/runtime/test/event-subscription-ipc.test.ts`、`apps/runtime/test/runtime-lifecycle.test.ts`（teardown 由
+  「按身份 SIGKILL」改为共享的「SIGTERM + 等待」）、`apps/runtime/test/support/agent-fixture.ts`（注册表委托）、
+  `package.json`（只在 `test:unit` ignore 列表与 `test:e2e` 列表加入本格自检文件）。
+- **未改**：`apps/runtime/src/**`、`apps/cli/src/**`、`packages/**`（含 `packages/**/test/**`）、`apps/ui/**`、
+  `docs/architecture/**`、`docs/decisions/**`、`PROJECT_SPEC.md`、`AGENTS.md`；本文件只插入本节（在 `## NEXT` 之前）。
+
+### 实际跑过的检查与结果
+
+- `bun run typecheck`：退出码 0（多次）。
+- `bun run check:fast`（最终树）：**退出码 0**。
+- `bun run check`（最终树，`TMPDIR=/tmp/f4-final-tmp`）：**退出码 0** —— 538 pass / 0 fail（62 文件）、UI 构建成功；
+  跑完后新增孤儿 Runtime **0**、临时夹具残留 **0**（`ps` + `lsof` 三重归属核验）。
+- 过程中如实记录到两次**既有、与本格无关的负载敏感抖动**（本机同期有另外两个 lane 在跑测试）：
+  `runtime-lifecycle.test.ts`「a deadline that never fires cannot hold a process open」一次（对照组 `raw 0` 得到 `raw 1`，
+  单独重跑 10 pass / 0 fail，与 FOUNDATION-050/054 记录同一处）；
+  `packages/agent-adapters/test/codex-adapter.test.ts`「reports an unexpected provider exit as disconnected…」一次
+  （`PROCESS_IDENTITY_UNAVAILABLE`：刚 spawn 的 stub 子进程已退出，读不到 start token；单独重跑 21 pass / 0 fail）。
+  两者都不起 Runtime、不创建夹具，均未因本格改动而改变行为；**不把它们算成本格修复成果**。
+- 稳定 Runtime（`/Users/loyage/Documents/codeestra`）的两个进程全程未被触碰；回收只对「argv 指向本工作树 + cwd = 本
+  工作树 + home 在本次临时目录内」的进程发 `SIGTERM`，其它 lane 与本机其它进程一个未动；全程未使用 `SIGKILL`。
+
+### 未验证 / 不得当成已成立
+
+- **其它工作树/其它 lane 的测试仍会泄漏**（它们的代码未改）；本格的清理脚本只回收本工作树的进程，未回收也未声称回收
+  别人的。本机同期存在的 F1/F3 lane 孤儿进程**保持原样**（归属属于它们）。
+- **没有全局钩子**：新增一个完全不 import 本辅助、且不写 `afterEach` 的 CLI 测试文件仍会泄漏。自检只能证明机制正确。
+- **`bun test` 的文件级并行**：本格结论基于「同一次 `bun test` 内文件顺序执行、support 模块注册表在文件间共享」这一实测
+  行为（socket/ipc 的目录历史上是靠后面文件的清理顺带删掉的）。若将来 bun 改成并行执行文件，共享注册表的假设需要重新验证。
+- **未验证**：Windows；Linux（`readProcessStartToken` 走 `/proc`，逻辑相同但未实机跑）；`unconfirmed` 分支只在自检里用
+  合成记录覆盖，没有制造「SIGTERM 后仍不退出」的真实 Runtime（那需要一个故意不响应 TERM 的构建，本格不做）。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、~~UI 投影~~（已由 FOUNDATION-050 完成 promotion/dependency 投影）。

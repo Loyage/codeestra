@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { runtimeResponseSchema, type ProjectIdentity,
   type RuntimeRequest } from '@codeestra/contracts';
-import { git, registerTemporaryDirectory } from './support/agent-fixture.js';
+import { git } from './support/agent-fixture.js';
+import {
+  reclaimTestResources,
+  registerRuntimeProcess,
+  registerTemporaryDirectory,
+} from './support/runtime-reclamation.js';
 
 /**
  * A response larger than the socket buffer must still arrive in full and close the connection.
@@ -17,11 +22,11 @@ import { git, registerTemporaryDirectory } from './support/agent-fixture.js';
 const runtimeEntry = resolve(import.meta.dir, '../src/main.ts');
 /** The buffer boundary that truncated the payload; the test must exceed it to be meaningful. */
 const socketBufferBytes = 8_192;
-const processes: Bun.Subprocess[] = [];
 
-afterEach(() => {
-  for (const child of processes.splice(0)) child.kill('SIGKILL');
-});
+// FOUNDATION-057: teardown stops every Runtime this file started and removes its fixtures, on the
+// success path and on the failure path. It signals by the identity the Runtime recorded in this
+// file's own temporary home, never by name, and it waits for the exit instead of killing blindly.
+afterEach(async () => { await reclaimTestResources(); });
 
 type ClientRequest = RuntimeRequest extends infer Request
   ? Request extends RuntimeRequest ? Omit<Request, 'requestId' | 'schemaVersion'> : never
@@ -50,7 +55,7 @@ async function startRuntime(): Promise<RuntimeHarness> {
     stdin: 'ignore', stdout: 'ignore', stderr: 'ignore',
     env: { ...Bun.env, CODEESTRA_HOME: home },
   });
-  processes.push(child);
+  registerRuntimeProcess(child.pid, home);
   const harness = { home, repo, socketPath: join(home, 'runtime.sock') } as const;
   await waitForRuntime(harness);
   return harness;

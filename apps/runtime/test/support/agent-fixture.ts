@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -9,16 +9,14 @@ import {
 } from '@codeestra/contracts';
 import { inspectRepository } from '@codeestra/git';
 import { Phase1Database } from '@codeestra/storage';
+import {
+  cleanupTemporaryDirectories,
+  registerTemporaryDirectory,
+} from './runtime-reclamation.js';
 
-const directories: string[] = [];
-
-export function registerTemporaryDirectory(path: string): void {
-  directories.push(path);
-}
-
-export function cleanupTemporaryDirectories(): void {
-  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
-}
+// The fixture registry lives in `runtime-reclamation.ts` so Runtime homes and plain fixture
+// directories are reclaimed from one place (FOUNDATION-057).
+export { cleanupTemporaryDirectories, registerTemporaryDirectory };
 
 export async function git(cwd: string, args: readonly string[]): Promise<string> {
   const process = Bun.spawn(['git', '-C', cwd, ...args], { stdout: 'pipe', stderr: 'pipe' });
@@ -62,7 +60,8 @@ export const fixtureRevisionId = '60000000-0000-4000-8000-000000000006';
 export async function createAgentFixture(options: AgentFixtureOptions = {}): Promise<AgentFixture> {
   const repo = mkdtempSync(join(tmpdir(), 'codeestra-agent-repo-'));
   const home = mkdtempSync(join(tmpdir(), 'codeestra-agent-home-'));
-  directories.push(repo, home);
+  registerTemporaryDirectory(repo);
+  registerTemporaryDirectory(home);
   await git(repo, ['init', '-b', 'main']);
   // Repository-local identity only: the fixture never writes global Git config.
   await git(repo, ['config', 'user.name', 'Test']);

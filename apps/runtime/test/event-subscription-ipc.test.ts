@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { runtimeStreamFrameSchema, type RuntimeRequest, type RuntimeStreamFrame,
   type ProjectIdentity } from '@codeestra/contracts';
-import { git, registerTemporaryDirectory } from './support/agent-fixture.js';
+import { git } from './support/agent-fixture.js';
+import {
+  reclaimTestResources,
+  registerRuntimeProcess,
+  registerTemporaryDirectory,
+} from './support/runtime-reclamation.js';
 
 /**
  * End-to-end proof over the real Unix socket: the Runtime must serve one-shot commands and
@@ -12,11 +17,10 @@ import { git, registerTemporaryDirectory } from './support/agent-fixture.js';
  * committed *after* it connected rather than only a replay.
  */
 const runtimeEntry = resolve(import.meta.dir, '../src/main.ts');
-const processes: Bun.Subprocess[] = [];
 
-afterEach(() => {
-  for (const child of processes.splice(0)) child.kill('SIGKILL');
-});
+// FOUNDATION-057: teardown stops every Runtime this file started and removes its fixtures, on the
+// success path and on the failure path, by the identity recorded in this file's own temporary home.
+afterEach(async () => { await reclaimTestResources(); });
 
 /** Distributive Omit keeps each command's own fields instead of collapsing the union. */
 type ClientRequest = RuntimeRequest extends infer Request
@@ -46,7 +50,7 @@ async function startRuntime(): Promise<RuntimeHarness> {
     stdin: 'ignore', stdout: 'ignore', stderr: 'ignore',
     env: { ...Bun.env, CODEESTRA_HOME: home },
   });
-  processes.push(child);
+  registerRuntimeProcess(child.pid, home);
   const harness = { home, repo, socketPath: join(home, 'runtime.sock') } as const;
   await waitForRuntime(harness);
   return harness;
