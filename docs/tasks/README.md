@@ -2500,6 +2500,116 @@ scheduler reservations reconcile <project-id> [--json]
 - 未改写任何 ADR；如果上述不一致需要新决策，应由相应 lane 写新 ADR，而不是本格。
 - 本格不包含调度引擎；F1（FOUNDATION-055）会补 `scheduler.md` 的「引擎真的会跑」部分。
 
+## FOUNDATION-056 — Agent 在散文里提问：不得静默记为 `SUCCESS`（ADR-0004/0014 语义内）
+
+状态：**已实现**，并在 CLI/命令面端到端验证（真实 CLI + 真实 Runtime + 协议 stub provider + `CODEESTRA_HOME=/tmp/ce-f3`）。
+本格是用户已拍板的**保守方案**：只保证「不得静默记为 `SUCCESS`」。**不新增审批/Attention 语义、不改 Task/Execution 状态机、不新增任何确认步骤、不加 schema 版本、不加迁移。**
+任务来源：`## NEXT` 第 6 条 = FOUNDATION-030「剩余问题」的第一条（散文提问仍被记为 `SUCCESS`）。
+
+### 要解决的问题
+
+Agent 有时**不调用任何工具、直接在散文里问一个问题然后结束轮次**。今天这条结束在 `agent_sessions.exit_json` 里就是 `outcome: "SUCCESS"`、
+在 run Operation 里就是 `AGENT_SETTLED/SUCCEEDED`，于是任务看起来「成功但什么都没做」——`SUCCESS` 没有任何说明。
+本格给这种结束一个**稳定的 reason code 与可审计的事实**，让它在命令面上自我解释；**不**把它升级成 Attention 或 `WAITING_FOR_USER`（那会改变状态机语义，属于本格之外）。
+
+### 判据（集中一处、可单测、明确是启发式）
+
+**事实层（Adapter，`packages/agent-adapters/src/pi-adapter.ts`）**：只从 provider 自己的 RPC 记录里读，不做任何解释，随 `completed` 事件的 `facts` 上报：
+
+| 事实 | 来源与含义 |
+|---|---|
+| `toolCallCount` | 整个 run 内 provider 报出的工具调用，**按 provider 给的 `toolCallId` 去重**（`tool_execution_start`、助手消息里的 `toolCall` 内容块、`toolResult` 消息三处任一出现即算；同一 id 只算一次） |
+| `finalAssistantText` | 最后一条**有文本**的助手消息的 text 块按顺序拼接（只有工具调用的助手消息不算“结束语”），**保留尾部**并截断到 2000 字符 |
+| `finalAssistantTextTruncated` | 上面的截断是否发生（规则看的是尾部，所以截断不影响判定，但必须如实记录） |
+| `finalAssistantStopReason` | provider 自己报的 stopReason（`stop`/`toolUse`/`error`…），未报则 `null` |
+
+Adapter **报不出事实时不猜**：`facts` 字段整体缺席表示“未知”，不表示“没有工具调用”。
+
+**规则层（纯函数，`packages/domain/src/agent-completion-signal.ts`）**：只有同时满足以下条件才产出 note：
+
+1. `toolCallCount === 0`（整个 run 没有任何工具调用证据）；
+2. `finalAssistantText` 去空白后非空；
+3. 去掉尾部装饰字符（`* _ ` " ' ’ ” ) ] } 】 》 > .`）后，**最后一个字符是 `?` 或 `？`**；
+4. 问号之前还剩 **≥2 个字符的实际文字**（去掉装饰字符与空白后计），所以裸 `?`、`??`、`**?` 都不算。
+
+命中后记 `code = PROSE_QUESTION_NO_TOOL_USE`、`heuristic = NO_TOOL_CALLS_IN_RUN_AND_TRAILING_QUESTION_MARK`，并把**它看到的那份 facts 原样带在 note 里**（`note.facts`），所以任何人都能重新核对这条判定。
+
+**这是启发式，不是语义判定。** note 的文案本身写明这一点（“This is a heuristic about the shape of the ending, not a semantic judgement that the Agent is waiting for an answer.”）。
+
+#### 漏报 / 误报取舍（宁可漏报，不要误报）
+
+把正常完成错标成可疑，和把可疑完成说成正常，是同一种谎报。因此规则往**窄**里取：
+
+- **会漏报（已知、故意）**：中文问句不以 `？` 结尾（例如 `…可以吗`）；问号后面还有别的正文；Adapter 不提供 `facts`（**Codex 目前不提供**，见下）；只有 `?` 或极短尾巴；认为“提问”但不以问号结尾的英文句式。
+- **计数取 run 级而不是 turn 级**：turn 级会把「干完活之后随手问一句 Want me to also…?」也算上，那恰恰不是用户抱怨的「成功但什么都没做」。run 级更少触发，符合“宁可漏报”。
+- **不做语义判定**：不判断“是不是真的在等用户回答”，也因此**不**产生 Attention、**不**进 `WAITING_FOR_USER`、**不**增加任何确认步骤（不变量 9/21/23、第一原则 1 与 3）。
+- **不许把结论写进状态**：note 只是一个附注事实，Task/Execution 状态一个都不变。
+
+### 记录与可见（命令面）
+
+- **持久化**：`agent_sessions.exit_json`（既有 JSON 列，**无需迁移**）存 `facts` 与 `note`；`AgentSessionCompleted` 领域事件 payload 也带 `note`，所以 `events list/tail` 与事件订阅都能读到同一条事实。
+- **命令面字段**：`task status <project-id> <task-id> --json` → `executions[].session.completion = { outcome, evidenceRef, failure, facts, note }`；`note` 为 `null` 表示这次完成不需要附注。
+- **CLI 显示**：`task status` 仍打印 JSON（`--json` 现在被显式接受，默认即是），但当存在 note 时**额外向 stderr 打印一行** `[note] <execution> (<session>) ended SUCCESS with PROSE_QUESTION_NO_TOOL_USE: …`；未知 flag 仍是 usage error（exit 2）。stdout 的 JSON 不被污染。
+- **明确没做**：run Operation 的 `AGENT_SETTLED/SUCCEEDED` 一字未改（所以“命令面哪里还能看到未加说明的 SUCCESS”这个问题的答案是：run Operation 仍是既有措辞，**说明性的那条事实挂在执行/会话完成上**）；不改 `apps/ui/**`（本波不在领地）。
+
+### 测试
+
+- `packages/domain/test/agent-completion-signal.test.ts`（vitest，7 项）：命中形态（`?`/`？`、Markdown 装饰、多段文本尾问号）、命中时 facts 原样带回、有工具调用（含“结构化提问也是工具调用”）不命中、`null`/空/纯空白/无问号/问号在中间/中文无问号不命中、裸 `?` 不命中、截断尾巴仍命中、幂等（同输入同输出）。
+- `packages/agent-adapters/test/pi-completion-facts.test.ts`（bun，4 项，协议 stub provider）：无工具 + 尾问号 → `toolCallCount: 0` 与精确文本；同一 `toolCallId` 被三条记录（start / 助手消息 / toolResult / `turn_end` 重复）提及 → **只算 1**；超长文本 → 保留 2000 字符尾部且 `finalAssistantTextTruncated: true`；只有工具调用、没有任何助手散文 → `finalAssistantText: null`。
+- `apps/runtime/test/agent-observation-service.test.ts`（bun，7 项，真实 storage + 真实 Adapter 合约 + 确定性 fake Agent）：散文提问结束 → `PROSE_QUESTION_NO_TOOL_USE` 被记录（exit_json 与 `AgentSessionCompleted` 事件各一处）、结果仍是 `SUCCESS`/Session `EXITED`、**没有 Attention**、Task 仍 `RUNNING`；有工具调用的正常完成 → **不标注**（但 facts 仍记录）；Agent 不报 facts → 不标注；**结构化 `ask_user_question` 路径**（一条 QUESTION Attention + 在观察循环内投递回答，与 Runtime pump 同路径）→ 仍然只有那一条 Attention、完成时 `toolCallCount = 1` 且 `note: null`，**不被启发式重复标注**；FAILURE 完成 → 不附注（失败本身已解释自己）；断连（`exit_json` 不是完成 payload）→ `completion: null`，**不编造**；**重复事件/重放** → 第二次是 `duplicate: true`，`adapter_events` 仍只有一行、note 不重复记录。
+- `apps/runtime/test/cli-prose-question.test.ts`（bun，2 项，**真实 CLI + 真实 Runtime + 协议 stub provider**）：
+  1. 散文提问结束：`task status --json` 报 `note.code = PROSE_QUESTION_NO_TOOL_USE`（附 facts）、stderr 有 `[note]` 行、`task.state` 仍是 `RUNNING`、`attention list` 为 `[]`、`events list` 里 `AgentSessionCompleted` 带同一 code、run Operation 仍是 `AGENT_SETTLED`、未知 flag exit 2；
+  2. 有工具调用且同样以问号结尾：`note: null`、`facts.toolCallCount = 1`、stderr 无 `[note]`。
+
+实际跑过的检查（如实记录，不把「重跑通过」当作「从没失败」）：
+
+- `bun run test`（vitest）：5 文件 / **272 项通过**。
+- `bun run test:unit`：**347 项通过（0 fail，35 文件）**。
+- `bun run check`（`CODEESTRA_HOME=/tmp/ce-f3`）第一次：typecheck、UI typecheck、272 vitest、unit 均通过；`test:storage` 跑 **543 项 / 64 文件**，其中 **1 项失败**是既有负载敏感抖动（`session-handoff-service.test.ts`「makes the incarnation check part of the claim, so two answers cannot both win」，与本格无 import 关系），单独重跑该文件 **11 pass / 0 fail**；因为这一步非零退出，`build:ui` 未执行。
+- `bun run check` 第二次（**最终树**，当时 unit 为 345 项）：**退出码 0** —— 根与 UI `tsc --noEmit`、272 项 Vitest、345 项 unit、**543 项 Bun tests（0 fail，64 文件）**、UI Vite 构建全部通过。
+- 另外单独跑过三次 `bun run test:storage`：两次 **543 pass / 0 fail**，一次 1 fail（同一类抖动，本次未捕获到用例名）；抖动用例集中在 handoff/PTY 时序断言，与本格新增文件无关。
+- 本格新增/改动的文件单独跑均 0 fail：`bun test apps/runtime/test/agent-observation-service.test.ts`（7 pass）、`bun test packages/agent-adapters/test/pi-completion-facts.test.ts`（4 pass）、`bun test apps/runtime/test/cli-prose-question.test.ts`（2 pass）。
+- **手工端到端（真实 CLI + 真实 Runtime + 协议 stub provider，`CODEESTRA_HOME=/tmp/ce-f3`）**：
+  - `task run` 退出码 0；`task status <p> <t> --json` 退出码 0，`executions[0].session.completion` 为
+    `{"outcome":"SUCCESS","facts":{"toolCallCount":0,"finalAssistantText":"Which package manager should I use?","finalAssistantTextTruncated":false,"finalAssistantStopReason":"stop"},"note":{"code":"PROSE_QUESTION_NO_TOOL_USE","heuristic":"NO_TOOL_CALLS_IN_RUN_AND_TRAILING_QUESTION_MARK",…}}`，
+    Task 仍为 `RUNNING`；stderr 多出 `[note] <execution> (<session>) ended SUCCESS with PROSE_QUESTION_NO_TOOL_USE: …`。
+  - `attention list` → `[]`（没有新增 Attention）；`events list` → `AgentSessionCompleted.payload.note.code = PROSE_QUESTION_NO_TOOL_USE`；
+    run Operation 仍为 `SUCCEEDED`/`AGENT_SETTLED`（本格未改它的措辞）；`task status … --bogus` → **exit 2**。
+  - 对照组（stub 先调一次工具、再以问号结尾）：`note: null`、`facts.toolCallCount: 1`、stderr 无 `[note]`。
+  - 该 home 已 `stop` 并确认进程退出；夹具（`/tmp/ce-f3{,-repo,-tools,-assets}`）已删除。
+- 全程只用 CLI 与 Runtime 命令面（含 `--json`、退出码、`events list`）驱动断言；没有使用 computer-use、桌面或浏览器自动化，没有获取电脑控制权。
+
+### 测试夹具与进程回收（归属证据）
+
+- 本格自己启动的夹具与进程全部回收：手工验收的 `/tmp/ce-f3{,-repo,-tools,-assets}`、以及 `bun run check` 跑出的 6 个临时 home Runtime
+  （`codeestra-slot-home-*`，来自既有的 `cli-capacity-slots` e2e 遗留：这些 CLI 测试会 `ensureRuntime` 启动临时 home 的 Runtime 而不 stop）。
+- 回收判据是**三重证据同时成立**才 SIGTERM（不是 SIGKILL）：**argv 指向本格工作树的 Runtime 入口** + **cwd = 本格工作树** + **打开的状态文件落在自己的临时夹具 home**。
+  6 个进程全部 SIGTERM 后自行退出（`exited`），稳定 Runtime（`/Users/loyage/Documents/codeestra`）与其它 lane（`f1-scheduling-engine`、`f4-test-runtime-leak`）的进程**一个未动**。
+- 共享 OS 临时目录里仍有几个无法归属于本格的夹具目录（`codeestra-config-*`、`codeestra-deps-home-*`，其它 lane 同时在跑同名测试文件），归属无法证明，**按规则不删**。
+
+### 未验证（不得当成已成立）
+
+- **真实 provider 的语气/语言差异**：端到端用的是协议 stub provider，**不是真实 Agent 集成证据**。中文问句（不带 `？` 结尾）、多段叙述、Markdown 结构、emoji 结尾等真实模型输出形态，本格只有单元级覆盖，**没有真实模型验证**。
+- **真实模型触发频率**：本格给不出任何统计意义上的漏报/误报率。真实模型是否会频繁命中这条启发式（例如习惯性地以“…?”收尾）**未知**。
+- **Codex 未接入事实层**：`codex-adapter.ts` 未改动，它上报的 `completed` 事件没有 `facts`，因此 Codex 的散文提问结束**不会被标注**（漏报，不是谎报）。真实 Pi 之外的行为未经任何验证。
+- **PTY/TUI 接管路径下的事实收集**：`session.handoff` 把 settled 当作安全点而非完成，本格未在真实 TUI 交接后验证 note 的生成。
+- **真实 `dev → main`、稳定 Runtime**：本格没有 push、没有提升 `main`、没有重启任何稳定 Runtime；`/Users/loyage/Documents/codeestra` 未被触碰。
+
+### 共享槽位与本格改动文件
+
+- **独占**：`apps/runtime/src/agent-observation-service.ts`（追加 note 计算）、本格测试文件（`packages/domain/test/agent-completion-signal.test.ts`、`packages/agent-adapters/test/pi-completion-facts.test.ts`、`apps/runtime/test/agent-observation-service.test.ts`、`apps/runtime/test/cli-prose-question.test.ts`）、本文件本节。
+- **共享槽位**：`packages/domain/src/agent-completion-signal.ts`（新纯函数模块，只**追加**，并在 `index.ts` 追加一行 export）、`packages/contracts/src/index.ts`（只追加 `agentCompletionFactsSchema` 与 `completed` 事件上一个**可选** `facts` 字段；命令 union 一行未动）、`apps/cli/src/main.ts`（`task status` 的 `--json` 接受与 stderr note 渲染、`usage()` 追加行）、`package.json`（`test:unit` 忽略列表与 `test:e2e` 各加 `cli-prose-question`）。
+- **需要说明的额外改动**（不在上述槽位清单内，但**本格无法回避**，且全部为追加）：
+  - `packages/agent-adapters/src/pi-adapter.ts`：事实只能来自 provider 自己的记录。新增的是**模块级纯收集函数** + `completed` 事件上多一个 `facts` 字段，既有判定（`turnFailure`、evidence、outcome）一行未改。
+  - `packages/agent-adapters/src/index.ts`：`FakeObservedEvent` 的 completed 变体追加可选 `facts` 透传（否则本格的编排测试无法注入事实）。
+  - `packages/storage/src/database.ts`：`recordAgentCompleted` 追加**可选** `facts`/`note` 入 payload、`AgentSessionCompleted` payload 追加可选 `note`、`ExecutionSummary.session` 追加 `completion`（含 `parseSessionCompletion`）。全部是追加；既有 `quiescent` 判定、状态迁移、幂等路径未改。**没有迁移、没有新 schema 版本（仍是 v21）。**
+- **未改**：`apps/runtime/src/scheduler.ts`、`agent-runtime-service.ts`、`operation-service.ts`（run Operation 措辞不变）、`apps/ui/**`、`packages/storage/src/migration.ts`、`apps/runtime/test/support/**`、`docs/architecture/**`、`PROJECT_SPEC.md`、`AGENTS.md`、`codex-adapter.ts`。
+
+### 决策与 doc-sync
+
+- **没有新增 ADR（因此不占用 0034）**。本格落在 ADR-0004（FULL 零确认、观察即事实）与 ADR-0014（提问不是审批、结构化提问走 Attention）**既有语义之内**：只是把一条**观测到的事实 + 稳定码**记录下来并展示，不改状态机、不加门禁、不进 Attention、不加确认，也不需要新的产品语义决策。
+- 遗留 doc-sync（本格领地之外，**不改**）：`docs/decisions/README.md` 的 Phase 1「Agent 需要决策时能否结构化提问」一行仍写「未做：把『Agent 结束轮次并在散文里提问』识别为等待人工」。该表述**仍然准确**（本格明确**没有**把它变成等待人工），但没提到第三种处置（标注事实而不改状态）；`docs/architecture/event-model.md`（F2 领地）未同步 `AgentSessionCompleted` 新增的可选 `note`/`facts`。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、~~UI 投影~~（已由 FOUNDATION-050 完成 promotion/dependency 投影）。
@@ -2508,5 +2618,5 @@ scheduler reservations reconcile <project-id> [--json]
 3. ~~ADR-0010 Phase 3 技术 spike~~：已由 FOUNDATION-040 完成（真实 Pi session-file 双向 RPC↔TUI 恢复、PTY 生命周期、safe-point fence 与权限模式 side channel，见 `docs/spikes/pi-session-handoff.md`）。~~handoff Operation / Session incarnation~~：Runtime 侧契约与状态已由 ADR-0023 / FOUNDATION-043 完成（STRICT 权限转既有 Attention、incarnation 绑定 + 原子拒绝过期决议、单 writer lease 的 `ATTACHMENT_BUSY`、安全点与 predecessor 归属核验、重启按事实 reconcile），并已合入 `dev`；`session handoff status/request/cancel/writer/admit` 的 `--json` 退出码稳定。剩余：~~PTY transport 与 successor 进程启动、detach/reattach 编排、CLI attach~~：已由 ADR-0026 / FOUNDATION-046 完成（Runtime 拥有的 PTY helper 上运行真实 `pi` 原生 TUI、`admit` 真交接、attach/detach/reattach、`release` 交还自动化并回到同一 session file、能力投影改为真实值）。仍在剩余：跨交接权限模式**完整矩阵**、并行工具批次安全点、PTY resize、真实模型在 TUI 中键入后交还的复验。~~UI 终端~~：已由 FOUNDATION-050 完成（终端面板、交接/incarnation、依赖图与 BLOCKED 原因、promotion、verification `CANCELLED` 语义色；仅人工目视确认，未做浏览器/桌面自动化）。
 4. ~~revision 投递确认，以及 Runtime 重启后对 stale ACTIVE Session 的启动 reconcile。~~ 已由 ADR-0028 / FOUNDATION-048 完成：投递成为一等需求 + append-only 尝试台账（schema v19），只有结构化 ACK 或经核验的 successor Execution 才算确认（「消息发出去了」永不当作确认），能力如实（Pi 仍 `UNSUPPORTED`）、不支持时走既有「协作停止 + 新建 Execution」，超时/重启中断按事实收口；`task revision create|list` 与 `task revision delivery list|get|resolve` 零确认、`--json`、退出码稳定；`reconcileStaleAgentSessions` 收敛重启后仍写 ACTIVE/RUNNING 的投影（不写 RUNNING、不声称静止、不发信号、不删资源，一律 `RECOVERY_REQUIRED` 并记账）。剩余（不在本格）：真实 provider 的 ACK 行为（需先有 Adapter 实现 `applyRevision`）、真实模型对投递提示的理解、修订/投递的 UI 投影。
 5. ~~验证副本与失败现场的回收~~：已由 ADR-0021/FOUNDATION-041 完成（`reclaim plan/apply/records`、归属校验、append-only 账本、启动 reconcile、默认保留失败现场、不新增确认）；同轮决定 Attention 工具参数继续原样入库。剩余：未注册目录的人工处理与跨项目批量回收。
-6. 识别「Agent 不用工具、在散文里提问并结束轮次」的形态（FOUNDATION-030 剩余的一半）：要么把它变成 Attention，要么至少不得记为未加说明的 `SUCCESS`。**（Wave F 的 F3 格领地）**
+6. ~~识别「Agent 不用工具、在散文里提问并结束轮次」的形态（FOUNDATION-030 剩余的一半）~~：**识别与显式记录部分已由 FOUNDATION-056 完成**（稳定码 `PROSE_QUESTION_NO_TOOL_USE` + provider 原始事实 + `task status --json` 的 `executions[].session.completion.note` + `AgentSessionCompleted` 事件 payload；启发式，宁可漏报，**不改状态机、不新增确认**）。仍未做、需要单独决策的部分：把它**自动升级为 Attention / `WAITING_FOR_USER`**（本格明确未做），以及 Codex 侧的事实层。
 7. ~~Phase 2 并行调度主体~~（已在 `docs/roadmap/mvp.md` Phase 2 验收矩阵）：**规格、分析器与容量原语**已由 Wave E 完成（ADR-0030/0031/0032：`.codeestra/impact.json` 映射与确定性 ImpactSnapshot、`SAFE|UNKNOWN|CONFLICTING` 与稳定 reason code、全局默认 2 + 每 adapter 上限、reservation/release/崩溃 reconcile）；**剩余**：调度引擎本体（自动 tick、候选排序 + 冲突/容量判定接入、实际 diff 超出预测的处置、`--allow-unknown` 命令形态）与它的 UI 投影。未经引擎前，Phase 2 验收矩阵里「两个 SAFE 任务真的同时跑」仍然**未成立**。

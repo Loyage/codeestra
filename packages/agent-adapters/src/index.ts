@@ -74,6 +74,7 @@ import type {
   AdapterCapabilities,
   AgentAnswerAdapter,
   AgentAnswerRequest,
+  AgentCompletionFacts,
   AgentObservedEvent,
   AgentSessionRef,
   AgentStartRequest,
@@ -114,7 +115,7 @@ export type FakeObservedEvent = Readonly<
     | { type: 'attention'; providerRequestId: string; kind: 'QUESTION' | 'PERMISSION';
       responseType: 'CONFIRM' | 'VALUE'; prompt: unknown }
     | { type: 'completed'; outcome: 'SUCCESS' | 'FAILURE'; evidenceRef: string;
-      failure?: { code: string; message: string } }
+      failure?: { code: string; message: string }; facts?: AgentCompletionFacts }
     | { type: 'disconnected'; reason: string }
   ))
 >;
@@ -181,6 +182,7 @@ export class DeterministicFakeAdapter implements AgentAnswerAdapter {
       } else {
         yield { ...identity, type: event.type, outcome: event.outcome,
           ...(event.failure === undefined ? {} : { failure: event.failure }),
+          ...(event.facts === undefined ? {} : { facts: event.facts }),
           evidence: { ref: event.evidenceRef, toolsQuiescent: true, ownedWritersStopped: true } };
       }
     }

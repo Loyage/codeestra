@@ -4,3 +4,4 @@ export * from './execution.js';
 export * from './dependency-graph.js';
 export * from './revision-delivery.js';
 export * from './impact-analysis.js';
+export * from './agent-completion-signal.js';

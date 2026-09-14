@@ -2,6 +2,7 @@ import {
   agentObservedEventSchema,
   type AgentObserveAdapter,
 } from '@codeestra/contracts';
+import { classifyAgentCompletion } from '@codeestra/domain';
 import {
   type AdapterEventResult,
   Phase1Database,
@@ -87,6 +88,13 @@ export async function observeAgentEvents(input: {
         throw new AgentObservationServiceError('INVALID_ADAPTER_EVENT',
           'A SUCCESS completion must not carry a failure reason');
       }
+      // The Runtime — not the Adapter — decides whether this completion needs a note. The rule is a
+      // pure, deterministic function over provider facts; it records a stable reason code and
+      // changes no Task/Execution state, so an unexplained SUCCESS stops being possible without
+      // inventing an approval step, an Attention, or a new terminal state (FOUNDATION-056).
+      const note = event.outcome === 'SUCCESS' && event.facts !== undefined
+        ? classifyAgentCompletion(event.facts)
+        : null;
       result = input.storage.recordAgentCompleted({
         sessionId: event.sessionId,
         executionId: event.executionId,
@@ -95,6 +103,8 @@ export async function observeAgentEvents(input: {
         outcome: event.outcome,
         evidence: event.evidence,
         ...(event.failure === undefined ? {} : { failure: event.failure }),
+        ...(event.facts === undefined ? {} : { facts: event.facts }),
+        ...(note === null ? {} : { note }),
         sessionEventId: randomUUID(),
         executionEventId: randomUUID(),
         taskEventId: randomUUID(),

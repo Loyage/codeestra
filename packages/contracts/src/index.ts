@@ -1343,6 +1343,29 @@ export const agentTurnFailureSchema = z.strictObject({
   message: z.string().min(1),
 });
 export type AgentTurnFailure = z.infer<typeof agentTurnFailureSchema>;
+
+/**
+ * Bounded, provider-reported facts about a completion. They are observations, never judgements:
+ * the Runtime (not the Adapter) decides what they mean, and a fact the Adapter cannot report is
+ * omitted rather than guessed — an absent `facts` means "unknown", not "no tool call".
+ *
+ * `toolCallCount` counts the whole observed run behind this completion, not the closing turn, so a
+ * run that used a tool and merely ended with a question is not described as "no tool use".
+ */
+export const agentCompletionFactsSchema = z.strictObject({
+  /** Tool invocations the provider reported during this Session run; 0 means it reported none. */
+  toolCallCount: z.number().int().nonnegative(),
+  /**
+   * Tail of the last assistant text of the run, verbatim but bounded to 2000 characters so a
+   * provider cannot force an unbounded row. `null` when the run produced no assistant text.
+   */
+  finalAssistantText: z.string().max(2000).nullable(),
+  /** True when `finalAssistantText` is only the tail of a longer provider text. */
+  finalAssistantTextTruncated: z.boolean(),
+  /** Provider-reported stop reason of that message; `null` when the provider did not say. */
+  finalAssistantStopReason: z.string().max(64).nullable(),
+});
+export type AgentCompletionFacts = z.infer<typeof agentCompletionFactsSchema>;
 const observedEventBase = {
   sessionId: z.string().min(1),
   executionId: z.string().min(1),
@@ -1365,6 +1388,12 @@ export const agentObservedEventSchema = z.discriminatedUnion('type', [
     /** Only meaningful with `outcome: 'FAILURE'`; absent means the adapter reported no reason. */
     failure: agentTurnFailureSchema.optional(),
     evidence: agentStopEvidenceSchema,
+    /**
+     * Provider-reported completion facts, or absent when this Adapter cannot report them. The
+     * Runtime evaluates them with a deterministic heuristic and records the outcome as a note —
+     * a completion is never silently green (FOUNDATION-056).
+     */
+    facts: agentCompletionFactsSchema.optional(),
   }),
   z.strictObject({
     ...observedEventBase,
