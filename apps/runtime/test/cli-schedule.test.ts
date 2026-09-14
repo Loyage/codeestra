@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileS
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { cleanupTemporaryDirectories, registerTemporaryDirectory } from './support/agent-fixture.js';
+import { reclaimTestResources, runCli } from './support/runtime-reclamation.js';
 
 /**
  * The scheduling engine through the real CLI and the real Runtime (FOUNDATION-055 / ADR-0030).
@@ -20,7 +21,14 @@ import { cleanupTemporaryDirectories, registerTemporaryDirectory } from './suppo
 const repositoryRoot = join(import.meta.dir, '..', '..', '..');
 const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
 
-afterEach(() => { cleanupTemporaryDirectories(); });
+afterEach(async () => {
+  // Integration fix: this file was written on a baseline that predates FOUNDATION-057's shared
+  // reclamation helper, so it leaked one `codeestra-schedule-*-home-*` Runtime per failing path
+  // (measured: 6 orphans after a full `bun run check` on the merged tree). It now stops every
+  // Runtime it started, on the success and the failure path alike.
+  await reclaimTestResources();
+  cleanupTemporaryDirectories();
+});
 
 function temporaryDirectory(prefix: string): string {
   const directory = mkdtempSync(join(tmpdir(), prefix));
@@ -29,16 +37,9 @@ function temporaryDirectory(prefix: string): string {
 }
 
 async function cli(args: readonly string[], environment: Record<string, string>) {
-  const child = Bun.spawn({
-    cmd: [process.execPath, cliEntry, ...args],
-    cwd: repositoryRoot,
-    env: { ...Bun.env, ...environment, no_proxy: '127.0.0.1,localhost' },
-    stdin: 'ignore', stdout: 'pipe', stderr: 'pipe',
-  });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
-  ]);
-  return { exitCode, stdout, stderr };
+  // FOUNDATION-057: the shared runner refuses a non-temporary CODEESTRA_HOME and registers the home
+  // so teardown can stop any Runtime this invocation started.
+  return await runCli(args, environment, { entry: cliEntry });
 }
 
 async function git(cwd: string, args: readonly string[]): Promise<string> {

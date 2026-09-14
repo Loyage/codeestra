@@ -3,11 +3,18 @@ import { chmodSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { cleanupTemporaryDirectories, registerTemporaryDirectory } from './support/agent-fixture.js';
+import { reclaimTestResources, runCli } from './support/runtime-reclamation.js';
 
 const repositoryRoot = join(import.meta.dir, '..', '..', '..');
 const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
 
-afterEach(() => { cleanupTemporaryDirectories(); });
+afterEach(async () => {
+  // Integration fix: this file predates FOUNDATION-057's shared reclamation helper. It happened to
+  // stop its Runtime on the success path, but a failing assertion would have leaked a daemon whose
+  // home was then deleted underneath it.
+  await reclaimTestResources();
+  cleanupTemporaryDirectories();
+});
 
 function temporaryDirectory(prefix: string): string {
   const directory = mkdtempSync(join(tmpdir(), prefix));
@@ -16,16 +23,9 @@ function temporaryDirectory(prefix: string): string {
 }
 
 async function cli(args: readonly string[], environment: Record<string, string>) {
-  const child = Bun.spawn({
-    cmd: [process.execPath, cliEntry, ...args],
-    cwd: repositoryRoot,
-    env: { ...Bun.env, ...environment, no_proxy: '127.0.0.1,localhost' },
-    stdin: 'ignore', stdout: 'pipe', stderr: 'pipe',
-  });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
-  ]);
-  return { exitCode, stdout, stderr };
+  // FOUNDATION-057: the shared runner refuses a non-temporary CODEESTRA_HOME and registers the home
+  // so teardown can stop any Runtime this invocation started.
+  return await runCli(args, environment, { entry: cliEntry });
 }
 
 async function git(cwd: string, args: readonly string[]): Promise<string> {
