@@ -3,7 +3,13 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
   rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cleanupTemporaryDirectories, registerTemporaryDirectory } from './support/agent-fixture.js';
+import {
+  reclaimTestResources,
+  registerRuntimeHome,
+  registerRuntimeProcess,
+  registerTemporaryDirectory,
+  runCli,
+} from './support/runtime-reclamation.js';
 import {
   acquireRuntimeOwnership,
   inspectRuntimeHome,
@@ -23,34 +29,13 @@ const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
 const runtimeEntry = join(repositoryRoot, 'apps', 'runtime', 'src', 'main.ts');
 const lifecycleEntry = join(repositoryRoot, 'apps', 'runtime', 'src', 'lifecycle.ts');
 
-/** Every Runtime this file starts is tracked and killed on the way out, by process, not by name. */
-const startedProcesses = new Set<ReturnType<typeof spawnRuntimeProcess>>();
-/** Homes this file created, so a Runtime the CLI started can be cleaned up by its own record. */
-const lifecycleHomes = new Set<string>();
-
-afterEach(async () => {
-  for (const child of startedProcesses) {
-    try { child.kill('SIGKILL'); } catch { /* It exited on its own. */ }
-  }
-  startedProcesses.clear();
-  // A Runtime started by the CLI is not a tracked child. It is stopped here by the identity it
-  // recorded in this test's own home, never by a name or a pattern — and never this test process.
-  for (const home of lifecycleHomes) {
-    const inspection = await inspectRuntimeHome({ home });
-    const recorded = [
-      ...inspection.bootRecords
-        .filter((trace) => trace.verdict === 'RUNNING' && trace.identityMatches !== false)
-        .map((trace) => trace.pid),
-      ...(inspection.lock.holderAlive && inspection.lock.holderIdentityMatches !== false
-        && inspection.lock.record !== null ? [inspection.lock.record.pid] : []),
-    ].filter((pid) => pid !== process.pid);
-    for (const pid of new Set(recorded)) {
-      try { process.kill(pid, 'SIGKILL'); } catch { /* Already gone. */ }
-    }
-  }
-  lifecycleHomes.clear();
-  cleanupTemporaryDirectories();
-});
+/**
+ * FOUNDATION-057: teardown reclaims through the shared helper. It stops every Runtime this file
+ * started — including one the CLI started, which is not a tracked child — by the identity recorded
+ * in this file's own temporary home, with SIGTERM and a wait. A home whose process refuses to exit
+ * is kept and reported, never SIGKILLed by a name or a pattern.
+ */
+afterEach(async () => { await reclaimTestResources(); });
 
 function temporaryDirectory(prefix: string): string {
   const directory = mkdtempSync(join(tmpdir(), prefix));
@@ -61,21 +46,14 @@ function temporaryDirectory(prefix: string): string {
 /** A home that does not exist yet, so "nothing was started" can be asserted about it. */
 function unstartedHome(prefix: string): string {
   const home = join(realpathSync(temporaryDirectory(prefix)), 'home');
-  lifecycleHomes.add(home);
+  registerRuntimeHome(home);
   return home;
 }
 
 async function cli(args: readonly string[], environment: Record<string, string>) {
-  const child = Bun.spawn({
-    cmd: [process.execPath, cliEntry, ...args],
-    cwd: repositoryRoot,
-    env: { ...Bun.env, ...environment, no_proxy: '127.0.0.1,localhost' },
-    stdin: 'ignore', stdout: 'pipe', stderr: 'pipe',
-  });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
-  ]);
-  return { exitCode, stdout, stderr };
+  // FOUNDATION-057: the shared runner refuses a non-temporary CODEESTRA_HOME and registers the home
+  // so teardown stops any Runtime the CLI started, including on the failure path.
+  return await runCli(args, environment, { entry: cliEntry });
 }
 
 interface LockView {
@@ -126,7 +104,7 @@ function spawnRuntimeProcess(environment: Record<string, string>) {
 
 function startRuntime(environment: Record<string, string>) {
   const child = spawnRuntimeProcess(environment);
-  startedProcesses.add(child);
+  registerRuntimeProcess(child.pid, environment['CODEESTRA_HOME'] as string);
   return child;
 }
 

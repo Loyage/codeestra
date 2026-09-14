@@ -3,12 +3,16 @@ import { mkdirSync, mkdtempSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cleanupTemporaryDirectories, registerTemporaryDirectory } from './support/agent-fixture.js';
+import {
+  reclaimTestResources,
+  registerTemporaryDirectory,
+  runCli,
+} from './support/runtime-reclamation.js';
 
 const repositoryRoot = join(import.meta.dir, '..', '..', '..');
 const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
 
-afterEach(() => { cleanupTemporaryDirectories(); });
+afterEach(async () => { await reclaimTestResources(); });
 
 function temporaryDirectory(prefix: string): string {
   const directory = mkdtempSync(join(tmpdir(), prefix));
@@ -16,24 +20,10 @@ function temporaryDirectory(prefix: string): string {
   return directory;
 }
 
-async function run(command: readonly string[], args: readonly string[], environment: Record<string, string>) {
-  const child = Bun.spawn({
-    cmd: [command[0] as string, ...command.slice(1), ...args],
-    cwd: repositoryRoot,
-    env: { ...Bun.env, ...environment, no_proxy: '127.0.0.1,localhost' },
-    // stdin is /dev/null so an unanswered trust prompt fails immediately instead of hanging.
-    stdin: 'ignore',
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
-  ]);
-  return { exitCode, stdout, stderr };
-}
-
-function cli(args: readonly string[], environment: Record<string, string>) {
-  return run([process.execPath, cliEntry], args, environment);
+async function cli(args: readonly string[], environment: Record<string, string>) {
+  // FOUNDATION-057: the shared runner refuses a non-temporary CODEESTRA_HOME and registers the
+  // home, so teardown stops the Runtime even when an assertion fails before the test's own stop.
+  return await runCli(args, environment, { entry: cliEntry });
 }
 
 async function git(cwd: string, args: readonly string[]): Promise<void> {
@@ -172,8 +162,8 @@ describe('codeestra open', () => {
     const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
     expect((await cli(['permission', 'set', 'strict'], environment)).exitCode).toBe(0);
     // Strict mode preserves the opt-in confirmation path; stdin is /dev/null so it must fail.
-    const refused = await run([process.execPath, cliEntry], ['open', repository, '--no-open'],
-      environment);
+    const refused = await runCli(['open', repository, '--no-open'], environment,
+      { entry: cliEntry });
     expect(refused.exitCode).toBe(1);
     expect(refused.stderr).toContain('Project trust was not confirmed');
     const listed = await cli(['project', 'list'], environment);

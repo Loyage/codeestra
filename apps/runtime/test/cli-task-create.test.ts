@@ -2,20 +2,20 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cleanupTemporaryDirectories, registerTemporaryDirectory } from './support/agent-fixture.js';
+import {
+  reclaimTestResources,
+  registerTemporaryDirectory,
+  runCli,
+} from './support/runtime-reclamation.js';
 
 const repositoryRoot = join(import.meta.dir, '..', '..', '..');
 const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
 
 afterEach(async () => {
-  // The Runtime is a daemon: without an explicit stop, each test would leave one running against a
-  // temporary home that is about to be deleted. Stop them before the directories go away.
-  for (const environment of startedRuntimes.splice(0)) await cli(['stop'], environment);
-  cleanupTemporaryDirectories();
+  // The Runtime is a daemon: teardown stops any Runtime this test started, including one started by
+  // a read-only command, before the temporary home is removed.
+  await reclaimTestResources();
 });
-
-/** Every environment whose Runtime was started, so `afterEach` can always stop it. */
-const startedRuntimes: Record<string, string>[] = [];
 
 function temporaryDirectory(prefix: string): string {
   const directory = mkdtempSync(join(tmpdir(), prefix));
@@ -24,16 +24,10 @@ function temporaryDirectory(prefix: string): string {
 }
 
 async function cli(args: readonly string[], environment: Record<string, string>) {
-  const child = Bun.spawn({
-    cmd: [process.execPath, cliEntry, ...args],
-    cwd: repositoryRoot,
-    env: { ...Bun.env, ...environment, no_proxy: '127.0.0.1,localhost' },
-    stdin: 'ignore', stdout: 'pipe', stderr: 'pipe',
-  });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
-  ]);
-  return { exitCode, stdout, stderr };
+  // FOUNDATION-057: the shared runner refuses a non-temporary CODEESTRA_HOME (a test must never
+  // reach the real Runtime home) and registers the home so teardown stops any Runtime it started,
+  // including when an assertion fails before the test's own stop.
+  return await runCli(args, environment, { entry: cliEntry });
 }
 
 async function git(cwd: string, args: readonly string[]): Promise<void> {
@@ -78,7 +72,6 @@ async function trustedProject(): Promise<{ environment: Record<string, string>; 
   await git(repository, ['branch', 'dev']);
 
   const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
-  startedRuntimes.push(environment);
   const opened = await cli(['open', repository, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as

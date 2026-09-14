@@ -5,12 +5,16 @@ import { join } from 'node:path';
 import { encodeQuestionnaireDialogTitle, type Questionnaire } from '@codeestra/contracts';
 import { RuntimeClient } from '../../ui/src/api.js';
 import type { AttentionView, TaskStatusView, TaskView } from '../../ui/src/types.js';
-import { cleanupTemporaryDirectories, registerTemporaryDirectory } from './support/agent-fixture.js';
+import {
+  reclaimTestResources,
+  registerTemporaryDirectory,
+  runCli,
+} from './support/runtime-reclamation.js';
 
 const repositoryRoot = join(import.meta.dir, '..', '..', '..');
 const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
 
-afterEach(() => { cleanupTemporaryDirectories(); });
+afterEach(async () => { await reclaimTestResources(); });
 
 function temporaryDirectory(prefix: string): string {
   const directory = mkdtempSync(join(tmpdir(), prefix));
@@ -19,16 +23,10 @@ function temporaryDirectory(prefix: string): string {
 }
 
 async function cli(args: readonly string[], environment: Record<string, string>) {
-  const child = Bun.spawn({
-    cmd: [process.execPath, cliEntry, ...args],
-    cwd: repositoryRoot,
-    env: { ...Bun.env, ...environment, no_proxy: '127.0.0.1,localhost' },
-    stdin: 'ignore', stdout: 'pipe', stderr: 'pipe',
-  });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
-  ]);
-  return { exitCode, stdout, stderr };
+  // FOUNDATION-057: the shared runner refuses a non-temporary CODEESTRA_HOME (a test must never
+  // reach the real Runtime home) and registers the home so teardown stops any Runtime it started,
+  // including when an assertion fails before the test's own stop.
+  return await runCli(args, environment, { entry: cliEntry });
 }
 
 async function git(cwd: string, args: readonly string[]): Promise<void> {

@@ -2,7 +2,11 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cleanupTemporaryDirectories, registerTemporaryDirectory } from './support/agent-fixture.js';
+import {
+  reclaimTestResources,
+  registerTemporaryDirectory,
+  runCli,
+} from './support/runtime-reclamation.js';
 
 /**
  * CLI/command-face acceptance for the Codex adapter (ADR-0029).
@@ -14,17 +18,7 @@ import { cleanupTemporaryDirectories, registerTemporaryDirectory } from './suppo
 const repositoryRoot = join(import.meta.dir, '..', '..', '..');
 const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
 
-const runtimeHomes: string[] = [];
-
-afterEach(async () => {
-  // Stop every Runtime this test file started before its directory disappears. A Runtime whose
-  // home is deleted first becomes an unreachable orphan, so the order matters even when a test
-  // fails in the middle.
-  for (const home of runtimeHomes.splice(0)) {
-    await cli(['stop'], { CODEESTRA_HOME: home });
-  }
-  cleanupTemporaryDirectories();
-});
+afterEach(async () => { await reclaimTestResources(); });
 
 function temporaryDirectory(prefix: string): string {
   // macOS resolves /var to /private/var; provider processes report resolved paths.
@@ -34,16 +28,10 @@ function temporaryDirectory(prefix: string): string {
 }
 
 async function cli(args: readonly string[], environment: Record<string, string>) {
-  const child = Bun.spawn({
-    cmd: [process.execPath, cliEntry, ...args],
-    cwd: repositoryRoot,
-    env: { ...Bun.env, ...environment, no_proxy: '127.0.0.1,localhost' },
-    stdin: 'ignore', stdout: 'pipe', stderr: 'pipe',
-  });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
-  ]);
-  return { exitCode, stdout, stderr };
+  // FOUNDATION-057: the shared runner refuses a non-temporary CODEESTRA_HOME (a test must never
+  // reach the real Runtime home) and registers the home so teardown stops any Runtime it started,
+  // including when an assertion fails before the test's own stop.
+  return await runCli(args, environment, { entry: cliEntry });
 }
 
 async function git(cwd: string, args: readonly string[]): Promise<void> {
@@ -230,7 +218,6 @@ async function fixture(options: { readonly strict?: boolean;
 
   const codexReportPath = join(tools, 'codex-report.json');
   const codexRolloutPath = join(codexHome, 'sessions', '2026', '09', '14', 'rollout-cli.jsonl');
-  runtimeHomes.push(home);
   const environment = {
     CODEESTRA_HOME: home,
     CODEESTRA_UI_DIST: assets,

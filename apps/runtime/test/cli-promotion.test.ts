@@ -2,23 +2,21 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { chmodSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cleanupTemporaryDirectories, registerTemporaryDirectory } from './support/agent-fixture.js';
+import {
+  reclaimTestResources,
+  registerTemporaryDirectory,
+  runCli,
+} from './support/runtime-reclamation.js';
 
 const repositoryRoot = join(import.meta.dir, '..', '..', '..');
 const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
 
 /**
- * Every fixture's Runtime home is stopped after each test, including a test that failed before it
- * reached its own cleanup: a Runtime whose temp home was deleted can no longer be reached by any
+ * Every fixture's Runtime home is reclaimed after each test, including a test that failed before
+ * it reached its own stop: a Runtime whose temp home was deleted can no longer be reached by any
  * client, so leaking one would leave an unkillable orphan behind.
  */
-const fixtureEnvironments: Record<string, string>[] = [];
-afterEach(async () => {
-  for (const environment of fixtureEnvironments.splice(0)) {
-    await cli(['stop'], environment).catch(() => undefined);
-  }
-  cleanupTemporaryDirectories();
-});
+afterEach(async () => { await reclaimTestResources(); });
 
 function temporaryDirectory(prefix: string): string {
   const directory = mkdtempSync(join(tmpdir(), prefix));
@@ -27,16 +25,10 @@ function temporaryDirectory(prefix: string): string {
 }
 
 async function cli(args: readonly string[], environment: Record<string, string>) {
-  const child = Bun.spawn({
-    cmd: [process.execPath, cliEntry, ...args],
-    cwd: repositoryRoot,
-    env: { ...Bun.env, ...environment, no_proxy: '127.0.0.1,localhost' },
-    stdin: 'ignore', stdout: 'pipe', stderr: 'pipe',
-  });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
-  ]);
-  return { exitCode, stdout, stderr };
+  // FOUNDATION-057: the shared runner refuses a non-temporary CODEESTRA_HOME (a test must never
+  // reach the real Runtime home) and registers the home so teardown stops any Runtime it started,
+  // including when an assertion fails before the test's own stop.
+  return await runCli(args, environment, { entry: cliEntry });
 }
 
 async function git(cwd: string, args: readonly string[]): Promise<string> {
@@ -156,7 +148,6 @@ async function fixture(options: { readonly failingStep?: string } = {}): Promise
     CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: shimPath,
   };
-  fixtureEnvironments.push(environment);
   const opened = await cli(['open', repository, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
