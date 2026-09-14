@@ -31,7 +31,9 @@
 
 READY 的等待原因单独派生为 CONFLICT / CAPACITY / DRAINING / REVISION_REVIEW 等，不误用 BLOCKED。依赖未满足是 BLOCKED 唯一含义。SUCCEEDED/CANCELLED 不自动重开。
 
-Task Verification：`NOT_RUN → QUEUED → RUNNING → PASSED | FAILED | ERROR`；revision/commit/策略失效产生 `STALE`。重验创建新 VerificationRun，旧证据不改写。
+Task Verification：`NOT_RUN → QUEUED → RUNNING → PASSED | FAILED | ERROR | CANCELLED`；revision/commit/策略失效产生 `STALE`。重验创建新 VerificationRun，旧证据不改写。
+
+`CANCELLED` 是一等终态（ADR-0027，schema v17 重建 `verification_runs` 的 CHECK，`integration_verification_runs` 未变）：与其它终态一样**必须**带 `ended_at` 与 `outcome_code`，因此「未确认进程组静止」仍写不成终态；确认静止后落 `CANCELLED/CANCELLED_BY_USER`。被取消的副本与失败现场同类，仍只经 ADR-0021 的 `reclaim` 显式回收。
 
 Phase 1 判定（ADR-0006）：全部命令 exit 0 且副本 tracked 内容未变→`PASSED`；命令非零退出或无法 spawn→`FAILED/COMMAND_FAILED`（不继续后续命令）；超时→`ERROR/COMMAND_TIMEOUT`；tracked 修改或 HEAD 移动→`ERROR/TREE_MUTATED`（不覆盖已判定的 `FAILED`）；副本无法创建→`ERROR/WORKTREE_FAILED`；Runtime 重启→`ERROR/RUNTIME_RESTARTED` 并保留副本路径。终态一旦写入，重放 completion 不改变结论。Task 自身状态不因验证而变成 SUCCEEDED：`PASSED` 只是当前 revision/commit 的 Task scope 证据，仍须经 IntegrationBatch 进入 `dev`。
 
@@ -86,6 +88,29 @@ REQUESTED
 
 TerminalAttachment：多个 `READ_ONLY` 可并存；最多一个 `WRITER` lease。断开→DETACHED 只释放 attachment/lease，不停止 Session；竞争 writer 返回 `ATTACHMENT_BUSY`。PTY 输出和按键不驱动领域状态迁移。
 
+### 3.1 Session incarnation 与单 writer lease（ADR-0023，ADR-0026 实现）
+
+**incarnation**（`session_incarnations`，schema v14）是一次 provider OS 进程代在数据库里的记录，而不是一条 `AgentSession`：同一 conversation（同一 session ID / session file）跨进程延续，但 OS 进程不伪装成同一个。
+
+```text
+ACTIVE ↔ FENCED
+ACTIVE | FENCED → EXITED
+ACTIVE | FENCED → RECOVERY_REQUIRED
+```
+
+- `ACTIVE`：当前 writer；`FENCED`：已装 handoff fence，只阻止**新**工具调用，不 abort 进行中的工具。
+- 记录 successor 前 Runtime 要求：没有任何 incarnation 仍 `ACTIVE`/`FENCED`、没有未释放租约、predecessor 的 session file 必须与 successor 相同（否则 `SESSION_FILE_CHANGED`）。重复 commandId 幂等返回既有 incarnation。
+- 进程身份是 pid + start token + argv hash；`process_tree_json` 是 provider 仍存活时抓取的进程树快照（自身 + 后代）。快照之后 fork 或已 reparent 的进程不在其中，因此**任何分支都不等于「静止」**。
+- `agent_sessions.current_incarnation_id` 是「决议还能到达哪个进程」的唯一答案。schema v14 **没有**移除 `agent_sessions.execution_id UNIQUE`：RPC↔TUI 交接收敛为同一 Session 内的 incarnation，不是第二条 `AgentSession`。
+
+**单 writer lease**（`session_writer_leases`）：每个 Session 最多一条未释放租约（partial unique index）。默认由 automation 的 incarnation 持有；第二个 attach/接管请求稳定失败为 `ATTACHMENT_BUSY` 并报出当前 holder，不排队、不静默等待。重启后 `reconcileSessionHandoffs` 以 `RUNTIME_RESTARTED` 释放所有未释放租约并将 live incarnation 置 `RECOVERY_REQUIRED`。
+
+**HandoffRequest**（`session_handoff_requests`）：`REQUESTED → FENCED → AT_SAFE_POINT → ADMITTED`，或 `CANCELLED` / `RECOVERY_REQUIRED`。安全点 = fence 已被 provider 确认 + 活动工具计数 0 + fence 后出现 settled + 无未决 Attention，全部来自结构化上报，不从屏幕文本推断。`admit` 只有在核验 predecessor 归属后才能启动 successor（`PREDECESSOR_NOT_STOPPED`/`PREDECESSOR_DESCENDANTS_ALIVE`/`PREDECESSOR_UNVERIFIED` 一律拒绝）。
+
+**STRICT 权限请求**（`session_permission_requests`）：`OPEN → DECIDING → {ALLOW | DENY | CANCEL}`，或 `STALE`。claim 是一条原子条件更新（`WHERE decision='OPEN' AND incarnation_id = current_incarnation_id`），只有仍是当前 writer 的 incarnation 能赢；两个客户端同时回答时另一个得 `ALREADY_DECIDING`，旧 incarnation 的决议被拒为 `STALE_INCARNATION` 且**不写入 provider、不驱动任何工具**。
+
+**Terminal**（`session_terminals` / `session_terminal_attachments`，schema v18）：terminal 状态 `RUNNING / RELEASED / STOPPED / RECOVERY_REQUIRED`，每 Session 最多一个 RUNNING；attachment 状态 `ATTACHED / DETACHED`，每 terminal 最多一个 `ATTACHED WRITER`。release 判定由「显式 release 字节 + provider 退出事实 + 归属核验 + session file 前后事实」共同构成；`exit_code` 只作审计，任何判定都不得以它分支（FOUNDATION-040 实测 Ctrl+D 与 SIGTERM 都是 0）。PTY 原始字节不持久化。
+
 原生审批回答中 reject/deny 也属于有效回答，不能把“用户已回答”等同“用户批准”。TUI gate 与 Runtime Attention 并发收到答案时只允许一份从 OPEN 变为已决，迟到答案不得再次驱动工具。
 
 ## 4. IntegrationBatch / StableBranchPromotion
@@ -125,3 +150,35 @@ Promotion（独立对象）：`REQUESTED → DRAINING → CHECKING → SWITCHING
 - 无法安全恢复数据或无法启动旧版→RECOVERY_REQUIRED，不声称回滚成功。
 
 Bootstrap 自身更新和不可逆 migration 不属于普通 Promotion 的隐式权限。其策略为 Phase 7 阻塞决策。
+
+## 6. Runtime 生命周期与所有权（ADR-0025）
+
+Runtime 是每个 `CODEESTRA_HOME` 的单实例，归属是**持久事实**而不是内存约定：
+
+- `<home>/runtime.lock` 记录 `{bootId, pid, startToken, startedAt, argv, cwd}`，用「先写临时文件、再 `linkSync`」原子创建。读者只会看到「没有锁」或「完整记录」，不存在「读到半条记录 → 误判 owner 已死 → 删掉活人的锁」的窗口。
+- 身份不靠 pid：`startToken`（`/proc` 或 `ps -o lstart=`）区分「同一个进程」与「pid 被复用」；zombie 不算活着。取锁发生在打开 SQLite 之前，因此两个进程同时迁移一个数据库从根上不可能。
+- 每次启动写一条 `<home>/runtime-boots/<bootId>.json`；只有干净退出才删自己的锁与记录。别人的锁/记录是证据，本进程永不删除；不可解析的锁文件被重命名为 `runtime.lock.corrupt` 保留。
+- 启动取不到锁时：owner 存活 `exit 3`，争用 `exit 4`；旧版本 Runtime 无锁文件但 endpoint 仍应答时，释放自己的锁并 `exit 0`。
+- `runtime.stop` 只报告「被要求停止的进程是谁」（`{stopping, pid, bootId, startedAt}`），**不隐含已停止**。CLI `codeestra stop [--wait <seconds>]`（默认 10s）先只读读取归属记录，再请求、有界轮询、按事实报告：`STOPPED` / `NOT_EXITED`（exit 0/1）、`NOT_RUNNING`（exit 0，且**不启动** Runtime）、`UNREACHABLE_PROCESS`（exit 1，**不杀**进程）。
+- shutdown 顺序完成后：只有 `coordinator.activeSessionIds()` 与 `verificationRunner.unconfirmedStops` **都为空**时才 `process.exit(0)`——即没有未确认停止的 provider 或验证进程；任一非空则不退出并保持可观察，让 `stop` 如实报 `NOT_EXITED`。
+
+## 7. Revision 投递 FSM（ADR-0028，schema v19）
+
+投递是**一等需求**（`task_revision_deliveries`），每次尝试是 append-only 台账（`task_revision_delivery_attempts`）：
+
+```text
+PENDING → IN_FLIGHT → ACKNOWLEDGED
+                    → UNACKNOWLEDGED
+                    → CHANNEL_UNSUPPORTED
+                    → TIMED_OUT
+                    → FAILED
+任意未满足态 ──────→ SUPERSEDED_BY_RESTART
+```
+
+- `satisfied` **只有** `ACKNOWLEDGED`（带 Adapter 的结构化 evidence）与 `SUPERSEDED_BY_RESTART`（读回 successor Execution 行并确认其**记录值** `applied_revision_id` 就是该 revision）。`PENDING`/`IN_FLIGHT`/`UNACKNOWLEDGED`/`CHANNEL_UNSUPPORTED`/`TIMED_OUT`/`FAILED` 一律 unsatisfied 且保留可见，不存在「静默丢弃」。
+- 能力如实：投递前实时 `probe()` Adapter；`revisionAcknowledgement != SUPPORTED` → `CHANNEL_UNSUPPORTED`（evidence `capability:<值>`，Pi 与 Codex 都是 `capability:UNSUPPORTED`）。声明 `SUPPORTED` 但缺 `applyRevision` 端口 → 同样 `CHANNEL_UNSUPPORTED`；返回 ACK 但没有 evidence → `UNACKNOWLEDGED/MISSING_ACK_EVIDENCE`。
+- 领域守卫：ACK 必须命名本投递的 revision 且 Task 的 `current_revision_id` 仍是它，否则 `STALE_REVISION_ACKNOWLEDGEMENT`；已满足的投递再 ACK/再开 attempt 抛 `REVISION_ALREADY_ACKNOWLEDGED`；`SUPERSEDED_BY_RESTART` 必须携带 successor 记录在案的 revision，否则 `SUCCESSOR_REVISION_MISMATCH`。每次状态推进经 `transitionRevisionDelivery` 做乐观版本 CAS，并发处置冲突为 `CONCURRENT_MODIFICATION`。
+- 不支持的 Adapter 的唯一处置是既有「协作停止 + 新建 Execution」（`task revision delivery resolve --action stop-and-restart`）；停止无法确认静止 → 尝试 `FAILED/STOP_UNCONFIRMED`，命令返回 `RECOVERY_REQUIRED`、退出码 1、资源全部保留。
+- 重启（`reconcileAtStartup`）把仍 `IN_FLIGHT` 的尝试按事实收口：期限已过 `TIMED_OUT`，无期限（被杀在途中）`FAILED/RUNTIME_RESTARTED`；**没有**自动重投。
+
+启动收敛（`reconcileStaleAgentSessions`）处理重启后 `agent_sessions`/`executions` 仍写 ACTIVE/RUNNING 的投影：按记录的 pid + start token 判所有权，得到 `PROVIDER_STOPPED` / `PROVIDER_STILL_RUNNING` / `PROVIDER_DESCENDANTS_ALIVE` / `PROVIDER_OWNERSHIP_UNVERIFIABLE` / `PROCESS_IDENTITY_MISSING` 之一，然后一律写 `DISCONNECTED`（Session，清空 current incarnation）+ `RECOVERY_REQUIRED`（Execution，保持 `resource_held=1`；workspace 与 Task 同样）。**绝不写 RUNNING/ACTIVE、绝不声称静止（进程树只是快照）、绝不发信号/杀进程、绝不删资源**；每次收敛向 `agent_session_startup_reconciliations` 追加一行（evidence 固定 `quiescenceProven:false`、`signalsSent:0`），幂等且不动本代 Runtime 仍持有的 Session。

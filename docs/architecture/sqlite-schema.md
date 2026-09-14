@@ -1,6 +1,6 @@
 # SQLite Schema
 
-状态：逻辑 SQL 设计基线；`packages/storage/src/migration.ts` 已落地到 schema version 8 的 Phase 1 子集（v8 为 ADR-0012 的 Agent 配置）；ADR-0010 的多 process-incarnation Session、guidance/takeover/terminal 表仅是 Phase 3 逻辑设计，尚未进入 migration。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与下面的约束等价。
+状态：逻辑 SQL 设计基线 + 已实现 migration 记录。第 2–6 节是逻辑关系设计（其中若干节已被后续 ADR 修订，见第 8 节各版本的说明）；第 8 节逐版本记录 `packages/storage/src/migration.ts` 中**实际存在**的 migration，当前 `phase1SchemaVersion = 21`。**schema version 16 永久未使用**，原因见第 8 节。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与第 2–6 节的约束等价，并以第 8 节的实现记录为准。
 
 ## 1. 约定
 
@@ -299,7 +299,12 @@ CREATE TABLE attention_answers (
 
 活动资源唯一性以 resource_held 而非心跳超时决定。即使 Runtime 的 lease 过期，也不能在未知进程仍可能写入时抢占 workspace。终态与 resource_held=0 的一致性在正式 CHECK/事务服务中强制；确认停止前不得置 0。
 
-Agent adapter_id 的权威来源为 Execution，不在多处维护可能不一致的主 Agent。provider session ID 是否跨项目唯一由 Adapter 决定，数据库不擅自全局唯一。ADR-0010 允许一个 Execution 因 RPC↔TUI 进程交接拥有多条 AgentSession，但活动 Session 部分唯一；predecessor 必须属于同一 Execution。旧 process identity/退出事实保留，新进程使用新 Codeestra session ID。Phase 3 migration 实现前，现有 version 7 的 `execution_id UNIQUE` 仍代表“每 Execution 单 Session”，不能声称已支持接管。
+Agent adapter_id 的权威来源为 Execution，不在多处维护可能不一致的主 Agent。provider session ID 是否跨项目唯一由 Adapter 决定，数据库不擅自全局唯一。
+
+上面 §3 的 `agent_sessions` / `session_guidance` / `takeover_requests` / `terminal_attachments` / `revision_deliveries` DDL 是 Phase 0 逻辑设计。**实现与它不同，且以第 8 节为准**：
+
+- 实际的 `agent_sessions`（v1 建立，v3 追加 `observation_cursor`，v14 追加 `current_incarnation_id`）仍有 `execution_id TEXT NOT NULL UNIQUE`；RPC↔TUI 的进程交接收敛为同一 Session 内的 **incarnation**（v14 `session_incarnations`），而不是每条进程一个 AgentSession。v14 是 ADR-0023 的实现选择，`predecessor` 概念落在 incarnation 上。
+- 逻辑设计里的 `session_guidance` / `takeover_requests` / `terminal_attachments` / `revision_deliveries` **没有按上述形态进入 migration**：ADR-0023 用 `session_handoff_requests` + `session_writer_leases` + `session_permission_requests`，ADR-0026 用 `session_terminals` + `session_terminal_attachments`，ADR-0028 用 `task_revision_deliveries` + `task_revision_delivery_attempts`。
 
 Session Guidance 不替代 TaskRevision：`task guide` 命令正文需在记录中耐久保存以支持可靠投递；TUI 已写入 provider conversation 的正文只保存 entry 引用/hash/长度，不重复复制；两者正文都不进入领域事件。TakeoverRequest 与 START/STOP successor Operation 共同保护非原子进程交接；旧进程未确认退出时状态进入 RECOVERY_REQUIRED，禁止创建第二 writer。Terminal attachment 记录连接/lease 元数据，PTY 原始字节只在 Runtime 有界内存缓冲，不入 SQLite。
 
@@ -523,3 +528,588 @@ CREATE UNIQUE INDEX one_active_verification_policy
 验证命令内容本身**不落库为可执行配置**：`commands_json` 只保存当次冻结的策略快照供审计，执行的策略每次从 main ref 重读并与确认摘要比对。
 
 升级前检查 schema version，未知较新版本拒绝写入。没有通过备份恢复验证前不执行破坏性 migration；Self Evolution 的跨版本回滚策略为单独准入门禁。
+
+### Phase 1 workspace 重试与 Execution 重建（schema version 7 / 9）
+
+**v7 `workspaceRetryMigration`（ADR-0005/0018）**：重建 `workspaces`，把列级 `path UNIQUE` 换成部分唯一索引，使失败的 workspace 可以保留历史并重试同一条路径；列与 `one_live_workspace(task_id)` 不变。`executions` 与 `result_commit_authorizations` 按名字引用 `workspaces(task_id,id)`，重建在 `PRAGMA foreign_keys=OFF` 下执行，rename 回来后重新校验。
+
+```sql
+CREATE UNIQUE INDEX one_live_workspace_path ON workspaces(path) WHERE state <> 'RELEASED';
+```
+
+**v9 `taskControlMigration`（ADR-0016，暂停/终止/归档）**：`tasks` 追加 `archived_at`（软删除，不删任何审计）与 `tasks_project_archived` 索引；重建 `executions`（`executions_v9`）以扩充 `stop_reason` 的 CHECK 并新增 `resume_from_execution_id`：
+
+```sql
+ALTER TABLE tasks ADD COLUMN archived_at INTEGER CHECK(archived_at IS NULL OR archived_at >= 0);
+-- executions 重建后的关键列/约束：
+stop_reason TEXT CHECK(stop_reason IN ('USER_CANCEL','USER_PAUSE','REVISION_RESTART','SHUTDOWN')),
+resume_from_execution_id TEXT REFERENCES executions(id),
+CHECK((state IN ('SUCCEEDED','FAILED','CANCELLED','SUPERSEDED') AND resource_held=0)
+  OR (state NOT IN ('SUCCEEDED','FAILED','CANCELLED','SUPERSEDED') AND resource_held=1)),
+CHECK((state='SUCCEEDED' AND result_commit IS NOT NULL) OR (state<>'SUCCEEDED' AND result_commit IS NULL)),
+CHECK(ended_at IS NULL OR started_at IS NULL OR ended_at >= started_at);
+CREATE UNIQUE INDEX one_held_execution ON executions(task_id) WHERE resource_held=1;
+```
+
+`resume_from_execution_id` 记录「这次 Execution 续接了哪个 predecessor 的 provider conversation」；provider resume 总是新建 Execution，而不是复活旧行。
+
+### Phase 4 集成管线（schema version 10，ADR-0018）
+
+新增持久对象，取代 §5 的逻辑 `integration_batches` / `integration_batch_items`：`projects` 追加 `dev_ref`（默认 `refs/heads/dev`，新 Task worktree 的固定基线）。
+
+- `integration_batches(id, project_id, dev_ref, dev_commit, state, integrated_commit, merge_strategy, merged_commit, worktree_path, worktree_ownership_token, verification_id, outcome_code, detail, created_at, completed_at)`。`state CHECK IN ('CREATED','PREPARING','VERIFYING','INTEGRATING_DEV','INTEGRATED','CONFLICTED','FAILED','RECOVERY_REQUIRED')`；`CHECK(integrated_commit IS NULL OR state='INTEGRATED')`。`merged_commit` 是 Git 产生但尚未推进任何 ref 的合并提交，也是崩溃恢复的证据。
+- `integration_batch_items(batch_id, project_id, task_id, revision_id, execution_id, candidate_commit, dev_commit, state, integrated_commit, detail, created_at, completed_at)`，主键 `(batch_id,task_id)`，`state CHECK IN ('PREPARED','MERGED','INTEGRATED','FAILED','CONFLICTED')`。本轮每批恰好一个成员，但主键形态已可承载多成员。
+- `integration_verification_runs(...)`：与 `verification_runs` 同形的独立实体（不是同一张表），额外绑定 `batch_id`（`UNIQUE`）、`candidate_commit` 所在的 `dev_commit` 基线；`state CHECK IN ('QUEUED','RUNNING','PASSED','FAILED','ERROR','STALE')`（**没有 `CANCELLED`**，见 v17）。
+
+### Phase 1 长命令进度（schema version 11，ADR-0019）
+
+```sql
+CREATE TABLE operation_progress (
+  operation_id TEXT NOT NULL REFERENCES operations(id),
+  sequence INTEGER NOT NULL CHECK(sequence >= 0),
+  step_key TEXT NOT NULL CHECK(length(trim(step_key)) > 0),
+  step TEXT NOT NULL CHECK(length(trim(step)) > 0),
+  state TEXT NOT NULL CHECK(state IN ('STARTED','SUCCEEDED','FAILED','CANCELLED','INFO')),
+  detail_json TEXT CHECK(detail_json IS NULL OR json_valid(detail_json)),
+  recorded_at INTEGER NOT NULL CHECK(recorded_at >= 0),
+  PRIMARY KEY(operation_id,sequence),
+  UNIQUE(operation_id,step_key)
+) STRICT, WITHOUT ROWID;
+```
+
+`step_key` 让重放同一 commandId 不能重复追加同一步。这是 ADR-0027 的 `operation_progress_events`（v17）的前驱：v11 只记录步骤，v17 把「已发布的事实事件」单独持久化。
+
+### Phase 1 资源回收账本（schema version 12，ADR-0021）
+
+```sql
+CREATE TABLE reclamation_records (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  operation_id TEXT NOT NULL REFERENCES operations(id),
+  command_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('TASK_WORKTREE','VERIFICATION_COPY','INTEGRATION_WORKTREE')),
+  resource_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  ownership_token TEXT,
+  external_ref TEXT,
+  resource_state TEXT NOT NULL,
+  outcome TEXT NOT NULL CHECK(outcome IN ('RECLAIMED','ALREADY_ABSENT','RETAINED','REFUSED','FAILED')),
+  reason_code TEXT NOT NULL CHECK(length(trim(reason_code)) > 0),
+  detail TEXT,
+  evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0)
+) STRICT;
+CREATE UNIQUE INDEX one_reclamation_record_per_resource
+  ON reclamation_records(operation_id,kind,resource_id);
+```
+
+append-only：后来的一次尝试追加新行，从不改写或删除旧行。
+
+### Phase 4 稳定提升（schema version 13，ADR-0022）
+
+取代 §5 的逻辑 `stable_branch_promotions` / `stable_promotion_approvals`：
+
+- `stable_promotions(id, project_id, dev_ref, main_ref, candidate_commit, expected_main_commit, integration_batch_id, verification_id, verification_tested_commit, permission_mode, state, approved_dev_commit, approved_main_commit, approved_verification_id, approved_at, promoted_commit, main_worktree_path, promoting_boot_id, restart_steps_json, restart_result_json, outcome_code, detail, created_at, completed_at)`。`permission_mode CHECK IN ('FULL','STRICT')`；`state CHECK IN ('CREATED','AWAITING_APPROVAL','PROMOTING','RESTARTING','SUCCEEDED','STALE','FAILED','RECOVERY_REQUIRED')`。`promoted_commit` 只从**观察到的 ref** 写入；`CHECK(state <> 'SUCCEEDED' OR promoted_commit IS NOT NULL)`。部分唯一索引 `one_open_promotion_per_project(project_id)` 限定仍开启的状态，避免两个提升争抢同一 refs。
+- `stable_promotion_members(promotion_id, batch_id, project_id, task_id, revision_id, execution_id, candidate_commit, created_at)`，主键 `(promotion_id,task_id)`。
+
+### Phase 3 Session incarnation 与单 writer lease（schema version 14，ADR-0023）
+
+新增 `session_incarnations`、`session_writer_leases`、`session_handoff_requests`、`session_permission_requests`，并给 `agent_sessions` 追加 `current_incarnation_id`：
+
+```sql
+CREATE TABLE session_incarnations (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+  execution_id TEXT NOT NULL REFERENCES executions(id),
+  incarnation_number INTEGER NOT NULL CHECK(incarnation_number > 0),
+  mode TEXT NOT NULL CHECK(mode IN ('AUTOMATED_RPC','HUMAN_TUI')),
+  state TEXT NOT NULL CHECK(state IN ('ACTIVE','FENCED','RECOVERY_REQUIRED','EXITED')),
+  provider_pid INTEGER CHECK(provider_pid IS NULL OR provider_pid > 0),
+  process_identity_json TEXT CHECK(process_identity_json IS NULL OR json_valid(process_identity_json)),
+  process_tree_json TEXT CHECK(process_tree_json IS NULL OR json_valid(process_tree_json)),
+  provider_session_id TEXT,
+  session_storage_ref TEXT,
+  predecessor_incarnation_id TEXT REFERENCES session_incarnations(id),
+  command_id TEXT NOT NULL CHECK(length(trim(command_id)) > 0),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  ended_at INTEGER,
+  exit_json TEXT CHECK(exit_json IS NULL OR json_valid(exit_json)),
+  UNIQUE(session_id,incarnation_number),
+  UNIQUE(session_id,command_id),
+  CHECK((state='EXITED' AND ended_at IS NOT NULL) OR (state<>'EXITED' AND ended_at IS NULL))
+) STRICT;
+CREATE TABLE session_writer_leases (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+  incarnation_id TEXT NOT NULL REFERENCES session_incarnations(id),
+  holder_kind TEXT NOT NULL CHECK(holder_kind IN ('AUTOMATED_RPC','TERMINAL_ATTACHMENT')),
+  holder_ref TEXT NOT NULL CHECK(length(trim(holder_ref)) > 0),
+  command_id TEXT NOT NULL CHECK(length(trim(command_id)) > 0),
+  acquired_at INTEGER NOT NULL CHECK(acquired_at >= 0),
+  released_at INTEGER,
+  release_reason TEXT,
+  CHECK(released_at IS NULL OR release_reason IS NOT NULL)
+) STRICT;
+CREATE UNIQUE INDEX one_active_session_writer_lease
+  ON session_writer_leases(session_id) WHERE released_at IS NULL;
+CREATE TABLE session_handoff_requests (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+  execution_id TEXT NOT NULL REFERENCES executions(id),
+  incarnation_id TEXT NOT NULL REFERENCES session_incarnations(id),
+  kind TEXT NOT NULL CHECK(kind IN ('TAKEOVER','RETURN')),
+  state TEXT NOT NULL CHECK(state IN ('REQUESTED','FENCED','AT_SAFE_POINT','ADMITTED',
+    'CANCELLED','RECOVERY_REQUIRED')),
+  command_id TEXT NOT NULL CHECK(length(trim(command_id)) > 0),
+  fence_active INTEGER NOT NULL CHECK(fence_active IN (0,1)),
+  fence_confirmed_at INTEGER, settled_after_fence_at INTEGER, safe_point_at INTEGER,
+  admitted_at INTEGER, detail TEXT,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+  UNIQUE(session_id,command_id)
+) STRICT;
+CREATE UNIQUE INDEX one_open_session_handoff_request
+  ON session_handoff_requests(session_id)
+  WHERE state IN ('REQUESTED','FENCED','AT_SAFE_POINT');
+CREATE TABLE session_permission_requests (
+  id TEXT PRIMARY KEY,
+  attention_id TEXT NOT NULL UNIQUE REFERENCES attention_requests(id),
+  session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+  incarnation_id TEXT NOT NULL REFERENCES session_incarnations(id),
+  provider_request_id TEXT NOT NULL, tool_call_id TEXT NOT NULL, tool_name TEXT NOT NULL,
+  input_json TEXT NOT NULL CHECK(json_valid(input_json)),
+  input_fingerprint TEXT NOT NULL, pi_mode TEXT NOT NULL,
+  decision TEXT NOT NULL CHECK(decision IN ('OPEN','DECIDING','ALLOW','DENY','CANCEL','STALE')),
+  requested_at INTEGER NOT NULL CHECK(requested_at >= 0),
+  decided_at INTEGER, decided_by TEXT,
+  UNIQUE(session_id,provider_request_id)
+) STRICT;
+ALTER TABLE agent_sessions ADD COLUMN current_incarnation_id TEXT REFERENCES session_incarnations(id);
+```
+
+`decision='DECIDING'` 是原子 claim 的中间态：`UPDATE ... WHERE decision='OPEN' AND incarnation_id = current_incarnation_id` 决定唯一赢家，过期 incarnation 的决议被拒为 `STALE_INCARNATION`。
+
+### Phase 2 Task 依赖（schema version 15，ADR-0024）
+
+```sql
+CREATE TABLE task_dependencies (
+  dependent_task_id TEXT NOT NULL,
+  prerequisite_task_id TEXT NOT NULL,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  required_revision_id TEXT NOT NULL,
+  created_by TEXT NOT NULL CHECK(length(trim(created_by)) > 0),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  PRIMARY KEY(dependent_task_id,prerequisite_task_id),
+  CHECK(dependent_task_id <> prerequisite_task_id),
+  FOREIGN KEY(project_id,dependent_task_id) REFERENCES tasks(project_id,id),
+  FOREIGN KEY(project_id,prerequisite_task_id) REFERENCES tasks(project_id,id),
+  FOREIGN KEY(prerequisite_task_id,required_revision_id) REFERENCES task_revisions(task_id,id)
+) STRICT;
+CREATE TRIGGER task_dependencies_no_update
+BEFORE UPDATE ON task_dependencies BEGIN
+  SELECT RAISE(ABORT,'task dependency edges are immutable; remove and add again');
+END;
+```
+
+依赖钉住上游 revision；环由纯领域图在 `BEGIN IMMEDIATE` 内检验，SQLite 无法表达这一点，因此 schema 只保证双端点同项目、pinned revision 属于上游、自环禁止与边不可变。
+
+### schema version 16 永久未使用
+
+**v16 没有任何 migration 步骤，也永远不会补一个。** 原因是版本号是按升序 `if (version < N)` 判定的：最早占用 v17 的 lane（ADR-0027 / FOUNDATION-047）合入 `dev` 时先于预留 v16 的 lane，既有数据库因此可能已被标为 17、18 或更高。对这类库执行 `if (version < 16)` 会被整段跳过，所以「补 v16」在真实升级路径上要么不生效、要么与已应用的 schema 冲突。后续 v19/v20/v21 的注释与 ADR-0028/0031/0032 都重复了这条规矩。
+
+### Phase 3 verification `CANCELLED` 与进度事件（schema version 17，ADR-0027）
+
+`verification_runs` 被**重建**（`verification_runs_v17` → rename），因为 `state` 是表 CHECK 的一部分，SQLite 不能原地加宽。列、行与两个索引逐字复制：
+
+```sql
+CREATE TABLE verification_runs_v17 (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT NOT NULL,
+  execution_id TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  operation_id TEXT NOT NULL UNIQUE REFERENCES operations(id),
+  command_id TEXT NOT NULL,
+  tested_commit TEXT NOT NULL,
+  tested_tree TEXT NOT NULL,
+  policy_version TEXT NOT NULL,
+  policy_digest TEXT NOT NULL,
+  main_commit TEXT NOT NULL,
+  commands_json TEXT NOT NULL CHECK(json_valid(commands_json) AND json_type(commands_json)='array'),
+  copy_path TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('QUEUED','RUNNING','PASSED','FAILED','ERROR','CANCELLED','STALE')),
+  outcome_code TEXT,
+  evidence_json TEXT CHECK(evidence_json IS NULL OR json_valid(evidence_json)),
+  queued_at INTEGER NOT NULL CHECK(queued_at >= 0),
+  started_at INTEGER,
+  ended_at INTEGER,
+  UNIQUE(project_id,command_id),
+  CHECK(ended_at IS NULL OR started_at IS NULL OR ended_at >= started_at),
+  CHECK((state IN ('QUEUED','RUNNING') AND ended_at IS NULL AND outcome_code IS NULL)
+    OR (state IN ('PASSED','FAILED','ERROR','CANCELLED','STALE')
+      AND ended_at IS NOT NULL AND outcome_code IS NOT NULL)),
+  FOREIGN KEY(task_id,execution_id) REFERENCES executions(task_id,id),
+  FOREIGN KEY(task_id,revision_id) REFERENCES task_revisions(task_id,id)
+) STRICT;
+CREATE INDEX verification_subject ON verification_runs(task_id,revision_id,tested_commit);
+CREATE INDEX verification_by_task ON verification_runs(project_id,task_id,queued_at);
+```
+
+关键语义：`CANCELLED` 与其它终态一样**必须**带 `ended_at` 与 `outcome_code`，所以「未确认静止」的取消仍写不成终态（实现里 `outcome_code='CANCELLED_BY_USER'`）。`integration_verification_runs` 刻意保留自己的 CHECK（没有 `CANCELLED`）：集成验证有独立 Operation kind，`task.operation.cancel` 到不了它。
+
+```sql
+CREATE TABLE operation_progress_events (
+  operation_id TEXT NOT NULL REFERENCES operations(id),
+  progress_sequence INTEGER NOT NULL CHECK(progress_sequence >= 0),
+  event_id TEXT NOT NULL UNIQUE,
+  dedup_key TEXT NOT NULL CHECK(length(trim(dedup_key)) > 0),
+  phase TEXT NOT NULL CHECK(phase IN ('STEP','OUTPUT','CANCEL','SETTLED')),
+  detail_json TEXT NOT NULL CHECK(json_valid(detail_json)),
+  recorded_at INTEGER NOT NULL CHECK(recorded_at >= 0),
+  PRIMARY KEY(operation_id,progress_sequence),
+  UNIQUE(operation_id,dedup_key)
+) STRICT, WITHOUT ROWID;
+```
+
+`domain_events` 行是已交付的事实；本表补充事件日志无法表达的东西：每 Operation 单调的 `progress_sequence`（消费者可排序并丢弃陈旧进度）、`dedup_key`（重复发布同一边界是 no-op）、以及每个已发布事件一行，使投影既能按全局游标也能按 `progress_sequence` 读取。
+
+### Phase 3 原生终端 PTY（schema version 18，ADR-0026）
+
+```sql
+CREATE TABLE session_terminals (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+  incarnation_id TEXT NOT NULL REFERENCES session_incarnations(id),
+  helper_pid INTEGER CHECK(helper_pid IS NULL OR helper_pid > 0),
+  helper_start_token TEXT,
+  provider_pid INTEGER CHECK(provider_pid IS NULL OR provider_pid > 0),
+  pty_slave TEXT,
+  window_size TEXT NOT NULL CHECK(window_size IN ('APPLIED','NOT_APPLIED')),
+  state TEXT NOT NULL CHECK(state IN ('RUNNING','RELEASED','STOPPED','RECOVERY_REQUIRED')),
+  release_command_id TEXT,
+  release_requested_at INTEGER,
+  release_byte TEXT,
+  provider_shutdown_reported_at INTEGER,
+  exit_code INTEGER,
+  exit_signal TEXT,
+  exit_reported_at INTEGER,
+  session_file TEXT,
+  entries_at_start INTEGER,
+  last_entry_id_at_start TEXT,
+  entries_at_release INTEGER,
+  last_entry_id_at_release TEXT,
+  release_detail TEXT,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  ended_at INTEGER,
+  UNIQUE(session_id,incarnation_id),
+  CHECK((state='RUNNING') = (ended_at IS NULL))
+) STRICT;
+CREATE UNIQUE INDEX one_running_session_terminal
+  ON session_terminals(session_id) WHERE state='RUNNING';
+```
+
+`exit_code` 只是审计：FOUNDATION-040 实测 Ctrl+D 与 SIGTERM 都是 0，因此任何判定都不得以退出码分支。`session_file` 前后差值是 release 判定的证据之一，而不是唯一证据。
+
+```sql
+CREATE TABLE session_terminal_attachments (
+  id TEXT PRIMARY KEY,
+  terminal_id TEXT NOT NULL REFERENCES session_terminals(id),
+  session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+  kind TEXT NOT NULL CHECK(kind IN ('WRITER','OBSERVER')),
+  holder_ref TEXT NOT NULL CHECK(length(trim(holder_ref)) > 0),
+  state TEXT NOT NULL CHECK(state IN ('ATTACHED','DETACHED')),
+  cursor_at_attach INTEGER NOT NULL CHECK(cursor_at_attach >= 0),
+  cursor_at_detach INTEGER,
+  command_id TEXT NOT NULL CHECK(length(trim(command_id)) > 0),
+  attached_at INTEGER NOT NULL CHECK(attached_at >= 0),
+  detached_at INTEGER,
+  detached_reason TEXT,
+  UNIQUE(terminal_id,command_id),
+  CHECK((state='DETACHED') = (detached_at IS NOT NULL))
+) STRICT;
+CREATE UNIQUE INDEX one_writer_terminal_attachment
+  ON session_terminal_attachments(terminal_id) WHERE state='ATTACHED' AND kind='WRITER';
+CREATE INDEX session_terminal_attachments_by_session
+  ON session_terminal_attachments(session_id,attached_at);
+```
+
+每终端最多一个 `ATTACHED WRITER`（部分唯一索引），detach 记录任意多行；第二个 writer 得到稳定的 `ATTACHMENT_BUSY` 而不是排队。**PTY 原始字节不落任何表**（ADR-0010 D06）：投影只在 Runtime 有界内存里。
+
+### Phase 3 revision 投递与启动收敛（schema version 19，ADR-0028）
+
+```sql
+CREATE TABLE task_revision_deliveries (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  execution_id TEXT,                 -- 创建 revision 时正在运行的 Execution；NULL 表示当时没有运行
+  session_id TEXT REFERENCES agent_sessions(id),
+  incarnation_id TEXT REFERENCES session_incarnations(id),
+  state TEXT NOT NULL CHECK(state IN ('PENDING','IN_FLIGHT','ACKNOWLEDGED','UNACKNOWLEDGED',
+    'CHANNEL_UNSUPPORTED','TIMED_OUT','FAILED','SUPERSEDED_BY_RESTART')),
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+  version INTEGER NOT NULL DEFAULT 0 CHECK(version >= 0),
+  channel TEXT CHECK(channel IS NULL OR channel IN ('PROVIDER_CONVERSATION','STOP_AND_RESTART')),
+  deadline_at INTEGER,
+  evidence_ref TEXT,
+  detail TEXT,
+  superseded_by_execution_id TEXT,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+  acknowledged_at INTEGER,
+  UNIQUE(task_id,revision_id),
+  UNIQUE(task_id,id),
+  CHECK((state='ACKNOWLEDGED') = (acknowledged_at IS NOT NULL)),
+  FOREIGN KEY(task_id,revision_id) REFERENCES task_revisions(task_id,id),
+  FOREIGN KEY(task_id,execution_id) REFERENCES executions(task_id,id),
+  FOREIGN KEY(task_id,superseded_by_execution_id) REFERENCES executions(task_id,id)
+) STRICT;
+CREATE INDEX task_revision_deliveries_by_task ON task_revision_deliveries(task_id,created_at,id);
+CREATE INDEX unsatisfied_revision_deliveries ON task_revision_deliveries(task_id)
+  WHERE state <> 'ACKNOWLEDGED' AND state <> 'SUPERSEDED_BY_RESTART';
+
+CREATE TABLE task_revision_delivery_attempts (
+  id TEXT PRIMARY KEY,
+  delivery_id TEXT NOT NULL REFERENCES task_revision_deliveries(id),
+  attempt_number INTEGER NOT NULL CHECK(attempt_number > 0),
+  channel TEXT NOT NULL CHECK(channel IN ('PROVIDER_CONVERSATION','STOP_AND_RESTART')),
+  execution_id TEXT,
+  session_id TEXT REFERENCES agent_sessions(id),
+  incarnation_id TEXT REFERENCES session_incarnations(id),
+  state TEXT NOT NULL CHECK(state IN ('IN_FLIGHT','ACKNOWLEDGED','UNACKNOWLEDGED',
+    'CHANNEL_UNSUPPORTED','TIMED_OUT','FAILED','SUPERSEDED_BY_RESTART')),
+  evidence_ref TEXT,
+  error_code TEXT,
+  detail TEXT NOT NULL CHECK(length(trim(detail)) > 0),
+  deadline_at INTEGER,
+  started_at INTEGER NOT NULL CHECK(started_at >= 0),
+  ended_at INTEGER,
+  UNIQUE(delivery_id,attempt_number),
+  CHECK((state='IN_FLIGHT') = (ended_at IS NULL))
+) STRICT;
+CREATE INDEX task_revision_delivery_attempts_by_delivery
+  ON task_revision_delivery_attempts(delivery_id,attempt_number);
+CREATE INDEX in_flight_revision_delivery_attempts ON task_revision_delivery_attempts(deadline_at)
+  WHERE state='IN_FLIGHT';
+```
+
+只有两个事实能满足投递：attempt 以 `ACKNOWLEDGED` 结束（带 Adapter 的结构化证据），或 successor Execution 行的**记录值** `applied_revision_id` 就是该 revision（ADR-0001 的停止并新建回退）。「消息发出去了」永不当作确认。
+
+```sql
+CREATE TABLE agent_session_startup_reconciliations (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT NOT NULL,
+  session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+  execution_id TEXT NOT NULL REFERENCES executions(id),
+  incarnation_id TEXT REFERENCES session_incarnations(id),
+  previous_session_state TEXT NOT NULL,
+  previous_execution_state TEXT NOT NULL,
+  projected_session_state TEXT NOT NULL,
+  projected_execution_state TEXT NOT NULL,
+  observation TEXT NOT NULL CHECK(observation IN ('PROVIDER_STOPPED','PROVIDER_STILL_RUNNING',
+    'PROVIDER_DESCENDANTS_ALIVE','PROVIDER_OWNERSHIP_UNVERIFIABLE','PROCESS_IDENTITY_MISSING')),
+  provider_pid INTEGER,
+  detail TEXT NOT NULL CHECK(length(trim(detail)) > 0),
+  evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
+  command_id TEXT NOT NULL,
+  recorded_at INTEGER NOT NULL CHECK(recorded_at >= 0),
+  UNIQUE(session_id,command_id)
+) STRICT;
+CREATE INDEX startup_reconciliations_by_session
+  ON agent_session_startup_reconciliations(session_id,recorded_at,id);
+```
+
+启动收敛的 append-only 审计：对一条 stale 的 Session/Execution 投影，实际观察到什么进程归属、据此投影成什么状态。它**永不**是「静止」的声称：`evidence_json` 固定写 `quiescenceProven: false`、`signalsSent: 0`。
+
+### Phase 2 影响快照与确定性冲突分析（schema version 20，ADR-0031）
+
+本节取代 §4 的逻辑 `impact_assessments` / `conflict_assessments` DDL。
+
+```sql
+CREATE TABLE project_impact_policy_confirmations (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  policy_state TEXT NOT NULL CHECK(policy_state IN ('ABSENT','PRESENT','INVALID')),
+  policy_digest TEXT,
+  content_digest TEXT,
+  error_code TEXT,
+  main_ref TEXT NOT NULL CHECK(length(trim(main_ref)) > 0),
+  main_commit TEXT NOT NULL,
+  actor TEXT NOT NULL CHECK(length(trim(actor)) > 0),
+  status TEXT NOT NULL CHECK(status IN ('ACTIVE','SUPERSEDED')),
+  confirmed_at INTEGER NOT NULL CHECK(confirmed_at >= 0),
+  superseded_at INTEGER,
+  CHECK((policy_state='PRESENT' AND policy_digest IS NOT NULL AND content_digest IS NULL)
+    OR (policy_state='INVALID' AND policy_digest IS NULL AND content_digest IS NOT NULL)
+    OR (policy_state='ABSENT' AND policy_digest IS NULL AND content_digest IS NULL)),
+  CHECK((status='ACTIVE' AND superseded_at IS NULL)
+    OR (status='SUPERSEDED' AND superseded_at IS NOT NULL))
+) STRICT;
+CREATE UNIQUE INDEX one_active_impact_policy
+  ON project_impact_policy_confirmations(project_id) WHERE status='ACTIVE';
+```
+
+`INVALID` 保留原始字节摘要，使「映射坏了」是被记录的**事实**，而不是被静默报成「没有映射」。
+
+```sql
+CREATE TABLE impact_snapshots (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  base_commit TEXT NOT NULL,
+  analyzer_version TEXT NOT NULL CHECK(length(trim(analyzer_version)) > 0),
+  policy_version TEXT NOT NULL CHECK(length(trim(policy_version)) > 0),
+  policy_digest TEXT NOT NULL CHECK(length(policy_digest) = 64),
+  case_mode TEXT NOT NULL CHECK(case_mode IN ('SENSITIVE','INSENSITIVE')),
+  change_fingerprint TEXT NOT NULL CHECK(length(trim(change_fingerprint)) > 0),
+  complete INTEGER NOT NULL CHECK(complete IN (0,1)),
+  incomplete_reasons_json TEXT NOT NULL
+    CHECK(json_valid(incomplete_reasons_json) AND json_type(incomplete_reasons_json)='array'),
+  files_json TEXT NOT NULL CHECK(json_valid(files_json) AND json_type(files_json)='array'),
+  important_directories_json TEXT NOT NULL CHECK(json_valid(important_directories_json)
+    AND json_type(important_directories_json)='array'),
+  modules_json TEXT NOT NULL CHECK(json_valid(modules_json) AND json_type(modules_json)='array'),
+  global_resources_json TEXT NOT NULL CHECK(json_valid(global_resources_json)
+    AND json_type(global_resources_json)='array'),
+  unclassified_files_json TEXT NOT NULL CHECK(json_valid(unclassified_files_json)
+    AND json_type(unclassified_files_json)='array'),
+  evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json) AND json_type(evidence_json)='array'),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  UNIQUE(task_id,revision_id,base_commit,analyzer_version,policy_version,change_fingerprint),
+  UNIQUE(task_id,id),
+  FOREIGN KEY(task_id,revision_id) REFERENCES task_revisions(task_id,id),
+  CHECK((complete=1) = (json_array_length(incomplete_reasons_json)=0))
+) STRICT;
+CREATE TRIGGER impact_snapshots_no_update BEFORE UPDATE ON impact_snapshots BEGIN
+  SELECT RAISE(ABORT,'impact snapshots are append-only; record a new snapshot instead');
+END;
+CREATE TRIGGER impact_snapshots_no_delete BEFORE DELETE ON impact_snapshots BEGIN
+  SELECT RAISE(ABORT,'impact snapshots are append-only evidence');
+END;
+
+CREATE TABLE impact_assessments (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  candidate_task_id TEXT NOT NULL,
+  candidate_revision_id TEXT NOT NULL,
+  candidate_snapshot_id TEXT NOT NULL REFERENCES impact_snapshots(id),
+  other_task_id TEXT NOT NULL,
+  other_revision_id TEXT NOT NULL,
+  other_snapshot_id TEXT NOT NULL REFERENCES impact_snapshots(id),
+  verdict TEXT NOT NULL CHECK(verdict IN ('SAFE_TO_PARALLELIZE','UNKNOWN','CONFLICTING')),
+  reason_codes_json TEXT NOT NULL CHECK(json_valid(reason_codes_json)
+    AND json_type(reason_codes_json)='array'),
+  hits_json TEXT NOT NULL CHECK(json_valid(hits_json) AND json_type(hits_json)='array'),
+  evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json) AND json_type(evidence_json)='array'),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  CHECK(candidate_snapshot_id <> other_snapshot_id),
+  UNIQUE(candidate_snapshot_id,other_snapshot_id)
+) STRICT;
+CREATE TRIGGER impact_assessments_no_update BEFORE UPDATE ON impact_assessments BEGIN
+  SELECT RAISE(ABORT,'impact assessments are append-only; a changed fact needs a new snapshot');
+END;
+CREATE TRIGGER impact_assessments_no_delete BEFORE DELETE ON impact_assessments BEGIN
+  SELECT RAISE(ABORT,'impact assessments are append-only evidence');
+END;
+```
+
+快照的唯一键就是「能否复用」的判据：`(task, revision, base, analyzer, policy, change fingerprint)`。Task 修订、基线移动、映射编辑、分析器换代、观测到的 diff 变大，都产生**新行**，旧行保留做审计且永不被再次选中。配对判定按两个 snapshot 唯一，没有任何列能把已记录的 `SAFE` 改成别的值。
+
+### Phase 2 容量与槽位预留（schema version 21，ADR-0032）
+
+```sql
+CREATE TABLE project_capacity_limits (
+  project_id TEXT PRIMARY KEY REFERENCES projects(id),
+  global_limit INTEGER NOT NULL CHECK(global_limit > 0),
+  version INTEGER NOT NULL DEFAULT 0 CHECK(version >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= 0),
+  updated_by TEXT NOT NULL CHECK(length(trim(updated_by)) > 0)
+) STRICT;
+CREATE TABLE project_adapter_slot_limits (
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  adapter_id TEXT NOT NULL CHECK(length(trim(adapter_id)) > 0),
+  slot_limit INTEGER NOT NULL CHECK(slot_limit > 0),
+  version INTEGER NOT NULL DEFAULT 0 CHECK(version >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= 0),
+  updated_by TEXT NOT NULL CHECK(length(trim(updated_by)) > 0),
+  PRIMARY KEY(project_id,adapter_id)
+) STRICT;
+```
+
+没有行 = 未显式设置：读取返回文档默认值（项目全局 2，上限 16），adapter 缺省等于该项目的当前全局上限，因此「跟随全局」是**派生事实**而不是复制的数字。
+
+```sql
+CREATE TABLE execution_slot_reservations (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  revision_id TEXT NOT NULL,
+  task_version INTEGER NOT NULL CHECK(task_version >= 0),
+  adapter_id TEXT NOT NULL CHECK(length(trim(adapter_id)) > 0),
+  workspace_id TEXT,
+  impact_snapshot_id TEXT,          -- 调用方声明的快照 id；跨表代重检尚未实现（Wave F）
+  dependency_fingerprint TEXT NOT NULL CHECK(length(trim(dependency_fingerprint)) > 0),
+  assessed_dev_commit TEXT,
+  state TEXT NOT NULL CHECK(state IN ('RESERVED','RELEASED','RECOVERY_REQUIRED')),
+  version INTEGER NOT NULL DEFAULT 0 CHECK(version >= 0),
+  command_id TEXT NOT NULL CHECK(length(trim(command_id)) > 0),
+  holder_boot_id TEXT NOT NULL CHECK(length(trim(holder_boot_id)) > 0),
+  holder_pid INTEGER NOT NULL CHECK(holder_pid > 0),
+  holder_start_token TEXT,
+  holder_actor TEXT NOT NULL CHECK(length(trim(holder_actor)) > 0),
+  reserved_at INTEGER NOT NULL CHECK(reserved_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= reserved_at),
+  released_at INTEGER,
+  release_reason TEXT,
+  release_kind TEXT CHECK(release_kind IS NULL OR release_kind IN
+    ('EXPLICIT','RECONCILED_HOLDER_EXITED','RECONCILED_PROCESS_ID_REUSED')),
+  release_observation TEXT CHECK(release_observation IS NULL OR release_observation IN
+    ('HOLDER_STOPPED','HOLDER_PROCESS_ID_REUSED','HOLDER_STILL_RUNNING',
+      'HOLDER_OWNERSHIP_UNVERIFIABLE','PROCESS_IDENTITY_MISSING')),
+  detail TEXT,
+  UNIQUE(project_id,command_id),
+  UNIQUE(task_id,id),
+  FOREIGN KEY(task_id,revision_id) REFERENCES task_revisions(task_id,id),
+  FOREIGN KEY(task_id,workspace_id) REFERENCES workspaces(task_id,id),
+  CHECK((state='RESERVED' AND released_at IS NULL AND release_reason IS NULL AND release_kind IS NULL)
+    OR (state='RELEASED' AND released_at IS NOT NULL AND release_reason IS NOT NULL
+      AND release_kind IS NOT NULL)
+    OR (state='RECOVERY_REQUIRED' AND released_at IS NULL AND release_reason IS NULL
+      AND release_kind IS NULL))
+) STRICT;
+CREATE UNIQUE INDEX one_active_slot_reservation ON execution_slot_reservations(task_id)
+  WHERE state IN ('RESERVED','RECOVERY_REQUIRED');
+CREATE UNIQUE INDEX one_active_workspace_reservation
+  ON execution_slot_reservations(project_id,workspace_id)
+  WHERE state IN ('RESERVED','RECOVERY_REQUIRED') AND workspace_id IS NOT NULL;
+```
+
+两个部分唯一索引把不变量变成 schema 事实：每 Task 一个活跃预留、一个 worktree 不被两个活跃预留占用。归属证据是 Runtime `bootId` + `pid` + 该 pid 的 OS start token（**不是**「这行是我建的」）。
+
+```sql
+CREATE TABLE execution_slot_reservation_events (
+  reservation_id TEXT NOT NULL REFERENCES execution_slot_reservations(id),
+  sequence INTEGER NOT NULL CHECK(sequence > 0),
+  kind TEXT NOT NULL CHECK(kind IN ('RESERVED','RELEASED','RECONCILE_OBSERVED')),
+  domain_event_id TEXT,
+  command_id TEXT NOT NULL CHECK(length(trim(command_id)) > 0),
+  actor TEXT NOT NULL CHECK(length(trim(actor)) > 0),
+  detail TEXT NOT NULL CHECK(length(trim(detail)) > 0),
+  evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
+  occurred_at INTEGER NOT NULL CHECK(occurred_at >= 0),
+  PRIMARY KEY(reservation_id,sequence),
+  UNIQUE(reservation_id,command_id)
+) STRICT, WITHOUT ROWID;
+```
+
+append-only：预留行持有被比较与交换的当前状态，而每一次观测——包括「决定保持占用、什么都没变」的 reconcile——都追加在这里，从不改写。`UNIQUE(reservation_id,command_id)` 让同一代重复 reconcile 幂等。
+
+### 迁移执行顺序与共享槽位后果
+
+`Phase1Database.migrate()` 按 `if (version < N)` 升序执行 v1…v21（跳过 v16），最后写 `PRAGMA user_version=21`。升级前 schema version 大于 `phase1SchemaVersion` 时以 `UNSUPPORTED_SCHEMA` 拒绝写入。
+
+已知后果（ADR-0032 记录）：单个 lane 合并后，**已经被标成更高版本号的库不会补跑后来出现的更低版本步骤**。跨格合并必须按既定顺序（E0 → E1 → E2；以及 Wave D 的 17 → 18 → 19）。这也是 v16 永久未使用的同一个根因。
