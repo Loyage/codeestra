@@ -1088,6 +1088,11 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 
 状态：已实现并通过 CLI/命令面测试；**未在真实 `main` 上执行提升，未重启任何真实 Runtime**（本格禁止）。本轮占用 schema v13；v11/v12 两段迁移原位未动。
 
+集成记录：lane commit `af93a4c`（`lane/b1-main-promotion`）→ dev merge `dd8f05f`（`--no-ff`，与已合入的 B3/FOUNDATION-044 冲突在 dev 工作树手工解决）。合并后在 `~/Documents/codeestra-dev` 执行 `bun install --frozen-lockfile` 与 `bun run check`，退出码 0（Vitest 231；Bun 351 = `test:unit` 205 + `test:e2e` 146，分层之和与总数一致；Vite 构建）。未 push、未提升 `main`、未重启稳定 Runtime。
+
+合并时的 schema 解决方式（沿 B3 在 ADR-0024 中写下的约定）：`if (version < 13) stablePromotionMigration;` 与 `if (version < 15) taskDependenciesMigration;` 两段并存且升序，常量保持三者最大值 `15`；**v14 仍留给并发 B2 格**。dev 工作树没有本地 `runtime.sqlite`，因此没有「旧库已被标成 15 而跳过 v14」的既有实例；稳定库（`~/.local/state/codeestra/runtime.sqlite`）当前仍是 v12，只有在 `main` 被提升后才会升级，因此 B2 应在其落地前插入 `if (version < 14)` 分支并保持常量 15。
+
+
 用户本轮选择（记录为 ADR-0022）：
 
 1. 提升后的后置步骤 = ADR-0009 D03 的完整序列：`bun install --frozen-lockfile` → `bun run build:ui` → `bun run codeestra stop` → `bun run codeestra status`（不采用“只 stop+status”或“默认跳过资产”的方案）。
