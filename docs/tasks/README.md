@@ -1341,6 +1341,115 @@ CLI usage 两段并存、`docs/tasks` 按 042/043/044 升序）。
 - **lane 版本号**：本轮直接把常量设为 15 并只加 `if (version < 15)`；B1(v13)/B2(v14) 合入时集成方必须保留全部升序分支并取最大常量，且本分支单独创建的本地库不会被 v13/v14 步骤补盖。
 - 测试只用 CLI/命令面与 HTTP 无关的 socket 命令面驱动，未使用桌面/浏览器/键鼠自动化；未做并发压力与多进程竞争测试（写锁内环校验与 CAS 已有单元覆盖）。
 
+## FOUNDATION-045 — Runtime 生命周期的可判定停止、单实例归属与只读诊断（ADR-0025）
+
+状态：已实现并通过 CLI/命令面测试（真实 CLI + 真实 Runtime + 协议 stub provider + 真实临时 Git 仓库，全部独立临时
+`CODEESTRA_HOME`）；**未使用真实 provider（非 stub）验证带活跃 provider 的 stop**，未验证跨用户 EPERM 场景，未做
+并发压力测试。**本轮不使用任何 schema 迁移**（v16 留给 C2、v17 留给 C3，均未占用；`phase1SchemaVersion` 保持 15）。
+未 push、未提升 `main`、未重启稳定 Runtime，未触碰稳定工作树 `/Users/loyage/Documents/codeestra`。
+
+上游目标由用户派单固定（ADR-0025）：`stop` 返回后进程必须真的退出或如实报告「未退出」；单实例与 socket 竞态不得
+留下不可达进程；诊断只读；**本轮不新增自动杀进程能力**，如需自动回收先提方案另立 ADR。
+
+### 根因（实测，两层）
+
+1. **`shutdown()` 跑完后事件循环仍被「有界宽限」timer 多留 ~5s（可累积）。** 各子系统都用
+   `Bun.sleep(graceMs)` 放进 `Promise.race` 且**从不清理 timer**：`AgentRuntimeCoordinator.close()`（5000ms）、
+   `PiRpcProcess.stop()`（5000ms×2）、`verification-service.ts`（2000ms + 7000ms）、`LongOperationService.close()`
+   （5000ms）。Bun 为 pending timer 保持事件循环，所以「race 另一侧早已完成、所有 close 都返回了」的进程仍活着到最长
+   宽限到期。逐项跳过 shutdown 步骤的实测：完整 shutdown → 进程 ~5.5s 才退出（shutdown 在 0.4s 完成）；跳过
+   `coordinator.close()` → ~0.53s；跳过 `handoff.close()` → 永不退出（监听 socket 仍在，属预期）。原始复现实测：
+   `stop` 50ms 返回、进程仍存活、**5.02s 后**才消失——FOUNDATION-042 看到的「socket 已删、storage 已关、进程仍在」
+   就是这个窗口。
+2. **`stop` 是 fire-and-forget，且启动路径没有归属锁。** `runtime.stop` 只 `setTimeout(() => shutdown(), 10)` 并回
+   `{stopping:true}`，没有任何一方等待或核对退出（「已发出信号」被当成「已停止」）。启动序言是 TOCTOU：
+   `endpointIsLive()` → `rmSync(socket)` → `Bun.listen`，两个启动者可都判定不可达后各自删同一路径再 bind。并发 4 个
+   启动者的实测：3 个分别以 `EADDRINUSE`（`runtime.sock`）、`EEXIST`（`session-handoff.sock`）或
+   `SQLiteError: table project_trusts already exists`（两个进程同时迁移/打开一个 SQLite）崩溃；而「败者删掉胜者 socket
+   路径、胜者留在无人可达的 inode 上」这一时序会让胜者**既不可达又永不退出**（监听 socket 使事件循环不空闲），
+   `stop` 也够不到——正是 FOUNDATION-042 记录的孤儿签名。
+
+### 已实现
+
+- `apps/runtime/src/lifecycle.ts`（新）：`withDeadline`（清 timer 的宽限竞速）、`pidExists`/`readProcessState`
+  （zombie 视为已退出）、`readProcessStartToken`（与 `@codeestra/agent-adapters` 同格式）、`probeRuntimeEndpoint`、
+  归属锁 `acquireRuntimeOwnership`/`releaseRuntimeOwnership`、只读 `inspectRuntimeHome`。**零 workspace import**，
+  因此 CLI 可以直接只读同一份记录；没有新增任何 workspace 依赖（`bun.lock` 未变）。
+- `apps/runtime/src/main.ts`（仅启动/shutdown 绑定区）：启动改为「先取 `<home>/runtime.lock` → 取不到则报出 owner 并
+  `exit 3/4` → endpoint 仍有人应答（旧版本无锁）则释放自己的锁并 `exit 0` → 才清旧 socket 并 listen」；每次启动写
+  `<home>/runtime-boots/<bootId>.json`；ping 结果加 `startedAt`，stop 结果加 `pid/bootId/startedAt`（只报「被要求停止的
+  是谁」）；shutdown 末尾在最后释放归属，并在**没有未确认停止的 provider/验证进程**时确定性 `process.exit(0)`，
+  否则打日志并保持可观察（让 `stop` 如实报 `NOT_EXITED`）。
+- `apps/runtime/src/agent-runtime-service.ts`：`close()` 的宽限竞速改用 `withDeadline`（唯一一处非领地文件改动，
+  2 行 + 1 个 import；语义不变，仍未 settle 只记日志）。
+- `apps/cli/src/main.ts`（仅 `stop`/`status` 分支块 + `usage()` 对应行，另加相邻的本地辅助函数）：
+  `stop [--wait <seconds>]`（默认 10s）先只读读归属记录，ping 不到 endpoint **不启动 Runtime**——
+  `UNREACHABLE_PROCESS`（进程仍在但没人应答，`exit 1`，**不杀**）或 `NOT_RUNNING`（`exit 0`）；ping 得到时按
+  `bootId` 关联同一进程、取其 `startToken`、发 `runtime.stop`，然后有界轮询直到 `pid` 不存在 / `GONE` / `ZOMBIE`，
+  超时才做最后一次身份核对，输出 `STOPPED|NOT_EXITED` 与 `waitedMs/identityVerified/identityChanged/stopReportedPid/
+  pidMismatch/ownership` 及退出码 0/1。`status` = ensure（ADR-0004 自动启动语义不变）+ ping + 只读 `ownership`；
+  拿不到 Runtime 时打印 `{status: UNAVAILABLE, error, ownership}` 且 `exit 1`（此前是未捕获异常栈）。
+- `packages/contracts/src/index.ts`：新增 `runtimePingResultSchema`（含 `startedAt`）与 `runtimeStopResultSchema`，
+  就地放在这两个命令的定义旁，不新开 group、不改其它命令。
+- `package.json`（**越界最小改动，需集成者确认**）：把 `runtime-lifecycle` 加入 `test:unit` 的 ignore glob 与
+  `test:e2e` 文件清单，保持 FOUNDATION-037 分层与 `check:fast` 速度（与其他格同时改动会产生并排冲突）。
+- **未新增任何权限门禁、审批层或确认步骤**：`stop` 是用户显式命令，FULL/STRICT 都不新增门禁；只加只读诊断与事实报告。
+- **升级窗口兼容**（新 CLI + 旧 Runtime，即本改动落地后的稳定 Runtime）：`stop` 把旧响应 `{stopping: true}` 视为「请求已被
+  接受」并同一个有界等待，如实报 `identityVerified: false`、`stopReportedPid: null`（没有可核对的记录）；`status` 原样
+  打印旧 ping 字段并附上只读 `ownership`。否则 ADR-0022 重启序列的第一步（`stop`）会在版本差异下莫名其妙地失败。
+
+### 回归测试（`apps/runtime/test/runtime-lifecycle.test.ts`，新，10 项）
+
+- `stop` 后进程真的消失且报 `STOPPED`（FOUNDATION-042 回归：`stop` 返回后进程已不在，`waitedMs`/wall < 4s 而非 5s 窗口）。
+- 宽限 timer 不得留住进程：对照实验——裸 `Promise.race(Bun.sleep(3000))` 的子进程 3s 才退出，`withDeadline` 立即退出。
+- `stop` 幂等；从未启动的 home 上 `stop` 报 `NOT_RUNNING`、`exit 0`、**不创建任何文件**、不启动 Runtime。
+- 并发 4 个启动者：恰好 1 个存活且它是锁的 owner，其余 `exit 3` 且 stderr 为「another Runtime owns this Runtime home」
+  （不再出现 `EADDRINUSE`/`EEXIST`/SQLite 迁移冲突），随后 `stop` 让全部消失。
+- socket 缺失但进程存活：`stop`/`status` 报 `UNREACHABLE_PROCESS`/`UNAVAILABLE`、`exit 1`、列出该 pid 与身份，且**不杀**。
+- SIGKILL 后新启动接管过期锁、把旧 boot 记为 `EXITED_WITHOUT_CLEAN_SHUTDOWN` 并保留其记录（不重写历史）。
+- 归属记录单元面：活 owner 拒绝第二次 claim、死后接管、非本 boot 的锁不删、损坏锁保留为 `runtime.lock.corrupt`、
+  存活/已退出/pid 复用三类 verdict 与整体 verdict。
+- 活跃 provider 子进程：协议 stub provider 保持存活时 `stop` 同时结束 Runtime 与该 provider 进程。
+
+### 实际验证
+
+- 同一复现步骤对照（隔离 home：`status` → `stop` → `ps -p <pid>`）：
+  - 修复前（`git stash` 回退本格改动后实测）：`stop` 50ms 返回 `exit 0`（`{stopping:true}`），进程在 `stop` 返回时
+    **仍然存活**，**5.02s 后**才消失。
+  - 修复后：`stop` 0.10s 返回 `exit 0`（`{status:STOPPED, waitedMs:29, identityVerified:true}`），进程在 `stop` 返回时
+    **已经不存在**，`runtime.lock` 与 boot 记录均已释放。
+- `bun run check:fast` 退出码 0：根/UI typecheck、Vitest **231** 项、Bun 单测 **229** 项。
+- `bun run check` 退出码 0：根/UI typecheck、Vitest **231** 项、`test:storage` **387** 项（0 fail，45 文件）、
+  UI Vite 构建。
+- `bun run test:e2e` 退出码 0：**158** 项 / 22 文件；与 `test:unit` **229** 项之和等于总数 **387**（分层无遗漏/重复）。
+- 结束后回收本格产生的临时目录与进程（逐一核验 argv/cwd/归属记录属于本工作树与临时 home 后才终止），未触碰
+  稳定 Runtime（`~/.local/state/codeestra`，PID 65545）与其他格（`c3-verification-progress`）的进程；未使用
+  桌面/浏览器/键鼠自动化。
+- 升级窗口兼容（人工，需两版代码：`git stash` 后启动旧代码 Runtime，再用新 CLI）：旧 Runtime（无 lock/boot 记录、
+  ping 无 `startedAt`）下 `status` 报 `verdict: RUNNING`、`lock.present: false` 并原样打印旧字段；`stop` 报 `STOPPED`、
+  `exit 0`、`identityVerified: false`、`stopReportedPid: null`，进程随后确实消失（首次实现会误报 `STOP_FAILED` 并 `exit 1`，
+  已修正并复测）。
+
+### 未验证 / 剩余问题
+
+1. **未用真实 Pi（非 stub）复验带活跃 provider 的 stop**：stub provider 只证明编排与释放路径，不证明真实 provider 的
+   释放时延与子进程（子 agent）行为。
+2. **其余三处同类 `Bun.sleep` 竞速未改（禁改领地）**：`packages/agent-adapters/src/pi-process.ts`、
+   `apps/runtime/src/verification-service.ts`、`apps/runtime/src/operation-service.ts` 仍是「race 里放 `Bun.sleep` 且不清理」。
+   本格的确定性退出使它们不再拖长进程寿命，但若循环因其他原因未清空，它们仍会多留数秒；建议各领地负责人改用
+   `withDeadline`（本格已把该 helper 放在 `apps/runtime/src/lifecycle.ts`）。
+3. **不可达孤儿仍只报告、不回收**（派单要求的边界）：若要自动化，建议另立 ADR，方案是显式命令 + `pid`/`startToken`
+   匹配 + endpoint 不应答三重校验后 SIGTERM→SIGKILL，并记账；常态路径 0 步 0 等待，异常路径多一条人工命令。
+   旧版本（无归属记录）的孤儿无记录可校验，本格不猜归属、不误杀。
+4. **`runtime-boots/` 会累积未干净退出的 boot 记录**（每个异常退出 1 个小 JSON，本格不自动清理；它是 ADR-0021 之外的
+   第四类未注册资源）。是否需要纳入回收属后续决策；保留现场是当前取舍。
+5. `stop` 只有在「endpoint 应答」或「归属/boot 记录存在」时才能识别进程；`runtime.lock` 含 `cwd`/`argv`（无密钥），
+   跨用户 EPERM 场景只按 fail-closed 处理（视为存活），未实测。
+6. 新版 Runtime 与旧版（无锁）Runtime 并存只覆盖了两条路径：「endpoint 应答则让位」与「新 CLI 停旧 Runtime」
+   （已在「实际验证」里人工复测）；旧 Runtime 与新 Runtime 真正同时启动、以及旧 Runtime 先于新 Runtime 持有的
+   `session-handoff.sock` 冲突未验证。
+7. 未做并发压力测试（数十个 home 同时 stop/status）与长时间运行下的 boot 记录规模测试。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、UI 投影。

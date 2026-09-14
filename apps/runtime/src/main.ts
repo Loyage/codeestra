@@ -15,6 +15,11 @@ import { AgentRuntimeCoordinator, deriveCommandId } from './agent-runtime-servic
 import { EventSubscriptionHub, type EventSubscriptionHandle } from './event-subscription-service.js';
 import { integrateTaskResult } from './integration-service.js';
 import { RuntimeHttpApi } from './http-api.js';
+import {
+  acquireRuntimeOwnership,
+  probeRuntimeEndpoint,
+  releaseRuntimeOwnership,
+} from './lifecycle.js';
 import { LongOperationService } from './operation-service.js';
 import { runtimeHome, runtimeSocketPath } from './paths.js';
 import { SessionHandoffService } from './session-handoff-service.js';
@@ -85,33 +90,52 @@ const piSessionDir = piSessionDirectory({ runtimeHome: home, environment: Bun.en
 mkdirSync(home, { recursive: true, mode: 0o700 });
 chmodSync(home, 0o700);
 
-async function endpointIsLive(): Promise<boolean> {
-  try {
-    const socket = await Bun.connect<SocketState>({
-      unix: socketPath,
-      socket: {
-        open(peer) { peer.end(); },
-        data() {},
-        error() {},
-      },
-    });
-    socket.end();
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-if (await endpointIsLive()) process.exit(0);
-rmSync(socketPath, { force: true });
-
-let permissionMode: PermissionMode = await readPermissionMode(home);
 /**
  * Identity of this Runtime process. A stable promotion records the boot that moved `main`, and its
  * restart evidence is only accepted from a different boot: that is how "the Runtime was really
  * restarted" is checked instead of assumed from a client's report.
  */
 const bootId = crypto.randomUUID();
+const startedAt = Date.now();
+/**
+ * A Runtime owns its home exclusively, and the claim happens before anything is opened.
+ *
+ * Two starters used to be able to reach the same home at once: both opened the one SQLite file,
+ * and both unlinked and rebound `runtime.sock`, so the loser could delete the winner's socket path
+ * and leave it alive on an inode nobody could connect to. The lock makes "who owns this home" a
+ * single atomic decision: exactly one process gets through, and every other starter either steps
+ * aside because the endpoint already answers or reports the owner it found.
+ */
+const ownership = await acquireRuntimeOwnership({
+  home,
+  pid: process.pid,
+  bootId,
+  startedAt,
+  argv: Bun.argv.slice(0, 8),
+  cwd: process.cwd(),
+});
+if (!ownership.acquired) {
+  // A live owner that cannot be reached is not this process's to replace: the endpoint is the
+  // authority, and a second Runtime on one home would mean two writers on one database.
+  console.error('[runtime] another Runtime owns this Runtime home',
+    `pid=${ownership.owner?.pid ?? 'unknown'}`,
+    `bootId=${ownership.owner?.bootId ?? 'unknown'}`,
+    `problem=${ownership.problem ?? 'none'}`);
+  process.exit(ownership.ownerAlive ? 3 : 4);
+}
+if (!ownership.bootRecordWritten) {
+  console.error('[runtime] this boot could not record its ownership trace', home);
+}
+// A Runtime started before this ownership record existed can still be serving this home without a
+// lock. The endpoint decides: if it answers, this process is a duplicate and steps aside.
+if (await probeRuntimeEndpoint(socketPath)) {
+  releaseRuntimeOwnership({ home, bootId });
+  process.exit(0);
+}
+// Only now is the socket file known to be a leftover of a Runtime that is not answering.
+rmSync(socketPath, { force: true });
+
+let permissionMode: PermissionMode = await readPermissionMode(home);
 const storage = new Phase1Database(join(home, 'runtime.sqlite'));
 const registry = createPiAdapterRegistry({ runtimeHome: home, environment: Bun.env });
 const coordinator = new AgentRuntimeCoordinator({
@@ -263,6 +287,7 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       return success(request.requestId, {
         pid: process.pid,
         bootId,
+        startedAt,
         status: 'READY',
         permissionMode,
         adapters: registry.ids(),
@@ -271,8 +296,10 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         uiRunning: httpApi.running,
       });
     case 'runtime.stop':
+      // The response reports which process was asked to stop, never that it stopped: only the
+      // caller can observe the exit, and `codeestra stop` waits for it and reports the fact.
       setTimeout(() => { void shutdown(); }, 10);
-      return success(request.requestId, { stopping: true });
+      return success(request.requestId, { stopping: true, pid: process.pid, bootId, startedAt });
     case 'permission.get':
       return success(request.requestId, { mode: permissionMode, default: 'FULL' });
     case 'permission.set':
@@ -1134,6 +1161,26 @@ async function shutdown(): Promise<void> {
   await longOperations.close();
   storage.close();
   rmSync(socketPath, { force: true });
+  // Ownership is released last: "this home is free" must only become true once everything else has
+  // been released, so a starter that still sees the lock keeps waiting instead of opening a second
+  // connection to the same database.
+  releaseRuntimeOwnership({ home, bootId });
+  // Ordered shutdown is complete. Anything still holding the event loop is a library timer whose
+  // own work has already finished (Bun keeps the loop alive for a pending `Bun.sleep`, and every
+  // bounded grace in a subsystem is written that way), so the process ends here instead of staying
+  // alive as an unreachable Runtime that no client can stop. A provider process or verification
+  // command that could not be confirmed stopped is the one thing that must not be exited over: it
+  // is logged, projected as recovery-required, and this process stays observable so a client can
+  // report that the stop did not complete.
+  const unconfirmed = [
+    ...coordinator.activeSessionIds().map((sessionId) => `session ${sessionId}`),
+    ...verificationRunner.unconfirmedStops.map((pid) => `verification command ${pid}`),
+  ];
+  if (unconfirmed.length === 0) {
+    process.exit(0);
+  }
+  console.error('[runtime] shutdown could not confirm every owned process stopped;'
+    + ' not exiting so the state stays observable', unconfirmed.join(', '));
 }
 
 listener = Bun.listen<SocketState>({

@@ -13,6 +13,7 @@ import type { AdapterRegistry } from './adapter-registry.js';
 import { deliverAgentAnswer } from './agent-answer-service.js';
 import { observeAgentEvents } from './agent-observation-service.js';
 import { startReservedExecution } from './agent-start-service.js';
+import { withDeadline } from './lifecycle.js';
 import {
   beginTaskRunOperation,
   operationSteps,
@@ -453,11 +454,8 @@ export class AgentRuntimeCoordinator {
     }
     // A provider that cannot be released may never end its stream; shutdown stays bounded
     // and reports the remaining Sessions rather than blocking the Runtime forever.
-    const settled = await Promise.race([
-      this.settle().then(() => true),
-      Bun.sleep(this.#shutdownGraceMs).then(() => false),
-    ]);
-    if (!settled) {
+    const settled = await withDeadline(this.settle(), this.#shutdownGraceMs);
+    if (!settled.settled) {
       this.#logger('Agent observation streams did not end before the shutdown deadline', {
         sessions: this.activeSessionIds(),
       });
