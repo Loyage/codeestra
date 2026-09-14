@@ -614,6 +614,95 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     projectId: z.string().uuid(),
     taskId: z.string().uuid().optional(),
   }),
+  /**
+   * Fixes the three facts a `dev → main` promotion may act on: the verified `dev` commit, the
+   * expected old `main` commit, and the independent integration verification of the promoted
+   * commit. The caller states all three; the Runtime refuses any promotion whose claim does not
+   * match Git, so a promotion can never be built from "whatever dev happens to be".
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('promotion.prepare'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    batchId: z.string().uuid(),
+    expectedDevCommit: z.string().min(7).max(64),
+    expectedMainCommit: z.string().min(7).max(64),
+  }),
+  /**
+   * Records one STRICT approval of exactly the prepared triple. FULL never needs it, so it is
+   * refused there instead of being accepted as a no-op confirmation.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('promotion.approve'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    promotionId: z.string().uuid(),
+  }),
+  /**
+   * Fast-forwards `main` to the fixed candidate inside the worktree that has `main` checked out,
+   * then records the restart plan. The Runtime never advances a checked-out branch through its ref,
+   * and never writes a second ref after this point.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('promotion.promote'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    promotionId: z.string().uuid(),
+  }),
+  /**
+   * Records the observed Runtime restart after the client ran the recorded post-steps in the main
+   * worktree. The submitted boot identity must be the Runtime answering this request and must not
+   * be the one that moved `main`, and the step list must match the recorded plan exactly.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('promotion.restart.record'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    promotionId: z.string().uuid(),
+    observedBootId: z.string().uuid(),
+    runtimeStatus: z.string().min(1).max(40).nullable(),
+    uiRunning: z.boolean().nullable(),
+    steps: z.array(z.strictObject({
+      id: z.string().min(1).max(40),
+      argv: z.array(z.string()).min(1),
+      cwd: z.string().min(1),
+      exitCode: z.number().int().nullable(),
+      durationMs: z.number().int().nonnegative(),
+      stdoutBytes: z.number().int().nonnegative(),
+      stderrBytes: z.number().int().nonnegative(),
+      stdoutDigest: z.string().min(16).max(128),
+      stderrDigest: z.string().min(16).max(128),
+      failureDetail: z.string().optional(),
+    })).max(16),
+  }),
+  /**
+   * Closes a promotion a restart left unresolved, without touching a ref. Used when the observed
+   * `main` is not the promoted commit, so nothing may be resumed.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('promotion.abandon'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    promotionId: z.string().uuid(),
+    reason: z.string().min(1).max(500),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('promotion.get'),
+    projectId: z.string().uuid(),
+    promotionId: z.string().uuid(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('promotion.list'),
+    projectId: z.string().uuid(),
+    limit: z.number().int().min(1).max(200).default(20),
+  }),
 ]);
 export type RuntimeRequest = z.infer<typeof runtimeRequestSchema>;
 

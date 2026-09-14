@@ -13,6 +13,9 @@ export type {
   ReclamationCandidates, ReclamationIntegrationRef, ReclamationOperationPlan, ReclamationOutcome,
   ReclamationProjectRef, ReclamationRecord, ReclamationRecordInput, ReclamationTaskRef,
   ReclamationVerificationRef, ReclamationWorkspaceRef,
+  PromotionCandidates, PromotionMember, PromotionPermissionMode,
+  PromotionRestartPlanStep, PromotionRestartResult, PromotionRestartStepOutcome,
+  StablePromotionPlan, StablePromotionState, StablePromotionSummary,
   StoredAgentAnswer, StoredConstraint, StoredEventEnvelope, StoredVerificationCommand,
   TaskDependencyBlockReason, TaskDependencyFact, TaskDependencyMutation, TaskDependencyRecord,
   TaskDependencyRemoval, TaskDependencyStateChange,
@@ -25,8 +28,8 @@ export {
   agentAnswerMigration, agentConfigurationMigration, agentDisconnectMigration,
   agentObservationMigration, agentStartMigration, integrationPipelineMigration,
   operationProgressMigration,
-  phase1Migration, phase1SchemaVersion, reclamationMigration, taskControlMigration,
-  taskDependenciesMigration, taskVerificationMigration,
+  phase1Migration, phase1SchemaVersion, reclamationMigration, stablePromotionMigration,
+  taskControlMigration, taskDependenciesMigration, taskVerificationMigration,
   workspaceRetryMigration,
 } from './migration.js';
 export { agentThinkingLevelSchema, agentThinkingLevels, storedAgentConfigurationSchema }

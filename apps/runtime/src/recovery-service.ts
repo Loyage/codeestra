@@ -403,3 +403,91 @@ export async function reconcileInterruptedResultCommits(input: {
   }
   return results;
 }
+
+export interface PromotionRecoveryResult {
+  readonly promotionId: string;
+  readonly outcome: 'FAILED_MAIN_NOT_UPDATED' | 'RESTART_UNPROVEN';
+  readonly observedMainCommit: string | null;
+  readonly candidateCommit: string;
+}
+
+/**
+ * Reconciles a stable promotion a restart found in flight. The decision comes from the `main` ref
+ * alone, because that is the only side effect this capability performs:
+ *
+ * - `PROMOTING` with `main` still at the recorded expected commit: the promotion never happened.
+ *   It is failed with `MAIN_NOT_UPDATED`, and nothing about `dev`/`main` changed.
+ * - `PROMOTING` with `main` already at the fixed candidate: the fast-forward did happen and only
+ *   the record is missing it. It becomes `RECOVERY_REQUIRED/RESTART_UNPROVEN` — the ref is **not**
+ *   written a second time, and the restart sequence (install/build/stop/status) still has to be run
+ *   and recorded before the promotion can be called successful.
+ * - `RESTARTING`: the same, since the restart result was never recorded.
+ * - `PROMOTING` with any other `main`: the ref moved outside this promotion. It becomes
+ *   `RECOVERY_REQUIRED/MAIN_REF_OBSERVED`, which a human resolves with `promotion.abandon`; the
+ *   record states the value it observed instead of guessing.
+ *
+ * `RECOVERY_REQUIRED` keeps the project's promotion slot occupied, so a new promotion cannot race
+ * an unresolved one; the same record is resumed by re-running `promotion promote`, which re-issues
+ * the recorded restart plan without touching a ref.
+ */
+export async function reconcileInterruptedPromotions(input: {
+  readonly storage: Phase1Database;
+  readonly readRefCommit: (target: {
+    readonly ref: string;
+    readonly repositoryRoot: string;
+  }) => Promise<string | null>;
+  readonly now?: () => number;
+  readonly randomUUID?: () => string;
+}): Promise<readonly PromotionRecoveryResult[]> {
+  const now = input.now ?? Date.now;
+  const randomUUID = input.randomUUID ?? (() => crypto.randomUUID());
+  const results: PromotionRecoveryResult[] = [];
+  for (const plan of input.storage.listIncompleteStablePromotions()) {
+    const observed = await input.readRefCommit({
+      ref: plan.mainRef, repositoryRoot: plan.repositoryRoot,
+    }).catch(() => null);
+    if (observed === plan.candidateCommit) {
+      input.storage.markStablePromotionRecoveryRequired({
+        promotionId: plan.promotionId,
+        outcomeCode: 'RESTART_UNPROVEN',
+        promotedCommit: observed,
+        reason: `Runtime restarted while the promotion was ${plan.state}: ${plan.mainRef} is already`
+          + ` the promoted commit ${plan.candidateCommit}, so no ref will be written again, but the`
+          + ' restart sequence was never recorded. Re-run promotion promote to run the recorded'
+          + ' post-steps, or promotion abandon if you restarted the stable service yourself',
+        eventId: randomUUID(),
+        at: now(),
+      });
+      results.push({ promotionId: plan.promotionId, outcome: 'RESTART_UNPROVEN',
+        observedMainCommit: observed, candidateCommit: plan.candidateCommit });
+      continue;
+    }
+    if (plan.state === 'PROMOTING' && observed === plan.expectedMainCommit) {
+      input.storage.failStablePromotion({
+        promotionId: plan.promotionId,
+        outcomeCode: 'MAIN_NOT_UPDATED',
+        detail: `Runtime restarted while the promotion was PROMOTING and ${plan.mainRef} is still at`
+          + ` the expected commit ${plan.expectedMainCommit}; main was not updated by this promotion`,
+        eventId: randomUUID(),
+        failedAt: now(),
+      });
+      results.push({ promotionId: plan.promotionId, outcome: 'FAILED_MAIN_NOT_UPDATED',
+        observedMainCommit: observed, candidateCommit: plan.candidateCommit });
+      continue;
+    }
+    input.storage.markStablePromotionRecoveryRequired({
+      promotionId: plan.promotionId,
+      outcomeCode: 'MAIN_REF_OBSERVED',
+      promotedCommit: null,
+      reason: `Runtime restarted while the promotion was ${plan.state}: ${plan.mainRef} is at`
+        + ` ${observed ?? 'an unreadable value'} instead of the promoted commit`
+        + ` ${plan.candidateCommit}; nothing was promoted by Codeestra. Resolve it explicitly`
+        + ' (promotion promote if the ref is yours to keep, otherwise promotion abandon)',
+      eventId: randomUUID(),
+      at: now(),
+    });
+    results.push({ promotionId: plan.promotionId, outcome: 'RESTART_UNPROVEN',
+      observedMainCommit: observed, candidateCommit: plan.candidateCommit });
+  }
+  return results;
+}

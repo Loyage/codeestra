@@ -1084,6 +1084,64 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 - 副本失败现场当前由 `verification-service` 在 run 结束时删除；本能力回收的是它留下的残留（删除失败、Runtime 中断）。未修改 A1 格领地文件。
 - Attention 参数保留决策未做敏感性扫描（例如真实 Agent 在参数里写入密钥的形态）。
 
+## FOUNDATION-042 — `dev → main` 稳定提升与重启成为产品能力（ADR-0022）
+
+状态：已实现并通过 CLI/命令面测试；**未在真实 `main` 上执行提升，未重启任何真实 Runtime**（本格禁止）。本轮占用 schema v13；v11/v12 两段迁移原位未动。
+
+用户本轮选择（记录为 ADR-0022）：
+
+1. 提升后的后置步骤 = ADR-0009 D03 的完整序列：`bun install --frozen-lockfile` → `bun run build:ui` → `bun run codeestra stop` → `bun run codeestra status`（不采用“只 stop+status”或“默认跳过资产”的方案）。
+2. 后置序列由 **CLI 客户端**执行：Runtime 只做核对 + fast-forward + 记为 `RESTARTING` 并返回计划；客户端在 `stop` 后仍存活，再用新 Runtime 的证据记账。
+3. 「Runtime 恢复响应」的成功判定 = `status: READY`；`uiRunning` 只作为**观察到的事实**记录，不作为提升条件（UI 是按需前端，ADR-0007/0008）。`AGENTS.md` 给 Agent 的人工规程不变。
+
+### 已实现
+
+- `packages/git/src/promotion.ts`（新）：`findCheckedOutWorktree`（定位检出某分支的工作树；未检出返回 null，多工作树检出同一分支报 `FOREIGN_RESOURCE`）、`inspectPromotionWorktree`（分支/HEAD 必须精确匹配、读取 tracked 改动与未跟踪文件、`clean` 只由 tracked 改动决定）、`fastForwardCheckedOutWorktree`（在**该工作树内** `git merge --ff-only <固定 OID>`，合并后回读 ref/HEAD/分支，只有 ref 真的等于候选才算成功；脏工作树、非后代候选一律 `FAILED` 且 ref 不动）。**不提供任何写 `main` 的 `update-ref` 路径。**
+- `apps/runtime/src/promotion-service.ts`（新）：`prepareStablePromotion`（固定并校验 dev commit / 预期 main OID / 集成验证三元组 + 成员 revision，只读 Git）、`approveStablePromotion`（STRICT 一次批准；FULL 拒绝 `APPROVAL_NOT_REQUIRED`）、`promoteStableBranch`（重新核对 → 记录 `PROMOTING` → fast-forward 已检出的 `main` → 回读 ref → 记录重启计划与 `promoting_boot_id` → `RESTARTING`）、`recordPromotionRestart`（boot 身份 + 步骤计划一致性 + `READY` 判定）、`abandonStablePromotion`（显式关闭无法续跑的记录）、`promotionRestartPlan`（固定 4 步序列）。拒绝码：`INVALID_COMMIT_ID`、`PROMOTION_EVIDENCE_MISMATCH`、`BATCH_NOT_INTEGRATED`、`VERIFICATION_NOT_PASSED`、`DEV_REF_MOVED`、`MAIN_REF_MOVED`、`PROMOTION_NOTHING_TO_PROMOTE`、`PROMOTION_NOT_FAST_FORWARD`、`MAIN_WORKTREE_MISSING`、`MAIN_WORKTREE_DIRTY`、`PROMOTION_NOT_APPROVED`、`APPROVAL_NOT_REQUIRED`、`PROMOTION_STALE`、`PROMOTION_IN_PROGRESS`、`MAIN_UPDATE_FAILED`、`RESTART_PLAN_MISMATCH`、`RUNTIME_NOT_OBSERVED`、`RUNTIME_NOT_RESTARTED`、`RUNTIME_NOT_READY`、`RESTART_STEP_FAILED`、`PROMOTION_FINISHED`。
+- `packages/storage`：`phase1SchemaVersion` 12 → 13；additive `stablePromotionMigration`（`stable_promotions` + `stable_promotion_members` + 「单项目单提升位」部分唯一索引 + 状态/终态/`SUCCEEDED` 必须有 `promoted_commit` 的 CHECK）；方法 `getPromotionCandidates`、`beginStablePromotion`、`findStablePromotionByCommand`、`approveStablePromotion`、`startStablePromotion`、`recordStablePromotionMainUpdate`、`recordStablePromotionRestart`、`markStablePromotionStale`、`failStablePromotion`、`markStablePromotionRecoveryRequired`、`listStablePromotions`、`getStablePromotion`、`getStablePromotionPlan`、`listIncompleteStablePromotions`。
+- `packages/contracts`：新增一个 `promotion.*` group（`prepare`/`approve`/`promote`/`restart.record`/`abandon`/`get`/`list`），union 末尾追加；`runtime.ping` 结果新增 `bootId`（重启证据）。
+- `apps/cli/src/main.ts`：新增 `promotion prepare|approve|promote|abandon|get|list` 分支块与重启执行器（逐步执行记录中的序列、失败即停止并把未运行步骤记为 `exitCode: null`、输出重定向到 stderr 以保持 stdout 机器可读、只记录摘要不记录原始输出）；`usage()` 追加行。`promotion promote` 只有 `SUCCEEDED` 退出码 0。
+- `apps/runtime/src/main.ts`：只做新服务接线、`bootId`、自己的 dispatch 分支与启动 reconcile 调用。
+- `apps/runtime/src/recovery-service.ts`：尾部追加 `reconcileInterruptedPromotions`（按 `main` ref 事实收敛：未更新 → `FAILED/MAIN_NOT_UPDATED`；已是候选 → `RECOVERY_REQUIRED/RESTART_UNPROVEN` 且**不二次写 ref**、可续跑；其他 → `RECOVERY_REQUIRED/MAIN_REF_OBSERVED`）。既有函数未改。
+
+### 明确未做（本轮范围外）
+
+- **真实 `main` 提升与稳定 Runtime 重启**：本格禁止操作 `/Users/loyage/Documents/codeestra`，因此这条验收未验证（见下）。
+- UI 投影（`apps/ui/**` 本轮无人改，ADR-0022 D01 明确留后续）。
+- 多批次合并提升、`main` 未检出时的提升路径、`push`/`origin/main`、系统外手动更新 `main` 的监控。
+- `docs/architecture/state-machines.md` §4 的 `VERIFYING` 与本实现的差异未回写该文档（该文件不在本格领地）。
+
+### 实际验证
+
+- `bun run check:fast` 退出码 0：根/UI typecheck + Vitest 212 项 + Bun 单测 194 项。
+- `bun run check` 退出码 0：`bun run test:storage` 332 项通过（`test:unit` 194 + `test:e2e` 138，分层之和与总数一致）、`bun run build:ui` 成功。
+- `packages/git/test/promotion.test.ts`（新，6 项）：主工作树定位/未检出/非法 ref；干净与脏工作树、分支与 HEAD 不匹配；`merge --ff-only` 后 ref+HEAD+index+文件同时前进；已提升幂等；脏工作树拒绝且本地改动保留；非后代候选拒绝。全部使用临时仓库。
+- `apps/runtime/test/promotion-service.test.ts`（新，21 项）：v12 → v13 additive 升级；`prepare` 固定三元组与成员 revision、不写 Git、`commandId` 重放；拒绝非批次集成结果/缩写 OID/main 不符或已等于候选/批次未 INTEGRATED/验证未 PASSED/工作树脏/`main` 未检出；FULL 提升后记录 ADR-0009 的 4 步计划（cwd = main 工作树）且 ref+HEAD+文件同时前进；只有「不同 boot + READY + 全步退出 0」`SUCCEEDED`；同 boot → `RUNTIME_NOT_RESTARTED`；`observedBootId` 非当前 Runtime → `RUNTIME_NOT_OBSERVED`；步骤被替换/截断 → `RESTART_PLAN_MISMATCH`；某步非 0 → `RESTART_STEP_FAILED` 且不回滚；非 READY → `RUNTIME_NOT_READY`；单提升位与不重复提升；STRICT 未批准拒绝、FULL 拒绝 `approve`、批准后成功；dev/main 移动 → `STALE` 且 ref 未动；崩溃 reconcile 三种分支与续跑/abandon。
+- `apps/runtime/test/cli-promotion.test.ts`（新，4 项，真实 CLI + 真实 Runtime + 临时仓库 + 协议 stub provider，临时 `CODEESTRA_HOME`）：
+  - 完整链路 `create → submit → run → result capture → verify → integrate → promotion prepare → promotion promote`：`main` 前移到成果 commit、`dev` 不变、工作树干净且文件已更新、记录中的四步**真实执行**（含真实 `bun install --frozen-lockfile`、`bun run build:ui`、`bun run codeestra stop`、`bun run codeestra status`，Runtime 真的被停掉并由 `status` 拉起）、`runtimeStatus=READY`、`uiRunning=false` 被记录、`promotion get/list` 一致。
+  - 后置步骤失败（`build:ui` 退出 1）：退出码 1、`FAILED/RESTART_STEP_FAILED`、后续步骤记为未运行、`main` 保持已提升不回滚、Runtime 仍可响应、终态记录拒绝 `abandon`。
+  - STRICT：未批准时 `promotion promote` 退出码 1（`PROMOTION_NOT_APPROVED`）；`approve` → `AWAITING_APPROVAL`；`abandon` → `FAILED/ABANDONED` 且 `main` 未动。
+  - 证据不符（错误 main OID / 错误 dev commit）退出码 1 且不建记录、不动 ref。
+- 所有 Runtime/CLI 运行都在各测试自己的临时 `CODEESTRA_HOME` 下（等价隔离，且不连接 main 的稳定 Runtime）；未运行任何针对真实仓库的破坏性命令；未使用 computer-use/桌面/浏览器自动化。
+- 结束后已回收本格产生的临时目录与孤儿 Runtime 进程（逐一核验 argv/cwd 属于本工作树且已无 `runtime.sock` 才终止）；未触碰其他格或稳定工作树的进程。
+
+### 剩余问题
+
+1. **既有缺陷（本格发现，未修复，非本格领地）：`codeestra stop` 之后 Runtime 进程有时不退出。** 复现（隔离 home，不触碰稳定服务）：
+   ```bash
+   cd /Users/loyage/Documents/codeestra-wt/b1-main-promotion
+   CODEESTRA_HOME=/tmp/ce-b1-probe bun run codeestra status   # 记录 pid
+   CODEESTRA_HOME=/tmp/ce-b1-probe bun run codeestra stop
+   ps -p <pid>   # 仍存活：socket 已被 rmSync、storage 已 close、进程被 reparent 到 init
+   ```
+   影响：多次重启/测试后累积**不可达**的孤儿 Runtime 进程；本格测试与该现象叠加时会留下孤儿（已清理）。依据：同一签名出现在并行的 b2 工作树（pid 48442，无 `runtime.sock`、无 sqlite fd，`shutdown` 已跑完），因此判断为既有 `shutdown()`/启动路径问题而非本格引入；修复涉及 `apps/runtime/src/main.ts` 的 shutdown/启动绑定，需另开任务（并考虑「socket 文件被并发启动者删掉」的竞态）。
+2. **越界最小改动（需集成者确认）**：
+   - `package.json` 的两个测试脚本列表追加本格新测试文件（`test:unit` 的 ignore glob 加 `cli-promotion`/`promotion-service`，`test:e2e` 加两个文件），以保持 FOUNDATION-037 的分层与 `check:fast` 速度；与其他格同时追加会产生可直接解决的并排冲突。
+   - `apps/runtime/test/cli-reclaim.test.ts` 的迁移断言把硬编码 `12` 改为 `phase1SchemaVersion`（schema v13 由本格独占导致的必然影响，1 行）。
+3. `promotion prepare` 要求调用方给出**完整** OID（不接受缩写）：脚本需从 `task integration list`/`project inspect` 取值。若希望接受缩写，需要额外的「解析但不接受 ref 名」规则设计。
+4. 固定重启序列假定 main 工作树是本仓库的 bun 检出（存在 `build:ui` 与 `codeestra` 脚本）；其他形态会以 `RESTART_STEP_FAILED` 如实失败，`main` 保持已更新。
+5. 提升记录的 `RECOVERY_REQUIRED`/`FAILED` 现场没有自动回收策略（ADR-0021 只管 worktree/副本）。
+
 ## FOUNDATION-044 — 任务依赖、DAG 环校验与 BLOCKED 语义（ADR-0024）
 
 状态：已实现并通过 CLI/命令面测试（真实临时仓库 + 临时 `CODEESTRA_HOME` + 协议 stub provider）；未用真实 provider 驱动依赖解阻塞，未使用桌面/浏览器/键鼠自动化。**本轮占用 schema v15；v13 保留给 B1 格、v14 保留给 B2 格，均未占用。**
@@ -1136,7 +1194,7 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 
 ## NEXT — 最小可用纵向切片
 
-0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。剩余：`dev → main` 提升与重启。
+0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、UI 投影。
 1. 真实验证 ADR-0016：在一次性临时仓库中用真实 Pi 跑「启动 → 暂停 → 恢复 → 终止」，核对 provider 进程确实退出、`--session` 确实续接同一 conversation、超时进入 `RECOVERY_REQUIRED`；脚本 Adapter 不能替代该验收。
 2. ~~长命令后台化与进度事件~~：已由 FOUNDATION-039 / ADR-0019 完成持久 Operation、步骤级进度、`--background` 与 `task.operation.cancel`（CLI + 同一命令面 + UI）。剩余：token 级实时进度事件、verification run 的独立 `CANCELLED` 状态、取消后验证副本的回收。
 3. ADR-0010 Phase 3 技术 spike：真实 Pi session-file 双向 RPC↔TUI 恢复、PTY 生命周期、safe-point 与权限模式 side channel；通过后再落 handoff Operation、Session incarnation 和 CLI attach。

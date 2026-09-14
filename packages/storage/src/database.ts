@@ -18,6 +18,7 @@ import {
   phase1Migration,
   phase1SchemaVersion,
   reclamationMigration,
+  stablePromotionMigration,
   taskControlMigration,
   taskDependenciesMigration,
   taskVerificationMigration,
@@ -508,6 +509,125 @@ export interface VerificationRunPlan extends VerificationRunSummary {
   readonly operationState: 'PLANNED' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'RECONCILE_REQUIRED';
 }
 
+export type PromotionPermissionMode = 'FULL' | 'STRICT';
+
+/**
+ * Stable branch promotion projections (ADR-0009 D02/D03, ADR-0022). One promotion fixes the three
+ * facts it is allowed to act on — the verified `dev` commit, the expected old `main` commit, and
+ * the independent integration verification of the promoted commit — together with the permission
+ * mode, the observed `main` after the update, and the Runtime restart result.
+ *
+ * `CREATED` holds the fixed evidence. `AWAITING_APPROVAL` exists only in STRICT and records the
+ * exact approved triple, so a later `dev`/`main`/evidence movement is detectable as `STALE`.
+ * `PROMOTING` records the main-worktree plan before Git runs; `RESTARTING` exists because the
+ * restart sequence outlives the Runtime that moved `main`, and its result has to be recorded by a
+ * later Runtime. `RECOVERY_REQUIRED` is a resumable, blocking state: reconciliation found the
+ * promotion mid-flight and states what the refs actually say.
+ */
+export type StablePromotionState = 'CREATED' | 'AWAITING_APPROVAL' | 'PROMOTING' | 'RESTARTING'
+  | 'SUCCEEDED' | 'STALE' | 'FAILED' | 'RECOVERY_REQUIRED';
+
+/** One Task revision whose result the promoted `dev` commit contains. */
+export interface PromotionMember {
+  readonly batchId: string;
+  readonly taskId: string;
+  readonly revisionId: string;
+  readonly executionId: string;
+  readonly candidateCommit: string;
+}
+
+/** The fixed restart sequence: absolute cwd plus argv. Recorded before the Runtime stops. */
+export interface PromotionRestartPlanStep {
+  readonly id: string;
+  readonly argv: readonly string[];
+  readonly cwd: string;
+}
+
+export interface PromotionRestartStepOutcome {
+  readonly id: string;
+  readonly argv: readonly string[];
+  readonly cwd: string;
+  readonly exitCode: number | null;
+  readonly durationMs: number;
+  readonly stdoutBytes: number;
+  readonly stderrBytes: number;
+  readonly stdoutDigest: string;
+  readonly stderrDigest: string;
+  readonly failureDetail?: string;
+}
+
+/** What the client observed when it checked the restarted Runtime. */
+export interface PromotionRestartResult {
+  readonly observedBootId: string;
+  readonly runtimeStatus: string | null;
+  readonly uiRunning: boolean | null;
+  readonly steps: readonly PromotionRestartStepOutcome[];
+}
+
+/** Everything the promoting client needs to run the post-steps without asking again. */
+export interface StablePromotionSummary {
+  readonly promotionId: string;
+  readonly projectId: string;
+  readonly devRef: string;
+  readonly mainRef: string;
+  readonly candidateCommit: string;
+  readonly expectedMainCommit: string;
+  readonly integrationBatchId: string;
+  readonly verificationId: string;
+  readonly verificationTestedCommit: string;
+  readonly permissionMode: PromotionPermissionMode;
+  readonly state: StablePromotionState;
+  readonly approval: {
+    readonly devCommit: string; readonly mainCommit: string;
+    readonly verificationId: string; readonly approvedAt: number;
+  } | null;
+  /** Observed `main` after the update; NULL until a ref was read back. */
+  readonly promotedCommit: string | null;
+  readonly mainWorktreePath: string | null;
+  /** Boot identity of the Runtime that moved `main`, recorded before Git ran. */
+  readonly promotingBootId: string | null;
+  readonly restartSteps: readonly PromotionRestartPlanStep[];
+  readonly restart: PromotionRestartResult | null;
+  readonly outcomeCode: string | null;
+  readonly detail: string | null;
+  readonly createdAt: number;
+  readonly completedAt: number | null;
+  /** Task revisions the promoted commit contains, fixed at preparation time. */
+  readonly members: readonly PromotionMember[];
+}
+
+export interface StablePromotionPlan extends StablePromotionSummary {
+  readonly operationId: string;
+  readonly operationState: 'PLANNED' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'RECONCILE_REQUIRED';
+  readonly repositoryRoot: string;
+  readonly gitCommonDir: string;
+  readonly objectFormat: 'sha1' | 'sha256';
+}
+
+/** Read-only facts the promotion service needs before it may touch any ref. */
+export interface PromotionCandidates {
+  readonly projectId: string;
+  readonly batchId: string;
+  readonly repositoryRoot: string;
+  readonly gitCommonDir: string;
+  readonly mainRef: string;
+  readonly devRef: string;
+  readonly objectFormat: 'sha1' | 'sha256';
+  readonly batchState: IntegrationBatchState;
+  readonly batchDevRef: string;
+  readonly batchDevCommit: string;
+  readonly batchMergedCommit: string | null;
+  readonly batchIntegratedCommit: string | null;
+  readonly verificationState: VerificationState | null;
+  readonly verificationId: string | null;
+  readonly verificationTestedCommit: string | null;
+  readonly verificationDevCommit: string | null;
+  readonly verificationOutcomeCode: string | null;
+  readonly members: readonly PromotionMember[];
+  /** The open promotion of this project, if any; a second attempt must not race it. */
+  readonly openPromotion: StablePromotionSummary | null;
+}
+
 /**
  * Integration pipeline projections (ADR-0018). A batch fixes the `dev` baseline, carries the
  * candidate result commit, and records the merge and the independent integration verification
@@ -694,6 +814,7 @@ export class Phase1Database {
         if (version < 10) this.sqlite.exec(integrationPipelineMigration);
         if (version < 11) this.sqlite.exec(operationProgressMigration);
         if (version < 12) this.sqlite.exec(reclamationMigration);
+        if (version < 13) this.sqlite.exec(stablePromotionMigration);
         if (version < 15) this.sqlite.exec(taskDependenciesMigration);
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
@@ -4756,6 +4877,676 @@ export class Phase1Database {
       SELECT id FROM integration_verification_runs
       WHERE state IN ('QUEUED','RUNNING') ORDER BY queued_at,id
     `).all().map((row) => this.integrationVerificationPlan(row.id));
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Stable branch promotion (ADR-0009 D02/D03, ADR-0022). These methods only record facts and
+  // enforce state transitions; the Git side effect (fast-forwarding the checked-out `main`
+  // worktree) and the Runtime restart sequence are executed by the promotion service and its
+  // client between calls, so a crash always leaves a state that can be reconciled from refs.
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * The integration evidence a promotion would fix, plus any promotion this project already has
+   * open. A promotion is only ever built from records that already exist: nothing here re-runs
+   * the integration verification, because the independent verification is what made `dev` move.
+   */
+  getPromotionCandidates(projectId: string, batchId: string): PromotionCandidates {
+    const row = this.sqlite.query<{
+      project_id: string; repo_root: string; git_common_dir: string; main_ref: string;
+      dev_ref: string; object_format: 'sha1' | 'sha256';
+      batch_state: IntegrationBatchState; batch_dev_ref: string; batch_dev_commit: string;
+      merged_commit: string | null;
+      integrated_commit: string | null;
+      verification_state: VerificationState | null;
+      verification_id: string | null;
+      verification_tested_commit: string | null;
+      verification_dev_commit: string | null;
+      verification_outcome_code: string | null;
+    }, [string, string]>(`
+      SELECT p.id AS project_id,p.repo_root,p.git_common_dir,p.main_ref,p.dev_ref,p.object_format,
+             batch.state AS batch_state,batch.dev_ref AS batch_dev_ref,
+             batch.dev_commit AS batch_dev_commit,batch.merged_commit,batch.integrated_commit,
+             run.state AS verification_state,run.id AS verification_id,
+             run.tested_commit AS verification_tested_commit,
+             run.dev_commit AS verification_dev_commit,run.outcome_code AS verification_outcome_code
+      FROM integration_batches batch
+      JOIN projects p ON p.id=batch.project_id
+      JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
+      LEFT JOIN integration_verification_runs run ON run.batch_id=batch.id
+      WHERE batch.project_id=?1 AND batch.id=?2
+    `).get(projectId, batchId);
+    if (row === null) {
+      throw new StorageError('NOT_FOUND', 'Integration batch or active project trust was not found');
+    }
+    const open = this.sqlite.query<{ id: string }, [string]>(`
+      SELECT id FROM stable_promotions
+      WHERE project_id=?1 AND state IN ('CREATED','AWAITING_APPROVAL','PROMOTING','RESTARTING',
+        'RECOVERY_REQUIRED')
+    `).get(projectId);
+    return {
+      projectId: row.project_id,
+      batchId,
+      repositoryRoot: row.repo_root,
+      gitCommonDir: row.git_common_dir,
+      mainRef: row.main_ref,
+      devRef: row.dev_ref,
+      objectFormat: row.object_format,
+      batchState: row.batch_state,
+      batchDevRef: row.batch_dev_ref,
+      batchDevCommit: row.batch_dev_commit,
+      batchMergedCommit: row.merged_commit,
+      batchIntegratedCommit: row.integrated_commit,
+      verificationState: row.verification_state,
+      verificationId: row.verification_id,
+      verificationTestedCommit: row.verification_tested_commit,
+      verificationDevCommit: row.verification_dev_commit,
+      verificationOutcomeCode: row.verification_outcome_code,
+      members: this.stablePromotionBatchMembers(projectId, batchId),
+      openPromotion: open === null ? null : this.stablePromotionSummary(open.id),
+    };
+  }
+
+  /**
+   * Fixes the promotion's three facts and its member revisions. Every value is copied from a
+   * record that already exists, so the promotion can be re-checked later against the same claim.
+   */
+  beginStablePromotion(input: {
+    readonly projectId: string;
+    readonly batchId: string;
+    readonly promotionId: string;
+    readonly operationId: string;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly createdEventId: string;
+    readonly devRef: string;
+    readonly mainRef: string;
+    readonly candidateCommit: string;
+    readonly expectedMainCommit: string;
+    readonly verificationId: string;
+    readonly verificationTestedCommit: string;
+    readonly permissionMode: PromotionPermissionMode;
+    readonly actor: string;
+    readonly createdAt: number;
+  }): Readonly<{ plan: StablePromotionPlan; created: boolean }> {
+    return this.sqlite.transaction(() => {
+      const existing = this.sqlite.query<{ payload_hash: string; result_json: string }, [string, string]>(
+        'SELECT payload_hash,result_json FROM command_receipts WHERE project_id=?1 AND command_id=?2',
+      ).get(input.projectId, input.commandId);
+      if (existing !== null) {
+        if (existing.payload_hash !== input.payloadHash) {
+          throw new StorageError('COMMAND_CONFLICT',
+            'Command ID was already used with a different payload');
+        }
+        const recorded = JSON.parse(existing.result_json) as { promotionId: string };
+        return { plan: this.stablePromotionPlan(recorded.promotionId), created: false };
+      }
+      const open = this.sqlite.query<{ id: string; state: StablePromotionState }, [string]>(`
+        SELECT id,state FROM stable_promotions
+        WHERE project_id=?1 AND state IN ('CREATED','AWAITING_APPROVAL','PROMOTING','RESTARTING',
+          'RECOVERY_REQUIRED')
+      `).get(input.projectId);
+      if (open !== null) {
+        throw new StorageError('INVALID_STATE',
+          `Promotion ${open.id} is ${open.state}; it must be resumed or abandoned first`);
+      }
+      const project = this.sqlite.query<{
+        repo_root: string; main_ref: string; dev_ref: string; object_format: 'sha1' | 'sha256';
+      }, [string]>(`
+        SELECT p.repo_root,p.main_ref,p.dev_ref,p.object_format FROM projects p
+        JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
+        WHERE p.id=?1
+      `).get(input.projectId);
+      if (project === null) {
+        throw new StorageError('NOT_FOUND', 'Active project trust was not found');
+      }
+      if (project.dev_ref !== input.devRef || project.main_ref !== input.mainRef) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Project baseline refs changed before the promotion was prepared');
+      }
+      this.sqlite.query(`
+        INSERT INTO operations(id,project_id,kind,aggregate_id,idempotency_key,state,request_json,
+          created_at,updated_at)
+        VALUES (?1,?2,'PROMOTE_STABLE_BRANCH',?3,?4,'PLANNED',?5,?6,?6)
+      `).run(input.operationId, input.projectId, input.promotionId, input.commandId,
+        JSON.stringify({ promotionId: input.promotionId, batchId: input.batchId,
+          devRef: input.devRef, mainRef: input.mainRef, candidateCommit: input.candidateCommit,
+          expectedMainCommit: input.expectedMainCommit, verificationId: input.verificationId }),
+        input.createdAt);
+      this.sqlite.query(`
+        INSERT INTO stable_promotions(id,project_id,dev_ref,main_ref,candidate_commit,
+          expected_main_commit,integration_batch_id,verification_id,verification_tested_commit,
+          permission_mode,state,created_at)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'CREATED',?11)
+      `).run(input.promotionId, input.projectId, input.devRef, input.mainRef,
+        input.candidateCommit, input.expectedMainCommit, input.batchId, input.verificationId,
+        input.verificationTestedCommit, input.permissionMode, input.createdAt);
+      for (const member of this.stablePromotionBatchMembers(input.projectId, input.batchId)) {
+        this.sqlite.query(`
+          INSERT INTO stable_promotion_members(promotion_id,batch_id,project_id,task_id,revision_id,
+            execution_id,candidate_commit,created_at)
+          VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+        `).run(input.promotionId, input.batchId, input.projectId, member.taskId,
+          member.revisionId, member.executionId, member.candidateCommit, input.createdAt);
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'PromotionCreated',1,'Promotion',?3,0,?4,?4,?5,?6)
+      `).run(input.createdEventId, input.projectId, input.promotionId, input.commandId,
+        input.createdAt, JSON.stringify({ promotionId: input.promotionId, batchId: input.batchId,
+          devRef: input.devRef, mainRef: input.mainRef, candidateCommit: input.candidateCommit,
+          expectedMainCommit: input.expectedMainCommit, verificationId: input.verificationId,
+          permissionMode: input.permissionMode, actor: input.actor }));
+      this.sqlite.query(`
+        INSERT INTO command_receipts(project_id,command_id,payload_hash,result_json,created_at)
+        VALUES (?1,?2,?3,?4,?5)
+      `).run(input.projectId, input.commandId, input.payloadHash,
+        JSON.stringify({ promotionId: input.promotionId }), input.createdAt);
+      return { plan: this.stablePromotionPlan(input.promotionId), created: true };
+    })();
+  }
+
+  /**
+   * Records the STRICT approval of exactly the fixed triple. The approved values are copied from
+   * the promotion's own fixed evidence, so an approval can only ever mean those three facts — and
+   * `promote` re-reads both refs so a movement after this point invalidates it.
+   */
+  approveStablePromotion(input: {
+    readonly promotionId: string;
+    readonly actor: string;
+    readonly approvedAt: number;
+    readonly eventId: string;
+  }): StablePromotionPlan {
+    return this.sqlite.transaction(() => {
+      const promotion = this.stablePromotionPlan(input.promotionId);
+      if (promotion.state === 'AWAITING_APPROVAL') return promotion;
+      if (promotion.state !== 'CREATED') {
+        throw new StorageError('INVALID_STATE',
+          `Promotion is ${promotion.state}; only a CREATED promotion can be approved`);
+      }
+      const updated = this.sqlite.query(`
+        UPDATE stable_promotions
+        SET state='AWAITING_APPROVAL',approved_dev_commit=candidate_commit,
+            approved_main_commit=expected_main_commit,approved_verification_id=verification_id,
+            approved_at=?1
+        WHERE id=?2 AND state='CREATED'
+      `).run(input.approvedAt, input.promotionId);
+      if (updated.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Promotion changed while recording its approval');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'PromotionApproved',1,'Promotion',?3,0,?1,?1,?4,?5)
+      `).run(input.eventId, promotion.projectId, input.promotionId, input.approvedAt,
+        JSON.stringify({ promotionId: input.promotionId, devRef: promotion.devRef,
+          mainRef: promotion.mainRef, candidateCommit: promotion.candidateCommit,
+          expectedMainCommit: promotion.expectedMainCommit,
+          verificationId: promotion.verificationId, actor: input.actor }));
+      return this.stablePromotionPlan(input.promotionId);
+    })();
+  }
+
+  /**
+   * CREATED/AWAITING_APPROVAL/RECOVERY_REQUIRED → PROMOTING, recorded before Git runs. STRICT
+   * requires a recorded approval that still matches the fixed triple; that is the only gate.
+   */
+  startStablePromotion(input: {
+    readonly promotionId: string;
+    readonly mainWorktreePath: string;
+    readonly restartSteps: readonly PromotionRestartPlanStep[];
+    readonly promotingBootId: string;
+    readonly permissionMode: PromotionPermissionMode;
+    readonly startedAt: number;
+    readonly eventId: string;
+  }): StablePromotionPlan {
+    return this.sqlite.transaction(() => {
+      const promotion = this.stablePromotionPlan(input.promotionId);
+      if (promotion.state !== 'CREATED' && promotion.state !== 'AWAITING_APPROVAL') {
+        return promotion;
+      }
+      if (input.permissionMode === 'STRICT') {
+        const approval = promotion.approval;
+        if (promotion.state !== 'AWAITING_APPROVAL' || approval === null
+          || approval.devCommit !== promotion.candidateCommit
+          || approval.mainCommit !== promotion.expectedMainCommit
+          || approval.verificationId !== promotion.verificationId) {
+          throw new StorageError('INVALID_STATE',
+            'STRICT mode needs a recorded approval of this dev/main/verification triple before promoting');
+        }
+      }
+      const updated = this.sqlite.query(`
+        UPDATE stable_promotions
+        SET state='PROMOTING',main_worktree_path=?1,restart_steps_json=?2,promoting_boot_id=?3,
+            permission_mode=?4,outcome_code=NULL,detail=NULL
+        WHERE id=?5 AND state IN ('CREATED','AWAITING_APPROVAL')
+      `).run(input.mainWorktreePath, JSON.stringify(input.restartSteps), input.promotingBootId,
+        input.permissionMode, input.promotionId);
+      const operation = this.sqlite.query(`
+        UPDATE operations SET state='IN_PROGRESS',updated_at=?1
+        WHERE id=?2 AND state IN ('PLANNED','RECONCILE_REQUIRED')
+      `).run(input.startedAt, promotion.operationId);
+      if (updated.changes !== 1 || operation.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Promotion changed while starting its main update');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'PromotionStarted',1,'Promotion',?3,0,?1,?1,?4,?5)
+      `).run(input.eventId, promotion.projectId, input.promotionId, input.startedAt,
+        JSON.stringify({ promotionId: input.promotionId, devRef: promotion.devRef,
+          mainRef: promotion.mainRef, candidateCommit: promotion.candidateCommit,
+          expectedMainCommit: promotion.expectedMainCommit,
+          mainWorktreePath: input.mainWorktreePath, restartSteps: input.restartSteps }));
+      return this.stablePromotionPlan(input.promotionId);
+    })();
+  }
+
+  /**
+   * PROMOTING → RESTARTING with the `main` commit that was actually read back from the ref. The
+   * restart sequence outlives the Runtime that moved `main`, so its result is recorded later.
+   */
+  recordStablePromotionMainUpdate(input: {
+    readonly promotionId: string;
+    readonly promotedCommit: string;
+    readonly observedAt: number;
+    readonly eventId: string;
+  }): StablePromotionPlan {
+    return this.sqlite.transaction(() => {
+      const promotion = this.stablePromotionPlan(input.promotionId);
+      if (promotion.state !== 'PROMOTING') return promotion;
+      const updated = this.sqlite.query(`
+        UPDATE stable_promotions SET state='RESTARTING',promoted_commit=?1
+        WHERE id=?2 AND state='PROMOTING'
+      `).run(input.promotedCommit, input.promotionId);
+      if (updated.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Promotion changed while recording its main update');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'PromotionMainUpdated',1,'Promotion',?3,0,?1,?1,?4,?5)
+      `).run(input.eventId, promotion.projectId, input.promotionId, input.observedAt,
+        JSON.stringify({ promotionId: input.promotionId, mainRef: promotion.mainRef,
+          expectedMainCommit: promotion.expectedMainCommit,
+          promotedCommit: input.promotedCommit, candidateCommit: promotion.candidateCommit }));
+      return this.stablePromotionPlan(input.promotionId);
+    })();
+  }
+
+  /**
+   * RESTARTING/RECOVERY_REQUIRED → SUCCEEDED or FAILED with the observed restart evidence. A
+   * failure keeps `promoted_commit` as observed: `main` may really have moved, and the record has
+   * to say so instead of pretending the promotion never happened.
+   */
+  recordStablePromotionRestart(input: {
+    readonly promotionId: string;
+    readonly state: 'SUCCEEDED' | 'FAILED';
+    readonly outcomeCode: string;
+    readonly restart: PromotionRestartResult;
+    readonly detail: string;
+    readonly eventId: string;
+    readonly completedEventId: string;
+    readonly completedAt: number;
+  }): StablePromotionPlan {
+    return this.sqlite.transaction(() => {
+      const promotion = this.stablePromotionPlan(input.promotionId);
+      if (promotion.state === 'SUCCEEDED' || promotion.state === 'FAILED') return promotion;
+      if (promotion.state !== 'RESTARTING' && promotion.state !== 'RECOVERY_REQUIRED') {
+        throw new StorageError('INVALID_STATE',
+          `Promotion is ${promotion.state}; only a promotion whose main update was observed can record a restart`);
+      }
+      const updated = this.sqlite.query(`
+        UPDATE stable_promotions
+        SET state=?1,restart_result_json=?2,outcome_code=?3,detail=?4,completed_at=?5
+        WHERE id=?6 AND state IN ('RESTARTING','RECOVERY_REQUIRED')
+      `).run(input.state, JSON.stringify(input.restart), input.outcomeCode, input.detail,
+        input.completedAt, input.promotionId);
+      const operation = this.sqlite.query(`
+        UPDATE operations SET state=?1,result_json=?2,updated_at=?3
+        WHERE id=?4 AND state IN ('PLANNED','IN_PROGRESS','RECONCILE_REQUIRED')
+      `).run(input.state === 'SUCCEEDED' ? 'SUCCEEDED' : 'FAILED',
+        JSON.stringify({ promotionId: input.promotionId, state: input.state,
+          outcomeCode: input.outcomeCode, promotedCommit: promotion.promotedCommit }),
+        input.completedAt, promotion.operationId);
+      if (updated.changes !== 1 || operation.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Promotion changed while recording its restart result');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'PromotionRestartRecorded',1,'Promotion',?3,0,?1,?1,?4,?5)
+      `).run(input.completedEventId, promotion.projectId, input.promotionId, input.completedAt,
+        JSON.stringify({ promotionId: input.promotionId, mainRef: promotion.mainRef,
+          promotedCommit: promotion.promotedCommit, state: input.state,
+          outcomeCode: input.outcomeCode, observedBootId: input.restart.observedBootId,
+          runtimeStatus: input.restart.runtimeStatus, uiRunning: input.restart.uiRunning,
+          steps: input.restart.steps }));
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,?3,1,'Promotion',?4,0,?5,?5,?6,?7)
+      `).run(input.eventId, promotion.projectId,
+        input.state === 'SUCCEEDED' ? 'PromotionCompleted' : 'PromotionFailed',
+        input.promotionId, input.completedEventId, input.completedAt,
+        JSON.stringify({ promotionId: input.promotionId, devRef: promotion.devRef,
+          mainRef: promotion.mainRef, candidateCommit: promotion.candidateCommit,
+          expectedMainCommit: promotion.expectedMainCommit,
+          promotedCommit: promotion.promotedCommit, state: input.state,
+          outcomeCode: input.outcomeCode, detail: input.detail }));
+      return this.stablePromotionPlan(input.promotionId);
+    })();
+  }
+
+  /**
+   * Marks a recorded STRICT approval unusable because a ref or the evidence moved. STALE is
+   * terminal: the candidate has to be prepared and approved again.
+   */
+  markStablePromotionStale(input: {
+    readonly promotionId: string;
+    readonly outcomeCode: string;
+    readonly reason: string;
+    readonly eventId: string;
+    readonly at: number;
+  }): StablePromotionPlan {
+    return this.sqlite.transaction(() => {
+      const promotion = this.stablePromotionPlan(input.promotionId);
+      if (promotion.state === 'STALE') return promotion;
+      if (promotion.state !== 'CREATED' && promotion.state !== 'AWAITING_APPROVAL') {
+        throw new StorageError('INVALID_STATE',
+          `Promotion is ${promotion.state}; only a promotion that has not moved main can be stale`);
+      }
+      const updated = this.sqlite.query(`
+        UPDATE stable_promotions SET state='STALE',outcome_code=?1,detail=?2,completed_at=?3
+        WHERE id=?4 AND state IN ('CREATED','AWAITING_APPROVAL')
+      `).run(input.outcomeCode, input.reason, input.at, input.promotionId);
+      const operation = this.sqlite.query(`
+        UPDATE operations SET state='FAILED',result_json=?1,updated_at=?2
+        WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS','RECONCILE_REQUIRED')
+      `).run(JSON.stringify({ promotionId: input.promotionId, state: 'STALE',
+        outcomeCode: input.outcomeCode }), input.at, promotion.operationId);
+      if (updated.changes !== 1 || operation.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Promotion changed while marking it stale');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'PromotionStale',1,'Promotion',?3,0,?1,?1,?4,?5)
+      `).run(input.eventId, promotion.projectId, input.promotionId, input.at,
+        JSON.stringify({ promotionId: input.promotionId, devRef: promotion.devRef,
+          mainRef: promotion.mainRef, candidateCommit: promotion.candidateCommit,
+          expectedMainCommit: promotion.expectedMainCommit,
+          verificationId: promotion.verificationId, outcomeCode: input.outcomeCode,
+          reason: input.reason }));
+      return this.stablePromotionPlan(input.promotionId);
+    })();
+  }
+
+  /**
+   * Terminal failure without touching a ref: the caller only uses this when `main` was not
+   * advanced, or when the restart result is known to have failed.
+   */
+  failStablePromotion(input: {
+    readonly promotionId: string;
+    readonly outcomeCode: string;
+    readonly detail: string;
+    readonly eventId: string;
+    readonly failedAt: number;
+  }): StablePromotionPlan {
+    return this.sqlite.transaction(() => {
+      const promotion = this.stablePromotionPlan(input.promotionId);
+      if (promotion.state === 'FAILED') return promotion;
+      if (promotion.state === 'SUCCEEDED' || promotion.state === 'STALE') {
+        throw new StorageError('INVALID_STATE',
+          `Promotion is ${promotion.state}; it cannot be failed after that outcome`);
+      }
+      const promoted = promotion.promotedCommit;
+      const updated = this.sqlite.query(`
+        UPDATE stable_promotions SET state='FAILED',outcome_code=?1,detail=?2,completed_at=?3,
+            promoted_commit=?4
+        WHERE id=?5 AND state IN ('CREATED','AWAITING_APPROVAL','PROMOTING','RESTARTING',
+          'RECOVERY_REQUIRED')
+      `).run(input.outcomeCode, input.detail, input.failedAt, promoted, input.promotionId);
+      const operation = this.sqlite.query(`
+        UPDATE operations SET state='FAILED',result_json=?1,updated_at=?2
+        WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS','RECONCILE_REQUIRED')
+      `).run(JSON.stringify({ promotionId: input.promotionId, state: 'FAILED',
+        outcomeCode: input.outcomeCode, promotedCommit: promoted }), input.failedAt,
+        promotion.operationId);
+      if (updated.changes !== 1 || operation.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Promotion changed while recording its failure');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'PromotionFailed',1,'Promotion',?3,0,?1,?1,?4,?5)
+      `).run(input.eventId, promotion.projectId, input.promotionId, input.failedAt,
+        JSON.stringify({ promotionId: input.promotionId, devRef: promotion.devRef,
+          mainRef: promotion.mainRef, candidateCommit: promotion.candidateCommit,
+          expectedMainCommit: promotion.expectedMainCommit,
+          promotedCommit: promoted, state: 'FAILED', outcomeCode: input.outcomeCode,
+          detail: input.detail }));
+      return this.stablePromotionPlan(input.promotionId);
+    })();
+  }
+
+  /**
+   * Reconciliation entry for a promotion a restart found in flight. The caller has already read
+   * `main`, so the record states what was observed instead of assuming the ref did not move. It is
+   * resumable (the restart sequence can be re-run without a second ref write) and until then it
+   * blocks a new promotion for the project.
+   */
+  markStablePromotionRecoveryRequired(input: {
+    readonly promotionId: string;
+    readonly outcomeCode: string;
+    readonly reason: string;
+    readonly promotedCommit: string | null;
+    readonly eventId: string;
+    readonly at: number;
+  }): StablePromotionPlan {
+    return this.sqlite.transaction(() => {
+      const promotion = this.stablePromotionPlan(input.promotionId);
+      if (promotion.state === 'RECOVERY_REQUIRED') return promotion;
+      if (promotion.state !== 'PROMOTING' && promotion.state !== 'RESTARTING') {
+        throw new StorageError('INVALID_STATE',
+          `Promotion is ${promotion.state}; only an in-flight promotion needs reconciliation`);
+      }
+      const updated = this.sqlite.query(`
+        UPDATE stable_promotions
+        SET state='RECOVERY_REQUIRED',outcome_code=?1,detail=?2,promoted_commit=?3
+        WHERE id=?4 AND state IN ('PROMOTING','RESTARTING')
+      `).run(input.outcomeCode, input.reason,
+        input.promotedCommit ?? promotion.promotedCommit, input.promotionId);
+      const operation = this.sqlite.query(`
+        UPDATE operations SET state='RECONCILE_REQUIRED',result_json=?1,updated_at=?2
+        WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS')
+      `).run(JSON.stringify({ promotionId: input.promotionId, state: 'RECOVERY_REQUIRED',
+        outcomeCode: input.outcomeCode }), input.at, promotion.operationId);
+      if (updated.changes !== 1 || operation.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Promotion changed while recording its recovery');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'PromotionReconcileRequired',1,'Promotion',?3,0,?1,?1,?4,?5)
+      `).run(input.eventId, promotion.projectId, input.promotionId, input.at,
+        JSON.stringify({ promotionId: input.promotionId, devRef: promotion.devRef,
+          mainRef: promotion.mainRef, candidateCommit: promotion.candidateCommit,
+          expectedMainCommit: promotion.expectedMainCommit,
+          promotedCommit: input.promotedCommit ?? promotion.promotedCommit,
+          previousState: promotion.state, outcomeCode: input.outcomeCode,
+          reason: input.reason }));
+      return this.stablePromotionPlan(input.promotionId);
+    })();
+  }
+
+  /**
+   * The promotion one command already produced, so a replayed `promotion.prepare` reaches its own
+   * record instead of being refused as a second attempt.
+   */
+  findStablePromotionByCommand(projectId: string, commandId: string): StablePromotionPlan | null {
+    const receipt = this.sqlite.query<{ result_json: string }, [string, string]>(`
+      SELECT receipt.result_json FROM command_receipts receipt
+      JOIN stable_promotions promotion ON promotion.id=json_extract(receipt.result_json,'$.promotionId')
+      WHERE receipt.project_id=?1 AND receipt.command_id=?2
+    `).get(projectId, commandId);
+    if (receipt === null) return null;
+    const recorded = JSON.parse(receipt.result_json) as { promotionId?: string };
+    if (recorded.promotionId === undefined) return null;
+    return this.stablePromotionPlan(recorded.promotionId);
+  }
+
+  listStablePromotions(projectId: string, limit = 20): readonly StablePromotionSummary[] {
+    return this.sqlite.query<{ id: string }, [string, number]>(`
+      SELECT id FROM stable_promotions WHERE project_id=?1 ORDER BY created_at DESC,id LIMIT ?2
+    `).all(projectId, limit).map((row) => this.stablePromotionSummary(row.id));
+  }
+
+  getStablePromotion(projectId: string, promotionId: string): StablePromotionSummary {
+    const summary = this.stablePromotionSummary(promotionId);
+    if (summary.projectId !== projectId) {
+      throw new StorageError('NOT_FOUND', 'Promotion was not found for this project');
+    }
+    return summary;
+  }
+
+  /** The plan form: project refs, object format and Operation state, for a state-changing call. */
+  getStablePromotionPlan(projectId: string, promotionId: string): StablePromotionPlan {
+    const plan = this.stablePromotionPlan(promotionId);
+    if (plan.projectId !== projectId) {
+      throw new StorageError('NOT_FOUND', 'Promotion was not found for this project');
+    }
+    return plan;
+  }
+
+  /** Promotions a previous Runtime left in flight; a restart reconciles them explicitly. */
+  listIncompleteStablePromotions(): readonly StablePromotionPlan[] {
+    return this.sqlite.query<{ id: string }, []>(`
+      SELECT id FROM stable_promotions WHERE state IN ('PROMOTING','RESTARTING')
+      ORDER BY created_at,id
+    `).all().map((row) => this.stablePromotionPlan(row.id));
+  }
+
+  private stablePromotionBatchMembers(projectId: string, batchId: string): readonly PromotionMember[] {
+    return this.sqlite.query<{
+      batch_id: string; task_id: string; revision_id: string; execution_id: string;
+      candidate_commit: string;
+    }, [string, string]>(`
+      SELECT batch_id,task_id,revision_id,execution_id,candidate_commit
+      FROM integration_batch_items WHERE project_id=?1 AND batch_id=?2 ORDER BY task_id
+    `).all(projectId, batchId).map((row) => ({
+      batchId: row.batch_id,
+      taskId: row.task_id,
+      revisionId: row.revision_id,
+      executionId: row.execution_id,
+      candidateCommit: row.candidate_commit,
+    }));
+  }
+
+  private stablePromotionSummary(promotionId: string): StablePromotionSummary {
+    const row = this.sqlite.query<{
+      id: string; project_id: string; dev_ref: string; main_ref: string; candidate_commit: string;
+      expected_main_commit: string; integration_batch_id: string; verification_id: string;
+      verification_tested_commit: string; permission_mode: PromotionPermissionMode;
+      state: StablePromotionState; approved_dev_commit: string | null;
+      approved_main_commit: string | null; approved_verification_id: string | null;
+      approved_at: number | null; promoted_commit: string | null; main_worktree_path: string | null;
+      promoting_boot_id: string | null;
+      restart_steps_json: string | null; restart_result_json: string | null;
+      outcome_code: string | null; detail: string | null; created_at: number;
+      completed_at: number | null;
+    }, [string]>(`
+      SELECT id,project_id,dev_ref,main_ref,candidate_commit,expected_main_commit,
+             integration_batch_id,verification_id,verification_tested_commit,permission_mode,state,
+             approved_dev_commit,approved_main_commit,approved_verification_id,approved_at,
+             promoted_commit,main_worktree_path,promoting_boot_id,restart_steps_json,
+             restart_result_json,outcome_code,detail,created_at,completed_at
+      FROM stable_promotions WHERE id=?1
+    `).get(promotionId);
+    if (row === null) throw new StorageError('NOT_FOUND', 'Promotion was not found');
+    return {
+      promotionId: row.id,
+      projectId: row.project_id,
+      devRef: row.dev_ref,
+      mainRef: row.main_ref,
+      candidateCommit: row.candidate_commit,
+      expectedMainCommit: row.expected_main_commit,
+      integrationBatchId: row.integration_batch_id,
+      verificationId: row.verification_id,
+      verificationTestedCommit: row.verification_tested_commit,
+      permissionMode: row.permission_mode,
+      state: row.state,
+      approval: row.approved_at === null || row.approved_dev_commit === null
+        || row.approved_main_commit === null || row.approved_verification_id === null
+        ? null
+        : {
+            devCommit: row.approved_dev_commit,
+            mainCommit: row.approved_main_commit,
+            verificationId: row.approved_verification_id,
+            approvedAt: row.approved_at,
+          },
+      promotedCommit: row.promoted_commit,
+      mainWorktreePath: row.main_worktree_path,
+      promotingBootId: row.promoting_boot_id,
+      restartSteps: row.restart_steps_json === null
+        ? []
+        : JSON.parse(row.restart_steps_json) as readonly PromotionRestartPlanStep[],
+      restart: row.restart_result_json === null
+        ? null
+        : JSON.parse(row.restart_result_json) as PromotionRestartResult,
+      outcomeCode: row.outcome_code,
+      detail: row.detail,
+      createdAt: row.created_at,
+      completedAt: row.completed_at,
+      members: this.sqlite.query<{
+        batch_id: string; task_id: string; revision_id: string; execution_id: string;
+        candidate_commit: string;
+      }, [string]>(`
+        SELECT batch_id,task_id,revision_id,execution_id,candidate_commit
+        FROM stable_promotion_members WHERE promotion_id=?1 ORDER BY task_id
+      `).all(promotionId).map((member) => ({
+        batchId: member.batch_id,
+        taskId: member.task_id,
+        revisionId: member.revision_id,
+        executionId: member.execution_id,
+        candidateCommit: member.candidate_commit,
+      })),
+    };
+  }
+
+  private stablePromotionPlan(promotionId: string): StablePromotionPlan {
+    const summary = this.stablePromotionSummary(promotionId);
+    const row = this.sqlite.query<{
+      repo_root: string; git_common_dir: string; object_format: 'sha1' | 'sha256';
+      operation_id: string; operation_state: StablePromotionPlan['operationState'];
+    }, [string]>(`
+      SELECT p.repo_root,p.git_common_dir,p.object_format,o.id AS operation_id,
+             o.state AS operation_state
+      FROM stable_promotions promotion
+      JOIN projects p ON p.id=promotion.project_id
+      JOIN operations o ON o.kind='PROMOTE_STABLE_BRANCH'
+        AND o.aggregate_id=promotion.id
+      WHERE promotion.id=?1
+    `).get(promotionId);
+    if (row === null) {
+      throw new StorageError('NOT_FOUND', 'Promotion is missing its project or Operation');
+    }
+    return {
+      ...summary,
+      operationId: row.operation_id,
+      operationState: row.operation_state,
+      repositoryRoot: row.repo_root,
+      gitCommonDir: row.git_common_dir,
+      objectFormat: row.object_format,
+    };
   }
 
   private integrationBatchSummary(batchId: string): IntegrationBatchSummary {

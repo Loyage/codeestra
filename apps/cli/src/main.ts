@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOptions,
@@ -557,6 +558,146 @@ interface TaskDependencyView {
   readonly dependents: readonly string[];
 }
 
+/** The promotion record as the Runtime projects it, plus what this client needs to run the restart. */
+interface PromotionRestartStepView {
+  readonly id: string;
+  readonly argv: readonly string[];
+  readonly cwd: string;
+}
+
+interface PromotionReportView {
+  readonly promotionId: string;
+  readonly projectId: string;
+  readonly state: string;
+  readonly devRef: string;
+  readonly mainRef: string;
+  readonly candidateCommit: string;
+  readonly expectedMainCommit: string;
+  readonly promotedCommit: string | null;
+  readonly mainWorktreePath: string | null;
+  readonly promotingBootId: string | null;
+  readonly restartSteps: readonly PromotionRestartStepView[];
+  readonly permissionMode: 'FULL' | 'STRICT';
+  readonly outcomeCode: string | null;
+  readonly detail: string | null;
+  readonly members: readonly { readonly taskId: string; readonly revisionId: string }[];
+  readonly restart: { readonly observedBootId: string; readonly runtimeStatus: string | null;
+    readonly uiRunning: boolean | null;
+    readonly steps: readonly PromotionStepOutcomeView[] } | null;
+}
+
+interface PromotionStepOutcomeView {
+  readonly id: string;
+  /** Mutable array: the IPC request type is not readonly. */
+  readonly argv: string[];
+  readonly cwd: string;
+  readonly exitCode: number | null;
+  readonly durationMs: number;
+  readonly stdoutBytes: number;
+  readonly stderrBytes: number;
+  readonly stdoutDigest: string;
+  readonly stderrDigest: string;
+  readonly failureDetail?: string;
+}
+
+function sha256Hex(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+/**
+ * Runs the recorded post-promotion sequence in the main worktree, in order, stopping at the first
+ * failure (ADR-0009 D03). This is the client's job because the Runtime stops itself in the middle
+ * of the sequence; steps that were not reached are reported as not run rather than omitted, so the
+ * submitted list still matches the recorded plan exactly.
+ */
+async function runPromotionRestartSteps(
+  plan: PromotionReportView,
+): Promise<PromotionStepOutcomeView[]> {
+  const outcomes: PromotionStepOutcomeView[] = [];
+  let halted = false;
+  for (const step of plan.restartSteps) {
+    if (halted) {
+      outcomes.push({ id: step.id, argv: [...step.argv], cwd: step.cwd, exitCode: null,
+        durationMs: 0,
+        stdoutBytes: 0, stderrBytes: 0, stdoutDigest: sha256Hex(''), stderrDigest: sha256Hex(''),
+        failureDetail: 'not run: an earlier post-step failed' });
+      continue;
+    }
+    console.error(`[promotion] ${step.id}: ${step.argv.join(' ')}  (cwd ${step.cwd})`);
+    const started = Date.now();
+    const child = Bun.spawn({ cmd: [...step.argv], cwd: step.cwd, stdin: 'ignore',
+      stdout: 'pipe', stderr: 'pipe' });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+    ]);
+    // Step output goes to stderr so stdout stays the machine-readable record. It is the user's own
+    // command output; the recorded evidence is a digest, not the text.
+    if (stdout.length > 0) console.error(stdout.trimEnd());
+    if (stderr.length > 0) console.error(stderr.trimEnd());
+    outcomes.push({
+      id: step.id, argv: [...step.argv], cwd: step.cwd, exitCode,
+      durationMs: Date.now() - started,
+      stdoutBytes: new TextEncoder().encode(stdout).length,
+      stderrBytes: new TextEncoder().encode(stderr).length,
+      stdoutDigest: sha256Hex(stdout), stderrDigest: sha256Hex(stderr),
+      ...(exitCode === 0 ? {} : { failureDetail: stderr.trim().slice(0, 500)
+        || `exited with ${exitCode}` }),
+    });
+    if (exitCode !== 0) {
+      console.error(`[promotion] ${step.id} exited ${exitCode}; later post-steps are not run`);
+      halted = true;
+    }
+  }
+  return outcomes;
+}
+
+/**
+ * Reads the Runtime the restart produced and records it. The boot identity sent here is the one
+ * that answered `runtime.ping` just now, and the Runtime checks it is the boot answering the record
+ * call as well — so a Runtime that was never stopped cannot be reported as restarted.
+ */
+async function recordPromotionRestart(
+  plan: PromotionReportView,
+  steps: PromotionStepOutcomeView[],
+): Promise<PromotionReportView> {
+  let observed: { readonly bootId: string; readonly status: string; readonly uiRunning: boolean };
+  try {
+    observed = await call({ command: 'runtime.ping' }) as
+      { readonly bootId: string; readonly status: string; readonly uiRunning: boolean };
+  } catch (error) {
+    console.error(`[promotion] the Runtime did not answer after the restart sequence: ${
+      error instanceof Error ? error.message : String(error)}`);
+    console.error('[promotion] main was already fast-forwarded and is not rolled back. Once the'
+      + ' Runtime answers, re-run `promotion promote` to run the recorded post-steps again.');
+    process.exit(1);
+  }
+  return await call({
+    command: 'promotion.restart.record',
+    commandId: crypto.randomUUID(),
+    projectId: plan.projectId,
+    promotionId: plan.promotionId,
+    observedBootId: observed.bootId,
+    runtimeStatus: observed.status,
+    uiRunning: observed.uiRunning,
+    steps,
+  }) as PromotionReportView;
+}
+
+function printPromotion(promotion: PromotionReportView): void {
+  console.log(`promotion ${promotion.promotionId} ${promotion.state}`
+    + (promotion.outcomeCode === null ? '' : ` (${promotion.outcomeCode})`));
+  console.log(`  dev  ${promotion.devRef} ${promotion.candidateCommit}`);
+  console.log(`  main ${promotion.mainRef}${promotion.promotedCommit === null
+    ? ` was ${promotion.expectedMainCommit}` : ` now ${promotion.promotedCommit}`}`);
+  console.log(`  ${promotion.permissionMode} mode · ${promotion.members.length} member revision(s)`
+    + ` · worktree ${promotion.mainWorktreePath ?? 'not recorded'}`);
+  for (const step of promotion.restart?.steps ?? []) {
+    console.log(`  ${step.id.padEnd(9, ' ')} exit ${step.exitCode === null
+      ? 'not run' : String(step.exitCode)} · ${step.durationMs}ms · ${step.argv.join(' ')}`);
+  }
+  if (promotion.detail !== null) console.log(`  ${promotion.detail}`);
+}
+
 function usage(): never {
   console.error(`Usage:
   bun run codeestra status
@@ -618,6 +759,12 @@ function usage(): never {
   bun run codeestra reclaim apply [--project <project-id>] [--task <task-id>] [--kind <kind>]…
     [--include-failure-scenes] [--json]
   bun run codeestra reclaim records [--project <project-id>] [--task <task-id>] [--limit <n>] [--json]
+  bun run codeestra promotion prepare <project-id> <batch-id> <expected-dev-commit> <expected-main-commit>
+  bun run codeestra promotion approve <project-id> <promotion-id>
+  bun run codeestra promotion promote <project-id> <promotion-id> [--json]
+  bun run codeestra promotion abandon <project-id> <promotion-id> --reason <text>
+  bun run codeestra promotion get <project-id> <promotion-id>
+  bun run codeestra promotion list <project-id> [--limit <n>]
 
 --reverse prints the newest transcript entry first. It is a rendering choice for the human view
 only (it is refused together with --json), and because the command face reads forward from a cursor
@@ -625,7 +772,14 @@ it may read up to ${maxTranscriptReverseReads} pages to reach the newest entries
 
 task verify --background returns a durable Operation handle instead of waiting for the policy to
 finish; follow it with task operation list and stop it with task operation cancel. Exit code 0 there
-means "the Operation was recorded and started", not "the verification passed".`);
+means "the Operation was recorded and started", not "the verification passed".
+
+promotion prepare fixes the verified dev commit, the expected old main commit and the integration
+verification of that commit; it writes nothing to Git. In FULL mode promotion promote fast-forwards
+main inside the worktree that has it checked out and then runs there: bun install --frozen-lockfile,
+bun run build:ui, bun run codeestra stop, bun run codeestra status. The restart is recorded only when
+every step exits 0 and the restarted Runtime answers READY. STRICT additionally needs promotion
+approve for that exact triple; a dev/main/evidence move makes it invalid. Only SUCCEEDED exits 0.`);
   process.exit(2);
 }
 
@@ -1301,6 +1455,96 @@ try {
       if (report.outcome === 'FAILED') process.exit(1);
     } else {
       print(await call({ command: 'reclaim.records', ...shared, limit: limit ?? 100 }));
+    }
+  } else if (group === 'promotion') {
+    // The stable promotion face. `prepare` fixes the three facts and writes nothing to Git;
+    // `promote` moves main inside its own worktree and then runs the recorded restart sequence in
+    // this (surviving) client process, because the Runtime stops itself in the middle of it.
+    const subcommand = action;
+    const tokens = [firstArgument, ...remainingArguments]
+      .filter((token): token is string => token !== undefined);
+    let json = false;
+    let limit: number | undefined;
+    let reason: string | undefined;
+    const positionals: string[] = [];
+    for (let index = 0; index < tokens.length; index += 1) {
+      const flag = tokens[index] as string;
+      const value = tokens[index + 1];
+      if (flag === '--json') json = true;
+      else if (flag === '--reason' && value !== undefined) { reason = value; index += 1; }
+      else if (flag === '--limit' && value !== undefined) {
+        const parsed = Number(value);
+        if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 200) usage();
+        limit = parsed;
+        index += 1;
+      } else if (flag.startsWith('--')) usage();
+      else positionals.push(flag);
+    }
+    const [projectId, ...argumentsAfterProject] = positionals;
+    if (projectId === undefined) usage();
+    const promotionId = argumentsAfterProject[0];
+    const trailing = argumentsAfterProject.slice(1);
+    if (subcommand === 'prepare') {
+      const [batchId, expectedDevCommit, expectedMainCommit, ...extra] = argumentsAfterProject;
+      if (batchId === undefined || expectedDevCommit === undefined
+        || expectedMainCommit === undefined || extra.length !== 0) usage();
+      print(await call({
+        command: 'promotion.prepare',
+        commandId: crypto.randomUUID(),
+        projectId,
+        batchId,
+        expectedDevCommit,
+        expectedMainCommit,
+      }));
+    } else if (subcommand === 'approve') {
+      if (trailing.length !== 0 || promotionId === undefined) usage();
+      print(await call({
+        command: 'promotion.approve',
+        commandId: crypto.randomUUID(),
+        projectId,
+        promotionId,
+      }));
+    } else if (subcommand === 'promote') {
+      if (trailing.length !== 0 || promotionId === undefined) usage();
+      const result = await call({
+        command: 'promotion.promote',
+        commandId: crypto.randomUUID(),
+        projectId,
+        promotionId,
+      }) as PromotionReportView;
+      if (result.state !== 'RESTARTING' && result.state !== 'RECOVERY_REQUIRED') {
+        // Nothing moved main (or the promotion was already finished): report the facts verbatim,
+        // and only a real SUCCEEDED promotion is exit code 0.
+        print(result);
+        if (result.state !== 'SUCCEEDED') process.exit(1);
+      } else {
+        const outcomes = await runPromotionRestartSteps(result);
+        const recorded = await recordPromotionRestart(result, outcomes);
+        if (json) print(recorded);
+        else printPromotion(recorded);
+        if (recorded.state !== 'SUCCEEDED') process.exit(1);
+      }
+    } else if (subcommand === 'abandon') {
+      if (trailing.length !== 0 || promotionId === undefined) usage();
+      if (reason === undefined) {
+        throw new Error('--reason <text> is required: an abandoned promotion keeps the record and'
+          + ' the observed ref state for audit');
+      }
+      print(await call({
+        command: 'promotion.abandon',
+        commandId: crypto.randomUUID(),
+        projectId,
+        promotionId,
+        reason,
+      }));
+    } else if (subcommand === 'get') {
+      if (trailing.length !== 0 || promotionId === undefined) usage();
+      print(await call({ command: 'promotion.get', projectId, promotionId }));
+    } else if (subcommand === 'list') {
+      if (trailing.length !== 0) usage();
+      print(await call({ command: 'promotion.list', projectId, limit: limit ?? 20 }));
+    } else {
+      usage();
     }
   } else {
     usage();
