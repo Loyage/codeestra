@@ -2007,6 +2007,48 @@ Pi 的 attach / PTY handoff / incarnation（ADR-0010/0023/0026）**没有**被�
 - 三格 UI（终端/交接/依赖/提升/CANCELLED）的观感、窄屏与键盘操作**只由人工目视确认**，本轮未做，也没有引入任何浏览器/桌面自动化。
 - 架构文档 doc-sync（`state-machines.md` §1、`event-model.md` §2 缺 `CANCELLED`/`OperationProgressed`/`OperationSettled`、`sqlite-schema.md` 落后到 v18 且未说明 v16 未使用、`agent-adapter.md` 缺 `controlledConfiguration`）仍未做。
 
+## FOUNDATION-052 — Phase 2 并行调度的决策固化（ADR-0030，纯文档）
+
+状态：**已实现（纯文档）、未 commit、未 push**。lane `lane/e0-phase2-decision`，基线**固定** `dev@cb7078ed`
+（不 rebase、不合并新 dev、不 pull）；未提升 `main`、未重启稳定 Runtime、未触碰稳定工作树
+`/Users/loyage/Documents/codeestra`。**本格不改任何代码、不占用 schema 版本**：`phase1SchemaVersion` 仍为
+**v19**、`migration.ts` 一行未动。本格只把用户已拍板的 10 项决策固化为规格与设计；**Phase 2 的任何代码都还没写**，
+因此不得把本节读成「并行调度已实现」。
+
+### 改动（全部为文档）
+
+- `PROJECT_SPEC.md` §2 核心不变量**第 6 条**：逐字替换为含「UNKNOWN 默认等待（不启动、不并行）」与「显式单次放行
+  `--allow-unknown`（**可与当前活跃任务并发**、绑定 revision 与评估版本、写审计、默认路径不增加确认步骤）」的措辞。
+  这是本格唯一的规格改动；**未动其它条文**，也**未改「阶段进度」段落**（那句「尚未实现 … 并行调度」要等 Phase 2
+  真正落地后由 Wave F 更新，本格改它就是谎报已实现）。
+- `docs/decisions/0030-phase2-parallel-scheduling.md`（新，ADR-0030）：逐条记录 D01–D10 的决定与**被否掉的选项**，
+  以及用户特别关心的三项后果——**效率成本**（放行是放宽而非新增门禁，常态路径 0 新增步骤，无新审批层/沙箱）、
+  **风险归属**（UNKNOWN 不是「无冲突」而是「无法证明」；放行后越界责任在放行方，Runtime 不做额外隔离）、
+  **审计链**（放行绑定 revision + `analyzerVersion`/`policyVersion`/`baseCommit`，与评估不一致即失效）。
+- `docs/decisions/README.md`：在「已接受」**表尾追加** ADR-0030 索引行（未插入中间、未重排既有条目）。
+- `docs/architecture/conflict-analyzer.md`：§2 补映射来源 `.codeestra/impact.json`（**只从项目 main ref 读**，读法同
+  `.codeestra/policies/verification.json`；Task branch 上的同名文件不参与判定）；§4 把「第一版没有隐藏 override」改为
+  已授权的**显式**单次放行，并写明审计要求、绑定失效、风险归属与「**放行不等于 SAFE**」（assessment 记录仍是 UNKNOWN）。
+- `docs/architecture/scheduler.md`：补 §1.1 容量模型（全局上限默认 2 可配置 + 每 adapter 上限默认等于全局上限，
+  `wait(CAPACITY)` 区分 `GLOBAL_CAPACITY`/`ADAPTER_CAPACITY`）、§1.2 触发模型（事件驱动 + 周期恢复 tick，
+  submit 后自动进入调度，FULL 0 确认）、§4.1 UNKNOWN 显式放行语义（放行不改变 assessment 本身），以及 §6「明确不做」
+  （非 Git 资源共享资源的 claim、多成员批次、aging 留后续；按主机资源推导容量与 LLM 预测也不做）。既有排序
+  （priority desc → createdAt asc → ID asc）、不抢占、不加 aging、两类锁与验收矩阵**未改**。
+
+### 验收自查
+
+- `bun run typecheck` 退出码 0（只用于确认没碰代码）。
+- `git diff --stat` 只包含上述文档；`grep -c "allow-unknown" PROJECT_SPEC.md` ≥ 1；§2 第 6 条与本格写入内容逐字一致。
+- 未 commit、未 push、未提升 `main`、未重启稳定 Runtime。
+
+### 未做（不得当成已成立）
+
+- **未写任何 Phase 2 代码**：没有 scheduler/conflict-analyzer 实现、没有 `.codeestra/impact.json` 读取器、
+  没有 `--allow-unknown` 命令形态；本 ADR 只固化语义。
+- **未占 schema 版本**（仍 v19）、未改 `migration.ts`、未改任何 `*.ts`/`*.tsx`/`*.json`/`package.json`/`apps/**`/`packages/**`。
+- **未动 `## NEXT` 的条目本身**（含其中仍写着「并行调度」待办的行——按槽位纪律需一次独立的 NEXT 更新）。
+- 未 commit、未 push、未提升 `main`、未重启稳定 Runtime、未触碰 `/Users/loyage/Documents/codeestra`。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、~~UI 投影~~（已由 FOUNDATION-050 完成 promotion/dependency 投影）。
