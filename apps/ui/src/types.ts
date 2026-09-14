@@ -454,6 +454,362 @@ export interface EventEnvelopeView {
   readonly payload: unknown;
 }
 
+/* ------------------------------------------------------------------------------------------------
+ * Session handoff and the native terminal (ADR-0023 / ADR-0026).
+ *
+ * These mirror the projections `session handoff status|attach|detach|release|terminal read|write`
+ * return on the same command face the CLI uses. Nothing here is a new capability: the panel only
+ * renders what the Runtime reports and never decides a handoff itself.
+ */
+
+export type SessionIncarnationModeView = 'AUTOMATED_RPC' | 'HUMAN_TUI';
+export type SessionIncarnationStateView = 'ACTIVE' | 'FENCED' | 'RECOVERY_REQUIRED' | 'EXITED';
+
+/** One provider process generation of a conversation; the OS process is never the conversation. */
+export interface SessionIncarnationView {
+  readonly incarnationId: string;
+  readonly incarnationNumber: number;
+  readonly mode: SessionIncarnationModeView;
+  readonly state: SessionIncarnationStateView;
+  readonly providerPid: number | null;
+  readonly providerSessionId: string | null;
+  readonly sessionStorageRef: string | null;
+  readonly predecessorIncarnationId: string | null;
+  /** Descendants recorded while the provider was still alive, not a live process count. */
+  readonly recordedDescendants: number;
+  readonly createdAt: number;
+  readonly endedAt: number | null;
+  readonly exit: unknown;
+}
+
+export interface SessionHandoffRequestView {
+  readonly requestId: string;
+  readonly kind: 'TAKEOVER' | 'RETURN';
+  readonly state: 'REQUESTED' | 'FENCED' | 'AT_SAFE_POINT' | 'ADMITTED' | 'CANCELLED'
+    | 'RECOVERY_REQUIRED';
+  readonly incarnationId: string;
+  readonly fenceActive: boolean;
+  readonly fenceConfirmedAt: number | null;
+  readonly settledAfterFenceAt: number | null;
+  readonly safePointAt: number | null;
+  readonly admittedAt: number | null;
+  readonly detail: string | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+/** The structured facts a handoff waits for; `missing` names what is still absent. */
+export interface SessionHandoffSafePointView {
+  readonly reached: boolean;
+  readonly fenceAcknowledged: boolean;
+  readonly activeTools: number;
+  readonly settledAfterFence: boolean;
+  readonly openAttention: boolean;
+  readonly missing: readonly string[];
+}
+
+export type SessionHandoffCapabilityView = 'IMPLEMENTED' | 'UNSUPPORTED' | 'PARTIAL' | 'UNVERIFIED';
+
+/**
+ * The Runtime's honest capability table. Unknown keys stay visible as they arrived: a capability
+ * this client does not know about must never be silently dropped or shown as supported.
+ */
+export interface SessionHandoffCapabilitiesView {
+  readonly runtimeContract: SessionHandoffCapabilityView;
+  readonly singleWriterLease: SessionHandoffCapabilityView;
+  readonly strictPermissionOverSideChannel: SessionHandoffCapabilityView;
+  readonly ptyTransport: SessionHandoffCapabilityView;
+  readonly successorProcessStart: SessionHandoffCapabilityView;
+  readonly nativeTerminalAttach: SessionHandoffCapabilityView;
+  readonly terminalDetach: SessionHandoffCapabilityView;
+  readonly releaseBackToAutomation: SessionHandoffCapabilityView;
+  readonly attachToLiveRpcProcess: SessionHandoffCapabilityView;
+  readonly crossHandoffPermissionModeMatrix: SessionHandoffCapabilityView;
+  readonly parallelToolBatchSafePoint: SessionHandoffCapabilityView;
+  readonly sessionCompactionDuringHandoff: SessionHandoffCapabilityView;
+  readonly ptyResize: SessionHandoffCapabilityView;
+  readonly windows: SessionHandoffCapabilityView;
+  readonly [capability: string]: SessionHandoffCapabilityView;
+}
+
+export type SessionTerminalStateView = 'RUNNING' | 'RELEASED' | 'STOPPED' | 'RECOVERY_REQUIRED';
+export type SessionTerminalAttachmentKindView = 'WRITER' | 'OBSERVER';
+
+export interface SessionTerminalAttachmentView {
+  readonly id: string;
+  readonly kind: SessionTerminalAttachmentKindView;
+  readonly holderRef: string;
+  readonly state: 'ATTACHED' | 'DETACHED';
+  readonly cursorAtAttach: number;
+  readonly cursorAtDetach: number | null;
+  readonly attachedAt: number;
+  readonly detachedAt: number | null;
+  readonly detachedReason: string | null;
+}
+
+/** What the Runtime knows about one Session's native terminal, including its release evidence. */
+export interface SessionTerminalView {
+  readonly terminalId: string;
+  readonly incarnationId: string;
+  readonly state: SessionTerminalStateView;
+  readonly helperPid: number | null;
+  readonly providerPid: number | null;
+  readonly ptySlave: string | null;
+  readonly windowSize: 'APPLIED' | 'NOT_APPLIED';
+  /** True while this Runtime generation still holds the terminal's control connection. */
+  readonly held: boolean;
+  readonly cursor: number;
+  readonly retainedBytes: number;
+  readonly projectedBytes: number;
+  readonly bufferTruncated: boolean;
+  readonly release: {
+    readonly commandId: string | null;
+    readonly requestedAt: number | null;
+    readonly releaseByte: string | null;
+    readonly providerShutdownReportedAt: number | null;
+    /** The provider's own exit fact; the code is audit data and never decides a release. */
+    readonly exit: { readonly code: number | null; readonly signal: string | null;
+      readonly reportedAt: number | null } | null;
+    readonly sessionFileEntriesAtStart: number | null;
+    readonly sessionFileEntriesAtRelease: number | null;
+    readonly lastEntryIdAtStart: string | null;
+    readonly lastEntryIdAtRelease: string | null;
+    readonly detail: string | null;
+  };
+  readonly writer: { readonly holderRef: string; readonly attachedAt: number } | null;
+  readonly attachments: readonly SessionTerminalAttachmentView[];
+}
+
+/** One open STRICT permission request the side channel routed into an Attention. */
+export interface SessionHandoffPermissionView {
+  readonly attentionId: string;
+  readonly toolName: string;
+  readonly toolCallId: string;
+  readonly inputFingerprint: string;
+  readonly piMode: string;
+  readonly decision: string;
+  readonly requestedAt: number;
+}
+
+export interface SessionHandoffStatusView {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly executionId: string;
+  readonly sessionId: string;
+  readonly sessionState: string;
+  readonly executionState: string;
+  readonly permissionMode: 'FULL' | 'STRICT';
+  readonly providerSessionId: string | null;
+  readonly sessionStorageRef: string | null;
+  readonly incarnation: SessionIncarnationView | null;
+  readonly incarnations: readonly SessionIncarnationView[];
+  readonly writerLease: {
+    readonly incarnationId: string;
+    readonly holderKind: 'AUTOMATED_RPC' | 'TERMINAL_ATTACHMENT';
+    readonly holderRef: string;
+    readonly acquiredAt: number;
+  } | null;
+  readonly handoff: SessionHandoffRequestView | null;
+  readonly handoffHistory: readonly SessionHandoffRequestView[];
+  readonly safePoint: SessionHandoffSafePointView;
+  readonly terminal: SessionTerminalView | null;
+  readonly sideChannel: {
+    readonly connected: boolean;
+    readonly mode: string | null;
+    readonly permissionMode: string | null;
+    readonly pid: number | null;
+    readonly activeTools: readonly string[];
+  } | null;
+  readonly permission: SessionHandoffPermissionView | null;
+  readonly lastPermission: {
+    readonly attentionId: string;
+    readonly toolName: string;
+    readonly toolCallId: string;
+    readonly inputFingerprint: string;
+    readonly decision: string;
+    readonly decidedAt: number | null;
+    readonly decidedBy: string | null;
+  } | null;
+  readonly capabilities: SessionHandoffCapabilitiesView;
+}
+
+/**
+ * The outcome of `session.handoff.admit`. `successorStarted` is false whenever no provider process
+ * was started, so a refusal and a real succession can never be confused by a client.
+ */
+export interface SuccessorAdmissionView {
+  readonly admitted: boolean;
+  readonly code: string;
+  readonly detail: string;
+  readonly predecessorObservation: string;
+  readonly successorMode: SessionIncarnationModeView | null;
+  readonly successorStarted: boolean;
+  readonly terminalTransport: 'PTY' | 'RPC' | 'NONE';
+  readonly successorIncarnation: SessionIncarnationView | null;
+  readonly terminal: SessionTerminalView | null;
+  /** True when this answer replayed an admission that had already been applied. */
+  readonly replayed: boolean;
+}
+
+export interface TerminalAttachResultView {
+  readonly terminal: SessionTerminalView | null;
+  readonly attachment: {
+    readonly id: string;
+    readonly kind: SessionTerminalAttachmentKindView;
+    readonly holderRef: string;
+    readonly cursorAtAttach: number;
+    readonly attachedAt: number;
+  };
+  readonly stream: { readonly cursor: number; readonly data: string; readonly truncated: boolean };
+}
+
+/** The incremental projection of terminal bytes; `truncated` means a cursor fell out of the buffer. */
+export interface TerminalReadView {
+  readonly terminalId: string;
+  readonly running: boolean;
+  readonly cursor: number;
+  readonly data: string;
+  readonly truncated: boolean;
+  readonly retainedBytes: number;
+  readonly projectedBytes: number;
+}
+
+/**
+ * The explicit release outcome. `released: false` is a real answer — the terminal is still the
+ * writer and nothing was handed back — so it is rendered as such instead of as an error toast.
+ */
+export interface TerminalReleaseResultView {
+  readonly released: boolean;
+  readonly code: string;
+  readonly detail: string;
+  readonly terminal: SessionTerminalView | null;
+  readonly release: {
+    readonly exit: { readonly code: number | null; readonly signal: string | null } | null;
+    readonly predecessorObservation: string;
+    readonly sessionFile: {
+      readonly file: string | null;
+      readonly entriesAtStart: number | null;
+      readonly entriesAtRelease: number | null;
+      readonly lastEntryIdAtStart: string | null;
+      readonly lastEntryIdAtRelease: string | null;
+      readonly predecessorEntrySurvived: boolean | null;
+      readonly truncated: boolean;
+    };
+  };
+  readonly successor: SuccessorAdmissionView | null;
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * Stable promotion (ADR-0022) and the dependency graph (ADR-0024), read-only projections.
+ */
+
+export type StablePromotionStateView = 'CREATED' | 'AWAITING_APPROVAL' | 'PROMOTING' | 'RESTARTING'
+  | 'SUCCEEDED' | 'STALE' | 'FAILED' | 'RECOVERY_REQUIRED';
+
+export interface PromotionMemberView {
+  readonly batchId: string;
+  readonly taskId: string;
+  readonly revisionId: string;
+  readonly executionId: string;
+  readonly candidateCommit: string;
+}
+
+/** One restart step the client executed and observed; the exit code is a fact, not a verdict. */
+export interface PromotionRestartStepView {
+  readonly id: string;
+  readonly argv: readonly string[];
+  readonly cwd: string;
+  readonly exitCode: number | null;
+  readonly durationMs: number;
+  readonly stdoutBytes: number;
+  readonly stderrBytes: number;
+  readonly stdoutDigest: string;
+  readonly stderrDigest: string;
+  readonly failureDetail?: string;
+}
+
+export interface PromotionRestartView {
+  readonly observedBootId: string;
+  readonly runtimeStatus: string | null;
+  readonly uiRunning: boolean | null;
+  readonly steps: readonly PromotionRestartStepView[];
+}
+
+/**
+ * `dev → main` as the Runtime recorded it. `promotedCommit` is only set once `main` really moved,
+ * and `restart` only says what the promoting client observed — a moved ref is not a live Runtime.
+ */
+export interface StablePromotionView {
+  readonly promotionId: string;
+  readonly projectId: string;
+  readonly devRef: string;
+  readonly mainRef: string;
+  readonly candidateCommit: string;
+  readonly expectedMainCommit: string;
+  readonly integrationBatchId: string;
+  readonly verificationId: string;
+  readonly verificationTestedCommit: string;
+  readonly permissionMode: 'FULL' | 'STRICT';
+  readonly state: StablePromotionStateView;
+  readonly approval: {
+    readonly devCommit: string;
+    readonly mainCommit: string;
+    readonly verificationId: string;
+    readonly approvedAt: number;
+  } | null;
+  readonly promotedCommit: string | null;
+  readonly mainWorktreePath: string | null;
+  readonly promotingBootId: string | null;
+  readonly restartSteps: readonly { readonly id: string; readonly argv: readonly string[];
+    readonly cwd: string }[];
+  readonly restart: PromotionRestartView | null;
+  readonly outcomeCode: string | null;
+  readonly detail: string | null;
+  readonly createdAt: number;
+  readonly completedAt: number | null;
+  readonly members: readonly PromotionMemberView[];
+}
+
+/** Why one dependency edge is not satisfied; `satisfied` is true exactly when this is null. */
+export interface TaskDependencyBlockReasonView {
+  readonly code: 'UPSTREAM_NOT_INTEGRATED' | 'DEV_BASELINE_MISSING' | 'DEV_REF_UNREADABLE'
+    | 'NOT_REACHABLE_FROM_DEV';
+  readonly prerequisiteTaskId: string;
+  readonly requiredRevisionId: string;
+  readonly detail: string | null;
+}
+
+export interface TaskDependencyEdgeView {
+  readonly dependentTaskId: string;
+  readonly dependentDisplayNumber: number;
+  readonly dependentState: string;
+  readonly prerequisiteTaskId: string;
+  readonly prerequisiteDisplayNumber: number;
+  readonly prerequisiteState: string;
+  readonly requiredRevisionId: string;
+  readonly requiredRevisionNumber: number;
+  readonly createdAt: number;
+  readonly integratedCommit: string | null;
+  readonly integrationBatchId: string | null;
+  readonly satisfied: boolean;
+  readonly reason: TaskDependencyBlockReasonView | null;
+}
+
+/** The `task.depends.list` projection; `taskId` is null for the project-wide listing. */
+export interface TaskDependencyView {
+  readonly projectId: string;
+  readonly taskId: string | null;
+  readonly taskState: string | null;
+  readonly taskVersion: number | null;
+  readonly devRef: string;
+  readonly devCommit: string | null;
+  readonly edges: readonly TaskDependencyEdgeView[];
+  readonly blocked: boolean;
+  readonly blockedReasons: readonly TaskDependencyBlockReasonView[];
+  readonly prerequisites: readonly string[];
+  readonly dependents: readonly string[];
+}
+
 export type StreamFrame =
   | { readonly schemaVersion: 1; readonly type: 'subscribed'; readonly requestId: string;
       readonly cursor: number; readonly projectId: string | null }
