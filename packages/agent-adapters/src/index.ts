@@ -8,13 +8,25 @@ export {
   PiRpcProtocolError,
   piExtensionUiResponseRecord,
 } from './pi-rpc.js';
-export { classifyPiTool } from './pi-gate-extension.js';
-export type { GateDecision } from './pi-gate-extension.js';
+export { classifyPiTool, handoffChannelProtocol, handoffFenceReason, sessionHandoffSocketPath }
+  from './pi-gate-extension.js';
+export type {
+  GateDecision, HandoffChannelCommand, HandoffChannelFrame, HandoffChannelHello,
+  PiPermissionMode, PiPermissionOutcome,
+} from './pi-gate-extension.js';
 export {
   codeestraAskUserQuestionToolName,
   registerAskUserQuestionTool,
 } from './pi-question-extension.js';
 export { readProcessStartToken } from './pi-identity.js';
+export {
+  captureProviderProcessTree,
+  inspectProviderProcessOwnership,
+  readProcessTable,
+} from './pi-process.js';
+export type {
+  ProcessTableRow, ProviderOwnershipObservation, ProviderProcessRef, ProviderProcessTree,
+} from './pi-process.js';
 export { PiRpcClient, PiRpcProcessError } from './pi-process.js';
 export type { PiRpcEnvelope, PiRpcErrorCode } from './pi-process.js';
 export { PiRpcAdapter } from './pi-adapter.js';

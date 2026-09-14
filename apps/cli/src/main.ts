@@ -731,6 +731,13 @@ function usage(): never {
   bun run codeestra session transcript <session-id> [--after <entry-id>] [--limit <n>] [--reverse]
     [--json]
   bun run codeestra session transcript part <session-id> <entry-id> <part-index>
+  bun run codeestra session handoff status <project-id> <session-id> [--json]
+  bun run codeestra session handoff request <project-id> <session-id> <takeover|return>
+  bun run codeestra session handoff cancel <project-id> <session-id>
+  bun run codeestra session handoff writer acquire <project-id> <session-id> --holder <ref>
+    [--kind AUTOMATED_RPC|TERMINAL_ATTACHMENT]
+  bun run codeestra session handoff writer release <project-id> <session-id> --holder <ref>
+  bun run codeestra session handoff admit <project-id> <session-id>
   bun run codeestra task result capture <project-id> <task-id> [execution-id]
   bun run codeestra task result prepare <project-id> <task-id> [execution-id]   # strict mode
   bun run codeestra task result commit <project-id> <task-id> <authorization-id> --confirm
@@ -779,7 +786,13 @@ verification of that commit; it writes nothing to Git. In FULL mode promotion pr
 main inside the worktree that has it checked out and then runs there: bun install --frozen-lockfile,
 bun run build:ui, bun run codeestra stop, bun run codeestra status. The restart is recorded only when
 every step exits 0 and the restarted Runtime answers READY. STRICT additionally needs promotion
-approve for that exact triple; a dev/main/evidence move makes it invalid. Only SUCCEEDED exits 0.`);
+approve for that exact triple; a dev/main/evidence move makes it invalid. Only SUCCEEDED exits 0.
+
+session handoff projects the Runtime-side handoff contract: the provider incarnation history, the
+single writer lease, the handoff fence/safe point and the admission decision. A second writer lease
+acquisition exits 1 with ATTACHMENT_BUSY, and a refused admission exits 1. admit only records the
+decision: this Runtime version has no PTY transport, so it never starts a successor process and
+never moves the lease.`);
   process.exit(2);
 }
 
@@ -1105,6 +1118,90 @@ try {
       const read = await readTranscript(sessionId, flags);
       if (flags.json) print(read.view);
       else printTranscript(read, sessionId, flags.reverse);
+    }
+  } else if (group === 'session' && action === 'handoff') {
+    // `session handoff` is the control face of the Runtime-side handoff contract (ADR-0023): the
+    // incarnation history, the single writer lease, the handoff fence and the admission decision.
+    // Every subcommand prints the same JSON projection the Runtime returns; `--json` is accepted and
+    // is also the default, so a script can state its intent without depending on that default.
+    const subcommand = firstArgument;
+    const tokens = remainingArguments;
+    // Flags are consumed with their value, so `--holder probe` is never mistaken for positionals;
+    // anything else starting with `--` is a usage error rather than a silently ignored flag.
+    const positional: string[] = [];
+    let holderRef: string | undefined;
+    let holderKind = 'TERMINAL_ATTACHMENT';
+    for (let index = 0; index < tokens.length; index += 1) {
+      const token = tokens[index] as string;
+      const value = tokens[index + 1];
+      if (token === '--json') continue;
+      if (token === '--holder' && value !== undefined) { holderRef = value; index += 1; continue; }
+      if (token === '--kind' && value !== undefined
+        && (value === 'AUTOMATED_RPC' || value === 'TERMINAL_ATTACHMENT')) {
+        holderKind = value;
+        index += 1;
+        continue;
+      }
+      if (token.startsWith('--')) usage();
+      positional.push(token);
+    }
+    if (subcommand === 'status') {
+      const [projectId, sessionId, ...extra] = positional;
+      if (projectId === undefined || sessionId === undefined || extra.length !== 0) usage();
+      print(await call({ command: 'session.handoff.status', projectId, sessionId }));
+    } else if (subcommand === 'request') {
+      const [projectId, sessionId, kind, ...extra] = positional;
+      if (projectId === undefined || sessionId === undefined
+        || (kind !== 'takeover' && kind !== 'return') || extra.length !== 0) usage();
+      print(await call({
+        command: 'session.handoff.request',
+        commandId: crypto.randomUUID(),
+        projectId,
+        sessionId,
+        kind: kind === 'takeover' ? 'TAKEOVER' : 'RETURN',
+      }));
+    } else if (subcommand === 'cancel') {
+      const [projectId, sessionId, ...extra] = positional;
+      if (projectId === undefined || sessionId === undefined || extra.length !== 0) usage();
+      print(await call({ command: 'session.handoff.cancel', projectId, sessionId }));
+    } else if (subcommand === 'writer') {
+      // The writer lease is the Runtime's answer to Pi having no session-file lock: competition is a
+      // refusal (exit 1 with ATTACHMENT_BUSY), never a silent queue.
+      const [writerAction, projectId, sessionId, ...extra] = positional;
+      if (writerAction !== 'acquire' && writerAction !== 'release') usage();
+      if (projectId === undefined || sessionId === undefined || extra.length !== 0) usage();
+      if (holderRef === undefined) usage();
+      if (writerAction === 'acquire') {
+        print(await call({
+          command: 'session.handoff.writer.acquire',
+          commandId: crypto.randomUUID(),
+          projectId,
+          sessionId,
+          holderKind: holderKind as 'AUTOMATED_RPC' | 'TERMINAL_ATTACHMENT',
+          holderRef,
+        }));
+      } else {
+        const released = await call({
+          command: 'session.handoff.writer.release', projectId, sessionId, holderRef,
+        }) as { readonly released: boolean };
+        print(released);
+        // Not releasing the lease is a real failure for a script: the Session keeps its writer.
+        if (!released.released) process.exit(1);
+      }
+    } else if (subcommand === 'admit') {
+      const [projectId, sessionId, ...extra] = positional;
+      if (projectId === undefined || sessionId === undefined || extra.length !== 0) usage();
+      const admission = await call({
+        command: 'session.handoff.admit',
+        commandId: crypto.randomUUID(),
+        projectId,
+        sessionId,
+      }) as { readonly admitted: boolean };
+      print(admission);
+      // A refused admission keeps the predecessor as the writer; exit code 0 would claim otherwise.
+      if (!admission.admitted) process.exit(1);
+    } else {
+      usage();
     }
   } else if (group === 'task' && action === 'run') {
     const [taskId, versionText, ...extra] = remainingArguments;

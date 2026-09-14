@@ -491,3 +491,72 @@ export async function reconcileInterruptedPromotions(input: {
   }
   return results;
 }
+export interface SessionHandoffRecoveryResult {
+  readonly sessionId: string;
+  readonly incarnationId: string;
+  readonly outcome: 'RECONCILED_FROM_FACTS';
+  readonly detail: string;
+}
+
+/**
+ * Reconciles the Runtime's own Session handoff state after a restart (ADR-0023).
+ *
+ * A restarted Runtime holds no provider process and no PTY control connection, so nothing it
+ * recorded can still be claimed as the writer. The decision is made from that fact alone:
+ *
+ * - every live incarnation becomes `RECOVERY_REQUIRED` and stops being the Session's current
+ *   incarnation, so no late permission decision can reach a process this Runtime no longer owns;
+ * - every un-released writer lease is released with the reason `RUNTIME_RESTARTED`;
+ * - every open handoff request becomes `RECOVERY_REQUIRED` with its fence marked inactive;
+ * - every open STRICT permission request and its Attention become `STALE`, because the provider
+ *   that asked is gone and the request can never be answered.
+ *
+ * It deliberately does not touch `agent_sessions`/`executions`/`tasks`: projecting a provider state
+ * the Runtime cannot observe is a different (still open) reconciliation question, and guessing it
+ * here would hide the missing evidence.
+ */
+export function reconcileSessionHandoffs(input: {
+  readonly storage: Phase1Database;
+  readonly now?: () => number;
+}): readonly SessionHandoffRecoveryResult[] {
+  const now = input.now ?? Date.now;
+  const results: SessionHandoffRecoveryResult[] = [];
+  for (const incarnation of input.storage.listLiveSessionIncarnations()) {
+    input.storage.markSessionIncarnationRecoveryRequired({
+      incarnationId: incarnation.id,
+      at: now(),
+      detail: {
+        code: 'RUNTIME_RESTARTED',
+        message: 'the Runtime restarted; it cannot prove it still holds this provider process',
+      },
+    });
+    results.push({
+      sessionId: incarnation.sessionId,
+      incarnationId: incarnation.id,
+      outcome: 'RECONCILED_FROM_FACTS',
+      detail: `incarnation ${incarnation.incarnationNumber} is no longer current`,
+    });
+  }
+  for (const lease of input.storage.listActiveSessionWriterLeases()) {
+    input.storage.releaseSessionWriterLeaseForSession({
+      sessionId: lease.sessionId,
+      reason: 'RUNTIME_RESTARTED',
+      releasedAt: now(),
+    });
+  }
+  for (const request of input.storage.listOpenSessionHandoffRequests()) {
+    input.storage.markSessionHandoffRecoveryRequired({
+      requestId: request.id,
+      at: now(),
+      detail: 'RUNTIME_RESTARTED: the Runtime restarted while this handoff was in flight',
+    });
+  }
+  for (const permission of input.storage.listOpenSessionPermissionRequests()) {
+    input.storage.markSessionPermissionRequestStale({
+      attentionId: permission.attentionId,
+      at: now(),
+      detail: 'RUNTIME_RESTARTED: the provider that asked is gone',
+    });
+  }
+  return results;
+}

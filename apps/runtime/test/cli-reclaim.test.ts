@@ -366,6 +366,8 @@ describe('reclamation schema', () => {
 
     const upgraded = new Phase1Database(path);
     try {
+      // The pinned number is the schema the migration runner targets, not this lane's version: a
+      // later additive migration must not make this assertion wrong.
       expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version')
         .get()?.user_version).toBe(phase1SchemaVersion);
       expect(upgraded.sqlite.query<Record<string, unknown>, []>(

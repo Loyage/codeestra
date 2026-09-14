@@ -10,6 +10,11 @@ export type {
   IntegrationBatchState, IntegrationBatchSummary, IntegrationCandidates,
   IntegrationItemState, IntegrationVerificationPlan, IntegrationVerificationSummary, MergeStrategy,
   PendingEventDelivery, ResultCommitAuthorization, ResultCommitCapturePlan, ResultCommitSubject,
+  SessionHandoffKind, SessionHandoffRequestRecord, SessionHandoffState,
+  SessionIncarnationMode, SessionIncarnationRecord, SessionIncarnationState, SessionIncarnationWrite,
+  SessionPermissionClaimCode, SessionPermissionClaimResult, SessionPermissionDecision,
+  SessionPermissionRequestRecord, SessionWriterLeaseAcquisition, SessionWriterLeaseCode,
+  SessionWriterLeaseRecord,
   ReclamationCandidates, ReclamationIntegrationRef, ReclamationOperationPlan, ReclamationOutcome,
   ReclamationProjectRef, ReclamationRecord, ReclamationRecordInput, ReclamationTaskRef,
   ReclamationVerificationRef, ReclamationWorkspaceRef,
@@ -28,8 +33,9 @@ export {
   agentAnswerMigration, agentConfigurationMigration, agentDisconnectMigration,
   agentObservationMigration, agentStartMigration, integrationPipelineMigration,
   operationProgressMigration,
-  phase1Migration, phase1SchemaVersion, reclamationMigration, stablePromotionMigration,
-  taskControlMigration, taskDependenciesMigration, taskVerificationMigration,
+  phase1Migration, phase1SchemaVersion, reclamationMigration, sessionHandoffMigration,
+  stablePromotionMigration, taskControlMigration, taskDependenciesMigration, taskVerificationMigration,
+
   workspaceRetryMigration,
 } from './migration.js';
 export { agentThinkingLevelSchema, agentThinkingLevels, storedAgentConfigurationSchema }

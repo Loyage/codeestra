@@ -17,6 +17,7 @@ import { integrateTaskResult } from './integration-service.js';
 import { RuntimeHttpApi } from './http-api.js';
 import { LongOperationService } from './operation-service.js';
 import { runtimeHome, runtimeSocketPath } from './paths.js';
+import { SessionHandoffService } from './session-handoff-service.js';
 import { readPermissionMode, writePermissionMode, type PermissionMode } from './permission-mode.js';
 import {
   abandonStablePromotion,
@@ -52,6 +53,7 @@ import {
   reconcileInterruptedResultCommits,
   reconcileInterruptedRunOperations,
   reconcileInterruptedVerifications,
+  reconcileSessionHandoffs,
   reconcileWorkspacePreparations,
 } from './recovery-service.js';
 import {
@@ -128,6 +130,19 @@ const coordinator = new AgentRuntimeCoordinator({
   logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
 });
 const subscriptions = new EventSubscriptionHub({ storage });
+/**
+ * Runtime side of the Session handoff contract (ADR-0023): the incarnation history, the single
+ * writer lease, the handoff fence and the STRICT permission decision channel. It is created before
+ * any Agent can start, because a controlled launch connects to its socket during `session_start`.
+ */
+const handoff = new SessionHandoffService({
+  storage,
+  runtimeHome: home,
+  resolveAdapter: (adapterId) => registry.resolve(adapterId),
+  permissionMode: () => permissionMode,
+  logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
+});
+handoff.listen();
 /** Built UI assets. The HTTP service is only started when a client asks for it. */
 const uiAssetsRoot = Bun.env.CODEESTRA_UI_DIST === undefined
   ? resolve(import.meta.dir, '../../../apps/ui/dist')
@@ -161,6 +176,9 @@ await reconcileInterruptedPromotions({
     repositoryRoot, ref,
   }),
 });
+// The Runtime cannot prove it still holds any provider process or PTY after a restart, so its own
+// handoff state is reconciled from that fact instead of being restored optimistically.
+reconcileSessionHandoffs({ storage });
 const verificationRunner = new VerificationRunner();
 /** Verification copies live inside the Runtime data directory, never in the user's repo. */
 const verificationCopiesRoot = join(home, 'verifications');
@@ -392,7 +410,7 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         commandId: request.commandId,
         actor: 'local-user',
       }));
-    case 'task.resume':
+    case 'task.resume': {
       // Resuming starts a new Execution in the retained workspace, so it is a start path and honours
       // the same dependency gate. The Task stays PAUSED and nothing is written when it is blocked.
       await assertDependenciesSatisfied({
@@ -400,7 +418,7 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         projectId: request.projectId,
         taskId: request.taskId,
       });
-      return success(request.requestId, await resumePausedTask({
+      const resumed = await resumePausedTask({
         storage,
         coordinator,
         projectId: request.projectId,
@@ -408,7 +426,12 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         expectedVersion: request.expectedVersion,
         commandId: request.commandId,
         adapterId: request.adapterId,
-      }));
+      });
+      if (resumed.sessionId !== null) {
+        await handoff.recordAutomationIncarnation({ sessionId: resumed.sessionId });
+      }
+      return success(request.requestId, resumed);
+    }
     case 'task.archive': {
       const payloadHash = createHash('sha256').update(JSON.stringify({
         projectId: request.projectId,
@@ -499,13 +522,17 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         commandId: request.commandId,
         actor: 'local-user',
       });
-      return success(request.requestId, await coordinator.runTask({
+      const started = await coordinator.runTask({
         projectId: request.projectId,
         taskId: request.taskId,
         expectedTaskVersion: runnable.expectedTaskVersion,
         commandId: request.commandId,
         adapterId: request.adapterId,
-      }));
+      });
+      // The automation takes the Session's single writer lease as soon as it owns a provider
+      // process, from the identity the Adapter already recorded.
+      await handoff.recordAutomationIncarnation({ sessionId: started.sessionId });
+      return success(request.requestId, started);
     }
     case 'task.result.prepare':
       return success(request.requestId, await prepareResultCommit({
@@ -768,6 +795,18 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       return success(request.requestId, storage.listAttentionRequests(request.projectId));
     case 'attention.answer': {
       assertQuestionnaireAnswerFits(request);
+      // A STRICT permission that arrived over the Runtime side channel is decided on that channel:
+      // the provider emitted no dialog this Runtime could answer, so routing it through the
+      // Adapter would report a delivery about a request that does not exist.
+      if (handoff.isPermissionAttention(request.attentionId)) {
+        return success(request.requestId, await handoff.answerPermission({
+          projectId: request.projectId,
+          attentionId: request.attentionId,
+          commandId: request.commandId,
+          answer: request.answer,
+          actor: 'local-user',
+        }));
+      }
       const payloadHash = createHash('sha256').update(JSON.stringify({
         projectId: request.projectId,
         attentionId: request.attentionId,
@@ -798,6 +837,36 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         ...(delivery.error === undefined ? {} : { error: delivery.error }),
       });
     }
+    case 'session.handoff.status':
+      return success(request.requestId,
+        handoff.status({ projectId: request.projectId, sessionId: request.sessionId }));
+    case 'session.handoff.request':
+      return success(request.requestId, handoff.requestHandoff({
+        projectId: request.projectId,
+        sessionId: request.sessionId,
+        kind: request.kind,
+        commandId: request.commandId,
+      }));
+    case 'session.handoff.cancel':
+      return success(request.requestId,
+        handoff.cancelHandoff({ projectId: request.projectId, sessionId: request.sessionId }));
+    case 'session.handoff.writer.acquire':
+      return success(request.requestId, handoff.acquireWriterLease({
+        projectId: request.projectId,
+        sessionId: request.sessionId,
+        holderKind: request.holderKind,
+        holderRef: request.holderRef,
+        commandId: request.commandId,
+      }));
+    case 'session.handoff.writer.release':
+      return success(request.requestId, handoff.releaseWriterLease({
+        projectId: request.projectId,
+        sessionId: request.sessionId,
+        holderRef: request.holderRef,
+      }));
+    case 'session.handoff.admit':
+      return success(request.requestId,
+        await handoff.admitSuccessor({ projectId: request.projectId, sessionId: request.sessionId }));
     case 'task.submit': {
       const payloadHash = createHash('sha256').update(JSON.stringify({
         projectId: request.projectId,
@@ -1039,6 +1108,7 @@ async function shutdown(): Promise<void> {
   shuttingDown = true;
   listener.stop(true);
   subscriptions.close();
+  handoff.close();
   httpApi.stop();
   // Signal first: an in-flight long command stops at its next step boundary without writing a
   // verdict, so a restart cannot turn a killed command into a judged failure.

@@ -1147,6 +1147,138 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 4. 固定重启序列假定 main 工作树是本仓库的 bun 检出（存在 `build:ui` 与 `codeestra` 脚本）；其他形态会以 `RESTART_STEP_FAILED` 如实失败，`main` 保持已更新。
 5. 提升记录的 `RECOVERY_REQUIRED`/`FAILED` 现场没有自动回收策略（ADR-0021 只管 worktree/副本）。
 
+## FOUNDATION-043 — STRICT 权限转 Attention、Session incarnation 与单 writer lease（ADR-0023）
+
+状态：**Runtime 侧契约与状态已实现并通过 CLI/命令面测试**；真实 Pi 0.84.4 + 真实模型（deepseek-flash）
+已在 RPC 模式下 headless 复验 STRICT 权限与 fence 两条路径。**未实现 PTY/TUI 实际转交与 successor 进程
+启动**（留给下一格），能力投影里如实写 `UNIMPLEMENTED`/`UNSUPPORTED`。**本轮占用 schema v14；v13 保留给
+B1 格，未使用。** 未 push、未提升 `main`、未重启稳定 Runtime。
+
+用户本轮决策（记录为 ADR-0023）：STRICT 下需要审批的工具调用**不得**沿用 `ctx.ui.confirm` 直接阻塞，
+改为经 Runtime side channel 转成一条结构化 Attention，用**现有** `attention list` / `attention answer`
+命令面回答；FULL 保持 0 确认、不产生 Attention、不新增门禁。
+
+### 已实现
+
+- `packages/agent-adapters/src/pi-gate-extension.ts`：STRICT 不再使用 `ctx.ui.confirm`；gate 通过
+  Runtime side channel（`${CODEESTRA_HOME}/session-handoff.sock`，`CODEESTRA_HANDOFF_SOCKET` 可覆盖）
+  发送结构化 `permission_request`（toolName + 原样 input + sha256 指纹 + pi mode），等待 typed 决议
+  （ALLOW/DENY/CANCEL），DENY/CANCEL 返回 terminating block。新增 `session_start`（hello）、
+  `tool_execution_start/end`、`agent_settled` 的上报（安全点需要结构化事实），以及 fence 的本地生效与
+  `fence_ack`。通道不可达时 fail-closed（有界重试，默认 10s，`CODEESTRA_HANDOFF_CONNECT_MS` 可收窄）。
+  FULL 仍然完全不接触通道。
+- `packages/agent-adapters/src/pi-process.ts`：`readProcessTable`（`ps -eo pid,ppid,pgid,command`）、
+  `captureProviderProcessTree`（provider 存活时抓取自身 + 后代 pid/start token）、
+  `inspectProviderProcessOwnership` → `STOPPED | ALIVE | DESCENDANTS_ALIVE | UNVERIFIABLE`。不使用
+  `pgrep -f`（spike 已证明不可靠），任何无法与记录身份比较的情况都报不可核验而不是假设静止。
+- `packages/storage`：`phase1SchemaVersion` 12 → 14；新增 additive `sessionHandoffMigration`
+  （`session_incarnations` / `session_writer_leases` / `session_handoff_requests` /
+  `session_permission_requests`，+ 索引与 `agent_sessions.current_incarnation_id`）。单 writer 由数据库
+  约束兜底：`one_active_session_writer_lease`（每 Session 至多一条未释放租约）与
+  `session_incarnations(session_id,incarnation_number)` / `(session_id,command_id)` 唯一。新增方法：
+  incarnation 记录（commandId 幂等）、租约 acquire/release、handoff request/fence/safe point/admit/
+  cancel、权限请求记录与 `claimSessionPermissionDecision`（原子条件更新）、`markSessionPermissionRequestStale`、
+  `failAgentAnswerOperation`、`getAgentSessionIdentity`、按 provider session 反查 Session 等。
+- `apps/runtime/src/session-handoff-service.ts`（新）：side channel 服务端（hello/welcome/rejected/fence/
+  permission_decision）、incarnation 记录（从 Adapter 已记录的进程身份）、单 writer lease 的
+  `ATTACHMENT_BUSY` 拒绝、handoff 请求与 fence、安全点判定、`admitSuccessor` 的归属核验、权限决议送达、
+  以及 `status` 只读投影（含 `capabilities`）。帧在 Runtime 尚未记录 incarnation 时会**按序排队等待**
+  （有界），不会因为瞬间时序丢弃或误拒；identity 不匹配则立即拒绝。
+- `apps/runtime/src/agent-answer-service.ts`：按 Attention 的真实来源路由——provider dialog（
+  `extension_ui_response`）走 Adapter；Runtime side channel 的权限请求先在 storage 里原子 claim
+  （要求 asking incarnation 仍是当前 writer），再写 side channel，最后才落 `completeAgentAnswer`。
+  `STALE_INCARNATION` 的答案记为 `FAILED` 且 Attention 记 `STALE`（不可重试、不触及 provider）。
+- `apps/runtime/src/recovery-service.ts`：尾部追加 `reconcileSessionHandoffs`（live incarnation →
+  `RECOVERY_REQUIRED` 并清空 current、租约以 `RUNTIME_RESTARTED` 释放、未决 handoff →
+  `RECOVERY_REQUIRED`、未决权限与 Attention → `STALE`），不乐观恢复、不改写 Session/Execution/Task 投影。
+- `packages/contracts`：新增 `session.handoff.status|request|cancel|writer.acquire|writer.release|admit`
+  六个严格请求（union 末尾追加）与 `permissionPromptSchema`（`codeestra.permission` 结构化 prompt）。
+- `apps/cli/src/main.ts`：`session handoff status|request|cancel|writer acquire|release|admit`（`--json`
+  为默认输出，`writer acquire` 竞争与 `admit` 被拒绝时退出码 1）；usage 追加命令行。
+- `apps/runtime/src/main.ts`：新服务接线（socket 在任何 Agent 启动前监听）、`task.run`/`task.resume`
+  成功后记录 automation incarnation、六个 dispatch 分支、`attention.answer` 的权限分流、shutdown 关闭
+  side channel、启动 reconcile 一行。
+
+### Attention 与决议形状
+
+`attention_requests.prompt_json` 对这类请求是结构化的：
+
+```json
+{ "kind": "codeestra.permission", "version": 1, "sessionId": "…", "incarnationId": "…",
+  "incarnationNumber": 1, "toolCallId": "call_00_…", "toolName": "bash",
+  "input": { "command": "rm -rf build" }, "inputFingerprint": "sha256:…",
+  "piMode": "rpc", "requestedAt": 0 }
+```
+
+用户回答面不变：`attention list <project>` 看到 `kind=PERMISSION`、`responseType=CONFIRM`；
+`attention answer <project> <attention-id> confirm no|cancel`。ADR-0021 的"参数原样入库"决定继续适用。
+
+### 实际验证（全部 headless，未使用浏览器/桌面/键鼠自动化）
+
+- `bun run check`：退出码 0 —— 根与 UI TypeScript、212 项 Vitest（2 个文件）、**327 项 Bun tests
+  （0 fail，38 个文件）**、UI Vite 构建；`bun run check:fast` 亦通过（209 项 Bun tests 的精简分层）。
+- `packages/agent-adapters/test/handoff-gate.test.ts`（13 项）：真实 UNIX socket 上的 gate 契约——
+  hello 携带 mode/pid/provider session id+file；FULL 零确认且不发权限帧；STRICT 只读工具不问、
+  敏感工具发结构化请求并按 ALLOW/DENY/CANCEL 收束；通道在等待中被关闭 → fail-closed；Runtime 无监听 →
+  fail-closed；Runtime 自身拒绝的理由不与"用户拒绝"混同；通道丢失后新的工具调用会重新建连（不是永久
+  fail-closed）；fence 先于审批生效、不发送审批帧、释放后恢复；未知工具直接拒绝。另含真实进程归属
+  3 项：SIGKILL provider 后仍检测到存活的后代 `DESCENDANTS_ALIVE`，后代消失后 `STOPPED`，进程表不可读
+  → `UNVERIFIABLE`，pid 复用不误判为存活。
+- `apps/runtime/test/session-handoff-service.test.ts`（11 项）：租约被第二个 holder 拒绝
+  `ATTACHMENT_BUSY`（并报出当前 holder）、同 holder 幂等、重复 commandId 不新建 incarnation/租约、
+  STRICT 权限→Attention→DENY 送达且 Execution 不记为成功、旧 incarnation 决议
+  `STALE_INCARNATION`（不写 provider、Attention `STALE`、Operation `FAILED`）、claim 原子性（第二次
+  `ALREADY_DECIDING`）、安全点（fence ack + 无活动工具 + settled）与 `PREDECESSOR_NOT_STOPPED` /
+  `DESCENDANTS_ALIVE` / `PREDECESSOR_UNVERIFIED` 拒绝、admitted 时 `successorStarted:false` 且不移动租约、
+  无法记录的权限请求被单独 fail-closed 拒绝且不摧毁通道、fence 释放、重启 reconcile 幂等、未知 provider
+  不被采纳。
+- `apps/runtime/test/cli-session-handoff.test.ts`（2 项，协议 stub 扮演 provider + 真实 socket/CLI）：
+  权限 Attention 经 `attention answer confirm no` 记为 `DELIVERED`/`DENY`、stub 收到 DENY、
+  `session handoff writer acquire` exit 1 + `ATTACHMENT_BUSY`（原租约不变）、`session handoff status --json`
+  投影 incarnation/lease/安全点/capabilities、fence 确认后 `AT_SAFE_POINT`、`session handoff admit`
+  因 predecessor 存活 exit 1（`PREDECESSOR_NOT_STOPPED`）、`session handoff cancel` 释放 fence。
+- **真实 Pi 0.84.4 + 真实模型（deepseek-flash）headless 复验**（`/tmp/b2-real-pi.ts`，不入库）：
+  RPC 模式下生产 gate extension 真实加载并 hello（真实 provider session id/file 与 pid）；让模型执行
+  `echo REALPI-STRICT-PROBE` → 收到结构化 `permission_request`（toolName bash、input 原样、sha256 指纹）；
+  **DENY** → Pi 的 toolResult 为 `Codeestra permission denied by user`（`tool_end isError:true`）→
+  `agent_settled`（拒绝不挂死）；**ALLOW** → 工具真实执行（输出 `REALPI-STRICT-PROBE`，isError false）；
+  打开 fence 后新 prompt 的工具调用被 `CODEESTRA_HANDOFF_FENCE: no new tools after the safe point` 拦下并
+  settled。
+- 既有 `packages/agent-adapters/test/pi-rpc.test.ts` 的两个 STRICT 测试改为新契约（原断言 `ctx.ui.confirm`
+  的部分被 side channel 契约测试取代）；`apps/runtime/test/cli-reclaim.test.ts` 的 schema 版本断言改为
+  引用 `phase1SchemaVersion`（v12 → v14 的必然变化，不再是硬编码数字）。
+- 迁移验证：临时的 **v12 库 additive 升级到 v14** 检查脚本（不入库）确认 `user_version` = 14、4 张新表
+  存在、`PRAGMA foreign_key_check` 无违规、`agent_sessions.current_incarnation_id` 已加。
+
+### 未验证（不得当成已成立）
+
+- **PTY/TUI 实际转交与 detach/reattach 编排**：`session handoff admit` 只做判定并记录，从不启动 successor
+  进程、也不移动租约；`capabilities` 明确 `terminalTransport: UNIMPLEMENTED`、
+  `nativeTerminalAttach: UNSUPPORTED`、`successorProcessStart: UNIMPLEMENTED`。
+- 跨交接的权限模式/工具集保持（需要真正换进程才能验）。
+- 并行工具批次下的安全点、compaction、长会话/大 session file、PTY resize。
+- 真实 Pi 的两条路径只在 RPC 模式复验；TUI/PTY 模式下的 side channel 端到端（spike 只验证过 spike 专用
+  扩展，未验证生产 gate）**未复验**。
+- Windows/其他 provider/非 macOS；`ctx.shutdown()` 的 `session_shutdown` 通知不可靠（沿用 spike 结论）。
+- Runtime 重启后对 stale ACTIVE Session 的 Session/Execution 投影 reconcile 仍是既有未关闭议题
+  （NEXT #4）；本轮只 reconcile 自己的 incarnation/lease/handoff/permission 状态，不猜 provider 状态。
+
+### 交付边界与权衡
+
+- 改动文件：`packages/agent-adapters/src/{pi-gate-extension,pi-process,index}.ts`、
+  `packages/storage/src/{migration,database,index}.ts`、`packages/contracts/src/index.ts`、
+  `apps/runtime/src/{session-handoff-service,agent-answer-service,recovery-service,main}.ts`、
+  `apps/cli/src/main.ts`、三个新测试文件 + `pi-rpc.test.ts`（gate 契约更新）+
+  `cli-reclaim.test.ts`（schema 版本断言）、`package.json`（仅把新 CLI 测试加入既有
+  `test:unit`/`test:e2e` 分层清单）、`docs/decisions/0023-*.md`、`docs/decisions/README.md`、本文件。
+  未修改 `PROJECT_SPEC.md`、`AGENTS.md`、`packages/domain/**`、`scheduler.ts`、`packages/git/**`、
+  `apps/ui/**`、`pi-adapter.ts`。
+- 未新增任何权限门禁或审批层：FULL 的零确认预算保持 0；STRICT 的审批仍是逐次工具审批，只是通道从
+  provider dialog 换成 Runtime side channel + 既有 Attention 命令面。
+- 取舍：STRICT 下 gate 不再显示原生 Pi 对话框。这是有意的——一条通道才能把决议绑定到 incarnation 并
+  保证"只接受第一份合法决议"；代价是 Runtime 不在时 STRICT 工具全部 fail-closed（有界重试后拒绝，
+  不是静默放行）。
+
 ## FOUNDATION-044 — 任务依赖、DAG 环校验与 BLOCKED 语义（ADR-0024）
 
 状态：已实现并通过 CLI/命令面测试（真实临时仓库 + 临时 `CODEESTRA_HOME` + 协议 stub provider）；未用真实 provider 驱动依赖解阻塞，未使用桌面/浏览器/键鼠自动化。**本轮占用 schema v15；v13 保留给 B1 格、v14 保留给 B2 格，均未占用。**

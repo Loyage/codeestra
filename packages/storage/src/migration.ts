@@ -1,5 +1,6 @@
 export const phase1SchemaVersion = 15;
 
+
 export const phase1Migration = `
 CREATE TABLE projects (
   id TEXT PRIMARY KEY,
@@ -707,6 +708,115 @@ CREATE TABLE stable_promotion_members (
   FOREIGN KEY(task_id,execution_id) REFERENCES executions(task_id,id)
 ) STRICT;
 `;
+
+/**
+ * Session handoff state (ADR-0010 Phase 3, ADR-0023). These tables record the facts the Runtime
+ * needs to keep *one* provider writer per conversation and to route a STRICT permission decision
+ * back to the exact provider incarnation that asked:
+ *
+ * - `session_incarnations` is the ordered process-generation history of one Agent Session. A
+ *   successor may only be recorded once its predecessor is no longer ACTIVE/FENCED, so the
+ *   database itself refuses two writers on one conversation/session file.
+ * - `session_writer_leases` is the single-writer lease the Runtime enforces because Pi has no
+ *   session-file exclusivity (measured in FOUNDATION-040): at most one un-released holder per
+ *   Session, so a second attach/takeover fails as `ATTACHMENT_BUSY` instead of queueing silently.
+ * - `session_handoff_requests` is the persisted takeover/return intent plus the handoff fence and
+ *   safe-point facts (fence acknowledged, no active tool, settled after the fence).
+ * - `session_permission_requests` binds one STRICT permission Attention to the incarnation that
+ *   asked for it, so a decision recorded for a superseded incarnation is rejected instead of being
+ *   applied to the wrong writer.
+ *
+ * `agent_sessions.current_incarnation_id` names the only incarnation a decision may still reach.
+ *
+ * Schema version 14 is reserved for this migration; version 13 is reserved by the concurrent lane.
+ */
+export const sessionHandoffMigration = `
+CREATE TABLE session_incarnations (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+  execution_id TEXT NOT NULL REFERENCES executions(id),
+  incarnation_number INTEGER NOT NULL CHECK(incarnation_number > 0),
+  mode TEXT NOT NULL CHECK(mode IN ('AUTOMATED_RPC','HUMAN_TUI')),
+  state TEXT NOT NULL CHECK(state IN ('ACTIVE','FENCED','RECOVERY_REQUIRED','EXITED')),
+  provider_pid INTEGER CHECK(provider_pid IS NULL OR provider_pid > 0),
+  process_identity_json TEXT CHECK(process_identity_json IS NULL OR json_valid(process_identity_json)),
+  process_tree_json TEXT CHECK(process_tree_json IS NULL OR json_valid(process_tree_json)),
+  provider_session_id TEXT,
+  session_storage_ref TEXT,
+  predecessor_incarnation_id TEXT REFERENCES session_incarnations(id),
+  command_id TEXT NOT NULL CHECK(length(trim(command_id)) > 0),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  ended_at INTEGER,
+  exit_json TEXT CHECK(exit_json IS NULL OR json_valid(exit_json)),
+  UNIQUE(session_id,incarnation_number),
+  UNIQUE(session_id,command_id),
+  CHECK((state='EXITED' AND ended_at IS NOT NULL) OR (state<>'EXITED' AND ended_at IS NULL))
+) STRICT;
+CREATE INDEX session_incarnations_by_session
+  ON session_incarnations(session_id,incarnation_number);
+
+CREATE TABLE session_writer_leases (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+  incarnation_id TEXT NOT NULL REFERENCES session_incarnations(id),
+  holder_kind TEXT NOT NULL CHECK(holder_kind IN ('AUTOMATED_RPC','TERMINAL_ATTACHMENT')),
+  holder_ref TEXT NOT NULL CHECK(length(trim(holder_ref)) > 0),
+  command_id TEXT NOT NULL CHECK(length(trim(command_id)) > 0),
+  acquired_at INTEGER NOT NULL CHECK(acquired_at >= 0),
+  released_at INTEGER,
+  release_reason TEXT,
+  CHECK(released_at IS NULL OR release_reason IS NOT NULL)
+) STRICT;
+CREATE UNIQUE INDEX one_active_session_writer_lease
+  ON session_writer_leases(session_id) WHERE released_at IS NULL;
+
+CREATE TABLE session_handoff_requests (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+  execution_id TEXT NOT NULL REFERENCES executions(id),
+  incarnation_id TEXT NOT NULL REFERENCES session_incarnations(id),
+  kind TEXT NOT NULL CHECK(kind IN ('TAKEOVER','RETURN')),
+  state TEXT NOT NULL CHECK(state IN ('REQUESTED','FENCED','AT_SAFE_POINT','ADMITTED',
+    'CANCELLED','RECOVERY_REQUIRED')),
+  command_id TEXT NOT NULL CHECK(length(trim(command_id)) > 0),
+  fence_active INTEGER NOT NULL CHECK(fence_active IN (0,1)),
+  fence_confirmed_at INTEGER,
+  settled_after_fence_at INTEGER,
+  safe_point_at INTEGER,
+  admitted_at INTEGER,
+  detail TEXT,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+  UNIQUE(session_id,command_id)
+) STRICT;
+CREATE UNIQUE INDEX one_open_session_handoff_request
+  ON session_handoff_requests(session_id)
+  WHERE state IN ('REQUESTED','FENCED','AT_SAFE_POINT');
+
+CREATE TABLE session_permission_requests (
+  id TEXT PRIMARY KEY,
+  attention_id TEXT NOT NULL UNIQUE REFERENCES attention_requests(id),
+  session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+  incarnation_id TEXT NOT NULL REFERENCES session_incarnations(id),
+  provider_request_id TEXT NOT NULL CHECK(length(trim(provider_request_id)) > 0),
+  tool_call_id TEXT NOT NULL CHECK(length(trim(tool_call_id)) > 0),
+  tool_name TEXT NOT NULL CHECK(length(trim(tool_name)) > 0),
+  input_json TEXT NOT NULL CHECK(json_valid(input_json)),
+  input_fingerprint TEXT NOT NULL CHECK(length(trim(input_fingerprint)) > 0),
+  pi_mode TEXT NOT NULL CHECK(length(trim(pi_mode)) > 0),
+  decision TEXT NOT NULL CHECK(decision IN ('OPEN','DECIDING','ALLOW','DENY','CANCEL','STALE')),
+  requested_at INTEGER NOT NULL CHECK(requested_at >= 0),
+  decided_at INTEGER,
+  decided_by TEXT,
+  UNIQUE(session_id,provider_request_id)
+) STRICT;
+CREATE INDEX open_session_permission_requests
+  ON session_permission_requests(session_id,decision);
+
+ALTER TABLE agent_sessions ADD COLUMN current_incarnation_id TEXT
+  REFERENCES session_incarnations(id);
+`;
+
 
 /**
  * Task dependencies (ADR-0024). An edge is directed dependent -> prerequisite and pins the exact

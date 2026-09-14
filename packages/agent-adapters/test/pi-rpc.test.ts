@@ -13,12 +13,21 @@ import {
 type GateResult = { block: true; reason: string; terminate: true } | undefined;
 type GateHandler = (
   event: { toolName: string; toolCallId: string; input: unknown },
-  context: { mode: string; hasUI: boolean; ui: { confirm(title: string, message: string): Promise<boolean> } },
+  context: { mode: string; hasUI: boolean },
 ) => Promise<GateResult>;
 
+/**
+ * Captures the gate's `tool_call` handler. The gate now registers lifecycle handlers as well, and
+ * it never takes a `ctx.ui` approval: STRICT decisions come from the Runtime side channel, which
+ * `handoff-gate.test.ts` drives over a real socket.
+ */
 function captureGate(): GateHandler {
   let handler: GateHandler | undefined;
-  codeestraGate({ on: (_event, registered) => { handler = registered; } });
+  codeestraGate({
+    on: (event: string, registered: unknown) => {
+      if (event === 'tool_call') handler = registered as GateHandler;
+    },
+  } as unknown as Parameters<typeof codeestraGate>[0]);
   if (handler === undefined) throw new Error('Gate did not register its tool handler');
   return handler;
 }
@@ -73,9 +82,10 @@ describe('Codeestra Pi gate', () => {
       expect(classifyPiTool('custom-danger')).toBe('ALLOW');
       // The question tool changes no file and runs no command: STRICT must never gate it either.
       expect(classifyPiTool('ask_user_question', 'STRICT')).toBe('ALLOW');
+      // Full mode never asks anyone: no side channel, no dialog, no Attention.
       expect(await handler(
         { toolName: 'custom-danger', toolCallId: 'x', input: circular },
-        { mode: 'json', hasUI: false, ui: { confirm: async () => false } },
+        { mode: 'json', hasUI: false },
       )).toBeUndefined();
     } finally {
       if (previous === undefined) delete process.env.CODEESTRA_PERMISSION_MODE;
@@ -119,50 +129,53 @@ describe('Codeestra Pi gate', () => {
     })).toThrow('does not match CONFIRM');
   });
 
-  test('strict mode allows read-only tools, prompts once for known mutations, and rejects unknown tools', async () => {
-    process.env.CODEESTRA_PERMISSION_MODE = 'STRICT';
-    const handler = captureGate();
-    let title = '';
-    let message = '';
-    const context = {
-      mode: 'rpc',
-      hasUI: true,
-      ui: { confirm: async (nextTitle: string, nextMessage: string) => {
-        title = nextTitle;
-        message = nextMessage;
-        return true;
-      } },
-    };
+  test('strict mode classifies read-only, known mutating, and unknown tools', () => {
     expect(classifyPiTool('read', 'STRICT')).toBe('ALLOW');
-    expect(await handler({ toolName: 'read', toolCallId: 'read-1', input: { path: 'a' } }, context))
-      .toBeUndefined();
-    expect(await handler({ toolName: 'write', toolCallId: 'write-1', input: { path: 'a' } }, context))
-      .toBeUndefined();
-    expect(title.startsWith(`${codeestraPermissionTitlePrefix}:write-1:write:`)).toBe(true);
-    expect(message).toContain('"path":"a"');
-    expect(await handler({ toolName: 'custom-danger', toolCallId: 'x', input: {} }, context))
-      .toMatchObject({ block: true, terminate: true });
+    expect(classifyPiTool('grep', 'STRICT')).toBe('ALLOW');
+    expect(classifyPiTool('write', 'STRICT')).toBe('REQUIRE_APPROVAL');
+    expect(classifyPiTool('bash', 'STRICT')).toBe('REQUIRE_APPROVAL');
+    expect(classifyPiTool('custom-danger', 'STRICT')).toBe('REJECT_UNKNOWN');
+    // Full mode permits every registered tool, including names Codeestra does not know.
+    expect(classifyPiTool('custom-danger', 'FULL')).toBe('ALLOW');
   });
 
-  test('strict mode blocks sensitive calls when denied or outside the RPC permission channel', async () => {
+  test('strict mode fails closed when no Runtime permission channel is reachable', async () => {
+    const previous = process.env.CODEESTRA_PERMISSION_MODE;
+    const previousSocket = process.env.CODEESTRA_HANDOFF_SOCKET;
+    const previousConnect = process.env.CODEESTRA_HANDOFF_CONNECT_MS;
     process.env.CODEESTRA_PERMISSION_MODE = 'STRICT';
-    const handler = captureGate();
-    const denied = await handler(
-      { toolName: 'bash', toolCallId: 'bash-1', input: { command: 'true' } },
-      { mode: 'rpc', hasUI: true, ui: { confirm: async () => false } },
-    );
-    expect(denied).toMatchObject({ block: true, reason: 'Codeestra permission denied by user' });
-    const unavailable = await handler(
-      { toolName: 'edit', toolCallId: 'edit-1', input: {} },
-      { mode: 'json', hasUI: false, ui: { confirm: async () => true } },
-    );
-    expect(unavailable).toMatchObject({ block: true, terminate: true });
-    const circular: { self?: unknown } = {};
-    circular.self = circular;
-    expect(await handler(
-      { toolName: 'write', toolCallId: 'write-bad', input: circular },
-      { mode: 'rpc', hasUI: true, ui: { confirm: async () => true } },
-    )).toMatchObject({ block: true, reason: 'Codeestra rejected non-serializable input for write' });
+    // A path nothing listens on: the Runtime side channel is the only approval channel, so a
+    // sensitive call must be blocked with a stated reason instead of prompting a terminal dialog.
+    process.env.CODEESTRA_HANDOFF_SOCKET = '/nonexistent/codeestra-handoff.sock';
+    // The production default keeps re-dialling for 10s (a Runtime may be restarting); this test
+    // checks the fail-closed outcome itself, so the window is shortened.
+    process.env.CODEESTRA_HANDOFF_CONNECT_MS = '200';
+    try {
+      const handler = captureGate();
+      const blocked = await handler(
+        { toolName: 'bash', toolCallId: 'bash-1', input: { command: 'true' } },
+        { mode: 'rpc', hasUI: true },
+      );
+      expect(blocked).toMatchObject({ block: true, terminate: true });
+      expect(blocked?.reason).toContain('without its Runtime permission channel');
+      const circular: { self?: unknown } = {};
+      circular.self = circular;
+      expect(await handler(
+        { toolName: 'write', toolCallId: 'write-bad', input: circular },
+        { mode: 'rpc', hasUI: true },
+      )).toMatchObject({ block: true, reason: 'Codeestra rejected non-serializable input for write' });
+      expect(await handler(
+        { toolName: 'custom-danger', toolCallId: 'x', input: {} },
+        { mode: 'rpc', hasUI: true },
+      )).toMatchObject({ block: true, terminate: true });
+    } finally {
+      if (previous === undefined) delete process.env.CODEESTRA_PERMISSION_MODE;
+      else process.env.CODEESTRA_PERMISSION_MODE = previous;
+      if (previousSocket === undefined) delete process.env.CODEESTRA_HANDOFF_SOCKET;
+      else process.env.CODEESTRA_HANDOFF_SOCKET = previousSocket;
+      if (previousConnect === undefined) delete process.env.CODEESTRA_HANDOFF_CONNECT_MS;
+      else process.env.CODEESTRA_HANDOFF_CONNECT_MS = previousConnect;
+    }
   });
 
   test('maps only valid dialog requests to persisted Attention events', () => {
