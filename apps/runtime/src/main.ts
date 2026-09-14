@@ -40,6 +40,7 @@ import {
   inspectProjectCapacity,
   setProjectCapacity,
 } from './capacity-service.js';
+import { ScheduleService } from './schedule-service.js';
 import { SlotReservationService } from './slot-reservation-service.js';
 import { prepareReservedWorkspace } from './workspace-service.js';
 import { LongOperationService } from './operation-service.js';
@@ -63,7 +64,6 @@ import {
 import { captureResultCommit, prepareResultCommit } from './result-commit-service.js';
 import {
   assertDependenciesSatisfied,
-  assertTaskRunnable,
   inspectTaskDependencies,
   reconcileDependentTasks,
   reconcileTaskDependencyState,
@@ -168,6 +168,9 @@ const coordinator = new AgentRuntimeCoordinator({
   storage,
   registry,
   runtimeHome: home,
+  // The Runtime generation that owns a slot reservation may only start its Execution; the
+  // scheduling engine passes the same boot id it recorded on the reservation.
+  bootId,
   // Configuration is resolved per Execution from the live environment and persisted scopes, so a
   // change applies to the next Agent Session without restarting the Runtime.
   resolveAgentConfig: ({ projectId, adapterId }) => {
@@ -255,6 +258,46 @@ const slotReservations = new SlotReservationService({
   // generation compares the same token before it believes a recorded holder is gone.
   startToken: await readProcessStartToken(process.pid),
   draining: () => drain.state(),
+  logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
+});
+/**
+ * The scheduling engine (FOUNDATION-055 / ADR-0030 D04). It composes what already exists — the
+ * dependency verdict, the deterministic analyzer and the slot reservation primitive — into the
+ * ordered loop of `docs/architecture/scheduler.md` §2, and it is the only thing that decides which
+ * Task runs now. It starts exactly one primary Agent per decision, through the coordinator, so the
+ * Execution it produces is the same one `task.run` has always produced.
+ */
+const schedule = new ScheduleService({
+  storage,
+  adapters: registry,
+  slots: slotReservations,
+  start: (request) => coordinator.runScheduledExecution(request),
+  // §4: an execution whose observed diff grew past the prediction its concurrency was allowed on is
+  // asked to pause through the existing cooperative stop; a stop that cannot be confirmed becomes
+  // RECOVERY_REQUIRED there, with the failure scene retained and nothing integrated.
+  pause: async ({ projectId, taskId, reason, actor }) => {
+    const task = storage.getTask(projectId, taskId);
+    if (task === null) {
+      throw new RuntimeCommandError('NOT_FOUND', 'Task was not found in this project');
+    }
+    const stopped = await pauseOrCancelTask({
+      storage,
+      coordinator,
+      kind: 'PAUSE',
+      projectId,
+      taskId,
+      expectedVersion: task.version,
+      commandId: crypto.randomUUID(),
+      actor,
+    });
+    // The reason travels with the outcome so the audit shows *why* the Runtime asked for the pause
+    // (an observed diff that grew past the prediction its concurrency was allowed on).
+    return { ...stopped, detail: `${stopped.detail} (requested: ${reason})` };
+  },
+  draining: () => drain.state(),
+  // The Adapter a scheduled start uses when nothing else is said is the same default the CLI has:
+  // `pi`, or the first registered Adapter when Pi is not there.
+  defaultAdapterId: 'pi',
   logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
 });
 /** Built UI assets. The HTTP service is only started when a client asks for it. */
@@ -354,6 +397,28 @@ for (const outcome of slotReconcileReport.outcomes) {
     + ` reconcile: ${outcome.previousState} -> ${outcome.state} (${outcome.outcome},`
     + ` ${outcome.observation ?? 'no observation'})`, outcome.detail);
 }
+// The scheduling engine's periodic recovery tick (ADR-0030 D04). It is started after every
+// reconcile above so its first pass judges the converged picture, and it only ever re-runs the same
+// judgements: it introduces no state of its own, and a pass that is already running makes the next
+// trigger a no-op instead of two ticks racing for one Task.
+const scheduleTickMs = Number(Bun.env.CODEESTRA_SCHEDULE_TICK_MS ?? 5_000);
+try {
+  const startup = await schedule.tick('STARTUP');
+  for (const project of startup.projects) {
+    for (const candidate of project.candidates) {
+      if (candidate.disposition === 'STARTED' || candidate.disposition === 'FAILED'
+        || candidate.disposition === 'WAITING') {
+        console.error(`[runtime] schedule ${candidate.disposition} ${candidate.taskId}`
+          + ` (${candidate.adapterId}): ${candidate.detail}`);
+      }
+    }
+  }
+} catch (error) {
+  console.error('[runtime] the startup scheduling pass failed',
+    error instanceof Error ? error.message : String(error));
+}
+schedule.startPeriodicTicks(scheduleTickMs);
+
 let listener: ReturnType<typeof Bun.listen<SocketState>>;
 
 function success(requestId: string, result: unknown): RuntimeResponse {
@@ -409,6 +474,59 @@ function assertQuestionnaireAnswerFits(
   const problem = validateQuestionnaireAnswer(prompt.data.questionnaire, request.answer.answer);
   if (problem !== null) {
     throw new RuntimeCommandError(`INVALID_QUESTIONNAIRE_ANSWER:${problem.code}`, problem.message);
+  }
+}
+
+/**
+ * One event-driven scheduling pass, summarised. A failing pass never turns the command that triggered
+ * it into a failure: that command's own fact is already recorded, the failure is logged with its
+ * stable code, and the next trigger (event or the recovery period) re-runs the same judgement.
+ */
+async function scheduleTick(trigger: string, projectId?: string): Promise<{
+  readonly tickId: string;
+  readonly trigger: string;
+  readonly started: readonly { readonly taskId: string; readonly executionId: string }[];
+  readonly waiting: readonly { readonly taskId: string; readonly kind: string;
+    readonly code: string }[];
+  readonly blocked: readonly string[];
+  readonly skipped: readonly { readonly taskId: string; readonly detail: string }[];
+  readonly failed: readonly { readonly taskId: string; readonly detail: string }[];
+  readonly error: { readonly code: string; readonly message: string } | null;
+}> {
+  try {
+    const report = await schedule.tick(trigger, {
+      ...(projectId === undefined ? {} : { projectId }),
+    });
+    const started: { taskId: string; executionId: string }[] = [];
+    const waiting: { taskId: string; kind: string; code: string }[] = [];
+    const blocked: string[] = [];
+    const skipped: { taskId: string; detail: string }[] = [];
+    const failed: { taskId: string; detail: string }[] = [];
+    for (const project of report.projects) {
+      for (const candidate of project.candidates) {
+        if (candidate.disposition === 'STARTED' && candidate.started !== null) {
+          started.push({ taskId: candidate.taskId, executionId: candidate.started.executionId });
+        } else if (candidate.disposition === 'WAITING' && candidate.wait !== null) {
+          waiting.push({ taskId: candidate.taskId, kind: candidate.wait.kind,
+            code: candidate.wait.code });
+        } else if (candidate.disposition === 'BLOCKED') {
+          blocked.push(candidate.taskId);
+        } else if (candidate.disposition === 'FAILED') {
+          failed.push({ taskId: candidate.taskId, detail: candidate.detail });
+        } else if (candidate.disposition === 'SKIPPED') {
+          skipped.push({ taskId: candidate.taskId, detail: candidate.detail });
+        }
+      }
+    }
+    return { tickId: report.tickId, trigger: report.trigger, started, waiting, blocked, skipped,
+      failed, error: null };
+  } catch (error) {
+    const code = typeof error === 'object' && error !== null && 'code' in error
+      ? String(error.code) : 'SCHEDULE_TICK_FAILED';
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[runtime] scheduling pass ${trigger} failed`, code, message);
+    return { tickId: '', trigger, started: [], waiting: [], blocked: [], skipped: [],
+      failed: [], error: { code, message } };
   }
 }
 
@@ -575,8 +693,8 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         operations: storage.listTaskOperations(request.projectId, request.taskId),
       });
     }
-    case 'task.pause':
-      return success(request.requestId, await pauseOrCancelTask({
+    case 'task.pause': {
+      const paused = await pauseOrCancelTask({
         storage,
         coordinator,
         kind: 'PAUSE',
@@ -585,9 +703,14 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         expectedVersion: request.expectedVersion,
         commandId: request.commandId,
         actor: 'local-user',
-      }));
-    case 'task.cancel':
-      return success(request.requestId, await pauseOrCancelTask({
+      });
+      // A stop changes the active set (a paused Task keeps its slot, a cancelled one releases it), so
+      // the scheduling engine is asked to look again; the answer is reported, not assumed.
+      const scheduling = await scheduleTick('TASK_STOPPED', request.projectId);
+      return success(request.requestId, { ...paused, schedule: scheduling });
+    }
+    case 'task.cancel': {
+      const cancelled = await pauseOrCancelTask({
         storage,
         coordinator,
         kind: 'CANCEL',
@@ -596,7 +719,10 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         expectedVersion: request.expectedVersion,
         commandId: request.commandId,
         actor: 'local-user',
-      }));
+      });
+      const scheduling = await scheduleTick('TASK_CANCELLED', request.projectId);
+      return success(request.requestId, { ...cancelled, schedule: scheduling });
+    }
     case 'task.resume': {
       // Resuming starts a new Execution in the retained workspace, so it is a start path and honours
       // the same dependency gate. The Task stays PAUSED and nothing is written when it is blocked.
@@ -605,6 +731,21 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         projectId: request.projectId,
         taskId: request.taskId,
       });
+      // Resuming is a start path, so it passes the same conflict gate (scheduler.md §4, invariant 11):
+      // a resumed Task whose impact cannot be proven disjoint from the active set stays paused. It
+      // already holds its slot, so no new capacity is requested for it.
+      const gate = await schedule.assertResumeAllowed({
+        projectId: request.projectId,
+        taskId: request.taskId,
+        adapterId: request.adapterId,
+        commandId: request.commandId,
+        allowUnknown: request.allowUnknown,
+        actor: 'local-user',
+      });
+      if (gate.outcome !== 'ALLOWED') {
+        throw new RuntimeCommandError(gate.outcome === 'WAIT' ? 'CONFLICT_WAIT' : 'CONFLICTING',
+          `The Task stays paused: ${gate.detail}`);
+      }
       const resumed = await resumePausedTask({
         storage,
         coordinator,
@@ -617,7 +758,11 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       if (resumed.sessionId !== null) {
         await handoff.recordAutomationIncarnation({ sessionId: resumed.sessionId });
       }
-      return success(request.requestId, resumed);
+      return success(request.requestId, {
+        ...resumed,
+        conflictGate: { outcome: gate.outcome, assessment: gate.assessment,
+          clearedUnknownBy: gate.clearedUnknownBy, detail: gate.detail },
+      });
     }
     case 'task.archive': {
       const payloadHash = createHash('sha256').update(JSON.stringify({
@@ -678,8 +823,8 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
     case 'task.revision.delivery.get':
       return success(request.requestId,
         revisionDeliveries.getDelivery(request.projectId, request.deliveryId));
-    case 'task.revision.delivery.resolve':
-      return success(request.requestId, await revisionDeliveries.resolveDelivery({
+    case 'task.revision.delivery.resolve': {
+      const resolved = await revisionDeliveries.resolveDelivery({
         projectId: request.projectId,
         taskId: request.taskId,
         deliveryId: request.deliveryId,
@@ -688,7 +833,13 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         commandId: request.commandId,
         adapterId: request.adapterId,
         actor: 'local-user',
-      }));
+      });
+      // A revision delivery changes what the active set is working on, so the engine looks again.
+      return success(request.requestId, {
+        ...resolved,
+        schedule: await scheduleTick('REVISION_DELIVERY', request.projectId),
+      });
+    }
     case 'task.verify': {
       // The Operation (and the verification run) exists before any command is spawned, so the
       // background form can return a handle and a cancel or a restart can still find the run.
@@ -735,27 +886,25 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         partIndex: request.partIndex,
       }));
     case 'task.run': {
-      // The dependency gate runs before anything is reserved: an unmet dependency must not create an
-      // Execution or occupy a worktree. A Task that just became READY is runnable in this same call.
-      const runnable = await assertTaskRunnable({
-        storage,
+      // The start path now goes through the scheduling gate (FOUNDATION-055): the same dependency,
+      // conflict and capacity judgements the automatic tick applies, so a start that the scheduler
+      // would refuse cannot be smuggled in by asking for it directly. `allowUnknown` is the explicit
+      // single-shot release of an UNKNOWN verdict (ADR-0030 D05) — it widens the gate, never adds one.
+      const outcome = await schedule.runNow({
         projectId: request.projectId,
         taskId: request.taskId,
         expectedTaskVersion: request.expectedTaskVersion,
+        adapterId: request.adapterId,
         commandId: request.commandId,
+        allowUnknown: request.allowUnknown,
         actor: 'local-user',
       });
-      const started = await coordinator.runTask({
-        projectId: request.projectId,
-        taskId: request.taskId,
-        expectedTaskVersion: runnable.expectedTaskVersion,
-        commandId: request.commandId,
-        adapterId: request.adapterId,
-      });
-      // The automation takes the Session's single writer lease as soon as it owns a provider
-      // process, from the identity the Adapter already recorded.
-      await handoff.recordAutomationIncarnation({ sessionId: started.sessionId });
-      return success(request.requestId, started);
+      if (outcome.sessionId !== null) {
+        // The automation takes the Session's single writer lease as soon as it owns a provider
+        // process, from the identity the Adapter already recorded.
+        await handoff.recordAutomationIncarnation({ sessionId: outcome.sessionId });
+      }
+      return success(request.requestId, outcome);
     }
     case 'task.result.prepare':
       return success(request.requestId, await prepareResultCommit({
@@ -828,6 +977,11 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
             commandId: request.commandId,
             actor: 'local-user',
           })
+          : null,
+        // `dev` moving is an eligibility change: dependents that were BLOCKED may now be READY, so
+        // the engine looks again instead of waiting for the next period.
+        schedule: report.state === 'INTEGRATED'
+          ? await scheduleTick('INTEGRATION', request.projectId)
           : null,
       });
     }
@@ -980,7 +1134,8 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         knownAdapterIds: registry.ids(),
         draining: drain.state(),
       });
-      return success(request.requestId, { changed: mutation.changed, capacity: mutation.view });
+      return success(request.requestId, { changed: mutation.changed, capacity: mutation.view,
+        schedule: await scheduleTick('CAPACITY_CHANGED', request.projectId) });
     }
     case 'scheduler.capacity.clear': {
       const mutation = clearAdapterCapacity({
@@ -992,7 +1147,8 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         knownAdapterIds: registry.ids(),
         draining: drain.state(),
       });
-      return success(request.requestId, { changed: mutation.changed, capacity: mutation.view });
+      return success(request.requestId, { changed: mutation.changed, capacity: mutation.view,
+        schedule: await scheduleTick('CAPACITY_CHANGED', request.projectId) });
     }
     case 'scheduler.reservations.list':
       return success(request.requestId, {
@@ -1017,14 +1173,22 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         actor: 'local-user',
         commandId: request.commandId,
       }));
-    case 'scheduler.reservations.release':
-      return success(request.requestId, await slotReservations.release({
+    case 'scheduler.reservations.release': {
+      const released = await slotReservations.release({
         projectId: request.projectId,
         reservationId: request.reservationId,
         reason: request.reason,
         actor: 'local-user',
         commandId: request.commandId,
-      }));
+      });
+      // A freed slot is an eligibility change: the engine looks again in the same command.
+      return success(request.requestId, {
+        ...released,
+        schedule: released.released
+          ? await scheduleTick('SLOT_RELEASED', request.projectId)
+          : null,
+      });
+    }
     case 'scheduler.reservations.workspace.prepare':
       return success(request.requestId, {
         workspace: await prepareReservedWorkspace({
@@ -1046,6 +1210,35 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       });
       return success(request.requestId, report);
     }
+    /**
+     * The scheduling engine's command face (FOUNDATION-055). `status` and `plan` are read-only
+     * (`plan` is the ordered dry run: it reserves nothing and starts nothing), `explain` answers why
+     * one Task is not running now, `run` requests a pass of the same loop the Runtime runs on events
+     * and on its recovery period, and `clearUnknown` records an explicit single-shot release with no
+     * start. None of them adds a confirmation step.
+     */
+    case 'task.schedule.status':
+      return success(request.requestId, await schedule.status(request.projectId, request.adapterId));
+    case 'task.schedule.plan':
+      return success(request.requestId, await schedule.plan(request.projectId, request.adapterId));
+    case 'task.schedule.explain':
+      return success(request.requestId, await schedule.explain({
+        projectId: request.projectId,
+        taskId: request.taskId,
+        ...(request.adapterId === undefined ? {} : { adapterId: request.adapterId }),
+      }));
+    case 'task.schedule.run':
+      return success(request.requestId, await schedule.tick('REQUESTED', {
+        projectId: request.projectId,
+        ...(request.adapterId === undefined ? {} : { adapterId: request.adapterId }),
+      }));
+    case 'task.schedule.clearUnknown':
+      return success(request.requestId, await schedule.clearUnknown({
+        projectId: request.projectId,
+        taskId: request.taskId,
+        commandId: request.commandId,
+        actor: 'local-user',
+      }));
     case 'promotion.prepare':
       return success(request.requestId, await prepareStablePromotion({
         storage,
@@ -1246,11 +1439,16 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         commandId: request.commandId,
         actor: 'local-user',
       });
+      // Submitting enters scheduling in the same command: the candidate takes part in the next tick,
+      // and the tick runs here so the user does not have to push anything (ADR-0030 D04). Failure of
+      // the *submission* is never reported from the scheduling pass, which is a separate fact.
+      const scheduling = await scheduleTick('SUBMIT', request.projectId);
       return success(request.requestId, {
         ...submitted,
         state: dependencies.state,
         version: dependencies.version,
         dependencyState: dependencies,
+        schedule: scheduling,
       });
     }
     case 'task.create': {
@@ -1485,6 +1683,7 @@ async function shutdown(): Promise<void> {
   // Draining starts before anything else is torn down: the socket may still deliver a request that
   // was already in flight, and a reservation must not be granted by a Runtime that is stopping.
   drain.begin('RUNTIME_SHUTDOWN');
+  schedule.stopPeriodicTicks();
   listener.stop(true);
   subscriptions.close();
   // Terminals this Runtime owns are ended first, while the database is still open: the recorded

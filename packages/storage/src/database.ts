@@ -10302,7 +10302,135 @@ export class Phase1Database {
       adapterBlocking: occupancy.adapterBlocking,
     };
   }
+
+  // ---------------------------------------------------------------------------------------------
+  // Scheduling decisions (Phase 2, FOUNDATION-055 / ADR-0030). The scheduling engine writes its
+  // decisions into the same append-only `domain_events` ledger everything else uses, and reads them
+  // back through these two methods. No new table is opened for this: a decision, a wait transition
+  // and an explicit `--allow-unknown` release are all *facts about the past* and belong in the
+  // ledger, which is exactly what the audit requirement asks for.
+  //
+  // Idempotency is keyed on the caller's command: one command writes at most one event of each
+  // type. A replayed tick therefore appends nothing, and the read side can treat
+  // `(event_type, correlation_id)` as the identity of a decision.
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * Appends one scheduling fact. The event is returned as it was stored, so a caller can record the
+   * event id (for example the release a start consumed) without a second read.
+   */
+  recordTaskScheduleEvent(input: {
+    readonly eventId: string;
+    readonly projectId: string;
+    readonly eventType: TaskScheduleEventType;
+    readonly taskId: string;
+    readonly aggregateVersion: number;
+    readonly commandId: string;
+    readonly actor: string;
+    readonly payload: Readonly<Record<string, unknown>>;
+    readonly occurredAt: number;
+  }): StoredEventEnvelope {
+    if (input.taskId.trim().length === 0) {
+      throw new StorageError('INVALID_STATE', 'A scheduling fact must name the Task it is about');
+    }
+    if (!taskScheduleEventTypes.includes(input.eventType)) {
+      throw new StorageError('INVALID_STATE',
+        `Unknown scheduling event type ${input.eventType}`);
+    }
+    // A replayed command must not append a second copy of the same decision, and the ledger has no
+    // unique index on the correlation id, so the guard is an explicit existence check inside the
+    // same statement.
+    const statement = `
+      INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+        aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+      SELECT ?1,?2,?3,1,'TaskSchedule',?4,?5,?6,NULL,?7,?8
+      WHERE NOT EXISTS(
+        SELECT 1 FROM domain_events WHERE event_type=?3 AND correlation_id=?6 AND aggregate_id=?4
+      )
+    `;
+    this.sqlite.query(statement).run(input.eventId, input.projectId, input.eventType, input.taskId,
+      input.aggregateVersion, input.commandId, input.occurredAt, JSON.stringify(input.payload));
+    const row = this.sqlite.query<{
+      event_id: string; sequence: number; event_type: string; schema_version: number;
+      project_id: string; aggregate_type: string; aggregate_id: string; aggregate_version: number;
+      correlation_id: string; causation_id: string | null; occurred_at: number; payload_json: string;
+    }, [string, string, string, string]>(`
+      SELECT event_id,sequence,event_type,schema_version,project_id,aggregate_type,aggregate_id,
+        aggregate_version,correlation_id,causation_id,occurred_at,payload_json
+      FROM domain_events WHERE event_id=?1 OR (event_type=?2 AND correlation_id=?3 AND aggregate_id=?4)
+      ORDER BY sequence DESC LIMIT 1
+    `).get(input.eventId, input.eventType, input.commandId, input.taskId);
+    if (row === null) {
+      throw new StorageError('INVALID_STATE', 'A scheduling fact was not readable after it was written');
+    }
+    return {
+      eventId: row.event_id,
+      sequence: row.sequence,
+      eventType: row.event_type,
+      schemaVersion: row.schema_version,
+      projectId: row.project_id,
+      aggregateType: row.aggregate_type,
+      aggregateId: row.aggregate_id,
+      aggregateVersion: row.aggregate_version,
+      correlationId: row.correlation_id,
+      causationId: row.causation_id,
+      occurredAt: row.occurred_at,
+      payload: JSON.parse(row.payload_json) as unknown,
+    };
+  }
+
+  /**
+   * Newest-first read of one Task's scheduling facts. The aggregate of these events is the Task, so
+   * every decision, wait transition, released prediction and explicit `UNKNOWN` release of a Task is
+   * one ordered history.
+   */
+  listTaskScheduleEvents(input: {
+    readonly projectId: string;
+    readonly taskId?: string;
+    readonly limit?: number;
+  }): readonly StoredEventEnvelope[] {
+    const limit = Math.min(Math.max(input.limit ?? 50, 1), 500);
+    return this.sqlite.query<{
+      event_id: string; sequence: number; event_type: string; schema_version: number;
+      project_id: string; aggregate_type: string; aggregate_id: string; aggregate_version: number;
+      correlation_id: string; causation_id: string | null; occurred_at: number; payload_json: string;
+    }, [string, string, number, ...string[]]>(`
+      SELECT event_id,sequence,event_type,schema_version,project_id,aggregate_type,aggregate_id,
+        aggregate_version,correlation_id,causation_id,occurred_at,payload_json
+      FROM domain_events
+      WHERE project_id=?1 AND aggregate_type='TaskSchedule'
+        AND (?2='' OR aggregate_id=?2) AND event_type IN (${taskScheduleEventTypes.map((_type, index) => `?${index + 4}`).join(',')})
+      ORDER BY sequence DESC LIMIT ?3
+    `).all(input.projectId, input.taskId ?? '', limit, ...taskScheduleEventTypes).map((row) => ({
+      eventId: row.event_id,
+      sequence: row.sequence,
+      eventType: row.event_type,
+      schemaVersion: row.schema_version,
+      projectId: row.project_id,
+      aggregateType: row.aggregate_type,
+      aggregateId: row.aggregate_id,
+      aggregateVersion: row.aggregate_version,
+      correlationId: row.correlation_id,
+      causationId: row.causation_id,
+      occurredAt: row.occurred_at,
+      payload: JSON.parse(row.payload_json) as unknown,
+    }));
+  }
 }
+
+/**
+ * The scheduling engine's own event names. E2's `ExecutionSlot*` and `SchedulerCapacityChanged` are
+ * deliberately not reused or renamed: a reservation and a scheduling decision are different facts.
+ */
+export const taskScheduleEventTypes = [
+  'TaskScheduleDecided',
+  'TaskWaitingForConflict',
+  'TaskWaitingForCapacity',
+  'TaskUnknownCleared',
+  'TaskImpactPredictionRevoked',
+] as const;
+
+export type TaskScheduleEventType = typeof taskScheduleEventTypes[number];
 
 /** One reservation as the shared projection every read returns. */
 export type ExecutionSlotReservationRecord = SlotReservationView;

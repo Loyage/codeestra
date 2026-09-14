@@ -235,11 +235,9 @@ describe('project impact', () => {
 
     const first = await createAndSubmit(environment, projectId, 'Change the first area');
     const second = await createAndSubmit(environment, projectId, 'Change the second area');
-    // Both Tasks run against the stub, so both hold a resource and both have a real worktree.
-    expect((await cli(['task', 'run', projectId, first.id, String(first.version)],
-      environment)).exitCode).toBe(0);
-    expect((await cli(['task', 'run', projectId, second.id, String(second.version)],
-      environment)).exitCode).toBe(0);
+    // Both Tasks enter scheduling on submit and the Runtime starts them there (ADR-0030 D04), so the
+    // fixture no longer pushes each one by hand: it waits for the fact that both ran, which is what
+    // gives both a held resource and a real worktree with a real change set.
     const worktrees = join(realpathSync(home), 'worktrees', projectId);
     const firstWorktree = join(worktrees, first.id);
     const secondWorktree = join(worktrees, second.id);

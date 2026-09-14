@@ -10,6 +10,8 @@ import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOpt
   type ProjectIdentity, type QuestionnaireAnswer, type RuntimeRequest,
   type RuntimeResponse,
   type ImpactPolicyConfirmation,
+  type ScheduleExplanationView, type ScheduleStartOutcomeView, type ScheduleTickReport,
+  type ScheduleUnknownReleaseView,
   type SessionTranscriptEntry, type SessionTranscriptView,
   type SlotReservationAcquisitionView,
   type SlotReservationReconcileReport, type SlotReservationReleaseView,
@@ -105,10 +107,29 @@ async function ensureRuntime(): Promise<void> {
   throw new Error('Runtime did not become ready');
 }
 
+/**
+ * A rejected Runtime command keeps its stable code. "A wait" and "a refusal" have to be told apart
+ * without parsing prose (a conflict or capacity wait exits 3, a refusal exits 1), so the code
+ * travels on the error itself.
+ */
+class CliRuntimeError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = 'CliRuntimeError';
+  }
+}
+
+function errorCodeOf(error: unknown): string | null {
+  return error instanceof CliRuntimeError ? error.code : null;
+}
+
 async function call(command: ClientRequest): Promise<unknown> {
   await ensureRuntime();
   const response = await request(command);
-  if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`);
+  if (!response.ok) {
+    throw new CliRuntimeError(response.error.code,
+      `${response.error.code}: ${response.error.message}`);
+  }
   return response.result;
 }
 
@@ -829,10 +850,14 @@ function usage(): never {
   bun run codeestra task list <project-id> [--all]
   bun run codeestra task submit <project-id> <task-id> <expected-version>
   bun run codeestra task run <project-id> <task-id> <expected-version> [--adapter <pi|codex>]
+    [--allow-unknown] [--json]
     Adapters: pi (default), codex. Every run is bound to one Agent; changing --adapter starts a
-    new Execution rather than switching the Agent inside one.
+    new Execution rather than switching the Agent inside one. This is the explicit start request of
+    the same gate the automatic scheduler applies, so it exits 3 when the Task is *waiting* (the
+    conflict or capacity reason code is in --json and on stderr) and 1 when it is refused.
   bun run codeestra task pause <project-id> <task-id> <expected-version>
   bun run codeestra task resume <project-id> <task-id> <expected-version> [--adapter <pi|codex>]
+    [--allow-unknown]
   bun run codeestra task cancel <project-id> <task-id> <expected-version>
   bun run codeestra task archive <project-id> <task-id> <expected-version>
   bun run codeestra task unarchive <project-id> <task-id> <expected-version>
@@ -877,6 +902,11 @@ function usage(): never {
   bun run codeestra task depends remove <project-id> <task-id> <expected-version>
     <prerequisite-task-id> [--json]
   bun run codeestra task depends list <project-id> [task-id] [--json]
+  bun run codeestra task schedule status <project-id> [--adapter <id>] [--json]
+  bun run codeestra task schedule plan <project-id> [--adapter <id>] [--json]
+  bun run codeestra task schedule explain <project-id> <task-id> [--adapter <id>] [--json]
+  bun run codeestra task schedule run <project-id> [--adapter <id>] [--json]
+  bun run codeestra task schedule clear-unknown <project-id> <task-id> [--json]
   bun run codeestra events list [--project <project-id>] [--since <sequence>] [--limit <n>]
   bun run codeestra events tail [--project <project-id>] [--since <sequence>]
   bun run codeestra attention list <project-id>
@@ -951,6 +981,24 @@ alive and was not signalled. prepare-workspace prepares the Task worktree for on
 binds it, and reconcile re-checks every active reservation's recorded holder against the real process
 table: a holder proven gone is released and recorded, while a holder that is alive or unverifiable
 keeps the slot (RECOVERY_REQUIRED) — no process is signalled and no resource is deleted.
+
+task schedule is the scheduling engine's command face. The Runtime schedules on its own: a
+relevant event (submit, integration into dev, a stop, a revision delivery, a freed slot, a capacity
+change) triggers a pass, and a periodic recovery pass converges what a crash left behind. status
+reports the facts (the active set, occupancy, the last pass), plan is the ordered dry run of the
+candidate loop and starts nothing, and explain answers why one Task is not running now: its
+dependency verdict, its conflict verdict against every active/reserved Task with the intersecting
+paths/directories/modules/shared resources, and the capacity numbers. The order is priority
+descending, then creation time, then ID ascending, and raising a priority only changes the next
+order — it never interrupts a Task that already holds its resources. explain exits 0 when the Task
+is running or would start now, 3 when it is *waiting* (a conflict or capacity wait is never BLOCKED:
+BLOCKED means an unmet dependency only), and 1 when it is BLOCKED or not schedulable at all.
+
+task schedule clear-unknown records the explicit single-shot release of an UNKNOWN assessment
+(ADR-0030 D05): it is bound to the assessed revision, baseline and analyzer/policy versions, it is
+written to the audit ledger, it is consumed by exactly one start, and it does *not* change the
+recorded verdict, which stays UNKNOWN. It is a widening of the gate, never a new one: without it,
+nothing changes. A CONFLICTING assessment is a proven overlap and is never released (exit 1).
 
 stop asks the Runtime that owns this CODEESTRA_HOME to shut down and then checks the process it
 named until it is gone (default 10s, bounded by --wait). It reports STOPPED (exit 0), NOT_EXITED
@@ -1685,23 +1733,28 @@ try {
     // Resuming reopens the predecessor's provider conversation, so the adapter is part of the
     // request: a different Agent must be asked for explicitly instead of silently resuming with
     // one that cannot read the recorded conversation.
-    let adapterId = 'pi';
-    for (let index = 0; index < extra.length; index += 1) {
-      const argument = extra[index];
-      if (argument !== '--adapter') usage();
-      const value = extra[index + 1];
-      if (value === undefined) usage();
-      adapterId = value;
-      index += 1;
+    // Resuming is a start path: it passes the same conflict gate as `task run`, so a Task whose
+    // impact cannot be proven disjoint from the active set stays paused unless the user releases it
+    // explicitly with --allow-unknown (single-shot, audited).
+    const split = splitFlagTokens(extra, ['--adapter'], ['--allow-unknown', '--json']);
+    if (split.positionals.length !== 0) usage();
+    try {
+      print(await call({
+        command: 'task.resume',
+        commandId: crypto.randomUUID(),
+        projectId: firstArgument,
+        taskId,
+        expectedVersion,
+        adapterId: split.flags.get('--adapter') ?? 'pi',
+        allowUnknown: split.bare.has('--allow-unknown'),
+      }));
+    } catch (error) {
+      if (errorCodeOf(error) === 'CONFLICT_WAIT') {
+        console.error(`[scheduler] the Task stays paused: ${errorText(error)}`);
+        process.exit(3);
+      }
+      throw error;
     }
-    print(await call({
-      command: 'task.resume',
-      commandId: crypto.randomUUID(),
-      projectId: firstArgument,
-      taskId,
-      expectedVersion,
-      adapterId,
-    }));
   } else if (group === 'task' && action === 'status') {
     const [taskId, ...extra] = remainingArguments;
     if (firstArgument === undefined || taskId === undefined || extra.length !== 0) usage();
@@ -1904,32 +1957,37 @@ try {
       usage();
     }
   } else if (group === 'task' && action === 'run') {
-    const [taskId, versionText, ...extra] = remainingArguments;
+    const [taskId, versionText, ...flags] = remainingArguments;
     const expectedTaskVersion = Number(versionText);
     if (firstArgument === undefined || taskId === undefined || versionText === undefined
       || !Number.isSafeInteger(expectedTaskVersion) || expectedTaskVersion < 0) usage();
-    let adapterId = 'pi';
-    const argumentsWithoutAdapter: string[] = [];
-    for (let index = 0; index < extra.length; index += 1) {
-      const argument = extra[index];
-      if (argument === '--adapter') {
-        const value = extra[index + 1];
-        if (value === undefined) usage();
-        adapterId = value;
-        index += 1;
-      } else {
-        argumentsWithoutAdapter.push(argument as string);
-      }
-    }
-    if (argumentsWithoutAdapter.length !== 0) usage();
-    print(await call({
+    const split = splitFlagTokens(flags, ['--adapter'], ['--allow-unknown', '--json']);
+    if (split.positionals.length !== 0) usage();
+    // `task run` is the explicit start request of the same gate the automatic tick applies: the
+    // dependency verdict, the conflict verdict against every active/reserved Task, and capacity.
+    // `--allow-unknown` is the explicit single-shot release of an UNKNOWN verdict (ADR-0030 D05) —
+    // it widens the gate, adds no confirmation, and is written to the audit ledger.
+    const result = await call({
       command: 'task.run',
       commandId: crypto.randomUUID(),
       projectId: firstArgument,
       taskId,
       expectedTaskVersion,
-      adapterId,
-    }));
+      adapterId: split.flags.get('--adapter') ?? 'pi',
+      allowUnknown: split.bare.has('--allow-unknown'),
+    }) as ScheduleStartOutcomeView;
+    print(result);
+    // A wait is a fact about *now*, not a failure: exit 3 keeps it apart from a refusal (exit 1),
+    // exactly like `scheduler reservations acquire`.
+    if (result.outcome === 'WAIT') {
+      console.error(`[scheduler] ${result.wait?.kind ?? 'WAIT'} wait: `
+        + `${result.wait?.code ?? result.code ?? 'unknown'} — ${result.detail}`);
+      process.exit(3);
+    }
+    if (result.outcome === 'REFUSED') {
+      console.error(`[scheduler] refused: ${result.code ?? 'unknown'} — ${result.detail}`);
+      process.exit(1);
+    }
   } else if (group === 'task' && action === 'verify') {
     const [taskId, ...rest] = remainingArguments;
     if (firstArgument === undefined || taskId === undefined) usage();
@@ -2418,6 +2476,75 @@ try {
     } else if (subcommand === 'list') {
       if (trailing.length !== 0) usage();
       print(await call({ command: 'promotion.list', projectId, limit: limit ?? 20 }));
+    } else {
+      usage();
+    }
+  } else if (group === 'task' && action === 'schedule') {
+    // The scheduling engine's command face (FOUNDATION-055). `status` and `plan` observe (plan is the
+    // ordered dry run: it reserves nothing and starts nothing), `explain` answers why one Task is not
+    // running now, `run` requests a pass of the loop the Runtime also runs on events and on its
+    // recovery period, and `clear-unknown` records an explicit single-shot release without starting
+    // anything. None of them adds a confirmation step.
+    const subcommand = firstArgument;
+    if (subcommand === 'status' || subcommand === 'plan' || subcommand === 'run') {
+      const split = splitFlagTokens(remainingArguments, ['--adapter'], ['--json']);
+      const [projectId, ...extra] = split.positionals;
+      if (projectId === undefined || extra.length !== 0) usage();
+      const adapterId = split.flags.get('--adapter');
+      const adapter = adapterId === undefined ? {} : { adapterId };
+      if (subcommand === 'status') {
+        print(await call({ command: 'task.schedule.status', projectId, ...adapter }));
+      } else if (subcommand === 'plan') {
+        print(await call({ command: 'task.schedule.plan', projectId, ...adapter }));
+      } else {
+        const report = await call({
+          command: 'task.schedule.run',
+          commandId: crypto.randomUUID(),
+          projectId,
+          ...adapter,
+        }) as ScheduleTickReport;
+        print(report);
+        // A tick is a *pass*, not a verdict: exit 0 means the pass ran, and what it decided is in the
+        // report (started, waiting with reason codes, blocked). Nothing starting is not a failure.
+        for (const project of report.projects) {
+          for (const candidate of project.candidates) {
+            console.error(`[scheduler] ${candidate.disposition} ${candidate.taskId}`
+              + `: ${candidate.detail}`);
+          }
+        }
+      }
+    } else if (subcommand === 'explain') {
+      const split = splitFlagTokens(remainingArguments, ['--adapter'], ['--json']);
+      const [projectId, taskId, ...extra] = split.positionals;
+      if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
+      const adapterId = split.flags.get('--adapter');
+      const view = await call({
+        command: 'task.schedule.explain',
+        projectId,
+        taskId,
+        ...(adapterId === undefined ? {} : { adapterId }),
+      }) as ScheduleExplanationView;
+      print(view);
+      console.error(`[scheduler] ${view.decision}: ${view.detail}`);
+      // 0 = it is running or would start now, 3 = it is waiting (conflict or capacity — a wait is not
+      // BLOCKED), 1 = it will not start for a reason that needs attention (unmet dependencies, or a
+      // state that is not schedulable at all).
+      if (view.decision === 'WAIT_CONFLICT' || view.decision === 'WAIT_CAPACITY') process.exit(3);
+      if (view.decision === 'BLOCKED' || view.decision === 'NOT_A_CANDIDATE') process.exit(1);
+    } else if (subcommand === 'clear-unknown') {
+      const split = splitFlagTokens(remainingArguments, [], ['--json']);
+      const [projectId, taskId, ...extra] = split.positionals;
+      if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
+      const released = await call({
+        command: 'task.schedule.clearUnknown',
+        commandId: crypto.randomUUID(),
+        projectId,
+        taskId,
+      }) as ScheduleUnknownReleaseView;
+      print(released);
+      // CONFLICTING is a *proven* overlap: `--allow-unknown` widens the gate for an unproven one
+      // only, so releasing it is refused with exit 1 instead of pretending it worked.
+      if (released.state === 'CONFLICTING') process.exit(1);
     } else {
       usage();
     }

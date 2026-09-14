@@ -499,6 +499,205 @@ export interface ReservedWorkspaceView {
   readonly created: boolean;
 }
 
+/**
+ * The scheduling engine's vocabulary (FOUNDATION-055). A wait is never `BLOCKED` (§2.10):
+ * `CONFLICT` carries the analyzer's reason codes and intersecting scopes, `CAPACITY` carries the
+ * capacity reason code and the slots that produced it. `BLOCKED` is a separate disposition and only
+ * ever means an unmet dependency.
+ */
+export type ScheduleWaitKind = 'CONFLICT' | 'CAPACITY';
+
+/** One measured intersection behind a conflict wait, as the analyzer reported it. */
+export interface ScheduleConflictHitView {
+  readonly reason: string;
+  readonly class: string;
+  readonly taskId: string | null;
+  readonly revisionId: string | null;
+  readonly paths: readonly string[];
+  readonly pathCount: number;
+  readonly directories: readonly string[];
+  readonly modules: readonly string[];
+  readonly globalResources: readonly string[];
+  readonly relation: string | null;
+  readonly detail: string;
+}
+
+export interface ScheduleWaitView {
+  readonly kind: ScheduleWaitKind;
+  /** An analyzer reason code for a conflict wait, a capacity reason code for a capacity wait. */
+  readonly code: string;
+  readonly detail: string;
+  readonly reasonCodes: readonly string[];
+  readonly hits: readonly ScheduleConflictHitView[];
+  /** Tasks occupying the slots / holding the conflicting scope. */
+  readonly blocking: readonly string[];
+  /** When this wait was first recorded, so a client can show the waiting duration. */
+  readonly since: number | null;
+}
+
+/** The assessment a scheduling decision was made from; the binding an `--allow-unknown` release uses. */
+export interface ScheduleAssessmentView {
+  readonly verdict: 'SAFE_TO_PARALLELIZE' | 'UNKNOWN' | 'CONFLICTING';
+  readonly reasonCodes: readonly string[];
+  readonly revisionId: string;
+  readonly baseCommit: string;
+  readonly analyzerVersion: string;
+  readonly policyVersion: string;
+  readonly candidateSnapshotId: string | null;
+  readonly candidateComplete: boolean;
+  readonly candidateIncompleteReasons: readonly string[];
+  readonly comparedTaskIds: readonly string[];
+  readonly activeTaskIds: readonly string[];
+  readonly explanation: readonly string[];
+}
+
+export type ScheduleDisposition = 'STARTED' | 'WOULD_START' | 'WAITING' | 'BLOCKED' | 'SKIPPED'
+  | 'FAILED';
+
+export interface ScheduleCandidateView {
+  readonly taskId: string;
+  readonly taskDisplayNumber: number;
+  readonly taskState: string;
+  readonly taskVersion: number;
+  readonly revisionId: string;
+  readonly priority: number;
+  readonly createdAt: number;
+  readonly adapterId: string;
+  readonly disposition: ScheduleDisposition;
+  readonly detail: string;
+  readonly wait: ScheduleWaitView | null;
+  readonly blockedReasons: readonly { readonly code: string; readonly prerequisiteTaskId: string;
+    readonly requiredRevisionId: string; readonly detail: string | null }[];
+  readonly assessment: ScheduleAssessmentView | null;
+  /** Present when this decision started an Execution. */
+  readonly started: { readonly executionId: string; readonly sessionId: string;
+    readonly workspaceId: string; readonly baseCommit: string;
+    readonly reservationId: string | null } | null;
+  /** The `UNKNOWN` release that permitted this start, if any. */
+  readonly clearedUnknownBy: string | null;
+}
+
+/** One recorded growth of an active Task's observed diff beyond its recorded prediction (§4). */
+export interface ScheduleImpactGrowthView {
+  readonly taskId: string;
+  readonly previousSnapshotId: string;
+  readonly snapshotId: string;
+  readonly addedPaths: readonly string[];
+  readonly removedPaths: readonly string[];
+  readonly conflictingTaskIds: readonly string[];
+  readonly reasonCodes: readonly string[];
+  /** True when the grown Task was asked to enter a safe pause through the existing pause path. */
+  readonly pauseRequested: boolean;
+  readonly pauseOutcome: string | null;
+  readonly detail: string;
+}
+
+export interface ScheduleProjectReport {
+  readonly projectId: string;
+  readonly candidates: readonly ScheduleCandidateView[];
+  readonly impactGrowth: readonly ScheduleImpactGrowthView[];
+  readonly activeTaskIds: readonly string[];
+  readonly capacity: ProjectCapacityView;
+}
+
+export interface ScheduleTickReport {
+  readonly tickId: string;
+  readonly trigger: string;
+  readonly startedAt: number;
+  readonly completedAt: number;
+  readonly draining: boolean;
+  /** True when the trigger was observed by an already running tick instead of starting a second one. */
+  readonly coalesced: boolean;
+  readonly projects: readonly ScheduleProjectReport[];
+}
+
+/** `task.schedule.status` / `task.schedule.plan` answer. `plan` sets `dryRun` and starts nothing. */
+export interface ScheduleOverviewView {
+  readonly projectId: string;
+  readonly dryRun: boolean;
+  readonly adapterId: string;
+  readonly draining: boolean;
+  readonly running: boolean;
+  readonly lastTick: { readonly tickId: string; readonly trigger: string;
+    readonly completedAt: number } | null;
+  readonly candidates: readonly ScheduleCandidateView[];
+  readonly active: readonly { readonly taskId: string; readonly taskDisplayNumber: number;
+    readonly taskState: string; readonly executionState: string; readonly adapterId: string;
+    readonly reservationId: string | null; readonly since: number }[];
+  readonly capacity: ProjectCapacityView;
+  readonly impactGrowth: readonly ScheduleImpactGrowthView[];
+}
+
+/** `task.schedule.explain` answer: the one-Task version of the overview, with its decision. */
+export interface ScheduleExplanationView {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly taskState: string;
+  readonly adapterId: string;
+  readonly candidate: boolean;
+  readonly decision: 'START_NOW' | 'WAIT_CONFLICT' | 'WAIT_CAPACITY' | 'BLOCKED'
+    | 'ACTIVE' | 'NOT_A_CANDIDATE';
+  readonly detail: string;
+  readonly wait: ScheduleWaitView | null;
+  readonly blockedReasons: readonly { readonly code: string; readonly prerequisiteTaskId: string;
+    readonly requiredRevisionId: string; readonly detail: string | null }[];
+  readonly assessment: ScheduleAssessmentView | null;
+  readonly capacity: ProjectCapacityView;
+  readonly activeTaskIds: readonly string[];
+  /** The valid `--allow-unknown` release in effect for this Task and assessment, if any. */
+  readonly unknownRelease: { readonly releaseId: string; readonly revisionId: string;
+    readonly baseCommit: string; readonly analyzerVersion: string;
+    readonly policyVersion: string; readonly reasonCodes: readonly string[];
+    readonly releasedBy: string; readonly releasedAt: number; readonly consumed: boolean } | null;
+  readonly explanation: readonly string[];
+}
+
+/** The audit record one `--allow-unknown` release writes. */
+export interface ScheduleUnknownReleaseView {
+  readonly recorded: boolean;
+  readonly releaseId: string | null;
+  readonly state: 'RECORDED' | 'ALREADY_VALID' | 'NOT_UNKNOWN' | 'SAFE' | 'CONFLICTING';
+  readonly verdict: 'SAFE_TO_PARALLELIZE' | 'UNKNOWN' | 'CONFLICTING';
+  readonly reasonCodes: readonly string[];
+  readonly revisionId: string;
+  readonly baseCommit: string;
+  readonly analyzerVersion: string;
+  readonly policyVersion: string;
+  readonly detail: string;
+}
+
+/**
+ * The outcome of a start request routed through the scheduling gate (`task.run`).
+ *
+ * It is a **superset** of the result `task.run` has always returned, so a client that reads
+ * `executionId`/`sessionId`/`workspacePath` keeps working: those fields are present exactly when a
+ * start happened (non-null), and the scheduling facts are added next to them. A request that did not
+ * start anything answers with `outcome` and the reason instead of pretending to be a run.
+ */
+export interface ScheduleStartOutcomeView {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly outcome: 'STARTED' | 'WAIT' | 'REFUSED';
+  readonly executionId: string | null;
+  readonly sessionId: string | null;
+  readonly attemptNumber: number | null;
+  readonly taskVersion: number | null;
+  readonly workspaceId: string | null;
+  readonly workspacePath: string | null;
+  readonly baseCommit: string | null;
+  readonly adapterId: string;
+  readonly adapterVersion: string | null;
+  readonly sessionState: string | null;
+  readonly permissionMode: 'FULL' | 'STRICT' | null;
+  readonly agentConfig: Readonly<Record<string, unknown>> | null;
+  readonly reservationId: string | null;
+  readonly wait: ScheduleWaitView | null;
+  readonly assessment: ScheduleAssessmentView | null;
+  readonly clearedUnknownBy: string | null;
+  readonly code: string | null;
+  readonly detail: string;
+}
+
 export const runtimeRequestSchema = z.discriminatedUnion('command', [
   z.strictObject({ ...requestBase, command: z.literal('runtime.ping') }),
   z.strictObject({ ...requestBase, command: z.literal('runtime.stop') }),
@@ -607,6 +806,13 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     taskId: z.string().uuid(),
     expectedVersion: z.number().int().nonnegative(),
   }),
+  /**
+   * Starts one Task now, through the same conflict gate the automatic tick uses (FOUNDATION-055).
+   * `allowUnknown` is the explicit single-shot release of an `UNKNOWN` verdict (ADR-0030 D05):
+   * without it, a Task whose impact cannot be proven to be disjoint from the active set *waits*
+   * (exit code 3) instead of starting. It is a widening of the gate, never a new one, and it is
+   * recorded as an audit fact bound to the revision and the assessment versions.
+   */
   z.strictObject({
     ...requestBase,
     command: z.literal('task.run'),
@@ -615,6 +821,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     taskId: z.string().uuid(),
     expectedTaskVersion: z.number().int().nonnegative(),
     adapterId: nonBlankString.default('pi'),
+    allowUnknown: z.boolean().default(false),
   }),
   z.strictObject({
     ...requestBase,
@@ -631,7 +838,13 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     taskId: z.string().uuid(),
     expectedVersion: z.number().int().nonnegative(),
   }),
-  /** PAUSED Task back to READY and immediately starts a new Execution in the same workspace. */
+  /**
+   * PAUSED Task back to READY and immediately starts a new Execution in the same workspace. It is a
+   * start path, so it passes the same conflict gate (scheduler.md §4): a resumed Task whose impact
+   * cannot be proven disjoint from the active set stays paused. `allowUnknown` is that gate's
+   * explicit single-shot release; the resumed Task already holds its slot, so no new capacity is
+   * requested for it.
+   */
   z.strictObject({
     ...requestBase,
     command: z.literal('task.resume'),
@@ -640,6 +853,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     taskId: z.string().uuid(),
     expectedVersion: z.number().int().nonnegative(),
     adapterId: nonBlankString.default('pi'),
+    allowUnknown: z.boolean().default(false),
   }),
   /** Terminal stop: a running Agent is stopped cooperatively, everything else ends immediately. */
   z.strictObject({
@@ -1242,6 +1456,52 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     command: z.literal('scheduler.reservations.reconcile'),
     commandId: z.string().uuid(),
     projectId: z.string().uuid(),
+  }),
+  /**
+   * The scheduling loop (FOUNDATION-055 / ADR-0030 D04). `status` reports the engine's own facts
+   * (active set, capacity, occupancy, the last decisions); `plan` is the ordered dry run of the
+   * candidate loop, and `explain` answers "why is this Task not running now" for one Task. None of
+   * the three starts, reserves or releases anything. `run` requests a tick — the same loop the
+   * Runtime runs on events and on its recovery period — and reports what it decided.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.schedule.status'),
+    projectId: z.string().uuid(),
+    adapterId: nonBlankString.optional(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.schedule.plan'),
+    projectId: z.string().uuid(),
+    adapterId: nonBlankString.optional(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.schedule.explain'),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    adapterId: nonBlankString.optional(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.schedule.run'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    adapterId: nonBlankString.optional(),
+  }),
+  /**
+   * Records the explicit single-shot release of one Task's `UNKNOWN` assessment without starting it
+   * (ADR-0030 D05). The release is bound to the assessed revision, baseline and analyzer/policy
+   * versions, is written to the audit ledger, and is consumed by exactly one start. It never
+   * rewrites the assessment: the recorded verdict stays `UNKNOWN`.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.schedule.clearUnknown'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
   }),
 ]);
 export type RuntimeRequest = z.infer<typeof runtimeRequestSchema>;

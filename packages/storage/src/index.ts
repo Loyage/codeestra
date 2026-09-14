@@ -1,5 +1,6 @@
 export { Phase1Database, SlotReservationError, StorageError, TaskDependencyError,
-  maxSlotReservationReadLimit, slotDependencyFingerprint } from './database.js';
+  maxSlotReservationReadLimit, slotDependencyFingerprint, taskScheduleEventTypes } from './database.js';
+export type { TaskScheduleEventType } from './database.js';
 export type {
   AdapterEventResult, AgentAnswerPlan, AgentConfigurationRecord, AgentSessionLifecycleState,
   AgentStartPlan, AgentThinkingLevel, AttentionSummary,
