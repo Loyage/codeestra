@@ -874,6 +874,64 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     /** Base64-encoded bytes; a release is the terminal's own Ctrl+D byte, not a Runtime decision. */
     dataBase64: z.string().max(16384),
   }),
+  /**
+   * Task revision delivery (PROJECT_SPEC §2.11, ADR-0028).
+   *
+   * `task.revision.create` appends an immutable revision and, when an Execution is holding the Task at
+   * that moment, records a *delivery requirement* for it. The requirement is satisfied only by a real
+   * acknowledgement from a channel that can acknowledge, or by the stop-and-restart fallback verified
+   * against the successor Execution row; the read commands expose every attempt so the state is
+   * auditable. `delivery.resolve` is the explicit disposition of an unconfirmed revision and never
+   * adds a confirmation step to the normal path.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.revision.create'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    expectedVersion: z.number().int().nonnegative(),
+    /** Absent means "keep the current specification and only add constraints". */
+    specification: nonBlankString.optional(),
+    constraints: constraintsSchema.default([]),
+    reason: nonBlankString,
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.revision.list'),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.revision.delivery.list'),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.revision.delivery.get'),
+    projectId: z.string().uuid(),
+    deliveryId: z.string().uuid(),
+  }),
+  /**
+   * The only explicit disposition of an unconfirmed revision. `STOP_AND_RESTART` cooperatively stops
+   * the Execution that cannot be confirmed on the new revision and starts a successor that is recorded
+   * with it — the successor row is the proof. `RETRY` re-attempts the conversation channel, and for an
+   * Adapter that reports no acknowledgement capability the retry records `CHANNEL_UNSUPPORTED` again
+   * rather than claiming a delivery.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.revision.delivery.resolve'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    deliveryId: z.string().uuid(),
+    action: z.enum(['STOP_AND_RESTART', 'RETRY']),
+    expectedVersion: z.number().int().nonnegative(),
+    adapterId: nonBlankString.default('pi'),
+  }),
 ]);
 export type RuntimeRequest = z.infer<typeof runtimeRequestSchema>;
 

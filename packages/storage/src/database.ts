@@ -4,8 +4,14 @@ import { z } from 'zod';
 import {
   DependencyGraphError,
   createDependencyGraph,
+  DomainError,
+  revisionDeliverySatisfied,
+  transitionRevisionDelivery,
   wouldCreateCycle,
   type DependencyEdge,
+  type RevisionDelivery,
+  type RevisionDeliveryChannel,
+  type RevisionDeliveryState,
 } from '@codeestra/domain';
 import type { AgentAnswer } from '@codeestra/contracts';
 import {
@@ -19,6 +25,7 @@ import {
   phase1Migration,
   phase1SchemaVersion,
   reclamationMigration,
+  revisionDeliveryMigration,
   sessionHandoffMigration,
   sessionTerminalMigration,
   stablePromotionMigration,
@@ -848,6 +855,7 @@ export class Phase1Database {
         if (version < 15) this.sqlite.exec(taskDependenciesMigration);
         if (version < 17) this.sqlite.exec(verificationProgressMigration);
         if (version < 18) this.sqlite.exec(sessionTerminalMigration);
+        if (version < 19) this.sqlite.exec(revisionDeliveryMigration);
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -8100,6 +8108,922 @@ export class Phase1Database {
   getAgentStartPlanForSession(sessionId: string): AgentStartPlan | null {
     return this.agentStartRow(sessionId);
   }
+
+  // ---------------------------------------------------------------------------------------------
+  // Revision delivery (PROJECT_SPEC §2.11, ADR-0028).
+  //
+  // Creating a revision while an Execution is running records a *requirement*: the Execution that
+  // must know the new specification. Every attempt to carry it there is appended to a ledger with
+  // the channel, the Execution/Session/incarnation it was aimed at, and how it ended. The delivery
+  // state is advanced through the pure domain FSM, so "already acknowledged" and "stale
+  // acknowledgement" are rejected by the same guards the domain tests cover — never by a claim that
+  // a message was sent.
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * Appends one immutable Task revision, moves `tasks.current_revision_id`, and records a delivery
+   * requirement when an Execution is holding the Task at that moment. The revision itself never
+   * changes an Execution: what must happen to a running Agent is decided by the delivery, not here.
+   */
+  createTaskRevision(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly expectedVersion: number;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly intentId: string;
+    readonly revisionId: string;
+    readonly deliveryId: string;
+    readonly intentEventId: string;
+    readonly revisionEventId: string;
+    readonly deliveryEventId: string;
+    readonly specification: string;
+    readonly constraints: readonly StoredConstraint[];
+    readonly kind: 'AMEND_TASK' | 'ADD_CONSTRAINT';
+    readonly reason: string;
+    readonly actor: string;
+    readonly createdAt: number;
+  }): TaskRevisionCreation {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.createdAt,
+      apply: (database) => {
+        const task = database.query<{
+          state: TaskLifecycleState; version: number; current_revision_id: string; display_number: number;
+        }, [string, string]>(`
+          SELECT t.state,t.version,t.current_revision_id,t.display_number FROM tasks t
+          JOIN project_trusts trust ON trust.project_id=t.project_id AND trust.status='ACTIVE'
+          WHERE t.project_id=?1 AND t.id=?2
+        `).get(input.projectId, input.taskId);
+        if (task === null) throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
+        if (task.version !== input.expectedVersion) {
+          throw new StorageError('CONCURRENT_MODIFICATION', 'Task version did not match');
+        }
+        if (task.state === 'CANCELLED' || task.state === 'SUCCEEDED') {
+          throw new StorageError('INVALID_STATE',
+            `A ${task.state} Task is terminal and cannot be revised`);
+        }
+        const next = database.query<{ number: number }, [string]>(`
+          SELECT COALESCE(MAX(number),0)+1 AS number FROM task_revisions WHERE task_id=?1
+        `).get(input.taskId);
+        if (next === null) throw new Error('Could not allocate a Task revision number');
+        database.query(`
+          INSERT INTO intents(id,project_id,idempotency_key,raw_text,kind,status,actor,created_at)
+          VALUES (?1,?2,?3,?4,?5,'APPLIED',?6,?7)
+        `).run(input.intentId, input.projectId, input.commandId, input.specification, input.kind,
+          input.actor, input.createdAt);
+        database.query(`
+          INSERT INTO task_revisions(id,task_id,number,previous_revision_id,specification,
+            constraints_json,source_intent_id,actor,reason,created_at)
+          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+        `).run(input.revisionId, input.taskId, next.number, task.current_revision_id,
+          input.specification, JSON.stringify(input.constraints), input.intentId, input.actor,
+          input.reason, input.createdAt);
+        const taskVersion = input.expectedVersion + 1;
+        const taskUpdate = database.query(`
+          UPDATE tasks SET current_revision_id=?1,version=?2,updated_at=?3
+          WHERE id=?4 AND project_id=?5 AND version=?6
+        `).run(input.revisionId, taskVersion, input.createdAt, input.taskId, input.projectId,
+          input.expectedVersion);
+        if (taskUpdate.changes !== 1) {
+          throw new StorageError('CONCURRENT_MODIFICATION', 'Task changed during revision creation');
+        }
+        database.query('INSERT INTO intent_targets(intent_id,task_id) VALUES (?1,?2)')
+          .run(input.intentId, input.taskId);
+        database.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'IntentRecorded',1,'Intent',?3,0,?4,?4,?5,?6)
+        `).run(input.intentEventId, input.projectId, input.intentId, input.commandId,
+          input.createdAt, JSON.stringify({ intentId: input.intentId, kind: input.kind,
+            taskId: input.taskId }));
+        database.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'TaskRevisionCreated',1,'Task',?3,?4,?5,?6,?7,?8)
+        `).run(input.revisionEventId, input.projectId, input.taskId, taskVersion, input.commandId,
+          input.intentEventId, input.createdAt,
+          JSON.stringify({ taskId: input.taskId, revisionId: input.revisionId,
+            revisionNumber: next.number, previousRevisionId: task.current_revision_id,
+            constraintCount: input.constraints.length, reason: input.reason,
+            actor: input.actor }));
+        const running = database.query<{
+          execution_id: string; session_id: string | null; incarnation_id: string | null;
+        }, [string]>(`
+          SELECT execution.id AS execution_id,session.id AS session_id,
+            session.current_incarnation_id AS incarnation_id
+          FROM executions execution
+          LEFT JOIN agent_sessions session ON session.execution_id=execution.id
+          WHERE execution.task_id=?1 AND execution.resource_held=1
+        `).get(input.taskId) ?? null;
+        if (running !== null) {
+          database.query(`
+            INSERT INTO task_revision_deliveries(id,project_id,task_id,revision_id,execution_id,
+              session_id,incarnation_id,state,attempt_count,created_at,updated_at)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,'PENDING',0,?8,?8)
+          `).run(input.deliveryId, input.projectId, input.taskId, input.revisionId,
+            running.execution_id, running.session_id, running.incarnation_id, input.createdAt);
+          database.query(`
+            INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+              aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+            VALUES (?1,?2,'TaskRevisionDeliveryRecorded',1,'TaskRevisionDelivery',?3,0,?4,?5,?6,?7)
+          `).run(input.deliveryEventId, input.projectId, input.deliveryId, input.commandId,
+            input.revisionEventId, input.createdAt,
+            JSON.stringify({ deliveryId: input.deliveryId, taskId: input.taskId,
+              revisionId: input.revisionId, executionId: running.execution_id,
+              sessionId: running.session_id, incarnationId: running.incarnation_id,
+              state: 'PENDING' }));
+        }
+        return {
+          taskId: input.taskId,
+          taskVersion,
+          revisionId: input.revisionId,
+          revisionNumber: next.number,
+          previousRevisionId: task.current_revision_id,
+          deliveryId: running === null ? null : input.deliveryId,
+          executionId: running === null ? null : running.execution_id,
+          sessionId: running === null ? null : running.session_id,
+        };
+      },
+    });
+  }
+
+  listTaskRevisions(projectId: string, taskId: string): readonly TaskRevisionSummary[] {
+    const task = this.sqlite.query<{ current_revision_id: string }, [string, string]>(`
+      SELECT t.current_revision_id FROM tasks t
+      JOIN project_trusts trust ON trust.project_id=t.project_id AND trust.status='ACTIVE'
+      WHERE t.project_id=?1 AND t.id=?2
+    `).get(projectId, taskId);
+    if (task === null) throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
+    return this.sqlite.query<{
+      id: string; number: number; previous_revision_id: string | null; specification: string;
+      constraints_json: string; reason: string; actor: string; created_at: number;
+    }, [string]>(`
+      SELECT id,number,previous_revision_id,specification,constraints_json,reason,actor,created_at
+      FROM task_revisions WHERE task_id=?1 ORDER BY number
+    `).all(taskId).map((row) => ({
+      id: row.id,
+      number: row.number,
+      previousRevisionId: row.previous_revision_id,
+      specification: row.specification,
+      constraints: JSON.parse(row.constraints_json) as readonly StoredConstraint[],
+      reason: row.reason,
+      actor: row.actor,
+      createdAt: row.created_at,
+      current: row.id === task.current_revision_id,
+    }));
+  }
+
+  listTaskRevisionDeliveries(projectId: string, taskId: string): readonly TaskRevisionDeliveryRecord[] {
+    const task = this.sqlite.query<{ current_revision_id: string }, [string, string]>(`
+      SELECT t.current_revision_id FROM tasks t
+      JOIN project_trusts trust ON trust.project_id=t.project_id AND trust.status='ACTIVE'
+      WHERE t.project_id=?1 AND t.id=?2
+    `).get(projectId, taskId);
+    if (task === null) throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
+    const attempts = this.revisionDeliveryAttemptsForDeliveries(
+      this.sqlite.query<{ id: string }, [string]>(
+        'SELECT id FROM task_revision_deliveries WHERE task_id=?1 ORDER BY created_at,id',
+      ).all(taskId).map((row) => row.id),
+    );
+    return this.sqlite.query<RevisionDeliveryRow, [string]>(`${revisionDeliverySelect}
+      WHERE delivery.task_id=?1 ORDER BY delivery.created_at,delivery.id
+    `).all(taskId).map((row) => this.mapTaskRevisionDelivery(row, task.current_revision_id,
+      attempts.get(row.id) ?? []));
+  }
+
+  getTaskRevisionDelivery(projectId: string, deliveryId: string): TaskRevisionDeliveryRecord {
+    const row = this.sqlite.query<RevisionDeliveryRow & { current_revision_id: string }, [string, string]>(`
+      SELECT delivery.id,delivery.project_id,delivery.task_id,delivery.revision_id,
+        revision.number AS revision_number,delivery.execution_id,delivery.session_id,
+        delivery.incarnation_id,delivery.state,delivery.attempt_count,delivery.channel,
+        delivery.deadline_at,delivery.evidence_ref,delivery.detail,
+        delivery.superseded_by_execution_id,delivery.created_at,delivery.updated_at,
+        delivery.acknowledged_at,delivery.version,task.current_revision_id
+      FROM task_revision_deliveries delivery
+      JOIN tasks task ON task.id=delivery.task_id
+      JOIN task_revisions revision ON revision.task_id=delivery.task_id
+        AND revision.id=delivery.revision_id
+      JOIN project_trusts trust ON trust.project_id=delivery.project_id AND trust.status='ACTIVE'
+      WHERE delivery.project_id=?1 AND delivery.id=?2
+    `).get(projectId, deliveryId);
+    if (row === null) throw new StorageError('NOT_FOUND', 'Revision delivery was not found');
+    return this.mapTaskRevisionDelivery(row, row.current_revision_id,
+      this.revisionDeliveryAttemptsForDeliveries([row.id]).get(row.id) ?? []);
+  }
+
+  /**
+   * The newest delivery of one Task that no acknowledgement and no successor Execution satisfied.
+   * Optional subject filters answer "is *this* Execution/Session on an unconfirmed revision?".
+   */
+  findUnsatisfiedRevisionDelivery(input: {
+    readonly taskId: string;
+    readonly executionId?: string;
+    readonly sessionId?: string;
+  }): TaskRevisionDeliveryRecord | null {
+    const row = this.sqlite.query<RevisionDeliveryRow & { current_revision_id: string }, [string]>(`
+      SELECT delivery.id,delivery.project_id,delivery.task_id,delivery.revision_id,
+        revision.number AS revision_number,delivery.execution_id,delivery.session_id,
+        delivery.incarnation_id,delivery.state,delivery.attempt_count,delivery.channel,
+        delivery.deadline_at,delivery.evidence_ref,delivery.detail,
+        delivery.superseded_by_execution_id,delivery.created_at,delivery.updated_at,
+        delivery.acknowledged_at,delivery.version,task.current_revision_id
+      FROM task_revision_deliveries delivery
+      JOIN tasks task ON task.id=delivery.task_id
+      JOIN task_revisions revision ON revision.task_id=delivery.task_id
+        AND revision.id=delivery.revision_id
+      WHERE delivery.task_id=?1
+        AND delivery.state NOT IN ('ACKNOWLEDGED','SUPERSEDED_BY_RESTART')
+      ORDER BY revision.number DESC,delivery.created_at DESC LIMIT 1
+    `).get(input.taskId);
+    if (row === null) return null;
+    if (input.executionId !== undefined && row.execution_id !== input.executionId) return null;
+    if (input.sessionId !== undefined && row.session_id !== input.sessionId) return null;
+    return this.mapTaskRevisionDelivery(row, row.current_revision_id,
+      this.revisionDeliveryAttemptsForDeliveries([row.id]).get(row.id) ?? []);
+  }
+
+  /**
+   * Opens one attempt to carry a revision to a specific Execution through a specific channel. The
+   * delivery state is advanced by the domain FSM, so an attempt cannot be opened on top of an
+   * attempt that is still in flight, and a satisfied delivery can never be re-opened.
+   */
+  beginRevisionDeliveryAttempt(input: {
+    readonly projectId: string;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly deliveryId: string;
+    readonly attemptId: string;
+    readonly channel: TaskRevisionDeliveryChannel;
+    readonly detail: string;
+    readonly deadlineAt: number | null;
+    readonly eventId: string;
+    readonly startedAt: number;
+  }): TaskRevisionDeliveryAttemptRecord {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.startedAt,
+      apply: (database) => {
+        const row = this.revisionDeliveryRow(input.deliveryId);
+        if (row === null) throw new StorageError('NOT_FOUND', 'Revision delivery was not found');
+        const next = this.applyRevisionDeliveryEvent(row, {
+          type: 'ATTEMPT_STARTED', channel: input.channel,
+        }, input.startedAt);
+        const attemptNumber = next.attemptCount;
+        database.query(`
+          INSERT INTO task_revision_delivery_attempts(id,delivery_id,attempt_number,channel,
+            execution_id,session_id,incarnation_id,state,detail,deadline_at,started_at)
+          VALUES (?1,?2,?3,?4,?5,?6,?7,'IN_FLIGHT',?8,?9,?10)
+        `).run(input.attemptId, input.deliveryId, attemptNumber, input.channel, row.execution_id,
+          row.session_id, row.incarnation_id, input.detail, input.deadlineAt, input.startedAt);
+        this.sqlite.query(`
+          UPDATE task_revision_deliveries SET channel=?1,deadline_at=?2,detail=?3 WHERE id=?4
+        `).run(input.channel, input.deadlineAt, input.detail, input.deliveryId);
+        this.insertRevisionDeliveryEvent({
+          eventId: input.eventId, projectId: row.project_id, deliveryId: input.deliveryId,
+          eventType: 'TaskRevisionDeliveryAttempted', correlationId: input.commandId,
+          causationId: null, occurredAt: input.startedAt,
+          payload: { deliveryId: input.deliveryId, taskId: row.task_id, revisionId: row.revision_id,
+            attemptNumber, channel: input.channel, executionId: row.execution_id,
+            sessionId: row.session_id, incarnationId: row.incarnation_id, state: 'IN_FLIGHT',
+            deadlineAt: input.deadlineAt },
+        });
+        return {
+          id: input.attemptId,
+          attemptNumber,
+          channel: input.channel,
+          executionId: row.execution_id,
+          sessionId: row.session_id,
+          incarnationId: row.incarnation_id,
+          state: 'IN_FLIGHT' as const,
+          evidenceRef: null,
+          errorCode: null,
+          detail: input.detail,
+          deadlineAt: input.deadlineAt,
+          startedAt: input.startedAt,
+          endedAt: null,
+        };
+      },
+    });
+  }
+
+  /**
+   * Closes one attempt with the fact it actually produced and advances the delivery with the same
+   * fact. `ACKNOWLEDGED` requires the adapter's structured evidence and is rejected when the Task
+   * has already moved on to another revision (a stale acknowledgement is not a satisfied delivery).
+   */
+  completeRevisionDeliveryAttempt(input: {
+    readonly projectId: string;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly deliveryId: string;
+    readonly attemptId: string;
+    readonly state: RevisionDeliveryAttemptState;
+    readonly evidenceRef: string | null;
+    readonly errorCode: string | null;
+    readonly detail: string;
+    readonly eventId: string;
+    readonly completedAt: number;
+  }): TaskRevisionDeliveryRecord {
+    try {
+      return this.completeRevisionDeliveryAttemptInTransaction(input);
+    } catch (error) {
+      // A rejected acknowledgement must not leave the attempt open forever: the guarded transition
+      // rolled the delivery back, so the attempt itself is closed as FAILED in its own transaction.
+      // Otherwise the delivery would stay IN_FLIGHT with an attempt that no retry could replace.
+      if (error instanceof DomainError && error.code === 'STALE_REVISION_ACKNOWLEDGEMENT') {
+        this.sqlite.query(`
+          UPDATE task_revision_delivery_attempts SET state='FAILED',error_code=?1,detail=?2,
+            ended_at=?3 WHERE id=?4 AND delivery_id=?5 AND state='IN_FLIGHT'
+        `).run(error.code, `rejected: ${error.message}`, input.completedAt, input.attemptId,
+          input.deliveryId);
+      }
+      throw error;
+    }
+  }
+
+  private completeRevisionDeliveryAttemptInTransaction(input: {
+    readonly projectId: string;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly deliveryId: string;
+    readonly attemptId: string;
+    readonly state: RevisionDeliveryAttemptState;
+    readonly evidenceRef: string | null;
+    readonly errorCode: string | null;
+    readonly detail: string;
+    readonly eventId: string;
+    readonly completedAt: number;
+  }): TaskRevisionDeliveryRecord {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.completedAt,
+      apply: (database) => {
+        const row = this.revisionDeliveryRow(input.deliveryId);
+        if (row === null) throw new StorageError('NOT_FOUND', 'Revision delivery was not found');
+        if (input.state === 'IN_FLIGHT') {
+          throw new StorageError('INVALID_STATE', 'An attempt cannot be closed as IN_FLIGHT');
+        }
+        const taskRow = this.sqlite.query<{ current_revision_id: string }, [string]>(`
+          SELECT current_revision_id FROM tasks WHERE id=?1
+        `).get(row.task_id);
+        if (taskRow === null) throw new StorageError('NOT_FOUND', 'Task of the delivery was not found');
+        const next = this.applyRevisionDeliveryEvent(row, input.state === 'ACKNOWLEDGED'
+          ? { type: 'ACKNOWLEDGED', revisionId: row.revision_id,
+              requiredRevisionId: taskRow.current_revision_id, evidenceRef: input.evidenceRef ?? '' }
+          : input.state === 'UNACKNOWLEDGED'
+            ? { type: 'NOT_ACKNOWLEDGED', detail: input.detail }
+            : input.state === 'CHANNEL_UNSUPPORTED'
+              ? { type: 'CHANNEL_UNSUPPORTED', capability: input.evidenceRef ?? 'unknown' }
+              : input.state === 'TIMED_OUT'
+                ? { type: 'TIMED_OUT', detail: input.detail }
+                : { type: 'FAILED', code: input.errorCode ?? 'DELIVERY_FAILED' }, input.completedAt);
+        const attemptUpdate = database.query(`
+          UPDATE task_revision_delivery_attempts SET state=?1,evidence_ref=?2,error_code=?3,
+            detail=?4,ended_at=?5 WHERE id=?6 AND delivery_id=?7 AND state='IN_FLIGHT'
+        `).run(input.state, input.evidenceRef, input.errorCode, input.detail, input.completedAt,
+          input.attemptId, input.deliveryId);
+        if (attemptUpdate.changes !== 1) {
+          throw new StorageError('INVALID_STATE', 'No in-flight attempt matched this completion');
+        }
+        database.query(`
+          UPDATE task_revision_deliveries SET detail=?1,deadline_at=NULL WHERE id=?2
+        `).run(input.detail, input.deliveryId);
+        this.insertRevisionDeliveryEvent({
+          eventId: input.eventId, projectId: row.project_id, deliveryId: input.deliveryId,
+          eventType: 'TaskRevisionDeliveryResolved', correlationId: input.commandId,
+          causationId: null, occurredAt: input.completedAt,
+          payload: { deliveryId: input.deliveryId, taskId: row.task_id, revisionId: row.revision_id,
+            attemptId: input.attemptId, state: next.state, channel: input.state === 'ACKNOWLEDGED'
+              ? row.channel : (row.channel ?? null), evidenceRef: next.evidenceRef,
+            errorCode: input.errorCode, detail: input.detail,
+            satisfied: revisionDeliverySatisfied(next.state) },
+        });
+        return this.mapTaskRevisionDelivery(
+          this.revisionDeliveryRow(input.deliveryId) as RevisionDeliveryRow,
+          taskRow.current_revision_id,
+          this.revisionDeliveryAttemptsForDeliveries([input.deliveryId]).get(input.deliveryId) ?? [],
+        );
+      },
+    });
+  }
+
+  /** Attempts still in flight whose deadline has passed; the caller records the timeout verdict. */
+  listExpiredRevisionDeliveryAttempts(now: number): readonly {
+    readonly attemptId: string; readonly deliveryId: string; readonly projectId: string;
+    readonly taskId: string; readonly channel: TaskRevisionDeliveryChannel;
+    readonly deadlineAt: number;
+  }[] {
+    return this.sqlite.query<{
+      attempt_id: string; delivery_id: string; project_id: string; task_id: string;
+      channel: TaskRevisionDeliveryChannel; deadline_at: number;
+    }, [number]>(`
+      SELECT attempt.id AS attempt_id,attempt.delivery_id,delivery.project_id,delivery.task_id,
+        attempt.channel,attempt.deadline_at
+      FROM task_revision_delivery_attempts attempt
+      JOIN task_revision_deliveries delivery ON delivery.id=attempt.delivery_id
+      WHERE attempt.state='IN_FLIGHT' AND attempt.deadline_at IS NOT NULL AND attempt.deadline_at<=?1
+      ORDER BY attempt.deadline_at,attempt.id
+    `).all(now).map((row) => ({
+      attemptId: row.attempt_id,
+      deliveryId: row.delivery_id,
+      projectId: row.project_id,
+      taskId: row.task_id,
+      channel: row.channel,
+      deadlineAt: row.deadline_at,
+    }));
+  }
+
+  listInFlightRevisionDeliveryAttempts(): readonly {
+    readonly attemptId: string; readonly deliveryId: string; readonly projectId: string;
+    readonly taskId: string; readonly channel: TaskRevisionDeliveryChannel;
+    readonly deadlineAt: number | null; readonly startedAt: number;
+  }[] {
+    return this.sqlite.query<{
+      attempt_id: string; delivery_id: string; project_id: string; task_id: string;
+      channel: TaskRevisionDeliveryChannel; deadline_at: number | null; started_at: number;
+    }, []>(`
+      SELECT attempt.id AS attempt_id,attempt.delivery_id,delivery.project_id,delivery.task_id,
+        attempt.channel,attempt.deadline_at,attempt.started_at
+      FROM task_revision_delivery_attempts attempt
+      JOIN task_revision_deliveries delivery ON delivery.id=attempt.delivery_id
+      WHERE attempt.state='IN_FLIGHT' ORDER BY attempt.started_at,attempt.id
+    `).all().map((row) => ({
+      attemptId: row.attempt_id,
+      deliveryId: row.delivery_id,
+      projectId: row.project_id,
+      taskId: row.task_id,
+      channel: row.channel,
+      deadlineAt: row.deadline_at,
+      startedAt: row.started_at,
+    }));
+  }
+
+  /**
+   * Satisfies a delivery from the stop-and-restart fact: the successor Execution row must actually
+   * have been recorded with this delivery's revision. The check is part of the same transaction, so
+   * a Runtime claim that "the successor continues on the new revision" cannot be recorded as true
+   * when the Execution says otherwise (`SUCCESSOR_REVISION_MISMATCH`).
+   */
+  resolveRevisionDeliveryByRestart(input: {
+    readonly projectId: string;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly deliveryId: string;
+    readonly successorExecutionId: string;
+    readonly attemptId: string;
+    readonly detail: string;
+    readonly eventId: string;
+    readonly resolvedAt: number;
+  }): TaskRevisionDeliveryRecord {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.resolvedAt,
+      apply: (database) => {
+        const row = this.revisionDeliveryRow(input.deliveryId);
+        if (row === null) throw new StorageError('NOT_FOUND', 'Revision delivery was not found');
+        const successor = database.query<{
+          applied_revision_id: string; state: string;
+        }, [string, string]>(`
+          SELECT applied_revision_id,state FROM executions WHERE id=?1 AND task_id=?2
+        `).get(input.successorExecutionId, row.task_id);
+        if (successor === null) {
+          throw new StorageError('NOT_FOUND', 'The successor Execution was not found for this Task');
+        }
+        const next = this.applyRevisionDeliveryEvent(row, {
+          type: 'SUPERSEDED_BY_RESTART',
+          successorExecutionId: input.successorExecutionId,
+          successorRevisionId: successor.applied_revision_id,
+        }, input.resolvedAt);
+        const attemptUpdate = database.query(`
+          UPDATE task_revision_delivery_attempts SET state='SUPERSEDED_BY_RESTART',detail=?1,
+            ended_at=?2 WHERE id=?3 AND delivery_id=?4 AND state='IN_FLIGHT'
+        `).run(input.detail, input.resolvedAt, input.attemptId, input.deliveryId);
+        if (attemptUpdate.changes !== 1) {
+          throw new StorageError('INVALID_STATE', 'No in-flight attempt matched this restart resolution');
+        }
+        database.query(`
+          UPDATE task_revision_deliveries SET detail=?1,superseded_by_execution_id=?2,
+            deadline_at=NULL WHERE id=?3
+        `).run(input.detail, input.successorExecutionId, input.deliveryId);
+        this.insertRevisionDeliveryEvent({
+          eventId: input.eventId, projectId: row.project_id, deliveryId: input.deliveryId,
+          eventType: 'TaskRevisionDeliveryResolved', correlationId: input.commandId,
+          causationId: input.attemptId, occurredAt: input.resolvedAt,
+          payload: { deliveryId: input.deliveryId, taskId: row.task_id, revisionId: row.revision_id,
+            predecessorExecutionId: row.execution_id, successorExecutionId: input.successorExecutionId,
+            state: next.state, channel: 'STOP_AND_RESTART', evidenceRef: next.evidenceRef,
+            satisfied: true, detail: input.detail },
+        });
+        const taskRow = this.sqlite.query<{ current_revision_id: string }, [string]>(
+          'SELECT current_revision_id FROM tasks WHERE id=?1').get(row.task_id);
+        return this.mapTaskRevisionDelivery(
+          this.revisionDeliveryRow(input.deliveryId) as RevisionDeliveryRow,
+          taskRow?.current_revision_id ?? row.revision_id,
+          this.revisionDeliveryAttemptsForDeliveries([input.deliveryId]).get(input.deliveryId) ?? [],
+        );
+      },
+    });
+  }
+
+  private insertRevisionDeliveryEvent(input: {
+    readonly eventId: string;
+    readonly projectId: string;
+    readonly deliveryId: string;
+    readonly eventType: string;
+    readonly correlationId: string;
+    readonly causationId: string | null;
+    readonly occurredAt: number;
+    readonly payload: Readonly<Record<string, unknown>>;
+  }): void {
+    this.sqlite.query(`
+      INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+        aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+      VALUES (?1,?2,?3,1,'TaskRevisionDelivery',?4,0,?5,?6,?7,?8)
+    `).run(input.eventId, input.projectId, input.eventType, input.deliveryId, input.correlationId,
+      input.causationId, input.occurredAt, JSON.stringify(input.payload));
+  }
+
+  private revisionDeliveryRow(deliveryId: string): RevisionDeliveryRow | null {
+    return this.sqlite.query<RevisionDeliveryRow, [string]>(`${revisionDeliverySelect}
+      WHERE delivery.id=?1
+    `).get(deliveryId);
+  }
+
+  private revisionDeliveryAttemptsForDeliveries(
+    deliveryIds: readonly string[],
+  ): Map<string, TaskRevisionDeliveryAttemptRecord[]> {
+    const grouped = new Map<string, TaskRevisionDeliveryAttemptRecord[]>();
+    if (deliveryIds.length === 0) return grouped;
+    const placeholders = deliveryIds.map((_, index) => `?${index + 1}`).join(',');
+    const rows = this.sqlite.query<{
+      id: string; delivery_id: string; attempt_number: number; channel: TaskRevisionDeliveryChannel;
+      execution_id: string | null; session_id: string | null; incarnation_id: string | null;
+      state: RevisionDeliveryAttemptState; evidence_ref: string | null; error_code: string | null;
+      detail: string; deadline_at: number | null; started_at: number; ended_at: number | null;
+    }, string[]>(`
+      SELECT id,delivery_id,attempt_number,channel,execution_id,session_id,incarnation_id,state,
+        evidence_ref,error_code,detail,deadline_at,started_at,ended_at
+      FROM task_revision_delivery_attempts WHERE delivery_id IN (${placeholders})
+      ORDER BY delivery_id,attempt_number
+    `).all(...deliveryIds);
+    for (const row of rows) {
+      const attempt: TaskRevisionDeliveryAttemptRecord = {
+        id: row.id,
+        attemptNumber: row.attempt_number,
+        channel: row.channel,
+        executionId: row.execution_id,
+        sessionId: row.session_id,
+        incarnationId: row.incarnation_id,
+        state: row.state,
+        evidenceRef: row.evidence_ref,
+        errorCode: row.error_code,
+        detail: row.detail,
+        deadlineAt: row.deadline_at,
+        startedAt: row.started_at,
+        endedAt: row.ended_at,
+      };
+      const list = grouped.get(row.delivery_id);
+      if (list === undefined) grouped.set(row.delivery_id, [attempt]);
+      else list.push(attempt);
+    }
+    return grouped;
+  }
+
+  private mapTaskRevisionDelivery(
+    row: RevisionDeliveryRow,
+    currentRevisionId: string,
+    attempts: readonly TaskRevisionDeliveryAttemptRecord[],
+  ): TaskRevisionDeliveryRecord {
+    return {
+      id: row.id,
+      projectId: row.project_id,
+      taskId: row.task_id,
+      revisionId: row.revision_id,
+      revisionNumber: row.revision_number,
+      executionId: row.execution_id,
+      sessionId: row.session_id,
+      incarnationId: row.incarnation_id,
+      state: row.state,
+      attemptCount: row.attempt_count,
+      channel: row.channel,
+      deadlineAt: row.deadline_at,
+      evidenceRef: row.evidence_ref,
+      detail: row.detail,
+      supersededByExecutionId: row.superseded_by_execution_id,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      acknowledgedAt: row.acknowledged_at,
+      satisfied: revisionDeliverySatisfied(row.state),
+      stale: row.revision_id !== currentRevisionId,
+      attempts,
+    };
+  }
+
+  /**
+   * Advances one delivery row through the pure domain FSM. The row's `version` column is the
+   * optimistic version, so a concurrent resolution is rejected instead of overwriting a fact.
+   */
+  private applyRevisionDeliveryEvent(
+    row: RevisionDeliveryRow,
+    event: Parameters<typeof transitionRevisionDelivery>[2],
+    updatedAt: number,
+  ): RevisionDelivery {
+    const delivery: RevisionDelivery = {
+      id: row.id,
+      taskId: row.task_id,
+      revisionId: row.revision_id,
+      state: row.state,
+      attemptCount: row.attempt_count,
+      evidenceRef: row.evidence_ref,
+      version: row.version,
+    };
+    const next = transitionRevisionDelivery(delivery, row.version, event);
+    // The FSM projection is persisted here, so the row and the returned aggregate cannot diverge: a
+    // concurrent transition that did not see this version is rejected instead of overwriting it.
+    // `acknowledged_at` moves with the state in the same statement: the table CHECK
+    // `(state='ACKNOWLEDGED') = (acknowledged_at IS NOT NULL)` must hold at every intermediate step.
+    const acknowledgedAt = next.state === 'ACKNOWLEDGED' ? updatedAt : null;
+    const update = this.sqlite.query(`
+      UPDATE task_revision_deliveries SET state=?1,attempt_count=?2,evidence_ref=?3,version=?4,
+        updated_at=?5,acknowledged_at=?6 WHERE id=?7 AND version=?8
+    `).run(next.state, next.attemptCount, next.evidenceRef, next.version, updatedAt, acknowledgedAt,
+      row.id, row.version);
+    if (update.changes !== 1) {
+      throw new StorageError('CONCURRENT_MODIFICATION', 'Revision delivery changed during transition');
+    }
+    return next;
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Startup convergence of stale Session projections (ADR-0028).
+  //
+  // After a restart this Runtime holds no provider process, so a `agent_sessions`/`executions` row
+  // that still says ACTIVE/RUNNING describes a process this generation cannot observe, attach to, or
+  // claim. These methods list those projections with the recorded process-ownership evidence and
+  // converge them from the *observed* facts; they never set a running state and never delete a
+  // worktree, copy, or branch.
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * Sessions whose projection still claims a running provider, with the recorded incarnation and
+   * writer lease facts a caller needs to check ownership. A Session whose Execution is already
+   * terminal or `RECOVERY_REQUIRED` is not listed: that pair is already converged.
+   */
+  listStaleAgentSessions(): readonly StaleAgentSessionRecord[] {
+    return this.sqlite.query<{
+      project_id: string; task_id: string; task_state: TaskLifecycleState; task_version: number;
+      execution_id: string; execution_state: ExecutionLifecycleState; execution_version: number;
+      workspace_id: string; workspace_state: WorkspaceLifecycleState;
+      session_id: string; session_state: AgentSessionLifecycleState; session_version: number;
+      adapter_id: string; current_incarnation_id: string | null;
+      incarnation_id: string | null; incarnation_number: number | null;
+      incarnation_state: SessionIncarnationState | null; provider_pid: number | null;
+      process_identity_json: string | null; process_tree_json: string | null;
+      incarnation_created_at: number | null;
+      lease_id: string | null; holder_kind: string | null; holder_ref: string | null;
+    }, []>(`
+      SELECT task.project_id,task.id AS task_id,task.state AS task_state,task.version AS task_version,
+        execution.id AS execution_id,execution.state AS execution_state,
+        execution.version AS execution_version,execution.workspace_id,
+        workspace.state AS workspace_state,
+        session.id AS session_id,session.state AS session_state,session.version AS session_version,
+        execution.adapter_id,session.current_incarnation_id,
+        incarnation.id AS incarnation_id,incarnation.incarnation_number,
+        incarnation.state AS incarnation_state,incarnation.provider_pid,
+        incarnation.process_identity_json,incarnation.process_tree_json,
+        incarnation.created_at AS incarnation_created_at,
+        lease.id AS lease_id,lease.holder_kind,lease.holder_ref
+      FROM agent_sessions session
+      JOIN executions execution ON execution.id=session.execution_id
+      JOIN tasks task ON task.id=execution.task_id
+      JOIN workspaces workspace ON workspace.id=execution.workspace_id
+      LEFT JOIN session_incarnations incarnation ON incarnation.id=(
+        SELECT candidate.id FROM session_incarnations candidate
+        WHERE candidate.session_id=session.id
+        ORDER BY candidate.incarnation_number DESC LIMIT 1)
+      LEFT JOIN session_writer_leases lease
+        ON lease.session_id=session.id AND lease.released_at IS NULL
+      WHERE session.state NOT IN ('EXITED','DISCONNECTED','RECOVERY_REQUIRED')
+        AND execution.state NOT IN ('SUCCEEDED','FAILED','CANCELLED','SUPERSEDED','RECOVERY_REQUIRED')
+      ORDER BY session.id
+    `).all().map((row) => ({
+      projectId: row.project_id,
+      taskId: row.task_id,
+      taskState: row.task_state,
+      taskVersion: row.task_version,
+      executionId: row.execution_id,
+      executionState: row.execution_state,
+      executionVersion: row.execution_version,
+      workspaceId: row.workspace_id,
+      workspaceState: row.workspace_state,
+      sessionId: row.session_id,
+      sessionState: row.session_state,
+      sessionVersion: row.session_version,
+      adapterId: row.adapter_id,
+      currentIncarnationId: row.current_incarnation_id,
+      incarnation: row.incarnation_id === null ? null : {
+        id: row.incarnation_id,
+        incarnationNumber: row.incarnation_number as number,
+        state: row.incarnation_state as SessionIncarnationState,
+        providerPid: row.provider_pid,
+        processIdentity: parseJsonValue(row.process_identity_json),
+        processTree: parseJsonValue(row.process_tree_json),
+        createdAt: row.incarnation_created_at as number,
+      },
+      writerLease: row.lease_id === null ? null : {
+        id: row.lease_id,
+        holderKind: row.holder_kind as string,
+        holderRef: row.holder_ref as string,
+      },
+    }));
+  }
+
+  /**
+   * Projects one stale Session/Execution pair as `DISCONNECTED`/`RECOVERY_REQUIRED` from the
+   * ownership fact the caller observed, and appends that observation to the audit ledger. The update
+   * is conditional on the states still being non-terminal, so a second startup (or a concurrent
+   * converge) is a no-op rather than a rewrite.
+   */
+  convergeStaleAgentSession(input: {
+    readonly sessionId: string;
+    readonly observation: StaleSessionObservation;
+    readonly providerPid: number | null;
+    readonly detail: string;
+    readonly evidence: Readonly<Record<string, unknown>>;
+    readonly reconciliationId: string;
+    readonly commandId: string;
+    readonly sessionEventId: string;
+    readonly executionEventId: string;
+    readonly taskEventId: string;
+    readonly recoveryEventId: string;
+    readonly recordedAt: number;
+  }): StaleAgentSessionConvergence {
+    return this.sqlite.transaction(() => {
+      const subject = this.sqlite.query<{
+        project_id: string; task_id: string; task_state: TaskLifecycleState; task_version: number;
+        execution_id: string; execution_state: ExecutionLifecycleState;
+        execution_version: number; workspace_id: string;
+        session_id: string; session_state: AgentSessionLifecycleState; session_version: number;
+        incarnation_id: string | null; provider_pid: number | null;
+      }, [string]>(`
+        SELECT task.project_id,task.id AS task_id,task.state AS task_state,task.version AS task_version,
+          execution.id AS execution_id,execution.state AS execution_state,
+          execution.version AS execution_version,execution.workspace_id,
+          session.id AS session_id,session.state AS session_state,session.version AS session_version,
+          incarnation.id AS incarnation_id,incarnation.provider_pid
+        FROM agent_sessions session
+        JOIN executions execution ON execution.id=session.execution_id
+        JOIN tasks task ON task.id=execution.task_id
+        LEFT JOIN session_incarnations incarnation ON incarnation.id=(
+          SELECT candidate.id FROM session_incarnations candidate
+          WHERE candidate.session_id=session.id
+          ORDER BY candidate.incarnation_number DESC LIMIT 1)
+        WHERE session.id=?1
+      `).get(input.sessionId);
+      if (subject === null) throw new StorageError('NOT_FOUND', 'Stale Agent Session was not found');
+      const terminalSession = ['EXITED', 'DISCONNECTED', 'RECOVERY_REQUIRED'].includes(subject.session_state);
+      const terminalExecution = ['SUCCEEDED', 'FAILED', 'CANCELLED', 'SUPERSEDED', 'RECOVERY_REQUIRED']
+        .includes(subject.execution_state);
+      if (terminalSession || terminalExecution) {
+        return {
+          converted: false,
+          reason: 'ALREADY_CONVERGED' as const,
+          sessionId: input.sessionId,
+          executionId: subject.execution_id,
+          previousSessionState: subject.session_state,
+          previousExecutionState: subject.execution_state,
+          projectedSessionState: subject.session_state,
+          projectedExecutionState: subject.execution_state,
+        };
+      }
+      const sessionUpdate = this.sqlite.query(`
+        UPDATE agent_sessions SET state='DISCONNECTED',version=version+1,last_observed_at=?1,
+          current_incarnation_id=NULL,exit_json=?2
+        WHERE id=?3 AND state IN ('CREATED','STARTING','ACTIVE','WAITING_FOR_USER','PAUSING',
+          'PAUSED','STOPPING')
+      `).run(input.recordedAt, JSON.stringify({ reason: input.detail,
+        observation: input.observation, reconciledAtBoot: true }), input.sessionId);
+      const executionUpdate = this.sqlite.query(`
+        UPDATE executions SET state='RECOVERY_REQUIRED',version=version+1
+        WHERE id=?1 AND state IN ('CREATED','PREPARING','STARTING','RUNNING','WAITING_FOR_USER',
+          'PAUSING','PAUSED','STOPPING')
+      `).run(subject.execution_id);
+      // The workspace keeps holding its resource: an orphaned tool child may still be writing it, so
+      // ownership is retained and reclamation stays the only path that removes it (ADR-0021).
+      this.sqlite.query("UPDATE workspaces SET state='RECOVERY_REQUIRED' WHERE id=?1 AND state IN ('RESERVED','PREPARING','READY','IN_USE')")
+        .run(subject.workspace_id);
+      const taskMoved = this.sqlite.query(`
+        UPDATE tasks SET state='RECOVERY_REQUIRED',version=version+1,updated_at=?1
+        WHERE id=?2 AND state IN ('RUNNING','WAITING_FOR_USER','PAUSING','PAUSED')
+      `).run(input.recordedAt, subject.task_id).changes === 1;
+      if (sessionUpdate.changes !== 1 || executionUpdate.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Stale Agent Session changed during startup convergence');
+      }
+      this.sqlite.query(`
+        INSERT INTO agent_session_startup_reconciliations(id,project_id,task_id,session_id,
+          execution_id,incarnation_id,previous_session_state,previous_execution_state,
+          projected_session_state,projected_execution_state,observation,provider_pid,detail,
+          evidence_json,command_id,recorded_at)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'DISCONNECTED','RECOVERY_REQUIRED',?9,?10,?11,?12,?13,?14)
+      `).run(input.reconciliationId, subject.project_id, subject.task_id, subject.session_id,
+        subject.execution_id, subject.incarnation_id, subject.session_state, subject.execution_state,
+        input.observation, input.providerPid ?? subject.provider_pid, input.detail,
+        JSON.stringify(input.evidence), input.commandId, input.recordedAt);
+      const taskFrom = subject.execution_state === 'WAITING_FOR_USER' ? 'WAITING_FOR_USER' : 'RUNNING';
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'RecoveryRequired',1,'AgentSession',?3,?4,?5,?5,?6,?7)
+      `).run(input.recoveryEventId, subject.project_id, subject.session_id,
+        subject.session_version + 1, input.commandId, input.recordedAt,
+        JSON.stringify({ resourceType: 'AgentSession', resourceId: subject.session_id,
+          reason: 'STALE_ACTIVE_SESSION_AT_STARTUP', observation: input.observation,
+          detail: input.detail }));
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'AgentSessionStateChanged',1,'AgentSession',?3,?4,?5,?6,?7,?8)
+      `).run(input.sessionEventId, subject.project_id, subject.session_id,
+        subject.session_version + 1, input.recoveryEventId, input.recoveryEventId,
+        input.recordedAt, JSON.stringify({ sessionId: subject.session_id,
+          from: subject.session_state, to: 'DISCONNECTED',
+          reason: 'startup convergence of a stale ACTIVE Session',
+          observation: input.observation }));
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'ExecutionStateChanged',1,'Execution',?3,?4,?5,?6,?7,?8)
+      `).run(input.executionEventId, subject.project_id, subject.execution_id,
+        subject.execution_version + 1, input.recoveryEventId, input.sessionEventId,
+        input.recordedAt, JSON.stringify({ executionId: subject.execution_id,
+          from: subject.execution_state, to: 'RECOVERY_REQUIRED',
+          reason: 'startup convergence: quiescence is not proven', observation: input.observation }));
+      if (taskMoved) {
+        this.sqlite.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'TaskStateChanged',1,'Task',?3,?4,?5,?6,?7,?8)
+        `).run(input.taskEventId, subject.project_id, subject.task_id, subject.task_version + 1,
+          input.recoveryEventId, input.executionEventId, input.recordedAt,
+          JSON.stringify({ taskId: subject.task_id, from: taskFrom, to: 'RECOVERY_REQUIRED',
+            reason: 'stale Agent Session at startup', observation: input.observation }));
+      }
+      return {
+        converted: true,
+        reason: 'CONVERGED' as const,
+        sessionId: subject.session_id,
+        executionId: subject.execution_id,
+        previousSessionState: subject.session_state,
+        previousExecutionState: subject.execution_state,
+        projectedSessionState: 'DISCONNECTED' as const,
+        projectedExecutionState: 'RECOVERY_REQUIRED' as const,
+      };
+    })();
+  }
+
+  listAgentSessionStartupReconciliations(sessionId: string): readonly AgentSessionStartupReconciliationRecord[] {
+    return this.sqlite.query<{
+      id: string; project_id: string; task_id: string; session_id: string; execution_id: string;
+      incarnation_id: string | null; previous_session_state: AgentSessionLifecycleState;
+      previous_execution_state: ExecutionLifecycleState;
+      projected_session_state: AgentSessionLifecycleState;
+      projected_execution_state: ExecutionLifecycleState;
+      observation: StaleSessionObservation; provider_pid: number | null; detail: string;
+      evidence_json: string; command_id: string; recorded_at: number;
+    }, [string]>(`
+      SELECT id,project_id,task_id,session_id,execution_id,incarnation_id,previous_session_state,
+        previous_execution_state,projected_session_state,projected_execution_state,observation,
+        provider_pid,detail,evidence_json,command_id,recorded_at
+      FROM agent_session_startup_reconciliations WHERE session_id=?1 ORDER BY recorded_at,id
+    `).all(sessionId).map((row) => ({
+      id: row.id,
+      projectId: row.project_id,
+      taskId: row.task_id,
+      sessionId: row.session_id,
+      executionId: row.execution_id,
+      incarnationId: row.incarnation_id,
+      previousSessionState: row.previous_session_state,
+      previousExecutionState: row.previous_execution_state,
+      projectedSessionState: row.projected_session_state,
+      projectedExecutionState: row.projected_execution_state,
+      observation: row.observation,
+      providerPid: row.provider_pid,
+      detail: row.detail,
+      evidence: JSON.parse(row.evidence_json) as Readonly<Record<string, unknown>>,
+      commandId: row.command_id,
+      recordedAt: row.recorded_at,
+    }));
+  }
 }
 
 const sessionTerminalSelect = `
@@ -8110,6 +9034,194 @@ const sessionTerminalSelect = `
     release_detail,created_at,ended_at
   FROM session_terminals
 `;
+
+export type TaskRevisionDeliveryState = RevisionDeliveryState;
+export type TaskRevisionDeliveryChannel = RevisionDeliveryChannel;
+
+/** One immutable Task revision as `task revision list` reads it. */
+export interface TaskRevisionSummary {
+  readonly id: string;
+  readonly number: number;
+  readonly previousRevisionId: string | null;
+  readonly specification: string;
+  readonly constraints: readonly StoredConstraint[];
+  readonly reason: string;
+  readonly actor: string;
+  readonly createdAt: number;
+  readonly current: boolean;
+}
+
+/** What creating one revision produced, including the delivery requirement it may have created. */
+export interface TaskRevisionCreation {
+  readonly taskId: string;
+  readonly taskVersion: number;
+  readonly revisionId: string;
+  readonly revisionNumber: number;
+  readonly previousRevisionId: string;
+  /** Present only when an Execution was holding the Task, so the revision must be delivered. */
+  readonly deliveryId: string | null;
+  readonly executionId: string | null;
+  readonly sessionId: string | null;
+}
+
+export type RevisionDeliveryAttemptState = 'IN_FLIGHT' | 'ACKNOWLEDGED' | 'UNACKNOWLEDGED'
+  | 'CHANNEL_UNSUPPORTED' | 'TIMED_OUT' | 'FAILED' | 'SUPERSEDED_BY_RESTART';
+
+/** One append-only attempt record: which channel carried (or failed to carry) the revision where. */
+export interface TaskRevisionDeliveryAttemptRecord {
+  readonly id: string;
+  readonly attemptNumber: number;
+  readonly channel: TaskRevisionDeliveryChannel;
+  readonly executionId: string | null;
+  readonly sessionId: string | null;
+  readonly incarnationId: string | null;
+  readonly state: RevisionDeliveryAttemptState;
+  readonly evidenceRef: string | null;
+  readonly errorCode: string | null;
+  readonly detail: string;
+  readonly deadlineAt: number | null;
+  readonly startedAt: number;
+  readonly endedAt: number | null;
+}
+
+export interface TaskRevisionDeliveryRecord {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly revisionId: string;
+  readonly revisionNumber: number;
+  readonly executionId: string | null;
+  readonly sessionId: string | null;
+  readonly incarnationId: string | null;
+  readonly state: TaskRevisionDeliveryState;
+  readonly attemptCount: number;
+  readonly channel: TaskRevisionDeliveryChannel | null;
+  readonly deadlineAt: number | null;
+  readonly evidenceRef: string | null;
+  readonly detail: string | null;
+  readonly supersededByExecutionId: string | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly acknowledgedAt: number | null;
+  /** True only for an acknowledgement or a verified successor Execution (see the domain FSM). */
+  readonly satisfied: boolean;
+  /** True when the Task has since moved on to another revision. */
+  readonly stale: boolean;
+  readonly attempts: readonly TaskRevisionDeliveryAttemptRecord[];
+}
+
+interface RevisionDeliveryRow {
+  readonly id: string;
+  readonly project_id: string;
+  readonly task_id: string;
+  readonly revision_id: string;
+  readonly revision_number: number;
+  readonly execution_id: string | null;
+  readonly session_id: string | null;
+  readonly incarnation_id: string | null;
+  readonly state: RevisionDeliveryState;
+  readonly attempt_count: number;
+  readonly channel: TaskRevisionDeliveryChannel | null;
+  readonly deadline_at: number | null;
+  readonly evidence_ref: string | null;
+  readonly detail: string | null;
+  readonly superseded_by_execution_id: string | null;
+  readonly created_at: number;
+  readonly updated_at: number;
+  readonly acknowledged_at: number | null;
+  readonly version: number;
+}
+
+const revisionDeliverySelect = `
+  SELECT delivery.id,delivery.project_id,delivery.task_id,delivery.revision_id,
+    revision.number AS revision_number,delivery.execution_id,delivery.session_id,
+    delivery.incarnation_id,delivery.state,delivery.attempt_count,delivery.channel,
+    delivery.deadline_at,delivery.evidence_ref,delivery.detail,
+    delivery.superseded_by_execution_id,delivery.created_at,delivery.updated_at,
+    delivery.acknowledged_at,delivery.version
+  FROM task_revision_deliveries delivery
+  JOIN task_revisions revision ON revision.task_id=delivery.task_id
+    AND revision.id=delivery.revision_id
+`;
+
+/** What a startup check can honestly say about the provider process of a stale Session. */
+export type StaleSessionObservation = 'PROVIDER_STOPPED' | 'PROVIDER_STILL_RUNNING'
+  | 'PROVIDER_DESCENDANTS_ALIVE' | 'PROVIDER_OWNERSHIP_UNVERIFIABLE' | 'PROCESS_IDENTITY_MISSING';
+
+/** One Session whose projection still claims a running provider, with its recorded owner evidence. */
+export interface StaleAgentSessionRecord {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly taskState: TaskLifecycleState;
+  readonly taskVersion: number;
+  readonly executionId: string;
+  readonly executionState: ExecutionLifecycleState;
+  readonly executionVersion: number;
+  readonly workspaceId: string;
+  readonly workspaceState: WorkspaceLifecycleState;
+  readonly sessionId: string;
+  readonly sessionState: AgentSessionLifecycleState;
+  readonly sessionVersion: number;
+  readonly adapterId: string;
+  readonly currentIncarnationId: string | null;
+  readonly incarnation: {
+    readonly id: string;
+    readonly incarnationNumber: number;
+    readonly state: SessionIncarnationState;
+    readonly providerPid: number | null;
+    readonly processIdentity: unknown;
+    readonly processTree: unknown;
+    readonly createdAt: number;
+  } | null;
+  readonly writerLease: {
+    readonly id: string;
+    readonly holderKind: string;
+    readonly holderRef: string;
+  } | null;
+}
+
+/** The outcome of converging one stale projection: the states it had and the states it now has. */
+export interface StaleAgentSessionConvergence {
+  readonly converted: boolean;
+  readonly reason: 'CONVERGED' | 'ALREADY_CONVERGED';
+  readonly sessionId: string;
+  readonly executionId: string;
+  readonly previousSessionState: AgentSessionLifecycleState;
+  readonly previousExecutionState: ExecutionLifecycleState;
+  readonly projectedSessionState: AgentSessionLifecycleState;
+  readonly projectedExecutionState: ExecutionLifecycleState;
+}
+
+/** The append-only audit row of one startup convergence, including the observed ownership fact. */
+export interface AgentSessionStartupReconciliationRecord {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly sessionId: string;
+  readonly executionId: string;
+  readonly incarnationId: string | null;
+  readonly previousSessionState: AgentSessionLifecycleState;
+  readonly previousExecutionState: ExecutionLifecycleState;
+  readonly projectedSessionState: AgentSessionLifecycleState;
+  readonly projectedExecutionState: ExecutionLifecycleState;
+  readonly observation: StaleSessionObservation;
+  readonly providerPid: number | null;
+  readonly detail: string;
+  readonly evidence: Readonly<Record<string, unknown>>;
+  readonly commandId: string;
+  readonly recordedAt: number;
+}
+
+/** JSON columns of the probe tables are read back as-is; a malformed value is reported, not guessed. */
+function parseJsonValue(json: string | null): unknown {
+  if (json === null) return null;
+  try {
+    return JSON.parse(json) as unknown;
+  } catch {
+    return null;
+  }
+}
+
 
 /** One Runtime-owned resource a reclamation run may consider, with its recorded ownership facts. */
 export interface ReclamationProjectRef {

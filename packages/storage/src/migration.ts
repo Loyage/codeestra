@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 18;
+export const phase1SchemaVersion = 19;
 
 
 export const phase1Migration = `
@@ -1006,4 +1006,109 @@ CREATE UNIQUE INDEX one_writer_terminal_attachment
   ON session_terminal_attachments(terminal_id) WHERE state='ATTACHED' AND kind='WRITER';
 CREATE INDEX session_terminal_attachments_by_session
   ON session_terminal_attachments(session_id,attached_at);
+`;
+
+/**
+ * Revision delivery (PROJECT_SPEC §2.11, ADR-0028) and the startup convergence of stale Session
+ * projections.
+ *
+ * `task_revision_deliveries` records one *requirement*: the Execution that must know a newly created
+ * revision. `task_revision_delivery_attempts` is the append-only ledger of every attempt to carry it
+ * there — the channel, the Execution/Session/incarnation it was aimed at, when it started and how it
+ * ended. An acknowledgement is never inferred from "the message was sent": only an attempt that
+ * ended `ACKNOWLEDGED` (with the adapter's structured evidence) or a delivery resolved by a successor
+ * Execution row whose *recorded* applied revision is this revision satisfies the requirement (the
+ * ADR-0001 stop-and-restart fallback). Everything else stays recorded and unsatisfied.
+ *
+ * `agent_session_startup_reconciliations` is the audit trail of the startup convergence: for one
+ * stale Session/Execution projection, what process ownership was actually observed and which states
+ * were projected from that observation. It is append-only evidence, never a claim of quiescence.
+ *
+ * Schema version 19 is reserved for this migration. Version 16 stays permanently unused (a database
+ * may already be stamped 17 or 18 and would skip a later `version < 16` step), so this migration only
+ * adds `if (version < 19)` after the existing ascending steps.
+ */
+export const revisionDeliveryMigration = `
+CREATE TABLE task_revision_deliveries (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  -- The Execution that was running when the revision was created; NULL when nothing was running, so
+  -- no delivery requirement exists.
+  execution_id TEXT,
+  session_id TEXT REFERENCES agent_sessions(id),
+  -- The Session incarnation that was the recorded writer at creation time, when one was recorded.
+  incarnation_id TEXT REFERENCES session_incarnations(id),
+  state TEXT NOT NULL CHECK(state IN ('PENDING','IN_FLIGHT','ACKNOWLEDGED','UNACKNOWLEDGED',
+    'CHANNEL_UNSUPPORTED','TIMED_OUT','FAILED','SUPERSEDED_BY_RESTART')),
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+  -- Optimistic version of the delivery FSM; a concurrent resolution is rejected, not overwritten.
+  version INTEGER NOT NULL DEFAULT 0 CHECK(version >= 0),
+  -- The channel of the newest attempt; NULL while no attempt was made.
+  channel TEXT CHECK(channel IS NULL OR channel IN ('PROVIDER_CONVERSATION','STOP_AND_RESTART')),
+  deadline_at INTEGER,
+  evidence_ref TEXT,
+  detail TEXT,
+  superseded_by_execution_id TEXT,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+  acknowledged_at INTEGER,
+  UNIQUE(task_id,revision_id),
+  UNIQUE(task_id,id),
+  CHECK((state='ACKNOWLEDGED') = (acknowledged_at IS NOT NULL)),
+  FOREIGN KEY(task_id,revision_id) REFERENCES task_revisions(task_id,id),
+  FOREIGN KEY(task_id,execution_id) REFERENCES executions(task_id,id),
+  FOREIGN KEY(task_id,superseded_by_execution_id) REFERENCES executions(task_id,id)
+) STRICT;
+CREATE INDEX task_revision_deliveries_by_task ON task_revision_deliveries(task_id,created_at,id);
+CREATE INDEX unsatisfied_revision_deliveries ON task_revision_deliveries(task_id)
+  WHERE state <> 'ACKNOWLEDGED' AND state <> 'SUPERSEDED_BY_RESTART';
+
+CREATE TABLE task_revision_delivery_attempts (
+  id TEXT PRIMARY KEY,
+  delivery_id TEXT NOT NULL REFERENCES task_revision_deliveries(id),
+  attempt_number INTEGER NOT NULL CHECK(attempt_number > 0),
+  channel TEXT NOT NULL CHECK(channel IN ('PROVIDER_CONVERSATION','STOP_AND_RESTART')),
+  execution_id TEXT,
+  session_id TEXT REFERENCES agent_sessions(id),
+  incarnation_id TEXT REFERENCES session_incarnations(id),
+  state TEXT NOT NULL CHECK(state IN ('IN_FLIGHT','ACKNOWLEDGED','UNACKNOWLEDGED',
+    'CHANNEL_UNSUPPORTED','TIMED_OUT','FAILED','SUPERSEDED_BY_RESTART')),
+  evidence_ref TEXT,
+  error_code TEXT,
+  detail TEXT NOT NULL CHECK(length(trim(detail)) > 0),
+  deadline_at INTEGER,
+  started_at INTEGER NOT NULL CHECK(started_at >= 0),
+  ended_at INTEGER,
+  UNIQUE(delivery_id,attempt_number),
+  CHECK((state='IN_FLIGHT') = (ended_at IS NULL))
+) STRICT;
+CREATE INDEX task_revision_delivery_attempts_by_delivery
+  ON task_revision_delivery_attempts(delivery_id,attempt_number);
+CREATE INDEX in_flight_revision_delivery_attempts ON task_revision_delivery_attempts(deadline_at)
+  WHERE state='IN_FLIGHT';
+
+CREATE TABLE agent_session_startup_reconciliations (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT NOT NULL,
+  session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+  execution_id TEXT NOT NULL REFERENCES executions(id),
+  incarnation_id TEXT REFERENCES session_incarnations(id),
+  previous_session_state TEXT NOT NULL,
+  previous_execution_state TEXT NOT NULL,
+  projected_session_state TEXT NOT NULL,
+  projected_execution_state TEXT NOT NULL,
+  observation TEXT NOT NULL CHECK(observation IN ('PROVIDER_STOPPED','PROVIDER_STILL_RUNNING',
+    'PROVIDER_DESCENDANTS_ALIVE','PROVIDER_OWNERSHIP_UNVERIFIABLE','PROCESS_IDENTITY_MISSING')),
+  provider_pid INTEGER,
+  detail TEXT NOT NULL CHECK(length(trim(detail)) > 0),
+  evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
+  command_id TEXT NOT NULL,
+  recorded_at INTEGER NOT NULL CHECK(recorded_at >= 0),
+  UNIQUE(session_id,command_id)
+) STRICT;
+CREATE INDEX startup_reconciliations_by_session
+  ON agent_session_startup_reconciliations(session_id,recorded_at,id);
 `;

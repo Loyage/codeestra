@@ -534,6 +534,27 @@ export class AgentRuntimeCoordinator {
     if (identity === null) {
       throw new AgentRuntimeServiceError('SESSION_NOT_FOUND', 'Agent Session was not found');
     }
+    // A successor reopens the *recorded* start plan, which pins the revision this conversation was
+    // started on. If the Task has since been revised and that revision was never confirmed on this
+    // Execution, restarting the automation would resume work on a specification that is no longer the
+    // Task's — exactly the "resume on an unacknowledged revision" the FSM forbids. The honest
+    // disposition is `task.revision.delivery.resolve --action stop-and-restart`, which records a
+    // successor Execution with the new revision instead of continuing this conversation.
+    const task = this.#storage.getTask(plan.projectId, plan.taskId);
+    if (task !== null && task.currentRevision.id !== plan.revisionId) {
+      const unsatisfied = this.#storage.findUnsatisfiedRevisionDelivery({
+        taskId: plan.taskId, executionId: plan.executionId,
+      });
+      throw new AgentRuntimeServiceError('REVISION_NOT_ACKNOWLEDGED',
+        `The Task is now on revision ${task.currentRevision.id} but this Session was started on`
+        + ` ${plan.revisionId}`
+        + (unsatisfied === null
+          ? ''
+          : `, and its revision delivery ${unsatisfied.id} is ${unsatisfied.state}`)
+        + '; returning this conversation to automation would re-enter a specification that is no'
+        + ' longer the Task\'s. Use `task revision delivery resolve` to stop and restart it, which'
+        + ' continues the same provider conversation on the current revision');
+    }
     if (identity.sessionStorageRef === null) {
       throw new AgentRuntimeServiceError('SESSION_FILE_UNRECORDED',
         'The Session has no recorded provider session file to reopen');

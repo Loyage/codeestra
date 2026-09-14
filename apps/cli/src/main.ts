@@ -375,6 +375,49 @@ function parseTaskCreateFlags(tokens: readonly string[]): TaskCreateInput {
   return { specification: specification.join(' '), constraints, kind };
 }
 
+/**
+ * Flags for `task revision create`. A specification is optional: omitting it keeps the current one
+ * and records an `ADD_CONSTRAINT` revision, which is exactly how "追加约束" is expressed.
+ */
+function parseRevisionFlags(tokens: readonly string[]): {
+  readonly specification: string | undefined;
+  readonly constraints: readonly { readonly id: string; readonly text: string }[];
+  readonly reason: string;
+} {
+  const specification: string[] = [];
+  const constraints: { id: string; text: string }[] = [];
+  let reason = 'user revision request';
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index] as string;
+    const value = tokens[index + 1];
+    if (token === '--specification') {
+      if (value === undefined || value.trim().length === 0) usage();
+      specification.push(value.trim());
+      index += 1;
+    } else if (token === '--constraint') {
+      if (value === undefined || value.trim().length === 0) usage();
+      constraints.push({ id: crypto.randomUUID(), text: value.trim() });
+      index += 1;
+    } else if (token === '--reason') {
+      if (value === undefined || value.trim().length === 0) usage();
+      reason = value.trim();
+      index += 1;
+    } else if (token === '--json') {
+      // Every revision command prints the Runtime result verbatim; the flag is accepted so a script
+      // can state its intent without depending on that default.
+    } else if (token.startsWith('--')) {
+      usage();
+    } else {
+      specification.push(token);
+    }
+  }
+  return {
+    specification: specification.length === 0 ? undefined : specification.join(' '),
+    constraints,
+    reason,
+  };
+}
+
 /** The subset of `task.status` this client reads to find an execution's Agent session. */
 interface TaskStatusExecutions {
   readonly executions: readonly {
@@ -739,6 +782,14 @@ function usage(): never {
   bun run codeestra task archive <project-id> <task-id> <expected-version>
   bun run codeestra task unarchive <project-id> <task-id> <expected-version>
   bun run codeestra task status <project-id> <task-id>
+  bun run codeestra task revision create <project-id> <task-id> <expected-version>
+    [--specification <text>] [--constraint <text>]… [--reason <text>] [--json]
+  bun run codeestra task revision list <project-id> <task-id> [--json]
+  bun run codeestra task revision delivery list <project-id> <task-id> [--json]
+  bun run codeestra task revision delivery get <project-id> <delivery-id> [--json]
+  bun run codeestra task revision delivery resolve <project-id> <task-id> <delivery-id>
+    <expected-version> --action <stop-and-restart|retry> [--adapter <id>] [--json]
+    # exit 0 only when the delivery ended satisfied; 1 when it stays unconfirmed
   bun run codeestra task transcript <project-id> <task-id> [--execution <id>] [--after <entry-id>]
     [--limit <n>] [--reverse] [--json]
   bun run codeestra session transcript <session-id> [--after <entry-id>] [--limit <n>] [--reverse]
@@ -1793,6 +1844,84 @@ try {
       attentionId,
       answer: parseAttentionAnswer(answerType, answerArguments),
     }));
+  } else if (group === 'task' && action === 'revision') {
+    // The revision face of PROJECT_SPEC §2.11: creating a revision is one command, and the delivery
+    // of that revision into a running Execution is separately readable and separately resolvable. A
+    // delivery is never reported as satisfied because the Runtime sent something — the state comes
+    // from the recorded ledger, and for an Adapter without an acknowledgement channel it stays
+    // visibly unconfirmed until the explicit stop-and-restart records a successor on that revision.
+    const subcommand = firstArgument;
+    if (subcommand === 'create') {
+      const [projectId, taskId, versionText, ...flagTokens] = remainingArguments;
+      const expectedVersion = Number(versionText);
+      if (projectId === undefined || taskId === undefined || versionText === undefined
+        || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
+      const input = parseRevisionFlags(flagTokens);
+      print(await call({
+        command: 'task.revision.create',
+        commandId: crypto.randomUUID(),
+        projectId,
+        taskId,
+        expectedVersion,
+        ...(input.specification === undefined ? {} : { specification: input.specification }),
+        constraints: [...input.constraints],
+        reason: input.reason,
+      }));
+    } else if (subcommand === 'list') {
+      const [projectId, taskId, ...extra] = remainingArguments;
+      if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
+      print(await call({ command: 'task.revision.list', projectId, taskId }));
+    } else if (subcommand === 'delivery') {
+      const deliveryAction = remainingArguments[0];
+      if (deliveryAction === 'list') {
+        const [projectId, taskId, ...extra] = remainingArguments.slice(1);
+        if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
+        print(await call({ command: 'task.revision.delivery.list', projectId, taskId }));
+      } else if (deliveryAction === 'get') {
+        const [projectId, deliveryId, ...extra] = remainingArguments.slice(1);
+        if (projectId === undefined || deliveryId === undefined || extra.length !== 0) usage();
+        print(await call({ command: 'task.revision.delivery.get', projectId, deliveryId }));
+      } else if (deliveryAction === 'resolve') {
+        const [projectId, taskId, deliveryId, versionText, ...tokens] = remainingArguments.slice(1);
+        const expectedVersion = Number(versionText);
+        if (projectId === undefined || taskId === undefined || deliveryId === undefined
+          || versionText === undefined || !Number.isSafeInteger(expectedVersion)
+          || expectedVersion < 0) usage();
+        let action: 'STOP_AND_RESTART' | 'RETRY' | undefined;
+        let adapterId = 'pi';
+        for (let index = 0; index < tokens.length; index += 1) {
+          const flag = tokens[index];
+          const value = tokens[index + 1];
+          if (flag === '--action' && value === 'stop-and-restart') { action = 'STOP_AND_RESTART'; index += 1; }
+          else if (flag === '--action' && value === 'retry') { action = 'RETRY'; index += 1; }
+          else if (flag === '--adapter' && value !== undefined) { adapterId = value; index += 1; }
+          else if (flag === '--json') continue;
+          else usage();
+        }
+        if (action === undefined) usage();
+        const resolved = await call({
+          command: 'task.revision.delivery.resolve',
+          commandId: crypto.randomUUID(),
+          projectId,
+          taskId,
+          deliveryId,
+          action,
+          expectedVersion,
+          adapterId,
+        }) as { readonly outcome: string; readonly detail: string };
+        print(resolved);
+        // The command face only reports success when the revision is actually confirmed on an
+        // Execution; a retry on an Adapter without an acknowledgement channel is honest and leaves
+        // the delivery unconfirmed, which a script must be able to see from the exit code.
+        if (!['SUPERSEDED_BY_RESTART', 'RESOLVED', 'ALREADY_SATISFIED'].includes(resolved.outcome)) {
+          process.exit(1);
+        }
+      } else {
+        usage();
+      }
+    } else {
+      usage();
+    }
   } else if (group === 'task' && action === 'submit') {
     const [taskId, versionText, ...extra] = remainingArguments;
     const expectedVersion = Number(versionText);
