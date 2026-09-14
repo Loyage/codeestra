@@ -10,7 +10,7 @@
 
 路径相对仓库根，统一分隔符并尊重实际文件系统大小写行为；拒绝 `..`、绝对路径与 symlink 逃逸；rename 同时计入 old/new path。目录比较按路径组件，不能把 `src/map` 误匹配 `src/mapping`。
 
-重要目录/模块来源于明确的项目配置及可解释静态映射；尚无可靠映射则 complete=false。公共 API、依赖锁文件、schema migration、构建/测试基础配置通常属于 globalResources。
+重要目录/模块来源于仓库内跟踪文件 `.codeestra/impact.json`（项目配置的声明式映射）；该文件只从**项目 main ref** 读取，读法与 `.codeestra/policies/verification.json` 一致：先把 ref 解析到 commit，再读该 commit 的文件，Task branch 上的同名文件**不参与判定**，文件缺失或映射缺失都是「没有可靠映射」而不是「没有影响」。尚无可靠映射则 complete=false。公共 API、依赖锁文件、schema migration、构建/测试基础配置通常属于 globalResources。
 
 ## 3. 纯判断规则
 
@@ -37,7 +37,9 @@ else:
 
 结果提供稳定 reason codes，例如 SAME_FILE、IMPORTANT_DIRECTORY_OVERLAP、SAME_MODULE、GLOBAL_RESOURCE、INCOMPLETE_IMPACT、STALE_BASE。UI 展示具体冲突范围，不只显示红色状态。
 
-第一版没有“用户强制忽略 UNKNOWN 并发”的隐藏 override；若未来增加需单独授权与风险审计决策。
+第一版没有“用户强制忽略 UNKNOWN 并发”的隐藏 override。**该能力现已由 ADR-0030 授权为显式单次放行（`--allow-unknown`），且仍然不是隐藏开关**：它是用户对「无法证明不冲突」的显式承担，不是分析器可以自己打开的旁路。放行必须绑定**被评估的 revision** 与**评估版本**（analyzer/policy 版本）并写入审计；任务修订、基线变化、映射/分析器/策略版本变化、实际 diff 超范围都使放行随 assessment 一并失效（见上），需要重新评估与重新放行。
+
+放行**不改变 assessment 记录本身**：`conflict_assessments` 里那次结论仍是 `UNKNOWN`，放行只是「允许在 UNKNOWN 下启动、并可与当前活跃任务并发」的独立事实。因此**放行不等于 SAFE**：它不构成证据、不改写冲突结论、不提高后续判定的置信度，也不减少 `reason codes`（仍是 `INCOMPLETE_IMPACT` / `STALE_BASE` 等）。风险归属在放行方：`UNKNOWN` 不是「无冲突」而是「无法证明」；放行后若两个 Agent 越界，责任在放行的人，Runtime 不因放行而增加额外隔离（残余风险见 `scheduler.md` §4）。
 
 ## 5. 测试
 
