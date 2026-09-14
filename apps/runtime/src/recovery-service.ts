@@ -1,5 +1,13 @@
 import { inspectResultCommit, readHeadCommit, reconcileWorkspace } from '@codeestra/git';
-import { Phase1Database } from '@codeestra/storage';
+import {
+  inspectProviderProcessOwnership,
+  type ProviderOwnershipObservation,
+  type ProviderProcessTree,
+} from '@codeestra/agent-adapters';
+import {
+  Phase1Database,
+  type StaleSessionObservation,
+} from '@codeestra/storage';
 import {
   reconcileRunOperations,
   type RunOperationRecoveryResult,
@@ -606,4 +614,209 @@ export function reconcileSessionTerminals(input: {
       providerPid: terminal.providerPid });
   }
   return { reconciled, maybeStillRunning };
+}
+
+export interface StaleAgentSessionReconcileResult {
+  readonly sessionId: string;
+  readonly executionId: string;
+  readonly taskId: string;
+  readonly outcome: 'CONVERGED' | 'SKIPPED_HELD_BY_RUNTIME' | 'ALREADY_CONVERGED' | 'FAILED';
+  readonly observation: StaleSessionObservation | null;
+  readonly previousSessionState: string;
+  readonly previousExecutionState: string;
+  readonly projectedSessionState: string | null;
+  readonly projectedExecutionState: string | null;
+  readonly detail: string;
+}
+
+/**
+ * Converges `agent_sessions`/`executions` projections that still claim a running provider after a
+ * Runtime restart (ADR-0028). This closes the one startup gap the other reconciles deliberately left
+ * open: `reconcileSessionHandoffs` cleans the Runtime's own handoff state and explicitly refuses to
+ * project a provider state it cannot observe, while this function does exactly that projection — from
+ * the *process ownership evidence* that was captured while the provider was alive.
+ *
+ * What it will and will not do:
+ *
+ * - It never sets a running state. Every converged projection is `DISCONNECTED`/`RECOVERY_REQUIRED`,
+ *   because this Runtime generation holds no provider process, no PTY, and no way to reattach (Pi has
+ *   no reconnect primitive).
+ * - It never claims quiescence, and therefore never resumes or completes an Execution. Even a
+ *   provably `STOPPED` provider is only evidence about the recorded process tree, which is a snapshot:
+ *   a process spawned after the capture, or one reparented out of it, is not covered. The observed
+ *   fact is recorded verbatim and the Execution stays `RECOVERY_REQUIRED`.
+ * - It never signals or kills a process. A provider that is still running, or a recorded descendant
+ *   that is still alive, is *reported* (FOUNDATION-040 measured that killing a provider does not stop
+ *   its tool children, and a PID without the recorded start token is not proof of identity).
+ * - It never deletes anything. Worktrees, verification copies, and integration worktrees keep their
+ *   ownership and are only ever removed by the explicit ADR-0021 that reclaims them.
+ * - `isHeldByThisRuntime` is the honest boundary: a Session this generation is actively observing is
+ *   never touched, so the same function is safe to call again after startup.
+ */
+export async function reconcileStaleAgentSessions(input: {
+  readonly storage: Phase1Database;
+  /** Sessions this Runtime generation currently holds a live provider process for. */
+  readonly isHeldByThisRuntime?: (sessionId: string) => boolean;
+  /** Injection point for tests; the default is the real `ps`-based ownership check. */
+  readonly inspectOwnership?: (tree: ProviderProcessTree) => Promise<ProviderOwnershipObservation>;
+  readonly now?: () => number;
+  readonly randomUUID?: () => string;
+  readonly logger?: (message: string, detail?: Readonly<Record<string, unknown>>) => void;
+}): Promise<readonly StaleAgentSessionReconcileResult[]> {
+  const now = input.now ?? Date.now;
+  const randomUUID = input.randomUUID ?? (() => crypto.randomUUID());
+  const inspectOwnership = input.inspectOwnership
+    ?? ((tree: ProviderProcessTree) => inspectProviderProcessOwnership({ tree }));
+  const logger = input.logger ?? (() => {});
+  const results: StaleAgentSessionReconcileResult[] = [];
+  for (const stale of input.storage.listStaleAgentSessions()) {
+    const base = {
+      sessionId: stale.sessionId,
+      executionId: stale.executionId,
+      taskId: stale.taskId,
+      previousSessionState: stale.sessionState,
+      previousExecutionState: stale.executionState,
+    };
+    if (input.isHeldByThisRuntime?.(stale.sessionId) === true) {
+      results.push({ ...base, outcome: 'SKIPPED_HELD_BY_RUNTIME', observation: null,
+        projectedSessionState: null, projectedExecutionState: null,
+        detail: 'this Runtime generation still holds this Session, so nothing is converged' });
+      continue;
+    }
+    const tree = providerTreeOf(stale.incarnation);
+    let observation: StaleSessionObservation;
+    let detail: string;
+    let providerPid: number | null = stale.incarnation?.providerPid ?? null;
+    let ownership: Readonly<Record<string, unknown>> = {};
+    if (tree === null) {
+      observation = 'PROCESS_IDENTITY_MISSING';
+      detail = stale.incarnation === null
+        ? 'no Session incarnation and no recorded process identity exist for this Session, so no'
+          + ' ownership check is possible; the recorded projection cannot be trusted either way'
+        : 'the Session incarnation recorded no provider process identity, so ownership cannot be'
+          + ' checked and quiescence is not proven';
+    } else {
+      providerPid = tree.pid;
+      try {
+        const observed = await inspectOwnership(tree);
+        ownership = observed as unknown as Readonly<Record<string, unknown>>;
+        if (observed.state === 'STOPPED') {
+          observation = 'PROVIDER_STOPPED';
+          detail = `no process with the recorded provider identity (pid ${tree.pid}) and none of its`
+            + ` ${tree.descendants.length} recorded descendant(s) are running, but the process tree is`
+            + ' a snapshot taken while the provider was alive, so workspace quiescence is still not'
+            + ' proven and the Execution is not resumed';
+        } else if (observed.state === 'ALIVE') {
+          observation = 'PROVIDER_STILL_RUNNING';
+          detail = `provider process ${observed.pid} is still running with the recorded start token;`
+            + ' this Runtime does not own a handle to it and cannot reattach, and it was not signalled';
+        } else if (observed.state === 'DESCENDANTS_ALIVE') {
+          observation = 'PROVIDER_DESCENDANTS_ALIVE';
+          detail = `the provider is gone but recorded tool descendant(s) ${observed.descendants.join(', ')}`
+            + ' are still running; they may still be writing the workspace and were not signalled';
+        } else {
+          observation = 'PROVIDER_OWNERSHIP_UNVERIFIABLE';
+          detail = `provider ownership could not be verified: ${observed.detail}`;
+        }
+      } catch (error) {
+        observation = 'PROVIDER_OWNERSHIP_UNVERIFIABLE';
+        detail = `the ownership check failed: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
+    const evidence = {
+      source: 'STARTUP_RECONCILE',
+      observation,
+      record: {
+        sessionState: stale.sessionState,
+        executionState: stale.executionState,
+        taskState: stale.taskState,
+        workspaceId: stale.workspaceId,
+        adapterId: stale.adapterId,
+        incarnation: stale.incarnation === null ? null : {
+          id: stale.incarnation.id,
+          incarnationNumber: stale.incarnation.incarnationNumber,
+          state: stale.incarnation.state,
+          providerPid: stale.incarnation.providerPid,
+          processTreeCapturedAt: (tree?.capturedAt ?? null),
+          processTreeNote: tree?.note ?? null,
+        },
+        writerLease: stale.writerLease,
+      },
+      ownership,
+      quiescenceProven: false,
+      signalsSent: 0,
+    };
+    try {
+      const converged = input.storage.convergeStaleAgentSession({
+        sessionId: stale.sessionId,
+        observation,
+        providerPid,
+        detail,
+        evidence,
+        reconciliationId: randomUUID(),
+        commandId: randomUUID(),
+        sessionEventId: randomUUID(),
+        executionEventId: randomUUID(),
+        taskEventId: randomUUID(),
+        recoveryEventId: randomUUID(),
+        recordedAt: now(),
+      });
+      results.push({
+        ...base,
+        outcome: converged.converted ? 'CONVERGED' : 'ALREADY_CONVERGED',
+        observation,
+        projectedSessionState: converged.projectedSessionState,
+        projectedExecutionState: converged.projectedExecutionState,
+        detail,
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      logger('a stale Agent Session projection could not be converged', {
+        sessionId: stale.sessionId,
+        reason,
+      });
+      results.push({ ...base, outcome: 'FAILED', observation,
+        projectedSessionState: null, projectedExecutionState: null,
+        detail: `startup convergence failed: ${reason}` });
+    }
+  }
+  return results;
+}
+
+/**
+ * The recorded process tree of one incarnation, or null when none was captured. A piece of identity
+ * that cannot be compared (for example a missing start token) is passed through unchanged so the
+ * ownership check reports `UNVERIFIABLE` instead of assuming the process is gone.
+ */
+function providerTreeOf(incarnation: {
+  readonly providerPid: number | null;
+  readonly processIdentity: unknown;
+  readonly processTree: unknown;
+} | null): ProviderProcessTree | null {
+  if (incarnation === null) return null;
+  const tree = incarnation.processTree;
+  if (tree !== null && typeof tree === 'object') {
+    const candidate = tree as Partial<ProviderProcessTree>;
+    if (typeof candidate.pid === 'number' && typeof candidate.startToken === 'string'
+      && Array.isArray(candidate.descendants)) {
+      return candidate as ProviderProcessTree;
+    }
+  }
+  const identity = incarnation.processIdentity;
+  if (identity !== null && typeof identity === 'object') {
+    const candidate = identity as { pid?: unknown; startToken?: unknown };
+    if (typeof candidate.pid === 'number' && typeof candidate.startToken === 'string') {
+      // No descendant walk was recorded while the provider was alive; the check can still say
+      // whether the provider itself is gone, and reports anything it cannot attribute.
+      return {
+        pid: candidate.pid,
+        startToken: candidate.startToken,
+        pgid: null,
+        descendants: [],
+        capturedAt: 0,
+        note: 'reconstructed from the recorded process identity: no descendant walk was captured',
+      };
+    }
+  }
+  return null;
 }

@@ -1699,12 +1699,46 @@ session handoff writer acquire|release ...
   - **`docs/architecture/state-machines.md` §1 的 Task Verification 状态列表与 `docs/architecture/event-model.md` §2 的事件目录尚未同步 `CANCELLED` 与 `OperationProgressed`/`OperationSettled`**；按 ADR-0019 的先例本格不动架构文档，已在 ADR-0027 显式记录该不一致，需一次 doc-sync。
   - 事件量未做并发/压力测量；未测多客户端同时订阅同一长命令的负载。
 
+## FOUNDATION-048 — revision 投递确认与重启后 stale ACTIVE Session 的启动收敛（ADR-0028）
+
+状态：**已实现并通过 CLI/命令面测试**；未 commit、未 push、未提升 `main`、未重启稳定 Runtime。**本轮占用 schema v19**（只追加 `if (version < 19)`，既有段一字未动；**v16 继续永久未使用**，未新增 `version < 16`）。基线固定 `dev@77eaf678`，未 rebase、未合并新 dev。
+
+用户本轮没有做 A/B/C 选择：本格的两件事早已是 `## NEXT` 第 4 项，实现方式由已确认的原则与 spike 事实决定（§1.1 效率至上与 CLI 完备、ADR-0001 的停止并新建 Execution fallback、ADR-0010/0023 的单 writer 与归属核验、ADR-0021 的失败现场、`docs/spikes/pi-0.84.4.md` 的 `revisionAcknowledgement = UNSUPPORTED`）。选项与取舍逐条记在 ADR-0028 的 Options/Decision 中，若用户要另一种语义可以在下一轮推翻。
+
+### 已实现
+
+- `packages/domain/src/revision-delivery.ts`（新）：投递 FSM。satisfied **只有** `ACKNOWLEDGED`（带 Adapter 结构化 evidence）与 `SUPERSEDED_BY_RESTART`（successor 行被证）；stale ACK → `STALE_REVISION_ACKNOWLEDGEMENT`，重复 ACK/重复开 attempt → `REVISION_ALREADY_ACKNOWLEDGED`，successor revision 不符 → `SUCCESSOR_REVISION_MISMATCH`；`packages/domain/src/errors.ts` 新增这三个稳定错误码（纯追加）。
+- `packages/storage/src/migration.ts`：`phase1SchemaVersion` 18 → 19，新增 additive `revisionDeliveryMigration`：`task_revision_deliveries`（需求 + FSM 状态 + 通道/期限/证据 + `version` 乐观版本 + ack 时间戳 CHECK）、`task_revision_delivery_attempts`（append-only 尝试台账：通道、Execution/Session/incarnation、起止时间、结果、error_code、`IN_FLIGHT ⇔ ended_at IS NULL`）、`agent_session_startup_reconciliations`（append-only 收敛台账）。
+- `packages/storage/src/database.ts`（只追加）：`createTaskRevision`（append-only revision + 移动 current_revision_id + 有运行中 Execution 时同事务记投递需求）、`listTaskRevisions`、`listTaskRevisionDeliveries`/`getTaskRevisionDelivery`/`findUnsatisfiedRevisionDelivery`、`beginRevisionDeliveryAttempt`/`completeRevisionDeliveryAttempt`（状态推进全走领域 FSM；stale ACK 回滚后把尝试就地记 `FAILED`，不留悬挂 in-flight）、`resolveRevisionDeliveryByRestart`（同事务读回 successor Execution 的 `applied_revision_id` 才标记满足）、`listExpiredRevisionDeliveryAttempts`/`listInFlightRevisionDeliveryAttempts`、`listStaleAgentSessions`/`convergeStaleAgentSession`/`listAgentSessionStartupReconciliations`。
+- `apps/runtime/src/revision-delivery-service.ts`（新）：能力门控的会话投递（实时 `probe()`；非 SUPPORTED / 缺 `applyRevision` 端口 / 非 live Session 分别如实记 `CHANNEL_UNSUPPORTED`，无 evidence 的 ACK 记 `UNACKNOWLEDGED/MISSING_ACK_EVIDENCE`，`withDeadline` 超时记 `TIMED_OUT`）、显式处置（`stop-and-restart` 复用 ADR-0016 的协作停止 + 既有 `resumePausedTask`；停止不能确认则 `RECOVERY_REQUIRED`）、启动收口（`reconcileAtStartup`）。
+- `apps/runtime/src/recovery-service.ts`（尾部追加）：`reconcileStaleAgentSessions`——按记录的 pid+start token 判所有权，一律收敛为 `DISCONNECTED`/`RECOVERY_REQUIRED`，不写 RUNNING、不声称静止、不发信号不杀进程、不删任何资源，观察值写 append-only 台账 + 四类事件，幂等且不碰本代 Runtime 仍持有的 Session。
+- `apps/runtime/src/agent-runtime-service.ts`：`startAutomationSuccessor` 在 Task 的 current revision 与该 Session 钉住的 revision 不一致时拒绝（`REVISION_NOT_ACKNOWLEDGED`）——否则交还自动化就是在未被确认的旧规格上恢复执行。`agent-observation-service.ts` 本格未改（该路径不需要改；结论已在 ADR-0028 写明）。
+- `packages/contracts/src/index.ts`：新增 `task.revision.create|list|delivery.list|delivery.get|delivery.resolve` 五个严格请求（只追加在 union 末尾；**未动 adapter 能力区**，那是 D2 领地）。
+- `apps/cli/src/main.ts`：`task revision create|list` 与 `task revision delivery list|get|resolve`（`--json`、稳定退出码：resolve 仅在确实满足时 0），usage 追加命令行。零新增确认。
+- `apps/runtime/src/main.ts`：服务接线、启动 reconcile（在 `reconcileSessionHandoffs` 之前跑，以便台账记下 incarnation 的启动时状态）、自己的 dispatch 分支。
+
+### 实际验证
+
+- `bun run check:fast`：退出码 0 —— 根与 UI TypeScript、231 项 Vitest、250 项 unit Bun tests（0 fail）。
+- `bun run check`：退出码 0 —— 根与 UI `tsc --noEmit`、231 项 Vitest、**439 项 Bun tests（0 fail，52 文件）**、UI Vite 构建。其中本格新增：`apps/runtime/test/revision-delivery.test.ts`（17 项）、`apps/runtime/test/stale-session-reconcile.test.ts`（7 项）；同时更新了 FOUNDATION-047 的 `verification-cancel.test.ts` 中两处写死 `phase1SchemaVersion === 18` 的断言（现为 19，因为本格占了 v19）。
+- 真实 CLI + 真实 Runtime + 独立 `CODEESTRA_HOME` + 协议 stub provider 的端到端：`task revision create`（未确认投递）→ `revision list`/`delivery list` → `task result capture` 被 `STALE_REVISION` 拒绝（exit 1）→ `delivery resolve --action retry`（exit 1，`UNSATISFIED`）→ `delivery resolve --action stop-and-restart`（exit 0，`SUPERSEDED_BY_RESTART`，successor revision = 新 revision）→ `delivery get` 回到 `satisfied: true`。
+- 收敛路径：stale 投影收敛后用**真实进程**验证「provider 仍在跑时不发信号」（`sleep 60` 在收敛后仍活着，由测试自己回收），以及 `PROVIDER_STOPPED`/`PROVIDER_OWNERSHIP_UNVERIFIABLE`/`PROCESS_IDENTITY_MISSING` 三个分支与 lease/incarnation 残留、重复启动幂等。
+- 迁移：真实 SQLite 上 v18 → v19 与 v16 → v19 两种历史库 additive 升级，既有行保留、三张新表存在、`foreign_key_check` 空。
+- 本格没有真实 provider 参与（无 Adapter 实现 `applyRevision`，Pi 仍 `UNSUPPORTED`），因此**没有**验证真实 provider 的 ACK 行为。
+
+### 未验证（不得当成已成立）
+
+- 真实 Provider 的 revision ACK：没有任何 Adapter 实现 `applyRevision`；`capabilities.revisionAcknowledgement` 对 Pi 仍是 `UNSUPPORTED`。脚本 Adapter 只证明「能力为 SUPPORTED 且端口返回 evidence 时才记 ACK」的编排与守卫，**不能**证明真实 Agent 能确认新规格。
+- 真实 provider 在 stop-and-restart 下复用同一 conversation（stub 只证明编排与 `sessionStorageRef` 参数的传递；真实 session file 双向恢复由 FOUNDATION-040 单独验证过）。
+- 修订期间未决 Attention 的顺序、实时 UI 投影（D3 领地）与 `task revision *` 的 UI 面。
+- 本格未改动 `packages/agent-adapters/**`、`apps/ui/**`、`packages/git/**`、`terminal-service.ts`、`session-handoff-service.ts`、`session-transcript-service.ts`、`agent-answer-service.ts`、`task-control-service.ts`（只调用其导出）；未改 `packages/storage/src/database.ts` 的任何既有方法或 `migrate()` 既有分支。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、UI 投影。
 1. 真实验证 ADR-0016：在一次性临时仓库中用真实 Pi 跑「启动 → 暂停 → 恢复 → 终止」，核对 provider 进程确实退出、`--session` 确实续接同一 conversation、超时进入 `RECOVERY_REQUIRED`；脚本 Adapter 不能替代该验收。
 2. ~~长命令后台化与进度事件~~：已由 FOUNDATION-039 / ADR-0019 完成持久 Operation、步骤级进度、`--background` 与 `task.operation.cancel`（CLI + 同一命令面 + UI）。~~剩余：token 级实时进度事件、verification run 的独立 `CANCELLED` 状态、取消后验证副本的回收~~：已由 FOUNDATION-047 / ADR-0027 完成（`CANCELLED` 一等终态 + 重建表、被取消副本仍走 ADR-0021 `reclaim`、进度改为 `OperationProgressed`/`OperationSettled` 领域事件并经 `events list/tail` 与 UI 实时可见）。剩余：`task.run` 的 provider 事件级进度（PTY/token 字节不进事件，见 ADR-0027 D05）、架构文档的 doc-sync。
 3. ~~ADR-0010 Phase 3 技术 spike~~：已由 FOUNDATION-040 完成（真实 Pi session-file 双向 RPC↔TUI 恢复、PTY 生命周期、safe-point fence 与权限模式 side channel，见 `docs/spikes/pi-session-handoff.md`）。~~handoff Operation / Session incarnation~~：Runtime 侧契约与状态已由 ADR-0023 / FOUNDATION-043 完成（STRICT 权限转既有 Attention、incarnation 绑定 + 原子拒绝过期决议、单 writer lease 的 `ATTACHMENT_BUSY`、安全点与 predecessor 归属核验、重启按事实 reconcile），并已合入 `dev`；`session handoff status/request/cancel/writer/admit` 的 `--json` 退出码稳定。剩余：~~PTY transport 与 successor 进程启动、detach/reattach 编排、CLI attach~~：已由 ADR-0026 / FOUNDATION-046 完成（Runtime 拥有的 PTY helper 上运行真实 `pi` 原生 TUI、`admit` 真交接、attach/detach/reattach、`release` 交还自动化并回到同一 session file、能力投影改为真实值）。仍在剩余：跨交接权限模式**完整矩阵**、并行工具批次安全点、PTY resize、真实模型在 TUI 中键入后交还的复验、**UI 终端**（C3 波次领地）。
-4. revision 投递确认，以及 Runtime 重启后对 stale ACTIVE Session 的启动 reconcile。
+4. ~~revision 投递确认，以及 Runtime 重启后对 stale ACTIVE Session 的启动 reconcile。~~ 已由 ADR-0028 / FOUNDATION-048 完成：投递成为一等需求 + append-only 尝试台账（schema v19），只有结构化 ACK 或经核验的 successor Execution 才算确认（「消息发出去了」永不当作确认），能力如实（Pi 仍 `UNSUPPORTED`）、不支持时走既有「协作停止 + 新建 Execution」，超时/重启中断按事实收口；`task revision create|list` 与 `task revision delivery list|get|resolve` 零确认、`--json`、退出码稳定；`reconcileStaleAgentSessions` 收敛重启后仍写 ACTIVE/RUNNING 的投影（不写 RUNNING、不声称静止、不发信号、不删资源，一律 `RECOVERY_REQUIRED` 并记账）。剩余（不在本格）：真实 provider 的 ACK 行为（需先有 Adapter 实现 `applyRevision`）、真实模型对投递提示的理解、修订/投递的 UI 投影。
 5. ~~验证副本与失败现场的回收~~：已由 ADR-0021/FOUNDATION-041 完成（`reclaim plan/apply/records`、归属校验、append-only 账本、启动 reconcile、默认保留失败现场、不新增确认）；同轮决定 Attention 工具参数继续原样入库。剩余：未注册目录的人工处理与跨项目批量回收。
 6. 识别「Agent 不用工具、在散文里提问并结束轮次」的形态（FOUNDATION-030 剩余的一半）：要么把它变成 Attention，要么至少不得记为未加说明的 `SUCCESS`。

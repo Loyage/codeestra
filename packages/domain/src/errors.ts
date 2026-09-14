@@ -2,7 +2,12 @@ export type DomainErrorCode =
   | 'INVALID_VALUE'
   | 'VERSION_CONFLICT'
   | 'INVALID_TRANSITION'
-  | 'GUARD_REJECTED';
+  | 'GUARD_REJECTED'
+  // Revision delivery (ADR-0028). A delivery may only be satisfied by a real acknowledgement or by
+  // a verified successor Execution, so the ways it can be violated are distinct, stable codes.
+  | 'REVISION_ALREADY_ACKNOWLEDGED'
+  | 'STALE_REVISION_ACKNOWLEDGEMENT'
+  | 'SUCCESSOR_REVISION_MISMATCH';
 
 export class DomainError extends Error {
   constructor(readonly code: DomainErrorCode, message: string) {

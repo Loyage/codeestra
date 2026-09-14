@@ -29,6 +29,10 @@ export type {
   TaskDependencyBlockReason, TaskDependencyFact, TaskDependencyMutation, TaskDependencyRecord,
   TaskDependencyRemoval, TaskDependencyStateChange,
   TaskLifecycleState, TaskResumeRequest, TaskStopRequest, TaskSummary,
+  AgentSessionStartupReconciliationRecord, RevisionDeliveryAttemptState,
+  StaleAgentSessionConvergence, StaleAgentSessionRecord, StaleSessionObservation,
+  TaskRevisionCreation, TaskRevisionDeliveryAttemptRecord, TaskRevisionDeliveryChannel,
+  TaskRevisionDeliveryRecord, TaskRevisionDeliveryState, TaskRevisionSummary,
   OperationProgressEventStep, OperationProgressEventSummary, OperationProgressPhase,
   RecordOperationProgressEventResult,
   TrustedProject, VerificationCandidateExecution, VerificationCandidates, VerificationEvidence,
@@ -41,6 +45,7 @@ export {
   operationProgressMigration,
   phase1Migration, phase1SchemaVersion, reclamationMigration, sessionHandoffMigration,
   sessionTerminalMigration,
+  revisionDeliveryMigration,
   stablePromotionMigration, taskControlMigration, taskDependenciesMigration, taskVerificationMigration,
   verificationProgressMigration,
 

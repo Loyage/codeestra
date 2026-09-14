@@ -65,8 +65,10 @@ import {
   reconcileInterruptedVerifications,
   reconcileSessionHandoffs,
   reconcileSessionTerminals,
+  reconcileStaleAgentSessions,
   reconcileWorkspacePreparations,
 } from './recovery-service.js';
+import { RevisionDeliveryService } from './revision-delivery-service.js';
 import {
   VerificationRunner,
   inspectVerificationPolicy,
@@ -211,6 +213,16 @@ const handoff = new SessionHandoffService({
   logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
 });
 handoff.listen();
+/**
+ * Task revision delivery (ADR-0028). It owns the delivery ledger, the capability-gated conversation
+ * attempt, and the explicit stop-and-restart disposition; scheduling stays with the coordinator.
+ */
+const revisionDeliveries = new RevisionDeliveryService({
+  storage,
+  registry,
+  coordinator,
+  logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
+});
 /** Built UI assets. The HTTP service is only started when a client asks for it. */
 const uiAssetsRoot = Bun.env.CODEESTRA_UI_DIST === undefined
   ? resolve(import.meta.dir, '../../../apps/ui/dist')
@@ -244,9 +256,30 @@ await reconcileInterruptedPromotions({
     repositoryRoot, ref,
   }),
 });
+// A Session/Execution projection that still says ACTIVE/RUNNING after a restart describes a provider
+// process this generation cannot observe, attach to, or claim. It is converged from the recorded
+// process-ownership evidence — never into a running state, never by claiming quiescence, and never by
+// signalling a process or deleting a worktree. It runs before the handoff reconcile so the audit row
+// records the incarnation state as it was at startup.
+const staleSessions = await reconcileStaleAgentSessions({
+  storage,
+  isHeldByThisRuntime: (sessionId) => coordinator.activeSessionIds().includes(sessionId),
+  logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
+});
+for (const stale of staleSessions) {
+  if (stale.outcome !== 'CONVERGED') continue;
+  console.error(`[runtime] stale Agent Session ${stale.sessionId} (${stale.observation}) was`
+    + ` converged to ${stale.projectedSessionState}/${stale.projectedExecutionState}`, stale.detail);
+}
 // The Runtime cannot prove it still holds any provider process or PTY after a restart, so its own
 // handoff state is reconciled from that fact instead of being restored optimistically.
 reconcileSessionHandoffs({ storage });
+// A revision delivery attempt that was in flight when the Runtime went down was never acknowledged;
+// it is concluded from that fact instead of being replayed or claimed.
+for (const attempt of revisionDeliveries.reconcileAtStartup()) {
+  console.error(`[runtime] revision delivery attempt ${attempt.attemptId} was concluded as`
+    + ` ${attempt.outcome}`, attempt.detail);
+}
 // A terminal this Runtime does not hold cannot be attached to or released; the fact is recorded and
 // the recorded processes are reported instead of being killed on a guess.
 const terminalReconcile = reconcileSessionTerminals({ storage });
@@ -544,6 +577,42 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         unarchivedAt: Date.now(),
       }));
     }
+    case 'task.revision.create':
+      // Creating a revision is a specification change, not an execution control: the running Agent is
+      // not paused here. What the Agent must know is recorded as a delivery requirement, and an
+      // Adapter with no acknowledgement channel leaves it visibly unsatisfied.
+      return success(request.requestId, await revisionDeliveries.createRevision({
+        projectId: request.projectId,
+        taskId: request.taskId,
+        expectedVersion: request.expectedVersion,
+        commandId: request.commandId,
+        ...(request.specification === undefined ? {} : { specification: request.specification }),
+        constraints: request.constraints,
+        reason: request.reason,
+        actor: 'local-user',
+      }));
+    case 'task.revision.list':
+      return success(request.requestId, {
+        revisions: revisionDeliveries.listRevisions(request.projectId, request.taskId),
+        deliveries: revisionDeliveries.listDeliveries(request.projectId, request.taskId),
+      });
+    case 'task.revision.delivery.list':
+      return success(request.requestId,
+        revisionDeliveries.listDeliveries(request.projectId, request.taskId));
+    case 'task.revision.delivery.get':
+      return success(request.requestId,
+        revisionDeliveries.getDelivery(request.projectId, request.deliveryId));
+    case 'task.revision.delivery.resolve':
+      return success(request.requestId, await revisionDeliveries.resolveDelivery({
+        projectId: request.projectId,
+        taskId: request.taskId,
+        deliveryId: request.deliveryId,
+        action: request.action,
+        expectedVersion: request.expectedVersion,
+        commandId: request.commandId,
+        adapterId: request.adapterId,
+        actor: 'local-user',
+      }));
     case 'task.verify': {
       // The Operation (and the verification run) exists before any command is spawned, so the
       // background form can return a handle and a cancel or a restart can still find the run.
