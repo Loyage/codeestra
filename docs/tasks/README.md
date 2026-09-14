@@ -2009,7 +2009,7 @@ Pi 的 attach / PTY handoff / incarnation（ADR-0010/0023/0026）**没有**被�
 
 ## FOUNDATION-052 — Phase 2 并行调度的决策固化（ADR-0030，纯文档）
 
-状态：**已实现（纯文档）、未 commit、未 push**。lane `lane/e0-phase2-decision`，基线**固定** `dev@cb7078ed`
+状态：**已实现（纯文档）、已提交并合入 `dev`**（lane commit `0b1d863`，dev 快进合入，集成详情见「Wave E 集成记录」）。lane `lane/e0-phase2-decision`，基线**固定** `dev@cb7078ed`
 （不 rebase、不合并新 dev、不 pull）；未提升 `main`、未重启稳定 Runtime、未触碰稳定工作树
 `/Users/loyage/Documents/codeestra`。**本格不改任何代码、不占用 schema 版本**：`phase1SchemaVersion` 仍为
 **v19**、`migration.ts` 一行未动。本格只把用户已拍板的 10 项决策固化为规格与设计；**Phase 2 的任何代码都还没写**，
@@ -2050,7 +2050,7 @@ Pi 的 attach / PTY handoff / incarnation（ADR-0010/0023/0026）**没有**被�
 - 未 commit、未 push、未提升 `main`、未重启稳定 Runtime、未触碰 `/Users/loyage/Documents/codeestra`。
 ## FOUNDATION-053 — ImpactSnapshot 与确定性 Conflict Analyzer（ADR-0031，schema v20）
 
-状态：实现 + 自查完成，**等待用户确认后才 commit**。worktree `/Users/loyage/Documents/codeestra-wt/e1-impact-analysis`，
+状态：实现 + 自查完成，**已提交并合入 `dev`**（lane commit `749e1fd`，dev merge `c03ee45`，集成详情见「Wave E 集成记录」）。worktree `/Users/loyage/Documents/codeestra-wt/e1-impact-analysis`，
 分支 `lane/e1-impact-analysis`，基线固定 `dev@cb7078ede92835bd3663b53dd4ac593b5543a879`（`phase1SchemaVersion` 由 19 → **20**）；
 未 rebase、未合并新 dev、未 pull、未 push、未提升 `main`、未触碰稳定工作树。
 
@@ -2187,7 +2187,7 @@ provider 的集成证据。仓库：`main == dev == 2dcc1a5`；两个 Task 都 R
   本格按「只允许在 `## NEXT` 之前插入一节」的纪律只插入本节，NEXT 行需要一次独立的更新。
 ## FOUNDATION-054 — 容量与槽位：全局上限、每 adapter 上限、reservation 与崩溃 reconcile（Wave E / E2）
 
-状态：**已实现、已自查，等待用户确认后才 commit**。lane 分支 `lane/e2-capacity-slots`，基线固定
+状态：**已实现、已自查、已提交并合入 `dev`**（lane commit `5982293`，dev merge `bd74e14`，集成详情见「Wave E 集成记录」）。lane 分支 `lane/e2-capacity-slots`，基线固定
 `dev@cb7078ede92835bd3663b53dd4ac593b5543a879`（未 rebase、未合并新 dev、未 pull、未 push、未提升 `main`、
 未重启稳定 Runtime、未触碰 `/Users/loyage/Documents/codeestra`）。ADR：**0032**（E0 = 0030、E1 = 0031；
 基线里还没有这两份，因此本格只写自己的号）。schema：**v21**。
@@ -2411,6 +2411,42 @@ scheduler reservations reconcile <project-id> [--json]
 - 临时夹具与 home 全部回收：`/tmp/ce-e2`、`/tmp/ce-e2-repo`、`/tmp/ce-e2-tools`，以及本格测试产生的
   `codeestra-slot-*` 临时目录（实测剩余 0）；证据日志与清理记录是 `/tmp` 下的临时文件，已在报告后删除（关键引文已写进本节）。
 
+## Wave E 集成记录（FOUNDATION-052/053/054，Phase 2 并行调度主体）
+
+状态：**三格均已提交并合入 `dev`**。基线统一固定 `dev@cb7078ede92835bd3663b53dd4ac593b5543a879`（`phase1SchemaVersion = 19`），三格均未 rebase、未合并新 dev、未 push、未提升 `main`、未触碰稳定工作树。
+
+| 格 | lane 分支 | lane commit | dev merge | FOUNDATION | ADR | schema |
+|---|---|---|---|---|---|---|
+| E0 | `lane/e0-phase2-decision` | `0b1d863` | fast-forward（无冲突） | 052 | 0030 | 无（纯文档） |
+| E1 | `lane/e1-impact-analysis` | `749e1fd` | `c03ee45` | 053 | 0031 | **v20** |
+| E2 | `lane/e2-capacity-slots` | `5982293` | `bd74e14` | 054 | 0032 | **v21** |
+
+合并顺序 E0 → E1 → E2（E0 先落规格与决策，再落 v20，最后落 v21）。三格在各自 worktree 内都跑过完整 `bun run check` 且退出码 0：E0 纯文档（typecheck）、E1 487 pass / 0 fail（57 文件）、E2 510 pass / 0 fail（58 文件）。
+
+### 集成时发现并修复的问题（两个分支上都没有）
+
+1. **迁移号与常量**：E1 与 E2 各自把 `phase1SchemaVersion` 提到 20 / 21 并各自追加自己的 `if (version < N)`，合并后取 **21** 且两步按升序共存（v20 impact、v21 capacity；**没有任何 `if (version < 16)`**）。
+2. **语义冲突（编译失败）**：E1 自己的迁移测试 `packages/storage/test/impact-analysis.test.ts` 写死了 `phase1SchemaVersion === 20`。在 E1 单独看是对的，在合并后（E2 的 v21）必失败。修复（`340dc67`）：断言改为 21，并说明该测试要证明的是「升级到达**当前**版本且落到本格的表」，不是「本格一定是最后一步」。这是与 Wave D 同类的问题：**单格绿、合并后才暴露**。
+3. **文档合并**：E0/E1/E2 三格都按「在 `## NEXT` 之前插入一节」的槽位纪律写，三次合并撞同一锚点，按 052 → 053 → 054 手工排序，内容一字未改。
+4. **`docs/tasks/README.md` 以外的 10 个文件手工冲突**（E2 合入时）：`packages/storage/src/{migration,database,index}.ts`、`packages/contracts/src/index.ts`、`apps/cli/src/main.ts`、`apps/runtime/src/main.ts`、`package.json`、两个 schema 版本断言测试。除版本号外均为**两侧都保留**（迁移两步共存、两格命令组共存、两份 import 共存、`test:unit`/`test:e2e` 列表取并集）。另外发现四处 git 的「共享前缀/后缀行」陷阱：两侧共用了同一个 `/**` 注释开头、同一个 `import {`、同一个结尾 `` `; ``，手工解决时必须把共用的那一行补回两次，否则会留下语法错误（已在提交前用 typecheck 逐一发现并修好）。
+
+### 集成后验证
+
+- `bun run check`（合并后的 `dev` 树，`CODEESTRA_HOME=/tmp/ce-integrate`）：退出码 0 —— 根与 UI `tsc --noEmit`、**265 项 Vitest**、**532 项 Bun tests（0 fail，61 文件）**、UI Vite 构建。
+- schema 现在为 **v21**；v16 仍未使用。
+- 同一次运行里有过 1 个失败是**既有负载敏感抖动**（`terminal-service.test.ts` 的 PTY 时序断言，FOUNDATION-046/050/053/054 已记录为未结项）：单独重跑 **7 pass / 0 fail**，与本波合入无关。
+- 未在 `dev` 上启动真实 provider，也未触碰稳定 Runtime；集成期间产生的 `/tmp/ce-integrate` 已回收。
+- **这不是 IntegrationBatch**：是用户确认后的手工 lane commit + `git merge --no-ff`。
+- **本波只交付了 Phase 2 的"原语"**：ImpactSnapshot/Conflict Analyzer（E1）与容量/槽位预留（E2）已经就位，但**没有任何引擎会自动 tick**——「两个 SAFE 任务真的同时开始」与 `--allow-unknown` 命令形态要等 Wave F 的调度引擎。任何人读 FOUNDATION-053/054 时不得把它们当作「并行调度已实现」。
+
+### 仍未验证（不得当成已成立）
+
+- **真实多任务并发执行**：本波没有引擎；E1 的端到端只有一个候选对若干活跃 Task 的判定，E2 的端到端只到「第三个任务得到容量等待」，没有两个 Task 真的同时跑。
+- **真实 Agent 的改动集是否落在声明映射里**：E1 的端到端 provider 是协议 stub；判定只对**观测到的 Git 变更集**负责。映射未声明的路径没有目录/模块语义，SAFE 的含义仍是「在声明的映射与观测事实下无法证明重叠」。
+- **真实 adapter 进程并发**与 provider 级槽位观测；**非 Git 共享资源**（按决策 8 不做）；**impact snapshot 的「快照代」重检**（E2 只记录调用方声明的 id）。
+- **架构文档 doc-sync 仍未做**：`sqlite-schema.md` 停在 v18，`state-machines.md`、`event-model.md` 缺 `CANCELLED`/`OperationProgressed`/`OperationSettled`，`agent-adapter.md` 缺 `controlledConfiguration`。
+- **UI**：`project impact *` 与 `scheduler capacity|reservations *` 只有 CLI/命令面完备，没有任何 UI 投影（`apps/ui/**` 本波未动）。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、~~UI 投影~~（已由 FOUNDATION-050 完成 promotion/dependency 投影）。
@@ -2419,4 +2455,5 @@ scheduler reservations reconcile <project-id> [--json]
 3. ~~ADR-0010 Phase 3 技术 spike~~：已由 FOUNDATION-040 完成（真实 Pi session-file 双向 RPC↔TUI 恢复、PTY 生命周期、safe-point fence 与权限模式 side channel，见 `docs/spikes/pi-session-handoff.md`）。~~handoff Operation / Session incarnation~~：Runtime 侧契约与状态已由 ADR-0023 / FOUNDATION-043 完成（STRICT 权限转既有 Attention、incarnation 绑定 + 原子拒绝过期决议、单 writer lease 的 `ATTACHMENT_BUSY`、安全点与 predecessor 归属核验、重启按事实 reconcile），并已合入 `dev`；`session handoff status/request/cancel/writer/admit` 的 `--json` 退出码稳定。剩余：~~PTY transport 与 successor 进程启动、detach/reattach 编排、CLI attach~~：已由 ADR-0026 / FOUNDATION-046 完成（Runtime 拥有的 PTY helper 上运行真实 `pi` 原生 TUI、`admit` 真交接、attach/detach/reattach、`release` 交还自动化并回到同一 session file、能力投影改为真实值）。仍在剩余：跨交接权限模式**完整矩阵**、并行工具批次安全点、PTY resize、真实模型在 TUI 中键入后交还的复验。~~UI 终端~~：已由 FOUNDATION-050 完成（终端面板、交接/incarnation、依赖图与 BLOCKED 原因、promotion、verification `CANCELLED` 语义色；仅人工目视确认，未做浏览器/桌面自动化）。
 4. ~~revision 投递确认，以及 Runtime 重启后对 stale ACTIVE Session 的启动 reconcile。~~ 已由 ADR-0028 / FOUNDATION-048 完成：投递成为一等需求 + append-only 尝试台账（schema v19），只有结构化 ACK 或经核验的 successor Execution 才算确认（「消息发出去了」永不当作确认），能力如实（Pi 仍 `UNSUPPORTED`）、不支持时走既有「协作停止 + 新建 Execution」，超时/重启中断按事实收口；`task revision create|list` 与 `task revision delivery list|get|resolve` 零确认、`--json`、退出码稳定；`reconcileStaleAgentSessions` 收敛重启后仍写 ACTIVE/RUNNING 的投影（不写 RUNNING、不声称静止、不发信号、不删资源，一律 `RECOVERY_REQUIRED` 并记账）。剩余（不在本格）：真实 provider 的 ACK 行为（需先有 Adapter 实现 `applyRevision`）、真实模型对投递提示的理解、修订/投递的 UI 投影。
 5. ~~验证副本与失败现场的回收~~：已由 ADR-0021/FOUNDATION-041 完成（`reclaim plan/apply/records`、归属校验、append-only 账本、启动 reconcile、默认保留失败现场、不新增确认）；同轮决定 Attention 工具参数继续原样入库。剩余：未注册目录的人工处理与跨项目批量回收。
-6. 识别「Agent 不用工具、在散文里提问并结束轮次」的形态（FOUNDATION-030 剩余的一半）：要么把它变成 Attention，要么至少不得记为未加说明的 `SUCCESS`。
+6. 识别「Agent 不用工具、在散文里提问并结束轮次」的形态（FOUNDATION-030 剩余的一半）：要么把它变成 Attention，要么至少不得记为未加说明的 `SUCCESS`。**（Wave F 的 F3 格领地）**
+7. ~~Phase 2 并行调度主体~~（已在 `docs/roadmap/mvp.md` Phase 2 验收矩阵）：**规格、分析器与容量原语**已由 Wave E 完成（ADR-0030/0031/0032：`.codeestra/impact.json` 映射与确定性 ImpactSnapshot、`SAFE|UNKNOWN|CONFLICTING` 与稳定 reason code、全局默认 2 + 每 adapter 上限、reservation/release/崩溃 reconcile）；**剩余**：调度引擎本体（自动 tick、候选排序 + 冲突/容量判定接入、实际 diff 超出预测的处置、`--allow-unknown` 命令形态）与它的 UI 投影。未经引擎前，Phase 2 验收矩阵里「两个 SAFE 任务真的同时跑」仍然**未成立**。
