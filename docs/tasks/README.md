@@ -2048,6 +2048,143 @@ Pi 的 attach / PTY handoff / incarnation（ADR-0010/0023/0026）**没有**被�
 - **未占 schema 版本**（仍 v19）、未改 `migration.ts`、未改任何 `*.ts`/`*.tsx`/`*.json`/`package.json`/`apps/**`/`packages/**`。
 - **未动 `## NEXT` 的条目本身**（含其中仍写着「并行调度」待办的行——按槽位纪律需一次独立的 NEXT 更新）。
 - 未 commit、未 push、未提升 `main`、未重启稳定 Runtime、未触碰 `/Users/loyage/Documents/codeestra`。
+## FOUNDATION-053 — ImpactSnapshot 与确定性 Conflict Analyzer（ADR-0031，schema v20）
+
+状态：实现 + 自查完成，**等待用户确认后才 commit**。worktree `/Users/loyage/Documents/codeestra-wt/e1-impact-analysis`，
+分支 `lane/e1-impact-analysis`，基线固定 `dev@cb7078ede92835bd3663b53dd4ac593b5543a879`（`phase1SchemaVersion` 由 19 → **20**）；
+未 rebase、未合并新 dev、未 pull、未 push、未提升 `main`、未触碰稳定工作树。
+
+**关于 ADR-0030**：本节所述的 Wave E **E0 格是并行格**，其决策 ADR（Phase 2 十项决策，编号 0030）在本格基线 `dev@cb7078e`
+中**不存在**。本格不自行发明产品语义，只实现用户已拍板的那部分，并把它写成 **ADR-0031**；E0 合入后如有重号或语义差异，在 `dev` 解决。
+
+### 交付物
+
+- `packages/contracts/src/impact-policy.ts`（新）：`.codeestra/impact.json` 严格 Zod schema、`impactPolicyPath`、
+  `impactPolicyVersion = 'impact-policy-v1'`、稳定错误码、`normalizeImpactPath`（拒绝绝对路径/`~`/`..`/`.`/空段/`\`/NUL/`.git`/非法通配符）、
+  按组件比较的模式匹配、`impactPolicyDigest`/`impactPolicyLabel`、确认 schema。
+- `packages/domain/src/impact-analysis.ts`（新，纯函数）：`impactAnalyzerVersion = 'impact-analyzer-v1'`、`createImpactSnapshot`、
+  `deriveImpactScope`、`assessCandidate`、`isSnapshotCurrent`、`explainAssessment`、稳定 reason code 与 `CONFLICT | INCOMPLETE | STALE_OR_INVALID | SAFE` 分组。
+- `apps/runtime/src/impact-analysis-service.ts`（新）：读 main ref 的映射、实测路径大小写、观测 worktree 变更集、
+  持久化/重用快照、逐对写审计行、`validateImpactPolicy`。
+- `packages/storage/**`：**v20** 迁移（`project_impact_policy_confirmations`、`impact_snapshots`、`impact_assessments` + 唯一索引 + append-only 触发器）、
+  确认与快照/判定读写、活跃集合投影；`trustProject` 增加可选的 impact 确认参数。
+- `packages/contracts/src/index.ts`：union 末尾追加 `project.impact.validate|show|explain`；`project.trust` 增加可选 `expectedImpactPolicy`。
+- `apps/cli/src/main.ts`：`project impact validate|show|explain`（`--json`、稳定退出码）；`open`/`project trust` 显示并回显映射摘要。
+- `apps/runtime/src/main.ts`：三个命令接线 + `project.trust` 记录映射确认 + `project.list` 投影 `confirmedImpactPolicy`。
+- 测试：`packages/domain/test/impact-analysis.test.ts`（34）、`packages/contracts/test/impact-policy.test.ts`（9）、
+  `packages/storage/test/impact-analysis.test.ts`（12）、`apps/runtime/test/cli-impact.test.ts`（1 项端到端）。
+- 文档：`docs/decisions/0031-*.md`（新）、`docs/decisions/README.md`（表尾一行 + Phase 2 一行）、本节。
+
+### 命令面用法
+
+```bash
+# 映射是否有效且在生效（退出码 0 = OK / OK_UNTRUSTED；否则 1，code 在 --json 里）
+bun run codeestra project impact validate [path] [--json]
+# 某个 Task 当前 revision 的 ImpactSnapshot（不完整也产出，complete:false 可脚本判定）
+bun run codeestra project impact show <project-id> <task-id> [--json]
+# 与每个活跃/已预留 Task 的判定 + 稳定 reason code + 命中范围（退出码 0 仅当 SAFE_TO_PARALLELIZE）
+bun run codeestra project impact explain <project-id> <task-id> [--json]
+```
+
+`.codeestra/impact.json` 示例（本格证据运行用的就是这一份）：
+
+```json
+{ "version": 1,
+  "importantDirectories": ["core"],
+  "modules": [{ "id": "core-module", "paths": ["core/**"] }],
+  "globalResources": [{ "id": "lockfile", "kind": "DEPENDENCY_LOCKFILE", "paths": ["bun.lock"],
+    "consumers": { "state": "DECLARED", "paths": ["package.json"] } }] }
+```
+
+### 端到端证据（真实 CLI + 真实 Runtime + `CODEESTRA_HOME=/tmp/ce-e1` + 临时仓库）
+
+Agent 是**协议 stub**（写一个 `src/agent/<task-id>.ts` 后保持存活，使 Task 持续持有资源）；它只证明命令面与编排，不是真实
+provider 的集成证据。仓库：`main == dev == 2dcc1a5`；两个 Task 都 RUNNING，各有一个 worktree。
+
+1. **SAFE**（`explain`，**退出码 0**）：两侧各只改了自己的 `src/agent/<task-id>.ts`（`mapping` 未声明 `src/agent`，只有文件不重叠）：
+   ```
+   impact complete (RECORDED)
+   plan 2dcc1a5f7003 · mapping impact-policy-v1#590ff5efdedc · path case INSENSITIVE (FILESYSTEM)
+   paths 1 changed, 1 not classified by the mapping
+   compared 1 active/reserved task(s)
+     verdict SAFE_TO_PARALLELIZE (NO_CONFLICT)
+     [SAFE] no overlapping scope with 78ae052c-… (revision 5b0075e5-…)
+   evidence: path case mode measured on "REPO" resolves to "repo" in the same parent
+   ```
+2. **CONFLICTING**（`explain`，**退出码 1**）：两侧各在声明的 `core` 下新增**不同**文件（`core/first.ts` / `core/second.ts`）：
+   ```
+   important directories: core
+   modules: core-module
+     verdict CONFLICTING (IMPORTANT_DIRECTORY_OVERLAP, SAME_MODULE)
+     [CONFLICT] IMPORTANT_DIRECTORY_OVERLAP … (SAME_DIRECTORY): both revisions change files inside
+       important director(ies) core (other revision: core) — directories core
+     [CONFLICT] SAME_MODULE … both revisions change files of module(s) core-module — modules core-module
+   ```
+   同一文件相撞时给出命中路径：`[CONFLICT] SAME_FILE … (SAME_FILE): 1 file(s) changed by both — paths src/agent/78ae052c-….ts`。
+3. **UNKNOWN（映射缺失）**（`explain`，**退出码 1**）：另一个没有 `.codeestra/impact.json` 的项目（同一个 Runtime）
+   ——`validate` 退出码 1 / `code: POLICY_ABSENT`：
+   ```
+   impact incomplete: POLICY_ABSENT (RECORDED)
+   plan 6b0f7672b36b · mapping impact-policy-v1#absent
+   compared 0 active/reserved task(s)
+     verdict UNKNOWN (INCOMPLETE_IMPACT)
+     [INCOMPLETE] INCOMPLETE_IMPACT on the candidate: impact is incomplete: POLICY_ABSENT
+   ```
+   注意：即使**没有任何活跃任务**，不完整的映射仍是 UNKNOWN——这是本格的核心不变量。
+4. **失效与重用**：同一事实重复 `show` → `disposition REUSED`（同一个 snapshot id）；
+   `task revision create` 改修订后 → `disposition RECORDED`，新 revision + **新的 snapshot id**（旧快照保留为审计，不被重用也不被覆盖）；
+   变更集变大/变小 → 新的 `change_fingerprint` → 新快照（因此删掉冲突文件后不会残留假冲突）。
+5. 结束时 `bun run codeestra stop` → `status: STOPPED`；`/tmp/ce-e1` 与 `/tmp/e1-evidence` 已回收。
+
+### 实际跑过的检查与结果
+
+- `bun run check:fast`：**退出码 0**（根与 UI typecheck + **265** Vitest + **297** unit Bun tests）。
+- `bun run check`（完整：typecheck + UI typecheck + Vitest + 全部 Bun tests + UI 构建）：
+  第一次 **退出码 1**，失败的是**未更新的版本断言**（`phase1SchemaVersion` 由 19 变 20）与我自己的一个 SQLite 排序断言
+  （两条快照 `created_at` 相同时按随机 id 排序，测试不该依赖它）；修好后再跑 **退出码 0**（265 Vitest + **487** Bun tests，0 fail）。
+- `apps/runtime/test/cli-impact.test.ts` 单独跑：**1 pass / 0 fail**（真实 CLI + 真实 Runtime + 临时 `CODEESTRA_HOME`）。
+- 本格四个测试文件单独重跑：**Vitest 34 + Bun 22，0 fail**。
+- **负载敏感抖动（既有问题，非本格引入）**：在短时间内连续重跑整个 Bun 套件后，曾出现 2–4 个失败，全部落在**其他格**的
+  时序敏感测试上（`stable promotion preparation` 单条耗时 154s、`Runtime lifecycle: stop is a fact` 单条耗时 681s、
+  `Codex adapter observation`、`production Pi adapter registry`），本格四个文件一次都没有失败；同样的完整套件在**机器空闲时**
+  是 487 pass / 0 fail。抖动根因沿用 FOUNDATION-046/050 的未结项（仍为负载敏感，未定位），本格不声称已修复它。
+- 迁移：真实 SQLite 上 **v19 → v20** 与 **v16 → v20** 两种历史库都 additive 升到 20（既有行保留、三张新表存在、
+  `PRAGMA foreign_key_check` 为空、升级不会凭空造出确认行）；`if (version < 16)` 不存在。
+
+### 改到的共享槽位文件（按槽位纪律）
+
+- `packages/storage/src/migration.ts`：只占 **v20**，只追加 `impactAnalysisMigration` 与 `if (version < 20)`。
+- `packages/contracts/src/index.ts`：只追加 `project.impact.*` 到 union 末尾（并加一行 `export * from './impact-policy.js'` 与 `project.trust` 的可选 `expectedImpactPolicy`）；**未动 adapter 能力区**。
+- `apps/cli/src/main.ts`：新增 `project impact` 分支块 + `usage()` 追加行 + `open`/`trust` 的映射摘要展示。
+- `apps/runtime/src/main.ts`：只做接线（三个 case + `project.trust` 记录确认 + `project.list` 多一个字段）；**未改启动序列**（启动 reconcile 由 E2 追加）。
+- `package.json`：只在 `test:unit` 忽略列表与 `test:e2e` 列表加 `cli-impact`。
+- `docs/decisions/README.md`：表尾追加 ADR-0031 一行 + Phase 2 决策表一行。
+- **连带改动（非我领地，但版本提升必须）**：`apps/runtime/test/revision-delivery.test.ts` 与 `apps/runtime/test/verification-cancel.test.ts`
+  中写死的 `phase1SchemaVersion === 19` 断言改为 20（前者同时把 `impactAnalysisMigration` 加进其迁移步骤列表）。只改了版本断言，未改动这些测试的语义。
+- **未改**：`packages/git/**`（复用既有 `inspectChangeSet`/`changeSetPaths`/`readRefFile`/`readLocalRefCommit`，**零改动**）、
+  `apps/ui/**`、`apps/runtime/src/{scheduler,workspace-service,adapter-registry,agent-runtime-service,terminal-service,session-handoff-service}.ts`、
+  `packages/agent-adapters/**`、`PROJECT_SPEC.md`、`AGENTS.md`、`docs/architecture/**`。
+
+### 未验证 / 未做（不得当成已成立）
+
+- **不用真实 Agent**：端到端证据里的 provider 是协议 stub。「真实 Agent 的改动集是否落在声明的映射里」本格无法验证，
+  也不由本格负责——判定只对**观测到的 Git 变更集**负责。
+- **映射未声明路径没有目录/模块语义**：只有「同文件」与「声明的资源」规则覆盖它们。SAFE 的含义是「在声明的映射与观测事实下无法证明重叠」，
+  不是「两个 Agent 永不越界」；`scheduler.md` §4 的残余风险继续成立。
+- **gitignore 的产物不在变更集里**（构建输出、本地环境文件、`node_modules`）；**非 Git 共享资源**（端口/数据库/dev server）本波明确不做。
+- **symlink**：端到端测试在 worktree 里构造了指向 `/tmp` 的**真实 symlink**，`show` 把它作为普通仓库相对路径 `escape-link` 报出（按 Git 报的名字比较，
+  内容从不被读取，`complete` 仍为 true）；映射侧则由 contracts 测试拒绝一切逃逸语法（`..`/绝对路径/`~`/`.git`/空段）。可逃逸的读取路径在结构上不存在
+  （映射经 `git cat-file`、变更集经 `git diff`/`git ls-files`，从不打开工作树文件）。
+- **活跃集合只按 `resource_held` 取**：本格不实现调度循环，因此没有「两个 Task 同时被判定为 SAFE 并真的同时开始」的真实并发压力面（Wave F）；
+  验证到的只是同一时刻最多一个候选与若干活跃 Task 的判定。
+- **基线不同即逐对 UNKNOWN**：本格不实现「把活跃 Task 的快照重算到新基线」（那需要 rebase/重建 worktree），因此 `dev` 前进后未重算的活跃 Task 会让新候选
+  保持 UNKNOWN。CLI 会输出项目 dev commit 与是否与基线一致，可解释但仍属保守代价。
+- **`validate` 不检查声明路径是否存在于仓库**（一个 Task 即将创建的目录是合法声明）；`show`/`explain` 的「未分类路径数」是操作者的主要提示。
+- **UI 投影**：本格不做（`apps/ui/**` 属 Wave F）；`project impact *` 的能力只在 CLI/命令面完备。
+- **架构文档 doc-sync 未做**（`docs/architecture/**` 不在本格领地）：`sqlite-schema.md` 仍停在 v18，未记录 v19/v20；
+  `docs/architecture/conflict-analyzer.md` 仍是设计文本，未回写实现细节（例如单侧「重要目录」集合的派生含义、聚合判定与配对审计行的关系）。
+- `docs/tasks/README.md` 的 `## NEXT`（Phase 2：并行 worktree 调度、资源预留、Conflict Analyzer、多成员批次）**未改**：
+  本格按「只允许在 `## NEXT` 之前插入一节」的纪律只插入本节，NEXT 行需要一次独立的更新。
 
 ## NEXT — 最小可用纵向切片
 

@@ -7,6 +7,7 @@ import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOpt
   runtimePingResultSchema,
   runtimeResponseSchema, runtimeStopResultSchema, runtimeStreamFrameSchema,
   type ProjectIdentity, type QuestionnaireAnswer, type RuntimeRequest, type RuntimeResponse,
+  type ImpactPolicyConfirmation,
   type SessionTranscriptEntry, type SessionTranscriptView,
   type VerificationPolicyInspection } from '@codeestra/contracts';
 import {
@@ -23,9 +24,14 @@ interface TrustedProjectListing {
   readonly name: string;
   readonly repoRoot: string;
   readonly gitCommonDir: string;
-  /** The active policy confirmation, or null when trust never confirmed one. */
+  /** The active verification policy confirmation, or null when trust never confirmed one. */
   readonly confirmedPolicy:
     { readonly state: 'ABSENT' | 'PRESENT'; readonly digest: string | null;
+      readonly mainRef: string; readonly mainCommit: string } | null;
+  /** The active impact-mapping confirmation, or null when trust never declared one. */
+  readonly confirmedImpactPolicy:
+    { readonly state: 'ABSENT' | 'PRESENT' | 'INVALID'; readonly digest: string | null;
+      readonly contentDigest: string | null; readonly code: string | null;
       readonly mainRef: string; readonly mainCommit: string } | null;
 }
 
@@ -771,6 +777,12 @@ function usage(): never {
   bun run codeestra project policy [path]
   bun run codeestra project trust [path] [--yes]
   bun run codeestra project list
+  bun run codeestra project impact validate [path] [--json]
+  bun run codeestra project impact show <project-id> <task-id> [--json]
+  bun run codeestra project impact explain <project-id> <task-id> [--json]
+    # exit 0 for validate only when a mapping exists at the main ref and is the confirmed one;
+    # exit 0 for explain only for SAFE_TO_PARALLELIZE. UNKNOWN means "cannot be proven", not
+    # "no conflict", and exits 1 like CONFLICTING does (the code is in --json).
   bun run codeestra task create <project-id> <specification> [--constraint <text>]…
     [--kind DEVELOPMENT]
   bun run codeestra task list <project-id> [--all]
@@ -888,7 +900,17 @@ acquisition exits 1 with ATTACHMENT_BUSY, and a refused admission exits 1. admit
 successor — a PTY-hosted native terminal for takeover, an RPC provider for the return — so it is the
 command that moves the lease; it refuses before recording anything rather than leaving a half-started
 successor, and an already admitted request replays the successor it recorded instead of starting a
-second one.`);
+second one.
+
+project impact is deterministic conflict analysis: it maps the owned worktree's Git change set onto
+the .codeestra/impact.json mapping at the project main ref and compares it with every Task that
+currently holds a resource. It is read-only, it never starts or schedules a Task, and it uses no
+model: the verdict is SAFE_TO_PARALLELIZE, UNKNOWN, or CONFLICTING, each with stable reason codes and
+the exact intersecting paths, directories, modules, or shared resources. show prints one Task's
+ImpactSnapshot, explain explains a verdict against the active Tasks, and validate reports whether a
+mapping is present at the main ref and is the digest project trust confirmed. UNKNOWN is recorded
+for every Task whose mapping is missing, unconfirmed, invalid, or empty, and for any active Task
+whose change set cannot be observed — that is the point: nothing is called safe without proof.`);
   process.exit(2);
 }
 
@@ -927,6 +949,185 @@ function describeVerificationPolicy(policy: VerificationPolicyInspection): void 
   }
   console.error('task verify runs these in an isolated copy of the tested commit, never in your'
     + ' working tree.');
+}
+
+/**
+ * What `project.impact.validate` reports. Only the fields this client renders are named; the rest of
+ * the payload is passed through untouched by `--json`.
+ */
+interface ImpactPolicyValidationView {
+  readonly code: 'OK' | 'OK_UNTRUSTED' | 'POLICY_ABSENT' | 'POLICY_INVALID' | 'POLICY_NOT_CONFIRMED';
+  readonly valid: boolean;
+  readonly repoRoot: string;
+  readonly mainRef: string;
+  readonly mainCommit: string;
+  readonly trusted: { readonly projectId: string; readonly name: string } | null;
+  readonly policy: {
+    readonly state: 'ABSENT' | 'PRESENT' | 'INVALID';
+    readonly digest: string | null;
+    readonly contentDigest: string | null;
+    readonly label: string | null;
+    readonly confirmed: boolean;
+    readonly confirmationState: string;
+    readonly errorCode: string | null;
+    readonly errorMessage: string | null;
+    readonly importantDirectories: number;
+    readonly modules: number;
+    readonly globalResources: number;
+  };
+  readonly warnings: readonly string[];
+  readonly analyzerVersion: string;
+}
+
+interface ImpactSnapshotView {
+  readonly taskId: string;
+  readonly taskState: string;
+  readonly revisionId: string;
+  readonly caseMode: string;
+  readonly caseModeSource: string;
+  readonly disposition: 'RECORDED' | 'REUSED' | 'UNAVAILABLE';
+  readonly dispositionDetail: string | null;
+  readonly unavailableDetail: string | null;
+  readonly baseline: {
+    readonly workspaceBaseCommit: string | null;
+    readonly projectDevCommit: string | null;
+    readonly matchesProjectDev: boolean;
+  };
+  readonly policy: ImpactPolicyValidationView['policy'];
+  readonly snapshot: {
+    readonly id: string;
+    readonly baseCommit: string;
+    readonly policyVersion: string;
+    readonly complete: boolean;
+    readonly incompleteReasons: readonly string[];
+    readonly files: readonly string[];
+    readonly importantDirectories: readonly string[];
+    readonly modules: readonly string[];
+    readonly globalResources: readonly {
+      readonly id: string; readonly kind: string; readonly written: boolean; readonly read: boolean;
+    }[];
+    readonly unclassifiedFiles: readonly string[];
+    readonly evidence: readonly string[];
+  } | null;
+}
+
+interface ImpactExplainView extends ImpactSnapshotView {
+  readonly candidate: ImpactSnapshotView;
+  readonly active: readonly {
+    readonly taskId: string;
+    readonly taskState: string;
+    readonly executionState: string;
+    readonly complete: boolean;
+    readonly incompleteReasons: readonly string[];
+    readonly disposition: string;
+    readonly detail: string | null;
+  }[];
+  readonly assessment: { readonly verdict: string; readonly reasonCodes: readonly string[] };
+  readonly explanation: readonly string[];
+}
+
+/**
+ * The exact impact-mapping facts the user reviewed, echoed into `project trust` so a mapping that
+ * moves between the inspection and the confirmation is refused (`IMPACT_POLICY_CHANGED`) instead of
+ * being confirmed silently.
+ */
+function expectedImpactPolicyConfirmation(report: ImpactPolicyValidationView): ImpactPolicyConfirmation {
+  if (report.policy.state === 'PRESENT') {
+    return { state: 'PRESENT', mainCommit: report.mainCommit,
+      digest: report.policy.digest as string };
+  }
+  if (report.policy.state === 'INVALID') {
+    return { state: 'INVALID', mainCommit: report.mainCommit,
+      contentDigest: report.policy.contentDigest as string,
+      code: report.policy.errorCode ?? 'INVALID_IMPACT_POLICY' };
+  }
+  return { state: 'ABSENT', mainCommit: report.mainCommit };
+}
+
+/** One line per declared mapping, so `project trust` shows what a confirmation actually accepts. */
+function describeImpactPolicy(report: ImpactPolicyValidationView['policy']): void {
+  if (report.state === 'ABSENT') {
+    console.error('Impact mapping (.codeestra/impact.json at the main ref): absent.');
+    console.error('  Without a mapping no impact can be proven complete, so every conflict verdict'+
+      ' is UNKNOWN and nothing runs in parallel.');
+    return;
+  }
+  if (report.state === 'INVALID') {
+    console.error('Impact mapping (.codeestra/impact.json at the main ref): INVALID.');
+    console.error(`  ${report.errorMessage ?? report.errorCode ?? 'unparsable mapping'}`);
+    console.error('  Every conflict verdict is UNKNOWN until the mapping parses.');
+    return;
+  }
+  console.error(`Impact mapping (.codeestra/impact.json at the main ref):`+
+    ` ${report.label ?? ''}${report.confirmed ? ' (confirmed)' : ' (NOT confirmed)'}`);
+  console.error(`  declared: ${report.importantDirectories} important director(ies),`+
+    ` ${report.modules} module(s), ${report.globalResources} shared resource(s)`);
+  if (!report.confirmed) {
+    console.error('  This digest is not the confirmed one, so every verdict is UNKNOWN until the'+
+      ' project is trusted again.');
+  }
+}
+
+function printImpactValidation(report: ImpactPolicyValidationView): void {
+  console.log(`project impact: ${report.code}`);
+  console.log(`repo ${report.repoRoot}`);
+  console.log(`main ${report.mainRef} @ ${report.mainCommit.slice(0, 12)}`);
+  console.log(report.trusted === null
+    ? 'not trusted (run project trust to make a mapping effective)'
+    : `trusted as ${report.trusted.name} (${report.trusted.projectId})`);
+  describeImpactPolicy(report.policy);
+  for (const warning of report.warnings) console.error(`warning: ${warning}`);
+  if (report.policy.state === 'INVALID' && report.policy.errorCode !== null) {
+    console.log(`error ${report.policy.errorCode}`);
+  }
+}
+
+function printImpactSnapshot(view: ImpactSnapshotView): void {
+  const snapshot = view.snapshot;
+  console.log(`task ${view.taskId} (${view.taskState}) revision ${view.revisionId}`);
+  if (snapshot === null) {
+    console.log(`impact unavailable: ${view.unavailableDetail ?? 'no snapshot could be derived'}`);
+    return;
+  }
+  console.log(`impact ${snapshot.complete
+    ? 'complete'
+    : `incomplete: ${snapshot.incompleteReasons.join(', ')}`} (${view.disposition})`);
+  console.log(`snapshot ${snapshot.id}`);
+  console.log(`plan ${snapshot.baseCommit.slice(0, 12)} · mapping ${snapshot.policyVersion}`+
+    ` · path case ${view.caseMode} (${view.caseModeSource})`);
+  console.log(`baseline ${snapshot.baseCommit.slice(0, 12)} · project dev`+
+    ` ${view.baseline.projectDevCommit?.slice(0, 12) ?? 'missing'}`+
+    `${view.baseline.matchesProjectDev ? ' (matches)' : ' (DIFFERENT: peers on another baseline are UNKNOWN)'}`);
+  console.log(`paths ${snapshot.files.length} changed, ${snapshot.unclassifiedFiles.length}`+
+    ' not classified by the mapping');
+  if (snapshot.files.length > 0 && snapshot.files.length <= 12) {
+    console.log(`  ${snapshot.files.join('\n  ')}`);
+  }
+  console.log(`important directories: ${snapshot.importantDirectories.length === 0
+    ? 'none matched'
+    : snapshot.importantDirectories.join(', ')}`);
+  console.log(`modules: ${snapshot.modules.length === 0 ? 'none matched' : snapshot.modules.join(', ')}`);
+  console.log('shared resources:');
+  if (snapshot.globalResources.length === 0) console.log('  none matched');
+  for (const resource of snapshot.globalResources) {
+    console.log(`  ${resource.id} (${resource.kind})`+
+      `${resource.written ? ' changed' : ''}${resource.read ? ' + depends on it' : ''}`);
+  }
+  for (const line of snapshot.evidence) console.log(`evidence: ${line}`);
+}
+
+function printImpactExplanation(view: ImpactExplainView): void {
+  printImpactSnapshot(view.candidate);
+  console.log(`\ncompared ${view.active.length} active/reserved task(s)`);
+  for (const peer of view.active) {
+    console.log(`  ${peer.taskId} (${peer.taskState}/${peer.executionState})`+
+      ` impact ${peer.complete ? 'complete' : `incomplete: ${peer.incompleteReasons.join(', ')}`}`+
+      `${peer.disposition === 'UNAVAILABLE' ? ' UNAVAILABLE' : ''}`);
+  }
+  // `explainAssessment` already leads with the verdict and its reason codes, so the human view
+  // simply prints those lines instead of repeating the header.
+  console.log('');
+  for (const line of view.explanation) console.log(`  ${line}`);
 }
 
 /**
@@ -1077,6 +1278,11 @@ try {
     const policy = await call({ command: 'project.verificationPolicy',
       path }) as VerificationPolicyInspection;
     describeVerificationPolicy(policy);
+    // The same trust event confirms the impact mapping (ADR-0031). Showing it here keeps the
+    // STRICT confirmation a single decision that covers both policies — it adds no extra step.
+    const impact = await call({ command: 'project.impact.validate',
+      path }) as ImpactPolicyValidationView;
+    describeImpactPolicy(impact.policy);
 
     const mode = await currentPermissionMode();
     const known = (await call({ command: 'project.list' }) as TrustedProjectListing[])
@@ -1088,16 +1294,22 @@ try {
     const confirmation = known?.confirmedPolicy ?? null;
     // One confirmation per project on the normal path. The rule mirrors the gate task verify
     // applies: the confirmed *policy digest* is what must still match, so committing to the main
-    // ref without touching the policy file never asks for a new confirmation.
+    // ref without touching the policy file never asks for a new confirmation. The impact mapping is
+    // confirmed by the same event, so it is checked the same way.
     const alreadyConfirmed = confirmation !== null
       && confirmation.state === policy.state
       && (policy.state !== 'PRESENT' || confirmation.digest === policy.digest);
-    if (alreadyConfirmed) {
+    const impactConfirmation = known?.confirmedImpactPolicy ?? null;
+    const impactAlreadyConfirmed = impactConfirmation !== null
+      && impactConfirmation.state === impact.policy.state
+      && (impact.policy.state !== 'PRESENT'
+        || impactConfirmation.digest === impact.policy.digest);
+    if (alreadyConfirmed && impactAlreadyConfirmed) {
       console.error(`\nAlready trusted as ${String(known?.name)}; the policy at the main ref is the`
         + ' confirmed one, so nothing needs confirming again.');
     } else {
       if (known !== undefined) {
-        console.error('\nThe confirmation on file no longer matches this repository: the policy at'
+        console.error('\nThe confirmation on file no longer matches this repository: a policy at'
           + ' the main ref changed (or was never confirmed), so it needs confirming again.');
       }
       if (mode === 'FULL') {
@@ -1117,6 +1329,7 @@ try {
         expectedVerificationPolicy: policy.state === 'PRESENT'
           ? { state: 'PRESENT', mainCommit: policy.mainCommit, digest: policy.digest as string }
           : { state: 'ABSENT', mainCommit: policy.mainCommit },
+        expectedImpactPolicy: expectedImpactPolicyConfirmation(impact),
       });
     }
 
@@ -1282,6 +1495,9 @@ try {
     const policy = await call({ command: 'project.verificationPolicy',
       path }) as VerificationPolicyInspection;
     print(policy);
+    const impact = await call({ command: 'project.impact.validate',
+      path }) as ImpactPolicyValidationView;
+    describeImpactPolicy(impact.policy);
     const mode = await currentPermissionMode();
     console.error(mode === 'FULL'
       ? '\nFULL permission mode: the project will be registered without confirmation; Agent tools,'
@@ -1307,7 +1523,48 @@ try {
       expectedVerificationPolicy: policy.state === 'PRESENT'
         ? { state: 'PRESENT', mainCommit: policy.mainCommit, digest: policy.digest as string }
         : { state: 'ABSENT', mainCommit: policy.mainCommit },
+      expectedImpactPolicy: expectedImpactPolicyConfirmation(impact),
     }));
+  } else if (group === 'project' && action === 'impact') {
+    // Deterministic conflict analysis (ADR-0031). Read-only: it derives snapshots, records them
+    // append-only, and explains a verdict. It never schedules, starts, or approves a Task.
+    const subcommand = firstArgument;
+    if (subcommand === 'validate') {
+      const positional = remainingArguments.filter((token) => !token.startsWith('--'));
+      const flags = remainingArguments.filter((token) => token.startsWith('--'));
+      if (positional.length > 1) usage();
+      const json = jsonOnlyFlag(flags);
+      const report = await call({ command: 'project.impact.validate',
+        path: positional[0] ?? process.cwd() }) as ImpactPolicyValidationView;
+      if (json) print(report);
+      else printImpactValidation(report);
+      // Exit 0 only when a mapping is present *and* in effect: an unconfirmed or broken mapping
+      // makes every verdict UNKNOWN, which is a failure for a script that wants parallelism.
+      if (report.code !== 'OK' && report.code !== 'OK_UNTRUSTED') process.exit(1);
+    } else if (subcommand === 'show' || subcommand === 'explain') {
+      const [projectId, taskId, ...flags] = remainingArguments;
+      if (projectId === undefined || taskId === undefined) usage();
+      const json = jsonOnlyFlag(flags);
+      if (subcommand === 'show') {
+        const view = await call({ command: 'project.impact.show', projectId,
+          taskId }) as ImpactSnapshotView;
+        if (json) print(view);
+        else printImpactSnapshot(view);
+        // A Task whose change set cannot be observed has no snapshot at all; an incomplete one is
+        // still reported (with `complete: false`) because that is what explains an UNKNOWN verdict.
+        if (view.snapshot === null) process.exit(1);
+      } else {
+        const view = await call({ command: 'project.impact.explain', projectId,
+          taskId }) as ImpactExplainView;
+        if (json) print(view);
+        else printImpactExplanation(view);
+        // Exit 0 means "proven safe to parallelize". UNKNOWN is not a softer SAFE: it is a refusal,
+        // and a script that treats it as success would run exactly the Task nobody could clear.
+        if (view.assessment.verdict !== 'SAFE_TO_PARALLELIZE') process.exit(1);
+      }
+    } else {
+      usage();
+    }
   } else if (group === 'task' && action === 'create') {
     if (firstArgument === undefined || remainingArguments.length === 0) usage();
     const input = parseTaskCreateFlags(remainingArguments);

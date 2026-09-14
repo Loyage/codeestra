@@ -9,6 +9,9 @@ export type {
   StoredAgentConfiguration, IntegrationBatchItemSummary, IntegrationBatchPlan,
   IntegrationBatchState, IntegrationBatchSummary, IntegrationCandidates,
   IntegrationItemState, IntegrationVerificationPlan, IntegrationVerificationSummary, MergeStrategy,
+  ImpactActiveTaskRef, ImpactAssessmentInput, ImpactAssessmentRecord, ImpactCandidateTaskRef,
+  ConfirmedImpactPolicy, ImpactPolicyConfirmationInput, ImpactSnapshotInput, ImpactSnapshotKey,
+  ImpactSnapshotRecord, StoredImpactResourceRef,
   PendingEventDelivery, ResultCommitAuthorization, ResultCommitCapturePlan, ResultCommitSubject,
   SessionHandoffKind, SessionHandoffRequestRecord, SessionHandoffState,
   SessionIncarnationMode, SessionIncarnationRecord, SessionIncarnationState, SessionIncarnationWrite,
@@ -41,7 +44,7 @@ export type {
 } from './database.js';
 export {
   agentAnswerMigration, agentConfigurationMigration, agentDisconnectMigration,
-  agentObservationMigration, agentStartMigration, integrationPipelineMigration,
+  agentObservationMigration, agentStartMigration, impactAnalysisMigration, integrationPipelineMigration,
   operationProgressMigration,
   phase1Migration, phase1SchemaVersion, reclamationMigration, sessionHandoffMigration,
   sessionTerminalMigration,

@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 19;
+export const phase1SchemaVersion = 20;
 
 
 export const phase1Migration = `
@@ -1111,4 +1111,125 @@ CREATE TABLE agent_session_startup_reconciliations (
 ) STRICT;
 CREATE INDEX startup_reconciliations_by_session
   ON agent_session_startup_reconciliations(session_id,recorded_at,id);
+`;
+
+/**
+ * Deterministic conflict analysis (ADR-0031, `docs/architecture/conflict-analyzer.md`).
+ *
+ * `project_impact_policy_confirmations` is what makes "unconfirmed mapping is refused" a fact
+ * instead of a claim, mirroring the verification policy confirmation: `project trust` records the
+ * `INVALID` state too, so a broken mapping is never silently reported as "no mapping".
+ *
+ * `impact_snapshots` is append-only and keyed by the facts that decide whether an assessment may be
+ * reused: (task, revision, base commit, analyzer version, mapping version, change fingerprint). A
+ * Task amendment, a moved baseline, an edited mapping, a new analyzer, or an observed diff that grew
+ * past the recorded one therefore produces a *new* row instead of overwriting the old one — the
+ * previous verdicts stay readable for audit and are simply never selected again.
+ *
+ * `impact_assessments` stores one pair-wise verdict, keyed by the two snapshots it was computed
+ * from. Because the key contains both snapshots, a new snapshot for either side yields a new row. A
+ * pair is never updated: there is no column that could turn a recorded `SAFE` into something else,
+ * which is the whole point — "actual diff exceeded the prediction" is expressed by writing a new
+ * snapshot and a new assessment, not by editing history.
+ *
+ * Schema version 20 is reserved for this migration. Version 16 stays permanently unused (a database
+ * may already be stamped 17–19 and would skip a later `version < 16` step), so this step is appended
+ * after the existing ascending ones and only adds `if (version < 20)`.
+ */
+export const impactAnalysisMigration = `
+CREATE TABLE project_impact_policy_confirmations (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  policy_state TEXT NOT NULL CHECK(policy_state IN ('ABSENT','PRESENT','INVALID')),
+  policy_digest TEXT,
+  content_digest TEXT,
+  error_code TEXT,
+  main_ref TEXT NOT NULL CHECK(length(trim(main_ref)) > 0),
+  main_commit TEXT NOT NULL,
+  actor TEXT NOT NULL CHECK(length(trim(actor)) > 0),
+  status TEXT NOT NULL CHECK(status IN ('ACTIVE','SUPERSEDED')),
+  confirmed_at INTEGER NOT NULL CHECK(confirmed_at >= 0),
+  superseded_at INTEGER,
+  CHECK((policy_state='PRESENT' AND policy_digest IS NOT NULL AND content_digest IS NULL)
+    OR (policy_state='INVALID' AND policy_digest IS NULL AND content_digest IS NOT NULL)
+    OR (policy_state='ABSENT' AND policy_digest IS NULL AND content_digest IS NULL)),
+  CHECK((status='ACTIVE' AND superseded_at IS NULL)
+    OR (status='SUPERSEDED' AND superseded_at IS NOT NULL))
+) STRICT;
+CREATE UNIQUE INDEX one_active_impact_policy
+  ON project_impact_policy_confirmations(project_id) WHERE status='ACTIVE';
+
+CREATE TABLE impact_snapshots (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  base_commit TEXT NOT NULL,
+  analyzer_version TEXT NOT NULL CHECK(length(trim(analyzer_version)) > 0),
+  policy_version TEXT NOT NULL CHECK(length(trim(policy_version)) > 0),
+  policy_digest TEXT NOT NULL CHECK(length(policy_digest) = 64),
+  case_mode TEXT NOT NULL CHECK(case_mode IN ('SENSITIVE','INSENSITIVE')),
+  change_fingerprint TEXT NOT NULL CHECK(length(trim(change_fingerprint)) > 0),
+  complete INTEGER NOT NULL CHECK(complete IN (0,1)),
+  incomplete_reasons_json TEXT NOT NULL
+    CHECK(json_valid(incomplete_reasons_json) AND json_type(incomplete_reasons_json)='array'),
+  files_json TEXT NOT NULL CHECK(json_valid(files_json) AND json_type(files_json)='array'),
+  important_directories_json TEXT NOT NULL
+    CHECK(json_valid(important_directories_json) AND json_type(important_directories_json)='array'),
+  modules_json TEXT NOT NULL CHECK(json_valid(modules_json) AND json_type(modules_json)='array'),
+  global_resources_json TEXT NOT NULL
+    CHECK(json_valid(global_resources_json) AND json_type(global_resources_json)='array'),
+  unclassified_files_json TEXT NOT NULL
+    CHECK(json_valid(unclassified_files_json) AND json_type(unclassified_files_json)='array'),
+  evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json) AND json_type(evidence_json)='array'),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  UNIQUE(task_id,revision_id,base_commit,analyzer_version,policy_version,change_fingerprint),
+  UNIQUE(task_id,id),
+  FOREIGN KEY(task_id,revision_id) REFERENCES task_revisions(task_id,id),
+  -- An incomplete snapshot must say why: "incomplete for no recorded reason" is not a state anyone
+  -- should be able to write, because it would be indistinguishable from a bug in the analyzer.
+  CHECK((complete=1) = (json_array_length(incomplete_reasons_json)=0))
+) STRICT;
+CREATE INDEX impact_snapshots_by_task ON impact_snapshots(project_id,task_id,created_at,id);
+
+CREATE TRIGGER impact_snapshots_no_update
+BEFORE UPDATE ON impact_snapshots BEGIN
+  SELECT RAISE(ABORT,'impact snapshots are append-only; record a new snapshot instead');
+END;
+CREATE TRIGGER impact_snapshots_no_delete
+BEFORE DELETE ON impact_snapshots BEGIN
+  SELECT RAISE(ABORT,'impact snapshots are append-only evidence');
+END;
+
+CREATE TABLE impact_assessments (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  candidate_task_id TEXT NOT NULL,
+  candidate_revision_id TEXT NOT NULL,
+  candidate_snapshot_id TEXT NOT NULL REFERENCES impact_snapshots(id),
+  other_task_id TEXT NOT NULL,
+  other_revision_id TEXT NOT NULL,
+  other_snapshot_id TEXT NOT NULL REFERENCES impact_snapshots(id),
+  verdict TEXT NOT NULL CHECK(verdict IN ('SAFE_TO_PARALLELIZE','UNKNOWN','CONFLICTING')),
+  reason_codes_json TEXT NOT NULL
+    CHECK(json_valid(reason_codes_json) AND json_type(reason_codes_json)='array'),
+  hits_json TEXT NOT NULL CHECK(json_valid(hits_json) AND json_type(hits_json)='array'),
+  evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json) AND json_type(evidence_json)='array'),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  CHECK(candidate_snapshot_id <> other_snapshot_id),
+  UNIQUE(candidate_snapshot_id,other_snapshot_id)
+) STRICT;
+CREATE INDEX impact_assessments_by_candidate
+  ON impact_assessments(project_id,candidate_task_id,created_at,id);
+CREATE INDEX impact_assessments_by_other
+  ON impact_assessments(project_id,other_task_id,created_at,id);
+
+CREATE TRIGGER impact_assessments_no_update
+BEFORE UPDATE ON impact_assessments BEGIN
+  SELECT RAISE(ABORT,'impact assessments are append-only; a changed fact needs a new snapshot');
+END;
+CREATE TRIGGER impact_assessments_no_delete
+BEFORE DELETE ON impact_assessments BEGIN
+  SELECT RAISE(ABORT,'impact assessments are append-only evidence');
+END;
 `;

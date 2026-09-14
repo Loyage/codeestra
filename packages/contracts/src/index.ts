@@ -1,9 +1,11 @@
 import { z } from 'zod';
 import { questionnaireAnswerSchema } from './questionnaire.js';
 import { verificationPolicyConfirmationSchema } from './verification-policy.js';
+import { impactPolicyConfirmationSchema } from './impact-policy.js';
 
 export * from './questionnaire.js';
 export * from './verification-policy.js';
+export * from './impact-policy.js';
 
 export const repositoryIdentitySchema = z.strictObject({
   repoRoot: z.string().min(1),
@@ -365,6 +367,12 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     /** The exact `project.inspect` result the user reviewed, including the dev baseline. */
     expectedIdentity: projectIdentitySchema,
     expectedVerificationPolicy: verificationPolicyConfirmationSchema,
+    /**
+     * The impact mapping the user reviewed (ADR-0031). Optional so a client that predates it still
+     * works: a trust that never declares a mapping records none, and every ImpactSnapshot then stays
+     * incomplete (`UNKNOWN`) — the safe direction. The CLI always sends it.
+     */
+    expectedImpactPolicy: impactPolicyConfirmationSchema.optional(),
   }),
   z.strictObject({ ...requestBase, command: z.literal('project.list') }),
   /**
@@ -936,6 +944,32 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     action: z.enum(['STOP_AND_RESTART', 'RETRY']),
     expectedVersion: z.number().int().nonnegative(),
     adapterId: nonBlankString.default('pi'),
+  }),
+  /**
+   * Deterministic conflict analysis (ADR-0031, `docs/architecture/conflict-analyzer.md`).
+   *
+   * These commands are read-only observations: they derive an ImpactSnapshot from the mapping at the
+   * project `main` ref plus the owned worktree's Git change set, persist it append-only, and return
+   * the verdict with its stable reason codes and the exact intersecting scope. `UNKNOWN` here means
+   * "cannot be proven", never "no conflict found", and nothing on this face ever starts, schedules,
+   * or approves a Task — `task schedule` belongs to Wave F and capacity to E2.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('project.impact.validate'),
+    path: z.string().min(1),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('project.impact.show'),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('project.impact.explain'),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
   }),
 ]);
 export type RuntimeRequest = z.infer<typeof runtimeRequestSchema>;

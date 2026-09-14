@@ -17,6 +17,7 @@ import {
   agentDisconnectMigration,
   agentObservationMigration,
   agentStartMigration,
+  impactAnalysisMigration,
   integrationPipelineMigration,
   operationProgressMigration,
   Phase1Database,
@@ -214,7 +215,7 @@ describe('revision delivery schema (v19)', () => {
       agentConfigurationMigration, taskControlMigration, integrationPipelineMigration,
       operationProgressMigration, reclamationMigration, stablePromotionMigration,
       sessionHandoffMigration, taskDependenciesMigration, verificationProgressMigration,
-      sessionTerminalMigration,
+      sessionTerminalMigration, impactAnalysisMigration,
     ];
     // `count` migrations were already applied and the database is stamped with `stamp`. The second
     // case is a database that skipped version 16 entirely: version 16 stays permanently unused, so
@@ -229,9 +230,9 @@ describe('revision delivery schema (v19)', () => {
       raw.close();
 
       const storage = new Phase1Database(path);
-      expect(phase1SchemaVersion).toBe(19);
+      expect(phase1SchemaVersion).toBe(20);
       expect(storage.sqlite.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version)
-        .toBe(19);
+        .toBe(20);
       expect(storage.sqlite.query<{ id: string }, []>('SELECT id FROM projects').all())
         .toEqual([{ id: 'p-1' }]);
       expect(storage.sqlite.query<{ event_id: string }, []>('SELECT event_id FROM domain_events').all())
