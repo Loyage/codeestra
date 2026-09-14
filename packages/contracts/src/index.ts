@@ -235,6 +235,11 @@ export const agentConfigurationEnvironmentVariables = Object.freeze({
     model: 'CODEESTRA_PI_MODEL',
     thinkingLevel: 'CODEESTRA_PI_THINKING',
   }),
+  codex: Object.freeze({
+    provider: 'CODEESTRA_CODEX_PROVIDER',
+    model: 'CODEESTRA_CODEX_MODEL',
+    thinkingLevel: 'CODEESTRA_CODEX_THINKING',
+  }),
 });
 
 const constraintsSchema = z.array(constraintSchema).superRefine((constraints, context) => {
@@ -904,6 +909,12 @@ export interface AdapterCapabilities {
   readonly attach: 'STRUCTURED' | 'PTY' | 'BOTH' | 'UNSUPPORTED';
   readonly reconnectToLiveSession: AdapterSupport;
   readonly resumeAfterExit: AdapterSupport;
+  /**
+   * Whether a controlled launch can exclude ambient user configuration. A provider that always
+   * loads its own user config, plugins, MCP servers or hooks changes the Agent's input outside
+   * Codeestra's revision snapshot, so the Adapter must say so instead of implying isolation.
+   */
+  readonly controlledConfiguration: AdapterSupport;
 }
 /** Provider process evidence. A PID alone is never treated as proof of identity. */
 export const agentProcessIdentitySchema = z.strictObject({

@@ -732,9 +732,11 @@ function usage(): never {
     [--kind DEVELOPMENT]
   bun run codeestra task list <project-id> [--all]
   bun run codeestra task submit <project-id> <task-id> <expected-version>
-  bun run codeestra task run <project-id> <task-id> <expected-version> [--adapter <id>]
+  bun run codeestra task run <project-id> <task-id> <expected-version> [--adapter <pi|codex>]
+    Adapters: pi (default), codex. Every run is bound to one Agent; changing --adapter starts a
+    new Execution rather than switching the Agent inside one.
   bun run codeestra task pause <project-id> <task-id> <expected-version>
-  bun run codeestra task resume <project-id> <task-id> <expected-version>
+  bun run codeestra task resume <project-id> <task-id> <expected-version> [--adapter <pi|codex>]
   bun run codeestra task cancel <project-id> <task-id> <expected-version>
   bun run codeestra task archive <project-id> <task-id> <expected-version>
   bun run codeestra task unarchive <project-id> <task-id> <expected-version>
@@ -1295,14 +1297,26 @@ try {
     const [taskId, versionText, ...extra] = remainingArguments;
     const expectedVersion = Number(versionText);
     if (firstArgument === undefined || taskId === undefined || versionText === undefined
-      || extra.length !== 0 || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
+      || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
+    // Resuming reopens the predecessor's provider conversation, so the adapter is part of the
+    // request: a different Agent must be asked for explicitly instead of silently resuming with
+    // one that cannot read the recorded conversation.
+    let adapterId = 'pi';
+    for (let index = 0; index < extra.length; index += 1) {
+      const argument = extra[index];
+      if (argument !== '--adapter') usage();
+      const value = extra[index + 1];
+      if (value === undefined) usage();
+      adapterId = value;
+      index += 1;
+    }
     print(await call({
       command: 'task.resume',
       commandId: crypto.randomUUID(),
       projectId: firstArgument,
       taskId,
       expectedVersion,
-      adapterId: 'pi',
+      adapterId,
     }));
   } else if (group === 'task' && action === 'status') {
     const [taskId, ...extra] = remainingArguments;

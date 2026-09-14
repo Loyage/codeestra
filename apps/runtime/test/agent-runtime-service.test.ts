@@ -37,6 +37,7 @@ const capabilities: AdapterCapabilities = Object.freeze({
   attach: 'STRUCTURED',
   reconnectToLiveSession: 'UNSUPPORTED',
   resumeAfterExit: 'UNSUPPORTED',
+  controlledConfiguration: 'SUPPORTED',
 });
 
 class ScriptedAnswerError extends Error {

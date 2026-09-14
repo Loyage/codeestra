@@ -1699,6 +1699,129 @@ session handoff writer acquire|release ...
   - **`docs/architecture/state-machines.md` §1 的 Task Verification 状态列表与 `docs/architecture/event-model.md` §2 的事件目录尚未同步 `CANCELLED` 与 `OperationProgressed`/`OperationSettled`**；按 ADR-0019 的先例本格不动架构文档，已在 ADR-0027 显式记录该不一致，需一次 doc-sync。
   - 事件量未做并发/压力测量；未测多客户端同时订阅同一长命令的负载。
 
+## FOUNDATION-049 — 第二个真实 Adapter：Codex 接入（ADR-0029）
+
+状态：**已实现并通过 CLI/命令面测试 + 真实 Codex smoke**。`lane/d2-codex-adapter`，固定基线 `dev@77eaf67`（`phase1SchemaVersion = 18`）。**未使用 schema 迁移**（v19 留给 D1），未 rebase、未合并新 dev、未 push、未提升 `main`、未触碰稳定工作树。
+
+本格成果分三档证据，正文按此分级：
+
+- **真实集成已验证**：`codex-cli 0.151.0` + 真实 ChatGPT 登录 + 真实模型 `gpt-5.5` 下的 `CodexAdapter` 本体
+  smoke（probe / STRICT gate allow / FULL 零确认 / 完成证据 / 进程身份 / 跨进程 `thread/resume`）。
+- **仅 stub 验证**：Adapter 的失败映射细节（协议 stub）与全部 CLI 命令面流程（stub provider）。
+- **不支持/未验证**：attach、PTY handoff、pause、revision ACK、live process reconnect、受控配置隔离；
+  以及 Runtime 侧 `FAILED → READY` 缺失导致的「失败后换 Agent」缺口（见下）。
+
+### Spike 与实测（`docs/spikes/codex-0.151.0.md`）
+
+先 spike 后实现。用真实 provider 实测了两种程序化接口，并选定传输：
+
+- `codex exec --json`：单向 JSONL 事件（`thread.started` / `turn.started` / `item.completed` /
+  `turn.completed` / `turn.failed` / `error`），无审批应答、无结构化提问、无 interrupt；`codex exec resume
+  <thread-id>` 可恢复 conversation（实测复述前一轮 token）。
+- `codex app-server --stdio`：**LF-JSONL / JSON-RPC 2.0 双向通道**（可用 `codex app-server
+  generate-json-schema` 自描述，262 个 v2 schema 文件）。实测：
+  - 审批 fail-closed：`item/commandExecution/requestApproval` 在应答前命令不执行；`decline` →
+    `status:"declined"`、`exitCode:null`；`accept` → 命令执行、`exitCode:0`、文件真的写入。
+  - `turn/interrupt` 立即返回 `turn/completed status:"interrupted"`，但**已在跑的 shell 工具继续运行并正常
+    `exit 0`**（interrupt 之后 marker 才落盘）。
+  - 对 app-server 发 `SIGTERM` **不会**终止在跑的工具：孤儿继续运行并写入工作区（与 FOUNDATION-040 对 Pi 的
+    测量一致）。
+  - 跨进程 `thread/resume {threadId}` 恢复同 thread id、同 rollout 路径、同 conversation（实测模型复述
+    secret）。
+  - `item/tool/requestUserInput`（结构化提问）**默认模式下工具不可用**，需
+    `--enable default_mode_request_user_input`（under development）才实测可触发并接受结构化答案。
+  - `app-server` 没有 `--ignore-user-config`；`-c mcp_servers={}` 也未阻止 ambient plugin/MCP 与
+    `~/.codex/hooks.json` 参与，rollout 里能看到 provider 自带的 `<recommended_plugins>` 片段进入模型输入。
+
+### 已实现
+
+- `packages/agent-adapters/src/codex-protocol.ts`（新）：LF-JSONL framing/解码、受控 argv
+  （`app-server --stdio [-c model_reasoning_effort=<level>] [--enable default_mode_request_user_input]`）、
+  FULL/STRICT → `approvalPolicy`/`sandbox` 映射、`thread`/`turn` payload 解析、审批与提问的 prompt 构造、
+  `{decision}`/`answers` 编码。无法承载的语义在此显式抛 `UNSUPPORTED_ANSWER`，不猜测。
+- `packages/agent-adapters/src/codex-process.ts`（新）：一个 app-server 子进程的 stdio 所有权、请求/响应
+  关联、**服务端→客户端请求不自动应答**（挂起即 fail-closed）、`blockedWriters` 无关的 stderr 摘要、
+  stop（SIGTERM→SIGKILL 并只按 OS 事实报告退出）。
+- `packages/agent-adapters/src/codex-adapter.ts`（新）：实现既有 `AgentAnswerAdapter` +
+  `AgentProcessRelease`，`adapterId = 'codex'`。FULL/STRICT 策略、revision/resume prompt、进程身份
+  （pid + start token + argv hash）、attention/完成/断连映射、typed answer 写回、resume 归属与身份核对。
+- `packages/contracts/src/index.ts`：**只改 adapter 能力/配置区** —— `AdapterCapabilities` 新增
+  `controlledConfiguration`（Pi `SUPPORTED`、Codex `UNSUPPORTED`、fake 显式声明），
+  `agentConfigurationEnvironmentVariables` 新增 `codex`（`CODEESTRA_CODEX_{PROVIDER,MODEL,THINKING}`）。
+  未触碰 `task.*`/`session.handoff.*`/`promotion.*` 命令定义。
+- `apps/runtime/src/adapter-registry.ts`：`createPiAdapterRegistry` → `createAdapterRegistry`，同时注册 Pi 与
+  Codex（`CODEESTRA_CODEX_EXECUTABLE` / `CODEESTRA_CODEX_HOME` / `CODEESTRA_CODEX_REQUEST_USER_INPUT`）。
+- `apps/runtime/src/main.ts`：仅注册接线（一行改名调用）。
+- `apps/cli/src/main.ts`：`task run` usage 列出可用 adapter；`task resume` 新增可选 `--adapter`
+  （默认仍是 `pi`，行为不变）。
+- `packages/agent-adapters/test/codex-adapter.test.ts`（新，21 项）与
+  `apps/runtime/test/cli-codex-adapter.test.ts`（新，5 项）。
+
+### 能力矩阵（实测填写，写进 `capabilities()`）
+
+| 能力 | Codex 0.151.0 | 依据 |
+|---|---|---|
+| persistentSession | `SUPPORTED` | thread id + rollout 文件，跨进程恢复实测 |
+| structuredAttention | `SUPPORTED`（开启 `--enable default_mode_request_user_input` 时）/ `UNSUPPORTED`（默认） | 默认模式下 provider 报 `request_user_input is unavailable in Default mode` |
+| nativePermissionRouting | `SUPPORTED` | 命令级审批 fail-closed，allow/deny 两条路径真实实测 |
+| pauseWithQuiescence | `UNSUPPORTED` | 无 pause/resume 原语 |
+| revisionAcknowledgement | `UNSUPPORTED` | 无确认通道；不从自然语言推断 ACK |
+| cooperativeStop | `REQUIRES_VALIDATION` | interrupt 不停工具、杀 app-server 留孤儿（实测） |
+| attach | `UNSUPPORTED` | 交互 TUI 走共享 app-server daemon，与我们的 stdio 子进程不是同一 writer |
+| reconnectToLiveSession | `UNSUPPORTED` | 丢失 stdio 后不重新接管 live 进程 |
+| resumeAfterExit | `SUPPORTED` | `thread/resume` 实测同 thread/同 rollout 路径 |
+| controlledConfiguration | `UNSUPPORTED` | 无 `--ignore-user-config`；ambient plugin/MCP/hook 参与执行 |
+
+Pi 的 attach / PTY handoff / incarnation（ADR-0010/0023/0026）**没有**被套用到 Codex；能力矩阵与代码里都
+明确写 `UNSUPPORTED`，也没有静默降级路径。
+
+### 失败后换 Agent（含实测缺口，必须如实读）
+
+- **成立**：每次 Execution 只有一个主 Agent；换 Agent 必须新建 Execution（无热切换）。实测：`task run
+  --adapter codex` 在 provider probe 阶段失败（可执行文件不存在）后，Task 保持 `READY`、没有 Execution 行，
+  随后 `task run --adapter pi` 建立**新的** Execution 并成功。
+- **成立**：pause → `task resume --adapter codex` 重开 predecessor 的 thread（stub 收到 `thread/resume`）；
+  `task resume --adapter pi` 被 fail-closed 拒绝（`AGENT_START_FAILED: The resumed session file is not inside
+  the Runtime Pi session directory`）——即跨 provider 恢复不会悄悄开一段新对话。
+- **缺口（本格领地外，未修）**：Runtime 目前没有 `FAILED → READY` 的路径。实测 `task run` 一个 FAILED Task
+  返回 `INVALID_STATE: Workspace cannot be reserved while Task is FAILED`（`task resume` 同样拒绝）。因此
+  Phase 5 的「失败后新 Execution 可更换 Agent」目前只在 **Execution 建立之前失败** 与 **pause→resume** 两条
+  既有路径上成立；要覆盖「Execution 失败后换 Agent」需要 domain/scheduler/storage 的 retry/requeue 决策
+  （D1 领地），已在 ADR-0029 D07 记录，不由本格抢改。
+
+### 实际跑过的检查与结果
+
+- `bun run check`（**提交前全量，退出码 0**）：`tsc --noEmit`（root + UI）通过；Vitest 231 passed（3 文件）；
+  Bun 441 pass / 0 fail（52 文件，含本格新增 21 + 5 项）；`vite build` 通过。
+- 开发循环中另跑过 `bun run check:fast`（同上前三步）：268 pass / 0 fail（27 文件）——与全量的差异来自
+  `test:storage` 分层。
+- 真实 smoke（`/tmp/ce-d2-spike/adapter-smoke.ts`、`adapter-resume-smoke.ts`，真实 `codex` + `gpt-5.5`）：
+  FULL `attentions=0` + `SUCCESS`；STRICT `attentions=1` + `answer(accept)` + `SUCCESS` 且命令目标文件真的
+  生成；两个独立 Adapter 实例 resume 得到 `same-thread=true same-path=true`，同一 rollout 文件内可见 p1
+  与 p2 两轮 prompt。
+- 未使用浏览器/桌面/键鼠自动化；全部驱动都是 CLI/命令面与 headless 脚本。
+
+### 未做 / 不声称
+
+- 未用真实模型跑完整 CLI 流程（`task run --adapter codex` 对真实 provider）：真实 provider 只用于 Adapter
+  本体 smoke；CLI 流程是 stub 证据。**stub 不是真实集成验收。**
+- 未验证：`item/fileChange/requestApproval` 与 `item/permissions/requestApproval` 的真实触发、多工具批次下
+  的 interrupt、Windows、Codex 升级后的协议兼容（app-server 标注 experimental）、`mcpServer/elicitation`
+  的真实语义。
+- 不支持：attach、PTY/handoff、pause/resume、revision ACK、reconnect live、完全受控启动；不使用
+  `dangerously-bypass-*`；不修改用户 `~/.codex` 配置或凭据，不打印 token。
+- **provider 会改自己的全局配置（实测，已还原）**：在 `/tmp/ce-d2-spike/repo` 首次 `codex exec` 后，
+  Codex 自行向 `~/.codex/config.toml` 追加了 `[projects."/private/tmp/ce-d2-spike/repo"] trust_level =
+  "trusted"`（人类可读 diff 只有这 3 行，见 spike §3.9）。本格没有手工写该文件；spike 结束时按预期把该 3 行
+  移除并核对了文件回到 spike 前状态，用户的凭据文件未被读打印、未被复制。本格创建的 18 个 Codex session
+  也已用 `codex delete --force` 删除。
+- 领地外的最小改动（需在交付说明中保留）：`apps/runtime/test/adapter-registry.test.ts`（registry 现在注册
+  两个 adapter，改断言）、`apps/runtime/test/{agent-runtime-service,operation-service,task-control-service}.test.ts`
+  （三处内联 capability 字面量补齐新必填字段）、`apps/cli/src/main.ts`（`task resume --adapter` + usage）。
+- **已知文档不一致（需一次 doc-sync）**：`docs/architecture/agent-adapter-api.md` 的类型清单仍未包含新增的
+  `controlledConfiguration`（沿用 ADR-0019/0027 先例：不在本格改架构文档，已在 ADR-0029 显式记录）。
+
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、UI 投影。

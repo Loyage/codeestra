@@ -31,6 +31,9 @@ const piCapabilities: AdapterCapabilities = Object.freeze({
   attach: 'STRUCTURED',
   reconnectToLiveSession: 'UNSUPPORTED',
   resumeAfterExit: 'SUPPORTED',
+  // Pi is launched with `--no-extensions` plus only Codeestra's own extensions, so nothing
+  // ambient changes the Agent's input for a revision.
+  controlledConfiguration: 'SUPPORTED',
 });
 
 export interface PiRpcAdapterOptions {
