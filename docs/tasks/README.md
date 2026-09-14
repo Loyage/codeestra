@@ -1732,6 +1732,125 @@ session handoff writer acquire|release ...
 - 真实 provider 在 stop-and-restart 下复用同一 conversation（stub 只证明编排与 `sessionStorageRef` 参数的传递；真实 session file 双向恢复由 FOUNDATION-040 单独验证过）。
 - 修订期间未决 Attention 的顺序、实时 UI 投影（D3 领地）与 `task revision *` 的 UI 面。
 - 本格未改动 `packages/agent-adapters/**`、`apps/ui/**`、`packages/git/**`、`terminal-service.ts`、`session-handoff-service.ts`、`session-transcript-service.ts`、`agent-answer-service.ts`、`task-control-service.ts`（只调用其导出）；未改 `packages/storage/src/database.ts` 的任何既有方法或 `migrate()` 既有分支。
+## FOUNDATION-050 — 原生终端的 UI 投影 + 会话交接/依赖/提升投影补全（纯投影，无新 ADR）
+
+状态：**已实现、未提交**（等待用户决定 commit）。lane `lane/d3-terminal-ui`，固定基线
+`dev@77eaf678a13d955fe7f01cba160cd5e9302f3fab`（`phase1SchemaVersion = 18`），未 rebase、未合并新 dev、
+未 push、未提升 `main`、未重启稳定 Runtime。**未新增 ADR**：本格只把已经存在于 CLI 命令面的能力做成 UI
+投影，不新增 Runtime 语义、不新增确认步骤、不改后端契约（`apps/runtime/**`、`apps/cli/**`、`packages/**`、
+架构文档、`PROJECT_SPEC.md`、`AGENTS.md` 一行未改）。
+
+### 已实现
+
+- `apps/ui/src/terminal.tsx`（新）：`TerminalPanel`——一个 Session 的会话交接与原生终端。全部走同一命令面：
+  - **接管**：`session.handoff.request takeover` → 显示安全点/ fence 事实（`safePoint.missing` 原样列出）→
+    `session.handoff.admit`（`admitted`/`successorStarted`/`terminalTransport`/`successorIncarnation` 原样呈现，
+    拒绝时显示 code + detail，**不显示成已接管**）→ `session.handoff.cancel` 释放 fence。
+  - **附加身份**：`WRITER` / `OBSERVER` 可选，显示本客户端 holder ref、当前身份与 Runtime 报出的写入者；
+    `attach` 从保留缓冲起点（`since: 0`）取回投影。
+  - **游标增量读取**：附加后每 700ms `session.handoff.terminal.read --since <cursor>`，游标单调；
+    `truncated` 如实提示「游标已落在有界缓冲之外，可能有缺失」；终端结束即停止跟随。
+  - **detach**：释放本客户端附加，不停终端、不动 provider。
+  - **write**：`terminal.write`（base64），可选末尾附加 CR（等同按 Enter）；单次超过合同上限时本地拒绝。
+  - **release**：`session.handoff.release`，可选「交还后继续自动化」；`released`/`code`/退出码/
+    `predecessorObservation`/session file 事实/successor 全部原样呈现，并写明退出码只是审计数据。
+  - 只读投影：incarnation 历史表（模式/状态/pid/记录的后代/前身）、写入租约、side channel、能力矩阵
+    （含 UI 不认识的键，绝不隐藏）、终端进程/游标/保留字节/附加记录。
+  - **写入不是审批通道**：面板明说这一点，并只指向既有 Attention；面板内没有任何批准入口。
+- 终端文本按**不可信内容**渲染：`displayTerminalText` 把 `\r\n`/`\r` 归一为换行、ESC 显示为 `␛`、其他 C0
+  控制字符显示为 `·`；**不解析 ANSI 序列**、不注入 DOM 标记（React 默认转义），显示缓冲有界（240k 字符）。
+- 刷新策略（已记录的取舍）：`session_handoff_requests` / `session_terminals` **不在领域事件目录里**，事件流
+  无法驱动它，因此该面板只在「有 open handoff 或终端 `RUNNING`」时每 2s 读一次 `session.handoff.status`，
+  其余按需读取 + 每次动作后读取 + 事件 token 变化时一次读取；结束状态不再轮询。
+- `apps/ui/src/dependencies.tsx`（新）：`DependencyPanel`（`task.depends.list`）—— 每任务依赖边（前置任务、
+  需要的 revision、已合入 commit、满足与否、reason code + detail、集成批次）、`BLOCKED` 原因清单、dev 基线、
+  上游/下游闭包；项目页用同一组件给项目级全图（按依赖任务分组）。不自己推导航，判定全部来自 Runtime。
+- `apps/ui/src/promotion.tsx`（新）：`PromotionPanel`（`promotion.list` + 详情用 `promotion.get`）—— 状态、
+  候选 commit、预期/已读回的 `main`、权限模式与批准、集成批次/验证、包含的任务 revision、重启步骤与
+  观测结果。明写「`main` 已移动 ≠ Runtime 已重启」，因此不会把已移动的 ref 显示成提升完成。
+- `apps/ui/src/App.tsx`：任务详情把只读执行过程区改为「Agent 会话与执行过程」（终端面板 + transcript，执行
+  选择器共用）；任务详情新增依赖与提升两节；项目页新增依赖图与提升记录两节；验证记录表的状态改为带语义色
+  的 chip，`CANCELLED` 因此与 `FAILED`/`ERROR` 视觉区分。
+- `apps/ui/src/styles.css`：终端/交接/依赖/提升样式，能力值与非满足依赖用 attention 色，窄屏（≤620px）单列。
+- **未改动**：长命令 Operation 与进度（FOUNDATION-039/047 的事件驱动 + 非 live 时 5s 兜底）沿用既有实现。
+
+### 命令面断言（UI 自身的 `RuntimeClient` + HTTP `/api/command`、`/api/events`）
+
+驱动方式：从 `codeestra ui --no-open` 取得地址与令牌，用 **UI 的同一个 `RuntimeClient` 类**（`apps/ui/src/api.ts`）
+打 `/api/command`；独立 `CODEESTRA_HOME=/tmp/ce-d3`、临时 git 仓库（`main` + `dev`）、协议 stub provider、
+真实 PTY 与真实进程表；脚本在 `/tmp`（不入库），运行后 `codeestra stop` 并回收 `/tmp/ce-d3*`。
+**结果：82/82 项断言通过**，覆盖：
+
+- 纯函数：ESC/CR/控制字符显示转换、显示缓冲有界、写入 base64。
+- 交接投影形状：`incarnation.mode = AUTOMATED_RPC`、`writerLease.holderKind`、能力矩阵（`ptyTransport` /
+  `nativeTerminalAttach` = IMPLEMENTED，`attachToLiveRpcProcess` / `ptyResize` = UNSUPPORTED）与 UI 用到键的齐全性。
+- 接管：`request` 记录 TAKEOVER 意图 → `safePoint.reached` + `fenceAcknowledged`（安全点是 Runtime 的事实）→
+  `admit` 返回 `admitted/successorStarted/terminalTransport=PTY/successorMode=HUMAN_TUI`、incarnation 链
+  `RPC → TUI` 指回同一 session file、lease 移到 `TERMINAL_ATTACHMENT`、`held: true`、`windowSize: APPLIED`、
+  **Execution 仍 RUNNING**（settled ≠ 执行结束）。
+- 游标读取：首次读含 provider 启动输出、`truncated: false`；`since=<cursor>` 再读得到空且游标单调。
+- 单 writer：第二个 writer 稳定返回 `ATTACHMENT_BUSY` 且错误文本报出当前 holder `ui-a`；observer 可附加。
+- 写入：`terminal.write` 的 base64 输入在投影中回显（轮询到出现为止）。
+- detach/reattach：detach 后终端仍 `RUNNING`、provider pid 不变、写入者清空；未持有的 detach 返回
+  `detached: false` + `NOT_ATTACHED`（**不是静默成功**）；reattach 成功。
+- release：`released: true`、`code=RELEASED`、provider 退出码 7 仅入审计、`predecessorObservation=STOPPED`、
+  `predecessorEntrySurvived: true`、successor `RPC` incarnation #3、终端 `RELEASED`、lease 回到自动化、
+  Execution 仍 RUNNING；再次 release 为 `TERMINAL_NOT_RUNNING`。
+- 依赖：`task.depends.list` 一条边、`satisfied: false`、reason `UPSTREAM_NOT_INTEGRATED` 带 detail、
+  READY 任务被 verdict 移到 `BLOCKED`、上游闭包、dev 基线；项目级投影给同一条边且 `taskId: null`。
+- 提升：`promotion.list` 返回可渲染列表；不存在的 `promotion.get` 返回稳定错误码（本格没有真实提升记录，
+  因此只断言形状与错误码，不断言真实提升的渲染）。
+- 长命令/验证：`task.status.operations` 带步骤、`task.verifications` 是列表、`task.verification.list` 同形。
+- 事件流仍只走订阅（`/api/events` 给出排他数字游标）。
+
+### 断言发现并修复的一处真实缺陷
+
+`session.handoff.detach` 在 Runtime 侧**不抛错**：本客户端没有附加时返回
+`{ detached: false, code: 'NOT_ATTACHED' }`（例如附加已被 release/stop 关闭）。最初的 UI 代码忽略返回值、总是
+显示「已分离」——正是「把已受理显示成成功」。已修复为：`detached: false` 时显示错误码并说明只停止跟随投影，
+运行断言 `未持有的 detach 不是静默成功` 通过。
+
+### 构建产物断言
+
+`bun run build:ui` 产物（Vite bundle）包含本格新增视图的文案/选择器：`原生终端与会话交接`、`请求接管`、
+`接管（启动原生终端）`、`交还自动化（release）`、`末尾附加回车`、`依赖与 BLOCKED 原因`、`稳定提升记录`、
+`ATTACHMENT_BUSY`、`truncated`、`已到安全点`；`styles.css` 含 `.terminal-stream`、`.state-blocked` 等新规则。
+
+### 实际跑过的检查与结果
+
+- `bun run check:fast`：**退出码 0**（根 typecheck + UI typecheck + 231 Vitest + 243 unit Bun tests，0 fail）。
+- `bun run check` 第一次：**退出码 1**，唯一失败是 `apps/runtime/test/cli-session-attach.test.ts`（FOUNDATION-046
+  已记录的**负载敏感抖动**：CLI `session handoff release` 退出码非 0）。该文件单独重跑 **1 pass / 0 fail**。
+- `bun run check` 第二次：**退出码 0** —— 根与 UI typecheck、231 Vitest、**415 Bun tests（0 fail）**、UI Vite 构建。
+- `bun run check` 第三次（**最终树**，含最后两处纯 UI 文案/属性小改之后）：**退出码 0**（同上），`bun run check:fast`
+  在最终树上也再次退出码 0（231 Vitest + 243 unit Bun tests）。三次结果都记录在此，不把抖动说成通过。
+- 本格改动只在 `apps/ui/**`（无任何测试导入），因此那次抖动与本次改动无关；**根因仍未定位**（沿用 FOUNDATION-046
+  的未结项）。
+
+### 待用户人工确认（本格无法自行完成，构建通过不等于 UI 验收）
+
+- 终端投影的实际观感：渲染效果、滚动行为、控制字符（`␛`/`·`）的可读性、长输出下的性能。
+- 键盘与焦点顺序：Tab 顺序、终端输入框上按 Enter 即发送、写入者/观察者切换前后的可用性提示。
+- 窄屏（≤620px）与深/浅主题下的布局与对比度（尤其终端区域与 `attention` 色状态）。
+- `ATTACHMENT_BUSY` 的实际交互：第二个 writer 被拒绝时错误就地显示、当前 holder 是否清晰。
+- 接管按钮在**真实 Pi 原生 TUI** 下的可用性与观感（本格只用协议 stub provider 断言字节与状态）。
+
+### 未验证 / 未做（不得当成已成立）
+
+- 真实模型在 UI 接管的 TUI 中键入消息的复验（本格与 FOUNDATION-046 一样使用 stub provider）。
+- PTY resize（Runtime `UNSUPPORTED`，UI 如实显示不支持，不做替代）；Windows；其他 provider。
+- 提升页未在**真实**提升记录上渲染（需要真实 `main` 工作树与重启序列，属用户的显式操作）。
+- `session_handoff_requests` / `session_terminals` 没有领域事件，UI 只能轮询（见上）；若将来要在 UI 里完全
+  事件驱动，需要 Runtime 侧新增事件——本格**不顺手改 Runtime**，作为待决项提出。
+- `docs/tasks/README.md` 的 `## NEXT`（第 3 条）仍写着「UI 终端」待办：本格已交付该投影，NEXT 行本身按其
+  「只允许在 NEXT 之前插入一节」的边界**未改**，需要一次独立的 NEXT 更新。
+
+### 交付边界
+
+改动/新增文件：`apps/ui/src/{terminal,dependencies,promotion}.tsx`（新）、`apps/ui/src/{App.tsx,types.ts,styles.css}`。
+**未改** `apps/runtime/**`、`apps/cli/**`、`packages/**`、`docs/architecture/**`、`docs/decisions/**`、
+`PROJECT_SPEC.md`、`AGENTS.md`；本文件只插入本节。未 commit、未 push、未提升 `main`、未重启稳定 Runtime；
+证据运行使用的 `/tmp/ce-d3*` 与 `/tmp/d3-evidence` 已回收。
 
 ## NEXT — 最小可用纵向切片
 

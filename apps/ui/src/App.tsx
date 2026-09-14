@@ -3,6 +3,9 @@ import { ThemeSelector } from './theme.js';
 import { usePendingAction } from './use-pending-action.js';
 import { RuntimeClient, describeError } from './api.js';
 import { TranscriptPanel } from './transcript.js';
+import { TerminalPanel } from './terminal.js';
+import { DependencyPanel } from './dependencies.js';
+import { PromotionPanel } from './promotion.js';
 import { NewTaskDock } from './new-task-dock.js';
 import {
   operationProgressFromEvent,
@@ -665,6 +668,7 @@ function Console({ token, initialProjectId }: {
             reloadTasks={async (id) => { await loadTaskList(id); }}
             loadDetail={loadTaskDetail}
             createToken={state.createToken}
+            detailToken={state.detailToken}
           />
         </div>
         {tab === 'attention' ? (
@@ -694,8 +698,9 @@ function Console({ token, initialProjectId }: {
           <AgentTab key={projectId} client={client} projectId={projectId} run={run} />
         ) : null}
         {tab === 'project' ? (
-          <ProjectTab client={client} permissionMode={state.permissionMode} run={run}
-            update={update} reloadProjects={loadProjects} />
+          <ProjectTab client={client} permissionMode={state.permissionMode} projectId={projectId}
+            tasks={state.tasks} refreshToken={state.detailToken} run={run} update={update}
+            reloadProjects={loadProjects} />
         ) : null}
       </main>
 
@@ -742,6 +747,7 @@ function TasksTab(props: CommonProps & {
   readonly openProjects: () => void;
   readonly reloadTasks: (projectId: string) => Promise<void>;
   readonly createToken: number;
+  readonly detailToken: number;
   readonly loadDetail: (projectId: string, taskId: string) => Promise<void>;
 }) {
   const { client, projectId, tasks, taskId, status, adapter, permissionMode, update } = props;
@@ -1370,7 +1376,8 @@ function TasksTab(props: CommonProps & {
                   <tbody>
                     {status.verifications.map((verification) => (
                       <tr key={verification.verificationId}>
-                        <td>{labelValue(verification.state)}</td>
+                        <td><span className={`state state-${verification.state.toLowerCase()}`}>
+                          {labelValue(verification.state)}</span></td>
                         <td>{verification.outcomeCode === null ? '—' : labelValue(verification.outcomeCode)}</td>
                         <td className="mono">{verification.testedCommit.slice(0, 10)}</td>
                         <td className="mono">{verification.policyDigest.slice(0, 10)}</td>
@@ -1420,7 +1427,8 @@ function TasksTab(props: CommonProps & {
                 </details>
 
                 <section className="process-panel">
-                <h3>Agent 执行过程 <span className="muted hint">只读观察</span></h3>
+                <h3>Agent 会话与执行过程
+                  <span className="muted hint">只读过程 + 原生终端（同一 CLI 命令面）</span></h3>
                 {transcriptExecution === null || transcriptExecution.session === null ? (
                   <p className="muted">
                     这个任务还没有启动过 Agent 会话，因此没有执行过程可显示。
@@ -1442,6 +1450,14 @@ function TasksTab(props: CommonProps & {
                         ))}
                       </select>
                     </div>
+                    <TerminalPanel
+                      key={`terminal-${transcriptExecution.session.sessionId}`}
+                      client={client}
+                      projectId={projectId}
+                      sessionId={transcriptExecution.session.sessionId}
+                      refreshToken={props.detailToken}
+                      run={props.run}
+                    />
                     <TranscriptPanel
                       key={transcriptExecution.session.sessionId}
                       client={client}
@@ -1452,6 +1468,24 @@ function TasksTab(props: CommonProps & {
                     />
                   </>
                 )}
+                </section>
+
+                <section className="process-panel">
+                  <DependencyPanel
+                    client={client}
+                    projectId={projectId}
+                    taskId={task.id}
+                    tasks={tasks}
+                    refreshToken={props.detailToken}
+                    run={props.run}
+                  />
+                  <PromotionPanel
+                    client={client}
+                    projectId={projectId}
+                    taskId={task.id}
+                    refreshToken={props.detailToken}
+                    run={props.run}
+                  />
                 </section>
               </>
             )}
@@ -1925,8 +1959,12 @@ function AgentTab({ client, projectId, run }: {
   );
 }
 
-function ProjectTab({ client, permissionMode, run, reloadProjects }: CommonProps & {
+function ProjectTab({ client, permissionMode, projectId, tasks, refreshToken, run, reloadProjects }: CommonProps & {
   readonly permissionMode: 'FULL' | 'STRICT';
+  readonly projectId: string | null;
+  readonly tasks: readonly TaskView[];
+  /** Bumped by stream events, so a dependency verdict or a promotion record appears without a reload. */
+  readonly refreshToken: number;
   readonly reloadProjects: () => Promise<void>;
 }) {
   const actions = usePendingAction(run);
@@ -1936,6 +1974,7 @@ function ProjectTab({ client, permissionMode, run, reloadProjects }: CommonProps
   const [policy, setPolicy] = useState<VerificationPolicyView | null>(null);
   const [confirmation, setConfirmation] = useState('');
   return (
+    <>
     <section className="card">
       <h2>添加本地项目</h2>
       <p className="muted">输入 Git 仓库的绝对路径，检查仓库与验证策略后添加。不会修改仓库文件。</p>
@@ -2037,5 +2076,14 @@ function ProjectTab({ client, permissionMode, run, reloadProjects }: CommonProps
       )}
       </fieldset>
     </section>
+    {projectId === null ? null : (
+      <section className="card">
+        <DependencyPanel client={client} projectId={projectId} taskId={null} tasks={tasks}
+          refreshToken={refreshToken} run={run} />
+        <PromotionPanel client={client} projectId={projectId} taskId={null}
+          refreshToken={refreshToken} run={run} />
+      </section>
+    )}
+    </>
   );
 }
