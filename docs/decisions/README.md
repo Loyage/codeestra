@@ -74,6 +74,10 @@
 
 Phase 0 不要求 Phase 7 所有发布细节已决定；Phase 1 不能以“未来会解决”绕过影响真实执行与 Git 安全的待决项。
 
+## 后续已接受的界面决策
+
+- [ADR-0034](0034-compact-task-workbench.md)：紧凑任务信息行、文字导航收窄、主操作优先。列表展示既有 Task/Attention 元信息与非百分比状态动效；概况可筛选，低频操作折叠；保留列表/详情分离与主题，不新增业务 API 或确认。
+
 ## ADR 规则
 
 命名 `NNNN-short-title.md`；包含 Status（Proposed/Accepted/Superseded）、Context、Options、Decision、Consequences、Verification 与关联文档。只有明确决定后才能标 Accepted。提案、技术假设和未验证能力必须分别标明。

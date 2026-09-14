@@ -7,6 +7,7 @@ import { TerminalPanel } from './terminal.js';
 import { DependencyPanel } from './dependencies.js';
 import { PromotionPanel } from './promotion.js';
 import { NewTaskDock } from './new-task-dock.js';
+import { TaskList, TaskStateBadge } from './task-list.js';
 import {
   operationProgressFromEvent,
   questionnaireFromPrompt,
@@ -394,7 +395,10 @@ function Console({ token, initialProjectId }: {
   const onFrame = useCallback((frame: StreamFrame) => {
     if (frame.type === 'subscribed') {
       cursorRef.current = frame.cursor;
-      setState((previous) => ({ ...previous, cursor: frame.cursor, streamStatus: 'live' }));
+      // Reconcile snapshots on initial subscription and reconnection rather than leaving the
+      // list indefinitely on its pre-disconnect projection when no new Task event arrives.
+      setState((previous) => ({ ...previous, cursor: frame.cursor, streamStatus: 'live',
+        detailToken: previous.detailToken + 1, attentionToken: previous.attentionToken + 1 }));
       return;
     }
     if (frame.type === 'heartbeat') {
@@ -669,6 +673,7 @@ function Console({ token, initialProjectId }: {
             loadDetail={loadTaskDetail}
             createToken={state.createToken}
             detailToken={state.detailToken}
+            live={state.streamStatus === 'live'}
           />
         </div>
         {tab === 'attention' ? (
@@ -705,8 +710,7 @@ function Console({ token, initialProjectId }: {
       </main>
 
       <footer className="muted">
-        关闭此页面不会停止 Runtime 或任何任务。目前尚未实现任务取消或暂停；令牌在 Runtime
-        停止前一直有效。
+        关闭页面不会停止任务 · 暂停与终止请在任务详情操作 · 合入 dev 不等于发布到 main。
         {selectedTask === null ? null : ` 当前选择：任务 #${selectedTask.displayNumber}。`}
       </footer>
       {projectId === null ? null : (
@@ -749,6 +753,7 @@ function TasksTab(props: CommonProps & {
   readonly createToken: number;
   readonly detailToken: number;
   readonly loadDetail: (projectId: string, taskId: string) => Promise<void>;
+  readonly live: boolean;
 }) {
   const { client, projectId, tasks, taskId, status, adapter, permissionMode, update } = props;
   const actions = usePendingAction(props.run);
@@ -758,8 +763,21 @@ function TasksTab(props: CommonProps & {
   const busy = actions.pending.has(taskId ?? 'none');
   const selectedRef = useRef(taskId);
   selectedRef.current = taskId;
+  const backButtonRef = useRef<HTMLButtonElement>(null);
+  const navigationFocus = useRef<{ view: 'list' | 'detail'; taskId: string } | null>(null);
+  useEffect(() => {
+    const request = navigationFocus.current;
+    if (request === null) return;
+    if (request.view === 'detail' && request.taskId === taskId) backButtonRef.current?.focus();
+    if (request.view === 'list' && taskId === null) {
+      (document.getElementById(`task-row-${request.taskId}`)
+        ?? document.getElementById('task-list-heading'))?.focus();
+    }
+    navigationFocus.current = null;
+  }, [taskId]);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState('all');
+  const [sort, setSort] = useState('default');
   // Archived Tasks are kept out of the default view; the toggle reveals the same list the Runtime
   // returned with `includeArchived`, so nothing is hidden from a user who asks for it.
   const [showArchived, setShowArchived] = useState(false);
@@ -805,17 +823,15 @@ function TasksTab(props: CommonProps & {
     && latestExecution.session?.state === 'EXITED';
   const taskAttentions = props.attentions.filter((attention) => attention.taskId === taskId);
   const waiting = taskAttentions.filter((attention) => attention.status === 'OPEN').length;
-  const visibleTasks = tasks.filter((candidate) => {
-    const matchesText = `${candidate.displayNumber} ${candidate.currentRevision.specification}`
-      .toLocaleLowerCase().includes(query.toLocaleLowerCase().trim());
-    const matchesArchive = showArchived || candidate.archivedAt === null;
-    return matchesText && matchesArchive && (filter === 'all' || candidate.state === filter);
-  });
-  // Archived Tasks stay out of the project overview so "all tasks" means the tasks still in play.
-  const liveTasks = tasks.filter((candidate) => candidate.archivedAt === null);
-  const nextStep = task === null ? '' : waiting > 0 ? 'Agent 需要你的回答，请在下方处理后继续。'
-    : task.state === 'DRAFT' ? '先提交为就绪，再启动 Agent。创建草稿不会自动运行。'
-    : task.state === 'READY' ? '任务已就绪，可以启动 Agent；也可以用「终止」直接放弃它。'
+  const verifying = status?.verifications.some((verification) =>
+    ['QUEUED', 'RUNNING'].includes(verification.state)) ?? false;
+  const nextStep = task === null ? '' : archived ? '任务已归档，记录与现场保留；可在「更多操作」中取消归档。'
+    : waiting > 0 ? '有待处理请求，请在下方回答。其他任务不受影响。'
+    : task.state === 'DRAFT' ? '提交后进入自动调度，满足依赖、冲突与容量条件才会启动。创建草稿不会自动运行。'
+    : task.state === 'READY' ? '任务等待调度；可手动尝试启动，Runtime 会核对依赖、冲突与容量，不保证立即运行。'
+    : task.state === 'BLOCKED' ? '正在等待上游依赖满足。展开下方任务依赖，查看尚未满足的条件。'
+    : inFlightIntegration !== null ? '集成尚未完成，请查看下方独立集成验证与合入记录。'
+    : verifying ? '任务验证进行中。下方显示实际步骤，可请求取消；完成前不能合入 dev。'
     : canCapture ? 'Agent 会话已退出。若有代码变更，可提交成果，然后独立验证。'
     : task.state === 'EXECUTED' ? (integratedBatch === null
       ? (passedVerification === null
@@ -847,60 +863,13 @@ function TasksTab(props: CommonProps & {
   }
 
   if (task === null) {
-    return (
-      <>
-      <div className="task-overview" aria-label="项目任务概况">
-      <div><strong>{liveTasks.length}</strong><span>全部任务</span></div>
-      <div><strong>{liveTasks.filter((item) => item.state === 'RUNNING').length}</strong><span>运行中</span></div>
-      <div><strong>{props.attentions.filter((item) => item.status === 'OPEN').length}</strong><span>待处理请求</span></div>
-      <div><strong>{liveTasks.filter((item) => item.state === 'EXECUTED').length}</strong><span>已提交成果 · 非已发布</span></div>
-      </div>
-      <section className="card task-list">
-        <div className="section-heading"><h2>任务列表</h2><span className="muted">{visibleTasks.length} / {liveTasks.length}</span></div>
-        <div className="task-filters">
-          <input type="search" aria-label="搜索任务" placeholder="搜索任务内容或编号" value={query}
-            onChange={(event) => setQuery(event.target.value)} />
-          <select aria-label="按任务状态筛选" value={filter} onChange={(event) => setFilter(event.target.value)}>
-            <option value="all">全部状态</option>
-            {[...new Set([...tasks.map((item) => item.state), ...(filter === 'all' ? [] : [filter])])].map((value) => (
-              <option key={value} value={value}>{labelValue(value)}</option>
-            ))}
-          </select>
-          <label className="inline">
-            <input type="checkbox" checked={showArchived}
-              onChange={(event) => setShowArchived(event.target.checked)} />
-            显示已归档
-          </label>
-        </div>
-        <ul className="list task-rows">
-          {visibleTasks.map((candidate) => (
-            <li key={candidate.id}>
-              <button
-                type="button"
-                className={candidate.id === taskId ? 'row active' : 'row'}
-                aria-current={candidate.id === taskId ? 'true' : undefined}
-                onClick={() => {
-                  if (candidate.id !== taskId) update({ taskId: candidate.id, status: null });
-                }}
-              >
-                <span className="muted task-number">#{candidate.displayNumber}</span>
-                <span className={`state state-${candidate.state.toLowerCase()}`}>
-                  {labelValue(candidate.state)}
-                </span>
-                <span className="task-title">{candidate.currentRevision.specification}</span>
-                <span className="muted task-revision">规格 r{candidate.currentRevision.number}{candidate.archivedAt === null ? '' : ' · 已归档'}</span>
-                <span className="muted task-open">查看详情 →</span>
-              </button>
-            </li>
-          ))}
-          {visibleTasks.length === 0 ? <li className="list-empty muted">
-            {tasks.length === 0 ? '还没有任务，在页面底部创建第一个草稿。' : '没有匹配的任务。'}
-            {tasks.length === 0 ? null : <button type="button" onClick={() => { setQuery(''); setFilter('all'); }}>清除筛选</button>}
-          </li> : null}
-        </ul>
-      </section>
-      </>
-    );
+    return <TaskList tasks={tasks} attentions={props.attentions} query={query} filter={filter}
+      showArchived={showArchived} live={props.live} setQuery={setQuery} setFilter={setFilter}
+      sort={sort} setSort={setSort} setShowArchived={setShowArchived}
+      selectTask={(id) => {
+        navigationFocus.current = { view: 'detail', taskId: id };
+        update({ taskId: id, status: null });
+      }} />;
   }
 
   return (
@@ -908,12 +877,17 @@ function TasksTab(props: CommonProps & {
         <button
           type="button"
           className="back-link"
-          onClick={() => update({ taskId: null, status: null })}
+          ref={backButtonRef}
+          onClick={() => {
+            navigationFocus.current = { view: 'list', taskId: task.id };
+            update({ taskId: null, status: null });
+          }}
         >
           ← 返回任务列表
         </button>
         <div className="section-heading"><h2>任务 #{task.displayNumber}</h2>
-              <span className={`state state-${task.state.toLowerCase()}`}>{labelValue(task.state)}</span>
+              <TaskStateBadge state={task.state} live={props.live && !canCapture} />
+              {canCapture ? <span className="muted hint">会话已退出 · 等待提交成果</span> : null}
               {task.archivedAt === null ? null : <span className="muted">已归档</span>}</div>
             <p className="muted hint">规格 r{task.currentRevision.number} · 状态版本 v{task.version}</p>
             <pre className="spec">{task.currentRevision.specification}</pre>
@@ -929,8 +903,9 @@ function TasksTab(props: CommonProps & {
             <div className="actions task-actions" aria-label="任务操作">
               <button
                 type="button"
-                className={task.state === 'DRAFT' ? 'primary' : ''}
-                disabled={busy || task.state !== 'DRAFT'}
+                className="primary"
+                hidden={task.state !== 'DRAFT' || archived}
+                disabled={busy}
                 onClick={() => {
                   void run('正在提交', async () => {
                     await client.command({
@@ -948,8 +923,8 @@ function TasksTab(props: CommonProps & {
                 提交为就绪
               </button>
 
-              <label className="inline">
-                适配器
+              <label className="inline" hidden={!['READY', 'PAUSED'].includes(task.state) || archived}>
+                Agent
                 <select
                   value={adapter}
                   onChange={(event) => update({ adapter: event.target.value })}
@@ -959,10 +934,11 @@ function TasksTab(props: CommonProps & {
               </label>
               <button
                 type="button"
-                className={task.state === 'READY' ? 'primary' : ''}
-                disabled={busy || task.state !== 'READY'}
+                className="primary"
+                hidden={task.state !== 'READY' || archived}
+                disabled={busy}
                 onClick={() => {
-                  void run('正在运行任务（暂不支持取消）', async () => {
+                  void run('正在运行任务', async () => {
                     const result = await client.command<unknown>({
                       command: 'task.run',
                       commandId: crypto.randomUUID(),
@@ -982,7 +958,8 @@ function TasksTab(props: CommonProps & {
 
               <button
                 type="button"
-                disabled={busy || !canPause || archived}
+                hidden={!canPause || archived}
+                disabled={busy}
                 title="协作停止 provider 进程并确认静止；保留工作树与会话，可用「继续」在同一工作树恢复"
                 onClick={() => {
                   void run('正在暂停任务', async () => {
@@ -1003,8 +980,9 @@ function TasksTab(props: CommonProps & {
 
               <button
                 type="button"
-                className={canResume ? 'primary' : ''}
-                disabled={busy || !canResume}
+                className="primary"
+                hidden={!canResume || archived}
+                disabled={busy}
                 title="在同一工作树新建一次执行，并复用已暂停会话的 provider conversation"
                 onClick={() => {
                   void run('正在继续任务', async () => {
@@ -1027,73 +1005,9 @@ function TasksTab(props: CommonProps & {
 
               <button
                 type="button"
-                disabled={busy || !canCancel || archived}
-                title="终止是终态：运行中的 Agent 会被协作停止，工作树与全部记录保留"
-                onClick={() => {
-                  void run('正在终止任务', async () => {
-                    await client.command({
-                      command: 'task.cancel',
-                      commandId: crypto.randomUUID(),
-                      projectId,
-                      taskId: task.id,
-                      expectedVersion: task.version,
-                    });
-                    await props.reloadTasks(projectId);
-                    await props.loadDetail(projectId, task.id);
-                  });
-                }}
-              >
-                终止
-              </button>
-
-              {archived ? (
-                <button
-                  type="button"
-                  disabled={busy}
-                  title="恢复被归档的任务；归档从不删除任何记录"
-                  onClick={() => {
-                    void run('正在恢复任务', async () => {
-                      await client.command({
-                        command: 'task.unarchive',
-                        commandId: crypto.randomUUID(),
-                        projectId,
-                        taskId: task.id,
-                        expectedVersion: task.version,
-                      });
-                      await props.reloadTasks(projectId);
-                      await props.loadDetail(projectId, task.id);
-                    });
-                  }}
-                >
-                  取消归档
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  disabled={busy || !canArchive}
-                  title="归档只隐藏任务：不删除记录，也不回收工作树；可随时恢复"
-                  onClick={() => {
-                    void run('正在归档任务', async () => {
-                      await client.command({
-                        command: 'task.archive',
-                        commandId: crypto.randomUUID(),
-                        projectId,
-                        taskId: task.id,
-                        expectedVersion: task.version,
-                      });
-                      await props.reloadTasks(projectId);
-                      await props.loadDetail(projectId, task.id);
-                    });
-                  }}
-                >
-                  归档
-                </button>
-              )}
-
-              <button
-                type="button"
-                className={canCapture ? 'primary' : ''}
-                disabled={busy || !canCapture}
+                className="primary"
+                hidden={!canCapture || archived}
+                disabled={busy}
                 title={canCapture ? '提交工作树中的成果，Runtime 会再次核对静止证据与差异' : '等待 Agent 退出且可捕获成果后使用'}
                 onClick={() => {
                   if (permissionMode === 'FULL') {
@@ -1125,8 +1039,9 @@ function TasksTab(props: CommonProps & {
 
               <button
                 type="button"
-                className={task.state === 'EXECUTED' ? 'primary' : ''}
-                disabled={busy || task.state !== 'EXECUTED'}
+                className={passedVerification === null ? 'primary' : ''}
+                hidden={task.state !== 'EXECUTED' || archived}
+                disabled={busy || verifying || inFlightIntegration !== null}
                 title="提交成果后，在固定 commit 上独立运行验证；后台运行，可在此查看进度并取消"
                 onClick={() => {
                   void run('正在排队验证', async () => {
@@ -1145,12 +1060,13 @@ function TasksTab(props: CommonProps & {
                   });
                 }}
               >
-                验证任务
+                {verifying ? '验证进行中…' : passedVerification !== null ? '重新验证' : '验证任务'}
               </button>
               <button
                 type="button"
-                className={canIntegrate ? 'primary' : ''}
-                disabled={busy || !canIntegrate}
+                className="primary"
+                hidden={!canIntegrate || archived}
+                disabled={busy || verifying}
                 title={canIntegrate
                   ? '把这次任务的成果 commit 合入 dev：先在独立工作树里合并，再跑独立集成验证，通过后才移动 dev 引用'
                   : '需要 EXECUTED 任务、该成果 commit 的验证已通过、且没有进行中或已完成的合入'}
@@ -1175,16 +1091,45 @@ function TasksTab(props: CommonProps & {
               >
                 合入 dev
               </button>
+              <details key={task.id} className="secondary-actions">
+                <summary>更多操作</summary>
+                <div className="actions">
+                  <button type="button" className="danger" disabled={busy || !canCancel || archived}
+                    title="终止是终态；协作停止 Agent，保留工作树与全部记录"
+                    onClick={() => {
+                      void run('正在终止任务', async () => {
+                        await client.command({ command: 'task.cancel', commandId: crypto.randomUUID(),
+                          projectId, taskId: task.id, expectedVersion: task.version });
+                        await props.reloadTasks(projectId);
+                        await props.loadDetail(projectId, task.id);
+                      });
+                    }}>终止</button>
+                  <button type="button" disabled={busy || (!archived && !canArchive)}
+                    title="归档只隐藏任务，不删除记录或回收工作树；可随时取消归档"
+                    onClick={() => {
+                      void run(archived ? '正在取消归档' : '正在归档任务', async () => {
+                        await client.command({ command: archived ? 'task.unarchive' : 'task.archive',
+                          commandId: crypto.randomUUID(), projectId, taskId: task.id,
+                          expectedVersion: task.version });
+                        await props.reloadTasks(projectId);
+                        await props.loadDetail(projectId, task.id);
+                      });
+                    }}>{archived ? '取消归档' : '归档'}</button>
+                </div>
+                <p className="muted hint">终止后不能重开；归档只隐藏任务，不删除记录或回收工作树。</p>
+              </details>
             </div>
+            {waiting === 0 ? null : (
+              <AttentionTab key={task.id} client={client} projectId={projectId}
+                attentions={taskAttentions} run={props.run} update={update} reload={props.reloadAttentions} />
+            )}
             {operations.length === 0 ? null : (
-              <section className="card nested">
+              <section className="card nested operation-panel">
                 <h3>长命令进度 <span className="muted hint">Runtime 记录的事实步骤</span></h3>
-                <p className="muted">
-                  进度只显示 Runtime 实际到达的步骤，不是预估百分比；运行中的命令会随
-                  `OperationProgressed` 事件实时刷新（事件流中断时退回每 5 秒轮询）。
-                  取消是协作停止：确认进程静止后才落状态，无法确认时会保留占用并需要人工处理。
-                  验证被取消时记的是 `CANCELLED`，不是命令失败。
-                </p>
+                <details className="hint"><summary>进度与取消说明</summary><p className="muted">
+                  只显示实际步骤，不预估百分比。事件流中断时每 5 秒刷新进度。
+                  取消是协作停止，确认静止后才结束；无法确认则保留占用并需要人工处理。
+                </p></details>
                 <div className="table-scroll"><table>
                   <thead>
                     <tr><th>类型</th><th>状态</th><th>最新步骤</th><th>更新时间</th><th>操作</th></tr>
@@ -1208,7 +1153,7 @@ function TasksTab(props: CommonProps & {
                                   {liveOutputLabel(operation.liveOutput)}
                                 </div>}
                             {operation.result === null ? null : (
-                              <div className="muted mono">{JSON.stringify(operation.result)}</div>
+                              <details><summary>结果详情</summary><pre>{JSON.stringify(operation.result, null, 2)}</pre></details>
                             )}</td>
                           <td>{new Date(operation.updatedAt).toLocaleTimeString('zh-CN')}</td>
                           <td>{active ? (
@@ -1260,11 +1205,6 @@ function TasksTab(props: CommonProps & {
                 </details>
               </section>
             )}
-            {waiting === 0 ? null : (
-              <AttentionTab key={task.id} client={client} projectId={projectId}
-                attentions={taskAttentions} run={props.run} update={update} reload={props.reloadAttentions} />
-            )}
-
             {permissionMode === 'FULL' || authorization === null
               || authorization.taskVersion !== task.version ? null : (
               <div className="card nested">

@@ -2988,6 +2988,40 @@ Adapter **报不出事实时不猜**：`facts` 字段整体缺席表示“未知
 - 提升包含 Wave A–E 全部提交 + Wave F 的 051/055/056/057，包含 schema 从 v11 到 v21 的十一个 additive 迁移（含 v16 永久空号），**没有**在 `main` 工作树上额外跑完整 `bun run check`（按用户本轮选择：只走既定序列）；`dev` 上的最终树已在提升前跑过完整 `check`（272 Vitest + 567 Bun tests，0 fail，0 孤儿进程，0 夹具）。
 - **提升后发现一个悬而未决的旧进程**：pid `65545`（`bun run …/codeestra/apps/runtime/src/main.ts`，**启动于 9月13日 22:02**，早于 ADR-0025 的 Runtime 生命周期记录）仍存活。证据：它**不持有** socket、lock 或 `runtime.sqlite`（`lsof` 为空），因此任何客户端都到不了它，`stop` 也无从命名它；但它是 pid `71909`（一个自 9月13日 22:06 起存活的 `pi` 进程，`cwd` 在 `~/.local/state/codeestra/worktrees/<old-id>/.orca-worktree-trash/…`）的父进程。**未动它们**：处理一个仍托管旧 Agent 子进程的进程需要用户决定，不能凭「看起来没用」就 SIGTERM。
 
+## FOUNDATION-058 — 紧凑任务信息行与主操作优先（ADR-0034）
+
+状态：实现与部署前全量检查完成；用户随后明确授权本次人工提交与部署（见下）。本节保留提交时事实，不预先声称 main 已推进或重启成功；视觉、窄屏与键盘体验仍待用户人工确认。
+
+### 已实现
+
+- 用户选择「紧凑信息行」与「紧凑导航＋突出主操作」，记录为 `docs/decisions/0034-compact-task-workbench.md`，同步决策索引；未修改人工规范 `AGENTS.md` 或 `PROJECT_SPEC.md`。
+- 新增 `apps/ui/src/task-list.tsx`：两行任务摘要、编号、较醒目的状态标记、OPEN 请求数量、规格版本、优先级、约束数、相对更新时间（可查看绝对时间）。全部读取既有 `task.list` / `attention.list`，不逐行获取完整历史、不改业务状态。
+- 概况一键筛选；「需要你处理」按任务去重，涵盖 OPEN 请求、等待用户、失败与恢复态；概况不含归档。新增本地排序（默认保持 Runtime 返回顺序）、`#编号` 搜索、重置筛选；列表与详情仍分开，返回保留查询/筛选/排序，恢复到原任务行的键盘焦点（已不在列表则落到列表标题）。
+- 状态使用文字、颜色、符号，进行态轻量旋转；支持减少动态效果偏好。断线显示最近记录提示并停止动效；SSE 订阅/重连补读现有投影。**Task RUNNING 不等于 provider 此刻在运行**，无完整会话数据的列表不伪造工具进度/百分比/执行耗时；详情可捕获成果时显示「会话已退出」，不继续播放该状态动效。
+- `apps/ui/src/styles.css`：桌面导航 194px → 146px，页头 76px → 56px；压缩页边距、概况和页脚，搜索筛选横排；列表使用页面滚动而非 60vh（窄屏 18rem）的嵌套滚动框，窄屏信息行变单列。保留文字导航与深浅主题。
+- `apps/ui/src/App.tsx`：主操作按状态显示，进行中验证避免重复发起；终止/归档移到「更多操作」且不增加审批；OPEN 问卷移到长命令进度之前；技术说明与原始结果折叠。修正已支持暂停/终止、submit 会进入自动调度等过时文案；不自动串接成果提交、验证和集成。
+- 扩充 `apps/runtime/test/cli-attention.test.ts` 的实际 UI HTTP 客户端用例，验证列表元信息、OPEN 请求关联、归档默认隐藏/显式可读/可恢复；保留会话退出不等于成果或验证成功的断言。
+
+### 实际验证
+
+- `bun run typecheck`、`bun run typecheck:ui`、`bun run build:ui`：通过。
+- `bun test apps/runtime/test/cli-attention.test.ts apps/runtime/test/http-api.test.ts apps/runtime/test/cli-task-control.test.ts apps/runtime/test/operation-progress-events.test.ts`：**20 pass / 0 fail，200 个断言**；包含问题回答、归档、状态版本、HTTP 授权、SSE 和步骤事件。
+- 使用临时 `CODEESTRA_HOME` 与当前 `apps/ui/dist` 经 CLI 启动独立 Runtime，HTTP 核对 HTML、2 个构建资产的字节内容、无令牌 401 和授权 ping 成功。最后经 CLI stop 确认停止并清理该临时目录，未连接/停止 main 稳定 Runtime；未记录实际 token。
+- `git diff --check`：通过。初次开发验收只运行定向回归；随后按用户提交/部署要求，以独立 `CODEESTRA_HOME` 运行 `bun install --frozen-lockfile` 与完整 `bun run check`，均退出码 0：根/UI TypeScript、**272 项 Vitest + 567 项 Bun tests（67 文件，3512 个断言，0 fail）**、Vite 构建。完整检查日志位于 `/tmp/codeestra-release-058.1sOl7N/check.log`；之后只补充发布决策与本节文档，未改已测业务代码。
+
+### 边界与待确认
+
+- 未获取电脑控制权，未使用浏览器/桌面自动化。构建与 HTTP 通过不证明视觉排版、动画、焦点或触控体验正确。
+- 用户人工确认：三种主题、窄屏、减少动态效果、状态更新、返回原筛选/任务行、更多操作、任务内回答。
+- 不新增 Domain/数据库/公共 API/调度能力；列表不声称能展示未查询的模型、具体工具、失败详情或验证证据。
+
+### 本次发布授权与固定基线
+
+- 用户明确选择沿用上次人工发布路径；一次性例外写入 ADR-0034「本次发布路径补充」。不存在 Runtime Task/IntegrationBatch，不能伪造领域批次或 PromotionRecord；此操作不会出现在产品 `promotion list` 中。
+- 开发基线：`dev@861932dbd33f836142d491cdfabdf1f4053cdf95`；预期旧 main：`7c02878f400f289e0ff484552d7a4a1420aa944b`。main 工作树 `/Users/loyage/Documents/codeestra` 提升前 clean，稳定 Runtime boot `3cdf511d-0b5c-4a38-8f4a-3338a8c4abe6`、pid 12056、READY、uiRunning=true、无活跃 Session。
+- 下一步执行者固定本次 dev 提交 OID，重新核对两个 ref 与 main 干净状态，在 main 工作树 fast-forward 固定 OID，随后按 install → build:ui → stop → status 执行；有需要时再启动 UI 并检查 READY + uiRunning。最终提交 OID、各步退出码与新 boot 由实际执行输出记录，不在提交前捏造发布结果。
+- 未授权 push；不直接 update-ref 已检出的 main，失败不回滚，不手工清理未知进程。新 UI token 不写入文档、日志或提交。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、~~UI 投影~~（已由 FOUNDATION-050 完成 promotion/dependency 投影）。

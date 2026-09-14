@@ -270,6 +270,18 @@ describe('codeestra attention answer', () => {
         constraints: [], kind: 'DEVELOPMENT' });
       expect(draft.state).toBe('DRAFT');
       expect(draft.currentRevision.number).toBe(1);
+      // Compact task rows use these existing command projections, not per-row task.status reads
+      // or a client-invented running duration / verification percentage.
+      const list = await client.command<TaskView[]>({ command: 'task.list', projectId,
+        includeArchived: true });
+      const listedDraft = list.find((item) => item.id === draft.id)!;
+      expect(listedDraft).toBeDefined();
+      expect(listedDraft).toMatchObject({ displayNumber: draft.displayNumber, priority: draft.priority,
+        createdAt: draft.createdAt, updatedAt: draft.updatedAt, archivedAt: null });
+      expect(Number.isFinite(listedDraft.updatedAt)).toBe(true);
+      expect(listedDraft.currentRevision.constraints).toEqual([]);
+      expect(list.find((item) => item.id === taskId)?.state).toBe('WAITING_FOR_USER');
+      expect(attentions.filter((item) => item.taskId === taskId && item.status === 'OPEN')).toHaveLength(1);
       const detail = await client.command<TaskStatusView>({ command: 'task.status', projectId,
         taskId: draft.id });
       expect(detail.task.id).not.toBe(taskId);
@@ -303,6 +315,21 @@ describe('codeestra attention answer', () => {
       expect(ended.verifications).toHaveLength(0);
       expect((await client.command<TaskView[]>({ command: 'task.list', projectId }))
         .find((item) => item.id === draft.id)?.state).toBe('DRAFT');
+      // The default overview excludes archived Tasks; the explicit archive filter can recover
+      // them without losing the state or revision used in the row.
+      await client.command({ command: 'task.archive', commandId: crypto.randomUUID(), projectId,
+        taskId: draft.id, expectedVersion: draft.version });
+      expect((await client.command<TaskView[]>({ command: 'task.list', projectId }))
+        .some((item) => item.id === draft.id)).toBe(false);
+      const archived = (await client.command<TaskView[]>({ command: 'task.list', projectId,
+        includeArchived: true })).find((item) => item.id === draft.id)!;
+      expect(archived.archivedAt).not.toBeNull();
+      expect(archived.state).toBe('DRAFT');
+      expect(archived.currentRevision).toEqual(draft.currentRevision);
+      await client.command({ command: 'task.unarchive', commandId: crypto.randomUUID(), projectId,
+        taskId: draft.id, expectedVersion: archived.version });
+      expect((await client.command<TaskView[]>({ command: 'task.list', projectId }))
+        .find((item) => item.id === draft.id)?.archivedAt).toBeNull();
     } finally {
       run.kill('SIGTERM');
       await cli(['stop'], environment);
