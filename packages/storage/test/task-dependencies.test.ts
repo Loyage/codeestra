@@ -186,7 +186,9 @@ describe('task dependency persistence', () => {
       const upgraded = new Phase1Database(filename);
       expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version)
         .toBe(phase1SchemaVersion);
-      expect(phase1SchemaVersion).toBe(15);
+      // The assertion is deliberately not a literal: the concurrent lanes above this one reserve
+      // later versions (16, 17), and the constant stays the maximum of them after they land.
+      expect(phase1SchemaVersion).toBeGreaterThanOrEqual(15);
       expect(upgraded.sqlite.query<{ name: string }, []>(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='task_dependencies'",
       ).get()?.name).toBe('task_dependencies');

@@ -88,6 +88,16 @@ export interface VerificationTreeEvidence {
   readonly clean: boolean;
 }
 
+/** One observed output chunk of a policy command: sizes only, never the bytes themselves. */
+export interface VerificationOutputChunk {
+  readonly commandId: string;
+  readonly stream: 'STDOUT' | 'STDERR';
+  readonly chunkBytes: number;
+  /** Cumulative bytes of this stream so far, so a reader can tell a live counter from a guess. */
+  readonly streamBytes: number;
+  readonly elapsedMs: number;
+}
+
 export interface VerificationReport {
   readonly verificationId: string;
   readonly projectId: string;
@@ -208,6 +218,7 @@ async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | nul
 
 async function captureStream(
   stream: ReadableStream<Uint8Array>,
+  onChunk?: (chunk: { readonly bytes: number; readonly chunkBytes: number }) => void,
 ): Promise<StreamCapture> {
   const digest = createHash('sha256');
   let bytes = 0;
@@ -216,6 +227,9 @@ async function captureStream(
   for await (const chunk of stream) {
     digest.update(chunk);
     bytes += chunk.byteLength;
+    // The callback only ever sees sizes: raw output is untrusted and has no business in an event,
+    // so a caller can publish "this command produced N bytes" without republishing the bytes.
+    onChunk?.({ bytes, chunkBytes: chunk.byteLength });
     tail = boundedTail(tail, decoder.decode(chunk, { stream: true }));
   }
   tail = boundedTail(tail, decoder.decode());
@@ -226,12 +240,17 @@ async function captureStream(
  * Runs one policy command in the verification copy. Commands are argv arrays spawned
  * directly, never through a shell, in their own process group so a timeout can stop the
  * whole tree instead of only the first process.
+ *
+ * `onOutput` is called for every chunk the process writes, with sizes only. It is the sub-step, live
+ * half of a long command's progress: a caller can publish "still producing output" without ever
+ * copying raw command output into a fact.
  */
 async function runCommand(input: {
   readonly verificationId: string;
   readonly command: StoredVerificationCommand;
   readonly copyPath: string;
   readonly runner: VerificationRunner;
+  readonly onOutput?: (chunk: VerificationOutputChunk) => void;
 }): Promise<VerificationCommandOutcome> {
   const cwd = input.command.cwd === '.' ? input.copyPath : join(input.copyPath, input.command.cwd);
   const resolvedCwd = resolve(cwd);
@@ -275,8 +294,14 @@ async function runCommand(input: {
     (code) => { exitCode = code; return code; },
     () => { exitCode = null; return null; },
   );
-  const stdoutPromise = captureStream(child.stdout);
-  const stderrPromise = captureStream(child.stderr);
+  const stdoutPromise = captureStream(child.stdout, (chunk) => input.onOutput?.({
+    commandId: input.command.id, stream: 'STDOUT', chunkBytes: chunk.chunkBytes,
+    streamBytes: chunk.bytes, elapsedMs: Date.now() - startedAt,
+  }));
+  const stderrPromise = captureStream(child.stderr, (chunk) => input.onOutput?.({
+    commandId: input.command.id, stream: 'STDERR', chunkBytes: chunk.chunkBytes,
+    streamBytes: chunk.bytes, elapsedMs: Date.now() - startedAt,
+  }));
   const timedOut = await Promise.race([
     exitPromise.then(() => false),
     Bun.sleep(input.command.timeoutSeconds * 1_000).then(() => true),
@@ -459,7 +484,12 @@ export interface VerificationExecution {
   readonly copyCreated: boolean;
   readonly copyRemoval: { readonly removed: boolean | null; readonly detail: string | null };
   readonly failureDetail: string | null;
-  /** True when a cancel was observed at a step boundary; the caller owns the terminal record. */
+  /**
+   * True when a cancel was observed at a step boundary; the caller owns the terminal record. A
+   * cancelled execution carries no judgement: `terminalState`/`outcomeCode` are placeholders and the
+   * caller must read the recorded run (`CANCELLED` after a confirmed stop) instead of treating it as
+   * a failed command.
+   */
   readonly cancelled: boolean;
 }
 
@@ -471,6 +501,8 @@ export interface VerificationExecutionCallbacks {
   readonly onCommandStart?: (command: StoredVerificationCommand) => void;
   readonly onCommandEnd?: (outcome: VerificationCommandOutcome) => void;
   readonly onCopyCreated?: (path: string) => void;
+  /** Called for every output chunk a running command writes; the caller decides how to coalesce. */
+  readonly onOutput?: (chunk: VerificationOutputChunk) => void;
   readonly isCancelled?: () => boolean;
 }
 
@@ -526,6 +558,7 @@ export async function executeVerificationPolicy(input: {
       input.onCommandStart?.(command);
       const outcome = await runCommand({
         verificationId: input.runId, command, copyPath: copy.path, runner: input.runner,
+        ...(input.onOutput === undefined ? {} : { onOutput: input.onOutput }),
       });
       outcomes.push(outcome);
       input.onCommandEnd?.(outcome);
@@ -591,6 +624,9 @@ export async function executeVerificationPolicy(input: {
         detail: error instanceof Error ? error.message : String(error),
       }));
   if (cancelled) {
+    // Not a verdict at all: the caller owns the terminal record (and only writes `CANCELLED` after
+    // confirming the stop). The `cancelled` flag below is what callers act on; these two fields are
+    // placeholders for a path that never reaches a judgement.
     terminalState = 'ERROR';
     outcomeCode = 'CANCELLED_BY_USER';
   }
@@ -830,6 +866,8 @@ export async function executeQueuedVerification(input: {
       ? {} : { onCommandEnd: input.callbacks.onCommandEnd }),
     ...(input.callbacks?.onCopyCreated === undefined
       ? {} : { onCopyCreated: input.callbacks.onCopyCreated }),
+    ...(input.callbacks?.onOutput === undefined
+      ? {} : { onOutput: input.callbacks.onOutput }),
     ...(input.callbacks?.isCancelled === undefined
       ? {} : { isCancelled: input.callbacks.isCancelled }),
   });

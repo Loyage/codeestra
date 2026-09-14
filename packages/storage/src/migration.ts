@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 15;
+export const phase1SchemaVersion = 17;
 
 
 export const phase1Migration = `
@@ -855,4 +855,84 @@ CREATE TRIGGER task_dependencies_no_update
 BEFORE UPDATE ON task_dependencies BEGIN
   SELECT RAISE(ABORT,'task dependency edges are immutable; remove and add again');
 END;
+`;
+
+/**
+ * Verification cancellation and long-command progress events (ADR-0027, FOUNDATION-047).
+ *
+ * `verification_runs` gains the first-class `CANCELLED` terminal state instead of borrowing
+ * `ERROR` for a run the user stopped. A state is part of a table CHECK, so the table is rebuilt the
+ * same way `executions_v9` was: columns, rows and both indexes are copied verbatim, so existing runs
+ * keep their identity, evidence and timestamps. The consistency CHECK is kept and extended —
+ * `CANCELLED`, like every other terminal state, must carry both `ended_at` and `outcome_code`, so an
+ * unconfirmed stop still cannot be written as a finished run. Nothing references
+ * `verification_runs` by foreign key, so the rebuild is safe with foreign keys enabled.
+ *
+ * `integration_verification_runs` deliberately keeps its own CHECK: an integration verification is
+ * not reachable by `task.operation.cancel` (it has its own Operation kind), so there is no cancelled
+ * path to express there yet.
+ *
+ * `operation_progress_events` is the durable, append-only trace of the progress events a long
+ * command publishes. The `domain_events` row is the delivered fact; this table adds what the event
+ * log alone cannot express: a per-Operation monotonic `progress_sequence` (so a consumer can order
+ * and ignore stale progress), a `dedup_key` (so re-emitting the same boundary is a no-op instead of
+ * a duplicated fact), and a row for every published event so a projection can be read by
+ * `progress_sequence` as well as by the global event cursor.
+ *
+ * Schema version 17 is reserved for this migration. Version 16 is reserved by the concurrent C2
+ * lane; when both land, every `version <` step is kept and runs in ascending order, and the version
+ * constant stays the maximum of the two (17).
+ */
+export const verificationProgressMigration = `
+CREATE TABLE verification_runs_v17 (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT NOT NULL,
+  execution_id TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  operation_id TEXT NOT NULL UNIQUE REFERENCES operations(id),
+  command_id TEXT NOT NULL,
+  tested_commit TEXT NOT NULL,
+  tested_tree TEXT NOT NULL,
+  policy_version TEXT NOT NULL,
+  policy_digest TEXT NOT NULL,
+  main_commit TEXT NOT NULL,
+  commands_json TEXT NOT NULL CHECK(json_valid(commands_json) AND json_type(commands_json)='array'),
+  copy_path TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('QUEUED','RUNNING','PASSED','FAILED','ERROR','CANCELLED','STALE')),
+  outcome_code TEXT,
+  evidence_json TEXT CHECK(evidence_json IS NULL OR json_valid(evidence_json)),
+  queued_at INTEGER NOT NULL CHECK(queued_at >= 0),
+  started_at INTEGER,
+  ended_at INTEGER,
+  UNIQUE(project_id,command_id),
+  CHECK(ended_at IS NULL OR started_at IS NULL OR ended_at >= started_at),
+  CHECK((state IN ('QUEUED','RUNNING') AND ended_at IS NULL AND outcome_code IS NULL)
+    OR (state IN ('PASSED','FAILED','ERROR','CANCELLED','STALE')
+      AND ended_at IS NOT NULL AND outcome_code IS NOT NULL)),
+  FOREIGN KEY(task_id,execution_id) REFERENCES executions(task_id,id),
+  FOREIGN KEY(task_id,revision_id) REFERENCES task_revisions(task_id,id)
+) STRICT;
+INSERT INTO verification_runs_v17(id,project_id,task_id,execution_id,revision_id,operation_id,
+  command_id,tested_commit,tested_tree,policy_version,policy_digest,main_commit,commands_json,
+  copy_path,state,outcome_code,evidence_json,queued_at,started_at,ended_at)
+  SELECT id,project_id,task_id,execution_id,revision_id,operation_id,command_id,tested_commit,
+    tested_tree,policy_version,policy_digest,main_commit,commands_json,copy_path,state,outcome_code,
+    evidence_json,queued_at,started_at,ended_at FROM verification_runs;
+DROP TABLE verification_runs;
+ALTER TABLE verification_runs_v17 RENAME TO verification_runs;
+CREATE INDEX verification_subject ON verification_runs(task_id,revision_id,tested_commit);
+CREATE INDEX verification_by_task ON verification_runs(project_id,task_id,queued_at);
+
+CREATE TABLE operation_progress_events (
+  operation_id TEXT NOT NULL REFERENCES operations(id),
+  progress_sequence INTEGER NOT NULL CHECK(progress_sequence >= 0),
+  event_id TEXT NOT NULL UNIQUE,
+  dedup_key TEXT NOT NULL CHECK(length(trim(dedup_key)) > 0),
+  phase TEXT NOT NULL CHECK(phase IN ('STEP','OUTPUT','CANCEL','SETTLED')),
+  detail_json TEXT NOT NULL CHECK(json_valid(detail_json)),
+  recorded_at INTEGER NOT NULL CHECK(recorded_at >= 0),
+  PRIMARY KEY(operation_id,progress_sequence),
+  UNIQUE(operation_id,dedup_key)
+) STRICT, WITHOUT ROWID;
 `;
