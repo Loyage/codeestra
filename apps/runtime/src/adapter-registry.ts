@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { PiRpcAdapter } from '@codeestra/agent-adapters';
+import { CodexAdapter, PiRpcAdapter } from '@codeestra/agent-adapters';
 import type { AgentAnswerAdapter } from '@codeestra/contracts';
 
 export class AdapterRegistryError extends Error {
@@ -57,8 +57,9 @@ export function piSessionDirectory(input: {
 }
 
 /**
- * Phase 1 production registry. Pi is the only registered Adapter; a deterministic fake is
- * never registered here because a fake Session must not be reported as a real execution.
+ * Phase 1 production registry. Pi and Codex are the real registered Adapters (ADR-0029); a
+ * deterministic fake is never registered here because a fake Session must not be reported as a
+ * real execution.
  */
 /**
  * One place that decides what a *controlled* Pi launch consists of: which gate and question
@@ -104,7 +105,7 @@ export function piControlledLaunch(input: {
   };
 }
 
-export function createPiAdapterRegistry(input: {
+export function createAdapterRegistry(input: {
   readonly runtimeHome: string;
   readonly environment?: Readonly<Record<string, string | undefined>>;
 }): AdapterRegistry {
@@ -125,6 +126,19 @@ export function createPiAdapterRegistry(input: {
     questionExtensionPath,
     sessionDir,
     platform: launch.platform,
+    environment: adapterEnvironment,
+  }));
+  // Codex is the second real Adapter (ADR-0029). It spawns `codex app-server --stdio` and owns
+  // that child; it deliberately shares nothing with the Pi launch above, because Codex has its own
+  // permission channel, session store and (unlike Pi) no way to ignore ambient user config.
+  registry.register(new CodexAdapter({
+    codexExecutable: (input.environment ?? {})['CODEESTRA_CODEX_EXECUTABLE'] ?? 'codex',
+    ...((input.environment ?? {})['CODEESTRA_CODEX_HOME'] === undefined
+      ? {}
+      : { codexHome: (input.environment ?? {})['CODEESTRA_CODEX_HOME'] as string }),
+    // Opt-in: the provider's structured question tool only exists behind an under-development
+    // feature flag, so the default launch does not enable it and capabilities say so.
+    enableRequestUserInput: (input.environment ?? {})['CODEESTRA_CODEX_REQUEST_USER_INPUT'] === '1',
     environment: adapterEnvironment,
   }));
   return registry;

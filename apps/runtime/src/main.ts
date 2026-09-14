@@ -7,7 +7,7 @@ import { devBranchRef, runtimeRequestSchema, validateQuestionnaireAnswer, questi
 import { inspectRepository, readLocalRefCommit } from '@codeestra/git';
 import { Phase1Database, StorageError, type AgentAnswerPlan } from '@codeestra/storage';
 import {
-  createPiAdapterRegistry,
+  createAdapterRegistry,
   piControlledLaunch,
   piSessionDirectory,
 } from './adapter-registry.js';
@@ -145,7 +145,7 @@ rmSync(socketPath, { force: true });
 
 let permissionMode: PermissionMode = await readPermissionMode(home);
 const storage = new Phase1Database(join(home, 'runtime.sqlite'));
-const registry = createPiAdapterRegistry({ runtimeHome: home, environment: Bun.env });
+const registry = createAdapterRegistry({ runtimeHome: home, environment: Bun.env });
 const coordinator = new AgentRuntimeCoordinator({
   storage,
   registry,

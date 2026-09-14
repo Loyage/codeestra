@@ -56,6 +56,7 @@ const capabilities: AdapterCapabilities = Object.freeze({
   attach: 'STRUCTURED',
   reconnectToLiveSession: 'UNSUPPORTED',
   resumeAfterExit: 'UNSUPPORTED',
+  controlledConfiguration: 'SUPPORTED',
 });
 
 interface Deferred { readonly promise: Promise<void>; readonly resolve: () => void }

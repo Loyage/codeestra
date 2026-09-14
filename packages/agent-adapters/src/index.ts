@@ -42,6 +42,33 @@ export type { PiSessionFileFacts } from './pi-session-file.js';
 export type { PiRpcEnvelope, PiRpcErrorCode } from './pi-process.js';
 export { PiRpcAdapter } from './pi-adapter.js';
 export type { PiRpcAdapterOptions } from './pi-adapter.js';
+export { CodexAdapter } from './codex-adapter.js';
+export type { CodexAdapterOptions } from './codex-adapter.js';
+export {
+  buildCodexAppServerArguments,
+  codexApprovalDecision,
+  codexApprovalKind,
+  codexApprovalPrompt,
+  codexMethods,
+  codexPermissionPolicy,
+  codexPlainQuestionPrompt,
+  codexQuestionnairePrompt,
+  CodexAdapterError,
+  CodexJsonlDecoder,
+  CodexProtocolError,
+  encodeCodexRecord,
+  encodeCodexUserInputResult,
+  parseCodexThreadIdentity,
+  parseCodexTurnCompletion,
+  parseCodexTurnId,
+  parseCodexUserInput,
+} from './codex-protocol.js';
+export type {
+  CodexAdapterErrorCode, CodexThreadIdentity, CodexTurnCompletion, CodexUserInputQuestion,
+  CodexUserInputRequest,
+} from './codex-protocol.js';
+export { CodexAppServerClient } from './codex-process.js';
+export type { CodexFrame, CodexPendingServerRequest } from './codex-process.js';
 
 import type {
   AdapterCapabilities,
@@ -79,6 +106,7 @@ const capabilities: AdapterCapabilities = Object.freeze({
   attach: 'STRUCTURED',
   reconnectToLiveSession: 'SUPPORTED',
   resumeAfterExit: 'UNSUPPORTED',
+  controlledConfiguration: 'SUPPORTED',
 });
 
 export type FakeObservedEvent = Readonly<

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { chmodSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createPiAdapterRegistry } from '../src/adapter-registry.js';
+import { createAdapterRegistry } from '../src/adapter-registry.js';
 import { cleanupTemporaryDirectories, registerTemporaryDirectory } from './support/agent-fixture.js';
 
 afterEach(() => { cleanupTemporaryDirectories(); });
@@ -27,7 +27,7 @@ describe('production Pi adapter registry', () => {
     await Bun.write(executable, '#!/bin/sh\necho 0.84.4\n');
     chmodSync(executable, 0o755);
 
-    const registry = createPiAdapterRegistry({
+    const registry = createAdapterRegistry({
       runtimeHome: home,
       environment: { PATH: bin, CODEESTRA_PI_EXECUTABLE: 'fake-pi' },
     });
@@ -37,7 +37,7 @@ describe('production Pi adapter registry', () => {
   test('an unresolvable provider is reported instead of pretending success', async () => {
     const bin = temporaryDirectory('codeestra-pi-empty-');
     const home = temporaryDirectory('codeestra-pi-home-');
-    const registry = createPiAdapterRegistry({
+    const registry = createAdapterRegistry({
       runtimeHome: home,
       environment: { PATH: bin, CODEESTRA_PI_EXECUTABLE: 'definitely-missing-pi' },
     });
@@ -59,7 +59,7 @@ echo "$@" > ${reportPath}
 echo 0.84.4
 `);
     chmodSync(executable, 0o755);
-    const registry = createPiAdapterRegistry({
+    const registry = createAdapterRegistry({
       runtimeHome: home,
       environment: {
         PATH: bin, CODEESTRA_PI_EXECUTABLE: 'fake-pi',
@@ -72,8 +72,9 @@ echo 0.84.4
 
   test('registers exactly one adapter instance and rejects unknown IDs', () => {
     const home = temporaryDirectory('codeestra-pi-home-');
-    const registry = createPiAdapterRegistry({ runtimeHome: home, environment: {} });
-    expect(registry.ids()).toEqual(['pi']);
-    expect(() => registry.resolve('codex')).toThrow('No Agent Adapter is registered for codex');
+    const registry = createAdapterRegistry({ runtimeHome: home, environment: {} });
+    expect(registry.ids()).toEqual(['pi', 'codex']);
+    expect(() => registry.resolve('claude-code'))
+      .toThrow('No Agent Adapter is registered for claude-code');
   });
 });
