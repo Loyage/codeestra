@@ -1453,10 +1453,13 @@ CLI usage 两段并存、`docs/tasks` 按 042/043/044 升序）。
 7. 未做并发压力测试（数十个 home 同时 stop/status）与长时间运行下的 boot 记录规模测试。
 ## FOUNDATION-046 — 原生终端 PTY 传输、successor 启动与 attach/detach/release（ADR-0026）
 
-状态：**已实现并通过 CLI/命令面测试**（真实 PTY + 真实进程表 + 协议 stub provider），并在**真实 Pi 0.84.4**
-上完成了传输与 side channel 的 headless 实测（见下「已实测」）。**未 commit、未 push、未提升 `main`、未重启
-稳定 Runtime**。本轮占用 **schema v16**（`sessionTerminalMigration`：`session_terminals` +
-`session_terminal_attachments`）；V13/V14/V15 三段既有迁移原样保留，`phase1SchemaVersion` 15 → 16。
+状态：**已实现、已提交并合入 `dev`**（真实 PTY + 真实进程表 + 协议 stub provider），并在**真实 Pi 0.84.4**
+上完成了传输与 side channel 的 headless 实测（见下「实际验证」）。lane commit `730880e`（`lane/c2-pty-handoff`，
+基线固定为 `dev@abec3f3`，未 rebase）→ dev merge `abc0685`（在 dev 工作树内 `--no-ff`，与 FOUNDATION-045/047
+的并排冲突在此解决）。**未 push、未提升 `main`、未重启稳定 Runtime**。
+集成时因 C3 的 v17 先合入，本格迁移**改占 schema v18**（`sessionTerminalMigration`：`session_terminals` +
+`session_terminal_attachments`；本格原预留的 v16 作废——dev 的数据库可能已被标为 17，`version < 16` 会被跳过）；
+V13/V14/V15/V17 四段既有迁移原样保留，`phase1SchemaVersion` 17 → 18。
 
 Phase 3 第二小步：把 `session handoff admit` 从「只判定并记录」变成**真的能接管**。ADR-0023 的安全点、单
 writer lease、incarnation 与决议路由语义不变；本格实现 ADR-0010 D04/D05 的传输半边，不新增任何权限门禁或
@@ -1496,7 +1499,7 @@ writer lease、incarnation 与决议路由语义不变；本格实现 ADR-0010 D
   session file 上启动 RPC successor、核验 session file 未被换掉、启动观察循环）与 `AgentRuntimeServiceError`。
 - `apps/runtime/src/adapter-registry.ts`：抽出 `piControlledLaunch`，让 RPC 与 PTY 两条传输共用同一份受控启动
   路径/platform/provider 可执行文件（避免两条传输漂移）。
-- `packages/storage`：v16 additive 迁移 + `session_terminals`/`session_terminal_attachments` 的
+- `packages/storage`：v18 additive 迁移 + `session_terminals`/`session_terminal_attachments` 的
   record/release/end/attach/detach/release-attachments 方法；追加 `markSessionIncarnationExited`（结束
   incarnation 同时清空 `current_incarnation_id`，旧决议立即 `STALE_INCARNATION`）、
   `mergeSessionIncarnationProcessTree`（按 pid 合并并集树）、`markSessionTerminalHandoffSafePoint`
@@ -1563,8 +1566,10 @@ session handoff writer acquire|release ...
     其 `pid` 与本格记录的 provider pid 一致（incarnation 身份核验对真实 provider 成立）；随后 Runtime 下发
     `{"kind":"fence","active":true}`，真实 TUI 回 `{"kind":"fence_ack","active":true}`——**补上了 FOUNDATION-043
     遗留的「生产 gate 在 TUI 模式未复验」缺口**（当时只验证过 spike 专用扩展）。
-- 迁移验证（临时脚本，不入库）：v15 库 additive 升级到 v16 后 `user_version` = 16、两张新表存在、
-  `PRAGMA foreign_key_check` 无违规。
+- 迁移验证：本格分支上（临时脚本，不入库）v15 库 additive 升级到 v16 后 `user_version` = 16、两张新表存在、
+  `PRAGMA foreign_key_check` 无违规。**集成后按 v18 重新验证**（`apps/runtime/test/verification-cancel.test.ts`，
+  随集成全量检查执行）：标记 16 的库升级到 18（v17 重建 + v18 两张新表都在、`foreign_key_check` 无违规），
+  标记 17 的库（本格 C3 先合入后 dev 的真实形态）只跑 v18 一步。
 
 ### 待用户人工确认（本格无法自行完成）
 
@@ -1611,6 +1616,37 @@ session handoff writer acquire|release ...
   shutdown 绑定区时若要显式等待，可调用 `TerminalService.close()`（已导出、幂等）。
 - 权衡：终端字节不落盘（ADR-0010 D06），因此 Runtime 重启后旧终端输出无法回溯，只能报 `RECOVERY_REQUIRED`；
   release 采用「不确认就不交还」的保守语义，代价是 provider 卡住时需要用户重试或 `cancel`。
+
+### dev 集成（`abc0685`，手工合并；与 FOUNDATION-045/047 并排）
+
+- **schema 改占 v18**：`migration.ts` 常量 18，步进顺序 `< 13 / < 14 / < 15 / < 17 / < 18`（v16 保持未使用）；
+  两段迁移模板与各自分支逐字节一致（机械核对过），只有一个 `sessionTerminalMigration` 定义。
+- **冲突解决**（都在 dev 工作树内，lane 不 rebase）：`migration.ts`（18 + 两个 `<` 步进）、`database.ts`
+  （`migrate()` 两个门 + C2 的 562 行终端方法 + C3 的 `completeOperation` 改动都在）、
+  `task-dependencies.test.ts`（版本断言保留双方理由）、`package.json`（`test:unit` 忽略清单与 `test:e2e` 文件表
+  取并集）、`cli/main.ts`（C1 的 `stop`/`status` 段 + C2 的 handoff 段）、`docs/tasks/README.md`（045/046/047 升序
+  + NEXT 第 2 条取 C3、第 3 条取 C2）。
+- **超出纯并集的集成修正**（不在任何 lane 上，故在此记录）：
+  - `cli/main.ts` 末段仍写着「admit 只记录判定、本版本没有 PTY 传输、从不启动 successor、从不移动 lease」，
+    已被本合并证伪，改为描述实际行为（启动 PTY 终端或 RPC successor、失败先收束不留半成品、已 admit 的请求回放）。
+  - `runtime/main.ts`：合并把 ADR-0023 的注释悬空在 ADR-0026 的终端接线之上，已放回 `SessionHandoffService`；
+    shutdown 改为在 `handoff.close()` 与 `storage.close()` **之前** `await terminals.close()`，使 shutdown 时仍开着的
+    终端被记为 `STOPPED`，而不是留下 `RUNNING` 行、下次启动只能报 `RECOVERY_REQUIRED`（硬杀仍由 helper 的
+    「控制管道关闭即终止 provider」兜底；`TerminalService.close()` 幂等）。
+  - `verification-cancel.test.ts`：两处版本字面量断言按 18 修正，v16 升级测试加一条 v18 生效断言，并新增
+    「标记 17（v17 已跑）的库只跑 v18」的用例。
+- **集成验证**（dev 工作树，即 merge commit 记录的树）：`bun install --frozen-lockfile` 后
+  `bun run check` 退出码 0 —— 根与 UI TypeScript、231 项 Vitest、**415 项 Bun tests（0 fail，50 个文件）**、
+  UI Vite 构建。未 push、未提升 `main`、未重启稳定 Runtime。
+- **已知测试脆弱性（未掩盖）**：本格的 PTY 测试对机器负载敏感。本格分支上多次跑全量时出现间歇失败
+  （`waitFor` 超时；一次是 `release` 返回 `released: false` 而非确认交还），单独跑与本次集成跑均全绿。
+  排查时发现本格工作树基线早于 C1 的生命周期修复，先前测试运行留下了 **21 组 Runtime + stub-pi 孤儿进程**
+  （`CODEESTRA_HOME` 指向 `codeestra-attach-home-*` 测试夹具）；已在核验归属后终止（只动本工作树夹具，稳定
+  Runtime `65545` 未受影响）。孤儿清理后同一全量检查连续通过。**根因未最终定位**（怀疑并集进程树里
+  短暂子进程的 `startToken` 为 null，PID 复用后使归属核验返回 `UNVERIFIED` → 保守拒绝），需后续单独跟进。
+- **本次未覆盖**：真实模型在 TUI 中键入后交还 RPC 的复验、跨交接权限模式完整矩阵、并行工具批次安全点、
+  PTY resize、compaction、大 session file、Windows、其他 provider、UI 终端（C3 领地）与 TUI 目视确认（需用户在场）。
+
 ## FOUNDATION-047 — verification run 的 `CANCELLED` 状态与长命令实时进度事件（ADR-0027，schema v17）
 
 状态：**已提交并合入 `dev`**。lane commit `8629e28`（`lane/c3-verification-progress`，基线固定为 `dev@abec3f3`，未 rebase）→ dev merge `fadc094`（在 dev 工作树内 `--no-ff`；与 FOUNDATION-045 的并排冲突在 `docs/tasks/README.md` 与 `package.json` 合并保留）。合并前在 dev 的合并树上完成独立全量检查；**这是手工合并，不是产品 IntegrationBatch**。未 push、未提升 `main`、未重启稳定 Runtime。决策见 ADR-0027；本格只做 ADR-0019 明确留下的两项（「未实现（不得声称）」第 1、2 条），不新增任何确认门禁。
@@ -1653,7 +1689,7 @@ session handoff writer acquire|release ...
 
 ### 交付边界与剩余问题
 
-- **占用了 schema v17**。本次先于预留 v16 的 C2 schema 改动合入，因此当前 dev 是 `phase1SchemaVersion = 17` 且没有 v16 迁移。数据库现在可能已被标记为 17，后续不得再插入 `if (version < 16)`（它会被既有 v17 数据库跳过）；C2 若需要 schema 变更必须使用下一个高于 17 的版本并提供相应升级测试。v16 保持未使用。
+- **占用了 schema v17**。本次先于预留 v16 的 C2 schema 改动合入，因此本格合入时 dev 是 `phase1SchemaVersion = 17` 且没有 v16 迁移。数据库现在可能已被标记为 17，后续不得再插入 `if (version < 16)`（它会被既有 v17 数据库跳过）；C2 若需要 schema 变更必须使用下一个高于 17 的版本并提供相应升级测试。v16 保持未使用。**（已按此规则执行：C2 于 `abc0685` 以 v18 合入，见 FOUNDATION-046；当前 dev 的 `phase1SchemaVersion` = 18。）**
 - **领地外的最小改动（需在交付说明中保留）**：`apps/runtime/src/reclaim-service.ts`（加 `CANCELLED` 到 failure scene，1 处分支）、`packages/storage/src/index.ts`（导出新迁移）、`packages/storage/src/database.ts` 的既有 `completeOperation`（对发布过进度的 Operation 追加 settle 事件，见 ADR-0027 D04）、`apps/ui/src/styles.css`（1 条 `.state-cancelled`）、`package.json`（测试分层清单）、以及 3 个既有测试文件的断言更新（其中 `task-dependencies.test.ts` 的字面量版本断言在 C2 的 v16 合入后必然失败）。
 - **剩余（不得声称已完成）**：
   - `task.run` 的进度是步骤级 + settle，不含 provider 事件级进度；provider token/PTY 字节按 event-model §4 与 ADR-0013 永不进入 domain event（细粒度通道仍是只读的 `session.transcript`）。要加 provider 事件级进度需要 `agent-runtime-service.ts`/`agent-observation-service.ts`（C4 槽位），本格未改。
