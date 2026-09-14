@@ -45,6 +45,17 @@ export type {
   MergeResult,
 } from './integration.js';
 export {
+  fastForwardCheckedOutWorktree,
+  findCheckedOutWorktree,
+  inspectPromotionWorktree,
+} from './promotion.js';
+export type {
+  CheckedOutWorktree,
+  PromotionMergeOutcome,
+  PromotionMergeResult,
+  PromotionWorktreeInspection,
+} from './promotion.js';
+export {
   createVerificationCopy,
   inspectVerificationCopy,
   readCommitTree,

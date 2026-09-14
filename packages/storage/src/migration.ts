@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 12;
+export const phase1SchemaVersion = 13;
 
 export const phase1Migration = `
 CREATE TABLE projects (
@@ -636,4 +636,72 @@ CREATE INDEX reclamation_records_by_project ON reclamation_records(project_id,cr
 CREATE INDEX reclamation_records_by_task ON reclamation_records(project_id,task_id,created_at,id);
 CREATE UNIQUE INDEX one_reclamation_record_per_resource
   ON reclamation_records(operation_id,kind,resource_id);
+`;
+
+/**
+ * Stable branch promotion (ADR-0009 D02/D03, PROJECT_SPEC §2.12/§2.14). One row fixes the three
+ * pieces of evidence a promotion is approved for — the verified `dev` commit, the expected old
+ * `main` commit, and the independent integration verification that judged the promoted commit —
+ * plus the permission mode, the observed `main` after the update, and the Runtime restart result.
+ *
+ * `promoted_commit` is written only from an observed ref, never from an assumption: a promotion
+ * that did not move `main` has no promoted commit. `main` is only ever advanced inside the
+ * worktree that has it checked out (ADR-0009 D03), so `main_worktree_path` is part of the plan.
+ *
+ * Schema version 13 is reserved for this migration; versions 11 and 12 stay untouched.
+ */
+export const stablePromotionMigration = `
+CREATE TABLE stable_promotions (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  dev_ref TEXT NOT NULL CHECK(length(trim(dev_ref)) > 0),
+  main_ref TEXT NOT NULL CHECK(length(trim(main_ref)) > 0),
+  candidate_commit TEXT NOT NULL,
+  expected_main_commit TEXT NOT NULL,
+  integration_batch_id TEXT NOT NULL REFERENCES integration_batches(id),
+  verification_id TEXT NOT NULL REFERENCES integration_verification_runs(id),
+  verification_tested_commit TEXT NOT NULL,
+  permission_mode TEXT NOT NULL CHECK(permission_mode IN ('FULL','STRICT')),
+  state TEXT NOT NULL CHECK(state IN ('CREATED','AWAITING_APPROVAL','PROMOTING','RESTARTING',
+    'SUCCEEDED','STALE','FAILED','RECOVERY_REQUIRED')),
+  approved_dev_commit TEXT,
+  approved_main_commit TEXT,
+  approved_verification_id TEXT,
+  approved_at INTEGER,
+  -- Observed main after the fast-forward; NULL until a ref was actually read back.
+  promoted_commit TEXT,
+  main_worktree_path TEXT,
+  -- Boot identity of the Runtime that moved main; a restart must not report the same one.
+  promoting_boot_id TEXT,
+  restart_steps_json TEXT CHECK(restart_steps_json IS NULL
+    OR (json_valid(restart_steps_json) AND json_type(restart_steps_json) = 'array')),
+  restart_result_json TEXT CHECK(restart_result_json IS NULL OR json_valid(restart_result_json)),
+  outcome_code TEXT,
+  detail TEXT,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  completed_at INTEGER,
+  CHECK((approved_at IS NULL) = (approved_dev_commit IS NULL)),
+  CHECK(state <> 'SUCCEEDED' OR promoted_commit IS NOT NULL),
+  CHECK(completed_at IS NULL OR completed_at >= created_at),
+  CHECK((state IN ('SUCCEEDED','STALE','FAILED') AND completed_at IS NOT NULL)
+    OR (state NOT IN ('SUCCEEDED','STALE','FAILED') AND completed_at IS NULL))
+) STRICT;
+CREATE INDEX stable_promotions_by_project ON stable_promotions(project_id,created_at,id);
+-- One open promotion per project: a second attempt would race the first over the same refs.
+CREATE UNIQUE INDEX one_open_promotion_per_project ON stable_promotions(project_id)
+  WHERE state IN ('CREATED','AWAITING_APPROVAL','PROMOTING','RESTARTING','RECOVERY_REQUIRED');
+
+CREATE TABLE stable_promotion_members (
+  promotion_id TEXT NOT NULL REFERENCES stable_promotions(id),
+  batch_id TEXT NOT NULL REFERENCES integration_batches(id),
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  execution_id TEXT NOT NULL,
+  candidate_commit TEXT NOT NULL,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  PRIMARY KEY(promotion_id,task_id),
+  FOREIGN KEY(task_id,revision_id) REFERENCES task_revisions(task_id,id),
+  FOREIGN KEY(task_id,execution_id) REFERENCES executions(task_id,id)
+) STRICT;
 `;

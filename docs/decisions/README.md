@@ -23,6 +23,7 @@
 - [ADR-0018](0018-task-result-integration-into-dev.md)：Task 成果合入 `dev` 的 IntegrationBatch 第一小步——在 Runtime 数据目录的 detached worktree 里合并，先跑独立集成验证，PASSED 后才用 CAS 推进 `dev` ref；任何失败保留现场且不推进 `dev`；同时把 Task worktree 基线修正为固定 `dev`（`projects.dev_ref`，仓库无 dev 时 trust 明确拒绝）。不含 `dev → main` 提升与重启。
 - [ADR-0019](0019-long-command-operations.md)：`task.run`/`task.verify` 成为持久 Operation——步骤级进度（`operation_progress`，v11）作为**事实**记录，CLI 新增 `task.verify --background` 与 `task.operation.list/get/cancel`（`--json`、稳定退出码），UI 投影同一命令面；取消先确认进程静止才落终态，未确认则 Operation `RECONCILE_REQUIRED` 并保留占用；重启按已记录的 Session/Execution/ref 事实 reconcile。复用现有枚举表达取消（不改状态机），不新增任何确认。
 - [ADR-0021](0021-resource-reclamation.md)：验证副本与失败现场的回收（`reclaim plan/apply/records`）。只删 Runtime 注册过的三类资源（Task worktree / 验证副本 / integration worktree），删除前逐一校验 owned root 归属、symlink escape、worktree 注册、branch/HEAD 与 held Execution；默认保留失败现场，`--include-failure-scenes` 才显式回收；append-only 账本入 schema v12；不新增确认。同轮决定：Attention 工具参数继续原样入库，不摘要化。
+- [ADR-0022](0022-stable-branch-promotion.md)：`dev → main` 稳定提升成为产品能力（`promotion prepare/approve/promote/restart.record/abandon/get/list`）。固定「被验证的 dev commit + 预期 main old OID + 集成验证证据」三元组，任一与事实不符即拒绝且不推进任何 ref；只有 `dev → main` 且只允许 fast-forward。FULL 零确认；STRICT 保留一次精确三元组批准，ref 或证据移动即 `STALE`。`main` 已被检出时在该工作树内 `git merge --ff-only <固定候选 OID>`，**禁止对已检出的 `main` 用 `update-ref`**；提升后由 CLI 客户端在执行 `main` 工作树内固定序列 `bun install --frozen-lockfile` → `bun run build:ui` → `bun run codeestra stop` → `bun run codeestra status`，只有「各步退出码 0 + 记账 Runtime 的 boot 与推动 main 的 boot 不同 + `status: READY`」才 `SUCCEEDED`（`uiRunning` 只记录为事实）；失败不回滚、保留现场，崩溃按 ref 事实 reconcile（不二次写 ref），不声称覆盖系统外手动更新 `main`。
 
 以上选择均由用户明确答复。用户给定的硬性原则见 `PROJECT_SPEC.md`，无需重复确认。
 
@@ -49,6 +50,7 @@
 | Phase 1 | Agent 需要决策时能否结构化提问 | 已由 ADR-0014 确认并实现：Codeestra 自有扩展注册 `ask_user_question`，一份问卷 = 一个 provider dialog = 一条 `QUESTION` Attention = 一次 answer Operation；结构化回答经 Runtime 按被问问卷校验后才记录；合法选项越界返回 `INVALID_QUESTIONNAIRE_ANSWER:*` 而非静默取消。未做：把“Agent 结束轮次并在散文里提问”识别为等待人工，以及真实模型经 Runtime 的端到端验收 |
 | Phase 1 | 长命令的进度、取消与重启 reconcile | 已由 ADR-0019 确认并实现：`task.run`/`task.verify` 记录持久 Operation 与步骤级进度（`operation_progress`，schema v11），CLI `task.verify --background` + `task.operation.list/get/cancel`（`--json`、稳定退出码），取消确认静止后才落状态、未确认则 `RECONCILE_REQUIRED` 并保留占用，重启按事实 reconcile。未做：verification run 的独立 `CANCELLED` 状态（状态机变更，保留后续决策）、取消后副本的 prune、token 级进度事件 |
 | 任意阶段 | Runtime 自有资源（worktree/验证副本/integration worktree）的物理回收 | 已由 ADR-0021 确认并实现：显式 `reclaim plan/apply/records`，只删注册过且归属校验通过的三类资源，默认保留失败现场，append-only 账本入 schema v12，中途崩溃由启动 reconcile 收敛；不新增确认。未做：未注册目录的自动处理、跨项目一次回收、并发压力测试 |
+| Phase 4 | `dev → main` 提升的实现形态：`main` 已检出时的推进方式、重启序列的执行者与成功判定、STRICT 批准失效、崩溃 reconcile | 已由 ADR-0022 确认并实现：固定 dev/main/证据三元组后 fast-forward 已检出的 `main`（不用 `update-ref`），重启序列由 CLI 客户端执行、以 boot 身份 + `READY` 记账（`uiRunning` 只记录），ref/证据移动使批准 `STALE`，崩溃按 ref 事实收敛且不二次写 ref。未做：真实 `main` 提升与稳定 Runtime 重启的真实验证、多批次合并提升、`main` 未检出时的提升路径 |
 
 Phase 0 不要求 Phase 7 所有发布细节已决定；Phase 1 不能以“未来会解决”绕过影响真实执行与 Git 安全的待决项。
 

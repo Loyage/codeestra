@@ -19,6 +19,13 @@ import { LongOperationService } from './operation-service.js';
 import { runtimeHome, runtimeSocketPath } from './paths.js';
 import { readPermissionMode, writePermissionMode, type PermissionMode } from './permission-mode.js';
 import {
+  abandonStablePromotion,
+  approveStablePromotion,
+  prepareStablePromotion,
+  promoteStableBranch,
+  recordPromotionRestart,
+} from './promotion-service.js';
+import {
   applyReclamation,
   listReclamationRecords,
   planReclamation,
@@ -34,6 +41,7 @@ import {
   reconcileInterruptedAgentAnswers,
   reconcileInterruptedAgentStarts,
   reconcileInterruptedIntegrations,
+  reconcileInterruptedPromotions,
   reconcileInterruptedResultCommits,
   reconcileInterruptedRunOperations,
   reconcileInterruptedVerifications,
@@ -89,6 +97,12 @@ if (await endpointIsLive()) process.exit(0);
 rmSync(socketPath, { force: true });
 
 let permissionMode: PermissionMode = await readPermissionMode(home);
+/**
+ * Identity of this Runtime process. A stable promotion records the boot that moved `main`, and its
+ * restart evidence is only accepted from a different boot: that is how "the Runtime was really
+ * restarted" is checked instead of assumed from a client's report.
+ */
+const bootId = crypto.randomUUID();
 const storage = new Phase1Database(join(home, 'runtime.sqlite'));
 const registry = createPiAdapterRegistry({ runtimeHome: home, environment: Bun.env });
 const coordinator = new AgentRuntimeCoordinator({
@@ -132,6 +146,14 @@ await reconcileInterruptedIntegrations({
 // A reclamation the Runtime was killed in the middle of is reconciled from the actual filesystem
 // state; it never deletes anything, and it leaves what is still there for the next explicit run.
 await reconcileInterruptedReclamations({ storage, runtimeHome: home });
+// A stable promotion interrupts the Runtime on purpose (it restarts it), so a promotion found in
+// flight is reconciled from the `main` ref only: no ref is ever written twice from here.
+await reconcileInterruptedPromotions({
+  storage,
+  readRefCommit: async ({ ref, repositoryRoot }) => readLocalRefCommit({
+    repositoryRoot, ref,
+  }),
+});
 const verificationRunner = new VerificationRunner();
 /** Verification copies live inside the Runtime data directory, never in the user's repo. */
 const verificationCopiesRoot = join(home, 'verifications');
@@ -215,6 +237,7 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
     case 'runtime.ping':
       return success(request.requestId, {
         pid: process.pid,
+        bootId,
         status: 'READY',
         permissionMode,
         adapters: registry.ids(),
@@ -546,6 +569,66 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         ...(request.taskId === undefined ? {} : { taskId: request.taskId }),
         limit: request.limit,
       }));
+    case 'promotion.prepare':
+      return success(request.requestId, await prepareStablePromotion({
+        storage,
+        projectId: request.projectId,
+        batchId: request.batchId,
+        expectedDevCommit: request.expectedDevCommit,
+        expectedMainCommit: request.expectedMainCommit,
+        commandId: request.commandId,
+        permissionMode,
+      }));
+    case 'promotion.approve':
+      return success(request.requestId, approveStablePromotion({
+        storage,
+        projectId: request.projectId,
+        promotionId: request.promotionId,
+        permissionMode,
+      }));
+    case 'promotion.promote':
+      return success(request.requestId, await promoteStableBranch({
+        storage,
+        projectId: request.projectId,
+        promotionId: request.promotionId,
+        bootId,
+        permissionMode,
+      }));
+    case 'promotion.restart.record':
+      return success(request.requestId, await recordPromotionRestart({
+        storage,
+        projectId: request.projectId,
+        promotionId: request.promotionId,
+        bootId,
+        observedBootId: request.observedBootId,
+        runtimeStatus: request.runtimeStatus,
+        uiRunning: request.uiRunning,
+        steps: request.steps.map((step) => ({
+          id: step.id,
+          argv: step.argv,
+          cwd: step.cwd,
+          exitCode: step.exitCode,
+          durationMs: step.durationMs,
+          stdoutBytes: step.stdoutBytes,
+          stderrBytes: step.stderrBytes,
+          stdoutDigest: step.stdoutDigest,
+          stderrDigest: step.stderrDigest,
+          ...(step.failureDetail === undefined ? {} : { failureDetail: step.failureDetail }),
+        })),
+      }));
+    case 'promotion.abandon':
+      return success(request.requestId, abandonStablePromotion({
+        storage,
+        projectId: request.projectId,
+        promotionId: request.promotionId,
+        reason: request.reason,
+      }));
+    case 'promotion.get':
+      return success(request.requestId,
+        storage.getStablePromotion(request.projectId, request.promotionId));
+    case 'promotion.list':
+      return success(request.requestId,
+        storage.listStablePromotions(request.projectId, request.limit));
     case 'attention.list':
       return success(request.requestId, storage.listAttentionRequests(request.projectId));
     case 'attention.answer': {
