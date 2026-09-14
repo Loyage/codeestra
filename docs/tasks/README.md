@@ -2500,6 +2500,197 @@ scheduler reservations reconcile <project-id> [--json]
 - 未改写任何 ADR；如果上述不一致需要新决策，应由相应 lane 写新 ADR，而不是本格。
 - 本格不包含调度引擎；F1（FOUNDATION-055）会补 `scheduler.md` 的「引擎真的会跑」部分。
 
+## FOUNDATION-055 — 调度引擎：自动 tick、候选顺序、等待语义、`--allow-unknown` 与 §4 越界处置（Wave F / F1）
+
+状态：**已实现、已自查，等待用户确认后才 commit**。lane 分支 `lane/f1-scheduling-engine`，基线固定
+`dev@866fa027c7457cba640865f1eb7ecfe52a2863d6`（未 rebase、未合并新 dev、未 pull、未 push、未提升 `main`、
+未重启稳定 Runtime、未触碰 `/Users/loyage/Documents/codeestra`）。ADR：**0033**。schema：**未占用**（仍 v21；
+`packages/storage/src/migration.ts` 一行未动，v22 未被占用，也没有插入 `if (version < 16)`）。
+
+### 已实现
+
+**调度循环（`apps/runtime/src/schedule-service.ts`，新）**
+
+- 稳定顺序 priority 降序 → `createdAt` 升序 → ID 升序；逐候选的判定顺序照 `scheduler.md` §2：
+  依赖（未满足/上游 commit 不可达 ⇒ `BLOCKED`）→ 冲突判定 → 容量 → 预留 → worktree → 启动前基线重检 → 启动一个主 Agent。
+  「没有 Adapter 可用」不是 `BLOCKED`，是一类带稳定 detail 的 `SKIPPED`。
+- **冲突判定调用 E1 的分析器**（`inspectTaskImpact` 观测 + 纯域 `assessCandidate`），调度器不产生 `SAFE`；
+  配对判定照 E1 的契约写 append-only 的 `impact_assessments` 审计行。候选没有 worktree 时，其观测改动集是**空集**
+  并经 `createImpactSnapshot` 得到预测（映射完整且确认 ⇒ `complete`），预测本身也记为一个 append-only 快照
+  （稳定指纹 `codeestra:pre-start-impact:no-observed-change`，evidence 写明「尚无 worktree」）。**这条残余风险不掩盖**：
+  空预测与任何活跃任务都不重叠，两个刚提交、还没写出任何东西的任务会被判成 SAFE 并并行——这正是 §4 存在的原因。
+- **容量走 E2 的预留原语**：`SlotReservationService.acquire` 在 `BEGIN IMMEDIATE` 内重检 task 版本、revision、依赖指纹、
+  两个容量维度与 draining；`GLOBAL_CAPACITY` 与 `ADAPTER_CAPACITY` 分开报告。拿到槽位后准备 workspace，预留 Execution，
+  启动 Agent，然后**把预留交给 Execution**（释放原因写明「Execution 已持有资源」，`actor = runtime-scheduler`），
+  因此不会留下两份账；崩溃在预留与 Execution 之间时由 E2 的启动 reconcile 按归属核验收敛。
+- **启动前重检**：重读 `dev`，与预留记录的 `assessed_dev_commit` 不一致 ⇒ 不启动、释放预留、按 `STALE_BASE` 等待；
+  revision 变化 ⇒ 同样不启动。
+- 触发面：`task.submit`（同一命令内进入调度，响应里带回 pass 结果）、`task.integrate`、`task.pause|cancel`、
+  `task.resume`、`task.schedule.run`、槽位释放、容量变更、修订投递 resolve、执行结束（coordinator 结算后回调），
+  以及启动时的一次 `STARTUP` pass 与周期恢复 pass（默认 5s，`CODEESTRA_SCHEDULE_TICK_MS` 可调）。
+  **周期 pass 只收敛不启动**：它刷新活跃任务的观测、检测越界、记录等待；启动只由事件或显式命令触发（理由见 ADR-0033 D01）。
+  Runtime 内 pass 互斥。
+- **活跃集合按 §1**：E1 的资源持有投影 **∪** 仍持有 worktree 的 `PAUSED` 任务。后者的必要性来自一处**既有不一致**：
+  暂停确认会把 Execution 置成 `SUPERSEDED`、`resource_held = 0`，所以 PAUSED 既不在 `listImpactActiveTasks` 也不占容量——
+  与 ADR-0031 D06 / ADR-0032 D03 的文字相矛盾。本格只在**冲突侧**把它补回来（否则两个范围重叠的 PAUSED 任务可被同时恢复），
+  **容量口径一个字没改**（那是 E2 的语义），不一致已写进 ADR-0033 D06 与本文档。
+- **§4 实际 diff 超出预测**：以「启动它时依据的那份预测」（`TaskScheduleDecided.candidateSnapshotId`）比对 worktree 现状；
+  同 revision/baseline/映射/分析器下改动集合真的变了才叫越界；**可证明重叠**时写 `TaskImpactPredictionRevoked`
+  （前后快照 id、增删路径、命中任务、reason code）并经**既有协作暂停**请求该任务安全暂停（确认不了即落 `RECOVERY_REQUIRED`，
+  现场保留、禁止自动集成）；同一份观测只撤销一次；不与其他活跃任务可证明重叠时只记录不暂停；**绝不抢占任何任务**。
+
+**`--allow-unknown`（显式单次放行）**
+
+- 命令面：`task run … --allow-unknown`、`task resume … --allow-unknown`、`task schedule clear-unknown <project> <task>`。
+- 落点：append-only 事件 `TaskUnknownCleared`（`correlation_id` = 调用命令 ⇒ 重放不产生第二条），绑定
+  `revisionId`/`baseCommit`/`analyzerVersion`/`policyVersion`/当时 `reasonCodes`/`hits`/`releasedBy`，`scope = SINGLE_START`。
+  **不占 schema**；**被一次启动消费**（决策事件里的 `clearedUnknownBy` = 放行事件 id）；**不改写判定**（`impact_assessments`
+  仍是 UNKNOWN，测试断言放行后 `project impact explain` 仍返回 UNKNOWN）；revision/baseline/映射/分析器任一变化即失效。
+- **只放行 UNKNOWN**：`CONFLICTING` 被拒绝（退出码 1，状态 `CONFLICTING`）。放行后该任务可与活跃任务并发，不降级为独占。
+
+**门禁形状（本轮用户拍板 + 一处保守化，已在本报告里明说）**
+
+- 自动 pass **只启动能证明 SAFE 的候选**；`UNKNOWN` 一律等待（活跃集为空也一样）。
+- 显式请求（`task run`/`task resume`/`task schedule run`/`plan`/`explain`）与自动 pass 共用同一门禁，但允许 `UNKNOWN`
+  在**活跃集为空**时独占启动（`scheduler.md` §2「单任务且影响未知可以独占运行」）；活跃集非空时需要 `--allow-unknown`。
+  这样「UNKNOWN 默认等待」与「可以独占运行」不再互相打架：等待是默认，独占是用户显式请求的结果。
+
+### 命令面（零新增确认、`--json`、稳定退出码）
+
+```
+task schedule status <project-id> [--adapter <id>] [--json]      # 只读：活跃集、容量、上次 pass
+task schedule plan   <project-id> [--adapter <id>] [--json]      # 同一套判定的有序 dry run：不预留、不 prepare、不启动
+task schedule explain <project-id> <task-id> [--adapter <id>] [--json]
+task schedule run    <project-id> [--adapter <id>] [--json]      # 请求一次 pass
+task schedule clear-unknown <project-id> <task-id> [--json]      # 只记放行，不启动
+task run    <project-id> <task-id> <version> [--adapter <id>] [--allow-unknown] [--json]
+task resume <project-id> <task-id> <version> [--adapter <id>] [--allow-unknown]
+```
+
+- `explain` 回答「为什么这个任务现在没在跑」：依赖 verdict、与每个活跃任务的 verdict 与命中范围（路径/目录/模块/共享资源）、
+  容量数字、等待原因；`PAUSED` 任务还会给出「恢复是否被允许」的判定。退出码 **0** = 在跑或现在会启动、**3** = 等待
+  （冲突或容量——等待从来不是 `BLOCKED`）、**1** = `BLOCKED` 或不可调度。
+- `task.run` 同构：**0** 启动、**3** 等待（reason code 在 `--json` 与 stderr）、**1** 拒绝（`BLOCKED`/`CONFLICTING`/不可启动状态），
+  且响应是**既有结果的超集**（`executionId`/`sessionId`/`workspacePath`/… 原样保留，调度事实并列返回），既有客户端不必改。
+- 自动选择 Adapter：`pi` 已注册则用，否则第一个已注册；`--adapter` 覆盖；判定与事件记录实际使用的 Adapter。没有新增配置语义。
+- 事件名不碰 E2：新增 `TaskScheduleDecided`/`TaskWaitingForConflict`/`TaskWaitingForCapacity`/`TaskUnknownCleared`/
+  `TaskImpactPredictionRevoked`（`aggregate_type = 'TaskSchedule'`），`ExecutionSlot*`/`SchedulerCapacityChanged` 未复用未改名。
+  等待事件只在等待**发生变化**时写一条（code + reasonCodes + blocking 去重），因此能读出「从何时起为什么在等」。
+
+### 验证（只用 CLI/命令面与 Runtime 命令面）
+
+- `apps/runtime/test/schedule-service.test.ts`（**10 项**，进程内；真实临时仓库 + 真实数据库 + 真实预留原语，只**注入**「启动 Agent」
+  这一步）：候选顺序与「提优先级只改顺序、不动已持有资源的任务」；两个 SAFE 都启动 + 第三个 `CAPACITY_GLOBAL_LIMIT_REACHED`
+  （且不是 `BLOCKED`、未创建 Execution）；无映射时自动 pass 等待、显式请求独占启动、有活跃任务时等待、`--allow-unknown`
+  可与活跃任务并发启动且审计绑定可读、判定仍 UNKNOWN、放行被一次启动消费、基线移动使放行失效；越界成长 ⇒ 撤销 + 请求暂停；
+  同文件重叠时恢复被拒（`--allow-unknown` 也拒）；依赖未满足是 `BLOCKED` 且不启动；两次 pass / 两个并发请求只产生一个 Execution；
+  PAUSED 仍在冲突活跃集合（即便不占槽位）；残留预留让启动被拒绝而不是重复创建。
+- `apps/runtime/test/cli-schedule.test.ts`（**6 项**，真实 CLI + 真实 Runtime + 独立 `CODEESTRA_HOME` + 临时仓库 + 协议 **stub** provider）：
+  1) submit 即自动启动两个 SAFE 不相交任务、都 RUNNING、容量 2、第三个 `task run` 退出 3 且 code 是 `CAPACITY_GLOBAL_LIMIT_REACHED`
+  （stderr 里不出现 `BLOCKED`）、审计里有两条 `TaskScheduleDecided`（第二条 `activeTaskIds = [第一个]`）与 `TaskWaitingForCapacity`；
+  2) 同文件重叠的 PAUSED 任务 `explain` 给 `WAIT_CONFLICT`/`SAME_FILE` + 命中路径，`resume` 退出 1 且保持 PAUSED，
+  `--allow-unknown` 与 `clear-unknown` 都拒绝；3) 无映射项目自动 pass 等待、`task run` 独占启动、第二个任务等待、
+  `--allow-unknown` 与活跃任务并发启动、`TaskUnknownCleared` 绑定可读、`project impact explain` 仍 UNKNOWN；
+  4) 两次 `task schedule run` + 两个并发 `task run` 只产生一个 Execution，stub 日志每个任务一行；
+  5) 越界 ⇒ `TaskImpactPredictionRevoked` + 两个任务都被协作暂停 + 恢复被拒 + 现场保留；
+  6) SIGKILL 崩溃后新 generation 不重复创建 Agent（Execution 唯一、stub 日志一行、启动 pass 不再启动它）。
+- 既有 e2e 回归：`apps/runtime/test/cli-impact.test.ts` 的 fixture 改为「submit 后等调度器启动」（ADR-0030 D04 的必然结果，
+  用户本轮明确同意只改 fixture 两行 + 注释），其余 195 项既有 e2e 未改动并保持通过。
+- `bun run check:fast`：退出码 0（root + UI typecheck、265 项 Vitest、**346 pass / 0 fail**，34 文件）。
+- `bun run check`：见下方「本次实际运行的检查」。
+- 手动端到端证据：`CODEESTRA_HOME=/tmp/ce-f1` + 临时仓库 `/tmp/ce-f1-repo`（含 `.codeestra/impact.json`）+ 协议 stub
+  provider（`/tmp/ce-f1-tools/stub-pi.ts`）：`task submit` 的两个任务都进入 RUNNING 且各自 worktree 里有自己的产物、
+  `scheduler capacity get` 报 `globalUsed = 2`、`task schedule run` 检测到越界并给出 `TaskImpactPredictionRevoked`
+  + `pauseOutcome`。结束前 `stop`，并回收本 home 下的 Runtime 与 stub 进程（ps + lsof 三重证据后 SIGTERM）。
+
+### 本次实际运行的检查（本条即运行记录）
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| 快速循环 | `bun run check:fast` | 退出码 **0**：root + UI `tsc --noEmit`、**265 项 Vitest**、**346 pass / 0 fail**（34 文件） |
+| 完整检查 | `bun run check`（最终代码上重跑） | 退出码 **0**（`CHECK_EXIT=0`）：`tsc --noEmit`（root + UI）、**265 项 Vitest**、`test:storage` **548 pass / 0 fail**（63 文件，含本格 16 项）、UI Vite 构建成功 |
+| 本格进程内 | `bun test apps/runtime/test/schedule-service.test.ts` | **10 pass / 0 fail** |
+| 本格端到端 | `bun test apps/runtime/test/cli-schedule.test.ts` | **6 pass / 0 fail**（真实 CLI + 真实 Runtime + 临时 `CODEESTRA_HOME` + 临时仓库 + 协议 stub provider；含「查询类命令不启动任何东西」的断言） |
+| 既有无回归 | `bun run test:e2e` | **196 pass / 0 fail**（28 文件；其中 `cli-impact.test.ts` 只改了 fixture） |
+| 手动端到端证据 | 见下一节 | 见下一节 |
+
+**未运行 / 无法运行**：真实 provider（Pi/Codex）并发；真实模型驱动两个任务同时工作；UI 投影（未接入 `task schedule *`）；
+`task revision delivery resolve` 启动路径的冲突门禁（本格未接）。这些都在下节「未做 / 未验证」里，不得当成已成立。
+
+### 手动端到端证据（`CODEESTRA_HOME=/tmp/ce-f1`，本次会话实际输出）
+
+环境：临时仓库 `/tmp/ce-f1-repo`（`.codeestra/impact.json` 声明 `importantDirectories: ["core"]` 与模块 `core/**`，
+`main`/`dev` 双分支）＋ `CODEESTRA_HOME=/tmp/ce-f1` ＋ **协议 stub** provider（`/tmp/ce-f1-tools/stub-pi.ts`：按任务规格里的
+`write:<path>` 写文件，然后保持这一轮开启；它**不是真实 Agent**，只证明 Runtime 的编排）。原始日志留在 `/tmp/ce-f1-evidence.log`。
+
+| 步骤 | 实际观察到的结果 |
+|---|---|
+| `task submit` A（`write:core/first.ts`） | `schedule.trigger = SUBMIT`、`started = [A]`：**提交后自动进入调度并在同一命令内启动** |
+| `task submit` B（`write:core/second.ts`） | `started = [B]`；两个任务同时 RUNNING，两个 worktree 里各自出现 `core/first.ts` / `core/second.ts` |
+| `task schedule explain <paused A>` | 退出码 **3**、`decision = WAIT_CONFLICT`、`verdict = CONFLICTING`、`reasonCodes = [IMPORTANT_DIRECTORY_OVERLAP, SAME_MODULE]`、`blocking = [C, B]`、detail 里给出相交目录 `core` |
+| `task resume A` | 退出码 **1**、`CONFLICTING: The Task stays paused: …`，A 仍是 `PAUSED`（**同文件/重要目录 → 串行**） |
+| `task submit` D（`write:src/agent/d.ts`，与活跃任务不相交） | `started = [D]`；`scheduler capacity get` → `globalUsed = 2 / globalLimit = 2` |
+| `task submit` E（不相交，但容量已满） | `started = []`、`waiting = [(E, CAPACITY, CAPACITY_GLOBAL_LIMIT_REACHED)]` |
+| `task run E 1 --json` | 退出码 **3**、`outcome = WAIT`、`wait.kind = CAPACITY`、`code = CAPACITY_GLOBAL_LIMIT_REACHED`、`blocking = [D, C]`、`verdict = SAFE_TO_PARALLELIZE`；stderr：`[scheduler] CAPACITY wait: CAPACITY_GLOBAL_LIMIT_REACHED — 2 of 2 project slots are in use`（**不是 `BLOCKED`**） |
+| `task schedule run`（两个 Agent 都已写出 `core/*.ts` 之后） | `impactGrowth`：`addedPaths: ["core/second.ts"]`、`conflictingTaskIds: [A]`、`reasonCodes: [IMPORTANT_DIRECTORY_OVERLAP, SAME_MODULE]`、`pauseRequested: true`、`pauseOutcome: "PAUSED/RELEASED: Session had already exited (requested: …)"`——**用既有协作暂停，不是抢占** |
+| `events list`（本次 99 条事件里的 8 条调度事实） | `TaskScheduleDecided A SAFE_TO_PARALLELIZE active=[]`、`TaskScheduleDecided B SAFE_TO_PARALLELIZE active=[A]`、`TaskImpactPredictionRevoked added=['core/second.ts'] conflicts=[A] reasons=[IMPORTANT_DIRECTORY_OVERLAP,SAME_MODULE] pauseRequested=true`、`TaskImpactPredictionRevoked added=['core/first.ts'] conflicts=[B] …`、`TaskScheduleDecided C SAFE_TO_PARALLELIZE active=[A,B]`、`TaskWaitingForConflict A IMPORTANT_DIRECTORY_OVERLAP`、`TaskScheduleDecided D SAFE_TO_PARALLELIZE active=[C,A,B]`（**A、B 已是 PAUSED 仍在活跃集合里**——§1 活跃集合的补回在此可见）、`TaskWaitingForCapacity E CAPACITY_GLOBAL_LIMIT_REACHED blocking=[D,C]` |
+| 收尾 | `codeestra stop` 退出码 0、`status = STOPPED`；随后按 ps + lsof 证据用 **SIGTERM**（未用 SIGKILL/`--force`）回收本会话在该 home 下产生的全部 Runtime 与 stub 进程（回收后 `ps` 计数为 0）；`/tmp/ce-f1`、`/tmp/ce-f1-repo`、`/tmp/ce-f1-tools`、`/tmp/ce-f1-evidence.log` 保留为证据 |
+
+### 手动端到端证据之二：`--allow-unknown`（无映射项目 `/tmp/ce-f1-unknown`，同一 stub）
+
+`/tmp/ce-f1-unknown-repo` **没有** `.codeestra/impact.json`，因此判定恒为 `UNKNOWN (INCOMPLETE_IMPACT)`。实际输出
+（原始日志 `/tmp/ce-f1-unknown-evidence.log`）：
+
+| 步骤 | 结果 |
+|---|---|
+| `task submit A 0`（自动 pass） | `started: []`、`waiting: [{A, kind: CONFLICT, code: INCOMPLETE_IMPACT}]`——**提交后自动进入调度，但 UNKNOWN 默认等待** |
+| `task run A 1 --json` | 退出码 **0**、`outcome: STARTED`、`verdict: UNKNOWN`、`clearedUnknownBy: null`（活跃集为空 ⇒ 显式请求可独占运行，无需放行） |
+| `task submit B 0` + `task run B 1 --json` | 退出码 **3**、`wait {kind: CONFLICT, code: INCOMPLETE_IMPACT, blocking: [A]}`；stderr：`pass --allow-unknown to start it anyway (single-shot, audited)` |
+| `task run B 1 --allow-unknown --json` | 退出码 **0**、`outcome: STARTED`、`verdict: UNKNOWN`、`clearedUnknownBy: b27e87a1-…`；A 与 B **同时 RUNNING**（放行允许与活跃任务并发） |
+| `project impact explain B --json` | 退出码 **1**、`verdict: UNKNOWN`、`reasonCodes: [INCOMPLETE_IMPACT]`——**放行没有改写判定** |
+
+审计片段（`events list` 原文，节选）：
+
+```json
+{
+  "eventType": "TaskUnknownCleared",
+  "aggregateType": "TaskSchedule",
+  "correlationId": "c9ce85f3-55ad-4872-9bc8-392fd1c7d398",
+  "payload": {
+    "taskId": "4ad466a9-…", "revisionId": "3b62b818-…",
+    "baseCommit": "75d150906cea9bef7d45f3d41f7ec636ab23c7ff",
+    "analyzerVersion": "impact-analyzer-v1",
+    "policyVersion": "impact-policy-v1#absent",
+    "candidateSnapshotId": "ed1693ea-…",
+    "verdict": "UNKNOWN",
+    "reasonCodes": ["INCOMPLETE_IMPACT"],
+    "hits": [ {"reason": "INCOMPLETE_IMPACT", "class": "INCOMPLETE", "taskId": "4ad466a9-…",
+               "detail": "impact is incomplete: POLICY_ABSENT"}, {"…": "…", "taskId": "823fb65a-…"} ],
+    "releasedBy": "local-user",
+    "releasedAt": 1789398378555,
+    "scope": "SINGLE_START",
+    "detail": "explicit single-shot release of an UNKNOWN assessment; it does not change the recorded verdict, and it stops applying when the revision, the baseline or the analyzer/policy version changes"
+  }
+}
+```
+
+以及消费它的那次启动决定（同一 Task 的 `TaskScheduleDecided`）：
+
+```json
+{ "verdict": "UNKNOWN", "reasonCodes": ["INCOMPLETE_IMPACT"],
+  "clearedUnknownBy": "b27e87a1-1e1d-4826-b202-6cd6e8fd0683",
+  "analyzerVersion": "impact-analyzer-v1", "policyVersion": "impact-policy-v1#absent",
+  "baseCommit": "75d150906cea" }
+```
+
+两次手动运行都以 `codeestra stop`（退出码 0、`status: STOPPED`）结束，并按 ps + lsof 证据 SIGTERM 回收了本会话在这两个 home 下
+产生的全部 Runtime 与 stub 进程（回收后 `ps` 计数为 0）。
+
+**一处如实说明**：这次手动运行里，第三个任务 C **被启动了而不是容量等待**——因为 `task schedule run`/submit 的 pass 会**先**做 §4 的越界检测，
+发现 A、B 的 diff 已长进声明范围并互相可证明重叠，于是**先**把两者暂停（PAUSED 不占槽位，见「未做/未验证」），容量因此空出来。
+这是设计内的顺序（先撤销旧 SAFE，再考虑新候选），「容量为 2 时第三个 → 容量等待」则在自动化端到端测试
+（`cli-schedule.test.ts` 第 1 项，两个不相交任务不触发 §4）与上表 `task run E` 那一步里各自被断言到。
+
 ## FOUNDATION-056 — Agent 在散文里提问：不得静默记为 `SUCCESS`（ADR-0004/0014 语义内）
 
 状态：**已实现**，并在 CLI/命令面端到端验证（真实 CLI + 真实 Runtime + 协议 stub provider + `CODEESTRA_HOME=/tmp/ce-f3`）。

@@ -20,7 +20,7 @@ import {
   recordRunStep,
   settleRunOperation,
 } from './operation-service.js';
-import { prepareTaskWorkspace } from './workspace-service.js';
+import { prepareReservedWorkspace, prepareTaskWorkspace } from './workspace-service.js';
 
 /**
  * Derived command IDs make one `task.run` command ID cover its whole chain. Replaying the
@@ -87,6 +87,12 @@ export interface AgentRuntimeCoordinatorOptions {
   readonly now?: () => number;
   readonly randomUUID?: () => string;
   readonly shutdownGraceMs?: number;
+  /**
+   * Identity of this Runtime generation. A reservation may only be turned into a run by the boot that
+   * created it (`SLOT_HELD_BY_ANOTHER_RUNTIME` otherwise), so the coordinator needs the same boot id
+   * the slot service records.
+   */
+  readonly bootId?: string;
   readonly logger?: (message: string, detail?: Readonly<Record<string, unknown>>) => void;
 }
 
@@ -108,6 +114,7 @@ export class AgentRuntimeCoordinator {
   readonly #now: () => number;
   readonly #randomUUID: () => string;
   readonly #shutdownGraceMs: number;
+  readonly #bootId: string;
   readonly #logger: (message: string, detail?: Readonly<Record<string, unknown>>) => void;
   readonly #pumps = new Map<string, Promise<void>>();
 
@@ -121,6 +128,7 @@ export class AgentRuntimeCoordinator {
     this.#now = options.now ?? Date.now;
     this.#randomUUID = options.randomUUID ?? (() => crypto.randomUUID());
     this.#shutdownGraceMs = options.shutdownGraceMs ?? 5_000;
+    this.#bootId = options.bootId ?? 'runtime';
     this.#logger = options.logger ?? (() => {});
   }
 
@@ -188,6 +196,77 @@ export class AgentRuntimeCoordinator {
         },
         recordedAt: this.#now(),
       });
+      return await this.#startPreparedExecution({
+        projectId: input.projectId,
+        taskId: input.taskId,
+        expectedTaskVersion: input.expectedTaskVersion,
+        commandId: input.commandId,
+        adapter,
+        operationId,
+        adapterVersion: probe.version,
+        workspace: {
+          workspaceId: workspace.workspaceId,
+          path: workspace.path,
+          baseCommit: workspace.baseCommit,
+        },
+        ...(input.resume === undefined ? {} : { resume: input.resume }),
+      });
+    } catch (error) {
+      // A run that never reached a Session is closed from the error it actually produced. The
+      // workspace and Agent start Operations keep their own, more specific recovery records.
+      const code = typeof error === 'object' && error !== null && 'code' in error
+        ? String(error.code)
+        : 'RUN_FAILED';
+      const message = error instanceof Error ? error.message : String(error);
+      recordRunStep({
+        storage: this.#storage,
+        operationId,
+        stepKey: 'RUN_FAILED',
+        step: 'RUN',
+        state: 'FAILED',
+        detail: { code, message },
+        recordedAt: this.#now(),
+      });
+      this.#storage.completeOperation({
+        operationId,
+        state: code === 'RECOVERY_REQUIRED' || code === 'RECONCILE_REQUIRED'
+          ? 'RECONCILE_REQUIRED' : 'FAILED',
+        result: { code, message },
+        completedAt: this.#now(),
+      });
+      throw error;
+    }
+  }
+
+
+  /**
+   * The start itself, shared by the two ways a run is established: `task.run` prepares the worktree
+   * directly, while the scheduling engine prepares it *for a slot reservation* it already holds
+   * (scheduler.md §2: reserve, then prepare the workspace outside the transaction, then start
+   * exactly one primary Agent). Both paths then record the same Execution and run steps, because a
+   * Task must not be able to tell from its audit which of the two started it.
+   */
+  async #startPreparedExecution(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly expectedTaskVersion: number;
+    readonly commandId: string;
+    readonly adapter: AgentAnswerAdapter;
+    readonly operationId: string;
+    readonly adapterVersion: string;
+    readonly workspace: {
+      readonly workspaceId: string;
+      readonly path: string;
+      readonly baseCommit: string;
+    };
+    readonly resume?: {
+      readonly resumeFromExecutionId: string;
+      readonly predecessorSessionId: string;
+      readonly predecessorSessionStorageRef: string;
+      readonly predecessorProviderSessionId: string | null;
+    };
+  }): Promise<RunTaskResult> {
+    const adapter = input.adapter;
       // Resolved before the reservation, so the effective configuration is part of the Execution's
       // recorded input and the Adapter cannot be started with something else.
       const agentConfig = this.#resolveAgentConfig({
@@ -198,14 +277,14 @@ export class AgentRuntimeCoordinator {
         projectId: input.projectId,
         taskId: input.taskId,
         expectedTaskVersion: input.expectedTaskVersion,
-        workspaceId: workspace.workspaceId,
+        workspaceId: input.workspace.workspaceId,
         executionId: deriveCommandId(input.commandId, 'execution'),
         commandId: deriveCommandId(input.commandId, 'reserve-execution'),
         payloadHash: deriveCommandId(input.commandId, 'reserve-payload'),
         reservationEventId: this.#randomUUID(),
         taskEventId: this.#randomUUID(),
         adapterId: adapter.id,
-        adapterVersion: probe.version,
+        adapterVersion: input.adapterVersion,
         agentConfig,
         ...(input.resume === undefined
           ? {} : { resumeFromExecutionId: input.resume.resumeFromExecutionId }),
@@ -214,7 +293,7 @@ export class AgentRuntimeCoordinator {
       });
       recordRunStep({
         storage: this.#storage,
-        operationId,
+        operationId: input.operationId,
         stepKey: operationSteps.executionReserved,
         step: 'EXECUTION',
         state: 'SUCCEEDED',
@@ -248,7 +327,7 @@ export class AgentRuntimeCoordinator {
       });
       recordRunStep({
         storage: this.#storage,
-        operationId,
+        operationId: input.operationId,
         stepKey: operationSteps.agentSessionStarted,
         step: 'AGENT_SESSION',
         state: 'SUCCEEDED',
@@ -276,12 +355,98 @@ export class AgentRuntimeCoordinator {
         permissionMode,
         agentConfig: started.agentConfig ?? null,
       };
+  }
+
+  /**
+   * Starts one Task inside a slot reservation the scheduling engine already holds
+   * (FOUNDATION-055). The reservation is the authority for the workspace: this refuses to prepare a
+   * worktree for a reservation another Runtime generation created, and the prepared workspace is
+   * bound to the reservation before any Execution exists. Everything after that is the ordinary run
+   * path, so an Execution started by the scheduler is indistinguishable from one started by
+   * `task.run` — same Operation, same steps, same recovery records.
+   */
+  async runScheduledExecution(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly expectedTaskVersion: number;
+    readonly revisionId: string;
+    readonly adapterId: string;
+    readonly reservationId: string;
+    readonly commandId: string;
+    readonly actor: string;
+  }): Promise<RunTaskResult> {
+    const adapter = this.#registry.resolve(input.adapterId);
+    const operationId = deriveCommandId(input.commandId, 'scheduled-run-operation');
+    beginTaskRunOperation({
+      storage: this.#storage,
+      projectId: input.projectId,
+      taskId: input.taskId,
+      operationId,
+      commandId: input.commandId,
+      adapterId: adapter.id,
+      expectedTaskVersion: input.expectedTaskVersion,
+      createdAt: this.#now(),
+    });
+    try {
+      const reservation = this.#storage.getSlotReservation(input.projectId, input.reservationId);
+      if (reservation.state !== 'RESERVED') {
+        throw new AgentRuntimeServiceError('SLOT_NOT_ACTIVE',
+          `Reservation ${input.reservationId} is ${reservation.state}; no Execution is started for it`);
+      }
+      if (reservation.holder.bootId !== this.#bootId) {
+        throw new AgentRuntimeServiceError('SLOT_HELD_BY_ANOTHER_RUNTIME',
+          `Reservation ${input.reservationId} was created by Runtime boot`
+          + ` ${reservation.holder.bootId}; this generation does not start its Execution`);
+      }
+      if (reservation.taskId !== input.taskId || reservation.revisionId !== input.revisionId) {
+        throw new AgentRuntimeServiceError('REVISION_CHANGED',
+          `Reservation ${input.reservationId} is for ${reservation.taskId}@${reservation.revisionId},`
+          + ` not for ${input.taskId}@${input.revisionId}`);
+      }
+      const probe = await adapter.probe();
+      const workspace = await prepareReservedWorkspace({
+        storage: this.#storage,
+        runtimeHome: this.#runtimeHome,
+        bootId: this.#bootId,
+        commandId: deriveCommandId(input.commandId, 'slot-workspace'),
+        projectId: input.projectId,
+        reservationId: input.reservationId,
+        expectedTaskVersion: input.expectedTaskVersion,
+        actor: input.actor,
+        now: this.#now,
+        randomUUID: this.#randomUUID,
+      });
+      recordRunStep({
+        storage: this.#storage,
+        operationId,
+        stepKey: operationSteps.workspacePrepared,
+        step: 'WORKSPACE',
+        state: 'SUCCEEDED',
+        detail: {
+          workspaceId: workspace.workspaceId,
+          workspacePath: workspace.path,
+          baseCommit: workspace.baseCommit,
+          reservationId: input.reservationId,
+        },
+        recordedAt: this.#now(),
+      });
+      return await this.#startPreparedExecution({
+        projectId: input.projectId,
+        taskId: input.taskId,
+        expectedTaskVersion: input.expectedTaskVersion,
+        commandId: input.commandId,
+        adapter,
+        operationId,
+        adapterVersion: probe.version,
+        workspace: {
+          workspaceId: workspace.workspaceId,
+          path: workspace.path,
+          baseCommit: workspace.baseCommit,
+        },
+      });
     } catch (error) {
-      // A run that never reached a Session is closed from the error it actually produced. The
-      // workspace and Agent start Operations keep their own, more specific recovery records.
       const code = typeof error === 'object' && error !== null && 'code' in error
-        ? String(error.code)
-        : 'RUN_FAILED';
+        ? String(error.code) : 'RUN_FAILED';
       const message = error instanceof Error ? error.message : String(error);
       recordRunStep({
         storage: this.#storage,
