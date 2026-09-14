@@ -230,9 +230,9 @@ describe('revision delivery schema (v19)', () => {
       raw.close();
 
       const storage = new Phase1Database(path);
-      expect(phase1SchemaVersion).toBe(20);
+      expect(phase1SchemaVersion).toBe(21);
       expect(storage.sqlite.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version)
-        .toBe(20);
+        .toBe(21);
       expect(storage.sqlite.query<{ id: string }, []>('SELECT id FROM projects').all())
         .toEqual([{ id: 'p-1' }]);
       expect(storage.sqlite.query<{ event_id: string }, []>('SELECT event_id FROM domain_events').all())

@@ -314,6 +314,191 @@ export const runtimeStopResultSchema = z.strictObject({
 });
 export type RuntimeStopResult = z.infer<typeof runtimeStopResultSchema>;
 
+/**
+ * Concurrency capacity and slot reservations (Phase 2, FOUNDATION-054 / ADR-0032).
+ *
+ * Two dimensions, both bounded by an explicit limit: the project-wide number of concurrent Tasks
+ * (default 2, configurable) and the number of concurrent slots per Agent Adapter (an Adapter with
+ * no explicit override follows the project limit). Nothing here is derived from host resources.
+ *
+ * A Task that cannot get a slot because of capacity is **waiting**, not blocked: `BLOCKED` is
+ * reserved for unmet dependencies (PROJECT_SPEC §2.10), so a capacity wait is expressed as its own
+ * stable reason code on the acquisition result and on `scheduler capacity get`.
+ */
+export const defaultConcurrencyLimit = 2;
+/** Upper bound for a configured limit: a typo must be refused, never silently clamped. */
+export const maxConcurrencyLimit = 16;
+/** Upper bound for one reservation read, so a client cannot ask the Runtime for unbounded rows. */
+export const maxSlotReservationReadLimit = 200;
+
+/**
+ * Why a Task did not get a slot. These are the codes a scheduler may surface as a *capacity wait*
+ * (never as `BLOCKED`); the set is closed so a client can branch on it.
+ */
+export type CapacityWaitReasonCode =
+  | 'CAPACITY_GLOBAL_LIMIT_REACHED'
+  | 'CAPACITY_ADAPTER_SLOT_LIMIT_REACHED'
+  | 'SCHEDULER_DRAINING';
+
+export interface CapacityWaitReason {
+  readonly code: CapacityWaitReasonCode;
+  readonly adapterId: string | null;
+  readonly limit: number | null;
+  readonly used: number | null;
+  /** Tasks occupying the slots that caused the wait; empty for a draining wait. */
+  readonly blocking: readonly string[];
+  readonly detail: string;
+}
+
+/** The capacity both dimensions as one acquisition is judged against, with where each limit came from. */
+export interface SlotCapacityCheck {
+  readonly globalLimit: number;
+  readonly globalLimitSource: 'DEFAULT' | 'EXPLICIT';
+  readonly globalUsed: number;
+  readonly globalBlocking: readonly string[];
+  readonly adapterId: string;
+  readonly adapterLimit: number;
+  readonly adapterLimitSource: 'DEFAULT' | 'EXPLICIT';
+  readonly adapterUsed: number;
+  readonly adapterBlocking: readonly string[];
+}
+
+/** One Adapter's capacity facts, as `scheduler capacity get` reports them. */
+export interface AdapterCapacityView {
+  readonly adapterId: string;
+  readonly limit: number;
+  readonly limitSource: 'DEFAULT' | 'EXPLICIT';
+  readonly used: number;
+  readonly available: number;
+  /** The code an acquisition for this Adapter would report right now, or null when a slot is free. */
+  readonly waitReason: CapacityWaitReasonCode | null;
+}
+
+export interface ProjectCapacityView {
+  readonly projectId: string;
+  readonly globalLimit: number;
+  readonly globalLimitSource: 'DEFAULT' | 'EXPLICIT';
+  readonly globalUsed: number;
+  readonly globalAvailable: number;
+  readonly globalWaitReason: CapacityWaitReasonCode | null;
+  readonly adapters: readonly AdapterCapacityView[];
+  readonly configVersion: number;
+  readonly updatedAt: number | null;
+  readonly updatedBy: string | null;
+  /** Runtime-owned draining fact: new reservations are refused while it is true. */
+  readonly draining: boolean;
+  readonly drainReason: string | null;
+  /** Tasks holding a slot right now, so a client can compute a waiting duration. */
+  readonly occupants: readonly { readonly taskId: string;
+    readonly reservationId: string | null; readonly adapterId: string; readonly since: number }[];
+}
+
+/** Who created a reservation and what evidence was recorded for it (never a bare "it was me"). */
+export interface SlotHolderEvidenceView {
+  readonly bootId: string;
+  readonly pid: number;
+  /** OS start token captured at acquisition; null when the OS could not answer. */
+  readonly startToken: string | null;
+  readonly actor: string;
+}
+
+export interface SlotReservationEventView {
+  readonly sequence: number;
+  readonly kind: 'RESERVED' | 'RELEASED' | 'RECONCILE_OBSERVED';
+  readonly domainEventId: string | null;
+  readonly commandId: string;
+  readonly actor: string;
+  readonly detail: string;
+  readonly evidence: Readonly<Record<string, unknown>>;
+  readonly occurredAt: number;
+}
+
+export interface SlotReservationView {
+  readonly reservationId: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly taskDisplayNumber: number;
+  readonly revisionId: string;
+  readonly taskVersion: number;
+  readonly adapterId: string;
+  readonly workspaceId: string | null;
+  readonly impactSnapshotId: string | null;
+  readonly dependencyFingerprint: string;
+  readonly assessedDevCommit: string | null;
+  readonly state: 'RESERVED' | 'RELEASED' | 'RECOVERY_REQUIRED';
+  readonly version: number;
+  readonly commandId: string;
+  readonly holder: SlotHolderEvidenceView;
+  readonly reservedAt: number;
+  readonly updatedAt: number;
+  readonly releasedAt: number | null;
+  readonly releaseReason: string | null;
+  readonly releaseKind: 'EXPLICIT' | 'RECONCILED_HOLDER_EXITED' | 'RECONCILED_PROCESS_ID_REUSED' | null;
+  readonly releaseObservation: 'HOLDER_STOPPED' | 'HOLDER_PROCESS_ID_REUSED' | 'HOLDER_STILL_RUNNING'
+    | 'HOLDER_OWNERSHIP_UNVERIFIABLE' | 'PROCESS_IDENTITY_MISSING' | null;
+  readonly detail: string | null;
+}
+
+export interface SlotReservationDetailView extends SlotReservationView {
+  readonly events: readonly SlotReservationEventView[];
+}
+
+export interface SlotReservationAcquisitionView {
+  readonly outcome: 'RESERVED' | 'CAPACITY_WAIT' | 'DRAINING';
+  readonly capacity: SlotCapacityCheck;
+  readonly wait: CapacityWaitReason | null;
+  readonly reservation: SlotReservationDetailView | null;
+  /**
+   * How the recorded holders of the slots that caused a wait looked when this command ran: a pid
+   * and start token compared with a live process table. Never an automatic release — capacity is
+   * only ever freed by an explicit release or by the audited startup reconcile.
+   */
+  readonly holderEvidence: readonly { readonly reservationId: string; readonly taskId: string;
+    readonly observation: 'HOLDER_STOPPED' | 'HOLDER_PROCESS_ID_REUSED' | 'HOLDER_STILL_RUNNING'
+      | 'HOLDER_OWNERSHIP_UNVERIFIABLE' | 'PROCESS_IDENTITY_MISSING'; readonly detail: string }[];
+}
+
+export interface SlotReservationReleaseView {
+  readonly released: boolean;
+  readonly outcome: 'RELEASED' | 'ALREADY_RELEASED';
+  readonly reservation: SlotReservationDetailView;
+}
+
+export interface SlotReservationReconcileOutcomeView {
+  readonly reservationId: string;
+  readonly taskId: string;
+  readonly outcome: 'RELEASED' | 'MARKED_RECOVERY_REQUIRED' | 'HELD' | 'ALREADY_RELEASED'
+    | 'ALREADY_RECONCILED' | 'SKIPPED_HELD_BY_RUNTIME' | 'FAILED';
+  readonly observation: 'HOLDER_STOPPED' | 'HOLDER_PROCESS_ID_REUSED' | 'HOLDER_STILL_RUNNING'
+    | 'HOLDER_OWNERSHIP_UNVERIFIABLE' | 'PROCESS_IDENTITY_MISSING' | null;
+  readonly previousState: string;
+  readonly state: string;
+  readonly detail: string;
+}
+
+export interface SlotReservationReconcileReport {
+  readonly bootId: string;
+  readonly outcomes: readonly SlotReservationReconcileOutcomeView[];
+  /** Reservations whose recorded process was never signalled by this Runtime generation. */
+  readonly notSignalled: readonly { readonly reservationId: string; readonly pid: number }[];
+}
+
+/**
+ * A workspace prepared for an existing reservation. The reservation is the authority: the workspace
+ * is bound to it, so a second Task can never claim the same worktree (the binding is enforced by a
+ * partial unique index, not by convention).
+ */
+export interface ReservedWorkspaceView {
+  readonly reservationId: string;
+  readonly taskId: string;
+  readonly workspaceId: string;
+  readonly path: string;
+  readonly branchRef: string;
+  readonly baseCommit: string;
+  readonly ownershipToken: string;
+  readonly created: boolean;
+}
+
 export const runtimeRequestSchema = z.discriminatedUnion('command', [
   z.strictObject({ ...requestBase, command: z.literal('runtime.ping') }),
   z.strictObject({ ...requestBase, command: z.literal('runtime.stop') }),
@@ -970,6 +1155,93 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     command: z.literal('project.impact.explain'),
     projectId: z.string().uuid(),
     taskId: z.string().uuid(),
+  }),
+  /**
+   * Capacity configuration (FOUNDATION-054 / ADR-0032). `get` reports the limits, where each one came
+   * from, how many slots are occupied, the stable wait reason a new acquisition would get, and the
+   * Runtime's draining fact. `set` writes one limit (project-wide, or one Adapter when `adapterId` is
+   * given) and `clear` removes an Adapter override so it follows the project limit again. An invalid
+   * value is refused with a stable code instead of being clamped to something plausible.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('scheduler.capacity.get'),
+    projectId: z.string().uuid(),
+    adapterId: nonBlankString.optional(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('scheduler.capacity.set'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    limit: z.number().int(),
+    adapterId: nonBlankString.optional(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('scheduler.capacity.clear'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    adapterId: nonBlankString,
+  }),
+  /**
+   * Slot reservations: the primitive a scheduler reserves with before it prepares a workspace or
+   * starts an agent (scheduler.md §3). `acquire` re-checks the Task version, revision, dependency
+   * facts, capacity and the draining fact inside one immediate transaction, and either records a
+   * reservation with its holder evidence or reports a capacity wait. `release` is explicit and
+   * audited; nothing releases a reservation because a heartbeat expired or a client went away.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('scheduler.reservations.list'),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid().optional(),
+    includeReleased: z.boolean().default(false),
+    limit: z.number().int().min(1).max(maxSlotReservationReadLimit).optional(),
+  }),
+  /** One reservation with its append-only history: the audit view of a single slot. */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('scheduler.reservations.get'),
+    projectId: z.string().uuid(),
+    reservationId: z.string().uuid(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('scheduler.reservations.acquire'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    expectedTaskVersion: z.number().int().nonnegative(),
+    revisionId: z.string().uuid(),
+    adapterId: nonBlankString.default('pi'),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('scheduler.reservations.release'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    reservationId: z.string().uuid(),
+    reason: nonBlankString,
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('scheduler.reservations.workspace.prepare'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    reservationId: z.string().uuid(),
+    expectedTaskVersion: z.number().int().nonnegative(),
+  }),
+  /**
+   * Runs the startup reconcile of slot reservations explicitly (it also runs on every Runtime start).
+   * It re-checks the recorded holder of every active reservation against the real process table and
+   * either releases it (holder proven gone) or keeps it occupied (holder alive or unverifiable).
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('scheduler.reservations.reconcile'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
   }),
 ]);
 export type RuntimeRequest = z.infer<typeof runtimeRequestSchema>;

@@ -13,13 +13,16 @@ import {
   type RevisionDeliveryChannel,
   type RevisionDeliveryState,
 } from '@codeestra/domain';
-import type { AgentAnswer } from '@codeestra/contracts';
+import type { AgentAnswer, CapacityWaitReason, SlotCapacityCheck, SlotReservationDetailView,
+  SlotReservationView } from '@codeestra/contracts';
+import { defaultConcurrencyLimit, maxConcurrencyLimit } from '@codeestra/contracts';
 import {
   agentAnswerMigration,
   agentConfigurationMigration,
   agentDisconnectMigration,
   agentObservationMigration,
   agentStartMigration,
+  capacitySlotReservationMigration,
   impactAnalysisMigration,
   integrationPipelineMigration,
   operationProgressMigration,
@@ -75,6 +78,130 @@ function operationTaskId(
     if (typeof request['taskId'] === 'string') return request['taskId'] as string;
   } catch { /* A malformed request payload must not break a progress write. */ }
   return kind === 'RUN_TASK' ? aggregateId : null;
+}
+
+/**
+ * Capacity configuration and resource reservations (FOUNDATION-054 / ADR-0032).
+ *
+ * A reservation carries the evidence of who created it — the Runtime boot, the process id, and the
+ * OS start token for that pid — because a bare "this row is mine" claim is not ownership evidence.
+ * `holderStartToken` is nullable on purpose: the OS may refuse to answer, and a missing token is a
+ * fact that the reconcile must treat as "unverifiable", never as "gone".
+ */
+export type SlotReservationState = 'RESERVED' | 'RELEASED' | 'RECOVERY_REQUIRED';
+export type SlotReservationReleaseKind = 'EXPLICIT' | 'RECONCILED_HOLDER_EXITED'
+  | 'RECONCILED_PROCESS_ID_REUSED';
+export type SlotHolderObservationKind = 'HOLDER_STOPPED' | 'HOLDER_PROCESS_ID_REUSED'
+  | 'HOLDER_STILL_RUNNING' | 'HOLDER_OWNERSHIP_UNVERIFIABLE' | 'PROCESS_IDENTITY_MISSING';
+export type SlotReservationEventKind = 'RESERVED' | 'RELEASED' | 'RECONCILE_OBSERVED';
+
+export interface AdapterSlotLimitRecord {
+  readonly adapterId: string;
+  readonly limit: number;
+  readonly version: number;
+  readonly updatedAt: number;
+  readonly updatedBy: string;
+}
+
+export interface ProjectCapacityRecord {
+  readonly projectId: string;
+  readonly globalLimit: number;
+  /** `DEFAULT` means no row exists and the documented default applies. */
+  readonly globalLimitSource: 'DEFAULT' | 'EXPLICIT';
+  readonly version: number;
+  readonly updatedAt: number | null;
+  readonly updatedBy: string | null;
+  readonly adapterOverrides: readonly AdapterSlotLimitRecord[];
+}
+
+export interface ProjectCapacityChange {
+  readonly changed: boolean;
+  readonly capacity: ProjectCapacityRecord;
+}
+
+export interface ProjectCapacityClearance {
+  readonly removed: boolean;
+  readonly capacity: ProjectCapacityRecord;
+}
+
+/** One Task occupying a slot right now, with the facts that made it an occupant. */
+export interface SlotOccupant {
+  readonly taskId: string;
+  /** Every Adapter this Task occupies a slot for (normally exactly one). */
+  readonly adapterIds: readonly string[];
+  /** The active reservation, or null when the occupant is an Execution holding its workspace. */
+  readonly reservationId: string | null;
+  readonly state: SlotReservationState | null;
+  readonly since: number;
+}
+
+/** Who occupies a slot right now: counted per Task, never per row. */
+export interface SlotOccupancy {
+  readonly globalUsed: number;
+  readonly adapterUsed: number;
+  readonly globalBlocking: readonly string[];
+  readonly adapterBlocking: readonly string[];
+  readonly occupants: readonly SlotOccupant[];
+}
+
+export interface ExecutionSlotAcquisition {
+  readonly outcome: 'RESERVED' | 'CAPACITY_WAIT' | 'DRAINING';
+  readonly capacity: SlotCapacityCheck;
+  readonly wait: CapacityWaitReason | null;
+  readonly reservation: SlotReservationDetail | null;
+}
+
+export interface SlotReservationAcquireInput {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly reservationId: string;
+  readonly expectedTaskVersion: number;
+  readonly expectedRevisionId: string;
+  readonly adapterId: string;
+  readonly workspaceId: string | null;
+  readonly impactSnapshotId: string | null;
+  /** Fingerprint of the Task's dependency facts as the caller assessed them. */
+  readonly dependencyFingerprint: string;
+  readonly assessedDevCommit: string | null;
+  readonly holder: {
+    readonly bootId: string;
+    readonly pid: number;
+    readonly startToken: string | null;
+    readonly actor: string;
+  };
+  /** Read again inside the transaction: draining may start between the caller's check and this write. */
+  readonly draining: () => { readonly draining: boolean; readonly reason: string | null };
+  readonly commandId: string;
+  readonly payloadHash: string;
+  readonly eventId: string;
+  readonly createdAt: number;
+}
+
+export interface SlotReservationReleaseResult {
+  readonly released: boolean;
+  readonly outcome: 'RELEASED' | 'ALREADY_RELEASED';
+  readonly reservation: SlotReservationDetail;
+}
+
+export interface SlotReservationReconcileOutcome {
+  readonly outcome: 'RELEASED' | 'MARKED_RECOVERY_REQUIRED' | 'HELD' | 'ALREADY_RELEASED'
+    | 'ALREADY_RECONCILED';
+  readonly state: SlotReservationState;
+  readonly reservation: SlotReservationDetail;
+}
+
+/**
+ * A refused reservation carries its own stable code: "the dependency graph moved", "the Task is not
+ * reservable", "a slot is already held" and "the revision changed" are different answers.
+ */
+export class SlotReservationError extends Error {
+  constructor(readonly code: 'CAPACITY_LIMIT_INVALID' | 'CAPACITY_LIMIT_OUT_OF_RANGE'
+    | 'UNKNOWN_ADAPTER' | 'TASK_NOT_RESERVABLE' | 'REVISION_CHANGED' | 'DEPENDENCY_STATE_CHANGED'
+    | 'SLOT_ALREADY_RESERVED' | 'SLOT_NOT_ACTIVE' | 'SLOT_ALREADY_BOUND'
+    | 'SLOT_HELD_BY_ANOTHER_RUNTIME' | 'SLOT_HOLDER_STILL_RUNNING', message: string) {
+    super(message);
+    this.name = 'SlotReservationError';
+  }
 }
 
 export interface TrustedProject {
@@ -970,6 +1097,9 @@ export class Phase1Database {
         if (version < 18) this.sqlite.exec(sessionTerminalMigration);
         if (version < 19) this.sqlite.exec(revisionDeliveryMigration);
         if (version < 20) this.sqlite.exec(impactAnalysisMigration);
+        // Version 21 is this step's own number, so a database stamped 17–20 still gets the
+        // capacity/slot tables. No earlier number is ever inserted.
+        if (version < 21) this.sqlite.exec(capacitySlotReservationMigration);
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -9361,6 +9491,1015 @@ export class Phase1Database {
       workspaceState: row.workspace_state,
     };
   }
+  // ---------------------------------------------------------------------------------------------
+  // Capacity and resource reservations (Phase 2, FOUNDATION-054 / ADR-0032). The persisted model is
+  // described in `capacitySlotReservationMigration`; these methods own its invariants.
+  //
+  // What they deliberately do **not** decide:
+  //
+  // - whether a dependency edge is *satisfied* — that needs the repository (Git reachability from
+  //   the project's `dev` ref) and lives in the scheduler. Here the edge facts are re-read inside
+  //   the write transaction and compared with the fingerprint the caller assessed, so a graph edit
+  //   between the Git check and this write is refused instead of silently reserved;
+  // - whether the recorded holder process is still alive — that is an OS question the Runtime
+  //   answers, and the answer is passed in as an observation to record.
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * The capacity configuration of one project: the project-wide limit plus every Adapter override
+   * that was actually set. An Adapter without a row *follows the project limit*; that is reported as
+   * `DEFAULT` rather than written down, so a later change to the project limit moves it too.
+   */
+  getProjectCapacity(projectId: string): ProjectCapacityRecord {
+    this.assertTrustedProject(projectId);
+    const limits = this.sqlite.query<{
+      global_limit: number; version: number; updated_at: number; updated_by: string;
+    }, [string]>(`
+      SELECT global_limit,version,updated_at,updated_by FROM project_capacity_limits
+      WHERE project_id=?1
+    `).get(projectId);
+    const overrides = this.sqlite.query<{
+      adapter_id: string; slot_limit: number; version: number; updated_at: number; updated_by: string;
+    }, [string]>(`
+      SELECT adapter_id,slot_limit,version,updated_at,updated_by FROM project_adapter_slot_limits
+      WHERE project_id=?1 ORDER BY adapter_id
+    `).all(projectId).map((row): AdapterSlotLimitRecord => ({
+      adapterId: row.adapter_id,
+      limit: row.slot_limit,
+      version: row.version,
+      updatedAt: row.updated_at,
+      updatedBy: row.updated_by,
+    }));
+    return {
+      projectId,
+      globalLimit: limits?.global_limit ?? defaultConcurrencyLimit,
+      globalLimitSource: limits === null ? 'DEFAULT' : 'EXPLICIT',
+      version: limits?.version ?? 0,
+      updatedAt: limits?.updated_at ?? null,
+      updatedBy: limits?.updated_by ?? null,
+      adapterOverrides: overrides,
+    };
+  }
+
+  private assertCapacityLimit(limit: number): void {
+    if (!Number.isSafeInteger(limit) || limit < 1) {
+      throw new SlotReservationError('CAPACITY_LIMIT_INVALID',
+        `A concurrency limit must be an integer of at least 1; got ${String(limit)}`);
+    }
+    if (limit > maxConcurrencyLimit) {
+      throw new SlotReservationError('CAPACITY_LIMIT_OUT_OF_RANGE',
+        `A concurrency limit must not exceed ${maxConcurrencyLimit}; got ${limit}`);
+    }
+  }
+
+  /**
+   * Sets the project-wide concurrency limit. It applies to every Adapter that has no explicit
+   * override, and it changes the number the *next* acquisition is judged against — a lower limit
+   * never releases anything that is already reserved.
+   */
+  setProjectGlobalCapacity(input: {
+    readonly projectId: string;
+    readonly limit: number;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly eventId: string;
+    readonly actor: string;
+    readonly updatedAt: number;
+  }): ProjectCapacityChange {
+    this.assertCapacityLimit(input.limit);
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.updatedAt,
+      apply: (database) => {
+        this.assertTrustedProject(input.projectId);
+        const existing = database.query<{ global_limit: number; version: number }, [string]>(`
+          SELECT global_limit,version FROM project_capacity_limits WHERE project_id=?1
+        `).get(input.projectId);
+        if (existing === null) {
+          database.query(`
+            INSERT INTO project_capacity_limits(project_id,global_limit,version,updated_at,updated_by)
+            VALUES (?1,?2,0,?3,?4)
+          `).run(input.projectId, input.limit, input.updatedAt, input.actor);
+        } else if (existing.global_limit !== input.limit) {
+          database.query(`
+            UPDATE project_capacity_limits SET global_limit=?1,version=?2,updated_at=?3,updated_by=?4
+            WHERE project_id=?5 AND global_limit=?6 AND version=?7
+          `).run(input.limit, existing.version + 1, input.updatedAt, input.actor,
+            input.projectId, existing.global_limit, existing.version);
+        }
+        const changed = existing === null || existing.global_limit !== input.limit;
+        if (changed) {
+          insertCapacityEvent(database, {
+            eventId: input.eventId,
+            projectId: input.projectId,
+            aggregateVersion: (existing?.version ?? 0) + 1,
+            actor: input.actor,
+            payload: {
+              projectId: input.projectId,
+              scope: 'GLOBAL',
+              adapterId: null,
+              from: existing?.global_limit ?? defaultConcurrencyLimit,
+              to: input.limit,
+              actor: input.actor,
+            },
+            occurredAt: input.updatedAt,
+          });
+        }
+        return { changed, capacity: this.getProjectCapacity(input.projectId) };
+      },
+    });
+  }
+
+  /** Sets one Adapter's slot limit, which stops following the project limit from now on. */
+  setAdapterSlotLimit(input: {
+    readonly projectId: string;
+    readonly adapterId: string;
+    readonly limit: number;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly eventId: string;
+    readonly actor: string;
+    readonly updatedAt: number;
+  }): ProjectCapacityChange {
+    this.assertCapacityLimit(input.limit);
+    if (input.adapterId.trim().length === 0) {
+      throw new SlotReservationError('UNKNOWN_ADAPTER', 'An Adapter slot limit needs an Adapter ID');
+    }
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.updatedAt,
+      apply: (database) => {
+        this.assertTrustedProject(input.projectId);
+        const existing = database.query<{ slot_limit: number; version: number }, [string, string]>(`
+          SELECT slot_limit,version FROM project_adapter_slot_limits
+          WHERE project_id=?1 AND adapter_id=?2
+        `).get(input.projectId, input.adapterId);
+        if (existing === null) {
+          database.query(`
+            INSERT INTO project_adapter_slot_limits(project_id,adapter_id,slot_limit,version,
+              updated_at,updated_by) VALUES (?1,?2,?3,0,?4,?5)
+          `).run(input.projectId, input.adapterId, input.limit, input.updatedAt, input.actor);
+        } else if (existing.slot_limit !== input.limit) {
+          database.query(`
+            UPDATE project_adapter_slot_limits SET slot_limit=?1,version=?2,updated_at=?3,updated_by=?4
+            WHERE project_id=?5 AND adapter_id=?6 AND slot_limit=?7 AND version=?8
+          `).run(input.limit, existing.version + 1, input.updatedAt, input.actor,
+            input.projectId, input.adapterId, existing.slot_limit, existing.version);
+        }
+        const changed = existing === null || existing.slot_limit !== input.limit;
+        if (changed) {
+          const globalLimit = this.getProjectCapacity(input.projectId).globalLimit;
+          insertCapacityEvent(database, {
+            eventId: input.eventId,
+            projectId: input.projectId,
+            aggregateVersion: (existing?.version ?? 0) + 1,
+            actor: input.actor,
+            payload: {
+              projectId: input.projectId,
+              scope: 'ADAPTER',
+              adapterId: input.adapterId,
+              from: existing?.slot_limit ?? globalLimit,
+              to: input.limit,
+              actor: input.actor,
+            },
+            occurredAt: input.updatedAt,
+          });
+        }
+        return { changed, capacity: this.getProjectCapacity(input.projectId) };
+      },
+    });
+  }
+
+  /** Removes one Adapter override, so that Adapter follows the project limit again. */
+  clearAdapterSlotLimit(input: {
+    readonly projectId: string;
+    readonly adapterId: string;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly eventId: string;
+    readonly actor: string;
+    readonly updatedAt: number;
+  }): ProjectCapacityClearance {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.updatedAt,
+      apply: (database) => {
+        this.assertTrustedProject(input.projectId);
+        const existing = database.query<{ slot_limit: number; version: number }, [string, string]>(`
+          SELECT slot_limit,version FROM project_adapter_slot_limits
+          WHERE project_id=?1 AND adapter_id=?2
+        `).get(input.projectId, input.adapterId);
+        if (existing !== null) {
+          database.query(
+            'DELETE FROM project_adapter_slot_limits WHERE project_id=?1 AND adapter_id=?2',
+          ).run(input.projectId, input.adapterId);
+          const globalLimit = this.getProjectCapacity(input.projectId).globalLimit;
+          insertCapacityEvent(database, {
+            eventId: input.eventId,
+            projectId: input.projectId,
+            aggregateVersion: existing.version + 1,
+            actor: input.actor,
+            payload: {
+              projectId: input.projectId,
+              scope: 'ADAPTER',
+              adapterId: input.adapterId,
+              from: existing.slot_limit,
+              to: globalLimit,
+              actor: input.actor,
+            },
+            occurredAt: input.updatedAt,
+          });
+        }
+        return {
+          removed: existing !== null,
+          capacity: this.getProjectCapacity(input.projectId),
+        };
+      },
+    });
+  }
+
+  /**
+   * Who currently occupies a slot in this project, read as facts.
+   *
+   * A slot is occupied by a Task that either holds an active reservation or is running with
+   * `resource_held=1` (the pre-reservation `task.run` path). Counting per *Task* — never per row —
+   * means a reserved Task that then starts an Execution consumes exactly one slot, and `excludeTaskId`
+   * keeps a Task from blocking itself when its reservation is re-checked.
+   */
+  countActiveSlotOccupants(input: {
+    readonly projectId: string;
+    readonly excludeTaskId?: string;
+  }): SlotOccupancy {
+    this.assertTrustedProject(input.projectId);
+    return countSlotOccupants(this.sqlite, input);
+  }
+
+  /** Every reservation of one project, newest first. Released rows are kept as audit. */
+  listSlotReservations(projectId: string, options: {
+    readonly taskId?: string;
+    readonly includeReleased?: boolean;
+    readonly limit?: number;
+  } = {}): readonly ExecutionSlotReservationRecord[] {
+    this.assertTrustedProject(projectId);
+    const limit = options.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > maxSlotReservationReadLimit) {
+      throw new StorageError('INVALID_STATE',
+        `A reservation read limit must be between 1 and ${maxSlotReservationReadLimit}`);
+    }
+    const filters = ['reservation.project_id=?1'];
+    const parameters: [string, ...(string | number)[]] = [projectId];
+    if (options.taskId !== undefined) {
+      parameters.push(options.taskId);
+      filters.push(`AND reservation.task_id=?${parameters.length}`);
+    }
+    if (options.includeReleased !== true) filters.push("AND reservation.state<>'RELEASED'");
+    parameters.push(limit);
+    return this.sqlite.query<SlotReservationRow, [string, ...(string | number)[]]>(`
+      ${slotReservationSelect}
+      WHERE ${filters.join(' ')}
+      ORDER BY reservation.reserved_at DESC,reservation.id
+      LIMIT ?${parameters.length}
+    `).all(...parameters).map(mapSlotReservationRow);
+  }
+
+  /**
+   * Every active reservation in the database, across projects. The startup reconcile needs exactly
+   * this set: after a restart no generation owns any reservation, so nothing is filtered out by
+   * project — a residual slot anywhere is residual capacity everywhere.
+   */
+  listActiveSlotReservations(): readonly ExecutionSlotReservationRecord[] {
+    return this.sqlite.query<SlotReservationRow, []>(`
+      ${slotReservationSelect}
+      WHERE reservation.state IN ('RESERVED','RECOVERY_REQUIRED')
+      ORDER BY reservation.reserved_at,reservation.id
+    `).all().map(mapSlotReservationRow);
+  }
+
+  getSlotReservation(projectId: string, reservationId: string): SlotReservationDetail {
+    this.assertTrustedProject(projectId);
+    const row = this.sqlite.query<SlotReservationRow, [string, string]>(`
+      ${slotReservationSelect}
+      WHERE reservation.project_id=?1 AND reservation.id=?2
+    `).get(projectId, reservationId);
+    if (row === null) throw new StorageError('NOT_FOUND', 'Slot reservation was not found');
+    const events = this.sqlite.query<{
+      sequence: number; kind: SlotReservationEventKind; domain_event_id: string | null;
+      command_id: string; actor: string; detail: string; evidence_json: string; occurred_at: number;
+    }, [string]>(`
+      SELECT sequence,kind,domain_event_id,command_id,actor,detail,evidence_json,occurred_at
+      FROM execution_slot_reservation_events WHERE reservation_id=?1 ORDER BY sequence
+    `).all(reservationId).map((event) => ({
+      sequence: event.sequence,
+      kind: event.kind,
+      domainEventId: event.domain_event_id,
+      commandId: event.command_id,
+      actor: event.actor,
+      detail: event.detail,
+      evidence: JSON.parse(event.evidence_json) as Readonly<Record<string, unknown>>,
+      occurredAt: event.occurred_at,
+    }));
+    return { ...mapSlotReservationRow(row), events };
+  }
+
+  /**
+   * Acquires one reservation, or reports why it could not be granted.
+   *
+   * Everything that decides the outcome is re-read *inside* the `BEGIN IMMEDIATE` transaction: the
+   * Task version and revision (the caller's compare-and-swap), the dependency facts (against the
+   * fingerprint the caller assessed), the draining fact, and the capacity of both dimensions. Two
+   * concurrent acquirers therefore cannot both see a free slot: the second one blocks on the write
+   * lock and then observes the committed row, and the partial unique index is the second guard.
+   *
+   * A refused acquisition writes nothing but the command receipt, so a capacity wait is a recorded
+   * observation rather than a side effect.
+   */
+  reserveExecutionSlot(input: SlotReservationAcquireInput): ExecutionSlotAcquisition {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.createdAt,
+      apply: (database) => {
+        this.assertTrustedProject(input.projectId);
+        const task = database.query<{
+          state: TaskLifecycleState; version: number; current_revision_id: string;
+        }, [string, string]>(`
+          SELECT task.state,task.version,task.current_revision_id FROM tasks task
+          WHERE task.project_id=?1 AND task.id=?2
+        `).get(input.projectId, input.taskId);
+        if (task === null) throw new StorageError('NOT_FOUND', 'Task was not found in this project');
+        if (task.version !== input.expectedTaskVersion) {
+          throw new StorageError('CONCURRENT_MODIFICATION', 'Task version did not match');
+        }
+        if (task.current_revision_id !== input.expectedRevisionId) {
+          throw new SlotReservationError('REVISION_CHANGED',
+            `Task revision is ${task.current_revision_id}, not ${input.expectedRevisionId}`);
+        }
+        if (task.state !== 'READY') {
+          throw new SlotReservationError('TASK_NOT_RESERVABLE',
+            `A slot can only be reserved for a READY Task; this Task is ${task.state}`);
+        }
+        // The same connection, therefore the same transaction: the facts cannot change between this
+        // read and the insert, and any graph or integration change since the caller's check shows up
+        // as a fingerprint mismatch instead of a reservation on a stale assessment.
+        const facts = this.listTaskDependencyFacts(input.projectId, { taskId: input.taskId });
+        const fingerprint = slotDependencyFingerprint(facts);
+        if (fingerprint !== input.dependencyFingerprint) {
+          throw new SlotReservationError('DEPENDENCY_STATE_CHANGED',
+            'The dependency facts changed since they were assessed; re-assess before reserving');
+        }
+        const existing = database.query<{ id: string; state: SlotReservationState }, [string]>(`
+          SELECT id,state FROM execution_slot_reservations
+          WHERE task_id=?1 AND state IN ('RESERVED','RECOVERY_REQUIRED')
+        `).get(input.taskId);
+        if (existing !== null) {
+          throw new SlotReservationError('SLOT_ALREADY_RESERVED',
+            `Task already has an active slot reservation ${existing.id} (${existing.state})`);
+        }
+        const capacity = this.slotCapacityFor(database, {
+          projectId: input.projectId,
+          adapterId: input.adapterId,
+          excludeTaskId: input.taskId,
+        });
+        const drain = input.draining();
+        if (drain.draining) {
+          return {
+            outcome: 'DRAINING' as const,
+            wait: {
+              code: 'SCHEDULER_DRAINING' as const,
+              adapterId: input.adapterId,
+              limit: null,
+              used: null,
+              blocking: [],
+              detail: drain.reason ?? 'the Runtime is draining and accepts no new reservations',
+            },
+            capacity,
+            reservation: null,
+          };
+        }
+        if (capacity.globalUsed >= capacity.globalLimit) {
+          return {
+            outcome: 'CAPACITY_WAIT' as const,
+            wait: {
+              code: 'CAPACITY_GLOBAL_LIMIT_REACHED' as const,
+              adapterId: input.adapterId,
+              limit: capacity.globalLimit,
+              used: capacity.globalUsed,
+              blocking: capacity.globalBlocking,
+              detail: `${capacity.globalUsed} of ${capacity.globalLimit} project slots are in use`,
+            },
+            capacity,
+            reservation: null,
+          };
+        }
+        if (capacity.adapterUsed >= capacity.adapterLimit) {
+          return {
+            outcome: 'CAPACITY_WAIT' as const,
+            wait: {
+              code: 'CAPACITY_ADAPTER_SLOT_LIMIT_REACHED' as const,
+              adapterId: input.adapterId,
+              limit: capacity.adapterLimit,
+              used: capacity.adapterUsed,
+              blocking: capacity.adapterBlocking,
+              detail: `${capacity.adapterUsed} of ${capacity.adapterLimit} ${input.adapterId} slots are in use`,
+            },
+            capacity,
+            reservation: null,
+          };
+        }
+        if (input.workspaceId !== null && input.workspaceId !== undefined) {
+          const workspace = database.query<{ state: string }, [string, string]>(`
+            SELECT state FROM workspaces WHERE task_id=?1 AND id=?2 AND state<>'RELEASED'
+          `).get(input.taskId, input.workspaceId);
+          if (workspace === null) {
+            throw new StorageError('NOT_FOUND', 'Workspace was not found for this Task');
+          }
+        }
+        database.query(`
+          INSERT INTO execution_slot_reservations(id,project_id,task_id,revision_id,task_version,
+            adapter_id,workspace_id,impact_snapshot_id,dependency_fingerprint,assessed_dev_commit,state,
+            version,command_id,holder_boot_id,holder_pid,holder_start_token,holder_actor,reserved_at,
+            updated_at)
+          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'RESERVED',0,?11,?12,?13,?14,?15,?16,?16)
+        `).run(input.reservationId, input.projectId, input.taskId, input.expectedRevisionId,
+          input.expectedTaskVersion, input.adapterId, input.workspaceId ?? null,
+          input.impactSnapshotId ?? null, input.dependencyFingerprint, input.assessedDevCommit,
+          input.commandId, input.holder.bootId, input.holder.pid, input.holder.startToken,
+          input.holder.actor, input.createdAt);
+        insertSlotReservationEvent(database, {
+          reservationId: input.reservationId,
+          kind: 'RESERVED',
+          domainEventId: input.eventId,
+          commandId: input.commandId,
+          actor: input.holder.actor,
+          detail: `reserved one ${input.adapterId} slot for Task ${input.taskId}`,
+          evidence: {
+            source: 'ACQUIRE',
+            holder: { bootId: input.holder.bootId, pid: input.holder.pid,
+              startToken: input.holder.startToken },
+            adapterId: input.adapterId,
+            revisionId: input.expectedRevisionId,
+            taskVersion: input.expectedTaskVersion,
+            workspaceId: input.workspaceId ?? null,
+            impactSnapshotId: input.impactSnapshotId ?? null,
+            dependencyFingerprint: input.dependencyFingerprint,
+            assessedDevCommit: input.assessedDevCommit,
+            capacity,
+          },
+          occurredAt: input.createdAt,
+        });
+        database.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'ExecutionSlotReserved',1,'ExecutionSlot',?3,1,?4,NULL,?5,?6)
+        `).run(input.eventId, input.projectId, input.reservationId, input.commandId, input.createdAt,
+          JSON.stringify({
+            reservationId: input.reservationId,
+            taskId: input.taskId,
+            revisionId: input.expectedRevisionId,
+            adapterId: input.adapterId,
+            workspaceId: input.workspaceId ?? null,
+            holder: { bootId: input.holder.bootId, pid: input.holder.pid,
+              startToken: input.holder.startToken },
+            capacity,
+          }));
+        // Reported *after* the insert: the capacity facts a caller reads back must include the slot
+        // it just acquired, otherwise a client would have to add one itself.
+        return {
+          outcome: 'RESERVED' as const,
+          capacity: this.slotCapacityFor(database, {
+            projectId: input.projectId,
+            adapterId: input.adapterId,
+          }),
+          wait: null,
+          reservation: this.getSlotReservation(input.projectId, input.reservationId),
+        };
+      },
+    });
+  }
+
+  /**
+   * Binds a prepared workspace to an active reservation. The workspace belongs to the same Task and
+   * to no other active reservation (enforced by the partial unique index).
+   */
+  bindReservationWorkspace(input: {
+    readonly projectId: string;
+    readonly reservationId: string;
+    readonly workspaceId: string;
+    readonly expectedReservationVersion: number;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly eventId: string;
+    readonly actor: string;
+    readonly at: number;
+  }): ExecutionSlotReservationRecord {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.at,
+      apply: (database) => {
+        const subject = database.query<{
+          id: string; task_id: string; state: SlotReservationState; version: number;
+          workspace_id: string | null;
+        }, [string, string]>(`
+          SELECT id,task_id,state,version,workspace_id FROM execution_slot_reservations
+          WHERE project_id=?1 AND id=?2
+        `).get(input.projectId, input.reservationId);
+        if (subject === null) {
+          throw new StorageError('NOT_FOUND', 'Slot reservation was not found');
+        }
+        if (subject.state !== 'RESERVED') {
+          throw new SlotReservationError('SLOT_NOT_ACTIVE',
+            `Reservation ${subject.id} is ${subject.state}; it holds no workspace to bind`);
+        }
+        if (subject.version !== input.expectedReservationVersion) {
+          throw new StorageError('CONCURRENT_MODIFICATION', 'Reservation version did not match');
+        }
+        if (subject.workspace_id === input.workspaceId) {
+          return this.getSlotReservation(input.projectId, input.reservationId);
+        }
+        if (subject.workspace_id !== null) {
+          throw new SlotReservationError('SLOT_ALREADY_BOUND',
+            `Reservation ${subject.id} already holds workspace ${subject.workspace_id}`);
+        }
+        const update = database.query(`
+          UPDATE execution_slot_reservations SET workspace_id=?1,version=?2,updated_at=?3
+          WHERE project_id=?4 AND id=?5 AND version=?6 AND state='RESERVED' AND workspace_id IS NULL
+        `).run(input.workspaceId, subject.version + 1, input.at, input.projectId, input.reservationId,
+          subject.version);
+        if (update.changes !== 1) {
+          throw new StorageError('CONCURRENT_MODIFICATION', 'Reservation changed while binding a workspace');
+        }
+        insertSlotReservationEvent(this.sqlite, {
+          reservationId: input.reservationId,
+          kind: 'RESERVED',
+          domainEventId: input.eventId,
+          commandId: input.commandId,
+          actor: input.actor,
+          detail: `bound workspace ${input.workspaceId} to the reservation`,
+          evidence: { source: 'WORKSPACE_BIND', workspaceId: input.workspaceId,
+            taskId: subject.task_id },
+          occurredAt: input.at,
+        });
+        database.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'ExecutionSlotWorkspaceBound',1,'ExecutionSlot',?3,?4,?5,NULL,?6,?7)
+        `).run(input.eventId, input.projectId, input.reservationId, subject.version + 1,
+          input.commandId, input.at, JSON.stringify({
+            reservationId: input.reservationId, taskId: subject.task_id,
+            workspaceId: input.workspaceId,
+          }));
+        return this.getSlotReservation(input.projectId, input.reservationId);
+      },
+    });
+  }
+
+  /**
+   * Releases one reservation explicitly. The caller has already decided that releasing is allowed
+   * (it owns the reservation, or the recorded holder was verified as gone); what is re-checked here
+   * is the row's own state and version, so two concurrent releases cannot both apply.
+   */
+  releaseExecutionSlot(input: {
+    readonly projectId: string;
+    readonly reservationId: string;
+    readonly expectedReservationVersion: number;
+    readonly reason: string;
+    readonly actor: string;
+    readonly releaseKind: SlotReservationReleaseKind;
+    readonly observation: SlotHolderObservationKind | null;
+    readonly evidence: Readonly<Record<string, unknown>>;
+    readonly eventId: string;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly at: number;
+  }): SlotReservationReleaseResult {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.at,
+      apply: (database) => {
+        const subject = database.query<{
+          id: string; task_id: string; state: SlotReservationState; version: number;
+        }, [string, string]>(`
+          SELECT id,task_id,state,version FROM execution_slot_reservations
+          WHERE project_id=?1 AND id=?2
+        `).get(input.projectId, input.reservationId);
+        if (subject === null) throw new StorageError('NOT_FOUND', 'Slot reservation was not found');
+        if (subject.state === 'RELEASED') {
+          return {
+            released: false,
+            outcome: 'ALREADY_RELEASED' as const,
+            reservation: this.getSlotReservation(input.projectId, input.reservationId),
+          };
+        }
+        if (subject.version !== input.expectedReservationVersion) {
+          throw new StorageError('CONCURRENT_MODIFICATION', 'Reservation version did not match');
+        }
+        const update = database.query(`
+          UPDATE execution_slot_reservations SET state='RELEASED',version=?1,updated_at=?2,
+            released_at=?2,release_reason=?3,release_kind=?4,release_observation=?5,detail=?3
+          WHERE project_id=?6 AND id=?7 AND version=?8 AND state<>'RELEASED'
+        `).run(subject.version + 1, input.at, input.reason, input.releaseKind, input.observation,
+          input.projectId, input.reservationId, subject.version);
+        if (update.changes !== 1) {
+          throw new StorageError('CONCURRENT_MODIFICATION', 'Reservation changed during release');
+        }
+        insertSlotReservationEvent(this.sqlite, {
+          reservationId: input.reservationId,
+          kind: 'RELEASED',
+          domainEventId: input.eventId,
+          commandId: input.commandId,
+          actor: input.actor,
+          detail: input.reason,
+          evidence: {
+            source: 'RELEASE',
+            releaseKind: input.releaseKind,
+            observation: input.observation,
+            previousState: subject.state,
+            ...input.evidence,
+          },
+          occurredAt: input.at,
+        });
+        database.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'ExecutionSlotReleased',1,'ExecutionSlot',?3,?4,?5,NULL,?6,?7)
+        `).run(input.eventId, input.projectId, input.reservationId, subject.version + 1,
+          input.commandId, input.at, JSON.stringify({
+            reservationId: input.reservationId,
+            taskId: subject.task_id,
+            releaseKind: input.releaseKind,
+            observation: input.observation,
+            reason: input.reason,
+          }));
+        return {
+          released: true,
+          outcome: 'RELEASED' as const,
+          reservation: this.getSlotReservation(input.projectId, input.reservationId),
+        };
+      },
+    });
+  }
+
+  /**
+   * Records one reconcile decision about a reservation and appends its observation — including the
+   * decision to keep the slot occupied, which changes nothing but must still be auditable.
+   *
+   * The command ID is what makes it idempotent: the startup reconcile derives it from this boot and
+   * the reservation, so a second run inside the same generation appends no second observation and
+   * applies no second state change.
+   */
+  recordSlotReservationReconcile(input: {
+    readonly projectId: string;
+    readonly reservationId: string;
+    readonly expectedReservationVersion: number;
+    readonly decision: 'RELEASE' | 'KEEP_HELD' | 'MARK_RECOVERY_REQUIRED';
+    readonly observation: SlotHolderObservationKind;
+    readonly releaseKind: SlotReservationReleaseKind | null;
+    readonly detail: string;
+    readonly evidence: Readonly<Record<string, unknown>>;
+    readonly ledgerEventId: string;
+    readonly eventId: string;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly actor: string;
+    readonly at: number;
+  }): SlotReservationReconcileOutcome {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.at,
+      apply: (database) => {
+        const subject = database.query<{
+          id: string; task_id: string; state: SlotReservationState; version: number;
+        }, [string, string]>(`
+          SELECT id,task_id,state,version FROM execution_slot_reservations
+          WHERE project_id=?1 AND id=?2
+        `).get(input.projectId, input.reservationId);
+        if (subject === null) throw new StorageError('NOT_FOUND', 'Slot reservation was not found');
+        if (subject.version !== input.expectedReservationVersion) {
+          throw new StorageError('CONCURRENT_MODIFICATION', 'Reservation version did not match');
+        }
+        const alreadyReconciled = database.query<{ sequence: number }, [string, string]>(`
+          SELECT sequence FROM execution_slot_reservation_events
+          WHERE reservation_id=?1 AND command_id=?2
+        `).get(input.reservationId, input.commandId);
+        if (alreadyReconciled !== null) {
+          return {
+            outcome: 'ALREADY_RECONCILED' as const,
+            state: subject.state,
+            reservation: this.getSlotReservation(input.projectId, input.reservationId),
+          };
+        }
+        let state: SlotReservationState = subject.state;
+        let outcome: SlotReservationReconcileOutcome['outcome'] = 'HELD';
+        if (input.decision === 'RELEASE') {
+          if (subject.state === 'RELEASED') {
+            outcome = 'ALREADY_RELEASED';
+          } else {
+            const update = database.query(`
+              UPDATE execution_slot_reservations SET state='RELEASED',version=?1,updated_at=?2,
+                released_at=?2,release_reason=?3,release_kind=?4,release_observation=?5,detail=?3
+              WHERE project_id=?6 AND id=?7 AND version=?8 AND state<>'RELEASED'
+            `).run(subject.version + 1, input.at, input.detail, input.releaseKind, input.observation,
+              input.projectId, input.reservationId, subject.version);
+            if (update.changes !== 1) {
+              throw new StorageError('CONCURRENT_MODIFICATION', 'Reservation changed during reconcile');
+            }
+            state = 'RELEASED';
+            outcome = 'RELEASED';
+          }
+        } else if (input.decision === 'MARK_RECOVERY_REQUIRED') {
+          if (subject.state !== 'RECOVERY_REQUIRED') {
+            const update = database.query(`
+              UPDATE execution_slot_reservations SET state='RECOVERY_REQUIRED',version=?1,
+                updated_at=?2,release_observation=?3,detail=?4
+              WHERE project_id=?5 AND id=?6 AND version=?7 AND state='RESERVED'
+            `).run(subject.version + 1, input.at, input.observation, input.detail, input.projectId,
+              input.reservationId, subject.version);
+            if (update.changes !== 1) {
+              throw new StorageError('CONCURRENT_MODIFICATION',
+                'Reservation changed while being marked RECOVERY_REQUIRED');
+            }
+            state = 'RECOVERY_REQUIRED';
+            outcome = 'MARKED_RECOVERY_REQUIRED';
+          } else {
+            outcome = 'HELD';
+          }
+        }
+        insertSlotReservationEvent(this.sqlite, {
+          reservationId: input.reservationId,
+          kind: 'RECONCILE_OBSERVED',
+          domainEventId: input.eventId,
+          commandId: input.commandId,
+          actor: input.actor,
+          detail: input.detail,
+          evidence: {
+            source: 'RECONCILE',
+            decision: input.decision,
+            observation: input.observation,
+            releaseKind: input.releaseKind,
+            previousState: subject.state,
+            projectedState: state,
+            ...input.evidence,
+          },
+          occurredAt: input.at,
+        });
+        database.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'ExecutionSlotReconciled',1,'ExecutionSlot',?3,?4,?5,NULL,?6,?7)
+        `).run(input.eventId, input.projectId, input.reservationId,
+          database.query<{ sequence: number | null }, [string]>(`
+            SELECT MAX(sequence) AS sequence FROM execution_slot_reservation_events WHERE reservation_id=?1
+          `).get(input.reservationId)?.sequence ?? 1,
+          input.commandId, input.at, JSON.stringify({
+            reservationId: input.reservationId,
+            taskId: subject.task_id,
+            decision: input.decision,
+            observation: input.observation,
+            previousState: subject.state,
+            projectedState: state,
+            detail: input.detail,
+          }));
+        return {
+          outcome,
+          state,
+          reservation: this.getSlotReservation(input.projectId, input.reservationId),
+        };
+      },
+    });
+  }
+
+  /** The capacity both dimensions as the next acquisition would be judged against. */
+  private slotCapacityFor(database: Database, input: {
+    readonly projectId: string;
+    readonly adapterId: string;
+    readonly excludeTaskId?: string;
+  }): SlotCapacityCheck {
+    const capacity = this.getProjectCapacity(input.projectId);
+    const override = capacity.adapterOverrides.find((row) => row.adapterId === input.adapterId) ?? null;
+    const occupancy = countSlotOccupants(database, input);
+    return {
+      globalLimit: capacity.globalLimit,
+      globalLimitSource: capacity.globalLimitSource,
+      globalUsed: occupancy.globalUsed,
+      globalBlocking: occupancy.globalBlocking,
+      adapterId: input.adapterId,
+      adapterLimit: override?.limit ?? capacity.globalLimit,
+      adapterLimitSource: override === null ? 'DEFAULT' : 'EXPLICIT',
+      adapterUsed: occupancy.adapterUsed,
+      adapterBlocking: occupancy.adapterBlocking,
+    };
+  }
+}
+
+/** One reservation as the shared projection every read returns. */
+export type ExecutionSlotReservationRecord = SlotReservationView;
+export type SlotReservationDetail = SlotReservationDetailView;
+
+/** Hard ceiling for one `scheduler reservations list`, so a read stays bounded. */
+export const maxSlotReservationReadLimit = 200;
+
+interface SlotReservationRow {
+  readonly id: string; readonly project_id: string; readonly task_id: string;
+  readonly task_display_number: number; readonly revision_id: string; readonly task_version: number;
+  readonly adapter_id: string; readonly workspace_id: string | null;
+  readonly impact_snapshot_id: string | null; readonly dependency_fingerprint: string;
+  readonly assessed_dev_commit: string | null; readonly state: SlotReservationState;
+  readonly version: number; readonly command_id: string; readonly holder_boot_id: string;
+  readonly holder_pid: number; readonly holder_start_token: string | null;
+  readonly holder_actor: string; readonly reserved_at: number; readonly updated_at: number;
+  readonly released_at: number | null; readonly release_reason: string | null;
+  readonly release_kind: SlotReservationReleaseKind | null;
+  readonly release_observation: SlotHolderObservationKind | null; readonly detail: string | null;
+}
+
+const slotReservationSelect = `
+  SELECT reservation.id,reservation.project_id,reservation.task_id,
+    task.display_number AS task_display_number,reservation.revision_id,reservation.task_version,
+    reservation.adapter_id,reservation.workspace_id,reservation.impact_snapshot_id,
+    reservation.dependency_fingerprint,reservation.assessed_dev_commit,reservation.state,
+    reservation.version,reservation.command_id,reservation.holder_boot_id,reservation.holder_pid,
+    reservation.holder_start_token,reservation.holder_actor,reservation.reserved_at,
+    reservation.updated_at,reservation.released_at,reservation.release_reason,
+    reservation.release_kind,reservation.release_observation,reservation.detail
+  FROM execution_slot_reservations reservation
+  JOIN tasks task ON task.id=reservation.task_id
+`;
+
+function mapSlotReservationRow(row: SlotReservationRow): ExecutionSlotReservationRecord {
+  return {
+    reservationId: row.id,
+    projectId: row.project_id,
+    taskId: row.task_id,
+    taskDisplayNumber: row.task_display_number,
+    revisionId: row.revision_id,
+    taskVersion: row.task_version,
+    adapterId: row.adapter_id,
+    workspaceId: row.workspace_id,
+    impactSnapshotId: row.impact_snapshot_id,
+    dependencyFingerprint: row.dependency_fingerprint,
+    assessedDevCommit: row.assessed_dev_commit,
+    state: row.state,
+    version: row.version,
+    commandId: row.command_id,
+    holder: {
+      bootId: row.holder_boot_id,
+      pid: row.holder_pid,
+      startToken: row.holder_start_token,
+      actor: row.holder_actor,
+    },
+    reservedAt: row.reserved_at,
+    updatedAt: row.updated_at,
+    releasedAt: row.released_at,
+    releaseReason: row.release_reason,
+    releaseKind: row.release_kind,
+    releaseObservation: row.release_observation,
+    detail: row.detail,
+  };
+}
+
+/**
+ * A fingerprint of the dependency facts of one Task, recomputed inside the reservation transaction
+ * and compared with the value the caller assessed. It covers the whole edge, including the recorded
+ * integration fact the satisfaction verdict was derived from, so an upstream integration that lands
+ * between the Git check and this write is refused instead of being reserved against a stale read.
+ */
+export function slotDependencyFingerprint(facts: readonly TaskDependencyFact[]): string {
+  const canonical = [...facts]
+    .map((fact) => ({
+      prerequisiteTaskId: fact.prerequisiteTaskId,
+      requiredRevisionId: fact.requiredRevisionId,
+      integratedCommit: fact.integratedCommit,
+      integrationBatchId: fact.integrationBatchId,
+    }))
+    .sort((left, right) => (left.prerequisiteTaskId < right.prerequisiteTaskId ? -1
+      : left.prerequisiteTaskId > right.prerequisiteTaskId ? 1 : 0));
+  return createHash('sha256').update(canonicalJson(canonical)).digest('hex');
+}
+
+/**
+ * The real occupants of one project's slots, per Task. Two sources are unioned: an active
+ * reservation (this primitive) and an Execution that still holds its workspace (`resource_held=1`,
+ * the pre-reservation `task.run` path). Union rather than sum keeps a reserved Task that then starts
+ * exactly one slot, and it is what makes the reported capacity fact honest about work that is
+ * actually running today.
+ */
+function countSlotOccupants(database: Database, input: {
+  readonly projectId: string;
+  readonly adapterId?: string;
+  readonly excludeTaskId?: string;
+}): SlotOccupancy {
+  const rows = database.query<{
+    task_id: string; adapter_id: string; reservation_id: string | null;
+    state: SlotReservationState | null; since_at: number; source: 'RESERVATION' | 'EXECUTION';
+  }, [string, string]>(`
+    SELECT task_id,adapter_id,reservation_id,state,since_at,source FROM (
+      SELECT task_id,adapter_id,id AS reservation_id,state,reserved_at AS since_at,
+        'RESERVATION' AS source FROM execution_slot_reservations
+        WHERE project_id=?1 AND state IN ('RESERVED','RECOVERY_REQUIRED')
+      UNION
+      SELECT execution.task_id AS task_id,execution.adapter_id AS adapter_id,NULL AS reservation_id,
+        NULL AS state,COALESCE(execution.started_at,0) AS since_at,'EXECUTION' AS source
+        FROM executions execution JOIN tasks task ON task.id=execution.task_id
+        WHERE task.project_id=?1 AND execution.resource_held=1
+    ) WHERE task_id<>?2
+  `).all(input.projectId, input.excludeTaskId ?? '');
+  interface MutableOccupant {
+    taskId: string;
+    adapterIds: Set<string>;
+    reservationId: string | null;
+    state: SlotReservationState | null;
+    since: number;
+  }
+  const byTask = new Map<string, MutableOccupant>();
+  for (const row of rows) {
+    const existing = byTask.get(row.task_id);
+    if (existing === undefined) {
+      byTask.set(row.task_id, {
+        taskId: row.task_id,
+        adapterIds: new Set([row.adapter_id]),
+        reservationId: row.reservation_id,
+        state: row.state,
+        since: row.since_at,
+      });
+      continue;
+    }
+    existing.adapterIds.add(row.adapter_id);
+    // A reservation is the stronger fact: it is what the scheduler holds, and it carries the slot
+    // identity, so it wins over the Execution row for the same Task.
+    if (existing.reservationId === null && row.reservation_id !== null) {
+      existing.reservationId = row.reservation_id;
+      existing.state = row.state;
+      existing.since = row.since_at;
+    }
+  }
+  const occupants = [...byTask.values()].sort((left, right) => (left.taskId < right.taskId ? -1 : 1));
+  const globalBlocking = occupants.map((occupant) => occupant.taskId);
+  const adapterBlocking = occupants
+    .filter((occupant) => input.adapterId !== undefined && occupant.adapterIds.has(input.adapterId))
+    .map((occupant) => occupant.taskId);
+  return {
+    globalUsed: globalBlocking.length,
+    adapterUsed: adapterBlocking.length,
+    globalBlocking,
+    adapterBlocking,
+    occupants: occupants.map((occupant) => ({
+      taskId: occupant.taskId,
+      adapterIds: [...occupant.adapterIds].sort(),
+      reservationId: occupant.reservationId,
+      state: occupant.state,
+      since: occupant.since,
+    })),
+  };
+}
+
+/** One `SchedulerCapacityChanged` fact. The aggregate is the project's capacity configuration. */
+function insertCapacityEvent(database: Database, input: {
+  readonly eventId: string;
+  readonly projectId: string;
+  readonly aggregateVersion: number;
+  readonly actor: string;
+  readonly payload: Readonly<Record<string, unknown>>;
+  readonly occurredAt: number;
+}): void {
+  database.query(`
+    INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+      aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+    VALUES (?1,?2,'SchedulerCapacityChanged',1,'SchedulerCapacity',?2,?3,?4,NULL,?5,?6)
+  `).run(input.eventId, input.projectId, input.aggregateVersion, input.actor, input.occurredAt,
+    JSON.stringify(input.payload));
+}
+
+/** Appends one reservation history row; the sequence is allocated inside the caller's transaction. */
+function insertSlotReservationEvent(database: Database, input: {
+  readonly reservationId: string;
+  readonly kind: SlotReservationEventKind;
+  readonly domainEventId: string | null;
+  readonly commandId: string;
+  readonly actor: string;
+  readonly detail: string;
+  readonly evidence: Readonly<Record<string, unknown>>;
+  readonly occurredAt: number;
+}): void {
+  database.query(`
+    INSERT INTO execution_slot_reservation_events(reservation_id,sequence,kind,domain_event_id,
+      command_id,actor,detail,evidence_json,occurred_at)
+    VALUES (?1,(SELECT COALESCE(MAX(sequence),0)+1 FROM execution_slot_reservation_events
+      WHERE reservation_id=?1),?2,?3,?4,?5,?6,?7,?8)
+  `).run(input.reservationId, input.kind, input.domainEventId, input.commandId, input.actor,
+    input.detail, JSON.stringify(input.evidence), input.occurredAt);
 }
 
 const sessionTerminalSelect = `

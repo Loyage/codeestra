@@ -2185,6 +2185,231 @@ provider 的集成证据。仓库：`main == dev == 2dcc1a5`；两个 Task 都 R
   `docs/architecture/conflict-analyzer.md` 仍是设计文本，未回写实现细节（例如单侧「重要目录」集合的派生含义、聚合判定与配对审计行的关系）。
 - `docs/tasks/README.md` 的 `## NEXT`（Phase 2：并行 worktree 调度、资源预留、Conflict Analyzer、多成员批次）**未改**：
   本格按「只允许在 `## NEXT` 之前插入一节」的纪律只插入本节，NEXT 行需要一次独立的更新。
+## FOUNDATION-054 — 容量与槽位：全局上限、每 adapter 上限、reservation 与崩溃 reconcile（Wave E / E2）
+
+状态：**已实现、已自查，等待用户确认后才 commit**。lane 分支 `lane/e2-capacity-slots`，基线固定
+`dev@cb7078ede92835bd3663b53dd4ac593b5543a879`（未 rebase、未合并新 dev、未 pull、未 push、未提升 `main`、
+未重启稳定 Runtime、未触碰 `/Users/loyage/Documents/codeestra`）。ADR：**0032**（E0 = 0030、E1 = 0031；
+基线里还没有这两份，因此本格只写自己的号）。schema：**v21**。
+
+### 已实现
+
+**容量配置（可查可设、CLI 完备）**
+
+- schema v21 新增 `project_capacity_limits`（项目级全局上限）与 `project_adapter_slot_limits`（每 adapter 覆写）。
+  没有行 = 未显式设置：读取返回文档默认值 `2` 且 `limitSource = 'DEFAULT'`；adapter 覆写只存显式设置过的行，
+  因此「缺省 = 该项目当前全局上限」是**派生事实**，改全局上限会一起移动没有覆写的 adapter。
+- 校验：整数、`≥1`、`≤16`（`maxConcurrencyLimit`）。`0`/负数/小数 → `CAPACITY_LIMIT_INVALID`；超上限 →
+  `CAPACITY_LIMIT_OUT_OF_RANGE`；未知 adapter id → `UNKNOWN_ADAPTER`（对照 adapter registry）。**拒绝，不夹取**，
+  且被拒绝的请求不写任何行（测试与端到端都断言过）。
+- 每次改变写一条 append-only `SchedulerCapacityChanged` 事件；重复设置同一个值不 bump 版本、不发事件。
+- 降低上限不释放任何已持有槽位：只影响之后的获取判定（`available` 可为 0、`used` 可 > `limit`，事实如实）。
+
+**资源预留（`execution_slot_reservations`，schema v21）**
+
+- 一行表达 scheduler.md §3 的三件事：Task 执行权 + adapter slot +（可绑定的）workspace。两个**部分唯一索引**把不变量
+  变成 schema 事实：`one_active_slot_reservation(task_id)`、`one_active_workspace_reservation(project_id, workspace_id)`。
+- 获取走 `BEGIN IMMEDIATE`（bun 的 `sqlite.transaction(...).immediate(...)`），在同一事务内按 scheduler.md §2 的顺序重检：
+  active trust → Task `version` CAS → `revision_id` CAS → `state = READY` → **依赖事实指纹**重读比对 →
+  该 Task 无活跃预留 → **容量（上限在同一事务内从表里重读）** → **draining（事务内求值）** → 写入预留 + append-only 历史行
+  + `ExecutionSlotReserved` 事件。两次 tick / 两个启动请求只能有一个成功：第二个要么在写锁上等待后看到已提交的行
+  （容量等待），要么撞上部分唯一索引（`SLOT_ALREADY_RESERVED`，错误文本带既有预留 id 与状态）。
+- 依赖的 Git 部分（pinned 上游是否仍可从 `dev` 到达）仍由 scheduler 的 `assertDependenciesSatisfied` 判定，本格不复制；
+  存储层能证明的是「这次写入与调用方评估时的依赖事实一致」（指纹不匹配 → `DEPENDENCY_STATE_CHANGED`）。
+- **快照代如实标注未实现**：本基线没有 impact snapshot 存储（E1 领地），`impact_snapshot_id` 只记录调用方声明的 id，
+  「快照代重检」要等 E1 落地后由 Wave F 传入；`assessed_dev_commit` 记录评估所依据的 `dev` OID。
+- 容量占用按 **Task** 计（不按行计）：活跃预留 ∪ `executions.resource_held = 1`（既有的 `task.run` 路径）的**并集**，
+  这样「先预留、再启动」的同一个 Task 只吃一个槽，同时今天的真实并发也如实计入。
+
+**释放（显式）与归属证据**
+
+- 每个预留记录归属证据：创建它的 Runtime `bootId`、进程 `pid`、该 pid 的 **OS start token**（可为 null，如实记录）、actor。
+  **「这行是我建的」不作为证据。**
+- 释放必须带 `--reason`，写 `released_at`/`release_reason`/`release_kind = EXPLICIT` + 历史行 + `ExecutionSlotReleased` 事件。
+  自己这一代创建的按 owner 的话释放；其他代持有者先做归属核验：**可证明仍存活 → 拒绝（`SLOT_HOLDER_STILL_RUNNING`）**，
+  可证明已死或无法核验 → 允许显式释放并把观测写进历史（人类显式决定与 reconcile 自动决定在审计里可区分）。
+- **绝不因心跳过期、用户等待或 UI/客户端消失自动释放**（本格没有实现任何心跳）。重复释放是诚实 no-op（`ALREADY_RELEASED`）。
+
+**启动 reconcile（先核对真实写入者，再决定）**
+
+- `inspectSlotHolder`：pid 不存在/僵尸 → `HOLDER_STOPPED`；pid 存活且 start token 相同 → `HOLDER_STILL_RUNNING`；
+  pid 存活但 token 不同 → `HOLDER_PROCESS_ID_REUSED`；任一 token 缺失或进程表读不到 → `HOLDER_OWNERSHIP_UNVERIFIABLE`；
+  没有进程身份 → `PROCESS_IDENTITY_MISSING`。
+- 决定：已死（前两者）→ **记为 RELEASED**（`RECONCILED_HOLDER_EXITED` / `RECONCILED_PROCESS_ID_REUSED`）；
+  仍存活 → **保持占用**（不动状态）；无法核验 → `RESERVED` → **`RECOVERY_REQUIRED`，保持占用，不自动放行**。
+- `execution_slot_reservation_events` 是 append-only 历史：获取、释放、以及**每一次 reconcile 观测**（包括「决定保持占用」
+  这种没有状态变化的情形）都追加，从不改写；`UNIQUE(reservation_id, command_id)` + command 回执让同一代重复 reconcile 幂等。
+- reconcile **不发信号、不杀进程、不删资源、不声称静止**。本代自己创建的预留跳过（`SKIPPED_HELD_BY_RUNTIME`）。
+- 启动序列：`apps/runtime/src/main.ts` 在既有 reconcile 序列**之后追加**这一步（未移动任何既有调用顺序），
+  理由写在代码注释里：槽位必须按其他 reconcile 收敛后的最终图景判定（例如某 Execution 刚被收敛成 `RECOVERY_REQUIRED`，
+  它的槽位仍被占）。
+
+**等待原因（不变量 10）与 draining**
+
+- 容量等待有自己的稳定码：`CAPACITY_GLOBAL_LIMIT_REACHED` / `CAPACITY_ADAPTER_SLOT_LIMIT_REACHED` / `SCHEDULER_DRAINING`，
+  并带 `{ adapterId, limit, used, blocking[] }`；`scheduler capacity get` 也返回每 adapter 的 `waitReason` 与占用者（含 `since`）。
+  `BLOCKED` 仍只表示依赖未满足。
+- Runtime 的 draining 是**内存事实**，只在开始 shutdown 时置位（持久化 draining 会在崩溃后残留并永久拒绝新预留，故不做）；
+  没有新增操作者 drain 开关（那会是本格之外的新产品语义）。
+
+**命令面（零新增确认、`--json`、稳定退出码）**
+
+```
+scheduler capacity get <project-id> [--adapter <id>] [--json]
+scheduler capacity set <project-id> --limit <n> [--adapter <id>] [--json]
+scheduler capacity clear <project-id> --adapter <id> [--json]
+scheduler reservations list <project-id> [--task <task-id>] [--include-released] [--limit <n>] [--json]
+scheduler reservations get <project-id> <reservation-id> [--json]
+scheduler reservations acquire <project-id> <task-id> <expected-task-version> --revision <revision-id> [--adapter <id>] [--json]
+scheduler reservations release <project-id> <reservation-id> --reason <text> [--json]
+scheduler reservations prepare-workspace <project-id> <reservation-id> <expected-task-version> [--json]
+scheduler reservations reconcile <project-id> [--json]
+```
+
+`acquire` 退出码：**0** = 拿到槽位，**3** = 容量等待/正在排水（`--json` 的 `wait.code` 是原因），**1** = 拒绝
+（依赖未满足、revision/版本过期、已有预留、未知 adapter、非法上限）。`prepare-workspace` 只有**本代创建**的
+`RESERVED` 预留可用（否则 `SLOT_HELD_BY_ANOTHER_RUNTIME`），准备出的 worktree 绑定到该预留，同一 commandId 重放不产生第二个 worktree。
+
+### 迁移结论（真实 SQLite 文件，additive）
+
+- `phase1SchemaVersion = 21`，迁移链只在尾部追加 `if (version < 21)`（`capacitySlotReservationMigration`），
+  **没有插入任何更早的版本号**（v16 继续永久未使用）；v20 留给并行的 E1（impact snapshot）。
+- 测试 `packages/storage/test/slot-capacity-migration.test.ts`（4 项）在真实文件上验证：
+  **v20 → v21** 与 **v16 → v21** 都只新增 4 张表（`project_capacity_limits`、`project_adapter_slot_limits`、
+  `execution_slot_reservations`、`execution_slot_reservation_events`），既有项目行与既有表（`agent_sessions`、
+  `task_revision_deliveries`、`operation_progress_events`）原样保留，`user_version` 到 21，`getProjectCapacity` 立即返回默认值；
+  已标 21 的库重开不再跑迁移且保留显式配置；「`RELEASED` 不带释放记录」被 schema CHECK 拒绝。
+- 已存在库的两种历史都被覆盖（17–20 的库走到 21 只跑 `version < 21` 一步）。
+- 已知共享槽位后果（写在 ADR-0032）：单独合并本格后，**已经被标成 21 的库**不会补跑后来出现的 v20 步骤；跨格合并必须按
+  Wave E 既定顺序 E0 → E1 → E2。
+
+### 真实证据：CLI + 真实 Runtime + `CODEESTRA_HOME=/tmp/ce-e2` + 临时仓库（协议 stub provider）
+
+运行方式：本格工作树内 `bun run codeestra …`，临时 Git 仓库（`main` + `dev`）、`/tmp/ce-e2` 为 home。
+下面的引文来自 `/tmp/ce-e2-evidence.log`（脚本与夹具在收尾时已回收；本机 `CODEESTRA_*` 只指向 `/tmp/ce-e2`）。
+
+1. **容量默认值与读回**。`scheduler capacity get <project> --json` → `globalLimit: 2`、`globalLimitSource: "DEFAULT"`、
+   `globalAvailable: 2`，`adapters` 为 `pi`/`codex` 各 `limit: 2, limitSource: "DEFAULT"`。
+   `capacity set --limit 2` → `{"changed": true, ... "globalLimitSource": "EXPLICIT"}`，随后 `get` 读回 `globalLimit: 2`。
+   `capacity set --limit 1 --adapter pi` 后 `get` 显示该 adapter `limit: 1, limitSource: EXPLICIT`，而 `codex` 仍为 `DEFAULT`；
+   `capacity clear --adapter pi` 后回到 `limit: 2, limitSource: DEFAULT`。
+2. **非法值稳定拒绝**：`--limit 0` → `CAPACITY_LIMIT_INVALID: A concurrency limit must be an integer of at least 1; got 0`（exit 1）；
+   `--limit 99` → `CAPACITY_LIMIT_OUT_OF_RANGE: A concurrency limit must not exceed 16; got 99`（exit 1）；
+   `--limit 1 --adapter claude` → `UNKNOWN_ADAPTER: Adapter claude is not registered; known Adapters: pi, codex`（exit 1）。
+3. **容量 2：两个不相交任务可同时预留**。两次 `acquire` 均 `"outcome": "RESERVED"`（第二条的 `capacity.globalUsed` 为 1 再变 2），
+   预留记录里带归属证据与基线：`holder: { bootId, pid: 2873, startToken: "ps:一  9月/14 20:31:10 2026" }`、
+   `assessedDevCommit: "352693f59b0e44f0ab884d3fee6a66d767e65001"`。
+4. **第三个任务得到容量等待（不是 BLOCKED）**：
+   ```
+   "outcome": "CAPACITY_WAIT",
+   "wait": { "code": "CAPACITY_GLOBAL_LIMIT_REACHED", "adapterId": "pi", "limit": 2, "used": 2,
+             "blocking": [<task2>, <task1>], "detail": "2 of 2 project slots are in use" },
+   "reservation": null,
+   "holderEvidence": [ { "observation": "HOLDER_STILL_RUNNING", "detail": "the recorded holder process 2873 is still
+     running with the recorded start token; it was not signalled and its slot is not released" }, … ]
+   [scheduler] capacity wait: CAPACITY_GLOBAL_LIMIT_REACHED (2 of 2 project slots are in use)
+   ### exit=3
+   ```
+5. **重复/并发预留只有一次成功**。同一任务再次 `acquire` →
+   `SLOT_ALREADY_RESERVED: Task already has an active slot reservation 1148b686-… (RESERVED)`（exit 1），
+   `reservations list` 仍只有 2 条活跃预留。并发证据另由测试给出（见下）：两个 CLI 进程同时为**不同**任务 acquire 都成功、
+   同时为**同一**任务 acquire 只有一个成功。
+6. **workspace 绑定**：`prepare-workspace <project> <reservation> 1 --json` →
+   `"path": "/private/tmp/ce-e2/worktrees/<project>/<task>"`、`"branchRef": "refs/heads/task/<task-id>"`、
+   `"baseCommit": "352693f5…"`、`"created": true`，`ls -d` 确认目录存在；该 `workspaceId` 出现在预留详情里。
+7. **显式释放 → 可重新预留**：`release … --reason "manual handoff: agent finished"` → `{"released": true, "outcome": "RELEASED",
+   "reservation": {"state": "RELEASED", "releaseKind": "EXPLICIT", "releaseReason": "manual handoff: agent finished"}}`，
+   历史为 `["RESERVED","RELEASED"]`；随后同一任务再次 `acquire` 成功。
+8. **崩溃 reconcile（真实进程证据）**：`status` 报出本 home 的 Runtime `pid 2873`，`kill -9 2873` 后确认进程消失；
+   下一条命令启动新 boot，启动 reconcile 处理残余预留：
+   ```
+   "state": "RELEASED",
+   "releaseKind": "RECONCILED_HOLDER_EXITED",
+   "releaseObservation": "HOLDER_STOPPED",
+   "releaseReason": "no process with the recorded holder identity is running (pid 2873), so the recorded writer is gone",
+   "holder": { "bootId": "6b211dc9-…", "pid": 2873, "startToken": "ps:一  9月/14 20:31:10 2026" },
+   events[1].evidence: { "decision": "RELEASE", "observation": "HOLDER_STOPPED", "previousState": "RESERVED",
+     "projectedState": "RELEASED", "quiescenceProven": false, "signalsSent": 0, "resourcesDeleted": 0 }
+   ```
+   `capacity get` 随后 `globalUsed: 0`、`occupants: []`；显式 `scheduler reservations reconcile` 再跑一次 `"outcomes": []`（幂等）。
+9. **无法核验 → 不放行（真实进程证据）**。停掉 Runtime 后写入一条残余预留（真实存在的活进程 `pid 14563` 作为
+   `holder_pid`，`holder_start_token` 故意为 NULL、`holder_boot_id = 'boot-crashed-generation'`），再启动 Runtime：
+   ```
+   "state": "RECOVERY_REQUIRED",
+   "releaseObservation": "HOLDER_OWNERSHIP_UNVERIFIABLE",
+   "detail": "pid 14563 is alive but its identity cannot be compared with the recorded holder (a start token is missing),
+              so ownership is unproven",
+   events[0].evidence: { "decision": "MARK_RECOVERY_REQUIRED", "observation": "HOLDER_OWNERSHIP_UNVERIFIABLE",
+     "recordedStartToken": null, "observedStartToken": "ps:一  9月/14 20:33:57 2026",
+     "quiescenceProven": false, "signalsSent": 0, "resourcesDeleted": 0 }
+   foreign process still alive after the reconcile?  →  yes, never signalled
+   ```
+   显式 `reconcile` 再跑一次仍是 `"outcome": "HELD"`、`"state": "RECOVERY_REQUIRED"`；`capacity get` 显示
+   `globalUsed: 1` 且 `occupants` 里有该任务 —— **槽位没有被放行**。
+
+### 测试与实际跑过的检查
+
+- `packages/storage/test/slot-capacity.test.ts`（17 项，in-memory + 真实 schema）：默认 2 / 设置读回 / adapter 覆写与清除 /
+  非法值与未知 adapter 的稳定码且不写入 / `SchedulerCapacityChanged` / 每 Task 唯一 + 同 commandId 重放一份 /
+  容量 2 时第三个等待且不写入 / adapter 维度独立 / 版本与 revision CAS / 依赖指纹不匹配 / draining /
+  `resource_held` 执行计入占用 / 释放可审计且可再预留 / reconcile 观测与幂等 / `RECOVERY_REQUIRED` 仍占容量 /
+  一个 workspace 不能绑到两个活跃预留 / 释放后不能绑定。
+- `packages/storage/test/slot-capacity-migration.test.ts`（4 项）：v20→v21、v16→v21、已标 21 重开、`RELEASED` 缺释放记录被拒。
+- `apps/runtime/test/slot-reservation-service.test.ts`（18 项，真实临时仓库 + in-memory DB）：容量读回影响判定 / adapter 覆写 /
+  非法值与未知 adapter / 容量等待以 reason code 表达（并断言不是 `BLOCKED`）/ 归属证据与 `assessedDevCommit` /
+  过期版本与 revision 拒绝 / 依赖未满足 = `DEPENDENCIES_UNMET` / 依赖图变化 / draining / **提优先级不打断已持有预留** /
+  释放后重新预留 / 显式释放拒绝可证明仍存活的持有者 / 已死与无法核验的 reconcile 决定 / 本代自己的预留不被自己 reconcile /
+  workspace 绑定与重放 / 另一代不能准备本代的 workspace / **真实进程**上的 `inspectSlotHolder`（存活、token 不符、token 缺失、
+  token 不可读、已退出）。
+- `apps/runtime/test/cli-capacity-slots.test.ts`（6 项，真实 CLI + 真实 Runtime + 临时 home/repo + 协议 stub provider）：
+  上面第 1–9 条全部断言化（含两个并发 CLI 进程的竞争、SIGKILL 崩溃后的启动 reconcile、以及「无法核验 → 不放行」且外进程未被发信号）。
+- `bun run check:fast`：**退出码 0**（根 typecheck + UI typecheck + 231 Vitest + 315 unit Bun tests，0 fail）。
+- `bun run check` 第一次：退出码 1 —— 三个**旧断言**硬编码 `phase1SchemaVersion === 19`（`revision-delivery.test.ts` 与
+  `verification-cancel.test.ts` 的迁移测试），本格升到 v21 后必然失败；已按新版本更新这三处断言（只改期望值，不改测试语义）。
+- `bun run check` 第二次：退出码 1 —— 唯一失败是 `runtime-lifecycle.test.ts`「a deadline that never fires cannot hold a process open」
+  的**既有负载敏感抖动**（对照组脚本断言 `raw 0`，高并发下得到 `raw 1`）。该文件单独重跑 **10 pass / 0 fail**。
+- `bun run check` 第三次（**最终树**，含上述清理之后）：**退出码 0** —— 根与 UI `tsc --noEmit`、231 项 Vitest、
+  **510 项 Bun tests（0 fail，58 文件）**、UI Vite 构建。
+- `bun run check:fast` 在最终树上跑了两次：第一次退出码 1，唯一失败是 `terminal-service.test.ts`「releases only when the
+  provider exited…」的**既有负载敏感抖动**（`outcome.released` 期望 true 得到 false；该文件只用 fake adapter 与 terminal/handoff
+  服务，不 import 本格任何模块，单独重跑 **7 pass / 0 fail**）；第二次**退出码 0**（231 Vitest + 315 unit Bun tests，0 fail）。
+  三次抖动都如实记录，不把「重跑通过」当成「从没失败」。
+- 未引入任何 UI/桌面/键鼠自动化；全部断言只通过 CLI 命令面与 Runtime 命令面（含其 `--json` 输出与退出码）驱动。
+
+### 共享槽位与本格改动文件
+
+- **独占**：`apps/runtime/src/capacity-service.ts`（新）、`apps/runtime/src/slot-reservation-service.ts`（新）、
+  `apps/runtime/src/workspace-service.ts`（追加 `prepareReservedWorkspace`）、本格测试文件、
+  `docs/decisions/0032-capacity-and-slot-reservations.md`（新）、本文件本节。
+- **共享槽位（按槽位写）**：`packages/storage/src/migration.ts`（只占 v21、只追加迁移常量与 `if (version < 21)`）、
+  `packages/contracts/src/index.ts`（只追加容量命令组与结果类型/常量到 union 末尾）、`apps/cli/src/main.ts`
+  （只加 `scheduler` 命令块与 `usage()` 追加行 + 一个 `splitFlagTokens` 辅助函数）、`apps/runtime/src/main.ts`
+  （只做接线 + 启动 reconcile 追加 + shutdown 开始处 `drain.begin`）、`package.json`
+  （只在 `test:unit` 忽略列表与 `test:e2e` 列表加 `cli-capacity-slots`）、`docs/decisions/README.md`（表尾追加 ADR-0032）。
+- **需要说明的额外改动**：`packages/storage/src/database.ts` 与 `packages/storage/src/index.ts` —— 预留的持久化方法只能落在
+  存储层（本格的「容量/槽位存储」），全部为**追加**（新方法、新类型、新错误类、新 helper），没有修改任何既有方法/类型/迁移步骤；
+  另有 `apps/runtime/test/{revision-delivery,verification-cancel}.test.ts` 三行版本断言 19 → 21（升 schema 的必然连带）。
+- **未改**：`apps/ui/**`、`packages/domain/**`、`packages/contracts/src/impact-policy.ts`、
+  `apps/runtime/src/scheduler.ts`（候选排序/冲突判定未动，一行未改）、`packages/agent-adapters/**`、
+  `session-handoff-service.ts`、`terminal-service.ts`、`PROJECT_SPEC.md`、`AGENTS.md`、`docs/architecture/**`。
+
+### 未验证 / 不得当成已成立
+
+- **真实多任务并发执行**：本格只提供容量/槽位原语，没有任何引擎会自己 tick；「两个任务真的同时跑起来」需要 Wave E 的 E3。
+- **真实 adapter 进程并发**：端到端用的是协议 stub provider；provider 级槽位观测（例如每个 provider 进程自己的资源上限）没有实现，
+  adapter slot 目前只是「每 adapter 的并发上限」这一维度的记账。
+- **非 Git 共享资源**（端口/数据库/dev server 的 claim）：按用户决策 8 本波不做。
+- **impact snapshot 的「快照代」重检**：本基线没有快照存储（E1 领地），只记录调用方声明的 `impact_snapshot_id`，不假装已重检。
+- **真实 provider 的崩溃现场**：崩溃场景注入的是「记录到的持有者进程已死/无法核验」，不是真实 Agent 进程的崩溃（没有引擎驱动真实执行）。
+- 容量默认 2 / 上限 16 的数值与「降低上限不释放已持有槽位」的语义已按 ADR-0032 记录；若用户希望不同默认或上限，改常量 + ADR 即可。
+- 既有的测试遗留问题（与本次交付无关）：CLI 类测试会通过 `ensureRuntime` 启动临时 home 的 Runtime 而不 stop。
+  本轮这些遗留进程**已按归属核验回收，共 43 个**（三次清理：`/tmp/ce-e2` 证据期间 1 个 + 本格 CLI 测试产生 30 个 +
+  `bun run check` / `check:fast` 产生 6 个 + 最终复跑 4 个测试文件产生 6 个）。回收判据是三重证据同时成立才 SIGTERM：**argv 指向本格工作树的 Runtime 入口**
+  + **cwd = 本格工作树** + **打开的状态文件落在本次夹具 home**（`/tmp/ce-e2` 或 `codeestra-slot-home-*` 等临时目录）。
+  稳定 Runtime（`/Users/loyage/Documents/codeestra`）与其它 lane 工作树的进程**一个未动**（清理后实测：稳定树 2 个进程仍在、
+  `-wt` 下其它 lane 8 个仍在）；全部进程收到 SIGTERM 后自行退出，没有用到 SIGKILL。
+- 临时夹具与 home 全部回收：`/tmp/ce-e2`、`/tmp/ce-e2-repo`、`/tmp/ce-e2-tools`，以及本格测试产生的
+  `codeestra-slot-*` 临时目录（实测剩余 0）；证据日志与清理记录是 `/tmp` 下的临时文件，已在报告后删除（关键引文已写进本节）。
 
 ## NEXT — 最小可用纵向切片
 
