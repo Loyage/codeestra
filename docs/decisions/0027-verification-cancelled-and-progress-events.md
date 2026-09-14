@@ -48,7 +48,7 @@ ADR-0019 把 `task.run`/`task.verify` 变成持久 Operation，并在 Consequenc
 - 一致性 CHECK 保持并扩展：`QUEUED`/`RUNNING` 必须没有 `ended_at`/`outcome_code`；`PASSED`/`FAILED`/`ERROR`/`CANCELLED`/`STALE` 必须两者都有。因此「取消但没确认」在数据库层面就写不成一个已完成的 run。
 - 保留既有 `UNIQUE(project_id,command_id)`、`UNIQUE(operation_id)` 与两个复合外键，迁移后 `PRAGMA foreign_key_check` 必须为空（无表引用 `verification_runs`，所以无需关闭外键）。
 - `integration_verification_runs` **不改**：它的 Operation kind 不由 `task.operation.cancel` 触达，没有需要表达的取消路径；不为将来可能存在的需求提前放宽 CHECK。
-- 迁移只在既有升序链尾部追加 `if (version < 17)`；v16 属于并发的 C2 lane，合并时两段都保留、常量取最大值（17）。本格占用 **v17**。
+- 迁移只在既有升序链尾部追加 `if (version < 17)`；本格占用 **v17**。集成时 C3 先于原预留 v16 的 C2 schema 改动进入 dev，因此 v16 实际未使用。已有数据库可能已经标记为 17，后续 C2 不得再补一个会被跳过的 `if (version < 16)`；若需要 schema 变更，必须使用下一个高于 17 的版本并覆盖从 17 升级。
 
 ### D02：取消只在确认静止后才落 `CANCELLED`
 

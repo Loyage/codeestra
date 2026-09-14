@@ -1451,7 +1451,7 @@ CLI usage 两段并存、`docs/tasks` 按 042/043/044 升序）。
 7. 未做并发压力测试（数十个 home 同时 stop/status）与长时间运行下的 boot 记录规模测试。
 ## FOUNDATION-047 — verification run 的 `CANCELLED` 状态与长命令实时进度事件（ADR-0027，schema v17）
 
-状态：**已实现、已跑全量检查并提交 lane commit `8629e28`**。分支 `lane/c3-verification-progress`，基线固定为 `dev@abec3f3daf7af995e34f2053966f7a70eedd2352`（`phase1SchemaVersion = 15`），未 rebase；正在 `dev` 工作树进行独立集成验证，尚未生成 merge commit。未 push、未提升 `main`、未重启稳定 Runtime。决策见 ADR-0027；本格只做 ADR-0019 明确留下的两项（「未实现（不得声称）」第 1、2 条），不新增任何确认门禁。
+状态：**已提交并合入 `dev`**。lane commit `8629e28`（`lane/c3-verification-progress`，基线固定为 `dev@abec3f3`，未 rebase）→ dev merge `fadc094`（在 dev 工作树内 `--no-ff`；与 FOUNDATION-045 的并排冲突在 `docs/tasks/README.md` 与 `package.json` 合并保留）。合并前在 dev 的合并树上完成独立全量检查；**这是手工合并，不是产品 IntegrationBatch**。未 push、未提升 `main`、未重启稳定 Runtime。决策见 ADR-0027；本格只做 ADR-0019 明确留下的两项（「未实现（不得声称）」第 1、2 条），不新增任何确认门禁。
 
 ### 已实现
 
@@ -1481,7 +1481,8 @@ CLI usage 两段并存、`docs/tasks` 按 042/043/044 升序）。
 ### 实际跑过的检查与结果
 
 - `bun run check:fast` 退出码 0（根 typecheck + UI typecheck + 231 项 Vitest + 229 项 unit Bun tests 0 fail）。
-- `bun run check` 退出码 0：根与 UI `tsc --noEmit`、231 项 Vitest、**389 项 Bun tests 0 fail**（46 个文件）、UI Vite 构建成功。本格未改 `packages/domain`/`packages/contracts`，Vitest 数量与本格无关。
+- lane 上 `bun run check` 退出码 0：根与 UI `tsc --noEmit`、231 项 Vitest、**389 项 Bun tests 0 fail**（46 个文件）、UI Vite 构建成功。本格未改 `packages/domain`/`packages/contracts`，Vitest 数量与本格无关。
+- dev 合并树上的独立集成检查 `bun run check` 退出码 0：根与 UI typecheck、231 项 Vitest、**399 项 Bun tests 0 fail**（47 个文件，包含 FOUNDATION-045 的 10 项 Runtime lifecycle 测试）、UI Vite 构建成功；验证通过后才创建 merge commit `fadc094`。
 - 新增/更新的测试：
   - `apps/runtime/test/verification-cancel.test.ts`（4 项通过）：v16→v17 迁移保留行/索引/`foreign_key_check`；`CANCELLED` 缺少 `ended_at`/`outcome_code` 被拒、`QUEUED` 带终态事实被拒；已在 17 时不重跑；确认静止 → `CANCELLED` + 副本保留 + `listVerificationRuns` 表达 + `reclaim` 默认保留/显式才回收；未确认静止 → run 仍 `RUNNING` + Operation `RECONCILE_REQUIRED` + `reclaim` `REFUSE/ACTIVE_VERIFICATION`。
   - `apps/runtime/test/operation-progress-events.test.ts`（8 项通过）：顺序/幂等/排他游标/终态后不再发布（步骤仍记录）/订阅可达/HTTP-SSE 可达；验证输出块事件（间隔 0）字节递增且不含输出文本；默认间隔合并为 1 条而终止步骤带真实总字节数；后台受理后进度里没有 `PASSED`；`task.run` 五步 + 一次 settle 且无 `PASSED`；未发布进度的 Operation 不进入进度流。
@@ -1490,7 +1491,7 @@ CLI usage 两段并存、`docs/tasks` 按 042/043/044 升序）。
 
 ### 交付边界与剩余问题
 
-- **占用了 schema v17**。合并时必须保留 C2 的 `if (version < 16)` 与本次的 `if (version < 17)` 两条升序分支，`phase1SchemaVersion` 取最大值 **17**；`migration.ts` 的既有段落未被移动。
+- **占用了 schema v17**。本次先于预留 v16 的 C2 schema 改动合入，因此当前 dev 是 `phase1SchemaVersion = 17` 且没有 v16 迁移。数据库现在可能已被标记为 17，后续不得再插入 `if (version < 16)`（它会被既有 v17 数据库跳过）；C2 若需要 schema 变更必须使用下一个高于 17 的版本并提供相应升级测试。v16 保持未使用。
 - **领地外的最小改动（需在交付说明中保留）**：`apps/runtime/src/reclaim-service.ts`（加 `CANCELLED` 到 failure scene，1 处分支）、`packages/storage/src/index.ts`（导出新迁移）、`packages/storage/src/database.ts` 的既有 `completeOperation`（对发布过进度的 Operation 追加 settle 事件，见 ADR-0027 D04）、`apps/ui/src/styles.css`（1 条 `.state-cancelled`）、`package.json`（测试分层清单）、以及 3 个既有测试文件的断言更新（其中 `task-dependencies.test.ts` 的字面量版本断言在 C2 的 v16 合入后必然失败）。
 - **剩余（不得声称已完成）**：
   - `task.run` 的进度是步骤级 + settle，不含 provider 事件级进度；provider token/PTY 字节按 event-model §4 与 ADR-0013 永不进入 domain event（细粒度通道仍是只读的 `session.transcript`）。要加 provider 事件级进度需要 `agent-runtime-service.ts`/`agent-observation-service.ts`（C4 槽位），本格未改。

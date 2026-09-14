@@ -879,9 +879,9 @@ END;
  * a duplicated fact), and a row for every published event so a projection can be read by
  * `progress_sequence` as well as by the global event cursor.
  *
- * Schema version 17 is reserved for this migration. Version 16 is reserved by the concurrent C2
- * lane; when both land, every `version <` step is kept and runs in ascending order, and the version
- * constant stays the maximum of the two (17).
+ * Schema version 17 is reserved for this migration. It reached dev before the C2 lane's originally
+ * reserved version 16 migration, so version 16 remains unused: a database may already be stamped 17
+ * and would skip a later `version < 16` step. Any later C2 schema change must use a version above 17.
  */
 export const verificationProgressMigration = `
 CREATE TABLE verification_runs_v17 (
