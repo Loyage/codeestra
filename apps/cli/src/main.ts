@@ -117,6 +117,40 @@ function print(value: unknown): void {
 }
 
 /**
+ * The completion note `task.status` reports for one Agent Session. The Runtime owns this shape; the
+ * client only renders it, so an unreadable payload means "no note", never an invented one.
+ */
+interface TaskStatusExecutionListing {
+  readonly executionId?: unknown;
+  readonly session?: { readonly sessionId?: unknown;
+    readonly completion?: { readonly outcome?: unknown;
+      readonly note?: { readonly code?: unknown; readonly message?: unknown } | null } | null } | null;
+}
+
+/**
+ * Renders the Agent-completion notes of a Task to stderr. A completion the Runtime had to annotate
+ * is thus visible both to a human reading `task status` and to a script reading its JSON. This is a
+ * rendering of a recorded fact: it changes no state, adds no confirmation, and never claims the
+ * Agent is waiting for an answer (FOUNDATION-056).
+ */
+function printCompletionNotes(view: unknown): void {
+  if (typeof view !== 'object' || view === null) return;
+  const executions = (view as { readonly executions?: unknown }).executions;
+  if (!Array.isArray(executions)) return;
+  for (const candidate of executions as readonly TaskStatusExecutionListing[]) {
+    const executionId = candidate.executionId;
+    const note = candidate.session?.completion?.note ?? null;
+    if (note === null || typeof note.code !== 'string') continue;
+    const sessionId = candidate.session?.sessionId;
+    const outcome = candidate.session?.completion?.outcome;
+    console.error(`[note] ${typeof executionId === 'string' ? executionId : 'unknown execution'}`
+      + ` (${typeof sessionId === 'string' ? sessionId : 'unknown session'})`
+      + ` ended ${typeof outcome === 'string' ? outcome : 'without a recorded outcome'}`
+      + ` with ${note.code}: ${typeof note.message === 'string' ? note.message : 'no message'}`);
+  }
+}
+
+/**
  * An Attention answer as the Runtime command face accepts it. A questionnaire answer stays
  * structured here rather than pre-serialized, so a bad option number is rejected by the Runtime
  * with a code the caller can act on instead of reaching the Agent as an opaque string.
@@ -836,7 +870,12 @@ function usage(): never {
   bun run codeestra task cancel <project-id> <task-id> <expected-version>
   bun run codeestra task archive <project-id> <task-id> <expected-version>
   bun run codeestra task unarchive <project-id> <task-id> <expected-version>
-  bun run codeestra task status <project-id> <task-id>
+  bun run codeestra task status <project-id> <task-id> [--json]
+    # every Execution's Agent completion is printed with its note; a code such as
+    # PROSE_QUESTION_NO_TOOL_USE marks a completion the Runtime annotated instead of
+    # leaving an unexplained SUCCESS (heuristic: no tool call in the run and the last
+    # assistant text ends with a question mark). The note is printed to stderr.
+    # --json is accepted and is the default, so a script can state its intent.
   bun run codeestra task revision create <project-id> <task-id> <expected-version>
     [--specification <text>] [--constraint <text>]… [--reason <text>] [--json]
   bun run codeestra task revision list <project-id> <task-id> [--json]
@@ -1703,9 +1742,14 @@ try {
       adapterId,
     }));
   } else if (group === 'task' && action === 'status') {
-    const [taskId, ...extra] = remainingArguments;
-    if (firstArgument === undefined || taskId === undefined || extra.length !== 0) usage();
-    print(await call({ command: 'task.status', projectId: firstArgument, taskId }));
+    const [taskId, ...flags] = remainingArguments;
+    if (firstArgument === undefined || taskId === undefined) usage();
+    // The JSON view is this command's only output; `--json` is accepted so a script can say what it
+    // expects, and anything else stays a usage error instead of being silently ignored.
+    for (const flag of flags) if (flag !== '--json') usage();
+    const view = await call({ command: 'task.status', projectId: firstArgument, taskId });
+    printCompletionNotes(view);
+    print(view);
   } else if (group === 'task' && action === 'transcript') {
     const [taskId, ...flags] = remainingArguments;
     if (firstArgument === undefined || taskId === undefined) usage();

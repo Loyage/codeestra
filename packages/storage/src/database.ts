@@ -5,9 +5,13 @@ import {
   DependencyGraphError,
   createDependencyGraph,
   DomainError,
+  noToolCallsWithTrailingQuestionMarkHeuristic,
+  PROSE_QUESTION_NO_TOOL_USE,
   revisionDeliverySatisfied,
   transitionRevisionDelivery,
   wouldCreateCycle,
+  type AgentCompletionFacts,
+  type AgentCompletionNote,
   type DependencyEdge,
   type RevisionDelivery,
   type RevisionDeliveryChannel,
@@ -409,6 +413,72 @@ export const executionErrorSchema = z.object({
 });
 export type ExecutionError = z.infer<typeof executionErrorSchema>;
 
+/**
+ * Parse schema for the completion note the Runtime records next to a settled Agent run. The shape
+ * is a typed twin of the domain's `AgentCompletionNote`, so a change on either side is a compile
+ * error here rather than a silently dropped note.
+ */
+const completionFactsSchema: z.ZodType<AgentCompletionFacts> = z.strictObject({
+  toolCallCount: z.number().int().nonnegative(),
+  finalAssistantText: z.string().max(2000).nullable(),
+  finalAssistantTextTruncated: z.boolean(),
+  finalAssistantStopReason: z.string().max(64).nullable(),
+});
+
+const agentCompletionNoteSchema: z.ZodType<AgentCompletionNote> = z.strictObject({
+  code: z.literal(PROSE_QUESTION_NO_TOOL_USE),
+  heuristic: z.literal(noToolCallsWithTrailingQuestionMarkHeuristic),
+  message: z.string().min(1),
+  facts: completionFactsSchema,
+});
+
+/**
+ * The recorded Agent-session completion: the provider's outcome, the facts behind it (when the
+ * Adapter could report them) and the Runtime's own note about an ending it must not leave
+ * unexplained. `note` is `null` for an ordinary completion.
+ */
+export interface AgentSessionCompletion {
+  readonly outcome: 'SUCCESS' | 'FAILURE';
+  readonly evidenceRef: string | null;
+  readonly failure: ExecutionError | null;
+  readonly facts: AgentCompletionFacts | null;
+  /** A stable code plus the facts it was applied to; see FOUNDATION-056. */
+  readonly note: AgentCompletionNote | null;
+}
+
+const sessionCompletionSchema = z.object({
+  outcome: z.enum(['SUCCESS', 'FAILURE']),
+  evidence: z.object({ ref: z.string().min(1) }).partial().optional(),
+  failure: executionErrorSchema.optional(),
+  facts: completionFactsSchema.optional(),
+  note: agentCompletionNoteSchema.optional(),
+});
+
+/**
+ * Reads the completion projection out of `agent_sessions.exit_json`. The same column also carries
+ * unrelated payloads (a start failure, a disconnect reason), so anything without a completion
+ * outcome is reported as "no completion recorded" instead of an invented one.
+ */
+function parseSessionCompletion(json: string | null): AgentSessionCompletion | null {
+  if (json === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json) as unknown;
+  } catch {
+    return null;
+  }
+  const result = sessionCompletionSchema.safeParse(parsed);
+  if (!result.success) return null;
+  const data = result.data;
+  return {
+    outcome: data.outcome,
+    evidenceRef: data.evidence?.ref ?? null,
+    failure: data.failure ?? null,
+    facts: data.facts ?? null,
+    note: data.note ?? null,
+  };
+}
+
 function parseExecutionError(json: string | null): ExecutionError | null {
   if (json === null) return null;
   let parsed: unknown;
@@ -504,6 +574,11 @@ export interface ExecutionSummary {
     readonly state: AgentSessionLifecycleState;
     readonly providerSessionId: string | null;
     readonly cursor: string | null;
+    /**
+     * The completion this Session recorded, including any note the Runtime had to add. `null` while
+     * the Session has not completed (or completed without a recorded outcome).
+     */
+    readonly completion: AgentSessionCompletion | null;
   } | null;
 }
 
@@ -1466,6 +1541,7 @@ export class Phase1Database {
       resume_from_execution_id: string | null;
       session_id: string | null; session_state: AgentSessionLifecycleState | null;
       provider_session_id: string | null; observation_cursor: string | null;
+      session_exit_json: string | null;
     }, [string]>(`
       SELECT execution.id AS execution_id,execution.task_id,execution.attempt_number,execution.state,
         execution.adapter_id,execution.adapter_version,execution.resource_held,execution.base_commit,
@@ -1473,7 +1549,7 @@ export class Phase1Database {
         execution.agent_config_json,
         execution.stop_reason,execution.resume_from_execution_id,
         session.id AS session_id,session.state AS session_state,
-        session.provider_session_id,session.observation_cursor
+        session.provider_session_id,session.observation_cursor,session.exit_json AS session_exit_json
       FROM executions execution LEFT JOIN agent_sessions session ON session.execution_id=execution.id
       WHERE execution.task_id=?1 ORDER BY execution.attempt_number DESC
     `).all(taskId).map((row) => ({
@@ -1496,6 +1572,7 @@ export class Phase1Database {
         state: row.session_state,
         providerSessionId: row.provider_session_id,
         cursor: row.observation_cursor,
+        completion: parseSessionCompletion(row.session_exit_json),
       },
     }));
   }
@@ -2622,6 +2699,16 @@ export class Phase1Database {
     readonly evidence: Readonly<{ ref: string; toolsQuiescent: true; ownedWritersStopped: true }>;
     /** Bounded provider-classified reason; only recorded for a FAILURE outcome. */
     readonly failure?: Readonly<{ code: string; message: string }>;
+    /**
+     * Provider-reported completion facts when the Adapter could report them. They are stored with
+     * the completion so a reader can always check the Runtime's note against the observations.
+     */
+    readonly facts?: AgentCompletionFacts;
+    /**
+     * The Runtime's deterministically derived note, or absent for an ordinary completion. Recording
+     * it is what makes "SUCCESS" explain itself; it changes no state and is not an Attention.
+     */
+    readonly note?: AgentCompletionNote;
     readonly sessionEventId: string;
     readonly executionEventId: string;
     readonly taskEventId: string;
@@ -2629,7 +2716,9 @@ export class Phase1Database {
   }): AdapterEventResult {
     return this.sqlite.transaction(() => {
       const payloadJson = JSON.stringify({ outcome: input.outcome, evidence: input.evidence,
-        ...(input.failure === undefined ? {} : { failure: input.failure }) });
+        ...(input.failure === undefined ? {} : { failure: input.failure }),
+        ...(input.facts === undefined ? {} : { facts: input.facts }),
+        ...(input.note === undefined ? {} : { note: input.note }) });
       const duplicate = this.adapterEventDuplicate(input.sessionId, input.providerEventId,
         input.cursor, 'completed', payloadJson);
       if (duplicate) return this.adapterEventResult(input.sessionId, input.providerEventId);
@@ -2657,7 +2746,10 @@ export class Phase1Database {
       `).run(input.sessionEventId, subject.projectId, input.sessionId, subject.sessionVersion + 1,
         input.executionId, input.providerEventId, input.observedAt,
         JSON.stringify({ executionId: input.executionId, sessionId: input.sessionId,
-          outcome: input.outcome, evidenceRef: input.evidence.ref }));
+          outcome: input.outcome, evidenceRef: input.evidence.ref,
+          // The note travels with the append-only completion fact, so "why does this SUCCESS say
+          // nothing happened" is answerable from the event log alone (FOUNDATION-056).
+          ...(input.note === undefined ? {} : { note: input.note }) }));
       if (input.outcome === 'FAILURE') {
         const executionUpdate = this.sqlite.query(`
           UPDATE executions SET state='FAILED',resource_held=0,version=version+1,

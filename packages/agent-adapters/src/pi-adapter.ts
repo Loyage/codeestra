@@ -6,6 +6,7 @@ import {
   type AgentAnswerAdapter,
   type AgentConfiguration,
   type AgentAnswerRequest,
+  type AgentCompletionFacts,
   type AgentControlReceipt,
   type AgentObservedEvent,
   type AgentProcessRelease,
@@ -98,6 +99,109 @@ function requiredString(value: unknown, field: string): string {
       `Pi get_state did not report a usable ${field}`, true, false);
   }
   return value;
+}
+
+/**
+ * Provider facts collected while one Pi run is observed. Every field is read straight out of Pi's
+ * own RPC records — nothing here decides what the facts mean; the Runtime applies its own
+ * deterministic rule (FOUNDATION-056).
+ */
+interface CompletionFactsAccumulator {
+  /** Tool call IDs Pi named, deduplicated so a message seen twice is counted once. */
+  readonly toolCallIds: Set<string>;
+  /** Tool calls the provider reported without a usable ID; they still prove a tool was used. */
+  unnamedToolCalls: number;
+  finalAssistantText: string | null;
+  finalAssistantTextTruncated: boolean;
+  finalAssistantStopReason: string | null;
+}
+
+/** Bounded so a hostile or chatty provider cannot force an unbounded database row. */
+const maxFinalAssistantTextChars = 2000;
+
+function newCompletionFactsAccumulator(): CompletionFactsAccumulator {
+  return { toolCallIds: new Set<string>(), unnamedToolCalls: 0, finalAssistantText: null,
+    finalAssistantTextTruncated: false, finalAssistantStopReason: null };
+}
+
+function namedId(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function noteToolCall(accumulator: CompletionFactsAccumulator, id: string | null): void {
+  if (id === null) accumulator.unnamedToolCalls += 1;
+  else accumulator.toolCallIds.add(id);
+}
+
+/** The assistant's own text blocks, in order; thinking and tool arguments are not assistant prose. */
+function assistantProse(message: Record<string, unknown>): string {
+  const content = message['content'];
+  if (!Array.isArray(content)) return '';
+  const parts: string[] = [];
+  for (const block of content) {
+    if (typeof block === 'string') {
+      parts.push(block);
+      continue;
+    }
+    if (typeof block !== 'object' || block === null) continue;
+    const entry = block as Record<string, unknown>;
+    if (entry['type'] === 'text' && typeof entry['text'] === 'string') parts.push(entry['text']);
+  }
+  return parts.join('\n');
+}
+
+function assistantToolCallIds(message: Record<string, unknown>): readonly (string | null)[] {
+  const content = message['content'];
+  if (!Array.isArray(content)) return [];
+  const ids: (string | null)[] = [];
+  for (const block of content) {
+    if (typeof block !== 'object' || block === null) continue;
+    const entry = block as Record<string, unknown>;
+    if (entry['type'] !== 'toolCall') continue;
+    ids.push(namedId(entry['id']));
+  }
+  return ids;
+}
+
+function collectCompletionFacts(
+  accumulator: CompletionFactsAccumulator,
+  record: Record<string, unknown>,
+): void {
+  const type = typeof record['type'] === 'string' ? record['type'] : '';
+  if (type === 'tool_execution_start') {
+    noteToolCall(accumulator, namedId(record['toolCallId']));
+    return;
+  }
+  if (type !== 'message_end' && type !== 'turn_end') return;
+  const message = record['message'];
+  if (typeof message !== 'object' || message === null) return;
+  const entry = message as Record<string, unknown>;
+  // Both the message's own tool-call blocks and a tool result message prove a tool was used. The
+  // IDs come from the provider, so the same call observed twice is counted once.
+  for (const id of assistantToolCallIds(entry)) noteToolCall(accumulator, id);
+  if (entry['role'] === 'toolResult') {
+    noteToolCall(accumulator, namedId(entry['toolCallId']));
+    return;
+  }
+  if (entry['role'] !== 'assistant') return;
+  const prose = assistantProse(entry);
+  // A tool-call-only assistant message is not the run's closing text; keeping the previous text
+  // means "the last thing the Agent said to the user".
+  if (prose.trim().length === 0) return;
+  accumulator.finalAssistantText = prose.length <= maxFinalAssistantTextChars
+    ? prose : prose.slice(prose.length - maxFinalAssistantTextChars);
+  accumulator.finalAssistantTextTruncated = prose.length > maxFinalAssistantTextChars;
+  accumulator.finalAssistantStopReason = typeof entry['stopReason'] === 'string'
+    ? entry['stopReason'].slice(0, 64) : null;
+}
+
+function completionFactsOf(accumulator: CompletionFactsAccumulator): AgentCompletionFacts {
+  return {
+    toolCallCount: accumulator.toolCallIds.size + accumulator.unnamedToolCalls,
+    finalAssistantText: accumulator.finalAssistantText,
+    finalAssistantTextTruncated: accumulator.finalAssistantTextTruncated,
+    finalAssistantStopReason: accumulator.finalAssistantStopReason,
+  };
 }
 
 /**
@@ -323,6 +427,9 @@ const evidenceRef = `pi-rpc:agent_settled:session=${live.providerSessionId}`
           permissionMode: live.permissionMode }), ...buildPiModelArguments(live.agentConfig)].join(' '))
         .digest('hex').slice(0, 16)}`;
     let turnFailure: string | null = null;
+    // Provider facts for the completion note. They are counted/collected from Pi's own records and
+    // never interpreted here: the Runtime applies its heuristic to them (FOUNDATION-056).
+    const facts = newCompletionFactsAccumulator();
     for await (const envelope of live.client.envelopes()) {
       if (envelope.kind === 'disconnected') {
         this.#sessions.delete(session.id);
@@ -338,6 +445,7 @@ const evidenceRef = `pi-rpc:agent_settled:session=${live.providerSessionId}`
       }
       const failure = assistantTurnFailure(envelope.record);
       if (failure !== undefined) turnFailure = failure;
+      collectCompletionFacts(facts, envelope.record);
       const attention = mapPiExtensionUiRequest({
         record: envelope.record,
         sessionId: session.id,
@@ -371,6 +479,7 @@ const evidenceRef = `pi-rpc:agent_settled:session=${live.providerSessionId}`
             toolsQuiescent: true,
             ownedWritersStopped: true,
           },
+          facts: completionFactsOf(facts),
         };
         return;
       }
