@@ -61,6 +61,10 @@ const unsupportedCapabilities: AdapterCapabilities = Object.freeze({
   attach: 'STRUCTURED',
   reconnectToLiveSession: 'UNSUPPORTED',
   resumeAfterExit: 'UNSUPPORTED',
+  // Integration fix: this stub asserts runtime orchestration only. `controlledConfiguration` was
+  // added by FOUNDATION-049 (ADR-0029) after this lane was based, so the field is declared here too.
+  // It says nothing about a real provider's isolation (this stub starts no provider).
+  controlledConfiguration: 'SUPPORTED',
 });
 
 /**
