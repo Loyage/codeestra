@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 12;
+export const phase1SchemaVersion = 15;
 
 export const phase1Migration = `
 CREATE TABLE projects (
@@ -636,4 +636,43 @@ CREATE INDEX reclamation_records_by_project ON reclamation_records(project_id,cr
 CREATE INDEX reclamation_records_by_task ON reclamation_records(project_id,task_id,created_at,id);
 CREATE UNIQUE INDEX one_reclamation_record_per_resource
   ON reclamation_records(operation_id,kind,resource_id);
+`;
+
+/**
+ * Task dependencies (ADR-0024). An edge is directed dependent -> prerequisite and pins the exact
+ * upstream revision, so the edge cannot drift when the upstream specification is amended.
+ *
+ * Integrity is enforced by the schema, not by the caller: both endpoints must be Tasks of the same
+ * project, the pinned revision must belong to the prerequisite, a Task cannot depend on itself, and
+ * the ordered pair can exist only once. Edge rows are immutable (a trigger refuses UPDATE):
+ * retargeting an edge is a removal plus an addition, so the audit trail never shows a dependency
+ * whose meaning silently changed. Cycles are detected in the write transaction by the pure domain
+ * graph (see `dependency-graph.ts`), which is the only thing SQLite cannot express here.
+ *
+ * Schema version 15 is reserved for this migration. Versions 13 and 14 are reserved by the
+ * concurrent B1/B2 lanes; when all three land, every `version <` step must be kept and run in
+ * ascending order, and the version constant must be the maximum of the three.
+ */
+export const taskDependenciesMigration = `
+CREATE TABLE task_dependencies (
+  dependent_task_id TEXT NOT NULL,
+  prerequisite_task_id TEXT NOT NULL,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  required_revision_id TEXT NOT NULL,
+  created_by TEXT NOT NULL CHECK(length(trim(created_by)) > 0),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  PRIMARY KEY(dependent_task_id,prerequisite_task_id),
+  CHECK(dependent_task_id <> prerequisite_task_id),
+  FOREIGN KEY(project_id,dependent_task_id) REFERENCES tasks(project_id,id),
+  FOREIGN KEY(project_id,prerequisite_task_id) REFERENCES tasks(project_id,id),
+  FOREIGN KEY(prerequisite_task_id,required_revision_id) REFERENCES task_revisions(task_id,id)
+) STRICT;
+CREATE INDEX task_dependencies_by_dependent
+  ON task_dependencies(project_id,dependent_task_id);
+CREATE INDEX task_dependencies_by_prerequisite
+  ON task_dependencies(project_id,prerequisite_task_id);
+CREATE TRIGGER task_dependencies_no_update
+BEFORE UPDATE ON task_dependencies BEGIN
+  SELECT RAISE(ABORT,'task dependency edges are immutable; remove and add again');
+END;
 `;

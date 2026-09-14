@@ -5,6 +5,7 @@
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
-    "@codeestra/contracts": "workspace:*"
+    "@codeestra/contracts": "workspace:*",
+    "@codeestra/domain": "workspace:*"
   }
 }

@@ -1084,6 +1084,54 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 - 副本失败现场当前由 `verification-service` 在 run 结束时删除；本能力回收的是它留下的残留（删除失败、Runtime 中断）。未修改 A1 格领地文件。
 - Attention 参数保留决策未做敏感性扫描（例如真实 Agent 在参数里写入密钥的形态）。
 
+## FOUNDATION-044 — 任务依赖、DAG 环校验与 BLOCKED 语义（ADR-0024）
+
+状态：已实现并通过 CLI/命令面测试（真实临时仓库 + 临时 `CODEESTRA_HOME` + 协议 stub provider）；未用真实 provider 驱动依赖解阻塞，未使用桌面/浏览器/键鼠自动化。**本轮占用 schema v15；v13 保留给 B1 格、v14 保留给 B2 格，均未占用。**
+
+上游语义由 ADR-0009 与用户本轮派单固定：**上游成果先进入 `dev` 才满足依赖**；仅 Task verification PASSED 不释放依赖；DAG 变更必须检验环；`BLOCKED` 只表示依赖未满足。决策记录为 ADR-0024（依赖满足定义、环校验策略、`BLOCKED` 迁移点、幂等与拒绝规则、命令面）。
+
+### 已实现
+
+- `packages/domain/src/dependency-graph.ts`（新，纯函数；不导入 Bun/SQLite/Git/Adapter）：`createDependencyGraph`（自环/重复边/空标识/越界 Task 拒绝并带结构化 `issue`）、`detectCycle`、`wouldCreateCycle`、`assertAcyclic`、`topologicalOrder`、`dependencyClosure`、`transitivePrerequisites`、`transitiveDependents`、`dependencyImpact`；错误为 `DependencyGraphError`。`index.ts` 只追加导出。
+- `packages/storage`：`phase1SchemaVersion` 12 → 15；追加 `taskDependenciesMigration`（`task_dependencies`：PK `(dependent,prerequisite)` 即 UNIQUE、`CHECK(dependent<>prerequisite)`、两条 `(project_id, task_id)` 复合外键到 `tasks`、`(prerequisite_task_id, required_revision_id)` 外键到 `task_revisions`、`task_dependencies_no_update` 不可改写触发器、两个索引）；追加 `listTaskDependencyFacts`（读边 + 该钉 revision 的最新 INTEGRATED 事实）、`addTaskDependency`、`removeTaskDependency`、`applyTaskDependencyState`（只允许 `READY↔BLOCKED`，带 CAS、事件与 command receipt）与 `TaskDependencyError('DEPENDENCY_CYCLE'|'SELF_DEPENDENCY')`。**环校验在 `executeCommand` 写事务内调用领域图**，成环即拒绝且不写任何行。`migrate()` 只追加 `if (version < 15)`。
+- `apps/runtime/src/scheduler.ts`（新）：`inspectTaskDependencies`（投影：每条边的 `satisfied` + 原因码 + 闭包/影响；不写状态）、`reconcileTaskDependencyState`（重算并把 `READY↔BLOCKED` 落库，非这两种状态只报告不改）、`reconcileDependentTasks`（上游合入后对传递下游闭包逐个重算，单任务失败记入 `errors` 而不使父命令失败）、`assertDependenciesSatisfied`、`assertTaskRunnable`。满足判定 = INTEGRATED 批次事实 + `integrated_commit` 仍可从当前 `dev` ref 到达（`readLocalRefCommit` + `isAncestor`，均来自现有 `@codeestra/git`，未改该包）。
+- `packages/contracts/src/index.ts`：union 末尾追加 `task.depends.add` / `task.depends.remove` / `task.depends.list` 三个严格请求。
+- `apps/cli/src/main.ts`：`task depends add|remove|list`（`--json`、稳定退出码；`list` 无 `--json` 时给人读视图，有 `--json` 时与 Runtime 投影一致；`add` 成功但任务因此 `BLOCKED` 仍为退出码 0）；usage 追加三行。
+- `apps/runtime/src/main.ts`（接线 + 新增 dispatch 分支 + 三处最小接入）：新分支 `task.depends.*`；`task.submit` 记录 `DRAFT→READY` 后在同一命令内执行依赖判定（未满足则 `READY→BLOCKED`）；`task.run` 在预留任何 workspace/Execution **之前**执行依赖守卫；`task.integrate` 成功后在响应里附带 `dependencyReconcile`；`task.resume` 先做只读依赖断言。
+- 依赖 `@codeestra/domain` 加入 `packages/storage` 与 `apps/runtime` 的 `package.json`（bun.lock 同步 +2 行，`bun install --frozen-lockfile` 通过）；`package.json` 的 `test:unit` 忽略表与 `test:e2e` 列表追加两个新测试文件。
+
+### 归属与安全判定
+
+1. 依赖两端点必须属于同一项目（复合外键），钉的 revision 必须属于上游（外键）——不依赖显示名或调用方自律。
+2. 边不可原地改写（触发器），改钉只能删除再加；`add` 命中已存在但版本不同的边返回 `INVALID_STATE`。
+3. 环在写事务内用领域图判定；拒绝时表内行数与 Task 版本均不变。
+4. 满足判定 fail-closed：`dev` ref 缺失或 Git 读取失败一律按未满足（`DEV_BASELINE_MISSING` / `DEV_REF_UNREADABLE`）。
+5. 依赖未满足时 `task.run`/`task.resume` 在任何 Git 或进程副作用前拒绝，因而不创建 Execution、不占用 worktree。
+6. 所有写路径带 `expectedVersion` CAS；重复 `commandId` 经 command receipt 重放，不产生第二行、不二次推进版本。
+
+### 实际验证
+
+- `bun run check:fast` 通过；**`bun run check` 通过（退出码 0）**：根/UI typecheck、Vitest 231 项、Bun 320 项（`test:unit` 199 + `test:e2e` 121，分层之和与总数一致）、Vite 构建。
+- `packages/domain/test/dependency-graph.test.ts`（Vitest，新增）：非法图与环（自环、直接环、间接环、带无环前缀的环）、候选边成环路径、非环图（链/菱形）、双向索引与冻结、传递闭包与影响（菱形去重、不含自身、环上终止、未知 Task 空闭包）、确定性拓扑序。
+- `packages/storage/test/task-dependencies.test.ts`（Bun，10 项）：v12→v15 additive 迁移保留既有行且 `foreign_key_check` 无违规、`user_version=14` 已盖章库 → v15、自依赖/未知 Task 拒绝（直接 INSERT 也被 schema 拒绝）、加边钉版本、同 `commandId` 重放幂等、不同 `commandId` 同边 `added:false` 不推进版本、改钉拒绝、仅 INTEGRATED 批次算事实、环拒绝且不写入、`RUNNING/PAUSED/SUCCEEDED/EXECUTED/CANCELLED` 拒绝改图而 `FAILED` 保持可编辑、删除与不存在删除 `NOT_FOUND`、`READY↔BLOCKED` 迁移（无理由 BLOCKED、带理由 READY、无变化不写事件不动版本、运行态不受影响）、边拒绝 UPDATE。
+- `apps/runtime/test/scheduler.test.ts`（Bun，6 项，真实临时 Git 仓库）：未合入 `dev` 时下游保持 `BLOCKED` 且无 workspace/Execution、`DEPENDENCIES_UNMET`、上游合入 `dev` 后下游转 `READY`、陈旧版本 `CONCURRENT_MODIFICATION`、`dev` 重写后 `NOT_REACHABLE_FROM_DEV`、`dev` 前进后的严格祖先仍满足、传递下游闭包重算（已 BLOCKED 的记 `unchanged`）、投影与运行中 Task 不被改动、环拒绝后图与版本不变、`dev` ref 缺失按 `DEV_BASELINE_MISSING`。
+- `apps/runtime/test/cli-task-depends.test.ts`（Bun，2 项，真实 CLI + 真实 Runtime + 协议 stub provider + 临时仓库）：`add`/`list`/自依赖与未知端点退出码 1/重复加边 `added:false`/环 `DEPENDENCY_CYCLE` 退出码 1/项目级列表/下游闭包/`remove` 与不存在 `remove` 的 `NOT_FOUND`/未知项目退出码 1；完整流程：`depends add → submit`（`BLOCKED`）→ `run` 退出码 1 且无 Execution、无 worktree 目录 → 上游 `run → result capture → verify → integrate` → 响应 `dependencyReconcile.readied` 含下游、`task depends list` `satisfied`、下游 `READY`、`dev` 等于成果 commit → `remove` 后无边仍 `READY`。
+- `packages/contracts/test/request.test.ts`（新增 1 项）：三个新请求的必填/可选字段与拒绝多余字段。
+- 既有测试仅一处机械修正：`apps/runtime/test/cli-reclaim.test.ts` 把硬编码 `12` 改为 `phase1SchemaVersion`（该断言本意即「升级到当前 schema」）。
+- 未改动 `packages/git/**`、`packages/agent-adapters/**`、`apps/ui/**`、`workspace-service.ts`、`PROJECT_SPEC.md`、`AGENTS.md`；未 push、未提升 `main`、未重启稳定 Runtime；所有 Git 测试均用临时仓库与临时 `CODEESTRA_HOME=/tmp/ce-b3*`。
+
+### 未验证 / 剩余问题
+
+- 未用真实 provider（非 stub）驱动「上游合入 `dev` → 下游解阻塞」；未验证真实模型长跑下的依赖行为（正确性不依赖 provider）。
+- **不包含并行调度**：不选任务、不预留资源、不启动多个 Agent、不做 Conflict Analyzer；`docs/architecture/scheduler.md` 其余部分仍属后续 Phase 2。
+- `task.submit` 记录 `DRAFT→READY` 与 `READY→BLOCKED` 两条迁移（storage `submitTask` 属共享热点，本轮只追加），对外状态与 FSM 一致但版本会 +2。
+- 上游被修订时不自动改钉 revision（ADR 中列为待用户确认项）；不实现边 `NEEDS_REVIEW`。
+- `task.resume` 的依赖断言在命令层，断言与启动之间仍有理论窗口；未加锁。
+- 跨项目依赖不支持；依赖图只能在 `DRAFT / BLOCKED / READY / FAILED` 编辑，`EXECUTED`／`SUCCEEDED`／运行中 Task 拒绝改图（不实现「依赖变化使已捕获证据失效」路径）。
+- Task 运行期间 `dev` 被重写使边转为未满足时，该 Task 已捕获的成果仍可按 ADR-0018 合入 `dev`（`task.integrate` 前不重验依赖，属 Phase 4）；守卫只阻断启动，不追溯进行中的执行。
+- **lane 版本号**：本轮直接把常量设为 15 并只加 `if (version < 15)`；B1(v13)/B2(v14) 合入时集成方必须保留全部升序分支并取最大常量，且本分支单独创建的本地库不会被 v13/v14 步骤补盖。
+- 测试只用 CLI/命令面与 HTTP 无关的 socket 命令面驱动，未使用桌面/浏览器/键鼠自动化；未做并发压力与多进程竞争测试（写锁内环校验与 CAS 已有单元覆盖）。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。剩余：`dev → main` 提升与重启。

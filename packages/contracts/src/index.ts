@@ -576,6 +576,44 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     taskId: z.string().uuid().optional(),
     limit: z.number().int().min(1).max(500).default(100),
   }),
+  /**
+   * Declares that one Task depends on another. The edge pins the upstream revision that must reach
+   * `dev` before the dependent may start (ADR-0009/ADR-0024); an edit that would make the project's
+   * dependency graph cyclic is refused and nothing is written. This is not an approval step: in
+   * FULL mode it adds no confirmation, and a cycle is a correctness rejection, not a permission one.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.depends.add'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    prerequisiteTaskId: z.string().uuid(),
+    /** Pins this upstream revision; absent means the upstream's current revision. */
+    requiredRevisionId: z.string().uuid().optional(),
+    expectedVersion: z.number().int().nonnegative(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.depends.remove'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    prerequisiteTaskId: z.string().uuid(),
+    expectedVersion: z.number().int().nonnegative(),
+  }),
+  /**
+   * Read-only projection of the dependency graph. With `taskId` it reports that Task's edges, the
+   * transitive prerequisite/impact closures, and the exact reason each edge is (un)satisfied;
+   * without it, every edge of the project. `satisfied` is decided by the recorded integration fact
+   * plus the current `dev` ref, so a rewritten `dev` shows up as blocked again.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.depends.list'),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid().optional(),
+  }),
 ]);
 export type RuntimeRequest = z.infer<typeof runtimeRequestSchema>;
 

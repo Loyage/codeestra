@@ -26,6 +26,7 @@
       "dependencies": {
         "@codeestra/agent-adapters": "workspace:*",
         "@codeestra/contracts": "workspace:*",
+        "@codeestra/domain": "workspace:*",
         "@codeestra/git": "workspace:*",
         "@codeestra/storage": "workspace:*",
       },
@@ -75,6 +76,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@codeestra/contracts": "workspace:*",
+        "@codeestra/domain": "workspace:*",
       },
     },
   },

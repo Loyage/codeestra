@@ -536,6 +536,27 @@ function printOperations(operations: readonly OperationView[], json: boolean): v
   for (const operation of operations) printOperation(operation);
 }
 
+/** The `task.depends.list` projection this client reads. */
+interface TaskDependencyView {
+  readonly projectId: string;
+  readonly taskId: string | null;
+  readonly taskState: string | null;
+  readonly taskVersion: number | null;
+  readonly devRef: string;
+  readonly devCommit: string | null;
+  readonly edges: readonly {
+    readonly dependentDisplayNumber: number;
+    readonly prerequisiteDisplayNumber: number;
+    readonly requiredRevisionNumber: number;
+    readonly integratedCommit: string | null;
+    readonly satisfied: boolean;
+    readonly reason: { readonly code: string } | null;
+  }[];
+  readonly blocked: boolean;
+  readonly prerequisites: readonly string[];
+  readonly dependents: readonly string[];
+}
+
 function usage(): never {
   console.error(`Usage:
   bun run codeestra status
@@ -579,6 +600,11 @@ function usage(): never {
   bun run codeestra task operation cancel <project-id> <task-id> <operation-id> [--json]
   bun run codeestra task integrate <project-id> <task-id> <expected-version>
   bun run codeestra task integration list <project-id> <task-id>
+  bun run codeestra task depends add <project-id> <task-id> <expected-version>
+    <prerequisite-task-id> [--revision <revision-id>] [--json]
+  bun run codeestra task depends remove <project-id> <task-id> <expected-version>
+    <prerequisite-task-id> [--json]
+  bun run codeestra task depends list <project-id> [task-id] [--json]
   bun run codeestra events list [--project <project-id>] [--since <sequence>] [--limit <n>]
   bun run codeestra events tail [--project <project-id>] [--since <sequence>]
   bun run codeestra attention list <project-id>
@@ -1024,6 +1050,80 @@ try {
       // An unconfirmed stop is a real failure for scripts: the process may still be running and the
       // Operation was left for a human, so the exit code must not report success.
       if (outcome.stop === 'UNCERTAIN') process.exit(1);
+    } else {
+      usage();
+    }
+  } else if (group === 'task' && action === 'depends') {
+    // `task depends add|remove|list` is a three-level command, so the subcommand lands in
+    // firstArgument. `add`/`remove` are commands (JSON result); `list` is a read that prints a human
+    // view by default and the Runtime projection with `--json`.
+    const subcommand = firstArgument;
+    if (subcommand === 'add' || subcommand === 'remove') {
+      // Flags may appear anywhere, so the arguments are walked in order instead of by position.
+      const positionals: string[] = [];
+      let requiredRevisionId: string | undefined;
+      for (let index = 0; index < remainingArguments.length; index += 1) {
+        const token = remainingArguments[index] as string;
+        if (token === '--json') continue;
+        if (subcommand === 'add' && token === '--revision') {
+          const value = remainingArguments[index + 1];
+          if (value === undefined) usage();
+          requiredRevisionId = value;
+          index += 1;
+          continue;
+        }
+        if (token.startsWith('--')) usage();
+        positionals.push(token);
+      }
+      const [projectId, taskId, versionText, prerequisiteTaskId, ...extra] = positionals;
+      const expectedVersion = Number(versionText);
+      if (projectId === undefined || taskId === undefined || versionText === undefined
+        || prerequisiteTaskId === undefined || extra.length !== 0
+        || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
+      const result = await call({
+        command: subcommand === 'add' ? 'task.depends.add' as const : 'task.depends.remove' as const,
+        commandId: crypto.randomUUID(),
+        projectId,
+        taskId,
+        prerequisiteTaskId,
+        expectedVersion,
+        ...(requiredRevisionId === undefined ? {} : { requiredRevisionId }),
+      });
+      print(result);
+    } else if (subcommand === 'list') {
+      const positionals: string[] = [];
+      let json = false;
+      for (const token of remainingArguments) {
+        if (token === '--json') { json = true; continue; }
+        if (token.startsWith('--')) usage();
+        positionals.push(token);
+      }
+      const [projectId, taskId, ...extra] = positionals;
+      if (projectId === undefined || extra.length !== 0) usage();
+      const view = await call({ command: 'task.depends.list', projectId,
+        ...(taskId === undefined ? {} : { taskId }) }) as TaskDependencyView;
+      if (json) {
+        print(view);
+      } else {
+        console.log(`project ${view.projectId} · ${view.devRef} ${view.devCommit ?? '缺失'}`
+          + `${view.taskId === null ? '' : ` · 任务 ${view.taskId}`}`
+          + ` · ${view.edges.length} 条依赖`);
+        if (view.taskId !== null) {
+          console.log(`状态 ${view.taskState ?? '?'} v${view.taskVersion ?? '?'}`
+            + ` · ${view.blocked ? `依赖未满足（${view.edges.length} 条）` : '依赖已满足'}`);
+        }
+        for (const edge of view.edges) {
+          console.log(`${edge.satisfied ? '✓' : '✗'} #${edge.dependentDisplayNumber}`
+            + ` 依赖 #${edge.prerequisiteDisplayNumber}`
+            + ` (revision #${edge.requiredRevisionNumber})`
+            + `${edge.integratedCommit === null ? '' : ` → dev ${edge.integratedCommit.slice(0, 12)}`}`
+            + `${edge.reason === null ? '' : ` · ${edge.reason.code}`}`);
+        }
+        if (view.taskId !== null
+          && (view.prerequisites.length > 0 || view.dependents.length > 0)) {
+          console.log(`上游闭包 ${view.prerequisites.length} 个 · 下游影响 ${view.dependents.length} 个`);
+        }
+      }
     } else {
       usage();
     }
