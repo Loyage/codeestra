@@ -1149,10 +1149,22 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 
 ## FOUNDATION-043 — STRICT 权限转 Attention、Session incarnation 与单 writer lease（ADR-0023）
 
-状态：**Runtime 侧契约与状态已实现并通过 CLI/命令面测试**；真实 Pi 0.84.4 + 真实模型（deepseek-flash）
-已在 RPC 模式下 headless 复验 STRICT 权限与 fence 两条路径。**未实现 PTY/TUI 实际转交与 successor 进程
-启动**（留给下一格），能力投影里如实写 `UNIMPLEMENTED`/`UNSUPPORTED`。**本轮占用 schema v14；v13 保留给
-B1 格，未使用。** 未 push、未提升 `main`、未重启稳定 Runtime。
+状态：**已提交并合入 `dev`**。lane commit `561e7d5`（`lane/b2-session-handoff`，基线固定
+`dev@e5b15a7`，未 rebase）→ dev merge `c853b11`（dev 工作树内 `--no-ff`，与已合入的
+B1/FOUNDATION-042、B3/FOUNDATION-044 的冲突在 dev 工作树手工解决；**这是手工合并，不是 IntegrationBatch**）。
+**Runtime 侧契约与状态已实现并通过 CLI/命令面测试**；真实 Pi 0.84.4 + 真实模型（deepseek-flash）已在
+RPC 模式下 headless 复验 STRICT 权限与 fence 两条路径。**未实现 PTY/TUI 实际转交与 successor 进程启动**
+（留给下一格），能力投影里如实写 `UNIMPLEMENTED`/`UNSUPPORTED`。**本轮占用 schema v14**（B1 占 v13
+`stablePromotionMigration`，B3 占 v15 `taskDependenciesMigration`）；合并后 `phase1SchemaVersion = 15`，
+三段迁移按升序同时保留。未 push、未提升 `main`、未重启稳定 Runtime。
+
+集成与验证（dev 工作树，即合并提交所记录的树）：`bun install --frozen-lockfile`，随后 `bun run check`
+**退出码 0** —— 根与 UI TypeScript、231 项 Vitest、**377 项 Bun tests（0 fail，44 文件）**、UI Vite 构建；
+分层 `test:unit` 229 + `test:e2e` 148 = 377，与总数一致（分层无遗漏/重复）。冲突解决逐条记录在合并提交里，
+并用「逐行比对两个父提交 → 合并结果」检查确认没有丢任何一侧内容（`phase1SchemaVersion` 取 15、
+`migrate()` 三步升序、contracts 的 promotion/depends 与 session.handoff 两组并存、
+`task.run`/`task.resume` 同时保留依赖门禁与本轮的 writer lease 记录、recovery 两个 reconcile 并存、
+CLI usage 两段并存、`docs/tasks` 按 042/043/044 升序）。
 
 用户本轮决策（记录为 ADR-0023）：STRICT 下需要审批的工具调用**不得**沿用 `ctx.ui.confirm` 直接阻塞，
 改为经 Runtime side channel 转成一条结构化 Attention，用**现有** `attention list` / `attention answer`
@@ -1334,7 +1346,7 @@ B1 格，未使用。** 未 push、未提升 `main`、未重启稳定 Runtime。
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、UI 投影。
 1. 真实验证 ADR-0016：在一次性临时仓库中用真实 Pi 跑「启动 → 暂停 → 恢复 → 终止」，核对 provider 进程确实退出、`--session` 确实续接同一 conversation、超时进入 `RECOVERY_REQUIRED`；脚本 Adapter 不能替代该验收。
 2. ~~长命令后台化与进度事件~~：已由 FOUNDATION-039 / ADR-0019 完成持久 Operation、步骤级进度、`--background` 与 `task.operation.cancel`（CLI + 同一命令面 + UI）。剩余：token 级实时进度事件、verification run 的独立 `CANCELLED` 状态、取消后验证副本的回收。
-3. ADR-0010 Phase 3 技术 spike：真实 Pi session-file 双向 RPC↔TUI 恢复、PTY 生命周期、safe-point 与权限模式 side channel；通过后再落 handoff Operation、Session incarnation 和 CLI attach。
+3. ~~ADR-0010 Phase 3 技术 spike~~：已由 FOUNDATION-040 完成（真实 Pi session-file 双向 RPC↔TUI 恢复、PTY 生命周期、safe-point fence 与权限模式 side channel，见 `docs/spikes/pi-session-handoff.md`）。~~handoff Operation / Session incarnation~~：Runtime 侧契约与状态已由 ADR-0023 / FOUNDATION-043 完成（STRICT 权限转既有 Attention、incarnation 绑定 + 原子拒绝过期决议、单 writer lease 的 `ATTACHMENT_BUSY`、安全点与 predecessor 归属核验、重启按事实 reconcile），并已合入 `dev`；`session handoff status/request/cancel/writer/admit` 的 `--json` 退出码稳定。剩余：**PTY transport 与 successor 进程启动、detach/reattach 编排、跨交接模式保持、并行工具批次安全点、CLI attach 与 UI 终端**（`session handoff admit` 目前只判定不启动，能力投影写 `terminalTransport: UNIMPLEMENTED`）。
 4. revision 投递确认，以及 Runtime 重启后对 stale ACTIVE Session 的启动 reconcile。
 5. ~~验证副本与失败现场的回收~~：已由 ADR-0021/FOUNDATION-041 完成（`reclaim plan/apply/records`、归属校验、append-only 账本、启动 reconcile、默认保留失败现场、不新增确认）；同轮决定 Attention 工具参数继续原样入库。剩余：未注册目录的人工处理与跨项目批量回收。
 6. 识别「Agent 不用工具、在散文里提问并结束轮次」的形态（FOUNDATION-030 剩余的一半）：要么把它变成 Attention，要么至少不得记为未加说明的 `SUCCESS`。
