@@ -12,6 +12,7 @@ import {
   phase1Migration,
   phase1SchemaVersion,
   reclamationMigration,
+  sessionHandoffMigration,
   taskControlMigration,
   taskVerificationMigration,
   workspaceRetryMigration,
@@ -687,6 +688,7 @@ export class Phase1Database {
         if (version < 10) this.sqlite.exec(integrationPipelineMigration);
         if (version < 11) this.sqlite.exec(operationProgressMigration);
         if (version < 12) this.sqlite.exec(reclamationMigration);
+        if (version < 14) this.sqlite.exec(sessionHandoffMigration);
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -5486,6 +5488,770 @@ export class Phase1Database {
         : JSON.parse(row.result_json) as Readonly<Record<string, unknown>>,
     };
   }
+  // -------------------------------------------------------------------------------------------
+  // Session handoff (ADR-0023): the ordered incarnation history of one Agent Session, the single
+  // writer lease, the handoff fence facts, and the routing of one STRICT permission decision back
+  // to the exact incarnation that asked for it.
+  //
+  // Pi offers no session-file exclusivity (FOUNDATION-040 T6-E measured two writers appending to
+  // one file without an error), so "one provider writer per conversation" is enforced here: a
+  // successor incarnation may only be recorded once its predecessor stopped claiming to be current
+  // *and* nobody holds the writer lease, and at most one un-released lease exists per Session.
+  // -------------------------------------------------------------------------------------------
+
+  /** Ordered process-generation history of one Agent Session, oldest first. */
+  listSessionIncarnations(sessionId: string): readonly SessionIncarnationRecord[] {
+    return this.sqlite.query<SessionIncarnationRow, [string]>(`
+      SELECT id,session_id,execution_id,incarnation_number,mode,state,provider_pid,
+        process_identity_json,process_tree_json,provider_session_id,session_storage_ref,
+        predecessor_incarnation_id,command_id,created_at,ended_at,exit_json
+      FROM session_incarnations WHERE session_id=?1 ORDER BY incarnation_number
+    `).all(sessionId).map(mapSessionIncarnationRow);
+  }
+
+  /**
+   * The one incarnation a decision may still reach. `agent_sessions.current_incarnation_id` is the
+   * single place that answers this, so a successor recording itself and a permission decision being
+   * applied cannot both be right: the decision checks this value in its own conditional update.
+   */
+  getCurrentSessionIncarnation(sessionId: string): SessionIncarnationRecord | null {
+    const row = this.sqlite.query<SessionIncarnationRow, [string]>(`
+      SELECT incarnation.id,incarnation.session_id,incarnation.execution_id,
+        incarnation.incarnation_number,incarnation.mode,incarnation.state,incarnation.provider_pid,
+        incarnation.process_identity_json,incarnation.process_tree_json,
+        incarnation.provider_session_id,incarnation.session_storage_ref,
+        incarnation.predecessor_incarnation_id,incarnation.command_id,incarnation.created_at,
+        incarnation.ended_at,incarnation.exit_json
+      FROM session_incarnations incarnation JOIN agent_sessions session
+        ON session.current_incarnation_id=incarnation.id
+      WHERE session.id=?1
+    `).get(sessionId);
+    return row === null ? null : mapSessionIncarnationRow(row);
+  }
+
+  getSessionIncarnation(incarnationId: string): SessionIncarnationRecord | null {
+    const row = this.sqlite.query<SessionIncarnationRow, [string]>(`
+      SELECT id,session_id,execution_id,incarnation_number,mode,state,provider_pid,
+        process_identity_json,process_tree_json,provider_session_id,session_storage_ref,
+        predecessor_incarnation_id,command_id,created_at,ended_at,exit_json
+      FROM session_incarnations WHERE id=?1
+    `).get(incarnationId);
+    return row === null ? null : mapSessionIncarnationRow(row);
+  }
+
+  /** Incarnations that still claim the conversation: they must be reconciled before a successor. */
+  listLiveSessionIncarnations(): readonly SessionIncarnationRecord[] {
+    return this.sqlite.query<SessionIncarnationRow, []>(`
+      SELECT id,session_id,execution_id,incarnation_number,mode,state,provider_pid,
+        process_identity_json,process_tree_json,provider_session_id,session_storage_ref,
+        predecessor_incarnation_id,command_id,created_at,ended_at,exit_json
+      FROM session_incarnations WHERE state IN ('ACTIVE','FENCED') ORDER BY created_at,id
+    `).all().map(mapSessionIncarnationRow);
+  }
+
+  /** The un-released writer lease of one Session, or null when the Session has no writer. */
+  getSessionWriterLease(sessionId: string): SessionWriterLeaseRecord | null {
+    const row = this.sqlite.query<SessionWriterLeaseRow, [string]>(`
+      SELECT id,session_id,incarnation_id,holder_kind,holder_ref,command_id,acquired_at,
+        released_at,release_reason
+      FROM session_writer_leases WHERE session_id=?1 AND released_at IS NULL
+    `).get(sessionId);
+    return row === null ? null : mapSessionWriterLeaseRow(row);
+  }
+
+  listActiveSessionWriterLeases(): readonly SessionWriterLeaseRecord[] {
+    return this.sqlite.query<SessionWriterLeaseRow, []>(`
+      SELECT id,session_id,incarnation_id,holder_kind,holder_ref,command_id,acquired_at,
+        released_at,release_reason
+      FROM session_writer_leases WHERE released_at IS NULL ORDER BY acquired_at,id
+    `).all().map(mapSessionWriterLeaseRow);
+  }
+
+  listSessionWriterLeases(sessionId: string): readonly SessionWriterLeaseRecord[] {
+    return this.sqlite.query<SessionWriterLeaseRow, [string]>(`
+      SELECT id,session_id,incarnation_id,holder_kind,holder_ref,command_id,acquired_at,
+        released_at,release_reason
+      FROM session_writer_leases WHERE session_id=?1 ORDER BY acquired_at,id
+    `).all(sessionId).map(mapSessionWriterLeaseRow);
+  }
+
+  /**
+   * Records one provider incarnation and takes the single writer lease for it.
+   *
+   * Replaying the same `commandId` returns the recorded incarnation instead of creating a second
+   * one. A new incarnation is refused while any incarnation of the Session is still ACTIVE/FENCED
+   * or while a writer lease is un-released: that refusal is what keeps two provider processes from
+   * writing one conversation, and it is a stable error code rather than a silent queue.
+   */
+  recordSessionIncarnation(input: {
+    readonly id: string;
+    readonly sessionId: string;
+    readonly mode: SessionIncarnationMode;
+    readonly commandId: string;
+    readonly providerPid: number | null;
+    readonly processIdentity: unknown;
+    readonly processTree: unknown;
+    readonly providerSessionId: string | null;
+    readonly sessionStorageRef: string | null;
+    readonly createdAt: number;
+  }): SessionIncarnationWrite {
+    return this.sqlite.transaction(() => {
+      const replayed = this.sessionIncarnationByCommand(input.sessionId, input.commandId);
+      if (replayed !== null) {
+        return { incarnation: replayed, lease: this.getSessionWriterLease(input.sessionId),
+          takenOver: false, replayed: true };
+      }
+      const session = this.sqlite.query<{ execution_id: string }, [string]>(
+        'SELECT execution_id FROM agent_sessions WHERE id=?1',
+      ).get(input.sessionId);
+      if (session === null) throw new StorageError('NOT_FOUND', 'Agent Session was not found');
+      const live = this.sqlite.query<{ incarnation_number: number; state: string }, [string]>(`
+        SELECT incarnation_number,state FROM session_incarnations
+        WHERE session_id=?1 AND state IN ('ACTIVE','FENCED') ORDER BY incarnation_number DESC LIMIT 1
+      `).get(input.sessionId);
+      if (live !== null) {
+        throw new StorageError('INVALID_STATE', 'PREDECESSOR_STILL_ACTIVE:'
+          + ` incarnation ${live.incarnation_number} is still ${live.state}`);
+      }
+      const held = this.getSessionWriterLease(input.sessionId);
+      if (held !== null) {
+        throw new StorageError('INVALID_STATE',
+          `WRITER_LEASE_HELD: ${held.holderKind} holder ${held.holderRef} has not released the lease`);
+      }
+      const previous = this.sqlite.query<{
+        id: string; incarnation_number: number; provider_session_id: string | null;
+        session_storage_ref: string | null;
+      }, [string]>(`
+        SELECT id,incarnation_number,provider_session_id,session_storage_ref FROM session_incarnations
+        WHERE session_id=?1 ORDER BY incarnation_number DESC LIMIT 1
+      `).get(input.sessionId);
+      if (previous !== null && previous.session_storage_ref !== null
+        && input.sessionStorageRef !== null
+        && previous.session_storage_ref !== input.sessionStorageRef) {
+        // A successor continues the *same* conversation; pointing it at another file would be a
+        // second conversation wearing the same Session identity.
+        throw new StorageError('INVALID_STATE',
+          'SESSION_FILE_CHANGED: a successor incarnation must reopen the same provider session file');
+      }
+      const incarnationNumber = (previous?.incarnation_number ?? 0) + 1;
+      this.sqlite.query(`
+        INSERT INTO session_incarnations(id,session_id,execution_id,incarnation_number,mode,state,
+          provider_pid,process_identity_json,process_tree_json,provider_session_id,
+          session_storage_ref,predecessor_incarnation_id,command_id,created_at)
+        VALUES (?1,?2,?3,?4,?5,'ACTIVE',?6,?7,?8,?9,?10,?11,?12,?13)
+      `).run(input.id, input.sessionId, session.execution_id, incarnationNumber, input.mode,
+        input.providerPid, input.processIdentity === null ? null : JSON.stringify(input.processIdentity),
+        input.processTree === null ? null : JSON.stringify(input.processTree),
+        input.providerSessionId, input.sessionStorageRef, previous?.id ?? null, input.commandId,
+        input.createdAt);
+      this.sqlite.query('UPDATE agent_sessions SET current_incarnation_id=?1 WHERE id=?2')
+        .run(input.id, input.sessionId);
+      const lease = this.#insertSessionWriterLease({
+        sessionId: input.sessionId,
+        incarnationId: input.id,
+        holderKind: input.mode === 'AUTOMATED_RPC' ? 'AUTOMATED_RPC' : 'TERMINAL_ATTACHMENT',
+        holderRef: `${input.mode}:${input.id}`,
+        commandId: input.commandId,
+        acquiredAt: input.createdAt,
+      });
+      return {
+        incarnation: this.getSessionIncarnation(input.id) as SessionIncarnationRecord,
+        lease,
+        takenOver: false,
+        replayed: false,
+      };
+    })();
+  }
+
+  /**
+   * Takes the writer lease for one existing incarnation. A second holder never waits: it is told
+   * the Session already has a writer (`ATTACHMENT_BUSY`), which is what a script can assert.
+   */
+  acquireSessionWriterLease(input: {
+    readonly sessionId: string;
+    readonly incarnationId: string;
+    readonly holderKind: SessionWriterLeaseRecord['holderKind'];
+    readonly holderRef: string;
+    readonly commandId: string;
+    readonly acquiredAt: number;
+  }): SessionWriterLeaseAcquisition {
+    return this.sqlite.transaction(() => {
+      const active = this.getSessionWriterLease(input.sessionId);
+      if (active !== null) {
+        if (active.holderRef === input.holderRef) {
+          return { acquired: true as const, code: null, lease: active, replayed: true, holder: null };
+        }
+        return { acquired: false as const, code: 'ATTACHMENT_BUSY' as const, lease: null,
+          replayed: false, holder: { holderKind: active.holderKind, holderRef: active.holderRef,
+            acquiredAt: active.acquiredAt } };
+      }
+      const current = this.getCurrentSessionIncarnation(input.sessionId);
+      if (current === null || current.id !== input.incarnationId) {
+        return { acquired: false as const, code: 'INCARNATION_NOT_CURRENT' as const, lease: null,
+          replayed: false, holder: null };
+      }
+      const expected = current.mode === 'AUTOMATED_RPC' ? 'AUTOMATED_RPC' : 'TERMINAL_ATTACHMENT';
+      if (input.holderKind !== expected) {
+        return { acquired: false as const, code: 'HOLDER_MISMATCH' as const, lease: null,
+          replayed: false, holder: null };
+      }
+      const lease = this.#insertSessionWriterLease(input);
+      return { acquired: true as const, code: null, lease, replayed: false, holder: null };
+    })();
+  }
+
+  /** Releases the writer lease when the given holder still owns it; never releases another's. */
+  releaseSessionWriterLease(input: {
+    readonly sessionId: string;
+    readonly holderRef: string;
+    readonly reason: string;
+    readonly releasedAt: number;
+  }): { readonly released: boolean; readonly code: 'RELEASED' | 'NO_LEASE' | 'HOLDER_MISMATCH' } {
+    const result = this.sqlite.query(`
+      UPDATE session_writer_leases SET released_at=?1,release_reason=?2
+      WHERE session_id=?3 AND holder_ref=?4 AND released_at IS NULL
+    `).run(input.releasedAt, input.reason, input.sessionId, input.holderRef);
+    if (result.changes === 1) return { released: true, code: 'RELEASED' };
+    const active = this.getSessionWriterLease(input.sessionId);
+    return { released: false, code: active === null ? 'NO_LEASE' : 'HOLDER_MISMATCH' };
+  }
+
+  releaseSessionWriterLeaseForSession(input: {
+    readonly sessionId: string;
+    readonly reason: string;
+    readonly releasedAt: number;
+  }): boolean {
+    const result = this.sqlite.query(`
+      UPDATE session_writer_leases SET released_at=?1,release_reason=?2
+      WHERE session_id=?3 AND released_at IS NULL
+    `).run(input.releasedAt, input.reason, input.sessionId);
+    return result.changes === 1;
+  }
+
+  /**
+   * Records the persisted handoff intent and the fence. The fence is a fact only once the provider
+   * acknowledges it, so the row starts as REQUESTED with `fence_active=0`.
+   */
+  recordSessionHandoffRequest(input: {
+    readonly id: string;
+    readonly sessionId: string;
+    readonly executionId: string;
+    readonly incarnationId: string;
+    readonly kind: SessionHandoffKind;
+    readonly commandId: string;
+    readonly createdAt: number;
+  }): { readonly request: SessionHandoffRequestRecord; readonly replayed: boolean } {
+    return this.sqlite.transaction(() => {
+      const replayed = this.sqlite.query<SessionHandoffRequestRow, [string, string]>(`
+        SELECT id,session_id,execution_id,incarnation_id,kind,state,command_id,fence_active,
+          fence_confirmed_at,settled_after_fence_at,safe_point_at,admitted_at,detail,created_at,updated_at
+        FROM session_handoff_requests WHERE session_id=?1 AND command_id=?2
+      `).get(input.sessionId, input.commandId);
+      if (replayed !== null) {
+        return { request: mapSessionHandoffRequestRow(replayed), replayed: true };
+      }
+      const open = this.getOpenSessionHandoffRequest(input.sessionId);
+      if (open !== null) {
+        throw new StorageError('INVALID_STATE',
+          `HANDOFF_ALREADY_REQUESTED: ${open.kind} request ${open.id} is ${open.state}`);
+      }
+      this.sqlite.query(`
+        INSERT INTO session_handoff_requests(id,session_id,execution_id,incarnation_id,kind,state,
+          command_id,fence_active,detail,created_at,updated_at)
+        VALUES (?1,?2,?3,?4,?5,'REQUESTED',?6,0,NULL,?7,?7)
+      `).run(input.id, input.sessionId, input.executionId, input.incarnationId, input.kind,
+        input.commandId, input.createdAt);
+      return {
+        request: this.getSessionHandoffRequest(input.id) as SessionHandoffRequestRecord,
+        replayed: false,
+      };
+    })();
+  }
+
+  getSessionHandoffRequest(requestId: string): SessionHandoffRequestRecord | null {
+    const row = this.sqlite.query<SessionHandoffRequestRow, [string]>(`
+      SELECT id,session_id,execution_id,incarnation_id,kind,state,command_id,fence_active,
+        fence_confirmed_at,settled_after_fence_at,safe_point_at,admitted_at,detail,created_at,updated_at
+      FROM session_handoff_requests WHERE id=?1
+    `).get(requestId);
+    return row === null ? null : mapSessionHandoffRequestRow(row);
+  }
+
+  /** The handoff request that is still in flight for one Session, if any. */
+  getOpenSessionHandoffRequest(sessionId: string): SessionHandoffRequestRecord | null {
+    const row = this.sqlite.query<SessionHandoffRequestRow, [string]>(`
+      SELECT id,session_id,execution_id,incarnation_id,kind,state,command_id,fence_active,
+        fence_confirmed_at,settled_after_fence_at,safe_point_at,admitted_at,detail,created_at,updated_at
+      FROM session_handoff_requests WHERE session_id=?1
+        AND state IN ('REQUESTED','FENCED','AT_SAFE_POINT') ORDER BY created_at DESC LIMIT 1
+    `).get(sessionId);
+    return row === null ? null : mapSessionHandoffRequestRow(row);
+  }
+
+  listSessionHandoffRequests(sessionId: string): readonly SessionHandoffRequestRecord[] {
+    return this.sqlite.query<SessionHandoffRequestRow, [string]>(`
+      SELECT id,session_id,execution_id,incarnation_id,kind,state,command_id,fence_active,
+        fence_confirmed_at,settled_after_fence_at,safe_point_at,admitted_at,detail,created_at,updated_at
+      FROM session_handoff_requests WHERE session_id=?1 ORDER BY created_at,id
+    `).all(sessionId).map(mapSessionHandoffRequestRow);
+  }
+
+  listOpenSessionHandoffRequests(): readonly SessionHandoffRequestRecord[] {
+    return this.sqlite.query<SessionHandoffRequestRow, []>(`
+      SELECT id,session_id,execution_id,incarnation_id,kind,state,command_id,fence_active,
+        fence_confirmed_at,settled_after_fence_at,safe_point_at,admitted_at,detail,created_at,updated_at
+      FROM session_handoff_requests WHERE state IN ('REQUESTED','FENCED','AT_SAFE_POINT')
+      ORDER BY created_at,id
+    `).all().map(mapSessionHandoffRequestRow);
+  }
+
+  /** Records the provider's own acknowledgement that the handoff fence is installed. */
+  confirmSessionHandoffFence(input: {
+    readonly requestId: string;
+    readonly at: number;
+  }): SessionHandoffRequestRecord {
+    return this.sqlite.transaction(() => {
+      const result = this.sqlite.query(`
+        UPDATE session_handoff_requests SET state='FENCED',fence_active=1,fence_confirmed_at=?1,
+          updated_at=?1 WHERE id=?2 AND state='REQUESTED'
+      `).run(input.at, input.requestId);
+      if (result.changes !== 1) {
+        throw new StorageError('INVALID_STATE', 'Handoff fence acknowledgement did not match a REQUESTED handoff');
+      }
+      const request = this.getSessionHandoffRequest(input.requestId) as SessionHandoffRequestRecord;
+      this.sqlite.query(`
+        UPDATE session_incarnations SET state='FENCED'
+        WHERE id=?1 AND state='ACTIVE'
+      `).run(request.incarnationId);
+      return request;
+    })();
+  }
+
+  /** Records the settled fact that arrived after the fence; the safe point needs it. */
+  recordSessionHandoffSettled(input: {
+    readonly requestId: string;
+    readonly at: number;
+  }): SessionHandoffRequestRecord {
+    const result = this.sqlite.query(`
+      UPDATE session_handoff_requests SET settled_after_fence_at=?1,updated_at=?1
+      WHERE id=?2 AND state IN ('FENCED','AT_SAFE_POINT') AND fence_active=1
+    `).run(input.at, input.requestId);
+    if (result.changes !== 1) {
+      throw new StorageError('INVALID_STATE', 'Settled fact did not match a fenced handoff request');
+    }
+    return this.getSessionHandoffRequest(input.requestId) as SessionHandoffRequestRecord;
+  }
+
+  recordSessionHandoffSafePoint(input: {
+    readonly requestId: string;
+    readonly at: number;
+    readonly detail: string;
+  }): SessionHandoffRequestRecord {
+    const result = this.sqlite.query(`
+      UPDATE session_handoff_requests SET state='AT_SAFE_POINT',safe_point_at=?1,detail=?2,updated_at=?1
+      WHERE id=?3 AND state='FENCED' AND fence_active=1
+    `).run(input.at, input.detail, input.requestId);
+    if (result.changes !== 1) {
+      throw new StorageError('INVALID_STATE', 'Safe point did not match a fenced handoff request');
+    }
+    return this.getSessionHandoffRequest(input.requestId) as SessionHandoffRequestRecord;
+  }
+
+  markSessionHandoffAdmitted(input: {
+    readonly requestId: string;
+    readonly at: number;
+    readonly detail: string;
+  }): SessionHandoffRequestRecord {
+    const result = this.sqlite.query(`
+      UPDATE session_handoff_requests SET state='ADMITTED',admitted_at=?1,detail=?2,updated_at=?1
+      WHERE id=?3 AND state='AT_SAFE_POINT'
+    `).run(input.at, input.detail, input.requestId);
+    if (result.changes !== 1) {
+      throw new StorageError('INVALID_STATE', 'Admission did not match a handoff request at its safe point');
+    }
+    return this.getSessionHandoffRequest(input.requestId) as SessionHandoffRequestRecord;
+  }
+
+  /** An abandoned handoff releases its fence; the incarnation may run tools again. */
+  cancelSessionHandoffRequest(input: {
+    readonly requestId: string;
+    readonly at: number;
+    readonly detail: string;
+  }): SessionHandoffRequestRecord {
+    return this.sqlite.transaction(() => {
+      const result = this.sqlite.query(`
+        UPDATE session_handoff_requests SET state='CANCELLED',fence_active=0,detail=?1,updated_at=?2
+        WHERE id=?3 AND state IN ('REQUESTED','FENCED','AT_SAFE_POINT')
+      `).run(input.detail, input.at, input.requestId);
+      if (result.changes !== 1) {
+        throw new StorageError('INVALID_STATE', 'Handoff request was not open');
+      }
+      const request = this.getSessionHandoffRequest(input.requestId) as SessionHandoffRequestRecord;
+      this.sqlite.query(`
+        UPDATE session_incarnations SET state='ACTIVE' WHERE id=?1 AND state='FENCED'
+      `).run(request.incarnationId);
+      return request;
+    })();
+  }
+
+  markSessionHandoffRecoveryRequired(input: {
+    readonly requestId: string;
+    readonly at: number;
+    readonly detail: string;
+  }): SessionHandoffRequestRecord {
+    this.sqlite.query(`
+      UPDATE session_handoff_requests SET state='RECOVERY_REQUIRED',fence_active=0,detail=?1,updated_at=?2
+      WHERE id=?3 AND state IN ('REQUESTED','FENCED','AT_SAFE_POINT')
+    `).run(input.detail, input.at, input.requestId);
+    return this.getSessionHandoffRequest(input.requestId) as SessionHandoffRequestRecord;
+  }
+
+  /**
+   * A reconciliation fact: this incarnation may no longer write the conversation. It stops being
+   * the current incarnation in the same statement, so no later decision can reach it.
+   */
+  markSessionIncarnationRecoveryRequired(input: {
+    readonly incarnationId: string;
+    readonly at: number;
+    readonly detail: Readonly<Record<string, unknown>>;
+  }): void {
+    this.sqlite.transaction(() => {
+      const incarnation = this.getSessionIncarnation(input.incarnationId);
+      if (incarnation === null) throw new StorageError('NOT_FOUND', 'Session incarnation was not found');
+      this.sqlite.query(`
+        UPDATE session_incarnations SET state='RECOVERY_REQUIRED',exit_json=?1
+        WHERE id=?2 AND state IN ('ACTIVE','FENCED')
+      `).run(JSON.stringify(input.detail), input.incarnationId);
+      this.sqlite.query(`
+        UPDATE agent_sessions SET current_incarnation_id=NULL
+        WHERE id=?1 AND current_incarnation_id=?2
+      `).run(incarnation.sessionId, input.incarnationId);
+    })();
+  }
+
+  /**
+   * Records one STRICT permission request as a real Attention together with the incarnation that
+   * asked. The two are written in one transaction: an Attention without its incarnation binding
+   * could never be routed, and a binding without its Attention could never be answered.
+   *
+   * `prompt` is the structured request (`codeestra.permission`: tool name, exact input, input
+   * fingerprint), so what the user approves is reproducible from the row alone.
+   */
+  recordSessionPermissionRequest(input: {
+    readonly id: string;
+    readonly sessionId: string;
+    readonly executionId: string;
+    readonly incarnationId: string;
+    readonly providerRequestId: string;
+    readonly providerEventId: string;
+    readonly cursor: string;
+    readonly toolCallId: string;
+    readonly toolName: string;
+    readonly inputJson: string;
+    readonly inputFingerprint: string;
+    readonly piMode: string;
+    readonly prompt: unknown;
+    readonly attentionId: string;
+    readonly attentionEventId: string;
+    readonly executionEventId: string;
+    readonly taskEventId: string;
+    readonly requestedAt: number;
+  }): { readonly permission: SessionPermissionRequestRecord; readonly duplicate: boolean } {
+    return this.sqlite.transaction(() => {
+      const existing = this.getSessionPermissionRequestByProviderRequestId(
+        input.sessionId, input.providerRequestId);
+      if (existing !== null) return { permission: existing, duplicate: true };
+      this.recordAgentAttention({
+        sessionId: input.sessionId,
+        executionId: input.executionId,
+        providerEventId: input.providerEventId,
+        cursor: input.cursor,
+        providerRequestId: input.providerRequestId,
+        kind: 'PERMISSION',
+        responseType: 'CONFIRM',
+        prompt: input.prompt,
+        attentionId: input.attentionId,
+        attentionEventId: input.attentionEventId,
+        executionEventId: input.executionEventId,
+        taskEventId: input.taskEventId,
+        observedAt: input.requestedAt,
+      });
+      this.sqlite.query(`
+        INSERT INTO session_permission_requests(id,attention_id,session_id,incarnation_id,
+          provider_request_id,tool_call_id,tool_name,input_json,input_fingerprint,pi_mode,decision,
+          requested_at)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'OPEN',?11)
+      `).run(input.id, input.attentionId, input.sessionId, input.incarnationId,
+        input.providerRequestId, input.toolCallId, input.toolName, input.inputJson,
+        input.inputFingerprint, input.piMode, input.requestedAt);
+      return {
+        permission: this.getSessionPermissionRequest(input.attentionId) as SessionPermissionRequestRecord,
+        duplicate: false,
+      };
+    })();
+  }
+
+  getSessionPermissionRequest(attentionId: string): SessionPermissionRequestRecord | null {
+    const row = this.sqlite.query<SessionPermissionRequestRow, [string]>(`
+      SELECT id,attention_id,session_id,incarnation_id,provider_request_id,tool_call_id,tool_name,
+        input_json,input_fingerprint,pi_mode,decision,requested_at,decided_at,decided_by
+      FROM session_permission_requests WHERE attention_id=?1
+    `).get(attentionId);
+    return row === null ? null : mapSessionPermissionRequestRow(row);
+  }
+
+  getSessionPermissionRequestByProviderRequestId(
+    sessionId: string,
+    providerRequestId: string,
+  ): SessionPermissionRequestRecord | null {
+    const row = this.sqlite.query<SessionPermissionRequestRow, [string, string]>(`
+      SELECT id,attention_id,session_id,incarnation_id,provider_request_id,tool_call_id,tool_name,
+        input_json,input_fingerprint,pi_mode,decision,requested_at,decided_at,decided_by
+      FROM session_permission_requests WHERE session_id=?1 AND provider_request_id=?2
+    `).get(sessionId, providerRequestId);
+    return row === null ? null : mapSessionPermissionRequestRow(row);
+  }
+
+  /** Every permission request of one Session, oldest first; the audit view of STRICT decisions. */
+  listSessionPermissionRequests(sessionId: string): readonly SessionPermissionRequestRecord[] {
+    return this.sqlite.query<SessionPermissionRequestRow, [string]>(`
+      SELECT id,attention_id,session_id,incarnation_id,provider_request_id,tool_call_id,tool_name,
+        input_json,input_fingerprint,pi_mode,decision,requested_at,decided_at,decided_by
+      FROM session_permission_requests WHERE session_id=?1 ORDER BY requested_at,id
+    `).all(sessionId).map(mapSessionPermissionRequestRow);
+  }
+
+  getOpenSessionPermissionRequest(sessionId: string): SessionPermissionRequestRecord | null {
+    const row = this.sqlite.query<SessionPermissionRequestRow, [string]>(`
+      SELECT id,attention_id,session_id,incarnation_id,provider_request_id,tool_call_id,tool_name,
+        input_json,input_fingerprint,pi_mode,decision,requested_at,decided_at,decided_by
+      FROM session_permission_requests WHERE session_id=?1 AND decision IN ('OPEN','DECIDING')
+      ORDER BY requested_at,id LIMIT 1
+    `).get(sessionId);
+    return row === null ? null : mapSessionPermissionRequestRow(row);
+  }
+
+  listOpenSessionPermissionRequests(): readonly SessionPermissionRequestRecord[] {
+    return this.sqlite.query<SessionPermissionRequestRow, []>(`
+      SELECT id,attention_id,session_id,incarnation_id,provider_request_id,tool_call_id,tool_name,
+        input_json,input_fingerprint,pi_mode,decision,requested_at,decided_at,decided_by
+      FROM session_permission_requests WHERE decision IN ('OPEN','DECIDING')
+      ORDER BY requested_at,id
+    `).all().map(mapSessionPermissionRequestRow);
+  }
+
+  /**
+   * Atomically claims one open permission decision for the incarnation that is still current.
+   *
+   * The incarnation is checked inside the conditional update, not by the caller beforehand, so a
+   * decision recorded for a superseded incarnation is refused even if it arrives at the same moment
+   * as the successor: only one of the two can change the row.
+   */
+  claimSessionPermissionDecision(input: {
+    readonly attentionId: string;
+    readonly claimedAt: number;
+  }): SessionPermissionClaimResult {
+    return this.sqlite.transaction(() => {
+      const permission = this.getSessionPermissionRequest(input.attentionId);
+      if (permission === null) return { claimed: false as const, code: 'NOT_FOUND' as const };
+      if (permission.decision === 'DECIDING') {
+        return { claimed: false as const, code: 'ALREADY_DECIDING' as const };
+      }
+      if (permission.decision !== 'OPEN') {
+        return { claimed: false as const, code: 'ALREADY_DECIDED' as const };
+      }
+      const result = this.sqlite.query(`
+        UPDATE session_permission_requests SET decision='DECIDING',decided_at=?1
+        WHERE attention_id=?2 AND decision='OPEN' AND incarnation_id=(
+          SELECT session.current_incarnation_id FROM agent_sessions session WHERE session.id=session_id)
+      `).run(input.claimedAt, input.attentionId);
+      if (result.changes !== 1) {
+        return { claimed: false as const, code: 'STALE_INCARNATION' as const, permission };
+      }
+      return {
+        claimed: true as const,
+        code: 'CLAIMED' as const,
+        permission: this.getSessionPermissionRequest(input.attentionId) as SessionPermissionRequestRecord,
+      };
+    })();
+  }
+
+  /** Releases a claim whose decision could not be written, so the user can answer again. */
+  releaseSessionPermissionClaim(attentionId: string): void {
+    this.sqlite.query(`
+      UPDATE session_permission_requests SET decision='OPEN',decided_at=NULL,decided_by=NULL
+      WHERE attention_id=?1 AND decision='DECIDING'
+    `).run(attentionId);
+  }
+
+  completeSessionPermissionDecision(input: {
+    readonly attentionId: string;
+    readonly decision: 'ALLOW' | 'DENY' | 'CANCEL';
+    readonly decidedAt: number;
+    readonly decidedBy: string;
+  }): SessionPermissionRequestRecord {
+    const result = this.sqlite.query(`
+      UPDATE session_permission_requests SET decision=?1,decided_at=?2,decided_by=?3
+      WHERE attention_id=?4 AND decision='DECIDING'
+    `).run(input.decision, input.decidedAt, input.decidedBy, input.attentionId);
+    if (result.changes !== 1) {
+      throw new StorageError('INVALID_STATE', 'Permission decision was not claimed before it was completed');
+    }
+    return this.getSessionPermissionRequest(input.attentionId) as SessionPermissionRequestRecord;
+  }
+
+  /** Records that an answer arrived too late to be applied; the provider side is never touched. */
+  markSessionPermissionRequestStale(input: {
+    readonly attentionId: string;
+    readonly at: number;
+    readonly detail: string;
+  }): SessionPermissionRequestRecord {
+    return this.sqlite.transaction(() => {
+      this.sqlite.query(`
+        UPDATE session_permission_requests SET decision='STALE',decided_at=?1,decided_by='runtime'
+        WHERE attention_id=?2 AND decision IN ('OPEN','DECIDING')
+      `).run(input.at, input.attentionId);
+      this.sqlite.query(`
+        UPDATE attention_requests SET status='STALE' WHERE id=?1 AND status IN ('OPEN','ANSWER_RECORDED')
+      `).run(input.attentionId);
+      const permission = this.getSessionPermissionRequest(input.attentionId);
+      if (permission === null) throw new StorageError('NOT_FOUND', 'Permission request was not found');
+      return permission;
+    })();
+  }
+
+  /**
+   * Marks a recorded answer that can never be delivered as failed instead of retryable. Used when
+   * the decision belongs to a superseded incarnation: the answer was recorded, but applying it
+   * would drive a provider process the Runtime no longer owns.
+   */
+  failAgentAnswerOperation(input: {
+    readonly operationId: string;
+    readonly attentionId: string;
+    readonly error: Readonly<{ code: string; message: string }>;
+    readonly failedAt: number;
+  }): void {
+    this.sqlite.transaction(() => {
+      this.sqlite.query(`
+        UPDATE operations SET state='FAILED',result_json=?1,updated_at=?2
+        WHERE id=?3 AND kind='ANSWER_AGENT' AND state IN ('PLANNED','IN_PROGRESS')
+      `).run(JSON.stringify({ error: input.error }), input.failedAt, input.operationId);
+      this.sqlite.query("UPDATE attention_requests SET status='STALE' WHERE id=?1 AND status<>'DELIVERED'")
+        .run(input.attentionId);
+    })();
+  }
+
+  /** Every Session that recorded a provider process tree, for ownership reconciliation. */
+  listSessionsWithRecordedIncarnations(): readonly string[] {
+    return this.sqlite.query<{ session_id: string }, []>(
+      'SELECT DISTINCT session_id FROM session_incarnations ORDER BY session_id',
+    ).all().map((row) => row.session_id);
+  }
+
+  /** Resolves the Agent Session a provider reported over the Runtime side channel. */
+  findSessionByProviderIdentity(input: {
+    readonly providerSessionId: string;
+  }): { readonly sessionId: string; readonly executionId: string; readonly projectId: string;
+    readonly taskId: string; readonly sessionState: string; readonly executionState: string } | null {
+    const row = this.sqlite.query<{
+      session_id: string; execution_id: string; project_id: string; task_id: string;
+      session_state: string; execution_state: string;
+    }, [string]>(`
+      SELECT session.id AS session_id,execution.id AS execution_id,task.project_id,task.id AS task_id,
+        session.state AS session_state,execution.state AS execution_state
+      FROM agent_sessions session JOIN executions execution ON execution.id=session.execution_id
+      JOIN tasks task ON task.id=execution.task_id
+      WHERE session.provider_session_id=?1 AND session.state IN ('ACTIVE','WAITING_FOR_USER','STARTING')
+      ORDER BY session.rowid DESC LIMIT 1
+    `).get(input.providerSessionId);
+    if (row === null) return null;
+    return {
+      sessionId: row.session_id,
+      executionId: row.execution_id,
+      projectId: row.project_id,
+      taskId: row.task_id,
+      sessionState: row.session_state,
+      executionState: row.execution_state,
+    };
+  }
+
+  /**
+   * The recorded facts of one Agent Session, including the Adapter's process identity. Used to
+   * describe an incarnation without re-reading the Adapter's own state.
+   */
+  getAgentSessionIdentity(sessionId: string): {
+    readonly sessionId: string;
+    readonly executionId: string;
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly sessionState: AgentSessionLifecycleState;
+    readonly executionState: ExecutionLifecycleState;
+    readonly providerSessionId: string | null;
+    readonly sessionStorageRef: string | null;
+    readonly processIdentity: unknown;
+  } | null {
+    const row = this.sqlite.query<{
+      session_id: string; execution_id: string; project_id: string; task_id: string;
+      session_state: AgentSessionLifecycleState; execution_state: ExecutionLifecycleState;
+      provider_session_id: string | null; session_storage_ref: string | null;
+      process_identity_json: string | null;
+    }, [string]>(`
+      SELECT session.id AS session_id,execution.id AS execution_id,task.project_id,task.id AS task_id,
+        session.state AS session_state,execution.state AS execution_state,
+        session.provider_session_id,session.session_storage_ref,session.process_identity_json
+      FROM agent_sessions session JOIN executions execution ON execution.id=session.execution_id
+      JOIN tasks task ON task.id=execution.task_id
+      WHERE session.id=?1
+    `).get(sessionId);
+    if (row === null) return null;
+    return {
+      sessionId: row.session_id,
+      executionId: row.execution_id,
+      projectId: row.project_id,
+      taskId: row.task_id,
+      sessionState: row.session_state,
+      executionState: row.execution_state,
+      providerSessionId: row.provider_session_id,
+      sessionStorageRef: row.session_storage_ref,
+      processIdentity: row.process_identity_json === null
+        ? null : JSON.parse(row.process_identity_json) as unknown,
+    };
+  }
+
+  private sessionIncarnationByCommand(sessionId: string, commandId: string): SessionIncarnationRecord | null {
+    const row = this.sqlite.query<SessionIncarnationRow, [string, string]>(`
+      SELECT id,session_id,execution_id,incarnation_number,mode,state,provider_pid,
+        process_identity_json,process_tree_json,provider_session_id,session_storage_ref,
+        predecessor_incarnation_id,command_id,created_at,ended_at,exit_json
+      FROM session_incarnations WHERE session_id=?1 AND command_id=?2
+    `).get(sessionId, commandId);
+    return row === null ? null : mapSessionIncarnationRow(row);
+  }
+
+  #insertSessionWriterLease(input: {
+    readonly sessionId: string;
+    readonly incarnationId: string;
+    readonly holderKind: SessionWriterLeaseRecord['holderKind'];
+    readonly holderRef: string;
+    readonly commandId: string;
+    readonly acquiredAt: number;
+  }): SessionWriterLeaseRecord {
+    // A lease row is a lease *term*, not a holder identity: a released lease stays as history, so
+    // re-acquiring after a release appends a new row instead of rewriting the old one.
+    const id = crypto.randomUUID();
+    this.sqlite.query(`
+      INSERT INTO session_writer_leases(id,session_id,incarnation_id,holder_kind,holder_ref,
+        command_id,acquired_at)
+      VALUES (?1,?2,?3,?4,?5,?6,?7)
+    `).run(id, input.sessionId, input.incarnationId, input.holderKind, input.holderRef,
+      input.commandId, input.acquiredAt);
+    const row = this.sqlite.query<SessionWriterLeaseRow, [string]>(`
+      SELECT id,session_id,incarnation_id,holder_kind,holder_ref,command_id,acquired_at,
+        released_at,release_reason FROM session_writer_leases WHERE id=?1
+    `).get(id);
+    if (row === null) throw new StorageError('INVALID_STATE', 'Session writer lease was not persisted');
+    return mapSessionWriterLeaseRow(row);
+  }
 }
 
 /** One Runtime-owned resource a reclamation run may consider, with its recorded ownership facts. */
@@ -5616,4 +6382,234 @@ export interface OperationSummary {
   readonly updatedAt: number;
   readonly cancelRequestedAt: number | null;
   readonly steps: readonly OperationProgressEntry[];
+}
+
+/**
+ * One provider process generation of one Agent Session (ADR-0010 D04 / ADR-0023). The same
+ * provider conversation (session file + session ID) survives the handoff; the OS process does not,
+ * so incarnations are an ordered history rather than a rename of one row.
+ */
+export type SessionIncarnationMode = 'AUTOMATED_RPC' | 'HUMAN_TUI';
+export type SessionIncarnationState = 'ACTIVE' | 'FENCED' | 'RECOVERY_REQUIRED' | 'EXITED';
+
+export interface SessionIncarnationRecord {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly executionId: string;
+  readonly incarnationNumber: number;
+  readonly mode: SessionIncarnationMode;
+  readonly state: SessionIncarnationState;
+  readonly providerPid: number | null;
+  /** Adapter-recorded process identity (pid + start token + argv hash); never just a PID. */
+  readonly processIdentity: unknown;
+  /** Process tree captured while the provider was alive; the owner evidence for a later check. */
+  readonly processTree: unknown;
+  readonly providerSessionId: string | null;
+  /** The provider session file this incarnation writes; successors must reopen the same one. */
+  readonly sessionStorageRef: string | null;
+  readonly predecessorIncarnationId: string | null;
+  readonly commandId: string;
+  readonly createdAt: number;
+  readonly endedAt: number | null;
+  readonly exit: unknown;
+}
+
+/**
+ * The Runtime-enforced single writer lease of one Session. Pi does not lock a session file, so this
+ * row — not the provider — is what makes a second writer fail as `ATTACHMENT_BUSY` instead of
+ * silently appending to a conversation another process is still writing.
+ */
+export interface SessionWriterLeaseRecord {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly incarnationId: string;
+  readonly holderKind: 'AUTOMATED_RPC' | 'TERMINAL_ATTACHMENT';
+  readonly holderRef: string;
+  readonly commandId: string;
+  readonly acquiredAt: number;
+  readonly releasedAt: number | null;
+  readonly releaseReason: string | null;
+}
+
+/** Why a lease acquisition did not succeed. `ATTACHMENT_BUSY` is the stable "someone else writes". */
+export type SessionWriterLeaseCode = 'ATTACHMENT_BUSY' | 'INCARNATION_NOT_CURRENT' | 'HOLDER_MISMATCH';
+
+export interface SessionWriterLeaseAcquisition {
+  readonly acquired: boolean;
+  readonly code: SessionWriterLeaseCode | null;
+  readonly lease: SessionWriterLeaseRecord | null;
+  readonly replayed: boolean;
+  /** The holder that already owns the Session, so the refusal can name it instead of queueing. */
+  readonly holder: { readonly holderKind: string; readonly holderRef: string;
+    readonly acquiredAt: number } | null;
+}
+
+export interface SessionIncarnationWrite {
+  readonly incarnation: SessionIncarnationRecord;
+  readonly lease: SessionWriterLeaseRecord | null;
+  readonly takenOver: boolean;
+  readonly replayed: boolean;
+}
+
+export type SessionHandoffKind = 'TAKEOVER' | 'RETURN';
+export type SessionHandoffState = 'REQUESTED' | 'FENCED' | 'AT_SAFE_POINT' | 'ADMITTED'
+  | 'CANCELLED' | 'RECOVERY_REQUIRED';
+
+/** A persisted takeover/return intent plus the fence and safe-point facts observed for it. */
+export interface SessionHandoffRequestRecord {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly executionId: string;
+  readonly incarnationId: string;
+  readonly kind: SessionHandoffKind;
+  readonly state: SessionHandoffState;
+  readonly commandId: string;
+  readonly fenceActive: boolean;
+  readonly fenceConfirmedAt: number | null;
+  readonly settledAfterFenceAt: number | null;
+  readonly safePointAt: number | null;
+  readonly admittedAt: number | null;
+  readonly detail: string | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+export type SessionPermissionDecision = 'OPEN' | 'DECIDING' | 'ALLOW' | 'DENY' | 'CANCEL' | 'STALE';
+
+/**
+ * One STRICT permission request, bound to the incarnation that asked. The binding is what makes a
+ * late answer for a superseded incarnation a refusal instead of a write to the wrong process.
+ */
+export interface SessionPermissionRequestRecord {
+  readonly id: string;
+  readonly attentionId: string;
+  readonly sessionId: string;
+  readonly incarnationId: string;
+  readonly providerRequestId: string;
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly input: unknown;
+  readonly inputFingerprint: string;
+  readonly piMode: string;
+  readonly decision: SessionPermissionDecision;
+  readonly requestedAt: number;
+  readonly decidedAt: number | null;
+  readonly decidedBy: string | null;
+}
+
+export type SessionPermissionClaimCode = 'CLAIMED' | 'STALE_INCARNATION' | 'ALREADY_DECIDING'
+  | 'ALREADY_DECIDED' | 'NOT_FOUND';
+
+export interface SessionPermissionClaimResult {
+  readonly claimed: boolean;
+  readonly code: SessionPermissionClaimCode;
+  readonly permission?: SessionPermissionRequestRecord;
+}
+
+interface SessionIncarnationRow {
+  id: string; session_id: string; execution_id: string; incarnation_number: number;
+  mode: SessionIncarnationMode; state: SessionIncarnationState; provider_pid: number | null;
+  process_identity_json: string | null; process_tree_json: string | null;
+  provider_session_id: string | null; session_storage_ref: string | null;
+  predecessor_incarnation_id: string | null; command_id: string; created_at: number;
+  ended_at: number | null; exit_json: string | null;
+}
+
+function mapSessionIncarnationRow(row: SessionIncarnationRow): SessionIncarnationRecord {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    executionId: row.execution_id,
+    incarnationNumber: row.incarnation_number,
+    mode: row.mode,
+    state: row.state,
+    providerPid: row.provider_pid,
+    processIdentity: row.process_identity_json === null
+      ? null : JSON.parse(row.process_identity_json) as unknown,
+    processTree: row.process_tree_json === null
+      ? null : JSON.parse(row.process_tree_json) as unknown,
+    providerSessionId: row.provider_session_id,
+    sessionStorageRef: row.session_storage_ref,
+    predecessorIncarnationId: row.predecessor_incarnation_id,
+    commandId: row.command_id,
+    createdAt: row.created_at,
+    endedAt: row.ended_at,
+    exit: row.exit_json === null ? null : JSON.parse(row.exit_json) as unknown,
+  };
+}
+
+interface SessionWriterLeaseRow {
+  id: string; session_id: string; incarnation_id: string;
+  holder_kind: SessionWriterLeaseRecord['holderKind']; holder_ref: string; command_id: string;
+  acquired_at: number; released_at: number | null; release_reason: string | null;
+}
+
+function mapSessionWriterLeaseRow(row: SessionWriterLeaseRow): SessionWriterLeaseRecord {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    incarnationId: row.incarnation_id,
+    holderKind: row.holder_kind,
+    holderRef: row.holder_ref,
+    commandId: row.command_id,
+    acquiredAt: row.acquired_at,
+    releasedAt: row.released_at,
+    releaseReason: row.release_reason,
+  };
+}
+
+interface SessionHandoffRequestRow {
+  id: string; session_id: string; execution_id: string; incarnation_id: string;
+  kind: SessionHandoffKind; state: SessionHandoffState; command_id: string;
+  fence_active: number; fence_confirmed_at: number | null; settled_after_fence_at: number | null;
+  safe_point_at: number | null; admitted_at: number | null; detail: string | null;
+  created_at: number; updated_at: number;
+}
+
+function mapSessionHandoffRequestRow(row: SessionHandoffRequestRow): SessionHandoffRequestRecord {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    executionId: row.execution_id,
+    incarnationId: row.incarnation_id,
+    kind: row.kind,
+    state: row.state,
+    commandId: row.command_id,
+    fenceActive: row.fence_active === 1,
+    fenceConfirmedAt: row.fence_confirmed_at,
+    settledAfterFenceAt: row.settled_after_fence_at,
+    safePointAt: row.safe_point_at,
+    admittedAt: row.admitted_at,
+    detail: row.detail,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+interface SessionPermissionRequestRow {
+  id: string; attention_id: string; session_id: string; incarnation_id: string;
+  provider_request_id: string; tool_call_id: string; tool_name: string; input_json: string;
+  input_fingerprint: string; pi_mode: string; decision: SessionPermissionDecision;
+  requested_at: number; decided_at: number | null; decided_by: string | null;
+}
+
+function mapSessionPermissionRequestRow(
+  row: SessionPermissionRequestRow,
+): SessionPermissionRequestRecord {
+  return {
+    id: row.id,
+    attentionId: row.attention_id,
+    sessionId: row.session_id,
+    incarnationId: row.incarnation_id,
+    providerRequestId: row.provider_request_id,
+    toolCallId: row.tool_call_id,
+    toolName: row.tool_name,
+    input: JSON.parse(row.input_json) as unknown,
+    inputFingerprint: row.input_fingerprint,
+    piMode: row.pi_mode,
+    decision: row.decision,
+    requestedAt: row.requested_at,
+    decidedAt: row.decided_at,
+    decidedBy: row.decided_by,
+  };
 }

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readProcessStartToken } from './pi-identity.js';
 import { encodePiRpcRecord, PiRpcJsonlDecoder, PiRpcProtocolError } from './pi-rpc.js';
 
 export type PiRpcErrorCode =
@@ -285,4 +286,212 @@ export class PiRpcClient {
     this.#sequence += 1;
     return `${this.epoch}:${this.#sequence}`;
   }
+}
+
+/**
+ * One row of the OS process table, read with `ps -eo pid=,ppid=,pgid=,command=`.
+ *
+ * FOUNDATION-040 measured that killing a provider does *not* stop a tool it already started: the
+ * orphan is reparented to PID 1 and keeps writing the workspace. It also measured that `pgrep -f`
+ * does not find such a child reliably, so ownership is decided from this table (pid + ppid + pgid)
+ * plus a per-PID start token, never from a display name or a command-line match.
+ */
+export interface ProcessTableRow {
+  readonly pid: number;
+  readonly ppid: number;
+  readonly pgid: number;
+  readonly command: string;
+}
+
+export async function readProcessTable(): Promise<readonly ProcessTableRow[]> {
+  let exitCode: number;
+  let stdout: string;
+  try {
+    const process = Bun.spawn(['ps', '-eo', 'pid=,ppid=,pgid=,command='], {
+      stdout: 'pipe', stderr: 'ignore',
+    });
+    [exitCode, stdout] = await Promise.all([process.exited, new Response(process.stdout).text()]);
+  } catch (error) {
+    throw new PiRpcProcessError('PROCESS_IDENTITY_UNAVAILABLE',
+      `Could not read the process table: ${error instanceof Error ? error.message : String(error)}`,
+      false, false);
+  }
+  if (exitCode !== 0) {
+    throw new PiRpcProcessError('PROCESS_IDENTITY_UNAVAILABLE',
+      `ps exited with ${exitCode}; process ownership cannot be verified`, false, false);
+  }
+  const rows: ProcessTableRow[] = [];
+  for (const line of stdout.split('\n')) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+    if (match === null) continue;
+    rows.push({
+      pid: Number(match[1]),
+      ppid: Number(match[2]),
+      pgid: Number(match[3]),
+      command: match[4] ?? '',
+    });
+  }
+  return rows;
+}
+
+/** One process captured as part of a provider's process tree, with its identity token. */
+export interface ProviderProcessRef {
+  readonly pid: number;
+  /** `readProcessStartToken` value at capture time; null when it could not be read. */
+  readonly startToken: string | null;
+  readonly command: string;
+}
+
+/**
+ * The provider process tree as it was observed *while the provider was still alive*.
+ *
+ * This has to be captured early: once the provider dies its children are reparented, so their
+ * lineage to the provider is no longer visible in the process table. What survives is the recorded
+ * pid + start token of each descendant, which is what a later check compares against.
+ */
+export interface ProviderProcessTree {
+  readonly pid: number;
+  readonly startToken: string;
+  readonly pgid: number | null;
+  readonly descendants: readonly ProviderProcessRef[];
+  readonly capturedAt: number;
+  readonly note: string;
+}
+
+const maxProcessTreeSize = 500;
+
+/**
+ * Snapshots one provider process and its descendants while it is alive. `descendants` is a
+ * by-value record of the pids it owned, not a claim that they still exist later.
+ */
+export async function captureProviderProcessTree(input: {
+  readonly pid: number;
+  readonly startToken: string;
+  readonly now?: () => number;
+  readonly readTable?: () => Promise<readonly ProcessTableRow[]>;
+  readonly readStartToken?: (pid: number) => Promise<string | null>;
+}): Promise<ProviderProcessTree> {
+  const now = input.now ?? Date.now;
+  const readTable = input.readTable ?? readProcessTable;
+  const readStartToken = input.readStartToken ?? readProcessStartToken;
+  const rows = await readTable();
+  const self = rows.find((row) => row.pid === input.pid);
+  const children = new Map<number, ProcessTableRow[]>();
+  for (const row of rows) {
+    const siblings = children.get(row.ppid);
+    if (siblings === undefined) children.set(row.ppid, [row]);
+    else siblings.push(row);
+  }
+  const descendants: ProviderProcessRef[] = [];
+  const queue = [input.pid];
+  const seen = new Set<number>([input.pid]);
+  while (queue.length > 0 && descendants.length < maxProcessTreeSize) {
+    const parent = queue.shift() as number;
+    for (const child of children.get(parent) ?? []) {
+      if (seen.has(child.pid)) continue;
+      seen.add(child.pid);
+      queue.push(child.pid);
+      descendants.push({
+        pid: child.pid,
+        startToken: await readStartToken(child.pid),
+        command: child.command.slice(0, 200),
+      });
+    }
+  }
+  return {
+    pid: input.pid,
+    startToken: input.startToken,
+    pgid: self?.pgid ?? null,
+    descendants,
+    capturedAt: now(),
+    note: descendants.length >= maxProcessTreeSize
+      ? `the descendant walk stopped at ${maxProcessTreeSize} processes`
+      : 'the descendant walk completed',
+  };
+}
+
+/** What a later check can honestly say about a recorded provider process tree. */
+export type ProviderOwnershipObservation =
+  /** Nothing in the recorded tree is still running. */
+  | { readonly state: 'STOPPED'; readonly detail: string }
+  /** The provider process itself is still running with the recorded identity. */
+  | { readonly state: 'ALIVE'; readonly detail: string; readonly pid: number }
+  /** The provider is gone but a recorded tool child is still alive (the orphan risk). */
+  | { readonly state: 'DESCENDANTS_ALIVE'; readonly detail: string; readonly descendants: readonly number[] }
+  /** The check could not be completed; callers must refuse rather than assume quiescence. */
+  | { readonly state: 'UNVERIFIABLE'; readonly detail: string };
+
+/**
+ * Decides whether a recorded provider tree is quiescent. Every branch that cannot compare a PID to
+ * the identity captured earlier returns `UNVERIFIABLE`, because a PID alone is reusable and the
+ * cost of wrongly assuming quiescence is two writers on one conversation.
+ */
+export async function inspectProviderProcessOwnership(input: {
+  readonly tree: ProviderProcessTree;
+  readonly readTable?: () => Promise<readonly ProcessTableRow[]>;
+  readonly readStartToken?: (pid: number) => Promise<string | null>;
+}): Promise<ProviderOwnershipObservation> {
+  const readTable = input.readTable ?? readProcessTable;
+  const readStartToken = input.readStartToken ?? readProcessStartToken;
+  let rows: readonly ProcessTableRow[];
+  try {
+    rows = await readTable();
+  } catch (error) {
+    return { state: 'UNVERIFIABLE',
+      detail: `the process table could not be read: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  const byPid = new Map(rows.map((row) => [row.pid, row]));
+  const self = byPid.get(input.tree.pid);
+  if (self !== undefined) {
+    let token: string | null;
+    try {
+      token = await readStartToken(input.tree.pid);
+    } catch (error) {
+      return { state: 'UNVERIFIABLE',
+        detail: `the start token of ${input.tree.pid} could not be read: `
+          + `${error instanceof Error ? error.message : String(error)}` };
+    }
+    if (token === null) {
+      return { state: 'UNVERIFIABLE',
+        detail: `no start token could be read for pid ${input.tree.pid}, so it cannot be compared`
+          + ' with the recorded provider identity' };
+    }
+    if (token === input.tree.startToken) {
+      return { state: 'ALIVE', pid: input.tree.pid,
+        detail: `provider process ${input.tree.pid} is still running with the recorded start token` };
+    }
+    // The PID is occupied by a different process now; continue with the descendants instead of
+    // attributing that process (or its children) to this Session.
+  }
+  const alive: number[] = [];
+  for (const descendant of input.tree.descendants) {
+    const row = byPid.get(descendant.pid);
+    if (row === undefined) continue;
+    if (descendant.startToken === null) {
+      return { state: 'UNVERIFIABLE',
+        detail: `pid ${descendant.pid} (recorded as "${descendant.command}") is occupied but its`
+          + ' start token was never captured, so it cannot be attributed or cleared' };
+    }
+    let token: string | null;
+    try {
+      token = await readStartToken(descendant.pid);
+    } catch (error) {
+      return { state: 'UNVERIFIABLE',
+        detail: `the start token of recorded descendant ${descendant.pid} could not be read: `
+          + `${error instanceof Error ? error.message : String(error)}` };
+    }
+    if (token === null) {
+      return { state: 'UNVERIFIABLE',
+        detail: `no start token could be read for recorded descendant ${descendant.pid}` };
+    }
+    if (token === descendant.startToken) alive.push(descendant.pid);
+  }
+  if (alive.length > 0) {
+    return { state: 'DESCENDANTS_ALIVE', descendants: alive,
+      detail: `the provider process is gone but ${alive.length} recorded tool descendant(s) are`
+        + ` still running: ${alive.join(', ')}` };
+  }
+  return { state: 'STOPPED',
+    detail: `no process with the recorded provider identity (pid ${input.tree.pid}) and none of its`
+      + ` ${input.tree.descendants.length} recorded descendant(s) are still running` };
 }

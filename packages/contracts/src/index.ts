@@ -256,6 +256,26 @@ export const reclaimKindSchema = z.enum([
 ]);
 export type ReclaimKind = z.infer<typeof reclaimKindSchema>;
 
+/**
+ * The structured STRICT permission request a controlled gate extension sends over the Runtime side
+ * channel (ADR-0023). It is the `prompt_json` of such an Attention: tool name, the exact input, and
+ * the input fingerprint, so "what was approved" stays reproducible from the row alone.
+ */
+export const permissionPromptSchema = z.strictObject({
+  kind: z.literal('codeestra.permission'),
+  version: z.literal(1),
+  sessionId: z.string().min(1),
+  incarnationId: z.string().min(1),
+  incarnationNumber: z.number().int().positive(),
+  toolCallId: z.string().min(1),
+  toolName: z.string().min(1),
+  input: z.unknown(),
+  inputFingerprint: z.string().min(1),
+  piMode: z.string().min(1),
+  requestedAt: z.number().int().nonnegative(),
+});
+export type PermissionPrompt = z.infer<typeof permissionPromptSchema>;
+
 export const runtimeRequestSchema = z.discriminatedUnion('command', [
   z.strictObject({ ...requestBase, command: z.literal('runtime.ping') }),
   z.strictObject({ ...requestBase, command: z.literal('runtime.stop') }),
@@ -575,6 +595,65 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     projectId: z.string().uuid(),
     taskId: z.string().uuid().optional(),
     limit: z.number().int().min(1).max(500).default(100),
+  }),
+  /**
+   * Session handoff control face (ADR-0010 Phase 3 / ADR-0023). These commands operate on the
+   * Runtime-side contract only: the incarnation history, the single writer lease, the handoff fence
+   * and the admission decision. The terminal transport itself is not implemented yet, and no command
+   * on this face claims that a successor process was started.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('session.handoff.status'),
+    projectId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+  }),
+  /** Persists a takeover/return intent and installs the handoff fence; never aborts a running tool. */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('session.handoff.request'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    kind: z.enum(['TAKEOVER', 'RETURN']),
+  }),
+  /** Abandons an open handoff request and releases its fence so the Agent can use tools again. */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('session.handoff.cancel'),
+    projectId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+  }),
+  /**
+   * Takes the single writer lease for one Session. A second holder is answered `ATTACHMENT_BUSY`
+   * with the current holder named: competition fails instead of queueing silently.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('session.handoff.writer.acquire'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    holderKind: z.enum(['AUTOMATED_RPC', 'TERMINAL_ATTACHMENT']),
+    holderRef: z.string().min(1).max(200),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('session.handoff.writer.release'),
+    projectId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    holderRef: z.string().min(1).max(200),
+  }),
+  /**
+   * Evaluates whether a successor incarnation may be started, from recorded facts: safe point,
+   * quiescent predecessor, no open Attention. It records the decision and starts nothing.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('session.handoff.admit'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    sessionId: z.string().uuid(),
   }),
 ]);
 export type RuntimeRequest = z.infer<typeof runtimeRequestSchema>;

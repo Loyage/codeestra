@@ -22,6 +22,7 @@
 - [ADR-0017](0017-new-task-dock.md)：新建任务改为页面底部常驻停靠条（收起：单行输入 + 创建；展开：多行规格正文、约束列表、任务类型），已选项目时在所有标签页可用。展开面板的每个字段都有对应 CLI 参数（`task create --constraint/--kind`），不存在仅 UI 可用的能力；`SELF` 在 UI 禁用、在 CLI 以 `TASK_KIND_UNSUPPORTED` 拒绝，Runtime 边界仍未收紧（已知缺口）。
 - [ADR-0018](0018-task-result-integration-into-dev.md)：Task 成果合入 `dev` 的 IntegrationBatch 第一小步——在 Runtime 数据目录的 detached worktree 里合并，先跑独立集成验证，PASSED 后才用 CAS 推进 `dev` ref；任何失败保留现场且不推进 `dev`；同时把 Task worktree 基线修正为固定 `dev`（`projects.dev_ref`，仓库无 dev 时 trust 明确拒绝）。不含 `dev → main` 提升与重启。
 - [ADR-0019](0019-long-command-operations.md)：`task.run`/`task.verify` 成为持久 Operation——步骤级进度（`operation_progress`，v11）作为**事实**记录，CLI 新增 `task.verify --background` 与 `task.operation.list/get/cancel`（`--json`、稳定退出码），UI 投影同一命令面；取消先确认进程静止才落终态，未确认则 Operation `RECONCILE_REQUIRED` 并保留占用；重启按已记录的 Session/Execution/ref 事实 reconcile。复用现有枚举表达取消（不改状态机），不新增任何确认。
+- [ADR-0023](0023-strict-permission-attention-and-session-writer-lease.md)：STRICT 权限一律经 Runtime side channel 转成既有 Attention（不再用 `ctx.ui.confirm`，FULL 仍 0 确认），决议按 incarnation + 原子条件更新拒绝过期/重放；Session incarnation 历史 + Runtime 强制的单 writer lease（第二个 writer 稳定 `ATTACHMENT_BUSY`，重复 commandId 幂等）；只在安全点交接且 successor 前必须核验 predecessor 归属（`PREDECESSOR_NOT_STOPPED`/`DESCENDANTS_ALIVE`/`UNVERIFIED` 一律拒绝）；重启按事实 reconcile。本轮只落 Runtime 侧契约与状态，PTY 传输与 successor 启动未实现并在能力投影中如实报告。
 - [ADR-0021](0021-resource-reclamation.md)：验证副本与失败现场的回收（`reclaim plan/apply/records`）。只删 Runtime 注册过的三类资源（Task worktree / 验证副本 / integration worktree），删除前逐一校验 owned root 归属、symlink escape、worktree 注册、branch/HEAD 与 held Execution；默认保留失败现场，`--include-failure-scenes` 才显式回收；append-only 账本入 schema v12；不新增确认。同轮决定：Attention 工具参数继续原样入库，不摘要化。
 
 以上选择均由用户明确答复。用户给定的硬性原则见 `PROJECT_SPEC.md`，无需重复确认。
@@ -39,7 +40,7 @@
 | Phase 1 | Task verification 隔离副本、超时与树改动语义 | 已实现副本内 argv 直接 spawn、按进程组超时停止与 tracked 改动失败；真实命令集验证与长时任务仍未实测 |
 | Phase 1 | 本地 IPC、进程托管与首次项目信任入口 | 产品行为已由 ADR-0004 确认；本用户 0600/0700 socket IPC、单实例、后台进程托管与两步 trust 已实现。一次性命令与只读事件订阅同一 socket（见 `docs/architecture/event-model.md` §3.1）；订阅连接不持久化游标、无自动重连、无按 project 鉴权，客户端重连需自带 cursor |
 | Phase 2 | 上游被修订时依赖锁定 revision 怎样更新 | 未明确前暂停该边调度并请求澄清，不自行跟随或固定旧需求 |
-| Phase 3 | Pi 原生 TUI 接管的 PTY transport、权限模式 side channel 与 session-file 双向交接 | 产品语义已由 ADR-0010/0011 确认；实现前用真实 Pi spike 验证 RPC 安全退出→TUI resume→TUI 安全退出→RPC resume，FULL/STRICT 不因交接改变，全程不得双开 writer |
+| Phase 3 | Pi 原生 TUI 接管的 PTY transport、权限模式 side channel 与 session-file 双向交接 | 产品语义已由 ADR-0010/0011 确认，实测事实见 `docs/spikes/pi-session-handoff.md`（FOUNDATION-040）。Runtime 侧契约与状态已由 ADR-0023/FOUNDATION-043 实现：STRICT 权限经 Runtime side channel 转成既有 Attention（不再用 `ctx.ui.confirm`，FULL 仍 0 确认）、决议按 incarnation + 原子条件更新拒绝过期/重放、Session incarnation 历史与单 writer lease（第二个 writer 稳定 `ATTACHMENT_BUSY`）、只在安全点交接且 successor 前核验 predecessor 归属、重启按事实 reconcile。**仍未实现**：PTY transport、successor 进程启动、detach/reattach 编排与跨交接模式保持（能力投影写 `terminalTransport: UNIMPLEMENTED`） |
 | Phase 4 | IntegrationBatch 的具体 merge commit 形态、失败批次拆分、main 已 checkout 的安全交接 | 长期目标分支已由 ADR-0009 固定：Task 先进入 dev，dev→main 需用户批准并随后重启；其余细节不自动推断 |
 | Phase 7 | migration/备份兼容策略、bootstrap 自身更新授权 | 禁止自动实现不可逆升级；实现前确认 |
 | 任意阶段 | 权限模式 | ADR-0011 已实现默认 FULL 与 CLI STRICT 开关；FULL 常态确认预算固定为 0，不再新增确认 |
