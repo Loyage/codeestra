@@ -2449,7 +2449,7 @@ scheduler reservations reconcile <project-id> [--json]
 
 ## FOUNDATION-051 — 架构文档 doc-sync：`docs/architecture/**` 对齐已合入 `dev` 的实现（Wave F / F2，纯文档，无 ADR）
 
-状态：**已实现、已自查，等待用户确认后 commit**。lane 分支 `lane/f2-doc-sync`，基线固定 `dev@866fa027c7457cba640865f1eb7ecfe52a2863d6`（未 rebase、未合并新 dev、未 pull）。**纯文档：一行 `*.ts`/`*.tsx`/`*.json` 都未改**，未改 `PROJECT_SPEC.md`、未改 `docs/decisions/**`（ADR 是历史记录）、未 push、未提升 `main`、未重启稳定 Runtime、未触碰 `/Users/loyage/Documents/codeestra`。无新 ADR：本格只同步已接受决策（ADR-0016/0018/0019/0021/0022/0023/0024/0026/0027/0028/0029/0031/0032）对应的实现。
+状态：**已实现、已提交并合入 `dev`**（lane commit `4dec130`，dev merge `b293e4c`，集成详情见「Wave F 集成记录」）。lane 分支 `lane/f2-doc-sync`，基线固定 `dev@866fa027c7457cba640865f1eb7ecfe52a2863d6`（未 rebase、未合并新 dev、未 pull）。**纯文档：一行 `*.ts`/`*.tsx`/`*.json` 都未改**，未改 `PROJECT_SPEC.md`、未改 `docs/decisions/**`（ADR 是历史记录）、未 push、未提升 `main`、未重启稳定 Runtime、未触碰 `/Users/loyage/Documents/codeestra`。无新 ADR：本格只同步已接受决策（ADR-0016/0018/0019/0021/0022/0023/0024/0026/0027/0028/0029/0031/0032）对应的实现。
 
 填补的缺口是 FOUNDATION-047/049/053/054 与 Wave D/E 集成记录反复点名的「架构文档 doc-sync 未做」。
 
@@ -2502,7 +2502,7 @@ scheduler reservations reconcile <project-id> [--json]
 
 ## FOUNDATION-055 — 调度引擎：自动 tick、候选顺序、等待语义、`--allow-unknown` 与 §4 越界处置（Wave F / F1）
 
-状态：**已实现、已自查，等待用户确认后才 commit**。lane 分支 `lane/f1-scheduling-engine`，基线固定
+状态：**已实现、已提交并合入 `dev`**（lane commit `e204693`，dev merge `1e458ba`，集成详情见「Wave F 集成记录」）。lane 分支 `lane/f1-scheduling-engine`，基线固定
 `dev@866fa027c7457cba640865f1eb7ecfe52a2863d6`（未 rebase、未合并新 dev、未 pull、未 push、未提升 `main`、
 未重启稳定 Runtime、未触碰 `/Users/loyage/Documents/codeestra`）。ADR：**0033**。schema：**未占用**（仍 v21；
 `packages/storage/src/migration.ts` 一行未动，v22 未被占用，也没有插入 `if (version < 16)`）。
@@ -2693,7 +2693,7 @@ task resume <project-id> <task-id> <version> [--adapter <id>] [--allow-unknown]
 
 ## FOUNDATION-056 — Agent 在散文里提问：不得静默记为 `SUCCESS`（ADR-0004/0014 语义内）
 
-状态：**已实现**，并在 CLI/命令面端到端验证（真实 CLI + 真实 Runtime + 协议 stub provider + `CODEESTRA_HOME=/tmp/ce-f3`）。
+状态：**已实现、已提交并合入 `dev`**（lane commit `db4783d`，dev merge `2182ab5`），并在 CLI/命令面端到端验证（真实 CLI + 真实 Runtime + 协议 stub provider + `CODEESTRA_HOME=/tmp/ce-f3`）。
 本格是用户已拍板的**保守方案**：只保证「不得静默记为 `SUCCESS`」。**不新增审批/Attention 语义、不改 Task/Execution 状态机、不新增任何确认步骤、不加 schema 版本、不加迁移。**
 任务来源：`## NEXT` 第 6 条 = FOUNDATION-030「剩余问题」的第一条（散文提问仍被记为 `SUCCESS`）。
 
@@ -2803,7 +2803,7 @@ Adapter **报不出事实时不猜**：`facts` 字段整体缺席表示“未知
 
 ## FOUNDATION-057 — CLI 类测试不再留下孤儿 Runtime 与临时夹具（Wave F / F4）
 
-状态：**已实现、已自查**（未 commit、未 push、未提升 `main`、未重启稳定 Runtime、未触碰稳定工作树
+状态：**已实现、已自查、已提交并合入 `dev`**（lane commit `46bd815`，dev merge `840da6b`）；提交前未 push、未提升 `main`、未重启稳定 Runtime、未触碰稳定工作树
 `/Users/loyage/Documents/codeestra`）。lane 分支 `lane/f4-test-runtime-leak`，基线**固定**
 `dev@866fa027c7457cba640865f1eb7ecfe52a2863d6`（未 rebase、未合并新 dev、未 pull）。**未新增 ADR**：本格只在
 `apps/runtime/test/**` 内提供测试基础设施，**生产代码（`apps/runtime/src/**`、`apps/cli/src/main.ts`）一行未改**，
@@ -2923,6 +2923,41 @@ Adapter **报不出事实时不猜**：`facts` 字段整体缺席表示“未知
   行为（socket/ipc 的目录历史上是靠后面文件的清理顺带删掉的）。若将来 bun 改成并行执行文件，共享注册表的假设需要重新验证。
 - **未验证**：Windows；Linux（`readProcessStartToken` 走 `/proc`，逻辑相同但未实机跑）；`unconfirmed` 分支只在自检里用
   合成记录覆盖，没有制造「SIGTERM 后仍不退出」的真实 Runtime（那需要一个故意不响应 TERM 的构建，本格不做）。
+
+## Wave F 集成记录（FOUNDATION-051/055/056/057）
+
+状态：**四格均已提交并合入 `dev`**。基线统一固定 `dev@866fa027c7457cba640865f1eb7ecfe52a2863d6`（`phase1SchemaVersion = 21`），四格均未 rebase、未合并新 dev、未 push、未提升 `main`、未触碰稳定工作树。
+
+| 格 | lane 分支 | lane commit | dev merge | FOUNDATION | ADR | schema |
+|---|---|---|---|---|---|---|
+| F2 | `lane/f2-doc-sync` | `4dec130` | `b293e4c` | 051 | 无（纯文档） | 无 |
+| F3 | `lane/f3-prose-question` | `db4783d` | `2182ab5` | 056 | 无（落在 ADR-0004/0014 内） | 无 |
+| F4 | `lane/f4-test-runtime-leak` | `46bd815` | `840da6b` | 057 | 无 | 无 |
+| F1 | `lane/f1-scheduling-engine` | `e204693` | `1e458ba` | 055 | 0033 | 无（**未占 v22**） |
+
+合并顺序 F2 → F3 → F4 → F1。每格在合入前都由主工作树**重跑一遍完整 `bun run check`**（不只采信 lane 自述）：F1 548 pass / 0 fail、F3 545 / 0、F4 538 / 0；F2 为零代码格，只跑 `typecheck` 并核对 diff 仅含 `docs/architecture/**`。
+
+### 集成时的情况
+
+- 三次 `docs/tasks/README.md` 锚点冲突（每次都是新格在 `## NEXT` 前插节），按号段升序手工排序为 **051 → 055 → 056 → 057**，内容一字未改。
+- 两次 `package.json` 冲突（`test:unit` 忽略列表与 `test:e2e` 列表），按并集合并：`cli-schedule`、`cli-prose-question`、`test-resource-reclamation` 同时进入两份列表。
+- `apps/cli/src/main.ts`、`packages/contracts/src/index.ts`、`packages/storage/src/{database,index}.ts`、`apps/runtime/src/main.ts` **全部自动合并成功**。
+- **本波没有出现「单格绿、合并后才爆」的集成缺陷**（Wave D 的必填字段、Wave E 的 schema 断言那两类都没再发生），合并后第一次 `typecheck` 与完整 `check` 就直接通过。这是槽位纪律与「合并前自己重跑全量 check」两条做法同时生效的结果，但不代表以后不会再发生。
+
+### 集成后验证
+
+- `bun run check`（合并后的 `dev` 树，`CODEESTRA_HOME=/tmp/ce-integrate`）：退出码 0 —— 根与 UI `tsc --noEmit`、**272 项 Vitest**、**567 项 Bun tests（0 fail，63 文件）**、UI Vite 构建。
+- schema 仍为 **v21**（F1 判断不需要新表，因此未占 v22；v22 仍空）。
+- **Phase 2 验收矩阵里最长的一条现在有断言了**：「两个 SAFE 且不相交的任务在容量 2 下真的同时进入 RUNNING」由 `cli-schedule.test.ts` 在真实 CLI + 真实 Runtime 上验证（provider 仍为协议 stub）。之前 Wave E 只能做到「原语就位」；现在引擎会自己 tick。
+- **F4 的效果可测**：在 F4 自己的 lane 上跑完一次完整 `check` 后，残留 Runtime 进程为 **0**（对照：Wave E 一轮开发留下 31 个孤儿进程 + 48 个夹具目录，E2 自报 43 个）。
+
+### 仍未验证（不得当成已成立）
+
+- **真实 provider 的并行**：并发的证据全部来自协议 stub；两个真实 Pi/Codex 进程同时跑一个仓库从未验证。
+- **真实模型行为**：F3 的启发式在真实 provider 上的误报/漏报率无统计数据（中文不带问号的提问是设计内漏报）；F1 的实际 diff 超预测处置也只由 stub 驱动。
+- **UI 投影**：`task schedule *`、`--allow-unknown`、`project impact *`、`scheduler capacity|reservations *` 与 F3 的完成注记均**只有 CLI/命令面**；UI 半边仍未做（人工目视也不适用）。
+- **多成员 IntegrationBatch**、**非 Git 共享资源**、**impact snapshot 的快照代重检**仍未做。
+- **F2 把「文档与实现不一致」的清单交给了用户裁决**（未静默改写规格），这些待裁决项仍未决。
 
 ## NEXT — 最小可用纵向切片
 
