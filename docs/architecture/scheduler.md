@@ -1,6 +1,6 @@
 # Conservative Scheduler
 
-状态：Phase 2 设计；Phase 1 只实施单活动任务资源门禁，不提前实现 DAG 并行。
+状态：§1–§6 是 Phase 2 设计（ADR-0030）；§7 记录**已实现的原语**（ADR-0032，schema v21）。**本基线里没有调度引擎**：`scheduler.ts` 目前只是 ADR-0024 的依赖判定器，自动 tick 由 FOUNDATION-055 在**本格之后**落地（见 §7.6）。
 
 ## 1. 调度输入和顺序
 
@@ -25,6 +25,8 @@
 容量等待不是 `BLOCKED`（`PROJECT_SPEC.md` §2.10）：它不改写依赖理由，也不算故障。本波不按主机 CPU/内存自动推导容量（见 §6）。
 
 ### 1.2 触发模型（ADR-0030 D04）
+
+> **本节是设计，尚未实现**：本基线里没有调度引擎，`scheduler.ts` 只是依赖判定器。自动 tick 由 FOUNDATION-055 在**本格之后**落地（见 §7.6）。
 
 调度由 Runtime **自动 tick** 驱动，用户不需要手动「推」任务：
 
@@ -111,3 +113,55 @@ on relevant committed event or periodic recovery tick:
 - **饥饿公平策略（aging）**：不加 aging。持续高优先级输入可能饿死低优先级任务，UI 只显示等待时长；公平策略作为独立产品决策留后续。
 
 同样明确不做：按主机 CPU/内存自动推导并发容量；LLM 辅助的 ImpactSnapshot 预测；在 `UNKNOWN` 上新增除 `--allow-unknown` 之外的任何门禁、审批或信任流程。
+
+## 7. 实现现状（Wave E / E2，ADR-0032，schema v21）
+
+本节记录**已经合入 `dev` 的实现**，与前面的设计意图分开。实现的是一组**原语 + 命令面**，不是会自己跑起来的调度器。
+
+### 7.1 容量模型
+
+- 项目级全局上限：没有 `project_capacity_limits` 行时为文档默认 **2**（`defaultConcurrencyLimit`），可配置，**上限 16**（`maxConcurrencyLimit`）。
+- 每 adapter 上限：`project_adapter_slot_limits` 只存**显式设置过**的行；缺省等于该项目的当前全局上限（派生而非复制，改全局会一起移动没有覆写的 adapter）。
+- 校验：整数、`≥1`、`≤16`；`0`/负数/小数 → `CAPACITY_LIMIT_INVALID`；超上限 → `CAPACITY_LIMIT_OUT_OF_RANGE`；未知 adapter id → `UNKNOWN_ADAPTER`。**拒绝，不夹取**，被拒绝的请求不写任何行。
+- 降低上限不释放已持有槽位：只影响之后的获取判定（`available` 可为 0、`used` 可 > `limit`，事实如实）。
+- 每次值真正改变写一条 append-only `SchedulerCapacityChanged`；重复设置同一值不 bump 版本、不发事件。
+
+### 7.2 预留状态与归属证据
+
+`execution_slot_reservations` 一行表达 Task 执行权 + adapter slot +（可绑定的）workspace。状态：`RESERVED → RELEASED`，或 `RESERVED → RECOVERY_REQUIRED`（保持占用）。两个部分唯一索引把不变量变成 schema 事实：每 Task 一个活跃预留（`RESERVED`/`RECOVERY_REQUIRED`）、一个 workspace 不被两个活跃预留占用。
+
+归属证据 = 创建它的 Runtime `bootId` + 进程 `pid` + 该 pid 的 OS `startToken`（可为 null，如实记录）+ actor。**「这行是我建的」不作为证据。** 获取在 `BEGIN IMMEDIATE` 内重检：active trust → Task `version` CAS → `revision_id` CAS → `state=READY` → 依赖事实指纹 → 无活跃预留 → 容量（上限在同一事务内从表里重读）→ draining（事务内求值），然后写预留 + append-only 历史行 + `ExecutionSlotReserved` 事件。两次 tick / 两个启动请求只能有一个成功（第二个要么在写锁上等到已提交的行 → 容量等待，要么撞上部分唯一索引 `SLOT_ALREADY_RESERVED`）。
+
+容量占用按 **Task** 计：活跃预留 ∪ `executions.resource_held=1` 的**并集**，使「先预留、再启动」的同一 Task 只吃一个槽，同时把今天的真实并发如实计入。释放必须带 `--reason`，写 `released_at`/`release_reason`/`release_kind='EXPLICIT'` + 历史行 + 事件；可证明仍存活的持有者被拒绝释放（`SLOT_HOLDER_STILL_RUNNING`），重复释放是诚实 no-op（`ALREADY_RELEASED`）。**绝不因心跳过期、用户等待或 UI 消失自动释放**（本格没有任何心跳）。
+
+### 7.3 reconcile 判定
+
+`inspectSlotHolder` 读真实进程表：pid 不存在/僵尸 → `HOLDER_STOPPED`；pid 存活且 start token 相同 → `HOLDER_STILL_RUNNING`；pid 存活但 token 不同 → `HOLDER_PROCESS_ID_REUSED`；任一 token 缺失或进程表读不到 → `HOLDER_OWNERSHIP_UNVERIFIABLE`；没有进程身份 → `PROCESS_IDENTITY_MISSING`。
+
+决定：已死（前两者）→ 记为 `RELEASED`（`RECONCILED_HOLDER_EXITED` / `RECONCILED_PROCESS_ID_REUSED`）；仍存活 → **保持占用**（状态不变）；无法核验 → `RESERVED` → `RECOVERY_REQUIRED`，**保持占用、不自动放行**。本代自己创建的预留跳过（`SKIPPED_HELD_BY_RUNTIME`）。reconcile **不发信号、不杀进程、不删资源、不声称静止**；每次观测（包括「决定保持占用」这种没有状态变化的情形）都追加到 `execution_slot_reservation_events`，`UNIQUE(reservation_id,command_id)` + command 回执让同一代重复 reconcile 幂等。启动序列在既有 reconcile 之后追加这一步（槽位按其他 reconcile 收敛后的最终图景判定）。
+
+### 7.4 等待原因与 draining
+
+容量等待用独立稳定码：`CAPACITY_GLOBAL_LIMIT_REACHED` / `CAPACITY_ADAPTER_SLOT_LIMIT_REACHED` / `SCHEDULER_DRAINING`，并带 `{ adapterId, limit, used, blocking[] }`。`BLOCKED` 仍只表示依赖未满足。Runtime 的 draining 是**内存事实**，只在开始 shutdown 时置位（不做持久化 draining，那会在崩溃后残留并永久拒绝新预留）；没有新增操作者 drain 开关。
+
+### 7.5 命令面与退出码
+
+```
+scheduler capacity get <project-id> [--adapter <id>] [--json]
+scheduler capacity set <project-id> --limit <n> [--adapter <id>] [--json]
+scheduler capacity clear <project-id> --adapter <id> [--json]
+scheduler reservations list <project-id> [--task <task-id>] [--include-released] [--limit <n>] [--json]
+scheduler reservations get <project-id> <reservation-id> [--json]
+scheduler reservations acquire <project-id> <task-id> <expected-task-version> --revision <revision-id> [--adapter <id>] [--json]
+scheduler reservations release <project-id> <reservation-id> --reason <text> [--json]
+scheduler reservations prepare-workspace <project-id> <reservation-id> <expected-task-version> [--json]
+scheduler reservations reconcile <project-id> [--json]
+```
+
+`acquire` 退出码：**0** = 拿到槽位，**3** = 容量等待/正在排水（`--json` 的 `wait.code` 是原因），**1** = 拒绝（依赖未满足、revision/版本过期、已有预留、未知 adapter、非法上限）。`prepare-workspace` 只有**本代创建**的 `RESERVED` 预留可用（否则 `SLOT_HELD_BY_ANOTHER_RUNTIME`），同一 commandId 重放不产生第二个 worktree。全部命令零新增确认、`--json`、退出码稳定。
+
+### 7.6 明确未实现：调度引擎（FOUNDATION-055）
+
+**本基线里没有引擎。** `apps/runtime/src/scheduler.ts` 目前只是 ADR-0024 的依赖判定器，一行未改为候选排序/冲突/容量判定接入；没有任何东西会自动 tick。ADR-0030 §1.2 的触发模型（事件驱动 tick + 周期恢复 tick + submit 后自动进入调度）是**设计**，**尚未实现**。调度引擎（候选排序、把冲突与容量判定接入、实际 diff 超出预测的处置、`--allow-unknown` 命令形态）由 **FOUNDATION-055** 在**本格之后**落地。
+
+因此在本格及其基线里：**不得写「自动 tick 已实现」或「两个 SAFE 任务真的会同时开始」。** Wave E 交付的是原语：E1 的 ImpactSnapshot/Conflict Analyzer 与 E2 的容量/槽位预留已经就位，但没有引擎驱动它们；本格的端到端证据只到「第三个任务得到容量等待」，没有两个 Task 真的同时跑。

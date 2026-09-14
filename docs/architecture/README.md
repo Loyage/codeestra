@@ -80,4 +80,4 @@ Self Task → Candidate → 自托管测试 → 用户 Promotion → 排空 → 
 
 完整产品的语义不可能用一次草案全部锁死。这里采用按阶段准入：Phase 0 的领域纯函数不涉及外部副作用；Phase 1 必须验证 Pi 协议并确认 Git 成果提交策略；Phase 2/4/7 的待决项只阻塞对应阶段，不被当作已批准默认值。
 
-SQLite 文档为关系设计，含明确标注的待细化约束，不是已执行 migration。API 为 Runtime port 合约草案，不是供应商能力承诺。
+SQLite 文档第 2–6 节为关系设计（含明确标注的待细化约束），第 8 节逐版本记录**已执行**的 migration（当前 `phase1SchemaVersion = 21`；v16 永久未使用）。API 为 Runtime port 合约草案，不是供应商能力承诺；`agent-adapter-api.md` 已记录 Pi 与 Codex 的实测能力矩阵。

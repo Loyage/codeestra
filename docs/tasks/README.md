@@ -2447,6 +2447,59 @@ scheduler reservations reconcile <project-id> [--json]
 - **架构文档 doc-sync 仍未做**：`sqlite-schema.md` 停在 v18，`state-machines.md`、`event-model.md` 缺 `CANCELLED`/`OperationProgressed`/`OperationSettled`，`agent-adapter.md` 缺 `controlledConfiguration`。
 - **UI**：`project impact *` 与 `scheduler capacity|reservations *` 只有 CLI/命令面完备，没有任何 UI 投影（`apps/ui/**` 本波未动）。
 
+## FOUNDATION-051 — 架构文档 doc-sync：`docs/architecture/**` 对齐已合入 `dev` 的实现（Wave F / F2，纯文档，无 ADR）
+
+状态：**已实现、已自查，等待用户确认后 commit**。lane 分支 `lane/f2-doc-sync`，基线固定 `dev@866fa027c7457cba640865f1eb7ecfe52a2863d6`（未 rebase、未合并新 dev、未 pull）。**纯文档：一行 `*.ts`/`*.tsx`/`*.json` 都未改**，未改 `PROJECT_SPEC.md`、未改 `docs/decisions/**`（ADR 是历史记录）、未 push、未提升 `main`、未重启稳定 Runtime、未触碰 `/Users/loyage/Documents/codeestra`。无新 ADR：本格只同步已接受决策（ADR-0016/0018/0019/0021/0022/0023/0024/0026/0027/0028/0029/0031/0032）对应的实现。
+
+填补的缺口是 FOUNDATION-047/049/053/054 与 Wave D/E 集成记录反复点名的「架构文档 doc-sync 未做」。
+
+### 改动的文件
+
+| 文件 | 改动 |
+|---|---|
+| `docs/architecture/sqlite-schema.md` | 状态行更新为 `phase1SchemaVersion = 21`；新增 v7/v9–v15/v17–v21 的逐版本 migration 记录与 DDL（含 CHECK/唯一索引/触发器），显式写明 **v16 永久未使用**及其原因；修正 §3 关于 `agent_sessions`/`revision_deliveries` 的过时逻辑设计说明 |
+| `docs/architecture/event-model.md` | 新增 §2.1「实现中实际写入的事件」（OperationProgressed/Settled、TaskRevisionDelivery*、ExecutionSlot*、SchedulerCapacityChanged、Integration*/Promotion*、ResourcesReclaimed 等）与 §2.2「设计名与实现名的差异（交用户裁决）」 |
+| `docs/architecture/state-machines.md` | §1 Task Verification 加入 `CANCELLED`；§3 新增 3.1 incarnation/单 writer lease/handoff/permission/terminal 状态；新增 §6 Runtime 生命周期与所有权（ADR-0025）、§7 Revision 投递 FSM（ADR-0028） |
+| `docs/architecture/agent-adapter-api.md` | §1 加入 `controlledConfiguration` 维度并说明实现契约与设计类型的差异；新增 §3 Codex（第二个真实 Adapter，ADR-0029）的传输/权限映射/实测能力矩阵，明确 **Pi 的 PTY 交接机制不套用到 Codex** |
+| `docs/architecture/scheduler.md` | 新增 §7「实现现状（Wave E / E2，ADR-0032）」：容量默认 2/上限 16、预留状态与归属证据、reconcile 判定、命令面与退出码，并显式写明**调度引擎（FOUNDATION-055）在本格之后落地** |
+| `docs/architecture/conflict-analyzer.md` | 新增 §6「实现现状（FOUNDATION-053 / ADR-0031）」：`.codeestra/impact.json` 字段与确认、快照失效键、稳定 reason code 清单、命令面与退出码；新增 §7 与调度引擎的关系（无引擎） |
+| `docs/architecture/README.md` | 修正「SQLite 文档…不是已执行 migration」这句已过时的描述（改为指向 §8 的已执行 migration 记录） |
+| `docs/tasks/README.md` | 本节 |
+
+`git diff --stat` 只包含 `docs/architecture/**` 与 `docs/tasks/README.md`。
+
+### 文档段落 ↔ 代码/迁移/事件名的对应关系
+
+- **sqlite-schema.md §8 各版本** ↔ `packages/storage/src/migration.ts` 的同名导出常量（`workspaceRetryMigration` v7、`taskControlMigration` v9、`integrationPipelineMigration` v10、`operationProgressMigration` v11、`reclamationMigration` v12、`stablePromotionMigration` v13、`sessionHandoffMigration` v14、`taskDependenciesMigration` v15、`verificationProgressMigration` v17、`sessionTerminalMigration` v18、`revisionDeliveryMigration` v19、`impactAnalysisMigration` v20、`capacitySlotReservationMigration` v21），执行顺序 ↔ `packages/storage/src/database.ts` `migrate()` 的 `if (version < N)` 链（跳过 v16）。
+- **event-model.md §2.1** ↔ `packages/storage/src/database.ts` 的 `INSERT INTO domain_events(... event_type ...)` 语句与 `insertRevisionDeliveryEvent` / `insertCapacityEvent` helper；（`OperationProgressed`/`OperationSettled`、`ExecutionSlot*`、`SchedulerCapacityChanged`、`TaskRevisionDelivery*`、`Integration*`、`Promotion*`）。
+- **state-machines.md §3.1/§6/§7** ↔ `session_incarnations`/`session_writer_leases`/`session_handoff_requests`/`session_permission_requests`（v14）、`session_terminals`/`session_terminal_attachments`（v18）、`task_revision_deliveries`/`task_revision_delivery_attempts`/`agent_session_startup_reconciliations`（v19）、`apps/runtime/src/lifecycle.ts`、`apps/cli/src/main.ts` 的 `codeestra stop`、`apps/runtime/src/revision-delivery-service.ts`、`apps/runtime/src/recovery-service.ts`。
+- **agent-adapter-api.md §3** ↔ `packages/agent-adapters/src/codex-adapter.ts` 的 `codexCapabilities()`、`packages/agent-adapters/src/codex-protocol.ts` 的 `codexPermissionPolicy()`、`packages/contracts/src/index.ts` 的 `AdapterCapabilities.controlledConfiguration`。
+- **scheduler.md §7** ↔ `apps/runtime/src/capacity-service.ts`、`apps/runtime/src/slot-reservation-service.ts`、`packages/contracts/src/index.ts` 的 `defaultConcurrencyLimit(2)`/`maxConcurrencyLimit(16)` 与 `CapacityWaitReason`、`apps/runtime/src/scheduler.ts`（仍是依赖判定器）。
+- **conflict-analyzer.md §6** ↔ `packages/contracts/src/impact-policy.ts`、`packages/domain/src/impact-analysis.ts`（reason code/incomplete reason 枚举）、`apps/runtime/src/impact-analysis-service.ts`、`apps/cli/src/main.ts` 的 `project impact validate|show|explain`。
+
+### 发现的实现/规格不一致（交用户裁决，**未**在文档里静默改写成「实现是对的」）
+
+1. **任务书说 `sqlite-schema.md` 停在 v18，实际停在 v8**（`git log` 显示它最后在 ADR-0012 时改动）。本格因此把 v9–v21 全部补上，而不仅是 v17–v21，否则会留下 v9–v16 缺失的误导性文档。
+2. **事件名大面积不一致**：实现在 `event-model.md` §2.2 逐项列出。`TaskRevisionAppended`→`TaskRevisionCreated`、`DependencyAdded`→`TaskDependencyAdded`、`ExecutionResultCaptured`→`ResultCommitCreated`、`DevIntegrationCandidateCreated`→`IntegrationBatchCreated`、整组 `StablePromotion*`→`Promotion*` 等。需要裁决：是把设计目录改成实现名，还是保留设计名并给实现名加映射（本格选了后者，不静默改写设计）。
+3. **交接/终端事件完全未实现**：`TakeoverRequested`/`SessionHandoffStarted`/`TerminalWriterLeaseChanged`/`RevisionDelivered`/`RevisionAcknowledged` 等在设计目录里，但代码中**不存在**（grep 命中 0）。实现只写对应的表。需要裁决。
+4. **`AdapterCapabilities` 的设计类型与实现契约不一致**：设计里有 `nativeTerminalHandoff`/`safePointNotification`，实现契约里没有；实现新增了 `controlledConfiguration`（本格已补进设计类型）。
+5. **§3 逻辑设计与实现不同**：设计写「一个 Execution 可有多条 AgentSession」，实现（v14）保留 `agent_sessions.execution_id UNIQUE`，把进程交接收敛为同一 Session 内的 incarnation。这是 ADR-0023 的明确选择，本格按 ADR 更新了文档并标注。
+6. **`sqlite-schema.md` §4 的 `impact_assessments`/`conflict_assessments` 逻辑 DDL 与 v20 实现不同**（ADR-0031 重定义了形态）。本格把 §4 标为已被 §8 v20 取代。
+
+### 自查结果
+
+- `grep -c "CANCELLED" docs/architecture/state-machines.md` ≥ 1：**通过**。
+- `sqlite-schema.md` 的 v19/v20/v21 三节都在：**通过**。
+- `grep -c "v16" docs/architecture/sqlite-schema.md` ≥ 1 且写明「永久未使用」：**通过**（3 处）。
+- `git diff --stat` 只含 `docs/architecture/**` 与 `docs/tasks/README.md`：**通过**（见报告）。
+- 未改动任何 `*.ts`/`*.tsx`/`*.json`、`PROJECT_SPEC.md`、`docs/decisions/**`。
+
+### 未覆盖 / 未验证
+
+- 本格没有跑 `bun run check`：纯文档改动，且基线已有基线自身的检查结果；不改代码不产生新的可运行断言。**未验证**的部分已在各文档中标注（例如 `SessionGuidance*` 事件在实现中的存在性）。
+- 未改写任何 ADR；如果上述不一致需要新决策，应由相应 lane 写新 ADR，而不是本格。
+- 本格不包含调度引擎；F1（FOUNDATION-055）会补 `scheduler.md` 的「引擎真的会跑」部分。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、~~UI 投影~~（已由 FOUNDATION-050 完成 promotion/dependency 投影）。
