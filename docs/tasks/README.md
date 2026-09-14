@@ -1701,7 +1701,7 @@ session handoff writer acquire|release ...
 
 ## FOUNDATION-048 — revision 投递确认与重启后 stale ACTIVE Session 的启动收敛（ADR-0028）
 
-状态：**已实现并通过 CLI/命令面测试**；未 commit、未 push、未提升 `main`、未重启稳定 Runtime。**本轮占用 schema v19**（只追加 `if (version < 19)`，既有段一字未动；**v16 继续永久未使用**，未新增 `version < 16`）。基线固定 `dev@77eaf678`，未 rebase、未合并新 dev。
+状态：**已实现、已提交并合入 `dev`**（CLI/命令面测试）；lane commit `dcd185c`（`lane/d1-revision-delivery`，基线固定 `dev@77eaf678`，未 rebase）→ dev merge `0c960ad`（在 dev 工作树内 `--no-ff`，与 FOUNDATION-049/050 无文件冲突），集成详情见下方「Wave D 集成记录」。**已 push：否**、未提升 `main`、未重启稳定 Runtime。**本轮占用 schema v19**（只追加 `if (version < 19)`，既有段一字未动；**v16 继续永久未使用**，未新增 `version < 16`）。
 
 用户本轮没有做 A/B/C 选择：本格的两件事早已是 `## NEXT` 第 4 项，实现方式由已确认的原则与 spike 事实决定（§1.1 效率至上与 CLI 完备、ADR-0001 的停止并新建 Execution fallback、ADR-0010/0023 的单 writer 与归属核验、ADR-0021 的失败现场、`docs/spikes/pi-0.84.4.md` 的 `revisionAcknowledgement = UNSUPPORTED`）。选项与取舍逐条记在 ADR-0028 的 Options/Decision 中，若用户要另一种语义可以在下一轮推翻。
 
@@ -1735,7 +1735,7 @@ session handoff writer acquire|release ...
 
 ## FOUNDATION-049 — 第二个真实 Adapter：Codex 接入（ADR-0029）
 
-状态：**已实现并通过 CLI/命令面测试 + 真实 Codex smoke**。`lane/d2-codex-adapter`，固定基线 `dev@77eaf67`（`phase1SchemaVersion = 18`）。**未使用 schema 迁移**（v19 留给 D1），未 rebase、未合并新 dev、未 push、未提升 `main`、未触碰稳定工作树。
+状态：**已实现、已提交并合入 `dev`**（CLI/命令面测试 + 真实 Codex smoke）。lane commit `cd9bf1b`（`lane/d2-codex-adapter`，基线固定 `dev@77eaf67`）→ dev merge `6688766`；详见下方「Wave D 集成记录」。**未使用 schema 迁移**（v19 归 D1），未 rebase、未合并新 dev、未 push、未提升 `main`、未触碰稳定工作树。
 
 本格成果分三档证据，正文按此分级：
 
@@ -1857,11 +1857,11 @@ Pi 的 attach / PTY handoff / incarnation（ADR-0010/0023/0026）**没有**被�
 
 ## FOUNDATION-050 — 原生终端的 UI 投影 + 会话交接/依赖/提升投影补全（纯投影，无新 ADR）
 
-状态：**已实现、未提交**（等待用户决定 commit）。lane `lane/d3-terminal-ui`，固定基线
-`dev@77eaf678a13d955fe7f01cba160cd5e9302f3fab`（`phase1SchemaVersion = 18`），未 rebase、未合并新 dev、
-未 push、未提升 `main`、未重启稳定 Runtime。**未新增 ADR**：本格只把已经存在于 CLI 命令面的能力做成 UI
-投影，不新增 Runtime 语义、不新增确认步骤、不改后端契约（`apps/runtime/**`、`apps/cli/**`、`packages/**`、
-架构文档、`PROJECT_SPEC.md`、`AGENTS.md` 一行未改）。
+状态：**已实现、已提交并合入 `dev`**。lane commit `62f49aa`（`lane/d3-terminal-ui`，基线固定
+`dev@77eaf678a13d955fe7f01cba160cd5e9302f3fab`）→ dev merge `87d2c7e`；详见下方「Wave D 集成记录」。
+未 rebase、未合并新 dev、未 push、未提升 `main`、未重启稳定 Runtime。**未新增 ADR**：本格只把已经存在于 CLI
+命令面的能力做成 UI 投影，不新增 Runtime 语义、不新增确认步骤、不改后端契约（`apps/runtime/**`、
+`apps/cli/**`、`packages/**`、架构文档、`PROJECT_SPEC.md`、`AGENTS.md` 一行未改）。
 
 ### 已实现
 
@@ -1975,12 +1975,44 @@ Pi 的 attach / PTY handoff / incarnation（ADR-0010/0023/0026）**没有**被�
 `PROJECT_SPEC.md`、`AGENTS.md`；本文件只插入本节。未 commit、未 push、未提升 `main`、未重启稳定 Runtime；
 证据运行使用的 `/tmp/ce-d3*` 与 `/tmp/d3-evidence` 已回收。
 
+## Wave D 集成记录（FOUNDATION-048/049/050）
+
+状态：**三格均已提交并合入 `dev`**。基线统一固定 `dev@77eaf678a13d955fe7f01cba160cd5e9302f3fab`（`phase1SchemaVersion = 18`），三格均未 rebase、未合并新 dev、未 push、未提升 `main`、未触碰稳定工作树（`/Users/loyage/Documents/codeestra`）。
+
+| 格 | lane 分支 | lane commit | dev merge | FOUNDATION | ADR | schema |
+|---|---|---|---|---|---|---|
+| D1 | `lane/d1-revision-delivery` | `dcd185c` | `0c960ad` | 048 | 0028 | **v19** |
+| D2 | `lane/d2-codex-adapter` | `cd9bf1b` | `6688766` | 049 | 0029 | 无 |
+| D3 | `lane/d3-terminal-ui` | `62f49aa` | `87d2c7e` | 050 | 无（纯投影） | 无 |
+
+合并顺序 D1 → D3 → D2（先落 v19，再把最重的 adapter 变更放最后）。三格在各自 worktree 内都跑过完整 `bun run check` 且退出码 0：D1 439 pass / 0 fail（52 文件）、D2 441 / 0（52）、D3 415 / 0（50）。
+
+### 集成时发现并修复的问题（两个分支上都没有）
+
+1. **语义冲突（编译失败）**：D1 的 `apps/runtime/test/revision-delivery.test.ts` 构造 `AdapterCapabilities` 时缺 D2 新增的必填字段 `controlledConfiguration`。两格单独 typecheck 都过，合并后才暴露。修复：在该测试声明该字段为 `'SUPPORTED'`，并注明这只是 stub 编排断言，不代表真实 provider 的隔离能力。
+2. **文档合并**：`docs/tasks/README.md` 三格都按「在 `## NEXT` 之前插入一节」的槽位纪律写，因此三次合并都在同一处冲突，按 048 → 049 → 050 顺序手工排序，内容一字未改（另补一个缺失的空行）。`apps/cli/src/main.ts`、`apps/runtime/src/main.ts`、`packages/contracts/src/index.ts`、`docs/decisions/README.md` 按各自的 group/块自动合并成功，无手工冲突。
+
+### 集成后验证
+
+- `bun run check`（合并后的 `dev` 树，`CODEESTRA_HOME=/tmp/ce-integrate`）：退出码 0 —— 根与 UI `tsc --noEmit`、231 项 Vitest、**465 项 Bun tests（0 fail，54 文件）**、UI Vite 构建。
+- schema 现在为 **v19**；v16 仍未使用，`if (version < 16)` 不存在。
+- 未在 `dev` 上启动真实 provider，也未触碰稳定 Runtime；集成期间产生的 `/tmp/ce-integrate` 与三格的 `/tmp/ce-d*` 已回收。
+- **这不是 IntegrationBatch**：是用户确认后的手工 lane commit + `git merge --no-ff`。仓库目前没有 `dev` 检出之外的克隆可供 `task integrate` 跑完整集成批次（ADR-0009 的合规路径），后续若要严格走产品路径需另建克隆。
+
+### 仍未验证（不得当成已成立）
+
+- *真实* Codex 的 attach / PTY handoff / pause / revision ACK / live reconnect：能力矩阵按 spike 实测声明为 `UNSUPPORTED`，它们本来就没有实现。D2 的真实集成证据限于 probe、STRICT gate allow、FULL 零确认、完成证据、进程身份与跨进程 `thread/resume`；全部 CLI 流程与失败映射是协议 stub。
+- 真实 provider 的 revision ACK（无任何 Adapter 实现 `applyRevision`，Pi 仍 `UNSUPPORTED`）、真实模型对投递提示的理解。
+- Runtime 没有 `FAILED → READY` 路径，因此「Execution 失败后换 Agent」目前只在 Execution 建立前失败与 pause→resume 路径上成立。
+- 三格 UI（终端/交接/依赖/提升/CANCELLED）的观感、窄屏与键盘操作**只由人工目视确认**，本轮未做，也没有引入任何浏览器/桌面自动化。
+- 架构文档 doc-sync（`state-machines.md` §1、`event-model.md` §2 缺 `CANCELLED`/`OperationProgressed`/`OperationSettled`、`sqlite-schema.md` 落后到 v18 且未说明 v16 未使用、`agent-adapter.md` 缺 `controlledConfiguration`）仍未做。
+
 ## NEXT — 最小可用纵向切片
 
-0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、UI 投影。
+0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、~~UI 投影~~（已由 FOUNDATION-050 完成 promotion/dependency 投影）。
 1. 真实验证 ADR-0016：在一次性临时仓库中用真实 Pi 跑「启动 → 暂停 → 恢复 → 终止」，核对 provider 进程确实退出、`--session` 确实续接同一 conversation、超时进入 `RECOVERY_REQUIRED`；脚本 Adapter 不能替代该验收。
-2. ~~长命令后台化与进度事件~~：已由 FOUNDATION-039 / ADR-0019 完成持久 Operation、步骤级进度、`--background` 与 `task.operation.cancel`（CLI + 同一命令面 + UI）。~~剩余：token 级实时进度事件、verification run 的独立 `CANCELLED` 状态、取消后验证副本的回收~~：已由 FOUNDATION-047 / ADR-0027 完成（`CANCELLED` 一等终态 + 重建表、被取消副本仍走 ADR-0021 `reclaim`、进度改为 `OperationProgressed`/`OperationSettled` 领域事件并经 `events list/tail` 与 UI 实时可见）。剩余：`task.run` 的 provider 事件级进度（PTY/token 字节不进事件，见 ADR-0027 D05）、架构文档的 doc-sync。
-3. ~~ADR-0010 Phase 3 技术 spike~~：已由 FOUNDATION-040 完成（真实 Pi session-file 双向 RPC↔TUI 恢复、PTY 生命周期、safe-point fence 与权限模式 side channel，见 `docs/spikes/pi-session-handoff.md`）。~~handoff Operation / Session incarnation~~：Runtime 侧契约与状态已由 ADR-0023 / FOUNDATION-043 完成（STRICT 权限转既有 Attention、incarnation 绑定 + 原子拒绝过期决议、单 writer lease 的 `ATTACHMENT_BUSY`、安全点与 predecessor 归属核验、重启按事实 reconcile），并已合入 `dev`；`session handoff status/request/cancel/writer/admit` 的 `--json` 退出码稳定。剩余：~~PTY transport 与 successor 进程启动、detach/reattach 编排、CLI attach~~：已由 ADR-0026 / FOUNDATION-046 完成（Runtime 拥有的 PTY helper 上运行真实 `pi` 原生 TUI、`admit` 真交接、attach/detach/reattach、`release` 交还自动化并回到同一 session file、能力投影改为真实值）。仍在剩余：跨交接权限模式**完整矩阵**、并行工具批次安全点、PTY resize、真实模型在 TUI 中键入后交还的复验、**UI 终端**（C3 波次领地）。
+2. ~~长命令后台化与进度事件~~：已由 FOUNDATION-039 / ADR-0019 完成持久 Operation、步骤级进度、`--background` 与 `task.operation.cancel`（CLI + 同一命令面 + UI）。~~剩余：token 级实时进度事件、verification run 的独立 `CANCELLED` 状态、取消后验证副本的回收~~：已由 FOUNDATION-047 / ADR-0027 完成（`CANCELLED` 一等终态 + 重建表、被取消副本仍走 ADR-0021 `reclaim`、进度改为 `OperationProgressed`/`OperationSettled` 领域事件并经 `events list/tail` 与 UI 实时可见）。剩余：`task.run` 的 provider 事件级进度（PTY/token 字节不进事件，见 ADR-0027 D05）、架构文档的 doc-sync（`state-machines.md`、`event-model.md`、`sqlite-schema.md`、`agent-adapter.md` 均落后于 FOUNDATION-046/047/048/049）。
+3. ~~ADR-0010 Phase 3 技术 spike~~：已由 FOUNDATION-040 完成（真实 Pi session-file 双向 RPC↔TUI 恢复、PTY 生命周期、safe-point fence 与权限模式 side channel，见 `docs/spikes/pi-session-handoff.md`）。~~handoff Operation / Session incarnation~~：Runtime 侧契约与状态已由 ADR-0023 / FOUNDATION-043 完成（STRICT 权限转既有 Attention、incarnation 绑定 + 原子拒绝过期决议、单 writer lease 的 `ATTACHMENT_BUSY`、安全点与 predecessor 归属核验、重启按事实 reconcile），并已合入 `dev`；`session handoff status/request/cancel/writer/admit` 的 `--json` 退出码稳定。剩余：~~PTY transport 与 successor 进程启动、detach/reattach 编排、CLI attach~~：已由 ADR-0026 / FOUNDATION-046 完成（Runtime 拥有的 PTY helper 上运行真实 `pi` 原生 TUI、`admit` 真交接、attach/detach/reattach、`release` 交还自动化并回到同一 session file、能力投影改为真实值）。仍在剩余：跨交接权限模式**完整矩阵**、并行工具批次安全点、PTY resize、真实模型在 TUI 中键入后交还的复验。~~UI 终端~~：已由 FOUNDATION-050 完成（终端面板、交接/incarnation、依赖图与 BLOCKED 原因、promotion、verification `CANCELLED` 语义色；仅人工目视确认，未做浏览器/桌面自动化）。
 4. ~~revision 投递确认，以及 Runtime 重启后对 stale ACTIVE Session 的启动 reconcile。~~ 已由 ADR-0028 / FOUNDATION-048 完成：投递成为一等需求 + append-only 尝试台账（schema v19），只有结构化 ACK 或经核验的 successor Execution 才算确认（「消息发出去了」永不当作确认），能力如实（Pi 仍 `UNSUPPORTED`）、不支持时走既有「协作停止 + 新建 Execution」，超时/重启中断按事实收口；`task revision create|list` 与 `task revision delivery list|get|resolve` 零确认、`--json`、退出码稳定；`reconcileStaleAgentSessions` 收敛重启后仍写 ACTIVE/RUNNING 的投影（不写 RUNNING、不声称静止、不发信号、不删资源，一律 `RECOVERY_REQUIRED` 并记账）。剩余（不在本格）：真实 provider 的 ACK 行为（需先有 Adapter 实现 `applyRevision`）、真实模型对投递提示的理解、修订/投递的 UI 投影。
 5. ~~验证副本与失败现场的回收~~：已由 ADR-0021/FOUNDATION-041 完成（`reclaim plan/apply/records`、归属校验、append-only 账本、启动 reconcile、默认保留失败现场、不新增确认）；同轮决定 Attention 工具参数继续原样入库。剩余：未注册目录的人工处理与跨项目批量回收。
 6. 识别「Agent 不用工具、在散文里提问并结束轮次」的形态（FOUNDATION-030 剩余的一半）：要么把它变成 Attention，要么至少不得记为未加说明的 `SUCCESS`。
