@@ -20,6 +20,7 @@ import {
   agentDisconnectMigration,
   agentObservationMigration,
   agentStartMigration,
+  impactAnalysisMigration,
   integrationPipelineMigration,
   operationProgressMigration,
   phase1Migration,
@@ -477,6 +478,118 @@ export interface ConfirmedVerificationPolicy extends VerificationPolicyConfirmat
 }
 
 /**
+ * The impact mapping (`ADR-0031`) declared when trust was established. `INVALID` keeps the digest of
+ * the raw bytes: a mapping that cannot be parsed is a recorded fact, not a silent "no mapping".
+ */
+export interface ImpactPolicyConfirmationInput {
+  readonly state: 'ABSENT' | 'PRESENT' | 'INVALID';
+  readonly digest: string | null;
+  readonly contentDigest: string | null;
+  readonly code: string | null;
+  readonly mainRef: string;
+  readonly mainCommit: string;
+}
+
+export interface ConfirmedImpactPolicy extends ImpactPolicyConfirmationInput {
+  readonly actor: string;
+  readonly confirmedAt: number;
+}
+
+/** One shared resource a snapshot touched, kept as data so a rehydrated snapshot stays analyzable. */
+export interface StoredImpactResourceRef {
+  readonly id: string;
+  readonly kind: string;
+  readonly written: boolean;
+  readonly read: boolean;
+}
+
+/**
+ * A stored ImpactSnapshot. It carries exactly what the pure analyzer needs to be re-run later
+ * (`files`, matched scope, completeness and its reasons) plus the facts its reuse is keyed on.
+ */
+export interface ImpactSnapshotInput {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly revisionId: string;
+  readonly baseCommit: string;
+  readonly analyzerVersion: string;
+  readonly policyVersion: string;
+  readonly policyDigest: string;
+  readonly caseMode: 'SENSITIVE' | 'INSENSITIVE';
+  readonly changeFingerprint: string;
+  readonly complete: boolean;
+  readonly incompleteReasons: readonly string[];
+  readonly files: readonly string[];
+  readonly importantDirectories: readonly string[];
+  readonly modules: readonly string[];
+  readonly globalResources: readonly StoredImpactResourceRef[];
+  readonly unclassifiedFiles: readonly string[];
+  readonly evidence: readonly string[];
+  readonly createdAt: number;
+}
+
+export type ImpactSnapshotRecord = ImpactSnapshotInput;
+
+/** The reuse key of `docs/architecture/conflict-analyzer.md` §4: any component moving invalidates. */
+export interface ImpactSnapshotKey {
+  readonly taskId: string;
+  readonly revisionId: string;
+  readonly baseCommit: string;
+  readonly analyzerVersion: string;
+  readonly policyVersion: string;
+  readonly changeFingerprint: string;
+}
+
+/** Pair-wise audit row. The pair itself is the key, so a changed fact needs a new snapshot. */
+export interface ImpactAssessmentInput {
+  readonly id: string;
+  readonly projectId: string;
+  readonly candidateTaskId: string;
+  readonly candidateRevisionId: string;
+  readonly candidateSnapshotId: string;
+  readonly otherTaskId: string;
+  readonly otherRevisionId: string;
+  readonly otherSnapshotId: string;
+  readonly verdict: 'SAFE_TO_PARALLELIZE' | 'UNKNOWN' | 'CONFLICTING';
+  readonly reasonCodes: readonly string[];
+  readonly hits: readonly unknown[];
+  readonly evidence: readonly string[];
+  readonly createdAt: number;
+}
+
+export type ImpactAssessmentRecord = ImpactAssessmentInput;
+
+/**
+ * One Task the analyzer must compare against: a Task that holds a resource, which is exactly the
+ * active/reserved set of `docs/architecture/scheduler.md` §1 (readying, RUNNING, WAITING_FOR_USER,
+ * PAUSING/PAUSED, stopping/cancelling, RECOVERY_REQUIRED, and reserved-but-unstarted Executions all
+ * hold their Execution row).
+ */
+export interface ImpactActiveTaskRef {
+  readonly taskId: string;
+  readonly taskState: TaskLifecycleState;
+  readonly revisionId: string;
+  readonly executionId: string;
+  readonly executionState: ExecutionLifecycleState;
+  readonly workspaceId: string | null;
+  readonly workspacePath: string | null;
+  readonly workspaceBaseCommit: string | null;
+  readonly workspaceState: WorkspaceLifecycleState | null;
+}
+
+/** The Task an assessment is made for, plus the newest workspace it could still produce changes in. */
+export interface ImpactCandidateTaskRef {
+  readonly taskId: string;
+  readonly taskState: TaskLifecycleState;
+  readonly revisionId: string;
+  readonly workspaceId: string | null;
+  readonly workspacePath: string | null;
+  readonly workspaceBaseCommit: string | null;
+  readonly workspaceState: WorkspaceLifecycleState | null;
+}
+
+/**
  * Task verification states. `CANCELLED` is a terminal state of its own (ADR-0027): a run the user
  * stopped is not a failed command, so it must not be recorded as `ERROR` with a borrowed outcome
  * code. `CANCELLED` is only ever written after the owned command group was confirmed stopped; an
@@ -856,6 +969,7 @@ export class Phase1Database {
         if (version < 17) this.sqlite.exec(verificationProgressMigration);
         if (version < 18) this.sqlite.exec(sessionTerminalMigration);
         if (version < 19) this.sqlite.exec(revisionDeliveryMigration);
+        if (version < 20) this.sqlite.exec(impactAnalysisMigration);
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -878,6 +992,14 @@ export class Phase1Database {
     readonly actor: string;
     readonly verificationPolicyConfirmationId: string;
     readonly verificationPolicy: VerificationPolicyConfirmationInput;
+    /**
+     * The impact mapping confirmed by this trust (ADR-0031). When a caller omits it, no active
+     * confirmation is written and any previous one is superseded: forgetting to declare the mapping
+     * leaves every ImpactSnapshot incomplete (`UNKNOWN`), which is the safe direction — it can never
+     * make a Task look parallelizable.
+     */
+    readonly impactPolicyConfirmationId?: string;
+    readonly impactPolicy?: ImpactPolicyConfirmationInput;
   }): void {
     this.sqlite.transaction(() => {
       const existing = this.sqlite.query<{
@@ -913,6 +1035,10 @@ export class Phase1Database {
           UPDATE project_verification_policy_confirmations SET status='SUPERSEDED',superseded_at=?1
           WHERE project_id=?2 AND status='ACTIVE'
         `).run(input.trustedAt, projectId);
+        this.sqlite.query(`
+          UPDATE project_impact_policy_confirmations SET status='SUPERSEDED',superseded_at=?1
+          WHERE project_id=?2 AND status='ACTIVE'
+        `).run(input.trustedAt, projectId);
       }
       this.sqlite.query(`
         INSERT INTO project_trusts
@@ -927,6 +1053,16 @@ export class Phase1Database {
       `).run(input.verificationPolicyConfirmationId, projectId, input.verificationPolicy.state,
         input.verificationPolicy.digest, input.verificationPolicy.mainRef,
         input.verificationPolicy.mainCommit, input.actor, input.trustedAt);
+      if (input.impactPolicy !== undefined && input.impactPolicyConfirmationId !== undefined) {
+        this.sqlite.query(`
+          INSERT INTO project_impact_policy_confirmations
+            (id,project_id,policy_state,policy_digest,content_digest,error_code,main_ref,main_commit,
+             actor,status,confirmed_at)
+          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'ACTIVE',?10)
+        `).run(input.impactPolicyConfirmationId, projectId, input.impactPolicy.state,
+          input.impactPolicy.digest, input.impactPolicy.contentDigest, input.impactPolicy.code,
+          input.impactPolicy.mainRef, input.impactPolicy.mainCommit, input.actor, input.trustedAt);
+      }
     })();
   }
 
@@ -941,7 +1077,37 @@ export class Phase1Database {
         UPDATE project_verification_policy_confirmations SET status='SUPERSEDED',superseded_at=?1
         WHERE project_id=?2 AND status='ACTIVE'
       `).run(invalidatedAt, projectId);
+      this.sqlite.query(`
+        UPDATE project_impact_policy_confirmations SET status='SUPERSEDED',superseded_at=?1
+        WHERE project_id=?2 AND status='ACTIVE'
+      `).run(invalidatedAt, projectId);
     })();
+  }
+
+  /** Active impact-mapping confirmation for a trusted project, or null when none was recorded. */
+  getConfirmedImpactPolicy(projectId: string): ConfirmedImpactPolicy | null {
+    const row = this.sqlite.query<{
+      policy_state: 'ABSENT' | 'PRESENT' | 'INVALID'; policy_digest: string | null;
+      content_digest: string | null; error_code: string | null; main_ref: string;
+      main_commit: string; actor: string; confirmed_at: number;
+    }, [string]>(`
+      SELECT c.policy_state,c.policy_digest,c.content_digest,c.error_code,c.main_ref,c.main_commit,
+             c.actor,c.confirmed_at
+      FROM project_impact_policy_confirmations c
+      JOIN project_trusts trust ON trust.project_id=c.project_id AND trust.status='ACTIVE'
+      WHERE c.project_id=?1 AND c.status='ACTIVE'
+    `).get(projectId);
+    if (row === null) return null;
+    return {
+      state: row.policy_state,
+      digest: row.policy_digest,
+      contentDigest: row.content_digest,
+      code: row.error_code,
+      mainRef: row.main_ref,
+      mainCommit: row.main_commit,
+      actor: row.actor,
+      confirmedAt: row.confirmed_at,
+    };
   }
 
   /** Active confirmation for a trusted project, or null when trust never confirmed one. */
@@ -9024,6 +9190,177 @@ export class Phase1Database {
       recordedAt: row.recorded_at,
     }));
   }
+
+  /**
+   * Records one ImpactSnapshot. The reuse key is `(task, revision, base, analyzer, mapping,
+   * change fingerprint)`: an identical recomputation returns the existing row instead of writing a
+   * second one, and any component moving writes a *new* row. Nothing here can update an old row —
+   * the table refuses it — so a verdict computed from an old fact stays readable as audit.
+   */
+  recordImpactSnapshot(input: ImpactSnapshotInput): ImpactSnapshotRecord {
+    this.sqlite.transaction(() => {
+      this.sqlite.query(`
+        INSERT INTO impact_snapshots(id,project_id,task_id,revision_id,base_commit,analyzer_version,
+          policy_version,policy_digest,case_mode,change_fingerprint,complete,incomplete_reasons_json,
+          files_json,important_directories_json,modules_json,global_resources_json,
+          unclassified_files_json,evidence_json,created_at)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
+        ON CONFLICT(task_id,revision_id,base_commit,analyzer_version,policy_version,change_fingerprint)
+        DO NOTHING
+      `).run(input.id, input.projectId, input.taskId, input.revisionId, input.baseCommit,
+        input.analyzerVersion, input.policyVersion, input.policyDigest, input.caseMode,
+        input.changeFingerprint, input.complete ? 1 : 0, JSON.stringify(input.incompleteReasons),
+        JSON.stringify(input.files), JSON.stringify(input.importantDirectories),
+        JSON.stringify(input.modules), JSON.stringify(input.globalResources),
+        JSON.stringify(input.unclassifiedFiles), JSON.stringify(input.evidence), input.createdAt);
+    })();
+    const stored = this.findImpactSnapshot({
+      taskId: input.taskId,
+      revisionId: input.revisionId,
+      baseCommit: input.baseCommit,
+      analyzerVersion: input.analyzerVersion,
+      policyVersion: input.policyVersion,
+      changeFingerprint: input.changeFingerprint,
+    });
+    if (stored === null) {
+      throw new StorageError('INVALID_STATE', 'Impact snapshot was not readable after it was recorded');
+    }
+    if (stored.projectId !== input.projectId) {
+      throw new StorageError('INVALID_STATE', 'Impact snapshot key belongs to a different project');
+    }
+    return stored;
+  }
+
+  findImpactSnapshot(key: ImpactSnapshotKey): ImpactSnapshotRecord | null {
+    const row = this.sqlite.query<ImpactSnapshotRow, [string, string, string, string, string, string]>(`
+      ${impactSnapshotSelect}
+      WHERE task_id=?1 AND revision_id=?2 AND base_commit=?3 AND analyzer_version=?4
+        AND policy_version=?5 AND change_fingerprint=?6
+    `).get(key.taskId, key.revisionId, key.baseCommit, key.analyzerVersion, key.policyVersion,
+      key.changeFingerprint);
+    return row === null ? null : mapImpactSnapshotRow(row);
+  }
+
+  /** Stored snapshots newest first, so a reader can see how a Task's prediction moved over time. */
+  listImpactSnapshots(input: {
+    readonly projectId: string;
+    readonly taskId?: string;
+    readonly limit?: number;
+  }): readonly ImpactSnapshotRecord[] {
+    const limit = Math.min(Math.max(input.limit ?? 50, 1), 500);
+    return this.sqlite.query<ImpactSnapshotRow, [string, string, number]>(`
+      ${impactSnapshotSelect}
+      WHERE project_id=?1 AND (?2 = '' OR task_id=?2)
+      ORDER BY created_at DESC,id DESC LIMIT ?3
+    `).all(input.projectId, input.taskId ?? '', limit).map(mapImpactSnapshotRow);
+  }
+
+  /**
+   * Records one pair-wise assessment. The key is the two snapshots it was computed from, so an
+   * unchanged pair replays the stored verdict and a changed fact produces a new pair instead of
+   * rewriting the old verdict.
+   */
+  recordImpactAssessment(input: ImpactAssessmentInput): ImpactAssessmentRecord {
+    this.sqlite.transaction(() => {
+      this.sqlite.query(`
+        INSERT INTO impact_assessments(id,project_id,candidate_task_id,candidate_revision_id,
+          candidate_snapshot_id,other_task_id,other_revision_id,other_snapshot_id,verdict,
+          reason_codes_json,hits_json,evidence_json,created_at)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+        ON CONFLICT(candidate_snapshot_id,other_snapshot_id) DO NOTHING
+      `).run(input.id, input.projectId, input.candidateTaskId, input.candidateRevisionId,
+        input.candidateSnapshotId, input.otherTaskId, input.otherRevisionId, input.otherSnapshotId,
+        input.verdict, JSON.stringify(input.reasonCodes), JSON.stringify(input.hits),
+        JSON.stringify(input.evidence), input.createdAt);
+    })();
+    const row = this.sqlite.query<ImpactAssessmentRow, [string, string]>(`
+      ${impactAssessmentSelect}
+      WHERE candidate_snapshot_id=?1 AND other_snapshot_id=?2
+    `).get(input.candidateSnapshotId, input.otherSnapshotId);
+    if (row === null) {
+      throw new StorageError('INVALID_STATE', 'Impact assessment was not readable after it was recorded');
+    }
+    return mapImpactAssessmentRow(row);
+  }
+
+  listImpactAssessments(input: {
+    readonly projectId: string;
+    readonly taskId?: string;
+    readonly limit?: number;
+  }): readonly ImpactAssessmentRecord[] {
+    const limit = Math.min(Math.max(input.limit ?? 50, 1), 500);
+    return this.sqlite.query<ImpactAssessmentRow, [string, string, number]>(`
+      ${impactAssessmentSelect}
+      WHERE project_id=?1 AND (?2 = '' OR candidate_task_id=?2 OR other_task_id=?2)
+      ORDER BY created_at DESC,id DESC LIMIT ?3
+    `).all(input.projectId, input.taskId ?? '', limit).map(mapImpactAssessmentRow);
+  }
+
+  /**
+   * Every Task the analyzer must be compared against: the active/reserved set of
+   * `docs/architecture/scheduler.md` §1. Holding an Execution row is exactly that state — a
+   * reserved-but-unstarted, running, waiting, pausing, paused, stopping, or recovery-required
+   * Execution all hold their resource, while a finished one has released it.
+   */
+  listImpactActiveTasks(projectId: string, excludeTaskId?: string): readonly ImpactActiveTaskRef[] {
+    return this.sqlite.query<{
+      task_id: string; task_state: TaskLifecycleState; current_revision_id: string;
+      execution_id: string; execution_state: ExecutionLifecycleState;
+      workspace_id: string | null; workspace_path: string | null; workspace_base_commit: string | null;
+      workspace_state: WorkspaceLifecycleState | null;
+    }, [string, string]>(`
+      SELECT task.id AS task_id,task.state AS task_state,task.current_revision_id,
+        execution.id AS execution_id,execution.state AS execution_state,
+        workspace.id AS workspace_id,workspace.path AS workspace_path,
+        workspace.base_commit AS workspace_base_commit,workspace.state AS workspace_state
+      FROM tasks task
+      JOIN executions execution ON execution.task_id=task.id AND execution.resource_held=1
+      LEFT JOIN workspaces workspace ON workspace.id=execution.workspace_id
+      WHERE task.project_id=?1 AND (?2 = '' OR task.id <> ?2)
+      ORDER BY task.id
+    `).all(projectId, excludeTaskId ?? '').map((row) => ({
+      taskId: row.task_id,
+      taskState: row.task_state,
+      revisionId: row.current_revision_id,
+      executionId: row.execution_id,
+      executionState: row.execution_state,
+      workspaceId: row.workspace_id,
+      workspacePath: row.workspace_path,
+      workspaceBaseCommit: row.workspace_base_commit,
+      workspaceState: row.workspace_state,
+    }));
+  }
+
+  /**
+   * One Task plus the newest workspace that was not released. An ImpactSnapshot is an observation of
+   * that workspace's change set, so it stays derivable after a run finished.
+   */
+  getImpactCandidateTask(projectId: string, taskId: string): ImpactCandidateTaskRef | null {
+    const row = this.sqlite.query<{
+      task_id: string; task_state: TaskLifecycleState; revision_id: string;
+      workspace_id: string | null; workspace_path: string | null;
+      workspace_base_commit: string | null; workspace_state: WorkspaceLifecycleState | null;
+    }, [string, string]>(`
+      SELECT task.id AS task_id,task.state AS task_state,task.current_revision_id AS revision_id,
+        workspace.id AS workspace_id,workspace.path AS workspace_path,
+        workspace.base_commit AS workspace_base_commit,workspace.state AS workspace_state
+      FROM tasks task
+      LEFT JOIN workspaces workspace
+        ON workspace.task_id=task.id AND workspace.state <> 'RELEASED'
+      WHERE task.project_id=?1 AND task.id=?2
+      ORDER BY workspace.created_at DESC,workspace.id DESC LIMIT 1
+    `).get(projectId, taskId);
+    if (row === null) return null;
+    return {
+      taskId: row.task_id,
+      taskState: row.task_state,
+      revisionId: row.revision_id,
+      workspaceId: row.workspace_id,
+      workspacePath: row.workspace_path,
+      workspaceBaseCommit: row.workspace_base_commit,
+      workspaceState: row.workspace_state,
+    };
+  }
 }
 
 const sessionTerminalSelect = `
@@ -9034,6 +9371,78 @@ const sessionTerminalSelect = `
     release_detail,created_at,ended_at
   FROM session_terminals
 `;
+
+interface ImpactSnapshotRow {
+  id: string; project_id: string; task_id: string; revision_id: string; base_commit: string;
+  analyzer_version: string; policy_version: string; policy_digest: string;
+  case_mode: 'SENSITIVE' | 'INSENSITIVE'; change_fingerprint: string; complete: number;
+  incomplete_reasons_json: string; files_json: string; important_directories_json: string;
+  modules_json: string; global_resources_json: string; unclassified_files_json: string;
+  evidence_json: string; created_at: number;
+}
+
+const impactSnapshotSelect = `
+  SELECT id,project_id,task_id,revision_id,base_commit,analyzer_version,policy_version,
+    policy_digest,case_mode,change_fingerprint,complete,incomplete_reasons_json,files_json,
+    important_directories_json,modules_json,global_resources_json,unclassified_files_json,
+    evidence_json,created_at
+  FROM impact_snapshots
+`;
+
+function mapImpactSnapshotRow(row: ImpactSnapshotRow): ImpactSnapshotRecord {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    taskId: row.task_id,
+    revisionId: row.revision_id,
+    baseCommit: row.base_commit,
+    analyzerVersion: row.analyzer_version,
+    policyVersion: row.policy_version,
+    policyDigest: row.policy_digest,
+    caseMode: row.case_mode,
+    changeFingerprint: row.change_fingerprint,
+    complete: row.complete === 1,
+    incompleteReasons: JSON.parse(row.incomplete_reasons_json) as readonly string[],
+    files: JSON.parse(row.files_json) as readonly string[],
+    importantDirectories: JSON.parse(row.important_directories_json) as readonly string[],
+    modules: JSON.parse(row.modules_json) as readonly string[],
+    globalResources: JSON.parse(row.global_resources_json) as readonly StoredImpactResourceRef[],
+    unclassifiedFiles: JSON.parse(row.unclassified_files_json) as readonly string[],
+    evidence: JSON.parse(row.evidence_json) as readonly string[],
+    createdAt: row.created_at,
+  };
+}
+
+interface ImpactAssessmentRow {
+  id: string; project_id: string; candidate_task_id: string; candidate_revision_id: string;
+  candidate_snapshot_id: string; other_task_id: string; other_revision_id: string;
+  other_snapshot_id: string; verdict: 'SAFE_TO_PARALLELIZE' | 'UNKNOWN' | 'CONFLICTING';
+  reason_codes_json: string; hits_json: string; evidence_json: string; created_at: number;
+}
+
+const impactAssessmentSelect = `
+  SELECT id,project_id,candidate_task_id,candidate_revision_id,candidate_snapshot_id,other_task_id,
+    other_revision_id,other_snapshot_id,verdict,reason_codes_json,hits_json,evidence_json,created_at
+  FROM impact_assessments
+`;
+
+function mapImpactAssessmentRow(row: ImpactAssessmentRow): ImpactAssessmentRecord {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    candidateTaskId: row.candidate_task_id,
+    candidateRevisionId: row.candidate_revision_id,
+    candidateSnapshotId: row.candidate_snapshot_id,
+    otherTaskId: row.other_task_id,
+    otherRevisionId: row.other_revision_id,
+    otherSnapshotId: row.other_snapshot_id,
+    verdict: row.verdict,
+    reasonCodes: JSON.parse(row.reason_codes_json) as readonly string[],
+    hits: JSON.parse(row.hits_json) as readonly unknown[],
+    evidence: JSON.parse(row.evidence_json) as readonly string[],
+    createdAt: row.created_at,
+  };
+}
 
 export type TaskRevisionDeliveryState = RevisionDeliveryState;
 export type TaskRevisionDeliveryChannel = RevisionDeliveryChannel;

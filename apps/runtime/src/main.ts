@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, rmSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
-import { devBranchRef, runtimeRequestSchema, validateQuestionnaireAnswer, questionnairePromptSchema,
+import { devBranchRef, impactPolicyPath, runtimeRequestSchema, validateQuestionnaireAnswer,
+  questionnairePromptSchema,
   type RuntimeRequest, type RuntimeResponse,
   type RuntimeStreamFrame } from '@codeestra/contracts';
 import { inspectRepository, readLocalRefCommit } from '@codeestra/git';
@@ -24,6 +25,14 @@ import {
   probeRuntimeEndpoint,
   releaseRuntimeOwnership,
 } from './lifecycle.js';
+import {
+  assessTaskImpact,
+  impactPolicyConfirmation,
+  inspectImpactPolicy,
+  inspectTaskImpact,
+  impactPolicyReport,
+  validateImpactPolicy,
+} from './impact-analysis-service.js';
 import { LongOperationService } from './operation-service.js';
 import { runtimeHome, runtimeSocketPath } from './paths.js';
 import { SessionHandoffService } from './session-handoff-service.js';
@@ -458,12 +467,37 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         mainRef: identity.mainRef,
       }));
     }
+    // Deterministic conflict analysis (ADR-0031). These three commands observe facts and persist
+    // append-only rows; none of them starts, schedules, or approves anything.
+    case 'project.impact.validate': {
+      return success(request.requestId, await validateImpactPolicy({
+        storage, path: request.path,
+      }));
+    }
+    case 'project.impact.show': {
+      return success(request.requestId, await inspectTaskImpact({
+        storage,
+        projectId: request.projectId,
+        taskId: request.taskId,
+        now: Date.now(),
+      }));
+    }
+    case 'project.impact.explain': {
+      return success(request.requestId, await assessTaskImpact({
+        storage,
+        projectId: request.projectId,
+        taskId: request.taskId,
+        now: Date.now(),
+      }));
+    }
     case 'project.list':
       // `confirmedPolicy` is the active ADR-0006 confirmation, so a client can tell whether the
       // policy at the main ref still matches what a human confirmed without re-confirming blindly.
+      // `confirmedImpactPolicy` is the same fact for the ADR-0031 impact mapping.
       return success(request.requestId, storage.listTrustedProjects().map((project) => ({
         ...project,
         confirmedPolicy: storage.getConfirmedVerificationPolicy(project.id),
+        confirmedImpactPolicy: storage.getConfirmedImpactPolicy(project.id),
       })));
     case 'events.list': {
       const events = storage.listEventsAfter({
@@ -1143,6 +1177,26 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         return failure(request.requestId, 'VERIFICATION_POLICY_CHANGED',
           'The verification policy at the main ref changed after confirmation; inspect it again');
       }
+      // The impact mapping is confirmed by the same trust event as the verification policy: in FULL
+      // mode that is zero user steps, and in STRICT it is the same single confirmation the user is
+      // already giving, now covering both policies (ADR-0031). A client that pinned the mapping it
+      // inspected (the CLI does) is refused if the file moved in between.
+      const impactPolicy = await inspectImpactPolicy({
+        repositoryRoot: actual.repoRoot,
+        mainRef: actual.mainRef,
+      });
+      if (request.expectedImpactPolicy !== undefined) {
+        const expectedImpact = request.expectedImpactPolicy;
+        const impactMatches = impactPolicy.state === expectedImpact.state
+          && impactPolicy.mainCommit === expectedImpact.mainCommit
+          && (expectedImpact.state !== 'PRESENT' || impactPolicy.digest === expectedImpact.digest)
+          && (expectedImpact.state !== 'INVALID'
+            || impactPolicy.contentDigest === expectedImpact.contentDigest);
+        if (!impactMatches) {
+          return failure(request.requestId, 'IMPACT_POLICY_CHANGED',
+            `${impactPolicyPath} at the main ref changed after it was inspected; inspect it again`);
+        }
+      }
       const now = Date.now();
       storage.trustProject({
         id: crypto.randomUUID(),
@@ -1160,6 +1214,8 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
               mainCommit: policy.mainCommit }
           : { state: 'ABSENT', digest: null, mainRef: actual.mainRef,
               mainCommit: policy.mainCommit },
+        impactPolicyConfirmationId: crypto.randomUUID(),
+        impactPolicy: impactPolicyConfirmation(impactPolicy),
         trustedAt: now,
         actor: permissionMode === 'FULL' ? 'runtime-full-permission' : 'local-user',
       });
@@ -1170,6 +1226,7 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         devRef: devBranchRef,
         devCommit: baselineCommit,
         verificationPolicy: policy,
+        impactPolicy: impactPolicyReport({ inspection: impactPolicy, confirmation: null }),
       });
     }
   }
