@@ -276,6 +276,37 @@ export const permissionPromptSchema = z.strictObject({
 });
 export type PermissionPrompt = z.infer<typeof permissionPromptSchema>;
 
+/**
+ * What `runtime.ping` reports about the Runtime process that answered it. `pid` alone is not
+ * identity: `bootId` is what a client compares across a restart, and `startedAt` is when this boot
+ * claimed its Runtime home (ADR-0025).
+ */
+export const runtimePingResultSchema = z.strictObject({
+  pid: z.number().int().positive(),
+  bootId: z.string().min(1),
+  startedAt: z.number().int().nonnegative(),
+  status: z.string().min(1),
+  permissionMode: z.enum(['FULL', 'STRICT']),
+  adapters: z.array(z.string()),
+  activeSessions: z.array(z.string()),
+  eventSubscribers: z.number().int().nonnegative(),
+  uiRunning: z.boolean(),
+});
+export type RuntimePingResult = z.infer<typeof runtimePingResultSchema>;
+
+/**
+ * What `runtime.stop` reports: the identity of the process that was asked to stop. It never claims
+ * that the process stopped — only the caller can observe that, and `codeestra stop` waits for the
+ * exit and reports it as a fact (ADR-0025).
+ */
+export const runtimeStopResultSchema = z.strictObject({
+  stopping: z.literal(true),
+  pid: z.number().int().positive(),
+  bootId: z.string().min(1),
+  startedAt: z.number().int().nonnegative(),
+});
+export type RuntimeStopResult = z.infer<typeof runtimeStopResultSchema>;
+
 export const runtimeRequestSchema = z.discriminatedUnion('command', [
   z.strictObject({ ...requestBase, command: z.literal('runtime.ping') }),
   z.strictObject({ ...requestBase, command: z.literal('runtime.stop') }),

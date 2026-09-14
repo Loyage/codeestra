@@ -4,10 +4,18 @@ import { join, resolve } from 'node:path';
 import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOptions,
   maxQuestionnaireQuestions,
   maxTranscriptEntryReadLimit,
-  runtimeResponseSchema, runtimeStreamFrameSchema,
+  runtimePingResultSchema,
+  runtimeResponseSchema, runtimeStopResultSchema, runtimeStreamFrameSchema,
   type ProjectIdentity, type QuestionnaireAnswer, type RuntimeRequest, type RuntimeResponse,
   type SessionTranscriptEntry, type SessionTranscriptView,
   type VerificationPolicyInspection } from '@codeestra/contracts';
+import {
+  inspectRuntimeHome,
+  pidExists,
+  readProcessStartToken,
+  readProcessState,
+  type RuntimeHomeInspection,
+} from '../../runtime/src/lifecycle.js';
 
 /** The subset of `project.list` this client reads. */
 interface TrustedProjectListing {
@@ -703,7 +711,7 @@ function usage(): never {
   bun run codeestra status
   bun run codeestra open [path] [--yes] [--no-open]
   bun run codeestra ui [--no-open]
-  bun run codeestra stop
+  bun run codeestra stop [--wait <seconds>]
   bun run codeestra permission get
   bun run codeestra permission set <full|strict>
   bun run codeestra agent config get [--project <project-id>] [--adapter <id>]
@@ -788,6 +796,17 @@ bun run build:ui, bun run codeestra stop, bun run codeestra status. The restart 
 every step exits 0 and the restarted Runtime answers READY. STRICT additionally needs promotion
 approve for that exact triple; a dev/main/evidence move makes it invalid. Only SUCCEEDED exits 0.
 
+stop asks the Runtime that owns this CODEESTRA_HOME to shut down and then checks the process it
+named until it is gone (default 10s, bounded by --wait). It reports STOPPED (exit 0), NOT_EXITED
+(exit 1) when the process is still there, NOT_RUNNING when no Runtime owns this home, and
+UNREACHABLE_PROCESS (exit 1) when a Runtime process is still there but nothing answers on its
+socket. It never starts a Runtime to stop it and never signals a process it cannot identify.
+
+status starts the Runtime when none is running and prints the runtime.ping result together with an
+ownership report read from this home's lifecycle records: the lock, the boot traces, and whether
+the endpoint answers. It is read-only, so an unreachable Runtime process is reported rather than
+replaced. Exit code 1 means the Runtime could not be reached or started.
+
 session handoff projects the Runtime-side handoff contract: the provider incarnation history, the
 single writer lease, the handoff fence/safe point and the admission decision. A second writer lease
 acquisition exits 1 with ATTACHMENT_BUSY, and a refused admission exits 1. admit only records the
@@ -833,9 +852,120 @@ function describeVerificationPolicy(policy: VerificationPolicyInspection): void 
     + ' working tree.');
 }
 
+/**
+ * The ownership facts `stop` and `status` report. They come from the Runtime's own lifecycle
+ * records under this home and are read without writing anything or signalling any process.
+ */
+function ownershipSummary(inspection: RuntimeHomeInspection): Record<string, unknown> {
+  return {
+    home: inspection.home,
+    socketPath: inspection.socketPath,
+    socketPresent: inspection.socketPresent,
+    endpointAnswers: inspection.endpointAnswers,
+    verdict: inspection.verdict,
+    lock: inspection.lock,
+    traces: inspection.traces,
+    unreadableRecords: inspection.unreadableRecords,
+  };
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** A bounded request that never starts a Runtime: `stop` must not create what it was asked to stop. */
+async function tryRequest(command: ClientRequest): Promise<RuntimeResponse | null> {
+  try {
+    return await request(command);
+  } catch {
+    return null;
+  }
+}
+
+const defaultStopWaitMs = 10_000;
+const stopPollIntervalMs = 25;
+/** Reading the OS process state costs a process spawn, so it is not done on every poll. */
+const zombieCheckIntervalMs = 100;
+
+/** `stop [--wait <seconds>]`: how long the client keeps checking whether the process really left. */
+function parseStopWaitMs(tokens: readonly string[]): number {
+  let waitMs = defaultStopWaitMs;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const flag = tokens[index];
+    const value = tokens[index + 1];
+    if (flag === '--wait' && value !== undefined) {
+      const seconds = Number(value);
+      if (!Number.isFinite(seconds) || seconds < 0 || seconds > 600) {
+        throw new Error('--wait expects seconds between 0 and 600');
+      }
+      waitMs = Math.round(seconds * 1000);
+      index += 1;
+      continue;
+    }
+    usage();
+  }
+  return waitMs;
+}
+
+/**
+ * Waits, for a bounded time, until the named process is no longer there.
+ *
+ * A PID is not identity, so the start token the Runtime recorded for itself is compared when it was
+ * available: a PID that the OS gave to an unrelated process after the Runtime exited is reported as
+ * exited instead of keeping `stop` waiting on a stranger. A zombie is already an exited Runtime
+ * (its sockets and files are released), so it counts as stopped instead of waiting for a reap.
+ */
+async function waitForRuntimeExit(input: {
+  readonly pid: number;
+  readonly startToken: string | null;
+  readonly waitMs: number;
+}): Promise<{ readonly exited: boolean; readonly waitedMs: number;
+  readonly identityVerified: boolean; readonly identityChanged: boolean }> {
+  const startedAt = Date.now();
+  const deadlineAt = startedAt + input.waitMs;
+  const identityVerified = input.startToken !== null
+    && await readProcessStartToken(input.pid) === input.startToken;
+  let lastStateCheck = 0;
+  for (;;) {
+    const waitedMs = Date.now() - startedAt;
+    if (!pidExists(input.pid)) {
+      return { exited: true, waitedMs, identityVerified, identityChanged: false };
+    }
+    if (Date.now() - lastStateCheck >= zombieCheckIntervalMs) {
+      lastStateCheck = Date.now();
+      const state = await readProcessState(input.pid);
+      if (state === 'GONE' || state === 'ZOMBIE') {
+        return { exited: true, waitedMs, identityVerified, identityChanged: false };
+      }
+    }
+    if (Date.now() >= deadlineAt) {
+      // One last identity check: a recycled PID means the Runtime this stop named is gone.
+      const identityChanged = input.startToken !== null
+        && await readProcessStartToken(input.pid) !== input.startToken;
+      return { exited: identityChanged, waitedMs, identityVerified, identityChanged };
+    }
+    await Bun.sleep(stopPollIntervalMs);
+  }
+}
+
 try {
   if (group === 'status' && action === undefined) {
-    print(await call({ command: 'runtime.ping' }));
+    // Ownership facts are read from this home's lifecycle records, read-only, so an unreachable
+    // Runtime process is reported instead of being hidden behind a freshly started one.
+    try {
+      const ping = await call({ command: 'runtime.ping' });
+      const ownership = await inspectRuntimeHome({ home, socketPath });
+      // A Runtime from before this contract (for example the stable one during an upgrade) still
+      // answers without the newer fields: its own object is printed as it is rather than rejected.
+      const parsed = runtimePingResultSchema.safeParse(ping);
+      print({ ...(parsed.success ? parsed.data : (ping as Record<string, unknown>)),
+        ownership: ownershipSummary(ownership) });
+    } catch (error) {
+      const ownership = await inspectRuntimeHome({ home, socketPath });
+      print({ status: 'UNAVAILABLE', error: errorText(error),
+        ownership: ownershipSummary(ownership) });
+      process.exit(1);
+    }
   } else if (group === 'ui') {
     // `ui` takes no positional arguments; every remaining token must be the --no-open flag.
     const flags = [action, firstArgument, ...remainingArguments]
@@ -930,8 +1060,71 @@ try {
     console.error('Results land on refs/heads/task/<task-id>; merge them yourself,'
       + ' for example: git merge task/<task-id>');
     if (!flagTokens.includes('--no-open')) launchBrowser(url);
-  } else if (group === 'stop' && action === undefined) {
-    print(await call({ command: 'runtime.stop' }));
+  } else if (group === 'stop' && (action === undefined || action.startsWith('--'))) {
+    // Stop is two-phase and factual: the Runtime only reports which process was asked to stop, and
+    // this client waits (bounded) for that process to actually disappear before reporting success.
+    // It never starts a Runtime to stop it, and never signals a process it cannot identify.
+    const tokens = [action, firstArgument, ...remainingArguments]
+      .filter((token): token is string => token !== undefined);
+    const waitMs = parseStopWaitMs(tokens);
+    const before = await inspectRuntimeHome({ home, socketPath });
+    const ping = await tryRequest({ command: 'runtime.ping' });
+    if (ping === null || !ping.ok) {
+      const ownership = await inspectRuntimeHome({ home, socketPath });
+      if (ownership.verdict === 'UNREACHABLE_PROCESS') {
+        // The defect this command exists to make decidable: a Runtime process that is still there
+        // while nothing answers on its socket. It is reported, never killed on a guess.
+        print({ status: 'UNREACHABLE_PROCESS', pid: ownership.lock.record?.pid ?? null,
+          bootId: ownership.lock.record?.bootId ?? null, waitedMs: 0,
+          ownership: ownershipSummary(ownership) });
+        process.exit(1);
+      }
+      print({ status: 'NOT_RUNNING', pid: null, bootId: null, waitedMs: 0,
+        ownership: ownershipSummary(ownership) });
+    } else {
+      const observed = ping.result as { readonly pid: number; readonly bootId: string;
+        readonly startedAt?: number };
+      // The ping names the process; the lock record (when this boot wrote one) adds the start token
+      // that makes the PID checkable, and must agree on the boot it identifies.
+      const holder = before.lock.record;
+      const lockIdentifiesPing = holder !== null && holder.bootId === observed.bootId;
+      const targetPid = lockIdentifiesPing ? holder.pid : observed.pid;
+      const stopResponse = await tryRequest({ command: 'runtime.stop' });
+      const stopResult: unknown = stopResponse !== null && stopResponse.ok ? stopResponse.result : null;
+      // A Runtime from before this contract answers `{stopping: true}` without naming itself: the
+      // request was accepted, but this client then has no recorded identity to verify against.
+      const accepted = typeof stopResult === 'object' && stopResult !== null
+        && (stopResult as { readonly stopping?: unknown }).stopping === true;
+      const stopped = accepted ? runtimeStopResultSchema.safeParse(stopResult) : null;
+      if (!accepted) {
+        print({ status: 'STOP_FAILED', pid: targetPid, bootId: observed.bootId,
+          error: stopResponse === null ? 'Runtime closed the connection without a response'
+            : stopResponse.ok ? 'Runtime did not accept the stop request'
+              : `${stopResponse.error.code}: ${stopResponse.error.message}` });
+        process.exit(1);
+      }
+      const exit = await waitForRuntimeExit({
+        pid: targetPid,
+        startToken: lockIdentifiesPing ? holder.startToken : null,
+        waitMs,
+      });
+      const ownership = await inspectRuntimeHome({ home, socketPath });
+      const stopReportedPid = stopped?.success === true ? stopped.data.pid : null;
+      print({
+        status: exit.exited ? 'STOPPED' : 'NOT_EXITED',
+        pid: targetPid,
+        bootId: observed.bootId,
+        // A stop response that names a different process than the one that answered the ping means
+        // two Runtimes claimed this home; that is a fact the caller must see, not paper over.
+        stopReportedPid,
+        pidMismatch: stopReportedPid !== null && stopReportedPid !== observed.pid,
+        waitedMs: exit.waitedMs,
+        identityVerified: exit.identityVerified,
+        identityChanged: exit.identityChanged,
+        ownership: ownershipSummary(ownership),
+      });
+      if (!exit.exited) process.exit(1);
+    }
   } else if (group === 'permission' && action === 'get'
     && firstArgument === undefined && remainingArguments.length === 0) {
     print(await call({ command: 'permission.get' }));

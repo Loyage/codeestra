@@ -29,6 +29,8 @@
 
 以上选择均由用户明确答复。用户给定的硬性原则见 `PROJECT_SPEC.md`，无需重复确认。
 
+- [ADR-0025](0025-runtime-lifecycle-stop-and-single-instance.md)：Runtime 生命周期可判定化。`codeestra stop` 改为「请求 + 有界等待 + 事实报告」（`STOPPED`/`NOT_EXITED` exit 0/1、`NOT_RUNNING` 不启动、`UNREACHABLE_PROCESS` exit 1 且**不杀进程**）；根因是各子系统把 `Bun.sleep(graceMs)` 放进 `Promise.race` 却从不清理 timer（Bun 会为 pending timer 保持事件循环，shutdown 跑完仍多活 ~5s），修复为清 timer 的 `withDeadline` + 顺序完成后确定性 `process.exit`（仅当没有未确认停止的 provider/验证进程）；启动改为 `runtime.lock`（硬链接原子写、`bootId/pid/startToken` 归属、owner 存活则拒绝、死后接管）+ 每次 boot 的 `runtime-boots/*.json` 痕迹，消除并发启动的双 Runtime、迁移崩溃与「socket 被并发启动者删除后不可达却永不退出」的竞态；新增只读诊断（CLI 直接读生命周期记录，不依赖 Runtime 存活、不写不删不发信号），自动回收不可达进程留待另立 ADR。
+
 **优先级标注**：ADR-0011 是当前权限语义：默认 FULL，取消 ADR-0001/0002/0003/0004/0006/0008/0009/0010 中冲突的确认要求；STRICT 作为显式 opt-in 保留旧门禁。ADR-0009 的 `main`/`dev` 分支职责、固定 SHA/证据与提升后重启等正确性要求不变。
 
 ## 阶段准入与待决项
