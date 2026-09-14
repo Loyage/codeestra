@@ -7,8 +7,13 @@ import {
   sessionHandoffSocketPath,
   type HandoffChannelCommand,
   type HandoffChannelHello,
+  type ProviderOwnershipObservation,
   type ProviderProcessTree,
 } from '@codeestra/agent-adapters';
+import {
+  TerminalService,
+  type SessionTerminalView,
+} from './terminal-service.js';
 import {
   permissionPromptSchema,
   type AgentAnswer,
@@ -73,17 +78,38 @@ export interface SessionHandoffSafePointView {
 }
 
 /**
- * The honest capability statement of this Runtime version. The Runtime-side state, lease, fence and
- * decision routing exist; the PTY transport and the successor process start do not, and no command
- * claims otherwise.
+ * The honest capability statement of this Runtime version (ADR-0026).
+ *
+ * Everything that is implemented is stated as such; everything that is not stays `UNSUPPORTED` or
+ * `UNVERIFIED` and is never silently degraded. In particular this Runtime can attach to a *native
+ * terminal it started*, but it still cannot attach to a running RPC provider process (Pi has no such
+ * primitive, FOUNDATION-040 §4.1) — those are two different claims and are reported separately.
  */
 export interface SessionHandoffCapabilities {
   readonly runtimeContract: 'IMPLEMENTED';
   readonly singleWriterLease: 'IMPLEMENTED';
   readonly strictPermissionOverSideChannel: 'IMPLEMENTED';
-  readonly nativeTerminalAttach: 'UNSUPPORTED';
-  readonly terminalTransport: 'UNIMPLEMENTED';
-  readonly successorProcessStart: 'UNIMPLEMENTED';
+  /** The provider runs on a real PTY; the Runtime owns the PTY host that holds the terminal. */
+  readonly ptyTransport: 'IMPLEMENTED' | 'UNSUPPORTED';
+  /** A successor provider process is started on the same conversation (RPC or native TUI). */
+  readonly successorProcessStart: 'IMPLEMENTED' | 'UNSUPPORTED';
+  /** Attaching a client to a native terminal this Runtime started. */
+  readonly nativeTerminalAttach: 'IMPLEMENTED' | 'UNSUPPORTED';
+  readonly terminalDetach: 'IMPLEMENTED' | 'UNSUPPORTED';
+  readonly releaseBackToAutomation: 'IMPLEMENTED' | 'UNSUPPORTED';
+  /** Attaching to an already-running `pi --mode rpc` process. Pi offers no primitive for it. */
+  readonly attachToLiveRpcProcess: 'UNSUPPORTED';
+  /**
+   * The permission mode and tool allowlist are re-applied by the Runtime on every successor argv, but
+   * the full cross-handoff matrix (every mode/tool combination, both directions, repeatedly) has not
+   * been measured; only single transitions with a real provider have.
+   */
+  readonly crossHandoffPermissionModeMatrix: 'PARTIAL';
+  /** A safe point while several tool calls from one assistant turn run in parallel. */
+  readonly parallelToolBatchSafePoint: 'UNVERIFIED';
+  readonly sessionCompactionDuringHandoff: 'UNSUPPORTED';
+  readonly ptyResize: 'UNSUPPORTED';
+  readonly windows: 'UNSUPPORTED';
 }
 
 export interface SessionHandoffStatusView {
@@ -108,6 +134,8 @@ export interface SessionHandoffStatusView {
   readonly handoff: SessionHandoffRequestView | null;
   readonly handoffHistory: readonly SessionHandoffRequestView[];
   readonly safePoint: SessionHandoffSafePointView;
+  /** The native terminal of this Session: the PTY, its projection cursor and its release evidence. */
+  readonly terminal: SessionTerminalView | null;
   readonly sideChannel: {
     readonly connected: boolean;
     readonly mode: string | null;
@@ -160,19 +188,38 @@ export interface SuccessorAdmission {
   readonly detail: string;
   readonly predecessorObservation: string;
   readonly successorMode: SessionIncarnationRecord['mode'] | null;
-  /** This Runtime records the decision; it does not start the successor process. */
-  readonly successorStarted: false;
-  readonly terminalTransport: 'UNIMPLEMENTED';
+  /** True only when a successor provider process was really started and recorded. */
+  readonly successorStarted: boolean;
+  readonly terminalTransport: 'PTY' | 'RPC' | 'NONE';
+  /** The successor incarnation this admission recorded, when one was started. */
+  readonly successorIncarnation: SessionIncarnationView | null;
+  /** The native terminal the successor runs on, when the successor is a HUMAN_TUI incarnation. */
+  readonly terminal: SessionTerminalView | null;
+  /** True when this answer replayed an admission that had already been applied. */
+  readonly replayed: boolean;
 }
 
-const capabilities: SessionHandoffCapabilities = Object.freeze({
-  runtimeContract: 'IMPLEMENTED',
-  singleWriterLease: 'IMPLEMENTED',
-  strictPermissionOverSideChannel: 'IMPLEMENTED',
-  nativeTerminalAttach: 'UNSUPPORTED',
-  terminalTransport: 'UNIMPLEMENTED',
-  successorProcessStart: 'UNIMPLEMENTED',
-});
+function capabilitiesFor(platform: 'unix' | 'windows'): SessionHandoffCapabilities {
+  const posix: 'IMPLEMENTED' | 'UNSUPPORTED' = platform === 'windows'
+    ? 'UNSUPPORTED' : 'IMPLEMENTED';
+  const capabilities: SessionHandoffCapabilities = {
+    runtimeContract: 'IMPLEMENTED',
+    singleWriterLease: 'IMPLEMENTED',
+    strictPermissionOverSideChannel: 'IMPLEMENTED',
+    ptyTransport: posix,
+    successorProcessStart: posix,
+    nativeTerminalAttach: posix,
+    terminalDetach: 'IMPLEMENTED',
+    releaseBackToAutomation: posix,
+    attachToLiveRpcProcess: 'UNSUPPORTED',
+    crossHandoffPermissionModeMatrix: 'PARTIAL',
+    parallelToolBatchSafePoint: 'UNVERIFIED',
+    sessionCompactionDuringHandoff: 'UNSUPPORTED',
+    ptyResize: 'UNSUPPORTED',
+    windows: 'UNSUPPORTED',
+  };
+  return Object.freeze(capabilities);
+}
 
 type ChannelSocket = Bun.Socket<{ channel: ChannelState }>;
 
@@ -258,10 +305,52 @@ function processIdentityOf(incarnation: SessionIncarnationRecord): {
   return { pid: candidate.pid, startToken: candidate.startToken };
 }
 
+/** What starting an automation successor (the `RETURN` direction) reports back. */
+export interface AutomationSuccessorStart {
+  readonly adapterId: string;
+  readonly projectId: string;
+  readonly sessionId: string;
+  readonly executionId: string;
+  readonly providerSessionId: string | null;
+  readonly sessionStorageRef: string | null;
+  readonly providerPid: number | null;
+  readonly processIdentity: unknown;
+}
+
 export interface SessionHandoffServiceOptions {
   readonly storage: Phase1Database;
   readonly runtimeHome: string;
   readonly resolveAdapter: (adapterId: string) => AgentAnswerAdapter;
+  /**
+   * The PTY transport. Without it the `TAKEOVER` successor cannot be started, and an admission says
+   * so instead of reporting a process that does not exist.
+   */
+  readonly terminal?: TerminalService;
+  /**
+   * Starts the RPC successor that takes the conversation back from a released terminal. The Runtime
+   * supplies this; the handoff service never launches an automation process itself, because the
+   * observation loop that owns it lives in the Agent Runtime coordinator.
+   */
+  readonly startAutomationSuccessor?: (input: {
+    readonly sessionId: string;
+    readonly commandId: string;
+    readonly reason: string;
+  }) => Promise<AutomationSuccessorStart>;
+  /** Stops an automation successor this Runtime started but refused to record. */
+  readonly releaseAutomationSuccessor?: (input: {
+    readonly executionId: string;
+    readonly reason: string;
+  }) => Promise<void>;
+  /**
+   * Cooperatively stops the automation provider of an Execution this Runtime still holds. The
+   * settled fact a handoff fence produces means the automation *should* stop itself; this hook lets
+   * the admission ask it to (and confirm), instead of reporting `PREDECESSOR_NOT_STOPPED` for
+   * something the Runtime itself is still holding.
+   */
+  readonly releaseAutomationProcess?: (input: {
+    readonly executionId: string;
+  }) => Promise<{ readonly released: boolean; readonly detail: string }>;
+  readonly platform?: 'unix' | 'windows';
   readonly environment?: Readonly<Record<string, string | undefined>>;
   readonly permissionMode?: () => 'FULL' | 'STRICT';
   readonly socketPath?: string;
@@ -288,8 +377,11 @@ export interface SessionHandoffServiceOptions {
  *    decision is an Attention of the existing `attention list`/`attention answer` face and can be
  *    refused when it belongs to an incarnation that is no longer the writer.
  *
- * The PTY transport and the successor process start are *not* implemented here and this service
- * never claims to have done them.
+ * ADR-0026 adds the transport half: an admitted handoff really starts a successor provider process
+ * on the same conversation (a PTY-hosted native terminal for `TAKEOVER`, an RPC process for
+ * `RETURN`), records the new incarnation and moves the single writer lease. Nothing here reports a
+ * successor it did not start, and nothing hands the conversation over while the predecessor's
+ * ownership is unclear.
  */
 export class SessionHandoffService {
   readonly #storage: Phase1Database;
@@ -301,6 +393,11 @@ export class SessionHandoffService {
   readonly #readProcessTable: SessionHandoffServiceOptions['readProcessTable'];
   readonly #readStartToken: SessionHandoffServiceOptions['readStartToken'];
   readonly #logger: (message: string, detail?: Readonly<Record<string, unknown>>) => void;
+  readonly #terminal: TerminalService | null;
+  readonly #startAutomationSuccessor: SessionHandoffServiceOptions['startAutomationSuccessor'];
+  readonly #releaseAutomationSuccessor: SessionHandoffServiceOptions['releaseAutomationSuccessor'];
+  readonly #releaseAutomationProcess: SessionHandoffServiceOptions['releaseAutomationProcess'];
+  readonly #capabilities: SessionHandoffCapabilities;
   readonly #channels = new Map<string, ChannelState>();
   /** Connections that said hello; a Session is only claimed once a frame needs it. */
   readonly #pendingChannels = new Set<ChannelState>();
@@ -317,6 +414,11 @@ export class SessionHandoffService {
     this.#readProcessTable = options.readProcessTable;
     this.#readStartToken = options.readStartToken;
     this.#logger = options.logger ?? (() => {});
+    this.#terminal = options.terminal ?? null;
+    this.#startAutomationSuccessor = options.startAutomationSuccessor;
+    this.#releaseAutomationSuccessor = options.releaseAutomationSuccessor;
+    this.#releaseAutomationProcess = options.releaseAutomationProcess;
+    this.#capabilities = capabilitiesFor(options.platform ?? 'unix');
     this.socketPath = options.socketPath ?? sessionHandoffSocketPath({
       ...options.environment, CODEESTRA_HOME: options.runtimeHome,
     });
@@ -382,6 +484,11 @@ export class SessionHandoffService {
     this.#listener = null;
     this.#channels.clear();
     rmSync(this.socketPath, { force: true });
+    // A terminal this Runtime owns must not outlive it. The stop is best-effort here (this method is
+    // called from the Runtime's shutdown path, which does not await it); the guarantee is the PTY
+    // host's own rule that a closed control pipe means "no writer is left to control this terminal",
+    // so even a hard Runtime exit terminates the provider instead of orphaning it.
+    void this.#terminal?.close();
   }
 
   /**
@@ -513,7 +620,8 @@ export class SessionHandoffService {
           decidedBy: latest.decidedBy,
         };
       })(),
-      capabilities,
+      terminal: this.#terminal?.view(input.sessionId) ?? null,
+      capabilities: this.#capabilities,
     };
   }
 
@@ -626,21 +734,61 @@ export class SessionHandoffService {
   }
 
   /**
-   * Decides whether a successor incarnation may be started, from recorded facts only. It never
-   * starts a process and never moves the lease: a successor that is admitted still needs the
-   * terminal transport, which this Runtime version does not implement.
+   * Decides whether a successor incarnation may be started, and — when the decision is ADMITTED —
+   * really starts it (ADR-0026).
+   *
+   * The decision itself is unchanged from ADR-0023: the safe point must be reached from structured
+   * facts, no Attention may be open, the writer lease must not belong to somebody else, and the
+   * predecessor's ownership must be `STOPPED` — an unverifiable predecessor is refused rather than
+   * optimistically taken over.
+   *
+   * What is new is that ADMITTED now does the transition end to end:
+   *
+   * 1. end the predecessor incarnation (it stops being the incarnation a decision can reach);
+   * 2. release its writer lease, so the successor can take it;
+   * 3. launch the successor provider on the *same* provider session file — a PTY-hosted native TUI
+   *    for `TAKEOVER`, an RPC process for `RETURN` — and verify it reopened the same conversation;
+   * 4. record the successor incarnation (which takes the single writer lease) and, for a terminal,
+   *    the terminal row;
+   * 5. mark the request ADMITTED.
+   *
+   * Every step is refused with a stable code when a fact is missing. A repeated call after a
+   * successful admission replays the recorded successor instead of starting a second process.
    */
   async admitSuccessor(input: {
     readonly projectId: string;
     readonly sessionId: string;
+    readonly commandId: string;
   }): Promise<SuccessorAdmission> {
     this.#requireSession(input.projectId, input.sessionId);
     const refusal = (code: string, detail: string, observation = 'NOT_CHECKED'): SuccessorAdmission => ({
       admitted: false, code, detail, predecessorObservation: observation,
-      successorMode: null, successorStarted: false, terminalTransport: 'UNIMPLEMENTED',
+      successorMode: null, successorStarted: false, terminalTransport: 'NONE',
+      successorIncarnation: null, terminal: null, replayed: false,
     });
     const request = this.#storage.getOpenSessionHandoffRequest(input.sessionId);
     if (request === null) {
+      // An admission that already happened is replayed from what it recorded: a repeated command
+      // must never start a second provider on one conversation.
+      const newest = this.#storage.listSessionHandoffRequests(input.sessionId).at(-1) ?? null;
+      if (newest !== null && newest.state === 'ADMITTED') {
+        const successor = this.#storage.listSessionIncarnations(input.sessionId)
+          .find((incarnation) => incarnation.predecessorIncarnationId === newest.incarnationId) ?? null;
+        if (successor !== null) {
+          return {
+            admitted: true, code: 'ADMITTED',
+            detail: 'this handoff was already admitted; the recorded successor incarnation is'
+              + ' reported instead of starting a second provider process',
+            predecessorObservation: 'STOPPED',
+            successorMode: successor.mode,
+            successorStarted: true,
+            terminalTransport: successor.mode === 'HUMAN_TUI' ? 'PTY' : 'RPC',
+            successorIncarnation: incarnationView(successor, processTreeOf(successor)),
+            terminal: this.#terminal?.view(input.sessionId) ?? null,
+            replayed: true,
+          };
+        }
+      }
       return refusal('HANDOFF_NOT_REQUESTED', 'No handoff request is open for this Session');
     }
     const view = this.status({ projectId: input.projectId, sessionId: input.sessionId });
@@ -651,6 +799,11 @@ export class SessionHandoffService {
     if (view.permission !== null) {
       return refusal('WAITING_FOR_ATTENTION',
         `Attention ${view.permission.attentionId} is still open; answer or cancel it first`);
+    }
+    if (view.executionState !== 'RUNNING') {
+      return refusal('EXECUTION_NOT_ACTIVE',
+        `Execution ${view.executionId} is ${view.executionState}; a handoff cannot take over a`
+        + ' finished Execution');
     }
     const incarnation = this.#storage.getSessionIncarnation(request.incarnationId);
     if (incarnation === null) {
@@ -667,11 +820,35 @@ export class SessionHandoffService {
         'No provider process tree was captured while the predecessor was alive, so its descendants'
         + ' cannot be cleared: refusing to start a successor', 'UNKNOWN');
     }
-    const observation = await inspectProviderProcessOwnership({
+    let observation = await inspectProviderProcessOwnership({
       tree,
       ...(this.#readProcessTable === undefined ? {} : { readTable: this.#readProcessTable }),
       ...(this.#readStartToken === undefined ? {} : { readStartToken: this.#readStartToken }),
     });
+    if (observation.state === 'ALIVE' && incarnation.mode === 'AUTOMATED_RPC'
+      && this.#releaseAutomationProcess !== undefined) {
+      // The automation is still alive after its own settled fact. That is the normal race: the
+      // Runtime's side channel learns about the fence before the Adapter has stopped the process it
+      // owns. The Runtime stops what it holds and checks the process table again — a process it does
+      // not hold is never signalled, and a provider that survives the stop is still refused below.
+      let released = false;
+      try {
+        const stop = await this.#releaseAutomationProcess({ executionId: view.executionId });
+        released = stop.released;
+      } catch (error) {
+        this.#logger('the automation predecessor could not be released', {
+          sessionId: input.sessionId,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+      if (released) {
+        observation = await inspectProviderProcessOwnership({
+          tree,
+          ...(this.#readProcessTable === undefined ? {} : { readTable: this.#readProcessTable }),
+          ...(this.#readStartToken === undefined ? {} : { readStartToken: this.#readStartToken }),
+        });
+      }
+    }
     if (observation.state === 'ALIVE') {
       return refusal('PREDECESSOR_NOT_STOPPED', observation.detail, 'ALIVE');
     }
@@ -681,22 +858,470 @@ export class SessionHandoffService {
     if (observation.state === 'UNVERIFIABLE') {
       return refusal('PREDECESSOR_UNVERIFIED', observation.detail, 'UNVERIFIABLE');
     }
+    const successorMode: SessionIncarnationRecord['mode'] = incarnation.mode === 'AUTOMATED_RPC'
+      ? 'HUMAN_TUI' : 'AUTOMATED_RPC';
+    if (successorMode === 'HUMAN_TUI') {
+      return this.#admitTerminalSuccessor({
+        request, incarnation, observation, view, commandId: input.commandId,
+      });
+    }
+    return this.#admitAutomationSuccessor({
+      request, incarnation, observation, view, commandId: input.commandId,
+    });
+  }
+
+  /** RPC → native TUI: the transport this lane adds. */
+  async #admitTerminalSuccessor(input: {
+    readonly request: SessionHandoffRequestRecord;
+    readonly incarnation: SessionIncarnationRecord;
+    readonly observation: ProviderOwnershipObservation;
+    readonly view: SessionHandoffStatusView;
+    readonly commandId: string;
+  }): Promise<SuccessorAdmission> {
+    const { request, incarnation, observation } = input;
+    const refusal = (code: string, detail: string): SuccessorAdmission => ({
+      admitted: false, code, detail, predecessorObservation: observation.state,
+      successorMode: 'HUMAN_TUI', successorStarted: false, terminalTransport: 'NONE',
+      successorIncarnation: null, terminal: this.#terminal?.view(request.sessionId) ?? null,
+      replayed: false,
+    });
+    const terminalService = this.#terminal;
+    if (terminalService === null) {
+      return refusal('TERMINAL_TRANSPORT_UNAVAILABLE',
+        'This Runtime has no terminal transport configured, so no native terminal was started');
+    }
+    const sessionFile = incarnation.sessionStorageRef;
+    if (sessionFile === null) {
+      return refusal('SESSION_FILE_UNRECORDED',
+        'The predecessor has no recorded provider session file, so a successor cannot reopen the'
+        + ' same conversation');
+    }
+    const plan = this.#storage.getAgentStartPlanForSession(request.sessionId);
+    if (plan === null) {
+      return refusal('SESSION_PLAN_UNAVAILABLE',
+        'The Runtime cannot reconstruct this Session\'s workspace and revision, so it refuses to'
+        + ' start a successor with different inputs');
+    }
+    if (this.#storage.getRunningSessionTerminal(request.sessionId) !== null) {
+      return refusal('TERMINAL_ALREADY_RUNNING',
+        'This Session already has a running native terminal');
+    }
+    // The conversation must not be handed to a second writer: the predecessor stops claiming to be
+    // current, and its lease is released, before anything is launched.
+    this.#storage.markSessionIncarnationExited({
+      incarnationId: incarnation.id,
+      at: this.#now(),
+      exit: { kind: 'HANDOFF', ownership: observation.state, detail: observation.detail,
+        sessionFile },
+      detail: `superseded by a native terminal successor after ${observation.detail}`,
+    });
+    this.#storage.releaseSessionWriterLeaseForSession({
+      sessionId: request.sessionId, reason: 'handoff to a native terminal', releasedAt: this.#now(),
+    });
+    let launched;
+    try {
+      launched = await terminalService.launchTerminal({
+        sessionId: request.sessionId,
+        projectId: plan.projectId,
+        adapterId: plan.adapterId,
+        workspacePath: plan.workspacePath,
+        sessionFile,
+        agentConfig: plan.agentConfig,
+      });
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error
+        ? String(error.code) : 'TERMINAL_LAUNCH_FAILED';
+      return refusal(code, `The native terminal could not be started: `
+        + `${error instanceof Error ? error.message : String(error)}`);
+    }
+    // Identity is the *provider* process (that is the pid the gate extension reports in its hello),
+    // captured while it is alive so a later ownership check can tell it from a reused pid.
+    const providerIdentity = launched.providerStartToken === null
+      ? { pid: launched.providerPid, kind: 'PTY_PROVIDER' }
+      : { pid: launched.providerPid, startToken: launched.providerStartToken,
+        adapterId: plan.adapterId, adapterVersion: plan.adapterVersion, kind: 'PTY_PROVIDER',
+        capturedAt: this.#now() };
+    let write;
+    try {
+      write = this.#storage.recordSessionIncarnation({
+        id: this.#randomUUID(),
+        sessionId: request.sessionId,
+        mode: 'HUMAN_TUI',
+        commandId: `handoff:${request.id}`,
+        providerPid: launched.providerPid,
+        processIdentity: providerIdentity,
+        // The tree is rooted at the PTY host (the session leader and the provider's parent), so it
+        // covers the helper *and* the provider and any tool child the provider starts.
+        processTree: launched.processTree,
+        providerSessionId: incarnation.providerSessionId,
+        sessionStorageRef: sessionFile,
+        createdAt: this.#now(),
+      });
+    } catch (error) {
+      // No successor incarnation means no writer may stay alive: the launched terminal is stopped
+      // instead of being left as an unowned provider in the user's workspace.
+      await terminalService.stopTerminal({ sessionId: request.sessionId,
+        reason: 'the successor incarnation could not be recorded', state: 'STOPPED' });
+      return refusal('SUCCESSOR_NOT_RECORDED',
+        `The successor incarnation could not be recorded: `
+        + `${error instanceof Error ? error.message : String(error)}`);
+    }
+    terminalService.commitTerminal({ launched, incarnationId: write.incarnation.id });
     this.#storage.markSessionHandoffAdmitted({
       requestId: request.id,
       at: this.#now(),
-      detail: `safe point reached and the predecessor is quiescent: ${observation.detail}`,
+      detail: `native terminal started as incarnation ${write.incarnation.incarnationNumber};`
+        + ` predecessor ownership ${observation.state}: ${observation.detail}`,
     });
     return {
       admitted: true,
       code: 'ADMITTED',
-      detail: 'The Runtime-side preconditions are satisfied; the terminal transport is not'
-        + ' implemented in this Runtime version, so no successor process was started and the writer'
-        + ' lease was not moved',
+      detail: `the predecessor is quiescent (${observation.detail}) and a native Pi terminal was`
+        + ` started on the same provider session file (incarnation`
+        + ` ${write.incarnation.incarnationNumber}, PTY ${launched.ptySlave})`,
       predecessorObservation: observation.state,
-      successorMode: incarnation.mode === 'AUTOMATED_RPC' ? 'HUMAN_TUI' : 'AUTOMATED_RPC',
-      successorStarted: false,
-      terminalTransport: 'UNIMPLEMENTED',
+      successorMode: 'HUMAN_TUI',
+      successorStarted: true,
+      terminalTransport: 'PTY',
+      successorIncarnation: incarnationView(write.incarnation,
+        processTreeOf(write.incarnation) ?? launched.processTree),
+      terminal: terminalService.view(request.sessionId),
+      replayed: false,
     };
+  }
+
+  /** Native TUI → RPC: the return direction, after an explicit release. */
+  async #admitAutomationSuccessor(input: {
+    readonly request: SessionHandoffRequestRecord;
+    readonly incarnation: SessionIncarnationRecord;
+    readonly observation: ProviderOwnershipObservation;
+    readonly view: SessionHandoffStatusView;
+    readonly commandId: string;
+  }): Promise<SuccessorAdmission> {
+    const { request, incarnation, observation } = input;
+    const refusal = (code: string, detail: string): SuccessorAdmission => ({
+      admitted: false, code, detail, predecessorObservation: observation.state,
+      successorMode: 'AUTOMATED_RPC', successorStarted: false, terminalTransport: 'NONE',
+      successorIncarnation: null, terminal: this.#terminal?.view(request.sessionId) ?? null,
+      replayed: false,
+    });
+    const running = this.#storage.getRunningSessionTerminal(request.sessionId);
+    if (running !== null) {
+      return refusal('TERMINAL_STILL_RUNNING',
+        `Terminal ${running.id} is still RUNNING; release it explicitly before handing the`
+        + ' conversation back to automation');
+    }
+    const start = this.#startAutomationSuccessor;
+    if (start === undefined) {
+      return refusal('AUTOMATION_SUCCESSOR_UNAVAILABLE',
+        'This Runtime cannot start an automation successor process, so the conversation was not'
+        + ' handed back');
+    }
+    const sessionFile = incarnation.sessionStorageRef;
+    if (sessionFile === null) {
+      return refusal('SESSION_FILE_UNRECORDED',
+        'The predecessor has no recorded provider session file, so a successor cannot reopen the'
+        + ' same conversation');
+    }
+    this.#storage.markSessionIncarnationExited({
+      incarnationId: incarnation.id,
+      at: this.#now(),
+      exit: { kind: 'RELEASE', ownership: observation.state, detail: observation.detail,
+        sessionFile },
+      detail: `released by an explicit terminal release after ${observation.detail}`,
+    });
+    this.#storage.releaseSessionWriterLeaseForSession({
+      sessionId: request.sessionId, reason: 'handoff back to automation', releasedAt: this.#now(),
+    });
+    let started: AutomationSuccessorStart;
+    try {
+      started = await start({
+        sessionId: request.sessionId,
+        commandId: `handoff:${request.id}`,
+        reason: 'handoff back to automation after an explicit terminal release',
+      });
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error
+        ? String(error.code) : 'AUTOMATION_SUCCESSOR_FAILED';
+      return refusal(code, `The automation successor could not be started: `
+        + `${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (started.sessionStorageRef !== null && started.sessionStorageRef !== sessionFile) {
+      // A successor that reopened a different file is a second conversation wearing this Session's
+      // identity; it is stopped rather than recorded.
+      await this.#stopAutomationSuccessor(started, 'the successor reopened a different session file');
+      return refusal('SESSION_FILE_CHANGED',
+        `The successor reopened ${started.sessionStorageRef} instead of ${sessionFile}`);
+    }
+    const identity = started.processIdentity;
+    let tree: ProviderProcessTree | null = null;
+    const identityPid = typeof identity === 'object' && identity !== null
+      && typeof (identity as { pid?: unknown }).pid === 'number'
+      ? (identity as { pid: number }).pid : started.providerPid;
+    const identityToken = typeof identity === 'object' && identity !== null
+      && typeof (identity as { startToken?: unknown }).startToken === 'string'
+      ? (identity as { startToken: string }).startToken : null;
+    if (identityPid !== null && identityToken !== null) {
+      try {
+        tree = await captureProviderProcessTree({
+          pid: identityPid, startToken: identityToken, now: this.#now,
+          ...(this.#readProcessTable === undefined ? {} : { readTable: this.#readProcessTable }),
+          ...(this.#readStartToken === undefined ? {} : { readStartToken: this.#readStartToken }),
+        });
+      } catch (error) {
+        this.#logger('the successor process tree could not be captured', {
+          sessionId: request.sessionId,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    let write;
+    try {
+      write = this.#storage.recordSessionIncarnation({
+        id: this.#randomUUID(),
+        sessionId: request.sessionId,
+        mode: 'AUTOMATED_RPC',
+        commandId: `handoff:${request.id}`,
+        providerPid: identityPid,
+        processIdentity: identity,
+        processTree: tree,
+        providerSessionId: started.providerSessionId,
+        sessionStorageRef: sessionFile,
+        createdAt: this.#now(),
+      });
+    } catch (error) {
+      await this.#stopAutomationSuccessor(started, 'the successor incarnation could not be recorded');
+      return refusal('SUCCESSOR_NOT_RECORDED',
+        `The successor incarnation could not be recorded: `
+        + `${error instanceof Error ? error.message : String(error)}`);
+    }
+    this.#storage.markSessionHandoffAdmitted({
+      requestId: request.id,
+      at: this.#now(),
+      detail: `automation successor started as incarnation`
+        + ` ${write.incarnation.incarnationNumber} on the same provider session file`,
+    });
+    return {
+      admitted: true,
+      code: 'ADMITTED',
+      detail: `the released terminal is quiescent (${observation.detail}) and an automation process`
+        + ` resumed the same provider session file (incarnation`
+        + ` ${write.incarnation.incarnationNumber})`,
+      predecessorObservation: observation.state,
+      successorMode: 'AUTOMATED_RPC',
+      successorStarted: true,
+      terminalTransport: 'RPC',
+      successorIncarnation: incarnationView(write.incarnation,
+        processTreeOf(write.incarnation) ?? tree),
+      terminal: this.#terminal?.view(request.sessionId) ?? null,
+      replayed: false,
+    };
+  }
+
+  /**
+   * The explicit release of a native terminal (ADR-0026 D05/D06). It is one command, not a second
+   * confirmation: the Runtime records the RETURN intent, writes the terminal's own release byte,
+   * waits for the provider process to exit, and then — only if ownership is cleared and the provider
+   * session file still holds the predecessor's entries — hands the conversation back to automation.
+   *
+   * A release that cannot be proven is reported as unfinished; the terminal is not killed (a running
+   * tool is never aborted for a handoff) and no successor is started.
+   */
+  async releaseTerminal(input: {
+    readonly projectId: string;
+    readonly sessionId: string;
+    readonly commandId: string;
+    readonly resumeAutomation?: boolean;
+  }): Promise<{
+    readonly released: boolean;
+    readonly code: string;
+    readonly detail: string;
+    readonly terminal: SessionTerminalView | null;
+    readonly release: {
+      readonly exit: { readonly code: number | null; readonly signal: string | null } | null;
+      readonly predecessorObservation: string;
+      readonly sessionFile: unknown;
+    };
+    readonly successor: SuccessorAdmission | null;
+  }> {
+    const session = this.#requireSession(input.projectId, input.sessionId);
+    const terminalService = this.#terminal;
+    if (terminalService === null) {
+      throw new SessionHandoffServiceError('TERMINAL_TRANSPORT_UNAVAILABLE',
+        'This Runtime has no terminal transport configured');
+    }
+    const running = this.#storage.getRunningSessionTerminal(input.sessionId);
+    if (running === null) {
+      throw new SessionHandoffServiceError('TERMINAL_NOT_RUNNING',
+        'This Session has no running native terminal to release');
+    }
+    // The RETURN intent is persisted before the release byte is written, so a crash in between is
+    // explainable from the recorded request rather than invisible.
+    const open = this.#storage.getOpenSessionHandoffRequest(input.sessionId);
+    if (open !== null && open.kind !== 'RETURN') {
+      throw new SessionHandoffServiceError('HANDOFF_KIND_MISMATCH',
+        `This Session has an open ${open.kind} handoff request; cancel it before releasing the terminal`);
+    }
+    const recorded = open === null ? this.#storage.recordSessionHandoffRequest({
+      id: this.#randomUUID(),
+      sessionId: input.sessionId,
+      executionId: session.executionId,
+      incarnationId: running.incarnationId,
+      kind: 'RETURN',
+      commandId: `release:${input.commandId}`,
+      createdAt: this.#now(),
+    }) : null;
+    const request = recorded === null ? (open as SessionHandoffRequestRecord) : recorded.request;
+    const outcome = await terminalService.release({
+      sessionId: input.sessionId,
+      commandId: input.commandId,
+    });
+    if (!outcome.released) {
+      return { released: false, code: outcome.code, detail: outcome.detail,
+        terminal: terminalService.view(input.sessionId), release: {
+          exit: outcome.exit === null ? null
+            : { code: outcome.exit.code, signal: outcome.exit.signal },
+          predecessorObservation: outcome.predecessorObservation,
+          sessionFile: outcome.sessionFile,
+        }, successor: null };
+    }
+    // A terminal release is its own safe point: no fence is involved (the human terminal was
+    // released explicitly), so the facts *are* the evidence: recorded above by `release`.
+    try {
+      this.#storage.markSessionTerminalHandoffSafePoint({
+        requestId: request.id,
+        at: this.#now(),
+        detail: `terminal ${outcome.terminalId} released: ${outcome.detail}`,
+      });
+    } catch (error) {
+      this.#logger('terminal release safe point could not be recorded', {
+        sessionId: input.sessionId,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+    if (input.resumeAutomation === false) {
+      return { released: true, code: outcome.code, detail: outcome.detail,
+        terminal: terminalService.view(input.sessionId), release: {
+          exit: outcome.exit === null ? null
+            : { code: outcome.exit.code, signal: outcome.exit.signal },
+          predecessorObservation: outcome.predecessorObservation,
+          sessionFile: outcome.sessionFile,
+        }, successor: null };
+    }
+    const successor = await this.admitSuccessor({
+      projectId: input.projectId,
+      sessionId: input.sessionId,
+      commandId: `${input.commandId}:successor`,
+    });
+    return { released: true, code: outcome.code, detail: outcome.detail,
+      terminal: terminalService.view(input.sessionId), release: {
+        exit: outcome.exit === null ? null
+          : { code: outcome.exit.code, signal: outcome.exit.signal },
+        predecessorObservation: outcome.predecessorObservation,
+        sessionFile: outcome.sessionFile,
+      }, successor };
+  }
+
+  /** Attaches this client to the running native terminal; a second writer gets `ATTACHMENT_BUSY`. */
+  attachTerminal(input: {
+    readonly projectId: string;
+    readonly sessionId: string;
+    readonly commandId: string;
+    readonly holderRef: string;
+    readonly kind?: 'WRITER' | 'OBSERVER';
+    readonly since?: number;
+  }): {
+    readonly terminal: SessionTerminalView | null;
+    readonly attachment: {
+      readonly id: string; readonly kind: string; readonly holderRef: string;
+      readonly cursorAtAttach: number; readonly attachedAt: number };
+    readonly stream: { readonly cursor: number; readonly data: string; readonly truncated: boolean };
+  } {
+    this.#requireSession(input.projectId, input.sessionId);
+    const terminalService = this.#requireTerminalTransport();
+    const attached = terminalService.attach({
+      sessionId: input.sessionId,
+      commandId: input.commandId,
+      holderRef: input.holderRef,
+      kind: input.kind ?? 'WRITER',
+      ...(input.since === undefined ? {} : { since: input.since }),
+    });
+    return {
+      terminal: terminalService.view(input.sessionId),
+      attachment: {
+        id: attached.attachment.id,
+        kind: attached.attachment.kind,
+        holderRef: attached.attachment.holderRef,
+        cursorAtAttach: attached.attachment.cursorAtAttach,
+        attachedAt: attached.attachment.attachedAt,
+      },
+      stream: { cursor: attached.cursor, data: attached.data, truncated: attached.truncated },
+    };
+  }
+
+  /** Detaches this client. The terminal and the provider keep running. */
+  detachTerminal(input: {
+    readonly projectId: string;
+    readonly sessionId: string;
+    readonly holderRef: string;
+    readonly since?: number;
+  }): { readonly terminal: SessionTerminalView | null; readonly detached: boolean;
+    readonly code: string; readonly stream: { readonly cursor: number; readonly data: string;
+      readonly truncated: boolean } } {
+    this.#requireSession(input.projectId, input.sessionId);
+    const terminalService = this.#requireTerminalTransport();
+    const detached = terminalService.detach({
+      sessionId: input.sessionId,
+      holderRef: input.holderRef,
+      ...(input.since === undefined ? {} : { since: input.since }),
+    });
+    return { terminal: terminalService.view(input.sessionId), detached: detached.detached,
+      code: detached.code,
+      stream: { cursor: detached.cursor, data: detached.data, truncated: detached.truncated } };
+  }
+
+  /** Scriptable incremental read of the projected terminal stream. */
+  readTerminal(input: { readonly projectId: string; readonly sessionId: string;
+    readonly since?: number }): ReturnType<TerminalService['read']> {
+    this.#requireSession(input.projectId, input.sessionId);
+    return this.#requireTerminalTransport().read({
+      sessionId: input.sessionId,
+      ...(input.since === undefined ? {} : { since: input.since }),
+    });
+  }
+
+  /** Writes bytes to the running terminal. Not an approval channel: STRICT decisions stay Attentions. */
+  writeTerminal(input: { readonly sessionId: string; readonly data: string }): {
+    readonly terminalId: string; readonly cursor: number } {
+    return this.#requireTerminalTransport().write(input);
+  }
+
+  #requireTerminalTransport(): TerminalService {
+    if (this.#terminal === null) {
+      throw new SessionHandoffServiceError('TERMINAL_TRANSPORT_UNAVAILABLE',
+        'This Runtime has no terminal transport configured');
+    }
+    return this.#terminal;
+  }
+
+  async #stopAutomationSuccessor(started: AutomationSuccessorStart, reason: string): Promise<void> {
+    // The coordinator owns the process it started, so the stop goes through the same release path
+    // the Runtime uses for a normal pause/cancel instead of a second kill mechanism.
+    const stop = this.#releaseAutomationSuccessor;
+    if (stop === undefined) {
+      this.#logger('a misidentified automation successor could not be stopped', {
+        sessionId: started.sessionId, reason,
+      });
+      return;
+    }
+    try {
+      await stop({ executionId: started.executionId, reason });
+    } catch (error) {
+      this.#logger('stopping the automation successor failed', {
+        sessionId: started.sessionId,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /** True when this Attention came from the Runtime side channel rather than a provider dialog. */
@@ -934,6 +1559,14 @@ export class SessionHandoffService {
     }
     if (frame['kind'] === 'permission_request') {
       this.#recordPermissionRequest(state, frame, resolved);
+      return;
+    }
+    if (frame['kind'] === 'session_shutdown') {
+      // Supporting evidence only: the release decision is taken from the provider process exit, the
+      // ownership check and the provider session file (this notification is not reliably delivered).
+      this.#terminal?.noteProviderShutdown({
+        sessionId: resolved.sessionId, at: this.#now(),
+      });
       return;
     }
   }

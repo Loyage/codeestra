@@ -738,6 +738,11 @@ function usage(): never {
     [--kind AUTOMATED_RPC|TERMINAL_ATTACHMENT]
   bun run codeestra session handoff writer release <project-id> <session-id> --holder <ref>
   bun run codeestra session handoff admit <project-id> <session-id>
+  bun run codeestra session handoff attach <project-id> <session-id> --holder <ref> [--writer] [--since <cursor>]
+  bun run codeestra session handoff detach <project-id> <session-id> --holder <ref>
+  bun run codeestra session handoff release <project-id> <session-id> [--no-resume]
+  bun run codeestra session handoff terminal read <project-id> <session-id> [--since <cursor>]
+  bun run codeestra session handoff terminal write <project-id> <session-id> --text <text>
   bun run codeestra task result capture <project-id> <task-id> [execution-id]
   bun run codeestra task result prepare <project-id> <task-id> [execution-id]   # strict mode
   bun run codeestra task result commit <project-id> <task-id> <authorization-id> --confirm
@@ -787,6 +792,13 @@ main inside the worktree that has it checked out and then runs there: bun instal
 bun run build:ui, bun run codeestra stop, bun run codeestra status. The restart is recorded only when
 every step exits 0 and the restarted Runtime answers READY. STRICT additionally needs promotion
 approve for that exact triple; a dev/main/evidence move makes it invalid. Only SUCCEEDED exits 0.
+
+session handoff attach/detach/release are the native terminal face: attach returns the projected
+terminal stream from a cursor (at most one writer attachment; a second one exits 1 with
+ATTACHMENT_BUSY), detach leaves the terminal and the provider running, and release writes the
+terminal's own release byte, verifies the provider process exited and the provider session file still
+holds the conversation, then hands it back to automation on the same session file. Exit code 1 means
+the release or the successor start could not be confirmed — never "probably fine".
 
 session handoff projects the Runtime-side handoff contract: the provider incarnation history, the
 single writer lease, the handoff fence/safe point and the admission decision. A second writer lease
@@ -1130,7 +1142,11 @@ try {
     // anything else starting with `--` is a usage error rather than a silently ignored flag.
     const positional: string[] = [];
     let holderRef: string | undefined;
-    let holderKind = 'TERMINAL_ATTACHMENT';
+    let holderKind = 'AUTOMATED_RPC';
+    let attachmentKind: 'WRITER' | 'OBSERVER' = 'OBSERVER';
+    let since: number | undefined;
+    let terminalText: string | undefined;
+    let noResume = false;
     for (let index = 0; index < tokens.length; index += 1) {
       const token = tokens[index] as string;
       const value = tokens[index + 1];
@@ -1142,6 +1158,17 @@ try {
         index += 1;
         continue;
       }
+      if (token === '--writer') { attachmentKind = 'WRITER'; continue; }
+      if (token === '--observer') { attachmentKind = 'OBSERVER'; continue; }
+      if (token === '--no-resume') { noResume = true; continue; }
+      if (token === '--since' && value !== undefined) {
+        const parsed = Number(value);
+        if (!Number.isSafeInteger(parsed) || parsed < 0) usage();
+        since = parsed;
+        index += 1;
+        continue;
+      }
+      if (token === '--text' && value !== undefined) { terminalText = value; index += 1; continue; }
       if (token.startsWith('--')) usage();
       positional.push(token);
     }
@@ -1196,10 +1223,80 @@ try {
         commandId: crypto.randomUUID(),
         projectId,
         sessionId,
-      }) as { readonly admitted: boolean };
+      }) as { readonly admitted: boolean; readonly successorStarted: boolean };
       print(admission);
       // A refused admission keeps the predecessor as the writer; exit code 0 would claim otherwise.
       if (!admission.admitted) process.exit(1);
+    } else if (subcommand === 'attach') {
+      const [projectId, sessionId, ...extra] = positional;
+      if (projectId === undefined || sessionId === undefined || extra.length !== 0) usage();
+      if (holderRef === undefined) usage();
+      const attached = await call({
+        command: 'session.handoff.attach',
+        commandId: crypto.randomUUID(),
+        projectId,
+        sessionId,
+        holderRef,
+        kind: attachmentKind,
+        ...(since === undefined ? {} : { since }),
+      }) as { readonly attachment: { readonly id: string }; readonly stream: { readonly cursor: number } };
+      print(attached);
+      // The attachment id and the cursor are what a script needs to detach / keep reading.
+      process.exitCode = 0;
+    } else if (subcommand === 'detach') {
+      const [projectId, sessionId, ...extra] = positional;
+      if (projectId === undefined || sessionId === undefined || extra.length !== 0) usage();
+      if (holderRef === undefined) usage();
+      const detached = await call({
+        command: 'session.handoff.detach',
+        commandId: crypto.randomUUID(),
+        projectId,
+        sessionId,
+        holderRef,
+        ...(since === undefined ? {} : { since }),
+      }) as { readonly detached: boolean };
+      print(detached);
+      // Detaching something this holder does not own is a refusal, not a silent success.
+      if (!detached.detached) process.exit(1);
+    } else if (subcommand === 'release') {
+      const [projectId, sessionId, ...extra] = positional;
+      if (projectId === undefined || sessionId === undefined || extra.length !== 0) usage();
+      const released = await call({
+        command: 'session.handoff.release',
+        commandId: crypto.randomUUID(),
+        projectId,
+        sessionId,
+        ...(noResume ? { resumeAutomation: false } : {}),
+      }) as { readonly released: boolean; readonly successor: { readonly admitted: boolean } | null };
+      print(released);
+      // A release that could not be confirmed, or a successor that could not be started, is not a
+      // completed hand-back: the exit code says so instead of reporting success.
+      if (!released.released || (released.successor !== null && !released.successor.admitted)) {
+        process.exit(1);
+      }
+    } else if (subcommand === 'terminal') {
+      // The projected terminal stream is the CLI-complete form of the native terminal: reading it is
+      // a normal command with a stable cursor, and writing to it is input, not an approval.
+      const [terminalAction, projectId, sessionId, ...extra] = positional;
+      if (terminalAction !== 'read' && terminalAction !== 'write') usage();
+      if (projectId === undefined || sessionId === undefined || extra.length !== 0) usage();
+      if (terminalAction === 'read') {
+        print(await call({
+          command: 'session.handoff.terminal.read', projectId, sessionId,
+          ...(since === undefined ? {} : { since }),
+        }));
+      } else {
+        if (terminalText === undefined) usage();
+        const written = await call({
+          command: 'session.handoff.terminal.write',
+          projectId,
+          sessionId,
+          commandId: crypto.randomUUID(),
+          dataBase64: Buffer.from(terminalText, 'utf8').toString('base64'),
+        }) as { readonly cursor: number };
+        print(written);
+        process.exitCode = 0;
+      }
     } else {
       usage();
     }

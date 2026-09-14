@@ -60,16 +60,32 @@ export function piSessionDirectory(input: {
  * Phase 1 production registry. Pi is the only registered Adapter; a deterministic fake is
  * never registered here because a fake Session must not be reported as a real execution.
  */
-export function createPiAdapterRegistry(input: {
+/**
+ * One place that decides what a *controlled* Pi launch consists of: which gate and question
+ * extensions are loaded, which session directory holds provider session files, which platform, and
+ * the real environment the provider needs.
+ *
+ * The RPC adapter and the native terminal transport both launch a controlled provider, and a handoff
+ * between them must not change any of these (ADR-0010 D06). Resolving them twice would let the two
+ * transports drift apart, so both read them from here.
+ */
+export function piControlledLaunch(input: {
   readonly runtimeHome: string;
   readonly environment?: Readonly<Record<string, string | undefined>>;
-}): AdapterRegistry {
+}): {
+  readonly environment: Record<string, string>;
+  readonly piExecutable: string;
+  readonly gateExtensionPath: string;
+  readonly questionExtensionPath: string;
+  readonly sessionDir: string;
+  readonly platform: 'unix' | 'windows';
+} {
   const environment = input.environment ?? {};
   // The Adapter spawns the provider process, so it needs the real environment: an empty env has no
   // PATH and `pi` could never be launched from the production Runtime.
-  const adapterEnvironment: Record<string, string> = {};
+  const launchEnvironment: Record<string, string> = {};
   for (const [name, value] of Object.entries(environment)) {
-    if (value !== undefined) adapterEnvironment[name] = value;
+    if (value !== undefined) launchEnvironment[name] = value;
   }
   const gateExtensionPath = environment['CODEESTRA_PI_GATE_EXTENSION']
     ?? resolve(import.meta.dir, '../../../packages/agent-adapters/src/pi-gate-extension.ts');
@@ -78,6 +94,25 @@ export function createPiAdapterRegistry(input: {
   const questionExtensionPath = environment['CODEESTRA_PI_QUESTION_EXTENSION']
     ?? resolve(import.meta.dir, '../../../packages/agent-adapters/src/pi-question-extension.ts');
   const sessionDir = piSessionDirectory({ runtimeHome: input.runtimeHome, environment });
+  return {
+    environment: launchEnvironment,
+    piExecutable: environment['CODEESTRA_PI_EXECUTABLE'] ?? 'pi',
+    gateExtensionPath,
+    questionExtensionPath,
+    sessionDir,
+    platform: environment['CODEESTRA_PI_PLATFORM'] === 'windows' ? 'windows' : 'unix',
+  };
+}
+
+export function createPiAdapterRegistry(input: {
+  readonly runtimeHome: string;
+  readonly environment?: Readonly<Record<string, string | undefined>>;
+}): AdapterRegistry {
+  const launch = piControlledLaunch(input);
+  const adapterEnvironment = launch.environment;
+  const gateExtensionPath = launch.gateExtensionPath;
+  const questionExtensionPath = launch.questionExtensionPath;
+  const sessionDir = launch.sessionDir;
   mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
   // Model, provider, and thinking level are not baked in here: the Runtime resolves them per
   // Execution from the environment, project, and global Agent configuration scopes and passes
@@ -85,11 +120,11 @@ export function createPiAdapterRegistry(input: {
   // configuration change applies to the next Session without restarting the Runtime.
   const registry = new AdapterRegistry();
   registry.register(new PiRpcAdapter({
-    piExecutable: environment['CODEESTRA_PI_EXECUTABLE'] ?? 'pi',
+    piExecutable: launch.piExecutable,
     gateExtensionPath,
     questionExtensionPath,
     sessionDir,
-    platform: environment['CODEESTRA_PI_PLATFORM'] === 'windows' ? 'windows' : 'unix',
+    platform: launch.platform,
     environment: adapterEnvironment,
   }));
   return registry;

@@ -773,7 +773,10 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
   }),
   /**
    * Evaluates whether a successor incarnation may be started, from recorded facts: safe point,
-   * quiescent predecessor, no open Attention. It records the decision and starts nothing.
+   * quiescent predecessor, no open Attention. When the decision is ADMITTED the Runtime starts the
+   * successor provider on the same conversation in a PTY (takeover) or as an RPC process (return),
+   * records the new incarnation and moves the writer lease; the response states which of the two it
+   * actually did. A refused admission starts nothing.
    */
   z.strictObject({
     ...requestBase,
@@ -781,6 +784,64 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     commandId: z.string().uuid(),
     projectId: z.string().uuid(),
     sessionId: z.string().uuid(),
+  }),
+  /**
+   * Attaches this client to the running native terminal and returns the projected stream since a
+   * cursor. At most one WRITER attachment exists per terminal: a second writer is answered
+   * `ATTACHMENT_BUSY` with the current holder named (never queued, never approved).
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('session.handoff.attach'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    holderRef: z.string().min(1).max(200),
+    kind: z.enum(['WRITER', 'OBSERVER']).optional(),
+    /** Terminal byte cursor to resume from; 0 means "from the start of the retained buffer". */
+    since: z.number().int().min(0).optional(),
+  }),
+  /** Releases this client's attachment. The terminal and the provider keep running. */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('session.handoff.detach'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    holderRef: z.string().min(1).max(200),
+    since: z.number().int().min(0).optional(),
+  }),
+  /**
+   * Explicit release: writes the terminal's own release byte, waits for the provider process to exit,
+   * verifies ownership and the session file, then hands the conversation back to automation. The exit
+   * code is recorded but never decides success (Ctrl+D and SIGTERM both exit 0).
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('session.handoff.release'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    /** Explicitly ask for the conversation to be handed back to RPC after the terminal exits. */
+    resumeAutomation: z.boolean().optional(),
+  }),
+  /** Incremental read of the projected terminal stream (scriptable; the UI uses the same facts). */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('session.handoff.terminal.read'),
+    projectId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    since: z.number().int().min(0).optional(),
+  }),
+  /** Writes bytes to the running terminal. Input, not a permission: it is not an approval channel. */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('session.handoff.terminal.write'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    /** Base64-encoded bytes; a release is the terminal's own Ctrl+D byte, not a Runtime decision. */
+    dataBase64: z.string().max(16384),
   }),
 ]);
 export type RuntimeRequest = z.infer<typeof runtimeRequestSchema>;

@@ -152,7 +152,9 @@ interface HandoffStatus {
   readonly incarnation: { readonly incarnationNumber: number; readonly mode: string;
     readonly state: string; readonly providerPid: number | null;
     readonly recordedDescendants: number } | null;
-  readonly incarnations: readonly { readonly state: string }[];
+  readonly incarnations: readonly { readonly mode: string; readonly state: string }[];
+  readonly terminal: { readonly state: string; readonly held: boolean;
+    readonly providerPid: number | null } | null;
   readonly writerLease: { readonly holderKind: string; readonly holderRef: string } | null;
   readonly handoff: { readonly kind: string; readonly state: string;
     readonly fenceActive: boolean } | null;
@@ -312,9 +314,12 @@ describe('codeestra session handoff', () => {
         runtimeContract: 'IMPLEMENTED',
         singleWriterLease: 'IMPLEMENTED',
         strictPermissionOverSideChannel: 'IMPLEMENTED',
-        nativeTerminalAttach: 'UNSUPPORTED',
-        terminalTransport: 'UNIMPLEMENTED',
-        successorProcessStart: 'UNIMPLEMENTED',
+        // FOUNDATION-046 implemented the transport half; the honest projection says so.
+        nativeTerminalAttach: 'IMPLEMENTED',
+        ptyTransport: 'IMPLEMENTED',
+        successorProcessStart: 'IMPLEMENTED',
+        releaseBackToAutomation: 'IMPLEMENTED',
+        attachToLiveRpcProcess: 'UNSUPPORTED',
       });
 
       // The permission is a normal Attention of the existing command face, with the structured
@@ -369,7 +374,7 @@ describe('codeestra session handoff', () => {
     }
   }, 60_000);
 
-  test('requires a safe point and refuses admission while the predecessor is still running', async () => {
+  test('requires a safe point, then hands the conversation to a native terminal', async () => {
     const { environment, projectId, run } = await startHandoffTask('fence');
     try {
       const sessionId = await currentSessionId(environment, projectId, run);
@@ -390,19 +395,29 @@ describe('codeestra session handoff', () => {
         activeTools: 0, settledAfterFence: true, openAttention: false });
       expect(safe.safePoint.missing).toHaveLength(0);
 
-      // The stub provider is still running, so no successor may start. The exit code says so.
-      const refused = await cli(['session', 'handoff', 'admit', projectId, sessionId], environment);
-      expect(refused.exitCode).toBe(1);
-      expect(JSON.parse(refused.stdout)).toMatchObject({ admitted: false,
-        code: 'PREDECESSOR_NOT_STOPPED', predecessorObservation: 'ALIVE',
-        successorStarted: false, terminalTransport: 'UNIMPLEMENTED' });
+      // Admission stops the automation process the Runtime itself still holds and then really starts
+      // the native terminal successor (FOUNDATION-046). A predecessor the Runtime does *not* hold is
+      // never signalled, and an unverifiable one is refused (see the service tests).
+      const admitted = await cli(['session', 'handoff', 'admit', projectId, sessionId], environment);
+      expect(admitted.exitCode).toBe(0);
+      expect(JSON.parse(admitted.stdout)).toMatchObject({ admitted: true, code: 'ADMITTED',
+        predecessorObservation: 'STOPPED', successorStarted: true,
+        successorMode: 'HUMAN_TUI', terminalTransport: 'PTY' });
+      const afterAdmit = await waitForStatus(environment, projectId, sessionId,
+        (candidate) => candidate.incarnations.length === 2);
+      expect(afterAdmit.incarnations.map((incarnation) => incarnation.mode))
+        .toEqual(['AUTOMATED_RPC', 'HUMAN_TUI']);
+      expect(afterAdmit.terminal?.state).toBe('RUNNING');
+      expect(afterAdmit.writerLease?.holderKind).toBe('TERMINAL_ATTACHMENT');
 
-      // Cancelling an abandoned handoff releases the fence so the Agent can use tools again.
+      // The handoff is admitted now, so there is nothing left to cancel: a refusal, not a success.
       const cancelled = await cli(['session', 'handoff', 'cancel', projectId, sessionId], environment);
-      expect(cancelled.exitCode).toBe(0);
-      const afterCancel = JSON.parse(cancelled.stdout) as HandoffStatus;
-      expect(afterCancel.handoff?.state).toBe('CANCELLED');
-      expect(afterCancel.incarnation?.state).toBe('ACTIVE');
+      expect(cancelled.exitCode).toBe(1);
+      expect(`${cancelled.stdout}${cancelled.stderr}`).toContain('HANDOFF_NOT_REQUESTED');
+      // The native terminal is the writer, and its incarnation is the current one.
+      expect(afterAdmit.incarnation?.mode).toBe('HUMAN_TUI');
+      expect(afterAdmit.incarnation?.state).toBe('ACTIVE');
+      expect(afterAdmit.terminal?.held).toBe(true);
     } finally {
       run.kill('SIGTERM');
       await cli(['stop'], environment);

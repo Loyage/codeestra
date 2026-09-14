@@ -6,7 +6,11 @@ import { devBranchRef, runtimeRequestSchema, validateQuestionnaireAnswer, questi
   type RuntimeStreamFrame } from '@codeestra/contracts';
 import { inspectRepository, readLocalRefCommit } from '@codeestra/git';
 import { Phase1Database, StorageError, type AgentAnswerPlan } from '@codeestra/storage';
-import { createPiAdapterRegistry, piSessionDirectory } from './adapter-registry.js';
+import {
+  createPiAdapterRegistry,
+  piControlledLaunch,
+  piSessionDirectory,
+} from './adapter-registry.js';
 import {
   agentConfigurationPayload,
   resolveAgentConfiguration,
@@ -18,6 +22,7 @@ import { RuntimeHttpApi } from './http-api.js';
 import { LongOperationService } from './operation-service.js';
 import { runtimeHome, runtimeSocketPath } from './paths.js';
 import { SessionHandoffService } from './session-handoff-service.js';
+import { TerminalService } from './terminal-service.js';
 import { readPermissionMode, writePermissionMode, type PermissionMode } from './permission-mode.js';
 import {
   abandonStablePromotion,
@@ -54,6 +59,7 @@ import {
   reconcileInterruptedRunOperations,
   reconcileInterruptedVerifications,
   reconcileSessionHandoffs,
+  reconcileSessionTerminals,
   reconcileWorkspacePreparations,
 } from './recovery-service.js';
 import {
@@ -135,11 +141,49 @@ const subscriptions = new EventSubscriptionHub({ storage });
  * writer lease, the handoff fence and the STRICT permission decision channel. It is created before
  * any Agent can start, because a controlled launch connects to its socket during `session_start`.
  */
+/**
+ * The native terminal transport (ADR-0026): the same controlled launch the RPC adapter uses, except
+ * that the provider runs its own terminal UI on a PTY this Runtime owns. It is created before the
+ * handoff service, because an admitted takeover starts a terminal.
+ */
+const launchPaths = piControlledLaunch({ runtimeHome: home, environment: Bun.env });
+const terminals = new TerminalService({
+  storage,
+  // The same provider executable and controlled launch the RPC adapter uses: switching transport
+  // must not switch the provider.
+  piExecutable: launchPaths.piExecutable,
+  piSessionDir: launchPaths.sessionDir,
+  gateExtensionPath: launchPaths.gateExtensionPath,
+  questionExtensionPath: launchPaths.questionExtensionPath,
+  environment: Bun.env,
+  permissionMode: () => permissionMode,
+  platform: launchPaths.platform,
+  resolveAgentConfig: ({ projectId, adapterId }) => {
+    const { effective } = resolveAgentConfiguration({
+      storage, adapterId, projectId, environment: Bun.env,
+    });
+    return Object.keys(effective).length === 0 ? null : effective;
+  },
+  logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
+});
 const handoff = new SessionHandoffService({
   storage,
   runtimeHome: home,
   resolveAdapter: (adapterId) => registry.resolve(adapterId),
   permissionMode: () => permissionMode,
+  platform: launchPaths.platform,
+  terminal: terminals,
+  // The RPC successor of a returned conversation is started by the coordinator that owns provider
+  // processes and their event projection; this service only records the resulting incarnation.
+  startAutomationSuccessor: (input) => coordinator.startAutomationSuccessor(input),
+  releaseAutomationProcess: (input) => coordinator.releaseExecutionProcess(input.executionId),
+  releaseAutomationSuccessor: async ({ executionId, reason }) => {
+    const released = await coordinator.releaseExecutionProcess(executionId);
+    if (!released.released) {
+      console.error(`[runtime] ${reason}: the automation successor did not confirm its stop`,
+        released.detail);
+    }
+  },
   logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
 });
 handoff.listen();
@@ -179,6 +223,13 @@ await reconcileInterruptedPromotions({
 // The Runtime cannot prove it still holds any provider process or PTY after a restart, so its own
 // handoff state is reconciled from that fact instead of being restored optimistically.
 reconcileSessionHandoffs({ storage });
+// A terminal this Runtime does not hold cannot be attached to or released; the fact is recorded and
+// the recorded processes are reported instead of being killed on a guess.
+const terminalReconcile = reconcileSessionTerminals({ storage });
+for (const terminal of terminalReconcile.maybeStillRunning) {
+  console.error('[runtime] a previous terminal generation was not signalled; its recorded processes'
+    + ' may still exist', terminal);
+}
 const verificationRunner = new VerificationRunner();
 /** Verification copies live inside the Runtime data directory, never in the user's repo. */
 const verificationCopiesRoot = join(home, 'verifications');
@@ -865,8 +916,46 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         holderRef: request.holderRef,
       }));
     case 'session.handoff.admit':
-      return success(request.requestId,
-        await handoff.admitSuccessor({ projectId: request.projectId, sessionId: request.sessionId }));
+      return success(request.requestId, await handoff.admitSuccessor({
+        projectId: request.projectId,
+        sessionId: request.sessionId,
+        commandId: request.commandId,
+      }));
+    case 'session.handoff.attach':
+      return success(request.requestId, handoff.attachTerminal({
+        projectId: request.projectId,
+        sessionId: request.sessionId,
+        commandId: request.commandId,
+        holderRef: request.holderRef,
+        ...(request.kind === undefined ? {} : { kind: request.kind }),
+        ...(request.since === undefined ? {} : { since: request.since }),
+      }));
+    case 'session.handoff.detach':
+      return success(request.requestId, handoff.detachTerminal({
+        projectId: request.projectId,
+        sessionId: request.sessionId,
+        holderRef: request.holderRef,
+        ...(request.since === undefined ? {} : { since: request.since }),
+      }));
+    case 'session.handoff.release':
+      return success(request.requestId, await handoff.releaseTerminal({
+        projectId: request.projectId,
+        sessionId: request.sessionId,
+        commandId: request.commandId,
+        ...(request.resumeAutomation === undefined
+          ? {} : { resumeAutomation: request.resumeAutomation }),
+      }));
+    case 'session.handoff.terminal.read':
+      return success(request.requestId, handoff.readTerminal({
+        projectId: request.projectId,
+        sessionId: request.sessionId,
+        ...(request.since === undefined ? {} : { since: request.since }),
+      }));
+    case 'session.handoff.terminal.write':
+      return success(request.requestId, handoff.writeTerminal({
+        sessionId: request.sessionId,
+        data: Buffer.from(request.dataBase64, 'base64').toString('utf8'),
+      }));
     case 'task.submit': {
       const payloadHash = createHash('sha256').update(JSON.stringify({
         projectId: request.projectId,

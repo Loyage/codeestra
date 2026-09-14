@@ -28,6 +28,17 @@ export type {
   ProcessTableRow, ProviderOwnershipObservation, ProviderProcessRef, ProviderProcessTree,
 } from './pi-process.js';
 export { PiRpcClient, PiRpcProcessError } from './pi-process.js';
+export {
+  buildPiTerminalArguments,
+  PiPtyError,
+  PiPtyTerminal,
+  terminalReleaseByte,
+} from './pi-pty.js';
+export type {
+  PiPtyExit, PiPtyLaunchInput, PiPtyOutputStream, PiPtyReady, PiPtySnapshot,
+} from './pi-pty.js';
+export { defaultSessionFileReadCapBytes, readPiSessionFileFacts } from './pi-session-file.js';
+export type { PiSessionFileFacts } from './pi-session-file.js';
 export type { PiRpcEnvelope, PiRpcErrorCode } from './pi-process.js';
 export { PiRpcAdapter } from './pi-adapter.js';
 export type { PiRpcAdapterOptions } from './pi-adapter.js';

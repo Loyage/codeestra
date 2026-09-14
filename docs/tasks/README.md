@@ -1267,6 +1267,8 @@ CLI usage 两段并存、`docs/tasks` 按 042/043/044 升序）。
 - **PTY/TUI 实际转交与 detach/reattach 编排**：`session handoff admit` 只做判定并记录，从不启动 successor
   进程、也不移动租约；`capabilities` 明确 `terminalTransport: UNIMPLEMENTED`、
   `nativeTerminalAttach: UNSUPPORTED`、`successorProcessStart: UNIMPLEMENTED`。
+  **（已由 FOUNDATION-046 / ADR-0026 实现并取代：`admit` 真启动 successor、终端经 Runtime 拥有的 PTY helper
+  运行、attach/detach/release 与能力投影见该记录；本条的「只判定不启动」不再是当前状态。）**
 - 跨交接的权限模式/工具集保持（需要真正换进程才能验）。
 - 并行工具批次下的安全点、compaction、长会话/大 session file、PTY resize。
 - 真实 Pi 的两条路径只在 RPC 模式复验；TUI/PTY 模式下的 side channel 端到端（spike 只验证过 spike 专用
@@ -1341,12 +1343,173 @@ CLI usage 两段并存、`docs/tasks` 按 042/043/044 升序）。
 - **lane 版本号**：本轮直接把常量设为 15 并只加 `if (version < 15)`；B1(v13)/B2(v14) 合入时集成方必须保留全部升序分支并取最大常量，且本分支单独创建的本地库不会被 v13/v14 步骤补盖。
 - 测试只用 CLI/命令面与 HTTP 无关的 socket 命令面驱动，未使用桌面/浏览器/键鼠自动化；未做并发压力与多进程竞争测试（写锁内环校验与 CAS 已有单元覆盖）。
 
+## FOUNDATION-046 — 原生终端 PTY 传输、successor 启动与 attach/detach/release（ADR-0026）
+
+状态：**已实现并通过 CLI/命令面测试**（真实 PTY + 真实进程表 + 协议 stub provider），并在**真实 Pi 0.84.4**
+上完成了传输与 side channel 的 headless 实测（见下「已实测」）。**未 commit、未 push、未提升 `main`、未重启
+稳定 Runtime**。本轮占用 **schema v16**（`sessionTerminalMigration`：`session_terminals` +
+`session_terminal_attachments`）；V13/V14/V15 三段既有迁移原样保留，`phase1SchemaVersion` 15 → 16。
+
+Phase 3 第二小步：把 `session handoff admit` 从「只判定并记录」变成**真的能接管**。ADR-0023 的安全点、单
+writer lease、incarnation 与决议路由语义不变；本格实现 ADR-0010 D04/D05 的传输半边，不新增任何权限门禁或
+审批层（FULL 仍 0 确认，STRICT 仍走既有 `attention answer` 通道）。
+
+### 已实现
+
+- `packages/agent-adapters/src/pi-pty-host.ts`（新）：Runtime 拥有的极小 PTY host 进程。`setsid` →
+  `posix_openpt`/`grantpt`/`unlockpt`/`ptsname` → 以 slave 作**控制终端** spawn provider → 用 LF-JSON 帧
+  （`input`/`signal`/`shutdown` ↔ `ready`/`output`/`exit`/`error`）与 Runtime 交换终端字节流与退出事实。
+  窗口大小在 spawn 前经 `stty rows/cols` 应用（直接 `ioctl(TIOCSWINSZ)` 在本环境写入垃圾值，已弃用并在代码里
+  注明原因）；master 只在 `poll` 报告可读时才读（阻塞读会把 helper 卡死在 provider 退出之后）；provider 的
+  退出由 `waitpid(WNOHANG)` 判定，不由 promise 或空读推断；helper 关掉自己的 slave 副本以便 EOF 可见；
+  **控制管道关闭 = 没有 writer 拥有这个终端 → 终止 provider 并退出**（孤儿防护）。
+- `packages/agent-adapters/src/pi-pty.ts`（新）：`buildPiTerminalArguments`（与 RPC 启动同源，仅少
+  `--mode rpc`）、`PiPtyTerminal`（有序 cursor 投影 + 有界内存缓冲 + `truncated` 上报、`write`、
+  `waitForExit`、`captureTree`/`refreshTree`（按 pid 并集合并）、`inspectOwnership`、`stop`、
+  `closeControl`）、`terminalReleaseByte`。
+- `packages/agent-adapters/src/pi-session-file.ts`（新）：只读、有界、可报告「只读了前缀」的 provider session
+  file 事实读取（条目数、最后一个 entry id、可选 entry id 列表、不可解析行数）。
+- `packages/agent-adapters/src/{index,pi-gate-extension}.ts`：追加导出；gate 新增 `session_shutdown` 上报
+  （**仅作附加证据**，FOUNDATION-040 实测不可靠，任何判定都不依赖它）。
+- `apps/runtime/src/terminal-service.ts`（新）：PTY 传输的 Runtime 侧——`launchTerminal`（用**记录的** start
+  plan 拼 argv，权限模式经 argv 与 `CODEESTRA_PERMISSION_MODE` 双通道进入 provider）、`commitTerminal`、
+  `view`（投影）、`read`/`write`、`attach`/`detach`（`ATTACHMENT_BUSY` 报出当前 holder）、`release`
+  （release 字节 → 退出事实 → 刷新后的并集树归属核验 → session file 事实；退出码只入审计）、
+  `stopTerminal`（结束终端并释放其 lease）、`close`（Runtime 关闭时 best-effort）、
+  `noteProviderShutdown`、以及终端存活期间的进程树定时刷新（合并写回 incarnation）。
+- `apps/runtime/src/session-handoff-service.ts`：`admitSuccessor` 现在真的完成交接（TUI 与 RPC 两个方向）；
+  predecessor 仍 `ALIVE` 但由本 Runtime 持有时先协作停止再重新核验（`releaseAutomationProcess`）；
+  新增 `EXECUTION_NOT_ACTIVE` 拒绝；新增 `releaseTerminal`（先持久化 RETURN 请求，再 release，再交还）、
+  `attachTerminal`/`detachTerminal`/`readTerminal`/`writeTerminal`；`capabilities` 改为 `capabilitiesFor(platform)`
+  的真实值；`close()` 顺带停止自己持有的终端。
+- `apps/runtime/src/agent-runtime-service.ts`（追加，非本格独占文件）：`#handoffSafeAdapter` 在存在 open
+  handoff 请求时**不把 settled 事实投影为 Execution 完成**（ADR-0010 D03），该 pump 也不结算 run Operation
+  （对话由新 incarnation 继续，运行没有结束）；新增 `startAutomationSuccessor`（用记录的 start plan 在同一
+  session file 上启动 RPC successor、核验 session file 未被换掉、启动观察循环）与 `AgentRuntimeServiceError`。
+- `apps/runtime/src/adapter-registry.ts`：抽出 `piControlledLaunch`，让 RPC 与 PTY 两条传输共用同一份受控启动
+  路径/platform/provider 可执行文件（避免两条传输漂移）。
+- `packages/storage`：v16 additive 迁移 + `session_terminals`/`session_terminal_attachments` 的
+  record/release/end/attach/detach/release-attachments 方法；追加 `markSessionIncarnationExited`（结束
+  incarnation 同时清空 `current_incarnation_id`，旧决议立即 `STALE_INCARNATION`）、
+  `mergeSessionIncarnationProcessTree`（按 pid 合并并集树）、`markSessionTerminalHandoffSafePoint`
+  （终端 release 自己的安全点，不需要 fence）、`getAgentStartPlanForSession`。
+- `apps/runtime/src/recovery-service.ts`（**尾部追加**）：`reconcileSessionTerminals` 把上一代仍 `RUNNING`
+  的终端收敛为 `RECOVERY_REQUIRED`、关闭附加，并**报告**记录的 helper/provider pid（不杀、不猜）。
+- `packages/contracts`：在 `session.handoff.*` group 内追加 `attach`/`detach`/`release`/
+  `terminal.read`/`terminal.write` 五个严格请求（`admit` 增加 `commandId`）。
+- `apps/cli/src/main.ts`：`session handoff attach|detach|release|terminal read|write`（默认 `--json`、稳定
+  退出码：第二 writer `ATTACHMENT_BUSY` exit 1、detach 非自己的附加 exit 1、release 未确认或 successor 未启动
+  exit 1）；usage 追加行。
+- `apps/runtime/src/main.ts`：终端服务接线（`piExecutable`/`gateExtensionPath`/`questionExtensionPath` 来自
+  `piControlledLaunch`）、`startAutomationSuccessor`/`releaseAutomationProcess` 回调、启动时
+  `reconcileSessionTerminals` 与「未发信号的旧终端」报告、六个 dispatch 分支。
+
+### 命令面（CLI 完备，可脚本化）
+
+```text
+session handoff status <project> <session>                       # 含 terminal 投影与 capabilities
+session handoff request <project> <session> takeover|return      # 持久化意图 + 装 fence（takeover）
+session handoff admit <project> <session>                        # 真交接：启动 TUI successor
+session handoff attach <project> <session> --holder <ref> [--writer] [--since <cursor>]
+session handoff detach <project> <session> --holder <ref>
+session handoff release <project> <session> [--no-resume]         # 显式交还自动化
+session handoff terminal read <project> <session> [--since <cursor>]
+session handoff terminal write <project> <session> --text <text>
+session handoff cancel <project> <session>
+session handoff writer acquire|release ...
+```
+
+### 实际验证（全部 headless；未使用浏览器/桌面/键鼠自动化）
+
+- `bun run check:fast`：通过（Vitest + 分层 Bun tests + 根/UI typecheck）。
+- **`bun run check`：退出码 0** —— 根与 UI TypeScript、Vitest、**392 项 Bun tests（0 fail，47 个文件）**、
+  UI Vite 构建。
+- `packages/agent-adapters/test/pi-pty.test.ts`（7 项，真实 PTY + 真实进程表）：provider 真的拿到 tty 且
+  `stty size` 读到 Runtime 申请的 `30 100`；cursor 单调、增量读只返回新字节；无人读取时 provider 继续产出且
+  过期 cursor 被报 `truncated`（有界缓冲）；release 字节后退出事实（含 exit code）被观察到；**控制管道关闭
+  即终止 provider**（Runtime 崩溃不留孤儿）；provider 被 SIGKILL 后仍活着的后代被报 `DESCENDANTS_ALIVE`，
+  且该孤儿**确实在 3 秒后写入了工作区**（用 `nohup` 模拟忽略 SIGHUP 的工具子进程）；session file 事实与
+  截断读；**生产 gate 扩展在 `mode: 'tui'` 下对真实 UNIX socket 的完整契约**（hello/STRICT 请求/ALLOW/
+  fence 阻止新工具且不产生审批请求）。
+- `apps/runtime/test/terminal-service.test.ts`（7 项，真实 PTY + fake provider）：终端进程身份与 session file
+  事实入库、投影 cursor、`ATTACHMENT_BUSY` 报出 holder、observer 可多个、同 commandId 重放、detach 后
+  provider pid 不变且仍可写、reattach、未授权 detach 为 `NOT_ATTACHED`；**release 在 provider exit code 7 下
+  仍 `released: true`**（退出码只入审计）、release 证据（字节/命令/退出/两段 session file 事实）落库；
+  `RELEASE_NOT_CONFIRMED` 时不杀 provider 且终端仍是 writer；`SESSION_FILE_REWRITTEN` 拒绝；后代仍活时拒绝
+  release；重启 reconcile → `RECOVERY_REQUIRED` 并报告 pid（幂等）；incarnation 链（`AUTOMATED_RPC` EXITED →
+  `HUMAN_TUI` ACTIVE，同一 session file，单 lease 移交）与结束终端后 lease 释放。
+- `apps/runtime/test/cli-session-attach.test.ts`（1 项，62 个断言；真实 CLI + 真实 Runtime + 真实 PTY +
+  协议 stub provider）：`request takeover` → 安全点 → `admit` **真启动 `HUMAN_TUI`**（`successorStarted: true`、
+  `terminalTransport: 'PTY'`、同一 session file、lease 变为 `TERMINAL_ATTACHMENT`、**Execution 仍 `RUNNING`**，
+  即 settled 未把 Execution 记成完成）→ `terminal read/write` 经 CLI 往返 → 第二 writer `ATTACHMENT_BUSY`
+  exit 1、observer 成功 → `detach` 后 provider pid 不变、reattach 成功、未授权 detach exit 1 →
+  `release` 在 exit code 7 下 `released: true`、successor RPC 从**同一** session file 继续
+  （`tui-release-entry` + `rpc-return-entry` 追加、provider 报告 `resumed: true`）、incarnation 链
+  `RPC → TUI → RPC` 可追溯 → 重复 `admit` **回放**（`replayed: true`）且不产生第四个 incarnation →
+  已释放终端再次 release 为 `TERMINAL_NOT_RUNNING` exit 1。
+- **真实 Pi 0.84.4（headless，脚本在 `/tmp`，不入库）**：
+  - 真实 `pi` 原生 TUI 在本格的 PTY helper 下运行：拿到真实 tty、`stty size` 为 Runtime 申请的 `100 30`、
+    4 秒内投影 7979 字节并渲染出 `pi v0.84.4` 启动界面与 `[Extensions]` 段；**Ctrl+D（release 字节）→ exit 0**。
+  - 真实 TUI 中**生产 gate 扩展**在 Runtime side channel 上 hello：`{"kind":"hello","protocol":1,"mode":"tui",
+    "hasUI":true,"permissionMode":"FULL","pid":58859,"providerSessionId":"01a09ee2-…","providerSessionFile":"…"}`，
+    其 `pid` 与本格记录的 provider pid 一致（incarnation 身份核验对真实 provider 成立）；随后 Runtime 下发
+    `{"kind":"fence","active":true}`，真实 TUI 回 `{"kind":"fence_ack","active":true}`——**补上了 FOUNDATION-043
+    遗留的「生产 gate 在 TUI 模式未复验」缺口**（当时只验证过 spike 专用扩展）。
+- 迁移验证（临时脚本，不入库）：v15 库 additive 升级到 v16 后 `user_version` = 16、两张新表存在、
+  `PRAGMA foreign_key_check` 无违规。
+
+### 待用户人工确认（本格无法自行完成）
+
+- **TUI 画面目视确认**：真实 Pi 启动界面、键入、resize 后的显示效果需要用户在场目视（headless 只能断言字节流
+  中存在渲染内容）。用户在本格中途中断了 PTY 探针，因此**没有**做目视确认。
+- 真实模型在 TUI 中键入消息后 `release` 交还 RPC 继续同一 conversation 的完整复验（本格用 stub 验证了编排与
+  同一 session file 的续接；FOUNDATION-040 已用真实模型验证过 session file 双向恢复）。
+
+### 未验证（不得当成已成立）
+
+- 跨交接的权限模式/工具集**完整矩阵**（两条传输的 argv 确由同一 `piControlledLaunch` 与同一拼装函数产生，
+  但只测了 FULL 的成对转换；`capabilities` 报 `PARTIAL`）。
+- 并行工具批次下的安全点（`UNVERIFIED`）、compaction、长会话/大 session file（`SESSION_FILE_TRUNCATED_READ`
+  会拒绝交还，未实测真实大文件）、**PTY resize**（不支持；初始尺寸经 `stty` 应用）、Windows、其他 provider。
+- 真实 provider 崩溃点注入（在 TUI 启动前后、release 前后 SIGKILL Runtime/helper）仍未做；本格只覆盖了
+  「Runtime 崩溃 → helper 终止 provider」这一条（单元测试）与重启 reconcile。
+- `session handoff admit` 的重放在**同一进程内**幂等；跨 Runtime 重启后请求会被 reconcile 成
+  `RECOVERY_REQUIRED`（沿用 ADR-0023 D05），未做「重启后继续未完成交接」。
+
+### 未做 / 明确不支持（不得静默降级）
+
+- `attachToLiveRpcProcess`：仍 `UNSUPPORTED`（Pi 没有把原生 TUI 附加到运行中 RPC 进程的原语）。
+- `ptyResize`、`windows`、`sessionCompactionDuringHandoff`：`UNSUPPORTED`。
+- 不新增任何权限门禁或审批层；FULL 的常态路径确认数仍为 0（`admit`/`attach`/`detach`/`release` 都不确认）。
+- **UI 终端不做**（`apps/ui/**` 本波属 C3 格，未改动一行）。
+
+### 交付边界与权衡
+
+- 改动文件：`packages/agent-adapters/src/{pi-pty,pi-pty-host,pi-session-file,pi-gate-extension,index}.ts`、
+  `packages/storage/src/{migration,database,index}.ts`、`packages/contracts/src/index.ts`、
+  `apps/runtime/src/{terminal-service,session-handoff-service,agent-runtime-service,adapter-registry,recovery-service,main}.ts`、
+  `apps/cli/src/main.ts`、三个新测试文件、`package.json`（新测试加入既有分层清单）、
+  `packages/storage/test/task-dependencies.test.ts` 与 `apps/runtime/test/{session-handoff-service,cli-session-handoff}.test.ts`
+  的机械修正（schema 常量断言改为 `>= 15`；capabilities 与「admit 只判定」的旧断言改为新语义）、
+  `docs/decisions/0026-*.md`、`docs/decisions/README.md`、本文件。**未修改** `apps/ui/**`、
+  `packages/agent-adapters/src/pi-adapter.ts`、`apps/runtime/src/agent-observation-service.ts`、
+  `packages/domain/**`、`apps/runtime/src/lifecycle.ts`、`packages/git/**`、`PROJECT_SPEC.md`、`AGENTS.md`。
+- 越出「只按槽位插入」的地方（明确记录，供集成方复核）：`agent-runtime-service.ts` 追加了 settled 抑制与
+  successor 启动（RPC successor 必须由其拥有；Wave C 无其他格占该文件）；`adapter-registry.ts` 抽出
+  `piControlledLaunch`；`recovery-service.ts`、`main.ts`、`contracts`、`cli/main.ts`、`migration.ts`、
+  `database.ts` 均按槽位追加。
+- Runtime 停止路径：`SessionHandoffService.close()`（既有 shutdown 调用点）会请求停止本 Runtime 持有的终端；
+  **保证**来自 helper 的「控制管道关闭即终止 provider」，因此不依赖 shutdown 是否 await。C1 格重写
+  shutdown 绑定区时若要显式等待，可调用 `TerminalService.close()`（已导出、幂等）。
+- 权衡：终端字节不落盘（ADR-0010 D06），因此 Runtime 重启后旧终端输出无法回溯，只能报 `RECOVERY_REQUIRED`；
+  release 采用「不确认就不交还」的保守语义，代价是 provider 卡住时需要用户重试或 `cancel`。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、UI 投影。
 1. 真实验证 ADR-0016：在一次性临时仓库中用真实 Pi 跑「启动 → 暂停 → 恢复 → 终止」，核对 provider 进程确实退出、`--session` 确实续接同一 conversation、超时进入 `RECOVERY_REQUIRED`；脚本 Adapter 不能替代该验收。
 2. ~~长命令后台化与进度事件~~：已由 FOUNDATION-039 / ADR-0019 完成持久 Operation、步骤级进度、`--background` 与 `task.operation.cancel`（CLI + 同一命令面 + UI）。剩余：token 级实时进度事件、verification run 的独立 `CANCELLED` 状态、取消后验证副本的回收。
-3. ~~ADR-0010 Phase 3 技术 spike~~：已由 FOUNDATION-040 完成（真实 Pi session-file 双向 RPC↔TUI 恢复、PTY 生命周期、safe-point fence 与权限模式 side channel，见 `docs/spikes/pi-session-handoff.md`）。~~handoff Operation / Session incarnation~~：Runtime 侧契约与状态已由 ADR-0023 / FOUNDATION-043 完成（STRICT 权限转既有 Attention、incarnation 绑定 + 原子拒绝过期决议、单 writer lease 的 `ATTACHMENT_BUSY`、安全点与 predecessor 归属核验、重启按事实 reconcile），并已合入 `dev`；`session handoff status/request/cancel/writer/admit` 的 `--json` 退出码稳定。剩余：**PTY transport 与 successor 进程启动、detach/reattach 编排、跨交接模式保持、并行工具批次安全点、CLI attach 与 UI 终端**（`session handoff admit` 目前只判定不启动，能力投影写 `terminalTransport: UNIMPLEMENTED`）。
+3. ~~ADR-0010 Phase 3 技术 spike~~：已由 FOUNDATION-040 完成（真实 Pi session-file 双向 RPC↔TUI 恢复、PTY 生命周期、safe-point fence 与权限模式 side channel，见 `docs/spikes/pi-session-handoff.md`）。~~handoff Operation / Session incarnation~~：Runtime 侧契约与状态已由 ADR-0023 / FOUNDATION-043 完成（STRICT 权限转既有 Attention、incarnation 绑定 + 原子拒绝过期决议、单 writer lease 的 `ATTACHMENT_BUSY`、安全点与 predecessor 归属核验、重启按事实 reconcile），并已合入 `dev`；`session handoff status/request/cancel/writer/admit` 的 `--json` 退出码稳定。剩余：~~PTY transport 与 successor 进程启动、detach/reattach 编排、CLI attach~~：已由 ADR-0026 / FOUNDATION-046 完成（Runtime 拥有的 PTY helper 上运行真实 `pi` 原生 TUI、`admit` 真交接、attach/detach/reattach、`release` 交还自动化并回到同一 session file、能力投影改为真实值）。仍在剩余：跨交接权限模式**完整矩阵**、并行工具批次安全点、PTY resize、真实模型在 TUI 中键入后交还的复验、**UI 终端**（C3 波次领地）。
 4. revision 投递确认，以及 Runtime 重启后对 stale ACTIVE Session 的启动 reconcile。
 5. ~~验证副本与失败现场的回收~~：已由 ADR-0021/FOUNDATION-041 完成（`reclaim plan/apply/records`、归属校验、append-only 账本、启动 reconcile、默认保留失败现场、不新增确认）；同轮决定 Attention 工具参数继续原样入库。剩余：未注册目录的人工处理与跨项目批量回收。
 6. 识别「Agent 不用工具、在散文里提问并结束轮次」的形态（FOUNDATION-030 剩余的一半）：要么把它变成 Attention，要么至少不得记为未加说明的 `SUCCESS`。
