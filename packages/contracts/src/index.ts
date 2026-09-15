@@ -597,6 +597,28 @@ export interface ScheduleWaitView {
   readonly since: number | null;
 }
 
+/**
+ * Why one member of the active/reserved set cannot be observed (ADR-0055 D04).
+ *
+ * This is a *scheduling* diagnostic code, not an analyzer reason code: it answers "who is occupying a
+ * resource and can that occupation even be read?" without changing any verdict. `WORKSPACE_MISSING`
+ * is the case where the ledger records a workspace path that is not on disk any more (an external
+ * tool moved the worktree, or a reclamation was not observed), which is exactly why no change set can
+ * be derived and therefore why the assessment is `UNKNOWN`.
+ */
+export type ScheduleOccupierCode = 'OBSERVABLE' | 'WORKSPACE_MISSING' | 'WORKSPACE_UNREADABLE'
+  | 'NO_WORKSPACE';
+
+export interface ScheduleOccupierView {
+  readonly taskId: string;
+  readonly taskState: string;
+  readonly executionState: string;
+  readonly code: ScheduleOccupierCode;
+  /** The recorded workspace path, whether or not it exists on disk. */
+  readonly workspacePath: string | null;
+  readonly detail: string;
+}
+
 /** The assessment a scheduling decision was made from; the binding an `--allow-unknown` release uses. */
 export interface ScheduleAssessmentView {
   readonly verdict: 'SAFE_TO_PARALLELIZE' | 'UNKNOWN' | 'CONFLICTING';
@@ -611,6 +633,8 @@ export interface ScheduleAssessmentView {
   readonly comparedTaskIds: readonly string[];
   readonly activeTaskIds: readonly string[];
   readonly explanation: readonly string[];
+  /** One entry per active/reserved Task: whether its occupation could be observed at all (D04). */
+  readonly occupiers: readonly ScheduleOccupierView[];
 }
 
 export type ScheduleDisposition = 'STARTED' | 'WOULD_START' | 'WAITING' | 'BLOCKED' | 'SKIPPED'
@@ -1176,6 +1200,27 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     taskId: z.string().uuid(),
     expectedVersion: z.number().int().nonnegative(),
     adapterId: nonBlankString.optional(),
+  }),
+  /**
+   * Reconciles a Task whose Execution is `RECOVERY_REQUIRED` from real facts (ADR-0055).
+   *
+   * The state machine promised this step (`state-machines.md`, `RECOVERY_REQUIRED | reconcile`) but no
+   * command face implemented it, which made a provably finished run an unfixable occupier: the Runtime
+   * kept its resource held, the conflict analyzer could never observe it, and every new Task of the
+   * project waited. This command only *reads* — provider process ownership, the recorded descendant
+   * snapshot, and whether the recorded workspace is still on disk — and it refuses, keeping every
+   * resource, unless the provider is provably gone. It never signals a process, never deletes or moves
+   * a worktree and never claims workspace quiescence.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.recover'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    expectedVersion: z.number().int().nonnegative(),
+    /** The user's own statement about the reconcile; recorded verbatim in the audit, not judged. */
+    reason: nonBlankString.optional(),
   }),
   /** Terminal stop: a running Agent is stopped cooperatively, everything else ends immediately. */
   z.strictObject({
@@ -2087,6 +2132,41 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
   }),
 ]);
 export type RuntimeRequest = z.infer<typeof runtimeRequestSchema>;
+
+/**
+ * `task.recover`'s answer (ADR-0055 D01/D03).
+ *
+ * `outcome` distinguishes the two facts a caller must not confuse: `RECONCILED` changed rows,
+ * `ALREADY_RECONCILED` found the Task already out of `RECOVERY_REQUIRED` with a terminal Execution,
+ * and `REFUSED` changed nothing. The observation travels with every answer, because "why it refused"
+ * is the whole point of the command.
+ */
+export interface TaskRecoveryView {
+  readonly taskId: string;
+  readonly displayNumber: number;
+  readonly outcome: 'RECONCILED' | 'ALREADY_RECONCILED' | 'REFUSED';
+  readonly code: string | null;
+  readonly detail: string;
+  readonly observation: {
+    readonly executionId: string | null;
+    readonly sessionId: string | null;
+    readonly workspaceId: string | null;
+    readonly workspacePath: string | null;
+    readonly providerPid: number | null;
+    readonly processState: 'STOPPED' | 'ALIVE' | 'DESCENDANTS_ALIVE' | 'UNVERIFIABLE'
+      | 'IDENTITY_MISSING';
+    readonly descendantRecord: 'RECORDED' | 'MISSING';
+    readonly descendantCount: number;
+    readonly workspacePresent: boolean;
+    readonly quiescenceProven: boolean;
+    readonly signalsSent: number;
+    readonly evidenceRef: string;
+  };
+  readonly taskState: string;
+  readonly taskVersion: number;
+  readonly executionState: string | null;
+  readonly reason: string | null;
+}
 
 export const runtimeResponseSchema = z.discriminatedUnion('ok', [
   z.strictObject({

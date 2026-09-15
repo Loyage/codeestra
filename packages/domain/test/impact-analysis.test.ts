@@ -367,6 +367,21 @@ describe('conflict analyzer: incomplete and stale facts never become SAFE', () =
     expect(assessment.safePairs).toEqual([]);
   });
 
+  it('is UNKNOWN, not a crash, when the candidate itself has no derivable snapshot', () => {
+    // FOUNDATION-086: this is the shape `project impact explain` produces for a Task whose workspace
+    // was removed (or which never had one). The verdict must be the analyzer's own UNKNOWN, with the
+    // missing snapshot named — dereferencing the absent generation crashed instead.
+    const assessment = assessCandidate({
+      candidate: { taskId: 'a', currentRevisionId: 'revision-a', snapshot: null,
+        unavailableDetail: 'the recorded workspace is not on disk' },
+      active: [],
+      context: context(),
+    });
+    expect(assessment.verdict).toBe('UNKNOWN');
+    expect(assessment.reasonCodes).toEqual(['MISSING_IMPACT_SNAPSHOT']);
+    expect(assessment.hits[0]?.detail).toContain('the recorded workspace is not on disk');
+  });
+
   it('is UNKNOWN when an active Task is incomplete', () => {
     const assessment = assess(
       { taskId: 'a', paths: ['src/a.ts'], mapping: mapping({ importantDirectories: ['src'] }) },

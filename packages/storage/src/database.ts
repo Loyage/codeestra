@@ -101,7 +101,11 @@ export class StorageError extends Error {
       | ProseQuestionResolutionCode | 'PROSE_QUESTION_RESOLUTION_REQUIRED'
       // The `intents.kind` CHECK was narrowed in schema v28 (ADR-0046), so a removed kind is a
       // boundary refusal with its own code rather than a raw SQLite constraint error.
-      | 'UNSUPPORTED_INTENT_KIND',
+      | 'UNSUPPORTED_INTENT_KIND'
+      // `task.recover` only means something for a Task the Runtime is waiting to reconcile
+      // (ADR-0055), so "there is nothing to reconcile here" is its own refusal instead of a generic
+      // state error a caller would have to read a sentence to understand.
+      | 'TASK_NOT_IN_RECOVERY',
     message: string,
   ) {
     super(message);
@@ -11785,6 +11789,192 @@ export class Phase1Database {
   }
 
   /**
+   * Everything `task.recover` (ADR-0055) needs to *observe* before it may change anything: the Task,
+   * the Execution that holds its resource, the Session and the newest incarnation (with the recorded
+   * provider process identity and, when it exists, the descendant snapshot), and the workspace row.
+   *
+   * This is a read: it records nothing and decides nothing. The decision belongs to the caller, which
+   * can only ever refuse or converge from the facts returned here.
+   */
+  getTaskRecoverySubject(projectId: string, taskId: string): TaskRecoverySubject | null {
+    const row = this.sqlite.query<{
+      project_id: string; task_id: string; display_number: number; task_state: TaskLifecycleState;
+      task_version: number; archived_at: number | null;
+      execution_id: string; execution_state: ExecutionLifecycleState; resource_held: number;
+      execution_version: number; workspace_id: string; workspace_path: string;
+      workspace_state: WorkspaceLifecycleState;
+      session_id: string | null; session_state: AgentSessionLifecycleState | null;
+      session_version: number | null; session_process_identity_json: string | null;
+      incarnation_id: string | null; incarnation_process_identity_json: string | null;
+      incarnation_process_tree_json: string | null;
+    }, [string, string]>(`
+      SELECT task.project_id,task.id AS task_id,task.display_number,task.state AS task_state,
+        task.version AS task_version,task.archived_at,
+        execution.id AS execution_id,execution.state AS execution_state,
+        execution.resource_held,execution.version AS execution_version,
+        workspace.id AS workspace_id,workspace.path AS workspace_path,workspace.state AS workspace_state,
+        session.id AS session_id,session.state AS session_state,session.version AS session_version,
+        session.process_identity_json AS session_process_identity_json,
+        incarnation.id AS incarnation_id,
+        incarnation.process_identity_json AS incarnation_process_identity_json,
+        incarnation.process_tree_json AS incarnation_process_tree_json
+      FROM tasks task
+      JOIN executions execution ON execution.task_id=task.id
+      JOIN workspaces workspace ON workspace.id=execution.workspace_id
+      LEFT JOIN agent_sessions session ON session.execution_id=execution.id
+      LEFT JOIN session_incarnations incarnation ON incarnation.id=(
+        SELECT candidate.id FROM session_incarnations candidate
+        WHERE candidate.session_id=session.id
+        ORDER BY candidate.incarnation_number DESC LIMIT 1)
+      WHERE task.project_id=?1 AND task.id=?2
+      ORDER BY execution.attempt_number DESC LIMIT 1
+    `).get(projectId, taskId);
+    if (row === null) return null;
+    return {
+      projectId: row.project_id,
+      taskId: row.task_id,
+      displayNumber: row.display_number,
+      taskState: row.task_state,
+      taskVersion: row.task_version,
+      archived: row.archived_at !== null,
+      executionId: row.execution_id,
+      executionState: row.execution_state,
+      executionResourceHeld: row.resource_held === 1,
+      executionVersion: row.execution_version,
+      workspaceId: row.workspace_id,
+      workspacePath: row.workspace_path,
+      workspaceState: row.workspace_state,
+      sessionId: row.session_id,
+      sessionState: row.session_state,
+      sessionVersion: row.session_version,
+      sessionProcessIdentity: parseJsonValue(row.session_process_identity_json),
+      incarnationId: row.incarnation_id,
+      incarnationProcessIdentity: parseJsonValue(row.incarnation_process_identity_json),
+      incarnationProcessTree: parseJsonValue(row.incarnation_process_tree_json),
+    };
+  }
+
+  /**
+   * The recovery reconcile one command already produced, so a replayed `task.recover` reaches its own
+   * record instead of being answered from the Task's *current* state (the same rule `promotion.prepare`
+   * follows). The payload hash travels with it because a replayed command id with a different payload
+   * must stay a conflict rather than being silently answered.
+   */
+  findTaskRecoveryOutcomeByCommand(
+    projectId: string,
+    commandId: string,
+  ): { readonly payloadHash: string; readonly outcome: TaskRecoveryOutcome } | null {
+    const receipt = this.sqlite.query<{ payload_hash: string; result_json: string }, [string, string]>(
+      'SELECT payload_hash,result_json FROM command_receipts WHERE project_id=?1 AND command_id=?2',
+    ).get(projectId, commandId);
+    if (receipt === null) return null;
+    let recorded: unknown;
+    try {
+      recorded = JSON.parse(receipt.result_json) as unknown;
+    } catch {
+      return null;
+    }
+    if (typeof recorded !== 'object' || recorded === null) return null;
+    const candidate = recorded as Partial<TaskRecoveryOutcome>;
+    if (candidate.outcome !== 'RECONCILED' || typeof candidate.taskVersion !== 'number'
+      || typeof candidate.taskId !== 'string') return null;
+    return { payloadHash: receipt.payload_hash, outcome: candidate as TaskRecoveryOutcome };
+  }
+
+  /**
+   * The one *write* `task.recover` performs (ADR-0055 D02): closes a `RECOVERY_REQUIRED` run as
+   * `FAILED` from the observation the caller made, and appends that observation to the ledger.
+   *
+   * Every update is conditional on the state it expects, so a concurrent converge is a no-op rather
+   * than a rewrite, and the whole call is one command receipt: a replayed command returns the first
+   * answer instead of appending a second set of events.
+   *
+   * What it deliberately does not do: it never signals a process, never deletes or moves the
+   * workspace (the row becomes `RETAINED`, which keeps `reclaim` the only path that removes the
+   * directory), never rewrites `exit_json` (that is what was observed at the time), and never claims
+   * quiescence — `quiescenceProven` is stored as `false` because a descendant snapshot the record
+   * never captured cannot be excluded.
+   */
+  convergeRecoveredTask(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly expectedVersion: number;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly reason: string | null;
+    readonly actor: string;
+    readonly detail: string;
+    readonly evidence: Readonly<Record<string, unknown>>;
+    readonly providerPid: number | null;
+    readonly executionEventId: string;
+    readonly sessionEventId: string;
+    readonly taskEventId: string;
+    readonly recoveryEventId: string;
+    readonly recordedAt: number;
+  }): TaskRecoveryOutcome {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.recordedAt,
+      apply: (database) => {
+        const subject = this.getTaskRecoverySubject(input.projectId, input.taskId);
+        if (subject === null) throw new StorageError('NOT_FOUND', 'Task was not found');
+        if (subject.taskVersion !== input.expectedVersion) {
+          throw new StorageError('CONCURRENT_MODIFICATION',
+            `Task version is ${subject.taskVersion}, not the expected ${input.expectedVersion}`);
+        }
+        if (subject.taskState !== 'RECOVERY_REQUIRED') {
+          throw new StorageError('TASK_NOT_IN_RECOVERY',
+            `Task is ${subject.taskState}, so there is nothing to reconcile`);
+        }
+        const sessionUpdate = subject.sessionId === null ? 0 : database.query(`
+          UPDATE agent_sessions SET state='EXITED',version=version+1,last_observed_at=?1
+          WHERE id=?2 AND state<>'EXITED'
+        `).run(input.recordedAt, subject.sessionId).changes;
+        // The Execution is closed only if it still claims the run; an Execution that already reached
+        // a terminal state is left exactly as it is (its failure is its own record).
+        const executionUpdate = database.query(`
+          UPDATE executions SET state='FAILED',resource_held=0,version=version+1,ended_at=?1,error_json=?2
+          WHERE id=?3 AND state NOT IN ('SUCCEEDED','FAILED','CANCELLED','SUPERSEDED')
+        `).run(input.recordedAt, JSON.stringify({ code: 'RECOVERY_RECONCILED',
+          message: input.detail, quiescenceProven: false }), subject.executionId).changes;
+        database.query(`
+          UPDATE workspaces SET state='RETAINED' WHERE id=?1 AND state IN ('RECOVERY_REQUIRED','IN_USE')
+        `).run(subject.workspaceId);
+        const taskUpdate = database.query(`
+          UPDATE tasks SET state='FAILED',version=version+1,updated_at=?1
+          WHERE id=?2 AND version=?3 AND state='RECOVERY_REQUIRED'
+        `).run(input.recordedAt, subject.taskId, input.expectedVersion).changes;
+        if (taskUpdate !== 1) {
+          throw new StorageError('CONCURRENT_MODIFICATION',
+            'Task changed during recovery reconcile');
+        }
+        appendRecoveryEvents(this.sqlite, {
+          projectId: input.projectId, subject, expectedVersion: input.expectedVersion,
+          commandId: input.commandId, actor: input.actor, reason: input.reason,
+          detail: input.detail, evidence: input.evidence,
+          executionEventId: input.executionEventId, sessionEventId: input.sessionEventId,
+          taskEventId: input.taskEventId, recoveryEventId: input.recoveryEventId,
+          recordedAt: input.recordedAt, sessionChanged: sessionUpdate === 1,
+          executionChanged: executionUpdate === 1,
+        });
+        return {
+          outcome: 'RECONCILED' as const,
+          taskId: subject.taskId,
+          displayNumber: subject.displayNumber,
+          previousTaskState: 'RECOVERY_REQUIRED' as const,
+          taskState: 'FAILED' as const,
+          taskVersion: input.expectedVersion + 1,
+          executionId: subject.executionId,
+          sessionId: subject.sessionId,
+          providerPid: input.providerPid,
+        };
+      },
+    });
+  }
+
+  /**
    * Projects one stale Session/Execution pair as `DISCONNECTED`/`RECOVERY_REQUIRED` from the
    * ownership fact the caller observed, and appends that observation to the audit ledger. The update
    * is conditional on the states still being non-terminal, so a second startup (or a concurrent
@@ -13939,6 +14129,133 @@ export interface AgentSessionStartupReconciliationRecord {
   readonly evidence: Readonly<Record<string, unknown>>;
   readonly commandId: string;
   readonly recordedAt: number;
+}
+
+/**
+ * The facts `task.recover` observes before it may change anything (ADR-0055). Every field is read from
+ * the ledger; nothing here is derived, and the process facts are re-checked against the real process
+ * table by the caller rather than trusted.
+ */
+export interface TaskRecoverySubject {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly displayNumber: number;
+  readonly taskState: TaskLifecycleState;
+  readonly taskVersion: number;
+  readonly archived: boolean;
+  readonly executionId: string;
+  readonly executionState: ExecutionLifecycleState;
+  readonly executionResourceHeld: boolean;
+  readonly executionVersion: number;
+  readonly workspaceId: string;
+  readonly workspacePath: string;
+  readonly workspaceState: WorkspaceLifecycleState;
+  readonly sessionId: string | null;
+  readonly sessionState: AgentSessionLifecycleState | null;
+  readonly sessionVersion: number | null;
+  /** The Session-level provider identity, which exists even when no incarnation row was kept. */
+  readonly sessionProcessIdentity: unknown;
+  readonly incarnationId: string | null;
+  readonly incarnationProcessIdentity: unknown;
+  /** The descendant snapshot taken while the provider was alive; absent means orphans cannot be
+   * attributed at all, which is recorded as `descendantRecord: 'MISSING'` rather than assumed empty. */
+  readonly incarnationProcessTree: unknown;
+}
+
+/** The stored answer of one recovery reconcile, so a replayed command returns the first one. */
+export interface TaskRecoveryOutcome {
+  readonly outcome: 'RECONCILED';
+  readonly taskId: string;
+  readonly displayNumber: number;
+  readonly previousTaskState: 'RECOVERY_REQUIRED';
+  readonly taskState: 'FAILED';
+  readonly taskVersion: number;
+  readonly executionId: string;
+  readonly sessionId: string | null;
+  readonly providerPid: number | null;
+}
+
+/**
+ * One `domain_events` row, used by the recovery reconcile path (ADR-0055). The rest of this file keeps
+ * its inline inserts; this helper exists because that path writes four events that share one payload
+ * shape, and spelling the same statement out four times invites them to drift apart.
+ */
+function insertDomainEvent(database: Database, event: {
+  readonly eventId: string;
+  readonly projectId: string;
+  readonly eventType: string;
+  readonly aggregateType: string;
+  readonly aggregateId: string;
+  readonly aggregateVersion: number;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+  readonly occurredAt: number;
+  readonly payload: Readonly<Record<string, unknown>>;
+}): void {
+  database.query(`
+    INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+      aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+    VALUES (?1,?2,?3,1,?4,?5,?6,?7,?8,?9,?10)
+  `).run(event.eventId, event.projectId, event.eventType, event.aggregateType, event.aggregateId,
+    event.aggregateVersion, event.correlationId, event.causationId, event.occurredAt,
+    JSON.stringify(event.payload));
+}
+
+/**
+ * The four events one recovery reconcile appends (ADR-0055 D02), in one place so the aggregate
+ * versions and the causation chain between them cannot drift per call site: the observation
+ * (`TaskRecoveryReconciled`) is the cause of the three state projections that follow it.
+ */
+function appendRecoveryEvents(database: Database, input: {
+  readonly projectId: string;
+  readonly subject: TaskRecoverySubject;
+  readonly expectedVersion: number;
+  readonly commandId: string;
+  readonly actor: string;
+  readonly reason: string | null;
+  readonly detail: string;
+  readonly evidence: Readonly<Record<string, unknown>>;
+  readonly executionEventId: string;
+  readonly sessionEventId: string;
+  readonly taskEventId: string;
+  readonly recoveryEventId: string;
+  readonly recordedAt: number;
+  readonly sessionChanged: boolean;
+  readonly executionChanged: boolean;
+}): void {
+  const { subject } = input;
+  insertDomainEvent(database, { eventId: input.recoveryEventId, projectId: input.projectId,
+    eventType: 'TaskRecoveryReconciled', aggregateType: 'Task', aggregateId: subject.taskId,
+    aggregateVersion: input.expectedVersion + 1, correlationId: input.commandId, causationId: null,
+    occurredAt: input.recordedAt,
+    payload: { taskId: subject.taskId, executionId: subject.executionId,
+      sessionId: subject.sessionId, workspaceId: subject.workspaceId,
+      workspacePath: subject.workspacePath, reason: input.reason, actor: input.actor,
+      detail: input.detail, ...input.evidence } });
+  if (input.sessionChanged && subject.sessionId !== null) {
+    insertDomainEvent(database, { eventId: input.sessionEventId, projectId: input.projectId,
+      eventType: 'AgentSessionStateChanged', aggregateType: 'AgentSession',
+      aggregateId: subject.sessionId, aggregateVersion: (subject.sessionVersion ?? 0) + 1,
+      correlationId: input.commandId, causationId: input.recoveryEventId,
+      occurredAt: input.recordedAt,
+      payload: { sessionId: subject.sessionId, from: subject.sessionState, to: 'EXITED',
+        reason: 'recovery reconciled' } });
+  }
+  if (input.executionChanged) {
+    insertDomainEvent(database, { eventId: input.executionEventId, projectId: input.projectId,
+      eventType: 'ExecutionStateChanged', aggregateType: 'Execution',
+      aggregateId: subject.executionId, aggregateVersion: subject.executionVersion + 1,
+      correlationId: input.commandId, causationId: input.recoveryEventId,
+      occurredAt: input.recordedAt,
+      payload: { executionId: subject.executionId, from: subject.executionState, to: 'FAILED',
+        reason: 'RECOVERY_RECONCILED', evidenceRef: String(input.evidence['evidenceRef'] ?? '') } });
+  }
+  insertDomainEvent(database, { eventId: input.taskEventId, projectId: input.projectId,
+    eventType: 'TaskStateChanged', aggregateType: 'Task', aggregateId: subject.taskId,
+    aggregateVersion: input.expectedVersion + 1, correlationId: input.commandId,
+    causationId: input.executionEventId, occurredAt: input.recordedAt,
+    payload: { taskId: subject.taskId, from: 'RECOVERY_REQUIRED', to: 'FAILED',
+      reason: 'recovery reconciled', actor: input.actor } });
 }
 
 /** JSON columns of the probe tables are read back as-is; a malformed value is reported, not guessed. */

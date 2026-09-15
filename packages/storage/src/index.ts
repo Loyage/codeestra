@@ -21,7 +21,7 @@ export type {
   IntegrationItemState, IntegrationVerificationPlan, IntegrationVerificationSummary, MergeStrategy,
   ImpactActiveTaskRef, ImpactAssessmentInput, ImpactAssessmentRecord, ImpactCandidateTaskRef,
   ConfirmedImpactPolicy, ImpactPolicyConfirmationInput, ImpactSnapshotInput, ImpactSnapshotKey,
-  ImpactSnapshotRecord, StoredImpactResourceRef,
+  ImpactSnapshotRecord, StoredImpactResourceRef, TaskRecoveryOutcome, TaskRecoverySubject,
   ExecutionKnowledgeSnapshotInput, ExecutionKnowledgeSnapshotRecord, KnowledgeLayerName,
   KnowledgeScopeName, KnowledgeSnapshotInput, KnowledgeSnapshotKey, KnowledgeSnapshotRecord,
   StoredKnowledgeEntry, StoredKnowledgeEntryOrigin,

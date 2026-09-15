@@ -712,7 +712,13 @@ function subjectHits(
   subject: ImpactSubject,
   context: ImpactAssessmentContext,
 ): readonly ImpactHit[] {
-  const codes = subjectValidity(subject.snapshot as ImpactSnapshot, subject.observedFiles, context,
+  // A subject without a snapshot has no generation to validate. Returning no hits here is not "no
+  // problem": the caller reports `MISSING_IMPACT_SNAPSHOT` for it (a null candidate and a null peer
+  // each get exactly one such hit), which is what makes the verdict `UNKNOWN` instead of `SAFE`. It
+  // used to dereference the null generation instead, so explaining a Task whose workspace had been
+  // removed crashed instead of explaining it (FOUNDATION-086).
+  if (subject.snapshot === null) return Object.freeze([]);
+  const codes = subjectValidity(subject.snapshot, subject.observedFiles, context,
     subject.currentRevisionId);
   return ordered(reasonCodeOrder, codes).map((code) => Object.freeze({
     reason: code,
