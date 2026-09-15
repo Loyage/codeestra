@@ -5727,6 +5727,49 @@ $ git diff --check
   而 ADR-0051/FOUNDATION-079 已把 `knowledgeContext` 接到三个 Adapter 上；本条真正未验证的是「模型层是否真的读了它」。
   修这句文本属下一格的 doc-sync，本格不静默重写。
 
+## Wave M 开发分支集成（M1 → M3 → M2 → M4，4 格经 Orca 受监督编排）
+
+状态：**四格已合入 `dev`，合并后完整检查通过（这是本仓库第一次在合并时就跑完整 `bun run check`）。** 未 push、未提升 `main`、未触碰稳定 clone 与其上的稳定 Runtime。
+
+本波对应用户裁决的四个方向：M1 多成员 IntegrationBatch、M2 两个 UI 投影缺口、M3 交接/终端剩余边界、M4 真实 provider 验收准备。基线固定 `dev@75fa7b87a4fbc515adf46a936b3666bf83a7ebaa`（四格同基线，未 rebase）。schema：**M1 占 v30**，其余不占迁移号。
+
+### 固定提交与合并顺序
+
+| 顺序 | 分支 | lane commit | `dev` 合并 | FOUNDATION / ADR / schema |
+|---|---|---|---|---|
+| M1 | `lane/m1-multi-member-integration` | `60f2695` + `b6a31f7` + `e5ed8aa` | merge `dbe6dea` | 081 / **ADR-0053** / **v30** |
+| M3 | `lane/m3-terminal-boundaries` | `d67c202` | merge `dc890c2` | 083 / **ADR-0054** / 无 |
+| M2 | `lane/m2-ui-projection-gaps` | `836ba1d` | merge `ec7ad97` | **082**（见下）/ 无 / 无 |
+| M4 | `lane/m4-acceptance-runbook` | `afddd5f` | merge `1b3a1a9` | 084 / 无 / 无 |
+
+### 集成期的编号与冲突处置（协调者手工，沿用 Wave I/L 的先例）
+
+- **又一次 FOUNDATION 撞号**：Wave M 的任务书只给了 M1 号段（081），M2 自行用了 081、M3 用 083、M4 用 084。协调者在合并 M2 时把它的记录**顺延为 FOUNDATION-082**（只改标题与其自引用），四块最终按 081 → 082 → 083 → 084 排序。**教训（第三次同类）**：号段必须在任务书里逐格写死；本波已把四格号段在派发前声明，但 M2/M3/M4 的任务书文本漏写，属协调者失误。
+- 冲突共 6 处，全部人工解决：`docs/decisions/README.md`（ADR-0053/0054 索引按号插入 + 「优先级标注」句并集）、`docs/guides/cli-reference.md`（版本头取已 bump 的 `schema v30`；M1/M3 各自新增的命令节都保留）、`docs/tasks/README.md`（四块记录 + `## NEXT` 条目取较新事实并保留 M4 的 runbook 指针，指针在 NEXT 中共 8 处）。
+- 冲突期间协调者有一次**操作失误并已更正**：解 `docs/decisions/README.md` 时脚本一次性改写失败，回退为「取 HEAD 版本 + 从 lane 精确插入」后成功；解 M2 的 `docs/tasks/README.md` 时先用 `--ours` 提交，导致该文件里 M2 的记录一度未被带入，随后以顺延编号的方式补回（同一合并批次内闭合，未留残缺）。
+
+### 集成期发现并修掉的问题
+
+1. **`dev` 在 Wave L 之后就是红的**（`71e8701` 修复，独立提交）：`packages/contracts/test/request.test.ts` 里 `project.trust` 的**字面 fixture** 仍描述旧身份——FOUNDATION-077 给 `projectIdentitySchema` 加了必填 `devRepoPath`（它是「用户审阅过的身份」的一部分），fixture 没跟上，于是「应当解析成功」的请求被拒（40 pass / 1 fail）。**M3 在 lane 上发现它并如实报告，没有顺手改别人的领地。** 修复：fixture 补 `devRepoPath: null`，并新增一条负例锁住「身份里缺 `devRepoPath` 必须被拒」。
+   **根因是协调者的合并时验证不完整**：Wave L 的合并时检查跑了 storage/git/promotion/adapters/runtime 与部分 e2e，**没有跑 `packages/contracts/test`**。自本波起，`dev` 上的合并时验证改为跑**完整 `bun run check`**（见下）。
+2. **跨格依赖按归属分派**（M3→M2）：M3 把 `ptyResize` 做成真实能力后，`apps/ui/src/terminal.tsx` 里硬编码的「resize 不支持（能力矩阵为 UNSUPPORTED）」会与运行时自相矛盾。协调者裁决：M3 不动 `apps/ui`，由 M2 把该行改为**按命令面返回值动态渲染**（含未知取值的如实回退文案）。两格都按此执行。
+3. **协调者一次给错词汇并已由 worker 纠正**：协调者对 M3 说能力取值用 `SUPPORTED/UNSUPPORTED/REQUIRES_VALIDATION`，但 `ptyResize` 属于 `SessionHandoffCapabilities`，其取值集是 `IMPLEMENTED|UNSUPPORTED|PARTIAL|UNVERIFIED`；M3 核对代码后提出，协调者确认并改为按既有词汇裁决。M3 记录里保留了这条纠正。
+
+### 合并后验证（在 `dev` 上跑**完整** `bun run check`，exit 0）
+
+- 根 `bun run typecheck` 0、`bun run typecheck:ui` 0；**Vitest 19 文件 / 453 tests passed**；**Bun 测试 819 pass / 0 fail（93 文件、5510 断言）**；`bun run build:ui` 成功。
+- 各格在 lane 上各自的定向结果（合并前）：M1 integration-service 22/22、cli-integration-batch 4/4、promotion-service 27/27（含「两成员 PASSED 批次上 prepare」且 **`promotion-service.ts` 零改动**）、storage 156/156（含真实 v29→v30 迁移）；M3 pi-pty 8、terminal-service 8、session-handoff 18、cli-session-attach 2；M2 `vitest apps/ui` 124（+31）、`build:ui:dev` 且 `data-channel="dev"`；M4 47 条命令/19 个 flag 与 `usage()` 全匹配、29 链接 0 断、dry-run 零副作用。
+- 本轮**没有**用产品 `promotion full-suite run` 产出提升证据：按 ADR-0038/0039，提升前必须在**当时固定的精确 SHA** 上重跑全量；本记录是合并后新增的提交，因此这里的 819/453 只作合并时验证，**不得**当作提升证据。
+
+### 未验证 / 已知缺口（如实汇总）
+
+- **真实 provider 全线仍未验收**：多成员批次只有 stub provider 证据；PTY resize 的实机观感与人机交互未验；`parallelToolBatchSafePoint: IMPLEMENTED` 的证据来自真实 Pi + 脚本化模型（不是真实模型）；权限矩阵**仍 `PARTIAL`**，M3 点名了不成立的那一格（真实 provider + 人经记录的 Attention 决定 + 原生 TUI 接管三者组合）。
+- **多成员批次仅限单项目**（跨项目批次未实现）。
+- **UI 投影仍缺**：多成员批次与批级 `STALE`/`CANCELLED` 没有 UI（M1 未碰 `apps/ui`）。
+- **M1 的两处领地例外**（已披露）：`apps/runtime/src/main.ts`（命令分派）与 `apps/runtime/src/recovery-service.ts`（reconcile 签名）。
+- **观感类**：M2 的两个新 UI 面板与 M4 runbook 的执行效果都只做了静态/命令面断言，人眼确认未做。
+- **M4 记录的文本漂移**：`## NEXT` 第 7 条仍写「Adapter 尚不消费 `knowledgeSnapshotRefs`」而 ADR-0051 已接通；本波未静默重写，留待下一次 doc-sync。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），
