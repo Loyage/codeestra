@@ -45,9 +45,10 @@
 - `main` 是用户日常实际运行 Codeestra、进行开发辅助工作的稳定分支；不得直接在 `main` 开发新功能。
 - `dev` 是新功能实验与集成分支。所有功能 Task/worktree 从固定 `dev` commit 建立基线；功能完成、Task verification 通过后，经 IntegrationBatch 与独立 Integration verification 进入 `dev`，不得直接进入 `main`。
 - `dev → main` 是唯一稳定提升路径，且**必须经 GitHub 中转**（ADR-0047）：① 把固定 dev 候选 push 到 `origin/dev`，并读回核对 `origin/dev == 候选 SHA`；② 在 main clone 执行 `git fetch` + `git merge --ff-only origin/dev`；③ 在 main clone 按下面的规程重启稳定 Runtime 并核对 `status: READY`；④ 核对通过后才把 `main` 推回 `origin/main`（重启失败则不推回，保留现场并如实报告）。
+- `just promote-main <SHA>` 封装上面的 ②③④（候选 SHA 必须显式给出；要求候选已是 `origin/dev` 的尖端、main 检出干净且检出 `main`）。第 ① 步（把固定候选 push 到 `origin/dev`）与提升前的全量测试证据仍需人工完成。
 - 每批固定 dev SHA、预期 main SHA 与验证证据；FULL 下不批准，STRICT 下保留用户批准且 ref/证据变化使批准失效。提升前必须在精确 `dev` 候选 SHA 上跑完全量测试（在 dev clone 发起）；候选、测试配置或锁文件变化即证据失效并重跑。
 - 只 push 固定候选这一个 ref；不 `--force`、不覆盖远端已有提交、不对已检出的 `main` 用 `update-ref`。断网、SSH 认证失败或远端不可达时不推进任何 ref，也不得把本地等价当作提升成功。
-- **产品 `promotion prepare/approve/promote` 目前仍是旧的本地 `git merge --ff-only` 路径（ADR-0047 的实现留到下一格）**：本仓库自身的提升不得使用它，一律走上面的人工四步，并在交付记录里如实写明实际用了哪条路径、执行到哪一步。
+- **产品 `promotion prepare/approve/promote` 已实现 ADR-0047 的 GitHub 中转路径（FOUNDATION-077 / schema v29，落地细则见 ADR-0052；旧的本地 ff 实现已删除）**：但本仓库自身的提升仍不得使用它，一律走上面的人工四步，并在交付记录里如实写明实际用了哪条路径、执行到哪一步。
 - `main` 成功更新后立即在 main clone 执行 `bun run codeestra stop`，再执行 `bun run codeestra status` 自动拉起并检查 Runtime。该后置步骤不增加第二次确认；Runtime 恢复响应前不得报告提升完成。失败时立即报告，不擅自回滚。
 - 当前没有后台监控用户在系统外手动更新 `main` 的能力；不要声称已覆盖该场景。也不声称 GitHub 侧已配置分支保护、必经评审或 CI 门禁。
 
@@ -70,12 +71,16 @@ CODEESTRA_HOME=~/.local/state/codeestra-dev bun run codeestra status
 CODEESTRA_HOME=~/.local/state/codeestra-dev bun run codeestra ui --no-open
 ```
 
+- 等价入口：`just restart-dev`（`install --frozen-lockfile` → dev 通道构建 UI → `stop` → `status` → `ui --no-open`），并在构建后核对 `index.html` 真的带 `data-channel="dev"`，不带标记就停止。
+
 - Web UI 端口由 Runtime 自己取空闲端口，两个实例不会撞端口；各自持有自己的内存 token，不要记录实际 token。
 - 不写 `CODEESTRA_HOME` 时，从 dev clone 运行 CLI 连的是**稳定 Runtime**、执行的是 `main` 代码：不能用来证明 dev 代码已运行。
 - dev 界面的通道标记来自构建期变量（ADR-0049）：不加 `VITE_CODEESTRA_CHANNEL=dev` 就**没有标记**，此时不要把该界面当稳定版或 dev 版汇报。
 - dev 实例的数据库、任务与会话是独立的临时数据，不得据它声称稳定数据迁移或稳定服务已更新。
 
 ### 重启 main 稳定服务（给 dev Agent 的操作规程）
+
+等价入口：`just restart-main`（只重启，不移动任何 ref、不推送）。它是下面序列的封装，并在末尾补一步 `bun run codeestra ui --no-open`：`stop` / `status` 不会把 Web UI 服务器带回来（ADR-0007：UI 是按需客户端，实测重启后 `uiRunning` 为 `false`），而下面第 5 条要求 `uiRunning: true`，所以 recipe 显式拉起。
 
 当用户在 dev 会话中说“重启 main 的服务”“让 main 更新生效”或同义指令时，必须操作 **main clone**，不能在 dev clone 直接运行这些命令。除非用户明确要求跳过，使用以下完整流程；即使本次看似没有依赖或 UI 变化，也允许重复执行 install/build 以避免遗漏各自本地的 gitignore 资产：
 

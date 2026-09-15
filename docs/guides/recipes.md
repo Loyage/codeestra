@@ -441,15 +441,24 @@ cd ~/Documents/codeestra
 git fetch origin
 git merge --ff-only origin/dev
 
-# ③ 在 main clone：重启稳定 Runtime 并核对
+# ③ 在 main clone：重启稳定 Runtime（并拉起 Web UI）后核对
 bun install --frozen-lockfile
 bun run build:ui
 bun run codeestra stop
+bun run codeestra status                 # 拉起 Runtime
+bun run codeestra ui --no-open           # 再拉起 Web UI 服务器，并打印带 token 的链接
 bun run codeestra status                 # 必须看到 status: "READY" 且 uiRunning: true
 
 # ④ 核对通过后，才把 main 推回远端
 git push origin main
 ```
+
+**为什么第 ③ 步要多一条 `codeestra ui --no-open`**：`stop` / `status` 不会把 Web UI 服务器带回来
+（ADR-0007：UI 是按需客户端），实测重启后 `uiRunning` 为 `false`；而恢复判据要求 `uiRunning: true`，
+不显式拉起就永远无法通过。
+
+第 ②–④ 步的等价入口是 `just promote-main <候选SHA>`（在 dev clone 里跑，候选 SHA 必须显式给出）；
+只重启、不提升的等价入口是 `just restart-main`。第 ① 步与提升前的全量测试证据仍需人工完成。
 
 ### 硬性约束（不是建议）
 

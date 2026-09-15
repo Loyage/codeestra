@@ -5825,6 +5825,89 @@ CODEESTRA_HOME=/tmp/ce-m-promote bun run codeestra promotion full-suite run <pro
 - **未在 main clone 额外跑全量**：`main` 与被执行全量的精确候选 SHA 完全相同、工作树 clean。
 - **真实 provider 仍未验收**：本波把验收做成了可执行的 runbook 与 dry-run 脚手架（`docs/notes/real-provider-acceptance-runbook.md`、`scripts/real-provider-acceptance.sh`），但 A1–A8 **一条都还没跑过**。
 
+## FOUNDATION-085 — 服务重启 recipe 与重启规程文档修正（Justfile + AGENTS.md + docs/guides，无 ADR、无 schema、无代码改动）
+
+状态：**在 dev clone 的直接工作区改动，未提交、未 push**。基线 `dev = 976a1c193a3c3f11db023962d97eb24ddd7603da`。
+不是 lane 分支：本格直接改 `/Users/loyage/Documents/codeestra-dev` 工作区（ADR-0048 的 dev clone）。
+**零代码改动**（`apps/`、`packages/`、`package.json`、`bun.lock` 均未动），所以**未跑任何测试套件**。
+
+### 本格改了什么
+
+| 位置 | 改动 |
+|---|---|
+| `Justfile` | 新增 4 个 recipe：`restart-main`、`restart-dev`、`promote-main SHA`、`ui-build-dev`（另加 3 个路径变量） |
+| `AGENTS.md` | 「重启 main 稳定服务」与「dev 实例」两节补 recipe 等价入口；「分支与发布工作流」补 `promote-main` 说明；**修正一句过时声明**（见下） |
+| `docs/guides/manual.md` | §2.5 补 `just restart-dev` 入口；§9.1 重启序列补 `codeestra ui --no-open` 并修正不可达的判据；§9.2 修正过时声明与 `promote` 的旧描述 |
+| `docs/guides/recipes.md` | §10 第 ③ 步补 `codeestra ui --no-open`，并补 recipe 入口与原因说明 |
+| `docs/tasks/README.md` | 本节 |
+
+### 三个实测出来的工程事实（设计就是被它们决定的）
+
+1. **`just` 默认「每行一个 shell」，普通写法的 `cd` 不保留到下一行。**探针：`cd X` 后 `pwd` 仍打印 justfile 所在目录。
+   所以四个 recipe 全用 **shebang 形式**（整段跑在同一个 shell 里）。
+2. **`just` 1.58.0 下，`@` 前缀对 shebang recipe 是反的**：加 `@` 会**回显整段脚本**，不加反而安静。
+   探针：同一个带 `if` 的 shebang recipe，去掉 `@` 后输出只剩真正的 stdout。→ 本格最终**不加** `@`。
+3. **`stop` + `status` 不会把 Web UI 服务器带回来。**实测：重启后 `uiRunning: false`；
+   跑一次 `codeestra ui --no-open` 才变 `true`。这直接影响了判据设计（见下）。
+
+### 为什么 recipe 里多了一条 `codeestra ui --no-open`
+
+`AGENTS.md` 的第 5 条要求「`status: "READY"` **且** `uiRunning: true`」才算稳定服务已恢复，
+但同一节规定的固定序列 `install → build:ui → stop → status` **产不出** `uiRunning: true`（事实 3）——
+即该判据按原序列**永远不可满足**。产品的记账语义则相反：`promotion-service.ts` 明确写
+「`uiRunning` is recorded as an observed fact; the Web UI is an on-demand client (ADR-0007), so it is not a
+promotion criterion」，且其测试**断言**重启后 `uiRunning` 为 `false`。
+
+用户 2026-09-16 裁决：**保留 `AGENTS.md` 第 5 条不动**，由 recipe 在 `stop`/`status` 之后显式
+`codeestra ui --no-open` 把 UI 拉起，使稳定服务回到「随时可用」（ADR-0048 D02）。
+`promote-main` 同样如此——否则它的推回前核对永远无法通过。
+
+### 过时声明的修正（与实现事实对齐，不是语义放宽）
+
+`AGENTS.md` 与 `manual.md` §9.2 原写「产品 `promotion prepare/approve/promote` 目前仍是旧的本地
+`git merge --ff-only` 路径（ADR-0047 的实现留到下一格）」。该描述已过时：
+`docs/decisions/README.md`、`docs/guides/features.md` §、`docs/guides/recipes.md` §10 与
+`apps/runtime/src/promotion-service.ts`（`pushCommitToRemote` / `readRemoteDevState` / `AWAITING_PULL` / 退出码 3）
+均已描述实现后的 GitHub 中转路径，`docs/tasks/README.md` 亦记有旧 `fastForwardCheckedOutWorktree` 已删除。
+**只改「实现现状」的描述，「本仓库自身不得使用产品提升路径、一律走人工四步」的规定原封保留。**
+
+### 实际执行的验证（全为定向；零代码改动，所以未跑任何测试套件）
+
+| # | 检查 | 命令 / 方法 | 结果 |
+|---|---|---|---|
+| 1 | Justfile 可解析 | `just --list` | 退出码 0；15 个 recipe 全部列出，描述正确（`--list` 取的是注释块**最后一行**，已据此重排） |
+| 2 | `just` 语义探针 | 临时 justfile（`/tmp/probe2`、`/tmp/probe4`） | 确认事实 1 与事实 2；探针目录已清理 |
+| 3 | **`just restart-dev` 实跑** | `just restart-dev`，输出落盘后取退出码（不接 `\| head`，见下） | **退出码 0**；dev Runtime `READY` 且 `uiRunning: true`；pid 由 63161 → 74439（多次重启均验证）；`data-channel="dev"` 标记与 `Codeestra DEV` 标题在构建产物里 |
+| 4 | `promote-main` 五条守卫（**临时仓库**） | 临时裸仓库 `origin.git` + 克隆，构造 `origin/main`/`origin/dev` | T1 非十六进制输入 → 拒；T2 候选非 `origin/dev` 尖端 → 拒；T3 分支非 `main` → 拒；T4 工作区脏 → 拒；T5 尖端候选 → 读回核对通过 + `--ff-only` 成功，随后在 `bun install` 处失败并退出。**五种情况下 `origin/main` 全部保持 `c5037fb` 未动** |
+| 5 | `promote-main` 不 push 的性质（T5） | 同 #4 | 失败点在步骤 4 之前 → **未执行 `git push origin main`**（这是本格最想验证的 Git 安全性质） |
+| 6 | `restart-main` 分支守卫 | `CODEESTRA_MAIN_CLONE` 指向临时 main 检出 + `CODEESTRA_HOME` 指向丢弃目录 | 分支为 `main` 且干净时守卫通过，随后在 `bun install` 处失败并退出；**真稳定 Runtime（pid 59049）全程未被触碰** |
+| 7 | `uiRunning` 语义 | `codeestra ui --no-open` 后读 `status` | `stop`+`status` 后为 `false`；`ui --no-open` 后为 `true` |
+| 8 | 未回显脚本 | 落盘后 `grep -c 'set -euo pipefail'` | `0`（去掉 `@` 后不再回显） |
+| 9 | `docs/guides` 未重校整篇 | 校对头 | 按 ADR-0050 D02「只在该篇内容被实际核对时更新」，**两篇校对头保持原样不动**，不把整篇标成已重校 |
+
+**一次误报与更正**：`just restart-dev 2>&1 | head -12` 报 `JUST_EXIT=101`。核后确认那是 `head` 提前关管道引发的 EPIPE，
+**不是 recipe 失败**；改把输出落盘后真实退出码为 0。此处记下以免 101 被当成证据。
+
+**没有跑什么、为什么**：
+
+- 未跑 `bun run check` / `check:fast` / `just check` / `just verify` / `typecheck`：本格**零代码改动**，聚合检查只会给出无信息的绿灯（ADR-0038）。
+- **未执行任何真实提升**：`promote-main` 的步骤 4（`git push origin main`）从未对真实远端执行，未移动任何真实 ref。
+- **未对真实稳定实例跑 `restart-main`**：那会中断用户正在使用的稳定 Runtime 并作废其 UI token；本格只用临时 main 检出 + 丢弃 `CODEESTRA_HOME` 验证了守卫与「首步失败即停」的路径。
+- 未跑 `just restart-main` 的完整成功路径，因此其 `ui --no-open` + `uiRunning` 核对是在 `restart-dev`（同构、已实跑）上验证的。
+
+### 遗留 / 下一格
+
+- **`Justfile` 与 `AGENTS.md` 的改动走不到 main clone，直到下一次提升**：`Justfile` 与 `AGENTS.md` 都是 git 跟踪文件，
+  而 ADR-0048 D02 禁止手改 main clone。因此在下次 `dev → main` 之前，`just restart-main` **只在 dev clone 里可用**
+  （它本身会 `cd` 到 main clone 执行）。这不算缺陷，但必须写明，以免在 main clone 里找不到 recipe 时误判。
+- **`promote-main` 不校验提升前全量测试证据**：ADR-0038 要求该证据绑定精确候选 SHA。recipe 把「已有该证据」写成**前置说明**，
+  没有机器校验（校验需要查询 Runtime 的全量证据，属产品命令面的能力）。这是有意的不做，不是遗漏。
+- **`restart-*` 会把带 token 的界面链接打到终端**：这是用户取链接的正常方式，**未写入任何文件或提交**（AGENTS.md 第 6 条）。
+- **`AGENTS.md` 第 5 条与产品语义的差异被有意保留**：`AGENTS.md` 要求 `uiRunning: true`，产品把 `uiRunning` 记为事实、不作判据。
+  本格以「recipe 显式拉起 UI」让两者同时成立，未改写任一侧语义。若日后要统一，应开 ADR 而不是改 recipe。
+- **`restart-dev` 不校验 dev clone 的分支是 `dev`**（只打印分支名），与 `restart-main` 的硬校验不对称：
+  `AGENTS.md` 只对 main 侧要求「先确认路径与分支」，本格按规范的不对称保留，未自行加门禁。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），

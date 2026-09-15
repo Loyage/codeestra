@@ -179,6 +179,9 @@ CODEESTRA_HOME=~/.local/state/codeestra-dev bun run codeestra status
 CODEESTRA_HOME=~/.local/state/codeestra-dev bun run codeestra ui --no-open
 ```
 
+上面四步的等价入口是 `just restart-dev`（在 dev clone 里跑）：它按顺序执行 install → dev 通道构建 UI →
+`stop` → `status` → `ui --no-open`，并在构建后核对 `index.html` 真的带 dev 标记，不带就停止。
+
 **dev 界面的通道标记来自构建期变量**：只有构建时设了 `VITE_CODEESTRA_CHANNEL=dev`（即用
 `bun run build:ui:dev`），界面才会带橙色的「Codeestra DEV」横幅与 `Codeestra DEV` 品牌名。
 **不加这个变量就没有标记**——在 dev clone 里跑 `bun run build:ui` 得到的是一个**没有标记**的界面，
@@ -702,7 +705,7 @@ bun run codeestra task integration cancel $PROJECT <batch-id> --reason "<为什�
 ```text
 ① 在 dev clone：把固定候选 push 到 origin/dev，并读回核对 origin/dev == 候选 SHA
 ② 在 main clone：git fetch origin，然后 git merge --ff-only origin/dev
-③ 在 main clone：重启稳定 Runtime 并核对 status: READY
+③ 在 main clone：重启稳定 Runtime（并拉起 Web UI）后核对 status: READY 且 uiRunning: true
 ④ 核对通过后，才把 main 推回 origin/main
 ```
 
@@ -723,9 +726,18 @@ git merge --ff-only origin/dev        # 只在本次是已批准的提升时执�
 bun install --frozen-lockfile
 bun run build:ui
 bun run codeestra stop
+bun run codeestra status              # 拉起 Runtime
+bun run codeestra ui --no-open        # 再拉起 Web UI 服务器（不自动开浏览器），并打印带 token 的链接
 bun run codeestra status              # 必须看到 status: "READY" 且 uiRunning: true
 git push origin main                  # 提升收尾：把已拉取并验证过的 main 推回
 ```
+
+**为什么第 ③ 步要多一条 `codeestra ui --no-open`**：`stop` / `status` 不会把 Web UI 服务器带回来
+（ADR-0007：UI 是按需客户端），实测重启后 `uiRunning` 为 `false`。而恢复判据要求 `uiRunning: true`，
+所以必须显式拉起，否则这一步永远无法通过。
+
+上面第 ②–④ 步的等价入口是 `just promote-main <候选SHA>`（在 dev clone 里跑；候选 SHA 必须显式给出）；
+只重启、不提升的等价入口是 `just restart-main`。第 ① 步与提升前的全量测试证据仍需人工完成。
 
 ### 9.2 产品命令 `promotion` 的现状（**重要边界**）
 
@@ -745,16 +757,19 @@ bun run codeestra promotion get|list|abandon …
   **候选 commit 上的锁文件 digest**。
 - `prepare` **不写 Git**：它只是把「已验证的 dev commit / 预期旧 main commit / 该 commit 的集成验证 +
   dev 全量证据」固定下来。
-- `promote` 会在检出 `main` 的**工作树里**做 fast-forward，然后在那里依次执行
-  `bun install --frozen-lockfile` → `bun run build:ui` → `bun run codeestra stop` → `bun run codeestra status`。
-  **重启只有在每一步都退 0、且重启后的 Runtime 回答 `READY` 时才会被记录。**
+- `promote` **一次只推进一步**：先把固定候选 push 到远端 `dev` 并读回核对，此时报「已推送、等待拉取」
+  （`state: PROMOTING`，`phase: AWAITING_PULL`，**退出码 3**）且**不记录任何重启步骤**；你在 main 检出做完
+  第 ② 步后**再调用一次**，它才核对到 main 检出已在候选上、记录并执行重启序列
+  `bun install --frozen-lockfile` → `bun run build:ui` → `bun run codeestra stop` → `bun run codeestra status`，
+  最后把候选推回远端 `main`。
+  **重启只有在每一步都退 0、且重启后的 Runtime 回答 `READY` 时才会被记录**（`uiRunning` 只记录为事实，
+  不是产品侧的重启判据；`promote` 不替你把 UI 拉起来）。
 - 失败时**不会自动回滚**：若 main 已被推进而重启序列失败，CLI 会明确打印这一点，并说明重跑
   `promotion promote` 会重跑已记录的后置步骤。
 
-> **⚠ 现状（必须如实说明）**：`promotion prepare/approve/promote` **目前仍然是旧的本地
-> `git merge --ff-only` 路径**——它按 ADR-0022 在本地 main 工作树里推进 ref，**不是** §9.1 的 GitHub 中转路径。
-> ADR-0047 已把「经 GitHub 中转」定为唯一提升路径，但**产品命令面的实现留到下一格**。
-> 因此：**本仓库自身的提升一律走 §9.1 的人工四步，不得使用产品 `promotion promote`**；
+> **⚠ 现状（必须如实说明）**：`promotion prepare/approve/promote` **已经实现** §9.1 的 GitHub 中转路径
+> （ADR-0047 / FOUNDATION-077、schema v29，落地细则见 ADR-0052），旧的本地 `git merge --ff-only` 实现已删除。
+> 但**本仓库自身的提升仍一律走 §9.1 的人工四步，不得使用产品 `promotion promote`**；
 > 交付记录里要如实写明实际用了哪条路径、执行到哪一步。
 
 界面上的「稳定提升记录 · dev → main」面板是**只读**的：它显示记录里的事实（候选 commit、main 是否被改动、
