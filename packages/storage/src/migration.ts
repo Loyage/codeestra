@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 25;
+export const phase1SchemaVersion = 26;
 
 
 export const phase1Migration = `
@@ -1530,4 +1530,79 @@ ALTER TABLE stable_promotions ADD COLUMN full_suite_policy_version TEXT;
 ALTER TABLE stable_promotions ADD COLUMN full_suite_policy_digest TEXT;
 ALTER TABLE stable_promotions ADD COLUMN full_suite_lockfile_digest TEXT;
 ALTER TABLE stable_promotions ADD COLUMN approved_full_suite_evidence_id TEXT;
+`;
+
+/**
+ * Project Knowledge layering and per-Execution binding (FOUNDATION-067 / ADR-0041).
+ *
+ * Two append-only tables, and nothing else:
+ *
+ * - `knowledge_snapshots` records the knowledge a project declared at one `main` commit: the
+ *   resolved entry list with per-entry content digests plus the whole-snapshot digest. It is the
+ *   immutable thing an Execution can point at, so a later edit to a knowledge file can never change
+ *   what an already-recorded Execution is said to have used. `knowledge_snapshots_no_update` and
+ *   `knowledge_snapshots_no_delete` make that a schema fact rather than a convention, exactly like
+ *   the revision-history triggers.
+ * - `execution_knowledge_snapshots` is the binding itself: one row per Execution, carrying the
+ *   snapshot it used and the digest of the exact context file materialized into that Execution's
+ *   worktree. `executions` is **not** rebuilt and gains no column (ADR-0041 D07): a new table plus
+ *   an optional insert inside `reserveExecution` gives the same atomicity with no table rewrite, and
+ *   rows that predate this capability stay exactly as they were.
+ *
+ * Schema version 26 is reserved for this step: 25 is FOUNDATION-065/ADR-0039, 22 and 23 belong to
+ * H1/H3, and 16 stays permanently unused. A database may already be stamped 17–24 and would skip a
+ * later `version < 16` step, so the migration runner only appends `if (version < 26)` after the
+ * existing ascending steps and never inserts an earlier number.
+ */
+export const knowledgeLayerMigration = `
+CREATE TABLE knowledge_snapshots (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  main_ref TEXT NOT NULL CHECK(length(trim(main_ref)) > 0),
+  main_commit TEXT NOT NULL CHECK(length(trim(main_commit)) > 0),
+  policy_version TEXT NOT NULL CHECK(length(trim(policy_version)) > 0),
+  snapshot_digest TEXT NOT NULL CHECK(length(snapshot_digest) = 64),
+  human_digest TEXT NOT NULL CHECK(length(human_digest) = 64),
+  generated_digest TEXT NOT NULL CHECK(length(generated_digest) = 64),
+  entry_count INTEGER NOT NULL CHECK(entry_count >= 0),
+  human_entry_count INTEGER NOT NULL CHECK(human_entry_count >= 0),
+  generated_entry_count INTEGER NOT NULL CHECK(generated_entry_count >= 0),
+  total_bytes INTEGER NOT NULL CHECK(total_bytes >= 0),
+  entries_json TEXT NOT NULL CHECK(json_valid(entries_json)),
+  created_by TEXT NOT NULL CHECK(length(trim(created_by)) > 0),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  CHECK(entry_count = human_entry_count + generated_entry_count)
+) STRICT;
+CREATE UNIQUE INDEX one_knowledge_snapshot_per_state
+  ON knowledge_snapshots(project_id,main_commit,snapshot_digest);
+CREATE INDEX knowledge_snapshots_by_project ON knowledge_snapshots(project_id,created_at,id);
+CREATE TRIGGER knowledge_snapshots_no_update BEFORE UPDATE ON knowledge_snapshots
+BEGIN SELECT RAISE(ABORT,'knowledge snapshots are append-only'); END;
+CREATE TRIGGER knowledge_snapshots_no_delete BEFORE DELETE ON knowledge_snapshots
+BEGIN SELECT RAISE(ABORT,'knowledge snapshots are append-only'); END;
+
+CREATE TABLE execution_knowledge_snapshots (
+  execution_id TEXT PRIMARY KEY REFERENCES executions(id),
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  snapshot_id TEXT NOT NULL REFERENCES knowledge_snapshots(id),
+  snapshot_digest TEXT NOT NULL CHECK(length(snapshot_digest) = 64),
+  context_path TEXT NOT NULL CHECK(length(trim(context_path)) > 0),
+  context_digest TEXT NOT NULL CHECK(length(context_digest) = 64),
+  context_bytes INTEGER NOT NULL CHECK(context_bytes >= 0),
+  entry_count INTEGER NOT NULL CHECK(entry_count >= 0),
+  refs_json TEXT NOT NULL CHECK(json_valid(refs_json)),
+  command_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0)
+) STRICT;
+CREATE INDEX execution_knowledge_snapshots_by_snapshot
+  ON execution_knowledge_snapshots(snapshot_id,created_at,execution_id);
+CREATE INDEX execution_knowledge_snapshots_by_task
+  ON execution_knowledge_snapshots(project_id,task_id,created_at,execution_id);
+CREATE TRIGGER execution_knowledge_snapshots_no_update
+  BEFORE UPDATE ON execution_knowledge_snapshots
+BEGIN SELECT RAISE(ABORT,'execution knowledge bindings are append-only'); END;
+CREATE TRIGGER execution_knowledge_snapshots_no_delete
+  BEFORE DELETE ON execution_knowledge_snapshots
+BEGIN SELECT RAISE(ABORT,'execution knowledge bindings are append-only'); END;
 `;

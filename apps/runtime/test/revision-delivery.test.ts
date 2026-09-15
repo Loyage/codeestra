@@ -234,6 +234,9 @@ describe('revision delivery schema (v19)', () => {
       raw.close();
 
       const storage = new Phase1Database(path);
+      // The claim is that the upgrade reaches the *current* schema, not that this
+      // lane is last: Wave I carries FOUNDATION-065 (v25) and FOUNDATION-067 (v26),
+      // so the constant is 26 while the table this file checks may be older.
       expect(phase1SchemaVersion).toBeGreaterThanOrEqual(24);
       // The pinned version is the schema the migration runner targets, not this lane's own step: a
       // later additive migration must not make this assertion wrong.

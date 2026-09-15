@@ -35,6 +35,12 @@ import {
   validateImpactPolicy,
 } from './impact-analysis-service.js';
 import {
+  listProjectKnowledge,
+  resolveProjectKnowledge,
+  showProjectKnowledge,
+  validateProjectKnowledge,
+} from './knowledge-service.js';
+import {
   RuntimeDrainState,
   clearAdapterCapacity,
   inspectProjectCapacity,
@@ -666,6 +672,32 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         projectId: request.projectId,
         taskId: request.taskId,
         now: Date.now(),
+      }));
+    }
+    // Project Knowledge (FOUNDATION-067 / ADR-0041). Read-only inspection of the layered knowledge:
+    // the human layers come from the project `main` ref, the machine layer from the Runtime data
+    // directory. Nothing here records a snapshot, materializes a context, or starts a Task —
+    // recording happens exactly once, when an Execution is established.
+    case 'project.knowledge.validate': {
+      return success(request.requestId, await validateProjectKnowledge({
+        storage, home, projectId: request.projectId,
+      }));
+    }
+    case 'project.knowledge.list': {
+      return success(request.requestId, await listProjectKnowledge({
+        storage, home, projectId: request.projectId,
+      }));
+    }
+    case 'project.knowledge.show': {
+      return success(request.requestId, showProjectKnowledge({
+        storage,
+        projectId: request.projectId,
+        ...(request.snapshotId === undefined ? {} : { snapshotId: request.snapshotId }),
+      }));
+    }
+    case 'project.knowledge.resolve': {
+      return success(request.requestId, await resolveProjectKnowledge({
+        storage, home, projectId: request.projectId, taskId: request.taskId,
       }));
     }
     case 'project.list':

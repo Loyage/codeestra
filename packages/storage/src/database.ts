@@ -38,6 +38,7 @@ import {
   capacitySlotReservationMigration,
   impactAnalysisMigration,
   integrationPipelineMigration,
+  knowledgeLayerMigration,
   operationProgressMigration,
   phase1Migration,
   phase1SchemaVersion,
@@ -860,6 +861,87 @@ export interface ImpactAssessmentInput {
 
 export type ImpactAssessmentRecord = ImpactAssessmentInput;
 
+// ---------------------------------------------------------------------------------------------
+// Project Knowledge (FOUNDATION-067 / ADR-0041). The persisted model is described in
+// `knowledgeLayerMigration`; these types are what a reader gets back.
+// ---------------------------------------------------------------------------------------------
+
+export type KnowledgeLayerName = 'instructions' | 'skills' | 'generated';
+export type KnowledgeScopeName = 'ALL' | 'DEVELOPMENT' | 'SELF';
+
+/** Provenance of one entry. Present only for machine-generated entries (`source` is required). */
+export interface StoredKnowledgeEntryOrigin {
+  readonly source?: string;
+  readonly kind?: string;
+  readonly revision?: string;
+  readonly commit?: string;
+}
+
+/** One entry as it was resolved, without its body: the body digest is what identity is made of. */
+export interface StoredKnowledgeEntry {
+  readonly layer: KnowledgeLayerName;
+  readonly path: string;
+  readonly id: string | null;
+  readonly scope: KnowledgeScopeName;
+  readonly digest: string;
+  readonly bytes: number;
+  readonly origin: StoredKnowledgeEntryOrigin;
+}
+
+/**
+ * One immutable knowledge snapshot: the complete entry list a project declared at one `main`
+ * commit, plus the digests that identify it. Written once and never updated (the table has no
+ * update path at all), so an Execution bound to it stays truthful after the knowledge is edited.
+ */
+export interface KnowledgeSnapshotInput {
+  readonly id: string;
+  readonly projectId: string;
+  readonly mainRef: string;
+  readonly mainCommit: string;
+  readonly policyVersion: string;
+  readonly snapshotDigest: string;
+  readonly humanDigest: string;
+  readonly generatedDigest: string;
+  readonly entryCount: number;
+  readonly humanEntryCount: number;
+  readonly generatedEntryCount: number;
+  readonly totalBytes: number;
+  readonly entries: readonly StoredKnowledgeEntry[];
+  readonly createdBy: string;
+  readonly createdAt: number;
+}
+
+export type KnowledgeSnapshotRecord = KnowledgeSnapshotInput;
+
+/** The reuse key: the same declared knowledge at the same commit is the same snapshot. */
+export interface KnowledgeSnapshotKey {
+  readonly projectId: string;
+  readonly mainCommit: string;
+  readonly snapshotDigest: string;
+}
+
+/**
+ * The binding between one Execution and the knowledge it actually used, including the digest of the
+ * exact context file materialized into that Execution's worktree. This is the row that answers
+ * "which knowledge version did this run use".
+ */
+export interface ExecutionKnowledgeSnapshotInput {
+  readonly executionId: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly snapshotId: string;
+  readonly snapshotDigest: string;
+  readonly contextPath: string;
+  readonly contextDigest: string;
+  readonly contextBytes: number;
+  readonly entryCount: number;
+  readonly refs: readonly string[];
+  readonly commandId: string;
+  readonly createdAt: number;
+}
+
+export type ExecutionKnowledgeSnapshotRecord = ExecutionKnowledgeSnapshotInput;
+
 /**
  * One Task the analyzer must compare against: a Task that holds a resource, which is exactly the
  * active/reserved set of `docs/architecture/scheduler.md` §1 (readying, RUNNING, WAITING_FOR_USER,
@@ -1366,9 +1448,12 @@ export class Phase1Database {
         // Version 24 is this step's own number, so a database stamped 21–23 still gets the
         // unregistered-directory ledger columns. No earlier number is ever inserted.
         if (version < 24) this.sqlite.exec(unregisteredReclamationMigration);
-        // Version 25 is this step's own number, so a database stamped 21–24 still gets the
-        // layered-verification tables. No earlier number is ever inserted.
+        // Version 25 (FOUNDATION-065 / ADR-0039) and version 26 (FOUNDATION-067 / ADR-0041) are
+        // this wave's own numbers, appended in ascending order: a database stamped 21–24 still gets
+        // both, and one stamped 25 (from a branch that carried only the first) still gets the
+        // second. Version 16 stays permanently unused and no earlier number is ever inserted.
         if (version < 25) this.sqlite.exec(verificationLayeringMigration);
+        if (version < 26) this.sqlite.exec(knowledgeLayerMigration);
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -3922,6 +4007,23 @@ export class Phase1Database {
     readonly agentConfig?: StoredAgentConfiguration | null;
     /** Set when this attempt continues an earlier paused Execution's conversation. */
     readonly resumeFromExecutionId?: string;
+    /**
+     * The knowledge snapshot this Execution used (FOUNDATION-067 / ADR-0041). It is inserted in the
+     * same write transaction as the Execution row, so "the Execution exists" and "the Execution is
+     * bound to the knowledge it used" can never be observed apart — a binding is not a second,
+     * losable write. Absent only for a caller that resolved no knowledge at all; there is no
+     * silently empty binding.
+     */
+    readonly knowledgeBinding?: {
+      readonly snapshotId: string;
+      readonly snapshotDigest: string;
+      readonly contextPath: string;
+      readonly contextDigest: string;
+      readonly contextBytes: number;
+      readonly entryCount: number;
+      readonly refs: readonly string[];
+      readonly commandId: string;
+    };
     readonly actor: string;
     readonly createdAt: number;
   }): ExecutionReservation {
@@ -3973,6 +4075,19 @@ export class Phase1Database {
           input.workspaceId, input.adapterId, input.adapterVersion, subject.base_commit,
           agentConfigJson, input.resumeFromExecutionId ?? null,
           subject.pending_retry_from_execution_id);
+        const knowledgeBinding = input.knowledgeBinding;
+        if (knowledgeBinding !== undefined) {
+          database.query(`
+            INSERT INTO execution_knowledge_snapshots(execution_id,project_id,task_id,snapshot_id,
+              snapshot_digest,context_path,context_digest,context_bytes,entry_count,refs_json,
+              command_id,created_at)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+          `).run(input.executionId, input.projectId, input.taskId, knowledgeBinding.snapshotId,
+            knowledgeBinding.snapshotDigest, knowledgeBinding.contextPath,
+            knowledgeBinding.contextDigest, knowledgeBinding.contextBytes,
+            knowledgeBinding.entryCount, JSON.stringify(knowledgeBinding.refs),
+            knowledgeBinding.commandId, input.createdAt);
+        }
         const workspaceUpdate = database.query(
           "UPDATE workspaces SET state='IN_USE' WHERE id=?1 AND state='READY'",
         ).run(input.workspaceId);
@@ -10822,6 +10937,146 @@ export class Phase1Database {
     };
   }
   // ---------------------------------------------------------------------------------------------
+  // Project Knowledge (FOUNDATION-067 / ADR-0041).
+  //
+  // Both tables are append-only by trigger, so there is deliberately no update or delete method
+  // here. What these methods own:
+  //
+  // - a snapshot is keyed by the *facts it was derived from* (`project`, `mainCommit`, digest), so
+  //   recording the same declared knowledge twice reuses one row instead of accumulating
+  //   duplicates, and a changed knowledge file is necessarily a different row;
+  // - a binding is keyed by the Execution (one Execution used one knowledge snapshot), and
+  //   re-recording the identical binding is a replay, while a different one is an error rather
+  //   than a silent overwrite.
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * Records one knowledge snapshot. Idempotent by `(project, mainCommit, snapshotDigest)`: the same
+   * declared knowledge recorded twice yields the first row, including when a parallel writer won
+   * the insert.
+   */
+  recordKnowledgeSnapshot(input: KnowledgeSnapshotInput): KnowledgeSnapshotRecord {
+    this.sqlite.transaction(() => {
+      this.sqlite.query(`
+        INSERT INTO knowledge_snapshots(id,project_id,main_ref,main_commit,policy_version,
+          snapshot_digest,human_digest,generated_digest,entry_count,human_entry_count,
+          generated_entry_count,total_bytes,entries_json,created_by,created_at)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+        ON CONFLICT(project_id,main_commit,snapshot_digest) DO NOTHING
+      `).run(input.id, input.projectId, input.mainRef, input.mainCommit, input.policyVersion,
+        input.snapshotDigest, input.humanDigest, input.generatedDigest, input.entryCount,
+        input.humanEntryCount, input.generatedEntryCount, input.totalBytes,
+        JSON.stringify(input.entries), input.createdBy, input.createdAt);
+    })();
+    const stored = this.findKnowledgeSnapshot({
+      projectId: input.projectId,
+      mainCommit: input.mainCommit,
+      snapshotDigest: input.snapshotDigest,
+    });
+    if (stored === null) {
+      throw new StorageError('INVALID_STATE',
+        'Knowledge snapshot was not readable after it was recorded');
+    }
+    return stored;
+  }
+
+  findKnowledgeSnapshot(key: KnowledgeSnapshotKey): KnowledgeSnapshotRecord | null {
+    const row = this.sqlite.query<KnowledgeSnapshotRow, [string, string, string]>(`
+      ${knowledgeSnapshotSelect}
+      WHERE project_id=?1 AND main_commit=?2 AND snapshot_digest=?3
+    `).get(key.projectId, key.mainCommit, key.snapshotDigest);
+    return row === null ? null : mapKnowledgeSnapshotRow(row);
+  }
+
+  getKnowledgeSnapshot(id: string): KnowledgeSnapshotRecord | null {
+    const row = this.sqlite.query<KnowledgeSnapshotRow, [string]>(`
+      ${knowledgeSnapshotSelect} WHERE id=?1
+    `).get(id);
+    return row === null ? null : mapKnowledgeSnapshotRow(row);
+  }
+
+  /** Stored snapshots newest first, so a reader can see how a project's knowledge moved. */
+  listKnowledgeSnapshots(input: {
+    readonly projectId: string;
+    readonly limit?: number;
+  }): readonly KnowledgeSnapshotRecord[] {
+    const limit = input.limit ?? 50;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+      throw new StorageError('INVALID_STATE', `Invalid knowledge snapshot limit ${limit}`);
+    }
+    return this.sqlite.query<KnowledgeSnapshotRow, [string, number]>(`
+      ${knowledgeSnapshotSelect}
+      WHERE project_id=?1 ORDER BY created_at DESC, id DESC LIMIT ?2
+    `).all(input.projectId, limit).map(mapKnowledgeSnapshotRow);
+  }
+
+  /**
+   * Binds one Execution to the knowledge snapshot it used, together with the digest of the context
+   * file it materialized. Called inside `reserveExecution`'s transaction for the real path, and
+   * directly by tests; re-recording the identical binding is a replay, and a *different* snapshot
+   * for the same Execution is an error — an Execution's binding is never rewritten.
+   */
+  recordExecutionKnowledgeSnapshot(
+    input: ExecutionKnowledgeSnapshotInput,
+  ): ExecutionKnowledgeSnapshotRecord {
+    this.sqlite.query(`
+      INSERT INTO execution_knowledge_snapshots(execution_id,project_id,task_id,snapshot_id,
+        snapshot_digest,context_path,context_digest,context_bytes,entry_count,refs_json,command_id,
+        created_at)
+      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+      ON CONFLICT(execution_id) DO NOTHING
+    `).run(input.executionId, input.projectId, input.taskId, input.snapshotId, input.snapshotDigest,
+      input.contextPath, input.contextDigest, input.contextBytes, input.entryCount,
+      JSON.stringify(input.refs), input.commandId, input.createdAt);
+    const stored = this.getExecutionKnowledgeSnapshot(input.executionId);
+    if (stored === null) {
+      throw new StorageError('INVALID_STATE',
+        'Execution knowledge binding was not readable after it was recorded');
+    }
+    if (stored.snapshotId !== input.snapshotId || stored.contextDigest !== input.contextDigest) {
+      throw new StorageError('COMMAND_CONFLICT',
+        `Execution ${input.executionId} is already bound to knowledge snapshot`
+          + ` ${stored.snapshotId}; a binding is immutable`);
+    }
+    return stored;
+  }
+
+  getExecutionKnowledgeSnapshot(executionId: string): ExecutionKnowledgeSnapshotRecord | null {
+    const row = this.sqlite.query<ExecutionKnowledgeSnapshotRow, [string]>(`
+      SELECT execution_id,project_id,task_id,snapshot_id,snapshot_digest,context_path,context_digest,
+        context_bytes,entry_count,refs_json,command_id,created_at
+      FROM execution_knowledge_snapshots WHERE execution_id=?1
+    `).get(executionId);
+    return row === null ? null : mapExecutionKnowledgeSnapshotRow(row);
+  }
+
+  /** Bindings of one project, newest first; scoped to one Task when `taskId` is given. */
+  listExecutionKnowledgeSnapshots(input: {
+    readonly projectId: string;
+    readonly taskId?: string;
+    readonly limit?: number;
+  }): readonly ExecutionKnowledgeSnapshotRecord[] {
+    const limit = input.limit ?? 50;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+      throw new StorageError('INVALID_STATE', `Invalid knowledge binding limit ${limit}`);
+    }
+    const rows = input.taskId === undefined
+      ? this.sqlite.query<ExecutionKnowledgeSnapshotRow, [string, number]>(`
+          SELECT execution_id,project_id,task_id,snapshot_id,snapshot_digest,context_path,
+            context_digest,context_bytes,entry_count,refs_json,command_id,created_at
+          FROM execution_knowledge_snapshots WHERE project_id=?1
+          ORDER BY created_at DESC, execution_id DESC LIMIT ?2
+        `).all(input.projectId, limit)
+      : this.sqlite.query<ExecutionKnowledgeSnapshotRow, [string, string, number]>(`
+          SELECT execution_id,project_id,task_id,snapshot_id,snapshot_digest,context_path,
+            context_digest,context_bytes,entry_count,refs_json,command_id,created_at
+          FROM execution_knowledge_snapshots WHERE project_id=?1 AND task_id=?2
+          ORDER BY created_at DESC, execution_id DESC LIMIT ?3
+        `).all(input.projectId, input.taskId, limit);
+    return rows.map(mapExecutionKnowledgeSnapshotRow);
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // Capacity and resource reservations (Phase 2, FOUNDATION-054 / ADR-0032). The persisted model is
   // described in `capacitySlotReservationMigration`; these methods own its invariants.
   //
@@ -12181,6 +12436,65 @@ const sessionTerminalSelect = `
     release_detail,created_at,ended_at
   FROM session_terminals
 `;
+
+interface KnowledgeSnapshotRow {
+  id: string; project_id: string; main_ref: string; main_commit: string; policy_version: string;
+  snapshot_digest: string; human_digest: string; generated_digest: string; entry_count: number;
+  human_entry_count: number; generated_entry_count: number; total_bytes: number;
+  entries_json: string; created_by: string; created_at: number;
+}
+
+const knowledgeSnapshotSelect = `
+  SELECT id,project_id,main_ref,main_commit,policy_version,snapshot_digest,human_digest,
+    generated_digest,entry_count,human_entry_count,generated_entry_count,total_bytes,entries_json,
+    created_by,created_at
+  FROM knowledge_snapshots
+`;
+
+function mapKnowledgeSnapshotRow(row: KnowledgeSnapshotRow): KnowledgeSnapshotRecord {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    mainRef: row.main_ref,
+    mainCommit: row.main_commit,
+    policyVersion: row.policy_version,
+    snapshotDigest: row.snapshot_digest,
+    humanDigest: row.human_digest,
+    generatedDigest: row.generated_digest,
+    entryCount: row.entry_count,
+    humanEntryCount: row.human_entry_count,
+    generatedEntryCount: row.generated_entry_count,
+    totalBytes: row.total_bytes,
+    entries: JSON.parse(row.entries_json) as readonly StoredKnowledgeEntry[],
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+  };
+}
+
+interface ExecutionKnowledgeSnapshotRow {
+  execution_id: string; project_id: string; task_id: string; snapshot_id: string;
+  snapshot_digest: string; context_path: string; context_digest: string; context_bytes: number;
+  entry_count: number; refs_json: string; command_id: string; created_at: number;
+}
+
+function mapExecutionKnowledgeSnapshotRow(
+  row: ExecutionKnowledgeSnapshotRow,
+): ExecutionKnowledgeSnapshotRecord {
+  return {
+    executionId: row.execution_id,
+    projectId: row.project_id,
+    taskId: row.task_id,
+    snapshotId: row.snapshot_id,
+    snapshotDigest: row.snapshot_digest,
+    contextPath: row.context_path,
+    contextDigest: row.context_digest,
+    contextBytes: row.context_bytes,
+    entryCount: row.entry_count,
+    refs: JSON.parse(row.refs_json) as readonly string[],
+    commandId: row.command_id,
+    createdAt: row.created_at,
+  };
+}
 
 interface ImpactSnapshotRow {
   id: string; project_id: string; task_id: string; revision_id: string; base_commit: string;

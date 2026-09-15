@@ -921,6 +921,16 @@ function usage(): never {
     # exit 0 for validate only when a mapping exists at the main ref and is the confirmed one;
     # exit 0 for explain only for SAFE_TO_PARALLELIZE. UNKNOWN means "cannot be proven", not
     # "no conflict", and exits 1 like CONFLICTING does (the code is in --json).
+  bun run codeestra project knowledge validate <project-id> [--json]
+  bun run codeestra project knowledge list <project-id> [--json]
+  bun run codeestra project knowledge show <project-id> [snapshot-id] [--json]
+  bun run codeestra project knowledge resolve <project-id> <task-id> [--json]
+    # The human-maintained layers (.codeestra/instructions, .codeestra/skills) are read from the
+    # project main ref only, so a Task branch can never rewrite the knowledge that judges its own
+    # execution. The machine-generated layer is Runtime data, not part of the project tree. validate
+    # and list exit 1 when any entry is refused (there is then no snapshot at all); show exits 1 when
+    # the project has no recorded snapshot; resolve reports what the next Execution would use and
+    # exits 1 only when no honest answer exists.
   bun run codeestra task create <project-id> <specification> [--constraint <text>]…
     [--kind DEVELOPMENT]
   bun run codeestra task list <project-id> [--all]
@@ -1158,7 +1168,17 @@ the exact intersecting paths, directories, modules, or shared resources. show pr
 ImpactSnapshot, explain explains a verdict against the active Tasks, and validate reports whether a
 mapping is present at the main ref and is the digest project trust confirmed. UNKNOWN is recorded
 for every Task whose mapping is missing, unconfirmed, invalid, or empty, and for any active Task
-whose change set cannot be observed — that is the point: nothing is called safe without proof.`);
+whose change set cannot be observed — that is the point: nothing is called safe without proof.
+
+project knowledge is the layered knowledge of PROJECT_SPEC section 4: human-maintained instructions
+and skills, plus a machine-generated layer the Runtime owns. The human layers are read from the
+project main ref, never from a Task branch, and the machine layer lives under the Runtime data
+directory rather than inside the project tree, so it cannot be committed by accident. There is no
+override semantics: every human entry that parses is in the snapshot, a duplicate id or path is a
+refusal, and a layer with any refused entry produces no snapshot at all — which is what makes it
+impossible for a machine to silently replace human knowledge. validate and list report every
+refusal, show reads back one recorded snapshot with the Executions bound to it, and resolve reports
+what the next Execution of one Task would use without starting anything.`);
   process.exit(2);
 }
 
@@ -1314,6 +1334,208 @@ function describeImpactPolicy(report: ImpactPolicyValidationView['policy']): voi
     console.error('  This digest is not the confirmed one, so every verdict is UNKNOWN until the'+
       ' project is trusted again.');
   }
+}
+
+/**
+ * What `project knowledge *` reports. Only the fields this client renders are named; the rest of
+ * each payload is passed through untouched by `--json`.
+ */
+interface KnowledgeLayerView {
+  readonly layer: string;
+  readonly kind: string;
+  readonly source: string;
+  readonly entryCount: number;
+  readonly bytes: number;
+}
+
+interface KnowledgeErrorView {
+  readonly layer: string | null;
+  readonly path: string | null;
+  readonly code: string;
+  readonly message: string;
+}
+
+interface KnowledgeEntryView {
+  readonly layer: string;
+  readonly kind: string;
+  readonly path: string;
+  readonly id: string | null;
+  readonly scope: string;
+  readonly digest: string;
+  readonly bytes: number;
+  readonly origin: Readonly<Record<string, string>>;
+  readonly appliesToTask: boolean;
+}
+
+interface KnowledgeValidationView {
+  readonly projectId: string;
+  readonly projectName: string;
+  readonly mainRef: string;
+  readonly mainCommit: string;
+  readonly policyVersion: string;
+  readonly code: 'OK' | 'KNOWLEDGE_LAYER_INVALID';
+  readonly valid: boolean;
+  readonly errors: readonly KnowledgeErrorView[];
+  readonly layers: readonly KnowledgeLayerView[];
+  readonly snapshotDigest: string | null;
+  readonly humanDigest: string | null;
+  readonly generatedDigest: string | null;
+  readonly entryCount: number;
+  readonly humanEntryCount: number;
+  readonly generatedEntryCount: number;
+  readonly totalBytes: number;
+}
+
+interface KnowledgeListView extends KnowledgeValidationView {
+  readonly snapshots: readonly {
+    readonly id: string;
+    readonly snapshotDigest: string;
+    readonly mainCommit: string;
+    readonly entryCount: number;
+    readonly createdAt: number;
+    readonly createdBy: string;
+  }[];
+  readonly entries: readonly KnowledgeEntryView[];
+}
+
+interface KnowledgeSnapshotView {
+  readonly snapshot: {
+    readonly id: string;
+    readonly mainRef: string;
+    readonly mainCommit: string;
+    readonly policyVersion: string;
+    readonly snapshotDigest: string;
+    readonly humanDigest: string;
+    readonly generatedDigest: string;
+    readonly entryCount: number;
+    readonly humanEntryCount: number;
+    readonly generatedEntryCount: number;
+    readonly totalBytes: number;
+    readonly createdBy: string;
+    readonly createdAt: number;
+  };
+  readonly entries: readonly KnowledgeEntryView[];
+  readonly executions: readonly {
+    readonly executionId: string;
+    readonly taskId: string;
+    readonly taskState: string;
+    readonly executionState: string;
+    readonly contextPath: string;
+    readonly contextDigest: string;
+    readonly contextBytes: number;
+    readonly entryCount: number;
+    readonly refs: readonly string[];
+  }[];
+}
+
+interface KnowledgeResolveView {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly taskKind: string;
+  readonly mainRef: string;
+  readonly mainCommit: string;
+  readonly policyVersion: string;
+  readonly state: 'VALID' | 'INVALID';
+  readonly errors: readonly KnowledgeErrorView[];
+  readonly snapshotDigest: string | null;
+  readonly contextPath: string;
+  readonly contextDigest: string | null;
+  readonly contextBytes: number | null;
+  readonly entryCount: number;
+  readonly entries: readonly KnowledgeEntryView[];
+}
+
+function describeKnowledgeLayers(layers: readonly KnowledgeLayerView[]): void {
+  for (const layer of layers) {
+    console.log(`  ${layer.layer} (${layer.kind}, ${layer.entryCount} entries, ${layer.bytes} bytes)`);
+    console.log(`    from ${layer.source}`);
+  }
+}
+
+function describeKnowledgeErrors(errors: readonly KnowledgeErrorView[]): void {
+  for (const error of errors) {
+    const where = error.path === null ? error.layer ?? 'knowledge' : error.path;
+    console.error(`  ${error.code} ${where}: ${error.message}`);
+  }
+}
+
+function printKnowledgeValidation(report: KnowledgeValidationView): void {
+  console.log(`project knowledge: ${report.code}`);
+  console.log(`project ${report.projectName} (${report.projectId})`);
+  console.log(`main ${report.mainRef} @ ${report.mainCommit.slice(0, 12)}`);
+  console.log(`policy ${report.policyVersion}`);
+  describeKnowledgeLayers(report.layers);
+  if (report.valid) {
+    console.log(`snapshot ${String(report.snapshotDigest).slice(0, 16)}`
+      + ` (${report.humanEntryCount} human + ${report.generatedEntryCount} generated entries,`
+      + ` ${report.totalBytes} bytes)`);
+    console.log(`human ${String(report.humanDigest).slice(0, 16)}`
+      + ` · generated ${String(report.generatedDigest).slice(0, 16)}`);
+  } else {
+    console.error(`${report.errors.length} entr${report.errors.length === 1 ? 'y' : 'ies'} refused;`
+      + ' no snapshot exists and no Execution may start until they are fixed:');
+    describeKnowledgeErrors(report.errors);
+  }
+}
+
+function printKnowledgeList(report: KnowledgeListView): void {
+  printKnowledgeValidation(report);
+  if (report.valid) {
+    for (const entry of report.entries) {
+      console.log(`  ${entry.layer} ${entry.path}`
+        + `${entry.id === null ? '' : ` id=${entry.id}`} scope=${entry.scope}`
+        + ` ${entry.digest.slice(0, 12)} ${entry.bytes}B`);
+    }
+  }
+  console.log(`recorded snapshots ${report.snapshots.length}`);
+  for (const snapshot of report.snapshots) {
+    console.log(`  ${snapshot.id.slice(0, 16)} ${snapshot.snapshotDigest.slice(0, 12)}`
+      + ` main ${snapshot.mainCommit.slice(0, 12)} ${snapshot.entryCount} entries`
+      + ` ${new Date(snapshot.createdAt).toISOString()} by ${snapshot.createdBy}`);
+  }
+}
+
+function printKnowledgeSnapshot(view: KnowledgeSnapshotView): void {
+  const snapshot = view.snapshot;
+  console.log(`knowledge snapshot ${snapshot.id}`);
+  console.log(`main ${snapshot.mainRef} @ ${snapshot.mainCommit.slice(0, 12)}`
+    + ` · policy ${snapshot.policyVersion}`);
+  console.log(`snapshot ${snapshot.snapshotDigest}`);
+  console.log(`human ${snapshot.humanDigest} · generated ${snapshot.generatedDigest}`);
+  console.log(`entries ${snapshot.entryCount}`
+    + ` (${snapshot.humanEntryCount} human + ${snapshot.generatedEntryCount} generated),`
+    + ` ${snapshot.totalBytes} bytes, recorded ${new Date(snapshot.createdAt).toISOString()}`
+    + ` by ${snapshot.createdBy}`);
+  for (const entry of view.entries) {
+    console.log(`  ${entry.layer} ${entry.path} scope=${entry.scope} ${entry.digest.slice(0, 12)}`);
+  }
+  console.log(`executions bound to this snapshot ${view.executions.length}`);
+  for (const execution of view.executions) {
+    console.log(`  execution ${execution.executionId}`
+      + ` task ${execution.taskId} (${execution.taskState}/${execution.executionState})`);
+    console.log(`    ${execution.contextPath} ${execution.contextDigest.slice(0, 12)}`
+      + ` ${execution.contextBytes}B · ${execution.entryCount} entries · ${execution.refs.length} refs`);
+  }
+}
+
+function printKnowledgeResolve(view: KnowledgeResolveView): void {
+  console.log(`project knowledge resolve: ${view.state}`);
+  console.log(`task ${view.taskId} (${view.taskKind})`);
+  console.log(`main ${view.mainRef} @ ${view.mainCommit.slice(0, 12)} · policy ${view.policyVersion}`);
+  if (view.state !== 'VALID') {
+    console.error('the knowledge layer is invalid, so no honest answer exists about what an'
+      + ' Execution would use:');
+    describeKnowledgeErrors(view.errors);
+    return;
+  }
+  console.log(`snapshot ${String(view.snapshotDigest).slice(0, 16)}`);
+  console.log(`context ${view.contextPath} ${String(view.contextDigest).slice(0, 12)}`
+    + ` ${view.contextBytes}B · ${view.entryCount} entries apply to this Task kind`);
+  for (const entry of view.entries) {
+    console.log(`  ${entry.layer} ${entry.path}`
+      + `${entry.id === null ? '' : ` id=${entry.id}`} scope=${entry.scope}`);
+  }
+  if (view.entryCount === 0) console.log('  (no knowledge applies to this Task kind)');
 }
 
 function printImpactValidation(report: ImpactPolicyValidationView): void {
@@ -1810,6 +2032,59 @@ try {
         // and a script that treats it as success would run exactly the Task nobody could clear.
         if (view.assessment.verdict !== 'SAFE_TO_PARALLELIZE') process.exit(1);
       }
+    } else {
+      usage();
+    }
+  } else if (group === 'project' && action === 'knowledge') {
+    // Project Knowledge (FOUNDATION-067 / ADR-0041). Read-only: it reports the layered knowledge
+    // (human layers from the project main ref, machine layer from the Runtime data directory) and
+    // the snapshots already bound to Executions. Nothing here records a snapshot or starts a Task.
+    const subcommand = firstArgument;
+    if (subcommand === 'validate' || subcommand === 'list') {
+      const positional = remainingArguments.filter((token) => !token.startsWith('--'));
+      const flags = remainingArguments.filter((token) => token.startsWith('--'));
+      if (positional.length > 1) usage();
+      const json = jsonOnlyFlag(flags);
+      const projectId = positional[0] ?? process.cwd();
+      if (subcommand === 'validate') {
+        const report = await call({ command: 'project.knowledge.validate', projectId }) as KnowledgeValidationView;
+        if (json) print(report);
+        else printKnowledgeValidation(report);
+        // Exit 0 only for a layer that is complete. A refused entry means there is no snapshot at
+        // all, which is a failure for a script that wants to know what the next run would read.
+        if (!report.valid) process.exit(1);
+      } else {
+        const report = await call({ command: 'project.knowledge.list', projectId }) as KnowledgeListView;
+        if (json) print(report);
+        else printKnowledgeList(report);
+        if (!report.valid) process.exit(1);
+      }
+    } else if (subcommand === 'show') {
+      const positional = remainingArguments.filter((token) => !token.startsWith('--'));
+      const flags = remainingArguments.filter((token) => token.startsWith('--'));
+      if (positional[0] === undefined || positional.length > 2) usage();
+      const json = jsonOnlyFlag(flags);
+      const view = await call({
+        command: 'project.knowledge.show',
+        projectId: positional[0],
+        ...(positional[1] === undefined ? {} : { snapshotId: positional[1] }),
+      }) as KnowledgeSnapshotView;
+      if (json) print(view);
+      else printKnowledgeSnapshot(view);
+    } else if (subcommand === 'resolve') {
+      const positional = remainingArguments.filter((token) => !token.startsWith('--'));
+      const flags = remainingArguments.filter((token) => token.startsWith('--'));
+      if (positional[0] === undefined || positional[1] === undefined || positional.length > 2) {
+        usage();
+      }
+      const json = jsonOnlyFlag(flags);
+      const view = await call({ command: 'project.knowledge.resolve', projectId: positional[0],
+        taskId: positional[1] }) as KnowledgeResolveView;
+      if (json) print(view);
+      else printKnowledgeResolve(view);
+      // Same rule as `validate`: an invalid layer has no honest answer, and "no knowledge applies"
+      // is a successful answer that still exits 0.
+      if (view.state !== 'VALID') process.exit(1);
     } else {
       usage();
     }

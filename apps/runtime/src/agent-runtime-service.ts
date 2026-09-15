@@ -13,6 +13,7 @@ import type { AdapterRegistry } from './adapter-registry.js';
 import { deliverAgentAnswer } from './agent-answer-service.js';
 import { observeAgentEvents } from './agent-observation-service.js';
 import { startReservedExecution } from './agent-start-service.js';
+import { executionKnowledgeRefs, prepareExecutionKnowledge } from './knowledge-service.js';
 import { withDeadline } from './lifecycle.js';
 import {
   beginTaskRunOperation,
@@ -273,6 +274,26 @@ export class AgentRuntimeCoordinator {
         projectId: input.projectId,
         adapterId: adapter.id,
       });
+      // Project Knowledge (FOUNDATION-067 / ADR-0041) is resolved, validated and materialized
+      // *before* the Execution row exists. A knowledge layer that cannot be loaded refuses the start
+      // (ADR-0041 D04) by throwing here, where there is nothing to roll back: no Execution, no
+      // workspace transition, no provider process. Nothing is written into the worktree (D05), so
+      // this step cannot change what the Task's own change set, result commit, or impact
+      // assessment looks like.
+      const task = this.#storage.getTask(input.projectId, input.taskId);
+      if (task === null) {
+        throw new AgentRuntimeServiceError('TASK_NOT_FOUND',
+          `No Task ${input.taskId} in project ${input.projectId}`);
+      }
+      const knowledge = await prepareExecutionKnowledge({
+        storage: this.#storage,
+        home: this.#runtimeHome,
+        projectId: input.projectId,
+        taskId: input.taskId,
+        taskKind: task.kind,
+        commandId: deriveCommandId(input.commandId, 'knowledge'),
+        now: this.#now,
+      });
       const execution = this.#storage.reserveExecution({
         projectId: input.projectId,
         taskId: input.taskId,
@@ -286,6 +307,9 @@ export class AgentRuntimeCoordinator {
         adapterId: adapter.id,
         adapterVersion: input.adapterVersion,
         agentConfig,
+        // The binding is inserted in the same transaction as the Execution row, so "this Execution
+        // exists" and "this Execution is bound to the knowledge it used" are never observable apart.
+        knowledgeBinding: knowledge.binding,
         ...(input.resume === undefined
           ? {} : { resumeFromExecutionId: input.resume.resumeFromExecutionId }),
         actor: 'runtime-scheduler',
@@ -315,6 +339,9 @@ export class AgentRuntimeCoordinator {
         startCommandId: deriveCommandId(input.commandId, 'start-agent'),
         environment: this.#environment,
         permissionMode,
+        // The exact knowledge this Execution uses, as references an observation can be replayed
+        // against. An Adapter is free to ignore them; the binding above is the authority.
+        knowledgeSnapshotRefs: knowledge.refs,
         ...(input.resume === undefined ? {} : {
           resume: {
             predecessorSessionId: input.resume.predecessorSessionId,
@@ -742,7 +769,8 @@ export class AgentRuntimeCoordinator {
           id: constraint.id, text: constraint.text,
         })),
       },
-      knowledgeSnapshotRefs: [],
+      knowledgeSnapshotRefs: executionKnowledgeRefs(
+        this.#storage.getExecutionKnowledgeSnapshot(plan.executionId)),
       permissionMode,
       resume: {
         predecessorSessionId: plan.sessionId,

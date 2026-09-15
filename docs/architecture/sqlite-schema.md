@@ -1,6 +1,6 @@
 # SQLite Schema
 
-状态：逻辑 SQL 设计基线 + 已实现 migration 记录。第 2–6 节是逻辑关系设计（其中若干节已被后续 ADR 修订，见第 8 节各版本的说明）；第 8 节逐版本记录 `packages/storage/src/migration.ts` 中**实际存在**的 migration，当前 `phase1SchemaVersion = 21`。**schema version 16 永久未使用**，原因见第 8 节。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与第 2–6 节的约束等价，并以第 8 节的实现记录为准。
+状态：逻辑 SQL 设计基线 + 已实现 migration 记录。第 2–6 节是逻辑关系设计（其中若干节已被后续 ADR 修订，见第 8 节各版本的说明）；第 8 节逐版本记录 `packages/storage/src/migration.ts` 中**实际存在**的 migration，当前 `phase1SchemaVersion = 26`（v22/v25 未占用，v25 属并行 lane）。**schema version 16 永久未使用**，原因见第 8 节。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与第 2–6 节的约束等价，并以第 8 节的实现记录为准。
 
 ## 1. 约定
 
@@ -1110,6 +1110,64 @@ append-only：预留行持有被比较与交换的当前状态，而每一次观
 
 ### 迁移执行顺序与共享槽位后果
 
-`Phase1Database.migrate()` 按 `if (version < N)` 升序执行 v1…v21（跳过 v16），最后写 `PRAGMA user_version=21`。升级前 schema version 大于 `phase1SchemaVersion` 时以 `UNSUPPORTED_SCHEMA` 拒绝写入。
+`Phase1Database.migrate()` 按 `if (version < N)` 升序执行 v1…v26（跳过 v16、v22、v25），最后写 `PRAGMA user_version=${phase1SchemaVersion}`。升级前 schema version 大于 `phase1SchemaVersion` 时以 `UNSUPPORTED_SCHEMA` 拒绝写入。
 
 已知后果（ADR-0032 记录）：单个 lane 合并后，**已经被标成更高版本号的库不会补跑后来出现的更低版本步骤**。跨格合并必须按既定顺序（E0 → E1 → E2；以及 Wave D 的 17 → 18 → 19）。这也是 v16 永久未使用的同一个根因。
+
+版本占用现状（以 `packages/storage/src/migration.ts` 为准，不提前创建未来表）：v22、v25 未占用（v25 属并行 lane），v23（`task retry`，ADR-0036）与 v24（未注册目录回收，ADR-0037）已实现——本节尚未逐版本补齐 v23/v24 的 DDL 记录，属文档同步滞后，不是未实现。
+
+### Phase 6 项目知识分层与 Execution 绑定（schema version 26，ADR-0041）
+
+新增两张 **append-only** 表，**不重建 `executions`、不新增列**：
+
+```sql
+CREATE TABLE knowledge_snapshots (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  main_ref TEXT NOT NULL CHECK(length(trim(main_ref)) > 0),
+  main_commit TEXT NOT NULL CHECK(length(trim(main_commit)) > 0),
+  policy_version TEXT NOT NULL CHECK(length(trim(policy_version)) > 0),
+  snapshot_digest TEXT NOT NULL CHECK(length(snapshot_digest) = 64),
+  human_digest TEXT NOT NULL CHECK(length(human_digest) = 64),
+  generated_digest TEXT NOT NULL CHECK(length(generated_digest) = 64),
+  entry_count INTEGER NOT NULL CHECK(entry_count >= 0),
+  human_entry_count INTEGER NOT NULL CHECK(human_entry_count >= 0),
+  generated_entry_count INTEGER NOT NULL CHECK(generated_entry_count >= 0),
+  total_bytes INTEGER NOT NULL CHECK(total_bytes >= 0),
+  entries_json TEXT NOT NULL CHECK(json_valid(entries_json)),
+  created_by TEXT NOT NULL CHECK(length(trim(created_by)) > 0),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  CHECK(entry_count = human_entry_count + generated_entry_count)
+) STRICT;
+CREATE UNIQUE INDEX one_knowledge_snapshot_per_state
+  ON knowledge_snapshots(project_id,main_commit,snapshot_digest);
+CREATE INDEX knowledge_snapshots_by_project ON knowledge_snapshots(project_id,created_at,id);
+-- knowledge_snapshots_no_update / knowledge_snapshots_no_delete：UPDATE 与 DELETE 一律 RAISE(ABORT)
+
+CREATE TABLE execution_knowledge_snapshots (
+  execution_id TEXT PRIMARY KEY REFERENCES executions(id),
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  snapshot_id TEXT NOT NULL REFERENCES knowledge_snapshots(id),
+  snapshot_digest TEXT NOT NULL CHECK(length(snapshot_digest) = 64),
+  context_path TEXT NOT NULL CHECK(length(trim(context_path)) > 0),
+  context_digest TEXT NOT NULL CHECK(length(context_digest) = 64),
+  context_bytes INTEGER NOT NULL CHECK(context_bytes >= 0),
+  entry_count INTEGER NOT NULL CHECK(entry_count >= 0),
+  refs_json TEXT NOT NULL CHECK(json_valid(refs_json)),
+  command_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0)
+) STRICT;
+CREATE INDEX execution_knowledge_snapshots_by_snapshot
+  ON execution_knowledge_snapshots(snapshot_id,created_at,execution_id);
+CREATE INDEX execution_knowledge_snapshots_by_task
+  ON execution_knowledge_snapshots(project_id,task_id,created_at,execution_id);
+-- execution_knowledge_snapshots_no_update / _no_delete：同上
+```
+
+设计要点：
+
+- `knowledge_snapshots` 的键是它**派生自的事实**（`project` + `main_commit` + `snapshot_digest`），因此同一份声明重复记录是复用一行，而知识文件变化必然是另一行。`entries_json` 保存逐条 `{layer,path,id,scope,digest,bytes,origin}`（不含正文），使「这个 Execution 用了哪些条目、各自内容 digest 是多少」可在事后完整读回。
+- `execution_knowledge_snapshots` 以 `execution_id` 为主键（一个 Execution 恰好用一个快照），`context_path`/`context_digest`/`context_bytes` 记录物化到 `<CODEESTRA_HOME>/knowledge/<project-id>/<task-id>/knowledge-context.md` 的确切字节。绑定不可改写：重复写同一绑定是重放，写**不同**的快照是 `COMMAND_CONFLICT` 而不是静默更新。
+- 绑定的插入在 `reserveExecution` 的**同一事务**内完成，因此「Execution 存在」与「已绑定所用知识」不可分开观察；插入失败时整个保留事务回滚（实测：Execution 行、绑定行均为 0，Task 回到 `READY`）。
+- 为什么是两张新表而不是给 `executions` 加列：新表 + 事务内插入给出同样的原子性，而没有表重写的风险，且既有历史行原样保留（ADR-0041 D07）。

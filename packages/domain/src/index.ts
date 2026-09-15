@@ -7,3 +7,4 @@ export * from './impact-analysis.js';
 export * from './agent-completion-signal.js';
 export * from './task-retry.js';
 export * from './verification-evidence.js';
+export * from './knowledge.js';

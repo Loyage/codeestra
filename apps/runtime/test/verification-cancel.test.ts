@@ -165,6 +165,9 @@ describe('CANCELLED as a first-class verification state (ADR-0027)', () => {
     try {
       expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version')
         .get()?.user_version).toBe(phase1SchemaVersion);
+      // The claim is that the upgrade reaches the *current* schema, not that this
+      // lane is last: Wave I carries FOUNDATION-065 (v25) and FOUNDATION-067 (v26),
+      // so the constant is 26 while the table this file checks may be older.
       expect(phase1SchemaVersion).toBeGreaterThanOrEqual(24);
       // The rebuilt table kept the existing row, identity, evidence columns and timestamps.
       const run = upgraded.getVerificationRun('p1', 'v1');
@@ -242,6 +245,9 @@ describe('CANCELLED as a first-class verification state (ADR-0027)', () => {
     try {
       expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version')
         .get()?.user_version).toBe(phase1SchemaVersion);
+      // The claim is that the upgrade reaches the *current* schema, not that this
+      // lane is last: Wave I carries FOUNDATION-065 (v25) and FOUNDATION-067 (v26),
+      // so the constant is 26 while the table this file checks may be older.
       expect(phase1SchemaVersion).toBeGreaterThanOrEqual(24);
       expect(upgraded.sqlite.query<{ name: string }, []>(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='session_terminals'",

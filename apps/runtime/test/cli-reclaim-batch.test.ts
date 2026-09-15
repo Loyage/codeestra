@@ -722,6 +722,9 @@ describe('unregistered reclamation schema', () => {
     try {
       expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version')
         .get()?.user_version).toBe(phase1SchemaVersion);
+      // The claim is that the upgrade reaches the *current* schema, not that this
+      // lane is last: Wave I carries FOUNDATION-065 (v25) and FOUNDATION-067 (v26),
+      // so the constant is 26 while the table this file checks may be older.
       expect(phase1SchemaVersion).toBeGreaterThanOrEqual(24);
       expect(upgraded.sqlite.query<Record<string, unknown>, []>('PRAGMA foreign_key_check').all())
         .toHaveLength(0);
