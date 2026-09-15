@@ -3022,6 +3022,66 @@ Adapter **报不出事实时不猜**：`facts` 字段整体缺席表示“未知
 - 下一步执行者固定本次 dev 提交 OID，重新核对两个 ref 与 main 干净状态，在 main 工作树 fast-forward 固定 OID，随后按 install → build:ui → stop → status 执行；有需要时再启动 UI 并检查 READY + uiRunning。最终提交 OID、各步退出码与新 boot 由实际执行输出记录，不在提交前捏造发布结果。
 - 未授权 push；不直接 update-ref 已检出的 main，失败不回滚，不手工清理未知进程。新 UI token 不写入文档、日志或提交。
 
+## FOUNDATION-059 — 调度、impact、容量与预留、完成注记的 UI 投影（Wave H / H1，纯投影，无 ADR，无迁移）
+
+状态：实现与自查完成，等待用户确认后才 commit。**未新增 ADR、未占 schema 版本、未改任何后端文件**（`apps/runtime/**`、`apps/cli/**`、`packages/**` 零改动）。视觉、窄屏与键盘体验仍需用户人工目视确认。
+
+用户在本格明确选择（两项）：
+
+1. **导航**：新增「调度」标签承载项目级内容，任务级内容内嵌在任务详情里（不新增第二个「影响」标签）。
+2. **UI 单测**：给 `apps/ui` 的纯函数加单测并接入 vitest —— 因此 `vitest.config.ts` 的 `include` 追加 `apps/ui/**/*.test.ts`（这是本格**唯一**跨出 `apps/ui/**` 的改动，纯追加、不改既有配置语义）。
+
+### 已实现（全部是同一命令面的投影）
+
+- `apps/ui/src/scheduling-labels.ts`（新，纯函数、无 DOM）：等待原因、容量 reason code、判定、`SAFE|UNKNOWN|CONFLICTING`、预留状态、reconcile 观测、impact reason code、等待时长、完成注记措辞，以及 7 类调度事件（`TaskScheduleDecided`、`TaskWaitingForConflict`、`TaskWaitingForCapacity`、`TaskUnknownCleared`、`ExecutionSlot*`、`SchedulerCapacityChanged`）的**人话摘要**。两条措辞规则由测试锁定：`UNKNOWN` 渲染为「无法证明」而**不是**「没有冲突」；容量等待/冲突等待**不得**显示成 `BLOCKED`（`BLOCKED` 只表示依赖未满足）。
+- `apps/ui/src/schedule.tsx`（新）：
+  - `SchedulePanel`（对应 `task schedule status|plan|run`）：活跃集合（任务/执行状态、adapter、预留、已运行时长）、按优先级排序的候选（处置、等待 kind+code+detail+已等待时长、占用方、依赖未满足原因、assessment）、实际影响增长记录；`plan` 以 dry run 横幅呈现且明说「不预留、不启动」。
+  - `ScheduleExplainPanel`（对应 `task schedule explain` + `clear-unknown`）：一处任务的决定与命中范围（路径/重要目录/模块/全局资源 + 关系 + class）；`UNKNOWN` 的显式单次放行是**带风险提示的显式动作**，始终显示绑定的 revision/baseCommit/analyzerVersion/policyVersion，并明说「放行不改变判定记录，该次 assessment 仍是 UNKNOWN」「不等于 SAFE」；无确认复选框、无新增门禁。
+  - `CapacityPanel`（对应 `scheduler capacity get|set|clear`、`scheduler reservations list|get|release|reconcile`）：两级上限（含 `limitSource` 与「跟随全局」说明）、已用/可用、`globalUsed > globalLimit` 如实显示、占用者与持有开始时间；`set` 把输入原样交给 Runtime（**不夹取**），非法值原样显示稳定错误码；`clear` 只对显式覆写可用；预留表含持有者证据（bootId/pid/startToken 可为 null/actor）与释放证据；`release` 必填原因；`reconcile` 面板区分 `HOLDER_STILL_RUNNING` / `HOLDER_OWNERSHIP_UNVERIFIABLE`→`RECOVERY_REQUIRED` / `PROCESS_IDENTITY_MISSING` 与可释放的两种观测。
+- `apps/ui/src/impact.tsx`（新）：`ImpactPolicyPanel`（`project impact validate`，用项目 `repoRoot` 作 path）与 `ImpactTaskPanel`（`project impact show` + `explain`）：映射状态/确认状态/摘要/警告、`complete: false` 与 `incompleteReasons` 如实显示、快照文件/重要目录/模块/全局资源/未分类路径、baseline 与 dev 不一致时的 UNKNOWN 提示、逐活跃任务表与逐配对 append-only 判定。
+- `apps/ui/src/types.ts`：补齐上述投影的只读类型；`ExecutionView.session.completion` 补上（`outcome`/`facts`/`note`），与 Runtime 的 `task.status` 投影一致。
+- `apps/ui/src/App.tsx`：新「调度」标签（调度面板 + 容量与预留 + impact 校验）；任务详情新增「调度判定」与「影响与冲突判定」；执行记录上方新增「会话结束注记」区块，按注记本意呈现（`结束形态的注记（PROSE_QUESTION_NO_TOOL_USE）——不是「Agent 在等你回答」，也不是失败`），并把 provider 原始事实与 outcome 一并显示；事件流对既有调度事件加一行人话摘要，**保留原始 payload 不替换**。
+- `apps/ui/src/styles.css`：新增 `.state-safe` / `.state-unknown` / `.state-waiting` / `.state-conflicting`（`UNKNOWN` 用 attention 色，**不**用成功色）与这些面板的排版；事件流里调度摘要独占一行。
+- `apps/ui/test/scheduling-labels.test.ts`（新，25 项）：覆盖 `UNKNOWN` 措辞、容量/分析器 reason code、`BLOCKED` 边界、dry run 不等于启动、reconcile 三类「保持占用」与两类「可释放」、`complete:false`、等待时长、完成注记不得升级为「等待回答」、以及事件摘要遇到不认识的负载必须返回 null。
+- `vitest.config.ts`：`include` 追加 `apps/ui/**/*.test.ts`。
+
+### 明确未纳入 UI 的既有命令（不是缺陷，边界声明）
+
+- `scheduler reservations acquire` / `prepare-workspace`：它们是引擎原语（需要 `expectedTaskVersion` + `revisionId`），UI 直接从低层原语启动任务会绕过 `task run`/调度判定的正常路径；启动仍走「提交/启动 Agent」与 `task schedule run`。
+- `task run --allow-unknown` / `task resume --allow-unknown`：放行在 UI 里是独立的 `task schedule clear-unknown` 动作（先记录放行，再交给调度决定是否启动），**不**把放行折叠进启动按钮，避免做成「看起来无害的开关」。
+- `scheduler reservations list --task`：面板已按项目列出并显示任务编号；未加逐任务过滤控件。
+
+### 本轮实测发现的后端缺陷（**不在本格领地，未修，仅报告**）
+
+1. **`project impact explain` 在候选没有可用快照时崩溃**（FOUNDATION-053 / ADR-0031）。真实 CLI 复现：对一个 READY 且尚无 worktree 的任务执行 `codeestra project impact explain <project-id> <task-id>` → `INVALID_REQUEST: null is not an object (evaluating 'snapshot.revisionId')`。定位：`packages/domain/src/impact-analysis.ts` 的 `assessCandidate` 在第 653 行无条件调用 `subjectHits(candidate, …)`，而 `subjectValidity` 直接解引用 `snapshot.revisionId`，候选 `snapshot === null`（`UNAVAILABLE`）时抛错；调度引擎路径（`schedule-service.ts` 的 `#assess`）在调用 analyzer 前先返回 `#unavailableAssessment`，所以只有 `project impact explain` 这条只读命令面会崩。影响：H1 的「解释判定（explain）」按钮对这类任务会显示 `INVALID_REQUEST: null is not an object…`（UI 如实显示稳定错误码，未吞未猜）。
+2. **`apps/runtime/test/cli-impact.test.ts:376` 在本基线上确定性失败**：`task cancel <project-id> <first-task-id> 2` 返回 exit 1、`CONCURRENT_MODIFICATION: Task version did not match`（测试硬编码的 v2 已过期）。已用 `git stash -u`（把 H1 全部改动移出工作树，回到 `dev@8058eb9` 的字节状态）复跑同一测试确认**同样失败**，因此是既有缺陷，不属于本格。
+
+### 实际验证
+
+- `bun run check:fast`：**退出码 0**（根 TypeScript、UI TypeScript、272+25 = **297 项 Vitest**、**357 项 Bun 单测** 0 fail）。
+- `bun run build:ui`：成功（29 modules，`dist/assets/index-*.js` 386.65 kB / gzip 113.43 kB）。
+- `bun run check`：**未整体通过**，唯一失败即上述既有的 `apps/runtime/test/cli-impact.test.ts`（1 fail / 566 pass，67 文件，3493 断言）；`test:storage` 失败后 `build:ui` 未执行（已单独跑过，成功）。
+- 端到端证据（真实 Runtime + 真实 CLI + `CODEESTRA_HOME=/tmp/ce-h1` + 临时仓库 + **协议 stub provider**，用 UI 的 `RuntimeClient`（`apps/ui/src/api.ts`，与浏览器同一类）直连 `/api/command`）：
+  - `repo-main`（`.codeestra/impact.json` 存在且已确认）：提交 3 个任务 → 前两个 `started` 且 `task.list` 显示 2 个 `RUNNING`，第三个 `waiting: [{kind: CAPACITY, code: CAPACITY_GLOBAL_LIMIT_REACHED}]`；`task.schedule.status` 的 `active` 为 2、`candidates[0].{disposition: WAITING, assessment.verdict: SAFE_TO_PARALLELIZE}`、`capacity.{globalUsed: 2, globalLimit: 2, globalWaitReason: CAPACITY_GLOBAL_LIMIT_REACHED}`；`plan.dryRun = true` 且 disposition 仍为 `WAITING`；`impact.validate = OK`（digest/Label 齐全）；`capacity.get` 显示两级 `limitSource: DEFAULT`；`capacity.set` 用 `limit=0` / `limit=99` 分别得到 `CAPACITY_LIMIT_INVALID` / `CAPACITY_LIMIT_OUT_OF_RANGE`（无夹取）；`reservations.list(includeReleased)` 显示预留把槽位**移交**给 Execution（releaseKind `EXPLICIT`、理由写明 handed over），`reservations.get` 显示 RESERVED×2 + RELEASED 事件与证据键；`schedule.run` 报告 `trigger REQUESTED`、`coalesced false`。
+  - `repo-note`（无映射）：提交 → `waiting CONFLICT/INCOMPLETE_IMPACT`；`task run` 显式独占启动（`outcome STARTED`、`assessment.verdict UNKNOWN`、`candidateIncompleteReasons [POLICY_ABSENT]`）；第二个任务 `explain = WAIT_CONFLICT / UNKNOWN / unknownRelease = null`（**未放行**）；`task.status` 里 `executions[0].session.completion.note` 为 `PROSE_QUESTION_NO_TOOL_USE`（含 `toolCallCount: 0` 与尾问句事实）；`impact.show` 给出 `complete: false` + `incompleteReasons [POLICY_ABSENT]`；`clear-unknown` 返回 `recorded true / state RECORDED / verdict 仍 UNKNOWN`，随后 `explain` 的 `unknownRelease` 出现且 `decision` 变为 `START_NOW`（放行 ≠ SAFE）。
+  - 事件面：`events.list` 中实际存在 `TaskScheduleDecided` / `TaskWaitingForCapacity` / `ExecutionSlotReserved` / `ExecutionSlotReleased` / `SchedulerCapacityChanged` 等，UI 摘要函数读取的就是这些既有 payload。
+  - 收尾：CLI `stop` 返回 `status: STOPPED`（`identityVerified: true`）；结束时本工作树孤儿 Runtime = 0、stub 进程 = 0、`/tmp/ce-h1` 已删除；稳定 `main` Runtime 未被触碰（仍在运行）。
+  - **provider 是协议 stub**：以上只证明 Runtime 的投影形状与 UI 的数据源确实存在，**不**构成真实 Agent 集成或真实模型行为的验收。
+- `git diff --check`：通过。
+
+### 未验证 / 需要用户人工确认
+
+- 未使用浏览器/桌面/键鼠自动化（符合本用户规范）：构建与命令面通过**不**证明视觉排版、窄屏、焦点与主题正确。请人工目视确认：
+  1. 「调度」标签在窄屏下候选卡片、等待时长与命中范围列表的换行与可读性；
+  2. `UNKNOWN` 的措辞与配色是否读起来像「无法证明」而不是「安全」；
+  3. 「记录单次放行」按钮的风险提示是否足够醒目、且不误导为无害开关；
+  4. 容量表的 `limitSource`、「跟随全局」提示与占用者时长；`set` 非法值只出现稳定错误码、不被静默接受；
+  5. 任务详情里「调度判定」「影响与冲突判定」「会话结束注记」三处的位置与观感；
+  6. 事件流里调度事件的人话摘要一行（原始 JSON 仍在）。
+- 未验证：真实 Pi TUI/真实模型下的调度事件实时表现；`SESSION`/PTY 相关面板未改动；`project impact explain` 缺陷修复后 UI 的错误分支将不再出现（修复属别的领地）。
+- 已知呈现限制：`capacity.get` 的每个 adapter 行都会带上当前全局等待码（`CAPACITY_GLOBAL_LIMIT_REACHED`），因此一个 `used 0/available 2` 的 adapter 也会显示「全局上限已满」——这与 Runtime 的语义一致（该 adapter 此刻获取也会因全局上限而等待），已按此措辞显示而未改写。
+- `apps/ui/src/schedule.tsx` 的活跃集合里 `reservationId` 常为 `null`：因为启动后槽位已移交给 Execution，占用继续由 `resource_held` 计入；面板已就此写明提示，未把 `null` 显示成丢失。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、~~UI 投影~~（已由 FOUNDATION-050 完成 promotion/dependency 投影）。

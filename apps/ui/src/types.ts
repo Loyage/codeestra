@@ -89,7 +89,41 @@ export interface ExecutionView {
     readonly state: string;
     readonly providerSessionId: string | null;
     readonly cursor: string | null;
+    /**
+     * The completion the Runtime recorded for this Session, including any note it had to add
+     * (FOUNDATION-056). `null` while the Session has not completed. The note is an observation
+     * about the *shape of the ending*; it is never a claim that the Agent is waiting for an answer.
+     */
+    readonly completion: AgentSessionCompletionView | null;
   } | null;
+}
+
+/** Provider-reported facts behind one completion; an absent fact means "unknown", never "none". */
+export interface AgentCompletionFactsView {
+  readonly toolCallCount: number;
+  readonly finalAssistantText: string | null;
+  readonly finalAssistantTextTruncated: boolean;
+  readonly finalAssistantStopReason: string | null;
+}
+
+/**
+ * The Runtime's own note about an ending it must not leave unexplained. It carries a stable code,
+ * the heuristic that fired, and the facts it was applied to — never a judgement of intent.
+ */
+export interface AgentCompletionNoteView {
+  readonly code: string;
+  readonly heuristic: string;
+  readonly message: string;
+  readonly facts: AgentCompletionFactsView;
+}
+
+/** What the Runtime recorded next to a settled Agent run. `note` is `null` for an ordinary end. */
+export interface AgentSessionCompletionView {
+  readonly outcome: 'SUCCESS' | 'FAILURE';
+  readonly evidenceRef: string | null;
+  readonly failure: { readonly code: string; readonly message?: string } | null;
+  readonly facts: AgentCompletionFactsView | null;
+  readonly note: AgentCompletionNoteView | null;
 }
 
 export interface VerificationCommandView {
@@ -808,6 +842,409 @@ export interface TaskDependencyView {
   readonly blockedReasons: readonly TaskDependencyBlockReasonView[];
   readonly prerequisites: readonly string[];
   readonly dependents: readonly string[];
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * The scheduling engine and capacity (FOUNDATION-055 / ADR-0030, FOUNDATION-054 / ADR-0032).
+ *
+ * Every type here mirrors a projection the Runtime already sends on the same command face the CLI
+ * uses. The UI adds no verdict of its own: an `UNKNOWN` assessment is rendered as "cannot be
+ * proven", never as "no conflict", and a capacity wait is never folded into `BLOCKED`.
+ */
+
+export type CapacityWaitReasonCodeView = 'CAPACITY_GLOBAL_LIMIT_REACHED'
+  | 'CAPACITY_ADAPTER_SLOT_LIMIT_REACHED' | 'SCHEDULER_DRAINING';
+
+/** Why a Task did not get a slot; a capacity wait is a fact about now, not a failure. */
+export interface CapacityWaitReasonView {
+  readonly code: CapacityWaitReasonCodeView;
+  readonly adapterId: string | null;
+  readonly limit: number | null;
+  readonly used: number | null;
+  readonly blocking: readonly string[];
+  readonly detail: string;
+}
+
+/** One Adapter's capacity, with where its limit came from (`DEFAULT` follows the project limit). */
+export interface AdapterCapacityView {
+  readonly adapterId: string;
+  readonly limit: number;
+  readonly limitSource: 'DEFAULT' | 'EXPLICIT';
+  readonly used: number;
+  readonly available: number;
+  readonly waitReason: CapacityWaitReasonCodeView | null;
+}
+
+/** The project's two capacity dimensions plus who currently holds each slot. */
+export interface ProjectCapacityView {
+  readonly projectId: string;
+  readonly globalLimit: number;
+  readonly globalLimitSource: 'DEFAULT' | 'EXPLICIT';
+  readonly globalUsed: number;
+  readonly globalAvailable: number;
+  readonly globalWaitReason: CapacityWaitReasonCodeView | null;
+  readonly adapters: readonly AdapterCapacityView[];
+  readonly configVersion: number;
+  readonly updatedAt: number | null;
+  readonly updatedBy: string | null;
+  readonly draining: boolean;
+  readonly drainReason: string | null;
+  readonly occupants: readonly { readonly taskId: string; readonly reservationId: string | null;
+    readonly adapterId: string; readonly since: number }[];
+}
+
+/** One measured intersection behind a conflict wait or an impact verdict. */
+export interface ConflictHitView {
+  readonly reason: string;
+  readonly class: string;
+  readonly taskId: string | null;
+  readonly revisionId: string | null;
+  readonly paths: readonly string[];
+  readonly pathCount: number;
+  readonly directories: readonly string[];
+  readonly modules: readonly string[];
+  readonly globalResources: readonly string[];
+  readonly relation: string | null;
+  readonly detail: string;
+}
+
+export type ScheduleWaitKindView = 'CONFLICT' | 'CAPACITY';
+
+/** A wait is never `BLOCKED`: it carries the analyzer's codes/scopes or the capacity numbers. */
+export interface ScheduleWaitView {
+  readonly kind: ScheduleWaitKindView;
+  readonly code: string;
+  readonly detail: string;
+  readonly reasonCodes: readonly string[];
+  readonly hits: readonly ConflictHitView[];
+  readonly blocking: readonly string[];
+  /** When this wait was first recorded, so the UI can show how long it has lasted. */
+  readonly since: number | null;
+}
+
+/** The assessment a decision was made from; the binding an `--allow-unknown` release uses. */
+export interface ScheduleAssessmentView {
+  readonly verdict: 'SAFE_TO_PARALLELIZE' | 'UNKNOWN' | 'CONFLICTING';
+  readonly reasonCodes: readonly string[];
+  readonly revisionId: string;
+  readonly baseCommit: string;
+  readonly analyzerVersion: string;
+  readonly policyVersion: string;
+  readonly candidateSnapshotId: string | null;
+  readonly candidateComplete: boolean;
+  readonly candidateIncompleteReasons: readonly string[];
+  readonly comparedTaskIds: readonly string[];
+  readonly activeTaskIds: readonly string[];
+  readonly explanation: readonly string[];
+}
+
+export type ScheduleDispositionView = 'STARTED' | 'WOULD_START' | 'WAITING' | 'BLOCKED' | 'SKIPPED'
+  | 'FAILED';
+
+/** One candidate in the ordered walk, with the decision the Runtime actually reached. */
+export interface ScheduleCandidateView {
+  readonly taskId: string;
+  readonly taskDisplayNumber: number;
+  readonly taskState: string;
+  readonly taskVersion: number;
+  readonly revisionId: string;
+  readonly priority: number;
+  readonly createdAt: number;
+  readonly adapterId: string;
+  readonly disposition: ScheduleDispositionView;
+  readonly detail: string;
+  readonly wait: ScheduleWaitView | null;
+  readonly blockedReasons: readonly { readonly code: string; readonly prerequisiteTaskId: string;
+    readonly requiredRevisionId: string; readonly detail: string | null }[];
+  readonly assessment: ScheduleAssessmentView | null;
+  readonly started: { readonly executionId: string; readonly sessionId: string;
+    readonly workspaceId: string; readonly baseCommit: string;
+    readonly reservationId: string | null } | null;
+  readonly clearedUnknownBy: string | null;
+}
+
+/** A recorded growth of an active Task's observed diff beyond its prediction (scheduler.md §4). */
+export interface ScheduleImpactGrowthView {
+  readonly taskId: string;
+  readonly previousSnapshotId: string;
+  readonly snapshotId: string;
+  readonly addedPaths: readonly string[];
+  readonly removedPaths: readonly string[];
+  readonly conflictingTaskIds: readonly string[];
+  readonly reasonCodes: readonly string[];
+  readonly pauseRequested: boolean;
+  readonly pauseOutcome: string | null;
+  readonly detail: string;
+}
+
+/** `task schedule status` / `task schedule plan`; `plan` is the dry run that starts nothing. */
+export interface ScheduleOverviewView {
+  readonly projectId: string;
+  readonly dryRun: boolean;
+  readonly adapterId: string;
+  readonly draining: boolean;
+  readonly running: boolean;
+  readonly lastTick: { readonly tickId: string; readonly trigger: string;
+    readonly completedAt: number } | null;
+  readonly candidates: readonly ScheduleCandidateView[];
+  readonly active: readonly { readonly taskId: string; readonly taskDisplayNumber: number;
+    readonly taskState: string; readonly executionState: string; readonly adapterId: string;
+    readonly reservationId: string | null; readonly since: number }[];
+  readonly capacity: ProjectCapacityView;
+  readonly impactGrowth: readonly ScheduleImpactGrowthView[];
+}
+
+/** `task schedule explain`: why one Task is (not) running now, in the Runtime's own words. */
+export interface ScheduleExplanationView {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly taskState: string;
+  readonly adapterId: string;
+  readonly candidate: boolean;
+  readonly decision: 'START_NOW' | 'WAIT_CONFLICT' | 'WAIT_CAPACITY' | 'BLOCKED' | 'ACTIVE'
+    | 'NOT_A_CANDIDATE';
+  readonly detail: string;
+  readonly wait: ScheduleWaitView | null;
+  readonly blockedReasons: readonly { readonly code: string; readonly prerequisiteTaskId: string;
+    readonly requiredRevisionId: string; readonly detail: string | null }[];
+  readonly assessment: ScheduleAssessmentView | null;
+  readonly capacity: ProjectCapacityView;
+  readonly activeTaskIds: readonly string[];
+  /** The valid `--allow-unknown` release in effect for this Task and assessment, if any. */
+  readonly unknownRelease: { readonly releaseId: string; readonly revisionId: string;
+    readonly baseCommit: string; readonly analyzerVersion: string;
+    readonly policyVersion: string; readonly reasonCodes: readonly string[];
+    readonly releasedBy: string; readonly releasedAt: number;
+    readonly consumed: boolean } | null;
+  readonly explanation: readonly string[];
+}
+
+/** What `task schedule clearUnknown` recorded; `state` distinguishes a real release from a no-op. */
+export interface ScheduleUnknownReleaseView {
+  readonly recorded: boolean;
+  readonly releaseId: string | null;
+  readonly state: 'RECORDED' | 'ALREADY_VALID' | 'NOT_UNKNOWN' | 'SAFE' | 'CONFLICTING';
+  readonly verdict: 'SAFE_TO_PARALLELIZE' | 'UNKNOWN' | 'CONFLICTING';
+  readonly reasonCodes: readonly string[];
+  readonly revisionId: string;
+  readonly baseCommit: string;
+  readonly analyzerVersion: string;
+  readonly policyVersion: string;
+  readonly detail: string;
+}
+
+/** One `task schedule run` pass: what it decided, for which projects. */
+export interface ScheduleTickReportView {
+  readonly tickId: string;
+  readonly trigger: string;
+  readonly startedAt: number;
+  readonly completedAt: number;
+  readonly draining: boolean;
+  readonly coalesced: boolean;
+  readonly projects: readonly { readonly projectId: string;
+    readonly candidates: readonly ScheduleCandidateView[];
+    readonly impactGrowth: readonly ScheduleImpactGrowthView[];
+    readonly activeTaskIds: readonly string[];
+    readonly capacity: ProjectCapacityView }[];
+}
+
+/** The result of `scheduler capacity set` / `clear`; `changed: false` is an honest no-op. */
+export interface CapacityMutationView {
+  readonly changed: boolean;
+  readonly capacity: ProjectCapacityView;
+  readonly schedule: ScheduleTickReportView | null;
+}
+
+/* -- Slot reservations (scheduler.md §3, ADR-0032) ------------------------------------------------ */
+
+/** Who created a reservation and the OS evidence recorded for it — never a bare "it was me". */
+export interface SlotHolderEvidenceView {
+  readonly bootId: string;
+  readonly pid: number;
+  readonly startToken: string | null;
+  readonly actor: string;
+}
+
+export interface SlotReservationEventView {
+  readonly sequence: number;
+  readonly kind: 'RESERVED' | 'RELEASED' | 'RECONCILE_OBSERVED';
+  readonly domainEventId: string | null;
+  readonly commandId: string;
+  readonly actor: string;
+  readonly detail: string;
+  readonly evidence: Readonly<Record<string, unknown>>;
+  readonly occurredAt: number;
+}
+
+export type SlotReservationStateView = 'RESERVED' | 'RELEASED' | 'RECOVERY_REQUIRED';
+
+export type SlotHolderObservationStateView = 'HOLDER_STOPPED' | 'HOLDER_PROCESS_ID_REUSED'
+  | 'HOLDER_STILL_RUNNING' | 'HOLDER_OWNERSHIP_UNVERIFIABLE' | 'PROCESS_IDENTITY_MISSING';
+
+export interface SlotReservationView {
+  readonly reservationId: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly taskDisplayNumber: number;
+  readonly revisionId: string;
+  readonly taskVersion: number;
+  readonly adapterId: string;
+  readonly workspaceId: string | null;
+  readonly impactSnapshotId: string | null;
+  readonly dependencyFingerprint: string;
+  readonly assessedDevCommit: string | null;
+  readonly state: SlotReservationStateView;
+  readonly version: number;
+  readonly commandId: string;
+  readonly holder: SlotHolderEvidenceView;
+  readonly reservedAt: number;
+  readonly updatedAt: number;
+  readonly releasedAt: number | null;
+  readonly releaseReason: string | null;
+  readonly releaseKind: 'EXPLICIT' | 'RECONCILED_HOLDER_EXITED'
+    | 'RECONCILED_PROCESS_ID_REUSED' | null;
+  readonly releaseObservation: SlotHolderObservationStateView | null;
+  readonly detail: string | null;
+}
+
+export interface SlotReservationDetailView extends SlotReservationView {
+  readonly events: readonly SlotReservationEventView[];
+}
+
+export interface SlotReservationListView {
+  readonly projectId: string;
+  readonly reservations: readonly SlotReservationView[];
+}
+
+/** One reservation's verdict from `scheduler reservations reconcile`; nothing is signalled. */
+export interface SlotReservationReconcileOutcomeView {
+  readonly reservationId: string;
+  readonly taskId: string;
+  readonly outcome: 'RELEASED' | 'MARKED_RECOVERY_REQUIRED' | 'HELD' | 'ALREADY_RELEASED'
+    | 'ALREADY_RECONCILED' | 'SKIPPED_HELD_BY_RUNTIME' | 'FAILED';
+  readonly observation: SlotHolderObservationStateView | null;
+  readonly previousState: string;
+  readonly state: string;
+  readonly detail: string;
+}
+
+export interface SlotReservationReconcileReportView {
+  readonly bootId: string;
+  readonly outcomes: readonly SlotReservationReconcileOutcomeView[];
+  /** Reservations whose recorded process was never signalled by this Runtime generation. */
+  readonly notSignalled: readonly { readonly reservationId: string; readonly pid: number }[];
+}
+
+/** `scheduler reservations release`: `released: false` with a code is a real answer, not an error. */
+export interface SlotReservationReleaseView {
+  readonly released: boolean;
+  readonly outcome: 'RELEASED' | 'ALREADY_RELEASED';
+  readonly reservation: SlotReservationDetailView;
+  readonly schedule: ScheduleTickReportView | null;
+}
+
+/* -- Conflict analysis (ADR-0031) ------------------------------------------------------------------ */
+
+/** The mapping report behind every impact verdict; `confirmed` is what makes it effective. */
+export interface ImpactPolicyReportView {
+  readonly state: 'ABSENT' | 'PRESENT' | 'INVALID';
+  readonly mainRef: string;
+  readonly mainCommit: string;
+  readonly digest: string | null;
+  readonly contentDigest: string | null;
+  readonly label: string | null;
+  readonly confirmed: boolean;
+  readonly confirmationState: 'ABSENT' | 'PRESENT' | 'INVALID' | 'NOT_RECORDED';
+  readonly errorCode: string | null;
+  readonly errorMessage: string | null;
+  readonly importantDirectories: number;
+  readonly modules: number;
+  readonly globalResources: number;
+}
+
+/** `project impact validate`; only `OK` / `OK_UNTRUSTED` mean the mapping is actually in effect. */
+export interface ImpactPolicyValidationView {
+  readonly code: 'OK' | 'OK_UNTRUSTED' | 'POLICY_ABSENT' | 'POLICY_INVALID' | 'POLICY_NOT_CONFIRMED';
+  readonly valid: boolean;
+  readonly repoRoot: string;
+  readonly mainRef: string;
+  readonly mainCommit: string;
+  readonly trusted: { readonly projectId: string; readonly name: string } | null;
+  readonly policy: ImpactPolicyReportView;
+  readonly warnings: readonly string[];
+  readonly analyzerVersion: string;
+}
+
+/** One stored ImpactSnapshot, exactly as the analyzer recorded it (append-only, never edited). */
+export interface ImpactSnapshotView {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly revisionId: string;
+  readonly baseCommit: string;
+  readonly analyzerVersion: string;
+  readonly policyVersion: string;
+  readonly policyDigest: string;
+  readonly caseMode: 'SENSITIVE' | 'INSENSITIVE';
+  readonly changeFingerprint: string;
+  readonly complete: boolean;
+  readonly incompleteReasons: readonly string[];
+  readonly files: readonly string[];
+  readonly importantDirectories: readonly string[];
+  readonly modules: readonly string[];
+  readonly globalResources: readonly { readonly id: string; readonly kind: string;
+    readonly written: boolean; readonly read: boolean }[];
+  readonly unclassifiedFiles: readonly string[];
+  readonly evidence: readonly string[];
+  readonly createdAt: number;
+}
+
+/** `project impact show`: the snapshot in effect for one Task, or why none could be derived. */
+export interface ImpactTaskSnapshotView {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly taskState: string;
+  readonly revisionId: string;
+  readonly policy: ImpactPolicyReportView;
+  readonly caseMode: 'SENSITIVE' | 'INSENSITIVE';
+  readonly caseModeSource: string;
+  readonly caseModeDetail: string;
+  readonly disposition: 'RECORDED' | 'REUSED' | 'UNAVAILABLE';
+  readonly dispositionDetail: string | null;
+  readonly baseline: { readonly workspaceBaseCommit: string | null;
+    readonly projectDevCommit: string | null; readonly matchesProjectDev: boolean };
+  readonly snapshot: ImpactSnapshotView | null;
+  readonly unavailableDetail: string | null;
+}
+
+/** `project impact explain`: the candidate against every active/reserved Task, with its verdict. */
+export interface ImpactAssessmentReportView {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly revisionId: string;
+  readonly candidate: ImpactTaskSnapshotView;
+  readonly active: readonly { readonly taskId: string; readonly taskState: string;
+    readonly executionState: string; readonly revisionId: string;
+    readonly disposition: 'RECORDED' | 'REUSED' | 'UNAVAILABLE';
+    readonly complete: boolean; readonly incompleteReasons: readonly string[];
+    readonly changeFingerprint: string | null; readonly detail: string | null }[];
+  readonly assessment: {
+    readonly verdict: 'SAFE_TO_PARALLELIZE' | 'UNKNOWN' | 'CONFLICTING';
+    readonly reasonCodes: readonly string[];
+    readonly candidateTaskId: string;
+    readonly candidateRevisionId: string;
+    readonly candidateChangeFingerprint: string;
+    readonly candidateComplete: boolean;
+    readonly candidateIncompleteReasons: readonly string[];
+    readonly comparedTaskIds: readonly string[];
+    readonly hits: readonly ConflictHitView[];
+    readonly safePairs: readonly { readonly taskId: string; readonly revisionId: string;
+      readonly changeFingerprint: string }[];
+    readonly evidence: readonly string[];
+  };
+  readonly explanation: readonly string[];
+  readonly recordedAssessments: readonly { readonly otherTaskId: string;
+    readonly verdict: string; readonly reasonCodes: readonly string[] }[];
 }
 
 export type StreamFrame =

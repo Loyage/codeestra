@@ -316,3 +316,30 @@ details summary { cursor: pointer; color: var(--muted); padding: 0.3rem 0; }
 .state-blocked, .state-not_applied, .state-unsupported, .state-unverified, .state-partial
   { color: var(--warn); background: var(--warn-soft); }
 .state-implemented { color: var(--ok); background: var(--ok-soft); }
+
+/* Scheduling engine, capacity and conflict analysis (FOUNDATION-055 / ADR-0030, FOUNDATION-054 /
+   ADR-0032, ADR-0031). These panels only project the Runtime's own facts. A wait is neither an
+   error nor a success, and `UNKNOWN` is an attention fact — never the success colour. */
+.state-safe { color: var(--ok); background: var(--ok-soft); }
+.state-unknown, .state-waiting { color: var(--warn); background: var(--warn-soft); }
+.state-conflicting { color: var(--danger); background: var(--danger-soft); }
+
+.schedule-panel, .capacity-panel, .impact-policy-panel, .impact-task-panel, .schedule-explain-panel
+  { margin-top: 0.5rem; min-width: 0; }
+.schedule-panel h4, .capacity-panel h4, .impact-policy-panel h4, .impact-task-panel h4,
+.schedule-explain-panel h4 { font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+.schedule-panel h4 .hint, .capacity-panel h4 .hint, .impact-policy-panel h4 .hint,
+.impact-task-panel h4 .hint, .schedule-explain-panel h4 .hint { font-weight: normal; }
+.schedule-panel h4:first-child, .capacity-panel h4:first-child, .impact-policy-panel h4:first-child,
+.impact-task-panel h4:first-child, .schedule-explain-panel h4:first-child { margin-top: 0; }
+.impact-task-panel .eyebrow { display: block; margin: 0.9rem 0 0.3rem; }
+.candidate-list > li { margin: 0; }
+.wait-block, .assessment-block { border-left: 3px solid var(--line); padding: 0.4rem 0 0.4rem 0.7rem; margin: 0.6rem 0; }
+.wait-block { border-left-color: var(--warn); }
+.hit-list { margin: 0.5rem 0 0.5rem 1rem; }
+.hit-list li { font-size: 0.78rem; }
+.completion-notes .note-code { color: var(--warn); font-weight: 650; }
+/* A scheduling event gets a human sentence under the raw payload; the payload is never replaced. */
+.events li.scheduling-event { flex-wrap: wrap; }
+.events li.scheduling-event .event-human { flex-basis: 100%; font-size: 0.78rem; }
+.events li.scheduling-event .event-human .hint { margin-left: 0.4rem; }

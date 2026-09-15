@@ -6,6 +6,14 @@ import { TranscriptPanel } from './transcript.js';
 import { TerminalPanel } from './terminal.js';
 import { DependencyPanel } from './dependencies.js';
 import { PromotionPanel } from './promotion.js';
+import { SchedulePanel, ScheduleExplainPanel, CapacityPanel } from './schedule.js';
+import { ImpactPolicyPanel, ImpactTaskPanel } from './impact.js';
+import {
+  completionNoteHeading,
+  completionNoteSummary,
+  isSchedulingEventType,
+  schedulingEventSummary,
+} from './scheduling-labels.js';
 import { NewTaskDock } from './new-task-dock.js';
 import { TaskList, TaskStateBadge } from './task-list.js';
 import {
@@ -28,11 +36,12 @@ import {
   type VerificationRunView,
 } from './types.js';
 
-type Tab = 'tasks' | 'attention' | 'events' | 'agent' | 'project';
+type Tab = 'tasks' | 'attention' | 'schedule' | 'events' | 'agent' | 'project';
 
 const tabLabels: Record<Tab, string> = {
   tasks: '任务工作台',
   attention: '待处理',
+  schedule: '调度',
   events: '运行事件',
   agent: 'Agent 配置',
   project: '项目',
@@ -607,7 +616,7 @@ function Console({ token, initialProjectId }: {
       <aside className="sidebar">
       <nav aria-label="主导航">
         <span className="nav-caption">工作空间</span>
-        {(['tasks', 'attention', 'project', 'agent', 'events'] as const).map((name) => (
+        {(['tasks', 'attention', 'schedule', 'project', 'agent', 'events'] as const).map((name) => (
           <button
             key={name}
             type="button"
@@ -688,6 +697,19 @@ function Console({ token, initialProjectId }: {
             update={update}
             reload={reloadAttentions}
           />
+        ) : null}
+        {tab === 'schedule' ? (
+          projectId === null ? <p className="muted">请先选择一个项目。</p> : (
+            <ScheduleTab
+              key={projectId}
+              client={client}
+              projectId={projectId}
+              repoRoot={state.projects.find((project) => project.id === projectId)?.repoRoot ?? ''}
+              tasks={state.tasks}
+              refreshToken={state.detailToken}
+              run={run}
+            />
+          )
         ) : null}
         {tab === 'events' ? (
           <EventsTab
@@ -1268,6 +1290,7 @@ function TasksTab(props: CommonProps & {
                   <code>{status.verifications[0].testedCommit.slice(0, 10)}</code>
                   <span className="muted">{status.verifications[0].outcomeCode ?? '等待结果'} · 不代表集成或发布</span>
                 </div>}
+                <CompletionNotes executions={status.executions} />
                 <details className="execution-evidence">
                 <summary>执行、验证与集成记录 · {status.executions.length} 次执行 / {status.verifications.length} 次验证 / {integrationBatches.length} 次合入</summary>
                 <h3>执行记录</h3>
@@ -1427,9 +1450,101 @@ function TasksTab(props: CommonProps & {
                     run={props.run}
                   />
                 </section>
+                <section className="process-panel">
+                  <ScheduleExplainPanel
+                    client={client}
+                    projectId={projectId}
+                    taskId={task.id}
+                    tasks={tasks}
+                    refreshToken={props.detailToken}
+                    run={props.run}
+                  />
+                  <ImpactTaskPanel
+                    client={client}
+                    projectId={projectId}
+                    taskId={task.id}
+                    tasks={tasks}
+                    refreshToken={props.detailToken}
+                    run={props.run}
+                  />
+                </section>
               </>
             )}
       </section>
+  );
+}
+
+function ScheduleTab(props: {
+  readonly client: RuntimeClient;
+  readonly projectId: string;
+  readonly repoRoot: string;
+  readonly tasks: readonly TaskView[];
+  readonly refreshToken: number;
+  readonly run: (label: string, action: () => Promise<void>) => Promise<void>;
+}) {
+  return (
+    <>
+      <section className="card">
+        <SchedulePanel client={props.client} projectId={props.projectId} tasks={props.tasks}
+          refreshToken={props.refreshToken} run={props.run} />
+      </section>
+      <section className="card">
+        <CapacityPanel client={props.client} projectId={props.projectId} tasks={props.tasks}
+          refreshToken={props.refreshToken} run={props.run} />
+      </section>
+      <section className="card">
+        <ImpactPolicyPanel client={props.client} projectId={props.projectId} repoRoot={props.repoRoot}
+          refreshToken={props.refreshToken} run={props.run} />
+      </section>
+    </>
+  );
+}
+
+/**
+ * Executions whose Session recorded a completion, with the Runtime's note rendered as what it is:
+ * an observation about the *shape of the ending*. It is not "the Agent is waiting for an answer"
+ * and it is not a failure; the recorded outcome says which of those it is.
+ */
+function CompletionNotes({ executions }: {
+  readonly executions: TaskStatusView['executions'];
+}) {
+  const recorded = executions.flatMap((execution) => execution.session?.completion == null
+    ? [] : [{ execution, completion: execution.session.completion }]);
+  if (recorded.length === 0) return null;
+  return (
+    <section className="card nested completion-notes">
+      <h3>会话结束注记 <span className="muted hint">FOUNDATION-056</span></h3>
+      <p className="muted hint">{completionNoteHeading}</p>
+      <ul className="list">
+        {recorded.map(({ execution, completion }) => (
+          <li key={execution.executionId} className="muted">
+            第 {execution.attemptNumber} 次执行 · 记录结果
+            {' '}{completion.outcome === 'SUCCESS' ? '成功' : '失败'}
+            {completion.failure === null ? null
+              : <> · <span className="mono">{completion.failure.code}</span>
+                {completion.failure.message === undefined
+                  ? null : <div className="hint">{completion.failure.message}</div>}</>}
+            {completion.note === null ? (
+              <div className="hint">这个结束形态没有需要注记的地方。</div>
+            ) : (
+              <>
+                <div className="mono note-code">{completion.note.code}</div>
+                <div className="hint">{completionNoteSummary(completion.note)}</div>
+                <div className="hint mono">
+                  工具调用 {completion.note.facts.toolCallCount} · 最后文本截断
+                  {' '}{completion.note.facts.finalAssistantTextTruncated ? '是' : '否'} · 停止原因
+                  {' '}{completion.note.facts.finalAssistantStopReason ?? '未报告'}
+                </div>
+                <details>
+                  <summary className="hint">Runtime 记录的原始注记与事实</summary>
+                  <pre>{JSON.stringify(completion.note, null, 2)}</pre>
+                </details>
+              </>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -1701,14 +1816,24 @@ function EventsTab({ frames, cursor, following, streamStatus, update, clear }: {
         既不会重复也不会遗漏事件。
       </p>
       <ol className="events">
-        {frames.map((event) => (
-          <li key={event.eventId}>
-            <span className="mono muted">{event.sequence}</span>
-            <span className="mono">{event.eventType}</span>
-            <span className="muted">{event.aggregateType}</span>
-            <span className="truncate mono">{JSON.stringify(event.payload)}</span>
-          </li>
-        ))}
+        {frames.map((event) => {
+          const summary = isSchedulingEventType(event.eventType)
+            ? schedulingEventSummary(event.eventType, event.payload) : null;
+          return (
+            <li key={event.eventId} className={summary === null ? undefined : 'scheduling-event'}>
+              <span className="mono muted">{event.sequence}</span>
+              <span className="mono">{event.eventType}</span>
+              <span className="muted">{event.aggregateType}</span>
+              <span className="truncate mono">{JSON.stringify(event.payload)}</span>
+              {summary === null ? null : (
+                <span className="event-human muted">
+                  {summary}
+                  <span className="hint">（原始 payload 即为左侧 JSON，未被改写）</span>
+                </span>
+              )}
+            </li>
+          );
+        })}
       </ol>
       <div ref={endRef} />
     </section>
