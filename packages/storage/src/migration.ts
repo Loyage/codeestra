@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 29;
+export const phase1SchemaVersion = 30;
 
 /** The kinds `intents.kind` accepts (ADR-0046) and the only kinds any command can write. */
 export const intentKinds = ['CREATE_TASK', 'AMEND_TASK', 'ADD_CONSTRAINT', 'CANCEL_TASK',
@@ -1705,4 +1705,64 @@ ALTER TABLE stable_promotions ADD COLUMN remote_dev_commit TEXT;
 ALTER TABLE stable_promotions ADD COLUMN remote_main_commit TEXT;
 ALTER TABLE stable_promotions ADD COLUMN pushed_at INTEGER;
 ALTER TABLE stable_promotions ADD COLUMN main_pushed_at INTEGER;
+`;
+
+/**
+ * Multi-member IntegrationBatch (FOUNDATION-081 / ADR-0053).
+ *
+ * `integration_batches.state` gains two terminal verdicts that the single-member pipeline could not
+ * express:
+ *
+ * - `STALE` — the batch's fixed evidence (a member's revision/result commit, or the recorded `dev`
+ *   baseline) is no longer the current fact, so this batch can never be integrated. `dev` was not
+ *   touched and the merge/verification evidence of the batch stays readable; the remedy is to
+ *   compose a new batch from the current facts.
+ * - `CANCELLED` — the user ended a batch before any Git side effect existed.
+ *
+ * A `STRICT` table's `CHECK` cannot be widened in place, so this step rebuilds the table with the
+ * documented procedure (create → copy → drop → rename) while foreign keys are off, exactly as the
+ * v28 `intents` shrink does. The row count is compared before and after by the migration runner,
+ * because Bun's `exec()` would otherwise swallow a step-time error inside this multi-statement
+ * script and keep going — dropping rows without a word. `integration_batch_items`,
+ * `integration_verification_runs` and `stable_promotions` reference this table by name and keep
+ * resolving, because the old table is dropped *before* the new one takes the name over and no other
+ * table is renamed. No column, index or row is otherwise changed: both new states are additive, so
+ * every existing row already satisfies the widened `CHECK`.
+ *
+ * Schema version 30 is this step's own number: 25 is FOUNDATION-065/ADR-0039, 26 is
+ * FOUNDATION-067/ADR-0041, 27 is FOUNDATION-071/ADR-0044, 28 is FOUNDATION-075/ADR-0046, 29 is
+ * FOUNDATION-077/ADR-0052, and 16 stays permanently unused. A database may already be stamped
+ * 17–29 and would skip a later `version < 16` step, so the migration runner only appends
+ * `if (version < 30)` after the existing ascending steps and never inserts an earlier number.
+ */
+export const integrationBatchTerminalStatesMigration = `
+CREATE TABLE integration_batches_v30 (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  dev_ref TEXT NOT NULL CHECK(length(trim(dev_ref)) > 0),
+  dev_commit TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('CREATED','PREPARING','VERIFYING','INTEGRATING_DEV',
+    'INTEGRATED','CONFLICTED','FAILED','RECOVERY_REQUIRED','STALE','CANCELLED')),
+  integrated_commit TEXT,
+  merge_strategy TEXT CHECK(merge_strategy IS NULL OR merge_strategy IN ('FAST_FORWARD','MERGE_COMMIT')),
+  merged_commit TEXT,
+  worktree_path TEXT,
+  worktree_ownership_token TEXT NOT NULL,
+  verification_id TEXT,
+  outcome_code TEXT,
+  detail TEXT,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  completed_at INTEGER,
+  CHECK(integrated_commit IS NULL OR state='INTEGRATED'),
+  CHECK(completed_at IS NULL OR completed_at >= created_at)
+) STRICT;
+INSERT INTO integration_batches_v30(id,project_id,dev_ref,dev_commit,state,integrated_commit,
+  merge_strategy,merged_commit,worktree_path,worktree_ownership_token,verification_id,outcome_code,
+  detail,created_at,completed_at)
+  SELECT id,project_id,dev_ref,dev_commit,state,integrated_commit,merge_strategy,merged_commit,
+    worktree_path,worktree_ownership_token,verification_id,outcome_code,detail,created_at,completed_at
+  FROM integration_batches;
+DROP TABLE integration_batches;
+ALTER TABLE integration_batches_v30 RENAME TO integration_batches;
+CREATE INDEX integration_batches_by_project ON integration_batches(project_id,created_at,id);
 `;

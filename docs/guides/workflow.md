@@ -1,6 +1,6 @@
 # 端到端流程走查
 
-> **适用版本** `dev@036cf68`（2026-09-15） · **schema** v28 · **最后校对** 2026-09-15
+> **适用版本** `dev@75fa7b8`（2026-09-15） · **schema** v30 · **最后校对** 2026-09-15
 > 版本会前进：`dev@036cf68` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 
@@ -318,17 +318,24 @@ bun run codeestra task tests history $PROJECT <task-id> [--limit <n>] [--json]
 
 ```sh
 bun run codeestra task integrate $PROJECT <task-id> <expected-version>
-bun run codeestra task integration list $PROJECT <task-id>
+bun run codeestra task integration list $PROJECT [<task-id>]
+
+# 多成员：先组成（不碰 Git），再一次性集成（ADR-0053）
+bun run codeestra task integration create $PROJECT --member <task-id>:<version> --member <task-id>:<version>
+bun run codeestra task integration integrate $PROJECT <batch-id>
+bun run codeestra task integration cancel $PROJECT <batch-id> --reason "<为什么不要了>"
 ```
 
-过程（ADR-0018）：
+过程（ADR-0018 / ADR-0053）：
 
 1. 在 Runtime 数据目录的 **detached integration worktree** 中合并成果 commit（**能 ff 就 ff，否则 `--no-ff`**）；
-2. 跑**独立的集成验证**（独立实体，见 [concepts.md](./concepts.md)）；
-3. 集成验证 `PASSED` 后才用 **CAS** 推进 `dev`，并把 Task 推到 `SUCCEEDED`。
+   多成员批次按 task-id 顺序逐个成员合并；
+2. 跑**独立的集成验证**（独立实体，见 [concepts.md](./concepts.md)）——多成员批次是**一次覆盖整批**的验证；
+3. 集成验证 `PASSED` 后才用 **CAS** 推进 `dev`，并把（每个）成员 Task 推到 `SUCCEEDED`。
 
-**退出码**：只有 `state === "INTEGRATED"` 才是 `0`。其他一切状态（`CONFLICTED`、`FAILED`、
-`RECOVERY_REQUIRED`、需要人处理）都**不推进 `dev`**，退出码 `1`。
+**退出码**：只有 `state === "INTEGRATED"` 才是 `0`；`CONFLICTED`/`FAILED`/`STALE`/`CANCELLED` 等已记录的
+非集成终态是 `1`；未收口、需要人先处理的批次（`RECOVERY_REQUIRED`）是 `3`；用法错误是 `2`。
+它们都**不推进 `dev`**。
 
 **拒绝的常见前提**：Task 验证未通过（`TASK_VERIFICATION_NOT_PASSED`）、没有成果 commit（`NO_CAPTURED_RESULT`）、
 `dev` 正被某个工作树检出（`DEV_REF_CHECKED_OUT`）、`dev` 分支缺失（`DEV_REF_MISSING`）、已有集成在进行

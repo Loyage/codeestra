@@ -183,20 +183,41 @@ export async function reconcileInterruptedIntegrations(input: {
     if (batch.state === 'INTEGRATING_DEV' && batch.mergedCommit !== null
       && observed === batch.mergedCommit) {
       // The ref write did happen; the integration is completed from the observed ref instead of
-      // being repeated or reported as failed.
-      input.storage.completeIntegrationBatch({
-        batchId: batch.batchId,
-        integratedCommit: batch.mergedCommit,
-        worktreeDetail: `reconciled after a restart: ${batch.devRef} already pointed at the`
-          + ' recorded merge commit'
-          + (batch.worktreePath === null ? '' : `; integration worktree at ${batch.worktreePath}`),
-        completedEventId: randomUUID(),
-        taskEventId: randomUUID(),
-        completedAt: now(),
-      });
-      results.push({ batchId: batch.batchId, outcome: 'RECOVERED_INTEGRATED',
-        worktreePath: batch.worktreePath, mergedCommit: batch.mergedCommit });
-      continue;
+      // being repeated or reported as failed. Completion is all-or-nothing (one transaction) and is
+      // guarded per member by the exact revision the batch fixed, so a member that moved on while
+      // the ref was written cannot be reported as integrated: that batch is left for a human with
+      // both facts stated instead of failing the whole startup reconcile.
+      try {
+        input.storage.completeIntegrationBatch({
+          batchId: batch.batchId,
+          integratedCommit: batch.mergedCommit,
+          worktreeDetail: `reconciled after a restart: ${batch.devRef} already pointed at the`
+            + ' recorded merge commit'
+            + (batch.worktreePath === null ? '' : `; integration worktree at ${batch.worktreePath}`),
+          completedEventId: randomUUID(),
+          // A reconciled completion writes one Task event per member, exactly like a live integration.
+          taskEventIds: batch.items.map(() => randomUUID()),
+          completedAt: now(),
+        });
+        results.push({ batchId: batch.batchId, outcome: 'RECOVERED_INTEGRATED',
+          worktreePath: batch.worktreePath, mergedCommit: batch.mergedCommit });
+        continue;
+      } catch (error) {
+        input.storage.markIntegrationRecoveryRequired({
+          batchId: batch.batchId,
+          outcomeCode: 'RECONCILE_REQUIRED',
+          reason: `${batch.devRef} already points at the recorded merge ${batch.mergedCommit}, but`
+            + ' the integration could not be completed from that fact because a member no longer'
+            + ` matches the revision this batch fixed: ${error instanceof Error
+              ? error.message : String(error)}. Nothing was written twice; resolve the batch`
+            + ' explicitly.',
+          eventId: randomUUID(),
+          at: now(),
+        });
+        results.push({ batchId: batch.batchId, outcome: 'RECOVERY_REQUIRED',
+          worktreePath: batch.worktreePath, mergedCommit: batch.mergedCommit });
+        continue;
+      }
     }
     const reason = batch.state === 'INTEGRATING_DEV'
       ? `Runtime restarted during the dev ref update: ${batch.devRef} is at`

@@ -109,7 +109,7 @@ on relevant committed event or periodic recovery tick:
 以下三项被用户明确否决进入本波，**不是遗漏、也不是「待补齐的实现细节」**：
 
 - **非 Git 共享资源的 resource claim（端口、数据库、dev server）**：不引入。不同文件不能证明这些资源可共享，因此这类冲突继续由 `complete=false → UNKNOWN` 保守承载，而不是用一个没有归属校验的声明字段假装安全；留后续。（全局共享资源清单仍由 `.codeestra/impact.json` 的 `globalResources` 表达，那只覆盖 Git 可见影响。）
-- **多成员 IntegrationBatch 批次**：成果入 `dev` 继续**各自独立批次**（现状）；CLI 显式组批与自动组批都留后续。
+- **多成员 IntegrationBatch 的自动组批**：**CLI 显式组批已实现**（FOUNDATION-081 / ADR-0053：`task integration create` 组成多成员批次，一次覆盖整批的独立验证，`PASSED` 才推进 `dev`；见 `state-machines.md` §4）。**调度器仍然不会自动组批**：一次调度 tick 的候选仍各自独立成一个批次，「哪些 Task 合成一批」继续由人显式决定，属后续。
 - **饥饿公平策略（aging）**：不加 aging。持续高优先级输入可能饿死低优先级任务，UI 只显示等待时长；公平策略作为独立产品决策留后续。
 
 同样明确不做：按主机 CPU/内存自动推导并发容量；LLM 辅助的 ImpactSnapshot 预测；在 `UNKNOWN` 上新增除 `--allow-unknown` 之外的任何门禁、审批或信任流程。

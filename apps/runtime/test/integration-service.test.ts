@@ -5,7 +5,12 @@ import { join } from 'node:path';
 import { DeterministicFakeAdapter } from '@codeestra/agent-adapters';
 import { AgentRuntimeCoordinator } from '../src/agent-runtime-service.js';
 import { AdapterRegistry } from '../src/adapter-registry.js';
-import { integrateTaskResult } from '../src/integration-service.js';
+import {
+  cancelIntegrationBatch,
+  createIntegrationBatch,
+  integrateIntegrationBatch,
+  integrateTaskResult,
+} from '../src/integration-service.js';
 import { reconcileInterruptedIntegrations } from '../src/recovery-service.js';
 import { captureResultCommit, prepareResultCommit } from '../src/result-commit-service.js';
 import { VerificationRunner, runTaskVerification } from '../src/verification-service.js';
@@ -323,7 +328,10 @@ describe('task result integration into dev', () => {
       cwd: '.', timeoutSeconds: 60 }]);
     try {
       const report = await integrate(fixture);
-      expect(report).toMatchObject({ state: 'FAILED', outcomeCode: 'DEV_REF_MOVED',
+      // The batch's fixed baseline stopped being the current `dev` while the integration ran, so the
+      // recorded verdict is STALE (ADR-0053), not FAILED: `dev` is untouched by this batch and the
+      // batch has to be composed again from the current baseline.
+      expect(report).toMatchObject({ state: 'STALE', outcomeCode: 'DEV_REF_MOVED',
         integratedCommit: null });
       expect(await git(repo, ['rev-parse', 'refs/heads/dev'])).toBe(marker);
       expect(fixture.value.storage.listTasks(fixture.value.projectId)[0]?.state).toBe('EXECUTED');
@@ -386,13 +394,15 @@ describe('task result integration into dev', () => {
       const batchId = crypto.randomUUID();
       fixture.value.storage.beginIntegrationBatch({
         projectId: fixture.value.projectId,
-        taskId: fixture.value.taskId,
-        executionId: fixture.value.storage.listTaskExecutions(fixture.value.projectId,
-          fixture.value.taskId)[0]?.executionId as string,
+        members: [{
+          taskId: fixture.value.taskId,
+          executionId: fixture.value.storage.listTaskExecutions(fixture.value.projectId,
+            fixture.value.taskId)[0]?.executionId as string,
+          expectedVersion: taskVersion(fixture),
+        }],
         batchId,
         operationId: crypto.randomUUID(),
         worktreeOwnershipToken: crypto.randomUUID(),
-        expectedVersion: taskVersion(fixture),
         devRef: 'refs/heads/dev',
         devCommit: fixture.value.mainCommit,
         commandId: crypto.randomUUID(),
@@ -510,6 +520,383 @@ describe('task result integration into dev', () => {
       expect(recovered?.detail).toContain(fixture.value.mainCommit);
       expect(fixture.value.storage.listTasks(fixture.value.projectId)[0]?.state).toBe('EXECUTED');
       expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.value.mainCommit);
+    } finally {
+      fixture.value.storage.close();
+    }
+  });
+});
+
+/**
+ * A second Task in the same fixture, driven to a captured result commit and a PASSED verification:
+ * the state a batch member has to be in. `file`/`content` let a test choose whether two members
+ * touch the same path (a conflict) or different ones (a clean multi-member merge).
+ */
+async function addVerifiedTask(value: AgentFixture, input: {
+  readonly file: string;
+  readonly content: string;
+}): Promise<{ readonly taskId: string; readonly resultCommit: string }> {
+  const taskId = crypto.randomUUID();
+  value.storage.createTask({
+    projectId: value.projectId,
+    commandId: crypto.randomUUID(),
+    payloadHash: 'create-member',
+    intentId: crypto.randomUUID(),
+    taskId,
+    revisionId: crypto.randomUUID(),
+    intentEventId: crypto.randomUUID(),
+    taskEventId: crypto.randomUUID(),
+    specification: 'A second member of the integration batch',
+    constraints: [],
+    kind: 'DEVELOPMENT',
+    actor: 'local-user',
+    createdAt: 100,
+  });
+  value.storage.submitTask({
+    projectId: value.projectId,
+    taskId,
+    expectedVersion: 0,
+    commandId: crypto.randomUUID(),
+    payloadHash: 'submit-member',
+    eventId: crypto.randomUUID(),
+    actor: 'local-user',
+    submittedAt: 101,
+  });
+  const adapter = new DeterministicFakeAdapter('SUCCEED', [{
+    type: 'completed', eventId: `fake-completed-${taskId}`, cursor: 'cursor-member',
+    outcome: 'SUCCESS', evidenceRef: 'fake-quiescence',
+  }]);
+  const registry = new AdapterRegistry();
+  registry.register(adapter);
+  const coordinator = new AgentRuntimeCoordinator({
+    storage: value.storage, registry, runtimeHome: value.home,
+  });
+  const run = await coordinator.runTask({
+    projectId: value.projectId, taskId, expectedTaskVersion: 1,
+    commandId: crypto.randomUUID(), adapterId: adapter.id,
+  });
+  await coordinator.settle();
+  await Bun.write(join(run.workspacePath, input.file), input.content);
+  const prepared = await prepareResultCommit({
+    storage: value.storage, projectId: value.projectId, taskId,
+    commandId: crypto.randomUUID(), actor: 'local-user',
+  });
+  const captured = await captureResultCommit({
+    storage: value.storage, projectId: value.projectId, taskId,
+    authorizationId: prepared.authorizationId, commandId: crypto.randomUUID(),
+  });
+  const verification = await runTaskVerification({
+    storage: value.storage, runner: new VerificationRunner(),
+    copiesRoot: join(value.home, 'verifications'),
+    projectId: value.projectId, taskId, commandId: crypto.randomUUID(),
+  });
+  expect(verification.state).toBe('PASSED');
+  return { taskId, resultCommit: captured.resultCommit };
+}
+
+function taskVersionOf(fixture: VerifiedFixture, taskId: string): number {
+  const task = fixture.value.storage.getTask(fixture.value.projectId, taskId);
+  if (task === null) throw new Error('fixture Task disappeared');
+  return task.version;
+}
+
+function createBatch(
+  fixture: VerifiedFixture,
+  members: readonly { readonly taskId: string; readonly expectedVersion: number }[],
+  overrides: Readonly<Record<string, unknown>> = {},
+) {
+  return createIntegrationBatch({
+    storage: fixture.value.storage,
+    projectId: fixture.value.projectId,
+    members,
+    commandId: crypto.randomUUID(),
+    permissionMode: 'FULL',
+    ...overrides,
+  });
+}
+
+function integrateBatch(
+  fixture: VerifiedFixture,
+  batchId: string,
+  overrides: Readonly<Record<string, unknown>> = {},
+) {
+  return integrateIntegrationBatch({
+    storage: fixture.value.storage,
+    runner: new VerificationRunner(),
+    copiesRoot: fixture.copiesRoot,
+    worktreesRoot: fixture.worktreesRoot,
+    projectId: fixture.value.projectId,
+    batchId,
+    commandId: crypto.randomUUID(),
+    permissionMode: 'FULL',
+    ...overrides,
+  });
+}
+
+describe('multi-member IntegrationBatch (ADR-0053)', () => {
+  test('integrates two members with one verification and advances dev only when it passes', async () => {
+    const fixture = await verifiedTask();
+    try {
+      const second = await addVerifiedTask(fixture.value, {
+        file: 'second-member.txt', content: 'second member\n',
+      });
+      const first = { taskId: fixture.value.taskId,
+        expectedVersion: taskVersionOf(fixture, fixture.value.taskId) };
+      const created = await createBatch(fixture, [first,
+        { taskId: second.taskId, expectedVersion: taskVersionOf(fixture, second.taskId) }]);
+      expect(created).toMatchObject({ state: 'CREATED', created: true, devCommit: fixture.value.mainCommit });
+      expect(created.members).toHaveLength(2);
+      // A composed batch writes no Git side effect: `dev` is still the baseline it fixed.
+      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.value.mainCommit);
+
+      const report = await integrateBatch(fixture, created.batchId);
+      expect(report).toMatchObject({ state: 'INTEGRATED', mergeStrategy: 'MERGE_COMMIT',
+        verificationState: 'PASSED' });
+      expect(report.members).toHaveLength(2);
+      expect(report.members.every((member) => member.state === 'INTEGRATED')).toBe(true);
+      const integratedCommit = report.integratedCommit as string;
+      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(integratedCommit);
+      // Both members' work is in the integrated tree, and both Tasks only reached SUCCEEDED here.
+      expect(await git(fixture.value.repo, ['ls-tree', '--name-only', integratedCommit]))
+        .toContain('agent-output.txt');
+      expect(await git(fixture.value.repo, ['ls-tree', '--name-only', integratedCommit]))
+        .toContain('second-member.txt');
+      expect(fixture.value.storage.listTasks(fixture.value.projectId)
+        .every((task) => task.state === 'SUCCEEDED')).toBe(true);
+
+      // One independent integration verification covers the whole batch, and its evidence names
+      // every member it was judged on.
+      const evidence = fixture.value.storage.sqlite.query<{ members_json: string | null;
+        batch_id: string }, [string]>(
+        "SELECT json_extract(evidence_json,'$.members') AS members_json,batch_id"
+        + ' FROM integration_verification_runs WHERE batch_id=?1').get(created.batchId);
+      expect(evidence).not.toBeNull();
+      expect(JSON.parse(evidence?.members_json as string)).toHaveLength(2);
+
+      // Replaying the same command ID reports the recorded batch and does not advance dev twice.
+      const replay = await integrateBatch(fixture, created.batchId, { commandId: report.batchId });
+      expect(replay).toMatchObject({ state: 'INTEGRATED', alreadyCompleted: true });
+      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(integratedCommit);
+      expect(fixture.value.storage.listIntegrationBatches(fixture.value.projectId)).toHaveLength(1);
+    } finally {
+      fixture.value.storage.close();
+    }
+  });
+
+  test('marks the batch STALE when a member revision moved after it was composed', async () => {
+    const fixture = await verifiedTask();
+    try {
+      const second = await addVerifiedTask(fixture.value, {
+        file: 'second-member.txt', content: 'second member\n',
+      });
+      const created = await createBatch(fixture, [
+        { taskId: fixture.value.taskId,
+          expectedVersion: taskVersionOf(fixture, fixture.value.taskId) },
+        { taskId: second.taskId, expectedVersion: taskVersionOf(fixture, second.taskId) },
+      ]);
+      // A real revision is appended to one member through the domain command, so the batch's fixed
+      // revision is no longer the Task's current one.
+      fixture.value.storage.createTaskRevision({
+        projectId: fixture.value.projectId,
+        taskId: second.taskId,
+        expectedVersion: taskVersionOf(fixture, second.taskId),
+        commandId: crypto.randomUUID(),
+        payloadHash: 'revise-member',
+        intentId: crypto.randomUUID(),
+        revisionId: crypto.randomUUID(),
+        deliveryId: crypto.randomUUID(),
+        intentEventId: crypto.randomUUID(),
+        revisionEventId: crypto.randomUUID(),
+        deliveryEventId: crypto.randomUUID(),
+        specification: 'The member moved after the batch was composed',
+        constraints: [],
+        kind: 'AMEND_TASK',
+        reason: 'test',
+        actor: 'local-user',
+        createdAt: 200,
+      });
+
+      const report = await integrateBatch(fixture, created.batchId);
+      expect(report).toMatchObject({ state: 'STALE', outcomeCode: 'MEMBER_EVIDENCE_MOVED',
+        integratedCommit: null });
+      expect(report.detail).toContain(second.taskId);
+      // Nothing was merged and `dev` kept its value; the members stay readable as they were.
+      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.value.mainCommit);
+      expect(report.members.map((member) => member.state)).toEqual(['PREPARED', 'PREPARED']);
+      expect(fixture.value.storage.listTasks(fixture.value.projectId)
+        .some((task) => task.state === 'SUCCEEDED')).toBe(false);
+    } finally {
+      fixture.value.storage.close();
+    }
+  });
+
+  test('marks the batch STALE when dev moved before the integration started', async () => {
+    const fixture = await verifiedTask();
+    try {
+      const second = await addVerifiedTask(fixture.value, {
+        file: 'second-member.txt', content: 'second member\n',
+      });
+      const created = await createBatch(fixture, [
+        { taskId: fixture.value.taskId,
+          expectedVersion: taskVersionOf(fixture, fixture.value.taskId) },
+        { taskId: second.taskId, expectedVersion: taskVersionOf(fixture, second.taskId) },
+      ]);
+      const devBefore = await advanceDev(fixture, 'dev moved on\n');
+
+      const report = await integrateBatch(fixture, created.batchId);
+      expect(report).toMatchObject({ state: 'STALE', outcomeCode: 'DEV_REF_MOVED',
+        integratedCommit: null });
+      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(devBefore);
+      // The stale batch does not block composing a new one: it is terminal, not in flight.
+      const fresh = await createBatch(fixture, [
+        { taskId: fixture.value.taskId,
+          expectedVersion: taskVersionOf(fixture, fixture.value.taskId) },
+        { taskId: second.taskId, expectedVersion: taskVersionOf(fixture, second.taskId) },
+      ]);
+      expect(fresh.state).toBe('CREATED');
+      expect(fresh.devCommit).toBe(devBefore);
+    } finally {
+      fixture.value.storage.close();
+    }
+  });
+
+  test('keeps a partial merge readable when a later member conflicts', async () => {
+    const fixture = await verifiedTask();
+    try {
+      // The second member changes the same path the first one created, so merging it onto the first
+      // member's tree conflicts. `dev` must not move and the members must stay distinguishable.
+      const second = await addVerifiedTask(fixture.value, {
+        file: 'agent-output.txt', content: 'a different version\n',
+      });
+      const created = await createBatch(fixture, [
+        { taskId: second.taskId, expectedVersion: taskVersionOf(fixture, second.taskId) },
+        { taskId: fixture.value.taskId,
+          expectedVersion: taskVersionOf(fixture, fixture.value.taskId) },
+      ]);
+      const report = await integrateBatch(fixture, created.batchId);
+      expect(report).toMatchObject({ state: 'CONFLICTED', outcomeCode: 'MERGE_CONFLICT',
+        integratedCommit: null });
+      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.value.mainCommit);
+      // The members are merged in `task_id` order: the one that merged first is MERGED, the member
+      // that conflicted is CONFLICTED, and no member is reported as integrated.
+      const byState = new Map(report.members.map((member) => [member.taskId, member.state]));
+      expect([...byState.values()].filter((state) => state === 'MERGED')).toHaveLength(1);
+      expect([...byState.values()].filter((state) => state === 'CONFLICTED')).toHaveLength(1);
+      expect(byState.get(second.taskId)).toBeDefined();
+      expect(fixture.value.storage.listTasks(fixture.value.projectId)
+        .every((task) => task.state === 'EXECUTED')).toBe(true);
+      // The failure scene is kept: the integration worktree still carries the conflict.
+      expect(existsSync(report.worktreePath as string)).toBe(true);
+    } finally {
+      fixture.value.storage.close();
+    }
+  });
+
+  test('cancels a composed batch, and refuses cancellation once a side effect exists', async () => {
+    const fixture = await verifiedTask();
+    try {
+      const second = await addVerifiedTask(fixture.value, {
+        file: 'second-member.txt', content: 'second member\n',
+      });
+      const members = [
+        { taskId: fixture.value.taskId,
+          expectedVersion: taskVersionOf(fixture, fixture.value.taskId) },
+        { taskId: second.taskId, expectedVersion: taskVersionOf(fixture, second.taskId) },
+      ];
+      const created = await createBatch(fixture, members);
+      const cancelled = await cancelIntegrationBatch({
+        storage: fixture.value.storage, projectId: fixture.value.projectId,
+        batchId: created.batchId, commandId: crypto.randomUUID(), reason: 'not needed any more',
+      });
+      expect(cancelled).toMatchObject({ state: 'CANCELLED', outcomeCode: 'CANCELLED_BY_USER',
+        integratedCommit: null });
+      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.value.mainCommit);
+      // A cancelled batch holds nothing, so the same members can be composed again.
+      const again = await createBatch(fixture, members);
+      expect(again.state).toBe('CREATED');
+
+      // Once the batch recorded a worktree, the Runtime cannot confirm that no member side effect is
+      // unsettled: the cancellation becomes a reconciliation requirement and keeps the slot.
+      fixture.value.storage.startIntegrationMerge({
+        batchId: again.batchId,
+        worktreePath: join(fixture.worktreesRoot, 'unsettled'),
+        startedAt: Date.now(),
+      });
+      const refused = await cancelIntegrationBatch({
+        storage: fixture.value.storage, projectId: fixture.value.projectId,
+        batchId: again.batchId, commandId: crypto.randomUUID(),
+      });
+      expect(refused).toMatchObject({ state: 'RECOVERY_REQUIRED', outcomeCode: 'RECONCILE_REQUIRED' });
+      // The unresolved batch keeps its slot: it neither integrates nor lets its members be composed
+      // into a new batch, and re-reading it reports the recorded verdict instead of starting work.
+      const later = await integrateBatch(fixture, again.batchId);
+      expect(later).toMatchObject({ state: 'RECOVERY_REQUIRED', alreadyCompleted: true });
+      await expect(createBatch(fixture, members)).rejects
+        .toMatchObject({ code: 'INTEGRATION_IN_PROGRESS' });
+    } finally {
+      fixture.value.storage.close();
+    }
+  });
+
+  test('reconciles a restart during the ref write for every member without writing the ref twice', async () => {
+    const fixture = await verifiedTask();
+    try {
+      const second = await addVerifiedTask(fixture.value, {
+        file: 'second-member.txt', content: 'second member\n',
+      });
+      const created = await createBatch(fixture, [
+        { taskId: fixture.value.taskId,
+          expectedVersion: taskVersionOf(fixture, fixture.value.taskId) },
+        { taskId: second.taskId, expectedVersion: taskVersionOf(fixture, second.taskId) },
+      ]);
+      const report = await integrateBatch(fixture, created.batchId);
+      expect(report.state).toBe('INTEGRATED');
+      const integratedCommit = report.integratedCommit as string;
+      // Fault injection: the exact state a crash between `update-ref` and the completion write
+      // leaves behind — ref already advanced, records still in flight.
+      fixture.value.storage.sqlite.query(`
+        UPDATE integration_batches SET state='INTEGRATING_DEV',integrated_commit=NULL,
+          completed_at=NULL,detail=NULL WHERE id=?1
+      `).run(created.batchId);
+      fixture.value.storage.sqlite.query(`
+        UPDATE integration_batch_items SET state='MERGED',integrated_commit=NULL,completed_at=NULL
+        WHERE batch_id=?1
+      `).run(created.batchId);
+      fixture.value.storage.sqlite.query(`
+        UPDATE operations SET state='IN_PROGRESS',result_json=NULL
+        WHERE kind='INTEGRATE_TASK_RESULT' AND aggregate_id=?1
+      `).run(created.batchId);
+      fixture.value.storage.sqlite.query(
+        "UPDATE tasks SET state='EXECUTED' WHERE project_id=?1",
+      ).run(fixture.value.projectId);
+
+      const results = await reconcileInterruptedIntegrations({
+        storage: fixture.value.storage, readRefCommit: readDev,
+      });
+      expect(results).toEqual([expect.objectContaining({
+        batchId: created.batchId, outcome: 'RECOVERED_INTEGRATED', mergedCommit: integratedCommit })]);
+      const recovered = fixture.value.storage.listIntegrationBatches(
+        fixture.value.projectId)[0];
+      expect(recovered?.state).toBe('INTEGRATED');
+      expect(recovered?.items.every((item) => item.state === 'INTEGRATED')).toBe(true);
+      expect(fixture.value.storage.listTasks(fixture.value.projectId)
+        .every((task) => task.state === 'SUCCEEDED')).toBe(true);
+      // The ref was read, not written a second time.
+      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(integratedCommit);
+    } finally {
+      fixture.value.storage.close();
+    }
+  });
+
+  test('a member already held by an unfinished batch cannot be composed or integrated again', async () => {
+    const fixture = await verifiedTask();
+    try {
+      const created = await createBatch(fixture, [{ taskId: fixture.value.taskId,
+        expectedVersion: taskVersionOf(fixture, fixture.value.taskId) }]);
+      expect(created.state).toBe('CREATED');
+      await expect(createBatch(fixture, [{ taskId: fixture.value.taskId,
+        expectedVersion: taskVersionOf(fixture, fixture.value.taskId) }]))
+        .rejects.toMatchObject({ code: 'INTEGRATION_IN_PROGRESS' });
+      await expect(integrate(fixture)).rejects.toMatchObject({ code: 'INTEGRATION_IN_PROGRESS' });
     } finally {
       fixture.value.storage.close();
     }

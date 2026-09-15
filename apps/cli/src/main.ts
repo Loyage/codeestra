@@ -212,6 +212,26 @@ function print(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
 }
 
+/** The part of an IntegrationBatch record the CLI reports on: members and the batch verdict. */
+interface IntegrationBatchLineView {
+  readonly batchId: string;
+  readonly state: string;
+  readonly devCommit: string;
+  readonly members: readonly { readonly taskId: string; readonly state: string }[];
+}
+
+/**
+ * Integration exit codes (ADR-0053). The three outcomes a script has to tell apart without parsing
+ * JSON are: `0` the `dev` ref moved (INTEGRATED), `1` a refusal or a recorded terminal verdict that
+ * did not integrate (FAILED/CONFLICTED/STALE/CANCELLED), and `3` a batch that is not finished and
+ * needs a human before anything else can proceed (RECOVERY_REQUIRED, i.e. an in-flight batch left by
+ * an earlier attempt). A usage error stays `2`.
+ */
+function exitForIntegrationVerdict(state: string): void {
+  if (state === 'INTEGRATED') return;
+  process.exit(state === 'RECOVERY_REQUIRED' ? 3 : 1);
+}
+
 /**
  * The completion note `task.status` reports for one Agent Session. The Runtime owns this shape; the
  * client only renders it, so an unreadable payload means "no note", never an invented one.
@@ -1151,7 +1171,14 @@ function usage(): never {
   bun run codeestra task operation get <project-id> <operation-id> [--json]
   bun run codeestra task operation cancel <project-id> <task-id> <operation-id> [--json]
   bun run codeestra task integrate <project-id> <task-id> <expected-version>
-  bun run codeestra task integration list <project-id> <task-id>
+    # one member: composes a batch and integrates it in one command (exit 0 integrated, 1 refused
+    # or a recorded terminal verdict, 3 a batch that needs a human first)
+  bun run codeestra task integration create <project-id> --member <task-id>:<expected-version>
+    [--member <task-id>:<expected-version> ...]
+  bun run codeestra task integration integrate <project-id> <batch-id>
+  bun run codeestra task integration list <project-id> [task-id]
+  bun run codeestra task integration get <project-id> <batch-id>
+  bun run codeestra task integration cancel <project-id> <batch-id> [--reason <text>]
   bun run codeestra task depends add <project-id> <task-id> <expected-version>
     <prerequisite-task-id> [--revision <revision-id>] [--json]
   bun run codeestra task depends remove <project-id> <task-id> <expected-version>
@@ -2978,14 +3005,94 @@ try {
       expectedVersion,
     }) as { state: string };
     print(report);
-    // Only INTEGRATED means the dev ref moved. Everything else keeps `dev` untouched and needs a
-    // human, so the exit code must not report success for it.
-    if (report.state !== 'INTEGRATED') process.exit(1);
+    exitForIntegrationVerdict(report.state);
   } else if (group === 'task' && action === 'integration') {
-    const [projectId, taskId, ...extra] = remainingArguments;
-    if (firstArgument !== 'list' || projectId === undefined || taskId === undefined
-      || extra.length !== 0) usage();
-    print(await call({ command: 'task.integration.list', projectId, taskId }));
+    const subcommand = firstArgument;
+    if (subcommand === 'create') {
+      // `--member <task-id>:<expected-version>` may be repeated; the member order in the request is
+      // not part of the batch, because the Runtime fixes and merges members in `task-id` order.
+      const members: { taskId: string; expectedVersion: number }[] = [];
+      const positionals: string[] = [];
+      for (let index = 0; index < remainingArguments.length; index += 1) {
+        const token = remainingArguments[index] as string;
+        // The output is the recorded batch as JSON; `--json` is accepted as the explicit spelling so
+        // a script does not have to know that this one command has no other rendering.
+        if (token === '--json') continue;
+        if (token === '--member') {
+          const value = remainingArguments[index + 1];
+          if (value === undefined) usage();
+          const separator = value.lastIndexOf(':');
+          const memberTaskId = separator === -1 ? '' : value.slice(0, separator);
+          const memberVersion = Number(separator === -1 ? '' : value.slice(separator + 1));
+          if (separator === -1 || !Number.isSafeInteger(memberVersion) || memberVersion < 0) usage();
+          members.push({ taskId: memberTaskId, expectedVersion: memberVersion });
+          index += 1;
+          continue;
+        }
+        if (token.startsWith('--')) usage();
+        positionals.push(token);
+      }
+      if (positionals.length !== 1 || members.length === 0) usage();
+      const view = await call({
+        command: 'task.integration.create',
+        commandId: crypto.randomUUID(),
+        projectId: positionals[0] as string,
+        members,
+      }) as IntegrationBatchLineView;
+      print(view);
+      console.error(`[integration] batch ${view.batchId} 已组成：${view.members.length} 个成员，`
+        + `dev 基线 ${view.devCommit.slice(0, 12)}；用 \`task integration integrate ${view.batchId}\` 执行`);
+    } else if (subcommand === 'integrate') {
+      const [projectId, batchId, ...extra] = remainingArguments;
+      if (projectId === undefined || batchId === undefined || extra.length !== 0) usage();
+      const report = await call({
+        command: 'task.integration.integrate',
+        commandId: crypto.randomUUID(),
+        projectId,
+        batchId,
+      }) as IntegrationBatchLineView;
+      print(report);
+      exitForIntegrationVerdict(report.state);
+    } else if (subcommand === 'get') {
+      const [projectId, batchId, ...extra] = remainingArguments;
+      if (projectId === undefined || batchId === undefined || extra.length !== 0) usage();
+      print(await call({ command: 'task.integration.get', projectId, batchId }));
+    } else if (subcommand === 'cancel') {
+      const positionals: string[] = [];
+      let reason: string | undefined;
+      for (let index = 0; index < remainingArguments.length; index += 1) {
+        const token = remainingArguments[index] as string;
+        if (token === '--reason') {
+          reason = remainingArguments[index + 1];
+          if (reason === undefined) usage();
+          index += 1;
+          continue;
+        }
+        if (token.startsWith('--')) usage();
+        positionals.push(token);
+      }
+      const [projectId, batchId, ...extra] = positionals;
+      if (projectId === undefined || batchId === undefined || extra.length !== 0) usage();
+      const view = await call({
+        command: 'task.integration.cancel',
+        commandId: crypto.randomUUID(),
+        projectId,
+        batchId,
+        ...(reason === undefined ? {} : { reason }),
+      }) as IntegrationBatchLineView;
+      print(view);
+      // A batch that could not be confirmed side-effect-free is not cancelled: it keeps its slot as
+      // RECOVERY_REQUIRED and needs a human, which is exit 3 rather than "done".
+      if (view.state === 'RECOVERY_REQUIRED') process.exit(3);
+      if (view.state !== 'CANCELLED') process.exit(1);
+    } else if (subcommand === 'list') {
+      const [projectId, taskId, ...extra] = remainingArguments;
+      if (projectId === undefined || extra.length !== 0) usage();
+      print(await call({ command: 'task.integration.list', projectId,
+        ...(taskId === undefined ? {} : { taskId }) }));
+    } else {
+      usage();
+    }
   } else if (group === 'task' && action === 'result') {
     // `task result <subcommand> …` is a three-level command, so the subcommand lands in
     // firstArgument and the project ID is the first remaining argument.

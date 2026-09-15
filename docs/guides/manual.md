@@ -1,7 +1,7 @@
 # Codeestra 用户说明书
 
-> **适用版本** `dev@036cf68`（2026-09-15） · **schema** v28 · **最后校对** 2026-09-15
-> 版本会前进：`dev@036cf68` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@75fa7b8`（2026-09-15） · **schema** v30 · **最后校对** 2026-09-15
+> 版本会前进：`dev@75fa7b8` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 
 这是**写给使用者的说明书**：从头读到尾就能把 Codeestra 用起来，不需要先读架构文档或 ADR。
@@ -634,7 +634,7 @@ bun run codeestra task tests history $PROJECT <task-id> [--limit <n>]
 
 ```sh
 bun run codeestra task integrate $PROJECT <task-id> <expected-version>
-bun run codeestra task integration list $PROJECT <task-id>
+bun run codeestra task integration list $PROJECT [<task-id>]
 ```
 
 过程固定三步：
@@ -643,8 +643,31 @@ bun run codeestra task integration list $PROJECT <task-id>
 2. 跑**独立的集成验证**（它是独立实体、独立记录）；
 3. 集成验证 `PASSED` 之后才用 **CAS** 推进 `dev`，并把 Task 推到 `SUCCEEDED`。
 
-**退出码**：只有 `state === "INTEGRATED"` 才是 `0`。其他一切状态（`CONFLICTED`、`FAILED`、
-`RECOVERY_REQUIRED`、需要人处理）都**不推进 `dev`**，退出码 `1`。
+**退出码**：只有 `state === "INTEGRATED"` 才是 `0`；`CONFLICTED`/`FAILED`/`STALE`/`CANCELLED` 等已记录的
+非集成终态是 `1`；需要人先处理的未收口批次（`RECOVERY_REQUIRED`）是 `3`；用法错误是 `2`。
+它们都**不推进 `dev`**。
+
+### 一次合入多个 Task（多成员批次）
+
+两个（或更多）Task 的成果可以先**组成一个批次**，一次集成验证覆盖整批，`PASSED` 才一起进入 `dev`：
+
+```sh
+bun run codeestra task integration create $PROJECT \
+  --member <task-id>:<expected-version> --member <task-id>:<expected-version>
+bun run codeestra task integration integrate $PROJECT <batch-id>
+bun run codeestra task integration cancel $PROJECT <batch-id> --reason "<为什么不要了>"
+```
+
+- `create` **不碰 Git**：它固定每个成员当前的 revision/成果提交与整批的 `dev` 基线。成员按 task-id 排序，
+  与实际命令行顺序无关（同一组成员集合总是产生同一次集成）。
+- `integrate` 按该顺序逐个成员合并，然后对最终提交跑**一次**独立验证；`PASSED` 后才推进 `dev` 并把**每个**
+  成员 Task 推到 `SUCCEEDED`。
+- 组成后但集成前，任一成员的 revision 或 `dev` 基线移动，批次会落 **`STALE`**（不合并、不推进、成员状态如实保留）；
+  这时按当前事实重新 `create` 即可（`STALE` 不阻塞新批次）。
+- `cancel` 只对一个还没碰过 Git 的批次成立；已经合并或已经排了验证的批次会变成 `RECOVERY_REQUIRED`
+  并**继续占用**该成员，等人工按记录处理。取消不需要确认（FULL 与 STRICT 都一样）。
+- 一个已组成但未集成的批次会占用它的成员：这些 Task 上的 `task integrate` 会以 `INTEGRATION_IN_PROGRESS` 拒绝，
+  直到批次被 `integrate` 或 `cancel`。
 
 **常见拒绝前提**：Task 验证未通过（`TASK_VERIFICATION_NOT_PASSED`）、没有成果 commit（`NO_CAPTURED_RESULT`）、
 `dev` 正被某个工作树检出（`DEV_REF_CHECKED_OUT`）、`dev` 分支缺失（`DEV_REF_MISSING`）、已有集成在进行

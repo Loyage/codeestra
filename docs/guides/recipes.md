@@ -1,7 +1,7 @@
 # 常见任务的做法（recipes）
 
-> **适用版本** `dev@036cf68`（2026-09-15） · **schema** v28 · **最后校对** 2026-09-15
-> 版本会前进：`dev@036cf68` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@75fa7b8`（2026-09-15） · **schema** v30 · **最后校对** 2026-09-15
+> 版本会前进：`dev@75fa7b8` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 
 本文是**步骤化**的：每条 recipe 回答一个「我想做 X」，给出可以照抄的命令与**做完之后看什么**。
@@ -379,7 +379,22 @@ bun run codeestra task status $PROJECT $TASK
 `task integrate` 内部是三步：在 detached integration worktree 里合并（能 ff 就 ff，否则 `--no-ff`）
 → 跑**独立的集成验证** → 集成验证 `PASSED` 之后才用 CAS 推进 `dev`。
 
-**退出码**：只有 `state === "INTEGRATED"` 才是 `0`。其他一切状态都**不推进 `dev`**，退出码 `1`。
+**退出码**：只有 `state === "INTEGRATED"` 才是 `0`；`FAILED`/`CONFLICTED`/`STALE`/`CANCELLED` 等已记录的
+非集成终态是 `1`；未收口、需要人先处理的批次（`RECOVERY_REQUIRED`）是 `3`；用法错误是 `2`。
+它们都**不推进 `dev`**。
+
+**想做一次合入多个任务**（多成员批次）：
+
+```sh
+bun run codeestra task integration create $PROJECT \
+  --member $TASK_A:<version-a> --member $TASK_B:<version-b>
+bun run codeestra task integration integrate $PROJECT <batch-id>
+```
+
+`create` 不碰 Git，只固定成员与 `dev` 基线；`integrate` 按 task-id 顺序逐个合并，然后对最终提交跑**一次**
+独立验证，`PASSED` 才推进 `dev` 并把每个成员推到 `SUCCEEDED`。组成后成员或 `dev` 移动 → 批次落 `STALE`，
+按当前事实重新 `create` 即可。改主意就 `task integration cancel`（未碰过 Git 的批次直接取消；已合并的会变成
+`RECOVERY_REQUIRED` 并继续占用成员）。
 
 常见拒绝与处理：
 
@@ -388,7 +403,7 @@ bun run codeestra task status $PROJECT $TASK
 | `TASK_VERIFICATION_NOT_PASSED` | 先让任务验证 `PASSED` |
 | `NO_CAPTURED_RESULT` | 还没有成果 commit，先 `task result capture` |
 | `DEV_REF_CHECKED_OUT` | `dev` 正被某个工作树检出 → 先把它切走 |
-| `INTEGRATION_IN_PROGRESS` | 已有集成在进行，等它结束 |
+| `INTEGRATION_IN_PROGRESS` | 已有集成在进行，或某个成员被一个未结算的批次占用；先 `integrate`/`cancel` 那个批次 |
 | `CONFLICTED`（状态） | 合并冲突，**现场已保留**，由你处理 |
 
 **别指望**：合入 `dev` **不等于**发布到 `main`（见 recipe 10）；

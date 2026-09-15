@@ -35,7 +35,8 @@ import { agentPluginKinds, agentPluginSelectionSchema,
   type AgentPluginSelection } from '@codeestra/contracts';
 import { AgentRuntimeCoordinator, deriveCommandId } from './agent-runtime-service.js';
 import { EventSubscriptionHub, type EventSubscriptionHandle } from './event-subscription-service.js';
-import { integrateTaskResult } from './integration-service.js';
+import { cancelIntegrationBatch, createIntegrationBatch, integrateIntegrationBatch,
+  integrateTaskResult, readIntegrationBatch } from './integration-service.js';
 import { RuntimeHttpApi } from './http-api.js';
 import {
   acquireRuntimeOwnership,
@@ -1268,6 +1269,55 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
     case 'task.integration.list':
       return success(request.requestId,
         storage.listIntegrationBatches(request.projectId, request.taskId));
+    case 'task.integration.create':
+      return success(request.requestId, await createIntegrationBatch({
+        storage,
+        projectId: request.projectId,
+        members: request.members,
+        commandId: request.commandId,
+        permissionMode,
+      }));
+    case 'task.integration.integrate': {
+      const report = await integrateIntegrationBatch({
+        storage,
+        runner: verificationRunner,
+        copiesRoot: verificationCopiesRoot,
+        worktreesRoot: integrationWorktreesRoot,
+        projectId: request.projectId,
+        batchId: request.batchId,
+        commandId: request.commandId,
+        permissionMode,
+      });
+      // `dev` just moved, so every member's dependents that were BLOCKED may now be satisfied. The
+      // same command face as `task.integrate` recomputes the verdict per member instead of in a
+      // background loop, and a dependent that could not be updated is reported rather than swallowed.
+      if (report.state !== 'INTEGRATED') return success(request.requestId, { ...report,
+        dependencyReconcile: null, schedule: null });
+      const dependencyReconcile = [];
+      for (const member of report.members) {
+        dependencyReconcile.push(await reconcileDependentTasks({
+          storage,
+          projectId: request.projectId,
+          taskId: member.taskId,
+          commandId: request.commandId,
+          actor: 'local-user',
+        }));
+      }
+      return success(request.requestId, { ...report, dependencyReconcile,
+        schedule: await scheduleTick('INTEGRATION', request.projectId) });
+    }
+    case 'task.integration.get':
+      return success(request.requestId, readIntegrationBatch({
+        storage, projectId: request.projectId, batchId: request.batchId,
+      }));
+    case 'task.integration.cancel':
+      return success(request.requestId, await cancelIntegrationBatch({
+        storage,
+        projectId: request.projectId,
+        batchId: request.batchId,
+        ...(request.reason === undefined ? {} : { reason: request.reason }),
+        commandId: request.commandId,
+      }));
     case 'task.depends.add': {
       const payloadHash = createHash('sha256').update(JSON.stringify({
         command: 'task.depends.add',

@@ -139,6 +139,13 @@ export type RuntimeStreamFrame = z.infer<typeof runtimeStreamFrameSchema>;
 export const maxEventReadLimit = 500;
 
 /**
+ * Upper bound for one IntegrationBatch's members (ADR-0053). A batch is one merge plus one
+ * verification, so the bound keeps a single command from turning into an unbounded amount of Git
+ * work; it is a request-shape limit, not a policy on how many Tasks may be integrated.
+ */
+export const maxIntegrationBatchMembers = 32;
+
+/**
  * Bounds for the read-only Agent session transcript view. A transcript read is a view over the
  * provider's own durable session file, not a Codeestra event: nothing here is written to SQLite,
  * and no business state is ever derived from it.
@@ -1323,7 +1330,56 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.integration.list'),
     projectId: z.string().uuid(),
-    taskId: z.string().uuid(),
+    /** Omitted lists every batch of the project; a multi-member batch spans several Tasks. */
+    taskId: z.string().uuid().optional(),
+  }),
+  /**
+   * Composes an IntegrationBatch of one or more members without touching Git (ADR-0053). Every
+   * member's current revision and captured result commit are fixed together with the `dev` baseline
+   * the batch will be integrated into, so the batch is a statement about the facts that existed when
+   * it was composed. `task.integration.integrate` is what merges and verifies it.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.integration.create'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    members: z.array(z.strictObject({
+      taskId: z.string().uuid(),
+      expectedVersion: z.number().int().nonnegative(),
+    })).min(1).max(maxIntegrationBatchMembers),
+  }),
+  /**
+   * Merges every member of a composed batch, runs one independent integration verification over the
+   * whole result, and advances `dev` by compare-and-swap only after it PASSes. A member whose
+   * revision or result commit moved, or a `dev` that is no longer the recorded baseline, makes the
+   * batch `STALE` instead: nothing is merged and the ref keeps its value.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.integration.integrate'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    batchId: z.string().uuid(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.integration.get'),
+    projectId: z.string().uuid(),
+    batchId: z.string().uuid(),
+  }),
+  /**
+   * Ends a composed batch. It reaches `CANCELLED` only when the record proves no member side effect
+   * exists yet; otherwise it becomes `RECOVERY_REQUIRED/RECONCILE_REQUIRED` and keeps its slot,
+   * because a merge, a verification or the ref write cannot be confirmed settled from here.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.integration.cancel'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    batchId: z.string().uuid(),
+    reason: z.string().trim().min(1).max(1_000).optional(),
   }),
   /**
    * Reads a window of the provider's own session file for one Agent Session. This is a read-only

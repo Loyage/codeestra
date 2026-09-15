@@ -1,6 +1,6 @@
 # 功能清单：「这软件能做什么」
 
-> **适用版本** `dev@036cf68`（2026-09-15） · **schema** v28 · **最后校对** 2026-09-15
+> **适用版本** `dev@75fa7b8`（2026-09-15） · **schema** v30 · **最后校对** 2026-09-15
 > 版本会前进：`dev@036cf68` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 
@@ -82,7 +82,7 @@
 | 成果提交 | FULL 单步 capture；STRICT 两步 prepare + commit `--confirm`。固定 HEAD/ChangeSet/revision，沿用仓库 identity，正常跑 hooks，失败保留现场 | `task result capture`、`task result prepare`、`task result commit … --confirm` | 任务详情 → 提交成果 / 成果提交授权 | [0003](../decisions/0003-task-result-commit-policy.md)、[0011](../decisions/0011-default-full-permission-mode.md) |
 | 任务验证 | 用 `main` ref 上人工维护的策略，在固定 commit 的 detached 副本里运行；证据不含原始输出 | `task verify [execution-id] [--policy auto\|targeted\|project] [--background]` | 任务详情 → 验证任务 | [0006](../decisions/0006-task-verification-policy.md)、[0008](../decisions/0008-efficiency-first-service-form.md) |
 | 分层测试证据 | 分支把定向范围写进 `.codeestra/tests.json`；`record` 把它快照成绑定 `(task, revision, commit, digest)` 的 append-only 记录；`verify` 只消费已记录的计划 | `task tests record/show/history` | —（界面只显示验证结果与证据，无计划/来源面板） | [0038](../decisions/0038-branch-targeted-tests-and-dev-full-suite.md)、[0039](../decisions/0039-layered-verification-evidence.md) |
-| 集成批次 | 在 detached integration worktree 合并（能 ff 就 ff，否则 `--no-ff`）→ 独立集成验证 → PASSED 后 CAS 推进 `dev` | `task integrate`、`task integration list` | 任务详情 → 集成记录 · dev | [0018](../decisions/0018-task-result-integration-into-dev.md) |
+| 集成批次 | 在 detached integration worktree 合并（能 ff 就 ff，否则 `--no-ff`）→ 独立集成验证 → PASSED 后 CAS 推进 `dev`；多成员批次可显式组批，一次验证覆盖整批 | `task integrate`、`task integration create\|integrate\|list\|get\|cancel` | 任务详情 → 集成记录 · dev（UI 尚无组批/取消入口） | [0018](../decisions/0018-task-result-integration-into-dev.md)、[0053](../decisions/0053-multi-member-integration-batch.md) |
 
 ## 稳定提升
 

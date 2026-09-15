@@ -1,6 +1,6 @@
 # 领域概念与边界
 
-> **适用版本** `dev@036cf68`（2026-09-15） · **schema** v28 · **最后校对** 2026-09-15
+> **适用版本** `dev@75fa7b8`（2026-09-15） · **schema** v30 · **最后校对** 2026-09-15
 > 版本会前进：`dev@036cf68` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 
@@ -136,7 +136,11 @@ dev 集成结果与集成验证证据。
 - 集成在 Runtime 数据目录下的 detached integration worktree 里合并：**能 ff 就 ff，否则 `--no-ff`**。
 - **先跑独立的集成验证，PASSED 之后才用 CAS 推进 `dev`**，并把 Task 推到 `SUCCEEDED`。
 - 任何失败**保留现场且不推进 `dev`**；`dev` 正被某个工作树检出时拒绝集成。
-- 批次状态：`CREATED / PREPARING / VERIFYING / INTEGRATING_DEV / INTEGRATED / CONFLICTED / FAILED / RECOVERY_REQUIRED`。
+- 批次状态：`CREATED / PREPARING / VERIFYING / INTEGRATING_DEV / INTEGRATED / CONFLICTED / FAILED / RECOVERY_REQUIRED / STALE / CANCELLED`
+  （`STALE` = 固定证据已过期，不推进；`CANCELLED` = 记录证明没有副作用时被用户结束）。
+- **一个批次可以含多个 Task**（ADR-0053）：`task integration create` 显式组成（不碰 Git），`task integration integrate` 按 task-id 顺序
+  逐个合并后由**一次**独立集成验证覆盖整批，`PASSED` 才推进 `dev` 并把**每个**成员推到 `SUCCEEDED`。
+  部分失败如实可读：失败的成员标 `CONFLICTED`/`FAILED`，已合并的保持 `MERGED`，未尝试的保持 `PREPARED`。
 
 ### Promotion（稳定提升）
 

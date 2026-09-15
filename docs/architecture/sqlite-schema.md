@@ -561,7 +561,7 @@ CREATE UNIQUE INDEX one_held_execution ON executions(task_id) WHERE resource_hel
 新增持久对象，取代 §5 的逻辑 `integration_batches` / `integration_batch_items`：`projects` 追加 `dev_ref`（默认 `refs/heads/dev`，新 Task worktree 的固定基线）。
 
 - `integration_batches(id, project_id, dev_ref, dev_commit, state, integrated_commit, merge_strategy, merged_commit, worktree_path, worktree_ownership_token, verification_id, outcome_code, detail, created_at, completed_at)`。`state CHECK IN ('CREATED','PREPARING','VERIFYING','INTEGRATING_DEV','INTEGRATED','CONFLICTED','FAILED','RECOVERY_REQUIRED')`；`CHECK(integrated_commit IS NULL OR state='INTEGRATED')`。`merged_commit` 是 Git 产生但尚未推进任何 ref 的合并提交，也是崩溃恢复的证据。
-- `integration_batch_items(batch_id, project_id, task_id, revision_id, execution_id, candidate_commit, dev_commit, state, integrated_commit, detail, created_at, completed_at)`，主键 `(batch_id,task_id)`，`state CHECK IN ('PREPARED','MERGED','INTEGRATED','FAILED','CONFLICTED')`。本轮每批恰好一个成员，但主键形态已可承载多成员。
+- `integration_batch_items(batch_id, project_id, task_id, revision_id, execution_id, candidate_commit, dev_commit, state, integrated_commit, detail, created_at, completed_at)`，主键 `(batch_id,task_id)`，`state CHECK IN ('PREPARED','MERGED','INTEGRATED','FAILED','CONFLICTED')`。schema v30（ADR-0053）起每批可含**多个**成员，主键形态与所有列都不变：成员的顺序是派生事实（一律按 `task_id`），不落列；终态批次里仍为 `PREPARED` 的成员就是「未处理」。
 - `integration_verification_runs(...)`：与 `verification_runs` 同形的独立实体（不是同一张表），额外绑定 `batch_id`（`UNIQUE`）、`candidate_commit` 所在的 `dev_commit` 基线；`state CHECK IN ('QUEUED','RUNNING','PASSED','FAILED','ERROR','STALE')`（**没有 `CANCELLED`**，见 v17）。
 
 ### Phase 1 长命令进度（schema version 11，ADR-0019）
@@ -1184,16 +1184,16 @@ ALTER TABLE stable_promotions ADD COLUMN approved_full_suite_evidence_id TEXT;
 
 ### 迁移执行顺序与共享槽位后果
 
-`Phase1Database.migrate()` 按 `if (version < N)` 升序执行 v1…v29（跳过 v16、v22），最后写
+`Phase1Database.migrate()` 按 `if (version < N)` 升序执行 v1…v30（跳过 v16、v22），最后写
 `PRAGMA user_version=${phase1SchemaVersion}`。升级前 schema version 大于 `phase1SchemaVersion` 时以 `UNSUPPORTED_SCHEMA` 拒绝写入。
 
 已知后果（ADR-0032 记录）：单个 lane 合并后，**已经被标成更高版本号的库不会补跑后来出现的更低版本步骤**。跨格合并必须按既定顺序
 （E0 → E1 → E2；以及 Wave D 的 17 → 18 → 19）。这也是 v16 永久未使用的同一个根因。
 
-版本占用现状（以 `packages/storage/src/migration.ts` 为准，不提前创建未来表）：v22 未占用；v16 永久未使用；v23–v29 已实现
+版本占用现状（以 `packages/storage/src/migration.ts` 为准，不提前创建未来表）：v22 未占用；v16 永久未使用；v23–v30 已实现
 （v23 `task retry`/ADR-0036，v24 未注册目录回收/ADR-0037，v25 分层验证证据/ADR-0038+ADR-0039，v26 项目知识/ADR-0041，
-v27 Agent 插件选择/ADR-0044，v28 `intents.kind` 收窄/ADR-0046，v29 dev clone 与经 GitHub 中转的提升/ADR-0047）。
-当前 `phase1SchemaVersion = 29`。
+v27 Agent 插件选择/ADR-0044，v28 `intents.kind` 收窄/ADR-0046，v29 dev clone 与经 GitHub 中转的提升/ADR-0047，
+v30 多成员 IntegrationBatch 的两个终态/ADR-0053）。当前 `phase1SchemaVersion = 30`。
 
 ### 经 GitHub 中转的提升与 dev clone（schema version 29，ADR-0047）
 
@@ -1217,6 +1217,31 @@ ALTER TABLE stable_promotions ADD COLUMN main_pushed_at INTEGER;
   移到别的 SHA 时 `prepare/approve/promote` 全部拒绝并把记录标 `STALE`，不移动任何 ref。
 - `phase`（`READY_TO_PUSH` / `AWAITING_PULL` / `RESTART_PENDING` / `MAIN_PUSH_PENDING` / `COMPLETE` / `REFUSED`）不是列，
   而是从 `state` 与 `restart_result_json` 推导的投影：同一事实只有一个来源，不会出现状态机与派生字段互相矛盾。
+
+### 多成员 IntegrationBatch 的批级终态（schema version 30，ADR-0053）
+
+只加宽 `integration_batches.state` 的 `CHECK`，**不加列、不加表、不改成员状态集合**。`STRICT` 表的 `CHECK`
+不能就地加宽，因此这一步**重建**该表，并按 v28 `intents` 的先例在 `database.ts` 里做前置校验与**行数核对**
+（Bun 的 `exec()` 会吞掉多语句脚本里的 step 错误并继续执行后面的 `DROP TABLE`，行数比对把「静默丢行」变成回滚）：
+
+```sql
+CREATE TABLE integration_batches_v30 ( ... 同列，state CHECK 追加 'STALE','CANCELLED' ... ) STRICT;
+INSERT INTO integration_batches_v30(...) SELECT ... FROM integration_batches;
+DROP TABLE integration_batches;
+ALTER TABLE integration_batches_v30 RENAME TO integration_batches;
+CREATE INDEX integration_batches_by_project ON integration_batches(project_id,created_at,id);
+```
+
+- 两个新取值都是**纯加宽**，因此所有既有行本来就满足新的 `CHECK`：既不做数据改写，也不需要「无法表达的行」前置拒绝。
+- 旧表在**新表改名之前**被删除，且没有别的表被改名，所以按名字引用它的 `integration_batch_items`、
+  `integration_verification_runs`、`stable_promotions` 继续解析到同一个名字；迁移在 `PRAGMA foreign_keys=OFF`
+  下运行（`rebuildsTable = version < 30`），结束后跑 `PRAGMA foreign_key_check` 并要求为空。
+- 语义：`STALE` = 固定证据已过期（成员证据移动或 `dev` 基线移动），**不推进 ref**；`CANCELLED` = 用户在记录可证明
+  无副作用时结束批次（零确认）。两者都写 `completed_at` 与 `outcome_code`，`integrated_commit` 保持 `NULL`
+  （既有 `CHECK(integrated_commit IS NULL OR state='INTEGRATED')` 不变）。
+- `integration_batch_items`、`integration_verification_runs` **没有** schema 变化：批次的成员清单本来就以
+  `(batch_id,task_id)` 落行，一次集成的验证证据在 `evidence_json.members` 里带 `taskVerificationId`/
+  `taskVerificationTestedCommit`。
 
 ### Phase 6 项目知识分层与 Execution 绑定（schema version 26，ADR-0041）
 
