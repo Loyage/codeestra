@@ -39,7 +39,7 @@ export type {
   ReclamationTaskRef,
   ReclamationVerificationRef, ReclamationWorkspaceRef,
   ProviderProcessRefLike, ProviderProcessTreeLike,
-  PromotionCandidates, PromotionMember, PromotionPermissionMode,
+  PromotionCandidates, PromotionMember, PromotionPermissionMode, PromotionPhase,
   PromotionRestartPlanStep, PromotionRestartResult, PromotionRestartStepOutcome,
   StablePromotionPlan, StablePromotionState, StablePromotionSummary,
   StoredAgentAnswer, StoredConstraint, StoredEventEnvelope, StoredVerificationCommand,
@@ -61,6 +61,7 @@ export type {
 export {
   agentAnswerMigration, agentConfigurationMigration, agentDisconnectMigration,
   agentObservationMigration, agentPluginSelectionMigration, agentStartMigration, capacitySlotReservationMigration,
+  devClonePromotionMigration,
   impactAnalysisMigration, integrationPipelineMigration, knowledgeLayerMigration,
   intentKindShrinkMigration, intentKinds,
   operationProgressMigration,

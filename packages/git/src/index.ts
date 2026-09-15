@@ -45,15 +45,21 @@ export type {
   MergeResult,
 } from './integration.js';
 export {
-  fastForwardCheckedOutWorktree,
+  commitExists,
   findCheckedOutWorktree,
+  inspectDevClone,
   inspectPromotionWorktree,
+  promotionRemote,
+  pushCommitToRemote,
+  readRemoteRef,
+  readRemoteUrl,
 } from './promotion.js';
 export type {
   CheckedOutWorktree,
-  PromotionMergeOutcome,
-  PromotionMergeResult,
+  DevCloneInspection,
   PromotionWorktreeInspection,
+  RemotePushResult,
+  RemoteRefRead,
 } from './promotion.js';
 export {
   createVerificationCopy,

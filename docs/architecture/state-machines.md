@@ -132,14 +132,17 @@ IntegrationBatch 已实现的状态为 `CREATED → PREPARING → VERIFYING → 
 
 未实现（不得声称）：IntegrationBatch 的批级 `STALE` 判定、批级 `CANCELLED`、多成员批次、任务集合级集成。
 
-StableBranchPromotion：`CREATED → VERIFYING → AWAITING_APPROVAL → PROMOTING → RESTARTING → SUCCEEDED`。
+StableBranchPromotion：`CREATED → AWAITING_APPROVAL → PROMOTING → RESTARTING → SUCCEEDED`（ADR-0047 后；早期文中的 `VERIFYING` 不是一个状态——
+全量证据在 `prepare`/`promote` 时同步核对，不存在持久的 VERIFYING 停留）。
 
 - 固定 expected dev SHA、expected main SHA 与独立验证证据；验证失败→FAILED。
 - **提升前的全量证据是一等对象**（ADR-0038/ADR-0039，schema v25 的 `dev_full_suite_evidence`）：`promotion full-suite run <project-id> --dev-commit <full-sha>` 在一个 detached 副本里对**精确候选 SHA** 跑项目 `main` ref 上的固定策略，由 Runtime 自己观测结果（客户端不能提交证据），并把证据三重绑定在候选 commit、该 ref 的策略 digest、该 commit 的 lockfile digest 上。`prepare`/`approve`/`promote` 都要求**正是这个 SHA** 的一次 `PASSED` 运行且三个绑定均未变；main 上的策略被改、候选内的 lockfile 变了、或出现更新的失败运行，都会使证据 `STALE` 并以 `DEV_FULL_SUITE_EVIDENCE_STALE` 拒绝（退出码 1）。
-- AWAITING_APPROVAL（仅 STRICT）：用户批准精确 dev/main/verification 三元组后→PROMOTING；dev、main 或证据变化→STALE。FULL 下固定三元组后直接进入 PROMOTING，不停留此状态。
-- PROMOTING：核对批准与 Git 工作区安全后执行 dev→main；main 更新成功→RESTARTING。
-- RESTARTING：在 main 工作树执行 CLI stop，再执行 status 拉起并检查 Runtime；成功响应→SUCCEEDED。失败→RECOVERY_REQUIRED 并报告，不擅自回滚。
-- FULL 下无显式门禁；STRICT 下批准是唯一显式门禁。重启都是提升后的自动后置步骤，不要求第二次确认。
+- AWAITING_APPROVAL（仅 STRICT）：用户批准精确 dev/main/verification 三元组后→PROMOTING；dev、main、远端 `dev` 或证据变化→STALE。FULL 下固定三元组后直接进入 PROMOTING，不停留此状态。
+- PROMOTING（ADR-0047 D03）：从项目记录的 dev clone 把**固定候选 OID** push 到远端 `dev`（从不 `--force`），再 `git ls-remote` 读回核对；相等才写入 `remote_dev_commit` 并进入此状态。因此 `PROMOTING` 意味着**「已推送、等待拉取」**，**不再**意味着 main 已变。读回不等→不记已推送（`REMOTE_DEV_READBACK_MISMATCH`）；push 被拒或远端不可达→记录保持可重试；远端 `dev` 移到非候选 SHA→`STALE` 且不移动任何 ref。
+- PROMOTING → RESTARTING：在 main 检出（用户自己执行 `git fetch` + `git merge --ff-only origin/dev`）观察到 `main` 已在候选上，且该候选确实是 expected main 的后代（fast-forward 而非 merge/reset）；此时记录重启计划与「读出 pull 的那个 boot」。
+- RESTARTING：在 main 检出执行 CLI stop，再执行 status 拉起并检查 Runtime；成功响应→推回远端 `main` 并读回核对→SUCCEEDED。失败→FAILED（不推回、不擅自回滚）；重启已记录但推回失败→保持 `RESTARTING`（投影 `MAIN_PUSH_PENDING`）并可只重试推回，不重复停 Runtime。
+- 恢复：`PROMOTING` + `main` 仍在 expected → 报 `AWAITING_PULL` 并保持记录可续（断网/重启都不是失败）；`main` 已在候选 → `RECOVERY_REQUIRED/RESTART_UNPROVEN`（不二次写 ref）；`main` 是别的值 → `RECOVERY_REQUIRED/MAIN_REF_OBSERVED`。
+- FULL 下无显式门禁；STRICT 下批准是唯一显式门禁。重启都是提升后的自动后置步骤，不要求第二次确认；**拉取（fetch + ff-only）是用户的显式步骤**，Runtime 不代替它执行，也不把它当成已完成。
 
 ## 5. Self Evolution
 
@@ -202,6 +205,7 @@ PENDING → IN_FLIGHT → ACKNOWLEDGED
 | v25 | `targeted_test_plans`、`dev_full_suite_evidence`（append-only）、`verification_runs.policy_source/plan_*`、`stable_promotions.full_suite_*` | 见 §4：提升前的全量证据是绑定三元组的一等对象，未完成的运行写不成终态 |
 | v26 | `knowledge_snapshots`、`execution_knowledge_snapshots`（两张 append-only） | 不在状态机里：绑定在 `reserveExecution` 的同一事务内写入，因此「Execution 存在」与「已绑定所用知识」不可分开观察（ADR-0041） |
 | v27 | `agent_configurations.plugin_selection_json` | 不在状态机里：见下节 |
+| v29 | `projects.dev_repo_path`、`stable_promotions.dev_repo_path/remote_dev_commit/remote_main_commit/pushed_at/main_pushed_at` | §4：`PROMOTING` 的含义由「main 已变」改为「已 push 到远端 `dev` 且读回核对通过、等待拉取」；三个新事实（本地候选 SHA、读回的远端 `dev` SHA、读回的远端 `main` SHA）把「已推送」与「已拉取」分开，不新增状态 |
 
 **命令组（零确认、`--json`、稳定退出码；全部是同一命令面，UI 不新增语义）**
 

@@ -44,6 +44,7 @@ import {
   agentObservationMigration,
   agentStartMigration,
   capacitySlotReservationMigration,
+  devClonePromotionMigration,
   impactAnalysisMigration,
   integrationPipelineMigration,
   intentKindShrinkMigration,
@@ -310,6 +311,12 @@ export interface TrustedProject {
   readonly mainRef: string;
   /** Ref every Task worktree is based on and every result is integrated into (ADR-0009). */
   readonly devRef: string;
+  /**
+   * The second clone of the same origin a promotion pushes its fixed candidate from (ADR-0047
+   * D05), or null when the project has none. Recorded only after it was verified as a separate
+   * clone of this origin sitting on `dev`; a path that cannot be verified is refused, never stored.
+   */
+  readonly devRepoPath: string | null;
   readonly objectFormat: 'sha1' | 'sha256';
   readonly policyVersion: number;
   readonly trustedAt: number;
@@ -1207,20 +1214,31 @@ export interface DevFullSuiteCandidates {
 export type PromotionPermissionMode = 'FULL' | 'STRICT';
 
 /**
- * Stable branch promotion projections (ADR-0009 D02/D03, ADR-0022). One promotion fixes the three
- * facts it is allowed to act on — the verified `dev` commit, the expected old `main` commit, and
+ * Stable branch promotion projections (ADR-0009 D02/D03, ADR-0022, ADR-0047). One promotion fixes
+ * the facts it is allowed to act on — the verified `dev` commit, the expected old `main` commit, and
  * the independent integration verification of the promoted commit — together with the permission
- * mode, the observed `main` after the update, and the Runtime restart result.
+ * mode, the dev clone it pushes from, the remote readbacks, and the Runtime restart result.
  *
  * `CREATED` holds the fixed evidence. `AWAITING_APPROVAL` exists only in STRICT and records the
  * exact approved triple, so a later `dev`/`main`/evidence movement is detectable as `STALE`.
- * `PROMOTING` records the main-worktree plan before Git runs; `RESTARTING` exists because the
- * restart sequence outlives the Runtime that moved `main`, and its result has to be recorded by a
- * later Runtime. `RECOVERY_REQUIRED` is a resumable, blocking state: reconciliation found the
- * promotion mid-flight and states what the refs actually say.
+ * `PROMOTING` means the fixed candidate was pushed to the remote `dev` and the remote was read back
+ * and matched: it is "pushed, awaiting the manual pull in the main checkout" (ADR-0047 D03), **not**
+ * "main moved". `RESTARTING` means the main checkout was observed at the candidate (the user pulled)
+ * and the restart sequence was recorded; its result has to be recorded by a later Runtime.
+ * `RECOVERY_REQUIRED` is a resumable, blocking state: reconciliation found the promotion mid-flight
+ * and states what the refs actually say.
  */
 export type StablePromotionState = 'CREATED' | 'AWAITING_APPROVAL' | 'PROMOTING' | 'RESTARTING'
   | 'SUCCEEDED' | 'STALE' | 'FAILED' | 'RECOVERY_REQUIRED';
+
+/**
+ * Which of the two distinguishable promotion facts a record currently states (ADR-0047 D03).
+ * `AWAITING_PULL` and `MAIN_PUSH_PENDING` are the two that must never be reported as a finished
+ * promotion: the first has pushed to the remote `dev` only, the second has a restarted main
+ * checkout whose new commit is not published on the remote `main` yet.
+ */
+export type PromotionPhase = 'READY_TO_PUSH' | 'AWAITING_PULL' | 'RESTART_PENDING'
+  | 'MAIN_PUSH_PENDING' | 'COMPLETE' | 'REFUSED';
 
 /** One Task revision whose result the promoted `dev` commit contains. */
 export interface PromotionMember {
@@ -1290,11 +1308,26 @@ export interface StablePromotionSummary {
     readonly policyDigest: string;
     readonly lockfileDigest: string;
   } | null;
-  /** Observed `main` after the update; NULL until a ref was read back. */
+  /** Commit the main checkout was observed at; NULL until the pull was observed (ADR-0047 D03). */
   readonly promotedCommit: string | null;
+  /** The worktree that has `main` checked out; NULL until the pull was observed there. */
   readonly mainWorktreePath: string | null;
-  /** Boot identity of the Runtime that moved `main`, recorded before Git ran. */
+  /** Boot identity of the Runtime that issued the restart plan after the pull was observed. */
   readonly promotingBootId: string | null;
+  /** The dev clone this promotion pushes its candidate from (ADR-0047 D05). */
+  readonly devRepoPath: string | null;
+  /**
+   * Commit read back from the remote dev ref after the push. This is a *readback*, never an input:
+   * the promotion only records it after `git ls-remote` reported the fixed candidate, which is what
+   * makes "the push exited 0" unable to stand in for "the candidate is on the remote".
+   */
+  readonly remoteDevCommit: string | null;
+  /** Commit read back from the remote main ref after the stable commit was published there. */
+  readonly remoteMainCommit: string | null;
+  readonly pushedAt: number | null;
+  readonly mainPushedAt: number | null;
+  /** Which pair of facts (pushed / pulled-and-restarted) this record currently states. */
+  readonly phase: PromotionPhase;
   readonly restartSteps: readonly PromotionRestartPlanStep[];
   readonly restart: PromotionRestartResult | null;
   readonly outcomeCode: string | null;
@@ -1321,6 +1354,8 @@ export interface PromotionCandidates {
   readonly gitCommonDir: string;
   readonly mainRef: string;
   readonly devRef: string;
+  /** The project's recorded dev clone, or null when it has none (ADR-0047 D05). */
+  readonly devRepoPath: string | null;
   readonly objectFormat: 'sha1' | 'sha256';
   readonly batchState: IntegrationBatchState;
   readonly batchDevRef: string;
@@ -1466,6 +1501,25 @@ export interface TaskSummary {
   readonly archivedAt: number | null;
 }
 
+/**
+ * Which pair of distinguishable promotion facts a record states (ADR-0047 D03).
+ *
+ * It is derived from the stored state and the recorded restart result, never stored on its own: a
+ * second source of truth for the same fact could disagree with the state machine, and the record a
+ * client reads would then be the wrong one. `READY_TO_PUSH`/`AWAITING_PULL`/`RESTART_PENDING`/
+ * `MAIN_PUSH_PENDING` are **not** a finished promotion; only `COMPLETE` is.
+ */
+function promotionPhase(input: {
+  readonly state: StablePromotionState;
+  readonly restart: PromotionRestartResult | null;
+}): PromotionPhase {
+  if (input.state === 'SUCCEEDED') return 'COMPLETE';
+  if (input.state === 'STALE' || input.state === 'FAILED') return 'REFUSED';
+  if (input.state === 'CREATED' || input.state === 'AWAITING_APPROVAL') return 'READY_TO_PUSH';
+  if (input.state === 'PROMOTING') return 'AWAITING_PULL';
+  return input.restart === null ? 'RESTART_PENDING' : 'MAIN_PUSH_PENDING';
+}
+
 function mapAgentConfigurationRow(row: AgentConfigurationRow): AgentConfigurationRecord {
   return {
     scope: row.scope,
@@ -1602,6 +1656,10 @@ export class Phase1Database {
               + ' after); the upgrade was rolled back and nothing was changed');
           }
         }
+        // Version 29 is the dev clone and GitHub-mediated promotion step (FOUNDATION-077 /
+        // ADR-0047). It is a pure `ADD COLUMN` step, so it runs after the v28 rebuild and needs no
+        // foreign-key handling of its own. No earlier number is ever inserted.
+        if (version < 29) this.sqlite.exec(devClonePromotionMigration);
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -1619,10 +1677,17 @@ export class Phase1Database {
   /** Records the explicit confirmation that established project trust, including the
    * verification policy the user saw. Re-trusting an identical repository supersedes the
    * previous trust and policy confirmation instead of rewriting them. */
-  trustProject(input: TrustedProject & {
+  trustProject(input: Omit<TrustedProject, 'devRepoPath'> & {
     readonly trustId: string;
     readonly actor: string;
     readonly verificationPolicyConfirmationId: string;
+    /**
+     * The dev clone this trust records (ADR-0047 D05), or null to clear a previously recorded one.
+     * Omit the property to leave whatever the project recorded untouched: trust never silently
+     * clears a path it was not asked about, and never stores a path it has not verified.
+     */
+    readonly devRepoPath?: string | null;
+    readonly recordDevRepoPath?: boolean;
     readonly verificationPolicy: VerificationPolicyConfirmationInput;
     /**
      * The impact mapping confirmed by this trust (ADR-0031). When a caller omits it, no active
@@ -1641,13 +1706,17 @@ export class Phase1Database {
         SELECT id,repo_root,git_common_dir,main_ref,object_format FROM projects WHERE repo_root=?1
       `).get(input.repoRoot);
       let projectId = input.id;
+      const devRepoPath = input.devRepoPath ?? null;
+      // A path is written when this trust declared one (including an explicit null, which clears
+      // it); otherwise the project keeps what it already had.
+      const writeDevRepoPath = input.recordDevRepoPath === true || input.devRepoPath !== undefined;
       if (existing === null) {
         this.sqlite.query(`
-          INSERT INTO projects(id,name,repo_root,git_common_dir,main_ref,dev_ref,object_format,
-            policy_version,created_at)
-          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+          INSERT INTO projects(id,name,repo_root,git_common_dir,main_ref,dev_ref,dev_repo_path,
+            object_format,policy_version,created_at)
+          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
         `).run(input.id, input.name, input.repoRoot, input.gitCommonDir, input.mainRef, input.devRef,
-          input.objectFormat, input.policyVersion, input.trustedAt);
+          devRepoPath, input.objectFormat, input.policyVersion, input.trustedAt);
       } else {
         if (existing.repo_root !== input.repoRoot || existing.git_common_dir !== input.gitCommonDir
           || existing.object_format !== input.objectFormat) {
@@ -1659,6 +1728,14 @@ export class Phase1Database {
         this.sqlite.query(`
           UPDATE projects SET dev_ref=?1 WHERE id=?2
         `).run(input.devRef, projectId);
+        // The dev clone path is only written when this trust actually declared one: a re-trust that
+        // says nothing about it keeps the recorded path instead of clearing it behind the user's
+        // back. Clearing is explicit (`recordDevRepoPath` with a null path).
+        if (writeDevRepoPath) {
+          this.sqlite.query(`
+            UPDATE projects SET dev_repo_path=?1 WHERE id=?2
+          `).run(devRepoPath, projectId);
+        }
         this.sqlite.query(`
           UPDATE project_trusts SET status='INVALIDATED',invalidated_at=?1
           WHERE project_id=?2 AND status='ACTIVE'
@@ -1773,10 +1850,11 @@ export class Phase1Database {
   listTrustedProjects(): readonly TrustedProject[] {
     return this.sqlite.query<{
       id: string; name: string; repo_root: string; git_common_dir: string; main_ref: string;
-      dev_ref: string; object_format: 'sha1' | 'sha256'; policy_version: number; accepted_at: number;
+      dev_ref: string; dev_repo_path: string | null;
+      object_format: 'sha1' | 'sha256'; policy_version: number; accepted_at: number;
     }, []>(`
-      SELECT p.id,p.name,p.repo_root,p.git_common_dir,p.main_ref,p.dev_ref,p.object_format,
-             p.policy_version,t.accepted_at
+      SELECT p.id,p.name,p.repo_root,p.git_common_dir,p.main_ref,p.dev_ref,p.dev_repo_path,
+             p.object_format,p.policy_version,t.accepted_at
       FROM projects p JOIN project_trusts t ON t.project_id=p.id AND t.status='ACTIVE'
       ORDER BY t.accepted_at,p.id
     `).all().map((row) => ({
@@ -1786,6 +1864,7 @@ export class Phase1Database {
       gitCommonDir: row.git_common_dir,
       mainRef: row.main_ref,
       devRef: row.dev_ref,
+      devRepoPath: row.dev_repo_path,
       objectFormat: row.object_format,
       policyVersion: row.policy_version,
       trustedAt: row.accepted_at,
@@ -6551,7 +6630,8 @@ export class Phase1Database {
   getPromotionCandidates(projectId: string, batchId: string): PromotionCandidates {
     const row = this.sqlite.query<{
       project_id: string; repo_root: string; git_common_dir: string; main_ref: string;
-      dev_ref: string; object_format: 'sha1' | 'sha256';
+      dev_ref: string; dev_repo_path: string | null;
+      object_format: 'sha1' | 'sha256';
       batch_state: IntegrationBatchState; batch_dev_ref: string; batch_dev_commit: string;
       merged_commit: string | null;
       integrated_commit: string | null;
@@ -6561,7 +6641,8 @@ export class Phase1Database {
       verification_dev_commit: string | null;
       verification_outcome_code: string | null;
     }, [string, string]>(`
-      SELECT p.id AS project_id,p.repo_root,p.git_common_dir,p.main_ref,p.dev_ref,p.object_format,
+      SELECT p.id AS project_id,p.repo_root,p.git_common_dir,p.main_ref,p.dev_ref,p.dev_repo_path,
+             p.object_format,
              batch.state AS batch_state,batch.dev_ref AS batch_dev_ref,
              batch.dev_commit AS batch_dev_commit,batch.merged_commit,batch.integrated_commit,
              run.state AS verification_state,run.id AS verification_id,
@@ -6588,6 +6669,7 @@ export class Phase1Database {
       gitCommonDir: row.git_common_dir,
       mainRef: row.main_ref,
       devRef: row.dev_ref,
+      devRepoPath: row.dev_repo_path,
       objectFormat: row.object_format,
       batchState: row.batch_state,
       batchDevRef: row.batch_dev_ref,
@@ -6622,6 +6704,8 @@ export class Phase1Database {
     readonly expectedMainCommit: string;
     readonly verificationId: string;
     readonly verificationTestedCommit: string;
+    /** The verified dev clone this promotion will push from; re-checked on every side-effecting call. */
+    readonly devRepoPath: string | null;
     /** The dev full-suite evidence triple this promotion is fixed to (ADR-0039). */
     readonly fullSuiteEvidenceId: string;
     readonly fullSuiteDevCommit: string;
@@ -6654,9 +6738,10 @@ export class Phase1Database {
           `Promotion ${open.id} is ${open.state}; it must be resumed or abandoned first`);
       }
       const project = this.sqlite.query<{
-        repo_root: string; main_ref: string; dev_ref: string; object_format: 'sha1' | 'sha256';
+        repo_root: string; main_ref: string; dev_ref: string; dev_repo_path: string | null;
+        object_format: 'sha1' | 'sha256';
       }, [string]>(`
-        SELECT p.repo_root,p.main_ref,p.dev_ref,p.object_format FROM projects p
+        SELECT p.repo_root,p.main_ref,p.dev_ref,p.dev_repo_path,p.object_format FROM projects p
         JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
         WHERE p.id=?1
       `).get(input.projectId);
@@ -6667,6 +6752,10 @@ export class Phase1Database {
         throw new StorageError('CONCURRENT_MODIFICATION',
           'Project baseline refs changed before the promotion was prepared');
       }
+      if (project.dev_repo_path !== input.devRepoPath) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'The project dev clone changed before the promotion was prepared');
+      }
       this.sqlite.query(`
         INSERT INTO operations(id,project_id,kind,aggregate_id,idempotency_key,state,request_json,
           created_at,updated_at)
@@ -6674,19 +6763,20 @@ export class Phase1Database {
       `).run(input.operationId, input.projectId, input.promotionId, input.commandId,
         JSON.stringify({ promotionId: input.promotionId, batchId: input.batchId,
           devRef: input.devRef, mainRef: input.mainRef, candidateCommit: input.candidateCommit,
-          expectedMainCommit: input.expectedMainCommit, verificationId: input.verificationId }),
+          expectedMainCommit: input.expectedMainCommit, verificationId: input.verificationId,
+          devRepoPath: input.devRepoPath }),
         input.createdAt);
       this.sqlite.query(`
         INSERT INTO stable_promotions(id,project_id,dev_ref,main_ref,candidate_commit,
           expected_main_commit,integration_batch_id,verification_id,verification_tested_commit,
           permission_mode,state,created_at,full_suite_evidence_id,full_suite_dev_commit,
-          full_suite_policy_version,full_suite_policy_digest,full_suite_lockfile_digest)
-        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'CREATED',?11,?12,?13,?14,?15,?16)
+          full_suite_policy_version,full_suite_policy_digest,full_suite_lockfile_digest,dev_repo_path)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'CREATED',?11,?12,?13,?14,?15,?16,?17)
       `).run(input.promotionId, input.projectId, input.devRef, input.mainRef,
         input.candidateCommit, input.expectedMainCommit, input.batchId, input.verificationId,
         input.verificationTestedCommit, input.permissionMode, input.createdAt,
         input.fullSuiteEvidenceId, input.fullSuiteDevCommit, input.fullSuitePolicyVersion,
-        input.fullSuitePolicyDigest, input.fullSuiteLockfileDigest);
+        input.fullSuitePolicyDigest, input.fullSuiteLockfileDigest, input.devRepoPath);
       for (const member of this.stablePromotionBatchMembers(input.projectId, input.batchId)) {
         this.sqlite.query(`
           INSERT INTO stable_promotion_members(promotion_id,batch_id,project_id,task_id,revision_id,
@@ -6762,16 +6852,21 @@ export class Phase1Database {
   }
 
   /**
-   * CREATED/AWAITING_APPROVAL/RECOVERY_REQUIRED → PROMOTING, recorded before Git runs. STRICT
-   * requires a recorded approval that still matches the fixed triple; that is the only gate.
+   * Records the readback of the remote `dev` ref after the fixed candidate was pushed, and moves
+   * CREATED/AWAITING_APPROVAL → PROMOTING (ADR-0047 D02/D03).
+   *
+   * The value stored here is the commit Git reported for the remote ref, not the commit that was
+   * pushed: entering PROMOTING means "the candidate is on the remote and the main checkout has not
+   * pulled it yet", which is exactly the distinction "push exited 0" cannot make. STRICT requires a
+   * recorded approval that still matches the fixed triple; that is the only gate.
    */
   startStablePromotion(input: {
     readonly promotionId: string;
-    readonly mainWorktreePath: string;
-    readonly restartSteps: readonly PromotionRestartPlanStep[];
-    readonly promotingBootId: string;
+    readonly devRepoPath: string;
+    /** Read back from the remote dev ref by `git ls-remote` after the push. */
+    readonly remoteDevCommit: string;
     readonly permissionMode: PromotionPermissionMode;
-    readonly startedAt: number;
+    readonly pushedAt: number;
     readonly eventId: string;
   }): StablePromotionPlan {
     return this.sqlite.transaction(() => {
@@ -6791,41 +6886,95 @@ export class Phase1Database {
             + ' triple before promoting');
         }
       }
+      if (input.remoteDevCommit !== promotion.candidateCommit) {
+        throw new StorageError('INVALID_STATE',
+          'The remote dev readback must be the fixed candidate commit; a promotion is never recorded'
+          + ' as pushed when the remote holds something else');
+      }
       const updated = this.sqlite.query(`
         UPDATE stable_promotions
-        SET state='PROMOTING',main_worktree_path=?1,restart_steps_json=?2,promoting_boot_id=?3,
+        SET state='PROMOTING',dev_repo_path=?1,remote_dev_commit=?2,pushed_at=?3,
             permission_mode=?4,outcome_code=NULL,detail=NULL
         WHERE id=?5 AND state IN ('CREATED','AWAITING_APPROVAL')
-      `).run(input.mainWorktreePath, JSON.stringify(input.restartSteps), input.promotingBootId,
-        input.permissionMode, input.promotionId);
+      `).run(input.devRepoPath, input.remoteDevCommit, input.pushedAt, input.permissionMode,
+        input.promotionId);
       const operation = this.sqlite.query(`
         UPDATE operations SET state='IN_PROGRESS',updated_at=?1
         WHERE id=?2 AND state IN ('PLANNED','RECONCILE_REQUIRED')
-      `).run(input.startedAt, promotion.operationId);
+      `).run(input.pushedAt, promotion.operationId);
       if (updated.changes !== 1 || operation.changes !== 1) {
         throw new StorageError('CONCURRENT_MODIFICATION',
-          'Promotion changed while starting its main update');
+          'Promotion changed while recording its dev push');
       }
       this.sqlite.query(`
         INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
           aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-        VALUES (?1,?2,'PromotionStarted',1,'Promotion',?3,0,?1,?1,?4,?5)
-      `).run(input.eventId, promotion.projectId, input.promotionId, input.startedAt,
+        VALUES (?1,?2,'PromotionDevPushed',1,'Promotion',?3,0,?1,?1,?4,?5)
+      `).run(input.eventId, promotion.projectId, input.promotionId, input.pushedAt,
         JSON.stringify({ promotionId: input.promotionId, devRef: promotion.devRef,
           mainRef: promotion.mainRef, candidateCommit: promotion.candidateCommit,
-          expectedMainCommit: promotion.expectedMainCommit,
-          mainWorktreePath: input.mainWorktreePath, restartSteps: input.restartSteps }));
+          expectedMainCommit: promotion.expectedMainCommit, devRepoPath: input.devRepoPath,
+          remoteDevCommit: input.remoteDevCommit, remote: 'origin',
+          awaitingPullFrom: promotion.mainRef }));
       return this.stablePromotionPlan(input.promotionId);
     })();
   }
 
   /**
-   * PROMOTING → RESTARTING with the `main` commit that was actually read back from the ref. The
-   * restart sequence outlives the Runtime that moved `main`, so its result is recorded later.
+   * Records a refused push attempt on an open record **without changing its state**: the promotion
+   * stays prepared so the same command can be retried once the remote is reachable again. Nothing
+   * about the remote or the local refs is claimed by this row — it exists so the failure is
+   * auditable and readable in `promotion get` instead of only in one client's stderr.
+   */
+  recordStablePromotionPushFailure(input: {
+    readonly promotionId: string;
+    readonly outcomeCode: string;
+    readonly detail: string;
+    readonly eventId: string;
+    readonly at: number;
+  }): StablePromotionPlan {
+    return this.sqlite.transaction(() => {
+      const promotion = this.stablePromotionPlan(input.promotionId);
+      if (promotion.state === 'STALE' || promotion.state === 'FAILED'
+        || promotion.state === 'SUCCEEDED') {
+        return promotion;
+      }
+      const updated = this.sqlite.query(`
+        UPDATE stable_promotions SET outcome_code=?1,detail=?2
+        WHERE id=?3 AND state IN ('CREATED','AWAITING_APPROVAL','PROMOTING','RESTARTING',
+          'RECOVERY_REQUIRED')
+      `).run(input.outcomeCode, input.detail, input.promotionId);
+      if (updated.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Promotion changed while recording its refused push');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'PromotionPushRefused',1,'Promotion',?3,0,?1,?1,?4,?5)
+      `).run(input.eventId, promotion.projectId, input.promotionId, input.at,
+        JSON.stringify({ promotionId: input.promotionId, devRef: promotion.devRef,
+          mainRef: promotion.mainRef, candidateCommit: promotion.candidateCommit,
+          state: promotion.state, outcomeCode: input.outcomeCode, detail: input.detail }));
+      return this.stablePromotionPlan(input.promotionId);
+    })();
+  }
+
+  /**
+   * PROMOTING → RESTARTING once the main checkout was observed at the fixed candidate, i.e. the
+   * user pulled the pushed dev candidate (ADR-0047 D03).
+   *
+   * The restart plan is recorded here rather than before the push, because the plan has to name the
+   * worktree the pull landed in; recording it before that would describe a worktree state that did
+   * not exist yet. `promotingBootId` is the boot that read the pull, so a restart can only be
+   * recorded from a Runtime that is not this one.
    */
   recordStablePromotionMainUpdate(input: {
     readonly promotionId: string;
     readonly promotedCommit: string;
+    readonly mainWorktreePath: string;
+    readonly restartSteps: readonly PromotionRestartPlanStep[];
+    readonly promotingBootId: string;
     readonly observedAt: number;
     readonly eventId: string;
   }): StablePromotionPlan {
@@ -6833,9 +6982,11 @@ export class Phase1Database {
       const promotion = this.stablePromotionPlan(input.promotionId);
       if (promotion.state !== 'PROMOTING') return promotion;
       const updated = this.sqlite.query(`
-        UPDATE stable_promotions SET state='RESTARTING',promoted_commit=?1
-        WHERE id=?2 AND state='PROMOTING'
-      `).run(input.promotedCommit, input.promotionId);
+        UPDATE stable_promotions SET state='RESTARTING',promoted_commit=?1,main_worktree_path=?2,
+            restart_steps_json=?3,promoting_boot_id=?4,outcome_code=NULL,detail=NULL
+        WHERE id=?5 AND state='PROMOTING'
+      `).run(input.promotedCommit, input.mainWorktreePath, JSON.stringify(input.restartSteps),
+        input.promotingBootId, input.promotionId);
       if (updated.changes !== 1) {
         throw new StorageError('CONCURRENT_MODIFICATION',
           'Promotion changed while recording its main update');
@@ -6847,19 +6998,26 @@ export class Phase1Database {
       `).run(input.eventId, promotion.projectId, input.promotionId, input.observedAt,
         JSON.stringify({ promotionId: input.promotionId, mainRef: promotion.mainRef,
           expectedMainCommit: promotion.expectedMainCommit,
-          promotedCommit: input.promotedCommit, candidateCommit: promotion.candidateCommit }));
+          promotedCommit: input.promotedCommit, candidateCommit: promotion.candidateCommit,
+          remoteDevCommit: promotion.remoteDevCommit,
+          mainWorktreePath: input.mainWorktreePath, restartSteps: input.restartSteps }));
       return this.stablePromotionPlan(input.promotionId);
     })();
   }
 
   /**
-   * RESTARTING/RECOVERY_REQUIRED → SUCCEEDED or FAILED with the observed restart evidence. A
-   * failure keeps `promoted_commit` as observed: `main` may really have moved, and the record has
-   * to say so instead of pretending the promotion never happened.
+   * Records the observed restart result (ADR-0009 D03) on a promotion whose main checkout was
+   * observed at the candidate.
+   *
+   * A failing restart ends the promotion as FAILED with the evidence that caused it. A successful
+   * one **does not** end it: `main` is at the candidate and the Runtime is back, but the stable
+   * commit is not published on the remote yet, and ADR-0047 D01 puts that push after the restart.
+   * The record therefore stays RESTARTING with `MAIN_PUSH_PENDING` until `recordStablePromotionMainPush`
+   * read back the remote. "Main is updated and restarted" is never reported as a promotion by itself.
    */
   recordStablePromotionRestart(input: {
     readonly promotionId: string;
-    readonly state: 'SUCCEEDED' | 'FAILED';
+    readonly state: 'RESTARTED' | 'FAILED';
     readonly outcomeCode: string;
     readonly restart: PromotionRestartResult;
     readonly detail: string;
@@ -6874,52 +7032,149 @@ export class Phase1Database {
         throw new StorageError('INVALID_STATE',
           `Promotion is ${promotion.state}; only a promotion whose main update was observed can record a restart`);
       }
-      const updated = this.sqlite.query(`
-        UPDATE stable_promotions
-        SET state=?1,restart_result_json=?2,outcome_code=?3,detail=?4,completed_at=?5
-        WHERE id=?6 AND state IN ('RESTARTING','RECOVERY_REQUIRED')
-      `).run(input.state, JSON.stringify(input.restart), input.outcomeCode, input.detail,
-        input.completedAt, input.promotionId);
-      const operation = this.sqlite.query(`
-        UPDATE operations SET state=?1,result_json=?2,updated_at=?3
-        WHERE id=?4 AND state IN ('PLANNED','IN_PROGRESS','RECONCILE_REQUIRED')
-      `).run(input.state === 'SUCCEEDED' ? 'SUCCEEDED' : 'FAILED',
-        JSON.stringify({ promotionId: input.promotionId, state: input.state,
-          outcomeCode: input.outcomeCode, promotedCommit: promotion.promotedCommit }),
-        input.completedAt, promotion.operationId);
+      const updated = input.state === 'RESTARTED'
+        ? this.sqlite.query(`
+            UPDATE stable_promotions
+            SET state='RESTARTING',restart_result_json=?1,outcome_code=?2,detail=?3
+            WHERE id=?4 AND state IN ('RESTARTING','RECOVERY_REQUIRED')
+          `).run(JSON.stringify(input.restart), input.outcomeCode, input.detail, input.promotionId)
+        : this.sqlite.query(`
+            UPDATE stable_promotions
+            SET state='FAILED',restart_result_json=?1,outcome_code=?2,detail=?3,completed_at=?4
+            WHERE id=?5 AND state IN ('RESTARTING','RECOVERY_REQUIRED')
+          `).run(JSON.stringify(input.restart), input.outcomeCode, input.detail,
+            input.completedAt, input.promotionId);
+      const operation = input.state === 'RESTARTED'
+        ? this.sqlite.query(`
+            UPDATE operations SET state='IN_PROGRESS',updated_at=?1
+            WHERE id=?2 AND state IN ('PLANNED','IN_PROGRESS','RECONCILE_REQUIRED')
+          `).run(input.completedAt, promotion.operationId)
+        : this.sqlite.query(`
+            UPDATE operations SET state='FAILED',result_json=?1,updated_at=?2
+            WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS','RECONCILE_REQUIRED')
+          `).run(JSON.stringify({ promotionId: input.promotionId, state: 'FAILED',
+            outcomeCode: input.outcomeCode, promotedCommit: promotion.promotedCommit }),
+            input.completedAt, promotion.operationId);
       if (updated.changes !== 1 || operation.changes !== 1) {
         throw new StorageError('CONCURRENT_MODIFICATION',
           'Promotion changed while recording its restart result');
       }
+      const recordedState = input.state === 'RESTARTED' ? 'RESTARTING' : 'FAILED';
       this.sqlite.query(`
         INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
           aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
         VALUES (?1,?2,'PromotionRestartRecorded',1,'Promotion',?3,0,?1,?1,?4,?5)
       `).run(input.completedEventId, promotion.projectId, input.promotionId, input.completedAt,
         JSON.stringify({ promotionId: input.promotionId, mainRef: promotion.mainRef,
-          promotedCommit: promotion.promotedCommit, state: input.state,
+          promotedCommit: promotion.promotedCommit, state: recordedState,
           outcomeCode: input.outcomeCode, observedBootId: input.restart.observedBootId,
           runtimeStatus: input.restart.runtimeStatus, uiRunning: input.restart.uiRunning,
           steps: input.restart.steps }));
-      this.sqlite.query(`
-        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-        VALUES (?1,?2,?3,1,'Promotion',?4,0,?5,?5,?6,?7)
-      `).run(input.eventId, promotion.projectId,
-        input.state === 'SUCCEEDED' ? 'PromotionCompleted' : 'PromotionFailed',
-        input.promotionId, input.completedEventId, input.completedAt,
-        JSON.stringify({ promotionId: input.promotionId, devRef: promotion.devRef,
-          mainRef: promotion.mainRef, candidateCommit: promotion.candidateCommit,
-          expectedMainCommit: promotion.expectedMainCommit,
-          promotedCommit: promotion.promotedCommit, state: input.state,
-          outcomeCode: input.outcomeCode, detail: input.detail }));
+      if (input.state === 'FAILED') {
+        this.sqlite.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'PromotionFailed',1,'Promotion',?3,0,?4,?4,?5,?6)
+        `).run(input.eventId, promotion.projectId, input.promotionId, input.completedEventId,
+          input.completedAt,
+          JSON.stringify({ promotionId: input.promotionId, devRef: promotion.devRef,
+            mainRef: promotion.mainRef, candidateCommit: promotion.candidateCommit,
+            expectedMainCommit: promotion.expectedMainCommit,
+            promotedCommit: promotion.promotedCommit, state: 'FAILED',
+            outcomeCode: input.outcomeCode, detail: input.detail }));
+      }
       return this.stablePromotionPlan(input.promotionId);
     })();
   }
 
   /**
-   * Marks a recorded STRICT approval unusable because a ref or the evidence moved. STALE is
-   * terminal: the candidate has to be prepared and approved again.
+   * Publishes (or fails to publish) the stable commit on the remote `main`, and with it decides the
+   * promotion's outcome (ADR-0047 D01/D02).
+   *
+   * `remoteMainCommit` is the value read back from the remote, or null when the push was refused or
+   * the readback did not match. Only a non-null readback equal to the candidate completes the
+   * promotion as SUCCEEDED; a failed publish keeps the record open in RESTARTING/MAIN_PUSH_PENDING
+   * with the failure recorded, so the same command can retry the publish without stopping the
+   * Runtime again — nothing is rolled back and nothing is claimed.
+   */
+  recordStablePromotionMainPush(input: {
+    readonly promotionId: string;
+    readonly remoteMainCommit: string | null;
+    readonly outcomeCode: string;
+    readonly detail: string;
+    readonly eventId: string;
+    readonly at: number;
+  }): StablePromotionPlan {
+    return this.sqlite.transaction(() => {
+      const promotion = this.stablePromotionPlan(input.promotionId);
+      if (promotion.state === 'SUCCEEDED' || promotion.state === 'FAILED') return promotion;
+      if (promotion.state !== 'RESTARTING') {
+        throw new StorageError('INVALID_STATE',
+          `Promotion is ${promotion.state}; only a promotion whose restart was recorded can publish main`);
+      }
+      if (promotion.restart === null) {
+        throw new StorageError('INVALID_STATE',
+          'The promotion has no recorded restart result; main is never published before the restart');
+      }
+      if (input.remoteMainCommit === null) {
+        const updated = this.sqlite.query(`
+          UPDATE stable_promotions SET outcome_code=?1,detail=?2
+          WHERE id=?3 AND state='RESTARTING'
+        `).run(input.outcomeCode, input.detail, input.promotionId);
+        if (updated.changes !== 1) {
+          throw new StorageError('CONCURRENT_MODIFICATION',
+            'Promotion changed while recording its refused main publish');
+        }
+        this.sqlite.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'PromotionMainPushRefused',1,'Promotion',?3,0,?1,?1,?4,?5)
+        `).run(input.eventId, promotion.projectId, input.promotionId, input.at,
+          JSON.stringify({ promotionId: input.promotionId, mainRef: promotion.mainRef,
+            candidateCommit: promotion.candidateCommit, promotedCommit: promotion.promotedCommit,
+            outcomeCode: input.outcomeCode, detail: input.detail }));
+        return this.stablePromotionPlan(input.promotionId);
+      }
+      if (input.remoteMainCommit !== promotion.candidateCommit) {
+        throw new StorageError('INVALID_STATE',
+          'The remote main readback must be the promoted commit; the remote holds something else');
+      }
+      const updated = this.sqlite.query(`
+        UPDATE stable_promotions
+        SET state='SUCCEEDED',remote_main_commit=?1,main_pushed_at=?2,outcome_code=?3,detail=?4,
+            completed_at=?2
+        WHERE id=?5 AND state='RESTARTING'
+      `).run(input.remoteMainCommit, input.at, input.outcomeCode, input.detail, input.promotionId);
+      const operation = this.sqlite.query(`
+        UPDATE operations SET state='SUCCEEDED',result_json=?1,updated_at=?2
+        WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS','RECONCILE_REQUIRED')
+      `).run(JSON.stringify({ promotionId: input.promotionId, state: 'SUCCEEDED',
+        outcomeCode: input.outcomeCode, promotedCommit: promotion.promotedCommit,
+        remoteMainCommit: input.remoteMainCommit }), input.at, promotion.operationId);
+      if (updated.changes !== 1 || operation.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Promotion changed while publishing its main commit');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'PromotionCompleted',1,'Promotion',?3,0,?1,?1,?4,?5)
+      `).run(input.eventId, promotion.projectId, input.promotionId, input.at,
+        JSON.stringify({ promotionId: input.promotionId, devRef: promotion.devRef,
+          mainRef: promotion.mainRef, candidateCommit: promotion.candidateCommit,
+          expectedMainCommit: promotion.expectedMainCommit,
+          remoteDevCommit: promotion.remoteDevCommit,
+          promotedCommit: promotion.promotedCommit, remoteMainCommit: input.remoteMainCommit,
+          state: 'SUCCEEDED', outcomeCode: input.outcomeCode, detail: input.detail }));
+      return this.stablePromotionPlan(input.promotionId);
+    })();
+  }
+
+  /**
+   * Marks a recorded promotion unusable because a ref or the evidence moved. STALE is terminal:
+   * the candidate has to be prepared and approved again. It is refused once the pull has been
+   * observed (RESTARTING and beyond), because there `main` really is on the candidate and STALE
+   * would read as "nothing happened".
    */
   markStablePromotionStale(input: {
     readonly promotionId: string;
@@ -6931,13 +7186,14 @@ export class Phase1Database {
     return this.sqlite.transaction(() => {
       const promotion = this.stablePromotionPlan(input.promotionId);
       if (promotion.state === 'STALE') return promotion;
-      if (promotion.state !== 'CREATED' && promotion.state !== 'AWAITING_APPROVAL') {
+      if (promotion.state !== 'CREATED' && promotion.state !== 'AWAITING_APPROVAL'
+        && promotion.state !== 'PROMOTING') {
         throw new StorageError('INVALID_STATE',
-          `Promotion is ${promotion.state}; only a promotion that has not moved main can be stale`);
+          `Promotion is ${promotion.state}; only a promotion whose pull was not observed yet can be stale`);
       }
       const updated = this.sqlite.query(`
         UPDATE stable_promotions SET state='STALE',outcome_code=?1,detail=?2,completed_at=?3
-        WHERE id=?4 AND state IN ('CREATED','AWAITING_APPROVAL')
+        WHERE id=?4 AND state IN ('CREATED','AWAITING_APPROVAL','PROMOTING')
       `).run(input.outcomeCode, input.reason, input.at, input.promotionId);
       const operation = this.sqlite.query(`
         UPDATE operations SET state='FAILED',result_json=?1,updated_at=?2
@@ -7078,6 +7334,20 @@ export class Phase1Database {
     return this.stablePromotionPlan(recorded.promotionId);
   }
 
+  /**
+   * The project's open promotion, or null. A second attempt must not race an open record, and the
+   * remote-movement checks need to know which record a refusal invalidates (ADR-0047 D02).
+   */
+  getOpenStablePromotion(projectId: string): StablePromotionSummary | null {
+    const row = this.sqlite.query<{ id: string }, [string]>(`
+      SELECT id FROM stable_promotions
+      WHERE project_id=?1 AND state IN ('CREATED','AWAITING_APPROVAL','PROMOTING','RESTARTING',
+        'RECOVERY_REQUIRED')
+      ORDER BY created_at DESC,id LIMIT 1
+    `).get(projectId);
+    return row === null ? null : this.stablePromotionSummary(row.id);
+  }
+
   listStablePromotions(projectId: string, limit = 20): readonly StablePromotionSummary[] {
     return this.sqlite.query<{ id: string }, [string, number]>(`
       SELECT id FROM stable_promotions WHERE project_id=?1 ORDER BY created_at DESC,id LIMIT ?2
@@ -7139,6 +7409,8 @@ export class Phase1Database {
       full_suite_policy_version: string | null; full_suite_policy_digest: string | null;
       full_suite_lockfile_digest: string | null;
       restart_steps_json: string | null; restart_result_json: string | null;
+      dev_repo_path: string | null; remote_dev_commit: string | null;
+      remote_main_commit: string | null; pushed_at: number | null; main_pushed_at: number | null;
       outcome_code: string | null; detail: string | null; created_at: number;
       completed_at: number | null;
     }, [string]>(`
@@ -7149,10 +7421,14 @@ export class Phase1Database {
              promoted_commit,main_worktree_path,promoting_boot_id,full_suite_evidence_id,
              full_suite_dev_commit,full_suite_policy_version,full_suite_policy_digest,
              full_suite_lockfile_digest,restart_steps_json,
-             restart_result_json,outcome_code,detail,created_at,completed_at
+             restart_result_json,dev_repo_path,remote_dev_commit,remote_main_commit,pushed_at,
+             main_pushed_at,outcome_code,detail,created_at,completed_at
       FROM stable_promotions WHERE id=?1
     `).get(promotionId);
     if (row === null) throw new StorageError('NOT_FOUND', 'Promotion was not found');
+    const restart = row.restart_result_json === null
+      ? null
+      : JSON.parse(row.restart_result_json) as PromotionRestartResult;
     return {
       promotionId: row.id,
       projectId: row.project_id,
@@ -7189,12 +7465,16 @@ export class Phase1Database {
       promotedCommit: row.promoted_commit,
       mainWorktreePath: row.main_worktree_path,
       promotingBootId: row.promoting_boot_id,
+      devRepoPath: row.dev_repo_path,
+      remoteDevCommit: row.remote_dev_commit,
+      remoteMainCommit: row.remote_main_commit,
+      pushedAt: row.pushed_at,
+      mainPushedAt: row.main_pushed_at,
+      phase: promotionPhase({ state: row.state, restart }),
       restartSteps: row.restart_steps_json === null
         ? []
         : JSON.parse(row.restart_steps_json) as readonly PromotionRestartPlanStep[],
-      restart: row.restart_result_json === null
-        ? null
-        : JSON.parse(row.restart_result_json) as PromotionRestartResult,
+      restart,
       outcomeCode: row.outcome_code,
       detail: row.detail,
       createdAt: row.created_at,

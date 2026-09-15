@@ -16,6 +16,7 @@ import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOpt
   type SlotReservationAcquisitionView,
   type SlotReservationReconcileReport, type SlotReservationReleaseView,
   type SlotSnapshotRefusalDetail,
+  type DevRepoInspection,
   type TaskRetryOutcomeView,
   type AgentPluginDetection,
   type VerificationPolicyInspection,
@@ -797,6 +798,9 @@ interface PromotionReportView {
   readonly promotionId: string;
   readonly projectId: string;
   readonly state: string;
+  /** Which pair of facts this record states (ADR-0047 D03); `COMPLETE` is the only finished one. */
+  readonly phase: 'READY_TO_PUSH' | 'AWAITING_PULL' | 'RESTART_PENDING' | 'MAIN_PUSH_PENDING'
+    | 'COMPLETE' | 'REFUSED';
   readonly devRef: string;
   readonly mainRef: string;
   readonly candidateCommit: string;
@@ -804,6 +808,12 @@ interface PromotionReportView {
   readonly promotedCommit: string | null;
   readonly mainWorktreePath: string | null;
   readonly promotingBootId: string | null;
+  /** The dev clone this promotion pushes from, and what the remote `dev` was read back as. */
+  readonly devRepoPath: string | null;
+  readonly remoteDevCommit: string | null;
+  readonly remoteMainCommit: string | null;
+  readonly pushedAt: number | null;
+  readonly mainPushedAt: number | null;
   readonly restartSteps: readonly PromotionRestartStepView[];
   readonly permissionMode: 'FULL' | 'STRICT';
   readonly outcomeCode: string | null;
@@ -912,11 +922,16 @@ async function recordPromotionRestart(
 }
 
 function printPromotion(promotion: PromotionReportView): void {
-  console.log(`promotion ${promotion.promotionId} ${promotion.state}`
+  console.log(`promotion ${promotion.promotionId} ${promotion.state}/${promotion.phase}`
     + (promotion.outcomeCode === null ? '' : ` (${promotion.outcomeCode})`));
-  console.log(`  dev  ${promotion.devRef} ${promotion.candidateCommit}`);
+  console.log(`  dev  ${promotion.devRef} ${promotion.candidateCommit}`
+    + (promotion.remoteDevCommit === null
+      ? ' · not pushed yet'
+      : ` · pushed to ${promotion.devRepoPath ?? 'origin'} as ${promotion.remoteDevCommit}`));
   console.log(`  main ${promotion.mainRef}${promotion.promotedCommit === null
-    ? ` was ${promotion.expectedMainCommit}` : ` now ${promotion.promotedCommit}`}`);
+    ? ` was ${promotion.expectedMainCommit}` : ` now ${promotion.promotedCommit}`}`
+    + (promotion.remoteMainCommit === null
+      ? '' : ` · published as ${promotion.remoteMainCommit}`));
   console.log(`  ${promotion.permissionMode} mode · ${promotion.members.length} member revision(s)`
     + ` · worktree ${promotion.mainWorktreePath ?? 'not recorded'}`);
   for (const step of promotion.restart?.steps ?? []) {
@@ -1038,10 +1053,15 @@ function usage(): never {
     # Every selected path is verified before anything is written and again before a Session starts;
     # a path that cannot be loaded is refused with a stable code and no Execution is created.
     # Exit codes: 0 applied, 1 refused (unusable path or adapter without plugin selection), 2 usage.
-  bun run codeestra project inspect [path]
+  bun run codeestra project inspect [path] [--dev-repo <dev-clone>]
   bun run codeestra project policy [path]
-  bun run codeestra project trust [path] [--yes]
+  bun run codeestra project trust [path] [--yes] [--dev-repo <dev-clone>|none]
   bun run codeestra project list
+    # ADR-0047 D05: the dev clone is a second, independent clone of the same origin. \`--dev-repo\`
+    # makes it an explicit input; the Runtime verifies it (a Git work tree, another clone rather than
+    # the main checkout or one of its worktrees, the same origin, HEAD on the project dev branch) and
+    # refuses with a stable code (DEV_REPO_*) when it cannot. trust never records a path it could not
+    # verify and never silently clears one it was not asked about; \`--dev-repo none\` clears it.
   bun run codeestra project impact validate [path] [--json]
   bun run codeestra project impact show <project-id> <task-id> [--json]
   bun run codeestra project impact explain <project-id> <task-id> [--json]
@@ -1227,11 +1247,22 @@ a running verification, and the Operation's settle, arrive on the same stream as
 verification is only ever reported by VerificationCompleted and by the run's own state.
 
 promotion prepare fixes the verified dev commit, the expected old main commit and the integration
-verification of that commit; it writes nothing to Git. In FULL mode promotion promote fast-forwards
-main inside the worktree that has it checked out and then runs there: bun install --frozen-lockfile,
-bun run build:ui, bun run codeestra stop, bun run codeestra status. The restart is recorded only when
-every step exits 0 and the restarted Runtime answers READY. STRICT additionally needs promotion
-approve for that exact triple; a dev/main/evidence move makes it invalid. Only SUCCEEDED exits 0.
+verification of that commit, and fixes the dev clone it will push from; it writes nothing to Git and
+nothing to the remote. The candidate is removed from the stable clone, so ADR-0047 D01's only
+promotion path is a round trip through the remote: promotion promote pushes the fixed candidate from
+the recorded dev clone to the remote dev branch, reads the remote ref back and compares it with the
+candidate (a push that exited 0 is not evidence), and stops there with exit code 3 and "pushed,
+awaiting pull" while the main checkout has not pulled it. In the main checkout the user runs
+\`git fetch origin && git merge --ff-only origin/dev\`; running promotion promote again then verifies
+that pull and runs the recorded sequence there: bun install --frozen-lockfile, bun run build:ui, bun
+run codeestra stop, bun run codeestra status. The restart counts as recorded only when every step
+exited 0 and the restarted Runtime answered READY, and only then is the candidate pushed to the
+remote main branch and read back, which is what makes the promotion SUCCEEDED. Nothing is ever
+forced and no ref is moved with update-ref; a remote dev branch that moved away from the candidate,
+a non-fast-forward push, an unreachable remote or a failed readback is refused without moving any
+ref (a refused push or publish leaves the record open so the same command retries it). STRICT
+additionally needs promotion approve for that exact triple; a dev/main/evidence move makes it
+invalid. Exit codes: 0 promoted, 1 refused or failed, 2 usage, 3 pushed but not pulled yet.
 
 ADR-0038 splits verification cost by branch responsibility. A \`task/*\`, \`lane/*\` or feature branch
 commits its own small \`.codeestra/tests.json\` (a scope statement plus 1-16 argv commands, each with
@@ -1475,6 +1506,16 @@ function expectedImpactPolicyConfirmation(report: ImpactPolicyValidationView): I
 }
 
 /** One line per declared mapping, so `project trust` shows what a confirmation actually accepts. */
+function describeDevRepo(inspection: DevRepoInspection): void {
+  if (!inspection.verified) {
+    console.error(`dev clone ${inspection.path}: unusable (${inspection.code ?? 'unknown'})`);
+    if (inspection.detail !== null) console.error(`  ${inspection.detail}`);
+    return;
+  }
+  console.error(`dev clone ${inspection.path}: verified (${inspection.devRef}`
+    + ` ${inspection.devRefCommit ?? 'unknown'}, origin ${inspection.originUrl ?? 'unknown'})`);
+}
+
 function describeImpactPolicy(report: ImpactPolicyValidationView['policy']): void {
   if (report.state === 'ABSENT') {
     console.error('Impact mapping (.codeestra/impact.json at the main ref): absent.');
@@ -1907,6 +1948,13 @@ try {
     console.error(`  dev baseline: ${identity.devRefPresent && identity.devCommit !== null
       ? `${identity.devRef} · ${identity.devCommit}`
       : `${identity.devRef} · 缺失（必须先创建 dev 分支）`}`);
+    // ADR-0047 D05: whether this project can promote at all is a reported fact, not a warning the
+    // user only discovers when `promotion prepare` refuses.
+    console.error(`  dev clone: ${identity.devRepoPath === null
+      ? '未记录（promotion prepare 会拒绝；用 project trust <path> --dev-repo <dev-clone> 显式核验并记录）'
+      : identity.devRepoPath.verified
+        ? `已核验 ${identity.devRepoPath.path}`
+        : `不可用 (${identity.devRepoPath.code ?? 'unknown'}) ${identity.devRepoPath.detail ?? ''}`}`);
     const policy = await call({ command: 'project.verificationPolicy',
       path }) as VerificationPolicyInspection;
     describeVerificationPolicy(policy);
@@ -2169,15 +2217,68 @@ try {
       usage();
     }
   } else if (group === 'project' && action === 'inspect') {
-    print(await call({ command: 'project.inspect', path: firstArgument ?? process.cwd() }));
+    // `--dev-repo <path>` inspects a *candidate* dev clone instead of the recorded one (ADR-0047
+    // D05), so a user can see whether a clone is usable before trusting it.
+    const tokens = [firstArgument, ...remainingArguments]
+      .filter((token): token is string => token !== undefined);
+    let devRepoPath: string | undefined;
+    const positional: string[] = [];
+    for (let index = 0; index < tokens.length; index += 1) {
+      const token = tokens[index] as string;
+      if (token === '--dev-repo') {
+        const value = tokens[index + 1];
+        if (value === undefined) usage();
+        devRepoPath = value;
+        index += 1;
+      } else if (token.startsWith('--')) usage();
+      else positional.push(token);
+    }
+    if (positional.length > 1) usage();
+    const report = await call({
+      command: 'project.inspect',
+      path: positional[0] ?? process.cwd(),
+      ...(devRepoPath === undefined ? {} : { devRepoPath }),
+    }) as ProjectIdentity;
+    print(report);
+    if (report.devRepoPath !== null) describeDevRepo(report.devRepoPath);
   } else if (group === 'project' && action === 'list') {
     print(await call({ command: 'project.list' }));
   } else if (group === 'project' && action === 'policy') {
     print(await call({ command: 'project.verificationPolicy', path: firstArgument ?? process.cwd() }));
   } else if (group === 'project' && action === 'trust') {
-    const path = firstArgument !== undefined && firstArgument !== '--yes' ? firstArgument : process.cwd();
-    const identity = await call({ command: 'project.inspect', path }) as ProjectIdentity;
+    // `--dev-repo <path>` is the explicit dev clone this trust records (ADR-0047 D05); `--dev-repo
+    // none` clears a recorded one. Both are stated by the user, never inferred.
+    const tokens = [firstArgument, ...remainingArguments]
+      .filter((token): token is string => token !== undefined);
+    let devRepoPath: string | null | undefined;
+    const positional: string[] = [];
+    for (let index = 0; index < tokens.length; index += 1) {
+      const token = tokens[index] as string;
+      if (token === '--dev-repo') {
+        const value = tokens[index + 1];
+        if (value === undefined) usage();
+        devRepoPath = value === 'none' ? null : value;
+        index += 1;
+      } else if (token === '--yes') {
+        // The confirmation flag is read from the raw argv below; it never becomes a positional.
+      } else if (token.startsWith('--')) usage();
+      else positional.push(token);
+    }
+    if (positional.length > 1) usage();
+    const path = positional[0] ?? process.cwd();
+    const identity = await call({
+      command: 'project.inspect',
+      path,
+      ...(devRepoPath === undefined || devRepoPath === null ? {} : { devRepoPath }),
+    }) as ProjectIdentity;
     print(identity);
+    // A dev clone that cannot be verified is refused here, before the confirmation is asked: trust
+    // never records a path it could not establish, and never leaves it silently empty.
+    if (identity.devRepoPath !== null && !identity.devRepoPath.verified) {
+      describeDevRepo(identity.devRepoPath);
+      throw new Error(`${identity.devRepoPath.code ?? 'DEV_REPO_NOT_A_REPOSITORY'}:`
+        + ` ${identity.devRepoPath.detail ?? 'the dev clone could not be verified'}`);
+    }
     const policy = await call({ command: 'project.verificationPolicy',
       path }) as VerificationPolicyInspection;
     print(policy);
@@ -2199,18 +2300,27 @@ try {
     } else {
       console.error('This project has no verification policy; task verify will refuse until one is added.');
     }
+    if (identity.devRepoPath === null) {
+      console.error('No dev clone is recorded: `promotion prepare` will refuse until one is, because a'
+        + ' stable promotion pushes the candidate to the remote dev branch from that clone.');
+    } else {
+      describeDevRepo(identity.devRepoPath);
+    }
     const confirmed = mode === 'FULL' || Bun.argv.includes('--yes')
       || prompt('Type TRUST to confirm:') === 'TRUST';
     if (!confirmed) throw new Error('Project trust was not confirmed');
-    print(await call({
+    const trusted = await call({
       command: 'project.trust',
       path,
       expectedIdentity: identity,
+      ...(devRepoPath === undefined ? {} : { devRepoPath }),
       expectedVerificationPolicy: policy.state === 'PRESENT'
         ? { state: 'PRESENT', mainCommit: policy.mainCommit, digest: policy.digest as string }
         : { state: 'ABSENT', mainCommit: policy.mainCommit },
       expectedImpactPolicy: expectedImpactPolicyConfirmation(impact),
-    }));
+    }) as { readonly devRepoPath: DevRepoInspection | null };
+    print(trusted);
+    if (trusted.devRepoPath !== null) describeDevRepo(trusted.devRepoPath);
   } else if (group === 'project' && action === 'impact') {
     // Deterministic conflict analysis (ADR-0031). Read-only: it derives snapshots, records them
     // append-only, and explains a verdict. It never schedules, starts, or approves a Task.
@@ -3364,10 +3474,24 @@ try {
         projectId,
         promotionId,
       }) as PromotionReportView;
+      if (result.phase === 'AWAITING_PULL') {
+        // ADR-0047 D03: the candidate is on the remote dev branch and the main checkout has not
+        // pulled it. That is a distinct outcome, not a failure and not a success: exit code 3, and
+        // no restart step was run or recorded.
+        if (json) print(result);
+        else printPromotion(result);
+        console.error('The fixed candidate is pushed to the remote dev branch and read back; the main'
+          + ' checkout has not pulled it yet. In the main checkout run:');
+        console.error('  git fetch origin && git merge --ff-only origin/dev');
+        console.error('Then run `promotion promote` again with the same promotion ID to record the pull'
+          + ' and run the restart sequence.');
+        process.exit(3);
+      }
       if (result.state !== 'RESTARTING' && result.state !== 'RECOVERY_REQUIRED') {
-        // Nothing moved main (or the promotion was already finished): report the facts verbatim,
-        // and only a real SUCCEEDED promotion is exit code 0.
-        print(result);
+        // Nothing left to run: report the facts verbatim, and only a real SUCCEEDED promotion is
+        // exit code 0.
+        if (json) print(result);
+        else printPromotion(result);
         if (result.state !== 'SUCCEEDED') process.exit(1);
       } else {
         const outcomes = await runPromotionRestartSteps(result);

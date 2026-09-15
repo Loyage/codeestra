@@ -3,9 +3,13 @@ import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  fastForwardCheckedOutWorktree,
+  commitExists,
   findCheckedOutWorktree,
+  inspectDevClone,
   inspectPromotionWorktree,
+  pushCommitToRemote,
+  readRemoteRef,
+  readRemoteUrl,
 } from '../src/promotion.js';
 
 const directories: string[] = [];
@@ -105,68 +109,102 @@ describe('promotion worktree helpers', () => {
       expectedCommit: fixture.candidate,
     })).rejects.toMatchObject({ code: 'STALE_BASE' });
   });
+});
 
-  test('fast-forwards ref, index and files together in the checked-out main worktree', async () => {
-    const fixture = await repository();
-    const before = await run(fixture.mainWorktree, ['status', '--porcelain']);
-    expect(before).toBe('');
-    const merged = await fastForwardCheckedOutWorktree({
-      path: fixture.mainWorktree,
-      expectedRef: 'refs/heads/main',
-      expectedCommit: fixture.mainCommit,
-      candidateCommit: fixture.candidate,
-    });
-    expect(merged).toMatchObject({ outcome: 'FAST_FORWARD', commit: fixture.candidate });
-    // The ref, HEAD, the index and the working files all moved: this is the whole reason a
-    // promotion never uses `git update-ref` on a checked-out branch.
-    expect(await run(fixture.mainWorktree, ['rev-parse', 'refs/heads/main'])).toBe(fixture.candidate);
-    expect(await run(fixture.mainWorktree, ['rev-parse', 'HEAD'])).toBe(fixture.candidate);
-    expect(await run(fixture.mainWorktree, ['status', '--porcelain'])).toBe('');
-    expect(await Bun.file(join(fixture.mainWorktree, 'promoted.txt')).text()).toBe('promoted\n');
+/**
+ * A local bare remote plus a second clone of it: the shape ADR-0047 D05 pushes from and reads back.
+ * Everything lives under the OS temp directory and no real remote is ever contacted.
+ */
+async function remoteFixture(): Promise<{
+  readonly repo: string;
+  readonly mainCommit: string;
+  readonly candidate: string;
+  readonly remote: string;
+  readonly devClone: string;
+}> {
+  const base = await repository();
+  const remote = realpathSync(mkdtempSync(join(tmpdir(), 'codeestra-promotion-remote-')));
+  directories.push(remote);
+  await run(remote, ['init', '--bare', '-b', 'main']);
+  await run(base.repo, ['remote', 'add', 'origin', remote]);
+  await run(base.repo, ['push', 'origin', 'main']);
+  // The candidate exists only in the source repository; it reaches the bare remote through the
+  // dev clone, exactly as the promotion is supposed to do it.
+  const devClone = realpathSync(mkdtempSync(join(tmpdir(), 'codeestra-promotion-dev-')));
+  directories.push(devClone);
+  await run(devClone, ['clone', remote, '.']);
+  await run(devClone, ['fetch', base.repo, `${base.candidate}:refs/heads/dev`]);
+  await run(devClone, ['checkout', 'dev']);
+  return { repo: base.repo, mainCommit: base.mainCommit, candidate: base.candidate, remote, devClone };
+}
+
+describe('dev clone and remote helpers', () => {
+  test('inspects another clone of the same origin that sits on the dev branch', async () => {
+    const fixture = await remoteFixture();
+    const inspection = await inspectDevClone({ path: fixture.devClone, devRef: 'refs/heads/dev' });
+    expect(inspection).toMatchObject({ branchRef: 'refs/heads/dev', devRefCommit: fixture.candidate,
+      clean: true, trackedModifications: [] });
+    expect(inspection.path).toBe(fixture.devClone);
+    // The main checkout is a different clone: a different worktree root and a different git dir.
+    const main = await inspectDevClone({ path: fixture.repo, devRef: 'refs/heads/dev' });
+    expect(main.gitCommonDir).not.toBe(inspection.gitCommonDir);
+    expect(await readRemoteUrl({ repositoryRoot: fixture.devClone })).toBe(fixture.remote);
   });
 
-  test('treats an already-promoted worktree as an idempotent fast-forward', async () => {
-    const fixture = await repository();
-    await run(fixture.mainWorktree, ['merge', '--ff-only', fixture.candidate]);
-    const again = await fastForwardCheckedOutWorktree({
-      path: fixture.mainWorktree,
-      expectedRef: 'refs/heads/main',
-      expectedCommit: fixture.candidate,
-      candidateCommit: fixture.candidate,
-    });
-    expect(again).toMatchObject({ outcome: 'FAST_FORWARD', commit: fixture.candidate });
-    expect(await run(fixture.mainWorktree, ['rev-parse', 'refs/heads/main'])).toBe(fixture.candidate);
+  test('reports a missing repository and a detached HEAD instead of guessing a branch', async () => {
+    const fixture = await remoteFixture();
+    await expect(inspectDevClone({
+      path: join(fixture.devClone, 'does-not-exist'), devRef: 'refs/heads/dev',
+    })).rejects.toMatchObject({ code: 'INVALID_REPOSITORY' });
+    await run(fixture.devClone, ['checkout', '--detach', fixture.candidate]);
+    const detached = await inspectDevClone({ path: fixture.devClone, devRef: 'refs/heads/dev' });
+    expect(detached.branchRef).toBeNull();
+    // The branch still exists; only HEAD is not on it, which is a fact the caller can refuse on.
+    expect(detached.devRefCommit).toBe(fixture.candidate);
+    expect(await commitExists({ repositoryRoot: fixture.devClone,
+      commit: fixture.candidate })).toBe(true);
+    expect(await commitExists({ repositoryRoot: fixture.devClone,
+      commit: 'f'.repeat(40) })).toBe(false);
   });
 
-  test('refuses to fast-forward a dirty checkout and leaves the ref where it was', async () => {
-    const fixture = await repository();
-    await Bun.write(join(fixture.mainWorktree, 'a.txt'), 'locally edited\n');
-    const merged = await fastForwardCheckedOutWorktree({
-      path: fixture.mainWorktree,
-      expectedRef: 'refs/heads/main',
-      expectedCommit: fixture.mainCommit,
-      candidateCommit: fixture.candidate,
-    });
-    expect(merged.outcome).toBe('FAILED');
-    expect(merged.commit).toBeNull();
-    expect(merged.detail).toContain('modified tracked file');
-    expect(await run(fixture.mainWorktree, ['rev-parse', 'refs/heads/main'])).toBe(fixture.mainCommit);
-    // The local edit is untouched: a promotion never resolves someone's work in progress.
-    expect(await Bun.file(join(fixture.mainWorktree, 'a.txt')).text()).toBe('locally edited\n');
+  test('reads a remote ref without writing locally and separates absent from unreachable', async () => {
+    const fixture = await remoteFixture();
+    const present = await readRemoteRef({ repositoryRoot: fixture.devClone,
+      remote: 'origin', ref: 'refs/heads/main' });
+    expect(present).toEqual({ reachable: true, commit: fixture.mainCommit, detail: null });
+    const missing = await readRemoteRef({ repositoryRoot: fixture.devClone,
+      remote: 'origin', ref: 'refs/heads/does-not-exist' });
+    expect(missing).toEqual({ reachable: true, commit: null, detail: null });
+    const unreachable = await readRemoteRef({ repositoryRoot: fixture.devClone,
+      remote: join(fixture.devClone, 'not-a-remote'), ref: 'refs/heads/main' });
+    expect(unreachable.reachable).toBe(false);
+    expect(unreachable.commit).toBeNull();
+    expect(unreachable.detail).not.toBeNull();
   });
 
-  test('refuses a candidate that is not a descendant of the expected main commit', async () => {
-    const fixture = await repository();
+  test('pushes one fixed commit to one ref and never rewrites what the remote already has', async () => {
+    const fixture = await remoteFixture();
+    const pushed = await pushCommitToRemote({ repositoryRoot: fixture.devClone, remote: 'origin',
+      commit: fixture.candidate, ref: 'refs/heads/dev' });
+    expect(pushed.ok).toBe(true);
+    const readback = await readRemoteRef({ repositoryRoot: fixture.devClone, remote: 'origin',
+      ref: 'refs/heads/dev' });
+    expect(readback.commit).toBe(fixture.candidate);
+
+    // A non-fast-forward update is refused by the remote, and the remote keeps its commit.
     const unrelated = await run(fixture.repo, ['commit-tree', `${fixture.mainCommit}^{tree}`,
       '-m', 'unrelated root']);
-    const merged = await fastForwardCheckedOutWorktree({
-      path: fixture.mainWorktree,
-      expectedRef: 'refs/heads/main',
-      expectedCommit: fixture.mainCommit,
-      candidateCommit: unrelated,
-    });
-    expect(merged.outcome).toBe('FAILED');
-    expect(await run(fixture.mainWorktree, ['rev-parse', 'refs/heads/main'])).toBe(fixture.mainCommit);
-    expect(await run(fixture.mainWorktree, ['status', '--porcelain'])).toBe('');
+    const refused = await pushCommitToRemote({ repositoryRoot: fixture.devClone, remote: 'origin',
+      commit: unrelated, ref: 'refs/heads/dev' });
+    expect(refused.ok).toBe(false);
+    expect(await run(fixture.remote, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.candidate);
+    // A remote that does not exist is a refusal, not a rewrite, and reports its own detail.
+    const unreachable = await pushCommitToRemote({ repositoryRoot: fixture.devClone,
+      remote: join(fixture.devClone, 'not-a-remote'), commit: fixture.candidate,
+      ref: 'refs/heads/dev' });
+    expect(unreachable.ok).toBe(false);
+    // Only a local branch ref can be a push target.
+    await expect(pushCommitToRemote({ repositoryRoot: fixture.devClone, remote: 'origin',
+      commit: fixture.candidate, ref: 'HEAD' })).rejects.toMatchObject({ code: 'INVALID_REPOSITORY' });
   });
 });

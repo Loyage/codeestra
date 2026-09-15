@@ -33,10 +33,43 @@ export type RepositoryIdentity = z.infer<typeof repositoryIdentitySchema>;
  * plus the development baseline a Task worktree would start from. Confirming trust therefore also
  * confirms the exact `dev` commit, and a baseline that moved between inspect and trust is refused.
  */
+/**
+ * What `project inspect` reports about one dev clone, and what `project trust` verifies before it
+ * records one. Every field is an observation: `verified` is false with a stable `code` when the
+ * path is not a separate clone of this origin sitting on the project's dev branch, and the partial
+ * facts that could be read are reported next to it so a client can say *why* it is unusable.
+ */
+export const devRepoInspectionSchema = z.strictObject({
+  path: z.string().min(1),
+  /** The project's dev branch this clone is expected to have checked out. */
+  devRef: z.string().min(1),
+  verified: z.boolean(),
+  /** Stable refusal code when `verified` is false; null otherwise. */
+  code: z.string().min(1).nullable(),
+  detail: z.string().nullable(),
+  repoRoot: z.string().nullable(),
+  gitCommonDir: z.string().nullable(),
+  headCommit: z.string().nullable(),
+  branchRef: z.string().nullable(),
+  devRefCommit: z.string().nullable(),
+  originUrl: z.string().nullable(),
+  originMatchesProject: z.boolean().nullable(),
+  clean: z.boolean().nullable(),
+});
+export type DevRepoInspection = z.infer<typeof devRepoInspectionSchema>;
+
 export const projectIdentitySchema = repositoryIdentitySchema.extend({
   devRef: z.string().min(1),
   devCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/).nullable(),
   devRefPresent: z.boolean(),
+  /**
+   * The verified dev clone of this project (ADR-0047 D05), or null when none is recorded.
+   *
+   * It is part of the identity a client echoes back: trust confirms *which* second clone pushes
+   * this project's promotion candidate, and a path that changed between inspect and trust is a
+   * different fact than the one the user reviewed.
+   */
+  devRepoPath: devRepoInspectionSchema.nullable(),
 });
 export type ProjectIdentity = z.infer<typeof projectIdentitySchema>;
 
@@ -986,7 +1019,17 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     scope: z.enum(['GLOBAL', 'PROJECT']).default('GLOBAL'),
     projectId: z.string().uuid().optional(),
   }),
-  z.strictObject({ ...requestBase, command: z.literal('project.inspect'), path: z.string().min(1) }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('project.inspect'),
+    path: z.string().min(1),
+    /**
+     * The dev clone to verify, as an explicit input (ADR-0047 D05). Omitted, the path recorded by a
+     * previous trust is inspected; supplied, that path is verified instead, so a user can see
+     * whether a candidate dev clone is usable before trusting it.
+     */
+    devRepoPath: z.string().min(1).optional(),
+  }),
   z.strictObject({
     ...requestBase,
     command: z.literal('project.verificationPolicy'),
@@ -998,6 +1041,13 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     path: z.string().min(1),
     /** The exact `project.inspect` result the user reviewed, including the dev baseline. */
     expectedIdentity: projectIdentitySchema,
+    /**
+     * The dev clone to record (ADR-0047 D05). The Runtime verifies it (another clone, same origin,
+     * on the dev branch) and refuses with a stable code when it cannot; it never records an empty
+     * path in place of one it could not verify. `null` clears a previously recorded path and an
+     * omitted field leaves it untouched.
+     */
+    devRepoPath: z.string().min(1).nullable().optional(),
     expectedVerificationPolicy: verificationPolicyConfirmationSchema,
     /**
      * The impact mapping the user reviewed (ADR-0031). Optional so a client that predates it still
@@ -1487,9 +1537,11 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     promotionId: z.string().uuid(),
   }),
   /**
-   * Fast-forwards `main` to the fixed candidate inside the worktree that has `main` checked out,
-   * then records the restart plan. The Runtime never advances a checked-out branch through its ref,
-   * and never writes a second ref after this point.
+   * Advances the promotion by exactly one step of ADR-0047 D01/D03: push the fixed candidate to the
+   * remote `dev` and read the remote ref back (reporting `phase: AWAITING_PULL` while the main
+   * checkout has not pulled it), then — once the pull is observed — record the restart plan and, when
+   * the restart was recorded and checked, push the candidate to the remote `main`. The Runtime never
+   * advances a checked-out branch through its ref: `main` moves only when the user pulls it.
    */
   z.strictObject({
     ...requestBase,
@@ -1500,8 +1552,9 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
   }),
   /**
    * Records the observed Runtime restart after the client ran the recorded post-steps in the main
-   * worktree. The submitted boot identity must be the Runtime answering this request and must not
-   * be the one that moved `main`, and the step list must match the recorded plan exactly.
+   * worktree, and then publishes the stable commit to the remote `main`. The submitted boot identity
+   * must be the Runtime answering this request and must not be the boot that read the pull and issued
+   * the plan, and the step list must match the recorded plan exactly.
    */
   z.strictObject({
     ...requestBase,
@@ -1526,8 +1579,9 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     })).max(16),
   }),
   /**
-   * Closes a promotion a restart left unresolved, without touching a ref. Used when the observed
-   * `main` is not the promoted commit, so nothing may be resumed.
+   * Closes a promotion whose outcome is still open, without touching a ref. Used when the observed
+   * state cannot be resumed (for example a `main` checkout moved by hand); the record keeps what was
+   * observed rather than claiming nothing happened.
    */
   z.strictObject({
     ...requestBase,

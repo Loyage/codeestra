@@ -4839,6 +4839,71 @@ git ls-remote --heads origin            → 7292ddc refs/heads/dev / c50730f ref
 - dev clone 里的本地 `main` 不会自动前进（无定时 fetch）；需要最新 main ref 时显式 `git fetch`，本格未改为自动。
 - Orca 等外部工具若记录了旧的 worktree 身份，需要用户侧重新指向 dev clone；本格未修改这些外部工具的数据。
 
+## FOUNDATION-077 — ADR-0047 的产品实现：经 GitHub 中转的稳定提升（schema v29 / ADR-0052）
+
+状态：**已完成本格**。分支 `lane/l1-promotion-github`（基线 `dev@036cf681`，未 rebase、未 push 任何远端）。
+ADR-0047 D05 明确把产品命令面留到本格，本格实现它并删除旧的本机 ff 路径。
+
+### 交付物
+
+| 交付物 | 内容 | 位置 |
+|---|---|---|
+| A schema v29 | 纯 `ALTER TABLE ... ADD COLUMN`（**不重建任何表**）：`projects.dev_repo_path`（可空，空串被 CHECK 拒绝）；`stable_promotions` 追加 `dev_repo_path`、`remote_dev_commit`、`remote_main_commit`、`pushed_at`、`main_pushed_at` | `packages/storage/src/migration.ts`、`src/database.ts` |
+| A 迁移 | `if (version < 29)`；v16 仍未使用、v22 仍未占用；既有的 v26/v27 回滚夹具补上「同时删掉 v29 的列」，否则它们不再是真实的旧版本库 | 同上、`packages/storage/test/agent-plugin-selection.test.ts` |
+| B dev clone 核验 | 新服务 `inspectDevRepo`/`requireDevRepo`/`requireCandidateInDevRepo`：是 Git work tree、是**另一个** clone（worktree root 与 git common dir 都不同）、`origin` 与 main 检出一致、HEAD 在项目 `dev` 分支且该分支存在；稳定码 `DEV_REPO_*`；`project inspect [--dev-repo <path>]` 报告核验结果，`project trust --dev-repo <path>\|none` 显式记录/清除，省略时保留原值 | `apps/runtime/src/dev-repo-service.ts`、`apps/runtime/src/main.ts`、`apps/cli/src/main.ts` |
+| C Git 层 | 删除 `fastForwardCheckedOutWorktree`（ADR-0047 已废弃的本机 ff 路径），新增 `inspectDevClone`、`readRemoteRef`（`ls-remote`，写本地零字节）、`readRemoteUrl`、`commitExists`、`pushCommitToRemote`（源是固定 OID，从不 `--force`） | `packages/git/src/promotion.ts`、`src/index.ts` |
+| C promotion 服务 | `prepare` 固定三元组 + dev clone + 远端 `dev` 状态（未移动才继续）；`promote` 一次只推进一步：push → 读回核对 → `PROMOTING`/`AWAITING_PULL`（**不执行任何重启记账**）→ 核对 main 检出的拉取与 fast-forward 关系 → 记录重启计划 → 重启记录成功后才推回远端 `main` 并读回 → `SUCCEEDED`；`abandon` 不再拒绝 `PROMOTING` | `apps/runtime/src/promotion-service.ts` |
+| C storage 生命周期 | `startStablePromotion` = 记录**读回的远端 `dev`** 并进入 `PROMOTING`；`recordStablePromotionMainUpdate` 记录 main 检出已拉的候选 + 重启计划 + 发出计划的 boot；`recordStablePromotionRestartOutcome`（成功不落终态）、`recordStablePromotionMainPush`（推回成功才 `SUCCEEDED`，失败保持可续）、`recordStablePromotionPushFailure`、`getOpenStablePromotion`、派生 `phase` | `packages/storage/src/database.ts` |
+| C 恢复 | `PROMOTING` + main 仍在旧提交 → 报 `AWAITING_PULL` 并保持可续（**不再** `FAILED/MAIN_NOT_UPDATED`）；main 已在候选 → `RESTART_UNPROVEN`；其他值 → `MAIN_REF_OBSERVED` | `apps/runtime/src/recovery-service.ts` |
+| C 契约 | `devRepoInspectionSchema`（`projectIdentitySchema.devRepoPath`）、`project.inspect` 的 `devRepoPath?`、`project.trust` 的 `devRepoPath?` | `packages/contracts/src/index.ts` |
+| D CLI 完备 | `project inspect --dev-repo`、`project trust --dev-repo\|none`、`promotion promote` 的退出码 **3**（已推送待拉取，打印 main 检出要执行的两条命令）、`printPromotion` 显示 `phase`/远端读回值；`usage()` 与 `docs/guides/cli-reference.md` §3/§15 同步 | `apps/cli/src/main.ts`、`docs/guides/cli-reference.md` |
+| E ADR | ADR-0052：命令面事实分层（可重试拒绝 vs `STALE`、`AWAITING_PULL` 与退出码 3、推回失败可续、`DEV_REPO_*` 口径） | `docs/decisions/0052-promotion-fact-layering.md`、`docs/decisions/README.md` |
+| E 架构文档 | `git-workspace-api.md` §3（4/4a/6/7 条按实现重写）、`state-machines.md` §4 + §8 表（v29 行）、`sqlite-schema.md`（`projects.dev_repo_path`、v29 新增列、版本占用到 v29） | `docs/architecture/*` |
+| E 规格现状同步 | `PROJECT_SPEC.md` 第 3 行状态段与 §8 的现状陈述（**只改现状，不改规范语义**） | `PROJECT_SPEC.md` |
+| F 测试 | 新增 `dev-repo-service.test.ts`（6）、`dev-clone-promotion.test.ts`（3）；重写 `promotion-service.test.ts`（26）与 `cli-promotion.test.ts`（6）；`packages/git/test/promotion.test.ts` 去掉 ff 用例、加 dev clone/远端用例（6） | `apps/runtime/test/*`、`packages/git/test/promotion.test.ts`、`packages/storage/test/*` |
+
+### 关键实现决定（ADR 未写、本格写进 ADR-0052 的部分）
+
+- **可重试 vs 失效**：远端不可达（`REMOTE_DEV_UNREACHABLE`）、push 被拒（`DEV_PUSH_REFUSED`）、读回不等
+  （`REMOTE_DEV_READBACK_MISMATCH`）只写 `outcome_code`/`detail` 并保持记录可重试；只有远端 `dev` 被移到非候选
+  SHA（`REMOTE_DEV_MOVED`）才把记录标 `STALE`（`STALE` 的允许来源因此从 `CREATED`/`AWAITING_APPROVAL` 扩到
+  `PROMOTING`）。
+- **不新增状态值**：`PROMOTING` 收窄为「已推送、等待拉取」，`phase` 由 `state` + `restart_result_json` 派生
+  （不落列，避免同一事实两个来源）。
+- **推回失败可续**：`recordStablePromotionRestart` 成功后不落终态（保持 `RESTARTING`，投影
+  `MAIN_PUSH_PENDING`），`recordStablePromotionMainPush` 读回等于候选才 `SUCCEEDED`；重跑只重试推回，不重复停
+  Runtime。
+- **候选对象在哪**：push 从 dev clone 发出，因此 `prepare`/`promote` 要求候选是该 clone 中的对象
+  （`DEV_REPO_CANDIDATE_MISSING`）；fast-forward 关系在 dev clone 中先核一次（候选对象在那里），拉取后再在 main
+  检出核一次（确保是 ff 而不是 merge/reset）。
+- **删除而非双路径**：`fastForwardCheckedOutWorktree` 与其导出、`PromotionStarted` 事件、`MAIN_UPDATE_FAILED`
+  路径一并删除；`promotion prepare/approve/promote` 不再有任何本机 ff 分支。
+
+### 实际运行的检查与结果（定向，ADR-0038；**未跑** `bun run check` / `just check` / `just verify` / `check:fast`）
+
+- `bun run typecheck` → 退出码 **0**（无输出错误）。
+- `bun test apps/runtime/test/cli-promotion.test.ts apps/runtime/test/promotion-service.test.ts apps/runtime/test/dev-repo-service.test.ts packages/git/test/promotion.test.ts packages/storage/test/dev-clone-promotion.test.ts`
+  → **47 pass / 0 fail**（cli-promotion 6、promotion-service 26、dev-repo-service 6、git promotion 6、storage v29 3）。
+- `bun test packages/storage/test packages/git/test` → **207 pass / 0 fail**（含 v12→当前、v26/v27 回滚夹具、v28→v29 文件库迁移与 `PRAGMA foreign_key_check` 为空）。
+- `bun test apps/runtime/test/cli-open.test.ts apps/runtime/test/runtime-lifecycle.test.ts` → **16 pass / 0 fail**（trust/inspect 命令面与 Runtime 生命周期未回归）。
+- `bun test apps/runtime/test/agent-runtime-service.test.ts` → **9 pass / 0 fail**。
+- **未跑**：`bun run check` / `just check` / `just verify` / `check:fast`（ADR-0038 禁止在开发分支跑全量）；
+  `bun run typecheck:ui`（未改 UI）；`bun run build:ui`（未改 UI 资产）。
+- **重启序列怎么模拟**：`promotion-service.test.ts` 用**伪造的步骤结果**调用 `promotion.restart.record`
+  （不启动任何进程，如实说明）；`cli-promotion.test.ts` 是真实端到端：临时检出里的 `bun install --frozen-lockfile`
+  / `bun run build:ui` / `bun run codeestra stop` / `bun run codeestra status` 由 CLI 真跑，Runtime 真的被停并由
+  `status` 拉起，重启记账按真实 `bootId` 判定。远端是 `git init --bare` 的临时裸仓库，用 `pre-receive`/`post-receive`
+  钩子模拟「拒绝 push」与「push 后远端被移动」。
+- **本格没有对真实 GitHub 做任何写操作、没有停稳定 Runtime、没有执行真实提升**：全部 Git 测试用临时仓库 +
+  临时裸远端；`/tmp/ce-l1` 只用于 CLI 测试进程的 `CODEESTRA_HOME`，测试结束后回收。
+
+### 未验证 / 已知残留（留给后续格）
+
+- 真实 GitHub 上的提升未执行（本仓库自身仍按 `AGENTS.md` 的人工四步）；GitHub 侧分支保护/必经评审/CI 门禁仍未配置，也未监控系统外手动更新 `main`。
+- 提升前全量证据（`dev_full_suite_evidence`）的读取仍以 `projects.repo_root`（main 检出）为仓库根：`promotion full-suite run` 与被重核的 lockfile 绑定都要求候选对象在 main 检出里存在。两个 clone 分离后，候选只在 dev clone 里的情形下这一步需要改（把 lockfile/副本根改到 dev clone，把策略读取留在 main ref）——本格未改，属下一格（以 `dev_repo_path` 取代 `projects.dev_ref` 的那一格）的收口项之一。
+- 稳定 Runtime 仍把 main 检出里的本地 `refs/heads/dev` 当 Task 基线（ADR-0018/0048 D04），**本格未删除**该 ref。
+- UI 未改：`apps/ui/src/types.ts` 的 promotion 视图类型没有新增 `phase`/远端读回字段（只影响 UI 投影，不影响命令面）。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），
@@ -4881,11 +4946,14 @@ git ls-remote --heads origin            → 7292ddc refs/heads/dev / c50730f ref
    观感、固定 shell 在窄屏与矮窗口的表现、Agent 设置页在窄屏下的排布。
 10. **Phase 7 Self Evolution 全部未开始**：Self Task、Candidate、自托管测试、`PROMOTABLE`、用户 Promotion、独立 bootstrap
     与恢复演练；不可逆 migration 与 bootstrap 自身更新的策略仍是 Phase 7 的阻塞决策。
-11. **ADR-0047 的产品实现（已定，下一格）**：`promotion` 命令面改为「push 固定候选到远端 `dev` + 读回核对」并在
-    main 检出尚未拉取时报告「等待拉取」而不是 `SUCCEEDED`；需要新增可空列 `projects.dev_repo_path`（schema **v29**）并让
-    `project trust` 显式核验它（两个 clone 分离后稳定 Runtime 手里没有 dev 候选对象）；提升证据需同时绑定本地候选 SHA
-    与读回的 `origin/dev` SHA，远端移动即 `STALE`。在此之前本仓库自身的提升只能走 `AGENTS.md` 的人工四步，
-    **不得调用旧的本机 ff 实现**。（本格只落了规范、目录分离与 dev UI 标记。）
+11. ~~**ADR-0047 的产品实现**~~ **已完成（FOUNDATION-077 / schema v29 / ADR-0052）**：`promotion prepare/approve/promote`
+    已是「push 固定候选到远端 `dev` + 读回核对 + 等待拉取 + 收口 + 推回远端 `main`」；`projects.dev_repo_path` 已加（可空），
+    `project trust --dev-repo` / `project inspect --dev-repo` 显式核验它（`DEV_REPO_*` 稳定码）；「已推送」用
+    `phase: AWAITING_PULL` + **退出码 3** 表达且不做任何重启记账；提升记录同时绑定本地候选 SHA 与读回的 `origin/dev` SHA，
+    远端移动即 `STALE`；旧的本机 ff 实现（`fastForwardCheckedOutWorktree`）已删除，**不存在双路径**。依据见上面
+    FOUNDATION-077 一节（含实际运行的定向检查与结果），命令面见 `docs/guides/cli-reference.md` §15。
+    **未做**：真实 GitHub 上的提升（本仓库自身仍走 `AGENTS.md` 的人工四步）、GitHub 侧分支保护/评审/CI 门禁、
+    main 检出里的过渡 `dev` ref 仍未删除（下一格）、全量证据的仓库根仍指向 main 检出（见 FOUNDATION-077 的残留项）。
 
 ### 原 0–7 编号对照
 
@@ -4931,6 +4999,7 @@ git ls-remote --heads origin            → 7292ddc refs/heads/dev / c50730f ref
 | 原第 11 条前半：`PROJECT_SPEC.md` §1 前状态段与 §3 的前后矛盾（「规格只读，待用户裁决」） | 用户 2026-09-15 裁决「开一格修规格」并明确授权；FOUNDATION-075 重写第 3 行状态段，并追加授权修 §8 的现状陈述。`git diff PROJECT_SPEC.md` = 3 行，§1.1/§2/§3–§9 规范语义一字未改（见 FOUNDATION-075 的「本次规格修订（逐句）」） |
 | 原第 11 条后半：`intents.kind` 允许 `CHANGE_PRIORITY`/`ANSWER_AGENT`/`SELF_MODIFICATION` 三个「无产生路径」的取值 | 用户裁决「缩小 CHECK（要迁移）」；FOUNDATION-075 / ADR-0046（schema v28）把 CHECK 收窄为五个取值。**同时纠正原声明里的事实错误**：`ANSWER_AGENT` 并不属于「无产生路径」——`planAttentionAnswer` 会写它（稳定库 24/33 行），因此它被保留 |
 | 原第 11 条里「`intents.kind` 的三个取值都没有产生路径」这一措辞本身 | K1 的事实错误（把 `ANSWER_AGENT` 也算了进去），已在 FOUNDATION-075 与 `docs/guides/troubleshooting.md` §3 第 10 条改正；FOUNDATION-074 的历史记录未改写 |
+| FOUNDATION-076 新增的第 11 条（ADR-0047 的产品实现） | FOUNDATION-077 依据已合入本分支的代码/命令面/表结构完成：`projects.dev_repo_path` 与 `stable_promotions` 的远端读回列（schema v29）、`DEV_REPO_*` 核验、`promotion promote` 的 push + 读回 + `phase: AWAITING_PULL`（退出码 3）+ 收口 + 推回远端 `main`、旧本机 ff 路径已删除（`packages/git/src/promotion.ts` 不再导出 `fastForwardCheckedOutWorktree`）。**未做**的部分已在第 11 条里逐条写明，未当作已完成 |
 
 ### 需要用户裁决（本格不得自行决定）
 

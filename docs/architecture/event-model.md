@@ -112,7 +112,7 @@ Phase 1（ADR-0006）的 `VerificationCompleted` 不写入命令原始输出；`
 | Event | aggregate | 说明 |
 |---|---|---|
 | `IntegrationBatchCreated` / `IntegrationCompleted` / `IntegrationFailed` / `IntegrationReconcileRequired` | `IntegrationBatch` | 单成员批次从 `CREATED` 到 `INTEGRATED`/`FAILED`/`RECOVERY_REQUIRED` 的实际事实 |
-| `PromotionCreated` / `PromotionApproved` / `PromotionStarted` / `PromotionMainUpdated` / `PromotionRestartRecorded` / `PromotionCompleted` / `PromotionStale` / `PromotionFailed` / `PromotionReconcileRequired` | `Promotion` | `dev → main` 提升的实际事实（固定三元组、观察到的 `main`、重启记账、ref/证据移动后的 `STALE` 与崩溃 reconcile） |
+| `PromotionCreated` / `PromotionApproved` / `PromotionDevPushed` / `PromotionPushRefused` / `PromotionMainUpdated` / `PromotionRestartRecorded` / `PromotionMainPushRefused` / `PromotionCompleted` / `PromotionStale` / `PromotionFailed` / `PromotionReconcileRequired` | `Promotion` | `dev → main` 提升的实际事实（固定三元组、push 到远端 `dev` 与**读回值**、观察到的 `main`、重启记账、推回远端 `main` 的尝试与结果、ref/证据移动后的 `STALE` 与崩溃 reconcile）。ADR-0047/0052 后本机 ff 路径已删除，因此 `PromotionStarted` 不再产生 |
 
 **回收（ADR-0021）**
 
@@ -183,7 +183,7 @@ FOUNDATION-074 的 doc-sync 把它们补齐（名字都是实现先行的，按 
 | `RevisionDelivered` / `RevisionAcknowledged` | `TaskRevisionDeliveryRecorded` / `TaskRevisionDeliveryAttempted` / `TaskRevisionDeliveryResolved` | 设计名**已废弃**（投递是一等需求 + append-only 尝试台账，见 ADR-0028） |
 | `ExecutionResultCaptured` | `ResultCommitCreated` | 设计名**已废弃** |
 | `DevIntegrationCandidateCreated` / `DevIntegrationCompleted` | `IntegrationBatchCreated` / `IntegrationCompleted`（另有 `IntegrationFailed` / `IntegrationReconcileRequired` / `IntegrationVerificationCompleted`） | 设计名**已废弃** |
-| `StablePromotionApproved` / `StablePromotionApprovalInvalidated` / `MainPromoted` / `RuntimeRestartedAfterMainUpdate` / `RuntimeRestartFailed` / `StablePromotionRequested` | `PromotionCreated` / `PromotionApproved` / `PromotionStarted` / `PromotionMainUpdated` / `PromotionRestartRecorded` / `PromotionCompleted` / `PromotionStale` / `PromotionFailed` / `PromotionReconcileRequired` | 设计名**已废弃**；批准失效由 `PromotionStale` 表达，没有与 `StablePromotionApprovalInvalidated` 同名的事件 |
+| `StablePromotionApproved` / `StablePromotionApprovalInvalidated` / `MainPromoted` / `RuntimeRestartedAfterMainUpdate` / `RuntimeRestartFailed` / `StablePromotionRequested` | `PromotionCreated` / `PromotionApproved` / `PromotionDevPushed` / `PromotionPushRefused` / `PromotionMainUpdated` / `PromotionRestartRecorded` / `PromotionMainPushRefused` / `PromotionCompleted` / `PromotionStale` / `PromotionFailed` / `PromotionReconcileRequired` | 设计名**已废弃**；批准失效由 `PromotionStale` 表达，没有与 `StablePromotionApprovalInvalidated` 同名的事件。`PromotionStarted`（ADR-0022 的本机 ff 实现）在 ADR-0047/0052 后不再产生 |
 | `TakeoverRequested` / `TakeoverSafePointReached` / `SessionHandoffStarted` / `SessionHandoffCompleted` / `TerminalWriterLeaseChanged` / `TakeoverReleased` / `TakeoverFailed` | **同名（本格实现，FOUNDATION-063）** | 设计名**采用**；`TerminalWriterLeaseChanged` 的 payload 以 lease 事实（`leaseId` + before/after holder）表达设计里的 `attachmentId`，因为实现的 writer lease 是以 `holder_ref` 计的 lease term，不引用 attachment 行 |
 | `ImpactAssessed` / `ConflictAssessed` | **未实现为 domain event**：ADR-0031 只把判定写进 `impact_assessments` 行 | 裁决：本格**不做**（判定类事件未列入实现范围） |
 | `TaskPriorityChanged` | 未实现（实现里没有 task priority 这一维度） | 设计名保留，未实现 |

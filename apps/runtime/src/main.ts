@@ -8,6 +8,9 @@ import { devBranchRef, impactPolicyPath, runtimeRequestSchema, uiSettingKeys,
   type RuntimeStreamFrame } from '@codeestra/contracts';
 import { inspectRepository, readLocalRefCommit } from '@codeestra/git';
 import {
+  inspectDevRepo,
+} from './dev-repo-service.js';
+import {
   defaultProseQuestionAttentionMode,
   type ProseQuestionAttentionMode,
 } from '@codeestra/domain';
@@ -785,11 +788,21 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       const baseline = await readLocalRefCommit({
         repositoryRoot: identity.repoRoot, ref: devBranchRef,
       });
+      // ADR-0047 D05: the dev clone is reported as a verified fact, not as a recorded string, so a
+      // client can tell whether this project can promote at all. An explicitly supplied path is
+      // inspected (that is how a user checks a candidate clone before trusting it); otherwise the
+      // path a previous trust recorded is used.
+      const devRepoPath = request.devRepoPath ?? storage.listTrustedProjects()
+        .find((project) => project.repoRoot === identity.repoRoot
+          || project.gitCommonDir === identity.gitCommonDir)?.devRepoPath ?? null;
       return success(request.requestId, {
         ...identity,
         devRef: devBranchRef,
         devCommit: baseline,
         devRefPresent: baseline !== null,
+        devRepoPath: devRepoPath === null ? null : await inspectDevRepo({
+          repositoryRoot: identity.repoRoot, devRef: devBranchRef, devRepoPath,
+        }),
       });
     }
     case 'project.verificationPolicy': {
@@ -1556,7 +1569,7 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         permissionMode,
       }));
     case 'promotion.approve':
-      return success(request.requestId, approveStablePromotion({
+      return success(request.requestId, await approveStablePromotion({
         storage,
         projectId: request.projectId,
         promotionId: request.promotionId,
@@ -1824,13 +1837,28 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       const baselineCommit = await readLocalRefCommit({
         repositoryRoot: identity.repoRoot, ref: devBranchRef,
       });
+      // The dev clone (ADR-0047 D05) is verified *before* anything is compared or written: a path
+      // that is not a separate clone of this origin sitting on `dev` is refused with a stable code,
+      // so trust never records a path it could not establish and never silently leaves it empty.
+      const requestedDevRepoPath = request.devRepoPath === undefined
+        ? storage.listTrustedProjects().find((project) => project.repoRoot === identity.repoRoot
+            || project.gitCommonDir === identity.gitCommonDir)?.devRepoPath ?? null
+        : request.devRepoPath;
+      const devRepoPath = requestedDevRepoPath === null ? null : await inspectDevRepo({
+        repositoryRoot: identity.repoRoot, devRef: devBranchRef, devRepoPath: requestedDevRepoPath,
+      });
+      if (devRepoPath !== null && !devRepoPath.verified) {
+        return failure(request.requestId, devRepoPath.code ?? 'DEV_REPO_NOT_A_REPOSITORY',
+          devRepoPath.detail ?? 'The dev clone could not be verified');
+      }
       // The client echoes exactly what `project.inspect` reported, so this comparison also pins the
-      // development baseline the user saw instead of only the repository identity.
+      // development baseline and the dev clone the user saw, not only the repository identity.
       const actual = {
         ...identity,
         devRef: devBranchRef,
         devCommit: baselineCommit,
         devRefPresent: baselineCommit !== null,
+        devRepoPath,
       };
       if (JSON.stringify(actual) !== JSON.stringify(request.expectedIdentity)) {
         return failure(request.requestId, 'REPOSITORY_CHANGED', 'Repository identity changed after confirmation');
@@ -1883,6 +1911,11 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         gitCommonDir: actual.gitCommonDir,
         mainRef: actual.mainRef,
         devRef: devBranchRef,
+        // Only a declared path is written: `undefined` keeps whatever the project recorded, and an
+        // explicit null clears it. Both are the user's own statement about the dev clone.
+        ...(request.devRepoPath === undefined
+          ? {}
+          : { devRepoPath: request.devRepoPath, recordDevRepoPath: true }),
         objectFormat: actual.objectFormat,
         policyVersion: 1,
         verificationPolicyConfirmationId: crypto.randomUUID(),
@@ -1902,6 +1935,7 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         repository: identity,
         devRef: devBranchRef,
         devCommit: baselineCommit,
+        devRepoPath,
         verificationPolicy: policy,
         impactPolicy: impactPolicyReport({ inspection: impactPolicy, confirmation: null }),
       });

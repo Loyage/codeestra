@@ -20,6 +20,8 @@ CREATE TABLE projects (
   repo_root TEXT NOT NULL UNIQUE,
   git_common_dir TEXT NOT NULL UNIQUE,
   main_ref TEXT NOT NULL,
+  dev_ref TEXT NOT NULL,               -- schema v1/v2，新 Task worktree 的固定基线（ADR-0009/0018）
+  dev_repo_path TEXT,                  -- schema v29，可空；推送 push 用的第二个 clone（ADR-0047 D05）
   object_format TEXT NOT NULL CHECK (object_format IN ('sha1','sha256')),
   policy_version INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL
@@ -612,6 +614,7 @@ append-only：后来的一次尝试追加新行，从不改写或删除旧行。
 取代 §5 的逻辑 `stable_branch_promotions` / `stable_promotion_approvals`：
 
 - `stable_promotions(id, project_id, dev_ref, main_ref, candidate_commit, expected_main_commit, integration_batch_id, verification_id, verification_tested_commit, permission_mode, state, approved_dev_commit, approved_main_commit, approved_verification_id, approved_at, promoted_commit, main_worktree_path, promoting_boot_id, restart_steps_json, restart_result_json, outcome_code, detail, created_at, completed_at)`。`permission_mode CHECK IN ('FULL','STRICT')`；`state CHECK IN ('CREATED','AWAITING_APPROVAL','PROMOTING','RESTARTING','SUCCEEDED','STALE','FAILED','RECOVERY_REQUIRED')`。`promoted_commit` 只从**观察到的 ref** 写入；`CHECK(state <> 'SUCCEEDED' OR promoted_commit IS NOT NULL)`。部分唯一索引 `one_open_promotion_per_project(project_id)` 限定仍开启的状态，避免两个提升争抢同一 refs。
+  状态含义在 ADR-0047 后更精确：`PROMOTING` 是「已 push 到远端 `dev` 且读回核对通过、main 检出尚未拉取」，`RESTARTING` 是「已观察到 main 检出在候选上」。v29 追加的四列（见下）与由状态+重启结果推导的 `phase` 一起把「已推送」与「已拉取」两类事实在记录与 `--json` 里分开。
 - `stable_promotion_members(promotion_id, batch_id, project_id, task_id, revision_id, execution_id, candidate_commit, created_at)`，主键 `(promotion_id,task_id)`。
 
 ### Phase 3 Session incarnation 与单 writer lease（schema version 14，ADR-0023）
@@ -1181,15 +1184,39 @@ ALTER TABLE stable_promotions ADD COLUMN approved_full_suite_evidence_id TEXT;
 
 ### 迁移执行顺序与共享槽位后果
 
-`Phase1Database.migrate()` 按 `if (version < N)` 升序执行 v1…v28（跳过 v16、v22），最后写
+`Phase1Database.migrate()` 按 `if (version < N)` 升序执行 v1…v29（跳过 v16、v22），最后写
 `PRAGMA user_version=${phase1SchemaVersion}`。升级前 schema version 大于 `phase1SchemaVersion` 时以 `UNSUPPORTED_SCHEMA` 拒绝写入。
 
 已知后果（ADR-0032 记录）：单个 lane 合并后，**已经被标成更高版本号的库不会补跑后来出现的更低版本步骤**。跨格合并必须按既定顺序
 （E0 → E1 → E2；以及 Wave D 的 17 → 18 → 19）。这也是 v16 永久未使用的同一个根因。
 
-版本占用现状（以 `packages/storage/src/migration.ts` 为准，不提前创建未来表）：v22 未占用；v16 永久未使用；v23–v28 已实现
+版本占用现状（以 `packages/storage/src/migration.ts` 为准，不提前创建未来表）：v22 未占用；v16 永久未使用；v23–v29 已实现
 （v23 `task retry`/ADR-0036，v24 未注册目录回收/ADR-0037，v25 分层验证证据/ADR-0038+ADR-0039，v26 项目知识/ADR-0041，
-v27 Agent 插件选择/ADR-0044，v28 `intents.kind` 收窄/ADR-0046）。当前 `phase1SchemaVersion = 28`。
+v27 Agent 插件选择/ADR-0044，v28 `intents.kind` 收窄/ADR-0046，v29 dev clone 与经 GitHub 中转的提升/ADR-0047）。
+当前 `phase1SchemaVersion = 29`。
+
+### 经 GitHub 中转的提升与 dev clone（schema version 29，ADR-0047）
+
+两步纯 `ALTER TABLE ... ADD COLUMN`，**不重建任何表**，因此既有行原样保留（`projects` 的 `CHECK` 只拒绝空字符串，
+「没有 dev clone」与「有 dev clone」都是合法事实）：
+
+```sql
+ALTER TABLE projects ADD COLUMN dev_repo_path TEXT
+  CHECK(dev_repo_path IS NULL OR length(trim(dev_repo_path)) > 0);
+
+ALTER TABLE stable_promotions ADD COLUMN dev_repo_path TEXT;
+ALTER TABLE stable_promotions ADD COLUMN remote_dev_commit TEXT;
+ALTER TABLE stable_promotions ADD COLUMN remote_main_commit TEXT;
+ALTER TABLE stable_promotions ADD COLUMN pushed_at INTEGER;
+ALTER TABLE stable_promotions ADD COLUMN main_pushed_at INTEGER;
+```
+
+- `remote_dev_commit` / `remote_main_commit` 是 `git ls-remote` 的**读回值**，不是 push 的输入：只有 push 结束后读回并
+  与固定候选逐字符相等，记录才会写这两个字段。这是「push 命令退出码为 0」不能当证据（ADR-0047 D02）在数据结构上的落点。
+- 提升记录因此同时绑定**本地候选 SHA**（`candidate_commit`）与**读回的远端 `dev` SHA**（`remote_dev_commit`）；远端 `dev` 后来
+  移到别的 SHA 时 `prepare/approve/promote` 全部拒绝并把记录标 `STALE`，不移动任何 ref。
+- `phase`（`READY_TO_PUSH` / `AWAITING_PULL` / `RESTART_PENDING` / `MAIN_PUSH_PENDING` / `COMPLETE` / `REFUSED`）不是列，
+  而是从 `state` 与 `restart_result_json` 推导的投影：同一事实只有一个来源，不会出现状态机与派生字段互相矛盾。
 
 ### Phase 6 项目知识分层与 Execution 绑定（schema version 26，ADR-0041）
 
