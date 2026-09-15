@@ -1,8 +1,9 @@
 # CLI 命令参考
 
-> **适用版本** `dev@036cf68`（2026-09-15） · **schema** v28 · **最后校对** 2026-09-15
-> 版本会前进：`dev@036cf68` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@75fa7b8`（2026-09-15） · **schema** v28 · **最后校对** 2026-09-15
+> 版本会前进：`dev@75fa7b8` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> §7 的 `session handoff terminal resize` 一节由 FOUNDATION-083 校对（ADR-0054）。
 
 本文覆盖 `apps/cli/src/main.ts` 中 `usage()` 列出的**每一个命令组**，以及 Runtime 的 HTTP/SSE 面。
 所有事实来自源码核对；核对方法见 `docs/tasks/README.md` 的 FOUNDATION-070 一节。
@@ -399,6 +400,8 @@ bun run codeestra session handoff release <project-id> <session-id> [--no-resume
 
 bun run codeestra session handoff terminal read  <project-id> <session-id> [--since <cursor>]
 bun run codeestra session handoff terminal write <project-id> <session-id> --text <text>
+bun run codeestra session handoff terminal resize <project-id> <session-id> --cols <n> --rows <n>
+  [--holder <ref>] [--json]
 ```
 
 要点与退出码：
@@ -413,10 +416,18 @@ bun run codeestra session handoff terminal write <project-id> <session-id> --tex
 - `release` 写终端自己的释放字节，**验证 provider 进程已退出且会话文件仍然保有对话**，然后把它交还给同一会话文件上的自动化。
   `--no-resume` 表示不自动交还。退出码 `1` 表示释放或后继启动无法被确认——**绝不是「大概没问题」**。
 - `terminal read` 从 `--since` 游标读投影终端流；`terminal write` 把 `--text` 以 base64 编码发送（是**输入**，不是审批）。
+- `terminal resize` 改变 Runtime 持有的 PTY 的几何（ADR-0054）。退出码 `0` **只有真的改了尺寸**（Transport 自己的应答，
+  `applied: "APPLIED"`）；`1` 拒绝或未生效；`2` 越界或缺参（stderr 打 `TERMINAL_RESIZE_INVALID_SIZE`）。
+  `--cols`/`--rows` 必须是 `1..1000` 的整数（合约的取值域在 CLI、Runtime 与 PTY host 三处都拒绝越界）。
+  `--holder <ref>` 是终端的写入者座位：已有客户端持有该终端的 `WRITER` attachment 时，**只有它能 resize**，
+  其他 holder（或不带 `--holder`）→ 退出码 `1`、码 `TERMINAL_RESIZE_WRITER_BUSY`（报出当前 holder）。这不是审批，常态路径 0 新增步骤。
+  结果同时反映在 `session handoff status` 的 `terminal.currentSize`（仅当本 Runtime 仍持有该终端时非 null）里；
+  启动时的 `terminal.windowSize` 只说明**启动时**那次设置是否成功。
 
 相关稳定码：`ATTACHMENT_BUSY`、`HANDOFF_KIND_MISMATCH`、`HANDOFF_NOT_REQUESTED`、`INCARNATION_NOT_CURRENT`、
 `SESSION_INCARNATION_UNAVAILABLE`、`SESSION_UNKNOWN`、`NOT_FOUND`、`INVALID_STATE`、
 `TERMINAL_NOT_RUNNING`、`TERMINAL_NOT_HELD`、`TERMINAL_NOT_FOUND`、`TERMINAL_EXITED`、
+`TERMINAL_RESIZE_INVALID_SIZE`、`TERMINAL_RESIZE_WRITER_BUSY`、`TERMINAL_RESIZE_FAILED`、`PTY_RESIZE_TIMEOUT`、
 `TERMINAL_TRANSPORT_UNAVAILABLE`、`PERMISSION_CHANNEL_UNAVAILABLE`、`NOT_A_PERMISSION_ATTENTION`。
 相关事件名见 §17。
 
@@ -924,6 +935,8 @@ Runtime 的本地 HTTP 面只绑定 `127.0.0.1`，端口在 `codeestra ui` 时�
 | `session handoff attach --observer` | 显式声明观察者 attachment（默认就是 `OBSERVER`） |
 | `session handoff detach --since` | detach 也接受 `--since` |
 | `session handoff terminal write` 的 `--text` | 服务端收到的是 base64（CLI 负责编码） |
+| `session handoff terminal resize --cols/--rows` | 必须是 `1..1000` 的整数；越界在 CLI 就以退出码 2 + `TERMINAL_RESIZE_INVALID_SIZE` 拒绝（不打给 Runtime） |
+| `session handoff terminal resize --holder` | 终端已有 `WRITER` attachment 时必填且必须是该 holder；否则 `TERMINAL_RESIZE_WRITER_BUSY` |
 | `promotion.restart.record` | CLI 在 `promote` 的重启序列之后调用；不是可直接执行的用户命令 |
 
 ---

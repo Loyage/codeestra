@@ -118,9 +118,28 @@ export interface PiPtyExit {
   readonly at: number;
 }
 
+/**
+ * The outcome of one TerminalTransport resize. It is a fact about the terminal, not a request that
+ * was accepted: `applied: 'NOT_APPLIED'` always names why (`INVALID_SIZE`, `PROVIDER_EXITED`,
+ * `STTY_FAILED`), so a caller never has to guess whether the provider reflowed.
+ */
+export interface PiPtyWindowSize {
+  readonly cols: number;
+  readonly rows: number;
+  readonly applied: 'APPLIED' | 'NOT_APPLIED';
+  readonly detail: string;
+}
+
+/** The TerminalTransport protocol both halves speak; see `pi-pty-host.ts`. */
+export const terminalTransportProtocol = 1;
+
+/** The resize range the Runtime accepts; the PTY host enforces the same bound. */
+export const maxWindowDimension = 1000;
+
 export interface PiPtyReady {
   readonly providerPid: number;
   readonly slavePath: string;
+  readonly transport: number;
   readonly windowSize: 'APPLIED' | 'NOT_APPLIED';
 }
 
@@ -144,6 +163,8 @@ export interface PiPtyLaunchInput {
   readonly bufferBytes?: number;
   /** How often the helper's reported provider exit is polled (tests shorten it). */
   readonly exitPollMs?: number;
+  /** How long a resize waits for the helper's answer before it is reported as unconfirmed. */
+  readonly resizeTimeoutMs?: number;
   readonly now?: () => number;
   readonly readTable?: typeof readProcessTable;
 }
@@ -162,24 +183,29 @@ export class PiPtyTerminal {
   readonly #child: PtyHostProcess;
   readonly #now: () => number;
   readonly #bufferBytes: number;
+  readonly #resizeTimeoutMs: number;
   readonly #readTable: typeof readProcessTable;
   readonly #chunks: { readonly cursor: number; readonly bytes: Uint8Array }[] = [];
   readonly #exitWaiters: ((exit: PiPtyExit) => void)[] = [];
+  readonly #resizeWaiters: ((result: PiPtyWindowSize) => void)[] = [];
   #buffered = 0;
   #cursor = 0;
   #projected = 0;
   #exit: PiPtyExit | null = null;
   #controlClosed = false;
   #ready: PiPtyReady | null = null;
+  #size: { readonly cols: number; readonly rows: number } | null = null;
 
   private constructor(input: {
     readonly child: PtyHostProcess;
     readonly bufferBytes: number;
+    readonly resizeTimeoutMs?: number;
     readonly now: () => number;
     readonly readTable: typeof readProcessTable;
   }) {
     this.#child = input.child;
     this.#bufferBytes = input.bufferBytes;
+    this.#resizeTimeoutMs = input.resizeTimeoutMs ?? 10_000;
     this.#now = input.now;
     this.#readTable = input.readTable;
     void this.#pumpFrames();
@@ -204,6 +230,16 @@ export class PiPtyTerminal {
     return this.#ready?.windowSize ?? 'NOT_APPLIED';
   }
 
+  /** The transport protocol the helper reported in `ready`; it must be the one that was requested. */
+  get transportProtocol(): number {
+    return this.#ready?.transport ?? 0;
+  }
+
+  /** The last geometry this Runtime applied through the transport, if any. */
+  get size(): { readonly cols: number; readonly rows: number } | null {
+    return this.#size;
+  }
+
   get exit(): PiPtyExit | null {
     return this.#exit;
   }
@@ -220,6 +256,7 @@ export class PiPtyTerminal {
       env: input.env,
       cols: input.cols ?? 120,
       rows: input.rows ?? 40,
+      transport: terminalTransportProtocol,
     });
     const spawn = input.spawn ?? ((argv, options) => Bun.spawn([...argv], {
       cwd: options.cwd,
@@ -240,6 +277,7 @@ export class PiPtyTerminal {
     const terminal = new PiPtyTerminal({
       child,
       bufferBytes: input.bufferBytes ?? 256 * 1024,
+      ...(input.resizeTimeoutMs === undefined ? {} : { resizeTimeoutMs: input.resizeTimeoutMs }),
       now: input.now ?? Date.now,
       readTable: input.readTable ?? readProcessTable,
     });
@@ -295,6 +333,48 @@ export class PiPtyTerminal {
       throw new PiPtyError('TERMINAL_CONTROL_CLOSED',
         'The terminal control pipe is closed; input was not written');
     }
+  }
+
+  /**
+   * Changes the terminal's window size through the versioned TerminalTransport protocol.
+   *
+   * This is a transport fact, not an AdapterEvent: the size is the terminal's own geometry, and the
+   * provider learns it from the terminal device (`TIOCGWINSZ`) exactly as it learns the size it was
+   * launched with. The answer is the helper's own observation — `NOT_APPLIED` with a reason is a
+   * real answer and is returned, never converted into a thrown "success".
+   *
+   * Refusals that are not "the terminal says no": an exited terminal and a closed control pipe are
+   * thrown, and an unconfirmed resize (the helper did not answer within the deadline) is thrown too,
+   * because calling that `NOT_APPLIED` would blame the terminal for the Runtime's own uncertainty.
+   */
+  async resize(input: { readonly cols: number; readonly rows: number }): Promise<PiPtyWindowSize> {
+    if (!Number.isSafeInteger(input.cols) || !Number.isSafeInteger(input.rows)
+      || input.cols < 1 || input.rows < 1
+      || input.cols > maxWindowDimension || input.rows > maxWindowDimension) {
+      throw new PiPtyError('INVALID_WINDOW_SIZE',
+        `A window size needs 1..${maxWindowDimension} integer columns and rows, got`
+        + ` ${input.cols}x${input.rows}`);
+    }
+    if (this.#exit !== null) {
+      throw new PiPtyError('TERMINAL_EXITED', 'The provider terminal has already exited');
+    }
+    const answer = new Promise<PiPtyWindowSize>((resolve) => { this.#resizeWaiters.push(resolve); });
+    const waiter = this.#resizeWaiters.at(-1) as (result: PiPtyWindowSize) => void;
+    if (!this.#send({ t: 'resize', cols: input.cols, rows: input.rows })) {
+      this.#resizeWaiters.pop();
+      throw new PiPtyError('TERMINAL_CONTROL_CLOSED',
+        'The terminal control pipe is closed; the resize was not sent');
+    }
+    const result = await Promise.race([answer, Bun.sleep(this.#resizeTimeoutMs).then(() => null)]);
+    if (result === null) {
+      // A late answer must not be handed to the next resize: the waiter is dropped before throwing.
+      const index = this.#resizeWaiters.indexOf(waiter);
+      if (index !== -1) this.#resizeWaiters.splice(index, 1);
+      throw new PiPtyError('PTY_RESIZE_TIMEOUT',
+        `The PTY host did not answer the resize within ${this.#resizeTimeoutMs} ms; whether the`
+        + ' terminal changed size is unknown');
+    }
+    return result;
   }
 
   /** Asks the helper to signal the provider. Only used for an owned, requested stop. */
@@ -404,12 +484,35 @@ export class PiPtyTerminal {
     let buffer = '';
     const dispatch = (frame: PtyHostFrame): void => {
       if (frame['t'] === 'ready') {
+        const transport = typeof frame['transport'] === 'number' ? frame['transport'] : 0;
+        if (transport !== terminalTransportProtocol) {
+          this.ready.reject(new PiPtyError('PTY_TRANSPORT_PROTOCOL_MISMATCH',
+            `The PTY host answered TerminalTransport protocol ${transport}; this Runtime speaks`
+            + ` ${terminalTransportProtocol}`));
+          return;
+        }
         this.#ready = {
           providerPid: typeof frame['providerPid'] === 'number' ? frame['providerPid'] : 0,
           slavePath: typeof frame['slave'] === 'string' ? frame['slave'] : '',
+          transport,
           windowSize: frame['windowSize'] === 'APPLIED' ? 'APPLIED' : 'NOT_APPLIED',
         };
         this.ready.resolve(this.#ready);
+        return;
+      }
+      if (frame['t'] === 'resized') {
+        const result: PiPtyWindowSize = {
+          cols: typeof frame['cols'] === 'number' ? frame['cols'] : 0,
+          rows: typeof frame['rows'] === 'number' ? frame['rows'] : 0,
+          applied: frame['applied'] === 'APPLIED' ? 'APPLIED' : 'NOT_APPLIED',
+          detail: typeof frame['detail'] === 'string' ? frame['detail'] : 'UNKNOWN',
+        };
+        // The terminal really has this geometry only when the helper applied it; a refused size never
+        // overwrites the size the provider is actually rendering at.
+        if (result.applied === 'APPLIED') this.#size = { cols: result.cols, rows: result.rows };
+        const waiter = this.#resizeWaiters.shift();
+        if (waiter === undefined) return;
+        waiter(result);
         return;
       }
       if (frame['t'] === 'output' && typeof frame['data'] === 'string') {

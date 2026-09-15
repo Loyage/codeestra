@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PiPtyTerminal, terminalReleaseByte } from '../src/pi-pty.js';
+import { PiPtyTerminal, terminalReleaseByte, terminalTransportProtocol } from '../src/pi-pty.js';
 import { readPiSessionFileFacts } from '../src/pi-session-file.js';
 import codeestraGate, { handoffFenceReason, type HandoffChannelFrame }
   from '../src/pi-gate-extension.js';
@@ -47,6 +47,17 @@ async function waitFor(predicate: () => boolean, timeoutMs = 10_000): Promise<bo
     await Bun.sleep(20);
   }
   return predicate();
+}
+
+/** The stable code of a refusal, so the assertion is about the code and not about prose. */
+async function refusalCode(promise: Promise<unknown>): Promise<string> {
+  try {
+    await promise;
+    return 'NO_ERROR';
+  } catch (error) {
+    return typeof error === 'object' && error !== null && 'code' in error
+      ? String(error.code) : `NO_CODE: ${String(error)}`;
+  }
 }
 
 type ToolCallHandler = (
@@ -109,6 +120,62 @@ describe('PTY transport (ADR-0026)', () => {
       expect(exit).not.toBeNull();
       expect(exit?.code).toBe(9);
       expect(terminal.snapshot().truncated).toBe(false);
+    } finally {
+      await terminal.stop({ graceMs: 2_000 });
+    }
+  }, 40_000);
+
+  test('changes the terminal window size through the transport and reports the transport protocol', async () => {
+    // The provider reads its own geometry from its own terminal, so the assertion is about the real
+    // PTY and not about the helper's exit code. `stty size` inside the provider is what an
+    // interactive TUI's reflow reads too.
+    const provider = fakeProvider(`
+      const size = () => Bun.spawnSync(['stty', 'size'], { stdio: ['inherit', 'pipe', 'pipe'] })
+        .stdout.toString().trim();
+      process.stdout.write('size=' + size() + '\\n');
+      const decoder = new TextDecoder();
+      for await (const chunk of Bun.stdin.stream()) {
+        const text = decoder.decode(chunk);
+        if (text.includes('SIZE?')) process.stdout.write('size=' + size() + '\\n');
+        if (text.includes('\\u0004')) break;
+      }
+      process.exit(0);
+    `);
+    const terminal = await PiPtyTerminal.launch({
+      argv: [provider], cwd: temporaryDirectory('codeestra-pty-cwd-'), env: environment(),
+      cols: 100, rows: 30,
+    });
+    try {
+      // The transport version is negotiated, not assumed: the helper echoed the requested protocol.
+      expect(terminal.transportProtocol).toBe(terminalTransportProtocol);
+      expect(await waitFor(() => terminal.outputSince(0).data.includes('size=30 100'))).toBe(true);
+      // Nothing has been resized yet, so the transport cannot state a current geometry.
+      expect(terminal.size).toBeNull();
+
+      const resized = await terminal.resize({ cols: 99, rows: 33 });
+      expect(resized).toEqual({ cols: 99, rows: 33, applied: 'APPLIED', detail: 'stty' });
+      expect(terminal.size).toEqual({ cols: 99, rows: 33 });
+      // The provider reads the new geometry from its own descriptor: the terminal really changed.
+      const cursor = terminal.outputSince(0).cursor;
+      terminal.write('SIZE?\n');
+      expect(await waitFor(() => terminal.outputSince(cursor).data.includes('size=33 99'))).toBe(true);
+
+      // A second resize is applied too, so this is not a one-shot launch-time setting.
+      expect((await terminal.resize({ cols: 40, rows: 12 })).applied).toBe('APPLIED');
+      const second = terminal.outputSince(0).cursor;
+      terminal.write('SIZE?\n');
+      expect(await waitFor(() => terminal.outputSince(second).data.includes('size=12 40'))).toBe(true);
+
+      // An out-of-range size is refused before anything is sent: no partial terminal state.
+      expect(await refusalCode(terminal.resize({ cols: 0, rows: 40 }))).toBe('INVALID_WINDOW_SIZE');
+      expect(await refusalCode(terminal.resize({ cols: 1001, rows: 40 }))).toBe('INVALID_WINDOW_SIZE');
+      expect(await refusalCode(terminal.resize({ cols: 10.5, rows: 40 }))).toBe('INVALID_WINDOW_SIZE');
+      expect(terminal.size).toEqual({ cols: 40, rows: 12 });
+
+      // After the provider exits, a resize is refused as an exited terminal instead of a guess.
+      terminal.write(terminalReleaseByte);
+      expect(await terminal.waitForExit(10_000)).not.toBeNull();
+      expect(await refusalCode(terminal.resize({ cols: 50, rows: 20 }))).toBe('TERMINAL_EXITED');
     } finally {
       await terminal.stop({ graceMs: 2_000 });
     }

@@ -78,6 +78,14 @@ for await (const chunk of Bun.stdin.stream()) {
     const { spawn } = await import('node:child_process');
     spawn('nohup', ['bash', '-c', 'sleep 30'], { stdio: 'ignore' });
   }
+  // The geometry the provider itself reads from its own terminal: this is how a real TUI learns the
+  // size it renders at, so a resize assertion that waits for this line is about the PTY, not about
+  // the Runtime's bookkeeping.
+  if (text.includes('SIZE?')) {
+    const size = Bun.spawnSync(['stty', 'size'], { stdio: ['inherit', 'pipe', 'pipe'] })
+      .stdout.toString().trim();
+    process.stdout.write('size:' + size + '\\n');
+  }
   if (seen.includes('\\u0004')) {
     ${options.ignoreRelease === true ? 'continue;' : `
     if (${options.rewriteSessionFile === true ? 'true' : 'false'}) {
@@ -440,6 +448,82 @@ describe('native terminal transport service (ADR-0026)', () => {
       const leasesAfter = harness.storage.listSessionWriterLeases(harness.sessionId);
       expect(leasesAfter.filter((lease) => lease.releasedAt === null)).toHaveLength(0);
       expect(leasesAfter.at(-1)?.releaseReason).toContain('shutting down');
+    } finally {
+      await harness.terminals.close();
+    }
+  }, 60_000);
+
+  test('resizes the held terminal for real, and refuses a size the writer seat does not own', async () => {
+    const harness = await startHarness();
+    try {
+      await waitForRawMode(harness);
+      // The launch-time fact is recorded; the *current* geometry is only stated once the Runtime has
+      // applied one, because a Runtime that has not resized cannot know what the provider renders at.
+      expect(harness.terminals.view(harness.sessionId)?.windowSize).toBe('APPLIED');
+      expect(harness.terminals.view(harness.sessionId)?.currentSize).toBeNull();
+
+      const cursor = harness.terminals.read({ sessionId: harness.sessionId }).cursor;
+      const resized = await harness.terminals.resize({
+        sessionId: harness.sessionId, cols: 90, rows: 30,
+      });
+      expect(resized).toMatchObject({ cols: 90, rows: 30, applied: 'APPLIED', detail: 'stty' });
+      expect(harness.terminals.view(harness.sessionId)?.currentSize)
+        .toEqual({ cols: 90, rows: 30 });
+      // The provider reads the new size from its own terminal descriptor: the PTY really changed.
+      harness.terminals.write({ sessionId: harness.sessionId, data: 'SIZE?\n' });
+      await waitFor(() => harness.terminals.read({ sessionId: harness.sessionId, since: cursor })
+        .data.includes('size:30 90'));
+
+      // The bound is enforced by the service as well as by the CLI, with its own stable code.
+      for (const invalid of [{ cols: 0, rows: 30 }, { cols: 90, rows: -1 }, { cols: 1001, rows: 30 }]) {
+        let refusal: unknown = null;
+        try {
+          await harness.terminals.resize({ sessionId: harness.sessionId, ...invalid });
+        } catch (error) {
+          refusal = error;
+        }
+        expect(refusal).toBeInstanceOf(TerminalServiceError);
+        expect((refusal as TerminalServiceError).code).toBe('TERMINAL_RESIZE_INVALID_SIZE');
+      }
+      // The refused sizes changed nothing.
+      expect(harness.terminals.view(harness.sessionId)?.currentSize)
+        .toEqual({ cols: 90, rows: 30 });
+
+      // A WRITER attachment owns the viewport: another holder (or an anonymous caller) is refused
+      // with the writer named, and the writer itself can resize.
+      harness.terminals.attach({ sessionId: harness.sessionId, commandId: crypto.randomUUID(),
+        holderRef: 'cli-a', kind: 'WRITER' });
+      for (const holderRef of [undefined, 'cli-b']) {
+        let refusal: unknown = null;
+        try {
+          await harness.terminals.resize({ sessionId: harness.sessionId, cols: 80, rows: 24,
+            ...(holderRef === undefined ? {} : { holderRef }) });
+        } catch (error) {
+          refusal = error;
+        }
+        expect((refusal as TerminalServiceError).code).toBe('TERMINAL_RESIZE_WRITER_BUSY');
+        expect((refusal as TerminalServiceError).message).toContain('cli-a');
+      }
+      expect((await harness.terminals.resize({ sessionId: harness.sessionId, cols: 80, rows: 24,
+        holderRef: 'cli-a' })).applied).toBe('APPLIED');
+
+      // A Runtime generation that does not hold the terminal cannot resize it: it has no PTY to
+      // change, and saying "resized" would be a claim about a process it does not own.
+      const otherGeneration = new TerminalService({
+        storage: harness.storage,
+        piSessionDir: join(tmpdir(), 'codeestra-unused-sessions'),
+        gateExtensionPath: '/tmp/gate-extension.ts',
+        questionExtensionPath: '/tmp/question-extension.ts',
+        environment: { PATH: Bun.env.PATH ?? '' },
+        permissionMode: () => 'FULL',
+      });
+      let notHeld: unknown = null;
+      try {
+        await otherGeneration.resize({ sessionId: harness.sessionId, cols: 70, rows: 20 });
+      } catch (error) {
+        notHeld = error;
+      }
+      expect((notHeld as TerminalServiceError).code).toBe('TERMINAL_NOT_HELD');
     } finally {
       await harness.terminals.close();
     }

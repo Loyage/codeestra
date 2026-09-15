@@ -221,8 +221,8 @@ describe('session handoff service', () => {
         // started, and still cannot attach to a running `pi --mode rpc` process.
         attachToLiveRpcProcess: 'UNSUPPORTED',
         crossHandoffPermissionModeMatrix: 'PARTIAL',
-        parallelToolBatchSafePoint: 'UNVERIFIED',
-        ptyResize: 'UNSUPPORTED',
+        parallelToolBatchSafePoint: 'IMPLEMENTED',
+        ptyResize: 'IMPLEMENTED',
         windows: 'UNSUPPORTED',
       });
 
@@ -556,6 +556,92 @@ describe('session handoff service', () => {
       expect(after.incarnation?.state).toBe('FENCED');
       expect(after.writerLease?.incarnationId).toBe(after.incarnation?.incarnationId);
       expect(after.lastPermission).toBeNull();
+    } finally {
+      channel.close();
+      harness.service.close();
+    }
+  });
+
+  test('counts a parallel tool batch, and will not call it a safe point while a STRICT approval is open', async () => {
+    const harness = await startHarness();
+    const channel = await openChannel(harness);
+    try {
+      await channel.waitFor((command) => command.kind === 'welcome');
+      harness.service.requestHandoff({
+        projectId: harness.projectId, sessionId: harness.sessionId,
+        kind: 'TAKEOVER', commandId: crypto.randomUUID(),
+      });
+      await channel.waitFor((command) => command.kind === 'fence');
+      // One assistant message with two tool calls: Pi reports both starts before either tool end,
+      // and the Runtime counts them from the ids the provider gave.
+      channel.send({ kind: 'fence_ack', active: true });
+      channel.send({ kind: 'tool_start', toolCallId: 'call-a', toolName: 'bash' });
+      channel.send({ kind: 'tool_start', toolCallId: 'call-b', toolName: 'bash' });
+      await waitFor(() => statusOf(harness).safePoint.activeTools === 2);
+      expect(statusOf(harness).safePoint.reached).toBe(false);
+      expect(statusOf(harness).safePoint.missing.join(' ')).toContain('2 tool call(s) are still running');
+
+      // Pi's preflight is sequential, so the two approvals of one batch arrive one at a time; each
+      // becomes its own Attention, exactly as a single-tool run would.
+      channel.send({ kind: 'permission_request', requestId: 'request-a', toolCallId: 'call-a',
+        toolName: 'bash', inputJson: '{"command":"echo a"}', inputFingerprint: 'sha256:a',
+        mode: 'tui' });
+      await waitFor(() => harness.storage.listAttentionRequests(harness.projectId).length === 1);
+      const whileApprovalPending = statusOf(harness);
+      expect(whileApprovalPending.permission?.toolName).toBe('bash');
+      expect(whileApprovalPending.safePoint).toMatchObject({ reached: false, activeTools: 2,
+        openAttention: true });
+
+      // The batch finishes while that approval is still open. A live provider cannot produce this
+      // order — it awaits the decision inside preflight, so `agent_settled` always comes after the
+      // answer (measured: docs/spikes/pi-parallel-tool-batch.md) — and the Runtime still refuses the
+      // safe point, because a handover there would start a successor while a tool call is blocked
+      // waiting for a decision. This is the invariant guard, not a provider-observed sequence.
+      channel.send({ kind: 'tool_end', toolCallId: 'call-b', toolName: 'bash', isError: false });
+      channel.send({ kind: 'tool_end', toolCallId: 'call-a', toolName: 'bash', isError: false });
+      channel.send({ kind: 'agent_settled' });
+      await waitFor(() => statusOf(harness).safePoint.settledAfterFence === true);
+      const pending = statusOf(harness);
+      expect(pending.safePoint).toMatchObject({ reached: false, fenceAcknowledged: true,
+        activeTools: 0, settledAfterFence: true, openAttention: true });
+      expect(pending.safePoint.missing.join(' ')).toContain('Attention');
+      expect((await harness.service.admitSuccessor({ projectId: harness.projectId,
+        sessionId: harness.sessionId, commandId: crypto.randomUUID() })).code)
+        .toBe('SAFE_POINT_NOT_REACHED');
+
+      // Answering it (allow) clears the block; the second sibling's approval then takes its place.
+      const first = await harness.service.answerPermission({
+        projectId: harness.projectId,
+        attentionId: pending.permission!.attentionId,
+        commandId: crypto.randomUUID(),
+        answer: { type: 'CONFIRM', confirmed: true },
+        actor: 'local-user',
+      });
+      expect(first).toMatchObject({ delivery: 'DELIVERED', decision: 'ALLOW' });
+      await channel.waitFor((command) => command.kind === 'permission_decision'
+        && command.requestId === 'request-a');
+      channel.send({ kind: 'permission_request', requestId: 'request-b', toolCallId: 'call-b',
+        toolName: 'bash', inputJson: '{"command":"echo b"}', inputFingerprint: 'sha256:b',
+        mode: 'tui' });
+      await waitFor(() => harness.storage.listAttentionRequests(harness.projectId).length === 2);
+      await waitFor(() => statusOf(harness).permission !== null);
+      expect(statusOf(harness).safePoint.reached).toBe(false);
+      const second = await harness.service.answerPermission({
+        projectId: harness.projectId,
+        attentionId: statusOf(harness).permission!.attentionId,
+        commandId: crypto.randomUUID(),
+        answer: { type: 'CONFIRM', confirmed: true },
+        actor: 'local-user',
+      });
+      expect(second).toMatchObject({ delivery: 'DELIVERED', decision: 'ALLOW' });
+      // The safe point is (re)evaluated on provider frames; the next one is the provider's own
+      // settled notification for the batch, which is also the frame a real run sends last.
+      channel.send({ kind: 'agent_settled' });
+      await waitFor(() => statusOf(harness).safePoint.reached);
+      // Only now — fence acknowledged, batch finished, settled, no approval outstanding — is the
+      // batch safe to hand over, and the recorded facts say exactly that.
+      expect(statusOf(harness).safePoint).toMatchObject({ reached: true, activeTools: 0,
+        settledAfterFence: true, openAttention: false, missing: [] });
     } finally {
       channel.close();
       harness.service.close();

@@ -100,15 +100,50 @@ export interface SessionHandoffCapabilities {
   /** Attaching to an already-running `pi --mode rpc` process. Pi offers no primitive for it. */
   readonly attachToLiveRpcProcess: 'UNSUPPORTED';
   /**
-   * The permission mode and tool allowlist are re-applied by the Runtime on every successor argv, but
-   * the full cross-handoff matrix (every mode/tool combination, both directions, repeatedly) has not
-   * been measured; only single transitions with a real provider have.
+   * The permission mode and tool allowlist are re-applied by the Runtime on every successor argv.
+   *
+   * `PARTIAL` (ADR-0054). Measured in this version: FULL and STRICT were each taken through the whole
+   * chain `AUTOMATED_RPC → HUMAN_TUI → AUTOMATED_RPC` at the real command face, and each provider
+   * process's own argv (`--approve`/`--no-approve` plus the STRICT `--tools` list) and environment
+   * (`CODEESTRA_PERMISSION_MODE`) was read back from the process itself; in a real Pi native TUI
+   * (production gate, real PTY) FULL raised zero approval requests and STRICT raised one recorded
+   * side-channel request per sibling tool, delivered as a typed decision, with `tui` as the reported
+   * provider mode; the handoff commands themselves added no confirmation; and a decision bound to an
+   * incarnation that is no longer current is refused atomically.
+   *
+   * **The cell that does not hold**: a real provider under STRICT where the *human* decision travels
+   * through the recorded Attention into a native TUI takeover. Each half is measured separately
+   * (real Pi → side channel; Runtime Attention → decision), the combination is not, and it must not be
+   * reported as established. Tool-level coverage is also per-class, not exhaustive: the approval path
+   * is exercised for `bash`; `edit`/`write` and unknown-tool rejection are covered by unit tests of
+   * the classifier, not by a real provider run.
    */
   readonly crossHandoffPermissionModeMatrix: 'PARTIAL';
-  /** A safe point while several tool calls from one assistant turn run in parallel. */
-  readonly parallelToolBatchSafePoint: 'UNVERIFIED';
+  /**
+   * A safe point while several tool calls from one assistant turn run in parallel.
+   *
+   * `IMPLEMENTED` (ADR-0054). Measured with real Pi (scripted model, production gate, real side
+   * channel): a batch reports every `tool_execution_start` in assistant source order before any
+   * `tool_execution_end` (completion order), a fence opened mid-batch lets the already-preflighted
+   * siblings finish with their real output and blocks the next tool call with a terminating result,
+   * and `agent_settled` follows the last `tool_execution_end`. The Runtime counts the batch by
+   * provider `toolCallId`, so a takeover cannot be admitted while the batch is running, and a pending
+   * STRICT approval keeps the safe point refused even after the batch settles.
+   */
+  readonly parallelToolBatchSafePoint: 'IMPLEMENTED';
   readonly sessionCompactionDuringHandoff: 'UNSUPPORTED';
-  readonly ptyResize: 'UNSUPPORTED';
+  /**
+   * Changing the geometry of the PTY this Runtime holds (ADR-0054).
+   *
+   * `IMPLEMENTED` on POSIX: `session.handoff.terminal.resize` sends a `resize` command on the
+   * versioned TerminalTransport and the PTY host applies it with `stty` on the terminal's slave
+   * device, which is the interface the provider itself reads (`TIOCGWINSZ`). Measured end to end on
+   * darwin/arm64 (Bun 1.4.2): the provider read `25 80` before and `33 99` after a resize, and the
+   * Runtime's projection reported the same geometry. The Linux path is the identical `stty`-on-slave
+   * mechanism and is **not measured on this machine**; Windows has no PTY transport at all, so the
+   * resize follows `ptyTransport`/`windows` and is `UNSUPPORTED` there.
+   */
+  readonly ptyResize: 'IMPLEMENTED' | 'UNSUPPORTED';
   readonly windows: 'UNSUPPORTED';
 }
 
@@ -213,9 +248,9 @@ function capabilitiesFor(platform: 'unix' | 'windows'): SessionHandoffCapabiliti
     releaseBackToAutomation: posix,
     attachToLiveRpcProcess: 'UNSUPPORTED',
     crossHandoffPermissionModeMatrix: 'PARTIAL',
-    parallelToolBatchSafePoint: 'UNVERIFIED',
+    parallelToolBatchSafePoint: 'IMPLEMENTED',
     sessionCompactionDuringHandoff: 'UNSUPPORTED',
-    ptyResize: 'UNSUPPORTED',
+    ptyResize: posix,
     windows: 'UNSUPPORTED',
   };
   return Object.freeze(capabilities);
@@ -1455,6 +1490,37 @@ export class SessionHandoffService {
   writeTerminal(input: { readonly sessionId: string; readonly data: string }): {
     readonly terminalId: string; readonly cursor: number } {
     return this.#requireTerminalTransport().write(input);
+  }
+
+  /**
+   * Resizes the terminal this Runtime holds. The writer seat owns the viewport, so a caller that is
+   * not the terminal's current WRITER attachment is refused with `TERMINAL_RESIZE_WRITER_BUSY`; the
+   * terminal's size is a transport fact and this face is the CLI-complete form of it.
+   */
+  async resizeTerminal(input: {
+    readonly projectId: string;
+    readonly sessionId: string;
+    readonly cols: number;
+    readonly rows: number;
+    readonly holderRef?: string;
+  }): Promise<{
+    readonly terminal: SessionTerminalView | null;
+    readonly terminalId: string;
+    readonly cols: number;
+    readonly rows: number;
+    readonly applied: 'APPLIED' | 'NOT_APPLIED';
+    readonly detail: string;
+    readonly cursor: number;
+  }> {
+    this.#requireSession(input.projectId, input.sessionId);
+    const terminalService = this.#requireTerminalTransport();
+    const resized = await terminalService.resize({
+      sessionId: input.sessionId,
+      cols: input.cols,
+      rows: input.rows,
+      ...(input.holderRef === undefined ? {} : { holderRef: input.holderRef }),
+    });
+    return { ...resized, terminal: terminalService.view(input.sessionId) };
   }
 
   #requireTerminalTransport(): TerminalService {

@@ -31,25 +31,52 @@
 import { dlopen, FFIType, ptr } from 'bun:ffi';
 import { closeSync, openSync, readSync, writeSync, constants as fsConstants } from 'node:fs';
 
+/**
+ * The transport protocol this helper speaks. The Runtime names the protocol it wants in the spawn
+ * plan and this helper echoes it back in `ready`, so a stale helper paired with a newer Runtime (or
+ * the reverse) is a stated refusal instead of a silently mis-read frame. `1` is the protocol that
+ * carries `resize` on top of input/output/release/signal; the number lives in both halves of the
+ * wire and is edited together with the frame table in `docs/architecture/agent-adapter-api.md`
+ * (§ TerminalTransport).
+ */
+export const supportedTransportProtocol = 1;
+
+/**
+ * The resize range this helper accepts. A terminal far above this is not a terminal a provider can
+ * render, and an unbounded width is a way to make a provider allocate enormous line buffers; the
+ * bound is enforced here as well as in the Runtime because the helper is the process that talks to
+ * the kernel.
+ */
+export const maxWindowDimension = 1000;
+
 export interface PtyHostPlan {
   readonly argv: readonly string[];
   readonly cwd: string;
   readonly env: Readonly<Record<string, string>>;
   readonly cols: number;
   readonly rows: number;
+  /** The TerminalTransport protocol the Runtime speaks (see `supportedTransportProtocol`). */
+  readonly transport: number;
 }
 
 export type PtyHostFrame =
   | { readonly t: 'ready'; readonly providerPid: number; readonly slave: string;
-      readonly cols: number; readonly rows: number;
+      readonly cols: number; readonly rows: number; readonly transport: number;
       readonly windowSize: 'APPLIED' | 'NOT_APPLIED' }
   | { readonly t: 'output'; readonly data: string }
+  /**
+   * The outcome of one resize. `applied: 'NOT_APPLIED'` always carries a `detail` naming why
+   * (`INVALID_SIZE`, `PROVIDER_EXITED`, `STTY_FAILED`), never a silent success.
+   */
+  | { readonly t: 'resized'; readonly cols: number; readonly rows: number;
+      readonly applied: 'APPLIED' | 'NOT_APPLIED'; readonly detail: string }
   | { readonly t: 'exit'; readonly code: number | null; readonly signal: string | null }
   | { readonly t: 'error'; readonly code: string; readonly message: string };
 
 type PtyHostCommand =
   | { readonly t: 'input'; readonly data: string }
   | { readonly t: 'eof' }
+  | { readonly t: 'resize'; readonly cols: number; readonly rows: number }
   | { readonly t: 'signal'; readonly signal: 'SIGTERM' | 'SIGKILL' | 'SIGINT' }
   | { readonly t: 'shutdown' };
 
@@ -97,11 +124,19 @@ function writeFrame(frame: PtyHostFrame): void {
 }
 
 /**
- * Applies the initial window size by asking `stty`, which is the interface the terminal itself
- * exposes. A direct `ioctl(TIOCSWINSZ)` was tried first and is deliberately not used here: in this
- * environment it silently stored garbage in the terminal's size (measured with `stty size` in the
- * provider), and a wrong size is worse than an unset one. Resizing an attached terminal stays out
- * of scope for this lane and is reported as unsupported.
+ * Applies a window size, initial or later, by asking `stty` on the terminal's slave device.
+ *
+ * A direct `ioctl(TIOCSWINSZ)` was tried first and is deliberately not used here: on this platform
+ * (darwin/arm64, Bun 1.4.2) an FFI `ioctl(fd, TIOCSWINSZ, &winsize)` returns 0 while storing nothing
+ * usable, and the provider then reads garbage from `stty size` (measured: `getSize()` read back
+ * `0 0`, `stty size` printed a different random pair on every run — the classic AArch64 variadic-ABI
+ * mismatch for `ioctl(2)`, which takes its third argument on the stack). A wrong size is worse than
+ * an unset one, so this helper uses the interface the terminal itself exposes instead.
+ *
+ * `stty` on the slave fd is measured to work for both the initial size (the `ready` frame's
+ * `windowSize`) and a later resize; the provider reads the new values back through its own descriptor
+ * (`stty size` inside the provider reported `25 80` before and `33 99` after a resize). The same
+ * mechanism is what makes an interactive TUI reflow.
  */
 async function applyWindowSize(input: {
   readonly slave: number;
@@ -205,12 +240,17 @@ function parsePlan(raw: string | undefined): PtyHostPlan {
   if (typeof parsed.cwd !== 'string' || parsed.cwd.length === 0) {
     throw new Error('the PTY host plan needs an absolute cwd');
   }
+  if (parsed.transport !== supportedTransportProtocol) {
+    throw new Error(`this PTY host speaks TerminalTransport protocol ${supportedTransportProtocol},`
+      + ` the plan asked for ${String(parsed.transport)}`);
+  }
   return {
     argv: parsed.argv,
     cwd: parsed.cwd,
     env: typeof parsed.env === 'object' && parsed.env !== null ? parsed.env : {},
     cols: typeof parsed.cols === 'number' && parsed.cols > 0 ? parsed.cols : 120,
     rows: typeof parsed.rows === 'number' && parsed.rows > 0 ? parsed.rows : 40,
+    transport: supportedTransportProtocol,
   };
 }
 
@@ -276,17 +316,19 @@ export async function runPtyHost(rawPlan: string | undefined): Promise<number> {
       message: error instanceof Error ? error.message : String(error) });
     return 2;
   }
-  writeFrame({ t: 'ready', providerPid: child.pid, slave: slaveName,
+  writeFrame({ t: 'ready', providerPid: child.pid, slave: slaveName, transport: plan.transport,
     cols: plan.cols, rows: plan.rows, windowSize });
 
   // The runtime-exit promise is kept only as a belt-and-braces signal; `waitForChild` below is the
-  // authority. The helper must close its own copy of the slave, otherwise the master never reports
-  // EOF when the provider exits and "the terminal is gone" stays invisible.
+  // authority. This helper keeps its own copy of the slave open for the terminal's whole life: that
+  // fd is the interface a later resize is applied through (`stty` on the terminal's slave device),
+  // and "the provider is gone" is decided by `waitpid`, never by the master reporting EOF. Closing
+  // the copy would hide the master's HUP but not the exit, and losing the ability to resize a live
+  // terminal would be the worse trade.
   let exitCode: number | null = null;
   let exitSignal: string | null = null;
   let exitSeen = false;
   let closed = false;
-  try { closeSync(slave); } catch { /* the child holds its own descriptors now. */ }
 
   const terminate = (): void => {
     try { child.kill('SIGTERM'); } catch { /* already gone */ }
@@ -296,6 +338,7 @@ export async function runPtyHost(rawPlan: string | undefined): Promise<number> {
     if (!closed) {
       closed = true;
       try { closeSync(master); } catch { /* already closed */ }
+      try { closeSync(slave); } catch { /* already closed */ }
     }
     return code;
   };
@@ -365,6 +408,25 @@ export async function runPtyHost(rawPlan: string | undefined): Promise<number> {
           try { writeSync(master, Buffer.from(command.data, 'base64')); } catch { /* slave closed */ }
         } else if (command.t === 'eof') {
           // Ctrl+D is an input byte on a raw terminal; deliberately nothing else happens here.
+        } else if (command.t === 'resize') {
+          // The one place a terminal's geometry changes after launch. The answer is always a frame:
+          // a runtime that asked for a size must never be left guessing whether it took effect.
+          const cols = command.cols;
+          const rows = command.rows;
+          const invalid = !Number.isSafeInteger(cols) || !Number.isSafeInteger(rows)
+            || cols < 1 || rows < 1 || cols > maxWindowDimension || rows > maxWindowDimension;
+          if (invalid) {
+            writeFrame({ t: 'resized', cols, rows, applied: 'NOT_APPLIED', detail: 'INVALID_SIZE' });
+          } else if (exitSeen) {
+            writeFrame({ t: 'resized', cols, rows, applied: 'NOT_APPLIED', detail: 'PROVIDER_EXITED' });
+          } else {
+            const applied = await applyWindowSize({ slave, cols, rows, cwd: plan.cwd, env: plan.env });
+            // The provider's own exit may have been reaped while `stty` ran; that is a fact worth
+            // reporting, and it still may have taken effect, so the frame says both.
+            observeExit();
+            writeFrame({ t: 'resized', cols, rows, applied,
+              detail: applied === 'APPLIED' ? 'stty' : 'STTY_FAILED' });
+          }
         } else if (command.t === 'signal') {
           try { child.kill(command.signal); } catch { /* already gone */ }
         } else if (command.t === 'shutdown') {

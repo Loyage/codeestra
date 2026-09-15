@@ -1771,6 +1771,14 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         sessionId: request.sessionId,
         data: Buffer.from(request.dataBase64, 'base64').toString('utf8'),
       }));
+    case 'session.handoff.terminal.resize':
+      return success(request.requestId, await handoff.resizeTerminal({
+        projectId: request.projectId,
+        sessionId: request.sessionId,
+        cols: request.cols,
+        rows: request.rows,
+        ...(request.holderRef === undefined ? {} : { holderRef: request.holderRef }),
+      }));
     case 'task.submit': {
       const payloadHash = createHash('sha256').update(JSON.stringify({
         projectId: request.projectId,

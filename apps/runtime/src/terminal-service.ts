@@ -1,11 +1,13 @@
 import {
   buildPiTerminalArguments,
+  maxWindowDimension,
   readPiSessionFileFacts,
   readProcessStartToken,
   terminalReleaseByte,
   PiPtyTerminal,
   type PiPtyExit,
   type PiPtyLaunchInput,
+  type PiPtyWindowSize,
   type ProviderProcessTree,
   type PiSessionFileFacts,
 } from '@codeestra/agent-adapters';
@@ -33,6 +35,12 @@ export interface SessionTerminalView {
   readonly providerPid: number | null;
   readonly ptySlave: string | null;
   readonly windowSize: SessionTerminalRecord['windowSize'];
+  /**
+   * The geometry this Runtime last applied through the TerminalTransport, when it still holds the
+   * terminal. `null` means "this Runtime cannot state the current size": the recorded `windowSize`
+   * is only the launch-time application fact, never a claim about the size now.
+   */
+  readonly currentSize: { readonly cols: number; readonly rows: number } | null;
   /** True while this Runtime still holds the terminal's control connection. */
   readonly held: boolean;
   /** Terminal byte cursor a client should resume reading from. */
@@ -357,6 +365,7 @@ export class TerminalService {
       providerPid: record.providerPid,
       ptySlave: record.ptySlave,
       windowSize: record.windowSize,
+      currentSize: held === null ? null : held.terminal.size,
       held: held !== null && held.terminal.exit === null,
       cursor: snapshot?.cursor ?? 0,
       retainedBytes: snapshot?.retainedBytes ?? 0,
@@ -422,6 +431,81 @@ export class TerminalService {
       data: output.data, truncated: output.truncated,
       retainedBytes: held.terminal.snapshot().retainedBytes,
       projectedBytes: held.terminal.snapshot().projectedBytes };
+  }
+
+  /**
+   * Changes the geometry of the terminal this Runtime holds (ADR-0054).
+   *
+   * The size is a transport fact about the terminal device: the provider learns it from its own
+   * descriptor, so nothing here writes to, reads from or interprets the terminal's bytes — an ANSI
+   * screen is never a source of business state.
+   *
+   * Two refusals, both derived from facts the Runtime already owns rather than from a new gate:
+   *
+   * 1. **This Runtime must hold the terminal.** A terminal recorded by an earlier Runtime generation
+   *    is not attachable and not resizable: this process has no PTY to change and cannot state the
+   *    size the provider is rendering at. `TERMINAL_NOT_HELD`.
+   * 2. **The writer seat owns the viewport.** If a client holds the terminal's WRITER attachment, only
+   *    that holder may resize; a different holder (or an anonymous caller) is refused with
+   *    `TERMINAL_RESIZE_WRITER_BUSY` and the current writer named. This is the same single-writer
+   *    rule attach already enforces — it protects the writer's viewport rather than adding an
+   *    approval step: no confirmation is ever asked for, and nothing is queued.
+   *
+   * The result is the transport's own observation. `applied: 'NOT_APPLIED'` with a stable `detail`
+   * code (`STTY_FAILED`, `PROVIDER_EXITED`) is returned as a fact; the command face turns it into a
+   * stable refusal code, and it is never dressed up as a successful resize.
+   */
+  async resize(input: {
+    readonly sessionId: string;
+    readonly cols: number;
+    readonly rows: number;
+    readonly holderRef?: string;
+  }): Promise<{
+    readonly terminalId: string;
+    readonly cols: number;
+    readonly rows: number;
+    readonly applied: PiPtyWindowSize['applied'];
+    readonly detail: string;
+    readonly cursor: number;
+  }> {
+    if (!Number.isSafeInteger(input.cols) || !Number.isSafeInteger(input.rows)
+      || input.cols < 1 || input.rows < 1
+      || input.cols > maxWindowDimension || input.rows > maxWindowDimension) {
+      throw new TerminalServiceError('TERMINAL_RESIZE_INVALID_SIZE',
+        `A terminal resize needs integer columns and rows in 1..${maxWindowDimension}, got`
+        + ` ${input.cols}x${input.rows}`);
+    }
+    const record = this.#storage.getRunningSessionTerminal(input.sessionId);
+    if (record === null) {
+      throw new TerminalServiceError('TERMINAL_NOT_RUNNING',
+        'This Session has no running native terminal to resize');
+    }
+    const held = this.#held.get(input.sessionId) ?? null;
+    if (held === null || held.record.id !== record.id) {
+      throw new TerminalServiceError('TERMINAL_NOT_HELD',
+        'This Runtime does not hold this Session\'s terminal, so it cannot change its size; the'
+        + ' terminal was started by another Runtime generation');
+    }
+    if (held.terminal.exit !== null) {
+      throw new TerminalServiceError('TERMINAL_EXITED', 'The provider terminal has already exited');
+    }
+    const writer = this.#storage.getAttachedSessionTerminalWriter(record.id);
+    if (writer !== null && writer.holderRef !== input.holderRef) {
+      throw new TerminalServiceError('TERMINAL_RESIZE_WRITER_BUSY',
+        `Terminal ${record.id} is being written by ${writer.holderRef} (attached at`
+        + ` ${writer.attachedAt}); only that writer may change its size`);
+    }
+    let result: PiPtyWindowSize;
+    try {
+      result = await held.terminal.resize({ cols: input.cols, rows: input.rows });
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error
+        ? String(error.code) : 'TERMINAL_RESIZE_FAILED';
+      throw new TerminalServiceError(code,
+        error instanceof Error ? error.message : String(error));
+    }
+    return { terminalId: record.id, cols: result.cols, rows: result.rows, applied: result.applied,
+      detail: result.detail, cursor: held.terminal.snapshot().cursor };
   }
 
   /** Writes terminal input. This is not an approval channel; STRICT approvals stay Attentions. */

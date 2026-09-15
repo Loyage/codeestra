@@ -45,12 +45,14 @@ export {
 export { PiRpcClient, PiRpcProcessError } from './pi-process.js';
 export {
   buildPiTerminalArguments,
+  maxWindowDimension,
   PiPtyError,
   PiPtyTerminal,
   terminalReleaseByte,
+  terminalTransportProtocol,
 } from './pi-pty.js';
 export type {
-  PiPtyExit, PiPtyLaunchInput, PiPtyOutputStream, PiPtyReady, PiPtySnapshot,
+  PiPtyExit, PiPtyLaunchInput, PiPtyOutputStream, PiPtyReady, PiPtySnapshot, PiPtyWindowSize,
 } from './pi-pty.js';
 export { defaultSessionFileReadCapBytes, readPiSessionFileFacts } from './pi-session-file.js';
 export type { PiSessionFileFacts } from './pi-session-file.js';

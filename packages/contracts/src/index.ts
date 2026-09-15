@@ -1744,6 +1744,31 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     dataBase64: z.string().max(16384),
   }),
   /**
+   * Changes the size of the PTY the Runtime holds for one Session (ADR-0054).
+   *
+   * The size is a TerminalTransport fact about the terminal device, not an AdapterEvent and not a
+   * permission: the provider learns it from its own descriptor, exactly as it learns the size it was
+   * launched with, and no terminal byte is interpreted to decide it. The command answers with the
+   * transport's own observation (`applied`) and with the geometry the Runtime now projects
+   * (`currentSize` on `session.handoff.status`), so a caller never has to guess whether the provider
+   * reflowed.
+   *
+   * The bound is part of the contract, not a client-side courtesy: a terminal far above this is not a
+   * terminal a provider can render, and an unbounded width is a way to make a provider allocate
+   * enormous line buffers. `holderRef` is a caller's terminal writer seat: when a client holds the
+   * terminal's WRITER attachment, only that holder may change its geometry.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('session.handoff.terminal.resize'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    cols: z.number().int().min(1).max(1000),
+    rows: z.number().int().min(1).max(1000),
+    holderRef: z.string().min(1).max(200).optional(),
+  }),
+  /**
    * Task revision delivery (PROJECT_SPEC §2.11, ADR-0028).
    *
    * `task.revision.create` appends an immutable revision and, when an Execution is holding the Task at
