@@ -4076,6 +4076,48 @@ verdict CONFLICTING (SAME_FILE)
 - **UI 一行未改**：五格都明确把 UI 投影排除在外（本波 `apps/ui/**` diff 为空）。
 - **`## NEXT` 仍有历史漂移**（例：第 7 条把已由 FOUNDATION-055/059 完成的调度引擎与 UI 投影写作「剩余」）。本波只如实更新了第 6 条，未做全面校准——那属于单独一次 doc-sync/NEXT 校准格。
 
+## 第二次真实 `dev → main` 提升（`main` `fd3d998` → `54ff304`，14 个提交，Wave I）
+
+状态：**已执行并成功**（用户显式授权）。这是 Wave I 五格（ADR-0039/0040/0041/0042/0043）进入稳定分支，也是**首次带上完整全量证据的提升**（ADR-0038 分层在本波才由命令面表达）。
+
+| 项 | 值 |
+|---|---|
+| 提升前 `main` | `fd3d99871a40e578105036bc6728213adf302c6a` |
+| 提升后 `main` | `54ff3049e7a4b3e85726210e39c71c6751403b37`（= 当时的 `dev`，也是被验证的精确候选） |
+| 推进的提交数 | 14 |
+| 方式 | 在已检出的 main 工作树内 `git merge --ff-only dev`（同时推进 ref/index/工作文件，退出码 0） |
+| `main` 工作树 | 提升前 clean、提升后 clean；`phase1SchemaVersion = 26` |
+| 稳定库 schema | 提升前 `user_version = 24` → 启动后 **26**（v25 分层验证证据、v26 知识分层）；新表 `targeted_test_plans`/`dev_full_suite_evidence`/`knowledge_snapshots`/`execution_knowledge_snapshots` 均已建立；`bun.lock` 本波未变 |
+
+### 提升前全量证据（ADR-0038 D03）
+
+在**精确候选 SHA `54ff3049e7a4b3e85726210e39c71c6751403b37`** 上执行 `bun run check`：**退出码 0**。根/UI TypeScript 通过；Vitest 10 文件 / 354 项通过；`test:storage` 725 pass / 0 fail（81 文件，4753 断言）；UI `vite build` 成功；运行后 `dev` 工作树 clean、无孤儿 Runtime。日志：`/tmp/iwave/promotion-candidate-check.log`。
+
+（诚实说明：这个候选是 `e401564` 之后多了两个**仅文档**提交的 SHA；先前那次在 `e401564` 上的检查不引用为提升证据，本轮重跑了。检查后到提升之间 `dev` 无任何提交，被验证的 SHA 与被提升的 SHA 完全相同。）
+
+### 重启序列与证据（AGENTS.md 「重启 main 稳定服务」规程）
+
+在 `/Users/loyage/Documents/codeestra` 按顺序执行，每步退出码均 0：
+
+1. `bun install --frozen-lockfile` → 退出码 0（`Checked 65 installs across 84 packages (no changes)`）。
+2. `bun run build:ui` → 退出码 0（`index-CVUE8hYj.css` / `index-Bp4PpPZZ.js`）。
+3. `bun run codeestra stop` → 退出码 0；lock 释放（`present:false`、`holderAlive:false`）。
+4. `bun run codeestra status` → 退出码 0：`status: "READY"`、`permissionMode: "FULL"`、`adapters: ["pi","codex","claude"]`（Claude 适配器已注册）、`activeSessions: []`、`eventSubscribers: 0`、`ownership.verdict: "RUNNING"`。
+5. `bun run codeestra ui --no-open` → 退出码 0；再次 `status` 得 `uiRunning: true`（AGENTS.md 要求 READY + uiRunning 两者同时成立）。带 token 的输出**未写入**任何文档/日志/提交（该临时日志已删除并核验其余日志无 token）。
+
+| | boot id | pid |
+|---|---|---|
+| 提升前 | `54225778-6498-4f59-83b8-447a928537ca` | 24280 |
+| 提升后 | `5cc84fdd-e843-42bb-9d37-03c91a4ea3a9` | 50758 |
+
+boot 身份不同（ADR-0022 的重启判定），且新进程确实运行新代码（适配器列表已含 `claude`，库已迁到 v26）。
+
+### 记录与诚实边界
+
+- **仍然没有产生领域 `PromotionRecord` 行**：本次走 AGENTS.md 规定的「main 工作树内 `git merge --ff-only dev`」路径。产品命令 `promotion prepare` 需要 `batchId` + IntegrationBatch 的集成验证证据（`requireIntegrationEvidence`），而 Wave I 的五个 lane 是协调者手工解冲突合入 `dev` 的，**没有 IntegrationBatch**，因此产品路径对这个候选在语义上无法 prepare。提升的 traceability 只在 Git 历史 + 本节，`promotion list` 看不到这次提升——与第一次提升同一个缺口，本次仍未补。
+- **未在 main 工作树额外跑全量**：`main` 此刻与被执行全量的精确候选 SHA 完全相同，树也相同（ff-only、两边 clean）；额外再跑一次不会增加信息。
+- 本波新增的 `promotion.full-suite run` 证据机制**未在真实仓库上跑过**（它需要项目注册在一个运行新代码的 Runtime 里；稳定 Runtime 提升前跑的是旧代码）。这仍是未验收项。
+
 ## NEXT — 最小可用纵向切片
 
 
