@@ -5397,6 +5397,122 @@ IntegrationBatch 与独立集成验证进入 `dev` 后才对 `dev` 生效（本�
 | `docs/guides/ui.md` / `getting-started.md` / `acceptance-checklist.md` / `README.md` | **确认无需修改**：本格未触碰 `apps/ui/**`，UI 的页签/按钮/文案/只读分界一字未变（因此 `ui.md` 不适用）；`getting-started.md` 讲的是安装与第一次运行，不涉及集成命令；`acceptance-checklist.md` 是人工观感清单，无机器断言可加；`README.md` 是目录页，条目未变 |
 | `docs/guides/concepts.md` 的权限语义段 / `manual.md` §权限 / `features.md` 的 FULL/STRICT 差异 | **确认无需修改**：FULL/STRICT 语义一字未改（ADR-0011），本格不新增任何门禁或确认；`manual.md` 只改了 §8（合入 dev） |
 
+## FOUNDATION-082 — M2：两个 UI 投影缺口（Wave M / `lane/m2-ui-projection-gaps`，无 ADR、无迁移）
+
+> 序号说明：FOUNDATION-080 是本文件当前最大值，本格按顺序占用 081；若 Wave M 的其它格（M1/M3）
+> 也占用了同一号，整合时以协调者口径调整，本格只改写标题号、不改记录内容。
+
+基线：`dev@75fa7b87a4fbc515adf46a936b3666bf83a7ebaa`（本格不 rebase、不合入新 dev、不 push）。
+领地：只改 `apps/ui/**` 与 `docs/guides/**`；`apps/runtime/**`、`apps/cli/**`、`packages/**`、
+`PROJECT_SPEC.md`、既有 ADR 正文、`.codeestra/**` 一行未动（依据见下面「后端未改」）。
+
+### 目标（`## NEXT` 第 12、13 条）
+
+1. `task retry` 的 UI 投影（命令面早已有：ADR-0036 / FOUNDATION-061，界面无按钮）；
+2. `promotion` 的「已推送、等待拉取」投影（契约与命令面已有：FOUNDATION-077 / ADR-0052）。
+
+### 交付
+
+**① `task retry` 入口（`apps/ui/src/task-retry.tsx`，App.tsx 只加 1 个 import + 1 个元素）**
+
+- 入口在任务详情 → 「更多操作」内，紧接 `终止` / `归档` 之后；标题 `重试失败任务`，按钮 `重试（task retry）`。
+- **不做本地状态判断**：按钮只受「是否正在发请求」控制，不按 `FAILED` 之类的本地允许清单隐藏/禁用；
+  被拒绝时显示 Runtime 返回的稳定码 + 本地词汇表的一句解释（`TASK_NOT_FAILED` / `TASK_CANCELLED` /
+  `TASK_STILL_RUNNING` / `TASK_PAUSED` / `RECONCILE_REQUIRED` / `TASK_ARCHIVED` / `UNKNOWN_ADAPTER` /
+  `WORKSPACE_OWNERSHIP_UNVERIFIABLE` / `WORKSPACE_RECLAIMED` 等）。
+- **CAS 版本**：显示当前 `v<version>` 并原样作为 `expected-version` 发送（界面过期 → `CONCURRENT_MODIFICATION`）。
+- **Adapter**：显示「上一次运行的 Adapter」（取该任务最新一次执行记录的 `adapterId`，与命令面
+  `adapterSource: RECORDED` 的重读对象一致），并可从下拉框换成 `runtime.ping` 报的**已注册**
+  Adapter；默认项就是「沿用该任务上一次运行的 Adapter」；读不到注册表时如实显示读取失败。
+- **三种结果分开呈现**：`STARTED`（退出码 0，列出 execution/session/工作树）、`WAIT`（**退出码 3**，
+  列出容量/冲突等待理由与占位 Task，**不显示执行行**）、`REFUSED`（列出稳定码与未满足依赖）。三者都
+  另列「已重新入队」事实、Adapter 来源与工作树模式。
+
+**② 提升阶段投影（`apps/ui/src/promotion.tsx`）**
+
+- 列表「状态」单元格现在有两个分别的标记：`state` + **派生 `phase`**（`尚未推送` / `已推送、等待拉取` /
+  `待重启核对` / `重启已记录、远端 main 未发布` / `已完成` / `记录已失效或未推进`）；只有 `COMPLETE`
+  用成功色，等待阶段用等待色。`PROMOTING` 的状态标签从「正在提升」改为「已推送远端 dev（未拉取）」。
+- 新增读回值行：`origin/dev <SHA>`（push 后 `git ls-remote` 读回）与 `origin/main <SHA>`（推回后才非空）。
+  `AWAITING_PULL` 时 `main 结果` 列显示 `尚未拉到 main 检出`（不再是「未改动」）、`重启` 列显示
+  `此阶段不记录`、`Runtime 重启` 小节明说该阶段不执行也不记录任何重启步骤。
+- 详情卡新增 `阶段（派生）`、`远端读回`（含 `pushedAt`/`mainPushedAt`/dev clone 路径，并注明是观察值而非输入）
+  与 **`下一步` 块**：`AWAITING_PULL` 时列出你在 main 检出要执行的两条命令
+  （`git fetch origin` / `git merge --ff-only origin/dev`）与「本界面不执行 Git、不拉取、也不重启」，
+  并写明**命令面在这一阶段退出码 3 是等待而不是失败**。`RESTART_PENDING` 列出接下来会跑的四步，
+  `MAIN_PUSH_PENDING` 说明重跑只重试推回。整个面板仍然**只读**（只发 `promotion.list` / `promotion.get`）。
+
+**③ 追加小项（协调者本格追加）：终端 `ptyResize` 能力改为按值渲染（`apps/ui/src/terminal.tsx`）**
+
+- 删掉窗口行里硬编码的「不支持 + 能力矩阵为 UNSUPPORTED」声明，改为显示命令面返回的 `ptyResize`
+  取值原文 + 一句按值给出的解释（`IMPLEMENTED`/`SUPPORTED` → 可以改变；`UNSUPPORTED` → 不能改变；
+  `PARTIAL` → 只在部分平台可改变；`UNVERIFIED` → 尚未验证；词汇表以外的取值只原样列出并明确说
+  「本界面没有这个取值的词汇表，不作解释」）。命令面没报这一项时显示「命令面没有报告」而不是假装可用。
+  这样 M3 把该值从硬编码 `UNSUPPORTED` 改为真实值后，窗口行与下方 `能力矩阵` 表不会再互相矛盾。
+- 本项**不依赖某个具体取值**：无论 M3 报 `IMPLEMENTED`、`PARTIAL` 还是仍为 `UNSUPPORTED`，行内文字与
+  矩阵一致；测试用类型 union 驱动，新增取值会立刻让测试失败。
+
+### 实际运行的验证（定向，ADR-0038；本格为开发分支，不跑全量）
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| UI 类型 | `bun run typecheck:ui` | **退出码 0** |
+| 测试 | `bunx vitest run apps/ui` | **10 个文件 / 124 项通过，退出码 0**（基线为 7 个文件 / 93 项，本格新增 3 个文件 31 项） |
+| dev 构建 | `bun run build:ui:dev` | **退出码 0** |
+| dev 通道标记 | `grep -o 'data-channel="dev"' apps/ui/dist/index.html` | 命中；`<title>Codeestra DEV</title>` 也命中（ADR-0049） |
+| 后端未改 | `git diff --name-only 75fa7b87a4fbc515adf46a936b3666bf83a7ebaa..HEAD \| grep -E '^(apps/runtime\|apps/cli\|packages)'` | **无输出**（grep 退出码 1） |
+
+新增测试与它们的证明边界（每个文件头部都写了「能证明什么 / 不能证明什么」）：
+
+- `apps/ui/test/task-retry.test.ts`：命令字段与 CLI 一致（不带 `adapterId` 时**不含**该键）；三种结果
+  互不混淆（`WAIT` 永不读出「已启动」）；拒绝码词汇表覆盖**从 domain 源码读出的** `TaskRetryRefusalCode`
+  与 `TaskRetryWorkspaceRefusalCode` 全部取值，且**每一个词汇表条目都能在 domain / contracts / storage /
+  两个 Runtime 服务的源码里找到**（避免 UI 自己发明一个命令面永远不会返回的码），三个容量等待码
+  从 contracts 的 `CapacityWaitReasonCode` union 读出并逐个断言读作「本次未启动」；SSR 渲染出的表单/结果卡
+  把版本、默认 Adapter 语义、稳定码与等待理由都写出来。**不能证明**：真实 Runtime 会拒绝什么
+  （那是命令面的判定）、观感。
+- `apps/ui/test/promotion-phase.test.ts`：phase 取值从**storage 源码**读出并逐个断言「只有 COMPLETE 算完成」；
+  `AWAITING_PULL` 的下一步命令、退出码 3 文案与「未拉到 main 检出 / 此阶段不记录」的读法。**不能证明**：
+  push/读回/拉取/重启的真实行为（那是 `apps/runtime/test/promotion-service` 与 `cli-promotion`）。
+- `apps/ui/test/terminal-pty-resize.test.ts`：`ptyResize` 的每一种取值都被原文引用且只有实现值读作可用；
+  源码里不再存在旧的硬编码声明。**不能证明**：Runtime 在某个平台报什么值（M3 的事实）。
+
+**明确没跑**：`bun run check` / `just check` / `just verify` / `check:fast` / `test:unit` / `test:storage` / `test:e2e`
+（ADR-0038：开发分支禁止全量，本格改动不跨后端）；没有对我而言的可用 Runtime 实例做端到端点击（ADR-0008 禁止
+浏览器/桌面自动化）。因此**没有任何一条声称「真实 Runtime 下的重试/提升已验收」**。
+
+### 文档同步（ADR-0050）
+
+| 文档 | 改了哪一节 | 为什么 |
+|---|---|---|
+| `docs/guides/features.md` | 「任务」表 `重试失败任务` 行的 UI 位置；「Agent 执行」表 `多 Adapter` 行的 UI 位置；「稳定提升」表 `提升 prepare/approve/promote` 行的能力描述与 UI 位置；新增 `「已推送 ≠ 已提升」投影` 行 | 改了 UI 行为；同时修正该行原本仍是旧本机 ff 路径的描述（与 ADR-0047/0052 已合入的实现不一致） |
+| `docs/guides/ui.md` | §2.3（c）任务操作按钮表新增 `更多操作 → 重试`；**新增 §2.3（c2）重试块逐项说明与三种结果表**；§2.3（l）稳定提升投影改写（phase 标记、读回值、`下一步` 块）；§5.2 项目级面板一句；**§2.3（k）** 里 `原生终端` 的 `窗口` 行改写（`ptyResize` 按值渲染）；§9.1 只读清单新增重试块只读部分与提升阶段标记；§9.2 改状态清单新增 `task.retry` | UI 行为变更必须落在 ui.md；ptyResize 为协调者本格追加项 |
+| `docs/guides/recipes.md` | §5.1「换 Adapter」新增界面路径与默认语义；§6 FAILED 行的重试说明与三种结果；**§10「关于产品命令」重写**（`promotion promote` 已是经 GitHub 中转路径 + 界面只读投影） | 用户日常做法变化；原段落写着「产品实现留到下一格」，与已合入 dev 的 FOUNDATION-077 矛盾，属必须改的假话 |
+| `docs/guides/workflow.md` | §8.2 的 `promote` 步骤重写为 ADR-0047/0052 的四步（push + 读回 → `AWAITING_PULL`/退出码 3 → 人工拉取 → 重启 → 推回），新增「界面上的投影」段；退出码与失败处置两句对齐 | 任务书点名的「发布到 main 一节」；原文写的仍是旧的本机 ff 路径 |
+| `docs/guides/cli-reference.md` | §15 `promote` 第 2 步那段加一句：Web UI 用 `promotion.list`/`get` 投影同一组只读事实且不把该状态显示成已完成 | UI 文案引用了命令语义；反过来让 CLI 读者知道界面投影的边界 |
+| `docs/guides/acceptance-checklist.md` | **未改** | 本格的目视项已写在本记录与交付说明里；该清单的维护不属于本格点名的同步清单，不想在未请求的情况下扩写它的分组编号 |
+
+`docs/guides/**` 每篇顶部的版本/校对头按 ADR-0050 D02 保留原基线
+（`dev@036cf68` / schema v28 / 2026-09-15）：本格日期与基线同日，且该头明写「以 `docs/tasks/README.md` 的最新记录为准」，无需改。
+
+### 需要人工目视确认的项（ADR-0008：无机器断言）
+
+1. 任务详情 →「更多操作」展开后，重试块在窄屏/矮窗口下不被挤压，Adapter 下拉框与 `重试` 按钮都点得到。
+2. 三种结果卡（`已启动` / `已入队 · 在等待（退出码 3）` / `已入队 · 启动被拒绝`）的颜色与文字在一眼之下
+   不会被误读为同一种结果（尤其警示色与成功色）。
+3. 提升记录的 `状态` 单元格里两个标记（state + phase）在三种主题下都分得清、窄屏不重叠。
+4. `AWAITING_PULL` 的 `下一步` 命令块在窄屏下横向滚动可读，`<检出 main 的那个 clone>` 占位不被裁掉。
+5. 终端面板 `窗口` 行新增的 `ptyResize` 说明行在 `compact` 密度下不挤成两行乱码。
+
+### 未做 / 残留
+
+- **没有对真实 Runtime 做端到端验收**：`task retry` 的等待/拒绝、提升的 `AWAITING_PULL` 都只用纯函数与
+  SSR 断言 + 命令面契约核对证明，没有在真实实例上点过（ADR-0008）。
+- **`## NEXT` 没有改**：本节只依据**已合入 `dev`** 的事实；本格在 `lane/**` 分支上，第 12、13 条要在
+  合入 `dev`（并经集成验证）之后才由整合方从剩余列表移出。
+- **提升界面仍然完全只读**：本格没有、也不会把 `promotion prepare/approve/promote` 投影成可点的界面操作。
+- 未 commit 到 `dev`、未 push、未触碰 main 稳定 clone 与稳定 Runtime。
+
 ## FOUNDATION-083 — M3 交接/终端剩余边界：PTY resize、并行工具批次安全点、跨交接权限模式矩阵（Wave M / `lane/m3-terminal-boundaries`，ADR-0054，无 schema 变更、不占迁移号）
 
 状态：**三个子项完成**；已提交到本 branch，**未 push、未合并、未提升 `main`、未触碰稳定 clone 与其上的稳定 Runtime**。
@@ -5490,6 +5606,126 @@ IntegrationBatch 与独立集成验证进入 `dev` 后才对 `dev` 生效（本�
 | `docs/spikes/pi-parallel-tool-batch.md` + `docs/spikes/pi-parallel-tool-batch/*.ts` | **新增**：真实 Pi 探针证据与两个可复跑探针脚本 |
 | `docs/tasks/README.md` | 本记录；`## NEXT` 第 2 条改写为“已收口的部分 + 仍剩余的部分” |
 | 不需要改 | `docs/guides/manual.md` / `recipes.md`：用户日常做法没有变化（resize 是**新增**能力，不是现有流程的改变；UI 也尚未投影它）。`docs/guides/ui.md`：UI 行为未变（本格一行 UI 未改），其“resize 不支持”的描述**仍是当前 UI 的事实**，等 M2 改为动态渲染后再同步。`docs/guides/concepts.md` / `features.md`：权限语义（FULL/STRICT）未变，本格没有新增门禁或改变 FULL/STRICT 差异 |
+## FOUNDATION-084 — 真实 provider 验收 runbook 与脚手架（Wave M / M4，无 ADR，无 schema）
+
+状态：**本分支（lane）已交付，未合入 `dev`、未 push**。基线 `dev = 75fa7b87a4fbc515adf46a936b3666bf83a7ebaa`（未 rebase）。
+工作树 `/Users/loyage/Documents/codeestra-wt/m4-acceptance-runbook`，分支 `lane/m4-acceptance-runbook`。
+本格是**准备**，不是验收：**零 provider 请求、零真实提升、零稳定服务操作**。
+
+### 本格改了什么
+
+| 位置 | 改动 |
+|---|---|
+| `docs/notes/real-provider-acceptance-runbook.md`（新） | 主交付物：8 项真实 provider 验收（A1–A8）的操作手册 |
+| `scripts/real-provider-acceptance.sh`（新） | 可复现脚手架：纯 bash、`set -euo pipefail`、**默认 dry-run**、只有 `--step` + `--yes` 同时给出才做真实动作、每条子进程显式限时、全新临时目录 |
+| `docs/guides/acceptance-checklist.md` | §5 补一条指向 runbook 的「功能验收（非观感）」入口（只加指针，**未**重写该清单） |
+| `README.md` | 文档列表补一行 runbook + 脚手架入口 |
+| `docs/tasks/README.md` | 本节 + 在 `## NEXT` 相关条目补「验收步骤见 runbook」（**没有**把它们标成已完成） |
+
+### 覆盖的 8 项验收
+
+| 项 | 内容 | 来源 |
+|---|---|---|
+| A1 | 容量 2 下两个 `SAFE` 任务真的同时 RUNNING | NEXT 第 6 条 / troubleshooting §4 第 1 条 |
+| A2 | 暂停 → 恢复 → 终止（provider 退出、`--session` 续接同一 conversation、`RECOVERY_REQUIRED` 观察） | NEXT 第 1 条 / ADR-0016 |
+| A3 | revision 投递台账如实记 `CHANNEL_UNSUPPORTED` + 唯一处置（停止并新建 Execution） | NEXT 第 3 条 / ADR-0028 / ADR-0051 |
+| A4 | Project Knowledge 真实消费（ADR-0051 明确留下的未验证项） | NEXT 第 7 条 / ADR-0041 / ADR-0051 |
+| A5 | 插件与 gate 对抗（受控、可回滚的观察） | NEXT 第 8 条 / ADR-0044 |
+| A6 | 散文提问 `WAITING_FOR_USER` + `Session EXITED` + `attention resolve` | NEXT 第 4 条 / ADR-0043 / FOUNDATION-069 |
+| A7 | 原生终端接管 + 真实模型键入后交还 RPC | NEXT 第 2 条 / ADR-0026 |
+| A8 | 真实 GitHub 上的产品路径提升（push + 读回 + 退出码 3 + 人工拉取 + 收口 + 推回） | NEXT 第 11 条已完成面的真实验收 / ADR-0047 / ADR-0052 |
+
+每条都含：前置条件、确切命令、预期观察、判定（**可机器断言**与**必须人眼**分开写）、失败/中止条件、
+证据保留、清理。runbook 开头有「一次性前置准备」清单（凭据/额度、临时仓库、`verification.json` 与
+`impact.json` 最小内容、`CODEESTRA_HOME` 选择、**如何确认跑的是哪份代码**），结尾有证据包清单与
+失败时保留现场的做法。
+
+### 三条本格如实写下的边界（不得被读成已验证）
+
+1. **A2 的「`task pause` 超时 → `RECOVERY_REQUIRED`」在真实 provider 下无法被确定性制造。** 真实 Pi 的
+   stop 是 `SIGTERM → grace → SIGKILL`，被 `SIGKILL` 后 OS 报告退出（`exited = true`）；`UNCERTAIN` 只在
+   Adapter **无法确认**退出时出现（`releaseExecutionProcess` 返回 `released: false`）。runbook 给出
+   **另外两条真实可达**的 `RECOVERY_REQUIRED` 观察（活动 Execution 存在时 Runtime 未收尾即消失 → 启动收敛；
+   `scheduler reservations reconcile` 保留槽位），并要求记录里分开写「pause-timeout 路径未观察到」。
+2. **A4 只能证明「交到了 provider」，不能证明「provider 用了它」。** 判定拆成可机器部分（物化文件 digest
+   等于记录、token 不在 worktree 中）与必须人眼部分（模型自己复述 token）；模型没复述时只能记「未证明」。
+3. **A5 的两种观察必须分开记录**：gate 对 `tool_call` 的判定（FULL 放行已注册工具是设计语义、不是漏洞；
+   STRICT 拒绝未知工具）与 extension 自己的直接副作用（不经过 `tool_call`，gate 结构上看不到）。
+
+### 实际执行的定向验证（ADR-0038：**未跑全量/聚合检查**）
+
+| # | 检查 | 命令 | 结果 |
+|---|---|---|---|
+| 1 | bash 语法 | `bash -n scripts/real-provider-acceptance.sh` | 退出码 0 |
+| 2 | 帮助文本 | `scripts/real-provider-acceptance.sh --help` | 退出码 0；列出 8 个 `--step` 与全部 flag |
+| 3 | **dry-run 实跑** | `scripts/real-provider-acceptance.sh`（无参数 → dry-run，全部步骤） | 退出码 0；共 83 行输出，每行要么是 `#` 说明、要么是 `[dry-run] …` **将要执行的命令**；**没有创建任何目录**（`${TMPDIR}/ce-m4-dry-run` 与 `/tmp/ce-m4-*` 均不存在）；没有真实模型调用；没有 Web UI token 或凭据（`token` 一词只出现在「本次输出不会出现 token」的说明里）；跑完后 `git ... status --porcelain` 与跑前逐行相同 |
+| 4 | CLI 命令存在性 | 从 runbook 与脚本的 `ce …` / `bun run codeestra …` 行提取 **47 条**命令引用，对照 `bun run codeestra __m4_usage_check__` 打出的 `usage()`（**107 条**语法行）逐条前缀匹配 | **0 条无法匹配** |
+| 5 | CLI flag 存在性 | 同一批命令行里出现的 **19 个** flag（`--action --adapter --all-projects --allow-unknown --answer --clear --dev-commit --dev-repo --execution --holder --json --limit --model --project --provider --since --text --writer --yes`）对照 `usage()` | **0 条未找到** |
+| 6 | 文档链接 | 解析 runbook + acceptance-checklist 的相对链接并检查文件存在性 | **29 条链接，0 条断链** |
+| 7 | 零代码改动 | `git status --porcelain -- apps packages package.json bun.lock PROJECT_SPEC.md AGENTS.md .codeestra` | **空输出**；`git diff --name-only` 只有 `docs/**` 与 `README.md` |
+| 8 | 空白/冲突标记 | `git diff --check` | 退出码 0 |
+
+### dry-run 实际输出（节选）
+
+完整命令：`cd <本工作树> && scripts/real-provider-acceptance.sh`（退出码 0，共 83 行）。下面只截头尾，
+中间是 A1–A8 各步的 `[dry-run] …` 行，与 runbook §2 的命令逐条一致；完整原文可由上面这条命令随时重现。
+
+```text
+# repository under test: /Users/loyage/Documents/codeestra-wt/m4-acceptance-runbook
+# MODE: dry-run (default). No command is executed.
+# this script never runs 'codeestra ui'; no Web UI token can appear in this output
+# temp root:      …/ce-m4-dry-run
+# CODEESTRA_HOME: …/ce-m4-dry-run/home
+# project repo:   …/ce-m4-dry-run/repo
+# evidence:       …/ce-m4-dry-run/evidence
+# would create a one-shot repository at …/ce-m4-dry-run/repo (main + dev + .codeestra policies)
+[dry-run] CODEESTRA_HOME=…/ce-m4-dry-run/home bun run codeestra status
+[dry-run] write evidence: …/ce-m4-dry-run/evidence/00-status.json
+[dry-run] CODEESTRA_HOME=…/ce-m4-dry-run/home bun run codeestra project trust …/repo --yes
+[dry-run] CODEESTRA_HOME=…/ce-m4-dry-run/home bun run codeestra project list
+# PROJECT_ID=<project-id>
+# A1 — two SAFE Tasks really running together (the one Phase 2 item never proven)
+[dry-run] CODEESTRA_HOME=…/home bun run codeestra scheduler capacity get <project-id> --json
+[dry-run] CODEESTRA_HOME=…/home bun run codeestra task create <project-id> "Write lane-a/out.txt with the text lane-a."
+…（中间 60 余行：A1–A8 每一步的 `[dry-run]` 命令与判定提示）…
+# A8 — the real GitHub promotion path (ADR-0047 / ADR-0052)
+# THIS STEP MOVES REMOTE REFS. It needs the user's explicit go-ahead for a real push.
+# set BATCH_ID / DEV_COMMIT (full sha) / MAIN_COMMIT (full sha) before running for real
+# dry-run: nothing was created, no model was called, no ref was moved, no token was printed
+done.
+```
+
+跑完之后的三条旁证：
+
+```text
+$ ls -d "${TMPDIR:-/tmp}/ce-m4-dry-run"
+ls: …/ce-m4-dry-run: No such file or directory
+$ git status --porcelain -- apps packages
+（空输出）
+$ git diff --check
+（空输出，退出码 0）
+```
+
+**没有跑什么、为什么**：
+
+- 未跑 `bun run check` / `check:fast` / `just check` / `just verify`：ADR-0038 禁止在 `lane/*` 分支跑聚合检查；
+  且本格零代码改动，聚合检查只会给出无信息的绿灯。
+- 未跑 `bun run typecheck` / `typecheck:ui`：同上（零代码改动）。
+- **未执行 runbook 的任何一条验收项、未发任何真实模型请求、未做任何 push/提升、未重启或停止任何 Runtime
+  （含稳定 Runtime）**。脚手架的真实模式只被 `bash -n` 与 dry-run 覆盖；真实模式下各步骤的实际运行留给用户在场的验收。
+- 未用真实 provider 验证 `scripts/real-provider-acceptance.sh --yes --step …` 的端到端可用性——那正是
+  本 runbook 要验收的对象，不能由本格自己证明。
+
+### 遗留 / 下一格
+
+- A1–A8 全部仍是**未验收**；`## NEXT` 的相关条目只补了指针，**没有**标成已完成。
+- 脚手架真实模式首次执行时可能要按实际返回微调 JSON 字段路径（`task revision create` 的 `delivery.id`、
+  `promotion prepare` 的 `promotionId` 等已按源码核对，但未在真实运行中复核）。
+- A2 的 pause-timeout → `RECOVERY_REQUIRED` 若要真正验证，需要一个「无法确认退出」的受控 provider；
+  用真实 Pi 伪造不属于本格范围。
+- **一处已知漂移（本格只加指针、未改写原文）**：`## NEXT` 第 7 条仍写「Adapter 尚不消费 `knowledgeSnapshotRefs`」，
+  而 ADR-0051/FOUNDATION-079 已把 `knowledgeContext` 接到三个 Adapter 上；本条真正未验证的是「模型层是否真的读了它」。
+  修这句文本属下一格的 doc-sync，本格不静默重写。
 
 ## NEXT — 最小可用纵向切片
 
@@ -5512,12 +5748,16 @@ IntegrationBatch 与独立集成验证进入 `dev` 后才对 `dev` 生效（本�
 1. **真实验证 ADR-0016 的暂停 / 恢复**（原第 1 条）：在一次性临时仓库中用真实 provider 跑「启动 → 暂停 → 恢复 → 终止」，
    核对 provider 进程确实退出、`--session` 确实续接同一 conversation、超时进入 `RECOVERY_REQUIRED`。当前只有脚本 Adapter
    覆盖该编排；真实模型未复验（`docs/guides/troubleshooting.md` §4 第 2 条）。
+   **验收步骤见 `docs/notes/real-provider-acceptance-runbook.md` §2.A2**（含 pause-timeout→`RECOVERY_REQUIRED` 的两条
+   真实可达替代观察与诚实边界）。
 2. **交接与原生终端的剩余能力边界**（原第 3 条的剩余）：跨交接权限模式**完整矩阵**、并行工具批次的安全点、PTY resize、
    真实模型在 TUI 中键入后交还自动化再复验。`session handoff *` 与 PTY 传输本身已实现（ADR-0026/FOUNDATION-046），
    其中 `ptyResize` 在 `apps/runtime/src/session-handoff-service.ts` 里如实声明为 `'UNSUPPORTED'`。
+   **验收步骤见 `docs/notes/real-provider-acceptance-runbook.md` §2.A7。**
 3. **修订投递的 provider 侧与 UI 投影**（原第 4 条的剩余）：真实 provider 的结构化 ACK 行为（需 Adapter 先实现
    `applyRevision`）、真实模型对投递提示的理解、修订/投递的 UI 投影。台账、命令面与启动收敛已实现（ADR-0028）；
    `apps/ui/src/**` 没有 revision/delivery 的专用视图。
+   **验收步骤见 `docs/notes/real-provider-acceptance-runbook.md` §2.A3。**
 4. **散文提问（prose question）的剩余面**（原第 6 条的剩余）：Codex 侧的事实层（`codex-adapter.ts` 未改动、不上报
    completion facts，因此 Codex 只漏报不谎报）、真实 provider 下「`Task WAITING_FOR_USER` + `Execution RUNNING` +
    `Session EXITED`」组合的复验、散文等待的 UI 投影（UI 目前只把它当一条普通 Attention 显示）。升级与
@@ -5542,13 +5782,21 @@ IntegrationBatch 与独立集成验证进入 `dev` 后才对 `dev` 生效（本�
    （产品 `promotion` 路径没有被本格改动）。
 6. **Phase 2 验收矩阵里「两个 SAFE 任务真的同时跑」**：调度引擎本体已实现（ADR-0033），但真实 provider 的并发运行
    未完成受控验收（`docs/guides/troubleshooting.md` §4 第 1 条）。在此之前该验收项仍算未成立。
+   **验收步骤见 `docs/notes/real-provider-acceptance-runbook.md` §2.A1**（必须先证明判定是 `SAFE` 再跑，
+   不得用 `--allow-unknown` 或调大容量掩盖）。
 7. **Phase 6 的 provider 消费**：`project knowledge *` 命令面与 Execution 绑定已实现（ADR-0041/schema v26），但 Adapter
    尚不消费 `knowledgeSnapshotRefs`，因此「Provider 是否真的读取物化上下文」未验证。
+   **验收步骤见 `docs/notes/real-provider-acceptance-runbook.md` §2.A4**（判定拆成「交到了」的可机器部分与
+   「真的读了」的人眼部分；本条前半句的文本漂移见 FOUNDATION-084 的「遗留」段）。
 8. **插件选择的真实验证**（ADR-0044）：真实模型下「确实使用了所选 skill/theme」目前只有 argv 与命令面证据；themes 的显式
    路径加载未单独实测（ADR-0044 D06 标注为推断）；第三方 extension 能否绕过 gate 未做对抗验证；Codex/Claude 的
    `pluginSelection` 如实为 `UNSUPPORTED`（**未实现**，不是待做的小尾巴）。
+   **验收步骤见 `docs/notes/real-provider-acceptance-runbook.md` §2.A5**（FULL 放行已注册工具与 STRICT 拒绝未知工具，
+   以及 extension 直接副作用不经 `tool_call`，两种观察必须分开记录）。
 9. **观感类验收（ADR-0008 下只能人工确认，没有机器断言）**：设置页与五个界面设置键的视觉效果、紧凑密度/字号/`reduced` 动效的
    观感、固定 shell 在窄屏与矮窗口的表现、Agent 设置页在窄屏下的排布。
+   （观感**不在**功能验收 runbook 范围内：`docs/notes/real-provider-acceptance-runbook.md` §5 明确把它退回本清单；
+   功能验收入口见 [acceptance-checklist.md §5](../guides/acceptance-checklist.md)。）
 10. **Phase 7 Self Evolution 全部未开始**：Self Task、Candidate、自托管测试、`PROMOTABLE`、用户 Promotion、独立 bootstrap
     与恢复演练；不可逆 migration 与 bootstrap 自身更新的策略仍是 Phase 7 的阻塞决策。
 11. ~~**ADR-0047 的产品实现**~~ **已完成（FOUNDATION-077 / schema v29 / ADR-0052）**：`promotion prepare/approve/promote`
