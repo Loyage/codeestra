@@ -5345,6 +5345,8 @@ IntegrationBatch 与独立集成验证进入 `dev` 后才对 `dev` 生效（本�
 | `bun test apps/runtime/test/promotion-service.test.ts` | **27 项通过 / 0 失败**（含新增「从多成员 PASSED 批次 prepare」1 项，并断言证据不匹配仍被拒） |
 | `bun test packages/storage/test` | **156 项通过 / 0 失败**（新增 `integration-batch-terminal-states.test.ts` 2 项：v29→v30 真实文件库迁移、行保留、新 `CHECK` 生效、`foreign_key_check` 为空、索引仍在；版本断言用 `>= 30`） |
 | `bun test apps/runtime/test/cli-integrate.test.ts apps/runtime/test/http-api.test.ts` | **8 项通过 / 0 失败**（既有单成员命令面与 HTTP 面不回归） |
+| `bun test apps/runtime/test/{dev-repo-service,result-commit-service,workspace-service,verification-service}.test.ts` | **50 项通过 / 0 失败**（storage/契约签名变动的相邻面：dev ref、成果提交、workspace、验证） |
+| `bun test apps/runtime/test/stale-session-reconcile.test.ts` | **7 项通过 / 0 失败**（与 `recovery-service.ts` 的改动相邻：启动收敛路径） |
 | `bun test packages/contracts/test` | 40 项通过 / **1 项失败**：`request.test.ts` 的 `project.trust` 策略确认用例。**与本格无关且可复现于基线**：把 `packages/contracts/src/index.ts` 还原为 `dev@75fa7b8` 后该用例同样失败，本格未修改该命令的任何字段，也未修这个既有失败（不静默改无关测试） |
 
 **未运行**（并说明原因）：`bun run check` / `just check` / `just verify` / `check:fast`——ADR-0038 禁止在开发分支
