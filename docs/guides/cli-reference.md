@@ -1,5 +1,9 @@
 # CLI 命令参考
 
+> **适用版本** `dev@036cf68`（2026-09-15） · **schema** v28 · **最后校对** 2026-09-15
+> 版本会前进：`dev@036cf68` 只是本目录最后一次校对的基线；当前适用版本以
+> [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+
 本文覆盖 `apps/cli/src/main.ts` 中 `usage()` 列出的**每一个命令组**，以及 Runtime 的 HTTP/SSE 面。
 所有事实来自源码核对；核对方法见 `docs/tasks/README.md` 的 FOUNDATION-070 一节。
 
