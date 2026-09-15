@@ -5314,6 +5314,11 @@ $ git diff --stat
     FOUNDATION-077 一节（含实际运行的定向检查与结果），命令面见 `docs/guides/cli-reference.md` §15。
     **未做**：真实 GitHub 上的提升（本仓库自身仍走 `AGENTS.md` 的人工四步）、GitHub 侧分支保护/评审/CI 门禁、
     main 检出里的过渡 `dev` ref 仍未删除（下一格）、全量证据的仓库根仍指向 main 检出（见 FOUNDATION-077 的残留项）。
+12. **`task retry` 的 UI 投影**（Wave L / L2 发现）：命令面早已实现（ADR-0036 / FOUNDATION-061），但界面**没有重试按钮**
+    （「更多操作」只有「终止」与「归档」）。L2 已把 `features.md` 里「任务详情 → 重试」的错误说法改成「界面无按钮」，
+    但把该动作投影进 UI 仍是缺口。
+13. **`promotion` 的「已推送、等待拉取」UI 投影**（Wave L / L4 当时因契约未定而未做）：L1 已把该状态落进契约
+    （派生 `phase: AWAITING_PULL` + 退出码 3），现在可以在项目页/任务详情投影「已推送 ≠ 已提升」。
 
 ### 原 0–7 编号对照
 
