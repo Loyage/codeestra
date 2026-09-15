@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import {
   agentPluginSelectionFromTrace,
   agentPluginSelectionIsEmpty,
+  type AgentKnowledgeContext,
   type AgentStartAdapter,
 } from '@codeestra/contracts';
 import {
@@ -9,6 +11,7 @@ import {
   type AgentStartPlan,
   type StoredAgentConfiguration,
 } from '@codeestra/storage';
+import { machineGeneratedRuntimeDirectory } from '@codeestra/domain';
 
 export class AgentStartServiceError extends Error {
   constructor(readonly code: string, message: string) {
@@ -43,6 +46,53 @@ function pluginSelectionStartArgument(
   return agentPluginSelectionIsEmpty(selection) ? {} : { pluginSelection: selection };
 }
 
+/**
+ * The materialized Project Knowledge artifact the Adapter must hand to its provider (ADR-0041 D05,
+ * ADR-0051).
+ *
+ * The Runtime reads back the binding it recorded for **this Execution** — never the knowledge the
+ * project declares now — and turns its Runtime-relative `contextPath` into an absolute path under
+ * this Runtime's own data directory. Two rules make the result trustworthy:
+ *
+ * 1. **Only real knowledge is handed over.** A missing binding, or a binding with zero materialized
+ *    entries, returns nothing at all, so an Execution with no knowledge keeps a byte-identical
+ *    controlled launch instead of pointing its provider at a header-only file.
+ * 2. **A recorded binding without a Runtime home is a refusal, not a downgrade.** A caller that
+ *    cannot name the home it materialized into is a caller that cannot start this Execution: the
+ *    alternative is starting the Agent anyway, which would silently turn "this Execution ran with
+ *    knowledge K" into a false statement.
+ *
+ * The recorded `contextPath` is relative to `<home>/knowledge/<project-id>` — the same root
+ * `writeRuntimeKnowledgeFile` resolves it against — so this resolves it the same way instead of
+ * re-deriving the layout from the record.
+ */
+export function knowledgeContextStartArgument(input: {
+  readonly storage: Phase1Database;
+  readonly projectId: string;
+  readonly executionId: string;
+  readonly runtimeHome: string | undefined;
+}): { readonly knowledgeContext?: AgentKnowledgeContext } {
+  const binding = input.storage.getExecutionKnowledgeSnapshot(input.executionId);
+  if (binding === null || binding.entryCount === 0) return {};
+  if (input.runtimeHome === undefined) {
+    throw new AgentStartServiceError('KNOWLEDGE_CONTEXT_UNAVAILABLE',
+      `Execution ${binding.executionId} is bound to knowledge snapshot ${binding.snapshotId} but no`
+      + ' Runtime home was supplied, so the materialized context cannot be located; refusing to start'
+      + ' an Agent without the knowledge its Execution recorded');
+  }
+  const root = join(input.runtimeHome, machineGeneratedRuntimeDirectory, input.projectId);
+  const filePath = resolve(root, binding.contextPath);
+  const inside = relative(root, filePath);
+  if (inside.length === 0 || inside.startsWith('..') || isAbsolute(inside)) {
+    throw new AgentStartServiceError('KNOWLEDGE_CONTEXT_UNAVAILABLE',
+      'The recorded knowledge context path is outside this Runtime\'s knowledge directory, so it is'
+      + ' not a Runtime-owned artifact');
+  }
+  return { knowledgeContext: {
+    filePath, digest: binding.contextDigest, bytes: binding.contextBytes,
+  } };
+}
+
 export async function startReservedExecution(input: {
   readonly storage: Phase1Database;
   readonly adapter: AgentStartAdapter;
@@ -65,6 +115,13 @@ export async function startReservedExecution(input: {
     readonly sessionStorageRef: string;
     readonly providerSessionId: string | null;
   };
+  /**
+   * This Runtime's own data directory. It is what turns the recorded, Runtime-relative knowledge
+   * context path into the absolute path an Adapter verifies and hands to its provider (ADR-0051).
+   * A caller that omits it while an Execution is bound to knowledge is refused, never silently
+   * started without that knowledge.
+   */
+  readonly runtimeHome?: string;
   readonly now?: () => number;
   readonly randomUUID?: () => string;
 }): Promise<AgentStartPlan> {
@@ -132,6 +189,12 @@ export async function startReservedExecution(input: {
         constraints: plan.constraints,
       },
       knowledgeSnapshotRefs: input.knowledgeSnapshotRefs ?? [],
+      ...knowledgeContextStartArgument({
+        storage: input.storage,
+        projectId: input.projectId,
+        executionId: plan.executionId,
+        runtimeHome: input.runtimeHome,
+      }),
       permissionMode,
       ...(input.resume === undefined ? {} : { resume: input.resume }),
       // The configuration resolved at reservation time, so the Adapter launches exactly what the

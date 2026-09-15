@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { agentProcessIdentitySchema, type AgentStartRequest } from '@codeestra/contracts';
+import { createHash } from 'node:crypto';
+import { agentProcessIdentitySchema, type AgentKnowledgeContext, type AgentStartRequest } from '@codeestra/contracts';
 import { CodexAdapter } from '../src/codex-adapter.js';
 import { CodexAdapterError } from '../src/codex-protocol.js';
 
@@ -70,6 +71,10 @@ const handle = (frame) => {
 const beginTurn = () => {
   if (mode === 'CRASH') { setTimeout(() => process.exit(3), 10); return; }
   if (mode === 'INTERRUPTED') {
+    // A tool item did arrive before the interrupt: the Adapter must still not report a completion
+    // (tool quiescence is not proven), and therefore must not report facts either.
+    emit({ method: 'item/completed', params: { threadId: sessionId, turnId, completedAtMs: 1,
+      item: { id: 'call-int', type: 'commandExecution', command: 'sleep 22', status: 'inProgress' } } });
     emit({ method: 'turn/completed', params: { threadId: sessionId,
       turn: { id: turnId, status: 'interrupted', error: null, items: [] } } });
     return;
@@ -122,6 +127,54 @@ const beginTurn = () => {
       turn: { id: turnId, status: 'not-a-status', error: null, items: [] } } });
     return;
   }
+  if (mode === 'FACTS_TOOL_USE') {
+    // One tool item seen twice (started + completed) with the same provider id, plus Codex's own
+    // non-tool bookkeeping items: the run used a tool exactly once and ended with prose.
+    emit({ method: 'item/started', params: { threadId: sessionId, turnId, startedAtMs: 1,
+      item: { id: 'call-1', type: 'commandExecution', command: '/bin/sh -lc echo hi', status: 'inProgress' } } });
+    emit({ method: 'item/started', params: { threadId: sessionId, turnId, startedAtMs: 1,
+      item: { id: 'reason-1', type: 'reasoning', summary: ['thinking'], content: [] } } });
+    emit({ method: 'item/completed', params: { threadId: sessionId, turnId, completedAtMs: 2,
+      item: { id: 'reason-1', type: 'reasoning', summary: ['thinking'], content: [] } } });
+    emit({ method: 'item/completed', params: { threadId: sessionId, turnId, completedAtMs: 3,
+      item: { id: 'msg-1', type: 'agentMessage', text: 'Wrote the file. Anything else?' } } });
+    emit({ method: 'item/completed', params: { threadId: sessionId, turnId, completedAtMs: 4,
+      item: { id: 'call-1', type: 'commandExecution', command: '/bin/sh -lc echo hi',
+        status: 'completed', exitCode: 0, aggregatedOutput: 'hi\\n' } } });
+    finishTurn();
+    return;
+  }
+  if (mode === 'FACTS_PROSE_QUESTION') {
+    // No tool item at all, and the last thing the Agent said ends with a question mark: the exact
+    // shape FOUNDATION-056's rule is about.
+    emit({ method: 'item/started', params: { threadId: sessionId, turnId, startedAtMs: 1,
+      item: { id: 'msg-1', type: 'agentMessage', text: '' } } });
+    emit({ method: 'item/completed', params: { threadId: sessionId, turnId, completedAtMs: 2,
+      item: { id: 'msg-1', type: 'agentMessage', text: 'Which package manager should I use?' } } });
+    finishTurn();
+    return;
+  }
+  if (mode === 'FACTS_UNKNOWN_ITEM') {
+    // An item type this Adapter does not recognize must never become "a tool call".
+    emit({ method: 'item/completed', params: { threadId: sessionId, turnId, completedAtMs: 1,
+      item: { id: 'future-1', type: 'someFutureCodexItem', detail: 'x' } } });
+    emit({ method: 'item/completed', params: { threadId: sessionId, turnId, completedAtMs: 2,
+      item: { id: 'msg-1', type: 'agentMessage', text: 'Nothing to do here.' } } });
+    finishTurn();
+    return;
+  }
+  if (mode === 'FACTS_TOOL_THEN_FAILED') {
+    emit({ method: 'item/completed', params: { threadId: sessionId, turnId, completedAtMs: 1,
+      item: { id: 'call-9', type: 'commandExecution', command: 'exit 1',
+        status: 'completed', exitCode: 1, aggregatedOutput: '' } } });
+    emit({ method: 'item/completed', params: { threadId: sessionId, turnId, completedAtMs: 2,
+      item: { id: 'msg-9', type: 'agentMessage', text: 'The command failed.' } } });
+    emit({ method: 'error', params: { threadId: sessionId, turnId,
+      error: { message: 'stub turn failed' }, willRetry: false } });
+    emit({ method: 'turn/completed', params: { threadId: sessionId,
+      turn: { id: turnId, status: 'failed', error: { message: 'stub provider failure' }, items: [] } } });
+    return;
+  }
   if (mode === 'UNSUPPORTED_REQUEST') {
     emit({ jsonrpc: '2.0', id: 7, method: 'mcpServer/elicitation/request', params: {
       threadId: sessionId, turnId, serverName: 'stub' } });
@@ -166,6 +219,15 @@ function temporaryDirectory(prefix: string): string {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
   directories.push(directory);
   return directory;
+}
+
+/** One materialized knowledge artifact, exactly as the Runtime records it for an Execution. */
+function knowledgeContext(text: string): AgentKnowledgeContext {
+  const directory = temporaryDirectory('codeestra-codex-knowledge-');
+  const filePath = join(directory, 'knowledge-context.md');
+  Bun.write(filePath, text);
+  const bytes = new TextEncoder().encode(text);
+  return { filePath, digest: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length };
 }
 
 afterEach(async () => {
@@ -391,6 +453,70 @@ describe('Codex adapter start', () => {
   });
 });
 
+describe('Codex adapter Project Knowledge handoff', () => {
+  const knowledgeText = [
+    '<!-- Generated by Codeestra Runtime. Machine-generated knowledge area: .codeestra/. -->',
+    'Snapshot digest: abc123',
+    '# Project knowledge',
+    '',
+    '## .codeestra/instructions/house-rules.md',
+    '',
+    'layer: instructions | digest: 1111',
+    '',
+    'Prefer `bun` over `npm`.',
+    '',
+  ].join('\n');
+
+  test('hands the recorded knowledge to Codex as developerInstructions, without touching argv', async () => {
+    const fixtureUnderTest = fixture('SETTLE');
+    const context = knowledgeContext(knowledgeText);
+    await fixtureUnderTest.adapter.start({ ...fixtureUnderTest.startRequest, knowledgeContext: context });
+    const report = await waitForReport(fixtureUnderTest, (r) => r.prompt !== null);
+    // Codex has no launched-instruction flag, so the controlled argv is unchanged...
+    expect(report.argv).toEqual(['app-server', '--stdio']);
+    // ...and the knowledge travels in the app-server's own `developerInstructions` field, byte for
+    // byte the text the Runtime recorded for this Execution.
+    const threadStart = report.requests.find((request) => request.method === 'thread/start');
+    expect(threadStart?.params['developerInstructions']).toBe(knowledgeText);
+    expect(readFileSync(context.filePath, 'utf8')).toBe(knowledgeText);
+  });
+
+  test('re-sends the same knowledge when a successor Execution resumes the thread', async () => {
+    const fixtureUnderTest = fixture('SETTLE');
+    const context = knowledgeContext(knowledgeText);
+    await fixtureUnderTest.adapter.start({
+      ...fixtureUnderTest.startRequest,
+      knowledgeContext: context,
+      resume: { predecessorSessionId: 'session-before',
+        sessionStorageRef: fixtureUnderTest.rolloutPath, providerSessionId: 'stub-thread-1' },
+    });
+    const report = await waitForReport(fixtureUnderTest, (r) => r.prompt !== null);
+    const resume = report.requests.find((request) => request.method === 'thread/resume');
+    expect(resume?.params['developerInstructions']).toBe(knowledgeText);
+    expect(report.requests.some((request) => request.method === 'thread/start')).toBe(false);
+  });
+
+  test('sends no developerInstructions when the Execution resolved no knowledge', async () => {
+    const fixtureUnderTest = fixture('SETTLE');
+    await fixtureUnderTest.adapter.start(fixtureUnderTest.startRequest);
+    const report = await waitForReport(fixtureUnderTest, (r) => r.prompt !== null);
+    expect(report.argv).toEqual(['app-server', '--stdio']);
+    const threadStart = report.requests.find((request) => request.method === 'thread/start');
+    expect(threadStart?.params).not.toHaveProperty('developerInstructions');
+  });
+
+  test('refuses to start when the knowledge file does not match its recorded digest', async () => {
+    const fixtureUnderTest = fixture('SETTLE');
+    const context = knowledgeContext(knowledgeText);
+    Bun.write(context.filePath, `${knowledgeText}tampered\n`);
+    await expect(fixtureUnderTest.adapter.start({
+      ...fixtureUnderTest.startRequest, knowledgeContext: context,
+    })).rejects.toMatchObject({ code: 'KNOWLEDGE_CONTEXT_UNAVAILABLE' });
+    // The refusal happens before any provider process exists.
+    expect(existsSync(fixtureUnderTest.reportPath)).toBe(false);
+  });
+});
+
 describe('Codex adapter observation', () => {
   test('maps an approval request to a PERMISSION Attention and writes the answer back', async () => {
     const fixtureUnderTest = fixture('APPROVAL');
@@ -559,5 +685,89 @@ describe('Codex adapter observation', () => {
     const released = await fixtureUnderTest.adapter.releaseSession('session-under-test');
     expect(released?.exited).toBe(true);
     expect(await fixtureUnderTest.adapter.releaseSession('session-under-test')).toBeNull();
+  });
+});
+
+/**
+ * Codex completion facts (FOUNDATION-079 / ADR-0043, ADR-0051).
+ *
+ * The stub replays Codex's own `item/started` / `item/completed` / `turn/completed` notifications, so
+ * what is asserted here is the Adapter's fact collection: a fact Codex did not report must stay
+ * absent, and a run without a completion must carry no facts at all.
+ */
+describe('Codex adapter completion facts', () => {
+  interface CompletedEvent {
+    readonly type: string;
+    readonly outcome?: string;
+    readonly failure?: { readonly code: string; readonly message: string };
+    readonly facts?: Readonly<Record<string, unknown>>;
+  }
+
+  test('reports a tool-using run once, with the provider text and no invented stop reason', async () => {
+    const fixtureUnderTest = fixture('FACTS_TOOL_USE');
+    const session = await fixtureUnderTest.adapter.start(fixtureUnderTest.startRequest);
+    const events = await collect(fixtureUnderTest.adapter, session) as readonly CompletedEvent[];
+    const completed = events.at(-1);
+    expect(completed).toMatchObject({ type: 'completed', outcome: 'SUCCESS' });
+    // The same tool item was reported by `item/started` and `item/completed`; it counts once. The
+    // `reasoning` item Codex also reported is not a tool call.
+    expect(completed?.facts).toEqual({
+      toolCallCount: 1,
+      finalAssistantText: 'Wrote the file. Anything else?',
+      finalAssistantTextTruncated: false,
+      finalAssistantStopReason: null,
+    });
+    // Facts are observations, never Attentions: the Adapter itself raises nothing from them.
+    expect(events.some((event) => event.type === 'attention')).toBe(false);
+  });
+
+  test('reports a tool-free run that ended with a question, which is what the note rule needs', async () => {
+    const fixtureUnderTest = fixture('FACTS_PROSE_QUESTION');
+    const session = await fixtureUnderTest.adapter.start(fixtureUnderTest.startRequest);
+    const events = await collect(fixtureUnderTest.adapter, session) as readonly CompletedEvent[];
+    const facts = events.at(-1)?.facts;
+    expect(facts).toEqual({
+      toolCallCount: 0,
+      finalAssistantText: 'Which package manager should I use?',
+      finalAssistantTextTruncated: false,
+      finalAssistantStopReason: null,
+    });
+    expect(String(facts?.['finalAssistantText']).trim().endsWith('?')).toBe(true);
+  });
+
+  test('never turns an unrecognized item type into a tool call', async () => {
+    const fixtureUnderTest = fixture('FACTS_UNKNOWN_ITEM');
+    const session = await fixtureUnderTest.adapter.start(fixtureUnderTest.startRequest);
+    const events = await collect(fixtureUnderTest.adapter, session) as readonly CompletedEvent[];
+    expect(events.at(-1)?.facts).toMatchObject({ toolCallCount: 0 });
+  });
+
+  test('carries the facts of a failed turn without inventing an outcome', async () => {
+    const fixtureUnderTest = fixture('FACTS_TOOL_THEN_FAILED');
+    const session = await fixtureUnderTest.adapter.start(fixtureUnderTest.startRequest);
+    const events = await collect(fixtureUnderTest.adapter, session) as readonly CompletedEvent[];
+    const completed = events.at(-1);
+    expect(completed).toMatchObject({ type: 'completed', outcome: 'FAILURE',
+      failure: { code: 'PROVIDER_TURN_FAILED' } });
+    expect(completed?.facts).toMatchObject({ toolCallCount: 1,
+      finalAssistantText: 'The command failed.' });
+  });
+
+  test('an interrupted turn reports no facts, because there is no completion to describe', async () => {
+    const fixtureUnderTest = fixture('INTERRUPTED');
+    const session = await fixtureUnderTest.adapter.start(fixtureUnderTest.startRequest);
+    const events = await collect(fixtureUnderTest.adapter, session) as readonly CompletedEvent[];
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: 'disconnected' });
+    expect(events[0]).not.toHaveProperty('facts');
+  });
+
+  test('a provider crash reports no facts either', async () => {
+    const fixtureUnderTest = fixture('CRASH');
+    const session = await fixtureUnderTest.adapter.start(fixtureUnderTest.startRequest);
+    const events = await collect(fixtureUnderTest.adapter, session) as readonly CompletedEvent[];
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: 'disconnected' });
+    expect(events[0]).not.toHaveProperty('facts');
   });
 });

@@ -1,6 +1,6 @@
 import { isAbsolute, join, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
-import type { AgentAnswer, AgentCompletionFacts } from '@codeestra/contracts';
+import type { AgentAnswer, AgentCompletionFacts, AgentKnowledgeContext } from '@codeestra/contracts';
 
 /**
  * Claude Code protocol surface used by the Adapter: framing, the SDK control channel (permission
@@ -32,6 +32,8 @@ export type ClaudeAdapterErrorCode =
   | 'UNKNOWN_PROVIDER_REQUEST'
   | 'UNSUPPORTED_ANSWER'
   | 'UNSUPPORTED_AGENT_CONFIGURATION'
+  /** The Execution's materialized knowledge could not be read at its recorded digest (ADR-0051). */
+  | 'KNOWLEDGE_CONTEXT_UNAVAILABLE'
   | 'INVALID_PROVIDER_RESPONSE';
 
 /**
@@ -199,6 +201,13 @@ export function buildClaudeArguments(input: {
   readonly sessionId?: string | undefined;
   /** Reopens a recorded conversation; mutually exclusive with `sessionId`. */
   readonly resumeSessionId?: string | undefined;
+  /**
+   * The materialized Project Knowledge this Execution is bound to (ADR-0051). Claude's own
+   * `--append-system-prompt-file` option is the channel: the Adapter verified the file against the
+   * recorded digest and passes its absolute path, so the provider reads the knowledge itself and the
+   * launch argv stays bounded. Absent means the launch is byte-identical to before this capability.
+   */
+  readonly knowledgeContext?: AgentKnowledgeContext | undefined;
 }): readonly string[] {
   const policy = claudePermissionPolicy(input.permissionMode);
   const effort = claudeThinkingEffort(input.thinkingLevel);
@@ -222,6 +231,9 @@ export function buildClaudeArguments(input: {
     argv.push('--resume', input.resumeSessionId);
   } else if (input.sessionId !== undefined) {
     argv.push('--session-id', input.sessionId);
+  }
+  if (input.knowledgeContext !== undefined) {
+    argv.push('--append-system-prompt-file', input.knowledgeContext.filePath);
   }
   return argv;
 }

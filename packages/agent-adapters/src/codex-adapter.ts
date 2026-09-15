@@ -20,18 +20,22 @@ import {
   codexApprovalDecision,
   codexApprovalKind,
   codexApprovalPrompt,
+  codexCompletionFacts,
   codexMethods,
   codexPermissionPolicy,
   codexPlainQuestionPrompt,
   codexQuestionnairePrompt,
   CodexAdapterError,
+  collectCodexCompletionFacts,
   encodeCodexUserInputResult,
+  newCodexFactAccumulator,
   parseCodexThreadIdentity,
   parseCodexTurnCompletion,
   parseCodexTurnId,
   parseCodexUserInput,
 } from './codex-protocol.js';
 import { readProcessStartToken } from './pi-identity.js';
+import { KnowledgeContextError, knowledgeContextUnavailableCode, readVerifiedKnowledgeContext } from './knowledge-context.js';
 
 /** The measured matrix for `codex-cli 0.151.0`; see `docs/spikes/codex-0.151.0.md`. */
 /**
@@ -232,6 +236,22 @@ export class CodexAdapter implements AgentAnswerAdapter, AgentProcessRelease {
   async start(request: AgentStartRequest): Promise<AgentSessionRef> {
     const agentConfig = request.agentConfig ?? {};
     const policy = codexPermissionPolicy(request.permissionMode);
+    // Codex has no launched-instruction file flag: its app-server protocol takes the instructions as
+    // a string (`thread/start`/`thread/resume` `developerInstructions`, measured from
+    // `codex app-server generate-json-schema`), so verified knowledge text is carried inline instead
+    // of passing a path Codex would have to be trusted to read. A file that does not match its
+    // recorded digest refuses the start before any process exists (ADR-0051).
+    let knowledgeText: string | null = null;
+    if (request.knowledgeContext !== undefined) {
+      try {
+        knowledgeText = readVerifiedKnowledgeContext(request.knowledgeContext);
+      } catch (error) {
+        if (error instanceof KnowledgeContextError) {
+          throw new CodexAdapterError(knowledgeContextUnavailableCode, error.message, false, false);
+        }
+        throw error;
+      }
+    }
     const argv = [
       ...this.#options.launcherArgs,
       ...buildCodexAppServerArguments({
@@ -262,6 +282,7 @@ export class CodexAdapter implements AgentAnswerAdapter, AgentProcessRelease {
         sandbox: policy.sandbox,
         ...(agentConfig.model === undefined ? {} : { model: agentConfig.model }),
         ...(agentConfig.provider === undefined ? {} : { modelProvider: agentConfig.provider }),
+        ...(knowledgeText === null ? {} : { developerInstructions: knowledgeText }),
       };
       let identity;
       let prompt: string;
@@ -357,6 +378,11 @@ export class CodexAdapter implements AgentAnswerAdapter, AgentProcessRelease {
           ...(live.agentConfig.thinkingLevel === undefined ? {} : { thinkingLevel: live.agentConfig.thinkingLevel }),
           enableRequestUserInput: this.#options.enableRequestUserInput,
         }))).digest('hex').slice(0, 16)}`;
+    // Provider facts for the completion note. They are counted/collected from Codex's own item
+    // notifications and never interpreted here: the Runtime applies its heuristic to them
+    // (FOUNDATION-056, ADR-0043). A `disconnected` observation carries no facts at all, because
+    // "the Session ended without a completion" is not the same fact as "the run used no tool".
+    const facts = newCodexFactAccumulator();
     for await (const frame of live.client.frames()) {
       if (frame.kind === 'disconnected') {
         this.#sessions.delete(session.id);
@@ -382,6 +408,10 @@ export class CodexAdapter implements AgentAnswerAdapter, AgentProcessRelease {
           `Codeestra Codex adapter does not implement ${frame.method}`);
         continue;
       }
+      // Facts are read from every notification, before any branch decides what to do with it: a tool
+      // item that arrived in the very turn that later fails or is interrupted is still a fact about
+      // this run, and dropping it would make a tool-using run look like a tool-free one.
+      collectCodexCompletionFacts(facts, frame);
       // Error notifications (`willRetry: true`) and `item` errors are provider diagnostics that
       // can accompany a turn which still completes. The turn's own terminal status is the only
       // verdict this Adapter will report as an outcome.
@@ -434,6 +464,7 @@ export class CodexAdapter implements AgentAnswerAdapter, AgentProcessRelease {
           failure: { code: 'PROVIDER_RESPONSE_INVALID',
             message: 'Codex reported a turn completion this Adapter could not interpret' },
           evidence: { ref: `${evidenceRef}:invalid`, toolsQuiescent: true, ownedWritersStopped: true },
+          facts: codexCompletionFacts(facts),
         };
         return;
       }
@@ -453,6 +484,7 @@ export class CodexAdapter implements AgentAnswerAdapter, AgentProcessRelease {
           toolsQuiescent: true,
           ownedWritersStopped: true,
         },
+        facts: codexCompletionFacts(facts),
       };
       return;
     }

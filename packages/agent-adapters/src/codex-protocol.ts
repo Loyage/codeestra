@@ -3,6 +3,7 @@ import {
   questionnairePromptSchema,
   questionnaireSchema,
   type AgentAnswer,
+  type AgentCompletionFacts,
   type Questionnaire,
 } from '@codeestra/contracts';
 
@@ -28,6 +29,8 @@ export type CodexAdapterErrorCode =
   | 'CURSOR_EPOCH_MISMATCH'
   | 'UNKNOWN_PROVIDER_REQUEST'
   | 'UNSUPPORTED_ANSWER'
+  /** The Execution's materialized knowledge could not be read at its recorded digest (ADR-0051). */
+  | 'KNOWLEDGE_CONTEXT_UNAVAILABLE'
   | 'INVALID_PROVIDER_RESPONSE';
 
 /**
@@ -159,6 +162,8 @@ export const codexMethods = Object.freeze({
   legacyPatchApproval: 'applyPatchApproval',
   userInput: 'item/tool/requestUserInput',
   turnCompleted: 'turn/completed',
+  itemStarted: 'item/started',
+  itemCompleted: 'item/completed',
 });
 
 /**
@@ -519,4 +524,101 @@ export function encodeCodexUserInputResult(input: {
     answers[question.id] = { answers: [] };
   }
   return { answers };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Completion facts (ADR-0043 / FOUNDATION-056 semantics, implemented for Codex)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Codex item types that are a **tool invocation**. The list is deliberately the narrow one: an item
+ * this Adapter does not recognize is not counted as a tool call (see the accumulator's doc comment),
+ * and neither are Codex's own bookkeeping items (`reasoning`, `plan`, `userMessage`, `hookPrompt`,
+ * compaction, review-mode markers). Measured against `codex-cli 0.154.0`
+ * (`codex app-server generate-json-schema`, `ThreadItem`).
+ */
+const codexToolItemTypes: ReadonlySet<string> = new Set([
+  'commandExecution',
+  'fileChange',
+  'mcpToolCall',
+  'dynamicToolCall',
+  'collabAgentToolCall',
+  'webSearch',
+  'imageGeneration',
+]);
+
+/**
+ * Provider facts collected while one Codex turn is observed. Every field is read straight out of
+ * Codex's own item notifications; nothing here decides what the facts mean — the Runtime applies its
+ * own deterministic rule (FOUNDATION-056).
+ *
+ * A miss is preferred over a false statement:
+ *
+ * - `toolCallCount` only counts item types Codex itself names as a tool call, deduplicated by the
+ *   provider's item id. An unrecognized item type therefore never becomes "a tool call", and an item
+ *   observed in both `item/started` and `item/completed` is counted once.
+ * - only a **completed** `agentMessage` item contributes `finalAssistantText`: a half-streamed delta
+ *   is not "the last thing the Agent said".
+ * - `finalAssistantStopReason` is never filled in: Codex reports no per-message stop reason, and the
+ *   turn's outcome is already carried by the completion itself. Deriving one from the turn status
+ *   would describe a different fact than the field means (compared with Pi, ADR-0043).
+ */
+export interface CodexFactAccumulator {
+  readonly toolItemIds: Set<string>;
+  /** Tool items the provider reported without a usable id; they still prove a tool was used. */
+  unnamedToolItems: number;
+  finalAssistantText: string | null;
+  finalAssistantTextTruncated: boolean;
+}
+
+/** Bounded so a hostile or chatty provider cannot force an unbounded database row. */
+const codexAssistantTextLimit = 2000;
+
+export function newCodexFactAccumulator(): CodexFactAccumulator {
+  return { toolItemIds: new Set<string>(), unnamedToolItems: 0,
+    finalAssistantText: null, finalAssistantTextTruncated: false };
+}
+
+function asRecord(value: unknown): Readonly<Record<string, unknown>> | null {
+  return typeof value === 'object' && value !== null
+    ? value as Readonly<Record<string, unknown>> : null;
+}
+
+function codexItemId(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+/** One provider notification's worth of facts. Unknown shapes are ignored, never guessed at. */
+export function collectCodexCompletionFacts(
+  accumulator: CodexFactAccumulator,
+  frame: { readonly method: string | undefined; readonly params: unknown },
+): void {
+  if (frame.method !== codexMethods.itemStarted && frame.method !== codexMethods.itemCompleted) return;
+  const item = asRecord(asRecord(frame.params)?.['item']);
+  if (item === null) return;
+  const type = typeof item['type'] === 'string' ? item['type'] : '';
+  if (codexToolItemTypes.has(type)) {
+    const id = codexItemId(item['id']);
+    if (id === null) accumulator.unnamedToolItems += 1;
+    else accumulator.toolItemIds.add(id);
+    return;
+  }
+  if (type !== 'agentMessage') return;
+  // Only the completed item carries the message's authoritative text; a delta is a fragment.
+  if (frame.method !== codexMethods.itemCompleted) return;
+  const text = typeof item['text'] === 'string' ? item['text'] : '';
+  if (text.trim().length === 0) return;
+  accumulator.finalAssistantText = text.length <= codexAssistantTextLimit
+    ? text : text.slice(text.length - codexAssistantTextLimit);
+  accumulator.finalAssistantTextTruncated = text.length > codexAssistantTextLimit;
+}
+
+export function codexCompletionFacts(accumulator: CodexFactAccumulator): AgentCompletionFacts {
+  return {
+    toolCallCount: accumulator.toolItemIds.size + accumulator.unnamedToolItems,
+    finalAssistantText: accumulator.finalAssistantText,
+    finalAssistantTextTruncated: accumulator.finalAssistantTextTruncated,
+    // Codex reports no per-message stop reason; an absent fact is reported as absent.
+    finalAssistantStopReason: null,
+  };
 }

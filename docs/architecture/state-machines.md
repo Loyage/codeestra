@@ -184,7 +184,8 @@ PENDING → IN_FLIGHT → ACKNOWLEDGED
 ```
 
 - `satisfied` **只有** `ACKNOWLEDGED`（带 Adapter 的结构化 evidence）与 `SUPERSEDED_BY_RESTART`（读回 successor Execution 行并确认其**记录值** `applied_revision_id` 就是该 revision）。`PENDING`/`IN_FLIGHT`/`UNACKNOWLEDGED`/`CHANNEL_UNSUPPORTED`/`TIMED_OUT`/`FAILED` 一律 unsatisfied 且保留可见，不存在「静默丢弃」。
-- 能力如实：投递前实时 `probe()` Adapter；`revisionAcknowledgement != SUPPORTED` → `CHANNEL_UNSUPPORTED`（evidence `capability:<值>`，Pi 与 Codex 都是 `capability:UNSUPPORTED`）。声明 `SUPPORTED` 但缺 `applyRevision` 端口 → 同样 `CHANNEL_UNSUPPORTED`；返回 ACK 但没有 evidence → `UNACKNOWLEDGED/MISSING_ACK_EVIDENCE`。
+- 能力如实：投递前实时 `probe()` Adapter；`revisionAcknowledgement != SUPPORTED` → `CHANNEL_UNSUPPORTED`（evidence `capability:<值>`，Pi、Codex 与 Claude 都是 `capability:UNSUPPORTED`）。声明 `SUPPORTED` 但缺 `applyRevision` 端口 → 同样 `CHANNEL_UNSUPPORTED`；返回 ACK 但没有 evidence → `UNACKNOWLEDGED/MISSING_ACK_EVIDENCE`。
+- 三个 provider 的「有没有 ACK 通道」已用真实 CLI 实测固定（ADR-0051 / FOUNDATION-079）：Pi RPC 有 `prompt`/`steer`/`follow_up` 但成功只回 `queue_update`（且无 revision 命令）、Codex app-server 有 `turn/steer`（需活跃 turn，响应只有 `{turnId}`）与 `thread/inject_items`、Claude 控制协议只有 `initialize`/`interrupt`/`can_use_tool`。**投递通道存在但「新修订已生效」无处可核验**，因此一律维持 `UNSUPPORTED`，不实现 `applyRevision`。
 - 领域守卫：ACK 必须命名本投递的 revision 且 Task 的 `current_revision_id` 仍是它，否则 `STALE_REVISION_ACKNOWLEDGEMENT`；已满足的投递再 ACK/再开 attempt 抛 `REVISION_ALREADY_ACKNOWLEDGED`；`SUPERSEDED_BY_RESTART` 必须携带 successor 记录在案的 revision，否则 `SUCCESSOR_REVISION_MISMATCH`。每次状态推进经 `transitionRevisionDelivery` 做乐观版本 CAS，并发处置冲突为 `CONCURRENT_MODIFICATION`。
 - 不支持的 Adapter 的唯一处置是既有「协作停止 + 新建 Execution」（`task revision delivery resolve --action stop-and-restart`）；停止无法确认静止 → 尝试 `FAILED/STOP_UNCONFIRMED`，命令返回 `RECOVERY_REQUIRED`、退出码 1、资源全部保留。
 - 重启（`reconcileAtStartup`）把仍 `IN_FLIGHT` 的尝试按事实收口：期限已过 `TIMED_OUT`，无期限（被杀在途中）`FAILED/RUNTIME_RESTARTED`；**没有**自动重投。

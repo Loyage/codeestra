@@ -34,6 +34,7 @@ import {
   parseClaudeResult,
 } from './claude-protocol.js';
 import { readProcessStartToken } from './pi-identity.js';
+import { KnowledgeContextError, knowledgeContextUnavailableCode, readVerifiedKnowledgeContext } from './knowledge-context.js';
 
 /**
  * The measured matrix for `claude 2.1.268`; see `docs/spikes/claude-2.1.268.md`.
@@ -270,6 +271,19 @@ export class ClaudeAdapter implements AgentAnswerAdapter, AgentProcessRelease {
         realpath: realpathSync,
       });
     }
+    // The knowledge this Execution is bound to is verified *before* anything is spawned: a file that
+    // does not match its recorded digest refuses the start instead of running the Agent with a
+    // silently reduced input set (ADR-0051). Claude then reads the same verified file itself.
+    if (request.knowledgeContext !== undefined) {
+      try {
+        readVerifiedKnowledgeContext(request.knowledgeContext);
+      } catch (error) {
+        if (error instanceof KnowledgeContextError) {
+          throw new ClaudeAdapterError(knowledgeContextUnavailableCode, error.message, false, false);
+        }
+        throw error;
+      }
+    }
     // `buildClaudeArguments` refuses a thinking level the provider cannot express, before any
     // process exists, so an unusable configuration never becomes a launched Session.
     const argv = buildClaudeArguments({
@@ -279,6 +293,9 @@ export class ClaudeAdapter implements AgentAnswerAdapter, AgentProcessRelease {
       ...(request.resume === undefined
         ? { sessionId: providerSessionId }
         : { resumeSessionId: providerSessionId }),
+      ...(request.knowledgeContext === undefined
+        ? {}
+        : { knowledgeContext: request.knowledgeContext }),
     });
     let child: Bun.Subprocess<'pipe', 'pipe', 'pipe'>;
     try {

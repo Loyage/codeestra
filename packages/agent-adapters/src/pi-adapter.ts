@@ -17,11 +17,13 @@ import {
 import { readProcessStartToken } from './pi-identity.js';
 import { PiRpcClient, PiRpcProcessError } from './pi-process.js';
 import {
+  buildPiKnowledgeArguments,
   buildPiModelArguments,
   buildPiRpcArguments,
   mapPiExtensionUiRequest,
   piExtensionUiResponseRecord,
 } from './pi-rpc.js';
+import { KnowledgeContextError, knowledgeContextUnavailableCode, readVerifiedKnowledgeContext } from './knowledge-context.js';
 import {
   assertPiPluginSelectionUsable,
   PiPluginError,
@@ -348,6 +350,19 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
           'The resumed session file is not inside the Runtime Pi session directory', false, false);
       }
     }
+    // The knowledge this Execution is bound to is verified *before* anything is spawned: a file that
+    // does not match its recorded digest refuses the start instead of running the Agent with a
+    // silently reduced input set (ADR-0051). Pi then reads the same verified path itself.
+    if (request.knowledgeContext !== undefined) {
+      try {
+        readVerifiedKnowledgeContext(request.knowledgeContext);
+      } catch (error) {
+        if (error instanceof KnowledgeContextError) {
+          throw new PiRpcProcessError(knowledgeContextUnavailableCode, error.message, false, false);
+        }
+        throw error;
+      }
+    }
     const argv = [
       ...this.#options.launcherArgs,
       ...buildPiRpcArguments({
@@ -360,6 +375,7 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
         ...(request.pluginSelection === undefined ? {} : { pluginSelection: request.pluginSelection }),
       }),
       ...buildPiModelArguments(agentConfig),
+      ...buildPiKnowledgeArguments(request.knowledgeContext),
     ];
     let child: Bun.Subprocess<'pipe', 'pipe', 'pipe'>;
     try {

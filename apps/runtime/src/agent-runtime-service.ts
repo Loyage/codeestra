@@ -17,7 +17,7 @@ import { assertPiPluginSelectionUsable } from '@codeestra/agent-adapters';
 import type { AdapterRegistry } from './adapter-registry.js';
 import { deliverAgentAnswer } from './agent-answer-service.js';
 import { observeAgentEvents } from './agent-observation-service.js';
-import { startReservedExecution } from './agent-start-service.js';
+import { startReservedExecution, knowledgeContextStartArgument } from './agent-start-service.js';
 import {
   agentLaunchConfiguration,
   type AgentPluginResolution,
@@ -387,6 +387,10 @@ export class AgentRuntimeCoordinator {
         // The exact knowledge this Execution uses, as references an observation can be replayed
         // against. An Adapter is free to ignore them; the binding above is the authority.
         knowledgeSnapshotRefs: knowledge.refs,
+        // ...and the materialized artifact itself, so the Adapter can hand the provider the same
+        // knowledge instead of the references alone (ADR-0051). The Runtime home is supplied here
+        // because the recorded context path is Runtime-relative.
+        runtimeHome: this.#runtimeHome,
         ...(input.resume === undefined ? {} : {
           resume: {
             predecessorSessionId: input.resume.predecessorSessionId,
@@ -816,6 +820,14 @@ export class AgentRuntimeCoordinator {
       },
       knowledgeSnapshotRefs: executionKnowledgeRefs(
         this.#storage.getExecutionKnowledgeSnapshot(plan.executionId)),
+      // A successor incarnation reopens the same conversation, so it keeps the knowledge its
+      // Execution was bound to rather than the knowledge the project declares now (ADR-0051).
+      ...knowledgeContextStartArgument({
+        storage: this.#storage,
+        projectId: plan.projectId,
+        executionId: plan.executionId,
+        runtimeHome: this.#runtimeHome,
+      }),
       permissionMode,
       resume: {
         predecessorSessionId: plan.sessionId,

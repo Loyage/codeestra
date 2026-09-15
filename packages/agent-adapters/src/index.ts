@@ -1,4 +1,5 @@
 export {
+  buildPiKnowledgeArguments,
   buildPiRpcArguments,
   codeestraPermissionTitlePrefix,
   encodePiExtensionUiResponse,
@@ -55,6 +56,12 @@ export { defaultSessionFileReadCapBytes, readPiSessionFileFacts } from './pi-ses
 export type { PiSessionFileFacts } from './pi-session-file.js';
 export type { PiRpcEnvelope, PiRpcErrorCode } from './pi-process.js';
 export {
+  KnowledgeContextError,
+  knowledgeContextUnavailable,
+  knowledgeContextUnavailableCode,
+  readVerifiedKnowledgeContext,
+} from './knowledge-context.js';
+export {
   piPluginSelectionSupport,
   PiRpcAdapter,
 } from './pi-adapter.js';
@@ -81,6 +88,7 @@ export {
   codexApprovalDecision,
   codexApprovalKind,
   codexApprovalPrompt,
+  codexCompletionFacts,
   codexMethods,
   codexPermissionPolicy,
   codexPlainQuestionPrompt,
@@ -88,16 +96,18 @@ export {
   CodexAdapterError,
   CodexJsonlDecoder,
   CodexProtocolError,
+  collectCodexCompletionFacts,
   encodeCodexRecord,
   encodeCodexUserInputResult,
+  newCodexFactAccumulator,
   parseCodexThreadIdentity,
   parseCodexTurnCompletion,
   parseCodexTurnId,
   parseCodexUserInput,
 } from './codex-protocol.js';
 export type {
-  CodexAdapterErrorCode, CodexThreadIdentity, CodexTurnCompletion, CodexUserInputQuestion,
-  CodexUserInputRequest,
+  CodexAdapterErrorCode, CodexFactAccumulator, CodexThreadIdentity, CodexTurnCompletion,
+  CodexUserInputQuestion, CodexUserInputRequest,
 } from './codex-protocol.js';
 export { CodexAppServerClient } from './codex-process.js';
 export type { CodexFrame, CodexPendingServerRequest } from './codex-process.js';
