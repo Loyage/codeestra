@@ -678,11 +678,27 @@ bun run codeestra task integration cancel $PROJECT <batch-id> --reason "<为什�
 
 **Task 验证 ≠ 集成验证**：前者判定一个 Task 的成果 commit，后者判定合并后的 dev 提交。两者不能互相替代。
 
+### 在界面上组批、集成与取消
+
+「项目」标签页的 `集成批次 · dev` 面板是同一命令面的前端（不新增语义、不绕过门禁）：
+
+- 上面的批次表与成员表是**只读**投影（列表来自 `task integration list`）；成员按 task-id 排序。
+- 「组批（task integration create）」用项目里的任务组一个批次：成员下拉框列出每一个任务（不按状态过滤），
+  每个成员旁边写清这次发送的 `expected-version`（CAS），下面是请求字段预览。
+- 每个批次的「集成」与「取消」按钮**不按本地状态隐藏或禁用**：能不能做由 Runtime 判断，被拒绝时界面
+  逐字显示它返回的稳定码（如 `TASK_NOT_EXECUTED`、`INTEGRATION_IN_PROGRESS`、`CONCURRENT_MODIFICATION`）。
+- 「取消」不保证成功：只有记录能证明无副作用（仍 `CREATED`且无 worktree/合并/验证）才会真正 `CANCELLED`；
+  否则它变成 `RECOVERY_REQUIRED`（退出码 3）并继续占用成员。界面把这个差别分开写。
+- 批级 `INTEGRATED` **不等于**已进 `main`：稳定提升是下一步（见下章）。
+
+界面**不**提供删除批次或重试合并；失败/失效的批次保留现场，按当前事实重新组批。
+
 ### 想深入看哪篇
 
 - 集成的完整流程：[workflow.md](./workflow.md) §7
 - 集成相关拒绝码：[troubleshooting.md](./troubleshooting.md) §1
 - `task integrate` / `task integration`：[cli-reference.md](./cli-reference.md) §11
+- 界面上的批次视图与组批/集成/取消：[ui.md](./ui.md) §5.3
 
 ---
 

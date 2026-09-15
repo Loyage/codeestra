@@ -9,6 +9,16 @@ import { TranscriptPanel } from './transcript.js';
 import { TerminalPanel } from './terminal.js';
 import { DependencyPanel } from './dependencies.js';
 import { PromotionPanel } from './promotion.js';
+import { IntegrationBatchPanel, IntegrationBatchTable } from './integration-batches.js';
+import {
+  DevRepoInspectionRows,
+  ProjectDevRepoInput,
+  canSubmitProjectTrust,
+  projectInspectCommand,
+  projectTrustCommand,
+  projectTrustPolicyConfirmation,
+  projectTrustRejectionNotice,
+} from './project-trust.js';
 import { TaskRetryControls } from './task-retry.js';
 import { RevisionDeliveryPanel } from './revisions.js';
 import { ProseQuestionWaitCard, isProseQuestionWait, readProseQuestionWait, proseQuestionResolveCommand } from './prose-wait.js';
@@ -31,8 +41,8 @@ import {
   type OperationProgressEventView,
   type OperationView,
   type ProseQuestionResolutionResultView,
+  type ProjectIdentityView,
   type QuestionnaireView,
-  type RepositoryIdentityView,
   type ResultCommitAuthorizationView,
   type StreamFrame,
   type TaskStatusView,
@@ -211,15 +221,6 @@ function applyOperationProgress(
     }],
   };
   return next;
-}
-
-/**
- * Integration batches reuse two state names from the Execution vocabulary, where they mean
- * something else: a batch's `PREPARING` is the merge, not a process start.
- */
-function integrationStateLabel(state: string): string {
-  if (state === 'PREPARING') return '正在合并';
-  return labelValue(state);
 }
 
 function labelValue(value: string): string {
@@ -436,7 +437,10 @@ function Console({ token, initialProjectId }: {
       || frame.event.eventType.startsWith('Task')
       || frame.event.eventType.startsWith('AgentSession')
       || frame.event.eventType.startsWith('Verification')
-      || frame.event.eventType.startsWith('ResultCommit');
+      || frame.event.eventType.startsWith('ResultCommit')
+      // A batch is composed, merged, invalidated or cancelled as its own aggregate, so its events
+      // refresh the project's batch view and the selected Task's integration record.
+      || frame.event.eventType.startsWith('Integration');
     // Long-command progress arrives as an event, so the Task detail is updated from the stream
     // instead of being polled. An Operation this client does not know yet (another client queued
     // it) triggers exactly one detail reload, after which its events merge in place.
@@ -1371,40 +1375,13 @@ function TasksTab(props: CommonProps & {
                     ) : null}
                   </tbody>
                 </table></div>
-                <h3>集成记录 · dev</h3>
-                <div className="table-scroll"><table>
-                  <thead>
-                    <tr><th>状态</th><th>结果</th><th>候选 commit</th><th>dev 基线</th><th>合入后 dev</th>
-                      <th>方式</th><th>集成验证</th><th>结束时间</th></tr>
-                  </thead>
-                  <tbody>
-                    {integrationBatches.map((batch) => (
-                      <tr key={batch.batchId}>
-                        <td>{integrationStateLabel(batch.state)}</td>
-                        <td>{batch.outcomeCode === null ? '—' : labelValue(batch.outcomeCode)}</td>
-                        <td className="mono">{batch.items[0]?.candidateCommit.slice(0, 10) ?? '—'}</td>
-                        <td className="mono">{batch.devCommit.slice(0, 10)}</td>
-                        <td className="mono">{batch.integratedCommit === null ? '未改动'
-                          : batch.integratedCommit.slice(0, 10)}</td>
-                        <td>{batch.mergeStrategy === null ? '—' : labelValue(batch.mergeStrategy)}</td>
-                        <td className="mono">{batch.verificationId === null ? '—'
-                          : batch.verificationId.slice(0, 8)}</td>
-                        <td>{batch.completedAt === null ? '—'
-                          : new Date(batch.completedAt).toLocaleTimeString('zh-CN')}</td>
-                      </tr>
-                    ))}
-                    {integrationBatches.length === 0 ? (
-                      <tr><td colSpan={8} className="muted">还没有合入记录；成果不会自动进入 dev。</td></tr>
-                    ) : null}
-                  </tbody>
-                </table></div>
-                {integrationBatches.some((batch) => batch.detail !== null) ? (
-                  <ul className="muted">
-                    {integrationBatches.filter((batch) => batch.detail !== null).map((batch) => (
-                      <li key={batch.batchId}>{integrationStateLabel(batch.state)}：{batch.detail}</li>
-                    ))}
-                  </ul>
-                ) : null}
+                <h3>集成批次 · dev
+                  <span className="muted hint">只读 · 一个批次可以跨多个任务（ADR-0053）</span></h3>
+                <IntegrationBatchTable batches={integrationBatches}
+                  emptyNote="本任务还没有集成批次；成果不会自动进入 dev。" />
+                <p className="muted hint">
+                  成员按 task_id 顺序列出；批级 INTEGRATED 只说明已合入 dev，不等于已进 main。
+                </p>
                 </details>
 
                 <section className="process-panel">
@@ -1921,9 +1898,12 @@ function ProjectTab({ client, permissionMode, projectId, tasks, refreshToken, ru
   const actions = usePendingAction(run);
   const busy = actions.pending.size > 0;
   const [path, setPath] = useState('');
-  const [identity, setIdentity] = useState<RepositoryIdentityView | null>(null);
+  const [devRepoPath, setDevRepoPath] = useState('');
+  const [identity, setIdentity] = useState<ProjectIdentityView | null>(null);
   const [policy, setPolicy] = useState<VerificationPolicyView | null>(null);
   const [confirmation, setConfirmation] = useState('');
+  /** The refusal of one `project.trust`, with the Runtime's stable code kept verbatim. */
+  const [trustError, setTrustError] = useState<string | null>(null);
   return (
     <>
     <section className="card">
@@ -1937,13 +1917,16 @@ function ProjectTab({ client, permissionMode, projectId, tasks, refreshToken, ru
           placeholder="/仓库/路径"
           onChange={(event) => {
             setPath(event.target.value); setIdentity(null); setPolicy(null); setConfirmation('');
+            setTrustError(null);
           }}
         />
         <button className="primary" type="button" disabled={path.trim().length === 0} onClick={() => {
           void actions.run('project', '正在检查项目与策略', async () => {
-            setIdentity(null); setPolicy(null); setConfirmation('');
+            setIdentity(null); setPolicy(null); setConfirmation(''); setTrustError(null);
+            // The dev clone is inspected when one was typed, so the identity this form echoes back
+            // below already carries the verification the user reviewed (ADR-0047 D05).
             const [identity, policy] = await Promise.all([
-              client.command<RepositoryIdentityView>({ command: 'project.inspect', path }),
+              client.command<ProjectIdentityView>(projectInspectCommand({ path, devRepoPath })),
               client.command<VerificationPolicyView>({ command: 'project.verificationPolicy', path }),
             ]);
             setIdentity(identity); setPolicy(policy);
@@ -1951,12 +1934,26 @@ function ProjectTab({ client, permissionMode, projectId, tasks, refreshToken, ru
         }}>检查项目</button>
       </div>
 
+      <ProjectDevRepoInput value={devRepoPath} busy={busy}
+        onChange={(value) => {
+          // Changing the path invalidates the inspected identity, exactly like the main path does:
+          // the trust request echoes the identity the user actually reviewed.
+          setDevRepoPath(value); setIdentity(null); setPolicy(null); setConfirmation('');
+          setTrustError(null);
+        }} />
+
       {identity === null ? null : (
         <dl className="kv">
           <dt>仓库根目录</dt><dd className="mono">{identity.repoRoot}</dd>
           <dt>main 引用</dt><dd className="mono">{identity.mainRef}</dd>
           <dt>对象格式</dt><dd>{identity.objectFormat}</dd>
           <dt>HEAD</dt><dd className="mono">{identity.headCommit}</dd>
+          <dt>dev 基线</dt>
+          <dd className="mono">{identity.devRef} {identity.devCommit?.slice(0, 12) ?? '—'}
+            <div className="muted">{identity.devRefPresent
+              ? '这个 ref 存在：Task 工作树与集成目标都从它建基线'
+              : '这个 ref 不存在：信任会被拒绝为 DEV_REF_MISSING'}</div></dd>
+          <DevRepoInspectionRows inspection={identity.devRepoPath} />
         </dl>
       )}
 
@@ -2002,20 +1999,36 @@ function ProjectTab({ client, permissionMode, projectId, tasks, refreshToken, ru
               onChange={(event) => setConfirmation(event.target.value)}
             />
           )}
+          <p className="muted hint">
+            这个按钮会发出 <span className="mono">project.trust</span>：把你审阅的身份（含上面的 dev clone
+            核验结果）、验证策略 digest 与 dev clone 路径一起提交。dev clone 路径为空时按钮不可点
+            —— 信任需要它，界面不假装成功；路径能不能用由 Runtime 核验。
+          </p>
+          {trustError === null ? null : (
+            <p className="error" role="alert">信任被拒绝：{trustError}</p>
+          )}
           <button
             type="button"
             className="primary"
-            disabled={permissionMode === 'STRICT' && confirmation !== 'TRUST'}
+            disabled={!canSubmitProjectTrust({ permissionMode, confirmation, devRepoPath })}
             onClick={() => {
               void actions.run('project', '正在添加项目', async () => {
-                await client.command({
-                  command: 'project.trust',
-                  path,
-                  expectedIdentity: identity,
-                  expectedVerificationPolicy: policy.state === 'PRESENT'
-                    ? { state: 'PRESENT', mainCommit: policy.mainCommit, digest: policy.digest }
-                    : { state: 'ABSENT', mainCommit: policy.mainCommit },
-                });
+                setTrustError(null);
+                try {
+                  await client.command(projectTrustCommand({
+                    path,
+                    expectedIdentity: identity,
+                    devRepoPath,
+                    expectedVerificationPolicy: projectTrustPolicyConfirmation(policy),
+                  }));
+                } catch (caught) {
+                  // A refusal writes nothing: the stable code is the answer, kept next to its note.
+                  const code = caught instanceof Error && 'code' in caught
+                    ? String(caught.code) : 'UNKNOWN';
+                  const message = caught instanceof Error ? caught.message : String(caught);
+                  setTrustError(projectTrustRejectionNotice(code, message));
+                  return;
+                }
                 setConfirmation('');
                 await reloadProjects();
               });
@@ -2030,6 +2043,8 @@ function ProjectTab({ client, permissionMode, projectId, tasks, refreshToken, ru
     {projectId === null ? null : (
       <section className="card">
         <DependencyPanel client={client} projectId={projectId} taskId={null} tasks={tasks}
+          refreshToken={refreshToken} run={run} />
+        <IntegrationBatchPanel client={client} projectId={projectId} tasks={tasks}
           refreshToken={refreshToken} run={run} />
         <PromotionPanel client={client} projectId={projectId} taskId={null}
           refreshToken={refreshToken} run={run} />
