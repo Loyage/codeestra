@@ -177,6 +177,9 @@ describe('Runtime task request boundary', () => {
         repoRoot: '/repo', gitCommonDir: '/repo/.git', mainRef: 'refs/heads/main',
         objectFormat: 'sha1', headCommit: 'a'.repeat(40),
         devRef: 'refs/heads/dev', devCommit: 'a'.repeat(40), devRefPresent: true,
+        // The verified dev clone is part of the identity the user reviewed (ADR-0047 D05); a client
+        // that omits it sends an identity that cannot be confirmed.
+        devRepoPath: null,
       },
     };
     expect(runtimeRequestSchema.safeParse(trust).success).toBe(false);
@@ -192,10 +195,22 @@ describe('Runtime task request boundary', () => {
     const identityWithoutBaseline = {
       repoRoot: '/repo', gitCommonDir: '/repo/.git', mainRef: 'refs/heads/main',
       objectFormat: 'sha1', headCommit: 'a'.repeat(40),
+      devRepoPath: null,
     };
     expect(runtimeRequestSchema.safeParse({
       ...trust,
       expectedIdentity: identityWithoutBaseline,
+      expectedVerificationPolicy: { state: 'ABSENT', mainCommit: 'a'.repeat(40) },
+    }).success).toBe(false);
+    // Dropping the dev clone path is refused: it is part of the identity the user reviewed
+    // (ADR-0047 D05), so a request that never names it cannot be confirmed.
+    expect(runtimeRequestSchema.safeParse({
+      ...trust,
+      expectedIdentity: {
+        repoRoot: '/repo', gitCommonDir: '/repo/.git', mainRef: 'refs/heads/main',
+        objectFormat: 'sha1', headCommit: 'a'.repeat(40),
+        devRef: 'refs/heads/dev', devCommit: 'a'.repeat(40), devRefPresent: true,
+      },
       expectedVerificationPolicy: { state: 'ABSENT', mainCommit: 'a'.repeat(40) },
     }).success).toBe(false);
     // A missing dev branch is representable (the Runtime then refuses trust with DEV_REF_MISSING).
