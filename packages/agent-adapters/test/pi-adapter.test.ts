@@ -350,6 +350,7 @@ describe('Pi RPC process adapter', () => {
       nativePermissionRouting: 'SUPPORTED',
       pauseWithQuiescence: 'UNSUPPORTED',
       revisionAcknowledgement: 'UNSUPPORTED',
+      sessionGuidance: 'SUPPORTED',
       cooperativeStop: 'REQUIRES_VALIDATION',
       reconnectToLiveSession: 'UNSUPPORTED',
       resumeAfterExit: 'SUPPORTED',

@@ -34,6 +34,8 @@ export type ClaudeAdapterErrorCode =
   | 'UNSUPPORTED_AGENT_CONFIGURATION'
   /** The Execution's materialized knowledge could not be read at its recorded digest (ADR-0051). */
   | 'KNOWLEDGE_CONTEXT_UNAVAILABLE'
+  /** The Task's recorded Session Guidance could not be read at its recorded digest (ADR-0057). */
+  | 'GUIDANCE_CONTEXT_UNAVAILABLE'
   | 'INVALID_PROVIDER_RESPONSE';
 
 /**
@@ -208,6 +210,16 @@ export function buildClaudeArguments(input: {
    * launch argv stays bounded. Absent means the launch is byte-identical to before this capability.
    */
   readonly knowledgeContext?: AgentKnowledgeContext | undefined;
+  /**
+   * The verified Session Guidance text this Execution is launched with (ADR-0057).
+   *
+   * Claude's CLI has both `--append-system-prompt` (literal text) and `--append-system-prompt-file`
+   * (a path the provider reads), and knowledge already uses the file variant. Guidance is passed as
+   * literal text through the other flag so the two artifacts stay separate — and so the Adapter never
+   * depends on either flag being repeatable, which was not measured. Absent means no guidance was
+   * recorded for the Task, leaving the launch byte-identical to before this capability.
+   */
+  readonly guidancePrompt?: string | undefined;
 }): readonly string[] {
   const policy = claudePermissionPolicy(input.permissionMode);
   const effort = claudeThinkingEffort(input.thinkingLevel);
@@ -234,6 +246,9 @@ export function buildClaudeArguments(input: {
   }
   if (input.knowledgeContext !== undefined) {
     argv.push('--append-system-prompt-file', input.knowledgeContext.filePath);
+  }
+  if (input.guidancePrompt !== undefined) {
+    argv.push('--append-system-prompt', input.guidancePrompt);
   }
   return argv;
 }

@@ -329,6 +329,7 @@ describe('Claude adapter capabilities', () => {
       nativePermissionRouting: 'REQUIRES_VALIDATION',
       pauseWithQuiescence: 'UNSUPPORTED',
       revisionAcknowledgement: 'UNSUPPORTED',
+      sessionGuidance: 'UNSUPPORTED',
       cooperativeStop: 'REQUIRES_VALIDATION',
       attach: 'UNSUPPORTED',
       nativeTerminalHandoff: 'UNSUPPORTED',

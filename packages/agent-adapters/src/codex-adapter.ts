@@ -36,6 +36,8 @@ import {
 } from './codex-protocol.js';
 import { readProcessStartToken } from './pi-identity.js';
 import { KnowledgeContextError, knowledgeContextUnavailableCode, readVerifiedKnowledgeContext } from './knowledge-context.js';
+import { GuidanceContextError, guidanceContextUnavailableCode, readVerifiedGuidanceContext } from './guidance-context.js';
+import { codexDeveloperInstructions } from './codex-guidance.js';
 
 /** The measured matrix for `codex-cli 0.151.0`; see `docs/spikes/codex-0.151.0.md`. */
 /**
@@ -78,6 +80,14 @@ function codexCapabilities(options: { readonly enableRequestUserInput: boolean }
     // Codex has no per-resource selection on its launch: plugin selection is not supported in this
     // step and is reported as such instead of being faked (ADR-0044 D03).
     pluginSelection: codexPluginSelectionSupport,
+    // ADR-0057: a provider primitive plausibly exists — `turn/steer` is in the app-server's own
+    // method list — but it requires an `expectedTurnId` this Adapter never holds, and the measured
+    // responses were refusals (`missing field expectedTurnId`) plus `thread/inject_items` appending
+    // to history (ADR-0051). No channel here has been validated against a live turn, so this is
+    // `REQUIRES_VALIDATION` rather than a `SUPPORTED` claim or a `UNSUPPORTED` denial of the
+    // primitive's existence. Either way the Runtime records `CHANNEL_UNSUPPORTED` instead of
+    // pretending the conversation was told.
+    sessionGuidance: 'REQUIRES_VALIDATION',
   });
 }
 
@@ -252,6 +262,23 @@ export class CodexAdapter implements AgentAnswerAdapter, AgentProcessRelease {
         throw error;
       }
     }
+    // Session Guidance is verified the same way (ADR-0057). Codex's app-server takes instructions as
+    // a **single string**, so this Adapter composes the two verified artifacts into the one field the
+    // provider accepts, each under its own header so the two remain distinguishable inside it. That
+    // composition is Codex's channel shape, not a shared abstraction: Pi and Claude each keep their
+    // own flags.
+    let guidanceText: string | null = null;
+    if (request.guidanceContext !== undefined) {
+      try {
+        guidanceText = readVerifiedGuidanceContext(request.guidanceContext);
+      } catch (error) {
+        if (error instanceof GuidanceContextError) {
+          throw new CodexAdapterError(guidanceContextUnavailableCode, error.message, false, false);
+        }
+        throw error;
+      }
+    }
+    const developerInstructions = codexDeveloperInstructions({ knowledgeText, guidanceText });
     const argv = [
       ...this.#options.launcherArgs,
       ...buildCodexAppServerArguments({
@@ -282,7 +309,7 @@ export class CodexAdapter implements AgentAnswerAdapter, AgentProcessRelease {
         sandbox: policy.sandbox,
         ...(agentConfig.model === undefined ? {} : { model: agentConfig.model }),
         ...(agentConfig.provider === undefined ? {} : { modelProvider: agentConfig.provider }),
-        ...(knowledgeText === null ? {} : { developerInstructions: knowledgeText }),
+        ...(developerInstructions === null ? {} : { developerInstructions }),
       };
       let identity;
       let prompt: string;

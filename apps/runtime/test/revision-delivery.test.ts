@@ -73,6 +73,7 @@ const unsupportedCapabilities: AdapterCapabilities = Object.freeze({
   // It says nothing about a real provider's isolation (this stub starts no provider).
   controlledConfiguration: 'SUPPORTED',
   pluginSelection: 'UNSUPPORTED',
+  sessionGuidance: 'UNSUPPORTED',
 });
 
 /**

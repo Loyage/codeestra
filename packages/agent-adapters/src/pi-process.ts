@@ -18,7 +18,9 @@ export type PiRpcErrorCode =
   /** A user-selected plugin/resource path could not be verified, so no process was started. */
   | 'AGENT_PLUGIN_UNAVAILABLE'
   /** The Execution's materialized knowledge could not be read at its recorded digest (ADR-0051). */
-  | 'KNOWLEDGE_CONTEXT_UNAVAILABLE';
+  | 'KNOWLEDGE_CONTEXT_UNAVAILABLE'
+  /** The Task's recorded Session Guidance could not be read at its recorded digest (ADR-0057). */
+  | 'GUIDANCE_CONTEXT_UNAVAILABLE';
 
 /**
  * `startMayHaveOccurred` and `deliveryMayHaveOccurred` describe what is known about the
@@ -94,6 +96,15 @@ export class PiRpcClient {
     timer: ReturnType<typeof setTimeout>;
   }>();
   readonly #decoder: PiRpcJsonlDecoder;
+  /**
+   * Listeners waiting for the next `queue_update` record. Pi answers a `steer` with a success
+   * response and then reports its own steering queue in a separate `queue_update`; a caller that
+   * wants that corroborating fact registers here, because `envelopes()` may already have a consumer
+   * (the observation pump) that owns the stream.
+   */
+  readonly #queueUpdateListeners = new Set<
+    (record: Readonly<Record<string, unknown>>) => void
+  >();
   readonly #stderrChunks: Uint8Array[] = [];
   #sequence = 0;
   #requestSequence = 0;
@@ -181,6 +192,26 @@ export class PiRpcClient {
       throw error;
     }
     return outcome.promise;
+  }
+
+  /**
+   * Resolves with the next `queue_update` record that arrives within `timeoutMs`, or `null` when none
+   * did. It never consumes the record: the observation stream still sees it. `null` is a fact ("Pi did
+   * not report its queue"), never a claim that the guidance was not queued.
+   */
+  awaitQueueUpdate(timeoutMs: number): Promise<Readonly<Record<string, unknown>> | null> {
+    return new Promise((resolve) => {
+      const listener = (record: Readonly<Record<string, unknown>>): void => {
+        clearTimeout(timer);
+        this.#queueUpdateListeners.delete(listener);
+        resolve(record);
+      };
+      const timer = setTimeout(() => {
+        this.#queueUpdateListeners.delete(listener);
+        resolve(null);
+      }, timeoutMs);
+      this.#queueUpdateListeners.add(listener);
+    });
   }
 
   async write(record: Readonly<Record<string, unknown>>): Promise<void> {
@@ -274,6 +305,9 @@ export class PiRpcClient {
         }
         return;
       }
+    }
+    if (record.type === 'queue_update' && this.#queueUpdateListeners.size > 0) {
+      for (const listener of [...this.#queueUpdateListeners]) listener(record);
     }
     this.#envelopes.push({ kind: 'record', cursor: this.#cursor(), record });
   }

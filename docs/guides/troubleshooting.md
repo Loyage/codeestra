@@ -571,7 +571,12 @@ K1 留下的两条待裁决已由 FOUNDATION-075 收口，因此这份清单**�
 3. **Provider 是否真的读取** Project Knowledge 物化文件未验证（Adapter 尚不消费 `knowledgeSnapshotRefs`）。
 4. **token 级实时流**未实现；transcript 是按需读取 + 轮询。
 5. **Codeestra 自升级 / Self Promotion 的完整切换**未实现（Phase 7）。
-6. **Session Guidance 未实现**：`guide` 端口既未导出也未实现，`SessionGuidanceRecorded`/`SessionGuidanceDelivered` 仍未实现。
+6. ~~**Session Guidance 未实现**：`guide` 端口既未导出也未实现，`SessionGuidanceRecorded`/`SessionGuidanceDelivered` 仍未实现。~~
+   **已实现（FOUNDATION-088 / ADR-0057 / schema v31）**：`session guide`（命令名 `session.guidance.record`）把一条指导交给
+   运行中的会话并记录它产生的事实，`session guidance list|get` 读账本；`guide` 端口在 Pi 上实现（RPC `steer` + provider 自己的
+   `queue_update`），Codex 报 `REQUIRES_VALIDATION`、Claude Code 报 `UNSUPPORTED`。
+   **仍未验证**：真实模型是否真的读了 guidance、真实 Pi 在忙碌轮次里是否接受 `steer`；**不要**把 `DELIVERED` 读成「模型已读」
+   （命令面里的 `modelAcknowledgement` 恒为 `UNSUPPORTED`），UI 也没有投影（N3 领地）。
 7. ~~多成员 IntegrationBatch 与批级 `STALE`/`CANCELLED` 未实现~~ **已实现（FOUNDATION-081 / ADR-0053 / schema v30，`lane/m1-multi-member-integration` 分支）**：
    `task integration create|integrate|get|cancel` 可显式组成多成员批次、按 task-id 顺序合并、由**一次**独立集成验证覆盖整批、`PASSED` 才推进 `dev`；
    批级 `STALE`（成员证据或 `dev` 基线移动）与 `CANCELLED`（记录证明无副作用时）都是一等终态；产品 `promotion prepare` 已在一个**多成员 PASSED 批次**上实测成立。

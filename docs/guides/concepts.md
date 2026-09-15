@@ -64,6 +64,11 @@ Task 的规格快照，append-only。第一次创建 Task 就产生第一条 rev
 
 旧 revision 的验证**不能**作为新 revision 的交付证据。
 
+**两条输入通道，不要混。** 改规格/约束/验收目标 = Revision（`task revision create`，产生不可变 revision，
+并使旧验证失效）；对**正在运行的会话**说一句「怎么做」而不改验收标准 = **Session Guidance**
+（`session guide`，不产生 revision、不动 `appliedRevisionId`、不使验证失效，见 §Session 与 features.md）。
+CLI/UI 不会根据自然语言猜测意图：想改验收标准就必须显式提交修订。
+
 ### Execution（执行）
 
 **一次执行尝试**，恰好绑定**一个主 Agent**。换主 Agent 要新建 Execution（而不是在同一个里换）。
@@ -95,6 +100,13 @@ Codeestra 诚实报告 Adapter 能力，不伪造 `resume` / `attach` / `interru
   展示工具调用/返回、助手文本、thinking、token 与成本。它不入库、不产生业务事实、**不是 attach、不是终端接管**。
 - **原生终端接管**（`session handoff *`）是另一套东西：attach / detach / release、单一 writer lease、
   安全点与准入决策。第二个 writer 申请会被以 `ATTACHMENT_BUSY` 明确拒绝，不排队。
+- **Session Guidance**（`session guide` / `session guidance list|get`）是把用户的话交给**真实 provider 会话**的通道
+  （ADR-0010 D02 / ADR-0057）。它**不产生 TaskRevision**、不动 Task 的 revision 与 version、**不使验证失效**；
+  记录后该 Task 的每条指导会在**新建 Execution** 启动时随启动参数一并交给 provider，所以它不随进程消失。
+  三个事实严格分开：**已记录**（正文耐久保存）/ **已投递**（provider 自己的通道**接受了这条消息，即入队**）/
+  **模型已读**（**不存在**：三个 provider 都没有可核验通道，ADR-0051）。因此 `DELIVERED` **不等于**「模型已经照做」，
+  命令面把这件事说出口（`modelAcknowledgement: 'UNSUPPORTED'`）；没有通道的 provider 记 `CHANNEL_UNSUPPORTED`，
+  不降级、不静默。
 
 ### Attention（需要人回答的请求）
 

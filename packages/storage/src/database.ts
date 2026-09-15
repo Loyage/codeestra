@@ -56,6 +56,7 @@ import {
   phase1SchemaVersion,
   reclamationMigration,
   revisionDeliveryMigration,
+  sessionGuidanceMigration,
   sessionHandoffMigration,
   sessionTerminalMigration,
   stablePromotionMigration,
@@ -1753,6 +1754,11 @@ export class Phase1Database {
               + ` ${batchesAfter} after); the upgrade was rolled back and nothing was changed`);
           }
         }
+        // Version 31 is the Session Guidance step (FOUNDATION-088 / ADR-0057). It only creates three
+        // new tables, so it needs no foreign-key handling of its own; the guard above still runs
+        // `PRAGMA foreign_key_check` because an upgrade from any older stamped version may rebuild a
+        // table on the way. No earlier number is ever inserted.
+        if (version < 31) this.sqlite.exec(sessionGuidanceMigration);
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -11552,6 +11558,343 @@ export class Phase1Database {
     }));
   }
 
+  // ---------------------------------------------------------------------------------------------
+  // Session Guidance (FOUNDATION-088 / ADR-0057). A guidance message is a conversation fact, not a
+  // specification change: nothing below touches `task_revisions`, `tasks.current_revision_id` or any
+  // verification run. The three facts this face keeps apart are "recorded", "delivered" (the
+  // provider's own channel accepted the message — it is enqueued) and "the model read it". Only the
+  // first two exist: ADR-0051 measured that no provider in this project has a channel that can prove
+  // the third, so no column here could hold it honestly.
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * Records one guidance message durably and, when an Execution is holding the Task at this moment,
+   * opens the single delivery attempt that will carry it into that conversation.
+   *
+   * The body is stored before any delivery is attempted (ADR-0010 D02) so a crash cannot lose what
+   * the user said, and the domain event carries only its hash and length (ADR-0010 D06). A Task that
+   * is not running simply gets no attempt: the record stays `RECORDED` and is handed to the next
+   * Execution at launch, which is how guidance survives the process that was told about it.
+   */
+  recordSessionGuidance(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly guidanceId: string;
+    readonly attemptId: string;
+    readonly eventId: string;
+    readonly body: string;
+    readonly bodyHash: string;
+    readonly bodyBytes: number;
+    readonly actor: string;
+    readonly recordedAt: number;
+  }): SessionGuidanceCreation {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.recordedAt,
+      apply: (database) => {
+        const task = database.query<{ state: TaskLifecycleState; version: number }, [string, string]>(`
+          SELECT t.state,t.version FROM tasks t
+          JOIN project_trusts trust ON trust.project_id=t.project_id AND trust.status='ACTIVE'
+          WHERE t.project_id=?1 AND t.id=?2
+        `).get(input.projectId, input.taskId);
+        if (task === null) {
+          throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
+        }
+        if (task.state === 'CANCELLED' || task.state === 'SUCCEEDED') {
+          throw new StorageError('INVALID_STATE',
+            `A ${task.state} Task is terminal and cannot receive session guidance`);
+        }
+        const running = database.query<{
+          execution_id: string; session_id: string | null; incarnation_id: string | null;
+        }, [string]>(`
+          SELECT execution.id AS execution_id,session.id AS session_id,
+            session.current_incarnation_id AS incarnation_id
+          FROM executions execution
+          LEFT JOIN agent_sessions session ON session.execution_id=execution.id
+          WHERE execution.task_id=?1 AND execution.resource_held=1
+        `).get(input.taskId) ?? null;
+        database.query(`
+          INSERT INTO session_guidance(id,project_id,task_id,execution_id,session_id,incarnation_id,
+            source,body,body_hash,body_bytes,actor,state,channel,evidence_ref,delivery_detail,
+            command_id,payload_hash,created_at,updated_at,delivered_at)
+          VALUES (?1,?2,?3,?4,?5,?6,'COMMAND',?7,?8,?9,?10,'RECORDED',NULL,NULL,NULL,?11,?12,?13,?13,
+            NULL)
+        `).run(input.guidanceId, input.projectId, input.taskId, running?.execution_id ?? null,
+          running?.session_id ?? null, running?.incarnation_id ?? null, input.body, input.bodyHash,
+          input.bodyBytes, input.actor, input.commandId, input.payloadHash, input.recordedAt);
+        if (running !== null) {
+          database.query(`
+            INSERT INTO session_guidance_deliveries(id,guidance_id,attempt_number,channel,
+              execution_id,session_id,incarnation_id,state,capability,evidence_ref,error_code,detail,
+              deadline_at,started_at,ended_at)
+            VALUES (?1,?2,1,'PROVIDER_CONVERSATION',?3,?4,?5,'IN_FLIGHT',NULL,NULL,NULL,?6,NULL,?7,
+              NULL)
+          `).run(input.attemptId, input.guidanceId, running.execution_id, running.session_id,
+            running.incarnation_id,
+            `attempting to hand guidance ${input.guidanceId} to Execution ${running.execution_id}`,
+            input.recordedAt);
+        }
+        insertDomainEvent(database, {
+          eventId: input.eventId, projectId: input.projectId,
+          eventType: 'SessionGuidanceRecorded', aggregateType: 'SessionGuidance',
+          aggregateId: input.guidanceId, aggregateVersion: 0, correlationId: input.commandId,
+          causationId: null, occurredAt: input.recordedAt,
+          payload: { guidanceId: input.guidanceId, taskId: input.taskId, source: 'COMMAND',
+            executionId: running?.execution_id ?? null, sessionId: running?.session_id ?? null,
+            incarnationId: running?.incarnation_id ?? null, bodyHash: input.bodyHash,
+            bodyBytes: input.bodyBytes, actor: input.actor,
+            attemptId: running === null ? null : input.attemptId },
+        });
+        return {
+          guidance: this.sessionGuidanceRecord(input.guidanceId),
+          taskVersion: task.version,
+          attemptId: running === null ? null : input.attemptId,
+        };
+      },
+    });
+  }
+
+  /**
+   * Closes the one attempt of a guidance record with the fact it actually produced.
+   *
+   * `DELIVERED` requires the channel fact the Adapter observed; a claim without evidence is refused,
+   * exactly as an unproven revision acknowledgement is (ADR-0028). An attempt that is no longer in
+   * flight is refused rather than overwritten: the ledger is append-only and a second conclusion is
+   * a visible error, not a silent update.
+   */
+  completeSessionGuidanceDelivery(input: {
+    readonly projectId: string;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly guidanceId: string;
+    readonly attemptId: string;
+    readonly state: SessionGuidanceDeliveryState;
+    readonly capability: string | null;
+    readonly evidenceRef: string | null;
+    readonly errorCode: string | null;
+    readonly detail: string;
+    readonly eventId: string;
+    readonly completedAt: number;
+  }): SessionGuidanceRecord {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.completedAt,
+      apply: (database) => {
+        const attempt = database.query<{
+          state: SessionGuidanceDeliveryState; execution_id: string | null; session_id: string | null;
+          incarnation_id: string | null;
+        }, [string, string]>(`
+          SELECT state,execution_id,session_id,incarnation_id FROM session_guidance_deliveries
+          WHERE id=?1 AND guidance_id=?2
+        `).get(input.attemptId, input.guidanceId);
+        if (attempt === null) {
+          throw new StorageError('NOT_FOUND', 'Guidance delivery attempt was not found');
+        }
+        if (attempt.state !== 'IN_FLIGHT') {
+          throw new StorageError('INVALID_STATE',
+            `The guidance delivery attempt is already ${attempt.state}`);
+        }
+        if (input.state === 'DELIVERED'
+          && (input.evidenceRef === null || input.evidenceRef.trim().length === 0)) {
+          throw new StorageError('INVALID_STATE',
+            'A delivered guidance must name the channel fact that was observed; a claim without'
+            + ' evidence is not a delivery');
+        }
+        database.query(`
+          UPDATE session_guidance_deliveries SET state=?1,capability=?2,evidence_ref=?3,
+            error_code=?4,detail=?5,ended_at=?6 WHERE id=?7 AND guidance_id=?8 AND state='IN_FLIGHT'
+        `).run(input.state, input.capability, input.evidenceRef, input.errorCode, input.detail,
+          input.completedAt, input.attemptId, input.guidanceId);
+        database.query(`
+          UPDATE session_guidance SET state=?1,channel='PROVIDER_CONVERSATION',evidence_ref=?2,
+            delivery_detail=?3,delivered_at=?4,updated_at=?5 WHERE id=?6
+        `).run(input.state, input.evidenceRef, input.detail,
+          input.state === 'DELIVERED' ? input.completedAt : null, input.completedAt,
+          input.guidanceId);
+        insertDomainEvent(database, {
+          eventId: input.eventId, projectId: input.projectId,
+          eventType: 'SessionGuidanceDelivered', aggregateType: 'SessionGuidance',
+          aggregateId: input.guidanceId, aggregateVersion: 1, correlationId: input.commandId,
+          causationId: null, occurredAt: input.completedAt,
+          payload: { guidanceId: input.guidanceId, attemptId: input.attemptId, channel:
+            'PROVIDER_CONVERSATION', state: input.state, capability: input.capability,
+            evidenceRef: input.evidenceRef, errorCode: input.errorCode, detail: input.detail,
+            executionId: attempt.execution_id, sessionId: attempt.session_id,
+            incarnationId: attempt.incarnation_id, delivered: input.state === 'DELIVERED' },
+        });
+        return this.sessionGuidanceRecord(input.guidanceId);
+      },
+    });
+  }
+
+  /** Every guidance record of one Task, oldest first, with its attempt ledger. */
+  listSessionGuidance(projectId: string, taskId: string): readonly SessionGuidanceRecord[] {
+    const task = this.sqlite.query<{ id: string }, [string, string]>(`
+      SELECT t.id FROM tasks t
+      JOIN project_trusts trust ON trust.project_id=t.project_id AND trust.status='ACTIVE'
+      WHERE t.project_id=?1 AND t.id=?2
+    `).get(projectId, taskId);
+    if (task === null) {
+      throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
+    }
+    return this.sqlite.query<SessionGuidanceRow, [string]>(
+      `${sessionGuidanceSelect} WHERE guidance.task_id=?1 ORDER BY guidance.created_at,guidance.id`,
+    ).all(taskId).map((row) => this.mapSessionGuidance(row));
+  }
+
+  getSessionGuidance(projectId: string, guidanceId: string): SessionGuidanceRecord {
+    const row = this.sqlite.query<SessionGuidanceRow, [string, string]>(`
+      ${sessionGuidanceSelect}
+      JOIN project_trusts trust ON trust.project_id=guidance.project_id AND trust.status='ACTIVE'
+      WHERE guidance.project_id=?1 AND guidance.id=?2
+    `).get(projectId, guidanceId);
+    if (row === null) {
+      throw new StorageError('NOT_FOUND',
+        'Session guidance or active project trust was not found');
+    }
+    return this.mapSessionGuidance(row);
+  }
+
+  private sessionGuidanceRecord(guidanceId: string): SessionGuidanceRecord {
+    const row = this.sqlite.query<SessionGuidanceRow, [string]>(
+      `${sessionGuidanceSelect} WHERE guidance.id=?1`).get(guidanceId);
+    if (row === null) throw new StorageError('NOT_FOUND', 'Session guidance was not found');
+    return this.mapSessionGuidance(row);
+  }
+
+  private mapSessionGuidance(row: SessionGuidanceRow): SessionGuidanceRecord {
+    const attempts = this.sqlite.query<SessionGuidanceAttemptRow, [string]>(`
+      SELECT id,attempt_number,channel,execution_id,session_id,incarnation_id,state,capability,
+        evidence_ref,error_code,detail,deadline_at,started_at,ended_at
+      FROM session_guidance_deliveries WHERE guidance_id=?1 ORDER BY attempt_number,id
+    `).all(row.id);
+    return {
+      id: row.id,
+      projectId: row.project_id,
+      taskId: row.task_id,
+      executionId: row.execution_id,
+      sessionId: row.session_id,
+      incarnationId: row.incarnation_id,
+      source: row.source,
+      body: row.body,
+      bodyHash: row.body_hash,
+      bodyBytes: row.body_bytes,
+      actor: row.actor,
+      state: row.state,
+      channel: row.channel,
+      evidenceRef: row.evidence_ref,
+      deliveryDetail: row.delivery_detail,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      deliveredAt: row.delivered_at,
+      attempts: attempts.map((attempt) => ({
+        id: attempt.id,
+        attemptNumber: attempt.attempt_number,
+        channel: attempt.channel,
+        executionId: attempt.execution_id,
+        sessionId: attempt.session_id,
+        incarnationId: attempt.incarnation_id,
+        state: attempt.state,
+        capability: attempt.capability,
+        evidenceRef: attempt.evidence_ref,
+        errorCode: attempt.error_code,
+        detail: attempt.detail,
+        deadlineAt: attempt.deadline_at,
+        startedAt: attempt.started_at,
+        endedAt: attempt.ended_at,
+      })),
+    };
+  }
+
+  /**
+   * Every guidance delivery attempt a restart interrupted. This Runtime holds no provider process
+   * after a restart, so an attempt recorded as in flight cannot be replayed or claimed: the startup
+   * reconcile closes it as `FAILED/RUNTIME_RESTARTED`, leaving the guidance record visibly
+   * unconcluded (and still handed to the next Execution at launch).
+   */
+  listInFlightSessionGuidanceDeliveries(): readonly {
+    readonly attemptId: string; readonly guidanceId: string; readonly projectId: string;
+    readonly taskId: string; readonly startedAt: number;
+  }[] {
+    return this.sqlite.query<{
+      attempt_id: string; guidance_id: string; project_id: string; task_id: string;
+      started_at: number;
+    }, []>(`
+      SELECT attempt.id AS attempt_id,guidance.id AS guidance_id,guidance.project_id,guidance.task_id,
+        attempt.started_at
+      FROM session_guidance_deliveries attempt
+      JOIN session_guidance guidance ON guidance.id=attempt.guidance_id
+      WHERE attempt.state='IN_FLIGHT' ORDER BY attempt.started_at,attempt.id
+    `).all().map((row) => ({
+      attemptId: row.attempt_id,
+      guidanceId: row.guidance_id,
+      projectId: row.project_id,
+      taskId: row.task_id,
+      startedAt: row.started_at,
+    }));
+  }
+
+  /**
+   * Records the guidance artifact one Execution was launched with.
+   *
+   * Repeated launches of the same Execution (a resume replay, a retried start) are idempotent for the
+   * same content, and a launch that carries a *different* set of recorded guidance appends a new row
+   * rather than rewriting the old one: what an Execution was launched with must stay readable even
+   * after the user adds more guidance.
+   */
+  recordExecutionGuidanceContext(input: {
+    readonly id: string;
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly executionId: string;
+    readonly guidanceIds: readonly string[];
+    readonly contextPath: string;
+    readonly contextDigest: string;
+    readonly contextBytes: number;
+    readonly recordedAt: number;
+  }): ExecutionGuidanceContextRecord {
+    this.sqlite.query(`
+      INSERT INTO execution_guidance_contexts(id,project_id,task_id,execution_id,guidance_ids_json,
+        guidance_count,context_path,context_digest,context_bytes,recorded_at)
+      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+      ON CONFLICT(execution_id,context_digest) DO NOTHING
+    `).run(input.id, input.projectId, input.taskId, input.executionId,
+      JSON.stringify(input.guidanceIds), input.guidanceIds.length, input.contextPath,
+      input.contextDigest, input.contextBytes, input.recordedAt);
+    const row = this.sqlite.query<ExecutionGuidanceContextRow, [string, string]>(`
+      SELECT id,project_id,task_id,execution_id,guidance_ids_json,guidance_count,context_path,
+        context_digest,context_bytes,recorded_at
+      FROM execution_guidance_contexts WHERE execution_id=?1 AND context_digest=?2
+    `).get(input.executionId, input.contextDigest);
+    if (row === null) {
+      throw new StorageError('INVALID_STATE', 'The guidance context could not be recorded');
+    }
+    return mapExecutionGuidanceContextRow(row);
+  }
+
+  listExecutionGuidanceContexts(projectId: string, taskId: string):
+  readonly ExecutionGuidanceContextRecord[] {
+    const task = this.sqlite.query<{ id: string }, [string, string]>(`
+      SELECT t.id FROM tasks t
+      JOIN project_trusts trust ON trust.project_id=t.project_id AND trust.status='ACTIVE'
+      WHERE t.project_id=?1 AND t.id=?2
+    `).get(projectId, taskId);
+    if (task === null) {
+      throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
+    }
+    return this.sqlite.query<ExecutionGuidanceContextRow, [string]>(`
+      SELECT id,project_id,task_id,execution_id,guidance_ids_json,guidance_count,context_path,
+        context_digest,context_bytes,recorded_at
+      FROM execution_guidance_contexts WHERE task_id=?1 ORDER BY recorded_at,id
+    `).all(taskId).map((row) => mapExecutionGuidanceContextRow(row));
+  }
+
   /**
    * Satisfies a delivery from the stop-and-restart fact: the successor Execution row must actually
    * have been recorded with this delivery's revision. The check is part of the same transaction, so
@@ -14108,6 +14451,148 @@ const revisionDeliverySelect = `
   JOIN task_revisions revision ON revision.task_id=delivery.task_id
     AND revision.id=delivery.revision_id
 `;
+
+/**
+ * Session Guidance (FOUNDATION-088 / ADR-0057).
+ *
+ * Guidance is the *other* input channel of ADR-0010 D02: it changes what the Agent is doing without
+ * changing the acceptance specification. Nothing on this face writes a `task_revisions` row, moves
+ * `tasks.current_revision_id`, or invalidates a verification run — `task amend` stays the only path
+ * that does, and it still invalidates the old evidence.
+ */
+
+/** The source of one guidance record. Only the command face produces one today (ADR-0057). */
+export type SessionGuidanceSource = 'COMMAND';
+
+/**
+ * The delivery fact of one guidance record.
+ *
+ * `RECORDED` means the message is durably recorded but no provider channel has accepted it yet
+ * (either nothing was running when it was given, or the attempt has not concluded). `DELIVERED`
+ * means the provider's own channel accepted the message — it is enqueued — which is **not** the same
+ * as the model having read it, and there is deliberately no value here for "applied" (ADR-0051).
+ */
+export type SessionGuidanceState = 'RECORDED' | 'DELIVERED' | 'CHANNEL_UNSUPPORTED' | 'TIMED_OUT'
+  | 'FAILED';
+
+export type SessionGuidanceDeliveryState = 'IN_FLIGHT' | 'DELIVERED' | 'CHANNEL_UNSUPPORTED'
+  | 'TIMED_OUT' | 'FAILED';
+
+/** One attempt to hand a guidance record into a provider conversation. Append-only. */
+export interface SessionGuidanceDeliveryAttemptRecord {
+  readonly id: string;
+  readonly attemptNumber: number;
+  readonly channel: 'PROVIDER_CONVERSATION';
+  readonly executionId: string | null;
+  readonly sessionId: string | null;
+  readonly incarnationId: string | null;
+  readonly state: SessionGuidanceDeliveryState;
+  /** The Adapter's reported capability at the moment of the attempt; null when never probed. */
+  readonly capability: string | null;
+  readonly evidenceRef: string | null;
+  readonly errorCode: string | null;
+  readonly detail: string;
+  readonly deadlineAt: number | null;
+  readonly startedAt: number;
+  readonly endedAt: number | null;
+}
+
+/** One durable guidance record with its attempt ledger. */
+export interface SessionGuidanceRecord {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly executionId: string | null;
+  readonly sessionId: string | null;
+  readonly incarnationId: string | null;
+  readonly source: SessionGuidanceSource;
+  /** The durable body (ADR-0010 D02). It is never written into a domain event (ADR-0010 D06). */
+  readonly body: string;
+  readonly bodyHash: string;
+  readonly bodyBytes: number;
+  readonly actor: string;
+  readonly state: SessionGuidanceState;
+  readonly channel: 'PROVIDER_CONVERSATION' | null;
+  readonly evidenceRef: string | null;
+  readonly deliveryDetail: string | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly deliveredAt: number | null;
+  readonly attempts: readonly SessionGuidanceDeliveryAttemptRecord[];
+}
+
+/** What recording one guidance message produced. */
+export interface SessionGuidanceCreation {
+  readonly guidance: SessionGuidanceRecord;
+  readonly taskVersion: number;
+  /** The open delivery attempt, when an Execution held the Task; null means nothing was running. */
+  readonly attemptId: string | null;
+}
+
+/** The guidance artifact one Execution was launched with (ADR-0057). */
+export interface ExecutionGuidanceContextRecord {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly executionId: string;
+  readonly guidanceIds: readonly string[];
+  readonly guidanceCount: number;
+  readonly contextPath: string;
+  readonly contextDigest: string;
+  readonly contextBytes: number;
+  readonly recordedAt: number;
+}
+
+interface SessionGuidanceRow {
+  id: string; project_id: string; task_id: string; execution_id: string | null;
+  session_id: string | null; incarnation_id: string | null; source: SessionGuidanceSource;
+  body: string; body_hash: string; body_bytes: number; actor: string; state: SessionGuidanceState;
+  channel: 'PROVIDER_CONVERSATION' | null; evidence_ref: string | null;
+  delivery_detail: string | null; created_at: number; updated_at: number; delivered_at: number | null;
+}
+
+interface SessionGuidanceAttemptRow {
+  id: string; attempt_number: number; channel: 'PROVIDER_CONVERSATION';
+  execution_id: string | null; session_id: string | null; incarnation_id: string | null;
+  state: SessionGuidanceDeliveryState; capability: string | null; evidence_ref: string | null;
+  error_code: string | null; detail: string; deadline_at: number | null; started_at: number;
+  ended_at: number | null;
+}
+
+interface ExecutionGuidanceContextRow {
+  id: string; project_id: string; task_id: string; execution_id: string; guidance_ids_json: string;
+  guidance_count: number; context_path: string; context_digest: string; context_bytes: number;
+  recorded_at: number;
+}
+
+/**
+ * The projection of one guidance row without its attempts. Qualified on purpose: the same string is
+ * used both standalone and joined onto `project_trusts`.
+ */
+const sessionGuidanceSelect = `
+  SELECT guidance.id,guidance.project_id,guidance.task_id,guidance.execution_id,guidance.session_id,
+    guidance.incarnation_id,guidance.source,guidance.body,guidance.body_hash,guidance.body_bytes,
+    guidance.actor,guidance.state,guidance.channel,guidance.evidence_ref,guidance.delivery_detail,
+    guidance.created_at,guidance.updated_at,guidance.delivered_at
+  FROM session_guidance guidance
+`;
+
+function mapExecutionGuidanceContextRow(
+  row: ExecutionGuidanceContextRow,
+): ExecutionGuidanceContextRecord {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    taskId: row.task_id,
+    executionId: row.execution_id,
+    guidanceIds: JSON.parse(row.guidance_ids_json) as readonly string[],
+    guidanceCount: row.guidance_count,
+    contextPath: row.context_path,
+    contextDigest: row.context_digest,
+    contextBytes: row.context_bytes,
+    recordedAt: row.recorded_at,
+  };
+}
 
 /** What a startup check can honestly say about the provider process of a stale Session. */
 export type StaleSessionObservation = 'PROVIDER_STOPPED' | 'PROVIDER_STILL_RUNNING'

@@ -120,6 +120,7 @@ import {
   reconcileWorkspacePreparations,
 } from './recovery-service.js';
 import { RevisionDeliveryService } from './revision-delivery-service.js';
+import { SessionGuidanceService } from './session-guidance-service.js';
 import {
   VerificationRunner,
   inspectVerificationPolicy,
@@ -305,6 +306,18 @@ const revisionDeliveries = new RevisionDeliveryService({
   logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
 });
 /**
+ * Session Guidance (ADR-0057). It owns the durable guidance ledger, the capability-gated attempt
+ * through the provider's own channel, and the artifact each new Execution is launched with. It never
+ * touches a Task revision, a Task version or a verification run: guidance is the other input channel
+ * (ADR-0010 D02).
+ */
+const sessionGuidance = new SessionGuidanceService({
+  storage,
+  registry,
+  runtimeHome: home,
+  logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
+});
+/**
  * Capacity and slot reservations (FOUNDATION-054 / ADR-0032). The drain fact is Runtime-owned: it
  * becomes true when this Runtime starts shutting down and in-memory only, because a persisted
  * "draining" flag would survive a crash and silently refuse every future reservation.
@@ -421,6 +434,13 @@ reconcileSessionHandoffs({ storage });
 // it is concluded from that fact instead of being replayed or claimed.
 for (const attempt of revisionDeliveries.reconcileAtStartup()) {
   console.error(`[runtime] revision delivery attempt ${attempt.attemptId} was concluded as`
+    + ` ${attempt.outcome}`, attempt.detail);
+}
+// A guidance delivery that was in flight when the Runtime went down observed no channel fact, so it
+// is concluded from that fact rather than replayed; the guidance record itself stays recorded and is
+// still handed to the next Execution at launch.
+for (const attempt of sessionGuidance.reconcileAtStartup()) {
+  console.error(`[runtime] session guidance delivery ${attempt.attemptId} was concluded as`
     + ` ${attempt.outcome}`, attempt.detail);
 }
 // A terminal this Runtime does not hold cannot be attached to or released; the fact is recorded and
@@ -1197,6 +1217,24 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       }));
     // Transcript reads are a view over the provider's own session file. They never write, never
     // change Task/Execution state, and are readable after the Session has long since exited.
+    // Session Guidance: the other input channel. Recording guidance is one command, and the delivery
+    // fact it produced is written to an append-only ledger; a Task with nothing running keeps the
+    // record and hands it to the next Execution instead of pretending it was told. Read commands
+    // expose the record, its attempts and the artifact each Execution was launched with.
+    case 'session.guidance.record':
+      return success(request.requestId, await sessionGuidance.record({
+        projectId: request.projectId,
+        taskId: request.taskId,
+        commandId: request.commandId,
+        message: request.message,
+        actor: 'local-user',
+      }));
+    case 'session.guidance.list':
+      return success(request.requestId,
+        sessionGuidance.list(request.projectId, request.taskId));
+    case 'session.guidance.get':
+      return success(request.requestId,
+        sessionGuidance.get(request.projectId, request.guidanceId));
     case 'session.transcript':
       return success(request.requestId, await readSessionTranscript({
         target: storage.getSessionTranscriptTarget(request.sessionId),

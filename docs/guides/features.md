@@ -55,6 +55,7 @@
 | Agent 配置 | 持久化 provider/model/thinking，分全局默认与每项目覆盖；逐字段按 `环境变量 > 项目 > 全局 > Adapter 默认` 解析；只影响新 Session | `agent config get/set/clear [--project <id>] [--adapter <id>] [--provider/--model/--thinking/--unset]` | Agent 设置标签页（`当前生效值` 表与 `编辑并保存`） | [0012](../decisions/0012-agent-configuration-scopes.md) |
 | Agent 插件选择 | 选 Pi 的四类资源（extensions / skills / prompt templates / themes）；选择是**一个整体字段**（项目整份替换全局，不逐项合并）；生效值连同来源层与第三方扩展风险写进 Execution | `agent plugins list`、`agent plugins select [--extension/--skill/--prompt-template/--theme <path>]… [--clear]` | Agent 设置标签页（`插件候选` 与 `清除选择`） | [0044](../decisions/0044-agent-plugin-selection-and-detection.md) |
 | 多 Adapter | 注册 `pi`（默认）、`codex`、`claude`；每次运行绑定一个 Agent，换 Adapter 是新建 Execution | `task run/resume/retry --adapter <id>` | 任务详情 → 启动 Agent / 继续（`Agent` 下拉框，在 `READY` 与 `PAUSED` 时出现）；重试入口另有自己的 Adapter 下拉框，默认「沿用该任务上一次运行的 Adapter」，选项来自 `runtime.ping` 的已注册列表 | [0029](../decisions/0029-codex-adapter-transport-and-capabilities.md)、[0040](../decisions/0040-claude-code-adapter-transport-and-capabilities.md) |
+| Session Guidance | 对**运行中的会话**给一条指导：不产生 TaskRevision、不动 revision、不使验证失效；记录后每个新 Execution 启动时随启动参数交给 provider（不随进程消失）；**“已投递” = provider 通道接收（入队），≠ 模型已读**（`modelAcknowledgement` 恒为 `UNSUPPORTED`）；无通道即 `CHANNEL_UNSUPPORTED` 且退出码 1 | `session guide <project> <task> --message <text>`、`session guidance list/get` | —（CLI-only；无 UI 投影） | [0010](../decisions/0010-live-agent-terminal-takeover.md)、[0057](../decisions/0057-session-guidance-channel-and-fact-layering.md) |
 
 ## 长命令与取消
 
@@ -100,6 +101,7 @@
 | 资源回收 | 试运行与执行共用同一决策形状；未注册目录不被删（除非指名）；失败现场默认保留 | `reclaim plan/apply/records` | —（CLI-only） | [0021](../decisions/0021-resource-reclamation.md)、[0037](../decisions/0037-reclaim-batch-and-unregistered-directories.md) |
 | worktree 重建 | 回收后从保留的 Task 分支重建 worktree，供 `task retry` 使用 | `task retry`（重建路径）；`reclaim plan/apply` 决定保留 | —（CLI-only） | [0042](../decisions/0042-rebuild-reclaimed-worktree.md) |
 | Project Knowledge | 分层知识（人工 `instructions`/`skills` 从 `main` ref 读 + Runtime 数据目录里的机器生成层）；无覆盖语义、重复 id/路径 fail-closed；逐条来源与 digest 进快照 | `project knowledge validate/list/show/resolve` | —（界面无投影） | [0041](../decisions/0041-project-knowledge-layers-and-execution-binding.md) |
+| Session Guidance 台账 | 一条指导的耐久记录（正文）+ append-only 尝试台账 + 每个 Execution 启动时带上它的产物事实（`launchedWith[]`）；artifact 在 `<CODEESTRA_HOME>/guidance/<project>/<task>/guidance-context.md`，**绝不写进 Task worktree**，也不与 Project Knowledge 共用文件 | `session guidance list/get` | —（CLI-only） | [0057](../decisions/0057-session-guidance-channel-and-fact-layering.md) |
 
 ## 命令面、事件与界面
 
@@ -124,5 +126,6 @@
 3. **Provider 是否真的读取 Project Knowledge 物化文件**未验证：本轮 Agent Adapter 不消费 `knowledgeSnapshotRefs`。
 4. **token 级实时流**（需要新事件与存储）未实现；transcript 是**按需读取 + 轮询**，不是逐 token 推送。
 5. **Codeestra 自升级 / Self Promotion 的完整切换**未实现（Phase 7）。
-6. 文档与实现不一致的地方在 [troubleshooting.md](./troubleshooting.md) §3 里**如实列出**（现为 FOUNDATION-074/075 的校准结果 + FOUNDATION-078 的逐屏走查校准），
+6. **Session Guidance 的模型侧未验证**：命令面、台账与启动交付已实现（ADR-0057），但「真实模型是否真的读了 guidance」与「真实 Pi 在**忙碌轮次**里是否接受 `steer`」都没有验收（ADR-0051 的 `steer` 实测是在空闲 session 上做的）；Codex 的 `turn/steer` 记为 `REQUIRES_VALIDATION`，Claude Code 的活会话通道为 `UNSUPPORTED`。**不要把 `DELIVERED` 读成「模型已经照做」。**
+7. 文档与实现不一致的地方在 [troubleshooting.md](./troubleshooting.md) §3 里**如实列出**（现为 FOUNDATION-074/075 的校准结果 + FOUNDATION-078 的逐屏走查校准），
    未做静默改写。

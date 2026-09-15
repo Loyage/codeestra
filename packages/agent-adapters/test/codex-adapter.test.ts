@@ -352,6 +352,7 @@ describe('Codex adapter capabilities', () => {
       nativePermissionRouting: 'SUPPORTED',
       pauseWithQuiescence: 'UNSUPPORTED',
       revisionAcknowledgement: 'UNSUPPORTED',
+      sessionGuidance: 'REQUIRES_VALIDATION',
       cooperativeStop: 'REQUIRES_VALIDATION',
       attach: 'UNSUPPORTED',
       nativeTerminalHandoff: 'UNSUPPORTED',

@@ -115,6 +115,27 @@ ACTIVE | FENCED → RECOVERY_REQUIRED
 
 原生审批回答中 reject/deny 也属于有效回答，不能把“用户已回答”等同“用户批准”。TUI gate 与 Runtime Attention 并发收到答案时只允许一份从 OPEN 变为已决，迟到答案不得再次驱动工具。
 
+### 3.2 Session Guidance（ADR-0057，schema v31）
+
+一条 guidance 的状态就是它的**投递事实**，与 TaskRevision 的严格 ACK 口径**不同**（ADR-0028）：
+
+```text
+RECORDED ──(存在活会话且通道为 SUPPORTED)──→ DELIVERED        # provider 自己的通道接受了消息（已入队）
+    │                     │→ CHANNEL_UNSUPPORTED | TIMED_OUT | FAILED
+    │
+    └──(当时没有 Execution 持有 Task，或没有活会话)── 保持 RECORDED
+```
+
+- `RECORDED`：正文已耐久保存（ADR-0010 D02）；该 Task 的 guidance 会在**每一条新 Execution**（含 `task resume` 的 successor 与
+  `task retry`）启动时随启动参数交给 provider，交付事实写进 `execution_guidance_contexts`，因此它不会随进程消失。
+- `DELIVERED`：**只表示 provider 通道接收（入队）**，不表示模型读了它。“模型已读”在本实现里**不存在**：三个 provider 都没有
+  可核验通道（ADR-0051），因此没有状态、没有列、没有事件能表达它。
+- `CHANNEL_UNSUPPORTED` / `TIMED_OUT` / `FAILED`：拒绝或未完成，并带稳定 `state`/`errorCode`，**不降级、不静默**。
+- guidance **不产生 TaskRevision**、不动 `tasks.current_revision_id`/`tasks.version`、不写 `VerificationInvalidated`、
+  不使任何验证或未提升批次失效；`task amend` 仍是唯一的规格变更路径。
+- 启动交付 fail-closed：Task 有 guidance 记录却拿不到 Runtime home 或 artifact 核验不过（绝对路径/普通文件/digest/字节数/UTF-8）
+  时以 `GUIDANCE_CONTEXT_UNAVAILABLE` **拒绝启动**，不静默少注入；**零 guidance 时 argv/入参逐字节不变**。
+
 ## 4. IntegrationBatch / StableBranchPromotion
 
 实现状态（ADR-0018 / ADR-0053 / ADR-0022）：**已实现多成员合入**（`task integrate` 单成员简写 +

@@ -1,4 +1,5 @@
 export {
+  buildPiGuidanceArguments,
   buildPiKnowledgeArguments,
   buildPiRpcArguments,
   codeestraPermissionTitlePrefix,
@@ -58,15 +59,25 @@ export { defaultSessionFileReadCapBytes, readPiSessionFileFacts } from './pi-ses
 export type { PiSessionFileFacts } from './pi-session-file.js';
 export type { PiRpcEnvelope, PiRpcErrorCode } from './pi-process.js';
 export {
+  GuidanceContextError,
+  guidanceContextUnavailable,
+  guidanceContextUnavailableCode,
+  readVerifiedGuidanceContext,
+} from './guidance-context.js';
+export { readVerifiedContextArtifact } from './context-artifact.js';
+export type { ContextArtifact } from './context-artifact.js';
+export {
   KnowledgeContextError,
   knowledgeContextUnavailable,
   knowledgeContextUnavailableCode,
   readVerifiedKnowledgeContext,
 } from './knowledge-context.js';
 export {
+  piGuidanceSupport,
   piPluginSelectionSupport,
   PiRpcAdapter,
 } from './pi-adapter.js';
+export { codexDeveloperInstructions } from './codex-guidance.js';
 export { claudePluginSelectionSupport } from './claude-adapter.js';
 export { codexPluginSelectionSupport } from './codex-adapter.js';
 /**
@@ -193,6 +204,7 @@ const capabilities: AdapterCapabilities = Object.freeze({
   resumeAfterExit: 'UNSUPPORTED',
   controlledConfiguration: 'SUPPORTED',
   pluginSelection: 'UNSUPPORTED',
+  sessionGuidance: 'UNSUPPORTED',
 });
 
 export type FakeObservedEvent = Readonly<

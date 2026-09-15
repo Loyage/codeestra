@@ -57,6 +57,8 @@ export type {
   TrustedProject, VerificationCandidateExecution, VerificationCandidates, VerificationEvidence,
   VerificationRunPlan, VerificationRunSummary, VerificationState, VerificationPolicySource,
   TargetedTestPlanRecord, DevFullSuiteState, DevFullSuiteEvidenceRecord, DevFullSuiteCandidates,
+  ExecutionGuidanceContextRecord, SessionGuidanceCreation, SessionGuidanceDeliveryAttemptRecord,
+  SessionGuidanceDeliveryState, SessionGuidanceRecord, SessionGuidanceSource, SessionGuidanceState,
   WorkspaceLifecycleState, WorkspacePreparationPlan,
 } from './database.js';
 export {
@@ -67,7 +69,8 @@ export {
   integrationPipelineMigration, knowledgeLayerMigration,
   intentKindShrinkMigration, intentKinds,
   operationProgressMigration,
-  phase1Migration, phase1SchemaVersion, reclamationMigration, sessionHandoffMigration,
+  phase1Migration, phase1SchemaVersion, reclamationMigration, sessionGuidanceMigration,
+  sessionHandoffMigration,
   sessionTerminalMigration,
   revisionDeliveryMigration,
   stablePromotionMigration, taskControlMigration, taskDependenciesMigration, taskVerificationMigration,

@@ -27,6 +27,12 @@ const stateCheckV29 = `CHECK(state IN ('CREATED','PREPARING','VERIFYING','INTEGR
 
 function downgradeToV29(database: Database): void {
   database.exec('PRAGMA foreign_keys=OFF;');
+  // A v29 database also predates the tables added by schema v31 (Session Guidance, ADR-0057), so
+  // they are removed as well: the upgrade below must be exactly what a real v29 database runs.
+  for (const table of ['session_guidance_deliveries', 'execution_guidance_contexts',
+    'session_guidance']) {
+    database.exec(`DROP TABLE IF EXISTS ${table}`);
+  }
   database.exec(`
     CREATE TABLE integration_batches_v29 (
       id TEXT PRIMARY KEY,

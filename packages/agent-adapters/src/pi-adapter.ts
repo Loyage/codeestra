@@ -17,6 +17,7 @@ import {
 import { readProcessStartToken } from './pi-identity.js';
 import { PiRpcClient, PiRpcProcessError } from './pi-process.js';
 import {
+  buildPiGuidanceArguments,
   buildPiKnowledgeArguments,
   buildPiModelArguments,
   buildPiRpcArguments,
@@ -24,6 +25,7 @@ import {
   piExtensionUiResponseRecord,
 } from './pi-rpc.js';
 import { KnowledgeContextError, knowledgeContextUnavailableCode, readVerifiedKnowledgeContext } from './knowledge-context.js';
+import { GuidanceContextError, guidanceContextUnavailableCode, readVerifiedGuidanceContext } from './guidance-context.js';
 import {
   assertPiPluginSelectionUsable,
   PiPluginError,
@@ -36,6 +38,13 @@ import {
  * binary happens to be installed in this environment.
  */
 export const piPluginSelectionSupport = 'SUPPORTED' as const;
+
+/**
+ * Whether Pi can hand a guidance message to a running conversation (ADR-0057). Declared as a constant
+ * for the same reason as `piPluginSelectionSupport`: a read-only projection must be able to answer
+ * without launching a provider.
+ */
+export const piGuidanceSupport = 'SUPPORTED' as const;
 
 const piCapabilities: AdapterCapabilities = Object.freeze({
   persistentSession: 'SUPPORTED',
@@ -65,6 +74,13 @@ const piCapabilities: AdapterCapabilities = Object.freeze({
   // Pi's launch composes explicit paths under `--no-extensions`/`--no-skills`/`--no-prompt-templates`
   // /`--no-themes`, so the user's selection is exactly what loads (ADR-0044 D02/D06).
   pluginSelection: piPluginSelectionSupport,
+  // ADR-0057: Pi's RPC `steer` is a real channel into a *running* conversation. Measured behaviour
+  // (ADR-0051): the command answers `success:true` and Pi then reports its own steering queue in a
+  // separate `queue_update` record. That is the strongest fact any provider here produces, and it
+  // still only says the message is **enqueued** — Pi has no channel that proves the model read it.
+  // This is why `sessionGuidance: 'SUPPORTED'` is paired with a delivery state named `DELIVERED`,
+  // never `ACKNOWLEDGED`.
+  sessionGuidance: piGuidanceSupport,
 });
 
 export interface PiRpcAdapterOptions {
@@ -363,6 +379,19 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
         throw error;
       }
     }
+    // The Task's recorded Session Guidance is verified the same way and for the same reason: a file
+    // that does not match its recorded digest refuses the start instead of running the Agent without
+    // what the user recorded (ADR-0057).
+    if (request.guidanceContext !== undefined) {
+      try {
+        readVerifiedGuidanceContext(request.guidanceContext);
+      } catch (error) {
+        if (error instanceof GuidanceContextError) {
+          throw new PiRpcProcessError(guidanceContextUnavailableCode, error.message, false, false);
+        }
+        throw error;
+      }
+    }
     const argv = [
       ...this.#options.launcherArgs,
       ...buildPiRpcArguments({
@@ -376,6 +405,10 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
       }),
       ...buildPiModelArguments(agentConfig),
       ...buildPiKnowledgeArguments(request.knowledgeContext),
+      // Guidance is a second, separate append (ADR-0057): Pi documents
+      // `--append-system-prompt` as repeatable, and keeping the two artifacts apart is what makes
+      // "the project declared K" and "the user said G" separately checkable rather than merged.
+      ...buildPiGuidanceArguments(request.guidanceContext),
     ];
     let child: Bun.Subprocess<'pipe', 'pipe', 'pipe'>;
     try {
@@ -564,6 +597,65 @@ const evidenceRef = `pi-rpc:agent_settled:session=${live.providerSessionId}`
       answer: request.answer,
     }));
     return { providerRequestId: request.providerRequestId, accepted: true };
+  }
+
+  /**
+   * Hands one guidance message to this Adapter's **running** Pi conversation (ADR-0057).
+   *
+   * Pi's RPC `steer` is the channel: it delivers the message after the current assistant turn's tool
+   * calls and before the next model call (measured, ADR-0010 D03 / ADR-0051). Success proves the
+   * provider **accepted** the message into its steering queue — the `queue_update` record it then
+   * reports is recorded as corroboration when it arrives — and it proves nothing about whether the
+   * model read it. That distinction is why the Runtime records this as `DELIVERED` and never as a
+   * confirmed revision acknowledgement.
+   *
+   * The adapter holds the child process, so a Session it no longer holds is refused rather than
+   * silently dropped: losing a guidance message must not look like success.
+   */
+  async guide(request: {
+    readonly session: AgentSessionRef;
+    readonly executionId: string;
+    readonly guidanceId: string;
+    readonly message: string;
+  }): Promise<{
+    readonly accepted: boolean;
+    readonly evidenceRef?: string;
+    readonly detail?: string;
+  }> {
+    const live = this.#sessions.get(request.session.id);
+    if (live === undefined || request.session.adapterId !== this.id) {
+      throw new PiRpcProcessError('LIVE_SESSION_UNAVAILABLE',
+        `No live Pi RPC process is held for Session ${request.session.id}; the guidance was not`
+        + ' handed to any provider conversation', true, true);
+    }
+    if (request.session.providerSessionId !== undefined
+      && request.session.providerSessionId !== live.providerSessionId) {
+      throw new PiRpcProcessError('SESSION_IDENTITY_MISMATCH',
+        'Session provider identity did not match the live Pi process', true, true);
+    }
+    // Register before sending: Pi emits the response and the queue update in that order, but a
+    // registration after the write could miss a record that already arrived.
+    const queueUpdate = live.client.awaitQueueUpdate(Math.min(this.#options.requestTimeoutMs, 2_000));
+    await live.client.request({ type: 'steer', message: request.message });
+    const reported = await queueUpdate;
+    const steering = reported === null ? null : reported['steering'];
+    const queued = Array.isArray(steering)
+      ? steering.filter((entry): entry is string => typeof entry === 'string').length
+      : null;
+    return {
+      accepted: true,
+      // The evidence names exactly the facts Pi produced: its own acceptance response, and whether it
+      // reported the steering queue. "enqueued" is the whole claim — never "the model read it".
+      evidenceRef: `pi-rpc:steer:epoch=${live.client.epoch}:session=${live.providerSessionId}`
+        + `:queue_update=${reported === null ? 'NOT_OBSERVED' : 'OBSERVED'}`,
+      detail: reported === null
+        ? `Pi accepted guidance ${request.guidanceId} into its steering queue (steer returned`
+          + ' success); it did not report a queue_update within the observation window, so the queue'
+          + ' contents were not observed'
+        : `Pi accepted guidance ${request.guidanceId} into its steering queue (steer returned`
+          + ` success) and reported ${queued ?? 0} pending steering message(s); this is an enqueued`
+          + ' fact, not proof that the model read it',
+    };
   }
 
   /** Provider PIDs this adapter could not confirm stopped. The Runtime must surface them. */

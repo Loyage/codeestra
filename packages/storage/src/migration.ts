@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 30;
+export const phase1SchemaVersion = 31;
 
 /** The kinds `intents.kind` accepts (ADR-0046) and the only kinds any command can write. */
 export const intentKinds = ['CREATE_TASK', 'AMEND_TASK', 'ADD_CONSTRAINT', 'CANCEL_TASK',
@@ -1735,6 +1735,128 @@ ALTER TABLE stable_promotions ADD COLUMN main_pushed_at INTEGER;
  * 17–29 and would skip a later `version < 16` step, so the migration runner only appends
  * `if (version < 30)` after the existing ascending steps and never inserts an earlier number.
  */
+/**
+ * Session Guidance (FOUNDATION-088 / ADR-0057).
+ *
+ * Three additive tables. No existing table is rebuilt and no existing row is rewritten, so the step
+ * carries no foreign-key hazard of its own and the runner's `PRAGMA foreign_key_check` stays a
+ * check on the whole schema rather than on this script.
+ *
+ * - `session_guidance` is the durable record of one user guidance message handed to a conversation.
+ *   ADR-0010 D02 requires the body to be stored durably *before* delivery so a crash cannot lose it,
+ *   and ADR-0010 D06 keeps the text out of domain events: the event carries the body hash and
+ *   length, the row carries the text. Nothing here is a specification change — a guidance record
+ *   never appears in `task_revisions` and never moves `tasks.current_revision_id` (ADR-0010 D02).
+ * - `session_guidance_deliveries` is the append-only attempt ledger, shaped like the revision
+ *   delivery ledger (ADR-0028) but with a deliberately weaker vocabulary. "Recorded", "delivered"
+ *   and "acknowledged by the model" are three different facts, and only the first two exist here:
+ *   `DELIVERED` means the provider's own channel *accepted* the message (it is enqueued), which is
+ *   the strongest fact any of the three providers can produce (ADR-0051). There is intentionally no
+ *   column in which a model having read the guidance could be written.
+ * - `execution_guidance_contexts` records which guidance artifact an Execution was launched with, so
+ *   "the guidance survived the process" is readable from the ledger instead of asserted.
+ *
+ * `source` lists only the value the implementation can produce today (`COMMAND`). ADR-0046 narrowed
+ * `intents.kind` to producible values for exactly this reason; TUI-sourced guidance (ADR-0010 D02)
+ * is not implemented, so it is not accepted here and will need its own step when it exists.
+ *
+ * Schema version 31 is this step's own number: 25 is FOUNDATION-065/ADR-0039, 26 is
+ * FOUNDATION-067/ADR-0041, 27 is FOUNDATION-071/ADR-0044, 28 is FOUNDATION-075/ADR-0046, 29 is
+ * FOUNDATION-077/ADR-0052, 30 is FOUNDATION-081/ADR-0053, and 16 stays permanently unused (22 is
+ * skipped by the wave's numbering convention). A database may already be stamped 17–30 and would
+ * skip a later `version < 16` step, so the migration runner only appends `if (version < 31)` after
+ * the existing ascending steps and never inserts an earlier number.
+ */
+export const sessionGuidanceMigration = `
+CREATE TABLE session_guidance (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT NOT NULL,
+  -- The Execution that was holding the Task when the guidance was recorded; NULL means nothing was
+  -- running, so the guidance can only be handed over at the next launch.
+  execution_id TEXT,
+  session_id TEXT REFERENCES agent_sessions(id),
+  incarnation_id TEXT REFERENCES session_incarnations(id),
+  -- Today the command face is the only producer; TUI-typed guidance is not implemented (ADR-0010).
+  source TEXT NOT NULL CHECK(source IN ('COMMAND')),
+  -- The durable body (ADR-0010 D02). It never enters a domain event (ADR-0010 D06).
+  body TEXT NOT NULL CHECK(length(trim(body)) > 0),
+  body_hash TEXT NOT NULL CHECK(length(body_hash) = 64),
+  body_bytes INTEGER NOT NULL CHECK(body_bytes > 0),
+  actor TEXT NOT NULL CHECK(length(trim(actor)) > 0),
+  -- The delivery fact, not a specification fact: 'RECORDED' is the only state a record is created
+  -- in, and it is also where a record stays when no live conversation existed to hand it to.
+  state TEXT NOT NULL CHECK(state IN ('RECORDED','DELIVERED','CHANNEL_UNSUPPORTED','TIMED_OUT',
+    'FAILED')),
+  channel TEXT CHECK(channel IS NULL OR channel IN ('PROVIDER_CONVERSATION')),
+  evidence_ref TEXT,
+  delivery_detail TEXT,
+  command_id TEXT NOT NULL,
+  payload_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+  delivered_at INTEGER,
+  -- Only a delivered record has a delivery time: the timestamp cannot be read as "we sent it".
+  CHECK((state='DELIVERED') = (delivered_at IS NOT NULL)),
+  UNIQUE(task_id,id),
+  FOREIGN KEY(task_id) REFERENCES tasks(id),
+  FOREIGN KEY(task_id,execution_id) REFERENCES executions(task_id,id)
+) STRICT;
+CREATE INDEX session_guidance_by_task ON session_guidance(task_id,created_at,id);
+
+CREATE TABLE session_guidance_deliveries (
+  id TEXT PRIMARY KEY,
+  guidance_id TEXT NOT NULL REFERENCES session_guidance(id),
+  attempt_number INTEGER NOT NULL CHECK(attempt_number > 0),
+  channel TEXT NOT NULL CHECK(channel IN ('PROVIDER_CONVERSATION')),
+  execution_id TEXT,
+  session_id TEXT REFERENCES agent_sessions(id),
+  incarnation_id TEXT REFERENCES session_incarnations(id),
+  -- 'DELIVERED' = the provider channel accepted the message (enqueued). It says nothing about
+  -- whether the model read it, and no other state here does either.
+  state TEXT NOT NULL CHECK(state IN ('IN_FLIGHT','DELIVERED','CHANNEL_UNSUPPORTED','TIMED_OUT',
+    'FAILED')),
+  -- The Adapter's own reported capability at the moment of the attempt, recorded even when the
+  -- attempt never reached the provider: "why nothing was sent" must be a readable fact.
+  capability TEXT,
+  evidence_ref TEXT,
+  error_code TEXT,
+  detail TEXT NOT NULL CHECK(length(trim(detail)) > 0),
+  deadline_at INTEGER,
+  started_at INTEGER NOT NULL CHECK(started_at >= 0),
+  ended_at INTEGER,
+  UNIQUE(guidance_id,attempt_number),
+  CHECK((state='IN_FLIGHT') = (ended_at IS NULL))
+) STRICT;
+CREATE INDEX session_guidance_deliveries_by_guidance
+  ON session_guidance_deliveries(guidance_id,attempt_number);
+CREATE INDEX in_flight_session_guidance_deliveries ON session_guidance_deliveries(deadline_at)
+  WHERE state='IN_FLIGHT';
+
+CREATE TABLE execution_guidance_contexts (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT NOT NULL,
+  execution_id TEXT NOT NULL,
+  -- The records the artifact was derived from. The artifact is a rendering of these rows, never the
+  -- authority: a re-launch re-derives it from the ledger.
+  guidance_ids_json TEXT NOT NULL CHECK(json_valid(guidance_ids_json)),
+  guidance_count INTEGER NOT NULL CHECK(guidance_count > 0),
+  context_path TEXT NOT NULL CHECK(length(trim(context_path)) > 0),
+  context_digest TEXT NOT NULL CHECK(length(context_digest) = 64),
+  context_bytes INTEGER NOT NULL CHECK(context_bytes > 0),
+  recorded_at INTEGER NOT NULL CHECK(recorded_at >= 0),
+  -- One Execution can be launched more than once (a resume after a crash) and the guidance set can
+  -- grow in between, so the pair is the key: re-recording the same content is idempotent, and a
+  -- different content is a new row instead of an overwritten one.
+  UNIQUE(execution_id,context_digest),
+  FOREIGN KEY(task_id) REFERENCES tasks(id),
+  FOREIGN KEY(task_id,execution_id) REFERENCES executions(task_id,id)
+) STRICT;
+CREATE INDEX execution_guidance_contexts_by_task
+  ON execution_guidance_contexts(task_id,recorded_at,id);
+`;
+
 export const integrationBatchTerminalStatesMigration = `
 CREATE TABLE integration_batches_v30 (
   id TEXT PRIMARY KEY,
