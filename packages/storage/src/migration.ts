@@ -1,4 +1,9 @@
-export const phase1SchemaVersion = 27;
+export const phase1SchemaVersion = 28;
+
+/** The kinds `intents.kind` accepts (ADR-0046) and the only kinds any command can write. */
+export const intentKinds = ['CREATE_TASK', 'AMEND_TASK', 'ADD_CONSTRAINT', 'CANCEL_TASK',
+  'ANSWER_AGENT'] as const;
+export type IntentKind = (typeof intentKinds)[number];
 
 
 export const phase1Migration = `
@@ -1623,4 +1628,47 @@ BEGIN SELECT RAISE(ABORT,'execution knowledge bindings are append-only'); END;
 export const agentPluginSelectionMigration = `
 ALTER TABLE agent_configurations ADD COLUMN plugin_selection_json TEXT
   CHECK(plugin_selection_json IS NULL OR json_valid(plugin_selection_json));
+`;
+
+/**
+ * `intents.kind` narrows to the kinds the product can actually produce (FOUNDATION-075 / ADR-0046).
+ *
+ * The declared CHECK also admitted `CHANGE_PRIORITY` and `SELF_MODIFICATION`, and no command has
+ * ever written either: the only writers of `intents` are Task creation (`CREATE_TASK`), revision
+ * creation (`AMEND_TASK` / `ADD_CONSTRAINT`) and Attention answering (`ANSWER_AGENT`). A declared
+ * but unreachable state is a promise the product does not keep, so the schema stops declaring it.
+ *
+ * `ANSWER_AGENT` **stays**: `Phase1Database.planAttentionAnswer` writes it in the same
+ * transaction as the delivery Operation, and every answered Attention has such a row.
+ *
+ * SQLite cannot narrow a CHECK in place, so `intents` is rebuilt the same way `workspaces` (v7) and
+ * `executions` (v9) were. Three tables reference it by name — `task_revisions.source_intent_id`,
+ * `intent_targets.intent_id` and `intent_attention_targets.intent_id` — so the migration runs with
+ * foreign keys off and `migrate()` verifies the whole schema afterwards. No row is dropped or
+ * rewritten: the copy is a plain `INSERT ... SELECT`.
+ *
+ * **This script must not be executed on a database that can still hold a removed kind.** Bun's
+ * `Database.exec()` swallows a step-time error inside a multi-statement script and keeps going, so a
+ * copy rejected by the narrowed CHECK would be followed by `DROP TABLE intents` and the rows would
+ * vanish without an error. `Phase1Database.migrate()` therefore refuses such a database up front
+ * (named reason, nothing touched) and compares the row count around the rebuild, so the only way to
+ * reach this script is with a copy that cannot fail on the kind column.
+ */
+export const intentKindShrinkMigration = `
+CREATE TABLE intents_v28 (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  idempotency_key TEXT NOT NULL,
+  raw_text TEXT NOT NULL,
+  kind TEXT CHECK(kind IN ('CREATE_TASK','AMEND_TASK','ADD_CONSTRAINT','CANCEL_TASK',
+    'ANSWER_AGENT')),
+  status TEXT NOT NULL CHECK(status IN ('RECORDED','NEEDS_CLARIFICATION','APPLIED','REJECTED')),
+  actor TEXT NOT NULL,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  UNIQUE(project_id,idempotency_key)
+) STRICT;
+INSERT INTO intents_v28(id,project_id,idempotency_key,raw_text,kind,status,actor,created_at)
+  SELECT id,project_id,idempotency_key,raw_text,kind,status,actor,created_at FROM intents;
+DROP TABLE intents;
+ALTER TABLE intents_v28 RENAME TO intents;
 `;

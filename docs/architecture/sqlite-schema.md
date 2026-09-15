@@ -1,6 +1,6 @@
 # SQLite Schema
 
-状态：逻辑 SQL 设计基线 + 已实现 migration 记录。第 2–6 节是逻辑关系设计（其中若干节已被后续 ADR 修订，见第 8 节各版本的说明）；第 8 节逐版本记录 `packages/storage/src/migration.ts` 中**实际存在**的 migration，当前 `phase1SchemaVersion = 27`（v22 未占用；v25 已由 FOUNDATION-065 占用）。**schema version 16 永久未使用**，原因见第 8 节。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与第 2–6 节的约束等价，并以第 8 节的实现记录为准。
+状态：逻辑 SQL 设计基线 + 已实现 migration 记录。第 2–6 节是逻辑关系设计（其中若干节已被后续 ADR 修订，见第 8 节各版本的说明）；第 8 节逐版本记录 `packages/storage/src/migration.ts` 中**实际存在**的 migration，当前 `phase1SchemaVersion = 28`（v22 未占用；v25 已由 FOUNDATION-065 占用、v28 已由 FOUNDATION-075 / ADR-0046 占用）。**schema version 16 永久未使用**，原因见第 8 节。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与第 2–6 节的约束等价，并以第 8 节的实现记录为准。
 
 ## 1. 约定
 
@@ -43,6 +43,7 @@ CREATE TABLE intents (
   project_id TEXT NOT NULL REFERENCES projects(id),
   idempotency_key TEXT NOT NULL,
   raw_text TEXT NOT NULL,
+  -- v1 的声明；v28（ADR-0046）把它收窄为前五个取值，见第 8 节。
   kind TEXT CHECK (kind IN ('CREATE_TASK','AMEND_TASK','ADD_CONSTRAINT',
     'CANCEL_TASK','CHANGE_PRIORITY','ANSWER_AGENT','SELF_MODIFICATION')),
   status TEXT NOT NULL CHECK (status IN ('RECORDED','NEEDS_CLARIFICATION','APPLIED','REJECTED')),
@@ -1180,15 +1181,15 @@ ALTER TABLE stable_promotions ADD COLUMN approved_full_suite_evidence_id TEXT;
 
 ### 迁移执行顺序与共享槽位后果
 
-`Phase1Database.migrate()` 按 `if (version < N)` 升序执行 v1…v27（跳过 v16、v22），最后写
+`Phase1Database.migrate()` 按 `if (version < N)` 升序执行 v1…v28（跳过 v16、v22），最后写
 `PRAGMA user_version=${phase1SchemaVersion}`。升级前 schema version 大于 `phase1SchemaVersion` 时以 `UNSUPPORTED_SCHEMA` 拒绝写入。
 
 已知后果（ADR-0032 记录）：单个 lane 合并后，**已经被标成更高版本号的库不会补跑后来出现的更低版本步骤**。跨格合并必须按既定顺序
 （E0 → E1 → E2；以及 Wave D 的 17 → 18 → 19）。这也是 v16 永久未使用的同一个根因。
 
-版本占用现状（以 `packages/storage/src/migration.ts` 为准，不提前创建未来表）：v22 未占用；v16 永久未使用；v23–v27 已实现
+版本占用现状（以 `packages/storage/src/migration.ts` 为准，不提前创建未来表）：v22 未占用；v16 永久未使用；v23–v28 已实现
 （v23 `task retry`/ADR-0036，v24 未注册目录回收/ADR-0037，v25 分层验证证据/ADR-0038+ADR-0039，v26 项目知识/ADR-0041，
-v27 Agent 插件选择/ADR-0044）。当前 `phase1SchemaVersion = 27`。
+v27 Agent 插件选择/ADR-0044，v28 `intents.kind` 收窄/ADR-0046）。当前 `phase1SchemaVersion = 28`。
 
 ### Phase 6 项目知识分层与 Execution 绑定（schema version 26，ADR-0041）
 
@@ -1259,3 +1260,25 @@ ALTER TABLE agent_configurations ADD COLUMN plugin_selection_json TEXT
 保留每一行（含两个部分唯一索引）原样，本能力之前的历史行只是没有选择。语义是**整体替换**：一个作用域的选择替换低优先级作用域的整份列表，
 每个选中路径在写入前核验一次、在 Session 启动前再核验一次，无法加载的路径以稳定码拒绝且不创建 Execution（`agent.config.*` 的
 profile 细节见 `agent-adapter-api.md`）。`executions.agent_config_json` 同时记录该次启动实际带上的 `plugins`，供事后读回。
+
+### `intents.kind` 收窄（schema version 28，ADR-0046）
+
+第 2 节里 `intents.kind` 仍写着 v1 的七个取值；实际实现的 CHECK 自 v28 起是五个（v1 的迁移文本一字未改，历史不重写）：
+
+```sql
+-- CREATE TABLE intents_v28 与 v1 的 intents 逐列相同，只有 kind 的 CHECK 不同：
+kind TEXT CHECK(kind IN ('CREATE_TASK','AMEND_TASK','ADD_CONSTRAINT','CANCEL_TASK',
+  'ANSWER_AGENT')),
+-- 复制 → DROP TABLE intents → ALTER TABLE intents_v28 RENAME TO intents
+```
+
+SQLite 不能就地收窄 CHECK，所以重建表。`intents` 被三张表按名字引用（`task_revisions.source_intent_id`、`intent_targets.intent_id`
+（`WITHOUT ROWID` 复合主键）、`intent_attention_targets.intent_id`），因此这一步与 v7/v9 同类：重建期间 `PRAGMA foreign_keys=OFF`，
+迁移后 `PRAGMA foreign_key_check` 必须为空（`migrate()` 的 `rebuildsTable` 谓词因此从 `version < 9` 放宽到 `version < 28`）。
+重建前的键照旧：主键索引 + `UNIQUE(project_id,idempotency_key)`；v27 的 `intents` 上没有任何触发器，v28 也不新增。
+
+**不静默丢数据**（ADR-0046 D04）：升级前若 `intents` 里还有被移除取值（`CHANGE_PRIORITY` / `SELF_MODIFICATION`）的行，
+以稳定码 `INVALID_STATE` 拒绝升级、原库一行不动；升级后再比对重建前后的行数（实测 Bun 的 `Database.exec()` 会吞掉多语句脚本里的
+step-time 错误，不比对就可能让 `DROP TABLE` 在复制被拒后照跑）。`tasks.priority` 由 v1 保留、字段与 `tasks_schedule` 索引不变，
+但移除 `CHANGE_PRIORITY` 后**没有任何命令能让它非 0**，因此 ADR-0030 的「priority desc」在现状下是惰性的（这是如实记录的代价）。
+Phase 7 落地 `SELF_MODIFICATION` 时需要再做一次迁移把取值加回来。
