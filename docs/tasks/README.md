@@ -4839,6 +4839,118 @@ git ls-remote --heads origin            → 7292ddc refs/heads/dev / c50730f ref
 - dev clone 里的本地 `main` 不会自动前进（无定时 fetch）；需要最新 main ref 时显式 `git fetch`，本格未改为自动。
 - Orca 等外部工具若记录了旧的 worktree 身份，需要用户侧重新指向 dev clone；本格未修改这些外部工具的数据。
 
+## FOUNDATION-077 — L4 UI 投影补齐：修订/投递视图 + 散文等待视图（Wave L / `lane/l4-ui-projections`，无 ADR、无迁移）
+
+状态：**本分支（lane）已完成交付，未合入 `dev`**。基线 `dev = 036cf68`（未 rebase）；工作树
+`/Users/loyage/Documents/codeestra-wt/l4-ui-projections`，分支 `lane/l4-ui-projections`；未 push。
+按 FOUNDATION-074 的口径，`## NEXT` 只依据「已合入 `dev`」的事实，因此**本格不改写 NEXT 正文**；
+NEXT 第 3、4 条的 UI 投影半边在本分支完成，待经 IntegrationBatch 与独立集成验证进入 `dev` 后才生效。
+
+本格补的都是「CLI 已有、UI 没有」的投影缺口，只动 `apps/ui/**`（外加 `docs/**`）：
+
+| # | 缺口 | 本格交付 |
+|---|---|---|
+| ① | `task revision *` / `task revision delivery *` 在 UI 里没有专用视图 | `apps/ui/src/revisions.tsx`：任务详情新增「修订与投递」面板——规格修订列表（版本/时间/摘要/约束数，完整正文可展开）＋投递台账（状态、时间、证据、是否确认、逐次尝试） |
+| ② | `grep prose apps/ui` 零命中：散文提问等待被当普通 Attention | `apps/ui/src/prose-wait.tsx`：「待处理」里独立的散文提问等待卡片，与权限/问卷可区分，并提供 `--answer`/`--dismiss` 的等价动作 |
+| ③ | promotion 的「已推送、等待拉取」状态 | **未做**：`packages/contracts` 里没有该字段（`grep -n "push\|remote\|origin" packages/contracts/src` 只命中一处无关的 ledger 注释），按任务约定不凭空造字段。等 ADR-0047 的产品契约落地（`projects.dev_repo_path` / 等待拉取状态）后再投影 |
+
+### ① 三事实投影（ADR-0028 的核心）
+
+面板把每条投递显示成**三个互不合并的事实**，而不是一个状态词；三个事实由记录的字段直接推出，
+UI 不自行判定是否确认（`satisfied` 来自 Runtime）：
+
+| 事实 | 来源字段 | 文案 |
+|---|---|---|
+| 已记录 | 存在投递行本身 | 「已记录」 |
+| 已投递 | `attemptCount > 0` 或 `attempts.length > 0` | 「已投递（有通道尝试）」/「未投递（无通道尝试）」 |
+| 已确认 | `satisfied`（域 FSM 只接受 `ACKNOWLEDGED` 与 `SUPERSEDED_BY_RESTART`） | 「已确认」/「未确认」 |
+
+- `UNSUPPORTED`（`state='CHANNEL_UNSUPPORTED'`，或全部尝试都是该状态）显示：**「该 adapter 不支持热投递……需停止当前执行并新建一次执行」**，给出「停止并新建执行（解决）」按钮（对应 `task revision delivery resolve --action stop-and-restart`），
+  并在该情形下**隐藏**「重试热投递」（重试只会再记一次同一个事实）。
+- `stale`（任务已走到更晚的修订）显示会被 `SUCCESSOR_REVISION_MISMATCH` 拒绝，并且两个解决按钮都不提供。
+- `IN_FLIGHT`：说明 Runtime 会自行得出结论，解决按钮在结论之前不提供。
+- 会改状态的控件都写了它要做什么：「停止并新建执行（解决）」的 title 说明会以当前 adapter 停止无法确认的执行并在同一工作树新建后续执行；「新建修订」表单在按钮上方写明会追加一条不可变规格版本、且**记录投递要求 ≠ 投递 ≠ 确认**。
+- 只读部分没有被做成看起来会改状态的控件：修订表、台账、事实 chip 都是纯展示。
+
+### ② 散文等待（ADR-0043 / FOUNDATION-069 的 UI 半边）
+
+- 归类：只有 `kind='QUESTION'` 且 prompt 同时匹配 `kind='codeestra.prose-question'`、
+  `code='PROSE_QUESTION_NO_TOOL_USE'`、`heuristic='NO_TOOL_CALLS_IN_RUN_AND_TRAILING_QUESTION_MARK'`
+  才算散文等待（与域 `readProseQuestionPrompt` 同一套判别；缺一不可，避免把 provider 对话框路由到 `attention.resolve`）。
+- 可区分：卡片带「散文提问等待 · provider 已退出」标记、左侧 warn 边线，列表顶部给出「其中 N 条是散文提问等待」；
+  同一 Attention 不会再渲染 `attention.answer` 的通用回答/取消控件（Runtime 会以 `PROSE_QUESTION_RESOLUTION_REQUIRED` 拒绝）。
+- 语义写清楚：provider 进程已退出、没有等待中的对话框、记录的答案**不会送进会话也不创建规格修订**、解除后必须显式重新运行（`task resume` 复用会话 / `task run` 新建执行）。
+- 两个动作与 CLI 等价：`attention.resolve` + `resolution='ANSWERED'`（必填文字）与 `resolution='DISMISSED_FALSE_POSITIVE'`（不得带文字），可选 `note`；返回结果按 `deliveredToProvider=false`、`sessionState=EXITED` 如实显示。
+
+### 命令面映射（UI 动作 → CLI 命令，字段逐一对应）
+
+| UI 动作 | 命令 |
+|---|---|
+| 读取面板 | `task.revision.list`（一次读回 `revisions` 与 `deliveries`） |
+| 新建修订（追加版本） | `task.revision.create <project> <task> <expectedVersion> --specification … --constraint … --reason …` |
+| 停止并新建执行（解决） | `task.revision.delivery.resolve <project> <task> <deliveryId> <expectedVersion> --action stop-and-restart --adapter <id>` |
+| 重试热投递 | 同上 `--action retry` |
+| 记录回答（不投递） | `attention.resolve <project> <attentionId> --answer <text>` |
+| 记录为误报 | `attention.resolve <project> <attentionId> --dismiss [--note <text>]` |
+
+约束 id 由客户端 `crypto.randomUUID()` 生成（与 CLI 一致）；长度上限（4000/2000）在客户端先拒绝，
+Runtime 仍是权威边界。
+
+### 交付物
+
+| 交付物 | 内容 | 位置 |
+|---|---|---|
+| D 修订/投递投影 | 三事实 chip、修订表、投递台账、adapter 不支持热投递的提示与「解决」入口、新建修订表单（含效果说明）、命令构造器 | `apps/ui/src/revisions.tsx` |
+| D 散文等待投影 | 判别器（三字面量）、只记录不投递的卡片、两个等价动作、结果文案 | `apps/ui/src/prose-wait.tsx` |
+| D 视图类型 | `TaskRevisionListView` / `RevisionDeliveryView` / `RevisionCreationView` / `RevisionDeliveryResolutionView` / `ProseQuestionResolutionResultView` 等（纯追加） | `apps/ui/src/types.ts` |
+| D 接线（最小） | 任务详情新增一个渲染分支（`RevisionDeliveryPanel`）、`AttentionTab` 的散文分支与计数、`export AttentionTab` 以便静态断言 | `apps/ui/src/App.tsx` |
+| D 样式（纯追加） | `.revision-panel` / `.delivery-facts` / `.fact-*` / `.revision-create` / `.prose-wait`；**未触碰** `.app`/`.app-header`/`.sidebar`/`.workspace-shell`（FOUNDATION-072 领地） | `apps/ui/src/styles.css` |
+| D 定向测试 | 修订/投递（24 项，含域字面量漂移守卫与 SSR 静态断言）、散文等待（13 项）、待处理列表区分（3 项） | `apps/ui/test/revisions.test.ts`、`apps/ui/test/prose-wait.test.ts`、`apps/ui/test/attention-prose-wait.test.ts` |
+
+### 实际验证（本分支执行；定向，未跑全量）
+
+| 命令 | 结果 |
+|---|---|
+| `bun run typecheck:ui` | **退出码 0** |
+| `bunx vitest run apps/ui` | **7 个文件 / 93 项测试通过**（新增 40 项） |
+| `bun run build:ui:dev` | **退出码 0**；`apps/ui/dist/index.html` 含 `data-channel="dev"` 与 `<title>Codeestra DEV</title>` |
+| `bun test apps/runtime/test/revision-delivery.test.ts` | **17 pass / 0 fail**（Runtime 侧命令面：`CHANNEL_UNSUPPORTED` 保持未确认、retry 仍 `UNSATISFIED`、`stop-and-restart` 由后继执行行确认） |
+| `bun test apps/runtime/test/cli-prose-question-attention.test.ts` | **4 pass / 0 fail**（`attention.list` 的 `prompt.kind/code`、`attention.answer` 被 `PROSE_QUESTION_RESOLUTION_REQUIRED` 拒绝、`attention.resolve` 返回 `deliveredToProvider:false`） |
+| 服务侧静态检查（无浏览器） | 在隔离 home `CODEESTRA_HOME=/tmp/ce-l4` 起 Runtime（`status` 自启）＋`ui --no-open` 后：`curl --noproxy '*' <base>` 返回 `data-channel="dev"` 与 `Codeestra DEV`，`index=200 bundle=200`；随后 `stop` 报 `STOPPED`，并 `rm -rf /tmp/ce-l4`（未记录 token） |
+
+测试能证明与不能证明的：
+
+- **能证明**：三事实不会互相冒充（未确认永不显示为「已确认」，与域 `revisionDeliverySatisfied` 的两状态逐一对齐，并读域源码做漂移守卫）；播报出去的命令字段与 CLI 一致；散文等待必须三个字面量全匹配才走 `attention.resolve`，且卡片文案明确「不会送进会话／需显式重新运行」。
+- **不能证明**：没有真实 Runtime 往返的 UI 往返（未起浏览器驱动界面），也没有真实 provider 的结构化 ACK（Pi `revisionAcknowledgement=UNSUPPORTED`，本格未改 adapter）；观感类结论不在机器断言内。
+- **未跑什么**：`bun run check` / `just check` / `just verify` / `check:fast`（ADR-0038 禁止在开发分支跑全量）；无浏览器/桌面自动化 e2e（ADR-0008）。
+
+### 需要人工目视确认（ADR-0008 下没有机器断言）
+
+1. 深色/浅色主题下三个事实 chip（记录=accent、投递=warn、确认=ok）是否一眼可分。
+2. `CHANNEL_UNSUPPORTED` 卡片只剩「停止并新建执行（解决）」时，是否不会被误读成“已完成投递”。
+3. 「新建修订」表单在窄屏（≤620px）下的排布，以及按钮上方效果说明是否足够醒目。
+4. 散文提问卡片与权限/问卷卡片在同一列表里的视觉区分（标记 chip ＋ warn 左边线）。
+5. dev 橙色通道横幅与本格新增面板并存时的可读性。
+
+### 一行后端都没改
+
+```
+$ git status --porcelain -- apps/runtime apps/cli packages PROJECT_SPEC.md .codeestra docs/decisions
+（空输出）
+$ git diff --stat
+ apps/ui/src/App.tsx    |  55 ++++++++++++++++++--
+ apps/ui/src/styles.css |  18 +++++++
+ apps/ui/src/types.ts   | 136 +++++++++++++++++++++++++++++++++++++++++++++++++
+（新增文件：apps/ui/src/revisions.tsx、apps/ui/src/prose-wait.tsx、apps/ui/test/*.test.ts ×3）
+```
+
+### 剩余问题
+
+- NEXT 第 3 条的 provider 半边仍未完成：真实 provider 的结构化 ACK 行为（需 Adapter 先实现 `applyRevision`）、真实模型对投递提示的理解。
+- NEXT 第 4 条的其余面：Codex 适配器不上报 completion facts 因此只漏报不谎报；真实 provider 下「`Task WAITING_FOR_USER` + `Execution RUNNING` + `Session EXITED`」组合的复验。
+- 任务③待契约落地后再投影（本格按约定不做，未发明字段）。
+- 本格未新增依赖、未新增权限/审批/沙箱，因此不需要新 ADR；如后续要为「已推送≠已提升」加投影，应先落地契约字段。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），
