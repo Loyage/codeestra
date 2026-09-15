@@ -12,9 +12,15 @@ ADR-0036 / FOUNDATION-061 如实保留了一个缺口，本 ADR 关闭它：
   worktree，因为它只做「从基线新建分支」这一件事；
 - 于是**已被 reclaim 的 worktree 无法重建**：`task retry` 只能以稳定码 `WORKSPACE_RECLAIMED` 拒绝，
   Execution 无法建立，一个失败过又被回收的 Task 实际上再也跑不起来；
-- 另一个硬事实是 `workspaces.path TEXT NOT NULL UNIQUE`：一个 Task 在账本里**永远只有一个 workspace 行**
-  （`one_live_workspace` 只允许一个非 `RELEASED` 行）。所以「重建」在数据语义上只能是**复用同一行**
-  （同一 `workspace_id` / `path` / `branch_ref` / `ownership_token`），不可能是第二行。
+- 账本的形态（用真实迁移链在内存库实测的 DDL，见 `packages/storage/src/database.ts` 的 `workspaceRetryMigration`）：
+  `workspaces` 表自 v7 重建后 **`path` 列没有表级 `UNIQUE`**（v1 的列级约束在 v7 重建时被移除，migration.ts 原有
+  注释就是为这件事写的），只有两个**部分**唯一索引：`one_live_workspace ON workspaces(task_id) WHERE state <> 'RELEASED'`
+  与 `one_live_workspace_path ON workspaces(path) WHERE state <> 'RELEASED'`。因此一个 Task 同时**只能有一个 live
+  workspace 行**，但 `RELEASED` 行是历史、不挡住同一路径上的后续工作（`recordMissingWorkspacePreparation` 与失败的
+  准备把行留在 `RELEASED`，正是为了不给“修好再重试”上锁）。
+- 本 ADR 的「重建复用同一行」不是因为路径列唯一，而是因为该行**就是**这个 checkout 的描述（`path` / `branch_ref` /
+  `base_commit` / `ownership_token`），重建出来的目录仍是同一个 workspace；另开一行会让同一个目录出现两个 owner，
+  且与 `one_live_workspace_path` 表达的「一个路径一个 live workspace」相悖。
 
 本 ADR 只补「重建」这一件事：不改变 `reclaim` 的删除语义（不清 branch、不 `--force`）、不改变
 「不自动重试」（ADR-0036）、不新增确认/门禁（ADR-0008/0011）。
@@ -88,8 +94,8 @@ prepare-workspace 三条入口共用的那一个。这样做的理由有二：
 ### D03：账本复用同一行，事件复用同一个名字
 
 - `workspaces` 行 `RELEASED → READY`，`id`/`path`/`branch_ref`/`ownership_token`/`base_commit` 全部不变
-  （`path` 唯一约束决定了这是唯一自洽的形态）；转移由新的 `markReclaimedWorkspaceRebuilt` 在同一事务内
-  完成，并写入既有 `WorkspacePrepared` 事件，payload 增加
+  （该行描述的就是这个 checkout；同一路径的 live 行由 `one_live_workspace_path` 限定为一条）；转移由新的
+  `markReclaimedWorkspaceRebuilt` 在同一事务内完成，并写入既有 `WorkspacePrepared` 事件，payload 增加
   `reattachedBranch: true`、`previousState: 'RELEASED'`、`rebuild: { outcome, reasonCode, detail, headCommit }`。
 - 该转移只接受 `RELEASED` 行，并在事务内重新核验 held Execution 与活跃预约；行已是 `READY` 时返回
   `changed: false`（两个并发 preparation 都对同一结果负责时都能成功，且不会产生第二个 worktree）。
@@ -148,10 +154,17 @@ prepare-workspace 三条入口共用的那一个。这样做的理由有二：
 - 旧 Execution 的失败、错误、证据一律不改写；不伪造 RUNNING/RESULT；不因心跳/等待自动释放任何预留。
 - `reclaim` 语义不变（仍不删 branch、不 `--force`）；未注册目录的处置权仍只在 `reclaim` 手里。
 - 已知边界（如实记录，未在本次解决）：
-  - 账本行 `RELEASED` 且**分支也已不存在**时，`decideRetryWorkspace` 仍按 ADR-0036 判为 `PREPARE_FRESH`；
-    而 `workspaces.path` 的唯一约束意味着同一 Task 无法再新建第二个 workspace 行，这条路径实际上会以数据库
-    约束错误收场。它需要独立决策（要么允许复用 `RELEASED` 行做一次真正的 fresh prepare，要么让
-    `PREPARE_FRESH` 也变成稳定拒绝码），本 ADR 不改 ADR-0036 的既有判定。
+  - 账本行 `RELEASED` 且**分支也已不存在**时，`decideRetryWorkspace` 仍按 ADR-0036 判为 `PREPARE_FRESH`（本 ADR
+    不改该判定）；这条路径**可用且已被定向测试覆盖**——`workspaces.path` 没有表级唯一约束（v7 重建后只剩两个部分
+    唯一索引，`RELEASED` 行不在其中），所以 fresh preparation 会在同一路径插入**第二个** workspace 行（新
+    `workspace_id`/`ownership_token`，新分支从固定 dev 基线建立），旧 `RELEASED` 行作为历史保留。实测：
+    `apps/runtime/test/cli-task-retry.test.ts` 的 “starts a fresh worktree when a reclaimed worktree and its
+    branch are both gone” 通过（`task retry` 退出 0、`workspace.mode=PREPARE_FRESH`、attempt 2 `STARTED`、记录路径上
+    真的重新准备了 worktree 且 HEAD = `refs/heads/dev` 的 commit、`reclaim plan` 对同一路径列出两个
+    `TASK_WORKTREE` target 且 `resourceId` 不同）；本 ADR 原先把这一路径写成“会以数据库约束错误收场”，那是**错误
+    的代码推断**（早期版本 `workspaces.path` 的列级 UNIQUE），已按实测更正。
+  - 上面那条路径仍属**未在真实 provider 下验收**（与其它重建路径一样，本次 e2e 用协议 stub）；它没有被
+    专门优化，只是既有 fresh preparation 的自然行为。
   - 重建后的首次启动，impact/conflict 观察仍把该 Task 视为「尚无 workspace」（`getImpactCandidateTask`
     过滤 `state <> 'RELEASED'`，落在工作树准备之前），因此第一次启动的改动集观察为空；这是既有语义，
     本 ADR 不扩大领地修改 `slot-reservation-service`。
@@ -175,7 +188,9 @@ prepare-workspace 三条入口共用的那一个。这样做的理由有二：
   分支 commit 未被移动、`TaskRetryRequested.workspaceMode=REBUILD_OWNED` 与
   `WorkspacePrepared.reattachedBranch=true`（`rebuild.outcome=REBUILT`）可读、重复 retry 以
   `CONCURRENT_MODIFICATION` 拒绝且注册数不变；分支分叉与路径被占用两种情形都以 `WORKSPACE_RECLAIMED`
-  拒绝、版本不变、无新 Execution、无 `TaskRetryRequested`、无 rebuild 事件、现场零写入。
+  拒绝、版本不变、无新 Execution、无 `TaskRetryRequested`、无 rebuild 事件、现场零写入；`RELEASED` 行 + 分支已
+  不存在（目录也已不在）时以 `PREPARE_FRESH` 走既有 fresh preparation（退出 0、attempt 2 `STARTED`、同一路径上
+  新建第二个 workspace 行可由 `reclaim plan` 的两个不同 `resourceId` 证认）。
 
 ## References
 

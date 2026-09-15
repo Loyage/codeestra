@@ -7102,9 +7102,10 @@ export class Phase1Database {
    *
    * Only a `RELEASED` row can come back, and only while nothing live claims it: a held Execution or an
    * active slot reservation still means another writer owns this workspace, so the transition is
-   * refused instead of racing it. The row keeps its id, path, branch and ownership token — a reclaimed
-   * workspace path is unique in this table, so a re-created worktree *is* that same workspace rather
-   * than a second one. The fact is recorded as the existing `WorkspacePrepared` event with the rebuild
+   * refused instead of racing it. The row keeps its id, path, branch and ownership token because that
+   * row *is* this checkout's description (`one_live_workspace_path` keeps exactly one live row per
+   * path), so re-creating the directory revives that same workspace instead of inventing a second
+   * owner for it. The fact is recorded as the existing `WorkspacePrepared` event with the rebuild
    * evidence in its payload, in the same transaction as the state change.
    *
    * A row already back in `READY` is reported as unchanged instead of failing: two preparations that

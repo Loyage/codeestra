@@ -614,6 +614,59 @@ describe('codeestra task retry', () => {
     await cli(['stop'], value.environment);
   }, 180_000);
 
+  test('starts a fresh worktree when a reclaimed worktree and its branch are both gone', async () => {
+    const value = await fixture();
+    const taskId = await startTask(value.environment, value.projectId, 'Branch gone (fail-once)');
+    const failed = await waitForState(value.environment, value.projectId, taskId, 'FAILED');
+    const worktree = join(value.home, 'worktrees', value.projectId, taskId);
+    await waitFor(() => existsSync(join(worktree, `runs-${taskId}.log`)));
+
+    const applied = await cli(['reclaim', 'apply', '--project', value.projectId, '--task', taskId,
+      '--kind', 'TASK_WORKTREE', '--include-failure-scenes', '--json'], value.environment);
+    expect(applied.exitCode).toBe(0);
+    expect(existsSync(worktree)).toBe(false);
+    // Both halves are gone: the directory was reclaimed and the Task branch is deleted out of band,
+    // so `decideRetryWorkspace` observes MISSING and answers PREPARE_FRESH — while the ledger still
+    // holds the `RELEASED` row for the very same path.
+    await git(value.repository, ['update-ref', '-d', `refs/heads/task/${taskId}`]);
+    expect(await git(value.repository, ['branch', '--list', `task/${taskId}`])).toBe('');
+    const devCommit = await git(value.repository, ['rev-parse', 'refs/heads/dev']);
+
+    const retried = await retry(value.environment, value.projectId, taskId, failed.task.version);
+    expect(retried.exitCode).toBe(0);
+    const view = JSON.parse(retried.stdout) as RetryView;
+    expect(view).toMatchObject({
+      state: 'READY',
+      workspace: { mode: 'PREPARE_FRESH' },
+      start: { outcome: 'STARTED', attemptNumber: 2 },
+    });
+    // The fresh preparation really prepared something: the recorded path holds a worktree on a newly
+    // created Task branch at the fixed dev baseline, and the reclaimed attempt's work is gone.
+    expect(existsSync(worktree)).toBe(true);
+    expect(await git(worktree, ['symbolic-ref', '-q', 'HEAD'])).toBe(`refs/heads/task/${taskId}`);
+    expect(await git(worktree, ['rev-parse', 'HEAD'])).toBe(devCommit);
+    await waitFor(() => existsSync(join(worktree, `runs-${taskId}.log`)));
+    expect(readFileSync(join(worktree, `runs-${taskId}.log`), 'utf8')).toBe(`start ${taskId}\n`);
+
+    // The `RELEASED` row is history, not a blocker: the ledger now holds a *second* row for the same
+    // path (the partial unique index only covers live rows), which `reclaim plan` reports as its own
+    // target with its own workspace ID. This is the command-face proof that the path was reusable.
+    const planned = await cli(['reclaim', 'plan', '--project', value.projectId, '--task', taskId,
+      '--kind', 'TASK_WORKTREE', '--include-failure-scenes', '--json'], value.environment);
+    const plan = JSON.parse(planned.stdout) as {
+      readonly targets: readonly { readonly kind: string; readonly resourceId: string;
+        readonly resourceState: string; readonly path: string }[];
+    };
+    const rows = plan.targets.filter((target) => target.kind === 'TASK_WORKTREE'
+      && target.path === worktree);
+    expect(rows).toHaveLength(2);
+    expect(new Set(rows.map((row) => row.resourceId)).size).toBe(2);
+    // One is the reclaimed history row, the other is the workspace the fresh preparation created.
+    expect(rows.filter((row) => row.resourceState === 'RELEASED')).toHaveLength(1);
+    expect(rows.filter((row) => row.resourceState !== 'RELEASED')).toHaveLength(1);
+    await cli(['stop'], value.environment);
+  }, 180_000);
+
   test('refuses to rebuild a reclaimed worktree whose branch cannot prove ownership, writing nothing', async () => {
     const value = await fixture();
     // (1) The branch exists but is unrelated to the baseline the workspace row recorded: an orphan
