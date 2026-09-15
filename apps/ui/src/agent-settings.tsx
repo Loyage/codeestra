@@ -59,6 +59,16 @@ interface ConfigurationView {
   readonly pluginSelection: Record<string, readonly string[]> | null;
   readonly pluginSelectionSource: 'GLOBAL' | 'PROJECT' | null;
   readonly thirdPartyExtensionApprovalRisk: boolean;
+  /**
+   * The environment scope of the resolution (ADR-0012): the field values that came from this
+   * Runtime process's environment variables, or null when none of them are set. It is not a list
+   * of variable names — `sources` says which fields are `ENVIRONMENT`.
+   */
+  readonly environment: {
+    readonly provider: string | null;
+    readonly model: string | null;
+    readonly thinkingLevel: string | null;
+  } | null;
 }
 
 interface CandidateView {
@@ -235,6 +245,15 @@ export function AgentSettingsPanel({ client, projectId, run }: {
               ))}
             </tbody>
           </table>
+          {config.environment === null ? null : (
+            <p className="muted">
+              本进程的环境变量正在覆盖这些字段（{Object.entries(config.environment)
+                .filter(([, value]) => value !== null)
+                .map(([key, value]) => `${key}=${String(value)}`).join('、')}
+              ）。环境变量优先级最高（环境变量 → 项目覆盖 → 全局默认 → 适配器默认），
+              但只属于本次 Runtime 进程，改它要重启 Runtime；这里保存的值会被它盖住。
+            </p>
+          )}
         </>
       )}
 
@@ -353,6 +372,24 @@ export function AgentSettingsPanel({ client, projectId, run }: {
             })}
           >
             清除选择
+          </button>
+          {/* The whole-scope reset used to live in the separate 「Agent 配置」 tab. It is kept here so
+              merging the two pages into one does not silently drop a capability (FOUNDATION-071). */}
+          <button type="button" className="ghost" disabled={saving}
+            onClick={() => void actions.run('plugin-selection', '正在清除该范围的模型配置', async () => {
+              try {
+                await client.command({
+                  command: 'agent.config.clear',
+                  adapterId,
+                  scope,
+                  ...(scope === 'PROJECT' && projectId !== null ? { projectId } : {}),
+                });
+              } finally {
+                await reload();
+              }
+            })}
+          >
+            清除该范围的模型配置
           </button>
         </>
       )}

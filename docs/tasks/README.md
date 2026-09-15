@@ -4398,6 +4398,16 @@ boot 身份不同（ADR-0022 的重启判定），且新进程确实运行新代
 - **UI 信息架构重复（待用户裁决）**：新增的「Agent 设置」（`plugins` 标签，含 provider / model / thinking level / 插件）与既有的「Agent 配置」（`agent` 标签）编辑的是同一组 provider/model/thinking，功能重叠、命名易混；本波保留两者未擅自收敛。
 - **未提升 `main`**：本波没有 IntegrationBatch 与领域 `PromotionRecord`（四个 lane 由协调者手工解冲突合入 `dev`），提升需要用户显式授权，并按 ADR-0038 在精确 dev SHA 上跑全量后推进。
 
+## 用户裁决后的收口：Agent 标签合并为一页（用户 2026-09-15 裁决）
+
+状态：**已实现、已提交**。Wave J 合并后遗留的信息架构重复（新增「Agent 设置」与旧「Agent 配置」编辑同一组 provider/model/thinking）按用户裁决收口：**合并为一页，删除旧标签**。
+
+- 删除 `apps/ui/src/App.tsx` 的 `AgentTab` 组件、`agent` 标签项与渲染分支，以及只被它使用的 `thinkingLevels` / `sourceLabel` / `AgentConfigurationResolutionView` 导入。
+- 旧标签的独有能力**没有丢**，已补进 `apps/ui/src/agent-settings.tsx`：①`agent.config.clear`（「清除该范围的模型配置」，按作用域）；②环境变量覆盖提示。
+- 顺带修正一处继承来的不精确：`config.environment` 是「环境作用域解析出的字段值」（`{provider,model,thinkingLevel}|null`），**不是** env 变量名表；类型声明与页面文案都改为如实描述（`sources` 才说明哪个字段来自 `ENVIRONMENT`）。
+- 验证：`bun run typecheck` 0、`bun run typecheck:ui` 0、`bunx vitest run apps/ui` **42 passed**、`bun run build:ui` 0（bundle 从 401.19 kB 降到 397.02 kB，与删除旧面板一致）；`bun test apps/runtime/test/cli-agent-config.test.ts` **4 pass**（确认 `agent.config.clear` 的请求形状与新页面一致）。
+- 未验证：设置页的视觉与交互仍需用户人工目视确认（ADR-0008，未使用浏览器/桌面自动化）。
+
 ## NEXT — 最小可用纵向切片
 
 
