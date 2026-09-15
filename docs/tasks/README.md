@@ -4355,6 +4355,49 @@ boot 身份不同（ADR-0022 的重启判定），且新进程确实运行新代
 - 夹具与进程已回收：手工冒烟测试用独立 `CODEESTRA_HOME=/tmp/ce-j4`（结束后已删除 `/tmp/ce-j4`、`/tmp/ce-j4-assets` 与临时脚本目录）；**可复现的 e2e 用例不写死 `/tmp/ce-j4`**，而是用回收辅助自己登记的临时 home（前缀 `ce-j4-home-`）——因为 `normalizeRuntimeEnvironment` 的安全底线要求测试 home 必须位于 `os.tmpdir()` 内，否则泄漏的 Runtime 无法归属到本工作树；`/tmp/ce-j4` 不满足该检查（macOS 上 `/tmp` → `/private/tmp`，与 `tmpdir()` 不同根）。
 - **孤儿 Runtime 已核验归属后回收**：手工冒烟测试留下了 3 个本工作树的 Runtime 进程（home 为 `/tmp/ce-j4`，其中 1 个仍持有 lock、2 个已成为 ppid=1 且 home 已删的不可达孤儿）。逐个用 `cwd == 本工作树` + `argv` 含本工作树的 `apps/runtime/src/main.ts` + `CODEESTRA_HOME=/tmp/ce-j4` 核验归属，持 lock 的那个另核对 `startToken` 匹配，全部 `SIGTERM` 后确认退出（未用 SIGKILL），且**未触碰** `/Users/loyage/Documents/codeestra` 上的稳定 Runtime（pid 50758 保持运行）。
 
+## Wave J 开发分支集成（J1 → J3 → J4 → J2，4 格经 Orca 受监督编排）
+
+状态：**四格已按用户指定顺序合入 `dev`，合并时定向验证通过。** 未 push、未提升 `main`、未重启稳定 Runtime。
+
+本波对应用户四项要求：①开发指南文档（教用户使用、软件有哪些功能）；②可定制 Agent（插件开关 + 自动检测 + agent 设置页）；③标题栏与「工作空间」必须固定、任务列表只影响自己这部分滚动；④全局设置功能（界面调整）。用户选择「开多个分支分别解决」+「Orca 受监督编排，并行 worker」。
+
+### 固定提交与合并顺序
+
+| 顺序 | 分支 | lane commit | `dev` 合并 | FOUNDATION / ADR / schema |
+|---|---|---|---|---|
+| J1 | `lane/j1-user-guide` | `732dea2` | merge `5f4ba66` | 070 / 无 / 无 |
+| J3 | `lane/j3-fixed-shell-layout` | `17c31d6` | merge `8c0370d` | 072 / 无 / 无 |
+| J4 | `lane/j4-global-settings` | `e16c116` | merge `9431c74` | 073 / **0045** / **v28 未占用，已释放** |
+| J2 | `lane/j2-agent-plugins` | `4d228a5` | merge `eab66ce` | 071 / **0044** / **v27** |
+
+基线固定 `dev@54ff3049e7a4b3e85726210e39c71c6751403b37`（四格同基线，未 rebase）。合并后 `phase1SchemaVersion = 27`。
+
+### 冲突处置（全部人工解决，不采信自动合并结果）
+
+共 6 处冲突：`packages/contracts/src/index.ts`（两侧 `export *` 都保留）、`docs/decisions/README.md`（ADR-0044 插到 0045 之前）、`docs/tasks/README.md`（提升记录 + 070→073 按号段升序）、`package.json`（`test:unit` 忽略列表与 `test:e2e` 列表取并集，唯一新增项是 `cli-agent-plugins`，并逐条核对列出的测试文件真实存在）、`apps/cli/src/main.ts`（合并成**一条** `@codeestra/contracts` 导入列表 + 保留 `AgentConfigurationView` 接口）、`apps/ui/src/App.tsx`（两个 import 都留、`Tab` union 与导航数组取并集，使 `plugins` 与 `settings` 两个标签都可达）。`apps/ui/src/styles.css` 由 git 自动合并（J3 布局段与 J4 自有 class 不重叠），逐行核对确认 J3 的 `.app`/`.app-header`/`.sidebar`/`.workspace-shell` 规则未被动过。
+
+### 集成期发现并修掉的问题（各 lane 单独跑时看不到）
+
+1. **根 `bun run typecheck` 在合并后变红（真实集成缺陷，`750e834` 修复）**：J3 新增的 `apps/ui/test/shell-layout.test.ts` 里 `import { App } from '../src/App.js'` —— 根 `tsconfig.json` 没有 `jsx` 也没有 DOM lib，因此 `bun run typecheck` 直接报 `TS6142`；而 `apps/ui/tsconfig.json` 的 include 只有 `src/**`，`typecheck:ui` **从来没有看过 `test/**`**。净效果是那个新测试文件在两个 project 里都**不被检查**，同时仓库级类型检查是红的。任何单格都看不到它：J3 被要求跑的是 `typecheck:ui` + `build:ui`，而该文件恰好落在 `typecheck:ui` 的 include 之外。修复：根 tsconfig `exclude: ["apps/ui"]`（UI 是独立的 TS project），`apps/ui/tsconfig.json` include `test/**` 并设 `types: ["bun"]`（该测试用 `node:fs` 读 `styles.css`）。修复后根与 UI typecheck 均退出码 0，并用**注入类型错误**反向验证 `typecheck:ui` 现在会报错（exit 2）——修复前它静默忽略。
+2. **J2 的第一次尝试被用户中止，第二次是限时续作**：第一轮 50 分钟里一直在做 provider 实测与源码取证（工作树零改动），用户中止了其中一条长时间运行的命令（本机没有 `timeout`）。协调者把该 task 如实标为 `failed`，复用同一 worker 终端下发**限时续作**任务（禁止再读打包源码、每条第 ≤8 秒且强制 `kill`、60 分钟预算），并在续作任务里带上第一轮已确认的结论。FOUNDATION-071 的记录与 ADR-0044 的证据表来自这**两次**尝试，第二轮才产出提交。
+3. **CI/测试纪律**：本波四格均未跑全量/聚合检查（ADR-0038）；协调者在合并树上只跑定向集 + 迁移/版本断言敏感集。
+
+### 独立集成验证（在合并后的 `dev@eab66ce` 上执行）
+
+- 根 `bun run test`（vitest）：**371 passed（12 文件）**；`bunx vitest run apps/ui`：**42 passed（3 文件）**。
+- J2 定向 5 文件：**27 pass / 0 fail**；J4 定向 2 文件：**13 pass / 0 fail**。
+- `packages/storage/test`（迁移/表约束）：**145 pass / 0 fail（10 文件）** —— v27 是纯追加，无「写死当前版本号」类失败。
+- 版本/迁移断言敏感的 runtime e2e 6 文件（`cli-reclaim-batch`/`revision-delivery`/`verification-cancel`/`cli-knowledge`/`cli-targeted-tests`/`cli-impact`）：**42 pass / 0 fail**。
+- `bun run build:ui`：退出码 0（`index-C8FIklpL.css` / `index-m5vIT_CQ.js`）。
+- **诚实边界**：`750e834` 只改两个 `tsconfig.json`（无运行时代码）；修复后重跑了根与 UI typecheck（均 0），**测试集本身没有在该提交上重跑**。按 ADR-0038，提升 `main` 前必须在当时固定的精确 dev SHA 上重跑全量并以其证据为准，本节的数字不得当作提升证据。
+
+### 未验证 / 已知缺口（不得当成已成立）
+
+- **人工确认项**（按 ADR-0008 未使用浏览器/桌面自动化）：J3 的观感、窄屏、键盘焦点、触控与停靠栏表现；J4 的视觉/动效观感、实机 `system` 主题切换与多标签页同步；J2 设置页的视觉与真实 provider 下的检测列表。
+- **J2 的推断项**：prompt templates 的「关发现 + 显式路径」有实测，**themes 的同类行为是推断未单独实测**（ADR-0044 D06 已标注）；真实模型下加载第三方 extension 是否真的能影响/绕过 gate **未做对抗验证**（只记录了风险事实）；命令面证据取自本机 `pi` **0.85.1**，而仓库 FOUNDATION-003/011/013 的 pin 是 0.84.4，差异未评估。
+- **UI 信息架构重复（待用户裁决）**：新增的「Agent 设置」（`plugins` 标签，含 provider / model / thinking level / 插件）与既有的「Agent 配置」（`agent` 标签）编辑的是同一组 provider/model/thinking，功能重叠、命名易混；本波保留两者未擅自收敛。
+- **未提升 `main`**：本波没有 IntegrationBatch 与领域 `PromotionRecord`（四个 lane 由协调者手工解冲突合入 `dev`），提升需要用户显式授权，并按 ADR-0038 在精确 dev SHA 上跑全量后推进。
+
 ## NEXT — 最小可用纵向切片
 
 
