@@ -56,6 +56,8 @@ Agent 结构化提问（ADR-0014）已实现：受控启动额外加载 Codeestr
 
 ## 文档
 
+- **[新开发者项目导览（HTML）](docs/project-introduction.html)**：可离线打开的中文介绍，涵盖愿景、原理、架构、进展与协作上手；基于 FOUNDATION-076 的文档快照，明确标注未实现 / 未验收边界。
+
 - **[用户指南](docs/guides/README.md)**：面向使用者的中文指南——安装与第一次运行、领域概念、端到端流程、功能清单、界面说明、完整 CLI 命令参考、常见故障与稳定码表。
 - [PROJECT_SPEC.md](PROJECT_SPEC.md)：长期规格。
 - [AGENTS.md](AGENTS.md)：协作与开发规则。

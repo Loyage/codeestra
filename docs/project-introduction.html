@@ -1,0 +1,500 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="面向新开发者的 Codeestra 项目介绍：愿景、Task-first 原理、Runtime 架构、已实现能力、验证边界与协作指南。">
+  <title>Codeestra · 新开发者项目导览</title>
+  <style>
+    :root { --ink:#183b38; --muted:#536c67; --paper:#f6f5ef; --card:#fffefa; --line:#d8dfd7; --green:#176557; --lime:#d7ef93; --orange:#a04727; --soft:#e9efe7; --radius:18px; }
+    * { box-sizing:border-box; }
+    html { scroll-behavior:smooth; scroll-padding-top:28px; }
+    body { margin:0; background:var(--paper); color:var(--ink); font:16px/1.8 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+    a { color:var(--green); text-underline-offset:4px; }
+    a:hover { text-decoration-thickness:2px; }
+    a:focus-visible, summary:focus-visible { outline:3px solid var(--orange); outline-offset:5px; border-radius:3px; }
+    .skip { position:fixed; top:-100px; left:20px; z-index:10; padding:10px 20px; background:var(--card); }
+    .skip:focus { top:12px; }
+    .rail { position:fixed; inset:0 auto 0 0; width:228px; padding:35px 25px; display:flex; flex-direction:column; background:var(--ink); color:#e0ebe4; overflow-y:auto; }
+    .brand { font-size:26px; font-weight:750; letter-spacing:-1px; color:#fff; text-decoration:none; }
+    .brand i { color:var(--lime); font-style:normal; }
+    .rail-caption { margin:3px 0 32px; font-size:12px; letter-spacing:2px; color:#b3c8bc; }
+    .rail nav { display:grid; gap:5px; }
+    .rail nav a { display:flex; gap:14px; padding:9px 10px; color:#e0ebe4; text-decoration:none; font-size:14px; border-radius:8px; }
+    .rail nav a:hover { background:#2a4c46; color:var(--lime); }
+    .rail nav span { font:12px/2 ui-monospace,monospace; color:#b0c5b8; }
+    .rail-bottom { margin-top:auto; padding-top:34px; font-size:12px; line-height:1.8; color:#b3c8bc; }
+    .rail-bottom strong { display:block; color:var(--lime); font-size:13px; }
+    main { margin-left:228px; max-width:1450px; padding:48px clamp(24px,5vw,82px) 28px; }
+    .eyebrow { font-size:12px; font-weight:750; letter-spacing:2px; text-transform:uppercase; color:var(--green); }
+    .hero { position:relative; overflow:hidden; border:1px solid var(--line); border-radius:26px; padding:clamp(28px,5vw,62px); background:var(--card); }
+    .hero::after { content:""; position:absolute; width:300px; height:300px; right:-150px; top:-155px; border:45px solid #e8eedc; border-radius:50%; pointer-events:none; }
+    .hero-meta { display:flex; align-items:center; flex-wrap:wrap; gap:12px; margin-bottom:28px; }
+    .pill { display:inline-block; padding:3px 11px; border-radius:30px; border:1px solid var(--line); font-size:12px; font-weight:650; background:var(--paper); }
+    h1 { font-size:clamp(36px,4.5vw,65px); letter-spacing:-2px; line-height:1.2; margin:0 0 25px; max-width:860px; position:relative; z-index:1; }
+    h1 em { font-style:normal; color:var(--green); }
+    .lead { max-width:760px; font-size:19px; line-height:1.9; color:var(--muted); }
+    .hero-quote { border-top:1px solid var(--line); margin-top:32px; padding-top:23px; font-size:clamp(19px,2vw,25px); font-weight:650; }
+    .hero-foot { margin-top:20px; font-size:12px; color:var(--muted); }
+    .hero-actions { display:flex; gap:12px; margin-top:25px; flex-wrap:wrap; }
+    .button { padding:10px 19px; border-radius:8px; background:var(--ink); color:#fff; font-size:14px; font-weight:650; text-decoration:none; }
+    .button.secondary { background:var(--soft); color:var(--ink); }
+    section { padding-top:66px; }
+    .section-head { display:flex; align-items:flex-start; gap:20px; margin-bottom:23px; }
+    .section-number { flex:none; font:14px/1.4 ui-monospace,monospace; padding-top:10px; color:var(--green); }
+    h2 { font-size:clamp(25px,3vw,35px); line-height:1.35; letter-spacing:-.7px; margin:0 0 9px; }
+    .section-head p { margin:0; color:var(--muted); }
+    h3 { font-size:19px; margin:0 0 10px; line-height:1.5; }
+    h4 { font-size:16px; margin:0 0 7px; }
+    p { margin:0 0 13px; }
+    p:last-child { margin-bottom:0; }
+    strong { font-weight:700; }
+    .grid { display:grid; gap:16px; }
+    .two { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .three { grid-template-columns:repeat(3,minmax(0,1fr)); }
+    .card { padding:25px; background:var(--card); border:1px solid var(--line); border-radius:var(--radius); min-width:0; }
+    .card p, .card li { font-size:14px; color:var(--muted); }
+    .card .label { display:block; margin-bottom:15px; color:var(--green); font:12px/1.4 ui-monospace,monospace; letter-spacing:1px; }
+    .dark { background:var(--ink); color:#f5f7ed; border-color:var(--ink); }
+    .dark p, .dark li { color:#cad9cf; }
+    .dark .label { color:var(--lime); }
+    .dark strong { color:var(--lime); }
+    .callout { margin-top:20px; padding:20px 24px; border-left:4px solid var(--green); background:var(--soft); border-radius:0 12px 12px 0; font-size:14px; }
+    .callout.warn { border-color:var(--orange); background:#f3e9dd; }
+    .callout strong { color:var(--ink); }
+    ul, ol { margin:10px 0 0; padding-left:22px; }
+    li { margin:5px 0; }
+    code, pre { font-family:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace; }
+    code { font-size:.88em; overflow-wrap:anywhere; }
+    pre { margin:15px 0 0; padding:23px; overflow:auto; border-radius:12px; background:#173833; color:#e7f0e6; font-size:12px; line-height:1.9; tab-size:2; }
+    pre code { font-size:inherit; overflow-wrap:normal; }
+    .concept { display:grid; grid-template-columns:140px 1fr; gap:18px; padding:18px 0; border-bottom:1px solid var(--line); }
+    .concept:last-child { border:0; padding-bottom:0; }
+    .concept:first-child { padding-top:0; }
+    .concept dt { font-weight:750; }
+    .concept dt small { display:block; font-size:11px; font-weight:500; color:var(--green); letter-spacing:.5px; }
+    .concept dd { margin:0; font-size:14px; color:var(--muted); }
+    dl { margin:0; }
+    .pipeline { list-style:none; padding:0; margin:0; display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; }
+    .pipeline li { position:relative; margin:0; padding:22px; border:1px solid var(--line); border-radius:14px; background:var(--card); }
+    .pipeline .step { font:12px/1.5 ui-monospace,monospace; color:var(--green); display:block; margin-bottom:12px; }
+    .pipeline h3 { font-size:16px; }
+    .pipeline p { font-size:13px; color:var(--muted); }
+    .equation { margin-top:19px; padding:20px; border:1px dashed #96ada0; border-radius:12px; text-align:center; line-height:2; font-size:14px; font-weight:650; }
+    .architecture { padding:26px; border:1px solid var(--line); border-radius:var(--radius); background:var(--card); }
+    .arch-clients { display:flex; justify-content:center; gap:14px; flex-wrap:wrap; }
+    .arch-client { flex:1; padding:13px; text-align:center; border:1px solid var(--line); border-radius:10px; font-weight:650; font-size:14px; }
+    .arch-client.future { border-style:dashed; color:var(--muted); }
+    .arch-connector { text-align:center; margin:13px 0; font-size:12px; color:var(--muted); }
+    .arch-runtime { background:var(--ink); color:white; padding:25px; border-radius:14px; }
+    .arch-runtime h3 { font-size:20px; }
+    .arch-runtime .pill { color:var(--ink); }
+    .arch-runtime p { font-size:13px; color:#c5d9cc; }
+    .arch-modules { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top:19px; }
+    .arch-modules span { padding:12px 10px; background:#2c5049; border-radius:8px; text-align:center; font-size:13px; }
+    .arch-foundation { margin-top:15px; padding:13px; background:var(--soft); border-radius:10px; text-align:center; font-size:13px; }
+    .table-wrap { overflow-x:auto; border:1px solid var(--line); border-radius:var(--radius); background:var(--card); }
+    table { width:100%; border-collapse:collapse; font-size:14px; }
+    caption { text-align:left; padding:18px 22px; font-weight:650; background:var(--soft); }
+    th, td { padding:17px 20px; text-align:left; vertical-align:top; border-bottom:1px solid var(--line); }
+    th { font-size:12px; letter-spacing:.5px; background:var(--soft); }
+    tr:last-child td { border-bottom:0; }
+    td:first-child { font-weight:650; }
+    td { color:var(--muted); }
+    .badge { display:inline-block; border-radius:5px; padding:3px 8px; font-size:11px; font-weight:700; white-space:nowrap; background:#e0efdf; color:#285437; }
+    .badge.partial { background:#f3e6d5; color:#82411d; }
+    .badge.future { background:#e9e9e4; color:#59655e; }
+    .timeline { display:grid; gap:0; margin:0; padding:0; list-style:none; }
+    .timeline li { margin:0; display:grid; grid-template-columns:95px 1fr; gap:20px; padding:20px 0; border-bottom:1px solid var(--line); }
+    .timeline li:last-child { border:0; }
+    .phase { font:12px/1.8 ui-monospace,monospace; color:var(--green); }
+    .timeline h3 { font-size:17px; margin-bottom:5px; }
+    .timeline p { font-size:14px; color:var(--muted); }
+    .timeline .badge { margin-left:8px; vertical-align:middle; }
+    details { border-bottom:1px solid var(--line); padding:18px 0; }
+    details:last-child { border-bottom:0; }
+    summary { cursor:pointer; font-weight:650; font-size:15px; }
+    details p { margin-top:12px; padding-left:17px; font-size:14px; color:var(--muted); }
+    /* —— 02 · 设计精髓对比海报（scoped，独立深色视觉） —— */
+    .duel { margin-top:10px; border-radius:26px; padding:clamp(22px,3.5vw,46px); color:#eef3ff; border:1px solid rgba(255,255,255,.06); font-size:15px; line-height:1.6; background:radial-gradient(circle at 12% 8%,rgba(255,152,118,.10),transparent 30%),radial-gradient(circle at 88% 6%,rgba(102,216,255,.12),transparent 30%),linear-gradient(180deg,#0c1530,#09101f); }
+    .duel-sub { max-width:1100px; margin:0 auto 30px; text-align:center; color:#96a3c8; font-size:17px; line-height:1.65; }
+    .duel-sub strong { color:#eef3ff; }
+    .duel-grid { display:grid; grid-template-columns:.86fr 1.45fr; gap:22px; }
+    .duel .panel { border:1px solid rgba(255,255,255,.08); border-radius:24px; padding:22px; background:linear-gradient(180deg,rgba(255,255,255,.034),rgba(255,255,255,.015)); box-shadow:0 24px 70px rgba(0,0,0,.22); }
+    .duel .badge { display:inline-block; padding:7px 11px; border-radius:999px; font-size:13px; font-weight:800; margin:0 0 10px; background:#2a3452; color:#dfe7ff; border:0; }
+    .duel .left .badge { background:rgba(255,152,118,.11); color:#ffc6b1; }
+    .duel .right .badge { background:rgba(102,216,255,.10); color:#a4ebff; }
+    .duel h3 { margin:0 0 6px; font-size:23px; color:#eef3ff; letter-spacing:-.02em; line-height:1.35; }
+    .duel .caption { color:#96a3c8; margin-bottom:18px; line-height:1.55; font-size:14px; }
+    .duel .node { border:1px solid rgba(255,255,255,.09); background:#151f3d; border-radius:15px; padding:13px 15px; text-align:center; line-height:1.45; font-size:14px; }
+    .duel .node b { display:block; margin-bottom:3px; font-size:15px; }
+    .duel .arrow { text-align:center; color:#7280ab; font-size:22px; line-height:1.1; margin:5px 0; }
+    .duel .serial { display:flex; flex-direction:column; align-items:center; }
+    .duel .serial>.node, .duel .serial>.waitbox, .duel .serial>.blocked, .duel .timeline { width:min(100%,500px); }
+    .duel .waitbox { padding:17px; border-radius:15px; text-align:center; border:1px dashed rgba(255,113,133,.55); background:rgba(255,113,133,.075); }
+    .duel .waitbox b { display:block; margin-bottom:4px; font-size:18px; color:#ffd0d7; }
+    .duel .timeline { margin:12px 0 4px; padding:13px; border-radius:15px; background:#0f1730; border:1px solid rgba(255,255,255,.07); }
+    .duel .timeline-title { font-size:13px; color:#aab5d3; margin-bottom:8px; }
+    .duel .timebar { display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px; }
+    .duel .timebar span { padding:9px 4px; text-align:center; border-radius:9px; background:rgba(255,152,118,.13); font-size:12px; color:#ffd7c7; }
+    .duel .blocked { margin:10px 0; padding:15px; border-radius:15px; background:rgba(255,113,133,.09); border:1px solid rgba(255,113,133,.27); }
+    .duel .blocked strong { color:#ffb9c4; }
+    .duel .queue { display:flex; gap:7px; justify-content:center; margin-top:10px; flex-wrap:wrap; }
+    .duel .idea { padding:7px 9px; border-radius:9px; background:#2a1930; border:1px solid rgba(255,113,133,.24); font-size:12px; color:#ffc6cf; }
+    .duel .queue-note { margin-top:9px; color:#d9aeb6; font-size:13px; text-align:center; }
+    .duel .delay { margin-top:17px; border-radius:15px; padding:15px; background:rgba(255,152,118,.075); border:1px solid rgba(255,152,118,.18); line-height:1.6; font-size:14px; }
+    .duel .red { color:#ffb7c1; font-weight:800; }
+    .duel .hot { color:#9de8ff; font-weight:800; }
+    .duel code { background:#1b2547; border:0; padding:2px 7px; border-radius:6px; color:#ffd7c7; }
+    .duel .dual-title { display:grid; grid-template-columns:1fr 64px 1.25fr; align-items:center; margin:8px 0 10px; text-align:center; font-weight:800; font-size:15px; }
+    .duel .ut { color:#a8f6dc; }
+    .duel .dt { color:#a7eaff; }
+    .duel .mid { color:#c7baff; }
+    .duel .dual { display:grid; grid-template-columns:1fr 64px 1.25fr; gap:10px; align-items:stretch; }
+    .duel .lane { border-radius:20px; padding:16px; min-height:590px; position:relative; }
+    .duel .userlane { background:rgba(130,239,196,.045); border:1px solid rgba(130,239,196,.22); }
+    .duel .devlane { background:rgba(102,216,255,.04); border:1px solid rgba(102,216,255,.20); }
+    .duel .exchange { position:relative; display:flex; flex-direction:column; align-items:center; justify-content:space-around; color:#c7baff; font-size:24px; }
+    .duel .exchange:before { content:""; position:absolute; top:4%; bottom:4%; left:50%; width:1px; background:linear-gradient(transparent,rgba(183,162,255,.4),transparent); }
+    .duel .exchange .x { z-index:1; background:#11172d; border:1px solid rgba(183,162,255,.28); border-radius:999px; padding:5px 7px; font-size:18px; }
+    .duel .lane-head { text-align:center; font-size:15px; font-weight:800; margin-bottom:12px; }
+    .duel .userlane .lane-head { color:#a9f6dc; }
+    .duel .devlane .lane-head { color:#a7eaff; }
+    .duel .loopstack { display:flex; flex-direction:column; gap:10px; }
+    .duel .usernode { background:#12243b; border-color:rgba(130,239,196,.17); }
+    .duel .feedback { border:1px dashed rgba(130,239,196,.35); border-radius:14px; padding:11px; text-align:center; color:#adf6dd; background:rgba(130,239,196,.05); }
+    .duel .always { margin-top:12px; padding:12px; border-radius:14px; background:rgba(183,162,255,.07); border:1px solid rgba(183,162,255,.18); font-size:13px; line-height:1.55; color:#ddd5ff; }
+    .duel .step { padding:11px 12px; border-radius:13px; background:#14213f; border:1px solid rgba(255,255,255,.075); text-align:center; font-size:14px; }
+    .duel .step b { display:block; color:#b9efff; margin-bottom:2px; }
+    .duel .dag { margin-top:10px; padding:13px; border-radius:15px; background:#0d1730; border:1px solid rgba(183,162,255,.21); }
+    .duel .dag h4 { text-align:center; margin:0 0 10px; color:#d4cbff; font-size:15px; }
+    .duel .drow { display:flex; gap:8px; justify-content:center; flex-wrap:wrap; }
+    .duel .task { min-width:112px; padding:8px; border-radius:10px; text-align:center; background:#18244a; border:1px solid rgba(183,162,255,.24); font-size:12px; }
+    .duel .task small { display:block; color:#95a2c7; margin-top:2px; }
+    .duel .connector { text-align:center; color:#6f7fa9; margin:3px; }
+    .duel .tracks { display:grid; grid-template-columns:repeat(3,1fr); gap:7px; margin-top:10px; }
+    .duel .track { border-radius:11px; padding:9px 5px; text-align:center; background:rgba(102,216,255,.08); border:1px solid rgba(102,216,255,.20); font-size:11px; }
+    .duel .track b { display:block; color:#c2f2ff; font-size:12px; margin-bottom:2px; }
+    .duel .return { margin-top:10px; padding:10px; border-radius:12px; text-align:center; background:rgba(130,239,196,.055); border:1px solid rgba(130,239,196,.18); font-size:12px; color:#b9f5e1; }
+    .duel .key { margin-top:17px; padding:16px; border-radius:16px; background:linear-gradient(90deg,rgba(102,216,255,.08),rgba(130,239,196,.075)); border:1px solid rgba(102,216,255,.18); line-height:1.65; font-size:14px; }
+    .duel .bottom { margin-top:22px; border-radius:21px; padding:20px; border:1px solid rgba(255,255,255,.08); background:linear-gradient(90deg,rgba(255,152,118,.045),rgba(102,216,255,.065)); }
+    .duel .bottom h3 { margin:0 0 12px; font-size:20px; }
+    .duel .compareline { display:grid; grid-template-columns:1fr auto 1fr; gap:15px; align-items:center; }
+    .duel .card { padding:14px; border-radius:14px; background:#111a33; border:1px solid rgba(255,255,255,.07); line-height:1.55; font-size:14px; }
+    .duel .vs { font-weight:900; color:#c5b7ff; text-align:center; }
+    @media (max-width:1100px) { .duel-grid { grid-template-columns:1fr; } .duel .dual, .duel .dual-title { grid-template-columns:1fr; } .duel .exchange { min-height:80px; flex-direction:row; } .duel .exchange:before { left:4%; right:4%; top:50%; bottom:auto; width:auto; height:1px; } .duel .tracks { grid-template-columns:1fr; } .duel .compareline { grid-template-columns:1fr; } }
+    .sources { list-style:none; padding:0; margin:0; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px 25px; }
+    .sources a { display:block; font-size:14px; font-weight:650; }
+    .sources small { color:var(--muted); font-size:12px; }
+    footer { margin-top:60px; padding:25px 0 10px; border-top:1px solid var(--line); display:flex; justify-content:space-between; gap:20px; font-size:12px; color:var(--muted); }
+    .spaced { margin-top:20px; }
+    @media (min-width:1700px) { main { margin-right:auto; } }
+    @media (max-width:1150px) { .rail { width:195px; padding:28px 18px; } main { margin-left:195px; padding:30px; } .three { grid-template-columns:1fr; } .pipeline { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+    @media (max-width:780px) { .rail { position:static; width:auto; padding:20px; } .rail-caption { margin:0 0 12px; } .rail nav { display:flex; flex-wrap:wrap; gap:3px; } .rail nav a { padding:6px 9px; font-size:12px; } .rail nav span, .rail-bottom { display:none; } main { margin:0; padding:20px 16px; } section { padding-top:43px; } .hero { padding:28px 23px; } .lead { font-size:16px; } .two, .sources { grid-template-columns:1fr; } .arch-modules { grid-template-columns:repeat(2,minmax(0,1fr)); } .concept { grid-template-columns:100px 1fr; gap:12px; } .section-head { gap:12px; } .card, .architecture { padding:21px; } h1 { letter-spacing:-1px; } th, td { padding:13px; } footer { flex-direction:column; } }
+    @media (max-width:420px) { .pipeline { grid-template-columns:1fr; } .arch-clients { flex-direction:column; } .timeline li { grid-template-columns:65px 1fr; gap:10px; } .timeline .badge { display:table; margin:7px 0 0; } }
+    @media (prefers-reduced-motion:reduce) { html { scroll-behavior:auto; } }
+    @media print { @page { margin:15mm; } html { scroll-behavior:auto; } body { background:#fff; font-size:10pt; } .rail, .skip, .hero-actions { display:none; } main { margin:0; padding:0; max-width:none; } .hero { padding:24px; } .hero::after { display:none; } h1 { font-size:32pt; } h2 { font-size:22pt; } section { padding-top:28px; } .card, .pipeline li, .timeline li, .callout, pre, details { break-inside:avoid; } .section-head { break-after:avoid; } .table-wrap { overflow:visible; } tr { break-inside:avoid; } .dark, .arch-runtime, pre { background:#f1f3ed; color:#183b38; border:1px solid #aab8ac; } .dark p, .dark li, .dark strong, .dark .label, .arch-runtime p { color:#183b38; } .arch-modules span { background:#e3e9e0; } pre { white-space:pre-wrap; overflow-wrap:anywhere; } a { color:inherit; } footer { margin-top:25px; } .duel { break-before:page; -webkit-print-color-adjust:exact; print-color-adjust:exact; } .duel .lane { min-height:0; } }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#main">跳到正文</a>
+  <aside class="rail" aria-label="导览目录">
+    <a class="brand" href="#intro">Codeestra<i>.</i></a>
+    <p class="rail-caption">DEVELOPER FIELD GUIDE</p>
+    <nav aria-label="章节">
+      <a href="#vision"><span>01</span>愿景与定位</a>
+      <a href="#duel"><span>02</span>设计精髓：两条循环</a>
+      <a href="#principles"><span>03</span>三条第一原则</a>
+      <a href="#concepts"><span>04</span>核心心智模型</a>
+      <a href="#pipeline"><span>05</span>任务如何交付</a>
+      <a href="#architecture"><span>06</span>系统如何运转</a>
+      <a href="#progress"><span>07</span>我们走到了哪里</a>
+      <a href="#next"><span>08</span>下一段路</a>
+      <a href="#contribute"><span>09</span>开发与交付规则</a>
+      <a href="#start"><span>10</span>第一天上手</a>
+      <a href="#reading"><span>11</span>继续阅读</a>
+    </nav>
+    <div class="rail-bottom"><strong>Task-first · Local-first</strong>项目介绍 / 中文版<br>内容快照：2026-09-15<br>基线：dev · Wave L 合入后（cb61699）<br>不是实时运行状态</div>
+  </aside>
+
+  <main id="main">
+    <header class="hero" id="intro">
+      <div class="hero-meta"><span class="eyebrow">Codeestra / 项目导览</span><span class="pill">面向新加入的开发者</span></div>
+      <h1>不只让 AI 写代码，<br>让开发意图成为<br><em>可验证的工程成果。</em></h1>
+      <p class="lead">Codeestra 是一个 <strong>Task-first、local-first 的 AI Development Runtime</strong>。它围绕任务组织 Agent、工作目录、依赖、验证与集成，让软件开发不再依赖人手工维系的一组聊天窗口。</p>
+      <div class="hero-quote">用户管理产品意图，Codeestra 管理软件工程。</div>
+      <div class="hero-actions"><a class="button" href="#duel">先看设计精髓 ↓</a><a class="button secondary" href="#vision">从愿景开始</a><a class="button secondary" href="#progress">直接看当前进展</a></div>
+      <p class="hero-foot">建议讲解顺序：为什么做 → 如何工作 → 已经做到什么 → 如何参与。单文件、无外部资源，可离线阅读；使用浏览器打印可另存为 PDF。</p>
+    </header>
+
+    <section id="vision" aria-labelledby="vision-title">
+      <div class="section-head"><span class="section-number">01 /</span><div><h2 id="vision-title">从“与 Agent 对话”，到“管理开发任务”</h2><p>要解决的不只是生成代码，而是从意图到稳定可用结果的工程协调成本。</p></div></div>
+      <div class="grid two">
+        <article class="card"><span class="label">THE PROBLEM / 今天的摩擦</span><h3>写代码之外，还有大量人肉编排</h3><p>任务交给哪个 Agent？两个任务会不会改到同一模块？上游“完成”后，下游是否真的拿到了代码？刚跑过的测试，验证的还是当前版本吗？重启之后，谁还在写工作目录？</p><p>如果这些答案只存在于聊天记录和人的记忆里，多开几个 Agent 窗口并不能自动带来可靠的并行开发。</p></article>
+        <article class="card dark"><span class="label">THE VISION / 我们的方向</span><h3>把工程关系变成系统能处理的事实</h3><p>以 Task 表达目标，以 Revision 固定规格，以 Execution 记录尝试，以 Git commit 与验证证据定义成果。</p><p>长期愿景是把<strong>意图、依赖、执行、验证、集成与稳定交付</strong>串起来；人专注产品判断，Runtime 承担可自动化的工程协调。愿景不等于这些环节已经全部自动化。</p></article>
+      </div>
+      <div class="callout"><strong>定位边界：</strong>不是聊天客户端，不是终端管理器，也不是套在多个 Agent 外面的 UI。它是本机单用户的开发编排服务；不以云端调度、多租户、分布式基础设施或桌面控制为目标。</div>
+    </section>
+
+    <section id="duel" aria-labelledby="duel-title">
+      <div class="section-head"><span class="section-number">02 /</span><div><h2 id="duel-title">设计精髓：谁在决定开发节奏？</h2><p>一张图看懂 Codeestra 与普通 Agent 的根本区别：串行回合制 vs 双循环并行。</p></div></div>
+      <div class="duel" role="group" aria-label="对比图：普通 Agent 串行开发与 Codeestra 双循环并行开发">
+        <p class="duel-sub">普通 Agent 的流程是“一轮一轮等待”；Codeestra 把<strong>用户体验反馈循环</strong>与<strong>AI 开发执行循环</strong>拆成两条并行轨道，让用户的新想法不再被上一轮 Agent 工作阻塞。</p>
+        <div class="duel-grid">
+          <div class="panel left">
+            <div class="badge">普通 Agent · 串行开发</div>
+            <h3>用户的想法，被 Agent 的执行时间卡住</h3>
+            <p class="caption">只有上一轮完成，用户才能看到效果、继续有效反馈；反馈速度受 Agent 完成速度限制。</p>
+            <div class="serial">
+              <div class="node"><b>① 用户体验产品</b>发现问题 / 产生想法</div>
+              <div class="arrow">↓</div>
+              <div class="node"><b>② 把意见告诉 Agent</b>开始这一轮开发</div>
+              <div class="arrow">↓</div>
+              <div class="node"><b>③ Agent 独占这一轮开发节奏</b>分析 → 修改 → 测试</div>
+              <div class="arrow">↓</div>
+              <div class="waitbox"><b>④ 漫长等待窗口</b>用户的新想法此时无法及时进入当前开发流程</div>
+              <div class="timeline">
+                <div class="timeline-title">时间被一段段串行占用</div>
+                <div class="timebar"><span>Agent 改进 1</span><span>Agent 改进 2</span><span>Agent 改进 3</span></div>
+              </div>
+              <div class="blocked">
+                <strong>用户想法开始堆积：</strong>
+                <div class="queue"><span class="idea">新想法 A · 等待</span><span class="idea">新想法 B · 等待</span><span class="idea">新问题 C · 等待</span></div>
+                <p class="queue-note">反馈不能即时变成开发任务 → 用户体验循环被阻塞</p>
+              </div>
+              <div class="arrow">↓</div>
+              <div class="node"><b>⑤ Agent 完成</b>用户终于查看新版本</div>
+              <div class="arrow">↓</div>
+              <div class="node"><b>⑥ 用户再次体验</b>才进入下一轮意见</div>
+              <div class="arrow">↺</div>
+            </div>
+            <div class="delay"><b>结果：</b><br>总开发时长近似各轮 Agent 开发时间的累加：<br><code>T ≈ T₁ + T₂ + T₃ + …</code><br><span class="red">用户的思考速度，被 Agent 的执行速度限制。</span></div>
+          </div>
+          <div class="panel right">
+            <div class="badge">Codeestra · 用户需求主导</div>
+            <h3>两条循环并行运行，持续互相交流</h3>
+            <p class="caption">用户一边体验、一边不断产生新意见；Codeestra 持续把意见转成任务、更新 DAG、释放可并行 worktree。两条循环互不等待，但持续交换信息。</p>
+            <div class="dual-title"><div class="ut">循环 A · 用户体验 / 想法流</div><div class="mid">⇄</div><div class="dt">循环 B · AI 开发 / 执行流</div></div>
+            <div class="dual">
+              <div class="lane userlane">
+                <div class="lane-head">用户始终可以继续思考与反馈</div>
+                <div class="loopstack">
+                  <div class="node usernode"><b>体验当前产品</b>持续使用、持续观察</div>
+                  <div class="arrow">↓</div>
+                  <div class="node usernode"><b>产生新想法 / 新意见</b>功能、体验、Bug、约束</div>
+                  <div class="arrow">↓</div>
+                  <div class="node usernode"><b>立即输入 Codeestra</b>无需等待上一条任务完成</div>
+                  <div class="feedback">↺ 继续体验产品，同时开发仍在后台持续进行</div>
+                </div>
+                <div class="always"><b>关键点：</b><br>用户的新想法不会排队等“上一个 Agent 回合结束”。<br><br>新意见可以随时成为：<b>新任务 / 任务修订 / 新约束 / 取消任务 / 对提问的回答</b>。</div>
+              </div>
+              <div class="exchange" aria-hidden="true"><span class="x">→</span><span class="x">←</span><span class="x">→</span><span class="x">←</span></div>
+              <div class="lane devlane">
+                <div class="lane-head">Codeestra 持续消费用户意图</div>
+                <div class="step"><b>AI 理解输入</b>识别 CREATE / AMEND / CONSTRAINT / CANCEL / ANSWER</div>
+                <div class="arrow">↓</div>
+                <div class="step"><b>任务拆解</b>只在有价值时拆成可独立执行任务</div>
+                <div class="arrow">↓</div>
+                <div class="step"><b>依赖分析</b>与任务列表中所有已有任务共同分析</div>
+                <div class="dag">
+                  <h4>Living Task DAG · 会被新想法持续更新</h4>
+                  <div class="drow"><div class="task">T1 核心逻辑<small>DONE</small></div></div>
+                  <div class="connector">↓</div>
+                  <div class="drow"><div class="task">T2 UI<small>READY</small></div><div class="task">T3 存档<small>READY</small></div><div class="task">T4 集成测试<small>WAIT T2/T3</small></div></div>
+                </div>
+                <div class="step"><b>调度规则</b>无未完成依赖即候选启动；冲突与容量另有关卡</div>
+                <div class="tracks">
+                  <div class="track"><b>Worktree A</b>Codex<br>T2 并行开发</div>
+                  <div class="track"><b>Worktree B</b>Pi<br>T3 并行开发</div>
+                  <div class="track"><b>Worktree C</b>Claude<br>其他 READY 任务</div>
+                </div>
+                <div class="return">完成 → 验证 → Integration → 产品更新<br>更新后的产品继续反馈给左侧用户体验循环</div>
+              </div>
+            </div>
+            <div class="key"><b>核心区别：</b><br>左侧用户循环和右侧开发循环<strong>同时运行</strong>。用户不断产生的想法可以即时注入任务池；Codeestra 持续重算依赖并释放可执行任务。<br><br>因此总体时间更接近 <span class="hot">任务 DAG 的关键路径耗时</span>，而不是所有 Agent 开发时间的简单累加。</div>
+          </div>
+        </div>
+        <div class="bottom">
+          <h3>一句话理解</h3>
+          <div class="compareline">
+            <div class="card"><b>普通 Agent</b><br>“你先等我做完，再告诉我下一件事。”<br><span class="red">想法被 Agent 回合阻塞。</span></div>
+            <div class="vs">VS</div>
+            <div class="card"><b>Codeestra</b><br>“你继续想、继续体验、继续提意见；我持续把它们变成可并行的软件工程任务。”<br><span class="hot">想法像流水一样不断进入开发 Pipeline。</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="callout"><strong>现状标注（讲解时请一并说明）：</strong>这张图是<strong>设计意图与已实现机制的组合</strong>。意图分类（CREATE / AMEND / CONSTRAINT / CANCEL / ANSWER）、依赖 DAG、调度引擎、worktree 与 Integration 已经实现；但<strong>真实 provider 的并行运行尚未验收</strong>（图中多 Adapter 并行轨道当前只有命令面与夹具证据），<code>CHANGE_PRIORITY</code> 已声明但当前不可产生（ADR-0046），Phase 7 自我演化未开始。</div>
+    </section>
+
+    <section id="principles" aria-labelledby="principles-title">
+      <div class="section-head"><span class="section-number">03 /</span><div><h2 id="principles-title">三条第一原则</h2><p>这是产品与工程取舍的最高依据，而不是可选的风格偏好。</p></div></div>
+      <div class="grid three">
+        <article class="card"><span class="label">01 — EFFICIENCY</span><h3>效率至上</h3><p>默认 <code>FULL</code> 主机级全权限，常态权限确认预算为 <strong>0 步、0 等待</strong>。可用 CLI 无确认切换 <code>STRICT</code>，恢复旧门禁。</p><p>减少用户等待，不用层层审批代替正确性核对。</p></article>
+        <article class="card"><span class="label">02 — SERVICE + CLI</span><h3>软件本体是服务</h3><p>独立 Runtime 拥有业务语义；CLI 必须完备、可脚本化，提供机器可读输出与稳定退出码。</p><p>Web UI 与未来桌面只是同一命令面的便利前端。“只有 UI 能做”是缺陷。</p></article>
+        <article class="card"><span class="label">03 — COMMAND-SURFACE TESTING</span><h3>只从命令面验证</h3><p>自动化测试与验收通过 CLI / Runtime 命令面及其 HTTP/SSE 传输驱动；不获取用户电脑控制权。</p><p>不使用桌面、键鼠或真实窗口自动化。视觉观感留给用户在场时人工确认。</p></article>
+      </div>
+      <div class="callout warn"><strong>零确认 ≠ 零校验，也不等于沙箱。</strong>FULL 下 Agent、验证命令和 Git hooks 使用当前系统用户的主机权限。Worktree 只隔离工作目录；revision、ref、归属、进程身份、幂等与恢复核对仍然有效。需要澄清产品意图时仍应提问，提问不是权限审批。</div>
+    </section>
+
+    <section id="concepts" aria-labelledby="concepts-title">
+      <div class="section-head"><span class="section-number">04 /</span><div><h2 id="concepts-title">先记住这几个名词</h2><p>Task 是业务主实体；Agent、Terminal、Conversation 和 Worktree 都围绕它服务。</p></div></div>
+      <div class="grid two">
+        <article class="card"><dl>
+          <div class="concept"><dt>Task<small>要完成什么</small></dt><dd>一项有边界的开发工作，持有规格、约束、依赖、执行历史、验证与集成状态。不是一条临时 prompt。</dd></div>
+          <div class="concept"><dt>Revision<small>哪一版要求</small></dt><dd>不可覆盖的规格快照。需求变化生成新 revision；旧版本的验证不能证明新要求已经实现。</dd></div>
+          <div class="concept"><dt>Execution<small>哪一次尝试</small></dt><dd>一次执行只绑定一个主 Agent。重试或换 Agent 产生新 Execution，旧失败和证据保留。</dd></div>
+          <div class="concept"><dt>Session<small>哪一个会话</small></dt><dd>有身份与生命周期的 provider 会话。不是无身份的 shell 调用；同一会话任意时刻最多一个 provider writer。</dd></div>
+        </dl></article>
+        <article class="card"><dl>
+          <div class="concept"><dt>Worktree<small>在哪里修改</small></dt><dd>运行中 Task 独占的 branch / 工作目录，从固定 dev commit 建立，位于 Runtime 数据目录。</dd></div>
+          <div class="concept"><dt>Attention<small>哪里需要人</small></dt><dd>提问、STRICT 权限请求或恢复介入。某个 Task 等待用户，不应让其他合格任务一起停下。</dd></div>
+          <div class="concept"><dt>Verification<small>凭什么算对</small></dt><dd>对固定 revision / commit 的验证记录。Task 验证与合并后集成验证分别记账，不能互相替代。</dd></div>
+          <div class="concept"><dt>IntegrationBatch<small>如何进入 dev</small></dt><dd>绑定任务、revision、成果 commit、dev 基线和集成验证证据。当前命令每批只集成一个 Task。</dd></div>
+        </dl></article>
+      </div>
+      <div class="equation">规格 → <code>Revision</code> &nbsp; · &nbsp; 尝试 → <code>Execution</code> &nbsp; · &nbsp; 成果 → <code>Commit</code> &nbsp; · &nbsp; 结论 → <code>Evidence</code></div>
+    </section>
+
+    <section id="pipeline" aria-labelledby="pipeline-title">
+      <div class="section-head"><span class="section-number">05 /</span><div><h2 id="pipeline-title">一个任务，如何成为稳定成果？</h2><p>下图是工程交付链，不代表一次命令就能自动完成整条流水线。</p></div></div>
+      <ol class="pipeline">
+        <li><span class="step">01 / INTENT</span><h3>明确意图与规格</h3><p>创建 Task，记录原始输入与首个 Revision。只有拆分能改善依赖、验证或并行边界时才拆分。</p></li>
+        <li><span class="step">02 / SCHEDULE</span><h3>检查能否开始</h3><p>DAG 无环；上游结果已进入 dev；冲突与容量允许。UNKNOWN 不等于安全。</p></li>
+        <li><span class="step">03 / EXECUTE</span><h3>隔离执行</h3><p>从固定 dev commit 建独占 worktree，预留 Execution，启动一个主 Agent 并记录 Session。</p></li>
+        <li><span class="step">04 / CAPTURE</span><h3>固定成果 commit</h3><p>核对 revision、HEAD、ChangeSet 与写入静止事实。FULL 使用单步 capture，正常执行 Git hooks。</p></li>
+        <li><span class="step">05 / VERIFY TASK</span><h3>验证这项改动</h3><p>在固定 commit 的 detached 副本跑已记录的定向计划，生成绑定 revision / commit 的证据。</p></li>
+        <li><span class="step">06 / INTEGRATE</span><h3>独立验证后进 dev</h3><p>在 integration worktree 合并并独立验证；通过后才以 CAS 推进 dev。失败保留现场。</p></li>
+        <li><span class="step">07 / VERIFY DEV</span><h3>固定提升候选</h3><p>所有候选集成后，对精确 dev SHA 跑全量测试。候选、策略或锁文件变化，证据失效。</p></li>
+        <li><span class="step">08 / PROMOTE</span><h3>经远端进入稳定版</h3><p>远端 dev 核对 → main ff-only 拉取 → 稳定 Runtime 重启核对 → 最后推回 origin/main。</p></li>
+      </ol>
+      <div class="equation">Agent 结束 ≠ 验证通过 ≠ 已进入 dev ≠ 已提升 main ≠ 稳定服务已恢复</div>
+      <div class="grid two spaced">
+        <article class="card"><h3>示例：给导出功能增加新字段</h3><p>如果 Task B 的导出逻辑依赖 Task A 的数据结构，A 的 Agent 说“完成了”不够，Task verification 通过也不够。A 必须通过独立集成验证并进入 dev，B 的固定基线还必须包含 A 的成果。</p><p>一个与它们无关的文档 Task C，只有通过影响与容量判断，才可能并行。这个例子说明设计规则，不代表真实 provider 并发已经验收。</p></article>
+        <article class="card"><h3>运行中改变要求怎么办？</h3><p>新增约束必须生成 Revision，并走暂停、投递与应用确认链。“消息发出去了”不是 ACK。</p><p>目前没有 Adapter 实现 <code>applyRevision</code>；不支持热投递时，走核验停止后新建 Execution 的路径，不能声称 Agent 已热更新规格。</p></article>
+      </div>
+      <div class="callout warn"><strong>当前边界：</strong>ADR-0047 的 GitHub 中转提升已落到产品命令面（FOUNDATION-077 / ADR-0052，schema v29）：<code>promotion promote</code> 逐步推进 push 固定候选 → 读回核对 → 等待 main 检出人工拉取 → 收口 → 重启 → 推回 origin/main，「已推送、等待拉取」不会被报告成 SUCCEEDED。当前 <code>task.integrate</code> 每次仍只集成一个 Task，且在目标 dev 已被工作树检出时拒绝；它不是在任意开发目录里直接 merge 的替代命令。</div>
+    </section>
+
+    <section id="architecture" aria-labelledby="architecture-title">
+      <div class="section-head"><span class="section-number">06 /</span><div><h2 id="architecture-title">一个 Runtime，多种入口，清晰分层</h2><p>这是本地模块化服务，不是微服务系统；关闭客户端不等于终止后台任务。</p></div></div>
+      <div class="architecture" role="group" aria-label="架构：CLI、Web UI 与未来桌面通过同一命令面连接 Runtime；Runtime 编排调度、Git、Agent、验证与知识，底层保存证据和恢复状态。">
+        <div class="arch-clients"><div class="arch-client">CLI · 完备命令面</div><div class="arch-client">Web UI · React / Vite</div><div class="arch-client future">Tauri 桌面 · 未实现</div></div>
+        <p class="arch-connector">↓ 同一 versioned commands / queries / events · CLI：Unix socket · Web：本机 HTTP / SSE ↓</p>
+        <div class="arch-runtime"><h3>Local Runtime <span class="pill">Bun / TypeScript</span></h3><p>拥有状态、编排与外部操作生命周期；一个 CODEESTRA_HOME 对应一个实例。</p><div class="arch-modules"><span>Task / Revision / DAG</span><span>Scheduler / Conflict</span><span>Execution / Session</span><span>Git Workspace / Integration</span><span>Verification / Operations</span><span>Knowledge / Adapter Registry</span></div></div>
+        <div class="arch-foundation">SQLite · 事务 / 唯一性约束 / 审计 &nbsp; | &nbsp; Outbox · 事件投递 &nbsp; | &nbsp; Recovery · 真实资源核对</div>
+        <p class="arch-connector">↓ Adapter ports 隔离供应商协议 ↓</p>
+        <div class="arch-clients"><div class="arch-client">Pi · RPC + 安全点 PTY 交接</div><div class="arch-client">Codex · app-server</div><div class="arch-client">Claude Code · SDK control 协议</div></div>
+      </div>
+      <div class="grid three spaced">
+        <article class="card"><h3>调度器不靠猜</h3><p>影响映射来自 main ref 上的 <code>.codeestra/impact.json</code>。确定性分析产出 SAFE / UNKNOWN / CONFLICTING，不用 LLM 猜冲突。</p><p>自动调度只启动可证明 SAFE 的任务；UNKNOWN 可显式单次放行，CONFLICTING 不放行。依赖、冲突与容量等待分别表达。</p></article>
+        <article class="card"><h3>恢复不靠盲目重试</h3><p>SQLite、Git 与进程之间没有跨系统原子事务。先记录 Operation，再执行副作用，最后按可观察事实收口。</p><p>命令回执保证幂等，事件去重与 Outbox 支持可靠投递。进程状态无法核验时保留恢复态，不伪造成功。</p></article>
+        <article class="card"><h3>知识不覆盖人工规范</h3><p>人工 instructions / skills 进 Git，只从 main ref 读取；机器生成层只放 Runtime 数据目录，避免进入成果 commit。</p><p>每个 Execution 绑定知识快照与摘要；三个 Adapter 启动时会把绑定的物化文件注入 provider（Pi <code>--append-system-prompt</code>、Claude <code>--append-system-prompt-file</code>、Codex developer instructions，ADR-0051），但「模型真的读取并使用了它」仍待真实模型验收。</p></article>
+      </div>
+      <div class="table-wrap spaced"><table><caption>从问题找到代码：当前真实目录</caption><thead><tr><th scope="col">路径</th><th scope="col">职责 / 阅读切入点</th></tr></thead><tbody>
+        <tr><td><code>apps/cli</code></td><td>参数、机器可读输出、退出码、自动连接 / 启动 Runtime。</td></tr>
+        <tr><td><code>apps/runtime</code></td><td>命令分发、调度、执行、验证、集成、知识、生命周期与恢复编排。</td></tr>
+        <tr><td><code>apps/ui</code></td><td>同一命令面的 React / Vite 投影；不直接读写数据库或定义业务语义。</td></tr>
+        <tr><td><code>packages/domain</code></td><td>纯 TypeScript 规则与状态机；不导入 Bun、数据库驱动、UI 或 Agent SDK。</td></tr>
+        <tr><td><code>packages/contracts</code></td><td>Zod 运行时边界、命令 / 事件 schema、Adapter ports。</td></tr>
+        <tr><td><code>packages/storage</code></td><td>Bun 原生 SQLite、迁移、事务、约束、审计、命令回执与投影。</td></tr>
+        <tr><td><code>packages/git</code> / <code>packages/agent-adapters</code></td><td>Git 归属与 worktree 操作 / 各 provider 的真实协议与能力声明。</td></tr>
+      </tbody></table></div>
+      <p class="hero-foot">技术选择：TypeScript、Bun workspaces、React、Vite、SQLite、Zod、Git CLI、Vitest / Bun test。Tauri 与独立 bootstrap 是规划，不是已有组件；不能把架构目标目录当作当前实现。</p>
+    </section>
+
+    <section id="progress" aria-labelledby="progress-title">
+      <div class="section-head"><span class="section-number">07 /</span><div><h2 id="progress-title">已经超出概念验证，但尚未完整验收</h2><p>内容基线：dev @ Wave L（FOUNDATION-077～080 合入后，2026-09-15）。下面是仓库进展快照，不是 main 部署证明。</p></div></div>
+      <div class="grid three">
+        <article class="card dark"><span class="label">FOUNDATION</span><h3>可运行的纵向基础</h3><p>Task、成果 commit、Task verification、单成员集成与提升证据机制已实现，CLI 与本地 Web UI 已可用。</p></article>
+        <article class="card"><span class="label">PROVIDER INTEGRATION</span><h3>3 个真实 Adapter</h3><p>Pi、Codex、Claude Code 已接入。接入不等于能力一致，更不等于三个 provider 的全部模型行为已验收。</p></article>
+        <article class="card"><span class="label">LATEST MILESTONE</span><h3>稳定 / 开发实例分离</h3><p>main 与 dev 已改为两个独立 clone；dev 使用独立 home 与构建期 DEV 标记。ADR-0047 的提升已落到产品命令面，用户说明书（ADR-0050）与知识注入（ADR-0051）同批落地。</p></article>
+      </div>
+      <ol class="timeline spaced" aria-label="各阶段当前状态">
+        <li><span class="phase">PHASE 0</span><div><h3>Architecture Foundation <span class="badge">基础已建立</span></h3><p>规格、ADR、领域状态机、仓库结构、工具链与测试入口已建立；文档与实现持续校准。</p></div></li>
+        <li><span class="phase">PHASE 1</span><div><h3>Single Task Runtime <span class="badge">交付项已实现</span></h3><p>Task 生命周期、独占工作目录、成果捕获、验证、暂停 / 取消 / 归档、显式重试与恢复核对。真实模型暂停 / 恢复和取消超时仍待复验。</p></div></li>
+        <li><span class="phase">PHASE 2</span><div><h3>DAG + Scheduler + Parallel Worktrees <span class="badge partial">实现已有 · 真实并发待验收</span></h3><p>DAG、冲突分析、容量预留、自动 tick 与 UI 投影已实现；两个 SAFE 任务由真实 provider 同时运行的验收尚未完成。</p></div></li>
+        <li><span class="phase">PHASE 3</span><div><h3>Interactive Agent Sessions <span class="badge partial">部分实现</span></h3><p>Attention、修订投递台账、Pi 安全点原生终端交接、只读 transcript 已实现。Session Guidance 未实现；真实 revision ACK 无 Adapter 支持。</p></div></li>
+        <li><span class="phase">PHASE 4</span><div><h3>Integration Pipeline <span class="badge partial">部分实现 · 提升已走产品命令面</span></h3><p>单成员 IntegrationBatch、独立集成验证、精确 dev SHA 全量证据，以及 ADR-0047 的「push → 等待拉取 → 收口 → 重启 → 推回」命令面已实现。多成员批次、批级 STALE / CANCELLED 与「等待拉取」的 UI 投影仍未实现。</p></div></li>
+        <li><span class="phase">PHASE 5</span><div><h3>Multiple Agent Adapters <span class="badge partial">已接入 · 按能力验收</span></h3><p>Pi / Codex / Claude Code 和失败后换 Agent 的新 Execution 路径已有。Claude 模型层待验证；插件选择目前仅 Pi 支持。</p></div></li>
+        <li><span class="phase">PHASE 6</span><div><h3>Project Knowledge <span class="badge partial">第一小步</span></h3><p>分层读取、快照、Execution 绑定与 CLI 已有；知识注入已在三个 Adapter 接通，模型层消费效果仍待验收（ADR-0051）。</p></div></li>
+        <li><span class="phase">PHASE 7</span><div><h3>Self Evolution <span class="badge future">未开始</span></h3><p>Self Task、Candidate、自托管测试、独立 bootstrap、兼容切换与回滚仍是设计目标；不是当前可使用的功能。</p></div></li>
+      </ol>
+      <div class="callout"><strong>如何读“通过”？</strong>Pi 真实模型 / write 工具 / 成果 commit / Task verification 已有首轮受控验收记录（FOUNDATION-019）。历史记录中的三次稳定提升走的是当时的人工路径，没有产生领域 PromotionRecord。协议 stub、fake 和脚本 Adapter 只证明对应编排，不能替代真实 provider 验收。ADR-0047 的新提升路径已实现，但尚未在本仓库真实执行过一次提升（Wave L 未 push、未提升 main）。</div>
+    </section>
+
+    <section id="next" aria-labelledby="next-title">
+      <div class="section-head"><span class="section-number">08 /</span><div><h2 id="next-title">下一段路：补闭环，也补证据</h2><p>不是推倒重来，也不是同时实施所有 Phase。下面按工作性质归纳，不是新增排期承诺。</p></div></div>
+      <div class="grid three">
+        <article class="card"><span class="label">A / Wave L 已落地</span><h3>提升走完产品命令面</h3><p>ADR-0047 已由产品实现（FOUNDATION-077 / ADR-0052）：push 固定候选 → 读回核对远端 dev → 等待 main 检出人工拉取 → 收口核对并重启 → 推回 origin/main。</p><p><strong>“已推送、等待拉取”与“已提升”在命令面可区分。</strong>剩余边界：「等待拉取」的 UI 投影、多成员批次，以及全量证据仍从 main 检出读取候选。</p></article>
+        <article class="card"><span class="label">B / 已有基础，补实现与验证</span><h3>把能力声明变成证据</h3><p>真实 provider 并发、暂停 / 恢复、取消超时、交接权限矩阵、第三方插件实际使用、Claude 模型层，以及知识注入后的模型层消费效果（注入已接通，ADR-0051）。</p><p>区分“协议通了”“进程退出了”“模型按预期工作了”，每一项单独证明。</p></article>
+        <article class="card"><span class="label">C / 后续能力与设计边界</span><h3>扩展而不伪造完成度</h3><p>多成员 IntegrationBatch、Session Guidance、修订与投递的 UI 投影，以及后续 Self Evolution。</p><p>自我演化要先解决数据兼容、不可逆 migration 与 bootstrap 更新授权，不能把切二进制当成数据回滚。</p></article>
+      </div>
+      <div class="callout"><strong>长期方向：</strong>Codeestra 最终也能作为自己开发流程的编排者，但“现在用 Codeestra 辅助开发 Codeestra”不等于“自动自我升级已实现”。运行 Stable 与开发 Candidate 必须隔离。</div>
+    </section>
+
+    <section id="contribute" aria-labelledby="contribute-title">
+      <div class="section-head"><span class="section-number">09 /</span><div><h2 id="contribute-title">新开发者需要守住的交付边界</h2><p>快速推进的前提，是每一步都知道修改了什么、验证了什么、尚未证明什么。</p></div></div>
+      <div class="grid two">
+        <article class="card"><h3>先明确语义，再实现小步</h3><ul><li>开工先读规格 §1.1、当前 ADR、任务记录，检查 Git 状态与已有改动。</li><li>产品行为、公共 API、数据模型、Git 安全有重大歧义时，给选项并记录 ADR；未答复不等于批准。</li><li>不把整条 roadmap 当作本次授权。普通局部、可逆的内部细节自行处理。</li><li>完工同步 <code>docs/tasks/</code>，保留失败、未验证项与实际检查结果。</li></ul></article>
+        <article class="card"><h3>实现围绕不变量，而非界面效果</h3><ul><li>Domain 保持纯净；外部输入在 Zod 边界校验，引用与唯一性由数据库约束保护。</li><li>Git / 进程 / SQLite 的组合用可恢复步骤，不假装跨系统原子。</li><li>命令使用参数数组；路径、ref 和进程归属必须核验，不依赖显示名称。</li><li>不静默覆盖人工 instructions / skills / policies，不把密钥写进日志或提交。</li></ul></article>
+      </div>
+      <div class="table-wrap spaced"><table><caption>测试成本按分支职责分层 · ADR-0038 / 0039</caption><thead><tr><th scope="col">阶段</th><th scope="col">应该做什么</th><th scope="col">不能拿来替代什么</th></tr></thead><tbody>
+        <tr><td>task / lane / feature / candidate</td><td>建分支时选少量具体测试，写清覆盖目标；Runtime 流程中用 <code>.codeestra/tests.json</code> 与 <code>task tests record</code> 固定计划。</td><td>禁止全仓测试 / 构建；<code>check:fast</code> 也是聚合检查，不是默认捷径。</td></tr>
+        <tr><td>Task → dev</td><td>Task verification 通过后，经 IntegrationBatch 和独立 Integration verification 集成。</td><td>任务自身通过不能代替合并后的验证；也不能代替提升前全量证据。</td></tr>
+        <tr><td>dev → main 前</td><td>在 dev 发起，对精确候选 SHA 完成全量测试；Runtime 的证据命令在该 SHA 的隔离副本运行。</td><td>候选、策略或锁文件变化后必须重跑。普通 dev 文档修改不触发立即全量测试。</td></tr>
+      </tbody></table></div>
+      <div class="card dark spaced"><span class="label">STABLE PROMOTION / 当前有效规程</span><h3>dev → origin/dev → main → 重启核对 → origin/main</h3><p>固定候选与预期 main SHA，确认精确候选的全量证据后：</p><ol><li>只 push 固定候选到远端 dev，并读回核对 SHA 相等。</li><li>在 main clone 执行 fetch + merge --ff-only origin/dev，核对拉到的就是候选。</li><li>在 main clone 按顺序 install → build:ui → stop → status；只有 <strong>READY 且 uiRunning: true</strong> 才报告稳定服务恢复。</li><li>重启核对成功后，才 fast-forward push main 回 origin/main。任一步失败就停下，保留现场，不擅自回滚或强推。</li></ol><p class="spaced">FULL 不增加常态批准，STRICT 保留精确证据批准；正确性检查不省略。此处是流程说明，不是授权执行发布。产品命令面（<code>promotion prepare/approve/promote</code>）按 ADR-0047 逐步推进同一序列：push → 读回核对 → <code>AWAITING_PULL</code>（不执行任何重启记账）→ 核对拉取并收口 → 重启记账成功后才推回远端 main；任一环节失败都保留现场、可续走，不假装一步到位。</p></div>
+    </section>
+
+    <section id="start" aria-labelledby="start-title">
+      <div class="section-head"><span class="section-number">10 /</span><div><h2 id="start-title">第一天：先确认你在运行哪一份代码</h2><p>本机双 clone 布局是当前开发环境约定；其他开发者请替换为自己的对应路径。</p></div></div>
+      <div class="grid two">
+        <article class="card"><span class="label">MAIN / 稳定实例</span><h3><code>~/Documents/codeestra</code></h3><p>检出 main，用于稳定服务与日常使用。只按既定规程拉取、安装、构建和重启；不在这里开发新功能，不复制 dev 未提交改动。</p><p>与 dev 不是彼此的 worktree，也不共享对象库、node_modules、UI 产物或运行数据。</p></article>
+        <article class="card"><span class="label">DEV / 开发实例</span><h3><code>~/Documents/codeestra-dev</code></h3><p>检出 dev，使用独立 <code>CODEESTRA_HOME</code>。Web UI 端口由 Runtime 自取空闲端口，不需要手动与稳定实例错开。</p><p>DEV 标记来自构建变量，不来自运行期猜测；没有标记的页面不能证明它是稳定版。</p></article>
+      </div>
+      <pre aria-label="开发实例准备命令"><code># 使用 Nix 提供工具；以下示例在开发 clone 执行
+nix shell nixpkgs#bun nixpkgs#nodejs_24 nixpkgs#just
+cd ~/Documents/codeestra-dev
+pwd
+git branch --show-current
+git status --short
+
+# 每个 clone 都需要自己的依赖与 UI 产物
+bun install --frozen-lockfile
+bun run build:ui:dev
+
+# 仅为当前 shell 设置独立实例目录
+export CODEESTRA_HOME="$HOME/.local/state/codeestra-dev"
+bun run codeestra status
+bun run codeestra permission get
+bun run codeestra ui --no-open</code></pre>
+      <p class="hero-foot">这段命令会启动 dev Runtime，但不会创建任务或启动 provider 执行开发工作。本次 HTML 文档交付没有代你运行这些命令。生成的 UI 地址含临时 token，不要写入文档、日志或提交。</p>
+      <div class="callout warn"><strong>最常见的误判：</strong>在 dev clone 执行不带独立 <code>CODEESTRA_HOME</code> 的 CLI，可能连接的是已经运行的稳定 Runtime，不能证明 dev 代码已生效。稳定 clone 保留的本地 dev ref 目前还是过渡基线指针，不随 origin/dev 自动前进，也不能作为提升证据。</div>
+      <div class="card spaced"><h3>讲解结束后，确认大家能回答这四个问题</h3>
+        <details open><summary>为什么不是“一个 Agent = 一个任务”？</summary><p>Task 表达目标与交付，Execution 表达一次尝试，Agent 是执行资源。换 Agent 不该丢掉任务身份、规格历史与失败证据。</p></details>
+        <details open><summary>为什么“Agent 已完成”不是成功？</summary><p>Agent 结束只是一条观察事实。还需成果 commit、Task 验证、独立集成验证、dev 全量证据，以及稳定提升与重启核对。</p></details>
+        <details open><summary>为什么已经有并行调度，仍写“并发未验收”？</summary><p>调度器与夹具下的测试证明了编排规则；真实 provider 的两个 SAFE 任务同时执行，是另一项必须单独完成的受控验收。</p></details>
+        <details open><summary>接到第一个开发任务后，先做什么？</summary><p>读相关规格与 ADR，检查现有改动，明确本次获准范围、涉及的不变量和少量定向测试，再开始实现。不要为熟悉项目顺手实施下一阶段或运行全量测试。</p></details>
+      </div>
+    </section>
+
+    <section id="reading" aria-labelledby="reading-title">
+      <div class="section-head"><span class="section-number">11 /</span><div><h2 id="reading-title">这份介绍是入口，不是另一份规格</h2><p>规范以 PROJECT_SPEC §1.1 与当前有效 ADR 为准；进度回到任务记录和代码证据。历史段落可能落后于最新决策。</p></div></div>
+      <div class="card"><ul class="sources">
+        <li><a href="../PROJECT_SPEC.md">产品与架构规格</a><small>愿景、第一原则、核心不变量与阶段边界。</small></li>
+        <li><a href="../AGENTS.md">开发协作规范</a><small>Git 安全、测试分层、本机布局和提升 / 重启规程。</small></li>
+        <li><a href="decisions/README.md">架构决策索引</a><small>尤其 ADR-0011、0038 / 0039、0047 / 0048 / 0049，以及 Wave L 的 0050–0052。</small></li>
+        <li><a href="tasks/README.md">当前任务与 NEXT</a><small>FOUNDATION-080 及剩余清单；按记录区分历史与现状。</small></li>
+        <li><a href="architecture/README.md">架构设计导航</a><small>领域、状态机、事件、Adapter 与 Git workspace ports。</small></li>
+        <li><a href="roadmap/mvp.md">分阶段 Roadmap</a><small>阶段交付与未验收项；提升规则需结合最新 ADR-0047 阅读。</small></li>
+        <li><a href="guides/manual.md">用户说明书</a><small>单份主线说明书（ADR-0050）：从「这是什么」读到术语表。</small></li>
+        <li><a href="guides/README.md">中文使用指南</a><small>概念、功能、工作流与故障处理；旧提升示例以新 ADR 为准。</small></li>
+        <li><a href="guides/cli-reference.md">CLI 命令参考</a><small>实际命令形态、机器可读输出与稳定错误码。</small></li>
+      </ul></div>
+      <p class="hero-foot">引用为仓库内相对链接；单独转发此 HTML 时正文与样式仍可离线使用，但参考文档需连同仓库 docs 一起提供。页面不加载远程字体、图片、脚本或分析服务，也不访问 Runtime。</p>
+    </section>
+    <footer><span>Codeestra · 把工程关系变成可追溯的事实。</span><span>文档快照 2026-09-15 · dev 036cf68 · <a href="#intro">返回顶部 ↑</a></span></footer>
+  </main>
+</body>
+</html>
