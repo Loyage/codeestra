@@ -7,6 +7,7 @@ import {
   registerTemporaryDirectory,
   runCli,
 } from './support/runtime-reclamation.js';
+import { provisionDevClone } from './support/agent-fixture.js';
 
 const repositoryRoot = join(import.meta.dir, '..', '..', '..');
 const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
@@ -135,6 +136,8 @@ async function fixture(options: { readonly failingStep?: string } = {}): Promise
   readonly remote: string;
   /** The second clone of that remote, recorded as the project's dev clone (ADR-0047 D05). */
   readonly devClone: string;
+  /** The clone the project is trusted with, and where the integration advances `dev` (ADR-0056). */
+  readonly devRepo: string;
 }> {
   const repository = temporaryDirectory('codeestra-promotion-repo-');
   const home = temporaryDirectory('codeestra-promotion-home-');
@@ -159,6 +162,9 @@ async function fixture(options: { readonly failingStep?: string } = {}): Promise
   // starts at main's tip, so the Task result (and therefore the promoted commit) descends from the
   // expected main commit and the promotion is a fast-forward.
   await git(repository, ['branch', 'dev']);
+  // ADR-0056: every dev fact comes from a second clone of the same origin that sits on
+  // `dev`; the project is trusted with it explicitly.
+  const devRepo = await provisionDevClone({ repository: repository });
 
   const stubPath = join(tools, 'stub-pi.ts');
   const shimPath = join(tools, 'pi');
@@ -171,19 +177,22 @@ async function fixture(options: { readonly failingStep?: string } = {}): Promise
   // this local bare repository, never to a real GitHub repository.
   const remote = temporaryDirectory('codeestra-promotion-remote-');
   await git(remote, ['init', '--bare', '-b', 'main']);
-  await git(repository, ['remote', 'add', 'origin', remote]);
+  // Both clones are re-pointed at this bare repository, so they really are clones of one origin
+  // (ADR-0056 compares them) and the promotion's only push target is this local remote.
+  await git(repository, ['remote', 'set-url', 'origin', remote]);
+  await git(devRepo, ['remote', 'set-url', 'origin', remote]);
   await git(repository, ['push', '-q', 'origin', 'refs/heads/main:refs/heads/main']);
   await git(repository, ['push', '-q', 'origin', 'refs/heads/dev:refs/heads/dev']);
-  const devClone = temporaryDirectory('codeestra-promotion-devclone-');
-  await git(devClone, ['clone', '-q', remote, '.']);
-  await git(devClone, ['checkout', '-q', 'dev']);
+  // The recorded dev clone is the fixture's own: ADR-0056 puts the integrated candidate there, so no
+  // second clone and no fetch step are needed to model "the candidate is in the dev clone".
+  const devClone = devRepo;
 
   const environment = {
     CODEESTRA_HOME: home,
     CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: shimPath,
   };
-  const opened = await cli(['open', repository, '--no-open'], environment);
+  const opened = await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { readonly id: string }[];
@@ -198,18 +207,9 @@ async function fixture(options: { readonly failingStep?: string } = {}): Promise
     readonly { readonly devRepoPath: string | null }[];
   expect(listed[0]?.devRepoPath).toBe(devClone);
   return { environment, repository, projectId: projects[0]?.id as string, mainCommit,
-    remote, devClone };
+    remote, devClone, devRepo };
 }
 
-/**
- * The candidate reaches the dev clone the way the dev clone would get it in reality — by fetching
- * the integrated dev branch. It never goes through the remote first: pushing the fixed candidate to
- * the remote is the promotion's own step.
- */
-async function syncDevClone(repository: string, devClone: string): Promise<void> {
-  await git(devClone, ['fetch', '-q', repository, 'refs/heads/dev']);
-  await git(devClone, ['merge', '--ff-only', '-q', 'FETCH_HEAD']);
-}
 
 interface StatusPayload {
   readonly task: { readonly id: string; readonly state: string; readonly version: number };
@@ -242,8 +242,10 @@ async function integratedTask(options: { readonly failingStep?: string;
   readonly mainCommit: string;
   readonly remote: string;
   readonly devClone: string;
+  readonly devRepo: string;
 }> {
-  const { environment, repository, projectId, mainCommit, remote, devClone } = await fixture(options);
+  const { environment, repository, projectId, mainCommit, remote, devClone, devRepo } =
+    await fixture(options);
   const created = JSON.parse((await cli(['task', 'create', projectId, 'Write a file'],
     environment)).stdout) as { readonly id: string };
   const taskId = created.id;
@@ -278,8 +280,7 @@ async function integratedTask(options: { readonly failingStep?: string;
     expect(JSON.parse(fullSuite.stdout) as { readonly state: string })
       .toMatchObject({ state: 'PASSED' });
   }
-  await syncDevClone(repository, devClone);
-  return { environment, repository, projectId, taskId, mainCommit, remote, devClone,
+  return { environment, repository, projectId, taskId, mainCommit, remote, devClone, devRepo,
     batchId: batches[0]?.batchId as string, resultCommit };
 }
 
@@ -486,7 +487,7 @@ describe('codeestra promotion', () => {
       // Neither refusal created a promotion or touched a ref, local or remote.
       expect(JSON.parse((await cli(['promotion', 'list', projectId], environment)).stdout)).toEqual([]);
       expect(await git(repository, ['rev-parse', 'refs/heads/main'])).toBe(mainCommit);
-      expect(await git(repository, ['rev-parse', 'refs/heads/dev'])).toBe(resultCommit);
+      expect(await git(integrated.devClone, ['rev-parse', 'refs/heads/dev'])).toBe(resultCommit);
       expect(await git(remote, ['rev-parse', 'refs/heads/dev'])).toBe(mainCommit);
 
       // The dev clone is verified as an explicit input: the main checkout itself is refused with a
@@ -570,7 +571,7 @@ describe('codeestra promotion', () => {
       expect(read).toMatchObject({ state: 'STALE', outcomeCode: 'DEV_FULL_SUITE_EVIDENCE_STALE',
         promotedCommit: null, remoteDevCommit: null });
       // Nothing was pushed anywhere: the policy commit is on main and dev is still the candidate.
-      expect(await git(repository, ['rev-parse', 'refs/heads/dev'])).toBe(resultCommit);
+      expect(await git(integrated.devClone, ['rev-parse', 'refs/heads/dev'])).toBe(resultCommit);
       expect(await git(remote, ['rev-parse', 'refs/heads/dev'])).toBe(mainCommit);
     } finally {
       await cli(['stop'], environment);

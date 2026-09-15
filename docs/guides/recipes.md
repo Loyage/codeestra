@@ -177,7 +177,7 @@ bun run codeestra task run $PROJECT $TASK <version> --allow-unknown
 
 # 路 C：把映射补好，让判定真的变成 SAFE
 #   在 main ref 上更新 .codeestra/impact.json，然后重新 trust（同一次 trust 会一并确认映射）
-bun run codeestra project trust /path/to/repo
+bun run codeestra project trust /path/to/repo --dev-repo /path/to/dev-clone
 bun run codeestra project impact validate /path/to/repo --json
 ```
 
@@ -592,7 +592,8 @@ bun install --frozen-lockfile
 bun run build:ui                                   # 需要 Web UI 时
 bun run codeestra status                           # 拉起 Runtime，看 READY
 
-bun run codeestra open /path/to/your-repo --no-open # 接入项目（FULL 零确认）并拿到界面地址
+bun run codeestra open /path/to/your-repo --dev-repo /path/to/dev-clone --no-open \
+  # 接入项目（FULL 零确认）并拿到界面地址；--dev-repo 是必需的（ADR-0056）
 bun run codeestra permission get                    # 确认权限模式
 
 bun run codeestra task create $PROJECT "一项具体的改动" --constraint "一条具体约束"

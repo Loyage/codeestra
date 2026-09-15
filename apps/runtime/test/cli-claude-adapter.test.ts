@@ -7,6 +7,7 @@ import {
   registerTemporaryDirectory,
   runCli,
 } from './support/runtime-reclamation.js';
+import { provisionDevClone } from './support/agent-fixture.js';
 
 /**
  * CLI/command-face acceptance for the Claude Code adapter (ADR-0040).
@@ -213,6 +214,9 @@ async function fixture(options: { readonly strict?: boolean; readonly mode?: str
   await git(repository, ['add', '.']);
   await git(repository, ['commit', '-q', '-m', 'fixture']);
   await git(repository, ['branch', 'dev']);
+  // ADR-0056: every dev fact comes from a second clone of the same origin that sits on
+  // `dev`; the project is trusted with it explicitly.
+  const devRepo = await provisionDevClone({ repository: repository });
 
   const claudeStubPath = join(tools, 'claude-stub.ts');
   await Bun.write(claudeStubPath, claudeStubSource);
@@ -242,7 +246,7 @@ async function fixture(options: { readonly strict?: boolean; readonly mode?: str
     // STRICT is a live Runtime switch; the project trust then needs the explicit confirmation flag.
     expect((await cli(['permission', 'set', 'strict'], environment)).exitCode).toBe(0);
   }
-  const opened = await cli(['open', repository, '--no-open',
+  const opened = await cli(['open', repository, '--dev-repo', devRepo, '--no-open',
     ...(options.strict === true ? ['--yes'] : [])], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as

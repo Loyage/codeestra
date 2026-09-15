@@ -180,6 +180,11 @@ describe('Runtime task request boundary', () => {
         // The verified dev clone is part of the identity the user reviewed (ADR-0047 D05); a client
         // that omits it sends an identity that cannot be confirmed.
         devRepoPath: null,
+        // FOUNDATION-087 / ADR-0056: the read-only retirement evidence for a checkout's own local
+        // `dev` ref travels with the identity, so a client that echoes it back stays unambiguous.
+        devRefRetirement: {
+          localDevRefPresent: false, localDevRefCommit: null, projectsWithoutDevRepo: [],
+        },
       },
     };
     expect(runtimeRequestSchema.safeParse(trust).success).toBe(false);

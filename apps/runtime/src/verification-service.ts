@@ -35,6 +35,7 @@ import {
   type VerificationPolicySource,
   type VerificationRunPlan,
 } from '@codeestra/storage';
+import { requireRecordedDevRepoPath } from './dev-repo-service.js';
 
 /** Bounded transient output kept for the caller's terminal; never persisted. */
 const maxOutputTailChars = 8_000;
@@ -888,6 +889,7 @@ export interface QueuedTaskVerification {
   readonly policyVersion: string;
   readonly policyDigest: string;
   readonly mainCommit: string;
+  /** The dev clone: the tested commit is an object of that repository (ADR-0056). */
   readonly repositoryRoot: string;
   readonly commands: readonly StoredVerificationCommand[];
   readonly copyPath: string;
@@ -923,6 +925,10 @@ export async function queueTaskVerification(input: {
   const now = input.now ?? Date.now;
   const randomUUID = input.randomUUID ?? (() => crypto.randomUUID());
   const candidates = input.storage.getVerificationCandidates(input.projectId, input.taskId);
+  // ADR-0056: the tested commit is an object of the project's dev clone, which is also the repository
+  // the detached copy is created from. A project without one is refused here, before anything is
+  // queued, instead of running the copy — and the commands — in the wrong repository.
+  requireRecordedDevRepoPath(input.storage.getTrustedProject(input.projectId));
   if (candidates.taskState !== 'EXECUTED') {
     throw new VerificationServiceError('TASK_NOT_EXECUTED',
       `Task is ${candidates.taskState}; verification needs an EXECUTED Task with a captured result commit`);
@@ -962,7 +968,9 @@ export async function queueTaskVerification(input: {
       'The targeted test plan that was selected could not be read back from its record');
   }
   const inspection = await inspectVerificationPolicy({
-    repositoryRoot: candidates.repositoryRoot,
+    // The policy is a fact of the stable `main` ref; the tested commits are objects of the dev
+    // clone (ADR-0056), which is why the two roots are read separately here.
+    repositoryRoot: candidates.mainRepositoryRoot,
     mainRef: candidates.mainRef,
   });
   if (inspection.state === 'ABSENT' && !useTargeted) {

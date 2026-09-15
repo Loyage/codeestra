@@ -7,6 +7,7 @@ import {
   registerTemporaryDirectory,
   runCli,
 } from './support/runtime-reclamation.js';
+import { provisionDevClone } from './support/agent-fixture.js';
 
 /**
  * The cached-snapshot-generation recheck over the real command face (FOUNDATION-060).
@@ -109,6 +110,8 @@ const impactMapping = {
 interface Fixture {
   readonly environment: Record<string, string>;
   readonly repository: string;
+  /** The dev clone the project is trusted with (ADR-0056): where the `dev` ref lives. */
+  readonly devRepo: string;
   readonly projectId: string;
 }
 
@@ -132,6 +135,9 @@ async function fixture(withMapping: boolean): Promise<Fixture> {
   await git(repository, ['add', '.']);
   await git(repository, ['commit', '-q', '-m', 'fixture']);
   await git(repository, ['branch', 'dev']);
+  // ADR-0056: every dev fact comes from a second clone of the same origin that sits on
+  // `dev`; the project is trusted with it explicitly.
+  const devRepo = await provisionDevClone({ repository: repository });
 
   const stubPath = join(tools, 'stub-pi.ts');
   const shimPath = join(tools, 'pi');
@@ -144,11 +150,11 @@ async function fixture(withMapping: boolean): Promise<Fixture> {
     CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: shimPath,
   };
-  const opened = await cli(['open', repository, '--no-open'], environment);
+  const opened = await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { readonly id: string }[];
-  return { environment, repository, projectId: projects[0]?.id as string };
+  return { environment, repository, devRepo, projectId: projects[0]?.id as string };
 }
 
 interface TaskRef {
@@ -262,10 +268,11 @@ async function activeReservations(fixtureState: Fixture) {
 /** Moves `dev` forward without touching the checked-out `main` worktree. */
 async function advanceDev(fixtureState: Fixture): Promise<string> {
   const tree = await git(fixtureState.repository, ['rev-parse', 'HEAD^{tree}']);
-  const previous = await git(fixtureState.repository, ['rev-parse', 'refs/heads/dev']);
-  const moved = await git(fixtureState.repository,
+  // ADR-0056: the long-lived `dev` ref lives in the project's dev clone, not in the main checkout.
+  const previous = await git(fixtureState.devRepo, ['rev-parse', 'refs/heads/dev']);
+  const moved = await git(fixtureState.devRepo,
     ['commit-tree', tree, '-p', previous, '-m', 'dev moves']);
-  await git(fixtureState.repository, ['update-ref', 'refs/heads/dev', moved]);
+  await git(fixtureState.devRepo, ['update-ref', 'refs/heads/dev', moved]);
   return moved;
 }
 

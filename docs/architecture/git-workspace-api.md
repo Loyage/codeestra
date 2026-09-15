@@ -70,7 +70,25 @@ interface IntegrationGitPort {
 
 ## 2. Task Workspace
 
-- prepare 以固定 dev SHA 为基线（ADR-0009；基线 ref 由 `projects.dev_ref` 记录，ADR-0018），独立 `refs/heads/task/<task-id>` 与 Runtime 数据目录 `worktrees/<project-id>/<task-id>/`（ADR-0005）。ref/path 只使用校验后的内部 UUID，不把用户文本当 ref/path，也不在用户仓库根目录创建 worktree。
+- prepare 以固定 dev SHA 为基线（ADR-0009；基线 ref 名由 `projects.dev_ref` 记录，ADR-0018），独立 `refs/heads/task/<task-id>` 与 Runtime 数据目录 `worktrees/<project-id>/<task-id>/`（ADR-0005）。ref/path 只使用校验后的内部 UUID，不把用户文本当 ref/path，也不在用户仓库根目录创建 worktree。
+- **这个基线 ref 在 dev clone 里解析**（ADR-0056）：`projects.dev_repo_path` 指向的第二个 clone 拥有长期 `dev` 分支，因此 Task worktree、Task branch、结果 commit 与集成都发生在那个 clone 的仓库里。`projects.repo_root`（稳定 main 检出）仍然拥有仓库身份与 `main` ref（判定策略、影响映射、提升的重启序列）。**两个 clone 各自拥有什么、哪些投影字段指向哪个仓库**见下表：
+
+| 根字段 / 事实 | 代表哪个仓库 | 谁消费它 |
+|---|---|---|
+| `TrustedProject.repoRoot` / `gitCommonDir` / `mainRef` | 稳定 main 检出 | 身份校验、`inspectVerificationPolicy`、`inspectImpactPolicy`、knowledge、提升的重启序列与 `main` 推回 |
+| `TrustedProject.devRepoPath` | dev clone | 所有 dev 事实的入口（下同） |
+| `WorkspacePreparationPlan.repoRoot` | **dev clone**（`gitCommonDir`/`mainRef` 仍是 main 检出的、与该计划无冲突的事实） | `prepareTaskWorkspace`、重启时 `reconcileWorkspacePreparations` 的 `reconcileWorkspace` |
+| `VerificationCandidates.repositoryRoot` | **dev clone**（被验证的 commit 是那里的对象） | 验证副本的创建、`testedCommit` 的 tree/计划文件读取 |
+| `VerificationCandidates.mainRepositoryRoot`（新增） | 稳定 main 检出 | 验证策略读取（ADR-0006：策略是 main ref 的事实） |
+| `DevFullSuiteCandidates.repositoryRoot` | **dev clone** | 全量证据的 detached 副本、候选 commit 的 tree、候选上的锁文件 |
+| `DevFullSuiteCandidates.mainRepositoryRoot`（新增） | 稳定 main 检出 | 固定全量策略读取 |
+| `IntegrationCandidates` / `IntegrationBatchCandidates`.repositoryRoot | **dev clone** | dev ref 读取、detached 合并 worktree、集成验证副本、ref 快进 |
+| 两者的 `mainRepositoryRoot`（新增） | 稳定 main 检出 | 集成验证策略读取 |
+| `IntegrationBatchPlan.repositoryRoot` | **dev clone** | 重启收敛时读 `dev` ref（`reconcileInterruptedIntegrations`） |
+| `ReclamationProjectRef.repoRoot` | **dev clone** | worktree 注册与归属核验、Task branch、`dev` 可达性 |
+| `ReclamationProjectRef.devRepoPath`（新增，可空） | dev clone（可空用于显式拒绝） | 回收入口的 `DEV_REPO_REQUIRED` 判定 |
+| `StablePromotionPlan` / `PromotionCandidates.repositoryRoot` | 稳定 main 检出（不变） | 提升的 `main` ref、预期旧 main commit、重启序列（`promotion-service.ts` 本格未改） |
+| `PromotionCandidates.devRepoPath` / `StablePromotionPlan.devRepoPath` | dev clone（不变） | push 源与候选对象核验 |
 - Git 尚无首个 commit 的仓库返回 UNBORN_MAIN 并明确指引用户初始化；不擅自提交用户文件。本 Codeestra 开发仓库的初始化与产品处理外部项目是不同操作。
 - 输入路径 canonicalize、检查父路径/symlink/归属；拒绝复用外来目录、非本 Task branch 或其他 worktree 注册记录。Git 输出用 `--porcelain -z` 等机器格式解析，支持空格/换行文件名。
 - 每个 repo 的变更型 Git 操作用 Runtime 锁串行；仍假定外部用户/工具可能修改 refs，故每步重新核验预期 SHA。
@@ -92,13 +110,17 @@ interface IntegrationGitPort {
 项目长期保留 `main`/`dev`（ADR-0009）：`main` 是稳定运行分支，`dev` 是功能实验与集成分支。所有 Task/worktree 从固定 dev OID 建立，Integration 分为“Task 进入 dev”和“dev 提升 main”两层。
 
 1. 固定 expectedDevCommit 与有序 source commits；创建独立 integration worktree，候选目标为长期 `dev`。
-2. 在该工作树形成 dev candidate：能 ff 就 ff，否则 `--no-ff`（合并提交以固定基线为第一父，候选必须是其后代）。冲突保留现场（worktree 与 `MERGE_HEAD` 不清理），不调用 Agent 静默替用户解决产品语义冲突。
-3. 冻结 dev candidate（`merged_commit`），执行独立 Integration Verification（独立实体 `integration_verification_runs`，独立副本）；成功后以 expected old OID 保护更新 `dev`（`update-ref <ref> <new> <expected>`）。任何完成功能都必须先完成此层，不得直接进入 `main`。ADR-0038 规定开发 branch/worktree 只跑建分支时选定的定向测试，因此该层证据不能冒充稳定提升前的全量回归。
-3b. **实现边界（ADR-0018）**：目标是长期 `dev` 的 ref，且仅在该 ref 未被任何工作树检出时才推进（`DEV_REF_CHECKED_OUT` 否则）；integration worktree 位于 `<CODEESTRA_HOME>/integrations/<project-id>/<batch-id>/`；成功后才尝试 `git worktree remove`（不加 force），失败现场与副本保留。崩溃恢复以 ref 实际值为准，不猜测、不重放。
+2. 在该工作树形成 dev candidate：能 ff 就 ff，否则 `--no-ff`（合并提交以固定基线为第一父，候选必须是其后代）。冲突保留现场（worktree 与 `MERGE_HEAD` 不清理），不调用 Agent 静默替用户解决产品语义冲突。合并 worktree 与 Task worktree 一样建在 **dev clone**（ADR-0056），因此候选对象天然就是 dev clone 的对象（提升的 push 源）。
+3. 冻结 dev candidate（`merged_commit`），执行独立 Integration Verification（独立实体 `integration_verification_runs`，独立副本）；成功后推进 `dev`。任何完成功能都必须先完成此层，不得直接进入 `main`。ADR-0038 规定开发 branch/worktree 只跑建分支时选定的测试，因此该层证据不能冒充稳定提升前的全量回归。
+
+   **推进方式（ADR-0056，Amends ADR-0018）**：不再手写 ref，而是按固定顺序 ①读 `dev` 并与批次固定基线比对（不等即批级 `STALE`/`DEV_REF_MOVED`）；②核验那个持有 `dev` 的检出（必须是 dev clone 自己的长期检出，在 `dev` 上、`git status --porcelain` 为空、HEAD 与 `refs/heads/dev` 都等于基线，否则 `DEV_CHECKOUT_NOT_ON_DEV`/`DEV_CHECKOUT_DIRTY`/`DEV_CHECKOUT_MOVED`）；③`git -C <dev clone> merge --ff-only <merged_commit>` 由 Git 把 ref、索引与工作区**一起**前移；④事后核验 `HEAD == refs/heads/dev == merged_commit` **并且** `git status --porcelain` 为空。失败的写入与拒绝都照实记录（`DEV_CHECKOUT_FF_FAILED` 等），不回滚、不 `reset --hard`、不 `checkout -f`、不 `--force`。
+3b. **实现边界（ADR-0018，由 ADR-0056 收窄一处）**：目标是 dev clone 里长期 `dev` 的 ref。除 **dev clone 自己的长期 `dev` 检出**（满足 §3 第 3 条的三项前置、并由同一步快进保持一致）外，任何其它工作树检出该 ref 时仍一律以 `DEV_REF_CHECKED_OUT` 拒绝；integration worktree 位于 `<CODEESTRA_HOME>/integrations/<project-id>/<batch-id>/` 且是 **dev clone** 的 detached worktree；成功后才尝试 `git worktree remove`（不加 force），失败现场与副本保留。崩溃恢复以 ref 实际值为准，不猜测、不重放。
+
+   **实测事实（写入 ADR-0056 作证据）**：dev clone 的 `HEAD` 是 `refs/heads/dev` 的**符号引用**，因此 `git update-ref refs/heads/dev <new>` 之后 `rev-parse HEAD` 与 `rev-parse refs/heads/dev` 都已经是 `<new>`，而索引/工作区仍停在旧提交（`git status --porcelain` 会把新提交引入的文件报成 `D`），此时 `git merge --ff-only <new>` 只打印 `Already up to date.` 而不做任何事。**「三等式」单独不构成「检出已更新」的证据**，成功判据必须包含 `status` 为空。期望值的保护是**读取-比对-拒绝**（不是 `update-ref` 的原子 CAS），残余竞态窗口是「读 ref 之后、`merge --ff-only` 之前」——并发移动会让快进不可能成立（`merged_commit` 是从被核验的基线构建的），因此不会静默覆盖。
 4. 稳定提升固定 expectedDevCommit、expectedMainCommit 与 verification evidence；其中必须包含在长期 `dev` 工作树对该精确 expectedDevCommit 运行并通过的全量测试证据（ADR-0038），dev SHA、测试配置或锁文件变化即失效。FULL 下直接提升，STRICT 下需用户批准 dev/main/verification 三元组。
 4a. **ADR-0047 唯一提升路径（已实现，schema v29）**：本机 `main` 与 `dev` 是**两个分别 clone 的独立仓库**（ADR-0048），稳定提升不再由 Runtime 在 main 工作树内 ff 本地 `dev` ref。产品只执行「push 固定候选到远端 `dev` + 读回核对」并报告**「已推送、等待拉取」**（`phase: AWAITING_PULL`，退出码 3），main 检出的 `git fetch` + `git merge --ff-only origin/dev` 是**用户显式步骤**；再次调用同一命令核对到 main 检出已在候选上后，才记录重启序列、跑它、并在重启核对成功后把候选 push 回远端 `main`（`phase: MAIN_PUSH_PENDING` 期间不得报告完成）。旧的本机 `fastForwardCheckedOutWorktree` 已删除，不存在双路径。
 
-   - **dev clone**：`projects.dev_repo_path`（可空）记录推 push 用的第二个 clone；`project trust --dev-repo <path>` 核验它（是 Git work tree、是**另一个** clone 而非 main 检出或其 worktree、`origin` 与 main 检出一致、HEAD 在项目 `dev` 分支上且该分支存在），不可核验即用稳定码 `DEV_REPO_*` 拒绝且**不写入**空值；`project inspect [--dev-repo <path>]` 报告同样的核验结果与 `clean`。push 前另核对候选对象在该 clone 中存在（`DEV_REPO_CANDIDATE_MISSING`）。
+   - **dev clone**：`projects.dev_repo_path` 记录第二个 clone。ADR-0056 之后它是**必需**的，而且是**全部 dev 事实的唯一来源**（不只是 push 源）：`project trust` 必须显式给出 `--dev-repo <path>`，省略或 `none` 以 `DEV_REPO_REQUIRED` 拒绝且**在任何写入之前**；已信任但路径为空的项目在任何需要 dev 基线的操作上同样以 `DEV_REPO_REQUIRED` 拒绝并给出补救命令，绝不回退到某个 clone 自己的本地 `dev` ref。`project trust --dev-repo <path>` 逐条核验它（是 Git work tree、是**另一个** clone 而非 main 检出或其 worktree、`origin` 与 main 检出一致、HEAD 在项目 `dev` 分支上且该分支存在），不可核验即用稳定码 `DEV_REPO_*` 拒绝且**不写入**；`project inspect [--dev-repo <path>]` 报告同样的核验结果与 `clean`，并额外报告只读的 `devRefRetirement`（被检查检出自己的本地 `dev` ref 状态 + 仍没有 dev clone 的已信任项目）。push 前另核对候选对象在该 clone 中存在（`DEV_REPO_CANDIDATE_MISSING`）。候选与副本根/锁文件从 **dev clone** 读，全量策略仍从 **main ref** 读。
    - **只推一个 ref**：push 源是固定候选 OID（不是分支名），目标是远端 `origin` 的 `dev`/`main`，从不 `--force`；远端自身的 fast-forward 规则决定能否更新。
    - **读回即证据**：`git ls-remote` 读回值、而不是 push 退出码，才是「候选/稳定点已在远端」的记录；push 成功但读回不等即 `REMOTE_DEV_READBACK_MISMATCH` / `REMOTE_MAIN_READBACK_MISMATCH`，不推进、不记完成。
    - **不写本地 ref**：本能力从不 `update-ref`、从不 ff 已检出的 `main`；`main` 只由用户在 main 检出自己 pull。

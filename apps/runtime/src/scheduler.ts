@@ -14,6 +14,7 @@ import {
   type TaskDependencyFact,
   type TaskLifecycleState,
 } from '@codeestra/storage';
+import { requireRecordedDevRepoPath } from './dev-repo-service.js';
 
 /**
  * The conservative dependency scheduler (Phase 2, first step — ADR-0024).
@@ -123,12 +124,15 @@ function graphOf(facts: readonly TaskDependencyFact[]): DependencyGraph {
 }
 
 /**
- * Reads the project's `dev` OID. A repository that cannot be read is reported as "no baseline",
- * which keeps every edge blocked: an unresolvable baseline must never be read as "satisfied".
+ * Reads the dev clone's `dev` OID (ADR-0056: the long-lived branch lives in `projects.dev_repo_path`,
+ * not in the stable checkout). A project without a dev clone is refused before anything is read, so
+ * no caller can mistake "there is no dev repository" for "the baseline moved"; a repository that
+ * cannot be read is reported as "no baseline", which keeps every edge blocked: an unresolvable
+ * baseline must never be read as "satisfied".
  */
-async function readDevCommit(repositoryRoot: string, devRef: string): Promise<string | null> {
+async function readDevCommit(devRepoPath: string, devRef: string): Promise<string | null> {
   try {
-    return await readLocalRefCommit({ repositoryRoot, ref: devRef });
+    return await readLocalRefCommit({ repositoryRoot: devRepoPath, ref: devRef });
   } catch {
     return null;
   }
@@ -209,10 +213,13 @@ export async function inspectTaskDependencies(input: {
   const taskFacts = input.taskId === undefined
     ? allFacts
     : allFacts.filter((fact) => fact.dependentTaskId === input.taskId);
-  const devCommit = await readDevCommit(project.repoRoot, project.devRef);
+  // The dev clone is resolved once, so a missing one is refused before any edge is judged and the
+  // loop does not repeat the same check.
+  const devRepoPath = requireRecordedDevRepoPath(project);
+  const devCommit = await readDevCommit(devRepoPath, project.devRef);
   const edges: TaskDependencyEdgeView[] = [];
   for (const fact of taskFacts) {
-    edges.push(await evaluateEdge({ fact, repositoryRoot: project.repoRoot, devCommit }));
+    edges.push(await evaluateEdge({ fact, repositoryRoot: devRepoPath, devCommit }));
   }
   const blockedReasons = edges
     .map((edge) => edge.reason)

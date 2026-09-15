@@ -15,6 +15,7 @@ import {
   cleanupTemporaryDirectories,
   createAgentFixture,
   git,
+  syncDevClone,
   type AgentFixture,
 } from './support/agent-fixture.js';
 
@@ -67,6 +68,8 @@ async function harness(options: { withMapping: boolean }): Promise<Harness> {
     // The mapping is read from the project's `main` ref and Task worktrees branch from `dev`, so
     // both refs carry it: the fixture is not testing a moved baseline here.
     await git(fixture.repo, ['branch', '-f', 'dev', 'HEAD']);
+    // ADR-0056 reads the baseline from the dev clone, so the forced dev branch has to reach it too.
+    await syncDevClone({ devRepo: fixture.devRepo, repository: fixture.repo });
     fixture.storage.trustProject({
       id: fixture.projectId,
       trustId: nextId(),
@@ -392,6 +395,9 @@ describe('scheduling loop', () => {
     expect(second.state).toBe('RECORDED');
     await git(harnessed.fixture.repo, ['commit', '--allow-empty', '-m', 'the baseline moves']);
     await git(harnessed.fixture.repo, ['branch', '-f', 'dev', 'HEAD']);
+    // ADR-0056: the baseline the release binds is the dev clone's, so moving the main checkout's
+    // `dev` is not enough for an expiry test.
+    await syncDevClone({ devRepo: harnessed.fixture.devRepo, repository: harnessed.fixture.repo });
     const afterMove = await harnessed.runNow({ taskId: later.taskId, version: later.version });
     expect(afterMove.outcome).toBe('WAIT');
     expect(afterMove.wait?.reasonCodes).toEqual(

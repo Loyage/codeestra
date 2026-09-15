@@ -7,6 +7,7 @@ import {
   registerTemporaryDirectory,
   runCli,
 } from './support/runtime-reclamation.js';
+import { provisionDevClone } from './support/agent-fixture.js';
 
 const repositoryRoot = join(import.meta.dir, '..', '..', '..');
 const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
@@ -102,6 +103,7 @@ for await (const chunk of Bun.stdin.stream()) {
 async function fixture(options: { readonly failingPolicy?: boolean } = {}): Promise<{
   readonly environment: Record<string, string>;
   readonly repository: string;
+  readonly devRepo: string;
   readonly projectId: string;
 }> {
   const repository = temporaryDirectory('codeestra-integrate-repo-');
@@ -121,6 +123,9 @@ async function fixture(options: { readonly failingPolicy?: boolean } = {}): Prom
   await git(repository, ['commit', '-q', '-m', 'fixture']);
   // ADR-0009: the long-lived dev branch is the workspace baseline and the integration target.
   await git(repository, ['branch', 'dev']);
+  // ADR-0056: every dev fact comes from a second clone of the same origin that sits on
+  // `dev`; the project is trusted with it explicitly.
+  const devRepo = await provisionDevClone({ repository: repository });
 
   const stubPath = join(tools, 'stub-pi.ts');
   const shimPath = join(tools, 'pi');
@@ -133,11 +138,11 @@ async function fixture(options: { readonly failingPolicy?: boolean } = {}): Prom
     CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: shimPath,
   };
-  const opened = await cli(['open', repository, '--no-open'], environment);
+  const opened = await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { readonly id: string }[];
-  return { environment, repository, projectId: projects[0]?.id as string };
+  return { environment, repository, devRepo, projectId: projects[0]?.id as string };
 }
 
 async function status(
@@ -154,11 +159,12 @@ async function status(
 async function capturedTask(options: { readonly failingPolicy?: boolean } = {}): Promise<{
   readonly environment: Record<string, string>;
   readonly repository: string;
+  readonly devRepo: string;
   readonly projectId: string;
   readonly taskId: string;
   readonly resultCommit: string;
 }> {
-  const { environment, repository, projectId } = await fixture(options);
+  const { environment, repository, devRepo, projectId } = await fixture(options);
   const created = JSON.parse((await cli(['task', 'create', projectId, 'Write a file'],
     environment)).stdout) as { readonly id: string };
   const taskId = created.id;
@@ -177,13 +183,13 @@ async function capturedTask(options: { readonly failingPolicy?: boolean } = {}):
   const captured = await cli(['task', 'result', 'capture', projectId, taskId], environment);
   expect(captured.exitCode).toBe(0);
   const resultCommit = (JSON.parse(captured.stdout) as { readonly resultCommit: string }).resultCommit;
-  return { environment, repository, projectId, taskId, resultCommit };
+  return { environment, repository, devRepo, projectId, taskId, resultCommit };
 }
 
 describe('codeestra task integrate', () => {
   test('runs the whole integration from the CLI and moves dev only after it passes', async () => {
-    const { environment, repository, projectId, taskId, resultCommit } = await capturedTask();
-    const devBefore = await git(repository, ['rev-parse', 'refs/heads/dev']);
+    const { environment, repository, devRepo, projectId, taskId, resultCommit } = await capturedTask();
+    const devBefore = await git(devRepo, ['rev-parse', 'refs/heads/dev']);
     const mainBefore = await git(repository, ['rev-parse', 'refs/heads/main']);
 
     const verified = await cli(['task', 'verify', projectId, taskId], environment);
@@ -201,7 +207,7 @@ describe('codeestra task integrate', () => {
       mergeStrategy: 'FAST_FORWARD', verificationState: 'PASSED' });
 
     // The ref moved, the stable branch did not, and the Task reached SUCCEEDED.
-    expect(await git(repository, ['rev-parse', 'refs/heads/dev'])).toBe(resultCommit);
+    expect(await git(devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(resultCommit);
     expect(await git(repository, ['rev-parse', 'refs/heads/main'])).toBe(mainBefore);
     expect(devBefore).not.toBe(resultCommit);
     const after = await status(environment, projectId, taskId);
@@ -218,8 +224,8 @@ describe('codeestra task integrate', () => {
   }, 120_000);
 
   test('refuses to integrate without a PASSED verification and leaves dev untouched', async () => {
-    const { environment, repository, projectId, taskId } = await capturedTask({ failingPolicy: true });
-    const devBefore = await git(repository, ['rev-parse', 'refs/heads/dev']);
+    const { environment, devRepo, projectId, taskId } = await capturedTask({ failingPolicy: true });
+    const devBefore = await git(devRepo, ['rev-parse', 'refs/heads/dev']);
     const verified = await cli(['task', 'verify', projectId, taskId], environment);
     expect(verified.exitCode).toBe(1);
 
@@ -227,7 +233,7 @@ describe('codeestra task integrate', () => {
     const integrated = await cli(['task', 'integrate', projectId, taskId, String(version)], environment);
     expect(integrated.exitCode).toBe(1);
     expect(integrated.stderr).toContain('TASK_VERIFICATION_NOT_PASSED');
-    expect(await git(repository, ['rev-parse', 'refs/heads/dev'])).toBe(devBefore);
+    expect(await git(devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(devBefore);
     const after = await status(environment, projectId, taskId);
     expect(after.task.state).toBe('EXECUTED');
     expect(after.integrations).toHaveLength(0);

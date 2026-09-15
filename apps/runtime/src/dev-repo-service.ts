@@ -19,7 +19,13 @@ import { commitExists, inspectDevClone, inspectRepository, readRemoteUrl } from 
  */
 export type DevRepoCode = 'DEV_REPO_NOT_A_REPOSITORY' | 'DEV_REPO_NOT_SEPARATE'
   | 'DEV_REPO_ORIGIN_UNKNOWN' | 'DEV_REPO_ORIGIN_MISMATCH' | 'DEV_REPO_BRANCH_MISMATCH'
-  | 'DEV_REPO_DEV_REF_MISSING' | 'DEV_REPO_CANDIDATE_MISSING';
+  | 'DEV_REPO_DEV_REF_MISSING' | 'DEV_REPO_CANDIDATE_MISSING'
+  /**
+   * No dev clone is recorded (or one was asked for) for an operation that needs the long-lived
+   * `dev` branch. FOUNDATION-087 / ADR-0056 made the clone the single source of dev facts, so an
+   * empty path is a refusal and never a fall back to some other clone's local `dev` ref.
+   */
+  | 'DEV_REPO_REQUIRED';
 
 export class DevRepoError extends Error {
   constructor(readonly code: DevRepoCode, message: string) {
@@ -160,6 +166,86 @@ export async function inspectDevRepo(input: {
     repoRoot: clone.path, gitCommonDir: clone.gitCommonDir, headCommit: clone.headCommit,
     branchRef: clone.branchRef, devRefCommit: clone.devRefCommit, originUrl,
     originMatchesProject: true, clean: clone.clean };
+}
+
+/**
+ * The two Git repositories of one trusted project, as ADR-0056 separates them:
+ *
+ * - the **main checkout** (`projects.repo_root`) owns the identity and the `main` ref, which is
+ *   where the human-maintained verification and impact policies live;
+ * - the **dev clone** (`projects.dev_repo_path`) owns the long-lived `dev` branch: the Task
+ *   baseline, every Task worktree, the integration merge and its compare-and-swap, and the fixed
+ *   candidate a stable promotion pushes.
+ *
+ * Both are needed by callers that read a policy and a dev fact in the same operation, so they are
+ * returned together instead of each caller inventing its own pair of roots.
+ */
+export interface ProjectDevRepository {
+  readonly projectId: string;
+  readonly mainRepositoryRoot: string;
+  readonly mainGitCommonDir: string;
+  readonly mainRef: string;
+  readonly devRepoPath: string;
+  readonly devRef: string;
+  /** Commit of the dev clone's local `dev` ref; the dev facts a caller may act on. */
+  readonly devCommit: string;
+  readonly devGitCommonDir: string;
+  readonly objectFormat: 'sha1' | 'sha256';
+  /** The verification behind the root, for callers that report what they checked. */
+  readonly inspection: DevRepoInspection;
+}
+
+/**
+ * The recorded dev clone path, or the stable refusal that names the one command which fixes it.
+ * Cheap and side-effect free: a caller that only needs to know *whether* a dev repository exists
+ * (and which path it is) uses this instead of the full verification below.
+ */
+export function requireRecordedDevRepoPath(project: {
+  readonly repoRoot: string;
+  readonly devRepoPath: string | null;
+}): string {
+  if (project.devRepoPath === null) {
+    throw new DevRepoError('DEV_REPO_REQUIRED',
+      `No dev clone is recorded for ${project.repoRoot}, so the long-lived dev branch cannot be`
+      + ' read: ADR-0056 resolves every dev fact from `projects.dev_repo_path` and never falls back'
+      + ' to the stable checkout\'s own `dev` ref'
+      + ` — run \`project trust ${project.repoRoot} --dev-repo <dev-clone>\``);
+  }
+  return project.devRepoPath;
+}
+
+/**
+ * Resolves and verifies the dev clone of one trusted project, and reads the `dev` commit from it.
+ * A project without a recorded clone is refused before anything is read or written, so no caller
+ * ever acts on a guessed baseline.
+ */
+export async function requireProjectDevRepository(project: {
+  readonly id: string;
+  readonly repoRoot: string;
+  readonly gitCommonDir: string;
+  readonly mainRef: string;
+  readonly devRef: string;
+  readonly devRepoPath: string | null;
+  readonly objectFormat: 'sha1' | 'sha256';
+}): Promise<ProjectDevRepository> {
+  const devRepoPath = requireRecordedDevRepoPath(project);
+  const inspection = await requireDevRepo({
+    repositoryRoot: project.repoRoot,
+    devRef: project.devRef,
+    devRepoPath,
+  });
+  return {
+    projectId: project.id,
+    mainRepositoryRoot: project.repoRoot,
+    mainGitCommonDir: project.gitCommonDir,
+    mainRef: project.mainRef,
+    devRepoPath: inspection.repoRoot as string,
+    devRef: project.devRef,
+    devCommit: inspection.devRefCommit as string,
+    devGitCommonDir: inspection.gitCommonDir as string,
+    objectFormat: project.objectFormat,
+    inspection,
+  };
 }
 
 /** The verified dev clone, or a refusal that names the fact that could not be established. */

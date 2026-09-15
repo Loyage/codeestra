@@ -37,6 +37,7 @@ import {
   registerTemporaryDirectory,
   runCli,
 } from './support/runtime-reclamation.js';
+import { provisionDevClone } from './support/agent-fixture.js';
 
 /**
  * Cross-project reclamation and unregistered-directory disposition (FOUNDATION-062, ADR-0037).
@@ -88,7 +89,8 @@ async function withStorage<T>(
 }
 
 /** One temporary Git repository with the `main`/`dev` pair a trusted project needs. */
-async function createRepository(prefix: string): Promise<string> {
+async function createRepository(prefix: string): Promise<{ readonly repository: string;
+  readonly devRepo: string }> {
   const repository = temporaryDirectory(prefix);
   mkdirSync(join(repository, '.codeestra', 'policies'), { recursive: true });
   await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'), JSON.stringify({
@@ -99,13 +101,18 @@ async function createRepository(prefix: string): Promise<string> {
   await git(repository, ['add', '.']);
   await git(repository, ['commit', '-q', '-m', 'fixture']);
   await git(repository, ['branch', 'dev']);
-  return repository;
+  // ADR-0056: every dev fact comes from a second clone of the same origin that sits on
+  // `dev`; the project is trusted with it explicitly.
+  const devRepo = await provisionDevClone({ repository: repository });
+  return { repository, devRepo };
 }
 
 interface Fixture {
   readonly environment: Record<string, string>;
   readonly home: string;
   readonly repositories: readonly string[];
+  /** The dev clone of each repository, index-aligned: where the `dev` ref actually lives (ADR-0056). */
+  readonly devRepositories: readonly string[];
   readonly projectIds: readonly string[];
 }
 
@@ -131,10 +138,12 @@ async function fixtureWithProjects(
   await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
   const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
   const repositories: string[] = [];
+  const devRepositories: string[] = [];
   for (let index = 0; index < count; index += 1) {
-    const repository = await createRepository(`codeestra-reclaim-batch-repo-${index}-`);
+    const { repository, devRepo } = await createRepository(`codeestra-reclaim-batch-repo-${index}-`);
     repositories.push(repository);
-    const opened = await cli(['open', repository, '--no-open'], environment);
+    devRepositories.push(devRepo);
+    const opened = await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
     expect(opened.exitCode).toBe(0);
   }
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
@@ -145,7 +154,7 @@ async function fixtureWithProjects(
     expect(project).toBeDefined();
     return project?.id as string;
   });
-  return { environment, home, repositories, projectIds };
+  return { environment, home, repositories, devRepositories, projectIds };
 }
 
 interface SeededTask {
@@ -291,7 +300,7 @@ describe('codeestra reclaim: cross-project batch', () => {
     const [first, second] = fixture.projectIds as [string, string];
     try {
       const reclaimable = await seededExecutedTask(fixture, first, 'Produce one artifact');
-      await git(fixture.repositories[0] as string, ['update-ref', 'refs/heads/dev',
+      await git(fixture.devRepositories[0] as string, ['update-ref', 'refs/heads/dev',
         reclaimable.resultCommit]);
       // The second project keeps a workspace a live reservation still holds: a refusal, not a skip.
       const reserved = await reservedTaskWorkspace(fixture, second, { cancel: true });
@@ -321,7 +330,8 @@ describe('codeestra reclaim: cross-project batch', () => {
       // The finished project is reclaimed; the busy project is untouched and still owned.
       expect(existsSync(reclaimable.workspacePath)).toBe(false);
       expect(existsSync(reserved.workspacePath)).toBe(true);
-      expect(await git(fixture.repositories[0] as string, ['rev-parse', '--verify',
+      // ADR-0056: the Task branch lives in the dev clone of that project.
+      expect(await git(fixture.devRepositories[0] as string, ['rev-parse', '--verify',
         `refs/heads/task/${reclaimable.taskId}`])).toBe(reclaimable.resultCommit);
 
       // The ledger is per project and read back across projects, with the deciding evidence.
@@ -380,7 +390,9 @@ describe('codeestra reclaim: unregistered directories', () => {
   test('lists an unregistered directory with its evidence, retains it by default, and removes it only when selected', async () => {
     const fixture = await fixtureWithProjects(1);
     const [projectId] = fixture.projectIds as [string];
-    const repository = fixture.repositories[0] as string;
+    // ADR-0056: a Runtime-owned worktree (and its Task branch) is registered in, and lives in, the
+    // project's dev clone; the main checkout is not the repository a reclamation verifies against.
+    const repository = fixture.devRepositories[0] as string;
     try {
       const head = await git(repository, ['rev-parse', 'HEAD']);
       // A real worktree on a real branch that no ledger row claims: Git registers it, Codeestra
@@ -558,7 +570,7 @@ describe('codeestra reclaim: unregistered directories', () => {
     const [projectId] = fixture.projectIds as [string];
     try {
       const task = await seededExecutedTask(fixture, projectId, 'Produce one artifact');
-      await git(fixture.repositories[0] as string, ['update-ref', 'refs/heads/dev',
+      await git(fixture.devRepositories[0] as string, ['update-ref', 'refs/heads/dev',
         task.resultCommit]);
       const planned = await cli(['reclaim', 'plan', '--all-projects', '--unregistered', '--json'],
         fixture.environment);
@@ -662,7 +674,7 @@ describe('codeestra reclaim: unregistered directories', () => {
     const [projectId] = fixture.projectIds as [string];
     try {
       const task = await seededExecutedTask(fixture, projectId, 'Produce one artifact');
-      await git(fixture.repositories[0] as string, ['update-ref', 'refs/heads/dev',
+      await git(fixture.devRepositories[0] as string, ['update-ref', 'refs/heads/dev',
         task.resultCommit]);
       const applied = await cli(['reclaim', 'apply', '--project', projectId, '--json'],
         fixture.environment);

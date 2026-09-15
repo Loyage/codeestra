@@ -218,14 +218,31 @@ bun run codeestra stop --wait 30      # 最多等 30 秒（0–600）
 ### 3.1 先看清 Runtime 读到了什么
 
 ```sh
-bun run codeestra project inspect /path/to/repo
+bun run codeestra project inspect /path/to/repo --dev-repo /path/to/dev-clone
 ```
 
 关键是这几项：`repoRoot`（工作树根）、`mainRef` / `objectFormat`（主分支 ref 与对象格式）、`headCommit`、
-`devRef` / `devCommit`（`dev` 分支是否存在及 commit）。
+`devRef` / `devCommit`（**dev clone 上的** `dev` 分支是否存在及 commit），以及 `devRepoPath`（那个 dev clone 的核验结果）。
 
 **Codeestra 要求项目长期保留 `main` 与 `dev` 两个分支**，并且所有功能 Task 从固定的 `dev` commit 建基线。
-若 `dev` 缺失，`project trust` 会以 `DEV_REF_MISSING` 拒绝。
+`main` 分支与判定策略由你的**主检出**提供；`dev` 分支（以及所有 Task 的 worktree、集成、提升候选）由第二个 clone
+提供 —— 这就是下面的 **dev clone**。
+
+### 3.1.1 准备一个 dev clone
+
+dev clone 是**同一 origin 的另一个独立 clone**，并且它检出 `dev`：
+
+```sh
+git clone <你的 origin URL> /path/to/dev-clone
+git -C /path/to/dev-clone checkout dev
+```
+
+要求（`project trust` 逐条核验，任一不成立就用稳定码拒绝）：是一个 Git work tree；**不是**主检出、也不是主检出的
+worktree（Git common dir 不同）；`origin` 与主检出一致；HEAD 在项目的 `dev` 分支上，且该分支在本地存在。
+
+它必须存在，因为从 ADR-0056 起它是**全部 dev 事实的唯一来源**：Task 基线、依赖判定、Task worktree、集成 worktree
+与 ref 推进、验证副本、回收归属、提升候选对象、全量证据的副本与锁文件。没有它，任何需要 dev 基线的操作都会以
+`DEV_REPO_REQUIRED` 拒绝（消息里直接给出补救命令）。
 
 再看**谁将来判定你的成果**：
 
@@ -250,12 +267,21 @@ bun run codeestra project impact validate /path/to/repo --json
 
 ```sh
 # FULL（默认）：零确认
-bun run codeestra project trust /path/to/repo
+bun run codeestra project trust /path/to/repo --dev-repo /path/to/dev-clone
 
 # STRICT：需要确认，交互输入 TRUST，或脚本传 --yes
 bun run codeestra permission set strict
-bun run codeestra project trust /path/to/repo --yes
+bun run codeestra project trust /path/to/repo --dev-repo /path/to/dev-clone --yes
 ```
+
+`--dev-repo` 是**必需**的（ADR-0056）。省略它（或写 `--dev-repo none`）会以 `DEV_REPO_REQUIRED` 拒绝，
+而且**什么都还没写**：项目不会被登记，补救命令就在错误消息里。
+
+**dev clone 会被推进**：集成成功时 Runtime 用 Git 自己的快进（`git merge --ff-only`）把 dev clone 里的 `refs/heads/dev`
+**和它自己的工作树**一起前移，因此那个 clone 的工作区会落到新提交上。集成前会先核验它干净、在 `dev` 上、且就在
+批次固定的基线上；不成立就以 `DEV_CHECKOUT_NOT_ON_DEV` / `DEV_CHECKOUT_DIRTY` / `DEV_CHECKOUT_MOVED` 拒绝，
+不合并、不推进。所以**不要在 dev clone 里留未提交/未跟踪的改动**（它会被拒绝而不是被覆盖），也**不要**在集成
+进行中手工切它的分支。
 
 **影响**：一旦 trust，Agent 工具、验证命令与 Git hooks 会**以你的用户权限**运行。
 STRICT 下界面会明确写着：这**不**授权 commit、更新 main、push 或使用未知工具。
@@ -272,12 +298,38 @@ STRICT 下界面会明确写着：这**不**授权 commit、更新 main、push �
 日常最快的路径是 `open`，它把 inspect → 策略展示 →（必要时）确认 → 打开界面串起来：
 
 ```sh
-bun run codeestra open /path/to/repo             # 接入并打开 Web UI，预选该项目
-bun run codeestra open /path/to/repo --no-open   # 只打印带 token 的地址
-bun run codeestra open /path/to/repo --yes       # STRICT 下的非交互确认
+bun run codeestra open /path/to/repo --dev-repo /path/to/dev-clone              # 接入并打开 Web UI
+bun run codeestra open /path/to/repo --dev-repo /path/to/dev-clone --no-open    # 只打印带 token 的地址
+bun run codeestra open /path/to/repo --dev-repo /path/to/dev-clone --yes        # STRICT 非交互确认
 ```
 
-`open` 会明确打印 `dev baseline`、验证策略命令清单、影响映射状态，以及**是否需要再次确认**。
+因为这条命令会组合一次 `project trust`，它同样需要 `--dev-repo`（ADR-0056）。打开一个**已信任**仓库的另一个
+工作树时 trust 会被跳过，那条路径不需要该 flag。
+
+`open` 会明确打印 `dev baseline`（**来自 dev clone**）、验证策略命令清单、影响映射状态、当前检出的
+过渡本地 `dev` ref 状态，以及**是否需要再次确认**。
+
+### 3.4 过渡的本地 `dev` ref：什么时候可以删
+
+如果你的主检出里还有一个本地 `refs/heads/dev`（分离两个 clone 之前的遗留），要明确：
+**Runtime 不再从它读任何东西**。所有 dev 事实都来自 dev clone（§3.1.1），Task 基线、集成与提升候选都不看它。
+
+想知道它现在还有没有用，只读地问一次：
+
+```sh
+bun run codeestra project inspect /path/to/main-checkout --dev-repo /path/to/dev-clone
+```
+
+输出里的 `devRefRetirement` 就是答案：
+
+| 情况 | 含义 |
+|---|---|
+| `localDevRefPresent: false` | 那个检出里已经没有这个 ref 了 |
+| `projectsWithoutDevRepo` 非空 | 这些已信任项目**还没有** dev clone，那个 ref 是它们仅存的一份 `dev` —— **先给它们 trust 一个 dev clone**，别删 |
+| `projectsWithoutDevRepo: []` | 没有任何项目依赖它：可以人工删除（`git -C <检出> branch -D dev`） |
+
+删除**永远是人工动作**：Runtime 不替你删，也不会因为它的状态改变任何判定。CLI 会在
+`project inspect` 的 stderr 里把上面的结论写成一句话（含"是否有项目仍需要它"）。
 
 > 图：`02-project-trust.png` — 「项目」标签页的「添加本地项目」：路径输入、检查项目后的仓库身份表、
 > 验证策略命令表，以及底部的「添加此项目」（FULL）或「信任此项目 + 输入 TRUST」（STRICT）。

@@ -7,6 +7,7 @@ import {
   registerTemporaryDirectory,
   runCli,
 } from './support/runtime-reclamation.js';
+import { provisionDevClone } from './support/agent-fixture.js';
 
 const repositoryRoot = join(import.meta.dir, '..', '..', '..');
 const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
@@ -64,9 +65,12 @@ async function trustedProject(): Promise<{ home: string; projectId: string }> {
   await git(repository, ['commit', '-q', '-m', 'fixture']);
   // ADR-0009: the long-lived dev branch is the baseline every workspace is created from.
   await git(repository, ['branch', 'dev']);
+  // ADR-0056: every dev fact comes from a second clone of the same origin that sits on
+  // `dev`; the project is trusted with it explicitly.
+  const devRepo = await provisionDevClone({ repository: repository });
   const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: 'pi-not-installed' };
-  expect((await cli(['open', repository, '--no-open'], environment)).exitCode).toBe(0);
+  expect((await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment)).exitCode).toBe(0);
   const listed = await cli(['project', 'list'], environment);
   const projects = JSON.parse(listed.stdout) as readonly { id: string }[];
   return { home, projectId: projects[0]?.id as string };

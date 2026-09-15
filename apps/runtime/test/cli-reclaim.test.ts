@@ -33,6 +33,7 @@ import {
   registerTemporaryDirectory,
   runCli,
 } from './support/runtime-reclamation.js';
+import { provisionDevClone } from './support/agent-fixture.js';
 
 const repositoryRoot = join(import.meta.dir, '..', '..', '..');
 const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
@@ -79,6 +80,8 @@ async function withStorage<T>(
 interface ReclaimFixture {
   readonly environment: Record<string, string>;
   readonly repo: string;
+  /** The dev clone the project is trusted with (ADR-0056). */
+  readonly devRepo: string;
   readonly home: string;
   readonly projectId: string;
 }
@@ -107,12 +110,15 @@ async function openedProject(): Promise<ReclaimFixture> {
   await git(repo, ['add', '.']);
   await git(repo, ['commit', '-q', '-m', 'fixture']);
   await git(repo, ['branch', 'dev']);
+  // ADR-0056: every dev fact comes from a second clone of the same origin that sits on
+  // `dev`; the project is trusted with it explicitly.
+  const devRepo = await provisionDevClone({ repository: repo });
   const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
-  const opened = await cli(['open', repo, '--no-open'], environment);
+  const opened = await cli(['open', repo, '--dev-repo', devRepo, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { id: string }[];
-  return { environment, repo, home, projectId: projects[0]?.id as string };
+  return { environment, repo, devRepo, home, projectId: projects[0]?.id as string };
 }
 
 /**
@@ -168,7 +174,8 @@ async function seededExecutedTask(
 
 /** Makes the captured result reachable from the long-lived `dev` ref, as integration would. */
 async function mergeResultIntoDev(fixture: ReclaimFixture, resultCommit: string): Promise<void> {
-  await git(fixture.repo, ['update-ref', 'refs/heads/dev', resultCommit]);
+  // ADR-0056: the long-lived `dev` ref lives in the project's dev clone.
+  await git(fixture.devRepo, ['update-ref', 'refs/heads/dev', resultCommit]);
 }
 
 interface ReclaimReportShape {
@@ -208,10 +215,11 @@ describe('codeestra reclaim command face', () => {
       expect(report.outcome).toBe('SUCCEEDED');
       expect(report.outcomeCounts).toMatchObject({ reclaimed: 1, failed: 0 });
       expect(existsSync(task.workspacePath)).toBe(false);
-      expect(await git(fixture.repo, ['worktree', 'list', '--porcelain']))
+      // ADR-0056: the worktree is registered in, and the Task branch lives in, the dev clone.
+      expect(await git(fixture.devRepo, ['worktree', 'list', '--porcelain']))
         .not.toContain(task.workspacePath);
       // Committed work must survive: the branch is kept, and the user's own checkout is clean.
-      expect(await git(fixture.repo, ['rev-parse', '--verify', branchRef])).toBe(task.resultCommit);
+      expect(await git(fixture.devRepo, ['rev-parse', '--verify', branchRef])).toBe(task.resultCommit);
       expect(await git(fixture.repo, ['status', '--porcelain'])).toBe('');
       const workspaceState = await withStorage(fixture.home, (storage) =>
         storage.getReclamationCandidates(fixture.projectId).workspaces[0]?.state);
@@ -262,7 +270,7 @@ describe('codeestra reclaim command face', () => {
         '--include-failure-scenes'], fixture.environment);
       expect(applied.exitCode).toBe(0);
       expect(existsSync(task.workspacePath)).toBe(false);
-      expect(await git(fixture.repo, ['rev-parse', '--verify', `refs/heads/task/${task.taskId}`]))
+      expect(await git(fixture.devRepo, ['rev-parse', '--verify', `refs/heads/task/${task.taskId}`]))
         .toBe(task.resultCommit);
     } finally {
       await cli(['stop'], fixture.environment);
@@ -419,7 +427,7 @@ describe('reclamation reconcile', () => {
               kind: target?.kind, projectId: fixture.projectId, taskId: target?.taskId,
               resourceId: target?.resourceId, path: target?.path,
               ownershipToken: target?.ownershipToken, externalRef: target?.externalRef,
-              resourceState: target?.resourceState, repositoryRoot: fixture.repo,
+              resourceState: target?.resourceState, repositoryRoot: fixture.devRepo,
               action: 'RECLAIM',
             }],
           },
@@ -427,7 +435,8 @@ describe('reclamation reconcile', () => {
         storage.startReclamationOperation(operationId, Date.now());
         // The removal side effect happened; the Runtime then died before recording anything.
         const removal = await removeOwnedWorktree({
-          repositoryRoot: fixture.repo,
+          // ADR-0056: the worktree is registered in the dev clone.
+          repositoryRoot: fixture.devRepo,
           ownedRoot: join(fixture.home, 'worktrees'),
           path: target?.path as string,
           expectedBranchRef: target?.externalRef as string,

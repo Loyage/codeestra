@@ -135,7 +135,7 @@ IntegrationBatch 的状态为 `CREATED → PREPARING → VERIFYING → INTEGRATI
 | `CREATED` | 已固定每个成员的 (revision, 结果提交, Execution)、整批 `dev` 基线（`dev_ref`+`dev_commit`）与策略摘要；**不碰 Git**。成员全部校验通过（`EXECUTED` + 版本匹配 + 同 revision/commit 的 `PASSED` Task 验证）才写入，一个成员不合法即整体拒绝。覆盖同一成员且未结算的既有批次使新批次被拒（`INTEGRATION_IN_PROGRESS`） |
 | `PREPARING` | 在 Runtime 数据目录的 detached integration worktree 中**按 `task_id` 顺序**逐个合并成员；第 i 个成员的基线是前 i-1 个的结果。能 ff 就 `--ff-only`，否则 `--no-ff`（第一父必须是该成员合并前的基线，候选必须是其后代）；冲突→`CONFLICTED`，其他错误→`FAILED`。批次级 `merge_strategy`/`merged_commit` 取最后一个成员的那一步，此时 `dev` 仍未被触及 |
 | `VERIFYING` | 在最终 `merged_commit` 的 detached 副本上运行**一次**独立集成验证（独立实体 `integration_verification_runs`，`UNIQUE(batch_id)`；绑定整批成员、固定 dev 基线、policy digest/main commit）；失败→`FAILED` |
-| `INTEGRATING_DEV` | 已核验集成验证 `PASSED` 后记录，随后以 `merged_commit` 与记录基线作 CAS 更新 `dev`。该状态存在的原因是：崩溃可能发生在 ref 写入前后，只有拿记录的 `merged_commit` 与 ref 实际值对比才能判定 |
+| `INTEGRATING_DEV` | 已核验集成验证 `PASSED` 后记录，随后把 `dev` 从记录基线前移到 `merged_commit`（ADR-0056：读 ref 比对基线 → 核验 dev clone 自己的检出的三项前置 → `git merge --ff-only` 把 ref、索引与工作区一起前移 → 核验 ref、HEAD 与 `status` 为空）。该状态存在的原因是：崩溃可能发生在 ref 写入前后，只有拿记录的 `merged_commit` 与 ref 实际值对比才能判定 |
 | `INTEGRATED` | ref 已更新才写入 `integrated_commit`，此时每个成员 Task 才 `EXECUTED → SUCCEEDED`。成功后才尝试 `git worktree remove`（不加 force） |
 | `STALE` | 批次固定的证据不再是当前事实：某成员证据移动（`MEMBER_EVIDENCE_MOVED`）或 `dev` 基线在推进时已移动（`DEV_REF_MOVED`）。**不合并、不推进**，成员状态保持原样，成员与 Task 不被改写；终态，不阻塞新批次 |
 | `CANCELLED` | 用户结束一个**记录可证明无副作用**的批次（仍 `CREATED` 且 `worktree_path`/`merge_strategy`/`merged_commit`/`verification_id` 全为空）。取消在 FULL 与 STRICT 下都零确认；取消不成立即见下 |
@@ -235,6 +235,7 @@ PENDING → IN_FLIGHT → ACKNOWLEDGED
 | v25 | `targeted_test_plans`、`dev_full_suite_evidence`（append-only）、`verification_runs.policy_source/plan_*`、`stable_promotions.full_suite_*` | 见 §4：提升前的全量证据是绑定三元组的一等对象，未完成的运行写不成终态 |
 | v26 | `knowledge_snapshots`、`execution_knowledge_snapshots`（两张 append-only） | 不在状态机里：绑定在 `reserveExecution` 的同一事务内写入，因此「Execution 存在」与「已绑定所用知识」不可分开观察（ADR-0041） |
 | v27 | `agent_configurations.plugin_selection_json` | 不在状态机里：见下节 |
+| —（无 schema 变更） | FOUNDATION-087 / ADR-0056 的 dev 事实来源收口：`projects.dev_repo_path` 成为**必需**，长期 `dev` 分支与全部 Task/集成/回收/提升候选事实都在该 clone 里解析 | §4 的集成推进：不再手写 ref，而是读 ref 比对基线 → 核验 dev clone 自己的检出的三项前置 → `merge --ff-only` 前移 ref+索引+工作区 → 核验「ref、HEAD 与 `status` 为空」；`DEV_CHECKOUT_*` 是拒绝而非新状态；批级 `STALE`（`DEV_REF_MOVED`）与 `INTEGRATING_DEV` 仍照旧 |
 | v29 | `projects.dev_repo_path`、`stable_promotions.dev_repo_path/remote_dev_commit/remote_main_commit/pushed_at/main_pushed_at` | §4：`PROMOTING` 的含义由「main 已变」改为「已 push 到远端 `dev` 且读回核对通过、等待拉取」；三个新事实（本地候选 SHA、读回的远端 `dev` SHA、读回的远端 `main` SHA）把「已推送」与「已拉取」分开，不新增状态 |
 
 **命令组（零确认、`--json`、稳定退出码；全部是同一命令面，UI 不新增语义）**

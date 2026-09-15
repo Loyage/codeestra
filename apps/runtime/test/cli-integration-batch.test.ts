@@ -7,6 +7,7 @@ import {
   registerTemporaryDirectory,
   runCli,
 } from './support/runtime-reclamation.js';
+import { provisionDevClone } from './support/agent-fixture.js';
 
 /**
  * The multi-member IntegrationBatch command face, driven through the real CLI and a real Runtime
@@ -92,6 +93,8 @@ for await (const chunk of Bun.stdin.stream()) {
 interface BatchFixture {
   readonly environment: Record<string, string>;
   readonly repository: string;
+  /** The dev clone the project is trusted with (ADR-0056). */
+  readonly devRepo: string;
   readonly projectId: string;
 }
 
@@ -111,6 +114,9 @@ async function fixture(): Promise<BatchFixture> {
   await git(repository, ['add', '.']);
   await git(repository, ['commit', '-q', '-m', 'fixture']);
   await git(repository, ['branch', 'dev']);
+  // ADR-0056: every dev fact comes from a second clone of the same origin that sits on
+  // `dev`; the project is trusted with it explicitly.
+  const devRepo = await provisionDevClone({ repository: repository });
 
   const stubPath = join(tools, 'stub-pi.ts');
   const shimPath = join(tools, 'pi');
@@ -123,11 +129,11 @@ async function fixture(): Promise<BatchFixture> {
     CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: shimPath,
   };
-  const opened = await cli(['open', repository, '--no-open'], environment);
+  const opened = await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { readonly id: string }[];
-  return { environment, repository, projectId: projects[0]?.id as string };
+  return { environment, repository, devRepo, projectId: projects[0]?.id as string };
 }
 
 interface TaskStatusPayload {
@@ -189,7 +195,7 @@ describe('codeestra task integration (multi-member batch)', () => {
   test('composes and integrates two members with one verification, and dev moves only then',
     async () => {
       const { fixture: value, members } = await twoMembers();
-      const devBefore = await git(value.repository, ['rev-parse', 'refs/heads/dev']);
+      const devBefore = await git(value.devRepo, ['rev-parse', 'refs/heads/dev']);
 
       const created = await cli(['task', 'integration', 'create', value.projectId,
         ...memberFlags(members)], value.environment);
@@ -200,7 +206,7 @@ describe('codeestra task integration (multi-member batch)', () => {
       expect(batch).toMatchObject({ state: 'CREATED', devCommit: devBefore });
       expect(batch.members).toHaveLength(2);
       // Composing writes no Git side effect at all: the batch is a record about facts.
-      expect(await git(value.repository, ['rev-parse', 'refs/heads/dev'])).toBe(devBefore);
+      expect(await git(value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(devBefore);
 
       const integrated = await cli(['task', 'integration', 'integrate', value.projectId,
         batch.batchId], value.environment);
@@ -211,10 +217,10 @@ describe('codeestra task integration (multi-member batch)', () => {
         readonly members: readonly { readonly state: string }[] };
       expect(report).toMatchObject({ state: 'INTEGRATED', verificationState: 'PASSED' });
       expect(report.members.map((member) => member.state)).toEqual(['INTEGRATED', 'INTEGRATED']);
-      expect(await git(value.repository, ['rev-parse', 'refs/heads/dev']))
+      expect(await git(value.devRepo, ['rev-parse', 'refs/heads/dev']))
         .toBe(report.integratedCommit);
       // Both members' work is in the integrated tree and both Tasks only reached SUCCEEDED here.
-      const tree = await git(value.repository, ['ls-tree', '-r', '--name-only',
+      const tree = await git(value.devRepo, ['ls-tree', '-r', '--name-only',
         report.integratedCommit]);
       expect(tree.split('\n').filter((path) => path.startsWith('member-'))).toHaveLength(2);
       for (const member of members) {
@@ -237,14 +243,14 @@ describe('codeestra task integration (multi-member batch)', () => {
       expect(replay.exitCode).toBe(0);
       expect(JSON.parse(replay.stdout)).toMatchObject({ state: 'INTEGRATED',
         alreadyCompleted: true, integratedCommit: report.integratedCommit });
-      expect(await git(value.repository, ['rev-parse', 'refs/heads/dev']))
+      expect(await git(value.devRepo, ['rev-parse', 'refs/heads/dev']))
         .toBe(report.integratedCommit);
       await cli(['stop'], value.environment);
     }, 180_000);
 
   test('marks the batch STALE when a member revision moved, and leaves dev untouched', async () => {
     const { fixture: value, members } = await twoMembers();
-    const devBefore = await git(value.repository, ['rev-parse', 'refs/heads/dev']);
+    const devBefore = await git(value.devRepo, ['rev-parse', 'refs/heads/dev']);
     const created = await cli(['task', 'integration', 'create', value.projectId,
       ...memberFlags(members)], value.environment);
     const batch = JSON.parse(created.stdout) as { readonly batchId: string };
@@ -262,7 +268,7 @@ describe('codeestra task integration (multi-member batch)', () => {
     expect(integrated.exitCode).toBe(1);
     expect(JSON.parse(integrated.stdout)).toMatchObject({ state: 'STALE',
       outcomeCode: 'MEMBER_EVIDENCE_MOVED', integratedCommit: null });
-    expect(await git(value.repository, ['rev-parse', 'refs/heads/dev'])).toBe(devBefore);
+    expect(await git(value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(devBefore);
     await cli(['stop'], value.environment);
   }, 180_000);
 
@@ -273,22 +279,19 @@ describe('codeestra task integration (multi-member batch)', () => {
         ...memberFlags(members)], value.environment);
       const batch = JSON.parse(created.stdout) as { readonly batchId: string };
 
-      // `dev` moves through a temporary worktree of the fixture repository, exactly like a user's own
-      // commit to the long-lived branch.
-      const worktree = temporaryDirectory('codeestra-batch-dev-');
-      await git(value.repository, ['worktree', 'add', '-q', worktree, 'dev']);
-      await Bun.write(join(worktree, 'dev-moved.txt'), 'dev moved\n');
-      await git(worktree, ['add', 'dev-moved.txt']);
-      await git(worktree, ['commit', '-q', '-m', 'dev moves on']);
-      const devMoved = await git(worktree, ['rev-parse', 'HEAD']);
-      await git(value.repository, ['worktree', 'remove', '-f', worktree]);
+      // `dev` moves exactly like a user's own commit to the long-lived branch. ADR-0056: that branch
+      // is the dev clone's, and it is checked out there, so the commit happens in the dev clone.
+      await Bun.write(join(value.devRepo, 'dev-moved.txt'), 'dev moved\n');
+      await git(value.devRepo, ['add', 'dev-moved.txt']);
+      await git(value.devRepo, ['commit', '-q', '-m', 'dev moves on']);
+      const devMoved = await git(value.devRepo, ['rev-parse', 'HEAD']);
 
       const integrated = await cli(['task', 'integration', 'integrate', value.projectId,
         batch.batchId], value.environment);
       expect(integrated.exitCode).toBe(1);
       expect(JSON.parse(integrated.stdout)).toMatchObject({ state: 'STALE',
         outcomeCode: 'DEV_REF_MOVED', integratedCommit: null });
-      expect(await git(value.repository, ['rev-parse', 'refs/heads/dev'])).toBe(devMoved);
+      expect(await git(value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(devMoved);
 
       // The stale batch is terminal, so the members can be composed again; cancelling that fresh
       // batch is a zero-confirmation terminal verdict that moves no ref.
@@ -303,7 +306,7 @@ describe('codeestra task integration (multi-member batch)', () => {
       expect(cancelled.exitCode).toBe(0);
       expect(JSON.parse(cancelled.stdout)).toMatchObject({ state: 'CANCELLED',
         outcomeCode: 'CANCELLED_BY_USER', integratedCommit: null });
-      expect(await git(value.repository, ['rev-parse', 'refs/heads/dev'])).toBe(devMoved);
+      expect(await git(value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(devMoved);
       // Cancelling again reports the recorded verdict instead of inventing a second one.
       const again = await cli(['task', 'integration', 'cancel', value.projectId, freshBatch.batchId],
         value.environment);

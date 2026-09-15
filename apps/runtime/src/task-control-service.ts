@@ -17,6 +17,7 @@ import {
 } from '@codeestra/storage';
 import type { AgentRuntimeCoordinator } from './agent-runtime-service.js';
 import { inspectTaskDependencies } from './scheduler.js';
+import { requireRecordedDevRepoPath } from './dev-repo-service.js';
 
 export class TaskControlError extends Error {
   constructor(readonly code: string, message: string) {
@@ -328,8 +329,11 @@ async function decideWorkspace(input: {
     };
   }
   const project = input.storage.getTrustedProject(input.projectId);
+  // ADR-0056: the Task worktree is a worktree of the project's dev clone, so its ownership and
+  // rebuild facts have to be read from that clone.
+  const devRepoPath = requireRecordedDevRepoPath(project);
   const observed = await inspectOwnedWorktreeRebuild({
-    repositoryRoot: project.repoRoot,
+    repositoryRoot: devRepoPath,
     ownedRoot: join(input.runtimeHome, 'worktrees'),
     path: recorded.path,
     branchRef: recorded.branchRef,
