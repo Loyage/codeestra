@@ -968,18 +968,18 @@ function usage(): never {
     [--kind DEVELOPMENT]
   bun run codeestra task list <project-id> [--all]
   bun run codeestra task submit <project-id> <task-id> <expected-version>
-  bun run codeestra task run <project-id> <task-id> <expected-version> [--adapter <pi|codex>]
+  bun run codeestra task run <project-id> <task-id> <expected-version> [--adapter <pi|codex|claude>]
     [--allow-unknown] [--json]
-    Adapters: pi (default), codex. Every run is bound to one Agent; changing --adapter starts a
+    Adapters: pi (default), codex, claude. Every run is bound to one Agent; changing --adapter starts a
     new Execution rather than switching the Agent inside one. This is the explicit start request of
     the same gate the automatic scheduler applies, so it exits 3 when the Task is *waiting* (the
     conflict or capacity reason code is in --json and on stderr) and 1 when it is refused.
   bun run codeestra task pause <project-id> <task-id> <expected-version>
-  bun run codeestra task resume <project-id> <task-id> <expected-version> [--adapter <pi|codex>]
+  bun run codeestra task resume <project-id> <task-id> <expected-version> [--adapter <pi|codex|claude>]
     [--allow-unknown]
     resume continues the *same* provider conversation of a PAUSED Task. A retry is a different
     operation: it requeues a FAILED Task and a new Execution follows.
-  bun run codeestra task retry <project-id> <task-id> <expected-version> [--adapter <pi|codex>]
+  bun run codeestra task retry <project-id> <task-id> <expected-version> [--adapter <pi|codex|claude>]
     [--json]
     Retries a FAILED Task. Nothing is automatic: only this command requeues it. Without --adapter
     the Adapter this Task last ran on is reused. The Task goes back to READY (or BLOCKED when an

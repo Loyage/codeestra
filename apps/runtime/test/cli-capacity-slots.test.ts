@@ -236,7 +236,7 @@ describe('codeestra scheduler capacity and reservations', () => {
       expect(refused.stderr).toContain(code);
     }
     const unknownAdapter = await cli(['scheduler', 'capacity', 'set', projectId, '--limit', '1',
-      '--adapter', 'claude'], environment);
+      '--adapter', 'claude-code'], environment);
     expect(unknownAdapter.exitCode).toBe(1);
     expect(unknownAdapter.stderr).toContain('UNKNOWN_ADAPTER');
     expect(JSON.parse((await cli(['scheduler', 'capacity', 'get', projectId, '--json'], environment))

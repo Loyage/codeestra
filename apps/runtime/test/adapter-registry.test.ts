@@ -73,7 +73,9 @@ echo 0.84.4
   test('registers exactly one adapter instance and rejects unknown IDs', () => {
     const home = temporaryDirectory('codeestra-pi-home-');
     const registry = createAdapterRegistry({ runtimeHome: home, environment: {} });
-    expect(registry.ids()).toEqual(['pi', 'codex']);
+    expect(registry.ids()).toEqual(['pi', 'codex', 'claude']);
+    // The provider's product name is not its Adapter ID: ADR-0040 registers Claude Code as
+    // `claude`, so `claude-code` stays an unknown ID and is refused like any other.
     expect(() => registry.resolve('claude-code'))
       .toThrow('No Agent Adapter is registered for claude-code');
   });

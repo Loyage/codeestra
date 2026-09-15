@@ -250,6 +250,16 @@ export const agentConfigurationEnvironmentVariables = Object.freeze({
     model: 'CODEESTRA_CODEX_MODEL',
     thinkingLevel: 'CODEESTRA_CODEX_THINKING',
   }),
+  /**
+   * Claude Code has no provider launch parameter (the model is chosen with `--model`; the API
+   * surface is chosen by the provider's own environment), so this scope deliberately names no
+   * provider variable. A configured provider is refused with `INVALID_AGENT_CONFIGURATION` instead
+   * of being recorded as applied.
+   */
+  claude: Object.freeze({
+    model: 'CODEESTRA_CLAUDE_MODEL',
+    thinkingLevel: 'CODEESTRA_CLAUDE_THINKING',
+  }),
 });
 
 const constraintsSchema = z.array(constraintSchema).superRefine((constraints, context) => {

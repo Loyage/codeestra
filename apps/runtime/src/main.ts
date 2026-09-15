@@ -18,6 +18,7 @@ import {
 } from './adapter-registry.js';
 import {
   agentConfigurationPayload,
+  agentConfigurationUnsupportedFields,
   resolveAgentConfiguration,
 } from './agent-config-service.js';
 import { AgentRuntimeCoordinator, deriveCommandId } from './agent-runtime-service.js';
@@ -627,6 +628,14 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       const projectId = request.projectId ?? null;
       const invalid = validateAgentConfigurationScope(request.scope, projectId);
       if (invalid !== null) return failure(request.requestId, invalid.code, invalid.message);
+      // Refused before anything is written, so a scope can never hold a field this Adapter would
+      // have to ignore (ADR-0012: the recorded configuration must be the applied one).
+      const unsupported = agentConfigurationUnsupportedFields(request.adapterId);
+      const refused = unsupported.find((field) => request[field] !== undefined);
+      if (refused !== undefined) {
+        return failure(request.requestId, 'INVALID_AGENT_CONFIGURATION',
+          `The ${request.adapterId} Adapter does not accept ${refused}; nothing was written`);
+      }
       storage.setAgentConfiguration({
         id: crypto.randomUUID(),
         scope: request.scope,
