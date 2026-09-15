@@ -419,6 +419,12 @@ bun run codeestra task integration integrate $PROJECT <batch-id>
 **别指望**：合入 `dev` **不等于**发布到 `main`（见 recipe 10）；
 **任务验证 ≠ 集成验证**，两者不能互相替代。
 
+**也可以在界面上做**（「项目」标签页 → `集成批次 · dev`，与上面完全是同一命令面）：批次表与成员表是
+只读的（成员按 task-id 排序）；`组批（task integration create）` 用项目里的任务选成员，每个成员旁边显示
+要发送的 `expected-version`（CAS）；每个批次的 `集成` 与 `取消` 按钮不按本地状态隐藏——能不能做由 Runtime
+判断，被拒时界面逐字显示稳定码。**取消不保证成功**：只有记录能证明无副作用时才会真的 `CANCELLED`，
+否则变成 `RECOVERY_REQUIRED`（退出码 3）并继续占用成员。界面不提供删除批次或重试合并。
+
 ---
 
 ## 10. 我想发布到 main

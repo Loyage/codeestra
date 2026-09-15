@@ -322,10 +322,24 @@ details summary { cursor: pointer; color: var(--muted); padding: 0.3rem 0; }
 
 /* Native terminal and handoff (ADR-0026). Terminal bytes are untrusted text: the stream is a
    scrollable preformatted region, never markup and never an interpreted ANSI screen. */
-.handoff-panel, .dependency-panel, .promotion-panel { margin-top: 0.5rem; min-width: 0; }
-.handoff-panel h4, .dependency-panel h4, .promotion-panel h4 { font-size: 0.95rem; margin: 1rem 0 0.4rem; }
-.handoff-panel h5, .promotion-detail h5 { font-size: 0.85rem; margin: 1.1rem 0 0.35rem; color: var(--muted); }
-.handoff-panel h4 .hint, .dependency-panel h4 .hint, .promotion-panel h4 .hint { font-weight: normal; }
+.handoff-panel, .dependency-panel, .promotion-panel, .integration-panel { margin-top: 0.5rem; min-width: 0; }
+.handoff-panel h4, .dependency-panel h4, .promotion-panel h4, .integration-panel h4 { font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+.handoff-panel h5, .promotion-detail h5, .integration-panel h5 { font-size: 0.85rem; margin: 1.1rem 0 0.35rem; color: var(--muted); }
+.handoff-panel h4 .hint, .dependency-panel h4 .hint, .promotion-panel h4 .hint,
+.integration-panel h4 .hint { font-weight: normal; }
+/* The write controls of one batch are a list of their own: the batch record and the member table
+   above them stay plain text, so a read-only projection never looks like a control. */
+.integration-panel .integration-members-row td { border-bottom: 2px solid var(--line); padding-top: 0; }
+.integration-members { margin: 0.2rem 0 0.4rem; }
+.integration-member-picker > li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+.integration-member-picker select { flex: 1 1 18rem; }
+.integration-operation { border-left: 3px solid var(--accent); padding: 0.4rem 0 0.6rem 0.7rem; }
+.integration-operation-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+.integration-action-note { font-size: 0.78rem; }
+.integration-cancel-reason { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.78rem; }
+.integration-cancel-reason input { max-width: 30rem; }
+.integration-outcome { margin-top: 0.6rem; }
+.integration-outcome .section-heading h5 { margin: 0; }
 /* The safe-point facts read as one line of facts, not as a column of list items. */
 .handoff-panel .facts { flex-direction: row; flex-wrap: wrap; gap: 0.9rem; font-size: 0.78rem; }
 .terminal-stream { max-height: 22rem; min-height: 6rem; margin-top: 0.5rem; font-size: 0.78rem; line-height: 1.45; }
@@ -333,6 +347,12 @@ details summary { cursor: pointer; color: var(--muted); padding: 0.3rem 0; }
 .terminal-write input[aria-label="终端输入"] { flex: 1 1 14rem; }
 .promotion-detail { margin-top: 0.8rem; }
 .promotion-detail .section-heading h5 { margin: 0; }
+/* The dev clone path of a trust (ADR-0047 D05 / ADR-0048): a required field of the
+   「添加本地项目」 form, kept apart from the main path input because the two paths are two clones. */
+.project-dev-repo { display: flex; flex-direction: column; gap: 0.35rem; margin: 0.6rem 0; min-width: 0; }
+.project-dev-repo input { max-width: 32rem; }
+.project-dev-repo p { margin: 0; }
+
 /* `task retry` (ADR-0036) lives in the task detail's 「更多操作」, which opens to full width.
    The form states the CAS version and the Adapter choice before the button is usable. */
 .task-retry-panel { margin: 0.6rem 0 0.2rem; min-width: 0; }

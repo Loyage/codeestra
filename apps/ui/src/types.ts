@@ -151,7 +151,11 @@ export interface VerificationRunView {
   readonly endedAt: number | null;
 }
 
-/** One member of an IntegrationBatch; this round always carries exactly one Task. */
+/**
+ * One fixed member of an IntegrationBatch, as `task.integration.list` (and every batch inside
+ * `task.status`) reports it. `state` is the member's own item state; a batch is multi-member since
+ * ADR-0053, so this is never "the one Task" the way it was before that.
+ */
 export interface IntegrationBatchItemView {
   readonly taskId: string;
   readonly taskVersion: number;
@@ -167,16 +171,37 @@ export interface IntegrationBatchItemView {
 }
 
 /**
- * A Task result entering the long-lived `dev` branch. `integratedCommit` is only set once the ref
- * actually moved; every other state means `dev` was left untouched.
+ * One member of an IntegrationBatch as the single-batch reads report it (`task.integration.get`,
+ * `create`, `cancel`, and every member of the `integrate` report). This is the same record as
+ * `IntegrationBatchItemView`, projected without the per-member `taskVersion` / `devCommit` /
+ * `createdAt` / `completedAt` columns.
+ */
+export interface IntegrationBatchMemberView {
+  readonly taskId: string;
+  readonly executionId: string;
+  readonly revisionId: string;
+  readonly candidateCommit: string;
+  readonly state: string;
+  readonly integratedCommit: string | null;
+  readonly detail: string | null;
+}
+
+/**
+ * A batch of one or more Task results entering the long-lived `dev` branch (ADR-0018 / ADR-0053).
+ * `integratedCommit` is only set once the ref actually moved; every other state means `dev` was left
+ * untouched. This is the shape `task.integration.list` and `task.status` return, with every member
+ * in `items`.
  */
 export interface IntegrationBatchView {
   readonly batchId: string;
+  readonly projectId: string;
   readonly devRef: string;
   readonly devCommit: string;
   readonly state: string;
   readonly integratedCommit: string | null;
   readonly mergeStrategy: 'FAST_FORWARD' | 'MERGE_COMMIT' | null;
+  /** The merge Git produced, recorded before the ref moves; null until a merge was recorded. */
+  readonly mergedCommit: string | null;
   readonly worktreePath: string | null;
   readonly verificationId: string | null;
   readonly outcomeCode: string | null;
@@ -184,6 +209,72 @@ export interface IntegrationBatchView {
   readonly createdAt: number;
   readonly completedAt: number | null;
   readonly items: readonly IntegrationBatchItemView[];
+}
+
+/**
+ * The recorded batch one single-batch command returns (`create` / `get` / `cancel`): the same facts
+ * as `IntegrationBatchView`, keyed by `members` instead of `items`, plus whether this call created
+ * the batch (`created: false` means the command was a replay of an already recorded batch).
+ */
+export interface IntegrationBatchRecordView {
+  readonly batchId: string;
+  readonly projectId: string;
+  readonly devRef: string;
+  readonly devCommit: string;
+  readonly state: string;
+  readonly integratedCommit: string | null;
+  readonly mergeStrategy: 'FAST_FORWARD' | 'MERGE_COMMIT' | null;
+  readonly mergedCommit: string | null;
+  readonly worktreePath: string | null;
+  readonly verificationId: string | null;
+  readonly outcomeCode: string | null;
+  readonly detail: string | null;
+  readonly createdAt: number;
+  readonly completedAt: number | null;
+  readonly members: readonly IntegrationBatchMemberView[];
+  /** True when this call created the batch. */
+  readonly created: boolean;
+}
+
+/** One policy command of the batch's independent integration verification, as it was observed. */
+export interface IntegrationCommandOutcomeView {
+  readonly id: string;
+  readonly argv: readonly string[];
+  readonly cwd: string;
+  readonly timeoutSeconds: number;
+  readonly exitCode: number | null;
+  readonly timedOut: boolean;
+  readonly durationMs: number;
+  readonly stdoutBytes: number;
+  readonly stderrBytes: number;
+  readonly stdoutDigest: string;
+  readonly stderrDigest: string;
+  /** Transient tail for the caller's terminal; empty when the run was replayed. */
+  readonly stdoutTail: string;
+  readonly stderrTail: string;
+  readonly failureDetail?: string;
+}
+
+/** The tree the integration verification ran against (facts, never a pass/fail prediction). */
+export interface IntegrationTreeEvidenceView {
+  readonly headCommit: string;
+  readonly trackedModifications: readonly string[];
+  readonly untrackedFiles: readonly string[];
+  readonly clean: boolean;
+}
+
+/**
+ * What `task.integration.integrate` reports: the merge it produced, the one verification that
+ * covered the whole batch, and every member's fixed binding. `alreadyCompleted` means the recorded
+ * verdict of a finished batch was returned instead of a second integration.
+ */
+export interface IntegrationReportView extends IntegrationBatchRecordView {
+  readonly mergedCommit: string | null;
+  readonly worktreeDetail: string | null;
+  readonly verificationState: string | null;
+  readonly commands: readonly IntegrationCommandOutcomeView[];
+  readonly tree: IntegrationTreeEvidenceView | null;
+  readonly alreadyCompleted: boolean;
 }
 
 export interface TaskStatusView {
@@ -446,6 +537,41 @@ export interface RepositoryIdentityView {
   readonly mainRef: string;
   readonly objectFormat: 'sha1' | 'sha256';
   readonly headCommit: string;
+}
+
+/**
+ * The Runtime's verification of a project's dev clone (ADR-0047 D05 / ADR-0048): a second, separate
+ * clone of the same origin sitting on the project's `dev` branch. `verified: false` always carries
+ * the stable code that names the fact which could not be established; every other field is what the
+ * check could still read.
+ */
+export interface DevRepoInspectionView {
+  readonly path: string;
+  /** The project's dev branch this clone is expected to have checked out. */
+  readonly devRef: string;
+  readonly verified: boolean;
+  readonly code: string | null;
+  readonly detail: string | null;
+  readonly repoRoot: string | null;
+  readonly gitCommonDir: string | null;
+  readonly headCommit: string | null;
+  readonly branchRef: string | null;
+  readonly devRefCommit: string | null;
+  readonly originUrl: string | null;
+  readonly originMatchesProject: boolean | null;
+  readonly clean: boolean | null;
+}
+
+/**
+ * What `project.inspect` returns: the repository identity plus the development baseline and the
+ * verified dev clone. It is also the value a trust echoes back as `expectedIdentity`, so the client
+ * must return it unchanged.
+ */
+export interface ProjectIdentityView extends RepositoryIdentityView {
+  readonly devRef: string;
+  readonly devCommit: string | null;
+  readonly devRefPresent: boolean;
+  readonly devRepoPath: DevRepoInspectionView | null;
 }
 
 export interface VerificationPolicyView {

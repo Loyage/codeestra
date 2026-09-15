@@ -6006,6 +6006,154 @@ promotion criterion」，且其测试**断言**重启后 `uiRunning` 为 `false`
 - `#7` 用既有 `task cancel`、`#8` 用新的 `task recover` 的**现场收口**仍要等 `dev → main` 提升 + 稳定 Runtime 重启之后才在稳定实例里可用。
 - `docs/guides/**` 的版本/校对头按 ADR-0050 D02 未刷新（本格仍在合入流程中，不是该目录最后一次校对的时点）。
 
+## FOUNDATION-089 — 多成员 IntegrationBatch 的 UI 半边：项目级批次视图 + 组批/集成/取消（Wave N / `lane/n3-integration-batch-ui`，ADR-0018 / ADR-0053，无 ADR、无 schema 迁移、**纯投影**）
+
+状态：**代码 + 定向测试 + 文档已完成并已提交**（用户 2026-09-16 确认后由本格提交，提交信息 `feat(ui): project trust sends the dev clone path (FOUNDATION-089)`；一个提交包含本格全部改动，含下面的 dev clone 增量。交付顺序按本格要求：先实现 + 跑检查 → 报告用户 → 确认后才提交）、**未合入 `dev`、未 push、未提升 `main`、未触碰稳定 clone 与其上的稳定 Runtime**。
+基线固定 `dev@f258c59da0126382b0448b85d71a1a80ca347d0c`（`bun install --frozen-lockfile` 已就位），未 rebase、未合并新的 `dev`。
+工作树 `/Users/loyage/Documents/codeestra-wt/n3-integration-batch-ui`，分支 `lane/n3-integration-batch-ui`。
+
+领地：**只改 `apps/ui/**` 与三处文档槽位**。`apps/runtime/**`、`apps/cli/**`、`packages/**`（含 contracts）**一行未动**；拿不到的事实一律报告，没有顺手改后端。
+
+### 本格改了什么
+
+| 位置 | 改动 |
+|---|---|
+| `apps/ui/src/integration-batches.tsx`（新，923 行） | 批次投影的全部纯函数与组件：状态/成员状态词汇与配色、派生终态语义、退出码映射、稳定码词汇表、三个请求构造器、成员排序、只读批次表 + 成员表、写控件区（组批/集成/取消）、结果卡 |
+| `apps/ui/src/App.tsx` | ① 任务详情的「集成记录 · dev」换成共用的只读 `IntegrationBatchTable`（旧实现只显示 `items[0]`，多成员批次会只显示第一个成员），空表文案改为「本任务还没有…」；② 「项目」标签页挂上 `IntegrationBatchPanel`（依赖面板与提升面板之间）；③ 事件刷新：`Integration*` 事件也触发详情/列表重读（此前批次事件不刷新任何视图）；④ 删除已无人使用的 `integrationStateLabel` |
+| `apps/ui/src/types.ts` | 契约对齐的视图类型：`IntegrationBatchView` 补 `projectId`/`mergedCommit`、`IntegrationBatchItemView` 的过时注释改正；新增 `IntegrationMemberView`、`IntegrationBatchRecordView`（`get`/`create`/`cancel` 的 `members` 形状）、`IntegrationCommandOutcomeView`、`IntegrationTreeEvidenceView`、`IntegrationReportView`（`integrate` 的返回） |
+| `apps/ui/src/styles.css` | `.integration-panel` 一族的样式（纳入既有 `.handoff-panel, .dependency-panel, .promotion-panel` 选择器组）、成员表缩进、写控件卡的左侧竖条、请求预览与结果卡；**没有**新增状态色变量（复用了既有 `state-ready`/`state-failed`/`state-cancelled`/`state-running`） |
+| `apps/ui/test/integration-batches.test.ts`（新） | 32 项定向断言（见下） |
+| `docs/guides/ui.md`、`manual.md`、`features.md`、`recipes.md` | 文档同步（逐篇写清在下面的表里） |
+| `docs/tasks/README.md` | 本节 |
+
+### 投影语义（关键决定，全部从命令面记录读出，不在前端发明）
+
+1. **只有 `INTEGRATED` 是绿**。`STALE` / `CANCELLED` 与 `RECOVERY_REQUIRED` / `FAILED` / `CONFLICTED` 都不拿 `state-ready`；文案分别写「已失效 · 未合并、dev 未动」「已取消 · 未合入」「需要人工对账 · 未收口（成员仍被占用）」。`INTEGRATED` 旁边固定写「不等于已进 main」（与 `promotion.tsx` 同一套措辞：合入 dev ≠ 已提升）。
+2. **三种结果分开呈现**（`integrationIntegrateVerdict`）：`INTEGRATED`（本次真的推进了 `dev`，退出码 0）/ `ALREADY_INTEGRATED`（批次已终态，返回既有记录，`alreadyCompleted: true`——**不**说成本次合并）/ `NOT_INTEGRATED`（`STALE`/`CANCELLED`/`FAILED`/`CONFLICTED`，退出码 1，`dev 未推进`）/ `NEEDS_RECONCILIATION`（`RECOVERY_REQUIRED`，退出码 3）。取消同样三分：`CANCELLED`（退出码 0）/ `RECOVERY_REQUIRED`（**没有被取消**，退出码 3，成员继续被占用）/ 已终态幂等返回（退出码 1）。这些映射与 `apps/cli/src/main.ts` 的 `exitForIntegrationVerdict` 与 `cancel` 分支逐条对齐，并由测试从 CLI 源码核对。
+3. **按钮不按本地允许清单隐藏/禁用**（照 `task-retry.tsx` 先例）：每个批次在任何状态都渲染「集成」「取消」两个按钮，只有「有一个请求在飞」时 `disabled`；被拒绝时显示 `CODE: <Runtime 说明>（<本地词汇表一句>）`，稳定码逐字保留。测试用 `IntegrationBatchState` 全部 10 个取值各渲染一遍来钉住这一点。
+4. **每个写控件正上方写清它会做什么**，并且取消那段必须包含「取消**不保证成功**」：只有记录证明无副作用（仍 `CREATED` 且无 worktree/合并/验证）才真会变成 `CANCELLED`，否则改为 `RECOVERY_REQUIRED / RECONCILE_REQUIRED`（退出码 3）并继续占用成员、FULL/STRICT 都零确认。测试同时断言渲染顺序（说明在按钮之前）与源码顺序。
+5. **只读部分不含任何控件**：批次表/成员表/请求预览都是纯文本，测试断言 `IntegrationBatchTable` 的 HTML 里没有 `<button>`/`<input>`/`<select>`。写控件在独立小节的独立卡片里。
+6. **成员按 `task_id` 排序呈现**（ADR-0053 D02：请求顺序不是批次的一部分，写入/读取/合并三处一致）；界面在渲染前排序，并由测试核对 storage 侧的两处 `ORDER BY item.task_id`，保证成员表不会与合并顺序矛盾，也保证多成员批次不因旧实现只看 `items[0]` 而少显示成员。
+7. **请求逐字按契约**：`task.integration.create` 送 `{commandId, projectId, members[{taskId, expectedVersion}]}`；`integrate` 送 `{commandId, projectId, batchId}`；`cancel` 送 `{commandId, projectId, batchId, reason?}`（**空白 reason 直接省略字段**，契约是 `trim().min(1)`，发空字符串会被拒）。成员 CAS 版本就是界面显示的那个值（过期由 Runtime 答 `CONCURRENT_MODIFICATION`），界面**不**在本地预判。
+8. **组批不按任何本地清单过滤**：成员下拉框列出当前项目的**每个**任务（`#编号 · 状态 · v版本 · 规格前 60 字`），不隐藏、不禁用、不按状态过滤，能不能当成员由 Runtime 判断；契约上限 32 个成员只作为事实显示，不当门禁。
+
+### 命令面缺投影的事实（按任务要求单列，界面**没有**自己算）
+
+- **批级进度**：没有百分比/剩余时间/阶段时间戳这类字段，`state` 是记录里唯一的进度事实（`CREATED` → `PREPARING` → `VERIFYING` → `INTEGRATING_DEV` → 终态）。界面把这句写进面板，不自己算一个看起来像事实的数。
+- **成员级耗时**：`integration_batch_items.created_at` 是**批次组成时间**（所有成员同一值），`completed_at` 只在成员落定（随批次合入或成为失败成员）时才有值；没有「该成员自己的开始时间」。因此界面**不显示**成员耗时，只如实显示成员状态。
+- **`task.integration.get` 的成员少四列**：它返回的 `members` 没有 `taskVersion`/`devCommit`/`createdAt`/`completedAt`，而 `list`（与 `task.status`）的 `items` 有。界面用 `list` 一次读完整个项目（含每成员全部字段），**未调用 `get`**；若以后要单批次详情页，`get` 可直接接上。
+- **批级没有独立的 CAS 版本号**：`create` 的 CAS 是每个成员的 `expectedVersion`；`integrate`/`cancel` 只拿 `batchId`，界面显示过期时的事实表现是批级 `STALE`（`MEMBER_EVIDENCE_MOVED` / `DEV_REF_MOVED` / `DEV_REF_CHANGED`），**不是** `CONCURRENT_MODIFICATION`。词汇表因此把 `CONCURRENT_MODIFICATION` 只解释为「任务版本前进 / 界面显示的值过期」，并把 `MEMBER_EVIDENCE_MOVED` / `DEV_REF_MOVED` / `DEV_REF_CHANGED` 分列。
+- **成员没有「现在是否还等于该成员当前事实」的字段**：批次记录只固定**当时**的值（`list` 也不重算）。该判断只在 `integrate` 时发生（`MEMBER_EVIDENCE_MOVED`），所以界面不显示「成员已过期」这类需要推断的列。
+- **`INTEGRATED` 的 `outcomeCode` 保持 `null`**（storage 的完成事务只改 state/`integrated_commit`/`detail`/`completed_at`）：界面显示 `—`，不自己造一个码。
+
+### 实际运行的定向验证（ADR-0038：本 branch 只跑定向；**未跑**全量）
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| UI 类型检查 | `bun run typecheck:ui` | 退出码 0 |
+| UI 定向测试 | `bunx vitest run apps/ui` | **12 文件 / 172 项通过**（本格新增两个测试文件：`integration-batches.test.ts` **32 项** + `project-trust.test.ts` **16 项**；后者属下面的 dev clone 增量） |
+| dev 通道构建 + 标记 | `bun run build:ui:dev` + `grep -o 'data-channel="dev"' apps/ui/dist/index.html` | 构建成功；grep 命中 `data-channel="dev"`（ADR-0049） |
+
+**未跑（并说明原因）**：`bun run check` / `just check` / `just verify` / `check:fast` 与本 branch 的全量测试、`bun run test:unit`、`test:storage` —— ADR-0038 明确禁止在 lane 分支跑这些；它们属于 `dev` 候选上的提升前全量。`bun run test`（vitest 全量 = domain + `apps/ui`）也未跑，因为本格只改了 `apps/ui/**`（domain 一行未改），只跑了 UI 那部分。**未**起任何真实 Runtime、**未**做端到端点击、**未**做浏览器/桌面/键鼠自动化（ADR-0008）。
+
+新测试全部落在 `apps/ui/test/**`，`vitest.config.ts` 的 `include` 已覆盖该目录，**不需要**改任何测试列表或配置。
+
+### 定向测试钉住的东西（`apps/ui/test/integration-batches.test.ts`）
+
+文件头写明了「能证明什么 / 不能证明什么」。关键断言：
+
+- **词汇表从 storage 源码读出**：`IntegrationBatchState` / `IntegrationItemState` 两个 union 逐值断言有标签、非 `INTEGRATED` 的标签里不得出现「已合入/完成/成功/已进 main」，`state-ready` 只允许出现在 `INTEGRATED`；终态集合与 `integration-service.ts` 的 `isFinished` 对齐。
+- **非成功的终态不被读成成功**：把 10 个 state 全渲染一遍，断言 `data-batch-state` 存在、`state-ready` 只出现 **1 次**；`STALE`/`CANCELLED` 两种 integrate 结果卡的 `data-integration-verdict` 是 `NOT_INTEGRATED`、文案含「未合入 / 退出码 1 / dev 未推进」；`RECOVERY_REQUIRED` 是 `NEEDS_RECONCILIATION`（含「需要人工按记录处理」）；取消未成立时是 `data-integration-verdict="RECOVERY_REQUIRED"` 且含「没有被取消」。
+- **成员顺序**：打乱输入后 `integrationMembersInTaskOrder` 与渲染顺序都是 `task_id` 升序，且排序幂等；storage 里至少两处 `ORDER BY item.task_id`。
+- **命令字段与契约一致**（漂移守卫）：用 `contractBlock()` 从 `packages/contracts/src/index.ts` 取出每个命令的条目，断言字段名、`.min(1)`、`.max(maxIntegrationBatchMembers)`，并从源码读出 `maxIntegrationBatchMembers` 与界面常量比对；`reason` 空白时省略、有值时 trim；请求预览逐行列出 `members[i].taskId` / `members[i].expectedVersion`，`commandId` 显示为「（点击时新生成）」而不假造一个已发送的值。
+- **退出码**：`integrationVerdictExitCode` / `integrationCancelExitCode` 对全部 state 与 CLI 源码里的 `exitForIntegrationVerdict` 与 cancel 分支对齐。
+- **词汇表不发明码**：解析 `integration-service.ts` 里所有 `new IntegrationServiceError('X'` 与 `outcomeCode: 'X'`，逐个断言有本地解释；再断言词汇表里每个键都能在 storage/contracts/service/CLI 四份源码中至少一份里找到（防止界面自己造码）。
+- **取消的「可能失败」语义**：`integrationCancelActionNote` 与渲染出的 HTML 都含「不保证成功」「RECOVERY_REQUIRED」「退出码 3」「没有被取消」「零确认」「不会推进 dev」「CREATED」「worktree」；并断言这段说明在正文里位于取消按钮之前。
+
+### 需要人工目视确认的项（ADR-0008 下没有机器断言）
+
+- **窄屏/矮窗口**：批次表 8 列 + 每个批次下挂成员表 6 列，窄屏时只靠 `.table-scroll` 横向滚动；是否被挤压到难读、成员表缩进是否足以看出从属关系，需要人工看（960 / 850 / 620px 三档＋矮窗口）。
+- **写动作按钮与只读区块是否一眼可分**：批次表/成员表无控件，写控件在独立卡片里、左侧有强调色竖条；按钮与说明文字的区别是否足够明显，需要人工看。
+- **`STALE` / `CANCELLED` / `RECOVERY_REQUIRED` 的色与文案是否会被误读成成功**：三者用的是警示/失效色（`state-cancelled` / `state-failed`），但「已失效」「已取消」开头的字面仍可能被扫成「已完成」，需要人工确认。
+- **三主题可读性**：浅色 / 深色 / `system`（含 dev 通道的橙色强调色）下，状态徽标、`pre` 请求预览、结果卡的对比度与层次。
+- **紧凑密度与字号三档**（ADR-0045）下的批次卡与成员表间距；`reduced` 动效下无异常。
+- **键盘顺序**：组批成员行 → `＋ 增加一个成员` → 按钮 → 每个批次的「集成 → 取消原因 → 取消」，焦点顺序是否符合阅读顺序。
+
+### ADR-0050 文档同步（逐篇写清改了哪一节；不需要改的写明原因）
+
+| 文件 | 改了什么 |
+|---|---|
+| `docs/guides/ui.md` | §2.3（j）：「集成记录 · dev」改为「集成批次 · dev」——新列、每行下挂**按 `task_id` 排序**的成员表、空表文案、`PREPARING`/`INTEGRATED`/`STALE`/`CANCELLED`/`RECOVERY_REQUIRED` 的文案，并写明这张表里没有控件；§5.2 由「两个只读面板」改为三个；**新增 §5.3「项目级集成批次（`集成批次 · dev`）——本页唯一能改集成状态的地方」**（逐元素：只读部分/组批区/写控件区、两段按钮上方原文逐字引用、结果卡与 `data-integration-verdict` 取值表、不使用 `task.integration.get` 的理由）；§9.1 新增两行只读条目（任务详情的批次表与成员表；项目的刷新/表/预览/结果卡）；§9.2 新增三行写命令（`task.integration.create` / `integrate` / `cancel`）。**未改**顶部版本/校对头（本格在 lane 上，ADR-0050 D02） |
+| `docs/guides/manual.md` | §8「合入 dev」新增「在界面上组批、集成与取消」小节（三个写控件做什么、取消不保证成功、批级 `INTEGRATED` ≠ 已进 main、界面不提供删除批次/重试合并），并在「想深入看哪篇」加一行 `ui.md §5.3` |
+| `docs/guides/features.md` | §「成果、验证与集成」的「集成批次」行：UI 位置由「任务详情 → 集成记录 · dev（UI 尚无组批/取消入口）」改为「任务详情 → `集成批次 · dev`（只读）；『项目』标签页 → 项目级批次视图 + 组批/集成/取消（写控件不按本地状态隐藏，取消不保证成功）」 |
+| `docs/guides/recipes.md` | recipe 9「我想把成果合入 dev」末尾新增「也可以在界面上做」段（项目标签页 → 集成批次；成员 CAS 显示；按钮不按状态隐藏；取消不保证成功） |
+| **不需要改** | `docs/guides/cli-reference.md`：命令面**一行未改**（无新命令/flag/退出码/稳定码，界面只是同一命令面的前端，第一原则）。`docs/guides/concepts.md`：集成语义与 FULL/STRICT 差异未变。`docs/guides/troubleshooting.md`：没有新增稳定码需要解释（界面显示的码都是既有码）。`docs/decisions/**`：本格无 ADR，ADR-0053 正文不改（它是本格的事实来源）。`docs/architecture/**`：无架构变化。`PROJECT_SPEC.md`、`AGENTS.md`、`.codeestra/**`：按领地禁改。`docs/guides/workflow.md` / `acceptance-checklist.md`：前者描述的是命令面流程（未变），后者的人工核对项已由上文「需要人工目视确认的项」覆盖且不属本格槽位 |
+
+**超出三个共享槽位的一处（如实标注）**：`docs/guides/manual.md` 不在任务给的共享槽位清单里，但 `AGENTS.md` 的 ADR-0050 纪律写明「用户日常做法变化→ `manual.md` + `recipes.md`」；本格给界面加了三个**可点的写动作**（组批/集成/取消），属于日常做法变化，因此在 §8 加了一个小节与一行交叉引用（**未动**该篇顶部的版本/校对头）。若协调者认为越界，这一处可单独回退。
+
+### 剩余问题（如实）
+
+- **已提交、未 push**：提交在 `lane/n3-integration-batch-ui` 上（`apps/ui/**` 下 3 个改动 + 4 个新增：`integration-batches.tsx`、`project-trust.tsx` 与两个测试文件，另有 5 份文档：`ui.md` / `manual.md` / `features.md` / `recipes.md` / `docs/tasks/README.md`）；未 push、未合并 `dev`、未提升 `main`、未碰稳定 clone。
+- **没有端到端验收**：真实的组批/集成/取消点击（含 `CONCURRENT_MODIFICATION`、`INTEGRATION_IN_PROGRESS`、`STALE` 路径）没有在真 Runtime 上跑过——本格禁止起真实 Runtime 做点击，也不做浏览器自动化。Runtime 侧行为由 ADR-0053 / FOUNDATION-081 的测试与 CLI 端到端覆盖，本格只保证「显示的是它返回的东西」。
+- **任务详情里既有的「合入 dev」按钮仍按本地允许清单（`canIntegrate`）隐藏**：那是 `task.integrate`（单成员即时集成）的既有投影，不在本格范围内，本格**未改**；它与新面板的「不按本地清单隐藏」原则不一致，如实报告，留给后续格决定是否统一。
+- **`docs/guides/acceptance-checklist.md` §B6 仍写「执行记录 / 验证记录 / 集成记录」**：该篇不在本格槽位（共享槽位只列了 `ui.md` / `features.md` / `recipes.md` / `docs/tasks/README.md`），因此**未改**；它只是表格名从「集成记录 · dev」变为「集成批次 · dev」的命名漂移，不涉及行为断言。
+- **`task.integration.get` 未被界面调用**（见「命令面缺投影的事实」第 3 条）：若后续要单批次详情视图，可直接接上，不需要新的后端能力。
+- **三主题/窄屏/紧凑密度/键盘顺序只有人工确认**（见上一节的清单）。
+- 本格**未**触碰稳定 clone 与稳定 Runtime，也**未**用产品 `promotion` 命令面。
+
+### 增量（2026-09-16）：dev clone 路径进入「添加项目」表单（用户已确认本增量提交）
+
+**背景（N1 / FOUNDATION-087 的接口面）**：N1 把 `projects.dev_repo_path` 变成必需：`project.trust` 不带
+`--dev-repo` 会以 `DEV_REPO_REQUIRED` 拒绝（在任何写入之前）。本格原来的「添加项目」**不发送 `devRepoPath`**，
+所以本波合入后从界面添加项目会直接失败。命令面字段（`project.trust` 的 `devRepoPath?`、`project.inspect` 的
+`devRepoPath?`，FOUNDATION-077 / schema v29）早已存在，因此这是**UI 对齐**：无新语义、无新门禁、后端一行未改。
+
+| 位置 | 改动 |
+|---|---|
+| `apps/ui/src/project-trust.tsx`（新，256 行） | `projectInspectCommand`（带 `devRepoPath` 时才发它）/ `projectTrustCommand`（值**原样**放进 `devRepoPath`；空值时不发这个字段）/ `projectTrustPolicyConfirmation`（状态镜像、不替 Runtime 描述）/ `canSubmitProjectTrust`（表单级两条条件）/ `projectDevRepoPathMissing`；`DEV_REPO_*` 家族（从 `DevRepoCode` union 读出）与信任面拒绝码的本地词汇表；`ProjectDevRepoInput` 与 `DevRepoInspectionRows` 两个只读/输入组件 |
+| `apps/ui/src/App.tsx` | 「添加本地项目」新增 dev clone 路径输入（必填）、`dev 基线` 与 `dev clone（这次会记录）` 两行身份审阅、检查项目带上 `devRepoPath`、信任按钮改用 `canSubmitProjectTrust`、`project.trust` 用构造器发（含 `devRepoPath`），并把拒绝改成按钮下方的 `信任被拒绝：<码>: <说明>（<本地解释>）` 局部提示（不再混在全局横幅里）；改动 dev clone 路径同样清空已检查出的结果 |
+| `apps/ui/src/types.ts` | 新增 `DevRepoInspectionView`（与 `devRepoInspectionSchema` 逐字段一致）与 `ProjectIdentityView`（`devRef`/`devCommit`/`devRefPresent`/`devRepoPath`） |
+| `apps/ui/src/styles.css` | `.project-dev-repo` 一族（输入、小字、缺值提示） |
+| `apps/ui/test/project-trust.test.ts`（新） | 16 项定向断言（见下） |
+| `docs/guides/ui.md` §5.1、`docs/guides/features.md` 的「项目识别」/「项目接入（trust）」两行 | 文档同步（见表下说明） |
+
+**增量语义（关键决定）**
+
+1. **值原样发送**：`devRepoPath` 不做 trim/规范化/存在性检查（与 CLI 的 argv 一致）；界面**不**判定路径合法性，
+   `DEV_REPO_*` 稳定码与信任面拒绝码照原样显示 + 本地词汇表一句解释（照 `task-retry.tsx` 先例）。
+2. **不假装成功**：dev clone 路径为空（含只有空格）时**按钮不可点**并写明原因；同时请求构造器在空值时
+   **省略** `devRepoPath`（不会造一个值），所以即使被程序化按下也不会得到一个「看起来成功」的信任。
+3. **身份审阅带 dev clone**：检查项目时把填好的 `devRepoPath` 一并交给 `project.inspect`，因此回述回去的
+   `expectedIdentity` 已包含用户看过的核验结果（Runtime 对该字段做逐字节比较，含 `dev clone` 与 `dev` 基线）。
+4. **未通过核验也能看到**：界面**不**因为 `verified: false` 隐藏/禁用信任按钮——那是“本地判定路径合法性”；
+   而是把核验结果（码/detail/本地解释/分支/HEAD/干净/origin）完整展示，按下后由 Runtime 再次拒绝（不写任何东西）。
+5. **词汇表漂移守卫**：`DevRepoCode` 的 7 个取值从 `apps/runtime/src/dev-repo-service.ts` 的 union 读出并逐个
+   要求有解释；信任面的 `REPOSITORY_CHANGED`/`DEV_REF_MISSING`/`VERIFICATION_POLICY_CHANGED`/`IMPACT_POLICY_CHANGED`/
+   `INVALID_STATE`/`INVALID_REQUEST` 逐个在源码中核对；`DEV_REPO_REQUIRED`（N1 引入，本树没有任何源码可证实）单独放在
+   一个 `forwardDeclaredTrustCodes` 列表里，测试把该列表**钉死为恰好一项**，所以第二个无法证实的码不可能静默长出来。
+6. **类型与 schema 双向对齐**：测试把 `DevRepoInspectionView` 的 13 个字段与 `devRepoInspectionSchema` 的字段集合逐字段比较
+   （本树实测两边都是这 13 个）。
+
+### 增量实际运行的定向验证
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| UI 类型检查 | `bun run typecheck:ui` | 退出码 0 |
+| UI 定向测试 | `bunx vitest run apps/ui` | **12 文件 / 172 项通过**（新增 `project-trust.test.ts` **16 项**全绿） |
+| dev 通道构建 + 标记 | `bun run build:ui:dev` + `grep -o 'data-channel="dev"' apps/ui/dist/index.html` | 构建成功；grep 命中 |
+
+**未跑（原因同上）**：`bun run check` / `just check` / `just verify` / `check:fast` 与任何全量测试（ADR-0038）；
+未起真实 Runtime、未做端到端点击、无浏览器/桌面自动化（ADR-0008）。本增量**未**改 `apps/runtime/**`、`apps/cli/**`、
+`packages/**`（`project.trust` 在**本树**尚不强制 `devRepoPath`——那个拒绝属 N1；本格只保证界面把字段带上）。
+
+**本增量新增的人工目视项**：两个路径输入（主路径 vs dev clone）在界面上是否一眼可分；
+`dev clone（这次会记录）` 那一行在未通过核验时代码/detail/本地解释/事实串是否可读；
+窄屏下这个键值行与输入框是否被挤压；空值提示在浅/深/`system` 三主题下是否与错误色区分开。
+
+**本增量如实报告的缺口（不属本格范围，未改）**：界面发送 `project.trust` 时仍**不发送** `expectedImpactPolicy`
+（契约里它是可选字段，CLI 总是发）：从界面信任的项目会记不到影响映射，于是影响判定恒为 `UNKNOWN`。
+这是本格之前就存在的 UI/CLI 差异，本增量只对齐 `devRepoPath`，所以把它列在这里。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），

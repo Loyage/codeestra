@@ -19,9 +19,9 @@
 
 | 能力 | 能做什么 | CLI 入口 | UI 位置 | ADR |
 |---|---|---|---|---|
-| 项目识别 | 读仓库身份：工作树根、`main` ref、对象格式、HEAD、`dev` ref/commit | `project inspect [path]` | 项目 → 添加本地项目（路径输入后） | — |
+| 项目识别 | 读仓库身份：工作树根、`main` ref、对象格式、HEAD、`dev` ref/commit 与 dev clone 的核验结果 | `project inspect [path] [--dev-repo <dev-clone>]` | 项目 → 添加本地项目（主路径 + **dev clone 路径（必填）**输入后） | [0047](../decisions/0047-github-mediated-stable-promotion.md) |
 | 验证策略展示 | 打印 `main` ref 上 `.codeestra/policies/verification.json` 的状态、digest 与逐条命令 | `project policy [path]` | 项目 → 验证策略 | [0006](../decisions/0006-task-verification-policy.md) |
-| 项目接入（trust） | 注册项目；把「你刚看到的身份 + 验证策略 digest + 影响映射 digest」一起确认；FULL 零确认 / STRICT 输 `TRUST` | `project trust [path] [--yes]` | 项目 → 添加/信任此项目 | [0011](../decisions/0011-default-full-permission-mode.md)、[0031](../decisions/0031-impact-snapshot-and-deterministic-conflict-analyzer.md) |
+| 项目接入（trust） | 注册项目；把「你刚看到的身份（含 dev clone 核验结果）+ 验证策略 digest + 影响映射 digest」一起确认；`--dev-repo <dev-clone>` 记录 dev clone（`--dev-repo none` 清除，省略则保留原值），无法核验则以 `DEV_REPO_*` 拒绝并**不**记录空值；FULL 零确认 / STRICT 输 `TRUST` | `project trust [path] [--yes] [--dev-repo <dev-clone>\|none]` | 项目 → 添加/信任此项目（**dev clone 路径必填，为空时按钮不可点**；拒绝时显示稳定码 + 本地解释） | [0011](../decisions/0011-default-full-permission-mode.md)、[0031](../decisions/0031-impact-snapshot-and-deterministic-conflict-analyzer.md)、[0047](../decisions/0047-github-mediated-stable-promotion.md)、[0048](../decisions/0048-dev-clone-and-separate-runtime-home.md) |
 | 一条命令接入并打开 | inspect → 策略展示 → 必要时确认 → 打开界面并预选该项目 | `open [path] [--yes] [--no-open]` | —（它就是打开 UI 的那条路） | [0007](../decisions/0007-local-web-ui-entry.md)、[0008](../decisions/0008-efficiency-first-service-form.md) |
 | 项目列表 | 列出已信任项目及其确认策略 | `project list` | 顶部项目选择器 | — |
 | 影响映射校验 | 报告 `main` ref 上的 `.codeestra/impact.json` 是否存在且是已确认的那一份 | `project impact validate [path] [--json]` | **调度 → 影响映射 · impact.json** | [0031](../decisions/0031-impact-snapshot-and-deterministic-conflict-analyzer.md) |
@@ -37,7 +37,7 @@
 | 暂停 / 恢复 | 暂停是协作停止（确认 provider 退出后才 `PAUSED`）；恢复以 provider conversation resume 继续 | `task pause`、`task resume <…> [--adapter <id>] [--allow-unknown]` | 任务详情 → 暂停 / 继续 | [0016](../decisions/0016-task-pause-cancel-archive.md) |
 | 重试失败任务 | 只对 `FAILED` 生效；重新入队（可能需要先重建 worktree）后，用同一个门禁请求一次启动 | `task retry <project> <task> <expected-version> [--adapter <id>] [--json]` | 任务详情 →「更多操作」→ `重试`（显示 CAS 版本与将使用的 Adapter，可换成已注册的 Adapter；被拒绝时显示 Runtime 的稳定码，「等待」与「已启动」分开显示） | [0036](../decisions/0036-task-retry-after-failure.md)、[0042](../decisions/0042-rebuild-reclaimed-worktree.md) |
 | 取消 / 归档 | 取消是终态（不自动重开）；归档是软删除（只写 `archived_at`，不删行、不回收） | `task cancel`、`task archive`、`task unarchive` | 任务详情 →「更多操作」 | [0016](../decisions/0016-task-pause-cancel-archive.md) |
-| 状态投影 | 列出 Execution / Session / 验证 / 集成投影，附 Agent 完成注记与散文提问等待 | `task status <project> <task> [--json]` | 任务详情（执行/验证/集成记录） | [0013](../decisions/0013-read-only-agent-transcript-view.md) |
+| 状态投影 | 列出 Execution / Session / 验证 / 集成投影，附 Agent 完成注记与散文提问等待 | `task status <project> <task> [--json]` | 任务详情（执行 / 验证 / `集成批次 · dev` 记录，后者含每个批次的成员表） | [0013](../decisions/0013-read-only-agent-transcript-view.md) |
 | 规格修订 | 创建新 revision（可只改理由、只加约束）并列出历史 | `task revision create`、`task revision list` | —（界面无入口） | [0028](../decisions/0028-revision-delivery-and-stale-session-startup-reconcile.md) |
 | Revision 投递台账 | 单独读取与解决「修订是否真的到达运行中的 Execution」 | `task revision delivery list/get/resolve` | —（界面无投影） | [0028](../decisions/0028-revision-delivery-and-stale-session-startup-reconcile.md) |
 | 优先级（**当前无命令面**） | 优先级是 Task 模型与调度排序的一部分（降序优先），但**没有任何 CLI 命令可以改它**：`task create` 不接受 priority 参数，新建 Task 的 priority 为 0 | —（无入口） | 任务工作台排序 | [0030](../decisions/0030-phase2-parallel-scheduling.md) |
@@ -82,7 +82,7 @@
 | 成果提交 | FULL 单步 capture；STRICT 两步 prepare + commit `--confirm`。固定 HEAD/ChangeSet/revision，沿用仓库 identity，正常跑 hooks，失败保留现场 | `task result capture`、`task result prepare`、`task result commit … --confirm` | 任务详情 → 提交成果 / 成果提交授权 | [0003](../decisions/0003-task-result-commit-policy.md)、[0011](../decisions/0011-default-full-permission-mode.md) |
 | 任务验证 | 用 `main` ref 上人工维护的策略，在固定 commit 的 detached 副本里运行；证据不含原始输出 | `task verify [execution-id] [--policy auto\|targeted\|project] [--background]` | 任务详情 → 验证任务 | [0006](../decisions/0006-task-verification-policy.md)、[0008](../decisions/0008-efficiency-first-service-form.md) |
 | 分层测试证据 | 分支把定向范围写进 `.codeestra/tests.json`；`record` 把它快照成绑定 `(task, revision, commit, digest)` 的 append-only 记录；`verify` 只消费已记录的计划 | `task tests record/show/history` | —（界面只显示验证结果与证据，无计划/来源面板） | [0038](../decisions/0038-branch-targeted-tests-and-dev-full-suite.md)、[0039](../decisions/0039-layered-verification-evidence.md) |
-| 集成批次 | 在 detached integration worktree 合并（能 ff 就 ff，否则 `--no-ff`）→ 独立集成验证 → PASSED 后 CAS 推进 `dev`；多成员批次可显式组批，一次验证覆盖整批 | `task integrate`、`task integration create\|integrate\|list\|get\|cancel` | 任务详情 → 集成记录 · dev（UI 尚无组批/取消入口） | [0018](../decisions/0018-task-result-integration-into-dev.md)、[0053](../decisions/0053-multi-member-integration-batch.md) |
+| 集成批次 | 在 detached integration worktree 合并（能 ff 就 ff，否则 `--no-ff`）→ 独立集成验证 → PASSED 后 CAS 推进 `dev`；多成员批次可显式组批，一次验证覆盖整批 | `task integrate`、`task integration create\|integrate\|list\|get\|cancel` | 任务详情 → `集成批次 · dev`（只读）；「项目」标签页 → 项目级批次视图 + `组批` / `集成` / `取消`（写控件不按本地状态隐藏，取消不保证成功） | [0018](../decisions/0018-task-result-integration-into-dev.md)、[0053](../decisions/0053-multi-member-integration-batch.md) |
 
 ## 稳定提升
 
