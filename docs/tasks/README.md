@@ -4208,6 +4208,63 @@ boot 身份不同（ADR-0022 的重启判定），且新进程确实运行新代
 - `apps/ui/dist` 在本工作树不存在（gitignore 本地状态），因此 `UI_ASSETS_MISSING` 路径与 `bun run build:ui` 是**按源码描述**，未实测。
 - 未验证 pi/codex/claude 是否真正读取 `knowledge-context.md`（源码事实是 Adapter 不消费 `knowledgeSnapshotRefs`，已如实写入 `features.md` 与 `troubleshooting.md`）。
 - 只提交到 `lane/j1-user-guide`，未 push、未 rebase、未触碰 `main` 稳定工作树或其它 lane 的工作树。
+## FOUNDATION-072 — 固定 shell：标题栏与工作空间不随内容滚动（Wave J / J3，无 ADR，无迁移）
+
+状态：**已实现并提交到 lane 分支**（未 push、未提升 `main`、未重启稳定 Runtime）。纯 `apps/ui/**` 改动：无 ADR、无 schema 变更、无后端改动（`apps/**` 除 `apps/ui/**` 与 `packages/**` 零改动）、未新增依赖、未改 `App.tsx`。
+基线：`dev = 54ff3049e7a4b3e85726210e39c71c6751403b37`。工作树：`/Users/loyage/Documents/codeestra-wt/j3-fixed-shell-layout`，分支 `lane/j3-fixed-shell-layout`。
+
+### 用户原话（验收标准，一字未改）
+
+> UI：标题栏和工作空间必须牢牢占住自己的位置，不会因为任务列表过长，就会导致往下滑动的时候这些东西就到屏幕外去了，任务列表过长理当只影响自己这一部分的滑动。
+
+### 根因
+
+`apps/ui/src/styles.css` 的 `.app` 用 `min-height: 100vh`：整页随内容长高，`body` 成了滚动容器，于是 `header.app-header`（标题栏）与 `aside.sidebar`（其 `nav-caption` 原文就是「工作空间」）会随页面滚动一起被推出视口。FOUNDATION-058 把任务列表从短的嵌套滚动框改成了页面滚动；本格改回「该滚的是哪一层」——不是页面，而是工作区那一列。
+
+### 改法（只动布局段）
+
+- **`.app`**：`min-height: 100vh` → `height: 100vh; height: 100dvh` 加 `overflow: hidden`；第二行由 `1fr` 改成 `minmax(0, 1fr)`（`1fr` 的 auto 最小值会把行撑开，等于把内容撑破固定视口）。
+- **`.workspace-shell`**：成为唯一滚动容器（`overflow: auto` + `min-height: 0`）。任务列表、任务详情、banner、页脚、新任务停靠栏都在这一列里滚动，页头与侧栏不在其中。
+- **`.sidebar`**：`min-height: 0; overflow: hidden` —— 自己占住位置、整体不滚；侧栏内部的可滚区域是 `.sidebar > nav`（`flex: 1 1 auto; min-height: 0; overflow-y: auto`），`sidebar-bottom`（主题、权限模式、事件流状态）留在侧栏底部。
+- **窄屏 `@media (max-width: 850px)`**：`.app` 保持 base 的固定高度与 `overflow: hidden`，只把方向改成纵向 flex；`.app-header`/`.sidebar` 为 `flex: none`，导航条 `overflow-x: auto`，`.workspace-shell` 为 `flex: 1 1 auto; min-height: 0`。`1100px` 与 `620px` 断点未改。
+- **未改** `App.tsx`（现有 `.app` 的直接子元素已是 `header` / `aside` / `.workspace-shell`，不需包装层）、未改主题机制（`data-theme`）、类名、文案与任何业务逻辑。本工作树里不存在 `settings.tsx`/`agent-settings.tsx`（J2/J4 的领地），未创建也未改动。
+
+### 实际运行的检查与逐条结果（定向，ADR-0038）
+
+| 命令 | 结果 |
+|---|---|
+| `bunx vitest run apps/ui/test/shell-layout.test.ts` | **8 passed (8)**，退出码 0（新增定向测试） |
+| `bunx vitest run apps/ui` | **2 files / 33 passed**，退出码 0（`apps/ui` 全部 vitest，含既有 `scheduling-labels.test.ts`，证明新文件确实被收集） |
+| `bun run typecheck:ui` | **退出码 0**（`tsc --noEmit -p apps/ui/tsconfig.json`） |
+| `bun run build:ui` | **退出码 0**（Vite 构建成功，29 modules transformed） |
+| 反向验证（临时把 `.app` 改回 `min-height: 100vh`、去掉 `.workspace-shell` 的 `overflow` 与 `.sidebar > nav` 的可滚区域后重跑同一测试） | **4 failed / 4 passed**；随后用备份原样还原，`git diff --stat apps/ui/src/styles.css` 复核改动完整 |
+
+**未跑、也不该在本分支跑**：`bun run check`、`just check`、`just verify`、`check:fast`（ADR-0038：全量只在 `dev` 的精确候选 SHA 上跑），以及任何后端/全仓测试——本次没有后端改动。**构建与类型检查通过不等于布局正确**，两者都不能被引用为观感证据。
+
+**测试登记**：`package.json` 未改（也就无需改）。`test:unit`/`test:e2e` 登记的是 `apps/runtime/test/**` 的 `bun test` 文件，而本次新文件走 `vitest.config.ts` 既有的 `include: ['packages/domain/**/*.test.ts', 'apps/ui/**/*.test.ts']`，与既有 `apps/ui/test/scheduling-labels.test.ts` 同一条路径；`bun run test`（`vitest run`）已包含它，`package.json` 里没有需要追加的测试列表项。此结论已由上面的 `bunx vitest run apps/ui` 实证（两个文件都被收集并通过）。
+
+### 新增测试的边界（必须与上面的结果一起读）
+
+`apps/ui/test/shell-layout.test.ts` 只锁定两类**结构/样式契约**，不证明观感：
+
+- **样式契约**：按断点（1440 / 1000 / 800 / 600）合并 base 与命中的 `@media` 规则后断言——`.app` 最后生效的 `height` 是 `100dvh` 且存在 `100vh` 回退、`.app` 没有任何 `min-height`、`overflow: hidden`、grid row 含 `minmax(0`；`.workspace-shell` 为 `overflow: auto` 且 `min-height: 0`；`.app-header` 不声明 overflow、`body`/`html` 不声明 overflow（页面不是滚动容器）；`.sidebar` 为 `min-height: 0` + `overflow: hidden`，`.sidebar > nav` 桌面 `overflow-y: auto`、窄屏 `overflow-x: auto` + `overflow-y: hidden`，窄屏 header/sidebar 为 `flex: none`。
+- **结构契约**：用既有依赖 `react-dom/server` 的 `renderToStaticMarkup` 渲染真实 `<App />`（`initialToken` 非空、无选中项目；只 stub `window.location.origin` 以便构造客户端，不驱动任何请求、不跑 effect、不新增依赖），再用测试内自带的极简标签栈读取器断言：`.app` 是唯一外壳根；`header.app-header` / `aside.sidebar` / `div.workspace-shell` 都是 `.app` 的直接子元素；header 与 sidebar **不是** workspace 列的后代；`main#workspace`（skip-link 目标）与 `.page-heading` 在 workspace 列内；header/sidebar 里原有控件（品牌、项目选择、主导航、外观选择、权限模式文案、`跳转到工作区` 链接）仍在。另有一条「守门」用例喂入人为嵌套的标记，证明读取器确实能识别 header 落在滚动列内（否则上面的断言可能因读取器失效而恒真）。
+- **它不证明**：真实浏览器里的布局与叠放、滚动手感（触控、PageDown/空格）、窄屏折行与横向导航条、焦点环是否被新滚动容器裁切、`position: sticky` 停靠栏在新滚动容器内的表现、深浅主题观感、`prefers-reduced-motion`。本格**没有**使用 computer-use、浏览器自动化、OS 级键鼠或截图（ADR-0008）。
+
+### 未验证 / 需要用户人工确认
+
+1. 桌面：任务列表很长时向下滚动，标题栏与「工作空间」侧栏始终留在原位，只有工作区那一列在动。
+2. 任务详情页很长（会话、事件流、终端面板）时同上。
+3. 窗口很矮（例如 500px）：侧栏内部导航是否自己出现滚动条、侧栏底部（主题/权限/事件流状态）是否仍在。
+4. 窄屏 ≤850px：标题栏不滚走、横向导航条可左右滑动、工作区列独立滚动；≤620px 的单列排布未退化。
+5. 键盘：Tab 顺序仍为 skip-link → 标题栏 → 侧栏 → 工作区；`跳转到工作区` 仍把焦点与视图带到 `<main id="workspace">`；焦点环未被新滚动容器裁切。
+6. 新任务停靠栏仍贴在可见工作区底部、不遮住上方内容（它仍是 `position: sticky`，现在相对新的滚动容器）。
+7. 深浅主题与 `prefers-reduced-motion: reduce` 下的表现未变；`.task-title` 的 2 行截断未变。
+
+### 未做（边界声明）
+
+- 未 push、未 rebase、未合并新的 `dev`、未提升 `main`、未触碰 `/Users/loyage/Documents/codeestra`（稳定工作树）与其上的稳定 Runtime；未运行任何 Runtime/CLI 命令，因此未使用 `CODEESTRA_HOME=/tmp/ce-j3`。
+- 未改任何业务逻辑、状态管理、命令面调用、后端文件，也未顺手重构与本次目标无关的样式。
 
 ## NEXT — 最小可用纵向切片
 
