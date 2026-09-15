@@ -740,6 +740,15 @@ export interface TerminalReleaseResultView {
 export type StablePromotionStateView = 'CREATED' | 'AWAITING_APPROVAL' | 'PROMOTING' | 'RESTARTING'
   | 'SUCCEEDED' | 'STALE' | 'FAILED' | 'RECOVERY_REQUIRED';
 
+/**
+ * Which pair of distinguishable facts a record states (ADR-0047 D03 / ADR-0052). The Runtime
+ * **derives** it from the stored state and the recorded restart result; it is never an input the
+ * client may send. `AWAITING_PULL` is the one that must never read as a finished promotion: the
+ * candidate is on the remote `dev` and the main checkout has not pulled it yet.
+ */
+export type PromotionPhaseView = 'READY_TO_PUSH' | 'AWAITING_PULL' | 'RESTART_PENDING'
+  | 'MAIN_PUSH_PENDING' | 'COMPLETE' | 'REFUSED';
+
 export interface PromotionMemberView {
   readonly batchId: string;
   readonly taskId: string;
@@ -789,11 +798,35 @@ export interface StablePromotionView {
     readonly devCommit: string;
     readonly mainCommit: string;
     readonly verificationId: string;
+    /** The exact dev full-suite evidence the approval also covered (ADR-0039); null when unrecorded. */
+    readonly fullSuiteEvidenceId: string | null;
     readonly approvedAt: number;
+  } | null;
+  /** The dev full-suite evidence `promote` re-reads before it touches any ref (ADR-0038 D03). */
+  readonly fullSuite: {
+    readonly evidenceId: string;
+    readonly devCommit: string;
+    readonly policyVersion: string;
+    readonly policyDigest: string;
+    readonly lockfileDigest: string;
   } | null;
   readonly promotedCommit: string | null;
   readonly mainWorktreePath: string | null;
   readonly promotingBootId: string | null;
+  /** The dev clone this promotion pushes its candidate from (ADR-0047 D05); null when none. */
+  readonly devRepoPath: string | null;
+  /**
+   * Commit **read back** from the remote dev ref after the push. This is an observation, never an
+   * input: it is only recorded once `git ls-remote` reported the fixed candidate, which is what makes
+   * "the push exited 0" unable to stand in for "the candidate is on the remote".
+   */
+  readonly remoteDevCommit: string | null;
+  /** Commit read back from the remote main ref after the stable commit was published there. */
+  readonly remoteMainCommit: string | null;
+  readonly pushedAt: number | null;
+  readonly mainPushedAt: number | null;
+  /** Which pair of facts (pushed / pulled-and-restarted) this record currently states. */
+  readonly phase: PromotionPhaseView;
   readonly restartSteps: readonly { readonly id: string; readonly argv: readonly string[];
     readonly cwd: string }[];
   readonly restart: PromotionRestartView | null;
@@ -1390,4 +1423,89 @@ export interface ProseQuestionResolutionResultView {
   readonly attentionStatus: string;
   readonly deliveredToProvider: false;
   readonly resolvedAt: number;
+}
+
+/**
+ * `runtime.ping` — what the Runtime that answered says about itself. `adapters` is the registered
+ * Adapter id list (the same fact `task retry --adapter` validates against), so the client renders
+ * the registered choices instead of assuming one.
+ */
+export interface RuntimePingView {
+  readonly pid: number;
+  readonly bootId: string;
+  readonly startedAt: number;
+  readonly status: string;
+  readonly permissionMode: 'FULL' | 'STRICT';
+  readonly adapters: readonly string[];
+  readonly activeSessions: readonly string[];
+  readonly eventSubscribers: number;
+  readonly uiRunning: boolean;
+}
+
+/**
+ * The one start request a `task.retry` (or `task.run`) issued afterwards, as the scheduling gate
+ * answered it. `outcome` is the whole verdict: `STARTED`, `WAIT` (the CLI's exit code 3) or
+ * `REFUSED` (with a stable `code`). The `sessionId`/`executionId` fields are present exactly when a
+ * start happened, so nothing here can be read as a start that did not occur.
+ */
+export interface ScheduleStartOutcomeView {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly outcome: 'STARTED' | 'WAIT' | 'REFUSED';
+  readonly executionId: string | null;
+  readonly sessionId: string | null;
+  readonly attemptNumber: number | null;
+  readonly taskVersion: number | null;
+  readonly workspaceId: string | null;
+  readonly workspacePath: string | null;
+  readonly baseCommit: string | null;
+  readonly adapterId: string;
+  readonly adapterVersion: string | null;
+  readonly sessionState: string | null;
+  readonly permissionMode: 'FULL' | 'STRICT' | null;
+  readonly agentConfig: Readonly<Record<string, unknown>> | null;
+  readonly reservationId: string | null;
+  readonly wait: ScheduleWaitView | null;
+  readonly assessment: ScheduleAssessmentView | null;
+  readonly clearedUnknownBy: string | null;
+  readonly code: string | null;
+  readonly detail: string;
+}
+
+/**
+ * The result of `task retry` (ADR-0036), which is deliberately **two** facts: the requeue the
+ * Runtime recorded, and the scheduling answer for the one start request that followed it. A retry
+ * that was recorded but is waiting for capacity (or refused by the gate) has still requeued the
+ * Task, and this shape lets the client say that instead of reporting a start that did not happen.
+ */
+export interface TaskRetryOutcomeView {
+  readonly projectId: string;
+  readonly taskId: string;
+  /** The Task's state after the requeue: `BLOCKED` when an upstream dependency is unmet. */
+  readonly state: 'READY' | 'BLOCKED';
+  readonly version: number;
+  readonly retryId: string;
+  readonly failedExecutionId: string;
+  readonly failedAttemptNumber: number;
+  readonly adapterId: string;
+  readonly previousAdapterId: string | null;
+  readonly adapterChanged: boolean;
+  readonly adapterSource: 'REQUESTED' | 'RECORDED' | 'FALLBACK';
+  /**
+   * Where the new Execution's worktree comes from. `REUSE_VERIFIED` and `PREPARE_FRESH` are the
+   * worktree it will use; `REBUILD_OWNED` is a verified *plan* the preparation path executes.
+   */
+  readonly workspace: {
+    readonly mode: 'REUSE_VERIFIED' | 'PREPARE_FRESH' | 'REBUILD_OWNED';
+    readonly workspaceId: string | null;
+    readonly evidence: string | null;
+    readonly detail: string;
+  };
+  readonly dependencyReasons: readonly {
+    readonly code: string;
+    readonly prerequisiteTaskId: string;
+    readonly requiredRevisionId: string;
+    readonly detail: string | null;
+  }[];
+  readonly start: ScheduleStartOutcomeView;
 }

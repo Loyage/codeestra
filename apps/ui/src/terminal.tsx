@@ -99,6 +99,27 @@ export function handoffLabel(value: string | null): string {
   return valueLabels[value] ?? value;
 }
 
+/**
+ * The `ptyResize` capability as one sentence, with the **wire value quoted verbatim** (ADR-0026).
+ *
+ * The old UI hard-coded a "不支持" claim for the window size next to an UNSUPPORTED claim about the
+ * capability matrix, which becomes a false statement the moment the Runtime reports anything else
+ * (and it contradicted the capability matrix directly below it, which reports the same value). This
+ * function never rewrites or guesses the value: every branch names the value the command face
+ * returned, and a value this client does not know is shown as-is with no conclusion drawn for it.
+ */
+export function ptyResizeFact(capability: string): string {
+  if (capability === 'IMPLEMENTED' || capability === 'SUPPORTED') {
+    return `窗口大小可以改变（命令面报告 ${capability}）`;
+  }
+  if (capability === 'UNSUPPORTED') return '窗口大小不能改变（命令面报告 UNSUPPORTED）';
+  if (capability === 'PARTIAL') {
+    return '窗口大小只在部分平台上可改变（命令面报告 PARTIAL；具体平台范围以命令面与 ADR 为准）';
+  }
+  if (capability === 'UNVERIFIED') return '窗口大小能否改变尚未验证（命令面报告 UNVERIFIED）';
+  return `本界面没有这个取值的词汇表，不作解释：命令面报告的 ptyResize 取值是 ${capability}`;
+}
+
 function incarnationModeLabel(mode: string): string {
   return incarnationModeLabels[mode] ?? mode;
 }
@@ -403,6 +424,9 @@ export function TerminalPanel({ client, projectId, sessionId, refreshToken, run 
 
   const busy = pending !== null;
   const canWrite = attachment !== null && attachment.kind === 'WRITER' && terminalRunning;
+  // The `ptyResize` capability is displayed exactly as the Runtime reported it (never rewritten):
+  // the window row and the capability matrix below it must always agree.
+  const ptyResize = status?.capabilities.ptyResize;
 
   return (
     <section className="handoff-panel">
@@ -577,7 +601,16 @@ export function TerminalPanel({ client, projectId, sessionId, refreshToken, run 
                   {' · '}{terminal.ptySlave ?? '—'}</dd>
                 <dt>窗口</dt>
                 <dd>{handoffLabel(terminal.windowSize)}
-                  <span className="muted"> · resize 不支持（能力矩阵为 UNSUPPORTED）</span></dd>
+                  {ptyResize === undefined ? (
+                    <div className="muted">命令面没有报告 <span className="mono">ptyResize</span>
+                      {' '}这一项。</div>
+                  ) : (
+                    <div className="muted">ptyResize: <span className="mono">{ptyResize}</span>
+                      {' · '}{ptyResizeFact(ptyResize)}
+                      <div>取值直接来自 <span className="mono">session.handoff.status</span> 的能力矩阵；
+                        这里不改写也不猜测</div></div>
+                  )}
+                </dd>
                 <dt>投影游标</dt>
                 <dd className="mono">{terminal.cursor} · 保留 {terminal.retainedBytes} B
                   {' · 已产生 '}{terminal.projectedBytes} B

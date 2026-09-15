@@ -363,25 +363,45 @@ bun run codeestra promotion list    $PROJECT [--limit <n>]
 bun run codeestra promotion abandon $PROJECT <promotion-id> --reason <text>
 ```
 
-- `prepare` **不写 Git**：它只是把「已验证的 dev commit / 预期旧 main commit / 该 commit 的集成验证 +
-  dev 全量证据」三个事实固定下来。
-- `promote` 在**检出 main 的那个工作树里**做 fast-forward，然后**在那里**依次执行：
+- `prepare` **不写 Git**（也不写远端）：它只是把「已验证的 dev commit / 预期旧 main commit / 该 commit 的集成验证 +
+  dev 全量证据」三个事实固定下来，并固定推送用的 dev clone（ADR-0047 D05）。
+- `promote` **一次只推进一步**，每一步都要读回事实：
 
-  ```text
-  bun install --frozen-lockfile
-  bun run build:ui
-  bun run codeestra stop
-  bun run codeestra status
-  ```
+  1. **push 固定候选到远端 `dev`**（源是候选 OID，不是分支名；从不 `--force`），再 `git ls-remote` **读回核对**。
+  2. main 检出还没有拉取 → 报**「已推送、等待拉取」**（`state: PROMOTING`，`phase: AWAITING_PULL`，**退出码 3**），
+     **不执行也不记录任何重启步骤**。**这一步是你在检出 main 的那个 clone 里做的事**：
 
-  **重启只有在每一步都退 0、且重启后的 Runtime 回答 `READY` 时才会被记录**。
+     ```sh
+     git fetch origin
+     git merge --ff-only origin/dev
+     ```
+
+     它**不是** Runtime 做的 ff，也不能用别的 merge 方式代替。
+  3. 拉取后**再次调用同一命令**：核对到 main 检出确实在候选上、且候选是预期旧 main 的后代后，记录重启计划，
+     然后在 main 检出依次执行：
+
+     ```text
+     bun install --frozen-lockfile
+     bun run build:ui
+     bun run codeestra stop
+     bun run codeestra status
+     ```
+
+     **重启只有在每一步都退 0、重启后的 Runtime 回答 `READY`、且应答的 boot 与发出计划的 boot 不同时才会被记录**。
+  4. 重启记录成功**之后**才把候选 push 回远端 `main` 并读回核对，然后 `SUCCEEDED`。推回失败保持可续：
+     再次调用**只重试推回**，不会重复停 Runtime。
+
+  **界面上的投影**（只读，`promotion.list` / `promotion.get`）：任务详情与「项目」标签页的
+  `稳定提升记录 · dev → main` 显示派生的 `phase`、读回的 `origin/dev` / `origin/main` SHA，并按阶段给出 `下一步`。
+  `AWAITING_PULL` 时它**不会把任何东西显示成已提升/已完成**，而是直接列出上面第 2 步的两条命令，
+  并写明「命令面在这一阶段退出码 3——那是等待，不是失败」。它不推送、不拉取、不重启。
 - **权限差异**：`FULL` 下不需要 `approve`；`STRICT` 下需要针对**那一组精确三元组**的 `approve`——dev/main/证据任一移动，
   批准即失效。
 - **证据过期**：main 上的策略被编辑、候选里锁文件变了、或出现更新的失败运行 → 以
   `DEV_FULL_SUITE_EVIDENCE_STALE` 拒绝（退出码 1）。
-- 退出码：只有 `SUCCEEDED` 是 `0`。
-- 失败时**不会自动回滚**：如果 main 已经 fast-forward 但重启序列失败，CLI 会明确打印「main 已被推进且未回滚；
-  Runtime 恢复应答后重跑 `promotion promote` 会重跑已记录的后置步骤」。
+- 退出码：`0` 仅在`SUCCEEDED`；`1` 拒绝或失败；`2` 用法错误；**`3` 已推送、等待拉取**。
+- 失败时**不会自动回滚**：如果 main 已被拉取到候选但重启序列失败，CLI 会明确打印「main 检出已在候选上且未回滚；
+  远端 `main` 未发布」，重跑 `promotion promote` 会重跑已记录的后置步骤（推回仍只在重启记录成功后才尝试）。
 
 ### 8.3 手工 stop + status（任何 main 更新之后）
 

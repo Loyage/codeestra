@@ -203,6 +203,10 @@ bun run codeestra task resume $PROJECT $TASK <version>  --adapter codex
 bun run codeestra task retry  $PROJECT $TASK <version>  --adapter pi
 
 # 方式 B：在界面上选（任务详情里的「Agent」下拉框）
+# 方式 C：重试时换 Agent（任务详情 →「更多操作」→ 重试块的「这次使用的 Adapter」下拉框）
+#   - 默认项是「沿用该任务上一次运行的 Adapter（<id>）」——这就是 CLI 不带 --adapter 的语义
+#   - 其余选项来自 runtime.ping 报的已注册 adapter 列表；选一个才带 adapterId
+#   - 上一次的 adapter 已不在注册表时，命令面会回退到默认 adapter（adapterSource: FALLBACK）
 ```
 
 可用的 adapter 是 `pi`（默认）、`codex`、`claude`（用 `codeestra status` 的 `adapters` 字段确认）。
@@ -268,6 +272,12 @@ bun run codeestra task retry  $PROJECT $TASK <version>
 # 先暂停再继续
 bun run codeestra task pause  $PROJECT $TASK <version> && bun run codeestra task resume $PROJECT $TASK <version>
 ```
+
+重试在界面上是任务详情 →「更多操作」→`重试（task retry）`。它显示当前版本（作为 CAS 的
+`expected-version`）与将使用的 adapter，并且**区分三种结果**：真的启动了新执行（退出码 0）、
+已重新入队但**在等待**（容量/冲突，退出码 3）、或者已重新入队但**启动被拒**（依赖未满足等，带稳定码）。
+界面不做本地状态判断：任务不是 `FAILED` 时会如实显示 `TASK_NOT_FAILED`（同理
+`TASK_CANCELLED` / `TASK_STILL_RUNNING` / `TASK_PAUSED` / `RECONCILE_REQUIRED` / `TASK_ARCHIVED`）。
 
 **如果还要改规格**，用 revision（append-only，不被覆盖），而不是改文字：
 
@@ -439,16 +449,23 @@ git push origin main
 ```sh
 bun run codeestra promotion full-suite run $PROJECT --dev-commit <full-sha>   # 先拿到全量证据
 bun run codeestra promotion prepare $PROJECT <batch-id> <expected-dev-commit> <expected-main-commit>
-bun run codeestra promotion promote $PROJECT <promotion-id>
+bun run codeestra promotion promote $PROJECT <promotion-id>                  # 一次只推进一步
 ```
 
-`promotion prepare/approve/promote` **目前仍然是旧的本地 `git merge --ff-only` 路径**，
-不是上面那套 GitHub 中转路径（ADR-0047 的产品实现留到下一格）。
-因此：**本仓库自身的提升一律走上面的四步人工路径，不得使用 `promotion promote`**，
-并在交付说明里如实写明实际用了哪条路径、执行到哪一步。
+`promotion prepare/approve/promote` 已经是**经 GitHub 中转**的路径（ADR-0047 / FOUNDATION-077、ADR-0052）：
+`promote` 先把固定候选 push 到远端 `dev` 并 `git ls-remote` 读回核对，此时报
+**「已推送、等待拉取」**（`state: PROMOTING`，`phase: AWAITING_PULL`，**退出码 3**）且**不记录任何重启步骤**；
+你在 main 检出做完上面第 ② 步（`git fetch origin` + `git merge --ff-only origin/dev`）后**再调用一次**，
+它才核对到 main 检出已在候选上、记录并执行重启序列（第 ③ 步的四条命令），最后把候选推回远端 `main`（第 ④ 步）。
+**它不替你做第 ② 步**：那一步永远是你在 main 检出里执行的命令。
 
-**别指望**：界面上的「稳定提升记录 · dev → main」是**只读**的，它不执行任何提升，
-并且它明确写着「**main 已移动不等于 Runtime 已完成重启**」。
+但**本仓库自身的提升仍一律走上面的四步人工路径**（`AGENTS.md`），不使用 `promotion promote`；
+交付说明里要写明实际用了哪条路径、执行到了哪一步。
+
+**界面上的投影**：「稳定提升记录 · dev → main」是**只读**的——它不 push、不拉取、不重启，
+不发任何命令。它显示派生的 `phase`、读回的 `origin/dev` / `origin/main` SHA，并在
+「已推送、等待拉取」阶段直接给出你需要在 main 检出执行的两条命令，
+同时明写「**main 已移动不等于 Runtime 已完成重启**」、「已推送 ≠ 已提升」。
 
 ---
 
