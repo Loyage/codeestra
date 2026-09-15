@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 28;
+export const phase1SchemaVersion = 29;
 
 /** The kinds `intents.kind` accepts (ADR-0046) and the only kinds any command can write. */
 export const intentKinds = ['CREATE_TASK', 'AMEND_TASK', 'ADD_CONSTRAINT', 'CANCEL_TASK',
@@ -1671,4 +1671,38 @@ INSERT INTO intents_v28(id,project_id,idempotency_key,raw_text,kind,status,actor
   SELECT id,project_id,idempotency_key,raw_text,kind,status,actor,created_at FROM intents;
 DROP TABLE intents;
 ALTER TABLE intents_v28 RENAME TO intents;
+`;
+
+/**
+ * The dev clone and the GitHub-mediated promotion (FOUNDATION-077 / ADR-0047).
+ *
+ * Two pure `ALTER TABLE ... ADD COLUMN` steps and nothing else, so no table is rebuilt and no
+ * existing row is rewritten:
+ *
+ * - `projects.dev_repo_path` is the second clone of the same origin a promotion pushes its fixed
+ *   candidate from. It is nullable because a project may legitimately have no dev clone yet; a
+ *   promotion that needs one refuses with a named reason instead of guessing a path. Its `CHECK`
+ *   only refuses an empty string, so a recorded path states something or nothing.
+ * - `stable_promotions` gains the facts that make "pushed to the remote" and "pulled into the main
+ *   checkout" two distinguishable pieces of evidence: the dev clone this promotion used, the
+ *   commit read back from `origin/dev` after the push, the commit read back from `origin/main`
+ *   after the publish, and when each happened. `remote_dev_commit` and `remote_main_commit` are
+ *   readbacks, never inputs, which is what makes "the push command exited 0" insufficient to be
+ *   recorded as a promotion fact.
+ *
+ * Schema version 29 is this step's own number: 25 is FOUNDATION-065/ADR-0039, 26 is
+ * FOUNDATION-067/ADR-0041, 27 is FOUNDATION-071/ADR-0044, 28 is FOUNDATION-075/ADR-0046, and 16
+ * stays permanently unused. A database may already be stamped 17–28 and would skip a later
+ * `version < 16` step, so the migration runner only appends `if (version < 29)` after the existing
+ * ascending steps and never inserts an earlier number.
+ */
+export const devClonePromotionMigration = `
+ALTER TABLE projects ADD COLUMN dev_repo_path TEXT
+  CHECK(dev_repo_path IS NULL OR length(trim(dev_repo_path)) > 0);
+
+ALTER TABLE stable_promotions ADD COLUMN dev_repo_path TEXT;
+ALTER TABLE stable_promotions ADD COLUMN remote_dev_commit TEXT;
+ALTER TABLE stable_promotions ADD COLUMN remote_main_commit TEXT;
+ALTER TABLE stable_promotions ADD COLUMN pushed_at INTEGER;
+ALTER TABLE stable_promotions ADD COLUMN main_pushed_at INTEGER;
 `;

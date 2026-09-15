@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { chmodSync, mkdirSync, mkdtempSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -19,7 +19,9 @@ const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
 afterEach(async () => { await reclaimTestResources(); });
 
 function temporaryDirectory(prefix: string): string {
-  const directory = mkdtempSync(join(tmpdir(), prefix));
+  // Canonical paths: the Runtime records the dev clone as `realpath` resolves it, and a comparison
+  // against a `/var`-vs-`/private/var` spelling would be a test artifact, not a product fact.
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
   registerTemporaryDirectory(directory);
   return directory;
 }
@@ -129,6 +131,10 @@ async function fixture(options: { readonly failingStep?: string } = {}): Promise
   readonly repository: string;
   readonly projectId: string;
   readonly mainCommit: string;
+  /** A local bare repository; the promotion's only push target in these tests. */
+  readonly remote: string;
+  /** The second clone of that remote, recorded as the project's dev clone (ADR-0047 D05). */
+  readonly devClone: string;
 }> {
   const repository = temporaryDirectory('codeestra-promotion-repo-');
   const home = temporaryDirectory('codeestra-promotion-home-');
@@ -160,6 +166,18 @@ async function fixture(options: { readonly failingStep?: string } = {}): Promise
   await Bun.write(shimPath, `#!/bin/sh\nexec "${process.execPath}" "${stubPath}" "$@"\n`);
   chmodSync(shimPath, 0o755);
 
+  // ADR-0048 D01: the main checkout and the dev clone are two independent clones of one origin.
+  // Both `main` and `dev` are long-lived branches on that origin; every push in this file goes to
+  // this local bare repository, never to a real GitHub repository.
+  const remote = temporaryDirectory('codeestra-promotion-remote-');
+  await git(remote, ['init', '--bare', '-b', 'main']);
+  await git(repository, ['remote', 'add', 'origin', remote]);
+  await git(repository, ['push', '-q', 'origin', 'refs/heads/main:refs/heads/main']);
+  await git(repository, ['push', '-q', 'origin', 'refs/heads/dev:refs/heads/dev']);
+  const devClone = temporaryDirectory('codeestra-promotion-devclone-');
+  await git(devClone, ['clone', '-q', remote, '.']);
+  await git(devClone, ['checkout', '-q', 'dev']);
+
   const environment = {
     CODEESTRA_HOME: home,
     CODEESTRA_UI_DIST: assets,
@@ -169,7 +187,28 @@ async function fixture(options: { readonly failingStep?: string } = {}): Promise
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { readonly id: string }[];
-  return { environment, repository, projectId: projects[0]?.id as string, mainCommit };
+  // The dev clone is an explicit input to trust, and the command face verifies it: this is the
+  // recorded fact a promotion needs before it may push anything (ADR-0047 D05).
+  const trusted = await cli(['project', 'trust', repository, '--dev-repo', devClone, '--yes'],
+    environment);
+  expect(trusted.exitCode).toBe(0);
+  // `project trust` prints the identity, the policy and the result; `project list` is the one
+  // machine-readable document that shows what was actually recorded.
+  const listed = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
+    readonly { readonly devRepoPath: string | null }[];
+  expect(listed[0]?.devRepoPath).toBe(devClone);
+  return { environment, repository, projectId: projects[0]?.id as string, mainCommit,
+    remote, devClone };
+}
+
+/**
+ * The candidate reaches the dev clone the way the dev clone would get it in reality — by fetching
+ * the integrated dev branch. It never goes through the remote first: pushing the fixed candidate to
+ * the remote is the promotion's own step.
+ */
+async function syncDevClone(repository: string, devClone: string): Promise<void> {
+  await git(devClone, ['fetch', '-q', repository, 'refs/heads/dev']);
+  await git(devClone, ['merge', '--ff-only', '-q', 'FETCH_HEAD']);
 }
 
 interface StatusPayload {
@@ -187,17 +226,6 @@ async function status(
   return JSON.parse(listed.stdout) as StatusPayload;
 }
 
-interface PromotionPayload {
-  readonly promotionId: string;
-  readonly state: string;
-  readonly outcomeCode: string | null;
-  readonly candidateCommit: string;
-  readonly expectedMainCommit: string;
-  readonly promotedCommit: string | null;
-  readonly mainWorktreePath: string | null;
-  readonly restart: { readonly runtimeStatus: string | null; readonly uiRunning: boolean | null;
-    readonly steps: readonly { readonly id: string; readonly exitCode: number | null }[] } | null;
-}
 
 /**
  * Drives one Task to an INTEGRATED dev commit through the CLI only, then prepares a promotion for
@@ -212,8 +240,10 @@ async function integratedTask(options: { readonly failingStep?: string;
   readonly batchId: string;
   readonly resultCommit: string;
   readonly mainCommit: string;
+  readonly remote: string;
+  readonly devClone: string;
 }> {
-  const { environment, repository, projectId, mainCommit } = await fixture(options);
+  const { environment, repository, projectId, mainCommit, remote, devClone } = await fixture(options);
   const created = JSON.parse((await cli(['task', 'create', projectId, 'Write a file'],
     environment)).stdout) as { readonly id: string };
   const taskId = created.id;
@@ -248,32 +278,82 @@ async function integratedTask(options: { readonly failingStep?: string;
     expect(JSON.parse(fullSuite.stdout) as { readonly state: string })
       .toMatchObject({ state: 'PASSED' });
   }
-  return { environment, repository, projectId, taskId, mainCommit,
+  await syncDevClone(repository, devClone);
+  return { environment, repository, projectId, taskId, mainCommit, remote, devClone,
     batchId: batches[0]?.batchId as string, resultCommit };
 }
 
+interface PromotionPayload {
+  readonly promotionId: string;
+  readonly state: string;
+  /** Which pair of facts the record states; `COMPLETE` is the only finished one (ADR-0047 D03). */
+  readonly phase: 'READY_TO_PUSH' | 'AWAITING_PULL' | 'RESTART_PENDING' | 'MAIN_PUSH_PENDING'
+    | 'COMPLETE' | 'REFUSED';
+  readonly outcomeCode: string | null;
+  readonly candidateCommit: string;
+  readonly expectedMainCommit: string;
+  readonly promotedCommit: string | null;
+  readonly mainWorktreePath: string | null;
+  readonly devRepoPath: string | null;
+  readonly remoteDevCommit: string | null;
+  readonly remoteMainCommit: string | null;
+  readonly restart: { readonly runtimeStatus: string | null; readonly uiRunning: boolean | null;
+    readonly steps: readonly { readonly id: string; readonly exitCode: number | null }[] } | null;
+}
 describe('codeestra promotion', () => {
-  test('promotes from the CLI, runs the recorded post-steps and only then reports success', async () => {
+  test('pushes to the remote dev branch, waits for the pull, then restarts and publishes main', async () => {
     const integrated = await integratedTask();
-    const { environment, repository, projectId, mainCommit, resultCommit, batchId } = integrated;
+    const { environment, repository, projectId, mainCommit, resultCommit, batchId, remote,
+      devClone } = integrated;
     try {
       const prepared = await cli(['promotion', 'prepare', projectId, batchId, resultCommit, mainCommit],
         environment);
       expect(prepared.exitCode).toBe(0);
       expect(prepared.stderr).toBe('');
       const plan = JSON.parse(prepared.stdout) as PromotionPayload;
-      expect(plan).toMatchObject({ state: 'CREATED', candidateCommit: resultCommit,
-        expectedMainCommit: mainCommit, promotedCommit: null });
-      // Preparing writes nothing to Git.
+      expect(plan).toMatchObject({ state: 'CREATED', phase: 'READY_TO_PUSH',
+        candidateCommit: resultCommit, expectedMainCommit: mainCommit, promotedCommit: null,
+        devRepoPath: devClone, remoteDevCommit: null });
+      // Preparing writes nothing to Git and nothing to the remote.
       expect(await git(repository, ['rev-parse', 'refs/heads/main'])).toBe(mainCommit);
-      expect(await git(repository, ['rev-parse', 'refs/heads/dev'])).toBe(resultCommit);
+      expect(await git(remote, ['rev-parse', 'refs/heads/dev'])).toBe(mainCommit);
+
+      // ADR-0047 D03: the push is one distinct fact. The command face reports "pushed, awaiting
+      // pull" with its own exit code (3), and does not run or record a single restart step.
+      const pushed = await cli(['promotion', 'promote', projectId, plan.promotionId, '--json'],
+        environment);
+      expect(pushed.exitCode).toBe(3);
+      expect(pushed.stderr).toContain('git merge --ff-only origin/dev');
+      const awaiting = JSON.parse(pushed.stdout) as PromotionPayload;
+      expect(awaiting).toMatchObject({ state: 'PROMOTING', phase: 'AWAITING_PULL',
+        remoteDevCommit: resultCommit, promotedCommit: null, remoteMainCommit: null });
+      expect(awaiting.restart).toBeNull();
+      expect(awaiting.mainWorktreePath).toBeNull();
+      // Only the remote dev branch moved: the main checkout is untouched.
+      expect(await git(remote, ['rev-parse', 'refs/heads/dev'])).toBe(resultCommit);
+      expect(await git(remote, ['rev-parse', 'refs/heads/main'])).toBe(mainCommit);
+      expect(await git(repository, ['rev-parse', 'refs/heads/main'])).toBe(mainCommit);
+
+      // Running the same command again while the pull has not happened is still "awaiting pull":
+      // no second push, no restart, no completion.
+      const again = await cli(['promotion', 'promote', projectId, plan.promotionId, '--json'],
+        environment);
+      expect(again.exitCode).toBe(3);
+      expect(JSON.parse(again.stdout) as PromotionPayload)
+        .toMatchObject({ phase: 'AWAITING_PULL', remoteMainCommit: null });
+
+      // The pull is the user's explicit step in the main checkout (AGENTS.md): the product never
+      // performs it, which is why this test does.
+      await git(repository, ['fetch', '-q', 'origin']);
+      await git(repository, ['merge', '--ff-only', '-q', 'origin/dev']);
+      expect(await git(repository, ['rev-parse', 'refs/heads/main'])).toBe(resultCommit);
 
       const promoted = await cli(['promotion', 'promote', projectId, plan.promotionId, '--json'],
         environment);
       expect(promoted.exitCode).toBe(0);
       const record = JSON.parse(promoted.stdout) as PromotionPayload;
-      expect(record).toMatchObject({ state: 'SUCCEEDED', outcomeCode: 'RESTARTED',
-        promotedCommit: resultCommit });
+      expect(record).toMatchObject({ state: 'SUCCEEDED', phase: 'COMPLETE',
+        outcomeCode: 'PROMOTED', promotedCommit: resultCommit, remoteMainCommit: resultCommit });
       // The whole recorded plan ran, in the recorded order, in the main worktree.
       expect(record.restart?.steps.map((step) => [step.id, step.exitCode])).toEqual([
         ['install', 0], ['build-ui', 0], ['stop', 0], ['status', 0],
@@ -282,12 +362,13 @@ describe('codeestra promotion', () => {
       // uiRunning is recorded as an observed fact, not required for success.
       expect(record.restart?.uiRunning).toBe(false);
 
-      // main moved to the verified dev commit, dev did not move, and the checkout followed.
+      // The remote is the source of truth: both long-lived branches are at the candidate, the
+      // checkout followed, and the post-step really ran there.
       expect(await git(repository, ['rev-parse', 'refs/heads/main'])).toBe(resultCommit);
-      expect(await git(repository, ['rev-parse', 'refs/heads/dev'])).toBe(resultCommit);
       expect(await git(repository, ['rev-parse', 'HEAD'])).toBe(resultCommit);
       expect(await git(repository, ['status', '--porcelain'])).toBe('');
-      // The post-step really ran in the main worktree: bun install left an install state behind.
+      expect(await git(remote, ['rev-parse', 'refs/heads/main'])).toBe(resultCommit);
+      expect(await git(remote, ['rev-parse', 'refs/heads/dev'])).toBe(resultCommit);
       expect(await Bun.file(join(repository, 'agent-output.txt')).text()).toBe('work\n');
 
       // The Runtime came back after the stop, and the promotion record survives it.
@@ -295,7 +376,7 @@ describe('codeestra promotion', () => {
       expect(after.exitCode).toBe(0);
       const read = JSON.parse((await cli(['promotion', 'get', projectId, plan.promotionId],
         environment)).stdout) as PromotionPayload;
-      expect(read).toMatchObject({ state: 'SUCCEEDED', outcomeCode: 'RESTARTED' });
+      expect(read).toMatchObject({ state: 'SUCCEEDED', outcomeCode: 'PROMOTED' });
       const listed = JSON.parse((await cli(['promotion', 'list', projectId], environment)).stdout) as
         readonly PromotionPayload[];
       expect(listed).toHaveLength(1);
@@ -303,27 +384,35 @@ describe('codeestra promotion', () => {
     } finally {
       await cli(['stop'], environment);
     }
-  }, 180_000);
+  }, 300_000);
 
-  test('reports a failed post-step without rolling main back and without claiming a restart', async () => {
+  test('reports a failed post-step without publishing main and without claiming a restart', async () => {
     const integrated = await integratedTask({ failingStep: 'build-ui' });
-    const { environment, repository, projectId, mainCommit, resultCommit, batchId } = integrated;
+    const { environment, repository, projectId, mainCommit, resultCommit, batchId, remote } =
+      integrated;
     try {
       const plan = JSON.parse((await cli(['promotion', 'prepare', projectId, batchId, resultCommit,
         mainCommit], environment)).stdout) as PromotionPayload;
+      expect((await cli(['promotion', 'promote', projectId, plan.promotionId], environment)).exitCode)
+        .toBe(3);
+      await git(repository, ['fetch', '-q', 'origin']);
+      await git(repository, ['merge', '--ff-only', '-q', 'origin/dev']);
+
       const promoted = await cli(['promotion', 'promote', projectId, plan.promotionId], environment);
       expect(promoted.exitCode).toBe(1);
       expect(promoted.stderr).toContain('build-ui');
       const record = JSON.parse((await cli(['promotion', 'get', projectId, plan.promotionId],
         environment)).stdout) as PromotionPayload;
       expect(record).toMatchObject({ state: 'FAILED', outcomeCode: 'RESTART_STEP_FAILED',
-        promotedCommit: resultCommit });
+        promotedCommit: resultCommit, remoteMainCommit: null });
       // The steps after the failure were reported as not run rather than silently omitted.
       expect(record.restart?.steps.map((step) => [step.id, step.exitCode])).toEqual([
         ['install', 0], ['build-ui', 1], ['stop', null], ['status', null],
       ]);
-      // Nothing is rolled back: main is at the promoted commit and the Runtime was never stopped.
+      // Nothing is rolled back and nothing is published: the main checkout is on the candidate, the
+      // remote main branch is not, and the Runtime was never stopped.
       expect(await git(repository, ['rev-parse', 'refs/heads/main'])).toBe(resultCommit);
+      expect(await git(remote, ['rev-parse', 'refs/heads/main'])).toBe(mainCommit);
       expect((await cli(['status'], environment)).exitCode).toBe(0);
 
       // The failing restart is already terminal, so abandoning it is refused instead of silently
@@ -338,46 +427,53 @@ describe('codeestra promotion', () => {
     } finally {
       await cli(['stop'], environment);
     }
-  }, 180_000);
+  }, 300_000);
 
   test('keeps the STRICT approval gate on the CLI without a second confirmation', async () => {
     const integrated = await integratedTask();
-    const { environment, repository, projectId, mainCommit, resultCommit, batchId } = integrated;
+    const { environment, repository, projectId, mainCommit, resultCommit, batchId, remote } =
+      integrated;
     try {
       expect((await cli(['permission', 'set', 'strict'], environment)).exitCode).toBe(0);
       const plan = JSON.parse((await cli(['promotion', 'prepare', projectId, batchId, resultCommit,
         mainCommit], environment)).stdout) as PromotionPayload;
-      // STRICT without an approval of the exact triple: refused before any ref is touched.
+      // STRICT without an approval of the exact triple: refused before anything is pushed.
       const refused = await cli(['promotion', 'promote', projectId, plan.promotionId], environment);
       expect(refused.exitCode).toBe(1);
       expect(refused.stderr).toContain('PROMOTION_NOT_APPROVED');
-      expect(await git(repository, ['rev-parse', 'refs/heads/main'])).toBe(mainCommit);
+      expect(await git(remote, ['rev-parse', 'refs/heads/dev'])).toBe(mainCommit);
 
       const approved = await cli(['promotion', 'approve', projectId, plan.promotionId], environment);
       expect(approved.exitCode).toBe(0);
       expect(JSON.parse(approved.stdout) as PromotionPayload)
         .toMatchObject({ state: 'AWAITING_APPROVAL' });
       // The approval is the one gate: a single explicit step, recorded against the fixed triple.
-      const read = JSON.parse((await cli(['promotion', 'get', projectId, plan.promotionId],
+      const promoted = await cli(['promotion', 'promote', projectId, plan.promotionId], environment);
+      expect(promoted.exitCode).toBe(3);
+      const record = JSON.parse((await cli(['promotion', 'get', projectId, plan.promotionId],
         environment)).stdout) as PromotionPayload;
-      expect(read).toMatchObject({ state: 'AWAITING_APPROVAL', candidateCommit: resultCommit });
+      expect(record).toMatchObject({ state: 'PROMOTING', phase: 'AWAITING_PULL',
+        candidateCommit: resultCommit, remoteDevCommit: resultCommit });
 
-      // Abandoning an approved-but-unpromoted record is allowed and keeps the observed ref state.
+      // Abandoning a pushed-but-unpulled promotion keeps the observed ref state: the remote dev
+      // branch is a fact the user resolves, never something the record pretends did not happen.
       const abandoned = await cli(['promotion', 'abandon', projectId, plan.promotionId,
         '--reason', 'postponed to the next window'], environment);
       expect(abandoned.exitCode).toBe(0);
       expect(JSON.parse(abandoned.stdout) as PromotionPayload)
-        .toMatchObject({ state: 'FAILED', outcomeCode: 'ABANDONED', promotedCommit: null });
+        .toMatchObject({ state: 'FAILED', outcomeCode: 'ABANDONED', promotedCommit: null,
+          remoteDevCommit: resultCommit });
       expect(await git(repository, ['rev-parse', 'refs/heads/main'])).toBe(mainCommit);
     } finally {
       await cli(['permission', 'set', 'full'], environment);
       await cli(['stop'], environment);
     }
-  }, 180_000);
+  }, 300_000);
 
-  test('refuses a promotion whose fixed evidence does not match Git', async () => {
+  test('refuses a promotion whose fixed evidence does not match Git, and a dev clone that is not one', async () => {
     const integrated = await integratedTask();
-    const { environment, repository, projectId, mainCommit, resultCommit, batchId } = integrated;
+    const { environment, repository, projectId, mainCommit, resultCommit, batchId, remote } =
+      integrated;
     try {
       const wrongMain = await cli(['promotion', 'prepare', projectId, batchId, resultCommit,
         'f'.repeat(40)], environment);
@@ -387,18 +483,37 @@ describe('codeestra promotion', () => {
         environment);
       expect(wrongDev.exitCode).toBe(1);
       expect(wrongDev.stderr).toContain('PROMOTION_EVIDENCE_MISMATCH');
-      // Neither refusal created a promotion or touched a ref.
+      // Neither refusal created a promotion or touched a ref, local or remote.
       expect(JSON.parse((await cli(['promotion', 'list', projectId], environment)).stdout)).toEqual([]);
       expect(await git(repository, ['rev-parse', 'refs/heads/main'])).toBe(mainCommit);
       expect(await git(repository, ['rev-parse', 'refs/heads/dev'])).toBe(resultCommit);
+      expect(await git(remote, ['rev-parse', 'refs/heads/dev'])).toBe(mainCommit);
+
+      // The dev clone is verified as an explicit input: the main checkout itself is refused with a
+      // stable code, and nothing is recorded in its place.
+      const inspected = await cli(['project', 'inspect', repository, '--dev-repo', repository],
+        environment);
+      expect(inspected.exitCode).toBe(0);
+      expect(JSON.parse(inspected.stdout) as {
+        readonly devRepoPath: { readonly verified: boolean; readonly code: string | null } })
+        .toMatchObject({ devRepoPath: { verified: false, code: 'DEV_REPO_NOT_SEPARATE' } });
+      const trusted = await cli(['project', 'trust', repository, '--dev-repo', repository, '--yes'],
+        environment);
+      expect(trusted.exitCode).toBe(1);
+      expect(trusted.stderr).toContain('DEV_REPO_NOT_SEPARATE');
+      // The previously verified dev clone is still the recorded one.
+      const listed = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
+        readonly { readonly devRepoPath: string | null }[];
+      expect(listed[0]?.devRepoPath).toBe(integrated.devClone);
     } finally {
       await cli(['stop'], environment);
     }
-  }, 180_000);
+  }, 300_000);
 
   test('refuses a promotion with no full-suite evidence of the fixed dev commit', async () => {
     const integrated = await integratedTask({ withoutFullSuiteEvidence: true });
-    const { environment, repository, projectId, mainCommit, resultCommit, batchId } = integrated;
+    const { environment, repository, projectId, mainCommit, resultCommit, batchId, remote } =
+      integrated;
     try {
       const listed = await cli(['promotion', 'full-suite', 'list', projectId], environment);
       expect(listed.exitCode).toBe(0);
@@ -410,14 +525,16 @@ describe('codeestra promotion', () => {
       expect(prepared.stderr).toContain('DEV_FULL_SUITE_EVIDENCE_MISSING');
       expect(JSON.parse((await cli(['promotion', 'list', projectId], environment)).stdout)).toEqual([]);
       expect(await git(repository, ['rev-parse', 'refs/heads/main'])).toBe(mainCommit);
+      expect(await git(remote, ['rev-parse', 'refs/heads/dev'])).toBe(mainCommit);
     } finally {
       await cli(['stop'], environment);
     }
-  }, 240_000);
+  }, 300_000);
 
-  test('records the three bindings and invalidates the evidence when the policy on main changes', async () => {
+  test('records the three bindings and refuses to push when the policy on main changes', async () => {
     const integrated = await integratedTask();
-    const { environment, repository, projectId, mainCommit, resultCommit, batchId } = integrated;
+    const { environment, repository, projectId, mainCommit, resultCommit, batchId, remote } =
+      integrated;
     try {
       const evidence = JSON.parse((await cli(['promotion', 'full-suite', 'list', projectId],
         environment)).stdout) as readonly {
@@ -451,11 +568,12 @@ describe('codeestra promotion', () => {
       const read = JSON.parse((await cli(['promotion', 'get', projectId, plan.promotionId],
         environment)).stdout) as PromotionPayload;
       expect(read).toMatchObject({ state: 'STALE', outcomeCode: 'DEV_FULL_SUITE_EVIDENCE_STALE',
-        promotedCommit: null });
-      // No ref moved: the policy commit is on main, and dev is still the un-promoted candidate.
+        promotedCommit: null, remoteDevCommit: null });
+      // Nothing was pushed anywhere: the policy commit is on main and dev is still the candidate.
       expect(await git(repository, ['rev-parse', 'refs/heads/dev'])).toBe(resultCommit);
+      expect(await git(remote, ['rev-parse', 'refs/heads/dev'])).toBe(mainCommit);
     } finally {
       await cli(['stop'], environment);
     }
-  }, 240_000);
+  }, 300_000);
 });

@@ -414,29 +414,33 @@ export async function reconcileInterruptedResultCommits(input: {
 
 export interface PromotionRecoveryResult {
   readonly promotionId: string;
-  readonly outcome: 'FAILED_MAIN_NOT_UPDATED' | 'RESTART_UNPROVEN';
+  readonly outcome: 'RESTART_UNPROVEN' | 'AWAITING_PULL';
   readonly observedMainCommit: string | null;
   readonly candidateCommit: string;
 }
 
 /**
- * Reconciles a stable promotion a restart found in flight. The decision comes from the `main` ref
- * alone, because that is the only side effect this capability performs:
+ * Reconciles a stable promotion a restart found in flight (ADR-0047 D01/D03).
  *
- * - `PROMOTING` with `main` still at the recorded expected commit: the promotion never happened.
- *   It is failed with `MAIN_NOT_UPDATED`, and nothing about `dev`/`main` changed.
- * - `PROMOTING` with `main` already at the fixed candidate: the fast-forward did happen and only
- *   the record is missing it. It becomes `RECOVERY_REQUIRED/RESTART_UNPROVEN` — the ref is **not**
- *   written a second time, and the restart sequence (install/build/stop/status) still has to be run
- *   and recorded before the promotion can be called successful.
+ * The decision comes from the main checkout's own ref alone, because nothing this capability does
+ * moves it: the pull is the user's explicit step. A restart between the push and the pull is normal
+ * rather than a failure, so the states are treated differently:
+ *
+ * - `PROMOTING` with `main` still at the recorded expected commit: the push is recorded and
+ *   verified and nothing else happened. The record stays open and resumable — it is reported as
+ *   `AWAITING_PULL`, not failed, because the promotion has neither completed nor lost anything.
+ * - `PROMOTING` with `main` already at the fixed candidate: the pull happened and only the restart
+ *   was never recorded. It becomes `RECOVERY_REQUIRED/RESTART_UNPROVEN` — `main` is **not** written
+ *   again, and the restart sequence (install/build/stop/status) still has to be run and recorded
+ *   before the promotion can be called successful.
  * - `RESTARTING`: the same, since the restart result was never recorded.
- * - `PROMOTING` with any other `main`: the ref moved outside this promotion. It becomes
- *   `RECOVERY_REQUIRED/MAIN_REF_OBSERVED`, which a human resolves with `promotion.abandon`; the
- *   record states the value it observed instead of guessing.
+ * - anything else: the ref moved outside this promotion. It becomes
+ *   `RECOVERY_REQUIRED/MAIN_REF_OBSERVED`, which a human resolves with `promotion.abandon` after
+ *   reading what was observed; the record states the value it saw instead of guessing.
  *
  * `RECOVERY_REQUIRED` keeps the project's promotion slot occupied, so a new promotion cannot race
  * an unresolved one; the same record is resumed by re-running `promotion promote`, which re-issues
- * the recorded restart plan without touching a ref.
+ * the recorded restart plan without touching a local ref.
  */
 export async function reconcileInterruptedPromotions(input: {
   readonly storage: Phase1Database;
@@ -471,15 +475,10 @@ export async function reconcileInterruptedPromotions(input: {
       continue;
     }
     if (plan.state === 'PROMOTING' && observed === plan.expectedMainCommit) {
-      input.storage.failStablePromotion({
-        promotionId: plan.promotionId,
-        outcomeCode: 'MAIN_NOT_UPDATED',
-        detail: `Runtime restarted while the promotion was PROMOTING and ${plan.mainRef} is still at`
-          + ` the expected commit ${plan.expectedMainCommit}; main was not updated by this promotion`,
-        eventId: randomUUID(),
-        failedAt: now(),
-      });
-      results.push({ promotionId: plan.promotionId, outcome: 'FAILED_MAIN_NOT_UPDATED',
+      // Nothing was lost and nothing has to be rewritten: the dev push is recorded and verified,
+      // the main checkout is still on its old commit, and the pull is the user's own step. Failing
+      // the record here would turn an ordinary Runtime restart into a failed promotion.
+      results.push({ promotionId: plan.promotionId, outcome: 'AWAITING_PULL',
         observedMainCommit: observed, candidateCommit: plan.candidateCommit });
       continue;
     }

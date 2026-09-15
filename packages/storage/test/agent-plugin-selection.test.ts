@@ -48,6 +48,14 @@ describe('agent plugin selection storage', () => {
         VALUES ('cfg-global','GLOBAL',NULL,'pi','deepseek','deepseek-flash','high',
           '{"extensions":[],"skills":[],"promptTemplates":[],"themes":[]}',5,'local-user')`).run();
       legacy.exec('ALTER TABLE agent_configurations DROP COLUMN plugin_selection_json');
+      // A version 26 database also predates every later step, so the columns added by schema v29
+      // (the dev clone and the promotion remote readbacks) are removed as well: the upgrade below
+      // must then be exactly what a real v26 database runs.
+      for (const column of ['dev_repo_path', 'remote_dev_commit', 'remote_main_commit', 'pushed_at',
+        'main_pushed_at']) {
+        legacy.exec(`ALTER TABLE stable_promotions DROP COLUMN ${column}`);
+      }
+      legacy.exec('ALTER TABLE projects DROP COLUMN dev_repo_path');
       legacy.exec('PRAGMA user_version=26');
       legacy.close();
 
