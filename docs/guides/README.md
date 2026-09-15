@@ -1,5 +1,9 @@
 # Codeestra 用户指南
 
+> **适用版本** `dev@036cf68`（2026-09-15） · **schema** v28 · **最后校对** 2026-09-15
+> 版本会前进：`dev@036cf68` 只是本目录最后一次校对的基线；当前适用版本以
+> [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+
 本目录是**面向使用者**的中文指南：怎么装、怎么用、软件具备哪些能力、每条命令怎么敲、出错了怎么办。
 
 Codeestra 是 Task-first、local-first 的 AI Development Runtime：你管理产品意图，Codeestra 管理软件工程
@@ -14,12 +18,16 @@ Codeestra 是 Task-first、local-first 的 AI Development Runtime：你管理产
 
 | 我想…… | 从这里开始 |
 |---|---|
+| **不知道该从哪读、想要一份从头读到尾的说明书** | **[manual.md](./manual.md)** |
 | 第一次把 Codeestra 跑起来 | [getting-started.md](./getting-started.md) |
 | 先搞懂 Project / Task / Execution 这些词是什么意思 | [concepts.md](./concepts.md) |
 | 走一遍「从建任务到合入 dev 再到稳定提升」的完整流程 | [workflow.md](./workflow.md) |
 | 查「这软件到底有哪些功能」 | [features.md](./features.md) |
 | 查「这条命令怎么用、参数是什么、退出码是什么」 | [cli-reference.md](./cli-reference.md) |
-| 认一下界面上的每个面板 | [ui.md](./ui.md) |
+| 认一下界面上的每个面板、每个按钮做什么 | [ui.md](./ui.md)（逐屏走查） |
+| 想做某件具体的事（改 bug / 并行 / 换 Agent / 发布…） | [recipes.md](./recipes.md) |
+| 想人工核对界面观感（窄屏、主题、字号、焦点…） | [acceptance-checklist.md](./acceptance-checklist.md) |
+| 图放哪、缺哪张图 | [images/README.md](./images/README.md) |
 | 遇到了报错 / 想查稳定错误码 | [troubleshooting.md](./troubleshooting.md) |
 
 ## 三条必须先知道的第一原则

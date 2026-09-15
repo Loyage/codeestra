@@ -4839,6 +4839,128 @@ git ls-remote --heads origin            → 7292ddc refs/heads/dev / c50730f ref
 - dev clone 里的本地 `main` 不会自动前进（无定时 fetch）；需要最新 main ref 时显式 `git fetch`，本格未改为自动。
 - Orca 等外部工具若记录了旧的 worktree 身份，需要用户侧重新指向 dev clone；本格未修改这些外部工具的数据。
 
+## FOUNDATION-078 — 用户说明书与文档同步纪律（Wave L / L2，纯文档，ADR-0050）
+
+状态：**已完成本格**。基线：`dev = 036cf681ec87127579c285bc51888c1f54d1f932`（未 rebase）；分支 `lane/l2-user-manual`，
+工作树 `/Users/loyage/Documents/codeestra-wt/l2-user-manual`。**无代码改动**（`apps/**`、`packages/**` 一行未动）、
+**无 schema 变更**（仍 v28、未占迁移号）、**未改 `PROJECT_SPEC.md` 与既有 ADR 正文、未改 `.codeestra/**`**。
+**ADR-0050 由本格占用（协调者裁决）**；L3 若需新 ADR 用 0051。
+
+用户原话：「我希望项目有使用指南，相当于一份写给用户的说明书。」
+用户对形态的裁决：**单份主线说明书 + 现有文档为参考**。配套四项**全部要**：①「功能变更必须同步说明书」更新纪律；
+②人工观感核对清单；③预留插图位（图由用户提供）；④每篇顶部加「适用版本 / 对应 schema 版本 / 最后校对日期」头。
+
+### 交付物
+
+| 交付物 | 内容 | 位置 |
+|---|---|---|
+| A ADR-0050 | 说明书单一主线、版本/校对头（SHA 必须与「以 tasks 记录为准」同时出现）、文档同步纪律、逐屏走查要求、人工核对清单、插图位、非目标与被否选项 | `docs/decisions/0050-user-manual-and-doc-sync-discipline.md` |
+| A 索引 | ADR 表尾新增 0050 一行；「优先级标注」段补一句 | `docs/decisions/README.md` |
+| B 主文档 | `manual.md`：14 节，可从「这是什么」读到「术语表」；每节末尾给「想深入看哪篇」；不复制既有篇的参数表与错误码表 | `docs/guides/manual.md`（新建，1098 行） |
+| B 逐屏走查 | `ui.md` 重写为逐屏走查：常驻外壳 + 7 个标签页（任务工作台 / 待处理 / 调度 / 项目 / Agent 设置 / 运行事件 / 设置），每个按钮/输入标注它发的命令，另加一张「只读投影 vs 真的改状态」汇总表 | `docs/guides/ui.md`（重写，849 行） |
+| B recipes | 13 条「我想做 X」的步骤化做法（改 bug / 加功能 / 并行 / 冲突 / 换 Agent 或模型 / 继续已有任务 / Agent 停下问我 / 散文提问 / 合入 dev / 发布 main / 保住失败现场 / 回收磁盘 / 从零开工） | `docs/guides/recipes.md`（新建，560 行） |
+| B 人工清单 | 逐项可勾选：固定外壳与滚动、窄屏 ≤850px、矮窗口、三种主题、紧凑密度、字号三档、`reduced` 动效、键盘焦点与 skip-link、长任务列表下标题栏与「工作空间」、停靠条、Attention 卡片、终端面板、dev 通道标记；含「为什么它存在」与未覆盖范围 | `docs/guides/acceptance-checklist.md`（新建，265 行） |
+| B 插图位 | 17 张建议图（文件名 + 该图要拍什么 + 图注文字 + 用在）：`00-overview` / `00-token-form` / `01-first-run` / `02-project-trust` / `03-task-workbench` / `04-task-detail` / `05-attention` / `06-transcript` / `07-terminal` / `08-schedule` / `09-events` / `10-agent-settings` / `11-settings` / `12-new-task-dock` / `13-narrow-layout` / `14-dev-banner` / `15-promotion-record` | `docs/guides/images/README.md`（新建） + `manual.md`/`ui.md` 里 **28 行** `> 图：…` 占位（17 个不同文件名） |
+| B 版本头 | 12 篇全部加上同一块：`适用版本 dev@036cf68（2026-09-15） · schema v28 · 最后校对 2026-09-15` + 「以 `docs/tasks/README.md` 的最新记录为准」 | `docs/guides/**`（12/12 篇） |
+| B 索引更新 | 分流表首位加 `manual.md`，并补 recipes / acceptance-checklist / images 三行 | `docs/guides/README.md` |
+| C 人工规范 | 「实现与验证」小节新增一条**功能变更必须同步用户文档（ADR-0050）**的纪律（人工规范，不加机器门禁） | `AGENTS.md` |
+| D 不一致清单 | §3 新增 `### 3.1 FOUNDATION-078 的逐屏走查校准`：12 项逐条列出位置 / 原写法 / 实际渲染（带 `App.tsx` 行号）/ 处置 | `docs/guides/troubleshooting.md` |
+| D features 校准 | 按上表修正 12 处 UI 位置/文案，新增「Agent 插件选择」与「界面效果设置」两行 | `docs/guides/features.md` |
+
+### 本次修改的人工规范（用户已授权）
+
+**本格修改了 `AGENTS.md`，用户已授权。** 新增内容只加了一条（在「实现与验证」小节末尾，位于既有
+「完成工作同步 `docs/tasks/`」一条之后）：新增或修改**命令面 / UI 行为 / 设置键 / 权限语义**时，
+必须同步更新 `docs/guides/` 的对应段落（并列出哪类变更对应哪几篇），**交付说明里写明改了哪一篇的哪一节；
+确实不需要改的要说明为什么不需要**；明确写了这是人工规范、不加机器门禁。
+`AGENTS.md` 的其他小节**一字未改**。
+
+同期在 `docs/tasks/README.md`（即本节）写入同一条纪律 —— 见下面「交付要求」一节。
+
+### 核对方法（硬要求：一切事实来自代码）
+
+本格为纯文档，但说明书与走查里的每个命令、标签、按钮都做了**源码核对**。全部核对为**只读**：
+只 `read`/`grep`/`wc`/`sed` 仓库源码与文档，**未启动 Runtime、未创建任务、未 trust 任何仓库、未触碰
+`/Users/loyage/Documents/codeestra`（main 稳定 clone）与 `/tmp/ce-*`**。
+
+| # | 核对了什么 | 方法（可复现命令） | 结果 |
+|---|---|---|---|
+| 1 | **文档内链接存在性** | Python 脚本（`pathlib` + 正则 `\[[^\]]*\]\(([^)\s]+)\)`）扫描 `docs/guides/**/*.md`，跳过 `http(s):`/`mailto:`/纯锚点，逐条 `(父目录 / 路径).resolve().exists()` | **12 个文件、277 条相对链接、0 条断链**（首轮 3 条断链：`docs/guides/images/README.md` 里三条指向 `docs/tasks`、`docs/decisions` 的链接少了一层 `../`，已修为 `../../` 后复测为 0） |
+| 2 | **插图占位与清单双向一致** | 同一脚本：提取全部 `^> 图：\`([^\`]+)\`` 占位名，与 `images/README.md` 里 `\| \`([^\`]+\.png)\` \|` 行对比 | **17 个占位、17 条清单，双向差集为空**（无「有占位无清单」也无「有清单无占位」） |
+| 3 | **命令组与子命令** | 从 `apps/cli/src/main.ts` 的 `usage()` 块（`split('function usage(): never {')` 到 \`);\`）提取全部 `bun run codeestra …` 行 → 命令组集合 + 每组动作集合；再从 `manual.md`/`recipes.md`/`ui.md`/`cli-reference.md` 提取全部 `codeestra <…>` 提及并逐条比对 | `usage()` 共 **107 条**命令行、**15 个**命令组；文档里 **297 条**提及，**未知命令组 0、未知子命令 0** |
+| 4 | **flag** | 从三篇新文档提取全部 `--flag`，与 `apps/cli/src/main.ts` 里的字面量集合比对 | **58 个** flag，其中 **52 个**在 CLI 里逐字命中；其余 **6 个**是 Git/provider 的 flag（`--ff-only`、`--force`、`--heads`、`--no-ff`、`--no-verify`、`--no-extensions`），**不是 Codeestra CLI flag**，按原义使用正确 |
+| 5 | **界面标签页与文案** | 硬编码一份 172 条的界面文案清单（7 个标签名、外壳、停靠条、任务操作按钮、各面板标题与关键说明句、设置项的中文名与取值标签），逐条在 `apps/ui/src/**` 的 `*.tsx`/`*.ts` 文本里做子串匹配 | **170 条逐字命中**；1 条是模板字符串（`发送 ${answered.length} 个回答`，源码里就是模板）；1 条（`Agent 执行过程`）**在源码里不是独立标题**——已把 `ui.md` 与插图清单改为「同一个 `Agent 会话与执行过程` 区块里的执行过程子面板，没有自己的标题」。复核抽查 36 条关键锚点（含 7 个 `tabLabels` 值与导航顺序数组）：**0 条缺失** |
+| 6 | **标签页顺序与数量** | `read apps/ui/src/App.tsx` | `tabLabels` 在 `:42` 定义 **7 个**标签；导航用 `(['tasks', 'attention', 'schedule', 'project', 'plugins', 'events', 'settings'] as const)` 渲染，与文档一致 |
+| 7 | **影响映射面板在哪一页** | `grep -n "ImpactPolicyPanel\|function ScheduleTab\|function ProjectTab\|DependencyPanel\|PromotionPanel" apps/ui/src/App.tsx` | `ImpactPolicyPanel` 在 `:1499`，**位于 `ScheduleTab`（`:1480`）内部**；`ProjectTab`（`:1852`）只渲染 `DependencyPanel`（`:1971`）与 `PromotionPanel`（`:1973`）。→ `features.md` 与旧 `ui.md` 写的「项目 → 影响映射」**是错的**，已修 |
+| 8 | **「更多操作」里到底有什么** | `grep -n "secondary-actions" -A 8 apps/ui/src/App.tsx`；`grep -n "task retry" apps/ui/src/*.tsx` | `:1119` 的 `<details>` 里只有 `终止`（`:1122`）与 `归档/取消归档`；**UI 里没有 task retry 按钮，也没有 revision/delivery 视图** → `features.md` 三处 UI 位置已修 |
+| 9 | **主题选择器在哪** | `grep -n "ThemeSelector" apps/ui/src/App.tsx` | `:244`（`theme-corner`，**只在登录前的令牌表单里**）与 `:636`（`sidebar-bottom`，**侧栏底部**）。→ 旧文档写的「顶部主题选择器」不准确，已修 |
+| 10 | **固定外壳（FOUNDATION-072）** | `grep -n "position: sticky\|overflow\|grid-template-rows" apps/ui/src/styles.css`；`sed -n '278,300p'` | `styles.css:79`：`.app { display:grid; grid-template-rows: auto 56px minmax(0,1fr); height:100dvh; overflow:hidden }`；`:104`：`.workspace-shell { … overflow:auto }`；`:281`：`@media (max-width:850px)` 把 `.app` 改成 `flex column`、`.app-header { flex:none }`、`.sidebar > nav` 改横向。→ 「标题栏与导航不随内容滚动、只有工作区滚动」**属实**（850px 的折点也在文档里写对了） |
+| 11 | **五个界面设置键/取值/默认值** | `grep -n "uiSettingKeys\|theme:\|density:\|fontSize:\|motion:\|timeDisplay:\|'system'…" packages/contracts/src/ui-settings.ts` | `uiSettingKeys = ['theme','density','fontSize','motion','timeDisplay']`（`:24`）；取值 `theme: system\|light\|dark`、`density: comfortable\|compact`、`fontSize: medium\|small\|large`、`motion: full\|reduced`、`timeDisplay: relative\|absolute`（`:41-45`）；默认 `system`/`comfortable`/`medium`/`full`/`relative`（`:66-70`）——与 `manual.md` §11.2、`ui.md` §8、`acceptance-checklist.md` 逐字一致 |
+| 12 | **容量上限与范围** | `grep -n "defaultConcurrencyLimit\|maxConcurrencyLimit" packages/contracts/src/index.ts`；`grep -n "limit < 1\|CAPACITY_LIMIT_OUT_OF_RANGE" apps/runtime/src/capacity-service.ts` | `defaultConcurrencyLimit = 2`（`:350`）、`maxConcurrencyLimit = 16`（`:352`）；`capacity-service.ts:53` 拒绝 `limit < 1`、`:58` 报 `CAPACITY_LIMIT_OUT_OF_RANGE` → 文档写的「默认 2、上限 16、下限 1」属实 |
+| 13 | **schema 版本** | `grep -n phase1SchemaVersion packages/storage/src/migration.ts` | `:1 export const phase1SchemaVersion = 28;` → 12 篇版本头的 `schema v28` 正确 |
+| 14 | **退出码语义** | `grep -n "退出码" docs/guides/cli-reference.md`；`sed -n '34,42p'` | §0.2 明确 `0` 成功（某些是「已受理」）/`1` 拒绝或失败/`2` 用法错误/`3` 等待或没什么可做，且「`3` 从不表示 `BLOCKED`」—— `manual.md` §13.2 与 `recipes.md` §0 的写法与它一致 |
+
+**核对覆盖的完整性**：核对 3（命令）与核对 5（文案）是**全量**的（不是抽样）；核对 1/2（链接与占位）也是全量。
+核对 6–14 是针对本格**改动过或新写**的事实点。
+
+### 实际运行的检查与结果（定向，ADR-0038）
+
+**未运行** `bun run check` / `just check` / `just verify` / `check:fast`（ADR-0038 禁止在 `lane/*` 分支跑全量或聚合检查）。
+
+**未运行** `bun run typecheck` / `bun run typecheck:ui`：本格**没有任何代码改动**（`git status` 里 `apps/**`、`packages/**` 一行未动），
+对未改动的代码跑类型检查只会得到一个无信息的绿灯，因此**如实不做**；`package.json`、`tsconfig.json`、`vitest.config.ts` 也均未触碰。
+
+实际跑的只有上表 14 项**只读核对**（Python 脚本 + `grep`/`sed`/`wc`）。**未创建任何测试文件**（纯文档格没有需要覆盖的代码路径）。
+
+### 发现并处置的 12 处文档与实现不一致
+
+完整清单见 `docs/guides/troubleshooting.md` §3.1（含行号证据与逐条处置）。摘要：影响映射面板的位置（2 处）、
+Project Knowledge 的 UI 位置、Agent 配置标签名与缺失的插件命令、界面主题是否进命令面 + 选择器位置、缺少 `settings ui` 能力行、
+规格修订与投递台账的 UI 位置、**不存在的 task retry 按钮**、验证策略来源面板、`promotion full-suite` 的 UI 入口、
+四行按钮文案（`启动 Agent`/`暂停`/`继续`/侧栏底部）以及过期指针。
+
+**处置方式**：只改**指南文字**（`docs/guides/**`），**不改代码、不改既有 ADR 正文**，
+并且**全部在 `troubleshooting.md` §3.1 逐条登记了位置/原写法/实际渲染/处置**——不是静默改写。
+
+### 交付要求（本格新增，与 `AGENTS.md` 同一条纪律）
+
+**功能变更必须同步用户文档（ADR-0050）。** 本格的交付与后续每一格的交付都按这条办：
+
+1. **新增/修改命令面**（命令、子命令、flag、退出码、稳定错误码）→ 同步 `docs/guides/cli-reference.md`；
+   若它改变用户的日常做法 → **同时**同步 `docs/guides/manual.md` 的相关节与 `docs/guides/recipes.md` 的相关条目。
+2. **UI 行为变化**（标签页、按钮、文案、只读/可写的分界）→ 同步 `docs/guides/ui.md`；改变日常做法时同步 `manual.md`。
+3. **设置键**（新增/删除/取值/默认值）→ 同步 `cli-reference.md` 的 `settings` 一节、`manual.md` 的「设置与权限」、
+   必要时同步 `acceptance-checklist.md`。
+4. **权限语义**（FULL/STRICT 的差异）→ 同步 `concepts.md`、`manual.md` 与 `features.md` 的权限行。
+5. **交付说明必须写明改了哪一篇的哪一节**；确实不需要改文档的，**要写明为什么不需要**——
+   「没提到」与「确认无需修改」是两件不同的事。
+6. `docs/guides/**` 每篇顶部的版本/校对头按 ADR-0050 D02 维护：改动该篇内容时更新「最后校对」日期；
+   适用版本的 dev SHA 必须与「以 `docs/tasks/README.md` 的最新记录为准」同时出现。
+7. **不加机器门禁**：这条是人工规范，不阻塞提交、不新增 CI 钩子（本仓库当前也没有 CI 门禁）。
+
+### 未核实 / 未验证 / 留给下一格
+
+- **全部观感类结论均未验证**（ADR-0008）：窄屏与矮窗口排布、三种主题的实际对比度、紧凑密度与字号三档的观感、
+  `reduced` 动效是否真的没有动画、键盘焦点顺序与 skip-link 的实际表现、固定外壳是否真的「稳住」、停靠条与
+  Attention 卡片与终端面板在窄屏下的可操作性、dev 通道横幅在浅色/深色下的辨识度。
+  这些**只能由用户在场目视确认**，清单在 `docs/guides/acceptance-checklist.md`（本格只写了清单，**没有打勾、没有声称核过任何一条**）。
+- **插图一张都没有**：`docs/guides/images/` 下现在只有 `README.md`。17 个占位行是契约，图由用户提供；
+  本格**未使用**浏览器/桌面自动化截图，也未生成示意图。
+- **浏览器里的真实点击路径未走查**：本格只做源码对照，**没有打开过界面**（未启动 Runtime、未构建 UI 资产）。
+  这意味着：文案与面板归属可信（源码逐字核对），但「实际点击后是否出现预期提示」未经核实。
+- **`docs/guides/**` 之外的文档未核对**：`docs/architecture/**` 等处是否也有同类「UI 位置」陈旧描述，
+  本格按 ADR-0050 D07 未扩范围。
+- **两处近似但未改**：`features.md` 后台长命令行的 UI 位置（按钮文案是 `验证任务`、面板名是 `长命令进度`，同屏相邻）、
+  以及任务验证行（与按钮文案逐字一致）——理由写在 `troubleshooting.md` §3.1。
+- **未在 dev 上跑任何全量检查**：纯文档格，且 ADR-0038 规定全量测试只在准备 `dev → main` 前对精确 dev 候选 SHA 跑一次；
+  本格不触发该步骤。
+
+### 本格未触碰的东西（如实列出）
+
+`PROJECT_SPEC.md`（一字未改）、既有 ADR 正文（只新增 0050 与在 README 索引追加一行/补一句）、
+`.codeestra/**`（未读未写）、`apps/**` 与 `packages/**`（一行未动）、`package.json`/`tsconfig.json`/`vitest.config.ts`（未动）、
+`node_modules`（未重装）、`/Users/loyage/Documents/codeestra` 与稳定 Runtime（未连接、未停止、未重启）、`/tmp/ce-*`（未动）。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），
@@ -4850,6 +4972,18 @@ git ls-remote --heads origin            → 7292ddc refs/heads/dev / c50730f ref
 **2026-09-15 更新（FOUNDATION-076）**：用户重新定义了本机项目构造，稳定提升路径已改为**经 GitHub 中转**（ADR-0047），
 `dev` 与 `main` 已成为两个分别 clone 的独立仓库（ADR-0048），dev 构建的 UI 带构建期通道标记（ADR-0049）。
 因此新增下面第 11 条（ADR-0047 的产品实现）；本次**没有**从剩余列表移出任何条目。原第 10 条不变。
+
+**2026-09-15 更新（FOUNDATION-078）**：用户要求一份「写给用户的说明书」。本格交付了单份主线说明书
+（`docs/guides/manual.md`）、逐屏 UI 走查（`ui.md` 重写）、13 条 recipes、人工观感核对清单与插图位（ADR-0050，**纯文档**），
+并在 `AGENTS.md` 与本文件写入「功能变更必须同步 `docs/guides/`」的交付要求。
+对剩余列表的影响：
+
+- **第 9 条（观感类验收）**：现在有了一份可勾选的清单（`docs/guides/acceptance-checklist.md`），但**清单上一条都没被打勾** ——
+  观感仍然只能由用户在场目视确认，因此该条**不移出**，只是从「无从下手」变成了「有据可依」。
+- **第 3 条（修订投递的 UI 投影）**：逐屏走查确认 UI 里仍没有 revision/delivery 视图（见 FOUNDATION-078 核对 8），
+  因此该条**不移出**；但 `features.md` 原先声称的「任务详情 → 修订投递」已作为假话改掉。
+- **第 10 条（Phase 7 Self Evolution）与其余各条**：未受影响。
+- 本次**没有**从剩余列表移出任何条目。
 
 ### 仍然剩余
 

@@ -1,5 +1,9 @@
 # 常见故障与稳定码表
 
+> **适用版本** `dev@036cf68`（2026-09-15） · **schema** v28 · **最后校对** 2026-09-15
+> 版本会前进：`dev@036cf68` 只是本目录最后一次校对的基线；当前适用版本以
+> [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+
 本文只列**源码里实际存在**的错误码与状态。每条给出「什么时候出现 / 怎么办」。
 
 ---
@@ -439,7 +443,7 @@ bun run codeestra events list --limit 1        # 或者从你保存的最后一�
 
 ---
 
-## 3. 文档与实现不一致的处置（FOUNDATION-074 校准 + FOUNDATION-075 收口）
+## 3. 文档与实现不一致的处置（FOUNDATION-074 校准 + FOUNDATION-075 收口 + FOUNDATION-078 逐屏走查校准）
 
 J1（FOUNDATION-070）曾在上一版这里如实列出 10 项「文档与实现不一致」，并明确「没有在文档里被悄悄改掉、只列出不裁决」。
 FOUNDATION-074（Wave K / K1 文档校准）逐条处置了这份清单：**8 项已修**（含唯一一处代码改动：`apps/cli/src/main.ts` 的 `usage()` 文本），
@@ -478,6 +482,38 @@ FOUNDATION-075（Wave K / K2）把第 7、10 条**一并收口**（处置见下�
 K1 留下的两条待裁决已由 FOUNDATION-075 收口，因此这份清单**没有剩余的「待裁决」项**；新的不一致应重新开一条（写明位置、原不一致、处置与依据），
 不要回头改已归档的历史记录。
 
+### 3.1 FOUNDATION-078 的逐屏走查校准（Wave L / L2）
+
+本格按用户裁决写了一份可以「从头读到尾」的说明书 `manual.md`，并按 ADR-0050 D04 把 `ui.md` 重写为**逐屏走查**。
+重写要求「逐个对照 `apps/ui/src/**` 的组件与文案」，于是又把 `docs/guides/**` 里只写在文字上的 UI 位置逐条核了一遍。
+下面每一项都**只动指南文字**（`docs/guides/**`），**未改任何代码**（`apps/**`、`packages/**` 一行未动），也未改既有 ADR 正文。
+
+| # | 位置 | 原写法 | 实际渲染（依据） | 本格处置 |
+|---|---|---|---|---|
+| 1 | `features.md` 影响映射校验 / 影响分析与冲突判定（两行） | UI 位置写「项目 → 影响映射」 | `ImpactPolicyPanel` 渲染在 **`ScheduleTab`** 里（`apps/ui/src/App.tsx:1480` 的 `ScheduleTab`，面板在 `:1499`）；`ProjectTab`（`:1852`）只渲染 `DependencyPanel`（`:1971`）与 `PromotionPanel`（`:1973`） | **已修**：两行都改为「**调度** → 影响映射 · impact.json」；`ui.md` 的逐屏走查按实际渲染写，并加一句「这个面板在『调度』标签页里，不在『项目』标签页里」 |
+| 2 | `features.md` Project Knowledge 行 | UI 位置写「项目 → 影响映射旁（只读展示）、任务详情」 | UI 里**没有任何** knowledge 组件：`grep -rn "knowledge" apps/ui/src/` 只命中 `fenceAcknowledged`（终端安全点的一个布尔字段，与 Project Knowledge 无关） | **已修**：改为「—（界面无投影）」；`ui.md` §10 把 `project knowledge *` 列入「只有 CLI」表 |
+| 3 | `features.md` Agent 配置行 | UI 位置写「Agent 配置标签页」；CLI 只列 `agent config get/set/clear` | 标签名实际是 **`Agent 设置`**（`App.tsx:42` 的 `tabLabels.plugins`）；FOUNDATION-071 / ADR-0044 已新增 `agent plugins list/select`，且界面有「插件候选」与「清除选择」 | **已修**：改名，并新增一行「Agent 插件选择」能力 |
+| 4 | `features.md` 界面主题行 | 写「—（无 CLI 语义；主题不进入命令面）」，UI 位置写「顶部主题选择器」 | ADR-0045 / FOUNDATION-073 后 `theme` **是命令面的一部分**（`settings ui set theme`，见 `apps/cli/src/main.ts` 的 `usage()`）；`ThemeSelector` 挂在**侧栏底部**（`App.tsx:636`），`theme-corner`（`:244`）只在登录前的令牌表单里 | **已修**：CLI 列改为 `settings ui set theme …`；UI 位置改为侧栏底部（并标注登录前的预览副本） |
+| 5 | `features.md` 设置行 | 只有 `settings prose-question-attention`，没有 `settings ui` | FOUNDATION-073 / ADR-0045 新增了 `settings ui list/get/set/reset` 与「设置」标签页 | **已修**：新增一行「界面效果设置」；原行改名「设置（散文提问等待）」并注明「设置」标签页只有界面效果五项 |
+| 6 | `features.md` 规格修订 / Revision 投递台账（两行） | UI 位置写「任务详情 →「更多操作」」/「任务详情 → 修订投递」 | 任务详情的「更多操作」（`App.tsx:1119`）里只有 `终止`（`:1122`）与 `归档/取消归档`；UI 里**没有** revision 或 delivery 视图（这与 `docs/tasks/README.md` `## NEXT` 第 3 条自己的声明一致） | **已修**：两行都改为「—（界面无入口 / 无投影）」 |
+| 7 | `features.md` 重试失败任务行 | UI 位置写「任务详情 → 重试」 | UI 里**没有**重试按钮（同一处 `secondary-actions`；`grep -n "task retry" apps/ui/src/*.tsx` 无命中） | **已修**：改为「—（界面无按钮；『更多操作』只有 `终止` 与 `归档`）」 |
+| 8 | `features.md` 分层测试证据行 | UI 位置写「任务详情 → 验证策略来源」 | 任务详情只渲染「最近验证」摘要与证据 JSON（`App.tsx` 的 `verifyReport` 区块），没有「策略来源」面板 | **已修**：改为「—（界面只显示验证结果与证据，无计划/来源面板）」 |
+| 9 | `features.md` dev 全量测试证据行 | UI 位置写「任务详情 → 稳定提升记录」 | `promotion full-suite` **没有任何 UI 入口**；「稳定提升记录」是 `promotion list/get` 的只读投影 | **已修**：改为「—（界面无入口）」；下面提升行的 UI 位置加注「**只读投影**，界面不执行提升」 |
+| 10 | `features.md` 运行任务 / 暂停恢复 / 多 Adapter / Runtime 生命周期（四行） | UI 位置分别写「运行任务」「暂停 / 恢复」「运行任务（选择 Agent）」「顶部运行状态」 | 实际按钮文案是 `启动 Agent`、`暂停`、`继续`；`Agent` 下拉框只在 `READY` 与 `PAUSED` 时出现（`App.tsx` 的 `task-actions`）；权限模式与事件流状态在**侧栏底部**，顶部只有一句 `本地运行 · 关闭页面不影响任务` | **已修**：四行都按实际文案/位置改写 |
+| 11 | `features.md` 文末「明确的未实现与未验证」第 6 条 | 把不一致清单指向「`docs/tasks/README.md` 的 FOUNDATION-070 一节」 | FOUNDATION-070 的 10 项清单已由 FOUNDATION-074/075 处置完毕（本文 §3 的表格就是它的结果），那个指针已过期 | **已修**：改为指向本节与 FOUNDATION-078 |
+| 12 | `ui.md`（旧版） | 侧栏导航只列了 6 项（缺 `设置`）且写「Agent 配置」；「项目」标签页一节写有「影响映射 · impact.json」 | 实际有 **7 个**标签（含 `设置`，`App.tsx:42`），标签名是 `Agent 设置`（见第 3 项）；影响映射在调度页（见第 1 项） | **已重写**：`ui.md` 已按 ADR-0050 D04 重写为逐屏走查（外壳 + 7 个标签页 + 只读/可写汇总表） |
+
+**近似但不改的两处**（如实标注，不改，因为不误导找人）：
+
+- `features.md` 后台长命令行的 UI 位置「任务详情 → 长命令进度」：按钮文案是 `验证任务`，`长命令进度` 是结果面板。
+  两者在同一屏、彼此相邻，不会把人指到错的地方。
+- `features.md` 任务验证行的 UI 位置「任务详情 → 验证任务」：与按钮文案逐字一致，**正确**，列在此处只为说明我核对过。
+
+**本格未能核实的一项**：`docs/guides/**` 之外的文档（例如 `docs/architecture/**`）是否也有同类「UI 位置」陈旧描述**没有核对**——
+本格范围是 `docs/guides/**`，没有扩到架构文档（ADR-0050 D07）。
+
+**已归档记录保持只读**：上面这张表与 FOUNDATION-074/075 的历史表格都不回改；新的不一致应重新开一条。
+
 ---
 
 ## 4. 明确的未验证 / 未实现（不要按「已有」使用）
@@ -498,6 +534,12 @@ K1 留下的两条待裁决已由 FOUNDATION-075 收口，因此这份清单**�
 13. FOUNDATION-075（规格状态段对齐 + `intents.kind` 缩小，schema v28）同样未运行任何全量/聚合检查（ADR-0038）；实际执行的定向检查见
    `docs/tasks/README.md` 的 FOUNDATION-075 一节。另外两件**未验证**的事：真实稳定 Runtime 上的 v27→v28 升级未执行（禁止触碰稳定工作树与稳定 Runtime），
    以及 v28 迁移「升级后比对行数」的第二道网没有直接测试（除了 kind 列之外重建不引入新约束，构造不出前置检查看不到的复制失败）。
+14. FOUNDATION-078（用户说明书 + 逐屏 UI 走查 + recipes + 人工核对清单 + 插图位，**纯文档**）未运行任何代码检查：
+   本格无代码改动，因此 `bun run typecheck` 与 `bun run typecheck:ui` **都没有跑**（两者都会在无改动时给出无信息的绿灯）；
+   同样**没有跑** `bun run check` / `just check` / `just verify` / `check:fast`（ADR-0038 禁止在 `lane/*` 分支跑聚合检查）。
+   实际跑的只有两类可复现断言：文档内链接存在性，以及命令/标签页/按钮文案对源码的核对；命令与结果见
+   `docs/tasks/README.md` 的 FOUNDATION-078 一节。**未验证**：全部观感类结论（见 [acceptance-checklist.md](./acceptance-checklist.md)）、
+   插图的真实效果（图尚未提供）、以及浏览器里的真实点击路径。
 
 ---
 

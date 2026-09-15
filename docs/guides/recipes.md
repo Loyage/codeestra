@@ -1,0 +1,560 @@
+# 常见任务的做法（recipes）
+
+> **适用版本** `dev@036cf68`（2026-09-15） · **schema** v28 · **最后校对** 2026-09-15
+> 版本会前进：`dev@036cf68` 只是本目录最后一次校对的基线；当前适用版本以
+> [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+
+本文是**步骤化**的：每条 recipe 回答一个「我想做 X」，给出可以照抄的命令与**做完之后看什么**。
+
+约定：
+
+- `$PROJECT` = `project list` 返回的 Project ID；
+- `$TASK` = `task create` 返回的 task id；
+- `<version>` = 该 Task 当前的 `version`（乐观版本号）。**它每次改状态都会变**——用 `task status` 或
+  上一条命令的输出重新取，不要凭记忆复用。
+- 每条命令的完整参数与退出码见 [cli-reference.md](./cli-reference.md)；
+  报错怎么办见 [troubleshooting.md](./troubleshooting.md)。
+
+---
+
+## 0. 每条 recipe 都会用到的三句
+
+```sh
+bun run codeestra status                      # Runtime 在不在、什么权限模式
+bun run codeestra task list $PROJECT          # 手上有哪些任务
+bun run codeestra task status $PROJECT $TASK  # 这个任务现在到底是什么状态
+```
+
+**记住退出码的三分法**：`0` 成功（某些命令是「已受理」）、`1` 拒绝或失败、`2` 用法错误、
+`3` 等待或没什么可做。`3` **从不表示 `BLOCKED`**。
+
+---
+
+## 1. 我想改一个 bug
+
+**目标**：把一个具体的缺陷修掉，让改动经过验证并进入 `dev`。
+
+```sh
+# 1) 描述得具体一点：现象、期望、边界、验收方式。约束能写就写。
+#    （规格是一整段文本，双引号里直接写；需要多行时用 shell 的 $'…' 或 heredoc。）
+bun run codeestra task create $PROJECT \
+  "修复 CRLF 输入被 parser 吞掉的缺陷：现象是含 CRLF 的输入末尾多出一个 token，期望与 LF 输入结果一致，验收方式是新增一个覆盖 CRLF 的用例" \
+  --constraint "不要改动公开 API"
+
+# 2) 提交（这一步会顺手核对依赖并跑一次调度 pass）
+bun run codeestra task submit $PROJECT $TASK <version>
+
+# 3) 看它为什么还没跑（如果确实没跑）
+bun run codeestra task schedule explain $PROJECT $TASK --json
+
+# 4) 启动（如果调度还没轮到，也可以手动请求一次；退出码 3 = 在等）
+bun run codeestra task run $PROJECT $TASK <version>
+
+# 5) 盯着看（会话、日志、事件）
+bun run codeestra task status $PROJECT $TASK
+bun run codeestra task transcript $PROJECT $TASK
+
+# 6) Agent 退出后提交成果
+bun run codeestra task result capture $PROJECT $TASK
+
+# 7) 验证 → 合入 dev
+bun run codeestra task verify $PROJECT $TASK
+bun run codeestra task integrate $PROJECT $TASK <version>
+```
+
+**做完看什么**：`task status` 里 `verifications[0].state` 是 `PASSED`，
+`integrations[0].state` 是 `INTEGRATED`，Task 到 `SUCCEEDED`。
+
+**别指望**：`SUCCEEDED` 只说明**已合入 dev**，不代表 `main` 已发布（见 recipe 10）。
+
+---
+
+## 2. 我想加一个小功能
+
+**目标**：加一个不大但完整的能力，并控制它的影响范围。
+
+```sh
+bun run codeestra task create $PROJECT \
+  "为 status 输出增加 adapters 列表：目标是 runtime.ping 已返回 adapters、CLI status 也打印它，范围只改 apps/cli 的输出，验收是 status 输出里能看到三个 adapter id" \
+  --constraint "不改 packages/contracts" \
+  --constraint "不改 apps/runtime"
+```
+
+其余步骤同 recipe 1。
+
+**小功能与 bug 的区别**在于「影响范围」：加功能更容易碰到别人也在改的地方，所以更值得先看冲突判定：
+
+```sh
+bun run codeestra project impact validate /path/to/repo --json     # 映射存在且被确认吗？
+bun run codeestra project impact explain  $PROJECT $TASK --json    # 和活跃任务有没有重叠
+```
+
+**别指望**：`UNKNOWN` 不等于「没冲突」。映射缺失/未确认时，所有判定都是 `UNKNOWN`，默认不并行。
+
+### 2.1（可选）顺手写下这个分支的定向测试
+
+如果这个任务要开一个新的 `task/*`、`lane/*` 或 feature 分支，**在建分支时就**写下它自己的小测试计划：
+
+```sh
+bun run codeestra task tests record $PROJECT $TASK
+bun run codeestra task tests show   $PROJECT $TASK
+```
+
+`.codeestra/tests.json` 是「一个 scope 说明 + 1–16 条带 `covers` 的 argv 命令」。
+`task verify` 跑的是**已记录的计划**（不是文件本身），所以事后改文件不会悄悄改变判定命令。
+
+---
+
+## 3. 我想同时做两件互不相干的事
+
+**目标**：两条工作同时推进，而**不是**让第二条在冲突检查里卡住。
+
+```sh
+# 1) 两个任务都建好、都提交
+bun run codeestra task create $PROJECT "把 A 模块的错误码补全" --constraint "只改 A 模块"
+bun run codeestra task submit $PROJECT $TASK_A <version-a>
+bun run codeestra task create $PROJECT "把 B 模块的文档补全" --constraint "只改 B 模块"
+bun run codeestra task submit $PROJECT $TASK_B <version-b>
+
+# 2) 逐个确认它们真的可以并行（关键一步）
+bun run codeestra project impact explain $PROJECT $TASK_A --json   # 退出码 0 仅当 SAFE_TO_PARALLELIZE
+bun run codeestra project impact explain $PROJECT $TASK_B --json
+
+# 3) 启动（两个都启动；容量上限默认是 2）
+bun run codeestra task run $PROJECT $TASK_A <version-a>
+bun run codeestra task run $PROJECT $TASK_B <version-b>
+
+# 4) 看谁占着槽位、谁在跑
+bun run codeestra scheduler capacity get      $PROJECT --json
+bun run codeestra scheduler reservations list $PROJECT
+bun run codeestra task schedule status        $PROJECT
+```
+
+**必须知道的三件事**：
+
+1. **「互不相干」是你说的，`SAFE_TO_PARALLELIZE` 才是有证据的。** 判定来自
+   `.codeestra/impact.json` 的人工映射 + 工作树的真实 change set，不用模型。
+2. **容量上限默认是 2。** 想同时跑更多要显式提高上限：
+   ```sh
+   bun run codeestra scheduler capacity set $PROJECT --limit 4
+   ```
+3. **`UNKNOWN` 默认等待。** 要强行并行必须**显式**放行（见 recipe 4）。
+
+**做完看什么**：`task schedule status` 的「活跃集合」里有两条；`scheduler capacity get` 的全局已用为 2。
+
+---
+
+## 4. 两件事互相冲突怎么办
+
+**目标**：知道冲突是什么、是「已证明」还是「无法证明」，然后选一条**明确**的路。
+
+```sh
+# 1) 先问「它为什么不跑」
+bun run codeestra task schedule explain $PROJECT $TASK --json
+bun run codeestra project impact explain $PROJECT $TASK --json
+```
+
+退出码与含义：
+
+| 退出码 / 判定 | 含义 | 你能做什么 |
+|---|---|---|
+| `0` / `SAFE_TO_PARALLELIZE` | 有证据证明可以并行 | 等调度，或 `task run` |
+| `3` / `WAIT_CONFLICT` | 与活跃任务重叠**未证明安全** | 等对方结束；或用下面的显式放行 |
+| `3` / `WAIT_CAPACITY` | 容量满了 | 等槽位释放，或显式提高上限 |
+| `1` / `BLOCKED` | **依赖未满足**（与冲突无关） | 见 recipe 5 |
+| `1` / `CONFLICTING` | **已证明的重叠** | **永远不放行**。改成串行，或改规格缩小范围 |
+
+**如果是 `UNKNOWN`，你有三条路**（选一条，不要混）：
+
+```sh
+# 路 A：等。什么都没变，这是默认行为。
+bun run codeestra task schedule run $PROJECT      # 手动请求一次调度（不会改变判定规则）
+
+# 路 B：显式单次放行（风险由你承担）
+bun run codeestra task schedule clear-unknown $PROJECT $TASK
+#   或者直接在启动时放行：
+bun run codeestra task run $PROJECT $TASK <version> --allow-unknown
+
+# 路 C：把映射补好，让判定真的变成 SAFE
+#   在 main ref 上更新 .codeestra/impact.json，然后重新 trust（同一次 trust 会一并确认映射）
+bun run codeestra project trust /path/to/repo
+bun run codeestra project impact validate /path/to/repo --json
+```
+
+**放行到底做了什么**（必须看清）：
+
+- 它绑定 revision、基线与分析器/策略版本，写入审计台账，被**恰好一次**启动消费；
+- 它**不改变已记录的判定**：那次 assessment 仍然是 `UNKNOWN`（不是 `SAFE`）；
+- 放行后 Runtime **不做额外隔离**；若两者越界，责任在放行的人；
+- 任务修订、基线变化、映射/分析器/策略版本变化、实际 diff 超出预测 → 放行**失效**。
+
+---
+
+## 5. 我想换一个 Agent 或模型
+
+**目标**：让下一步用另一个 adapter 或另一组模型参数。
+
+### 5.1 换 Adapter
+
+```sh
+# 方式 A：启动/继续/重试时指定（一次执行绑定一个 Agent）
+bun run codeestra task run    $PROJECT $TASK <version>  --adapter claude
+bun run codeestra task resume $PROJECT $TASK <version>  --adapter codex
+bun run codeestra task retry  $PROJECT $TASK <version>  --adapter pi
+
+# 方式 B：在界面上选（任务详情里的「Agent」下拉框）
+```
+
+可用的 adapter 是 `pi`（默认）、`codex`、`claude`（用 `codeestra status` 的 `adapters` 字段确认）。
+
+**关键语义**：**换 `--adapter` 是新建一次 Execution，不是在同一个 Execution 里换 Agent。**
+原来那次执行的历史、失败与证据原样保留，不会被重写。
+
+### 5.2 换模型 / Provider / 思考深度
+
+```sh
+# 看当前生效值与每一项的来源（环境变量 / 项目覆盖 / 全局默认 / 适配器默认）
+bun run codeestra agent config get --project $PROJECT --adapter pi
+
+# 全局默认
+bun run codeestra agent config set --adapter pi --model <model-id> --thinking high
+
+# 只对这个项目覆盖
+bun run codeestra agent config set --project $PROJECT --adapter pi --model <model-id>
+
+# 清掉某一项或整段
+bun run codeestra agent config set   --project $PROJECT --adapter pi --unset model
+bun run codeestra agent config clear --project $PROJECT --adapter pi
+```
+
+**两个必须知道的边界**：
+
+1. **配置只影响此后新建的 Session**，不重启 Runtime、不需要确认。已经跑起来的那次执行不会改变。
+2. **环境变量那一层优先级最高，而且只属于当前 Runtime 进程**：`CODEESTRA_PI_MODEL` 之类的变量会盖住你
+   在这里保存的值，改它要重启 Runtime。`agent config get` 的 `sources` 会如实告诉你是哪一层在生效。
+
+### 5.3 换插件（扩展 / 技能 / 提示词模板 / 主题）
+
+```sh
+bun run codeestra agent plugins list   --project $PROJECT --adapter pi --json
+bun run codeestra agent plugins select --project $PROJECT --adapter pi \
+  --skill /path/to/skill --clear
+```
+
+界面上的「Agent 设置」标签页做的是同一件事（勾选 = 整份选择替换）。
+**如实告知**：勾选第三方 extension 可能影响或绕过 Pi 的 fail-closed 审批门禁（该事实会被记进 Execution）；
+Codex 与 Claude 当前如实报告 `pluginSelection: UNSUPPORTED`。
+
+---
+
+## 6. 我想换一个已有任务继续
+
+**目标**：不新建任务，而是在**同一个任务和工作树**上接着干。先分清四种情况：
+
+| 现在的状态 | 用哪条命令 | 说明 |
+|---|---|---|
+| `PAUSED` | `task resume` | 在同一工作树新建一次执行，**复用已暂停会话的 provider conversation** |
+| `FAILED` | `task retry` | 只对 `FAILED` 生效；重新入队，之后走**同一条调度门禁**（会排队，不插队） |
+| `RUNNING` / `WAITING_FOR_USER` | `task pause` 然后 `task resume` | 暂停是协作停止，确认 provider 退出后才进 `PAUSED` |
+| `CANCELLED` | — | **终态不会自动重开**：需要重做就新建任务 |
+
+```sh
+# 继续一个已暂停的任务
+bun run codeestra task resume $PROJECT $TASK <version>
+
+# 重试一个失败的任务（默认沿用上次的 adapter）
+bun run codeestra task retry  $PROJECT $TASK <version>
+
+# 先暂停再继续
+bun run codeestra task pause  $PROJECT $TASK <version> && bun run codeestra task resume $PROJECT $TASK <version>
+```
+
+**如果还要改规格**，用 revision（append-only，不被覆盖），而不是改文字：
+
+```sh
+bun run codeestra task revision create $PROJECT $TASK <version> \
+  --specification "新的一句话要求" --constraint "新增的约束" --reason "因为 …"
+bun run codeestra task revision list   $PROJECT $TASK
+```
+
+修订进入**正在运行的**执行是一个独立过程（Revision Delivery），台账在：
+
+```sh
+bun run codeestra task revision delivery list $PROJECT $TASK
+bun run codeestra task revision delivery resolve $PROJECT $TASK <delivery-id> <version> \
+  --action stop-and-restart --adapter pi
+```
+
+**别指望**：对**不支持确认通道**的 Adapter（Pi 当前如此），投递会**如实保持未确认**，
+唯一的处置是「协作停止 + 新建 Execution」（`--action stop-and-restart`）。
+**旧 revision 的验证不能当作新 revision 的交付证据。**
+
+---
+
+## 7. Agent 停下来问我了
+
+**目标**：回答 Agent 的请求，让它继续。
+
+```sh
+# 1) 看有哪些请求
+bun run codeestra attention list $PROJECT
+
+# 2) 按 kind + responseType 选一种回答方式
+bun run codeestra attention answer $PROJECT <attention-id> confirm yes
+bun run codeestra attention answer $PROJECT <attention-id> confirm no
+bun run codeestra attention answer $PROJECT <attention-id> value "用现有 helper，不要新增依赖"
+bun run codeestra attention answer $PROJECT <attention-id> --choose 1:2 --text 2="保持向后兼容"
+bun run codeestra attention answer $PROJECT <attention-id> --cancel
+
+# 3) 确认它被投递了
+bun run codeestra attention list $PROJECT
+```
+
+- 题号与选项号都是 **1-based**，与界面显示一致；`--choose` 与 `--text` 都可以重复。
+- 一道题只能答一次。
+- **越界/重复/单选多选不符**会被拒绝为 `INVALID_QUESTIONNAIRE_ANSWER:*`，**请求保持 `OPEN`**，
+  你已答的内容不会被吞掉——改对再提交即可。
+- 回答提交后由 Runtime 投递给 Agent，**不需要你离开工作台**。
+
+界面上等价的操作是「待处理」标签页里的那张卡（或者任务详情里就地嵌入的同一张卡）。
+
+**只暂停对应的那个 Task**：其他合格任务继续跑。
+
+---
+
+## 8. Agent 在散文里提问（没有 dialog 可以回答）
+
+**目标**：识别这种情况，用**正确**的通道结束等待。
+
+症状：任务停在 `WAITING_FOR_USER`，但**没有任何 Agent 在跑**。
+
+```sh
+bun run codeestra task status $PROJECT $TASK     # stderr 会打印 [waiting] … 与 Agent 的问题原文
+bun run codeestra attention list $PROJECT        # 找到 prompt.kind = codeestra.prose-question 的那条
+
+# 两个退出方式，必须恰好给一个
+bun run codeestra attention resolve $PROJECT <attention-id> --answer "这是我的回答"
+bun run codeestra attention resolve $PROJECT <attention-id> --dismiss --note "是误报"
+```
+
+**为什么不能直接用 `attention answer`**：provider 进程**已经退出**，没有 dialog 可以写。
+用 `attention answer` 去投递它会被以 `PROSE_QUESTION_RESOLUTION_REQUIRED` 拒绝——**这是故意的**，
+因为那会声称投递了一个不存在的请求。
+
+**这两条命令都做了什么**：记录一条关于**这一次等待**的陈述。它们**不会**恢复 provider 对话，
+也**不是** TaskRevision（不是对规格的修改）。
+
+不想每次都被这样打断：
+
+```sh
+bun run codeestra settings prose-question-attention record-only   # 只标注完成，不记等待
+bun run codeestra settings prose-question-attention off           # 什么都不记
+bun run codeestra settings prose-question-attention auto          # 回到默认
+```
+
+改开关零确认，也**不会改写已经记录下来的等待**。
+
+---
+
+## 9. 我想把成果合入 dev
+
+**目标**：让成果进入开发分支。**前提是它已经通过任务验证。**
+
+```sh
+# 0) 先确认前置条件都成立
+bun run codeestra task status $PROJECT $TASK       # 状态应为 EXECUTED，且有一次 PASSED 的验证
+bun run codeestra task verification list $PROJECT $TASK
+
+# 1) 没验证就先验证
+bun run codeestra task verify $PROJECT $TASK
+
+# 2) 合入
+bun run codeestra task integrate $PROJECT $TASK <version>
+
+# 3) 看结果
+bun run codeestra task integration list $PROJECT $TASK
+bun run codeestra task status $PROJECT $TASK
+```
+
+`task integrate` 内部是三步：在 detached integration worktree 里合并（能 ff 就 ff，否则 `--no-ff`）
+→ 跑**独立的集成验证** → 集成验证 `PASSED` 之后才用 CAS 推进 `dev`。
+
+**退出码**：只有 `state === "INTEGRATED"` 才是 `0`。其他一切状态都**不推进 `dev`**，退出码 `1`。
+
+常见拒绝与处理：
+
+| 码 | 处理 |
+|---|---|
+| `TASK_VERIFICATION_NOT_PASSED` | 先让任务验证 `PASSED` |
+| `NO_CAPTURED_RESULT` | 还没有成果 commit，先 `task result capture` |
+| `DEV_REF_CHECKED_OUT` | `dev` 正被某个工作树检出 → 先把它切走 |
+| `INTEGRATION_IN_PROGRESS` | 已有集成在进行，等它结束 |
+| `CONFLICTED`（状态） | 合并冲突，**现场已保留**，由你处理 |
+
+**别指望**：合入 `dev` **不等于**发布到 `main`（见 recipe 10）；
+**任务验证 ≠ 集成验证**，两者不能互相替代。
+
+---
+
+## 10. 我想发布到 main
+
+**目标**：把已批准的开发分支内容推进稳定分支，并让稳定服务真正用上新代码。
+
+**先看你在哪**：本机的 `main` 与 `dev` 是**两个分别 clone 的独立仓库**。
+所以提升**必须经 GitHub 中转**，不能是本地的 `git merge`。
+
+### 步骤（四步，全部照 `AGENTS.md` 的人工路径）
+
+```sh
+# ① 在 dev clone：push 固定候选到远端 dev，并读回核对
+cd ~/Documents/codeestra-dev
+git push origin <候选 SHA>:refs/heads/dev
+git ls-remote --heads origin            # 核对 origin/dev == 候选 SHA
+
+# ② 在 main clone：fetch 后 ff-only 拉取
+cd ~/Documents/codeestra
+git fetch origin
+git merge --ff-only origin/dev
+
+# ③ 在 main clone：重启稳定 Runtime 并核对
+bun install --frozen-lockfile
+bun run build:ui
+bun run codeestra stop
+bun run codeestra status                 # 必须看到 status: "READY" 且 uiRunning: true
+
+# ④ 核对通过后，才把 main 推回远端
+git push origin main
+```
+
+### 硬性约束（不是建议）
+
+- **只 push 固定候选这一个 ref**；不 `--force`、不覆盖远端已有提交、不对已检出的 `main` 用 `update-ref`。
+- **断网、SSH 认证失败或远端不可达时不推进任何 ref**；也不得把「本地等价」当作提升成功。
+- `git merge --ff-only` 不成立就**停止并报告**，不改用 merge commit、reset 或强推。
+- **重启核对通过之前不得报告提升完成**；失败时**不擅自回滚**，保留现场并如实报告。
+- 提升前必须在**精确的 dev 候选 SHA** 上跑完全量测试；候选、测试配置或锁文件变化即证据失效。
+
+### 关于产品命令（**重要**）
+
+```sh
+bun run codeestra promotion full-suite run $PROJECT --dev-commit <full-sha>   # 先拿到全量证据
+bun run codeestra promotion prepare $PROJECT <batch-id> <expected-dev-commit> <expected-main-commit>
+bun run codeestra promotion promote $PROJECT <promotion-id>
+```
+
+`promotion prepare/approve/promote` **目前仍然是旧的本地 `git merge --ff-only` 路径**，
+不是上面那套 GitHub 中转路径（ADR-0047 的产品实现留到下一格）。
+因此：**本仓库自身的提升一律走上面的四步人工路径，不得使用 `promotion promote`**，
+并在交付说明里如实写明实际用了哪条路径、执行到哪一步。
+
+**别指望**：界面上的「稳定提升记录 · dev → main」是**只读**的，它不执行任何提升，
+并且它明确写着「**main 已移动不等于 Runtime 已完成重启**」。
+
+---
+
+## 11. 我想保住失败现场，不清理
+
+**目标**：出事了先别丢证据。
+
+**默认行为就是对的选择**：`reclaim` **默认保留失败现场**——未提交改动、失败/取消的验证或集成
+在没有 `--include-failure-scenes` 时都是 `RETAIN`。所以**什么都不要做**就是保住现场。
+
+要确认它确实被保住：
+
+```sh
+bun run codeestra reclaim plan --project $PROJECT --json      # 只读试运行，看每个资源的动作
+bun run codeestra reclaim records --project $PROJECT          # 审计账本
+```
+
+看 `plan` 的结果：`RETAIN`（保留）与 `RECLAIM`（回收）分开列，每个都带归属证据。
+如果某个失败现场显示为 `RECLAIM`，那说明它不是失败现场（例如它成功了、或没有未提交改动）。
+
+需要主动做的事只有一件——**不要加** `--include-failure-scenes`、**不要**用
+`--remove-unregistered` 指名删除任何目录。
+
+**配合的其他做法**：
+
+```sh
+bun run codeestra events tail                                        # 先把事实流抓下来
+bun run codeestra task status $PROJECT $TASK > /tmp/task-status.json # 存一份状态投影
+bun run codeestra task operation list $PROJECT $TASK                 # 长命令的步骤与结果
+```
+
+**看到 `RECOVERY_REQUIRED` 时**：它是「有事实无法被证明，需要一次带审计的对账」，
+**不是**让你重试掩盖它。先看 `task status` 与 `events tail`，再决定是人工核对还是显式回收。
+
+---
+
+## 12. 我想回收磁盘
+
+**目标**：把 Runtime 数据目录下不再需要的资源清掉，**并且知道每一样为什么被清或被留**。
+
+```sh
+# 1) 先看（plan 是只读试运行，返回的结构与 apply 完全相同）
+bun run codeestra reclaim plan --project $PROJECT --json
+
+# 2) 缩小范围（可选）
+bun run codeestra reclaim plan --project $PROJECT --task $TASK
+bun run codeestra reclaim plan --project $PROJECT --kind TASK_WORKTREE
+bun run codeestra reclaim plan --project $PROJECT --kind VERIFICATION_COPY --kind INTEGRATION_WORKTREE
+
+# 3) 确认无误后执行（同样的参数）
+bun run codeestra reclaim apply --project $PROJECT --kind TASK_WORKTREE
+
+# 4) 看审计记录
+bun run codeestra reclaim records --project $PROJECT --limit 50
+```
+
+- 三类资源：`TASK_WORKTREE`、`VERIFICATION_COPY`、`INTEGRATION_WORKTREE`。
+- 每个被考虑的资源都有动作：`RECLAIM / RETAIN / REFUSE / ALREADY_ABSENT / RECOVERY_REQUIRED`，带归属证据。
+- **失败现场默认保留**；未注册目录**不会被删**，除非用 `--remove-unregistered <精确路径>` 指名。
+- 跨项目批量：不带 `--project`（或加 `--all-projects`）覆盖**所有**已信任项目，结果按项目分组。
+- **退出码**：`FAILED` → `1`；可回收数量为 0（plan）或实际回收数量为 0（apply）→ `3`
+  （「没什么可回收」不是错误）；否则 `0`。
+
+**回收了还能恢复吗**：被回收的**任务工作树**可以用 `task retry` 从保留的 Task 分支重建
+（回收不会删 task branch）。但**这不是「撤销」**：如果重建被拒绝（分支不存在、与基线无关、
+已被别处检出、路径被占用），`task retry` 会如实报 `WORKSPACE_RECLAIMED` 或
+`WORKSPACE_OWNERSHIP_UNVERIFIABLE`，**不会替你删掉占路的目录**。
+
+**这是唯一具有破坏性的命令面。** 不确定就先只跑 `plan`。
+
+---
+
+## 13. 通用：我从零该怎么开工
+
+第一次用的时候按这个顺序走一遍：
+
+```sh
+cd /path/to/codeestra
+bun install --frozen-lockfile
+bun run build:ui                                   # 需要 Web UI 时
+bun run codeestra status                           # 拉起 Runtime，看 READY
+
+bun run codeestra open /path/to/your-repo --no-open # 接入项目（FULL 零确认）并拿到界面地址
+bun run codeestra permission get                    # 确认权限模式
+
+bun run codeestra task create $PROJECT "一项具体的改动" --constraint "一条具体约束"
+bun run codeestra task submit $PROJECT $TASK <version>
+bun run codeestra task run    $PROJECT $TASK <version>
+```
+
+然后：
+
+- 被问了 → recipe 7
+- 用散文问了 → recipe 8
+- 想改规格 → recipe 6
+- 该提交成果了 → recipe 1 的第 6 步
+- 冲突了 → recipe 4
+- 出事了 → recipe 11；实在看不懂 → [troubleshooting.md](./troubleshooting.md)
+
+---
+
+## 相关阅读
+
+- 从头读到尾的说明书：[manual.md](./manual.md)
+- 端到端流程与预期输出：[workflow.md](./workflow.md)
+- 逐屏 UI 走查（每个按钮做什么）：[ui.md](./ui.md)
+- 每条命令的参数与退出码：[cli-reference.md](./cli-reference.md)
+- 报错怎么办：[troubleshooting.md](./troubleshooting.md)
+- 人工观感核对清单：[acceptance-checklist.md](./acceptance-checklist.md)
