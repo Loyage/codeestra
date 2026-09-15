@@ -17,6 +17,8 @@ import {
   phase1Migration,
   phase1SchemaVersion,
   reclamationMigration,
+  sessionHandoffMigration,
+  stablePromotionMigration,
   taskControlMigration,
   taskVerificationMigration,
   workspaceRetryMigration,
@@ -230,6 +232,11 @@ describe('task dependency persistence', () => {
       legacy.exec(integrationPipelineMigration);
       legacy.exec(operationProgressMigration);
       legacy.exec(reclamationMigration);
+      // A database really stamped at 14 already has the version-13 promotion tables and the
+      // version-14 session-handoff tables. Without them the stamp describes a state no real
+      // database reaches, and a later migration that touches those tables has nothing to alter.
+      legacy.exec(stablePromotionMigration);
+      legacy.exec(sessionHandoffMigration);
       legacy.exec('PRAGMA user_version=14');
       legacy.close();
 

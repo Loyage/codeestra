@@ -60,7 +60,7 @@ TaskRevision 保留原始意图来源、作者、前一 revision、规格与约�
 
 Task verification 在固定 commit 的隔离副本上运行项目内人工维护的 `.codeestra/policies/verification.json`：该策略只从项目 main ref 读取（Task branch 上的同名文件不参与判定）。FULL 下策略新增或变化直接执行，STRICT 下在项目 trust 时确认。验证证据绑定 revision/commit/policy digest，且不保存原始命令输出。
 
-验证成本按分支职责分层（ADR-0038）：创建 `task/*`、`lane/*`、feature 或 Self Task candidate 分支时，按开发方向固定少量定向测试，开发分支不得运行全量测试；所有改动集成到长期 `dev` 后，必须在准备 `dev → main` 前对精确 dev 候选 SHA 运行全量测试，候选或测试输入变化使证据失效。Task/Integration 的定向验证不能替代这份提升前全量证据。当前固定项目策略与 promotion 证据模型尚不能自动表达该分层，不得声称已实现。
+验证成本按分支职责分层（ADR-0038，已由 ADR-0039 实现）：创建 `task/*`、`lane/*`、feature 或 Self Task candidate 分支时，按开发方向固定少量定向测试，开发分支不得运行全量测试；所有改动集成到长期 `dev` 后，必须在准备 `dev → main` 前对精确 dev 候选 SHA 运行全量测试，候选、测试配置或锁文件变化使证据失效。Task/Integration 的定向验证不能替代这份提升前全量证据。命令面：分支把该范围写进 `.codeestra/tests.json`，`task tests record` 把它快照成绑定 `(task, revision, commit, digest)` 的 append-only 记录，`task verify` 只消费已记录的计划并如实记录 `policySource`（没有记录时仍用固定项目策略，固定策略未被移除）；`promotion.full-suite run --dev-commit <full-sha>` 由 Runtime 在精确 SHA 的 detached 副本上运行项目 `main` ref 的固定策略并观察结果（客户端不能自报），证据绑定该 SHA、该策略 digest 与候选锁文件 digest，`promotion prepare/approve/promote` 全部消费它，任一绑定变化或在精确候选上没有该证据即拒绝且不推进任何 ref。本 ADR-0039 之前注明的「当前模型尚不能自动表达该分层」已不再成立。
 
 取消、修订、重试及人工回答均需要审计；数据库变更与外部进程/Git 操作之间不能假设存在原子事务。恢复时应核对真实资源状态。
 

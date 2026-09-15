@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 24;
+export const phase1SchemaVersion = 25;
 
 
 export const phase1Migration = `
@@ -1427,4 +1427,107 @@ CREATE INDEX reclamation_records_by_task ON reclamation_records(project_id,task_
 CREATE INDEX reclamation_records_by_source ON reclamation_records(source,created_at,id);
 CREATE UNIQUE INDEX one_reclamation_record_per_resource
   ON reclamation_records(operation_id,kind,resource_id);
+`;
+
+/**
+ * Layered verification evidence (ADR-0038 implemented by ADR-0039 / FOUNDATION-065).
+ *
+ * ADR-0038 splits verification cost by branch responsibility, and the two halves need two new
+ * first-class records — both of which are facts a later spectator must be able to read back
+ * without trusting a report:
+ *
+ * - `targeted_test_plans` is the append-only binding of a branch's `.codeestra/tests.json` to the
+ *   exact `(task, revision, commit, digest)` it was chosen for. Verification consumes a *recorded*
+ *   plan, never the file at read time, so widening or narrowing a branch's scope is an explicit,
+ *   audited append instead of a silent edit. UPDATE and DELETE are refused by triggers: the same
+ *   append-only discipline as `task_dependencies`, because a plan that changed in place would make
+ *   the verification evidence it justified unauditable.
+ * - `dev_full_suite_evidence` is the independent "the full suite passed on this exact dev SHA"
+ *   evidence a `dev → main` promotion requires. One row per run, bound to the candidate commit, the
+ *   fixed project policy (`main` ref) and the lockfile at that commit; the terminal states carry
+ *   `ended_at`/`outcome_code` like `verification_runs`, so an unfinished run can never be read as a
+ *   pass. A re-run always inserts a new row, so "which run justified this promotion" stays exact.
+ *
+ * `verification_runs` gains the policy *source* it actually ran (its `policy_digest` alone cannot
+ * say whether it was the fixed project policy or a branch-targeted plan), and `stable_promotions`
+ * records the exact full-suite evidence triple it was prepared and approved against.
+ *
+ * Schema version 25 is reserved for this migration; 16 stays permanently unused and no earlier
+ * number is ever inserted (a database may already be stamped 17–24 and would skip it).
+ */
+export const verificationLayeringMigration = `
+ALTER TABLE verification_runs ADD COLUMN policy_source TEXT NOT NULL DEFAULT 'PROJECT_POLICY'
+  CHECK(policy_source IN ('PROJECT_POLICY','TARGETED_TEST_PLAN'));
+ALTER TABLE verification_runs ADD COLUMN plan_id TEXT;
+ALTER TABLE verification_runs ADD COLUMN plan_version TEXT;
+ALTER TABLE verification_runs ADD COLUMN plan_digest TEXT;
+
+CREATE TABLE targeted_test_plans (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  tested_commit TEXT NOT NULL,
+  plan_version TEXT NOT NULL CHECK(length(trim(plan_version)) > 0),
+  plan_digest TEXT NOT NULL CHECK(length(plan_digest) = 64),
+  source_path TEXT NOT NULL CHECK(length(trim(source_path)) > 0),
+  commands_json TEXT NOT NULL CHECK(json_valid(commands_json) AND json_type(commands_json)='array'),
+  scope TEXT NOT NULL CHECK(length(trim(scope)) > 0),
+  recorded_by TEXT NOT NULL CHECK(length(trim(recorded_by)) > 0),
+  recorded_at INTEGER NOT NULL CHECK(recorded_at >= 0),
+  FOREIGN KEY(task_id,revision_id) REFERENCES task_revisions(task_id,id)
+) STRICT;
+CREATE UNIQUE INDEX one_targeted_test_plan_per_subject
+  ON targeted_test_plans(project_id,task_id,revision_id,tested_commit,plan_digest);
+CREATE INDEX targeted_test_plans_by_task
+  ON targeted_test_plans(project_id,task_id,recorded_at DESC,id);
+CREATE TRIGGER targeted_test_plans_no_update
+BEFORE UPDATE ON targeted_test_plans BEGIN
+  SELECT RAISE(ABORT,'targeted test plans are append-only; record a new plan instead');
+END;
+CREATE TRIGGER targeted_test_plans_no_delete
+BEFORE DELETE ON targeted_test_plans BEGIN
+  SELECT RAISE(ABORT,'targeted test plans are append-only; they are never deleted');
+END;
+
+CREATE TABLE dev_full_suite_evidence (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  dev_ref TEXT NOT NULL CHECK(length(trim(dev_ref)) > 0),
+  dev_commit TEXT NOT NULL,
+  policy_version TEXT NOT NULL CHECK(length(trim(policy_version)) > 0),
+  policy_digest TEXT NOT NULL CHECK(length(policy_digest) = 64),
+  lockfile_path TEXT NOT NULL CHECK(length(trim(lockfile_path)) > 0),
+  -- Absence is bound explicitly: a project with no lockfile records 0 and the digest of no bytes,
+  -- so adding one later is a different binding instead of a silently weaker one.
+  lockfile_present INTEGER NOT NULL CHECK(lockfile_present IN (0,1)),
+  lockfile_digest TEXT NOT NULL CHECK(length(lockfile_digest) = 64),
+  commands_json TEXT NOT NULL CHECK(json_valid(commands_json) AND json_type(commands_json)='array'),
+  copy_path TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('QUEUED','RUNNING','PASSED','FAILED','ERROR')),
+  outcome_code TEXT,
+  evidence_json TEXT CHECK(evidence_json IS NULL OR json_valid(evidence_json)),
+  command_id TEXT NOT NULL CHECK(length(trim(command_id)) > 0),
+  observed_by TEXT NOT NULL CHECK(length(trim(observed_by)) > 0),
+  queued_at INTEGER NOT NULL CHECK(queued_at >= 0),
+  started_at INTEGER,
+  ended_at INTEGER,
+  UNIQUE(project_id,command_id),
+  CHECK(ended_at IS NULL OR started_at IS NULL OR ended_at >= started_at),
+  CHECK((state IN ('QUEUED','RUNNING') AND ended_at IS NULL AND outcome_code IS NULL)
+    OR (state IN ('PASSED','FAILED','ERROR')
+      AND ended_at IS NOT NULL AND outcome_code IS NOT NULL))
+) STRICT;
+CREATE INDEX dev_full_suite_evidence_by_project
+  ON dev_full_suite_evidence(project_id,queued_at DESC,id);
+CREATE INDEX dev_full_suite_evidence_by_commit
+  ON dev_full_suite_evidence(project_id,dev_commit,queued_at DESC);
+
+ALTER TABLE stable_promotions ADD COLUMN full_suite_evidence_id TEXT
+  REFERENCES dev_full_suite_evidence(id);
+ALTER TABLE stable_promotions ADD COLUMN full_suite_dev_commit TEXT;
+ALTER TABLE stable_promotions ADD COLUMN full_suite_policy_version TEXT;
+ALTER TABLE stable_promotions ADD COLUMN full_suite_policy_digest TEXT;
+ALTER TABLE stable_promotions ADD COLUMN full_suite_lockfile_digest TEXT;
+ALTER TABLE stable_promotions ADD COLUMN approved_full_suite_evidence_id TEXT;
 `;

@@ -51,6 +51,7 @@ import {
   taskRetryMigration,
   taskVerificationMigration,
   unregisteredReclamationMigration,
+  verificationLayeringMigration,
   verificationProgressMigration,
   workspaceRetryMigration,
 } from './migration.js';
@@ -941,6 +942,12 @@ export interface VerificationRunSummary {
   readonly testedTree: string;
   readonly policyVersion: string;
   readonly policyDigest: string;
+  /** Which record the executed commands came from (ADR-0038/0039); never inferred from the digest. */
+  readonly policySource: VerificationPolicySource;
+  /** The recorded targeted test plan this run used, when the source is that plan. */
+  readonly planId: string | null;
+  readonly planVersion: string | null;
+  readonly planDigest: string | null;
   readonly mainCommit: string;
   readonly commands: readonly StoredVerificationCommand[];
   readonly copyPath: string;
@@ -955,6 +962,74 @@ export interface VerificationRunSummary {
 export interface VerificationRunPlan extends VerificationRunSummary {
   readonly operationId: string;
   readonly operationState: 'PLANNED' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'RECONCILE_REQUIRED';
+}
+
+/**
+ * Where a verification run's commands came from (ADR-0038/0039). The digest alone cannot say this:
+ * the same bytes could in principle describe both a policy and a plan, and a report that guessed
+ * would be claiming the branch-targeted run and the fixed project policy are the same thing.
+ */
+export type VerificationPolicySource = 'PROJECT_POLICY' | 'TARGETED_TEST_PLAN';
+
+/**
+ * One append-only targeted test plan record (ADR-0038/0039). It binds a branch's
+ * `.codeestra/tests.json` to the exact `(task, revision, commit, digest)` it was chosen for; a
+ * scope change appends a new row, so the evidence a verification produced stays attributable.
+ */
+export interface TargetedTestPlanRecord {
+  readonly planId: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly revisionId: string;
+  readonly testedCommit: string;
+  readonly planVersion: string;
+  readonly planDigest: string;
+  readonly sourcePath: string;
+  readonly scope: string;
+  readonly commands: readonly StoredVerificationCommand[];
+  readonly recordedBy: string;
+  readonly recordedAt: number;
+}
+
+/** One dev full-suite run. Only `PASSED` can carry a `dev → main` promotion. */
+export type DevFullSuiteState = 'QUEUED' | 'RUNNING' | 'PASSED' | 'FAILED' | 'ERROR';
+
+/**
+ * Independent "full suite passed on this exact dev SHA" evidence (ADR-0038 D03, ADR-0039). Every
+ * run is one row bound to the candidate commit, the fixed project policy read from `main`, and the
+ * lockfile at that commit; a re-run inserts a new row instead of rewriting the old one.
+ */
+export interface DevFullSuiteEvidenceRecord {
+  readonly evidenceId: string;
+  readonly projectId: string;
+  readonly devRef: string;
+  readonly devCommit: string;
+  readonly policyVersion: string;
+  readonly policyDigest: string;
+  readonly lockfilePath: string;
+  /** False when the project has no lockfile at the candidate commit; the absence is the binding. */
+  readonly lockfilePresent: boolean;
+  readonly lockfileDigest: string;
+  readonly commands: readonly StoredVerificationCommand[];
+  readonly copyPath: string;
+  readonly state: DevFullSuiteState;
+  readonly outcomeCode: string | null;
+  readonly evidence: VerificationEvidence | null;
+  readonly commandId: string;
+  readonly observedBy: string;
+  readonly queuedAt: number;
+  readonly startedAt: number | null;
+  readonly endedAt: number | null;
+}
+
+/** Repository facts a dev full-suite run needs; no Task is involved in this evidence. */
+export interface DevFullSuiteCandidates {
+  readonly projectId: string;
+  readonly repositoryRoot: string;
+  readonly gitCommonDir: string;
+  readonly mainRef: string;
+  readonly devRef: string;
+  readonly objectFormat: 'sha1' | 'sha256';
 }
 
 export type PromotionPermissionMode = 'FULL' | 'STRICT';
@@ -1027,7 +1102,21 @@ export interface StablePromotionSummary {
   readonly state: StablePromotionState;
   readonly approval: {
     readonly devCommit: string; readonly mainCommit: string;
-    readonly verificationId: string; readonly approvedAt: number;
+    readonly verificationId: string;
+    /** The exact dev full-suite evidence the approval also covered (ADR-0039). */
+    readonly fullSuiteEvidenceId: string | null;
+    readonly approvedAt: number;
+  } | null;
+  /**
+   * The exact dev full-suite evidence this promotion was prepared against (ADR-0038 D03).
+   * `promote` re-reads all three bindings and refuses if any of them moved.
+   */
+  readonly fullSuite: {
+    readonly evidenceId: string;
+    readonly devCommit: string;
+    readonly policyVersion: string;
+    readonly policyDigest: string;
+    readonly lockfileDigest: string;
   } | null;
   /** Observed `main` after the update; NULL until a ref was read back. */
   readonly promotedCommit: string | null;
@@ -1277,6 +1366,9 @@ export class Phase1Database {
         // Version 24 is this step's own number, so a database stamped 21–23 still gets the
         // unregistered-directory ledger columns. No earlier number is ever inserted.
         if (version < 24) this.sqlite.exec(unregisteredReclamationMigration);
+        // Version 25 is this step's own number, so a database stamped 21–24 still gets the
+        // layered-verification tables. No earlier number is ever inserted.
+        if (version < 25) this.sqlite.exec(verificationLayeringMigration);
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -4757,6 +4849,11 @@ export class Phase1Database {
     readonly testedTree: string;
     readonly policyVersion: string;
     readonly policyDigest: string;
+    /** Which record defined the commands; recorded as a fact, never derived from the digest. */
+    readonly policySource?: VerificationPolicySource;
+    readonly planId?: string | null;
+    readonly planVersion?: string | null;
+    readonly planDigest?: string | null;
     readonly mainCommit: string;
     readonly commands: readonly StoredVerificationCommand[];
     readonly copyPath: string;
@@ -4818,12 +4915,13 @@ export class Phase1Database {
       this.sqlite.query(`
         INSERT INTO verification_runs(id,project_id,task_id,execution_id,revision_id,operation_id,
           command_id,tested_commit,tested_tree,policy_version,policy_digest,main_commit,commands_json,
-          copy_path,state,queued_at)
-        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'QUEUED',?15)
+          copy_path,state,queued_at,policy_source,plan_id,plan_version,plan_digest)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'QUEUED',?15,?16,?17,?18,?19)
       `).run(input.verificationId, input.projectId, input.taskId, input.executionId, input.revisionId,
         input.operationId, input.commandId, input.testedCommit, input.testedTree, input.policyVersion,
         input.policyDigest, input.mainCommit, JSON.stringify(input.commands), input.copyPath,
-        input.queuedAt);
+        input.queuedAt, input.policySource ?? 'PROJECT_POLICY', input.planId ?? null,
+        input.planVersion ?? null, input.planDigest ?? null);
       this.sqlite.query(`
         INSERT INTO command_receipts(project_id,command_id,payload_hash,result_json,created_at)
         VALUES (?1,?2,?3,?4,?5)
@@ -4991,13 +5089,16 @@ export class Phase1Database {
       id: string; project_id: string; task_id: string; execution_id: string; revision_id: string;
       operation_id: string; operation_state: VerificationRunPlan['operationState'];
       tested_commit: string; tested_tree: string; policy_version: string; policy_digest: string;
+      policy_source: VerificationPolicySource; plan_id: string | null; plan_version: string | null;
+      plan_digest: string | null;
       main_commit: string; commands_json: string; copy_path: string; state: VerificationState;
       outcome_code: string | null; evidence_json: string | null; queued_at: number;
       started_at: number | null; ended_at: number | null;
     }, [string]>(`
       SELECT r.id,r.project_id,r.task_id,r.execution_id,r.revision_id,r.operation_id,
              o.state AS operation_state,r.tested_commit,r.tested_tree,r.policy_version,
-             r.policy_digest,r.main_commit,r.commands_json,r.copy_path,r.state,r.outcome_code,
+             r.policy_digest,r.policy_source,r.plan_id,r.plan_version,r.plan_digest,r.main_commit,
+             r.commands_json,r.copy_path,r.state,r.outcome_code,
              r.evidence_json,r.queued_at,r.started_at,r.ended_at
       FROM verification_runs r JOIN operations o ON o.id=r.operation_id
       WHERE r.id=?1
@@ -5015,6 +5116,10 @@ export class Phase1Database {
       testedTree: row.tested_tree,
       policyVersion: row.policy_version,
       policyDigest: row.policy_digest,
+      policySource: row.policy_source,
+      planId: row.plan_id,
+      planVersion: row.plan_version,
+      planDigest: row.plan_digest,
       mainCommit: row.main_commit,
       commands: JSON.parse(row.commands_json) as readonly StoredVerificationCommand[],
       copyPath: row.copy_path,
@@ -5613,6 +5718,311 @@ export class Phase1Database {
   }
 
   // ---------------------------------------------------------------------------------------------
+  // Layered verification records (ADR-0038, ADR-0039). Targeted test plans are append-only: a
+  // scope change is a new row, never an edit, and the triggers in the migration refuse UPDATE and
+  // DELETE outright. Dev full-suite evidence is one row per observed run.
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * Appends one targeted test plan record for its exact subject, or returns the recorded row when
+   * the identical digest was already recorded for that `(task, revision, commit)`.
+   */
+  recordTargetedTestPlan(input: {
+    readonly planId: string;
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly revisionId: string;
+    readonly testedCommit: string;
+    readonly planVersion: string;
+    readonly planDigest: string;
+    readonly sourcePath: string;
+    readonly scope: string;
+    readonly commands: readonly StoredVerificationCommand[];
+    readonly recordedBy: string;
+    readonly recordedAt: number;
+  }): Readonly<{ plan: TargetedTestPlanRecord; created: boolean }> {
+    return this.sqlite.transaction(() => {
+      const existing = this.sqlite.query<{ id: string }, [string, string, string, string, string]>(`
+        SELECT id FROM targeted_test_plans
+        WHERE project_id=?1 AND task_id=?2 AND revision_id=?3 AND tested_commit=?4 AND plan_digest=?5
+      `).get(input.projectId, input.taskId, input.revisionId, input.testedCommit, input.planDigest);
+      if (existing !== null) {
+        return { plan: this.targetedTestPlanRecord(existing.id), created: false };
+      }
+      const task = this.sqlite.query<{
+        state: TaskLifecycleState; current_revision_id: string;
+      }, [string, string]>(`
+        SELECT t.state,t.current_revision_id FROM tasks t
+        JOIN project_trusts trust ON trust.project_id=t.project_id AND trust.status='ACTIVE'
+        WHERE t.project_id=?1 AND t.id=?2
+      `).get(input.projectId, input.taskId);
+      if (task === null) {
+        throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
+      }
+      if (task.current_revision_id !== input.revisionId) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Task revision changed before the targeted test plan was recorded');
+      }
+      this.sqlite.query(`
+        INSERT INTO targeted_test_plans(id,project_id,task_id,revision_id,tested_commit,plan_version,
+          plan_digest,source_path,commands_json,scope,recorded_by,recorded_at)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+      `).run(input.planId, input.projectId, input.taskId, input.revisionId, input.testedCommit,
+        input.planVersion, input.planDigest, input.sourcePath, JSON.stringify(input.commands),
+        input.scope, input.recordedBy, input.recordedAt);
+      return { plan: this.targetedTestPlanRecord(input.planId), created: true };
+    })();
+  }
+
+  /** The newest recorded plan for one exact subject, or null when nothing was recorded for it. */
+  getLatestTargetedTestPlan(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly revisionId: string;
+    readonly testedCommit: string;
+  }): TargetedTestPlanRecord | null {
+    const row = this.sqlite.query<{ id: string }, [string, string, string, string]>(`
+      SELECT id FROM targeted_test_plans
+      WHERE project_id=?1 AND task_id=?2 AND revision_id=?3 AND tested_commit=?4
+      ORDER BY recorded_at DESC,id DESC LIMIT 1
+    `).get(input.projectId, input.taskId, input.revisionId, input.testedCommit);
+    return row === null ? null : this.targetedTestPlanRecord(row.id);
+  }
+
+  /** Every recorded plan of one Task, newest first: the append-only audit of its test scope. */
+  listTargetedTestPlans(projectId: string, taskId: string,
+    limit = 100): readonly TargetedTestPlanRecord[] {
+    return this.sqlite.query<{ id: string }, [string, string, number]>(`
+      SELECT id FROM targeted_test_plans WHERE project_id=?1 AND task_id=?2
+      ORDER BY recorded_at DESC,id DESC LIMIT ?3
+    `).all(projectId, taskId, limit).map((row) => this.targetedTestPlanRecord(row.id));
+  }
+
+  private targetedTestPlanRecord(planId: string): TargetedTestPlanRecord {
+    const row = this.sqlite.query<{
+      id: string; project_id: string; task_id: string; revision_id: string; tested_commit: string;
+      plan_version: string; plan_digest: string; source_path: string; commands_json: string;
+      scope: string; recorded_by: string; recorded_at: number;
+    }, [string]>(`
+      SELECT id,project_id,task_id,revision_id,tested_commit,plan_version,plan_digest,source_path,
+             commands_json,scope,recorded_by,recorded_at
+      FROM targeted_test_plans WHERE id=?1
+    `).get(planId);
+    if (row === null) throw new StorageError('NOT_FOUND', 'Targeted test plan was not found');
+    return {
+      planId: row.id,
+      projectId: row.project_id,
+      taskId: row.task_id,
+      revisionId: row.revision_id,
+      testedCommit: row.tested_commit,
+      planVersion: row.plan_version,
+      planDigest: row.plan_digest,
+      sourcePath: row.source_path,
+      scope: row.scope,
+      commands: JSON.parse(row.commands_json) as readonly StoredVerificationCommand[],
+      recordedBy: row.recorded_by,
+      recordedAt: row.recorded_at,
+    };
+  }
+
+  /** Repository refs a dev full-suite run binds its evidence to; no Task is involved. */
+  getDevFullSuiteCandidates(projectId: string): DevFullSuiteCandidates {
+    const row = this.sqlite.query<{
+      id: string; repo_root: string; git_common_dir: string; main_ref: string; dev_ref: string;
+      object_format: 'sha1' | 'sha256';
+    }, [string]>(`
+      SELECT p.id,p.repo_root,p.git_common_dir,p.main_ref,p.dev_ref,p.object_format FROM projects p
+      JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
+      WHERE p.id=?1
+    `).get(projectId);
+    if (row === null) throw new StorageError('NOT_FOUND', 'Active project trust was not found');
+    return {
+      projectId: row.id,
+      repositoryRoot: row.repo_root,
+      gitCommonDir: row.git_common_dir,
+      mainRef: row.main_ref,
+      devRef: row.dev_ref,
+      objectFormat: row.object_format,
+    };
+  }
+
+  /**
+   * Records the start of one dev full-suite run. Replaying the same command ID returns the recorded
+   * run instead of starting a second one; a different payload under it is refused.
+   */
+  beginDevFullSuiteRun(input: {
+    readonly evidenceId: string;
+    readonly projectId: string;
+    readonly devRef: string;
+    readonly devCommit: string;
+    readonly policyVersion: string;
+    readonly policyDigest: string;
+    readonly lockfilePath: string;
+    readonly lockfilePresent: boolean;
+    readonly lockfileDigest: string;
+    readonly commands: readonly StoredVerificationCommand[];
+    readonly copyPath: string;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly observedBy: string;
+    readonly startedAt: number;
+  }): Readonly<{ evidence: DevFullSuiteEvidenceRecord; created: boolean }> {
+    return this.sqlite.transaction(() => {
+      const existing = this.sqlite.query<{ payload_hash: string; result_json: string }, [string, string]>(
+        'SELECT payload_hash,result_json FROM command_receipts WHERE project_id=?1 AND command_id=?2',
+      ).get(input.projectId, input.commandId);
+      if (existing !== null) {
+        if (existing.payload_hash !== input.payloadHash) {
+          throw new StorageError('COMMAND_CONFLICT',
+            'Command ID was already used with a different payload');
+        }
+        const recorded = JSON.parse(existing.result_json) as { evidenceId: string };
+        return { evidence: this.devFullSuiteEvidenceRecord(recorded.evidenceId), created: false };
+      }
+      const project = this.sqlite.query<{ id: string }, [string]>(`
+        SELECT p.id FROM projects p
+        JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
+        WHERE p.id=?1
+      `).get(input.projectId);
+      if (project === null) {
+        throw new StorageError('NOT_FOUND', 'Active project trust was not found');
+      }
+      this.sqlite.query(`
+        INSERT INTO dev_full_suite_evidence(id,project_id,dev_ref,dev_commit,policy_version,
+          policy_digest,lockfile_path,lockfile_present,lockfile_digest,commands_json,copy_path,state,
+          command_id,observed_by,queued_at,started_at)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'RUNNING',?12,?13,?14,?14)
+      `).run(input.evidenceId, input.projectId, input.devRef, input.devCommit, input.policyVersion,
+        input.policyDigest, input.lockfilePath, input.lockfilePresent ? 1 : 0, input.lockfileDigest,
+        JSON.stringify(input.commands), input.copyPath, input.commandId, input.observedBy,
+        input.startedAt);
+      this.sqlite.query(`
+        INSERT INTO command_receipts(project_id,command_id,payload_hash,result_json,created_at)
+        VALUES (?1,?2,?3,?4,?5)
+      `).run(input.projectId, input.commandId, input.payloadHash,
+        JSON.stringify({ evidenceId: input.evidenceId }), input.startedAt);
+      return { evidence: this.devFullSuiteEvidenceRecord(input.evidenceId), created: true };
+    })();
+  }
+
+  /** RUNNING → a terminal state with the observed evidence; the bindings are never rewritten. */
+  completeDevFullSuiteRun(input: {
+    readonly evidenceId: string;
+    readonly state: 'PASSED' | 'FAILED' | 'ERROR';
+    readonly outcomeCode: string;
+    readonly evidence: VerificationEvidence;
+    readonly endedAt: number;
+  }): DevFullSuiteEvidenceRecord {
+    return this.sqlite.transaction(() => {
+      const current = this.devFullSuiteEvidenceRecord(input.evidenceId);
+      if (current.state === 'PASSED' || current.state === 'FAILED' || current.state === 'ERROR') {
+        return current;
+      }
+      const updated = this.sqlite.query(`
+        UPDATE dev_full_suite_evidence
+        SET state=?1,outcome_code=?2,evidence_json=?3,ended_at=?4
+        WHERE id=?5 AND state IN ('QUEUED','RUNNING')
+      `).run(input.state, input.outcomeCode, JSON.stringify(input.evidence), input.endedAt,
+        input.evidenceId);
+      if (updated.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Dev full-suite evidence changed while recording its outcome');
+      }
+      return this.devFullSuiteEvidenceRecord(input.evidenceId);
+    })();
+  }
+
+  /**
+   * Closes runs a previous Runtime left QUEUED or RUNNING. A run nobody is driving is a failure,
+   * not a pass: it is recorded as `ERROR` with the fact that the Runtime restarted, and its copy
+   * stays on disk for the ordinary reclamation path.
+   */
+  reconcileDevFullSuiteEvidence(now: number): readonly string[] {
+    return this.sqlite.transaction(() => {
+      const rows = this.sqlite.query<{ id: string }, []>(`
+        SELECT id FROM dev_full_suite_evidence WHERE state IN ('QUEUED','RUNNING') ORDER BY queued_at,id
+      `).all().map((row) => row.id);
+      for (const id of rows) {
+        this.sqlite.query(`
+          UPDATE dev_full_suite_evidence
+          SET state='ERROR',outcome_code='RUNTIME_RESTARTED',ended_at=?1,
+              evidence_json=?2
+          WHERE id=?3 AND state IN ('QUEUED','RUNNING')
+        `).run(now, JSON.stringify({
+          reason: 'the Runtime that started this full-suite run restarted before it finished;'
+            + ' the observed state is not a verdict',
+        }), id);
+      }
+      return rows;
+    })();
+  }
+
+  getDevFullSuiteEvidence(projectId: string, evidenceId: string): DevFullSuiteEvidenceRecord {
+    const evidence = this.devFullSuiteEvidenceRecord(evidenceId);
+    if (evidence.projectId !== projectId) {
+      throw new StorageError('NOT_FOUND', 'Dev full-suite evidence was not found for this project');
+    }
+    return evidence;
+  }
+
+  listDevFullSuiteEvidence(projectId: string,
+    limit = 20): readonly DevFullSuiteEvidenceRecord[] {
+    return this.sqlite.query<{ id: string }, [string, number]>(`
+      SELECT id FROM dev_full_suite_evidence WHERE project_id=?1
+      ORDER BY queued_at DESC,id DESC LIMIT ?2
+    `).all(projectId, limit).map((row) => this.devFullSuiteEvidenceRecord(row.id));
+  }
+
+  /** Records of one exact candidate commit, newest first: what a promotion is checked against. */
+  listDevFullSuiteEvidenceForCommit(projectId: string, devCommit: string,
+    limit = 20): readonly DevFullSuiteEvidenceRecord[] {
+    return this.sqlite.query<{ id: string }, [string, string, number]>(`
+      SELECT id FROM dev_full_suite_evidence WHERE project_id=?1 AND dev_commit=?2
+      ORDER BY queued_at DESC,id DESC LIMIT ?3
+    `).all(projectId, devCommit, limit).map((row) => this.devFullSuiteEvidenceRecord(row.id));
+  }
+
+  private devFullSuiteEvidenceRecord(evidenceId: string): DevFullSuiteEvidenceRecord {
+    const row = this.sqlite.query<{
+      id: string; project_id: string; dev_ref: string; dev_commit: string; policy_version: string;
+      policy_digest: string; lockfile_path: string; lockfile_present: number;
+      lockfile_digest: string; commands_json: string;
+      copy_path: string; state: DevFullSuiteState; outcome_code: string | null;
+      evidence_json: string | null; command_id: string; observed_by: string; queued_at: number;
+      started_at: number | null; ended_at: number | null;
+    }, [string]>(`
+      SELECT id,project_id,dev_ref,dev_commit,policy_version,policy_digest,lockfile_path,
+             lockfile_present,lockfile_digest,commands_json,copy_path,state,outcome_code,
+             evidence_json,command_id,observed_by,queued_at,started_at,ended_at
+      FROM dev_full_suite_evidence WHERE id=?1
+    `).get(evidenceId);
+    if (row === null) throw new StorageError('NOT_FOUND', 'Dev full-suite evidence was not found');
+    return {
+      evidenceId: row.id,
+      projectId: row.project_id,
+      devRef: row.dev_ref,
+      devCommit: row.dev_commit,
+      policyVersion: row.policy_version,
+      policyDigest: row.policy_digest,
+      lockfilePath: row.lockfile_path,
+      lockfilePresent: row.lockfile_present === 1,
+      lockfileDigest: row.lockfile_digest,
+      commands: JSON.parse(row.commands_json) as readonly StoredVerificationCommand[],
+      copyPath: row.copy_path,
+      state: row.state,
+      outcomeCode: row.outcome_code,
+      evidence: row.evidence_json === null
+        ? null
+        : JSON.parse(row.evidence_json) as VerificationEvidence,
+      commandId: row.command_id,
+      observedBy: row.observed_by,
+      queuedAt: row.queued_at,
+      startedAt: row.started_at,
+      endedAt: row.ended_at,
+    };
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // Stable branch promotion (ADR-0009 D02/D03, ADR-0022). These methods only record facts and
   // enforce state transitions; the Git side effect (fast-forwarding the checked-out `main`
   // worktree) and the Runtime restart sequence are executed by the promotion service and its
@@ -5698,6 +6108,12 @@ export class Phase1Database {
     readonly expectedMainCommit: string;
     readonly verificationId: string;
     readonly verificationTestedCommit: string;
+    /** The dev full-suite evidence triple this promotion is fixed to (ADR-0039). */
+    readonly fullSuiteEvidenceId: string;
+    readonly fullSuiteDevCommit: string;
+    readonly fullSuitePolicyVersion: string;
+    readonly fullSuitePolicyDigest: string;
+    readonly fullSuiteLockfileDigest: string;
     readonly permissionMode: PromotionPermissionMode;
     readonly actor: string;
     readonly createdAt: number;
@@ -5749,11 +6165,14 @@ export class Phase1Database {
       this.sqlite.query(`
         INSERT INTO stable_promotions(id,project_id,dev_ref,main_ref,candidate_commit,
           expected_main_commit,integration_batch_id,verification_id,verification_tested_commit,
-          permission_mode,state,created_at)
-        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'CREATED',?11)
+          permission_mode,state,created_at,full_suite_evidence_id,full_suite_dev_commit,
+          full_suite_policy_version,full_suite_policy_digest,full_suite_lockfile_digest)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'CREATED',?11,?12,?13,?14,?15,?16)
       `).run(input.promotionId, input.projectId, input.devRef, input.mainRef,
         input.candidateCommit, input.expectedMainCommit, input.batchId, input.verificationId,
-        input.verificationTestedCommit, input.permissionMode, input.createdAt);
+        input.verificationTestedCommit, input.permissionMode, input.createdAt,
+        input.fullSuiteEvidenceId, input.fullSuiteDevCommit, input.fullSuitePolicyVersion,
+        input.fullSuitePolicyDigest, input.fullSuiteLockfileDigest);
       for (const member of this.stablePromotionBatchMembers(input.projectId, input.batchId)) {
         this.sqlite.query(`
           INSERT INTO stable_promotion_members(promotion_id,batch_id,project_id,task_id,revision_id,
@@ -5770,6 +6189,10 @@ export class Phase1Database {
         input.createdAt, JSON.stringify({ promotionId: input.promotionId, batchId: input.batchId,
           devRef: input.devRef, mainRef: input.mainRef, candidateCommit: input.candidateCommit,
           expectedMainCommit: input.expectedMainCommit, verificationId: input.verificationId,
+          fullSuiteEvidenceId: input.fullSuiteEvidenceId,
+          fullSuiteDevCommit: input.fullSuiteDevCommit,
+          fullSuitePolicyDigest: input.fullSuitePolicyDigest,
+          fullSuiteLockfileDigest: input.fullSuiteLockfileDigest,
           permissionMode: input.permissionMode, actor: input.actor }));
       this.sqlite.query(`
         INSERT INTO command_receipts(project_id,command_id,payload_hash,result_json,created_at)
@@ -5802,7 +6225,7 @@ export class Phase1Database {
         UPDATE stable_promotions
         SET state='AWAITING_APPROVAL',approved_dev_commit=candidate_commit,
             approved_main_commit=expected_main_commit,approved_verification_id=verification_id,
-            approved_at=?1
+            approved_full_suite_evidence_id=full_suite_evidence_id,approved_at=?1
         WHERE id=?2 AND state='CREATED'
       `).run(input.approvedAt, input.promotionId);
       if (updated.changes !== 1) {
@@ -5817,7 +6240,9 @@ export class Phase1Database {
         JSON.stringify({ promotionId: input.promotionId, devRef: promotion.devRef,
           mainRef: promotion.mainRef, candidateCommit: promotion.candidateCommit,
           expectedMainCommit: promotion.expectedMainCommit,
-          verificationId: promotion.verificationId, actor: input.actor }));
+          verificationId: promotion.verificationId,
+          fullSuiteEvidenceId: promotion.fullSuite?.evidenceId ?? null,
+          actor: input.actor }));
       return this.stablePromotionPlan(input.promotionId);
     })();
   }
@@ -5845,9 +6270,11 @@ export class Phase1Database {
         if (promotion.state !== 'AWAITING_APPROVAL' || approval === null
           || approval.devCommit !== promotion.candidateCommit
           || approval.mainCommit !== promotion.expectedMainCommit
-          || approval.verificationId !== promotion.verificationId) {
+          || approval.verificationId !== promotion.verificationId
+          || approval.fullSuiteEvidenceId !== (promotion.fullSuite?.evidenceId ?? null)) {
           throw new StorageError('INVALID_STATE',
-            'STRICT mode needs a recorded approval of this dev/main/verification triple before promoting');
+            'STRICT mode needs a recorded approval of this dev/main/verification/full-suite-evidence'
+            + ' triple before promoting');
         }
       }
       const updated = this.sqlite.query(`
@@ -6191,16 +6618,23 @@ export class Phase1Database {
       verification_tested_commit: string; permission_mode: PromotionPermissionMode;
       state: StablePromotionState; approved_dev_commit: string | null;
       approved_main_commit: string | null; approved_verification_id: string | null;
+      approved_full_suite_evidence_id: string | null;
       approved_at: number | null; promoted_commit: string | null; main_worktree_path: string | null;
       promoting_boot_id: string | null;
+      full_suite_evidence_id: string | null; full_suite_dev_commit: string | null;
+      full_suite_policy_version: string | null; full_suite_policy_digest: string | null;
+      full_suite_lockfile_digest: string | null;
       restart_steps_json: string | null; restart_result_json: string | null;
       outcome_code: string | null; detail: string | null; created_at: number;
       completed_at: number | null;
     }, [string]>(`
       SELECT id,project_id,dev_ref,main_ref,candidate_commit,expected_main_commit,
              integration_batch_id,verification_id,verification_tested_commit,permission_mode,state,
-             approved_dev_commit,approved_main_commit,approved_verification_id,approved_at,
-             promoted_commit,main_worktree_path,promoting_boot_id,restart_steps_json,
+             approved_dev_commit,approved_main_commit,approved_verification_id,
+             approved_full_suite_evidence_id,approved_at,
+             promoted_commit,main_worktree_path,promoting_boot_id,full_suite_evidence_id,
+             full_suite_dev_commit,full_suite_policy_version,full_suite_policy_digest,
+             full_suite_lockfile_digest,restart_steps_json,
              restart_result_json,outcome_code,detail,created_at,completed_at
       FROM stable_promotions WHERE id=?1
     `).get(promotionId);
@@ -6224,7 +6658,19 @@ export class Phase1Database {
             devCommit: row.approved_dev_commit,
             mainCommit: row.approved_main_commit,
             verificationId: row.approved_verification_id,
+            fullSuiteEvidenceId: row.approved_full_suite_evidence_id,
             approvedAt: row.approved_at,
+          },
+      fullSuite: row.full_suite_evidence_id === null || row.full_suite_dev_commit === null
+        || row.full_suite_policy_version === null || row.full_suite_policy_digest === null
+        || row.full_suite_lockfile_digest === null
+        ? null
+        : {
+            evidenceId: row.full_suite_evidence_id,
+            devCommit: row.full_suite_dev_commit,
+            policyVersion: row.full_suite_policy_version,
+            policyDigest: row.full_suite_policy_digest,
+            lockfileDigest: row.full_suite_lockfile_digest,
           },
       promotedCommit: row.promoted_commit,
       mainWorktreePath: row.main_worktree_path,

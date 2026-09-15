@@ -50,7 +50,8 @@ export type {
   OperationProgressEventStep, OperationProgressEventSummary, OperationProgressPhase,
   RecordOperationProgressEventResult,
   TrustedProject, VerificationCandidateExecution, VerificationCandidates, VerificationEvidence,
-  VerificationRunPlan, VerificationRunSummary, VerificationState,
+  VerificationRunPlan, VerificationRunSummary, VerificationState, VerificationPolicySource,
+  TargetedTestPlanRecord, DevFullSuiteState, DevFullSuiteEvidenceRecord, DevFullSuiteCandidates,
   WorkspaceLifecycleState, WorkspacePreparationPlan,
 } from './database.js';
 export {
@@ -64,6 +65,7 @@ export {
   stablePromotionMigration, taskControlMigration, taskDependenciesMigration, taskVerificationMigration,
   taskRetryMigration,
   unregisteredReclamationMigration,
+  verificationLayeringMigration,
   verificationProgressMigration,
 
   workspaceRetryMigration,

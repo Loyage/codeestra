@@ -234,7 +234,7 @@ describe('revision delivery schema (v19)', () => {
       raw.close();
 
       const storage = new Phase1Database(path);
-      expect(phase1SchemaVersion).toBe(24);
+      expect(phase1SchemaVersion).toBeGreaterThanOrEqual(24);
       // The pinned version is the schema the migration runner targets, not this lane's own step: a
       // later additive migration must not make this assertion wrong.
       expect(storage.sqlite.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version)

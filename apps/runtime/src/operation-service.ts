@@ -1,4 +1,5 @@
 import {
+  targetedTestPlanLabel,
   verificationPolicyLabel,
 } from '@codeestra/contracts';
 import {
@@ -388,6 +389,8 @@ export class LongOperationService {
     readonly executionId?: string;
     readonly commandId: string;
     readonly background: boolean;
+    /** Which record defines the commands (ADR-0038/0039); `AUTO` by default. */
+    readonly policySource?: 'AUTO' | 'PROJECT_POLICY' | 'TARGETED_TEST_PLAN';
   }): Promise<VerificationStart> {
     const queued = await queueTaskVerification({
       storage: this.#storage,
@@ -397,6 +400,7 @@ export class LongOperationService {
       ...(input.executionId === undefined ? {} : { executionId: input.executionId }),
       commandId: input.commandId,
       permissionMode: this.#permissionMode(),
+      ...(input.policySource === undefined ? {} : { policySource: input.policySource }),
       now: this.#now,
       randomUUID: this.#randomUUID,
     });
@@ -519,7 +523,13 @@ export class LongOperationService {
       testedTree: plan.testedTree,
       policyVersion: plan.policyVersion,
       policyDigest: plan.policyDigest,
-      policyLabel: verificationPolicyLabel(plan.policyDigest),
+      policyLabel: plan.policySource === 'TARGETED_TEST_PLAN'
+        ? targetedTestPlanLabel(plan.policyDigest)
+        : verificationPolicyLabel(plan.policyDigest),
+      policySource: plan.policySource,
+      planId: plan.planId,
+      planVersion: plan.planVersion,
+      planDigest: plan.planDigest,
       mainCommit: plan.mainCommit,
       state: plan.state,
       outcomeCode: plan.outcomeCode,

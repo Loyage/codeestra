@@ -93,7 +93,14 @@ import { RevisionDeliveryService } from './revision-delivery-service.js';
 import {
   VerificationRunner,
   inspectVerificationPolicy,
+  latestTargetedTestPlanView,
+  listTargetedTestPlanViews,
+  recordTargetedTestPlan,
 } from './verification-service.js';
+import {
+  listFullSuiteEvidence,
+  runDevFullSuite,
+} from './promotion-evidence-service.js';
 
 interface SocketState {
   buffer: string;
@@ -317,6 +324,12 @@ reconcileInterruptedAgentStarts({ storage });
 reconcileInterruptedAgentAnswers({ storage });
 await reconcileInterruptedResultCommits({ storage });
 reconcileInterruptedVerifications({ storage });
+// A dev full-suite run this Runtime did not finish (a crash, a kill) is closed as an ERROR with the
+// fact that the Runtime restarted: an unfinished run is not a pass, and `reconcileInterruptedRunOperations`
+// above does not know about this evidence table. Its copy stays on disk for the reclamation path.
+for (const evidenceId of storage.reconcileDevFullSuiteEvidence(Date.now())) {
+  console.error('[runtime] dev full-suite evidence closed as RUNTIME_RESTARTED', evidenceId);
+}
 await reconcileInterruptedIntegrations({
   storage,
   // Proving an interrupted ref write needs the ref itself: a batch whose recorded merge is already
@@ -903,9 +916,28 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         ...(request.executionId === undefined ? {} : { executionId: request.executionId }),
         commandId: request.commandId,
         background: request.background,
+        policySource: request.policySource,
       });
       return success(request.requestId, started.background ? started.handle : started.report);
     }
+    case 'task.tests.record':
+      return success(request.requestId, await recordTargetedTestPlan({
+        storage,
+        projectId: request.projectId,
+        taskId: request.taskId,
+        ...(request.executionId === undefined ? {} : { executionId: request.executionId }),
+        ...(request.commit === undefined ? {} : { commit: request.commit }),
+        ...(request.expectedPlanDigest === undefined
+          ? {} : { expectedPlanDigest: request.expectedPlanDigest }),
+      }));
+    case 'task.tests.show':
+      return success(request.requestId, latestTargetedTestPlanView({
+        storage, projectId: request.projectId, taskId: request.taskId,
+      }));
+    case 'task.tests.history':
+      return success(request.requestId, listTargetedTestPlanViews({
+        storage, projectId: request.projectId, taskId: request.taskId, limit: request.limit,
+      }));
     case 'task.verification.list':
       return success(request.requestId,
         storage.listVerificationRuns(request.projectId, request.taskId));
@@ -1392,6 +1424,19 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
     case 'promotion.list':
       return success(request.requestId,
         storage.listStablePromotions(request.projectId, request.limit));
+    case 'promotion.fullSuite.run':
+      return success(request.requestId, await runDevFullSuite({
+        storage,
+        runner: verificationRunner,
+        copiesRoot: verificationCopiesRoot,
+        projectId: request.projectId,
+        expectedDevCommit: request.expectedDevCommit,
+        commandId: request.commandId,
+      }));
+    case 'promotion.fullSuite.list':
+      return success(request.requestId, listFullSuiteEvidence({
+        storage, projectId: request.projectId, limit: request.limit,
+      }));
     case 'attention.list':
       return success(request.requestId, storage.listAttentionRequests(request.projectId));
     case 'attention.answer': {

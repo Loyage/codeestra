@@ -65,6 +65,9 @@ process.stdout.write('terminal=' + (process.stdout.isTTY === true ? 'yes' : 'no'
 // being interpreted as end-of-input by the line discipline. The fake provider does the same, so the
 // release protocol under test is the one a real TUI sees.
 Bun.spawnSync(['stty', 'raw', '-echo'], { stdio: ['inherit', 'pipe', 'pipe'] });
+// A fact the test can wait for: until this line the terminal is still canonical, and Ctrl+D would
+// be read as end-of-input by the line discipline instead of arriving as the release byte.
+process.stdout.write('raw-mode=ready\\n');
 const decoder = new TextDecoder();
 let seen = '';
 for await (const chunk of Bun.stdin.stream()) {
@@ -192,8 +195,29 @@ async function startHarness(options: Parameters<typeof fakeTerminalProvider>[0] 
     createdAt: Date.now(),
   });
   terminals.commitTerminal({ launched, incarnationId: incarnation.incarnation.id });
+  // A bounded wait for the fact the release decision is built on: the ownership check compares a
+  // process tree captured *while the provider was alive*. A launch that raced the provider's startup
+  // records none, and the release then refuses as PREDECESSOR_UNVERIFIED — which is the honest
+  // production answer, but not the scenario these tests are about. The Runtime refreshes the tree on
+  // its own timer, so this waits for that observed fact instead of assuming the first capture won.
+  const treeDeadline = Date.now() + 5_000;
+  while (Date.now() < treeDeadline
+    && (fixture.storage.getSessionIncarnation(incarnation.incarnation.id)?.processTree ?? null)
+      === null) {
+    await Bun.sleep(25);
+  }
   return { storage: fixture.storage, terminals, handoff, sessionId: run.sessionId,
     projectId: fixture.projectId, sessionFile, incarnationId: incarnation.incarnation.id };
+}
+
+/**
+ * Waits until the provider reports that it has switched its terminal to raw mode. Every release
+ * assertion below depends on that fact; waiting for the TUI banner alone assumed a timing
+ * relationship between two lines the provider prints, which a loaded machine does not guarantee.
+ */
+async function waitForRawMode(harness: Harness): Promise<void> {
+  await waitFor(() => harness.terminals.read({ sessionId: harness.sessionId }).data
+    .includes('raw-mode=ready'));
 }
 
 describe('native terminal transport service (ADR-0026)', () => {
@@ -272,8 +296,7 @@ describe('native terminal transport service (ADR-0026)', () => {
     // The provider exits with 7 on release: the exit code is audit data, never the criterion.
     const harness = await startHarness({ exitCode: 7 });
     try {
-      await waitFor(() => harness.terminals.read({ sessionId: harness.sessionId }).data
-        .includes('CODEESTRA-FAKE-TUI'));
+      await waitForRawMode(harness);
       const outcome = await harness.terminals.release({
         sessionId: harness.sessionId, commandId: crypto.randomUUID(),
       });
@@ -314,8 +337,7 @@ describe('native terminal transport service (ADR-0026)', () => {
   test('refuses a release it cannot confirm, and does not kill the provider to get one', async () => {
     const harness = await startHarness({ ignoreRelease: true, releaseGraceMs: 1_500 });
     try {
-      await waitFor(() => harness.terminals.read({ sessionId: harness.sessionId }).data
-        .includes('CODEESTRA-FAKE-TUI'));
+      await waitForRawMode(harness);
       const outcome = await harness.terminals.release({
         sessionId: harness.sessionId, commandId: crypto.randomUUID(),
       });
@@ -336,8 +358,7 @@ describe('native terminal transport service (ADR-0026)', () => {
   test('refuses a release when the provider session file was rewritten', async () => {
     const harness = await startHarness({ rewriteSessionFile: true });
     try {
-      await waitFor(() => harness.terminals.read({ sessionId: harness.sessionId }).data
-        .includes('CODEESTRA-FAKE-TUI'));
+      await waitForRawMode(harness);
       const outcome = await harness.terminals.release({
         sessionId: harness.sessionId, commandId: crypto.randomUUID(),
       });
@@ -352,8 +373,7 @@ describe('native terminal transport service (ADR-0026)', () => {
   test('refuses a release while a tool child the provider started is still running', async () => {
     const harness = await startHarness();
     try {
-      await waitFor(() => harness.terminals.read({ sessionId: harness.sessionId }).data
-        .includes('CODEESTRA-FAKE-TUI'));
+      await waitForRawMode(harness);
       // A tool the provider started that outlives it: the release must not hand the conversation
       // over while this process can still write the workspace.
       harness.terminals.write({ sessionId: harness.sessionId, data: 'SPAWN-ORPHAN\n' });

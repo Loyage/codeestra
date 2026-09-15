@@ -105,8 +105,22 @@ async function writeCheckoutScripts(repository: string, failingStep?: string): P
       'build:ui': failingStep === 'build-ui' ? 'false' : 'echo built',
       codeestra: `${process.execPath} ${cliEntry}`,
     },
+    // A local `file:` dependency, so `bun install` produces a real lockfile offline. The dev
+    // full-suite evidence binds that lockfile's digest (ADR-0039), and a fixture with no lockfile
+    // could not exercise the binding at all.
+    dependencies: { 'local-dep': 'file:./local-dep' },
   }, null, 2)}\n`);
-  await git(repository, ['add', 'package.json']);
+  mkdirSync(join(repository, 'local-dep'), { recursive: true });
+  await Bun.write(join(repository, 'local-dep', 'package.json'),
+    `${JSON.stringify({ name: 'local-dep', version: '1.0.0' }, null, 2)}\n`);
+  const installed = Bun.spawnSync({
+    cmd: ['bun', 'install'], cwd: repository, stdout: 'pipe', stderr: 'pipe',
+    env: { PATH: Bun.env.PATH ?? '' },
+  });
+  if (installed.exitCode !== 0) {
+    throw new Error(`bun install failed in the fixture: ${installed.stderr.toString()}`);
+  }
+  await git(repository, ['add', 'package.json', 'local-dep', 'bun.lock']);
   await git(repository, ['commit', '-q', '-m', 'checkout scripts']);
 }
 
@@ -127,6 +141,9 @@ async function fixture(options: { readonly failingStep?: string } = {}): Promise
     commands: [{ id: 'check', argv: ['true'], cwd: '.', timeoutSeconds: 60 }],
   }));
   await Bun.write(join(repository, 'README.md'), 'fixture\n');
+  // `bun install --frozen-lockfile` is one of the recorded promotion post-steps and runs for real,
+  // so the fixture must ignore what it installs to stay a clean worktree.
+  await Bun.write(join(repository, '.gitignore'), 'node_modules\n');
   await git(repository, ['init', '-q', '-b', 'main']);
   await git(repository, ['add', '.']);
   await git(repository, ['commit', '-q', '-m', 'fixture']);
@@ -186,7 +203,8 @@ interface PromotionPayload {
  * Drives one Task to an INTEGRATED dev commit through the CLI only, then prepares a promotion for
  * exactly that integration batch.
  */
-async function integratedTask(options: { readonly failingStep?: string } = {}): Promise<{
+async function integratedTask(options: { readonly failingStep?: string;
+  readonly withoutFullSuiteEvidence?: boolean } = {}): Promise<{
   readonly environment: Record<string, string>;
   readonly repository: string;
   readonly projectId: string;
@@ -221,6 +239,15 @@ async function integratedTask(options: { readonly failingStep?: string } = {}): 
   const batches = JSON.parse((await cli(['task', 'integration', 'list', projectId, taskId],
     environment)).stdout) as readonly { readonly batchId: string; readonly state: string }[];
   expect(batches[0]?.state).toBe('INTEGRATED');
+  if (options.withoutFullSuiteEvidence !== true) {
+    // ADR-0038 D03: the full suite must be observed passing on the exact integrated dev commit
+    // before any promotion of it can be prepared.
+    const fullSuite = await cli(['promotion', 'full-suite', 'run', projectId,
+      '--dev-commit', resultCommit], environment);
+    expect(fullSuite.exitCode).toBe(0);
+    expect(JSON.parse(fullSuite.stdout) as { readonly state: string })
+      .toMatchObject({ state: 'PASSED' });
+  }
   return { environment, repository, projectId, taskId, mainCommit,
     batchId: batches[0]?.batchId as string, resultCommit };
 }
@@ -368,4 +395,67 @@ describe('codeestra promotion', () => {
       await cli(['stop'], environment);
     }
   }, 180_000);
+
+  test('refuses a promotion with no full-suite evidence of the fixed dev commit', async () => {
+    const integrated = await integratedTask({ withoutFullSuiteEvidence: true });
+    const { environment, repository, projectId, mainCommit, resultCommit, batchId } = integrated;
+    try {
+      const listed = await cli(['promotion', 'full-suite', 'list', projectId], environment);
+      expect(listed.exitCode).toBe(0);
+      expect(JSON.parse(listed.stdout)).toEqual([]);
+
+      const prepared = await cli(['promotion', 'prepare', projectId, batchId, resultCommit,
+        mainCommit], environment);
+      expect(prepared.exitCode).toBe(1);
+      expect(prepared.stderr).toContain('DEV_FULL_SUITE_EVIDENCE_MISSING');
+      expect(JSON.parse((await cli(['promotion', 'list', projectId], environment)).stdout)).toEqual([]);
+      expect(await git(repository, ['rev-parse', 'refs/heads/main'])).toBe(mainCommit);
+    } finally {
+      await cli(['stop'], environment);
+    }
+  }, 240_000);
+
+  test('records the three bindings and invalidates the evidence when the policy on main changes', async () => {
+    const integrated = await integratedTask();
+    const { environment, repository, projectId, mainCommit, resultCommit, batchId } = integrated;
+    try {
+      const evidence = JSON.parse((await cli(['promotion', 'full-suite', 'list', projectId],
+        environment)).stdout) as readonly {
+          readonly evidenceId: string; readonly devCommit: string; readonly state: string;
+          readonly policyVersion: string; readonly policyDigest: string;
+          readonly lockfilePath: string; readonly lockfileDigest: string }[];
+      expect(evidence).toHaveLength(1);
+      expect(evidence[0]).toMatchObject({ devCommit: resultCommit, state: 'PASSED',
+        policyVersion: 'verification-policy-v1', lockfilePath: 'bun.lock' });
+      expect(evidence[0]?.policyDigest).toMatch(/^[0-9a-f]{64}$/);
+      expect(evidence[0]?.lockfileDigest).toMatch(/^[0-9a-f]{64}$/);
+
+      const plan = JSON.parse((await cli(['promotion', 'prepare', projectId, batchId, resultCommit,
+        mainCommit], environment)).stdout) as PromotionPayload & {
+          readonly fullSuite: { readonly evidenceId: string; readonly devCommit: string } | null };
+      expect(plan.state).toBe('CREATED');
+      expect(plan.fullSuite).toMatchObject({ evidenceId: evidence[0]?.evidenceId,
+        devCommit: resultCommit });
+
+      // The full suite's command set is the project policy read at the main ref, so editing it
+      // there is exactly the change that must invalidate the evidence.
+      await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'),
+        `${JSON.stringify({ version: 1, commands: [{ id: 'check', argv: ['echo', 'changed'],
+          cwd: '.', timeoutSeconds: 60 }] })}\n`);
+      await git(repository, ['add', '.codeestra/policies/verification.json']);
+      await git(repository, ['commit', '-q', '-m', 'different judging commands']);
+
+      const promoted = await cli(['promotion', 'promote', projectId, plan.promotionId], environment);
+      expect(promoted.exitCode).toBe(1);
+      expect(promoted.stderr).toContain('DEV_FULL_SUITE_EVIDENCE_STALE');
+      const read = JSON.parse((await cli(['promotion', 'get', projectId, plan.promotionId],
+        environment)).stdout) as PromotionPayload;
+      expect(read).toMatchObject({ state: 'STALE', outcomeCode: 'DEV_FULL_SUITE_EVIDENCE_STALE',
+        promotedCommit: null });
+      // No ref moved: the policy commit is on main, and dev is still the un-promoted candidate.
+      expect(await git(repository, ['rev-parse', 'refs/heads/dev'])).toBe(resultCommit);
+    } finally {
+      await cli(['stop'], environment);
+    }
+  }, 240_000);
 });

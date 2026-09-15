@@ -204,6 +204,30 @@ async function createAndSubmit(
   return { ...created, state: 'READY', version: 1 };
 }
 
+/**
+ * Cancels a Task with the version it actually carries. The version is a fact about the Task, not a
+ * constant: a periodic scheduling pass can bump it while the test runs, and the cancellation is a
+ * compare-and-set that (correctly) refuses a stale version. A bounded re-read asserts the outcome
+ * the command face promises — the Task is cancelled — instead of racing the scheduler.
+ */
+async function cancelWithCurrentVersion(
+  projectId: string,
+  taskId: string,
+  environment: Record<string, string>,
+): Promise<Awaited<ReturnType<typeof cli>>> {
+  let last: Awaited<ReturnType<typeof cli>> | null = null;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const status = await cli(['task', 'status', projectId, taskId], environment);
+    expect(status.exitCode).toBe(0);
+    const version = (JSON.parse(status.stdout) as { readonly task: { readonly version: number } })
+      .task.version;
+    last = await cli(['task', 'cancel', projectId, taskId, String(version)], environment);
+    if (last.exitCode === 0 || !last.stderr.includes('CONCURRENT_MODIFICATION')) return last;
+    await Bun.sleep(250);
+  }
+  return last as Awaited<ReturnType<typeof cli>>;
+}
+
 describe('project impact', () => {
   test('derives SAFE, CONFLICTING, and UNKNOWN verdicts from real change sets', async () => {
     const home = temporaryDirectory('codeestra-impact-home-');
@@ -373,7 +397,11 @@ describe('project impact', () => {
     expect(invalidReport.explanation.join('\n')).toContain('POLICY_INVALID');
 
     // Only the command face is used above; the Runtime is stopped through the CLI like any client.
-    expect((await cli(['task', 'cancel', projectId, first.id, '2'], environment)).exitCode).toBe(0);
+    // The Task version is re-read instead of assumed: the scheduling engine's recovery pass can
+    // pause a Task whose impact prediction was revoked, which moves the version, and a hard-coded
+    // `2` turned that legitimate transition into a false CONCURRENT_MODIFICATION.
+    const cancelled = await cancelWithCurrentVersion(projectId, first.id, environment);
+    expect(cancelled.exitCode).toBe(0);
     const stopped = await cli(['stop'], environment);
     expect(stopped.exitCode).toBe(0);
   }, 300_000);
