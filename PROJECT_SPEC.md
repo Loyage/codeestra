@@ -66,17 +66,35 @@ Task verification 在固定 commit 的隔离副本上运行项目内人工维护
 
 ## 4. 项目知识
 
-预留布局：
+分层与来源（ADR-0041 已实现第一小步）：
 
 ```text
+项目仓库（进 Git，人工维护，只从 main ref 读取）
 .codeestra/
-├── instructions/   # 人工维护
-├── skills/         # 人工维护
-├── policies/       # 人工维护
-├── generated/      # 机器生成，包含来源与版本信息
+├── instructions/   # 人工维护，Markdown（.md）+ 可选 YAML front-matter（id/scope）
+├── skills/         # 人工维护，同上
+└── policies/       # 人工维护，既有 JSON 机制独占（verification.json / impact.json）
+
+Runtime 数据目录（不进 Git，机器生成，只有 Runtime 可写）
+<CODEESTRA_HOME>/knowledge/<project-id>/
+├── generated/             # 机器生成层的读位置
+│   ├── <entry>.md         # 机器生成内容
+│   └── <entry>.meta.json  # 来源与版本（source/kind/revision/commit/generatedAt）
+└── <task-id>/             # 某个 Execution 物化出的知识上下文（写位置）
+    └── knowledge-context.md
 ```
 
-知识目录的 Git 跟踪策略另行明确，不能将整个 `.codeestra/` 一概当作知识或一概忽略。Worktree、密钥、终端日志和运行数据库属于 Runtime 数据，不放入项目 `.codeestra/`，不得意外进入提交。
+**规格修订（FOUNDATION-067 / ADR-0041）**：本节原先只写「`.codeestra/generated/` 机器生成」，把 `generated/` 画在项目 `.codeestra/` 内，并把「知识目录的 Git 跟踪策略」留作待明确。本轮据实测把它确定为：**机器生成层的读与写都在 Runtime 数据目录，项目树里一个字节都不写**。理由不是偏好而是硬事实：worktree 里未被 ignore 的未跟踪文件会进入该 Task 的 Git change set，于是（a）任意两个并发 Task 都会因同一个路径被判 `SAME_FILE`/`CONFLICTING`（已实测：容量等待退化为冲突拒绝），且（b）它会被 `task result capture` 的 `git add --all` 提交进成果 commit 并随 IntegrationBatch 进入 `dev`。把机器生成知识放在 Runtime 数据目录让「机器生成不进提交」成为结构事实，而不依赖任何 ignore 规则。`.gitignore` 里的 `.codeestra/generated/` 只是守卫规则（防止用户仓库里残留同名目录被提交），**不是**存放位置。
+
+加载顺序固定为 `instructions` → `skills` → `generated`，先人工后机器。**没有覆盖语义**：可解析的人工条目全部进入快照，一条都不丢弃；重复 id 或重复路径是 fail-closed 拒绝（稳定错误码），不是「后者胜」。人工层只从项目 `main` ref 读取（读法同 `.codeestra/policies/verification.json` 与 `.codeestra/impact.json`），所以 Task 分支上的同名文件不参与判定。人工层任何条目被拒（front-matter 非法、超出上限、非 UTF-8、重复 id/路径）则**拒绝建立 Execution**；`generated/` 缺失或为空是正常状态。
+
+每个 Execution 在建立时绑定它**实际使用**的知识快照：内容 digest（逐条目 + 整体）、`main` commit、逐条来源路径；绑定写入 append-only 表 `execution_knowledge_snapshots`（schema v26），并与 Execution 行在同一写事务内，因此「Execution 存在」与「已绑定所用知识版本」不可分开观察。解析结果物化为 `<CODEESTRA_HOME>/knowledge/<project-id>/<task-id>/knowledge-context.md`，其 digest 与字节数一并写进绑定。命令面：`project knowledge validate|list|show|resolve`（`--json`、稳定退出码）。
+
+已知边界：Provider 侧**是否读取**该物化文件尚未验证（本轮 Agent Adapter 不消费 `knowledgeSnapshotRefs`，adapter 侧注入属后续格）。
+
+知识的最小语义集里 `policies/` 仍由既有机制独占，不进知识层；向量检索、embedding 与 LLM 摘要不在本阶段。
+
+知识目录的 Git 跟踪策略由此明确：人工层必须进 Git；机器生成层属 Runtime 数据、读写都不在项目树内，因而不得进提交；Worktree、密钥、终端日志和运行数据库同样属于 Runtime 数据，不放入项目 `.codeestra/`。
 
 ## 5. 自我演化
 

@@ -234,7 +234,10 @@ describe('revision delivery schema (v19)', () => {
       raw.close();
 
       const storage = new Phase1Database(path);
-      expect(phase1SchemaVersion).toBe(24);
+      // The claim is that the upgrade reaches the *current* schema, not that this
+      // lane is last: FOUNDATION-067 moved the constant to 26, and 25 belongs to a
+      // parallel lane that may merge after this one.
+      expect(phase1SchemaVersion).toBeGreaterThanOrEqual(24);
       // The pinned version is the schema the migration runner targets, not this lane's own step: a
       // later additive migration must not make this assertion wrong.
       expect(storage.sqlite.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version)

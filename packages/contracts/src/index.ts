@@ -1612,6 +1612,43 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     taskId: z.string().uuid(),
   }),
   /**
+   * Project Knowledge (FOUNDATION-067 / ADR-0041, `PROJECT_SPEC.md` §4).
+   *
+   * The human-maintained layers (`.codeestra/instructions`, `.codeestra/skills`) are always read
+   * from the project `main` ref — exactly like the verification policy and the impact mapping — so a
+   * Task branch can never rewrite the knowledge that judges its own execution. The
+   * machine-generated layer is Runtime data (`<CODEESTRA_HOME>/knowledge/<project-id>/generated/`),
+   * not something inside the project tree. All four commands are read-only observations: they
+   * derive entries and digests and never record a snapshot, materialize a context, or start a Task.
+   *
+   * `validate` reports every refused entry at once (a layer with any refusal is not a snapshot at
+   * all); `show` reads back one recorded snapshot and the Executions bound to it; `list` reports the
+   * knowledge declared now plus the snapshot history; `resolve` reports what the next Execution of
+   * one Task *would* use, by the same scope rule that Execution would apply.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('project.knowledge.validate'),
+    projectId: z.string().uuid(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('project.knowledge.list'),
+    projectId: z.string().uuid(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('project.knowledge.show'),
+    projectId: z.string().uuid(),
+    snapshotId: nonBlankString.optional(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('project.knowledge.resolve'),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+  }),
+  /**
    * Capacity configuration (FOUNDATION-054 / ADR-0032). `get` reports the limits, where each one came
    * from, how many slots are occupied, the stable wait reason a new acquisition would get, and the
    * Runtime's draining fact. `set` writes one limit (project-wide, or one Adapter when `adapterId` is

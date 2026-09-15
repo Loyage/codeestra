@@ -20,6 +20,9 @@ export type {
   ImpactActiveTaskRef, ImpactAssessmentInput, ImpactAssessmentRecord, ImpactCandidateTaskRef,
   ConfirmedImpactPolicy, ImpactPolicyConfirmationInput, ImpactSnapshotInput, ImpactSnapshotKey,
   ImpactSnapshotRecord, StoredImpactResourceRef,
+  ExecutionKnowledgeSnapshotInput, ExecutionKnowledgeSnapshotRecord, KnowledgeLayerName,
+  KnowledgeScopeName, KnowledgeSnapshotInput, KnowledgeSnapshotKey, KnowledgeSnapshotRecord,
+  StoredKnowledgeEntry, StoredKnowledgeEntryOrigin,
   PendingEventDelivery, ResultCommitAuthorization, ResultCommitCapturePlan, ResultCommitSubject,
   SessionHandoffKind, SessionHandoffRequestRecord, SessionHandoffState,
   SessionIncarnationMode, SessionIncarnationRecord, SessionIncarnationState, SessionIncarnationWrite,
@@ -56,7 +59,7 @@ export type {
 export {
   agentAnswerMigration, agentConfigurationMigration, agentDisconnectMigration,
   agentObservationMigration, agentStartMigration, capacitySlotReservationMigration,
-  impactAnalysisMigration, integrationPipelineMigration,
+  impactAnalysisMigration, integrationPipelineMigration, knowledgeLayerMigration,
   operationProgressMigration,
   phase1Migration, phase1SchemaVersion, reclamationMigration, sessionHandoffMigration,
   sessionTerminalMigration,

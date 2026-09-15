@@ -722,7 +722,10 @@ describe('unregistered reclamation schema', () => {
     try {
       expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version')
         .get()?.user_version).toBe(phase1SchemaVersion);
-      expect(phase1SchemaVersion).toBe(24);
+      // The claim is that the upgrade reaches the *current* schema, not that this
+      // lane is last: FOUNDATION-067 moved the constant to 26, and 25 belongs to a
+      // parallel lane that may merge after this one.
+      expect(phase1SchemaVersion).toBeGreaterThanOrEqual(24);
       expect(upgraded.sqlite.query<Record<string, unknown>, []>('PRAGMA foreign_key_check').all())
         .toHaveLength(0);
       const kept = upgraded.sqlite.query<{ id: string; source: string; task_id: string }, []>(

@@ -34,6 +34,12 @@ export async function startReservedExecution(input: {
   readonly startCommandId: string;
   readonly environment?: Readonly<Record<string, string>>;
   readonly permissionMode?: 'FULL' | 'STRICT';
+  /**
+   * References to the knowledge the Execution was bound to (FOUNDATION-067 / ADR-0041). The Runtime
+   * passes exactly what it recorded in `execution_knowledge_snapshots`; absent means the Execution
+   * resolved no knowledge at all, which the Adapter sees as an empty list rather than as `undefined`.
+   */
+  readonly knowledgeSnapshotRefs?: readonly string[];
   /** Present when this Execution continues a paused one through provider conversation resume. */
   readonly resume?: {
     readonly predecessorSessionId: string;
@@ -106,7 +112,7 @@ export async function startReservedExecution(input: {
         specification: plan.specification,
         constraints: plan.constraints,
       },
-      knowledgeSnapshotRefs: [],
+      knowledgeSnapshotRefs: input.knowledgeSnapshotRefs ?? [],
       permissionMode,
       ...(input.resume === undefined ? {} : { resume: input.resume }),
       // The configuration resolved at reservation time, so the Adapter launches exactly what the

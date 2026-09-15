@@ -42,6 +42,7 @@ Self Task → Candidate → 自托管测试 → 用户 Promotion → 排空 → 
 - [Git Workspace API](git-workspace-api.md)
 - [Conservative Scheduler](scheduler.md)
 - [Conflict Analyzer](conflict-analyzer.md)
+- [Project Knowledge](knowledge.md)
 - [Repository / Module Structure](repository-structure.md)
 - [MVP roadmap](../roadmap/mvp.md)
 - [决策索引与剩余门禁](../decisions/README.md)

@@ -3548,6 +3548,125 @@ UI **零改动**（事件联合是 `eventType: string`，`contracts` 变更不�
 - 未运行全量测试：本次仅改文档，且 ADR-0038 明确全量测试只在固定 dev 候选准备提升到 main 时执行。
 - 仅执行文档关键词、链接、diff 与 Git 状态检查；结果以本次交付说明为准。
 
+## FOUNDATION-067 — Project Knowledge 第一小步：分层加载、Execution 绑定与 CLI 命令面（ADR-0041，schema v26）
+
+状态：**已实现并已提交到 lane 分支 `lane/i3-project-knowledge`（未 push、未提升 main、未重启稳定 Runtime）**。基线固定 `dev@fd3d99871a40e578105036bc6728213adf302c6a`（`phase1SchemaVersion = 24`），未 rebase、未合并新 dev、未触碰 `/Users/loyage/Documents/codeestra`（main 稳定工作树）。语义未定的部分**全部先问协调者再动手**：三轮共 13 题（8 + 4 + 1），所有裁决见 ADR-0041。
+
+### 本格解决什么
+
+实现 `docs/roadmap/mvp.md` Phase 6 的第一小步。开工前的已核实缺口：仓库里**没有任何知识加载路径**（`packages/agent-adapters` 不消费 `AgentStartRequest.knowledgeSnapshotRefs`，`agent-start-service.ts` 与 `agent-runtime-service.ts` 都硬编码 `[]`），`.codeestra/` 下只有 `policies/verification.json`。
+
+交付：知识分层与来源、人工层只从项目 `main` ref 加载、每个 Execution 绑定它**实际使用**的知识快照（digest + 来源 + revision/commit）、append-only 审计、机器生成只能写 Runtime 数据目录且写人工路径 fail-closed、`project knowledge validate|list|show|resolve` 命令面、Git 跟踪策略落为代码常量 + 文档事实。
+
+### 修改清单
+
+**新增（本格独占领地）**
+
+| 文件 | 内容 |
+|---|---|
+| `packages/domain/src/knowledge.ts` | 纯领域：层常量与层序、窄 front-matter（顶层标量 `id`/`scope`，手写、无新依赖）、路径与层归属校验、条目解析与拒绝码、层序排序与重复 id/路径 fail-closed、`scope` 复用 `Task.kind`、逐条/分层/整体 digest、确定性上下文渲染、`knowledgeSnapshotRefs` |
+| `packages/domain/test/knowledge.test.ts` | 23 项纯领域测试 |
+| `apps/runtime/src/knowledge-service.ts` | Runtime 侧：从 `main` ref 列目录并读 blob（`ls-tree -r -z` + `cat-file blob`，`TextDecoder({fatal:true})`）、读 Runtime 生成层并校验 provenance、inspection/validate/list/show/resolve 报告、`assertMachineGeneratedWriteTarget`、`writeRuntimeKnowledgeFile`、`prepareExecutionKnowledge`、`knowledgeSnapshotId` |
+| `packages/storage/test/knowledge.test.ts` | 13 项真实 SQLite 测试 |
+| `apps/runtime/test/cli-knowledge.test.ts` | 5 项真实 CLI + Runtime + 临时 `CODEESTRA_HOME` + 临时仓库 + 协议 stub provider 的端到端测试 |
+| `docs/decisions/0041-project-knowledge-layers-and-execution-binding.md` | ADR（D01–D10 + 后果 + 验证要求） |
+| `docs/architecture/knowledge.md` | 知识层架构文档 |
+
+**纯追加/机械修改（既有文件）**
+
+| 文件 | 改了什么 |
+|---|---|
+| `packages/storage/src/migration.ts` | `phase1SchemaVersion` 24 → **26**；追加 `knowledgeLayerMigration`（两张 append-only 表 + 三个索引 + 四个触发器）。只追加 `if (version < 26)`，**没有插入任何更早号段**（v25 属并行 lane，v16 永久未使用） |
+| `packages/storage/src/database.ts` | `migrate()` 追加 `if (version < 26)`；新增类型 `KnowledgeSnapshotInput/Record/Key`、`ExecutionKnowledgeSnapshotInput/Record`、`StoredKnowledgeEntry(Origin)`、`KnowledgeLayerName/KnowledgeScopeName`；新增方法 `recordKnowledgeSnapshot`/`findKnowledgeSnapshot`/`getKnowledgeSnapshot`/`listKnowledgeSnapshots`/`recordExecutionKnowledgeSnapshot`/`getExecutionKnowledgeSnapshot`/`listExecutionKnowledgeSnapshots`；`reserveExecution` 新增**可选** `knowledgeBinding` 并在同一事务内插入绑定行 |
+| `packages/storage/src/index.ts` | 追加类型导出与 `knowledgeLayerMigration` |
+| `packages/contracts/src/index.ts` | 追加 `project.knowledge.validate|list|show|resolve` 四个 request schema |
+| `apps/runtime/src/main.ts` | 追加四个 command 分支（只读观察） |
+| `apps/runtime/src/agent-runtime-service.ts` | **最小追加**：`#startPreparedExecution` 在 `reserveExecution` **之前**调用 `prepareExecutionKnowledge`（任务不存在时 `TASK_NOT_FOUND`）、把 `knowledge.binding` 传进保留事务、把 `knowledge.refs` 传给 `startReservedExecution`；successor 路径（原 `knowledgeSnapshotRefs: []`）改为读回该 Execution 已记录的 refs。**未改任何既有分支语义** |
+| `apps/runtime/src/agent-start-service.ts` | **最小追加**：`startReservedExecution` 新增可选 `knowledgeSnapshotRefs`，`adapter.start` 处由硬编码 `[]` 改为 `input.knowledgeSnapshotRefs ?? []` |
+| `apps/cli/src/main.ts` | 追加 `project knowledge validate|list|show|validate` 子命令分支、`--json` 视图类型、人类可读打印、usage 与 `project knowledge` 说明段 |
+| `packages/domain/src/index.ts` | 追加一行 `export * from './knowledge.js';` |
+| `.gitignore` | 追加 `.codeestra/generated/` 守卫规则（并注明它**不是**机器生成层的存放位置） |
+| `PROJECT_SPEC.md` | §4 **显式规格修订**（见下「规格修订」） |
+| `docs/architecture/README.md` | 导航追加 `knowledge.md` 一行 |
+| `docs/architecture/sqlite-schema.md` | 状态行 21 → 26；第 8 节追加 v26 DDL 记录，并如实写明 v23/v24 的逐版本 DDL 记录尚未补齐（文档同步滞后） |
+| `docs/decisions/README.md` | 追加 ADR-0041 索引行 |
+| `package.json` | `cli-knowledge` 加入 `test:unit` 忽略列表与 `test:e2e` 列表 |
+| `packages/storage/test/impact-analysis.test.ts`、`apps/runtime/test/revision-delivery.test.ts`、`apps/runtime/test/verification-cancel.test.ts`（2 处）、`apps/runtime/test/cli-reclaim-batch.test.ts` | 机械修正：`expect(phase1SchemaVersion).toBe(24)` → `toBeGreaterThanOrEqual(24)`（本格把常量推到 26 的必然影响；断言本意即「升级到达当前版本」，不是「本格是最后一步」） |
+
+### 关键裁决（用户拍板，共 13 题）
+
+| # | 问题 | 裁决 |
+|---|---|---|
+| 1 | 格式与目录语义 | Markdown + 窄 YAML front-matter（`id`/`scope`），手写解析器**不加依赖**；`policies/*.json` 仍由既有机制独占 |
+| 2 | 优先级与冲突 | **无覆盖语义**：全部可解析人工条目进快照、不丢弃；重复 id/路径 fail-closed；**不做任务级覆盖** |
+| 3 | 「加载」落到哪一步 | 解析 + 快照绑定 + 审计 + CLI + 物化 + 填 `knowledgeSnapshotRefs`；**不改 agent-adapters**，provider 侧消费如实标注未验证 |
+| 4 | 加载失败语义 | 人工层非法/超限/非 UTF-8 → **拒绝建立 Execution**（Execution 不落库）；`generated/` 缺失或为空属正常 |
+| 5 | 写入者与元数据 | 只有 Runtime 可写；`<entry>.meta.json` 记 provenance；digest 粒度 = 每文件 + 整体 |
+| 6 | Git 跟踪 | 机器生成不进 Git；人工层必进 Git；`.gitignore` 加守卫规则并落为代码常量 + 文档 |
+| 7 | schema | v26 新建 `knowledge_snapshots` + `execution_knowledge_snapshots`，**不重建 `executions`**；断言用常量或 `>= 26` |
+| 8 | 命令面 | `project knowledge list|show|validate` + `resolve <project> <task>`，`--json`、退出码 0/1/2、`project` 分组 |
+| 9 | `scope` 取值 | `ALL`(缺省) / `DEVELOPMENT` / `SELF`，复用既有 `tasks.kind` |
+| 10 | `generated/` 读位置 | Runtime 数据目录 `<CODEESTRA_HOME>/knowledge/<project-id>/generated/` |
+| 11 | 领地 | 允许对 `agent-runtime-service.ts` / `agent-start-service.ts` 做**最小追加式**修改并逐处列出 |
+| 12 | 是否需要机器写命令 | **不新增**；写入者是 Runtime，不是用户 |
+| 13 | worktree 写入（见下） | 机器生成知识**读写都在 Runtime 数据目录，项目树里一个字节都不写** |
+
+### 本格发现并修复的真实回归（协调者要求作为证据保留）
+
+**现象**：把物化出的 `knowledge-context.md` 写进 Task worktree 的 `.codeestra/generated/` 后，`apps/runtime/test/cli-task-retry.test.ts` 的用例「a retry queues behind capacity instead of jumping the queue」失败：本应退出码 **3（容量等待）**，实际变成冲突拒绝。
+
+**impact 报告原文（实测输出）**：
+
+```
+verdict CONFLICTING (SAME_FILE)
+[CONFLICT] SAME_FILE against 99cf287d-2506-46d2-94d2-9153ae6d32d7 (SAME_FILE): 1 file(s) changed by both — paths .codeestra/generated/knowledge-context.md
+```
+
+**实测到的原因（不是推测）**：`packages/git/src/result-commit.ts` 的 change set 由 `git diff --name-status <base>` **加** `git ls-files --others --exclude-standard` 组成（该文件第 193–211 行），而 `stageResultChangeSet` 用 `git add --all`（第 251 行）。未 ignore 的未跟踪文件因此同时（a）进入每个 Task 的 change set，使任意两个并发 Task 都命中同一个路径被判 `SAME_FILE`/`CONFLICTING`，（b）会被成果 commit 提交并随 IntegrationBatch 进入 `dev`——违反「机器生成不得进提交」。本仓库的 `.gitignore` 只对本仓库生效，用户项目没有这条规则，所以这是产品缺陷而非夹具缺规则。
+
+**修复**：按协调者裁决把物化上下文写到 `<CODEESTRA_HOME>/knowledge/<project-id>/<task-id>/knowledge-context.md`，**worktree 里一个字节都不写**；Runtime 从不写用户仓库的 Git 元数据（不做 `.git/info/exclude` —— 实测其为 common dir 作用域），也不改 impact 分析器与成果提交。新增定向测试「two concurrent Tasks never conflict because of machine-generated knowledge」：两个 Task 并发运行后，各自 worktree 的 `git status --porcelain -uall` 精确等于 `?? src/agent/<task-id>.ts`，`.codeestra/generated` 不存在，`project impact explain` 的 candidate files 只含 Agent 产物且 reasonCodes 不含 `SAME_FILE`。
+
+**规格修订（必须显式，不得静默重新解释）**：`PROJECT_SPEC.md` §4 原先只写「`.codeestra/generated/` 机器生成」并把 Git 跟踪策略留作待明确。本格修订为：人工层在项目 `.codeestra/{instructions,skills}`（`policies/` 由既有 JSON 机制独占）；机器生成层的**读与写都在 Runtime 数据目录**；`.gitignore` 的 `.codeestra/generated/` 只是守卫规则、**不是**存放位置。修订文字已写进 `PROJECT_SPEC.md` §4 与 ADR-0041 D05。
+
+### 实际运行的检查与逐条结果
+
+全部命令在 `/Users/loyage/Documents/codeestra-wt/i3-project-knowledge` 下执行。**未运行** `bun run check`、`bun run check:fast`、`just check`、`just verify`（ADR-0038）。
+
+| 命令 | 退出码 | 结果 |
+|---|---|---|
+| `bun run typecheck` | 0 | 无错误 |
+| `bun test packages/domain/test packages/storage/test` | 0 | **420 pass / 0 fail**，1264 expect，14 文件（含本格新增 23 + 13） |
+| `bun test apps/runtime/test/cli-knowledge.test.ts` | 0 | **5 pass / 0 fail**，101 expect |
+| `bun test apps/runtime/test/revision-delivery.test.ts apps/runtime/test/verification-cancel.test.ts apps/runtime/test/cli-reclaim-batch.test.ts apps/runtime/test/cli-reclaim.test.ts` | 0 | **42 pass / 0 fail**，396 expect（本格改了其中 4 处版本断言，故重跑） |
+| `bun test apps/runtime/test/agent-runtime-service.test.ts apps/runtime/test/agent-observation-service.test.ts apps/runtime/test/workspace-service.test.ts` | 0 | **35 pass / 0 fail**，173 expect（ExecutionContext 建立路径受本格改动影响） |
+| `bun test apps/runtime/test/cli-schedule.test.ts apps/runtime/test/schedule-service.test.ts apps/runtime/test/cli-task-control.test.ts apps/runtime/test/cli-task-retry.test.ts apps/runtime/test/cli-task-run-progress.test.ts` | 0 | **27 pass / 0 fail**，410 expect（调度/暂停恢复/重试/进度路径 + 上述回归） |
+
+中间过程结果（如实记录，不隐藏）：
+
+- `cli-task-retry.test.ts` 曾在修复前 **1 fail**（容量等待用例），失败输出见上一节；修复后重跑 0 fail。
+- `cli-knowledge.test.ts` 在开发过程中多次失败并逐个修正：`validate` 报告缺 `state` 字段、`list` 报告缺 `valid`/`code`/`humanEntryCount`/`generatedEntryCount`、`show` 分支把 `--json` 误当 `snapshot-id`、断言用 `realpathSync(home)` 与 Runtime 实际使用的 `CODEESTRA_HOME` 字面量不一致、`git status` 未加 `-uall` 导致目录被折叠。
+- 首次把夹具设为「`task submit` 后自动启动」超时：该仓库没有 `.codeestra/impact.json`，调度器的自动 pass 无法证明 SAFE，因此改为显式 `task run`（同一门禁、同一建立路径），并保留这一事实的注释。
+
+**过程卫生**：所有 e2e 测试使用 `apps/runtime/test/support/runtime-reclamation.ts` 的 `runCli`/`registerTemporaryDirectory`/`reclaimTestResources`（`afterEach` 回收）；跑完后 `ps -Ao pid,command | grep codeestra-wt/i3-project-knowledge | wc -l` = **0**（无本格遗留 Runtime 或 provider 进程）；未修改 `.codeestra/policies/verification.json`；未 push、未提升 main、未重启稳定 Runtime、未触碰 `/Users/loyage/Documents/codeestra`。
+
+### 未验证与已知缺口（不得读作已完成）
+
+1. **Provider 侧消费未验证**。Agent Adapter 目前不消费 `knowledgeSnapshotRefs`，本格领地也不含 `packages/agent-adapters/**`。成立的是「解析、物化、绑定、可追溯、拒绝路径」；**不**成立「Agent 真的读到了知识」。adapter 侧注入属后续格。
+2. **机器生成层的其它写入者未实现**。除每 Execution 的 `knowledge-context.md` 外，没有生成 `generated/` 条目的组件；`generated/` 的读取、provenance 校验与拒绝路径已实现并有存储/命令面测试。
+3. **无 `tool result capture` / verification / integration 的端到端联验**：绑定只验证到 Execution 建立与可追溯查询，没有验证成果提交后 `dev` 侧的追溯读取。
+4. **无 UI 投影**（`apps/ui/**` 不在本格领地）。
+5. **不涉及**向量检索 / embedding / LLM 摘要；`policies/` 不进知识层。
+6. 上限（每层 256 条、单条 64 KiB、整快照 1 MiB、front-matter 32 行）是常量而非项目配置。
+7. `docs/architecture/sqlite-schema.md` 中 v23/v24 的逐版本 DDL 记录仍未补齐（既有文档同步滞后，本格未擅自代补）。
+8. 真实模型 + 真实 provider 的端到端未跑（本格只用协议 stub provider，符合 ADR-0008 的命令面测试边界）。
+
+### 领地
+
+独占：`packages/domain/src/knowledge*.ts`、`apps/runtime/src/knowledge-service.ts`、本格新增的 3 个测试文件、`docs/architecture/knowledge.md`、`docs/decisions/0041-*.md`。
+纯追加/机械修改：`packages/storage/src/{migration,database,index}.ts`、`packages/contracts/src/index.ts`、`apps/cli/src/main.ts`、`apps/runtime/src/main.ts`、`package.json`、`docs/**`、`.gitignore`、`PROJECT_SPEC.md` §4、以及上述 4 处版本断言。
+经协调者显式授权的最小追加式修改：`apps/runtime/src/agent-runtime-service.ts`、`apps/runtime/src/agent-start-service.ts`。
+**未改**：`packages/agent-adapters/**`、`apps/ui/**`、`verification-service.ts`、`promotion-service.ts`、`schedule-service.ts`、`.codeestra/policies/verification.json`。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、~~UI 投影~~（已由 FOUNDATION-050 完成 promotion/dependency 投影）。

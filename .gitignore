@@ -11,3 +11,7 @@ dist/
 .codeestra/logs/
 .codeestra/*.sqlite*
 .codeestra/*.db*
+# Machine-generated knowledge is Runtime data (`<CODEESTRA_HOME>/knowledge/<project-id>/generated/`),
+# not project content. This rule only guards against a stale `.codeestra/generated/` directory in a
+# project tree being committed by accident (ADR-0041); it is not where the layer is stored.
+.codeestra/generated/
