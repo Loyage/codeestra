@@ -118,7 +118,7 @@ project impact explain <project-id> <task-id> [--json]# 给出判定与理由；
 
 ### 6.6 未实现（不得声称）
 
-调度循环、容量、自动 tick、多成员批次、非 Git 共享资源（端口/数据库/dev server）的 resource claim、gitignore 产物的语义、以及映射未声明路径的目录/模块语义；`--allow-unknown` 的命令形态。这些属 Wave F / 后续 ADR。
+调度循环、容量、自动 tick、（多成员批次本身已由 FOUNDATION-081/ADR-0053 实现，见 `state-machines.md` §4，但分析器不参与组批）、非 Git 共享资源（端口/数据库/dev server）的 resource claim、gitignore 产物的语义、以及映射未声明路径的目录/模块语义；`--allow-unknown` 的命令形态。这些属 Wave F / 后续 ADR。
 
 ## 7. 与调度引擎的关系（Wave F）
 

@@ -24,7 +24,11 @@ import {
 } from '@codeestra/storage';
 import { AgentRuntimeCoordinator } from '../src/agent-runtime-service.js';
 import { AdapterRegistry } from '../src/adapter-registry.js';
-import { integrateTaskResult } from '../src/integration-service.js';
+import {
+  createIntegrationBatch,
+  integrateIntegrationBatch,
+  integrateTaskResult,
+} from '../src/integration-service.js';
 import {
   abandonStablePromotion,
   approveStablePromotion,
@@ -79,6 +83,8 @@ function temporaryDirectory(prefix: string): string {
 async function promotionFixture(options: {
   readonly withoutFullSuiteEvidence?: boolean;
   readonly withoutDevClone?: boolean;
+  /** Integrate a two-member IntegrationBatch instead of a single Task (ADR-0053). */
+  readonly multiMember?: boolean;
 } = {}): Promise<PromotionFixture> {
   const value = await createAgentFixture();
   const adapter = new DeterministicFakeAdapter('SUCCEED', [{
@@ -90,43 +96,111 @@ async function promotionFixture(options: {
   const coordinator = new AgentRuntimeCoordinator({
     storage: value.storage, registry, runtimeHome: value.home,
   });
-  const run = await coordinator.runTask({
-    projectId: value.projectId, taskId: value.taskId, expectedTaskVersion: 1,
-    commandId: crypto.randomUUID(), adapterId: adapter.id,
-  });
-  await coordinator.settle();
-  await Bun.write(join(run.workspacePath, 'agent-output.txt'), 'work\n');
-  const prepared = await prepareResultCommit({
-    storage: value.storage, projectId: value.projectId, taskId: value.taskId,
-    commandId: crypto.randomUUID(), actor: 'local-user',
-  });
-  await captureResultCommit({
-    storage: value.storage, projectId: value.projectId, taskId: value.taskId,
-    authorizationId: prepared.authorizationId, commandId: crypto.randomUUID(),
-  });
-  const verification = await runTaskVerification({
-    storage: value.storage, runner: new VerificationRunner(),
-    copiesRoot: join(value.home, 'verifications'),
-    projectId: value.projectId, taskId: value.taskId, commandId: crypto.randomUUID(),
-  });
-  expect(verification.state).toBe('PASSED');
-  const integrated = await integrateTaskResult({
-    storage: value.storage,
-    runner: new VerificationRunner(),
-    copiesRoot: join(value.home, 'verifications'),
-    worktreesRoot: join(value.home, 'integrations'),
-    projectId: value.projectId,
-    taskId: value.taskId,
-    expectedVersion: value.storage.getTask(value.projectId, value.taskId)?.version as number,
-    commandId: crypto.randomUUID(),
-    permissionMode: 'FULL',
-  });
-  expect(integrated.state).toBe('INTEGRATED');
-  const batch = value.storage.listIntegrationBatches(value.projectId, value.taskId)[0];
-  if (batch === undefined || batch.verificationId === null) {
+  /** Drives one Task to an EXECUTED state with a captured result commit and a PASSED verification. */
+  const driveTask = async (taskId: string, file: string): Promise<void> => {
+    const run = await coordinator.runTask({
+      projectId: value.projectId, taskId, expectedTaskVersion: 1,
+      commandId: crypto.randomUUID(), adapterId: adapter.id,
+    });
+    await coordinator.settle();
+    await Bun.write(join(run.workspacePath, file), 'work\n');
+    const prepared = await prepareResultCommit({
+      storage: value.storage, projectId: value.projectId, taskId,
+      commandId: crypto.randomUUID(), actor: 'local-user',
+    });
+    await captureResultCommit({
+      storage: value.storage, projectId: value.projectId, taskId,
+      authorizationId: prepared.authorizationId, commandId: crypto.randomUUID(),
+    });
+    const verification = await runTaskVerification({
+      storage: value.storage, runner: new VerificationRunner(),
+      copiesRoot: join(value.home, 'verifications'),
+      projectId: value.projectId, taskId, commandId: crypto.randomUUID(),
+    });
+    expect(verification.state).toBe('PASSED');
+  };
+  await driveTask(value.taskId, 'agent-output.txt');
+  const taskVersionOf = (taskId: string): number =>
+    value.storage.getTask(value.projectId, taskId)?.version as number;
+  let integratedCommit: string;
+  let batchId: string;
+  let verificationId: string | null;
+  if (options.multiMember === true) {
+    // ADR-0053: a batch with two members is integrated by one independent verification, and the
+    // promotion below has to consume exactly that batch-level evidence.
+    const secondTaskId = crypto.randomUUID();
+    value.storage.createTask({
+      projectId: value.projectId,
+      commandId: crypto.randomUUID(),
+      payloadHash: 'create-second-member',
+      intentId: crypto.randomUUID(),
+      taskId: secondTaskId,
+      revisionId: crypto.randomUUID(),
+      intentEventId: crypto.randomUUID(),
+      taskEventId: crypto.randomUUID(),
+      specification: 'A second member of the integration batch',
+      constraints: [],
+      kind: 'DEVELOPMENT',
+      actor: 'local-user',
+      createdAt: 50,
+    });
+    value.storage.submitTask({
+      projectId: value.projectId,
+      taskId: secondTaskId,
+      expectedVersion: 0,
+      commandId: crypto.randomUUID(),
+      payloadHash: 'submit-second-member',
+      eventId: crypto.randomUUID(),
+      actor: 'local-user',
+      submittedAt: 51,
+    });
+    await driveTask(secondTaskId, 'second-member.txt');
+    const created = await createIntegrationBatch({
+      storage: value.storage,
+      projectId: value.projectId,
+      members: [
+        { taskId: value.taskId, expectedVersion: taskVersionOf(value.taskId) },
+        { taskId: secondTaskId, expectedVersion: taskVersionOf(secondTaskId) },
+      ],
+      commandId: crypto.randomUUID(),
+      permissionMode: 'FULL',
+    });
+    const report = await integrateIntegrationBatch({
+      storage: value.storage,
+      runner: new VerificationRunner(),
+      copiesRoot: join(value.home, 'verifications'),
+      worktreesRoot: join(value.home, 'integrations'),
+      projectId: value.projectId,
+      batchId: created.batchId,
+      commandId: crypto.randomUUID(),
+      permissionMode: 'FULL',
+    });
+    expect(report.state).toBe('INTEGRATED');
+    integratedCommit = report.integratedCommit as string;
+    batchId = created.batchId;
+    verificationId = report.verificationId;
+  } else {
+    const integrated = await integrateTaskResult({
+      storage: value.storage,
+      runner: new VerificationRunner(),
+      copiesRoot: join(value.home, 'verifications'),
+      worktreesRoot: join(value.home, 'integrations'),
+      projectId: value.projectId,
+      taskId: value.taskId,
+      expectedVersion: taskVersionOf(value.taskId),
+      commandId: crypto.randomUUID(),
+      permissionMode: 'FULL',
+    });
+    expect(integrated.state).toBe('INTEGRATED');
+    const recorded = value.storage.listIntegrationBatches(value.projectId, value.taskId)[0];
+    integratedCommit = integrated.integratedCommit as string;
+    batchId = recorded?.batchId as string;
+    verificationId = recorded?.verificationId ?? null;
+  }
+  if (verificationId === null) {
     throw new Error('the integration fixture did not record a verified batch');
   }
-  const candidateCommit = integrated.integratedCommit as string;
+  const candidateCommit = integratedCommit;
   // ADR-0038 D03: the promotion gate needs the full suite to have passed on this exact dev SHA,
   // observed by the Runtime in a detached copy of that commit.
   let fullSuiteEvidenceId = '';
@@ -160,8 +234,8 @@ async function promotionFixture(options: {
   return {
     value,
     candidateCommit,
-    batchId: batch.batchId,
-    verificationId: batch.verificationId,
+    batchId,
+    verificationId,
     mainCommit: value.mainCommit,
     mainWorktree: value.repo,
     fullSuiteEvidenceId,
@@ -974,4 +1048,37 @@ describe('failure and crash recovery', () => {
       fixture.value.storage.close();
     }
   });
+});
+
+describe('stable promotion from a multi-member batch (ADR-0053)', () => {
+  test('prepares a promotion from one PASSED multi-member batch and refuses mismatched evidence',
+    async () => {
+      const fixture = await promotionFixture({ multiMember: true });
+      try {
+        const prepared = await prepare(fixture);
+        expect(prepared).toMatchObject({
+          state: 'CREATED',
+          phase: 'READY_TO_PUSH',
+          candidateCommit: fixture.candidateCommit,
+          integrationBatchId: fixture.batchId,
+          verificationId: fixture.verificationId,
+          created: true,
+        });
+        // The promotion fixes the batch's whole member set, not just one Task.
+        expect(prepared.members).toHaveLength(2);
+        expect(new Set(prepared.members.map((member) => member.taskId)).size).toBe(2);
+        expect(prepared.members.every((member) =>
+          member.batchId === fixture.batchId && member.candidateCommit.length > 0)).toBe(true);
+
+        // Evidence that does not name this batch's integrated commit is refused, not reinterpreted.
+        await expect(prepare(fixture, { commandId: crypto.randomUUID(),
+          expectedDevCommit: fixture.mainCommit })).rejects
+          .toMatchObject({ code: 'PROMOTION_EVIDENCE_MISMATCH' });
+        // A different batch that never integrated is refused as a batch, not as a member.
+        await expect(prepare(fixture, { commandId: crypto.randomUUID(),
+          batchId: crypto.randomUUID() })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      } finally {
+        fixture.value.storage.close();
+      }
+    }, 180_000);
 });

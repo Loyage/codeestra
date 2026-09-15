@@ -1,7 +1,7 @@
 # CLI 命令参考
 
-> **适用版本** `dev@036cf68`（2026-09-15） · **schema** v28 · **最后校对** 2026-09-15
-> 版本会前进：`dev@036cf68` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@75fa7b8`（2026-09-15） · **schema** v30 · **最后校对** 2026-09-15
+> 版本会前进：`dev@75fa7b8` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 
 本文覆盖 `apps/cli/src/main.ts` 中 `usage()` 列出的**每一个命令组**，以及 Runtime 的 HTTP/SSE 面。
@@ -513,27 +513,65 @@ bun run codeestra task operation cancel <project-id> <task-id> <operation-id> [-
 
 ---
 
-## 11. `task integrate` / `task integration`
+## 11. `task integrate` / `task integration`（IntegrationBatch）
 
 ```sh
+# 单成员：组成一个成员的批次并立刻集成（ADR-0018 的既有形态）
 bun run codeestra task integrate <project-id> <task-id> <expected-version>
-bun run codeestra task integration list <project-id> <task-id>
+
+# 多成员：先组成（不碰 Git），再集成（ADR-0053）
+bun run codeestra task integration create <project-id> --member <task-id>:<expected-version> \
+  [--member <task-id>:<expected-version> ...] [--json]
+bun run codeestra task integration integrate <project-id> <batch-id> [--json]
+bun run codeestra task integration list <project-id> [task-id] [--json]
+bun run codeestra task integration get <project-id> <batch-id> [--json]
+bun run codeestra task integration cancel <project-id> <batch-id> [--reason <text>] [--json]
 ```
 
-集成过程：在 Runtime 数据目录的 detached integration worktree 中合并（**能 ff 就 ff，否则 `--no-ff`**）
-→ 跑**独立的集成验证** → PASSED 后才用 CAS 推进 `dev` 并把 Task 推到 `SUCCEEDED`。
+`create` **不写任何 Git 副作用**：它固定每个成员当前 revision 的 `(revision, 结果提交, Execution)`、
+整批的 `dev` 基线与项目验证策略摘要（`CREATED`）。成员全部通过校验才落一条批次——每个成员都必须是
+`EXECUTED`、版本匹配、当前 revision 有一个已捕获结果提交的 `SUCCEEDED` Execution，并且该 revision+commit
+有 `PASSED` 的 Task 验证；一个不合法即整体拒绝（不写半批）。成员按 `task_id` 排序（请求顺序不是批次的一部分，
+**同一成员集合因此总是产生同一次集成**）。
 
-**退出码 `0` 仅当 `state === "INTEGRATED"`**；其他一切状态退出码 `1`，并且 **`dev` 未被触碰**。
+`integrate` 的过程：在 Runtime 数据目录的 detached integration worktree 中**按 `task_id` 顺序**逐个成员合并
+（**能 ff 就 ff，否则 `--no-ff`**）→ 对最终合并提交跑**一次覆盖整批的独立验证** → `PASSED` 后才用 CAS 推进
+`dev`，并把**每个**成员 Task 推到 `SUCCEEDED`。
+
+**退出码**（`task integrate` / `task integration integrate` / `task integration cancel` 一致）：
+
+| 码 | 含义 |
+|---|---|
+| `0` | `dev` 已按本批次证据推进（`INTEGRATED`）；或读取/取消得到已记录的终态 |
+| `1` | 拒绝（前置条件、策略未确认、参数不合法之外的情形）或已记录的**非集成终态**：`FAILED`/`CONFLICTED`/`STALE`/`CANCELLED` |
+| `2` | 用法错误 |
+| `3` | 批次未收口、**需要人工先处理**（`RECOVERY_REQUIRED`）；重跑同一条命令不会有别的结果 |
+
+`STALE` 表示批次固定的证据已过期：某成员 revision/结果提交/验证移动（`MEMBER_EVIDENCE_MOVED`），
+或 `dev` 基线在集成前/推进时移动（`DEV_REF_MOVED`）。**不合并、不推进、成员状态保持原样**；终态，
+不阻塞用当前事实重新组成批次。`CANCELLED` 只在记录能证明没有副作用时成立（仍 `CREATED` 且无
+worktree/merge/验证）；否则得到 `RECOVERY_REQUIRED` + `RECONCILE_REQUIRED` 并**保留占用**。
+**取消在 FULL 与 STRICT 下都是零确认**（`permission mode` 见 §0/§1，本命令没有新增门禁）。
+
+部分失败如实可读：只有失败的成员被标 `CONFLICTED`/`FAILED`，已合并的成员保持 `MERGED`，未尝试的
+保持 `PREPARED`；验证失败这类批次级失败不改写成员状态。**任何情况下都不会把部分成功写成整批成功**。
+
+`list` / `get` / `create` / `cancel` / `integrate` 的标准输出都是记录的 JSON（`--json` 是显式同义写法），
+`members[]` 里逐成员给出 `taskId`/`revisionId`/`candidateCommit`/`state`/`integratedCommit`。
 
 稳定码：`TASK_VERIFICATION_NOT_PASSED`、`NO_CAPTURED_RESULT`、`TASK_NOT_EXECUTED`、`STALE_REVISION`、
-`DEV_REF_MISSING`、`DEV_REF_CHECKED_OUT`、`INTEGRATION_IN_PROGRESS`、`INTEGRATION_BATCH_INVALID`、
-`INVALID_COMMIT_ID`、`REPOSITORY_CHANGED`、`EXECUTION_NOT_FOUND`、`VERIFICATION_POLICY_ABSENT`、
-`VERIFICATION_POLICY_NOT_CONFIRMED`。
+`DEV_REF_MISSING`、`DEV_REF_CHECKED_OUT`、`INTEGRATION_IN_PROGRESS`（已有未结算批次持有成员，或该批次仍在
+中途）、`INTEGRATION_BATCH_INVALID`、`INVALID_REQUEST`、`INVALID_COMMIT_ID`、`REPOSITORY_CHANGED`、
+`EXECUTION_NOT_FOUND`、`VERIFICATION_POLICY_ABSENT`、`VERIFICATION_POLICY_NOT_CONFIRMED`、`NOT_FOUND`、
+`CONCURRENT_MODIFICATION`。批级 `outcome_code`：`MEMBER_EVIDENCE_MOVED`、`DEV_REF_MOVED`、`DEV_REF_CHANGED`、
+`MERGE_CONFLICT`、`MERGE_FAILED`、`WORKTREE_FAILED`、`INSPECTION_FAILED`、`INTEGRATION_VERIFICATION_FAILED`、
+`CANCELLED_BY_USER`、`RECONCILE_REQUIRED`、`DEV_REF_OBSERVED`。
 
-集成成功后会以 `INTEGRATION` 触发一次调度 pass，结果里附带 `dependencyReconcile`。
+集成成功后会以 `INTEGRATION` 触发一次调度 pass，结果里附带每个成员的 `dependencyReconcile`。
 
-事件名：`IntegrationBatchCreated`、`IntegrationVerificationCompleted`、`IntegrationCompleted`、
-`IntegrationFailed`、`IntegrationReconcileRequired`。
+事件名：`IntegrationBatchCreated`、`IntegrationMemberMerged`、`IntegrationVerificationCompleted`、
+`IntegrationCompleted`、`IntegrationFailed`、`IntegrationBatchStale`、`IntegrationBatchCancelled`、
+`IntegrationReconcileRequired`。
 
 ---
 
@@ -663,6 +701,11 @@ bun run codeestra promotion list <project-id> [--limit <n>]
 - `prepare` 固定「已验证的 dev commit / 预期旧 main commit / 该 commit 的集成验证与 dev 全量证据」，并固定**推送用的 dev
   clone**（`projects.dev_repo_path`；未记录或无法核验时以 `DEV_REPO_PATH_MISSING` / `DEV_REPO_*` 拒绝）。
   **不写任何 Git，也不写远端**。远端 `dev` 已经移到非候选 SHA 时拒绝（`REMOTE_DEV_MOVED`，`STALE`）。
+- 集成证据是**批次级**的（ADR-0053）：`<batch-id>` 可以是一个多成员批次，`prepare` 会把该批次的
+  **全部成员**（`taskId`/`revisionId`/`candidateCommit`）固定进提升记录（输出里的 `members[]`），
+  并要求该批次的独立集成验证 `PASSED` 且绑定到它的 merge commit 与固定 `dev` 基线。
+  批次未 `INTEGRATED`、`integratedCommit` 不等于传入的 dev SHA、或成员清单与批次记录不符时以
+  `BATCH_NOT_INTEGRATED` / `PROMOTION_EVIDENCE_MISMATCH` 拒绝；**多成员不改变任何提升门禁**。
 - `approve` **仅 STRICT 需要**；它针对**那一组精确三元组**，dev/main/证据/远端 `dev` 任一移动即失效。
 - `promote` 一次只推进**一步**，且每一步都要读回事实：
 

@@ -107,11 +107,17 @@ Phase 1（ADR-0006）的 `VerificationCompleted` 不写入命令原始输出；`
 
 `SchedulerCapacityChanged` 只在值真正变化时发布（重复设置同一值不 bump 版本、不发事件）。`ExecutionSlotReconciled` 也会为「决定保持占用、状态未变」的观测发布——那是审计事实，不是状态迁移。`TaskSchedule*` 的重放保护是 `(event_type, correlation_id, aggregate_id)`，不是 event id。
 
-**集成与提升（ADR-0018 / ADR-0022）**
+**集成与提升（ADR-0018 / ADR-0053 / ADR-0022）**
 
 | Event | aggregate | 说明 |
 |---|---|---|
-| `IntegrationBatchCreated` / `IntegrationCompleted` / `IntegrationFailed` / `IntegrationReconcileRequired` | `IntegrationBatch` | 单成员批次从 `CREATED` 到 `INTEGRATED`/`FAILED`/`RECOVERY_REQUIRED` 的实际事实 |
+| `IntegrationBatchCreated` | `IntegrationBatch` | 批次组成：`members[]`（每个成员的 taskId/revisionId/executionId/candidateCommit）、`devRef`/`devCommit`、actor。多成员批次的成员清单即来自这条载荷与 `integration_batch_items` |
+| `IntegrationMemberMerged` | `IntegrationBatch` | **每个成员**的合并事实：taskId、revisionId、candidateCommit、`mergeStrategy`、该步产生的 `mergedCommit`。部分失败时「哪一步真的发生了」由这一串事件与成员状态共同表达 |
+| `IntegrationCompleted` | `IntegrationBatch` | 全部成员进入 `dev`：`integratedCommit`、批次级 `mergeStrategy`、`verificationId`、`members[]`（每个成员的 taskId/executionId/revisionId/candidateCommit） |
+| `IntegrationFailed` | `IntegrationBatch` | 合并/验证失败：`state`（`CONFLICTED`/`FAILED`）、`outcomeCode`、`detail`、`failedTaskId`（批次级失败时为 null）、`members[]`（含各自 state，成员级部分成功在此如实可读） |
+| `IntegrationBatchStale` | `IntegrationBatch` | 批级 `STALE`：`outcomeCode`（`MEMBER_EVIDENCE_MOVED`/`DEV_REF_MOVED`）、reason、previousState、成员 state。**不合并、不推进 `dev`** |
+| `IntegrationBatchCancelled` | `IntegrationBatch` | 批级 `CANCELLED`（`outcomeCode='CANCELLED_BY_USER'`）：记录可证明无副作用时才发布 |
+| `IntegrationReconcileRequired` | `IntegrationBatch` | 重启中断或取消无法确认无副作用 → `RECOVERY_REQUIRED`（`RECONCILE_REQUIRED`/`DEV_REF_OBSERVED`），`members[]` 带各自 state，占用保留 |
 | `PromotionCreated` / `PromotionApproved` / `PromotionDevPushed` / `PromotionPushRefused` / `PromotionMainUpdated` / `PromotionRestartRecorded` / `PromotionMainPushRefused` / `PromotionCompleted` / `PromotionStale` / `PromotionFailed` / `PromotionReconcileRequired` | `Promotion` | `dev → main` 提升的实际事实（固定三元组、push 到远端 `dev` 与**读回值**、观察到的 `main`、重启记账、推回远端 `main` 的尝试与结果、ref/证据移动后的 `STALE` 与崩溃 reconcile）。ADR-0047/0052 后本机 ff 路径已删除，因此 `PromotionStarted` 不再产生 |
 
 **回收（ADR-0021）**
@@ -194,7 +200,7 @@ FOUNDATION-074 的 doc-sync 把它们补齐（名字都是实现先行的，按 
 | `CandidateBuilt` / `SelfTestCompleted` / `StablePromoted` / `StableRollbackCompleted` | 未实现 | 设计名保留（Self Evolution 阶段） |
 | `ProseQuestionAttentionResolved` | **实现先行名**（FOUNDATION-069 新增，本格补登记） | 本格**登记为长期名**；`UserAnswerDelivered` 不适用于散文提问（它没有 provider 请求），因此不合并 |
 | `TaskRetryRequested` | **实现先行名**（FOUNDATION-061 新增，本格补登记） | 本格**登记为长期名**；与 `TaskStateChanged` 同事务、不取代它 |
-| （设计目录没有的实现新增名） | `TaskArchived` / `TaskUnarchived` / `WorkspaceReclaimed` / `ResourcesReclaimed` / `OperationProgressed` / `OperationSettled` / `ExecutionSlot*` / `SchedulerCapacityChanged` / `TaskSchedule*` / `TaskImpactPredictionRevoked` / `Promotion*` / `Integration*` | 反向登记：这些是实现先行的名字，同样永不重命名 |
+| （设计目录没有的实现新增名） | `TaskArchived` / `TaskUnarchived` / `WorkspaceReclaimed` / `ResourcesReclaimed` / `OperationProgressed` / `OperationSettled` / `ExecutionSlot*` / `SchedulerCapacityChanged` / `TaskSchedule*` / `TaskImpactPredictionRevoked` / `Promotion*` / `Integration*`（含 ADR-0053 的 `IntegrationMemberMerged` / `IntegrationBatchStale` / `IntegrationBatchCancelled`） | 反向登记：这些是实现先行的名字，同样永不重命名 |
 
 ## 3. 一致性、投递和恢复
 

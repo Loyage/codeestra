@@ -5289,6 +5289,114 @@ $ git diff --stat
 - **冲突处理**：与 Wave L 记录在 `## NEXT` 前相邻，双方的记录按时间顺序全部保留，未改写任何一方的文字（冲突标记已清除）。
 - **导览同步刷新**：`docs/project-introduction.html` 内已过时的表述改为合入后的事实——ADR-0047 的产品路径已实现（FOUNDATION-077 / ADR-0052）、知识注入已接通三个 Adapter 而模型层效果待验收（ADR-0051）、`task.integrate` 仍每次单成员；内容基线改为「dev @ Wave L」；新增 `docs/guides/manual.md` 入口（ADR-0050）；Phase 4 / Phase 6 / `## NEXT` 章节与「如何读通过」段落相应改写。链接总数仍为 26（§04 里指向 `AGENTS.md` 的链接随表述改写移除，同时新增说明书入口，文件链接仍 9 条）。
 - 本次刷新为**纯文本编辑**，未重新运行渲染或浏览器断言；结构断言（标签配对、唯一 ID、章节数、链接与锚点、标题层级、无外部资源）与 `git diff --check` 在刷新后各跑一次。
+## FOUNDATION-081 — 多成员 IntegrationBatch 与批级终态（Wave M / `lane/m1-multi-member-integration`，ADR-0053，schema v30）
+
+状态：**本分支（lane）已完成交付，尚未合入 `dev`**。基线 `dev = 75fa7b8`（未 rebase、未合并新的 `dev`）；工作树
+`/Users/loyage/Documents/codeestra-wt/m1-multi-member-integration`，分支 `lane/m1-multi-member-integration`；**未 push、未触碰 main 稳定 clone**。
+命令面、`--json`、退出码与迁移都以「本分支已实现」为口径陈述；按 FOUNDATION-074 的 NEXT 口径，它们在经
+IntegrationBatch 与独立集成验证进入 `dev` 后才对 `dev` 生效（本格被明确要求改写 NEXT 第 5 条，见该条的括注）。
+
+### 起点事实（本格实测，不是转述）
+
+- `integration_batches` / `integration_batch_items` 表存在（schema v10/ADR-0018），`integration_batch_items` 主键
+  `(batch_id,task_id)` 已可承载多成员，但 `task.integrate` 只固定一个 Task 的 revision/结果提交。
+- `integration_batches.state` 的 `CHECK` 只有 `CREATED/PREPARING/VERIFYING/INTEGRATING_DEV/INTEGRATED/
+  CONFLICTED/FAILED/RECOVERY_REQUIRED`：**「固定证据过期」与「用户取消」没有落点**。
+- `failIntegrationBatch` 把所有 `PREPARED`/`MERGED` 成员一并改写为 `FAILED`/`CONFLICTED`（多成员下等于抹掉已发生的合并）。
+- `dev` 在集成期间被移动时写 `FAILED/DEV_REF_MOVED`（把「世界变了」记成「操作失败」）。
+- 因此本仓库自身的 `dev → main` 提升从不消费产品批次证据：`promotion prepare` 需要的批次级集成验证证据从未被产生。
+
+### 交付物
+
+| # | 交付物 | 位置 |
+|---|---|---|
+| ① | 批级集成语义：显式组成多成员批次（每个成员固定 revision/结果提交/Execution）、按 `task_id` 顺序合并、**一次**覆盖整批的独立集成验证、`PASSED` 才 CAS 推进 `dev`、每个成员 Task 才 `SUCCEEDED` | `apps/runtime/src/integration-service.ts`、`packages/storage/src/database.ts` |
+| ② | 批级 `STALE`：成员证据移动（`MEMBER_EVIDENCE_MOVED`）与 `dev` 基线移动（`DEV_REF_MOVED`）→ 不合并、不推进、成员状态保持原样 | 同上 + `markIntegrationBatchStale` |
+| ③ | 批级 `CANCELLED`：只有记录能证明无副作用（仍 `CREATED` 且无 worktree/merge/verification）才落终态；否则 `RECOVERY_REQUIRED/RECONCILE_REQUIRED` 并保留占用；FULL/STRICT 都零确认 | `cancelIntegrationBatch`（storage + service） |
+| ④ | 部分失败如实：只标失败成员，已合并者保持 `MERGED`、未尝试者保持 `PREPARED`；批次级失败不改写成员 | `failIntegrationBatch`（`failedTaskId`） |
+| ⑤ | schema v30：**只加宽** `integration_batches.state` 的 `CHECK`（`STALE`/`CANCELLED`），重建表 + 前置校验 + 行数核对；不加列、不加表、不改成员状态集合 | `packages/storage/src/migration.ts`、`database.ts` 的 `if (version < 30)` |
+| ⑥ | 命令面：`task.integration.create` / `integrate` / `get` / `cancel`，`task.integration.list` 的 `taskId` 变可选；`task integrate` 保留为单成员简写；`usage()` 同步；退出码 0/1/2/3 | `packages/contracts/src/index.ts`（纯追加 + 一处可选化）、`apps/cli/src/main.ts`、`apps/runtime/src/main.ts` |
+| ⑦ | `promotion prepare` 消费批级证据：**无需改动 `promotion-service.ts`**（`members` 一直取自 `integration_batch_items`），以两成员 PASSED 批次实测 | `apps/runtime/test/promotion-service.test.ts` |
+| ⑧ | 文档：ADR-0053（+ 索引行）、`state-machines.md` §4、`event-model.md`、`sqlite-schema.md`、`cli-reference.md` §11/§15、`manual.md` §8、`recipes.md` §9、本记录 | `docs/**` |
+
+### 设计选择（逐条给依据）
+
+| 选择 | 依据 |
+|---|---|
+| 组成与集成分离（`create` 不碰 Git，`integrate` 才合并/验证/推进） | ADR-0053 D01：只有先存在一个「已固定成员与基线」的记录，`STALE` 才有对象可标；也让「拒绝」与「已记录终态」可区分 |
+| 成员按 `task_id` 排序（写入/读取/合并三处一致） | ADR-0053 D02：同一成员集合必须产生同一次集成，否则「同一个 dev SHA」不再是对同一件事的复核 |
+| 一个批次 = 顺序合并 + 一次覆盖整批的验证，批次级 `merge_strategy` 取最后一步 | ADR-0053 D03；沿用既有 `mergeResultCommit` 的判定（ff/`--no-ff`、第一父=基线、候选=后代），不新造合并语义 |
+| `STALE` 作为一等终态；`DEV_REF_MOVED` 由 `FAILED` 改为 `STALE` | ADR-0053 D04：候选没失败，失败的是「候选相对某个基线」这个前提；`outcome_code` 不变，只有状态语义收窄 |
+| `CANCELLED` 只在记录可证明无副作用时成立，否则 `RECOVERY_REQUIRED/RECONCILE_REQUIRED` 并保留占用 | ADR-0053 D04；与既有「取消必须确认静止、未确认则保留占用」一致（ADR-0019/0027 的同一原则） |
+| 取消零确认；不新增任何门禁 | ADR-0011/ADR-0053 D04：写一个从未碰过 Git 的批次的终态不是门禁；FULL 与 STRICT 语义不变 |
+| 成员状态集合不加 `SKIPPED`：终态批次里的 `PREPARED` 就是「未处理」 | ADR-0053 D07：批次终态 + 成员状态已唯一确定语义，避免为同义事实加取值 |
+| 退出码 3 = `RECOVERY_REQUIRED`（需要人工先处理） | ADR-0053 D06；沿用 ADR-0052 与调度等待的既有约定（「不是被拒绝，而是世界需要先改变」） |
+| 一个成员已属未结算批次时拒绝组成/集成（`INTEGRATION_IN_PROGRESS`） | ADR-0053 D01：两个批次都以为自己固定了该成员的结果提交 |
+| 泛化 `beginIntegrationBatch`/`recordIntegrationMerge`/`completeIntegrationBatch`/`failIntegrationBatch`，而不是并存两套单成员路径 | 不产生双路径：单成员形态成为多成员的一般情形的特例（`items.length === 1`） |
+| `promotion-service.ts` 不改 | ADR-0053 D08：批级证据本来就是批级的；改它只会是为「多成员」造一个不必要的分支 |
+
+### 实际验证（本分支执行；定向，ADR-0038，未跑全量）
+
+| 命令 | 结果 |
+|---|---|
+| `bun run typecheck` | **退出码 0** |
+| `bun test apps/runtime/test/integration-service.test.ts` | **22 项通过 / 0 失败**（新增 `multi-member IntegrationBatch (ADR-0053)` 7 项；既有 15 项含 1 项按 ADR-0053 D04 把断言从 `FAILED/DEV_REF_MOVED` 改为 `STALE/DEV_REF_MOVED`） |
+| `bun test apps/runtime/test/cli-integration-batch.test.ts` | **4 项通过 / 0 失败**（真实 CLI + Runtime + 协议假 provider；覆盖多成员成功与重放、成员 revision 移动 → STALE、`dev` 移动 → STALE、取消与重复取消、用法错误退出码 2） |
+| `bun test apps/runtime/test/promotion-service.test.ts` | **27 项通过 / 0 失败**（含新增「从多成员 PASSED 批次 prepare」1 项，并断言证据不匹配仍被拒） |
+| `bun test packages/storage/test` | **156 项通过 / 0 失败**（新增 `integration-batch-terminal-states.test.ts` 2 项：v29→v30 真实文件库迁移、行保留、新 `CHECK` 生效、`foreign_key_check` 为空、索引仍在；版本断言用 `>= 30`） |
+| `bun test apps/runtime/test/cli-integrate.test.ts apps/runtime/test/http-api.test.ts` | **8 项通过 / 0 失败**（既有单成员命令面与 HTTP 面不回归） |
+| `bun test apps/runtime/test/{dev-repo-service,result-commit-service,workspace-service,verification-service}.test.ts` | **50 项通过 / 0 失败**（storage/契约签名变动的相邻面：dev ref、成果提交、workspace、验证） |
+| `bun test apps/runtime/test/stale-session-reconcile.test.ts` | **7 项通过 / 0 失败**（与 `recovery-service.ts` 的改动相邻：启动收敛路径） |
+| `bun test packages/contracts/test` | 40 项通过 / **1 项失败**：`request.test.ts` 的 `project.trust` 策略确认用例。**与本格无关且可复现于基线**：把 `packages/contracts/src/index.ts` 还原为 `dev@75fa7b8` 后该用例同样失败，本格未修改该命令的任何字段，也未修这个既有失败（不静默改无关测试） |
+
+**未运行**（并说明原因）：`bun run check` / `just check` / `just verify` / `check:fast`——ADR-0038 禁止在开发分支
+（`lane/*`）跑全量检查；全量测试只在提升前的精确 `dev` 候选上执行。`bun run typecheck:ui` / `build:ui` 未跑：
+本格未触碰 `apps/ui/**`（M2 领地），UI 也不因新增命令而改变（它读的是同一份批次记录）。
+
+### 领地说明（诚实登记）
+
+按任务单「允许改」的清单之外，本格还改动了两处**非 M2/M3 领地**的文件，原因与内容如下（都最小化）：
+
+- `apps/runtime/src/main.ts`：Runtime 的命令分发器是**唯一**注册命令的地方（`switch (request.command)`），
+  没有它就无法让新命令面可达。改动只有 5 个 `case`（3 个新增命令 + 读取 + 取消）与 1 行 import；
+  没有触碰任何既有 case 的语义，也没有改 M2（`apps/ui/**`）或 M3（`terminal-service`/`session-handoff-service`/
+  `packages/agent-adapters/**`）领地。
+- `apps/runtime/src/recovery-service.ts`：`completeIntegrationBatch` 的签名（`taskEventId` → 每个成员一个
+  `taskEventIds`）由多成员决定，启动 reconcile 的那个调用点必须同步；同时给「按 ref 事实补记完成」加了
+  `try/catch`：成员在崩溃窗口里移动时不再让启动收敛整体失败，而是把两个事实都写进 `RECOVERY_REQUIRED` 的原因。
+
+### 未做与已知边界
+
+- **没有真实 Agent 的多成员验收**：CLI e2e 用协议假 provider 驱动命令面，只证明协议与编排行为（AGENTS.md 的既有口径）。
+- **没有 UI 投影**：`task integration create|cancel` 在 Web UI 里没有按钮（`apps/ui/**` 是 M2 领地；本格未动）。
+- **`STALE` 的成员级判定只在集成入口重读一次**：成员在集成过程中途（合并之后、验证之前）改变 revision 不会被中途检出，
+  此时批次会因推进 `dev` 之前的 CAS/成员校验而失败或留下可读的记录，而不是「静默推进」。
+- **多成员批次只覆盖同一项目的 Task**（批次的 `project_id` 是单值），跨项目成批不在本格范围。
+- **`RECOVERY_REQUIRED` 仍需人工处理**：本格只保证它按记录的 ref/证据事实收敛（`INTEGRATING_DEV` + ref 等于
+  `merged_commit` → 补记 `INTEGRATED`，不二次写 ref），没有自动清理路径。
+
+### 文档同步（ADR-0050 要求逐篇写明）
+
+| 文件 | 改动 |
+|---|---|
+| `docs/decisions/0053-multi-member-integration-batch.md` | 新增（ADR-0053，Accepted，schema v30） |
+| `docs/decisions/README.md` | 「已接受」新增 ADR-0053 索引行；「优先级标注」补一句它的优先级与「不放宽不变量、不新增门禁」 |
+| `docs/architecture/state-machines.md` | §4 重写：多成员实现状态、批次状态表（含 `STALE`/`CANCELLED`）、成员状态表与「`PREPARED` 即未处理」、部分失败口径、恢复与幂等 |
+| `docs/architecture/event-model.md` | 集成事件表按实现重列（含 `IntegrationMemberMerged`/`IntegrationBatchStale`/`IntegrationBatchCancelled`），并把它们登记进「实现先行的名字」 |
+| `docs/architecture/sqlite-schema.md` | 新增「多成员 IntegrationBatch 的批级终态（schema version 30）」一节；§5 的 `integration_batch_items` 说明改为多成员；§8 的版本占用现状与 `phase1SchemaVersion` 更新为 30 |
+| `docs/guides/cli-reference.md` | §11 重写（新增 `create|integrate|get|cancel`、退出码表、稳定码与批级 `outcome_code`、事件名）；§15 的 `prepare` 增加「批次级证据 + 多成员 `members[]`」；顶部版本头 `dev@75fa7b8 · schema v30` |
+| `docs/guides/manual.md` | §8 新增「一次合入多个 Task（多成员批次）」；退出码口径改为 0/1/2/3；顶部版本头同上 |
+| `docs/guides/recipes.md` | §9 增加多成员 recipe、退出码口径与 `INTEGRATION_IN_PROGRESS` 的更新说明；顶部版本头同上 |
+| `docs/guides/workflow.md` | §7 补多成员命令与退出码 0/1/2/3；顶部版本头同上 |
+| `docs/guides/concepts.md` | §IntegrationBatch 的状态列表补 `STALE`/`CANCELLED`，并补一段多成员语义与部分失败口径；顶部版本头同上 |
+| `docs/guides/features.md` | 「集成批次」行的命令面补 `task integration create\|integrate\|get\|cancel` 与 ADR-0053 链接，并注明 UI 尚无组批/取消入口；顶部版本头同上 |
+| `docs/guides/troubleshooting.md` | §4 第 7 条（多成员未实现）改为「已实现」并写明仍未做的部分；顶部版本头同上 |
+| `docs/architecture/scheduler.md` | 「多成员批次」一条改为「CLI 显式组批已实现、自动组批仍不实现」 |
+| `docs/architecture/conflict-analyzer.md` | §6.6 的未实现清单里把「多成员批次」标注为已由 FOUNDATION-081 实现（分析器仍不参与组批） |
+| `docs/tasks/README.md` | 本记录 + `## NEXT` 第 5 条改为已完成 + 移除条目表新增一行 + NEXT 顶部更新说明 |
+| `docs/guides/ui.md` / `getting-started.md` / `acceptance-checklist.md` / `README.md` | **确认无需修改**：本格未触碰 `apps/ui/**`，UI 的页签/按钮/文案/只读分界一字未变（因此 `ui.md` 不适用）；`getting-started.md` 讲的是安装与第一次运行，不涉及集成命令；`acceptance-checklist.md` 是人工观感清单，无机器断言可加；`README.md` 是目录页，条目未变 |
+| `docs/guides/concepts.md` 的权限语义段 / `manual.md` §权限 / `features.md` 的 FULL/STRICT 差异 | **确认无需修改**：FULL/STRICT 语义一字未改（ADR-0011），本格不新增任何门禁或确认；`manual.md` 只改了 §8（合入 dev） |
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），
@@ -5300,6 +5408,10 @@ $ git diff --stat
 **2026-09-15 更新（FOUNDATION-076）**：用户重新定义了本机项目构造，稳定提升路径已改为**经 GitHub 中转**（ADR-0047），
 `dev` 与 `main` 已成为两个分别 clone 的独立仓库（ADR-0048），dev 构建的 UI 带构建期通道标记（ADR-0049）。
 因此新增下面第 11 条（ADR-0047 的产品实现）；本次**没有**从剩余列表移出任何条目。原第 10 条不变。
+
+**2026-09-15 更新（FOUNDATION-081）**：多成员 IntegrationBatch 与批级 `STALE`/`CANCELLED` 已实现（ADR-0053，schema v30），
+因此第 5 条从剩余列表移出（依据见 FOUNDATION-081 一节；**该格在 `lane` 分支交付、尚未合入 `dev`**，见第 5 条里的括注）。
+剩余列表现在只有 1–4、6–10、12–13 号（第 11 条已于 FOUNDATION-077 完成）。
 
 ### 仍然剩余
 
@@ -5316,10 +5428,24 @@ $ git diff --stat
    completion facts，因此 Codex 只漏报不谎报）、真实 provider 下「`Task WAITING_FOR_USER` + `Execution RUNNING` +
    `Session EXITED`」组合的复验、散文等待的 UI 投影（UI 目前只把它当一条普通 Attention 显示）。升级与
    `attention resolve` 已实现（ADR-0043/FOUNDATION-069）。
-5. **多成员 IntegrationBatch**（原第 0 条的剩余）：`integration_batch_items` 表存在，但 `task.integrate` 每次只集成一个
-   Task；批级 `STALE`、批级 `CANCELLED`、任务集合级集成仍是后续合约（见 `docs/architecture/state-machines.md` §4）。
-   三次真实的 `dev → main` 提升都走 AGENTS.md 的人工路径；产品命令 `promotion prepare` 需要 IntegrationBatch 的集成验证
-   证据，而这些批次没有产生它。（**ADR-0047 后**：第四次起的人工路径本身也必须经远端 `dev` 中转，见上面第 11 条。）
+5. ~~**多成员 IntegrationBatch**~~ **已完成（FOUNDATION-081 / ADR-0053 / schema v30）**。
+   上面那段历史事实**不改写**：本格开始前的实测是——`integration_batch_items` 表存在，但 `task.integrate` 每次只集成
+   一个 Task；批级 `STALE`、批级 `CANCELLED`、任务集合级集成当时仍是后续合约（见
+   `docs/architecture/state-machines.md` §4）；三次真实的 `dev → main` 提升都走 AGENTS.md 的人工路径；产品命令
+   `promotion prepare` 需要 IntegrationBatch 的集成验证证据，而这些批次没有产生它（**ADR-0047 后**：第四次起的人工
+   路径本身也必须经远端 `dev` 中转，见上面第 11 条）。
+   **后续结论（FOUNDATION-081，2026-09-15）**：多成员批次、批级 `STALE`、批级 `CANCELLED` 都已实现，
+   `promotion prepare` 现在能在**一个多成员 `PASSED` 批次**上成立。依据（本分支 `lane/m1-multi-member-integration`，
+   基线 `dev@75fa7b8`）：`task.integration.create|integrate|get|cancel` 与可选 `taskId` 的
+   `task.integration.list` 在 `usage()` 与契约中（`packages/contracts/src/index.ts`）；
+   `integration_batches.state` 的 `CHECK` 加宽（schema v30，`packages/storage/src/migration.ts`、
+   `database.ts` 的 `if (version < 30)`）；`apps/runtime/src/integration-service.ts` 的批级组成/合并/一次验证/`STALE`/
+   `CANCELLED` 路径；`apps/runtime/test/{integration-service,cli-integration-batch,promotion-service}.test.ts` 与
+   `packages/storage/test/integration-batch-terminal-states.test.ts` 的定向结果（见 FOUNDATION-081 一节的表）。
+   `promotion-service.ts` **未改**（批级证据本来就是批级的，ADR-0053 D08）。
+   **诚实边界**：本格在 `lane` 分支交付、尚未合入 `dev`——按 FOUNDATION-074 的 NEXT 口径，这些事实对 `dev` 生效
+   要等它经 IntegrationBatch 与独立集成验证进入 `dev`；**本仓库自身第五次及以后的提升仍走 AGENTS.md 的人工四步**
+   （产品 `promotion` 路径没有被本格改动）。
 6. **Phase 2 验收矩阵里「两个 SAFE 任务真的同时跑」**：调度引擎本体已实现（ADR-0033），但真实 provider 的并发运行
    未完成受控验收（`docs/guides/troubleshooting.md` §4 第 1 条）。在此之前该验收项仍算未成立。
 7. **Phase 6 的 provider 消费**：`project knowledge *` 命令面与 Execution 绑定已实现（ADR-0041/schema v26），但 Adapter
@@ -5389,6 +5515,7 @@ $ git diff --stat
 | 原第 11 条前半：`PROJECT_SPEC.md` §1 前状态段与 §3 的前后矛盾（「规格只读，待用户裁决」） | 用户 2026-09-15 裁决「开一格修规格」并明确授权；FOUNDATION-075 重写第 3 行状态段，并追加授权修 §8 的现状陈述。`git diff PROJECT_SPEC.md` = 3 行，§1.1/§2/§3–§9 规范语义一字未改（见 FOUNDATION-075 的「本次规格修订（逐句）」） |
 | 原第 11 条后半：`intents.kind` 允许 `CHANGE_PRIORITY`/`ANSWER_AGENT`/`SELF_MODIFICATION` 三个「无产生路径」的取值 | 用户裁决「缩小 CHECK（要迁移）」；FOUNDATION-075 / ADR-0046（schema v28）把 CHECK 收窄为五个取值。**同时纠正原声明里的事实错误**：`ANSWER_AGENT` 并不属于「无产生路径」——`planAttentionAnswer` 会写它（稳定库 24/33 行），因此它被保留 |
 | 原第 11 条里「`intents.kind` 的三个取值都没有产生路径」这一措辞本身 | K1 的事实错误（把 `ANSWER_AGENT` 也算了进去），已在 FOUNDATION-075 与 `docs/guides/troubleshooting.md` §3 第 10 条改正；FOUNDATION-074 的历史记录未改写 |
+| 第 5 条（多成员 IntegrationBatch、批级 `STALE`/`CANCELLED`、任务集合级集成、`promotion prepare` 缺批次证据） | FOUNDATION-081 / ADR-0053 / schema v30：多成员组成与集成命令面、一次覆盖整批的独立验证、批级 `STALE`（`MEMBER_EVIDENCE_MOVED`/`DEV_REF_MOVED`）与 `CANCELLED`（不确认则 `RECOVERY_REQUIRED/RECONCILE_REQUIRED`）、成员级部分失败如实；`promotion prepare` 在**多成员 PASSED 批次**上实测成立。依据是本分支的代码/命令面/表结构与上表列出的定向测试（**尚未合入 `dev`**，该条已在正文里注明） |
 | FOUNDATION-076 新增的第 11 条（ADR-0047 的产品实现） | FOUNDATION-077 依据已合入本分支的代码/命令面/表结构完成：`projects.dev_repo_path` 与 `stable_promotions` 的远端读回列（schema v29）、`DEV_REPO_*` 核验、`promotion promote` 的 push + 读回 + `phase: AWAITING_PULL`（退出码 3）+ 收口 + 推回远端 `main`、旧本机 ff 路径已删除（`packages/git/src/promotion.ts` 不再导出 `fastForwardCheckedOutWorktree`）。**未做**的部分已在第 11 条里逐条写明，未当作已完成 |
 
 ### 需要用户裁决（本格不得自行决定）

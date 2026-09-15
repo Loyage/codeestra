@@ -46,6 +46,7 @@ import {
   capacitySlotReservationMigration,
   devClonePromotionMigration,
   impactAnalysisMigration,
+  integrationBatchTerminalStatesMigration,
   integrationPipelineMigration,
   intentKindShrinkMigration,
   intentKinds,
@@ -1373,17 +1374,28 @@ export interface PromotionCandidates {
 }
 
 /**
- * Integration pipeline projections (ADR-0018). A batch fixes the `dev` baseline, carries the
- * candidate result commit, and records the merge and the independent integration verification
- * that allowed the `dev` ref to advance. `integratedCommit` is null until the ref actually moved.
+ * Integration pipeline projections (ADR-0018, ADR-0053). A batch fixes the `dev` baseline, carries
+ * one or more member candidates, and records the merges and the single independent integration
+ * verification that allowed the `dev` ref to advance. `integratedCommit` is null until the ref
+ * actually moved.
  *
  * The states follow `docs/architecture/state-machines.md` §4: `CREATED → PREPARING → VERIFYING →
  * INTEGRATING_DEV → INTEGRATED`, with `CONFLICTED`/`FAILED`/`RECOVERY_REQUIRED` as the other ends.
  * `INTEGRATING_DEV` exists because a crash between the ref write and the record is only resolvable
  * by comparing the recorded `mergedCommit` against the ref that was actually written.
+ *
+ * Two further terminal verdicts belong to the multi-member contract (ADR-0053) and are never mixed
+ * with a failure:
+ *
+ * - `STALE`: the fixed evidence (a member's revision/result commit, or the recorded `dev` baseline)
+ *   stopped being the current fact before anything was integrated. `dev` is untouched and no merge
+ *   ran; the batch has to be composed again from the current facts.
+ * - `CANCELLED`: the user ended a batch that had no Git side effect yet. A batch that already has a
+ *   recorded worktree, merge or verification is never cancelled from here — it needs reconciliation
+ *   first, so it becomes `RECOVERY_REQUIRED/RECONCILE_REQUIRED` instead.
  */
 export type IntegrationBatchState = 'CREATED' | 'PREPARING' | 'VERIFYING' | 'INTEGRATING_DEV'
-  | 'INTEGRATED' | 'CONFLICTED' | 'FAILED' | 'RECOVERY_REQUIRED';
+  | 'INTEGRATED' | 'CONFLICTED' | 'FAILED' | 'RECOVERY_REQUIRED' | 'STALE' | 'CANCELLED';
 export type IntegrationItemState = 'PREPARED' | 'MERGED' | 'INTEGRATED' | 'FAILED' | 'CONFLICTED';
 export type MergeStrategy = 'FAST_FORWARD' | 'MERGE_COMMIT';
 
@@ -1422,6 +1434,38 @@ export interface IntegrationBatchSummary {
   readonly items: readonly IntegrationBatchItemSummary[];
 }
 
+/** One member of a batch, with the facts its fixed record has to be compared against. */
+export interface IntegrationBatchMemberFacts {
+  readonly taskId: string;
+  readonly taskDisplayNumber: number;
+  readonly taskState: TaskLifecycleState;
+  readonly taskVersion: number;
+  readonly currentRevisionId: string;
+  /** The revision the batch fixed for this member. */
+  readonly revisionId: string;
+  readonly executionId: string;
+  readonly executionState: ExecutionLifecycleState;
+  readonly resultCommit: string | null;
+  /** The result commit the batch fixed for this member. */
+  readonly candidateCommit: string;
+  /** The PASSED Task verification of exactly this revision and result commit, when one exists. */
+  readonly taskVerificationId: string | null;
+  readonly taskVerificationTestedCommit: string | null;
+}
+
+/** Reads for one composed batch: its record, its project, and every member's current facts. */
+export interface IntegrationBatchCandidates {
+  readonly projectId: string;
+  readonly batchId: string;
+  readonly repositoryRoot: string;
+  readonly gitCommonDir: string;
+  readonly mainRef: string;
+  readonly devRef: string;
+  readonly objectFormat: 'sha1' | 'sha256';
+  readonly batch: IntegrationBatchSummary;
+  readonly members: readonly IntegrationBatchMemberFacts[];
+}
+
 /** Read-only facts the integration service needs before it may touch any ref. */
 export interface IntegrationCandidates {
   readonly projectId: string;
@@ -1449,6 +1493,7 @@ export interface IntegrationBatchPlan extends IntegrationBatchSummary {
   readonly repositoryRoot: string;
   readonly mainRef: string;
   readonly objectFormat: 'sha1' | 'sha256';
+  /** The batch's first member; `items` carries every member (ADR-0053). */
   readonly item: IntegrationBatchItemSummary;
 }
 
@@ -1577,10 +1622,10 @@ export class Phase1Database {
       throw new StorageError('UNSUPPORTED_SCHEMA', `Database schema ${version} is newer than ${phase1SchemaVersion}`);
     }
     if (version === phase1SchemaVersion) return;
-    // `workspaces` (v7), `executions` (v9) and `intents` (v28) are each referenced by name from
-    // other tables, so every upgrade below the newest such step runs with foreign keys off and
-    // verifies the whole schema before the connection is used.
-    const rebuildsTable = version < 28;
+    // `workspaces` (v7), `executions` (v9), `intents` (v28) and `integration_batches` (v30) are each
+    // referenced by name from other tables, so every upgrade below the newest such step runs with
+    // foreign keys off and verifies the whole schema before the connection is used.
+    const rebuildsTable = version < 30;
     if (rebuildsTable) this.sqlite.exec('PRAGMA foreign_keys=OFF;');
     try {
       this.sqlite.transaction(() => {
@@ -1660,6 +1705,24 @@ export class Phase1Database {
         // ADR-0047). It is a pure `ADD COLUMN` step, so it runs after the v28 rebuild and needs no
         // foreign-key handling of its own. No earlier number is ever inserted.
         if (version < 29) this.sqlite.exec(devClonePromotionMigration);
+        if (version < 30) {
+          // ADR-0053 widens `integration_batches.state` with the two terminal verdicts a
+          // multi-member batch needs (`STALE`, `CANCELLED`). Widening a `STRICT` table's CHECK means
+          // rebuilding the table, so the copy is guarded the same way the v28 `intents` rebuild is:
+          // an unexpected row count turns a silently-dropped table into a loud rollback, because
+          // Bun's `exec()` swallows a step-time error inside a multi-statement script and would run
+          // the following `DROP TABLE` anyway.
+          const batchesBefore = this.sqlite.query<{ rows: number }, []>(
+            'SELECT COUNT(*) AS rows FROM integration_batches').get()?.rows ?? 0;
+          this.sqlite.exec(integrationBatchTerminalStatesMigration);
+          const batchesAfter = this.sqlite.query<{ rows: number }, []>(
+            'SELECT COUNT(*) AS rows FROM integration_batches').get()?.rows ?? -1;
+          if (batchesAfter !== batchesBefore) {
+            throw new StorageError('INVALID_STATE',
+              `Schema v30 rebuild of integration_batches lost rows (${batchesBefore} before,`
+              + ` ${batchesAfter} after); the upgrade was rolled back and nothing was changed`);
+          }
+        }
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -5783,25 +5846,232 @@ export class Phase1Database {
   }
 
   /**
-   * Reserves one IntegrationBatch for one Task and fixes the `dev` baseline it was prepared
-   * against. The Task must still be EXECUTED at the exact revision and commit the batch carries.
+   * Reads for one composed batch: its record, the project it belongs to, and every member's current
+   * facts. Nothing here decides anything; the integration service compares the fixed record against
+   * these facts before touching a ref.
+   */
+  getIntegrationBatchCandidates(projectId: string, batchId: string): IntegrationBatchCandidates {
+    const project = this.sqlite.query<{
+      repo_root: string; git_common_dir: string; main_ref: string; dev_ref: string;
+      object_format: 'sha1' | 'sha256';
+    }, [string, string]>(`
+      SELECT p.repo_root,p.git_common_dir,p.main_ref,p.dev_ref,p.object_format
+      FROM projects p
+      JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
+      WHERE p.id=?1 AND EXISTS(SELECT 1 FROM integration_batches b WHERE b.id=?2 AND b.project_id=p.id)
+    `).get(projectId, batchId);
+    if (project === null) {
+      throw new StorageError('NOT_FOUND', 'Integration batch or active project trust was not found');
+    }
+    const batch = this.integrationBatchSummary(batchId);
+    if (batch.projectId !== projectId) {
+      throw new StorageError('NOT_FOUND', 'Integration batch was not found for this project');
+    }
+    const members = this.sqlite.query<{
+      task_id: string; display_number: number; task_state: TaskLifecycleState;
+      task_version: number; current_revision_id: string; revision_id: string; execution_id: string;
+      execution_state: ExecutionLifecycleState; result_commit: string | null;
+      candidate_commit: string; task_verification_id: string | null;
+      task_verification_tested_commit: string | null;
+    }, [string, string]>(`
+      SELECT item.task_id,task.display_number,task.state AS task_state,task.version AS task_version,
+             task.current_revision_id,item.revision_id,item.execution_id,
+             execution.state AS execution_state,execution.result_commit,item.candidate_commit,
+             (SELECT run.id FROM verification_runs run
+               WHERE run.task_id=item.task_id AND run.revision_id=item.revision_id
+                 AND run.tested_commit=item.candidate_commit AND run.state='PASSED'
+               ORDER BY run.queued_at DESC,run.id LIMIT 1) AS task_verification_id,
+             (SELECT run.tested_commit FROM verification_runs run
+               WHERE run.task_id=item.task_id AND run.revision_id=item.revision_id
+                 AND run.tested_commit=item.candidate_commit AND run.state='PASSED'
+               ORDER BY run.queued_at DESC,run.id LIMIT 1) AS task_verification_tested_commit
+      FROM integration_batch_items item
+      JOIN tasks task ON task.id=item.task_id
+      JOIN executions execution ON execution.task_id=item.task_id AND execution.id=item.execution_id
+      WHERE item.project_id=?1 AND item.batch_id=?2
+      ORDER BY item.task_id
+    `).all(projectId, batchId).map((row) => ({
+      taskId: row.task_id,
+      taskDisplayNumber: row.display_number,
+      taskState: row.task_state,
+      taskVersion: row.task_version,
+      currentRevisionId: row.current_revision_id,
+      revisionId: row.revision_id,
+      executionId: row.execution_id,
+      executionState: row.execution_state,
+      resultCommit: row.result_commit,
+      candidateCommit: row.candidate_commit,
+      taskVerificationId: row.task_verification_id,
+      taskVerificationTestedCommit: row.task_verification_tested_commit,
+    }));
+    return {
+      projectId,
+      batchId,
+      repositoryRoot: project.repo_root,
+      gitCommonDir: project.git_common_dir,
+      mainRef: project.main_ref,
+      devRef: project.dev_ref,
+      objectFormat: project.object_format,
+      batch,
+      members,
+    };
+  }
+
+  /**
+   * Marks a batch unusable because its fixed evidence stopped being the current fact (ADR-0053).
+   * `STALE` is terminal and never touches `dev`: the merge/verification evidence that already exists
+   * stays readable, and the remedy is to compose a new batch from the current facts. A batch whose
+   * ref already moved (`INTEGRATED`) cannot become stale.
+   */
+  markIntegrationBatchStale(input: {
+    readonly batchId: string;
+    readonly outcomeCode: string;
+    readonly reason: string;
+    readonly eventId: string;
+    readonly at: number;
+  }): IntegrationBatchPlan {
+    return this.sqlite.transaction(() => {
+      const batch = this.integrationBatchPlan(input.batchId);
+      if (batch.state === 'STALE') return batch;
+      if (batch.state !== 'CREATED' && batch.state !== 'PREPARING'
+        && batch.state !== 'VERIFYING' && batch.state !== 'INTEGRATING_DEV') {
+        throw new StorageError('INVALID_STATE',
+          `Integration batch is ${batch.state}; only a batch that did not integrate can be stale`);
+      }
+      const updated = this.sqlite.query(`
+        UPDATE integration_batches SET state='STALE',outcome_code=?1,detail=?2,completed_at=?3
+        WHERE id=?4 AND state IN ('CREATED','PREPARING','VERIFYING','INTEGRATING_DEV')
+      `).run(input.outcomeCode, input.reason, input.at, input.batchId);
+      const operation = this.sqlite.query(`
+        UPDATE operations SET state='FAILED',result_json=?1,updated_at=?2
+        WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS')
+      `).run(JSON.stringify({ batchId: input.batchId, state: 'STALE',
+        outcomeCode: input.outcomeCode }), input.at, batch.operationId);
+      if (updated.changes !== 1 || operation.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Integration batch changed while marking it stale');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'IntegrationBatchStale',1,'IntegrationBatch',?3,0,?1,?1,?4,?5)
+      `).run(input.eventId, batch.projectId, input.batchId, input.at,
+        JSON.stringify({ batchId: input.batchId, devRef: batch.devRef, devCommit: batch.devCommit,
+          integratedCommit: null, outcomeCode: input.outcomeCode, reason: input.reason,
+          previousState: batch.state,
+          members: batch.items.map((member) => ({ taskId: member.taskId,
+            revisionId: member.revisionId, candidateCommit: member.candidateCommit,
+            state: member.state })) }));
+      return this.integrationBatchPlan(input.batchId);
+    })();
+  }
+
+  /**
+   * Ends a composed batch before it integrated (ADR-0053). A cancellation is only recorded as
+   * `CANCELLED` when the record itself proves that no member side effect exists yet: the batch is
+   * still `CREATED` and it recorded no worktree, no merge and no verification. Anything else is left
+   * for reconciliation instead of being called cancelled — a merge may exist, a verification process
+   * may still be writing its copy, or the ref write may have happened — so the batch keeps its slot
+   * as `RECOVERY_REQUIRED/RECONCILE_REQUIRED` and a human resolves it from the recorded evidence.
+   *
+   * Cancelling is idempotent: a batch that is already terminal is reported as it stands.
+   */
+  cancelIntegrationBatch(input: {
+    readonly batchId: string;
+    readonly reason: string;
+    readonly eventId: string;
+    readonly at: number;
+  }): IntegrationBatchPlan {
+    const observed = this.integrationBatchPlan(input.batchId);
+    if (observed.state === 'INTEGRATED' || observed.state === 'FAILED'
+      || observed.state === 'CONFLICTED' || observed.state === 'CANCELLED'
+      || observed.state === 'STALE' || observed.state === 'RECOVERY_REQUIRED') {
+      return observed;
+    }
+    // `markIntegrationRecoveryRequired` owns its own transaction, so the unconfirmed path is decided
+    // before the cancel transaction starts rather than nested inside it. A batch that already left
+    // `CREATED`, or that recorded a worktree/merge/verification while it was `CREATED`, cannot be
+    // confirmed side-effect-free from the records alone.
+    if (observed.state !== 'CREATED' || !this.memberSideEffectsSettled(observed)) {
+      return this.markIntegrationRecoveryRequired({
+        batchId: input.batchId,
+        outcomeCode: 'RECONCILE_REQUIRED',
+        reason: `cancellation was requested but batch ${input.batchId} recorded a worktree, a merge`
+          + ' or a verification, so its member side effects cannot be confirmed settled:'
+          + ` ${input.reason}`,
+        eventId: input.eventId,
+        at: input.at,
+      });
+    }
+    return this.sqlite.transaction(() => {
+      const batch = this.integrationBatchPlan(input.batchId);
+      if (batch.state !== 'CREATED') return batch;
+      if (!this.memberSideEffectsSettled(batch)) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Integration batch recorded a side effect while it was being cancelled');
+      }
+      const updated = this.sqlite.query(`
+        UPDATE integration_batches SET state='CANCELLED',outcome_code='CANCELLED_BY_USER',
+          detail=?1,completed_at=?2
+        WHERE id=?3 AND state='CREATED'
+      `).run(input.reason, input.at, input.batchId);
+      const operation = this.sqlite.query(`
+        UPDATE operations SET state='FAILED',result_json=?1,updated_at=?2
+        WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS')
+      `).run(JSON.stringify({ batchId: input.batchId, state: 'CANCELLED',
+        outcomeCode: 'CANCELLED_BY_USER' }), input.at, batch.operationId);
+      if (updated.changes !== 1 || operation.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Integration batch changed while cancelling it');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'IntegrationBatchCancelled',1,'IntegrationBatch',?3,0,?1,?1,?4,?5)
+      `).run(input.eventId, batch.projectId, input.batchId, input.at,
+        JSON.stringify({ batchId: input.batchId, devRef: batch.devRef, devCommit: batch.devCommit,
+          integratedCommit: null, outcomeCode: 'CANCELLED_BY_USER', reason: input.reason,
+          members: batch.items.map((member) => ({ taskId: member.taskId,
+            revisionId: member.revisionId, candidateCommit: member.candidateCommit,
+            state: member.state })) }));
+      return this.integrationBatchPlan(input.batchId);
+    })();
+  }
+
+  /**
+   * Reserves one IntegrationBatch for one or more Task members and fixes the `dev` baseline it was
+   * prepared against (ADR-0018, ADR-0053). Every member must still be an EXECUTED Task at the exact
+   * revision and result commit the batch will carry, so a batch is always a statement about facts
+   * that existed when it was composed. Validation is all-or-nothing: one unusable member refuses the
+   * whole batch and no row is written.
+   *
+   * Members are stored (and therefore merged) in `task_id` order, so the same member set always
+   * produces the same integration no matter which order the request listed it in.
    */
   beginIntegrationBatch(input: {
     readonly projectId: string;
-    readonly taskId: string;
-    readonly executionId: string;
     readonly batchId: string;
     readonly operationId: string;
     readonly worktreeOwnershipToken: string;
-    readonly expectedVersion: number;
     readonly devRef: string;
     readonly devCommit: string;
+    readonly members: readonly {
+      readonly taskId: string;
+      readonly executionId: string;
+      readonly expectedVersion: number;
+    }[];
     readonly commandId: string;
     readonly payloadHash: string;
     readonly createdEventId: string;
     readonly actor: string;
     readonly createdAt: number;
   }): Readonly<{ plan: IntegrationBatchPlan; created: boolean }> {
+    if (input.members.length === 0) {
+      throw new StorageError('INVALID_STATE', 'An IntegrationBatch needs at least one member');
+    }
+    if (new Set(input.members.map((member) => member.taskId)).size !== input.members.length) {
+      throw new StorageError('INVALID_STATE', 'An IntegrationBatch cannot name the same Task twice');
+    }
     return this.sqlite.transaction(() => {
       const existing = this.sqlite.query<{ payload_hash: string; result_json: string }, [string, string]>(
         'SELECT payload_hash,result_json FROM command_receipts WHERE project_id=?1 AND command_id=?2',
@@ -5814,47 +6084,71 @@ export class Phase1Database {
         const recorded = JSON.parse(existing.result_json) as { batchId: string };
         return { plan: this.integrationBatchPlan(recorded.batchId), created: false };
       }
-      const task = this.sqlite.query<{
-        state: TaskLifecycleState; version: number; current_revision_id: string; dev_ref: string;
-      }, [string, string]>(`
-        SELECT t.state,t.version,t.current_revision_id,p.dev_ref FROM tasks t
-        JOIN projects p ON p.id=t.project_id
-        JOIN project_trusts trust ON trust.project_id=t.project_id AND trust.status='ACTIVE'
-        WHERE t.project_id=?1 AND t.id=?2
-      `).get(input.projectId, input.taskId);
-      if (task === null) {
-        throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
+      const project = this.sqlite.query<{ dev_ref: string }, [string]>(`
+        SELECT p.dev_ref FROM projects p
+        JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
+        WHERE p.id=?1
+      `).get(input.projectId);
+      if (project === null) {
+        throw new StorageError('NOT_FOUND', 'Project or active project trust was not found');
       }
-      if (task.version !== input.expectedVersion) {
-        throw new StorageError('CONCURRENT_MODIFICATION', 'Task version did not match');
-      }
-      if (task.state !== 'EXECUTED') {
-        throw new StorageError('INVALID_STATE',
-          `Task is ${task.state}; integration needs an EXECUTED Task with a captured result commit`);
-      }
-      if (task.dev_ref !== input.devRef) {
+      if (project.dev_ref !== input.devRef) {
         throw new StorageError('CONCURRENT_MODIFICATION', 'Project baseline ref changed before integration');
       }
-      const execution = this.sqlite.query<{
-        state: ExecutionLifecycleState; applied_revision_id: string; result_commit: string | null;
-      }, [string, string]>(`
-        SELECT state,applied_revision_id,result_commit FROM executions WHERE task_id=?1 AND id=?2
-      `).get(input.taskId, input.executionId);
-      if (execution === null) {
-        throw new StorageError('NOT_FOUND', 'Execution was not found for this Task');
-      }
-      if (execution.state !== 'SUCCEEDED' || execution.result_commit === null
-        || execution.applied_revision_id !== task.current_revision_id) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Execution evidence changed before integration was prepared');
+      // The request order is not authoritative: a batch is merged in `task_id` order so the same
+      // member set cannot produce two different integrations.
+      const ordered = [...input.members].sort((left, right) =>
+        left.taskId < right.taskId ? -1 : left.taskId > right.taskId ? 1 : 0);
+      const fixed: { taskId: string; revisionId: string; executionId: string;
+        candidateCommit: string }[] = [];
+      for (const member of ordered) {
+        const task = this.sqlite.query<{
+          state: TaskLifecycleState; version: number; current_revision_id: string;
+        }, [string, string]>(`
+          SELECT t.state,t.version,t.current_revision_id FROM tasks t
+          JOIN project_trusts trust ON trust.project_id=t.project_id AND trust.status='ACTIVE'
+          WHERE t.project_id=?1 AND t.id=?2
+        `).get(input.projectId, member.taskId);
+        if (task === null) {
+          throw new StorageError('NOT_FOUND', `Task ${member.taskId} or active project trust was not found`);
+        }
+        if (task.version !== member.expectedVersion) {
+          throw new StorageError('CONCURRENT_MODIFICATION',
+            `Task ${member.taskId} version did not match`);
+        }
+        if (task.state !== 'EXECUTED') {
+          throw new StorageError('INVALID_STATE',
+            `Task ${member.taskId} is ${task.state}; integration needs an EXECUTED Task with a`
+            + ' captured result commit');
+        }
+        const execution = this.sqlite.query<{
+          state: ExecutionLifecycleState; applied_revision_id: string; result_commit: string | null;
+        }, [string, string]>(`
+          SELECT state,applied_revision_id,result_commit FROM executions WHERE task_id=?1 AND id=?2
+        `).get(member.taskId, member.executionId);
+        if (execution === null) {
+          throw new StorageError('NOT_FOUND', `Execution was not found for Task ${member.taskId}`);
+        }
+        if (execution.state !== 'SUCCEEDED' || execution.result_commit === null
+          || execution.applied_revision_id !== task.current_revision_id) {
+          throw new StorageError('CONCURRENT_MODIFICATION',
+            `Execution evidence of Task ${member.taskId} changed before integration was prepared`);
+        }
+        fixed.push({
+          taskId: member.taskId,
+          revisionId: task.current_revision_id,
+          executionId: member.executionId,
+          candidateCommit: execution.result_commit,
+        });
       }
       this.sqlite.query(`
         INSERT INTO operations(id,project_id,kind,aggregate_id,idempotency_key,state,request_json,
           created_at,updated_at)
         VALUES (?1,?2,'INTEGRATE_TASK_RESULT',?3,?4,'PLANNED',?5,?6,?6)
       `).run(input.operationId, input.projectId, input.batchId, input.commandId,
-        JSON.stringify({ batchId: input.batchId, taskId: input.taskId,
-          executionId: input.executionId, devRef: input.devRef, devCommit: input.devCommit }),
+        JSON.stringify({ batchId: input.batchId, devRef: input.devRef, devCommit: input.devCommit,
+          members: fixed.map((member) => ({ taskId: member.taskId, revisionId: member.revisionId,
+            executionId: member.executionId, candidateCommit: member.candidateCommit })) }),
         input.createdAt);
       this.sqlite.query(`
         INSERT INTO integration_batches(id,project_id,dev_ref,dev_commit,state,
@@ -5862,21 +6156,23 @@ export class Phase1Database {
         VALUES (?1,?2,?3,?4,'CREATED',?5,?6)
       `).run(input.batchId, input.projectId, input.devRef, input.devCommit,
         input.worktreeOwnershipToken, input.createdAt);
-      this.sqlite.query(`
-        INSERT INTO integration_batch_items(batch_id,project_id,task_id,revision_id,execution_id,
-          candidate_commit,dev_commit,state,created_at)
-        VALUES (?1,?2,?3,?4,?5,?6,?7,'PREPARED',?8)
-      `).run(input.batchId, input.projectId, input.taskId, task.current_revision_id,
-        input.executionId, execution.result_commit, input.devCommit, input.createdAt);
+      for (const member of fixed) {
+        this.sqlite.query(`
+          INSERT INTO integration_batch_items(batch_id,project_id,task_id,revision_id,execution_id,
+            candidate_commit,dev_commit,state,created_at)
+          VALUES (?1,?2,?3,?4,?5,?6,?7,'PREPARED',?8)
+        `).run(input.batchId, input.projectId, member.taskId, member.revisionId,
+          member.executionId, member.candidateCommit, input.devCommit, input.createdAt);
+      }
       this.sqlite.query(`
         INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
           aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
         VALUES (?1,?2,'IntegrationBatchCreated',1,'IntegrationBatch',?3,0,?4,?4,?5,?6)
       `).run(input.createdEventId, input.projectId, input.batchId, input.commandId, input.createdAt,
-        JSON.stringify({ batchId: input.batchId, taskId: input.taskId,
-          executionId: input.executionId, revisionId: task.current_revision_id,
-          candidateCommit: execution.result_commit, devRef: input.devRef,
-          devCommit: input.devCommit, actor: input.actor }));
+        JSON.stringify({ batchId: input.batchId, devRef: input.devRef, devCommit: input.devCommit,
+          actor: input.actor,
+          members: fixed.map((member) => ({ taskId: member.taskId, revisionId: member.revisionId,
+            executionId: member.executionId, candidateCommit: member.candidateCommit })) }));
       this.sqlite.query(`
         INSERT INTO command_receipts(project_id,command_id,payload_hash,result_json,created_at)
         VALUES (?1,?2,?3,?4,?5)
@@ -5910,27 +6206,48 @@ export class Phase1Database {
     })();
   }
 
-  /** Records the merge Git produced. The `dev` ref is still untouched at this point. */
+  /**
+   * Records one member's merge. The `dev` ref is still untouched at this point, and the batch keeps
+   * the merge of its last member as its own `mergeStrategy`/`mergedCommit`: the final integration
+   * tree either is that member's candidate commit (every step fast-forwarded) or the merge commit
+   * that member produced.
+   */
   recordIntegrationMerge(input: {
     readonly batchId: string;
+    readonly taskId: string;
     readonly mergeStrategy: MergeStrategy;
     readonly mergedCommit: string;
+    readonly eventId: string;
     readonly mergedAt: number;
   }): IntegrationBatchPlan {
     return this.sqlite.transaction(() => {
       const batch = this.integrationBatchPlan(input.batchId);
-      if (batch.state !== 'PREPARING' || batch.mergeStrategy !== null) return batch;
+      if (batch.state !== 'PREPARING') return batch;
+      const item = batch.items.find((entry) => entry.taskId === input.taskId);
+      if (item === undefined) {
+        throw new StorageError('NOT_FOUND', `Task ${input.taskId} is not a member of batch ${input.batchId}`);
+      }
+      if (item.state !== 'PREPARED') return batch;
       const updated = this.sqlite.query(`
         UPDATE integration_batches SET merge_strategy=?1,merged_commit=?2
-        WHERE id=?3 AND state='PREPARING' AND merge_strategy IS NULL
+        WHERE id=?3 AND state='PREPARING'
       `).run(input.mergeStrategy, input.mergedCommit, input.batchId);
-      const item = this.sqlite.query(`
+      const member = this.sqlite.query(`
         UPDATE integration_batch_items SET state='MERGED'
-        WHERE batch_id=?1 AND state='PREPARED'
-      `).run(input.batchId);
-      if (updated.changes !== 1 || item.changes !== 1) {
-        throw new StorageError('CONCURRENT_MODIFICATION', 'Integration batch changed while recording its merge');
+        WHERE batch_id=?1 AND task_id=?2 AND state='PREPARED'
+      `).run(input.batchId, input.taskId);
+      if (updated.changes !== 1 || member.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Integration batch changed while recording a member merge');
       }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'IntegrationMemberMerged',1,'IntegrationBatch',?3,0,?1,?1,?4,?5)
+      `).run(input.eventId, batch.projectId, input.batchId, input.mergedAt,
+        JSON.stringify({ batchId: input.batchId, taskId: input.taskId,
+          revisionId: item.revisionId, candidateCommit: item.candidateCommit,
+          mergeStrategy: input.mergeStrategy, mergedCommit: input.mergedCommit }));
       return this.integrationBatchPlan(input.batchId);
     })();
   }
@@ -5966,9 +6283,9 @@ export class Phase1Database {
         throw new StorageError('INVALID_STATE',
           `Integration batch is ${batch.state}; verification needs a recorded merge`);
       }
-      if (batch.item.state !== 'MERGED') {
+      if (batch.items.some((item) => item.state !== 'MERGED')) {
         throw new StorageError('INVALID_STATE',
-          `Integration item is ${batch.item.state}; verification needs a merged candidate`);
+          'Integration verification needs every member of the batch to be merged');
       }
       this.sqlite.query(`
         INSERT INTO operations(id,project_id,kind,aggregate_id,idempotency_key,state,request_json,
@@ -5977,14 +6294,21 @@ export class Phase1Database {
       `).run(input.operationId, batch.projectId, input.verificationId, input.commandId,
         JSON.stringify({ verificationId: input.verificationId, batchId: input.batchId,
           testedCommit: input.testedCommit, devCommit: batch.devCommit,
-          policyDigest: input.policyDigest }), input.queuedAt);
+          policyDigest: input.policyDigest,
+          members: batch.items.map((item) => ({ taskId: item.taskId, revisionId: item.revisionId,
+            executionId: item.executionId, candidateCommit: item.candidateCommit })) }),
+        input.queuedAt);
+      // The verification row names the batch's first member for the per-Task columns the table has
+      // always carried; the batch itself is the subject (`batch_id` is unique here), and the full
+      // member list lives in the evidence and in `integration_batch_items`.
       this.sqlite.query(`
         INSERT INTO integration_verification_runs(id,batch_id,project_id,task_id,execution_id,
           revision_id,operation_id,command_id,tested_commit,tested_tree,dev_commit,policy_version,
           policy_digest,main_commit,commands_json,copy_path,state,queued_at)
         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,'QUEUED',?17)
-      `).run(input.verificationId, input.batchId, batch.projectId, batch.item.taskId,
-        batch.item.executionId, batch.item.revisionId, input.operationId, input.commandId,
+      `).run(input.verificationId, input.batchId, batch.projectId, batch.items[0]?.taskId as string,
+        batch.items[0]?.executionId as string, batch.items[0]?.revisionId as string,
+        input.operationId, input.commandId,
         input.testedCommit, input.testedTree, batch.devCommit, input.policyVersion,
         input.policyDigest, input.mainCommit, JSON.stringify(input.commands), input.copyPath,
         input.queuedAt);
@@ -6066,15 +6390,18 @@ export class Phase1Database {
   }
 
   /**
-   * Records that `dev` now contains the batch's candidate. The Task only reaches SUCCEEDED here:
-   * a captured result commit is not an integration, and verification does not move a ref.
+   * Records that `dev` now contains every member of the batch. Each Task only reaches SUCCEEDED here:
+   * a captured result commit is not an integration, and verification does not move a ref. Every member
+   * is guarded by the exact revision the batch fixed, so a Task that moved on since the batch was
+   * composed cannot be reported as integrated.
    */
   completeIntegrationBatch(input: {
     readonly batchId: string;
     readonly integratedCommit: string;
     readonly worktreeDetail: string;
     readonly completedEventId: string;
-    readonly taskEventId: string;
+    /** One event ID per member, in `items` order. */
+    readonly taskEventIds: readonly string[];
     readonly completedAt: number;
   }): IntegrationBatchPlan {
     return this.sqlite.transaction(() => {
@@ -6083,6 +6410,10 @@ export class Phase1Database {
       if (batch.state !== 'VERIFYING' && batch.state !== 'INTEGRATING_DEV') {
         throw new StorageError('INVALID_STATE',
           `Integration batch is ${batch.state}; only a verified batch can be completed`);
+      }
+      if (input.taskEventIds.length !== batch.items.length) {
+        throw new StorageError('INVALID_STATE',
+          'Completing an integration needs one Task event ID per member');
       }
       const verification = this.integrationVerificationPlan(batch.verificationId as string);
       if (verification.state !== 'PASSED') {
@@ -6097,39 +6428,57 @@ export class Phase1Database {
         UPDATE integration_batches SET state='INTEGRATED',integrated_commit=?1,detail=?2,completed_at=?3
         WHERE id=?4 AND state IN ('VERIFYING','INTEGRATING_DEV')
       `).run(input.integratedCommit, input.worktreeDetail, input.completedAt, input.batchId);
-      const task = this.sqlite.query(`
-        UPDATE tasks SET state='SUCCEEDED',version=version+1,updated_at=?1
-        WHERE id=?2 AND project_id=?3 AND state='EXECUTED' AND version=?4
-      `).run(input.completedAt, batch.item.taskId, batch.projectId, batch.item.taskVersion);
+      if (item.changes !== batch.items.length || updated.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Integration batch or its members changed while completing the integration');
+      }
+      for (const [index, member] of batch.items.entries()) {
+        const taskEventId = input.taskEventIds[index];
+        if (taskEventId === undefined) {
+          throw new StorageError('INVALID_STATE',
+            'Completing an integration needs one Task event ID per member');
+        }
+        const task = this.sqlite.query(`
+          UPDATE tasks SET state='SUCCEEDED',version=version+1,updated_at=?1
+          WHERE id=?2 AND project_id=?3 AND state='EXECUTED' AND current_revision_id=?4
+        `).run(input.completedAt, member.taskId, batch.projectId, member.revisionId);
+        if (task.changes !== 1) {
+          throw new StorageError('CONCURRENT_MODIFICATION',
+            `Task ${member.taskId} changed while completing the integration`);
+        }
+        this.sqlite.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'TaskStateChanged',1,'Task',?3,?4,?5,?6,?7,?8)
+        `).run(taskEventId, batch.projectId, member.taskId, member.taskVersion + 1,
+          input.completedEventId, input.completedEventId, input.completedAt,
+          JSON.stringify({ taskId: member.taskId, from: 'EXECUTED', to: 'SUCCEEDED',
+            reason: 'result integrated into dev', actor: 'runtime-integration' }));
+      }
       const operation = this.sqlite.query(`
         UPDATE operations SET state='SUCCEEDED',result_json=?1,updated_at=?2
         WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS')
       `).run(JSON.stringify({ batchId: input.batchId, state: 'INTEGRATED',
-        integratedCommit: input.integratedCommit }), input.completedAt, batch.operationId);
-      if (item.changes !== 1 || updated.changes !== 1 || task.changes !== 1 || operation.changes !== 1) {
+        integratedCommit: input.integratedCommit,
+        members: batch.items.map((member) => ({ taskId: member.taskId,
+          revisionId: member.revisionId, candidateCommit: member.candidateCommit })) }),
+        input.completedAt, batch.operationId);
+      if (operation.changes !== 1) {
         throw new StorageError('CONCURRENT_MODIFICATION',
-          'Integration batch or Task changed while completing the integration');
+          'Integration batch operation changed while completing the integration');
       }
-      const taskVersion = batch.item.taskVersion + 1;
-      this.sqlite.query(`
-        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-        VALUES (?1,?2,'TaskStateChanged',1,'Task',?3,?4,?5,?6,?7,?8)
-      `).run(input.taskEventId, batch.projectId, batch.item.taskId, taskVersion,
-        input.completedEventId, input.completedEventId, input.completedAt,
-        JSON.stringify({ taskId: batch.item.taskId, from: 'EXECUTED', to: 'SUCCEEDED',
-          reason: 'result integrated into dev', actor: 'runtime-integration' }));
       this.sqlite.query(`
         INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
           aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
         VALUES (?1,?2,'IntegrationCompleted',1,'IntegrationBatch',?3,0,?4,?4,?5,?6)
       `).run(input.completedEventId, batch.projectId, input.batchId, input.completedEventId,
-        input.completedAt, JSON.stringify({ batchId: input.batchId, taskId: batch.item.taskId,
-          executionId: batch.item.executionId, revisionId: batch.item.revisionId,
-          candidateCommit: batch.item.candidateCommit, devRef: batch.devRef,
+        input.completedAt, JSON.stringify({ batchId: input.batchId, devRef: batch.devRef,
           devCommit: batch.devCommit, integratedCommit: input.integratedCommit,
           mergeStrategy: batch.mergeStrategy, verificationId: batch.verificationId,
-          worktree: input.worktreeDetail }));
+          worktree: input.worktreeDetail,
+          members: batch.items.map((member) => ({ taskId: member.taskId,
+            executionId: member.executionId, revisionId: member.revisionId,
+            candidateCommit: member.candidateCommit })) }));
       return this.integrationBatchPlan(input.batchId);
     })();
   }
@@ -6143,6 +6492,8 @@ export class Phase1Database {
     readonly state: 'FAILED' | 'CONFLICTED';
     readonly outcomeCode: string;
     readonly detail: string;
+    /** The member whose merge or evidence failed; omitted when the batch itself failed (verification). */
+    readonly failedTaskId?: string;
     readonly mergeStrategy?: MergeStrategy;
     readonly mergedCommit?: string;
     readonly eventId: string;
@@ -6151,30 +6502,43 @@ export class Phase1Database {
     return this.sqlite.transaction(() => {
       const batch = this.integrationBatchPlan(input.batchId);
       if (batch.state === 'INTEGRATED' || batch.state === 'FAILED'
-        || batch.state === 'CONFLICTED' || batch.state === 'RECOVERY_REQUIRED') {
+        || batch.state === 'CONFLICTED' || batch.state === 'RECOVERY_REQUIRED'
+        || batch.state === 'STALE' || batch.state === 'CANCELLED') {
         return batch;
       }
       if (input.mergeStrategy !== undefined && batch.mergeStrategy === null) {
         this.sqlite.query(`UPDATE integration_batches SET merge_strategy=?1 WHERE id=?2`)
           .run(input.mergeStrategy, input.batchId);
       }
-      const item = this.sqlite.query(`
+      // Only the member whose merge actually failed is marked. Members that were already merged keep
+      // `MERGED` and members that were never attempted keep `PREPARED`, so a partial integration is
+      // never reported as a whole-batch success *or* as a whole-batch failure.
+      const failingState = input.state === 'CONFLICTED' ? 'CONFLICTED' : 'FAILED';
+      const candidates = batch.items.filter((item) => item.state === 'PREPARED' || item.state === 'MERGED');
+      if (input.failedTaskId !== undefined
+        && !candidates.some((item) => item.taskId === input.failedTaskId)) {
+        throw new StorageError('INVALID_STATE',
+          `Task ${input.failedTaskId} has no unsettled member record in batch ${input.batchId}`);
+      }
+      const failedTaskId = input.failedTaskId;
+      const item = failedTaskId === undefined ? null : this.sqlite.query(`
         UPDATE integration_batch_items SET state=?1,detail=?2,completed_at=?3
-        WHERE batch_id=?4 AND state IN ('PREPARED','MERGED')
-      `).run(input.state === 'CONFLICTED' ? 'CONFLICTED' : 'FAILED', input.detail, input.failedAt,
-        input.batchId);
+        WHERE batch_id=?4 AND task_id=?5 AND state IN ('PREPARED','MERGED')
+      `).run(failingState, input.detail, input.failedAt, input.batchId, failedTaskId);
       const updated = this.sqlite.query(`
         UPDATE integration_batches
         SET state=?1,outcome_code=?2,detail=?3,completed_at=?4
-        WHERE id=?5 AND state IN ('CREATED','PREPARING','VERIFYING','INTEGRATING_DEV','RECOVERY_REQUIRED')
+        WHERE id=?5 AND state IN ('CREATED','PREPARING','VERIFYING','INTEGRATING_DEV')
       `).run(input.state, input.outcomeCode, input.detail, input.failedAt, input.batchId);
       const operation = this.sqlite.query(`
         UPDATE operations SET state='FAILED',result_json=?1,updated_at=?2
         WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS','RECONCILE_REQUIRED')
       `).run(JSON.stringify({ batchId: input.batchId, state: input.state,
-        outcomeCode: input.outcomeCode, mergedCommit: input.mergedCommit ?? null }),
+        outcomeCode: input.outcomeCode, mergedCommit: input.mergedCommit ?? null,
+        failedTaskId: input.failedTaskId ?? null }),
         input.failedAt, batch.operationId);
-      if (item.changes !== 1 || updated.changes !== 1 || operation.changes !== 1) {
+      if (updated.changes !== 1 || operation.changes !== 1
+        || (item !== null && item.changes !== 1)) {
         throw new StorageError('CONCURRENT_MODIFICATION',
           'Integration batch changed while recording its failure');
       }
@@ -6183,11 +6547,14 @@ export class Phase1Database {
           aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
         VALUES (?1,?2,'IntegrationFailed',1,'IntegrationBatch',?3,0,?4,?4,?5,?6)
       `).run(input.eventId, batch.projectId, input.batchId, input.eventId, input.failedAt,
-        JSON.stringify({ batchId: input.batchId, taskId: batch.item.taskId,
-          candidateCommit: batch.item.candidateCommit, devRef: batch.devRef,
+        JSON.stringify({ batchId: input.batchId, devRef: batch.devRef,
           devCommit: batch.devCommit, state: input.state, outcomeCode: input.outcomeCode,
           detail: input.detail, mergeStrategy: input.mergeStrategy ?? batch.mergeStrategy,
-          mergedCommit: input.mergedCommit ?? null }));
+          mergedCommit: input.mergedCommit ?? null,
+          failedTaskId: input.failedTaskId ?? null,
+          members: batch.items.map((member) => ({ taskId: member.taskId,
+            executionId: member.executionId, revisionId: member.revisionId,
+            candidateCommit: member.candidateCommit })) }));
       return this.integrationBatchPlan(input.batchId);
     })();
   }
@@ -6211,6 +6578,8 @@ export class Phase1Database {
         UPDATE integration_batch_items SET detail=?1
         WHERE batch_id=?2 AND state IN ('PREPARED','MERGED')
       `).run(input.reason, input.batchId);
+      const unsettled = batch.items.filter((member) =>
+        member.state === 'PREPARED' || member.state === 'MERGED').length;
       const updated = this.sqlite.query(`
         UPDATE integration_batches SET state='RECOVERY_REQUIRED',outcome_code=?1,detail=?2,completed_at=?3
         WHERE id=?4 AND state IN ('CREATED','PREPARING','VERIFYING','INTEGRATING_DEV')
@@ -6220,7 +6589,7 @@ export class Phase1Database {
         WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS')
       `).run(JSON.stringify({ batchId: input.batchId, state: 'RECOVERY_REQUIRED',
         outcomeCode: input.outcomeCode }), input.at, batch.operationId);
-      if (item.changes !== 1 || updated.changes !== 1 || operation.changes !== 1) {
+      if (item.changes !== unsettled || updated.changes !== 1 || operation.changes !== 1) {
         throw new StorageError('CONCURRENT_MODIFICATION',
           'Integration batch changed while recording its recovery');
       }
@@ -6229,10 +6598,12 @@ export class Phase1Database {
           aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
         VALUES (?1,?2,'IntegrationReconcileRequired',1,'IntegrationBatch',?3,0,?1,?1,?4,?5)
       `).run(input.eventId, batch.projectId, input.batchId, input.at,
-        JSON.stringify({ batchId: input.batchId, taskId: batch.item.taskId,
-          candidateCommit: batch.item.candidateCommit, devRef: batch.devRef,
+        JSON.stringify({ batchId: input.batchId, devRef: batch.devRef,
           devCommit: batch.devCommit, mergedCommit: batch.mergedCommit,
-          previousState: batch.state, outcomeCode: input.outcomeCode, reason: input.reason }));
+          previousState: batch.state, outcomeCode: input.outcomeCode, reason: input.reason,
+          members: batch.items.map((member) => ({ taskId: member.taskId,
+            executionId: member.executionId, revisionId: member.revisionId,
+            candidateCommit: member.candidateCommit, state: member.state })) }));
       return this.integrationBatchPlan(input.batchId);
     })();
   }
@@ -6287,6 +6658,15 @@ export class Phase1Database {
     return rows.map((row) => this.integrationBatchSummary(row.id));
   }
 
+  /** Reads one recorded batch with its Operation and project refs, for an integration attempt. */
+  getIntegrationBatchPlan(projectId: string, batchId: string): IntegrationBatchPlan {
+    const plan = this.integrationBatchPlan(batchId);
+    if (plan.projectId !== projectId) {
+      throw new StorageError('NOT_FOUND', 'Integration batch was not found for this project');
+    }
+    return plan;
+  }
+
   getIntegrationBatch(projectId: string, batchId: string): IntegrationBatchSummary {
     const summary = this.integrationBatchSummary(batchId);
     if (summary.projectId !== projectId) {
@@ -6300,6 +6680,18 @@ export class Phase1Database {
     return this.sqlite.query<{ id: string }, []>(`
       SELECT id FROM integration_batches
       WHERE state IN ('CREATED','PREPARING','VERIFYING','INTEGRATING_DEV') ORDER BY created_at,id
+    `).all().map((row) => this.integrationBatchPlan(row.id));
+  }
+
+  /**
+   * Batches that still block a new integration attempt for their members: the in-flight states plus
+   * `RECOVERY_REQUIRED`, which is terminal but unresolved and therefore keeps its slot (ADR-0053).
+   */
+  listBlockingIntegrationBatches(): readonly IntegrationBatchPlan[] {
+    return this.sqlite.query<{ id: string }, []>(`
+      SELECT id FROM integration_batches
+      WHERE state IN ('CREATED','PREPARING','VERIFYING','INTEGRATING_DEV','RECOVERY_REQUIRED')
+      ORDER BY created_at,id
     `).all().map((row) => this.integrationBatchPlan(row.id));
   }
 
@@ -7520,6 +7912,20 @@ export class Phase1Database {
       gitCommonDir: row.git_common_dir,
       objectFormat: row.object_format,
     };
+  }
+
+  /**
+   * Whether the batch record proves that no member side effect exists: nothing was merged and no
+   * verification was queued. Only such a batch may be cancelled; anything else needs reconciliation.
+   */
+  private memberSideEffectsSettled(batch: {
+    readonly worktreePath: string | null;
+    readonly mergeStrategy: MergeStrategy | null;
+    readonly mergedCommit: string | null;
+    readonly verificationId: string | null;
+  }): boolean {
+    return batch.worktreePath === null && batch.mergeStrategy === null
+      && batch.mergedCommit === null && batch.verificationId === null;
   }
 
   private integrationBatchSummary(batchId: string): IntegrationBatchSummary {

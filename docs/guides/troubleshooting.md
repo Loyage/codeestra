@@ -1,6 +1,6 @@
 # 常见故障与稳定码表
 
-> **适用版本** `dev@036cf68`（2026-09-15） · **schema** v28 · **最后校对** 2026-09-15
+> **适用版本** `dev@75fa7b8`（2026-09-15） · **schema** v30 · **最后校对** 2026-09-15
 > 版本会前进：`dev@036cf68` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 
@@ -524,7 +524,11 @@ K1 留下的两条待裁决已由 FOUNDATION-075 收口，因此这份清单**�
 4. **token 级实时流**未实现；transcript 是按需读取 + 轮询。
 5. **Codeestra 自升级 / Self Promotion 的完整切换**未实现（Phase 7）。
 6. **Session Guidance 未实现**：`guide` 端口既未导出也未实现，`SessionGuidanceRecorded`/`SessionGuidanceDelivered` 仍未实现。
-7. **多成员 IntegrationBatch 与批级 `STALE`/`CANCELLED` 未实现**：`task.integrate` 每次只集成一个 Task；因此产品 `promotion prepare` 至今没有在这些提升候选上成立（三次真实提升走的是 AGENTS.md 的人工路径）。
+7. ~~多成员 IntegrationBatch 与批级 `STALE`/`CANCELLED` 未实现~~ **已实现（FOUNDATION-081 / ADR-0053 / schema v30，`lane/m1-multi-member-integration` 分支）**：
+   `task integration create|integrate|get|cancel` 可显式组成多成员批次、按 task-id 顺序合并、由**一次**独立集成验证覆盖整批、`PASSED` 才推进 `dev`；
+   批级 `STALE`（成员证据或 `dev` 基线移动）与 `CANCELLED`（记录证明无副作用时）都是一等终态；产品 `promotion prepare` 已在一个**多成员 PASSED 批次**上实测成立。
+   **仍未做**：真实 Agent 的多成员验收（CLI e2e 用协议假 provider 驱动命令面）、UI 里没有组批/取消按钮（M2 领地）。
+   **仍未改变**：本仓库自身的提升继续走 `AGENTS.md` 的人工四步。
 8. **Claude Code 的模型层全部未验证**（本机 `claude auth status` 为未登录）：该 Adapter 的 `structuredAttention`/`nativePermissionRouting`/`cooperativeStop`/`resumeAfterExit` 均报 `REQUIRES_VALIDATION`，不得当成 `SUPPORTED` 使用。
 9. **插件选择的真实效果未验证**（ADR-0044）：真实模型下「确实使用了所选 skill/theme」只有 argv 与命令面证据；themes 的显式路径加载未单独实测（ADR-0044 D06 标注为同构代码路径推断）；第三方 extension 是否能绕过 gate 未做对抗验证。
 10. **真实 provider 下的散文提问组合未验收**：`Task WAITING_FOR_USER` + `Execution RUNNING` + `Session EXITED` 只在存储/运行时单测与 stub e2e 下验证；Codex 侧的事实层未实现（只漏报、不谎报）。

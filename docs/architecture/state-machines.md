@@ -117,20 +117,49 @@ ACTIVE | FENCED → RECOVERY_REQUIRED
 
 ## 4. IntegrationBatch / StableBranchPromotion
 
-实现状态（ADR-0018 / ADR-0022）：**已实现单成员合入**（`task.integrate` / `task.integration.list`，CLI + 同一命令面 + UI），
+实现状态（ADR-0018 / ADR-0053 / ADR-0022）：**已实现多成员合入**（`task integrate` 单成员简写 +
+`task integration create|integrate|list|get|cancel`，CLI + 同一命令面 + UI 读取同一记录），
 **也已实现 `StableBranchPromotion` 段**（`promotion prepare/approve/promote/abandon/get/list`，ADR-0022/FOUNDATION-042，见本节末）。
-IntegrationBatch 已实现的状态为 `CREATED → PREPARING → VERIFYING → INTEGRATING_DEV → INTEGRATED`，另有
-`CONFLICTED / FAILED / RECOVERY_REQUIRED`；**多成员批次、批级 `STALE`、批级 `CANCELLED` 仍属后续阶段合约**（`task.integrate`
-每次只集成一个 Task，虽然 `integration_batch_items` 表已在）。
+IntegrationBatch 的状态为 `CREATED → PREPARING → VERIFYING → INTEGRATING_DEV → INTEGRATED`，另有
+`CONFLICTED / FAILED / RECOVERY_REQUIRED` 与两个批级终态 `STALE / CANCELLED`。
+**批级 `STALE`、批级 `CANCELLED` 与多成员批次已由 FOUNDATION-081（ADR-0053，schema v30）实现**：
+一个批次显式组成**多个成员**（各自固定 revision/结果提交/Execution），顺序合并后由**一次**独立集成验证覆盖整批，
+`PASSED` 才推进 `dev`。
 
-- CREATED：固定 `dev` 基线 OID、候选 result commit、revision 与 execution，并确认该 revision+commit 的 Task 验证为 `PASSED`；DEV_REF_MISSING / DEV_REF_CHECKED_OUT / TASK_VERIFICATION_NOT_PASSED 在写入任何 Git 副作用前拒绝。
-- PREPARING：在 Runtime 数据目录的 detached integration worktree 中合并固定候选；能 ff 就 `--ff-only`，否则 `--no-ff`（第一父为固定基线，候选必须是其后代）；冲突→CONFLICTED，其他错误→FAILED。合并产生的提交写入 `merged_commit`，此时 `dev` 仍未被触及。
-- VERIFYING：在 `merged_commit` 的 detached 副本上运行独立集成验证（独立实体 `integration_verification_runs`，绑定 candidate/merged commit/固定 dev 基线/policy digest/main commit 与 Task 验证 ID）；失败→FAILED。
-- INTEGRATING_DEV：已核验集成验证 PASSED 后记录，随后以 `merged_commit` 与记录基线作 CAS 更新 `dev`。该状态存在的原因是：崩溃可能发生在 ref 写入前后，只有拿记录的 `merged_commit` 与 ref 实际值对比才能判定。
-- INTEGRATED：ref 已更新才写入 `integrated_commit`，此时才 `EXECUTED → SUCCEEDED`。成功后才尝试 `git worktree remove`（不加 force）。
-- 恢复：未完成集成验证→`ERROR(RUNTIME_RESTARTED)` 并保留副本；`CREATED/PREPARING/VERIFYING`→`RECOVERY_REQUIRED`（明确 dev 未被推进）；`INTEGRATING_DEV`→ref 等于 `merged_commit` 则核验后补记 INTEGRATED（不二次写 ref），否则 `RECOVERY_REQUIRED/DEV_REF_OBSERVED` 并写明观察值。`RECOVERY_REQUIRED` 阻止新尝试直到人工处理；不自动部分集成。
+### 4.1 批次与成员状态
 
-未实现（不得声称）：IntegrationBatch 的批级 `STALE` 判定、批级 `CANCELLED`、多成员批次、任务集合级集成。
+批次：
+
+| 状态 | 含义与守卫 |
+|---|---|
+| `CREATED` | 已固定每个成员的 (revision, 结果提交, Execution)、整批 `dev` 基线（`dev_ref`+`dev_commit`）与策略摘要；**不碰 Git**。成员全部校验通过（`EXECUTED` + 版本匹配 + 同 revision/commit 的 `PASSED` Task 验证）才写入，一个成员不合法即整体拒绝。覆盖同一成员且未结算的既有批次使新批次被拒（`INTEGRATION_IN_PROGRESS`） |
+| `PREPARING` | 在 Runtime 数据目录的 detached integration worktree 中**按 `task_id` 顺序**逐个合并成员；第 i 个成员的基线是前 i-1 个的结果。能 ff 就 `--ff-only`，否则 `--no-ff`（第一父必须是该成员合并前的基线，候选必须是其后代）；冲突→`CONFLICTED`，其他错误→`FAILED`。批次级 `merge_strategy`/`merged_commit` 取最后一个成员的那一步，此时 `dev` 仍未被触及 |
+| `VERIFYING` | 在最终 `merged_commit` 的 detached 副本上运行**一次**独立集成验证（独立实体 `integration_verification_runs`，`UNIQUE(batch_id)`；绑定整批成员、固定 dev 基线、policy digest/main commit）；失败→`FAILED` |
+| `INTEGRATING_DEV` | 已核验集成验证 `PASSED` 后记录，随后以 `merged_commit` 与记录基线作 CAS 更新 `dev`。该状态存在的原因是：崩溃可能发生在 ref 写入前后，只有拿记录的 `merged_commit` 与 ref 实际值对比才能判定 |
+| `INTEGRATED` | ref 已更新才写入 `integrated_commit`，此时每个成员 Task 才 `EXECUTED → SUCCEEDED`。成功后才尝试 `git worktree remove`（不加 force） |
+| `STALE` | 批次固定的证据不再是当前事实：某成员证据移动（`MEMBER_EVIDENCE_MOVED`）或 `dev` 基线在推进时已移动（`DEV_REF_MOVED`）。**不合并、不推进**，成员状态保持原样，成员与 Task 不被改写；终态，不阻塞新批次 |
+| `CANCELLED` | 用户结束一个**记录可证明无副作用**的批次（仍 `CREATED` 且 `worktree_path`/`merge_strategy`/`merged_commit`/`verification_id` 全为空）。取消在 FULL 与 STRICT 下都零确认；取消不成立即见下 |
+| `CONFLICTED` / `FAILED` | 合并冲突 / 其他失败（含集成验证失败）。`dev` 未被本批次改写，现场保留 |
+| `RECOVERY_REQUIRED` | 重启中断，或**取消请求无法确认无副作用**（`RECONCILE_REQUIRED`）。终态但未收口：继续占用其成员直到人工处理，新批次被拒 |
+
+成员（`integration_batch_items`，主键 `(batch_id,task_id)`）：
+
+- `PREPARED`：已固定、尚未合并。**终态批次里仍为 `PREPARED` 的成员就是「未处理」**
+  （没有单独的 `SKIPPED` 取值：批次终态 + 成员状态已经唯一确定了这一点）。
+- `MERGED`：已进入本批次的集成树（**不等于**进入 `dev`）。
+- `INTEGRATED`：随批次写入 `integrated_commit`，即已在 `dev` 里。
+- `FAILED` / `CONFLICTED`：该成员自己的合并/证据失败。
+
+**部分失败如实**：只有实际失败的成员被写成 `FAILED`/`CONFLICTED`；已合并的成员保持 `MERGED`，未尝试的保持
+`PREPARED`。批次级失败（验证失败、检查失败）不指向任何成员，成员保持 `MERGED`。不存在「部分成功被写成整批成功」
+或反向的路径。
+
+- 恢复：未完成集成验证→`ERROR(RUNTIME_RESTARTED)` 并保留副本；`CREATED/PREPARING/VERIFYING`→
+  `RECOVERY_REQUIRED`（明确 dev 未被推进）；`INTEGRATING_DEV`→ref 等于 `merged_commit` 则核验后补记 `INTEGRATED`
+  （不二次写 ref，且**每个成员**都在同一事务里转为 `INTEGRATED`/`SUCCEEDED`），否则
+  `RECOVERY_REQUIRED/DEV_REF_OBSERVED` 并写明观察值。`RECOVERY_REQUIRED` 阻止新尝试直到人工处理；不自动部分集成。
+- 幂等：`task integration integrate` 对已终态批次返回记录的结论（`alreadyCompleted`），不重复合并、不重复推进 `dev`；
+  同一 command id 的组成请求返回它已保留的那个批次。
 
 StableBranchPromotion：`CREATED → AWAITING_APPROVAL → PROMOTING → RESTARTING → SUCCEEDED`（ADR-0047 后；早期文中的 `VERIFYING` 不是一个状态——
 全量证据在 `prepare`/`promote` 时同步核对，不存在持久的 VERIFYING 停留）。
