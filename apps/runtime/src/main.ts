@@ -6,6 +6,10 @@ import { devBranchRef, impactPolicyPath, runtimeRequestSchema, validateQuestionn
   type RuntimeRequest, type RuntimeResponse,
   type RuntimeStreamFrame } from '@codeestra/contracts';
 import { inspectRepository, readLocalRefCommit } from '@codeestra/git';
+import {
+  defaultProseQuestionAttentionMode,
+  type ProseQuestionAttentionMode,
+} from '@codeestra/domain';
 import { Phase1Database, StorageError, type AgentAnswerPlan } from '@codeestra/storage';
 import {
   createAdapterRegistry,
@@ -48,6 +52,10 @@ import { runtimeHome, runtimeSocketPath } from './paths.js';
 import { SessionHandoffService } from './session-handoff-service.js';
 import { TerminalService } from './terminal-service.js';
 import { readPermissionMode, writePermissionMode, type PermissionMode } from './permission-mode.js';
+import {
+  readProseQuestionAttentionMode,
+  writeProseQuestionAttentionMode,
+} from './prose-question-attention-settings.js';
 import {
   abandonStablePromotion,
   approveStablePromotion,
@@ -165,6 +173,21 @@ if (await probeRuntimeEndpoint(socketPath)) {
 rmSync(socketPath, { force: true });
 
 let permissionMode: PermissionMode = await readPermissionMode(home);
+// The prose-question escalation setting is a downgrade-only switch, so an unreadable file must not
+// stop the Runtime from starting: the failure is reported and the product default is used.
+let proseQuestionAttentionMode: ProseQuestionAttentionMode = defaultProseQuestionAttentionMode;
+try {
+  proseQuestionAttentionMode = await readProseQuestionAttentionMode(home);
+} catch (error) {
+  console.error('[runtime] the prose-question attention setting could not be read',
+    error instanceof Error ? error.message : String(error));
+}
+/** The settings face reports the current value, the default, and what the value applies to. */
+const proseQuestionAttentionSettings = () => ({
+  mode: proseQuestionAttentionMode,
+  default: defaultProseQuestionAttentionMode,
+  appliesTo: 'Agent completions observed after this change; an already recorded wait is unchanged',
+});
 const storage = new Phase1Database(join(home, 'runtime.sqlite'));
 const registry = createAdapterRegistry({ runtimeHome: home, environment: Bun.env });
 const coordinator = new AgentRuntimeCoordinator({
@@ -183,6 +206,7 @@ const coordinator = new AgentRuntimeCoordinator({
     return Object.keys(effective).length === 0 ? null : effective;
   },
   permissionMode: () => permissionMode,
+  proseQuestionAttentionMode: () => proseQuestionAttentionMode,
   logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
 });
 const subscriptions = new EventSubscriptionHub({ storage });
@@ -567,6 +591,12 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         mode: permissionMode,
         appliesTo: 'new operations and new Agent sessions',
       });
+    case 'settings.proseQuestionAttention.get':
+      return success(request.requestId, proseQuestionAttentionSettings());
+    case 'settings.proseQuestionAttention.set':
+      proseQuestionAttentionMode = request.mode;
+      writeProseQuestionAttentionMode(home, proseQuestionAttentionMode);
+      return success(request.requestId, proseQuestionAttentionSettings());
     case 'agent.config.get':
       return success(request.requestId, agentConfigurationPayload(resolveAgentConfiguration({
         storage,
@@ -1437,6 +1467,32 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         delivery: delivery.delivery,
         ...(delivery.error === undefined ? {} : { error: delivery.error }),
       });
+    }
+    case 'attention.resolve': {
+      // A prose question is a wait, not a dialog: the provider process already exited, so there is
+      // nothing to deliver and no conversation to resume. The command records how the wait ended
+      // and puts the Task back where it was, which is the only honest end state (FOUNDATION-069).
+      const payloadHash = createHash('sha256').update(JSON.stringify({
+        projectId: request.projectId,
+        attentionId: request.attentionId,
+        resolution: request.resolution,
+        text: request.text ?? null,
+        note: request.note ?? null,
+      })).digest('hex');
+      return success(request.requestId, storage.resolveProseQuestionAttention({
+        projectId: request.projectId,
+        attentionId: request.attentionId,
+        commandId: request.commandId,
+        payloadHash,
+        resolution: request.resolution,
+        text: request.text ?? null,
+        note: request.note ?? null,
+        actor: 'local-user',
+        answerId: crypto.randomUUID(),
+        resolutionEventId: crypto.randomUUID(),
+        taskEventId: crypto.randomUUID(),
+        resolvedAt: Date.now(),
+      }));
     }
     case 'session.handoff.status':
       return success(request.requestId,

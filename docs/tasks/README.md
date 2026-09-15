@@ -3548,6 +3548,108 @@ UI **零改动**（事件联合是 `eventType: string`，`contracts` 变更不�
 - 未运行全量测试：本次仅改文档，且 ADR-0038 明确全量测试只在固定 dev 候选准备提升到 main 时执行。
 - 仅执行文档关键词、链接、diff 与 Git 状态检查；结果以本次交付说明为准。
 
+## FOUNDATION-069 — 散文提问升级为一等等待（ADR-0043，**无 schema 变更、不占迁移号**）
+
+状态：**已实现，lane 分支 commit（未 push、未提升 `main`、未重启稳定 Runtime）。**
+基线：`dev = fd3d99871a40e578105036bc6728213adf302c6a`。工作树：`/Users/loyage/Documents/codeestra-wt/i5-prose-question-attention`，分支 `lane/i5-prose-question-attention`。
+
+本格补上 FOUNDATION-056 与 ADR-0004/0014 语义里**明确未做的那半截**：把「Agent 在散文里提问并结束轮次」
+从只记录 note 升级为一等的等待/Attention 事实，同时保住误报不得静默破坏 Task。
+
+### 用户已拍板的产品语义（8 问，逐条答复）
+
+| 问题 | 裁决 |
+|---|---|
+| 默认是否自动升级 | **B：默认自动升级**（命中即 `Task → WAITING_FOR_USER` + 一条 Attention），降级开关不是默认 |
+| 通道形状 | **A：复用 `attention_requests`**，`kind='QUESTION'` + `prompt.kind='codeestra.prose-question'`；零 schema 变更 |
+| 恢复语义 | **A：只允许显式解除/降级**；回答文本只入审计与事件，**不投递给任何 provider** |
+| schema 变更 | **A：不允许**（协调者另加：**不得自取迁移号**，v25 归 I1、v26 归 I3） |
+| Codex 事实层 | **A：不在本格** |
+| UI 投影 | **A：不在本格**（不动 `apps/ui/**`） |
+| 开关形状 | **A：全局 Runtime 设置 + CLI 命令**；零确认、`--json`、稳定退出码；默认必须是 `auto` |
+| 解除命令形状 | **A：新增 `attention resolve`**，与 `attention answer` 平行，拒绝把散文等待送进 provider 投递路径 |
+
+### 修改
+
+- **`packages/domain/src/prose-question-attention.ts`（新）**：唯一一处纯判定。升级策略 `decideProseQuestionEscalation(mode, note)`
+  （`auto` / `record-only` / `off`，默认 `auto`）、prompt 构造与严格回读（`buildProseQuestionPrompt` / `readProseQuestionPrompt`）、
+  派生 `provider_request_id`（`codeestra-prose-question:<providerEventId>`）、解除合法性判定
+  `decideProseQuestionResolution(facts)` 与负载校验 `validateProseQuestionResolution`，含全部稳定拒绝码。无 Bun/DB/Git/模型依赖。
+- **`packages/storage/src/database.ts`（纯追加）**：`recordAgentCompleted` 新增可选 `proseQuestion`，在**同一事务**内投影
+  等待（`attention_requests` 行 + `tasks.state='WAITING_FOR_USER'` + `UserAttentionRequested` + `TaskStateChanged`）；
+  新增按 command 幂等的 `resolveProseQuestionAttention`；`planAttentionAnswer` 对散文等待返回
+  `PROSE_QUESTION_RESOLUTION_REQUIRED`（在既有 provider 投递路由之前拦截）；`StorageError` 码并集追加本格稳定码。
+- **`packages/contracts/src/prose-question.ts`（新）+ `index.ts`（纯追加）**：`attention.resolve`、
+  `settings.proseQuestionAttention.get|set` 三个请求，以及结果/设置/负载 schema。
+- **`apps/runtime/src/agent-observation-service.ts`**：按模式在完成投影时决定是否升级（默认 `auto`）。
+- **`apps/runtime/src/agent-runtime-service.ts`**：新增 `proseQuestionAttentionMode` 端口（Session 启动时读取，不重启即生效；
+  读取失败时记日志并回落到产品默认，不让一个坏设置文件毁掉一次正常完成的观察流）。
+- **`apps/runtime/src/prose-question-attention-settings.ts`（新）**：全局设置文件（`$CODEESTRA_HOME/prose-question-attention.json`，原子写，与 `permission-mode.ts` 同构）。
+- **`apps/runtime/src/main.ts`（纯追加）**：`attention.resolve` 与两个 settings 命令的处理，以及启动时读取设置。
+- **`apps/cli/src/main.ts`（纯追加）**：`attention resolve --dismiss|--answer <text> [--note <text>] [--json]`、
+  `settings prose-question-attention [auto|record-only|off] [--json]`、用法文本，以及 `task status` 在存在 OPEN 散文等待时
+  向 stderr 多打一行 `[waiting] …`（渲染既有事实，不改 stdout 的 JSON）。
+- **`package.json`（测试列表）**：新 e2e 文件登记进 `test:unit` 忽略列表与 `test:e2e`。
+- **`apps/runtime/test/cli-prose-question.test.ts`（既有文件的小改）**：FOUNDATION-056 的契约现在只在 `record-only` 下成立，
+  因此该夹具显式降级到 `record-only`；默认路径由新 e2e 文件覆盖。
+- **`apps/runtime/test/agent-observation-service.test.ts`（既有文件的小改）**：原「散文提问不产生 Attention、Task 仍 RUNNING」
+  的断言改为默认 `auto` 行为，并新增 `record-only` / `off` 两项严格更少的对照。
+
+关键设计取舍（详见 ADR-0043）：**只暂停该 Task**（`Session` 保持 `EXITED`、`Execution` 保持 `RUNNING`，进程真的退出了，
+不把死会话伪装成活的 provider 会话）；解除**什么都不投递**（`deliveredToProvider: false`）、不新建 Execution、不 resume conversation；
+回答**不是 TaskRevision**，`task amend` 语义一字未改；Task 不处于 `RUNNING` 时（例如并发停止）**跳过等待而不是让完成投影失败**。
+
+### 实际运行的检查与逐条结果
+
+| 命令 | 结果 |
+|---|---|
+| `bun run typecheck` | **退出码 0**（在最后一次改动后复跑） |
+| `bunx vitest run packages/domain/test/prose-question-attention.test.ts` | **8 passed (8)**，退出码 0（新文件） |
+| `bun test packages/storage/test/prose-question-attention.test.ts` | **11 pass / 0 fail**（63 断言），退出码 0（新文件） |
+| `bun test packages/contracts/test/request.test.ts` | **20 pass / 0 fail**，退出码 0（契约边界回归） |
+| `bun test apps/runtime/test/agent-observation-service.test.ts` | **9 pass / 0 fail**（48 断言），退出码 0 |
+| `bun test apps/runtime/test/agent-runtime-service.test.ts` | **7 pass / 0 fail**，退出码 0 |
+| `bun test apps/runtime/test/session-handoff-service.test.ts` | **17 pass / 0 fail**（129 断言），退出码 0 |
+| `bun test apps/runtime/test/cli-prose-question.test.ts` | **2 pass / 0 fail**，退出码 0 |
+| `bun test apps/runtime/test/cli-prose-question-attention.test.ts` | **4 pass / 0 fail**（76 断言），退出码 0（新 e2e，真实 CLI + 真实 Runtime + 临时 home/仓库 + 协议 stub provider） |
+
+新增覆盖的关键断言：升级与完成**同事务**（Session `EXITED` / Execution `RUNNING` / Task `WAITING_FOR_USER` 三事实一次写入）；
+同一 provider event 重放**不产生第二条** Attention；同一 command 重放**不产生第二条**审计行；`attention answer` 对散文等待
+以 `PROSE_QUESTION_RESOLUTION_REQUIRED` 拒绝且**零写入**（无 answer/operation/receipt）；`--dismiss` 与 `--answer` 各自留审计
+并把 Task 还原；第二次解除以 `PROSE_QUESTION_ATTENTION_ALREADY_RESOLVED` 拒绝；`PROSE_QUESTION_SESSION_NOT_EXITED` /
+`PROSE_QUESTION_TASK_NOT_WAITING` 等拒绝路径零写入；终态（`CANCELLED`）不被复活；Task 非 `RUNNING` 时 note 仍记录、等待跳过；
+`settings` 三个取值端到端生效（`record-only` 下 `attention list` 为空、`off` 下 note 为 null）；用法错误 exit 2；
+`task revision list` 仍只有 1 条 revision。
+
+### 未验证与已知缺口（不得当成已成立）
+
+- **真实模型未验收**：端到端用的是协议 stub provider，只证明 Runtime 自己的编排与命令面，**不证明真实模型行为**；本格给不出命中频率/误报率的任何统计。
+- **Codex 侧事实层未做**：`codex-adapter.ts` 未改动，它仍不上报 completion facts，因此 Codex 的散文提问只漏报、不谎报。
+- **回答后继续对话未做**：`--answer` 只记录文本，不新建 Execution、不 `--session` resume；「回答后回到同一 conversation 继续」是明确留给后续格的产品语义。
+- **UI 投影未做**：`apps/ui/**` 一字未改，散文等待在 Web UI 里没有专门呈现（`attention list`/`task.status` 的事实已可在命令面读到）。
+- **新聚合组合未在真实 provider 下复验**：`Task WAITING_FOR_USER` + `Execution RUNNING` + `Session EXITED` 是前所未有的组合，
+  本格只在 storage/runtime 单元与 stub e2e 下验证；它与 `task pause`/`task cancel` 在真实 provider 进程上的交互未实测。
+- **未运行全量/聚合检查**（ADR-0038）：没有跑 `bun run check`、`bun run check:fast`、`just check`、`just verify`，`bun run test`（vitest 全量）与 `bun run typecheck:ui` 也未运行；只跑了上表列出的定向文件。
+- **一个与本格无关的既有失败**：`bun test apps/runtime/test/cli-attention.test.ts` 第三个用例
+  （`workbench HTTP client reads tasks and answers while a task awaits user input`）报
+  `TypeError: null is not an object (evaluating 'envelope.ok')`（`apps/ui/src/api.ts:45`）。已在**未修改的基线**上复现：
+  `git stash push -u` 后同一文件仍 **2 pass / 1 fail**，随后 `git stash pop` 恢复本格改动。本格未修（属 UI/HTTP 面，不在领地）。
+
+### 文档与决策
+
+- 新增 `docs/decisions/0043-prose-question-attention-escalation.md`（ADR-0043）：8 条决策 + 被否掉的 7 个选项 + 后果 + 验证要求。
+- `docs/decisions/README.md`：在 ADR-0038 行之后追加 ADR-0043 索引行。
+- **未改写 `## NEXT`（按要求）**：其中第 6 条仍写着「仍未做……把它自动升级为 Attention / `WAITING_FOR_USER`」，
+  这句在本格之后**已不准确**（默认 `auto` 已经做到）。本格按指令没有改动 `## NEXT`，把它作为待人工/集成时更新的一处已知文档不一致留在这里。
+
+### 领地与未触碰
+
+- 未改动 `apps/ui/**`、`packages/agent-adapters/**`、`schedule-service.ts`、`verification-service.ts`、`promotion-service.ts`、`packages/git/**`；
+  **未改 `packages/storage/src/migration.ts`、未占任何迁移号（schema 仍 v24）**；未改 `.codeestra/policies/verification.json`。
+- 未 push、未提升 `main`、未重启稳定 Runtime；`/Users/loyage/Documents/codeestra` 未被触碰；全程只用 CLI/命令面（无 computer-use / 桌面 / 浏览器自动化）。
+- 本格夹具与进程已回收：`reclaimTestResources()` 在每个 e2e 的 `afterEach` 执行，各用例结束时 `codeestra stop`；
+  跑完后核对本工作树无残留 Runtime 进程、`/tmp/codeestra-wait-*` 夹具目录已被回收。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、~~UI 投影~~（已由 FOUNDATION-050 完成 promotion/dependency 投影）。

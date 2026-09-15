@@ -2,7 +2,14 @@ import {
   agentObservedEventSchema,
   type AgentObserveAdapter,
 } from '@codeestra/contracts';
-import { classifyAgentCompletion } from '@codeestra/domain';
+import {
+  buildProseQuestionPrompt,
+  classifyAgentCompletion,
+  decideProseQuestionEscalation,
+  defaultProseQuestionAttentionMode,
+  proseQuestionProviderRequestId,
+  type ProseQuestionAttentionMode,
+} from '@codeestra/domain';
 import {
   type AdapterEventResult,
   Phase1Database,
@@ -22,6 +29,13 @@ export async function observeAgentEvents(input: {
   readonly sessionId: string;
   readonly now?: () => number;
   readonly randomUUID?: () => string;
+  /**
+   * How eagerly a prose-question completion becomes a wait (FOUNDATION-069). `auto` is the product
+   * default: the note is also recorded as a `WAITING_FOR_USER` Task plus one Attention, because a
+   * Task whose Agent exited without doing anything may not hang silently (ADR-0004). The other two
+   * modes are the explicit downgrades, and they record strictly less, never more.
+   */
+  readonly proseQuestionAttentionMode?: ProseQuestionAttentionMode;
   /** Awaited after each accepted projection, before the next provider event is consumed. */
   readonly onProjected?: (result: AdapterEventResult) => void | Promise<void>;
 }): Promise<readonly AdapterEventResult[]> {
@@ -92,9 +106,28 @@ export async function observeAgentEvents(input: {
       // pure, deterministic function over provider facts; it records a stable reason code and
       // changes no Task/Execution state, so an unexplained SUCCESS stops being possible without
       // inventing an approval step, an Attention, or a new terminal state (FOUNDATION-056).
-      const note = event.outcome === 'SUCCESS' && event.facts !== undefined
-        ? classifyAgentCompletion(event.facts)
-        : null;
+      //
+      // Whether that note also becomes a wait is a separate, equally deterministic decision: the
+      // same note is escalated in `auto` mode only, and the escalation is projected inside the same
+      // transaction as the completion (FOUNDATION-069).
+      const escalation = decideProseQuestionEscalation(
+        input.proseQuestionAttentionMode ?? defaultProseQuestionAttentionMode,
+        event.outcome === 'SUCCESS' && event.facts !== undefined
+          ? classifyAgentCompletion(event.facts)
+          : null,
+      );
+      const note = escalation.note;
+      const proseQuestion = escalation.escalate && note !== null
+        ? {
+          attentionId: randomUUID(),
+          attentionEventId: randomUUID(),
+          taskEventId: randomUUID(),
+          // A prose question has no provider request, so the Runtime records a derived value it
+          // can always recognize as its own instead of reusing a provider id (or leaving a hole).
+          providerRequestId: proseQuestionProviderRequestId(event.eventId),
+          prompt: buildProseQuestionPrompt(note),
+        }
+        : undefined;
       result = input.storage.recordAgentCompleted({
         sessionId: event.sessionId,
         executionId: event.executionId,
@@ -105,6 +138,7 @@ export async function observeAgentEvents(input: {
         ...(event.failure === undefined ? {} : { failure: event.failure }),
         ...(event.facts === undefined ? {} : { facts: event.facts }),
         ...(note === null ? {} : { note }),
+        ...(proseQuestion === undefined ? {} : { proseQuestion }),
         sessionEventId: randomUUID(),
         executionEventId: randomUUID(),
         taskEventId: randomUUID(),

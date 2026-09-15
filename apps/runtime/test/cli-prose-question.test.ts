@@ -162,6 +162,12 @@ async function fixture(mode: 'PROSE_QUESTION' | 'TOOL_THEN_QUESTION'): Promise<{
   };
   const opened = await cli(['open', repository, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);
+  // FOUNDATION-069 made the product default `auto`, which records the note *and* the wait it stands
+  // for. The contract this file pins is FOUNDATION-056's: annotate the completion and change no
+  // state. That is now the explicit `record-only` downgrade, so the fixture asks for it; the default
+  // path is covered end to end by `cli-prose-question-attention.test.ts`.
+  const downgraded = await cli(['settings', 'prose-question-attention', 'record-only'], environment);
+  expect(downgraded.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { readonly id: string }[];
   return { environment, projectId: projects[0]?.id as string };
@@ -228,7 +234,8 @@ describe('codeestra prose question notes', () => {
       expect(listed.stderr).toContain('[note]');
       expect(listed.stderr).toContain('PROSE_QUESTION_NO_TOOL_USE');
 
-      // The note is not a wait state and not an Attention: the Task state machine is untouched.
+      // The note is not a wait state and not an Attention while escalation is downgraded: the Task
+      // state machine is untouched (FOUNDATION-056, now the explicit `record-only` mode).
       expect(status.task.state).toBe('RUNNING');
       const attention = await cli(['attention', 'list', projectId], environment);
       expect(attention.exitCode).toBe(0);

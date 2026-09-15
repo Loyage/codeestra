@@ -5,4 +5,5 @@ export * from './dependency-graph.js';
 export * from './revision-delivery.js';
 export * from './impact-analysis.js';
 export * from './agent-completion-signal.js';
+export * from './prose-question-attention.js';
 export * from './task-retry.js';

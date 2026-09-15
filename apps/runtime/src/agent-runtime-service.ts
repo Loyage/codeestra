@@ -5,6 +5,10 @@ import {
   type AgentConfiguration,
 } from '@codeestra/contracts';
 import {
+  defaultProseQuestionAttentionMode,
+  type ProseQuestionAttentionMode,
+} from '@codeestra/domain';
+import {
   Phase1Database,
   type AgentAnswerPlan,
   type ObservableAgentSession,
@@ -84,6 +88,12 @@ export interface AgentRuntimeCoordinatorOptions {
     readonly adapterId: string;
   }) => AgentConfiguration | null;
   readonly permissionMode?: () => 'FULL' | 'STRICT';
+  /**
+   * The prose-question escalation setting (FOUNDATION-069). It is read per Session start so a
+   * `settings prose-question-attention` change applies to the next run without restarting the
+   * Runtime — this is a setting, not a gate, and it never retroactively changes a recorded wait.
+   */
+  readonly proseQuestionAttentionMode?: () => ProseQuestionAttentionMode;
   readonly now?: () => number;
   readonly randomUUID?: () => string;
   readonly shutdownGraceMs?: number;
@@ -111,6 +121,7 @@ export class AgentRuntimeCoordinator {
     readonly adapterId: string;
   }) => AgentConfiguration | null;
   readonly #permissionMode: () => 'FULL' | 'STRICT';
+  readonly #proseQuestionAttentionMode: () => ProseQuestionAttentionMode;
   readonly #now: () => number;
   readonly #randomUUID: () => string;
   readonly #shutdownGraceMs: number;
@@ -125,6 +136,8 @@ export class AgentRuntimeCoordinator {
     this.#environment = options.environment ?? {};
     this.#resolveAgentConfig = options.resolveAgentConfig ?? (() => null);
     this.#permissionMode = options.permissionMode ?? (() => 'FULL');
+    this.#proseQuestionAttentionMode = options.proseQuestionAttentionMode
+      ?? (() => defaultProseQuestionAttentionMode);
     this.#now = options.now ?? Date.now;
     this.#randomUUID = options.randomUUID ?? (() => crypto.randomUUID());
     this.#shutdownGraceMs = options.shutdownGraceMs ?? 5_000;
@@ -780,6 +793,25 @@ export class AgentRuntimeCoordinator {
     };
   }
 
+  /**
+   * Reads the escalation setting for one Session. A broken setting must not turn a perfectly good
+   * completion into an unobservable stream, so the failure is logged and the product default is
+   * used. The default is the *more* informative behaviour (it records the wait); the downgrade has
+   * to be asked for explicitly, never inferred from an unreadable file.
+   */
+  #readProseQuestionAttentionMode(sessionId: string): ProseQuestionAttentionMode {
+    try {
+      return this.#proseQuestionAttentionMode();
+    } catch (error) {
+      this.#logger('the prose-question attention setting could not be read; using the default', {
+        sessionId,
+        default: defaultProseQuestionAttentionMode,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      return defaultProseQuestionAttentionMode;
+    }
+  }
+
   #ensurePump(sessionId: string): void {
     if (this.#pumps.has(sessionId)) return;
     let session: ObservableAgentSession;
@@ -819,6 +851,7 @@ export class AgentRuntimeCoordinator {
         sessionId: session.sessionId,
         now: this.#now,
         randomUUID: this.#randomUUID,
+        proseQuestionAttentionMode: this.#readProseQuestionAttentionMode(session.sessionId),
         onProjected: async () => {
           await this.#deliverPlannedAnswers(session.sessionId);
         },
