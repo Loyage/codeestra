@@ -1111,7 +1111,8 @@ function usage(): never {
     [--kind AUTOMATED_RPC|TERMINAL_ATTACHMENT]
   bun run codeestra session handoff writer release <project-id> <session-id> --holder <ref>
   bun run codeestra session handoff admit <project-id> <session-id>
-  bun run codeestra session handoff attach <project-id> <session-id> --holder <ref> [--writer] [--since <cursor>]
+  bun run codeestra session handoff attach <project-id> <session-id> --holder <ref>
+    [--writer|--observer] [--since <cursor>]
   bun run codeestra session handoff detach <project-id> <session-id> --holder <ref>
   bun run codeestra session handoff release <project-id> <session-id> [--no-resume]
   bun run codeestra session handoff terminal read <project-id> <session-id> [--since <cursor>]
@@ -1174,6 +1175,7 @@ function usage(): never {
   bun run codeestra scheduler capacity clear <project-id> --adapter <id> [--json]
   bun run codeestra scheduler reservations list <project-id> [--task <task-id>]
     [--include-released] [--limit <n>] [--json]
+  bun run codeestra scheduler reservations get <project-id> <reservation-id> [--json]
   bun run codeestra scheduler reservations acquire <project-id> <task-id> <expected-task-version>
     --revision <revision-id> [--snapshot <impact-snapshot-id>] [--adapter <id>] [--json]
   bun run codeestra scheduler reservations release <project-id> <reservation-id> --reason <text>
@@ -1267,7 +1269,8 @@ A refusal that carries facts prints them as JSON and then exits 1. Exit code 3 i
 BLOCKED means unmet dependencies only.
 
 scheduler reservations list shows the active reservations of a project with their holder evidence and
-their append-only history (--include-released keeps the audit rows). release is explicit and requires
+their append-only history (--include-released keeps the audit rows), and get reads one reservation
+back by id together with that same history. release is explicit and requires
 --reason; nothing releases a slot because a heartbeat expired, a client disappeared or a user waited.
 A release refused with SLOT_HOLDER_STILL_RUNNING means the recorded holder process is provably still
 alive and was not signalled. prepare-workspace prepares the Task worktree for one reservation and

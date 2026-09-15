@@ -4468,14 +4468,205 @@ boot 身份不同，且新进程确实运行新代码（启动后稳定库已迁
 - 本记录是**提升之后**在 `dev` 上新增的提交，因此 `main != dev`（main 停在 `c50730f`，dev 比 main 多这一条记录提交）。下一次提升会把它一起带上。
 - 未在 `main` 工作树上额外跑全量：`main` 与被执行全量的精确候选 SHA 完全相同、两边工作树 clean，额外再跑不增加信息（沿用前两次的处置）。
 
+## FOUNDATION-074 — 文档校准：NEXT / roadmap / 架构 doc-sync（Wave K / K1，纯文档 + usage 文本）
+
+状态：**已完成（lane 分支 commit，未 push、未提升 `main`、未重启稳定 Runtime）。**
+基线：`dev = fa27b795ce8b9efdaaefe7367b0b93d2a1b516f9`（未 rebase）。工作树：
+`/Users/loyage/Documents/codeestra-wt/k1-docs-calibration`，分支 `lane/k1-docs-calibration`。
+
+用户 2026-09-15 裁决：Wave I/J 之后文档与实现出现三类漂移——`## NEXT` 的历史漂移、roadmap 没有回填阶段状态、架构文档落后于
+FOUNDATION-046/047/048/049 与 Wave I/J 的 schema v25/v26/v27 及新命令面——因此开一格全面校准，并把 J1 在
+`docs/guides/troubleshooting.md` §3 如实列出的 10 项不一致逐条处置。本格**不是**改规格去迁就实现，也**不是**把未验证的东西
+写成已完成；每一条「已完成」都只依据**已合入 `dev` 的代码/命令面/事件/表结构**，不依据任何任务记录里的说法。
+
+### 处置结果
+
+| 目标 | 结果 |
+|---|---|
+| `## NEXT` 只保留真正剩余的事项 | 已重写该节。原 0–7 编号全部保留并逐条给出当前状态与依据；文末列出「本次从 NEXT 移除的条目及依据」 |
+| roadmap 回填真实完成度 | `docs/roadmap/mvp.md` 每个 Phase 加「当前状态（截至本格）」小节；「阶段草案」措辞改为如实描述；未做能力与未验证项逐条标注 |
+| 架构文档对齐实现 | `sqlite-schema.md`（补 v23/v24/v25/v27 的 DDL 记录、`phase1SchemaVersion = 26` → `27`）、`event-model.md`（补 `ProseQuestionAttentionResolved` 与 `TaskRetryRequested`）、`state-machines.md`（补 promotion 的 full-suite 证据模型、`pluginSelection` 能力位与 `UNSUPPORTED` 的如实声明）、`agent-adapter-api.md`（补 `pluginSelection` 维度与三个 Adapter 的实测值）。另修 `scheduler.md` 的「本基线里没有调度引擎」与 `architecture/README.md` 的 `phase1SchemaVersion = 21` 两处与实现不符的陈旧陈述 |
+| J1 的 10 项逐条处置 | 8 项已修（含唯一一处代码改动：`usage()` 文本），2 项保留为「待裁决」（`PROJECT_SPEC.md` §1/§3 前后不一致；`intents.kind` 有三个没有任何 CLI 产生路径的取值），理由见 `docs/guides/troubleshooting.md` §3 |
+| `README.md` 状态段 | 「当前状态」与「下一步」两段已按实现重写（J1 第 1–6 条的根因） |
+
+### 唯一一处代码改动
+
+`apps/cli/src/main.ts` 的 `usage()` 文本，只补上**确实存在但未列出**的命令（J1 第 8/9 条），并在同一 `usage()` 里给
+`reservations list` 的说明段补一句 `get` 的语义：
+
+- 新增一行 `scheduler reservations get <project-id> <reservation-id> [--json]`——契约
+  `scheduler.reservations.get` 在 `packages/contracts/src/index.ts:1859`，分派在 `apps/cli/src/main.ts` 的
+  `reservationAction === 'get'` 分支（子命令**可用**，此前只是没有列进用法）。
+- `session handoff attach` 用法行补上 `[--observer]`——解析器接受 `--observer`，且默认 attachment kind 就是 `OBSERVER`
+  （`let attachmentKind: 'WRITER' | 'OBSERVER' = 'OBSERVER'`）。
+
+`git diff --stat` 只有这一个代码文件；其余改动全在 `docs/**` 与 `README.md`。**没有**改 `PROJECT_SPEC.md`、
+`docs/decisions/**`、`.codeestra/**`、`AGENTS.md`，没有新增依赖或测试基础设施。
+
+### 一个超出交付清单但为了避免自相矛盾而做的文档改动
+
+交付清单列出的文档是 `docs/tasks/README.md`、`docs/roadmap/mvp.md`、`docs/architecture/*.md`、`docs/guides/troubleshooting.md`
+与 `README.md`。本格另外改了 **`docs/guides/cli-reference.md`** 的两处，因为它们直接描述**本格刚修好的**那一处不一致：
+§14 的注写着「`scheduler reservations get` 没有出现在 `usage()` 里」、§21 的「其他只在源码里出现的东西」表里列着同一行。
+修完 `usage()` 后这两处会变成假话；就此把它当作**文档同步的一部分**改掉，并在交付说明里显式列出（不是静默改动）。
+如果协调者认为这超出范围，这两处可单独回滚而不影响其它改动。
+
+### 状态声明 → 依据（逐条列出实际运行的核对命令）
+
+| 声明 | 依据命令 | 结果 |
+|---|---|---|
+| dev 基线改造已完成（ADR-0018）：Task worktree 从 `project.devRef` 建立 | `grep -n "devRef" apps/runtime/src/workspace-service.ts` | 命中 `93,120,172,312`（`devRef: project.devRef`、`inspectBaseRef(project.repoRoot, project.devRef)`） |
+| 自动调度引擎已实现（ADR-0033） | `grep -n "CODEESTRA_SCHEDULE_TICK_MS" apps/runtime/src/main.ts`；契约 `grep -n "z.literal('task.schedule.run')" packages/contracts/src/index.ts` | `main.ts:465`（默认 5000ms）；`index.ts:1935` |
+| 长命令后台化与进度事件已实现（ADR-0019/0027） | `task.verify --background` 在 `usage()`；事件写入名单含 `OperationProgressed`/`OperationSettled` | 用法行存在；两个事件名出现在 `packages/storage/src/database.ts` 的 `INSERT INTO domain_events` 名单 |
+| Task cancel / pause / resume / archive 已实现（ADR-0016） | `grep -n "z.literal('task.cancel')" packages/contracts/src/index.ts` | `index.ts:1126`（pause/resume/retry/archive/unarchive 同族均在） |
+| IntegrationBatch 与 dev→main 提升已是产品能力（ADR-0018/0022/0038/0039） | `grep -n "z.literal('task.integrate')\|z.literal('promotion.prepare')\|z.literal('promotion.fullSuite.run')" packages/contracts/src/index.ts` | `1266` / `1471` / `1559` |
+| 原生终端接管已实现（ADR-0026） | `grep -rn "PTY" apps/runtime/src/session-handoff-service.ts` | 命中（`ptyTransport: 'IMPLEMENTED' \| 'UNSUPPORTED'`、`ptyResize: 'UNSUPPORTED'`） |
+| reclaim 的未注册目录与跨项目批量已完成（ADR-0037） | `usage()` 的 `reclaim plan/apply/records` 含 `--all-projects`、`--unregistered`；schema v24 | 用法行存在；`unregisteredReclamationMigration` 在 `packages/storage/src/migration.ts` |
+| `scheduler reservations get` 可用 | `grep -n "reservationAction === 'get'" apps/cli/src/main.ts` | 命中（`scheduler.reservations.get`） |
+| 散文提问已升级为一等等待（ADR-0043/FOUNDATION-069） | `grep -n "ProseQuestionAttentionResolved" packages/storage/src/database.ts`；契约 `attention.resolve` | 事件在 `domain_events` 写入名单；契约 `index.ts:1320` |
+| settings 与 agent plugins 命令组已实现（ADR-0044/0045） | `grep -n "z.literal('settings.ui.set')\|z.literal('agent.plugins.list')\|z.literal('agent.config.clear')" packages/contracts/src/index.ts` | `1354` / `978` / `984` |
+| schema 当前是 v27 | `grep -n "phase1SchemaVersion" packages/storage/src/migration.ts` | `1:export const phase1SchemaVersion = 27;`，且迁移链以 `if (version < 27)` 收尾 |
+| 三个真实 Adapter 与能力如实声明 | `grep -rn "pluginSelection" packages/agent-adapters/src/*.ts` | `pi-adapter.ts:65`（Pi 支持）、`codex-adapter.ts:76` 与 `claude-adapter.ts:96`（`UNSUPPORTED`）、`index.ts:183`（fake 为 `UNSUPPORTED`） |
+
+### 实际运行的检查
+
+| 命令 | 结果 |
+|---|---|
+| 文档内本地链接存在性（脚本见下） | `checked 73 files, 229 local links; broken: 0` |
+| `bun run typecheck` | **退出码 0**（`tsc --noEmit`，在 `usage()` 文本改动之后运行） |
+| `CODEESTRA_HOME=/tmp/ce-k1 bun run codeestra`（无参数→usage） | **退出码 2**（符合设计）；输出含 `scheduler reservations get <project-id> <reservation-id> [--json]` 与 `[--writer\|--observer] [--since <cursor>]`，证明新增用法行确实出现在用户可见的用法里 |
+| 上表的核对命令（`grep`） | 全部命中，结果如上 |
+
+链检查用的可复现命令（在仓库根目录执行；脚本对每个 `*.md` 取出行内链接的目标，跳过 `http(s)`/`mailto`，对相对路径按文件所在目录
+解析并检查存在性）：
+
+```sh
+python3 - "$(pwd)" <<'EOF'
+import os,re,sys
+root=sys.argv[1]; os.chdir(root)
+targets=[t for t in ['README.md','PROJECT_SPEC.md']
+         +[os.path.join(dp,f) for dp,_,fs in os.walk('docs') for f in fs if f.endswith('.md')]
+         if os.path.exists(t)]
+pat=re.compile(r'\]\(([^)\s]+)\)')
+bad=[]; n=0
+for t in targets:
+    base=os.path.dirname(os.path.abspath(t))
+    for m in pat.finditer(open(t,encoding='utf-8').read()):
+        link=m.group(1).split('#')[0]
+        if not link or link.startswith(('http://','https://','mailto:')): continue
+        n+=1
+        if not os.path.exists(os.path.normpath(os.path.join(base,link))): bad.append((t,link))
+print(f'checked {len(targets)} files, {n} local links; broken: {len(bad)}')
+for t,l in bad: print('BROKEN',t,'->',l)
+EOF
+```
+
+**未运行**（ADR-0038，本格是 `lane/*` 开发分支）：`bun run check`、`bun run check:fast`、`just check`、`just verify`、
+`bun run test`、`bun run typecheck:ui`。本格只有文档改动与一处 CLI usage 文本改动，没有触及 UI 与测试基础设施；全量只在
+`dev → main` 前对精确 `dev` SHA 运行。
+
+### 保留为「未验证」（本格没有改变它们的结论）
+
+真实 provider 的并发运行、真实 provider 的 revision ACK、真实模型下的暂停/恢复复验、themes 的显式路径加载
+（ADR-0044 D06 明确标注为同构代码路径推断）、Provider 是否真的读取 Project Knowledge 物化文件、设置页与固定 shell 的观感
+（ADR-0008 下只能人工确认）。这些全部保留在 `docs/roadmap/mvp.md` 的对应「当前状态」与 `troubleshooting.md` §4，未因功能
+已实现而被抹掉。
+
+### 未核实与待裁决（不得当成已解决）
+
+- **历史记录里三处未转义的表格竖线**留下未改：`docs/tasks/README.md` 的 FOUNDATION-067 记录（约 3712/3716/3737 行）与
+  `docs/guides/cli-reference.md` §253 行以内联 `knowledge validate|list|show|resolve`、`CONFLICT|CAPACITY` 写法把一个单元格拆成多个，
+  渲染错位但**事实无误**。它们是本格之前就存在的；历史记录章节只允许在事实被证实后补注，不允许改写，因此本格**未动**，只在此登记。
+- **`PROJECT_SPEC.md` §1 前状态段与 §3 前后不一致**：规格文件在本格只读（用户裁决），因此**未改**，保留在
+  `docs/guides/troubleshooting.md` §3 并标「待裁决」。
+- **`intents.kind` 的三个取值没有任何 CLI 产生路径**（`CHANGE_PRIORITY`/`ANSWER_AGENT`/`SELF_MODIFICATION`）：缩小 CHECK
+  或补命令都属代码/规格变更，本格只改文档不改代码，因此保留为待裁决。
+- **本格未核实**：历史记录章节里各条「已完成」的声明本身（本格只核对被本格改动的状态声明与 J1 的 10 项），以及
+  `docs/architecture/*.md` 第 2–6 节的逻辑设计（第 8 节的实现记录才是权威）。
+
 ## NEXT — 最小可用纵向切片
 
+本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），
+不依据任何任务记录里的说法。原 0–7 的编号保留在下面的对照表里；从剩余列表中移出的条目在文末单列。
 
-0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、~~UI 投影~~（已由 FOUNDATION-050 完成 promotion/dependency 投影）。
-1. 真实验证 ADR-0016：在一次性临时仓库中用真实 Pi 跑「启动 → 暂停 → 恢复 → 终止」，核对 provider 进程确实退出、`--session` 确实续接同一 conversation、超时进入 `RECOVERY_REQUIRED`；脚本 Adapter 不能替代该验收。
-2. ~~长命令后台化与进度事件~~：已由 FOUNDATION-039 / ADR-0019 完成持久 Operation、步骤级进度、`--background` 与 `task.operation.cancel`（CLI + 同一命令面 + UI）。~~剩余：token 级实时进度事件、verification run 的独立 `CANCELLED` 状态、取消后验证副本的回收~~：已由 FOUNDATION-047 / ADR-0027 完成（`CANCELLED` 一等终态 + 重建表、被取消副本仍走 ADR-0021 `reclaim`、进度改为 `OperationProgressed`/`OperationSettled` 领域事件并经 `events list/tail` 与 UI 实时可见）。剩余：`task.run` 的 provider 事件级进度（PTY/token 字节不进事件，见 ADR-0027 D05）、架构文档的 doc-sync（`state-machines.md`、`event-model.md`、`sqlite-schema.md`、`agent-adapter.md` 均落后于 FOUNDATION-046/047/048/049）。
-3. ~~ADR-0010 Phase 3 技术 spike~~：已由 FOUNDATION-040 完成（真实 Pi session-file 双向 RPC↔TUI 恢复、PTY 生命周期、safe-point fence 与权限模式 side channel，见 `docs/spikes/pi-session-handoff.md`）。~~handoff Operation / Session incarnation~~：Runtime 侧契约与状态已由 ADR-0023 / FOUNDATION-043 完成（STRICT 权限转既有 Attention、incarnation 绑定 + 原子拒绝过期决议、单 writer lease 的 `ATTACHMENT_BUSY`、安全点与 predecessor 归属核验、重启按事实 reconcile），并已合入 `dev`；`session handoff status/request/cancel/writer/admit` 的 `--json` 退出码稳定。剩余：~~PTY transport 与 successor 进程启动、detach/reattach 编排、CLI attach~~：已由 ADR-0026 / FOUNDATION-046 完成（Runtime 拥有的 PTY helper 上运行真实 `pi` 原生 TUI、`admit` 真交接、attach/detach/reattach、`release` 交还自动化并回到同一 session file、能力投影改为真实值）。仍在剩余：跨交接权限模式**完整矩阵**、并行工具批次安全点、PTY resize、真实模型在 TUI 中键入后交还的复验。~~UI 终端~~：已由 FOUNDATION-050 完成（终端面板、交接/incarnation、依赖图与 BLOCKED 原因、promotion、verification `CANCELLED` 语义色；仅人工目视确认，未做浏览器/桌面自动化）。
-4. ~~revision 投递确认，以及 Runtime 重启后对 stale ACTIVE Session 的启动 reconcile。~~ 已由 ADR-0028 / FOUNDATION-048 完成：投递成为一等需求 + append-only 尝试台账（schema v19），只有结构化 ACK 或经核验的 successor Execution 才算确认（「消息发出去了」永不当作确认），能力如实（Pi 仍 `UNSUPPORTED`）、不支持时走既有「协作停止 + 新建 Execution」，超时/重启中断按事实收口；`task revision create|list` 与 `task revision delivery list|get|resolve` 零确认、`--json`、退出码稳定；`reconcileStaleAgentSessions` 收敛重启后仍写 ACTIVE/RUNNING 的投影（不写 RUNNING、不声称静止、不发信号、不删资源，一律 `RECOVERY_REQUIRED` 并记账）。剩余（不在本格）：真实 provider 的 ACK 行为（需先有 Adapter 实现 `applyRevision`）、真实模型对投递提示的理解、修订/投递的 UI 投影。
-5. ~~验证副本与失败现场的回收~~：已由 ADR-0021/FOUNDATION-041 完成（`reclaim plan/apply/records`、归属校验、append-only 账本、启动 reconcile、默认保留失败现场、不新增确认）；同轮决定 Attention 工具参数继续原样入库。剩余：未注册目录的人工处理与跨项目批量回收。
-6. ~~识别「Agent 不用工具、在散文里提问并结束轮次」的形态（FOUNDATION-030 剩余的一半）~~：**识别与显式记录部分已由 FOUNDATION-056 完成**（稳定码 `PROSE_QUESTION_NO_TOOL_USE` + provider 原始事实 + `task status --json` 的 `executions[].session.completion.note` + `AgentSessionCompleted` 事件 payload；启发式，宁可漏报，**不改状态机、不新增确认**）。~~仍未做、需要单独决策的部分：把它自动升级为 Attention / `WAITING_FOR_USER`~~：**已由 ADR-0043 / FOUNDATION-069（Wave I）完成**——命中即在同一完成事务内升级为一条 `QUESTION` Attention + Task `WAITING_FOR_USER`（默认 auto，可用 `codeestra settings prose-question-attention record-only|off` 降级），只由新增的 `task attention resolve … --dismiss|--answer` 解除，回答**不投递**给 provider；零 schema 变更。**剩余**：Codex 侧的事实层（本格明确未做）；真实 provider 下的「等待 + Session 已退出」组合未验收；UI 未投影。
-7. ~~Phase 2 并行调度主体~~（已在 `docs/roadmap/mvp.md` Phase 2 验收矩阵）：**规格、分析器与容量原语**已由 Wave E 完成（ADR-0030/0031/0032：`.codeestra/impact.json` 映射与确定性 ImpactSnapshot、`SAFE|UNKNOWN|CONFLICTING` 与稳定 reason code、全局默认 2 + 每 adapter 上限、reservation/release/崩溃 reconcile）；**剩余**：调度引擎本体（自动 tick、候选排序 + 冲突/容量判定接入、实际 diff 超出预测的处置、`--allow-unknown` 命令形态）与它的 UI 投影。未经引擎前，Phase 2 验收矩阵里「两个 SAFE 任务真的同时跑」仍然**未成立**。
+### 仍然剩余
+
+1. **真实验证 ADR-0016 的暂停 / 恢复**（原第 1 条）：在一次性临时仓库中用真实 provider 跑「启动 → 暂停 → 恢复 → 终止」，
+   核对 provider 进程确实退出、`--session` 确实续接同一 conversation、超时进入 `RECOVERY_REQUIRED`。当前只有脚本 Adapter
+   覆盖该编排；真实模型未复验（`docs/guides/troubleshooting.md` §4 第 2 条）。
+2. **交接与原生终端的剩余能力边界**（原第 3 条的剩余）：跨交接权限模式**完整矩阵**、并行工具批次的安全点、PTY resize、
+   真实模型在 TUI 中键入后交还自动化再复验。`session handoff *` 与 PTY 传输本身已实现（ADR-0026/FOUNDATION-046），
+   其中 `ptyResize` 在 `apps/runtime/src/session-handoff-service.ts` 里如实声明为 `'UNSUPPORTED'`。
+3. **修订投递的 provider 侧与 UI 投影**（原第 4 条的剩余）：真实 provider 的结构化 ACK 行为（需 Adapter 先实现
+   `applyRevision`）、真实模型对投递提示的理解、修订/投递的 UI 投影。台账、命令面与启动收敛已实现（ADR-0028）；
+   `apps/ui/src/**` 没有 revision/delivery 的专用视图。
+4. **散文提问（prose question）的剩余面**（原第 6 条的剩余）：Codex 侧的事实层（`codex-adapter.ts` 未改动、不上报
+   completion facts，因此 Codex 只漏报不谎报）、真实 provider 下「`Task WAITING_FOR_USER` + `Execution RUNNING` +
+   `Session EXITED`」组合的复验、散文等待的 UI 投影（UI 目前只把它当一条普通 Attention 显示）。升级与
+   `attention resolve` 已实现（ADR-0043/FOUNDATION-069）。
+5. **多成员 IntegrationBatch**（原第 0 条的剩余）：`integration_batch_items` 表存在，但 `task.integrate` 每次只集成一个
+   Task；批级 `STALE`、批级 `CANCELLED`、任务集合级集成仍是后续合约（见 `docs/architecture/state-machines.md` §4）。
+   三次真实的 `dev → main` 提升都走 AGENTS.md 的人工路径；产品命令 `promotion prepare` 需要 IntegrationBatch 的集成验证
+   证据，而这些批次没有产生它。
+6. **Phase 2 验收矩阵里「两个 SAFE 任务真的同时跑」**：调度引擎本体已实现（ADR-0033），但真实 provider 的并发运行
+   未完成受控验收（`docs/guides/troubleshooting.md` §4 第 1 条）。在此之前该验收项仍算未成立。
+7. **Phase 6 的 provider 消费**：`project knowledge *` 命令面与 Execution 绑定已实现（ADR-0041/schema v26），但 Adapter
+   尚不消费 `knowledgeSnapshotRefs`，因此「Provider 是否真的读取物化上下文」未验证。
+8. **插件选择的真实验证**（ADR-0044）：真实模型下「确实使用了所选 skill/theme」目前只有 argv 与命令面证据；themes 的显式
+   路径加载未单独实测（ADR-0044 D06 标注为推断）；第三方 extension 能否绕过 gate 未做对抗验证；Codex/Claude 的
+   `pluginSelection` 如实为 `UNSUPPORTED`（**未实现**，不是待做的小尾巴）。
+9. **观感类验收（ADR-0008 下只能人工确认，没有机器断言）**：设置页与五个界面设置键的视觉效果、紧凑密度/字号/`reduced` 动效的
+   观感、固定 shell 在窄屏与矮窗口的表现、Agent 设置页在窄屏下的排布。
+10. **Phase 7 Self Evolution 全部未开始**：Self Task、Candidate、自托管测试、`PROMOTABLE`、用户 Promotion、独立 bootstrap
+    与恢复演练；不可逆 migration 与 bootstrap 自身更新的策略仍是 Phase 7 的阻塞决策。
+11. **两处待用户裁决的不一致**（J1 第 7、10 条，见 `docs/guides/troubleshooting.md` §3）：`PROJECT_SPEC.md` §1 前状态段与
+    §3 的前后矛盾（规格只读，本格未改）；`intents.kind` 允许 `CHANGE_PRIORITY`/`ANSWER_AGENT`/`SELF_MODIFICATION`
+    三个没有任何 CLI 产生路径的取值。
+
+### 原 0–7 编号对照
+
+- **0. dev 基线（ADR-0009）**：**已完成**——`projects.dev_ref` 固定为 `refs/heads/dev`（ADR-0018），仓库无 `dev` 时 trust
+  以 `DEV_REF_MISSING` 拒绝，workspace 从该 ref 的 OID 建立。`dev → main` 提升与重启**已是产品能力**（ADR-0022/
+  FOUNDATION-042）并已**真实执行三次**（见「第一次/第二次/第三次真实 `dev → main` 提升」各节）。**剩余**见上面第 5 条
+  （多成员批次）。
+- **1. 真实验证 ADR-0016**：**仍未完成**，见上面第 1 条。
+- **2. 长命令后台化与进度事件**：**已完成**（FOUNDATION-039/ADR-0019；verification 的 `CANCELLED` 与
+  `OperationProgressed`/`OperationSettled` 由 FOUNDATION-047/ADR-0027 完成）。其最后一项剩余——「架构文档的 doc-sync
+  （`state-machines.md`、`event-model.md`、`sqlite-schema.md`、`agent-adapter.md` 落后于 FOUNDATION-046/047/048/049）」——
+  **由本格（FOUNDATION-074）完成**。仍剩余的是 `task.run` 的 provider 事件级进度（ADR-0027 D05 明确排除 token 字节）。
+- **3. ADR-0010 Phase 3 技术 spike / handoff / PTY**：**spike 已完成**（FOUNDATION-040）；**Runtime 侧契约、incarnation
+  与单 writer lease 已完成**（ADR-0023/FOUNDATION-043）；**PTY transport、successor 启动与 attach/detach/release 已完成**
+  （ADR-0026/FOUNDATION-046）；**UI 终端面板已完成**（FOUNDATION-050）。**剩余**见上面第 2 条。
+- **4. revision 投递确认与启动收敛**：**已完成**（ADR-0028/FOUNDATION-048，schema v19）。**剩余**见上面第 3 条。
+- **5. 验证副本与失败现场回收**：**已完成**（ADR-0021/FOUNDATION-041）；当年列为剩余的「未注册目录的人工处理与跨项目批量
+  回收」**已由 ADR-0037/FOUNDATION-062 完成**（schema v24，`reclaim … --all-projects --unregistered`）。本条**无剩余**。
+- **6. 散文提问**：**识别与显式记录已完成**（FOUNDATION-056：稳定码 `PROSE_QUESTION_NO_TOOL_USE`）；**自动升级为一等
+  Attention 已完成**（ADR-0043/FOUNDATION-069）。**剩余**见上面第 4 条。
+- **7. Phase 2 并行调度主体**：**规格、分析器与容量原语已完成**（ADR-0030/0031/0032）；**调度引擎本体已完成**
+  （ADR-0033/FOUNDATION-055：自动 tick、候选顺序、等待语义、`--allow-unknown`、§4 越界处置），**其 UI 投影已完成**
+  （FOUNDATION-059）。**剩余**只有上面第 6 条的真实 provider 并发验收。
+
+### 本次从 NEXT 移除的条目及依据
+
+以下声明曾是「剩余」，本格依据已合入 `dev` 的代码/命令面/表结构把它们移出剩余列表（依据命令见 FOUNDATION-074 的对照表）：
+
+| 原声明 | 移除依据 |
+|---|---|
+| 「剩余：真实 `main` 提升与稳定 Runtime 重启的实测」 | 已真实执行**三次**（`docs/tasks/README.md` 的「第一次/第二次/第三次真实 `dev → main` 提升」记录，第三次带 `promotion full-suite run` 的产品路径证据）。真实执行是**历史事实**，不是代码事实，故同时以记录与契约（`promotion.prepare`）交叉确认 |
+| 「剩余：`task.run` 的架构文档 doc-sync」 | **本格完成**（四份架构文档已对齐，见 FOUNDATION-074 的处置结果表） |
+| 「剩余：未注册目录的人工处理与跨项目批量回收」 | ADR-0037/FOUNDATION-062（schema v24）：`reclaim plan/apply/records` 支持 `--all-projects`、`--unregistered`、`--scan-root`、`--remove-unregistered`，并写入 `reclamation_records.source` |
+| 「剩余：PTY transport 与 successor 进程启动、detach/reattach 编排、CLI attach」 | ADR-0026/FOUNDATION-046：`session handoff attach/detach/release/admit/terminal read\|write` 均在 `usage()` 与契约中，`ptyTransport` 声明为 `'IMPLEMENTED'` |
+| 「剩余：handoff Operation / Session incarnation / 单 writer lease」 | ADR-0023/FOUNDATION-043 + schema v14（`session_incarnations`、`session_writer_leases`、`session_permission_requests`） |
+| 「剩余：调度引擎本体（自动 tick、候选排序 + 冲突/容量判定接入、实际 diff 超出预测的处置、`--allow-unknown` 命令形态）与它的 UI 投影」 | ADR-0033/FOUNDATION-055（`task.schedule status/plan/explain/run/clear-unknown`、`CODEESTRA_SCHEDULE_TICK_MS`、`TaskImpactPredictionRevoked`）+ FOUNDATION-059 的 UI 投影 |
+| 「剩余：token 级实时进度事件、verification run 的独立 `CANCELLED` 状态、取消后验证副本的回收」 | ADR-0027/FOUNDATION-047（`CANCELLED` 一等终态、schema v17 重建 CHECK、被取消副本走 ADR-0021 `reclaim`） |
+| 「剩余：识别『Agent 不用工具、在散文里提问并结束轮次』的形态」 | FOUNDATION-056（`PROSE_QUESTION_NO_TOOL_USE` + `task status` 的 `executions[].session.completion.note`）与 ADR-0043/FOUNDATION-069（升级为一等等待） |
+| 「剩余：把它自动升级为 Attention / `WAITING_FOR_USER`」 | ADR-0043/FOUNDATION-069（默认 `auto`；`codeestra settings prose-question-attention record-only\|off` 降级） |
+| 「`## NEXT` 仍有历史漂移，属于单独一次 doc-sync/NEXT 校准格」 | 本格（FOUNDATION-074） |
+| 「剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、UI 投影」中的**UI 投影**一项 | FOUNDATION-050（promotion/dependency/terminal 投影） |
+| 「剩余：Phase 2 并行调度主体…未经引擎前，Phase 2 验收矩阵里『两个 SAFE 任务真的同时跑』仍然未成立」中的**前半**（引擎未实现） | ADR-0033/FOUNDATION-055：引擎已实现；**后半（真实并发验收）仍然成立**，保留在上面第 6 条 |
+
+### 需要用户裁决（本格不得自行决定）
+
+- `PROJECT_SPEC.md` §1 前状态段与 §3 的前后矛盾：规格只读，改它需要用户裁决（保留在 `troubleshooting.md` §3 第 7 条）。
+- `intents.kind` 的三个无产生路径取值：缩小 schema CHECK 或补命令都可能是正确答案，属产品/规格决策
+  （保留在 `troubleshooting.md` §3 第 10 条）。

@@ -1,6 +1,6 @@
 # SQLite Schema
 
-状态：逻辑 SQL 设计基线 + 已实现 migration 记录。第 2–6 节是逻辑关系设计（其中若干节已被后续 ADR 修订，见第 8 节各版本的说明）；第 8 节逐版本记录 `packages/storage/src/migration.ts` 中**实际存在**的 migration，当前 `phase1SchemaVersion = 26`（v22/v25 未占用，v25 属并行 lane）。**schema version 16 永久未使用**，原因见第 8 节。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与第 2–6 节的约束等价，并以第 8 节的实现记录为准。
+状态：逻辑 SQL 设计基线 + 已实现 migration 记录。第 2–6 节是逻辑关系设计（其中若干节已被后续 ADR 修订，见第 8 节各版本的说明）；第 8 节逐版本记录 `packages/storage/src/migration.ts` 中**实际存在**的 migration，当前 `phase1SchemaVersion = 27`（v22 未占用；v25 已由 FOUNDATION-065 占用）。**schema version 16 永久未使用**，原因见第 8 节。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与第 2–6 节的约束等价，并以第 8 节的实现记录为准。
 
 ## 1. 约定
 
@@ -1108,13 +1108,87 @@ CREATE TABLE execution_slot_reservation_events (
 
 append-only：预留行持有被比较与交换的当前状态，而每一次观测——包括「决定保持占用、什么都没变」的 reconcile——都追加在这里，从不改写。`UNIQUE(reservation_id,command_id)` 让同一代重复 reconcile 幂等。
 
+### Phase 1 失败后的显式重试（schema version 23，ADR-0036）
+
+只加两列，不重建任何表：
+
+```sql
+ALTER TABLE tasks ADD COLUMN pending_retry_from_execution_id TEXT REFERENCES executions(id);
+ALTER TABLE executions ADD COLUMN retry_from_execution_id TEXT REFERENCES executions(id);
+```
+
+`pending_retry_from_execution_id` 是「这个 Task 正被显式重试、来源是哪次失败 Execution」的持久意图；`retry_from_execution_id`
+把新 Execution 与它要接替的那次失败绑定。`FAILED → READY` **不是自动的**：只有 `task.retry` 才写这两列并产生
+`TaskRetryRequested`（见 `event-model.md`），因此「重试排队」与「新 Execution」不可分开观察。
+
+### 未注册目录的回收处置（schema version 24，ADR-0037）
+
+`reclamation_records` 被**重建**（既有行逐行复制、两个索引重建），因为要表达 ADR-0021 明确拒绝过的一类事实：
+
+```sql
+-- 与 v12 的关键差异
+source TEXT NOT NULL DEFAULT 'REGISTERED'
+  CHECK(source IN ('REGISTERED','UNREGISTERED_DIRECTORY'));
+kind TEXT NOT NULL CHECK(kind IN ('TASK_WORKTREE','VERIFICATION_COPY','INTEGRATION_WORKTREE',
+  'UNREGISTERED_DIRECTORY'));
+task_id TEXT REFERENCES tasks(id);   -- 从 NOT NULL 变为可空
+outcome TEXT NOT NULL CHECK(outcome IN ('RECLAIMED','ALREADY_ABSENT','RETAINED','REFUSED','FAILED',
+  'RECOVERY_REQUIRED'));
+CREATE INDEX reclamation_records_by_source ON reclamation_records(source,created_at,id);
+CREATE UNIQUE INDEX one_reclamation_record_per_resource
+  ON reclamation_records(operation_id,kind,resource_id);
+```
+
+三点理由（与 `migration.ts` 的注释一致）：`source` 让「已登记资源」与「未登记目录」可按来源读回，不必从 reason code 猜；
+`task_id` 变可空是因为残留的 `verifications/<project>/<id>` 目录只有项目、没有可诚实归属的 Task，编造一个正是这个能力绝不能做的
+假归属；`outcome` 增加 `RECOVERY_REQUIRED`，是「无法核验归属」（目录内有活进程、Git 状态不可读、项目未知）的诚实结局。既有行按
+原样复制并标 `REGISTERED`。没有任何外键引用 `reclamation_records`，所以开外键重建是安全的。
+
+### 分层验证证据（schema version 25，ADR-0038 / ADR-0039）
+
+`verification_runs` 只加四列（不重建），并新增两张表：
+
+```sql
+ALTER TABLE verification_runs ADD COLUMN policy_source TEXT NOT NULL DEFAULT 'PROJECT_POLICY'
+  CHECK(policy_source IN ('PROJECT_POLICY','TARGETED_TEST_PLAN'));
+ALTER TABLE verification_runs ADD COLUMN plan_id TEXT;
+ALTER TABLE verification_runs ADD COLUMN plan_version TEXT;
+ALTER TABLE verification_runs ADD COLUMN plan_digest TEXT;
+
+CREATE TABLE targeted_test_plans ( ... ) STRICT;      -- append-only（UPDATE/DELETE trigger RAISE(ABORT)）
+CREATE TABLE dev_full_suite_evidence ( ... ) STRICT;  -- 每次运行一行，终态必须带 ended_at/outcome_code
+CREATE UNIQUE INDEX one_targeted_test_plan_per_subject
+  ON targeted_test_plans(project_id,task_id,revision_id,tested_commit,plan_digest);
+CREATE INDEX dev_full_suite_evidence_by_commit
+  ON dev_full_suite_evidence(project_id,dev_commit,queued_at DESC);
+
+ALTER TABLE stable_promotions ADD COLUMN full_suite_evidence_id TEXT REFERENCES dev_full_suite_evidence(id);
+ALTER TABLE stable_promotions ADD COLUMN full_suite_dev_commit TEXT;
+ALTER TABLE stable_promotions ADD COLUMN full_suite_policy_version TEXT;
+ALTER TABLE stable_promotions ADD COLUMN full_suite_policy_digest TEXT;
+ALTER TABLE stable_promotions ADD COLUMN full_suite_lockfile_digest TEXT;
+ALTER TABLE stable_promotions ADD COLUMN approved_full_suite_evidence_id TEXT;
+```
+
+- `targeted_test_plans` 是某个分支的 `.codeestra/tests.json` 与它被选定时的精确 `(task, revision, commit, digest)` 的 append-only
+  绑定。验证消费的是**已记录的计划**，绝不读当下的文件，所以扩大或缩小范围是一次显式、可审计的追加，而不是静默编辑；`UPDATE`/
+  `DELETE` 被 trigger 拒绝，理由与 `task_dependencies`、`task_revisions` 相同——就地改掉的计划会让它曾经支撑的证据不可审计。
+- `dev_full_suite_evidence` 是 `dev → main` 要求的独立证据：绑定候选 commit、项目 `main` ref 上的固定策略（`policy_digest`）与该
+  commit 的 lockfile。`lockfile_present` 把「没有 lockfile」也显式绑定（记 0 + 空字节的 digest），因此以后新增 lockfile 是一个不同
+  的绑定而不是静默变弱；终态 `CHECK` 保证未完成的运行不能被读成通过；重跑总是插新行，因此「哪一次运行支撑了这次提升」保持精确。
+- `verification_runs.policy_source` 记录它实际跑的是固定项目策略还是分支定向计划——`policy_digest` 本身说不清这件事。
+
 ### 迁移执行顺序与共享槽位后果
 
-`Phase1Database.migrate()` 按 `if (version < N)` 升序执行 v1…v26（跳过 v16、v22、v25），最后写 `PRAGMA user_version=${phase1SchemaVersion}`。升级前 schema version 大于 `phase1SchemaVersion` 时以 `UNSUPPORTED_SCHEMA` 拒绝写入。
+`Phase1Database.migrate()` 按 `if (version < N)` 升序执行 v1…v27（跳过 v16、v22），最后写
+`PRAGMA user_version=${phase1SchemaVersion}`。升级前 schema version 大于 `phase1SchemaVersion` 时以 `UNSUPPORTED_SCHEMA` 拒绝写入。
 
-已知后果（ADR-0032 记录）：单个 lane 合并后，**已经被标成更高版本号的库不会补跑后来出现的更低版本步骤**。跨格合并必须按既定顺序（E0 → E1 → E2；以及 Wave D 的 17 → 18 → 19）。这也是 v16 永久未使用的同一个根因。
+已知后果（ADR-0032 记录）：单个 lane 合并后，**已经被标成更高版本号的库不会补跑后来出现的更低版本步骤**。跨格合并必须按既定顺序
+（E0 → E1 → E2；以及 Wave D 的 17 → 18 → 19）。这也是 v16 永久未使用的同一个根因。
 
-版本占用现状（以 `packages/storage/src/migration.ts` 为准，不提前创建未来表）：v22、v25 未占用（v25 属并行 lane），v23（`task retry`，ADR-0036）与 v24（未注册目录回收，ADR-0037）已实现——本节尚未逐版本补齐 v23/v24 的 DDL 记录，属文档同步滞后，不是未实现。
+版本占用现状（以 `packages/storage/src/migration.ts` 为准，不提前创建未来表）：v22 未占用；v16 永久未使用；v23–v27 已实现
+（v23 `task retry`/ADR-0036，v24 未注册目录回收/ADR-0037，v25 分层验证证据/ADR-0038+ADR-0039，v26 项目知识/ADR-0041，
+v27 Agent 插件选择/ADR-0044）。当前 `phase1SchemaVersion = 27`。
 
 ### Phase 6 项目知识分层与 Execution 绑定（schema version 26，ADR-0041）
 
@@ -1171,3 +1245,17 @@ CREATE INDEX execution_knowledge_snapshots_by_task
 - `execution_knowledge_snapshots` 以 `execution_id` 为主键（一个 Execution 恰好用一个快照），`context_path`/`context_digest`/`context_bytes` 记录物化到 `<CODEESTRA_HOME>/knowledge/<project-id>/<task-id>/knowledge-context.md` 的确切字节。绑定不可改写：重复写同一绑定是重放，写**不同**的快照是 `COMMAND_CONFLICT` 而不是静默更新。
 - 绑定的插入在 `reserveExecution` 的**同一事务**内完成，因此「Execution 存在」与「已绑定所用知识」不可分开观察；插入失败时整个保留事务回滚（实测：Execution 行、绑定行均为 0，Task 回到 `READY`）。
 - 为什么是两张新表而不是给 `executions` 加列：新表 + 事务内插入给出同样的原子性，而没有表重写的风险，且既有历史行原样保留（ADR-0041 D07）。
+
+### Phase 5 Agent 插件 / 资源选择（schema version 27，ADR-0044）
+
+只加一列，不重建任何表：
+
+```sql
+ALTER TABLE agent_configurations ADD COLUMN plugin_selection_json TEXT
+  CHECK(plugin_selection_json IS NULL OR json_valid(plugin_selection_json));
+```
+
+选择是一份列表（extensions / skills / prompt templates / themes 四类），因此不能塞进既有的三个标量覆盖列。`ALTER TABLE ... ADD COLUMN`
+保留每一行（含两个部分唯一索引）原样，本能力之前的历史行只是没有选择。语义是**整体替换**：一个作用域的选择替换低优先级作用域的整份列表，
+每个选中路径在写入前核验一次、在 Session 启动前再核验一次，无法加载的路径以稳定码拒绝且不创建 Execution（`agent.config.*` 的
+profile 细节见 `agent-adapter-api.md`）。`executions.agent_config_json` 同时记录该次启动实际带上的 `plugins`，供事后读回。

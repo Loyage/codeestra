@@ -142,6 +142,29 @@ ADR-0042（从 reclaim 保留的 task branch 重建 owned worktree）**不新增
 - 这七个事件与它们描述的状态变更在**同一 SQLite 事务**内提交（`TakeoverFailed` 除外——拒绝本身没有状态变更，它自己就是那条事实，事件 id 由 command + stage + reason 推导，故同一命令重放不产生第二条）。
 - 单一 writer lease 的每一次更换都写 `TerminalWriterLeaseChanged`（acquire 与 release 各一条），因此「谁在写这个 conversation」可从日志复原，而不是只能从当前行推断。
 
+**显式重试与散文提问解除（Wave H / Wave I，本格补齐登记）**
+
+这两个事件本体分别由 FOUNDATION-061（ADR-0036）与 FOUNDATION-069（ADR-0043）实现，但一直只在正文里被引用、未进事件目录；
+FOUNDATION-074 的 doc-sync 把它们补齐（名字都是实现先行的，按 §2.2 规则永不重命名）。
+
+| Event | aggregate | 关键 payload |
+|---|---|---|
+| `TaskRetryRequested` | `Task` | taskId, `from='FAILED'`, `to`（`READY`/`BLOCKED`）, failedExecutionId, failedAttemptNumber, adapterId, previousAdapterId, `adapterChanged`, `workspaceMode`（`REUSE_OWNED`/`REBUILD_OWNED`/`NEW_WORKSPACE` 等）, workspaceId, workspaceEvidence, `dependencies`, actor |
+| `ProseQuestionAttentionResolved` | `Attention` | attentionId, `resolution`（`DISMISSED`/`ANSWERED`）, answerText, note, actor, `attentionStatus='CLOSED'`, `deliveredToProvider: false`, reason |
+
+- `TaskRetryRequested` 是重试**自己的**审计记录，与它引起的 `TaskStateChanged` 分开追加：它回答「谁在哪个 Agent 上、用哪种
+  workspace 处置重试了哪次失败」。同一命令重放不产生第二条。
+- `ProseQuestionAttentionResolved` 与它引起的 `TaskStateChanged`（`WAITING_FOR_USER → RUNNING`）在同一次 `attention resolve`
+  里提交；`deliveredToProvider: false` 是事实的一部分——散文提问没有 provider dialog 可写，解除**什么都不投递**、不新建
+  Execution、不 resume conversation。`attention answer` 对散文等待以 `PROSE_QUESTION_RESOLUTION_REQUIRED` 拒绝，因此这条事件
+  永远不会出现在 provider 投递路径上。
+
+**Wave I/J 的其余能力没有新增事件名（FOUNDATION-074 核对）**：Project Knowledge（ADR-0041，schema v26）把快照与 Execution 绑定
+写进 `knowledge_snapshots` / `execution_knowledge_snapshots` 两张表，**不写事件**；提升前全量证据（ADR-0039，schema v25 的
+`dev_full_suite_evidence`）同样只有行，不算领域事件；`settings ui *`（ADR-0045）与 `agent plugins *`（ADR-0044）也都是**设置/配置**，
+后者只追加 `agent_configurations` 的一列并在 `executions.agent_config_json` 留痕。它们的可审计性来自表与命令回执，不是事件流；
+把「没有新事件」如实写出来，比默默省略更有用。
+
 ### 2.2 命名规则（ADR-0035 裁决，长期有效）
 
 1. **已实现的事件名以实现为准，永不重命名。** 事件台账是 append-only 审计：重命名会让同一语义在历史里长期存在两个名字，并让已发出的订阅游标、消费者幂等键和外部脚本同时失效。设计目录里与之不同的名字标为**已废弃**。
@@ -169,6 +192,8 @@ ADR-0042（从 reclaim 保留的 task branch 重建 owned worktree）**不新增
 | `ExecutionPauseRequested` / `ExecutionPaused` / `ExecutionCancelled` / `ExecutionSuperseded` | 未找到同名事件；暂停/取消的投影通过 `TaskStateChanged` / `ExecutionStateChanged` 与 Operation 状态表达 | **未验证**是否存在等价专名，本格不改动 |
 | `ResultCommitAuthorizationRequested` | 未实现同名事件（授权由 prepare/confirm 两步与 `ResultCommitAuthorized` 表达） | 设计名保留，未实现 |
 | `CandidateBuilt` / `SelfTestCompleted` / `StablePromoted` / `StableRollbackCompleted` | 未实现 | 设计名保留（Self Evolution 阶段） |
+| `ProseQuestionAttentionResolved` | **实现先行名**（FOUNDATION-069 新增，本格补登记） | 本格**登记为长期名**；`UserAnswerDelivered` 不适用于散文提问（它没有 provider 请求），因此不合并 |
+| `TaskRetryRequested` | **实现先行名**（FOUNDATION-061 新增，本格补登记） | 本格**登记为长期名**；与 `TaskStateChanged` 同事务、不取代它 |
 | （设计目录没有的实现新增名） | `TaskArchived` / `TaskUnarchived` / `WorkspaceReclaimed` / `ResourcesReclaimed` / `OperationProgressed` / `OperationSettled` / `ExecutionSlot*` / `SchedulerCapacityChanged` / `TaskSchedule*` / `TaskImpactPredictionRevoked` / `Promotion*` / `Integration*` | 反向登记：这些是实现先行的名字，同样永不重命名 |
 
 ## 3. 一致性、投递和恢复
