@@ -104,7 +104,9 @@ const capacityTables = [
 function expectUpgradedToCapacitySchema(upgraded: Phase1Database): void {
   expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version)
     .toBe(phase1SchemaVersion);
-  expect(phase1SchemaVersion).toBe(21);
+  // This lane's step is v21; the assertion is that the upgrade reaches whatever the current schema
+  // version is, not that this lane is the last one.
+  expect(phase1SchemaVersion).toBeGreaterThanOrEqual(21);
   const tables = upgraded.sqlite.query<{ name: string }, []>(`
     SELECT name FROM sqlite_master WHERE type='table'
       AND name IN ('project_capacity_limits','project_adapter_slot_limits',

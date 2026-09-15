@@ -3022,6 +3022,187 @@ Adapter **报不出事实时不猜**：`facts` 字段整体缺席表示“未知
 - 下一步执行者固定本次 dev 提交 OID，重新核对两个 ref 与 main 干净状态，在 main 工作树 fast-forward 固定 OID，随后按 install → build:ui → stop → status 执行；有需要时再启动 UI 并检查 READY + uiRunning。最终提交 OID、各步退出码与新 boot 由实际执行输出记录，不在提交前捏造发布结果。
 - 未授权 push；不直接 update-ref 已检出的 main，失败不回滚，不手工清理未知进程。新 UI token 不写入文档、日志或提交。
 
+## FOUNDATION-062 — `reclaim` 的跨项目批量与未注册目录处置（ADR-0037，schema v24）
+
+状态：**实现 + 自查完成，等用户确认后提交**（本格未 commit、未 push、未提升 `main`、未重启稳定 Runtime）。worktree
+`/Users/loyage/Documents/codeestra-wt/h4-reclaim-batch`，分支 `lane/h4-reclaim-batch`，基线**固定**
+`dev@8058eb9275fbea87c1216c4ac9ea66b7e7d96022`（未 rebase、未合并新 dev、未 pull）。ADR：**0037**（本格需要新决策：
+账本 schema 变化、批量 operation 语义、未注册目录门槛、ADR-0021 D03 退出码修订）。schema：**v24**（v22/v23 留给并行格，
+`if (version < 24)`，绝不插入 `if (version < 16)`）。
+
+任务来源：`## NEXT` 第 5 条的剩余半截——「未注册目录的人工处理与跨项目批量回收」。
+
+### 缺口
+
+`reclaim` 过去只能按 `--project`（或 `--task`）对**已登记**的三类资源做 `plan`/`apply`。于是：① 想清理多个项目要一个
+个来；② 磁盘上**不在账本里**的目录（历史遗留、半途中断、别人的格留下的）只能人工 `rm -rf`——正好绕过归属校验与
+留痕，这是 ADR-0021 最不想看到的用法。
+
+### 新增/扩展的命令面（不加第二个命令）
+
+```bash
+bun run codeestra reclaim plan  [--project <id> | --all-projects] [--task <id>] [--kind <k>]… \
+  [--include-failure-scenes] [--unregistered] [--scan-root <home 内绝对路径>] \
+  [--remove-unregistered <path>]… [--json]
+bun run codeestra reclaim apply [同上] [--json]
+bun run codeestra reclaim records [--project <id> | --all-projects] [--task <id>] \
+  [--source <ALL|REGISTERED|UNREGISTERED_DIRECTORY>] [--since <epoch-ms|ISO>] [--until <epoch-ms|ISO>] \
+  [--limit <n>] [--json]
+```
+
+- **省略 `--project` = 全部 ACTIVE-trusted project**（`--all-projects` 是同义显式写法）。两者同时给出、或
+  `--task` 没有 `--project`，CLI 以 exit 2 拒绝（不猜）；Runtime 侧 `resolveReclaimScope` 同样以
+  `PROJECT_SCOPE_CONFLICT`/`PROJECT_SCOPE_REQUIRED` 拒绝。
+- **批量 = 每个项目一个独立 operation**：命令 ID 由批命令 ID 与 project ID 确定性派生（`sha256(commandId:projectId)`），
+  所以每个项目有自己的 `operations`/receipt/账本行，重放同一批命令按项目命中各自 receipt、不二次记账；
+  **一个项目的拒绝、失败甚至读不出来都不影响其它项目**（失败项目进顶层 `failures[]`，并以 `projectError` 出现在
+  自己的分组里，不静默消失）。单项目输出仍是原来的扁平形状（加 `scope` 与 `unregistered` 字段）；批量输出是
+  `scope: ALL_PROJECTS` + `projects[]` 分组 + 聚合 `counts`/`outcomeCounts` + `operations[]`/`failures[]`。
+- **未注册目录**：`--unregistered` 触发有界扫描（只走
+  `<CODEESTRA_HOME>/{worktrees,verifications,integrations}/<project-id>/<resource-id>` 两层、不跟 symlink、
+  最多 500 个候选并在超出时记 `truncated: true`），`--scan-root` 可收窄到 home 内任意子树（home 之外
+  `SCAN_ROOT_OUTSIDE_HOME`、相对路径 `SCAN_ROOT_NOT_ABSOLUTE`，都 exit 1）。**默认 dry-run**：`plan` 永不删除，
+  `apply --unregistered` 不点名任何路径时也只 `RETAIN` 并记账；真正删除必须用 `--remove-unregistered <绝对路径>`
+  显式点名**那一个目录**。这是「显式选择」，**不新增任何确认/审批**（FULL 常态路径一步未增）。
+- **删除时重核**：每个被点名的目录在删除前重跑同一套判定（同一份进程表读数），任何事实变化（新 symlink、路径被账本
+  认领、出现进程、出现未提交文件）都变成一条记录下来的拒绝而不是删除。Git 已注册 → 走既有 `removeOwnedWorktree`
+  （重校注册/branch/HEAD 后 `git worktree remove` + prune）；未注册 → 本服务自己的窄删除（重校 owned root、
+  路径恰好 `<root>/<uuid>/<uuid>`、`.git` 标记仍在，然后只 `rmSync` 那一个目录）。**都不删 branch、不用 `git clean`/
+  `reset --hard`、不用 `--force`、不按名字杀进程。**
+
+### 归属核验：删任何东西之前必须同时成立的证据
+
+已登记资源沿用 ADR-0021 的三重校验（owned root 内 + Git 注册一致 + branch/HEAD 与记录一致），并**新增**一条：
+workspace 被 `execution_slot_reservations` 中 `RESERVED`/`RECOVERY_REQUIRED` 的预留认领时一律
+`REFUSE/ACTIVE_RESERVATION`，**不受 `--include-failure-scenes` 影响**（预留活过它将要启动的那次 Execution）；
+删除前再读一次该预留（`findActiveWorkspaceReservation`），`releaseWorkspaceForReclamation` 也新增同样的拒绝。
+
+未注册目录在同一结果里带出判定依据（不是散文）：**路径形态 `layout`、所属 `runtimeHome`、Codeestra 标记文件
+（`gitMarker`/`gitMarkerTarget`）、是否被账本认领（`ledgerClaim`）、Git 注册事实（`registered`/`registeredBranch`/
+`registrationHead`）、工作区是否干净（`clean`/tracked/untracked）、进程表（`processCheck`/`processesInUse`）、
+是否被显式点名（`explicitlySelected`）**。判定顺序（任一不满足即不删）：symlink → 不在 owned root 内 → 账本已认领
+（可信项目直接排除出候选，记入 `scan.claimedByLedger`；不可信项目 `CLAIMED_BY_UNTRUSTED_PROJECT`）→ 项目不可信/无项目行
+（`PROJECT_NOT_TRUSTED`）→ 该路径命名了一个仍活跃的 Task（`ACTIVE_TASK`）→ 无 `.git` 标记
+（`NOT_A_CODEESTRA_WORKTREE`）→ Git 注册不可读（`GIT_INSPECTION_FAILED`）→ Git 工作区状态不可读
+（`GIT_STATE_UNAVAILABLE`）→ 进程表不可读（`PROCESS_CHECK_UNAVAILABLE`）→ 有进程工作目录在里面（`PROCESS_IN_USE`）
+→ 有未提交改动（失败现场，`--include-failure-scenes` 才可越过）→ 未被点名（`UNREGISTERED_REQUIRES_EXPLICIT_SELECTION`）。
+前三类不可核验的情况一律 `RECOVERY_REQUIRED` 且不删。
+
+进程检查是 OS 事实：Linux 读 `/proc/<pid>/cwd`，否则 `lsof -a -d cwd -Fpn`（本机实测 ~2s，只在 `--unregistered`
+时发生一次）；两种方式都不可用即 `PROCESS_CHECK_UNAVAILABLE`（fail closed）。
+
+### 账本形态（schema v24，纯 additive 重建）
+
+`reclamation_records` 重建为 v24：新增 `source`（`REGISTERED`/`UNREGISTERED_DIRECTORY`）、`kind` 增加
+`UNREGISTERED_DIRECTORY`、`outcome` 增加 `RECOVERY_REQUIRED`、`task_id` 改为可空（`verifications/<project>/<id>`
+这类残留有 project 却没有可诚实归因的 Task）；既有行原样拷贝并盖 `REGISTERED`，两个旧索引保留，新增
+`reclamation_records_by_source`。`reclaim records` 可按项目（单项目或 `--all-projects`）、任务、`--source`、
+`--since`/`--until`（epoch 毫秒或 ISO-8601）读回，输出仍是记录数组（每条带 `projectId`/`taskId`/`source`/时间）。
+
+### 退出码（**Amends ADR-0021 D03**）
+
+| 退出码 | `plan` | `apply` |
+|---|---|---|
+| 0 | 至少有一条可回收（`RECLAIM` 或已点名的未注册删除） | 确实 `RECLAIMED ≥ 1` |
+| 3 | 正常 no-op：没有可回收项 | 正常 no-op：这次什么都没回收到 |
+| 1 | 失败（未知项目 `NOT_FOUND`、扫描根越界、删除失败…） | 同上 + 删除失败 |
+| 2 | CLI 用法错误（同既有 `usage()`） | 同左 |
+
+`retained`/`refused` 仍是**正常决策**（不是失败），只是不再与「确实回收了东西」共用 0；退出码 3 时 stderr 保持为空。
+
+### 测试清单
+
+- `apps/runtime/test/cli-reclaim-batch.test.ts`（新，**12 项**，真实 CLI + 真实 Runtime + 1~2 个真实临时仓库）：
+  1) 跨项目批量：项目 A `RECLAIMED`、项目 B 因活跃预留 `REFUSED`，一条拒绝不影响另一条，按项目分组、聚合计数、
+  每个项目一个 operation、账本按项目读回、按来源过滤；2) 空批量 `plan`/`apply` 均 exit 3，范围冲突/`--task` 无
+  `--project` exit 2；3) `git worktree add` 造出的未注册 worktree 被列出（证据断言含 `layout`/`runtimeHome`/
+  `gitMarker`/`ledgerClaim`/`clean`/`processCheck`/`explicitlySelected`）→ 默认 `RETAIN` 且目录仍在 → 点名删除后
+  目录消失、**branch 保留**、重复执行不二次记账（同路径只有一条 `RECLAIMED`）；4) 项目行不存在的目录与无 `.git`
+  标记的目录即便被点名也不删（`ls` 前后对比断言目录与内部文件仍在），可归因的那个记 `RECOVERY_REQUIRED`；
+  5) `git clone` 造出的未注册 checkout（Git 不注册）走窄删除，`--scan-root` 越出 home 被拒；6) home 经 symlink 到达时
+  （`/tmp` vs `/private/tmp`）**已登记 worktree 不得被当成未注册目录**，且按 symlink 拼写的选择仍命中规范记录
+  （这条是本轮 e2e 暴露出的真实缺陷的回归测试：修之前必失败、修之后通过）；7) 活跃预留保护
+  `REFUSE/ACTIVE_RESERVATION` 且账本里带预留 ID；8) 真进程 cwd 在未注册目录内 → `RECOVERY_REQUIRED/PROCESS_IN_USE`
+  且目录仍在（本测试自己 spawn 一个 cwd 在该目录内的子进程，并在 `finally` 里结束它）；9) 按
+  `--source`/`--since`/`--until` 读账本；10) v21→v24 迁移保留既有行、`foreign_key_check` 为空、新 CHECK 拒绝非法
+  source/outcome、`task_id` 可为空；11) 迁移不在 base schema 里；12) 已是最新版本的库重开时不重跑。
+- `apps/runtime/test/cli-reclaim.test.ts`（既有，4 处断言更新）：无操作/拒绝路径的 `plan`/`apply` 退出码从 0 改为 3。
+- `packages/storage/test/{impact-analysis,slot-capacity-migration}.test.ts`、`apps/runtime/test/{revision-delivery,
+  verification-cancel}.test.ts`：4 处写死 `phase1SchemaVersion === 21` 的断言随 v24 更新（其中一处改为
+  `toBe(phase1SchemaVersion)`，另一处改为 `toBeGreaterThanOrEqual(21)`，避免下次再被同一个断言绊住）。
+
+### 实际验证
+
+- `bun run check`：**退出码 0** —— 根与 UI `tsc --noEmit`、**272 项 Vitest**、**579 项 Bun tests（0 fail，68 文件）**、
+  UI Vite 构建成功。**跑完后孤儿 Runtime 进程 0**（`ps` 按 argv/cwd 核验，本 home 无残留）。
+- 过程中如实记录一次**既有、与本格无关的负载敏感抖动**：第一次完整 `check` 中
+  `cli-impact.test.ts`「derives SAFE, CONFLICTING, and UNKNOWN verdicts from real change sets」在最后一步
+  `task cancel <project> <first> 2`（硬编码 expected version）上收到 exit 1；单独重跑该文件 **1 pass / 0 fail**，
+  其后的完整 `check` 均 **579 pass / 0 fail**。本格未改动调度/取消/版本路径（`schedule-service`、
+  `scheduler`、`slot-reservation-service`、`task-control-service` 一行未动），不把它算成本格修复成果。
+- **端到端（真实 CLI + 真实 Runtime + `CODEESTRA_HOME=/tmp/ce-h4` + 两个真实临时仓库）**，完整输出见
+  `/tmp/h4-evidence.log`，要点：
+  - `reclaim plan --all-projects --unregistered --json`：`scope: ALL_PROJECTS`，两个分组
+    （A `TASK_WORKTREE RECLAIM COMPLETED_AND_QUIESCENT`，B `TASK_WORKTREE REFUSE ACTIVE_RESERVATION`），
+    聚合 `counts {total: 2, reclaim: 1, refuse: 1}`，`processCheck: AVAILABLE`，exit 0。
+  - `reclaim apply --all-projects --json`：exit 0，`outcome: SUCCEEDED`、`outcomeCounts {reclaimed: 1, refused: 1, failed: 0}`、
+    `operations` 两个项目各一条、`failures: []`；A 的 worktree 目录消失、B 的 workspace 仍在；账本两条
+    （A `RECLAIMED/REMOVED`、B `REFUSED/ACTIVE_RESERVATION`）。
+  - 未注册目录：`git worktree add -b task/<uuid>` 造出的目录被列出，证据
+    `{layout: "<home>/worktrees/<project-id>/<resource-id>", runtimeHome: "/private/tmp/ce-h4", gitMarker: "FILE",
+    ledgerClaim: null, registered: true, clean: true, processCheck: "AVAILABLE", explicitlySelected: false}`，
+    动作 `RETAIN/UNREGISTERED_REQUIRES_EXPLICIT_SELECTION`；不点名的 `apply` 之后 `ls -d` 仍显示该目录（exit 3）。
+  - 点名删除：`apply --unregistered --remove-unregistered <path>` exit 0、`reclaimed: 1`，目录消失，
+    `git rev-parse refs/heads/task/<uuid>` 仍返回原 commit（branch 保留）；第二次同名运行 exit 3 且
+    `records --source UNREGISTERED_DIRECTORY` 里同路径只有一条 `RECLAIMED`（append-only，不重复记账）。
+  - 无法核验：项目行不存在的目录（真实 worktree）在点名的批 `apply` 里列为
+    `unregistered.unattributed` 的 `RECOVERY_REQUIRED/PROJECT_NOT_TRUSTED`（不删、也**不入账本**，见下）；
+    可信项目内无 `.git` 标记的目录记为 `RECOVERY_REQUIRED/NOT_A_CODEESTRA_WORKTREE`；`ls -d` 与
+    `ls <dir>` 前后对比证明两个目录及其内部 `notes.txt` 都在原处。
+  - 真进程占用：在一个真实 worktree 内起 `sleep 120`（cwd 在里面）后，`plan` 列出
+    `RECOVERY_REQUIRED/PROCESS_IN_USE` 并附进程工作目录；点名的 `apply` 仍 exit 3、目录仍在。
+  - 收尾：`codeestra stop` exit 0（`status: STOPPED`、`waitedMs: 31`、`identityVerified: true`、
+    `ownership.verdict: NOT_RUNNING`），随后 `ps` 里没有命名 `/tmp/ce-h4` 的进程；`/tmp/ce-h4*` 夹具已回收。
+
+### 已知边界（如实记录）
+
+- **无法归因到任何 ACTIVE-trusted project 的目录只报告、不入账本**（`unregistered.unattributed`，动作
+  `RECOVERY_REQUIRED`）。账本是 project 作用域（`reclamation_records.project_id` 与 `operations.project_id` 非空），
+  把别人的目录记到某个项目名下正是本能力要防的假归因；要清理它们需要先把项目重新 trust，或另立一个 home 级账本
+  （需单独决策）。这一点写在 ADR-0037 D08/Consequences。
+- **进程检查只比对工作目录**：一个把 cwd 设在别处、却持有该目录内文件句柄的进程不会被发现。
+- 未被任何记录识别的**非目录条目**（文件）不进入候选，也不会被删除；`--scan-root` 之外的一切都不看。
+
+### 未验证（不得当成已成立）
+
+- 跨用户/跨机器场景：`lsof` 对其它用户进程的可见性、`/proc` 与 `lsof` 之外的平台。
+- 真实磁盘压力下的大批量（>500 候选被 `truncated` 截断的路径只有单元级覆盖）。
+- 陈旧注册（Git 仍注册、目录已不在）的未注册分支；并发多次 `reclaim apply` 的竞争（仍按 command ID 幂等，
+  未做压力测试）。
+- UI 投影（本格不做；`apps/ui/**` 一行未动）。
+- 把 `reclaim` 接入任何自动路径（本格明确不做，且属于需要单独 ADR 的范围）。
+
+### 改动边界
+
+改动/新增：`apps/runtime/src/reclaim-service.ts`（独占）、`apps/runtime/test/cli-reclaim-batch.test.ts`（新）、
+`docs/decisions/0037-*.md`（新）、`docs/tasks/README.md`（本节）；共享槽位按纪律只做追加：
+`packages/contracts/src/index.ts`（只动三个 `reclaim.*` 请求）、`packages/storage/src/{migration,database,index}.ts`
+（v24 迁移 + 账本/候选纯追加读写 + 新方法）、`apps/cli/src/main.ts`（只加 `reclaim` 的选项与 `usage()` 追加行）、
+`apps/runtime/src/main.ts`（只做接线）、`package.json`（两份测试列表各加 `cli-reclaim-batch`）、
+`docs/decisions/README.md`（表尾一行 + Phase 2 前那张表的一行更新）。**未改**：`schedule-service`、`scheduler`、
+`slot-reservation-service`、`agent-runtime-service`、`session-handoff-service`、`terminal-service`、
+`packages/agent-adapters/**`、`apps/ui/**`、`packages/domain/**`、`PROJECT_SPEC.md`、`docs/architecture/**`；
+`## NEXT` 条目本身**一字未动**。
+
+### 建议如何更新 `## NEXT` 第 5 条
+
+第 5 条现在只剩「并发压力测试」这一项，建议把该行改为：
+
+> 5. ~~验证副本与失败现场的回收~~：已由 ADR-0021/FOUNDATION-041 完成（…）。~~剩余：未注册目录的人工处理与跨项目批量回收~~
+>    已由 ADR-0037/FOUNDATION-062 完成（`--all-projects` 批量、`--unregistered` 有界扫描 + 逐条归属核验 + 默认 dry-run +
+>    `--remove-unregistered` 点名才删 + 同一本账的 `source` 留痕；退出码 0/3/1，schema v24）。**剩余**：并发多次
+>    `apply` 的竞争压力测试；**无法归因到任何已信任项目的目录只报告不入账**（需先重新 trust，或另立 home 级账本——单独决策）。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、~~UI 投影~~（已由 FOUNDATION-050 完成 promotion/dependency 投影）。

@@ -226,10 +226,11 @@ describe('codeestra reclaim command face', () => {
       expect(records[0]).toMatchObject({ outcome: 'RECLAIMED' });
       expect(records[0]?.evidence).toMatchObject({ registered: true, clean: true, merged: true });
 
-      // A repeated apply is idempotent: nothing was left to remove, and no new ledger row lies.
+      // A repeated apply is idempotent: nothing was left to remove, no new ledger row lies, and
+      // "nothing was reclaimed" is reported as exit code 3 rather than as a failure.
       const repeated = await cli(['reclaim', 'apply', '--project', fixture.projectId],
         fixture.environment);
-      expect(repeated.exitCode).toBe(0);
+      expect(repeated.exitCode).toBe(3);
       const replay = JSON.parse(repeated.stdout) as ReclaimReportShape;
       expect(replay.outcome).toBe('SUCCEEDED');
       expect(replay.outcomeCounts).toMatchObject({ reclaimed: 0, alreadyAbsent: 1, failed: 0 });
@@ -248,7 +249,8 @@ describe('codeestra reclaim command face', () => {
       expect(retained.counts).toMatchObject({ total: 1, retain: 1, reclaim: 0 });
       expect(retained.targets[0]).toMatchObject({ action: 'RETAIN', reasonCode: 'FAILURE_SCENE' });
       const noop = await cli(['reclaim', 'apply', '--project', fixture.projectId], fixture.environment);
-      expect(noop.exitCode).toBe(0);
+      // Retaining a failure scene is a normal decision, and nothing was reclaimed: exit code 3.
+      expect(noop.exitCode).toBe(3);
       const noopReport = JSON.parse(noop.stdout) as ReclaimReportShape;
       expect(noopReport.outcomeCounts).toMatchObject({ reclaimed: 0, retained: 1 });
       expect(existsSync(task.workspacePath)).toBe(true);
@@ -282,14 +284,17 @@ describe('codeestra reclaim command face', () => {
       const planned = await cli(['reclaim', 'plan', '--project', fixture.projectId],
         fixture.environment);
       expect(planned.stderr).toBe('');
-      expect(planned.exitCode).toBe(0);
+      // Nothing can be reclaimed while the recorded path is refused, which the exit code says
+      // without anyone having to parse the JSON.
+      expect(planned.exitCode).toBe(3);
       const plan = JSON.parse(planned.stdout) as ReclaimReportShape;
       expect(plan.counts).toMatchObject({ refuse: 1, reclaim: 0 });
       expect(plan.targets[0]).toMatchObject({ action: 'REFUSE', reasonCode: 'PATH_OUTSIDE_OWNED_ROOT' });
 
       const applied = await cli(['reclaim', 'apply', '--project', fixture.projectId],
         fixture.environment);
-      expect(applied.exitCode).toBe(0);
+      // A refused resource is an intentional outcome, not a failure; nothing was reclaimed.
+      expect(applied.exitCode).toBe(3);
       expect(existsSync(join(foreign, 'user-work.txt'))).toBe(true);
       // The real worktree was never addressed either, because the record no longer matches it.
       expect(existsSync(task.workspacePath)).toBe(true);
@@ -324,8 +329,7 @@ describe('codeestra reclaim command face', () => {
       const plan = JSON.parse((await cli(['reclaim', 'plan', '--project', fixture.projectId,
         '--include-failure-scenes'], fixture.environment)).stdout) as ReclaimReportShape;
       expect(plan.counts).toMatchObject({ refuse: 1, reclaim: 0 });
-      expect(plan.targets[0]).toMatchObject({ action: 'REFUSE', reasonCode: 'ACTIVE_EXECUTION' });
-      expect(existsSync(join(fixture.home, 'worktrees', fixture.projectId, created.id)))
+      expect(plan.targets[0]).toMatchObject({ action: 'REFUSE', reasonCode: 'ACTIVE_EXECUTION' });      expect(existsSync(join(fixture.home, 'worktrees', fixture.projectId, created.id)))
         .toBe(true);
     } finally {
       await cli(['stop'], fixture.environment);
