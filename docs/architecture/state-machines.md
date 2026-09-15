@@ -1,6 +1,6 @@
 # 状态机与迁移规则
 
-状态：Phase 0/1 基线；Integration/Self 为后续阶段合约。未列出的迁移拒绝；所有迁移需 expected aggregateVersion、actor、reason，并在事务中记录事实事件。恢复操作不绕过 guard。
+状态：§1–§7 是已实现的状态机与迁移规则（第 8 节登记 Wave I/J 的持久事实与命令面）。未列出的迁移拒绝；所有迁移需 expected aggregateVersion、actor、reason，并在事务中记录事实事件。恢复操作不绕过 guard。Self Evolution（§5）仍是后续阶段合约。
 
 ## 1. Task lifecycle
 
@@ -14,6 +14,8 @@
 | READY | schedule | 当前 revision、依赖、冲突、容量、workspace 预留均通过→RUNNING（含 Execution 准备过程） |
 | RUNNING | agent needs input | 真实 AttentionRequest 已建立→WAITING_FOR_USER |
 | WAITING_FOR_USER | answer accepted / agent active | 所有当前阻塞问题关闭，无待应用 revision→RUNNING |
+| RUNNING | prose question detected | Runtime 判定命中稳定码 `PROSE_QUESTION_NO_TOOL_USE`（启发式：本轮无工具调用且最后一段助手文本以问号结束）→在同一完成事务内升为一条 `QUESTION` Attention + WAITING_FOR_USER（ADR-0043 默认 `auto`，可用 `settings prose-question-attention record-only\|off` 降级）。`Session` 保持 `EXITED`、`Execution` 保持 `RUNNING`：进程真的退出了，不把死会话伪装成活着的 provider 会话 |
+| WAITING_FOR_USER | prose question resolved | `attention resolve --dismiss\|--answer` 关闭该 Attention 并回到 RUNNING（同事务）；**不向 provider 投递任何内容**（`deliveredToProvider: false`）、不新建 Execution、不 resume conversation。`attention answer` 对这类等待以 `PROSE_QUESTION_RESOLUTION_REQUIRED` 拒绝 |
 | RUNNING / WAITING_FOR_USER | revision added | 保存 revision、验证失效、请求停止写入→PAUSING |
 | PAUSING | quiescence confirmed | 无工具/子进程继续写入的可靠证据→PAUSED |
 | PAUSED | revision acknowledged / resume | 当前 revision 已应用且冲突重新核验→RUNNING |
@@ -115,7 +117,11 @@ ACTIVE | FENCED → RECOVERY_REQUIRED
 
 ## 4. IntegrationBatch / StableBranchPromotion
 
-实现状态（ADR-0018）：**已实现单成员合入**（`task.integrate` / `task.integration.list`，CLI + 同一命令面 + UI）。已实现的状态为 `CREATED → PREPARING → VERIFYING → INTEGRATING_DEV → INTEGRATED`，另有 `CONFLICTED / FAILED / RECOVERY_REQUIRED`；多成员批次、`STALE`、`CANCELLED` 与 `StableBranchPromotion` 段仍属后续阶段合约。
+实现状态（ADR-0018 / ADR-0022）：**已实现单成员合入**（`task.integrate` / `task.integration.list`，CLI + 同一命令面 + UI），
+**也已实现 `StableBranchPromotion` 段**（`promotion prepare/approve/promote/abandon/get/list`，ADR-0022/FOUNDATION-042，见本节末）。
+IntegrationBatch 已实现的状态为 `CREATED → PREPARING → VERIFYING → INTEGRATING_DEV → INTEGRATED`，另有
+`CONFLICTED / FAILED / RECOVERY_REQUIRED`；**多成员批次、批级 `STALE`、批级 `CANCELLED` 仍属后续阶段合约**（`task.integrate`
+每次只集成一个 Task，虽然 `integration_batch_items` 表已在）。
 
 - CREATED：固定 `dev` 基线 OID、候选 result commit、revision 与 execution，并确认该 revision+commit 的 Task 验证为 `PASSED`；DEV_REF_MISSING / DEV_REF_CHECKED_OUT / TASK_VERIFICATION_NOT_PASSED 在写入任何 Git 副作用前拒绝。
 - PREPARING：在 Runtime 数据目录的 detached integration worktree 中合并固定候选；能 ff 就 `--ff-only`，否则 `--no-ff`（第一父为固定基线，候选必须是其后代）；冲突→CONFLICTED，其他错误→FAILED。合并产生的提交写入 `merged_commit`，此时 `dev` 仍未被触及。
@@ -124,13 +130,12 @@ ACTIVE | FENCED → RECOVERY_REQUIRED
 - INTEGRATED：ref 已更新才写入 `integrated_commit`，此时才 `EXECUTED → SUCCEEDED`。成功后才尝试 `git worktree remove`（不加 force）。
 - 恢复：未完成集成验证→`ERROR(RUNTIME_RESTARTED)` 并保留副本；`CREATED/PREPARING/VERIFYING`→`RECOVERY_REQUIRED`（明确 dev 未被推进）；`INTEGRATING_DEV`→ref 等于 `merged_commit` 则核验后补记 INTEGRATED（不二次写 ref），否则 `RECOVERY_REQUIRED/DEV_REF_OBSERVED` 并写明观察值。`RECOVERY_REQUIRED` 阻止新尝试直到人工处理；不自动部分集成。
 
-未实现（不得声称）：`STALE` 判定、批级 `CANCELLED`、多成员批次、任务集合级集成。
-
-StableBranchPromotion：`CREATED → VERIFYING → AWAITING_APPROVAL → PROMOTING → RESTARTING → SUCCEEDED`。
+未实现（不得声称）：IntegrationBatch 的批级 `STALE` 判定、批级 `CANCELLED`、多成员批次、任务集合级集成。
 
 StableBranchPromotion：`CREATED → VERIFYING → AWAITING_APPROVAL → PROMOTING → RESTARTING → SUCCEEDED`。
 
 - 固定 expected dev SHA、expected main SHA 与独立验证证据；验证失败→FAILED。
+- **提升前的全量证据是一等对象**（ADR-0038/ADR-0039，schema v25 的 `dev_full_suite_evidence`）：`promotion full-suite run <project-id> --dev-commit <full-sha>` 在一个 detached 副本里对**精确候选 SHA** 跑项目 `main` ref 上的固定策略，由 Runtime 自己观测结果（客户端不能提交证据），并把证据三重绑定在候选 commit、该 ref 的策略 digest、该 commit 的 lockfile digest 上。`prepare`/`approve`/`promote` 都要求**正是这个 SHA** 的一次 `PASSED` 运行且三个绑定均未变；main 上的策略被改、候选内的 lockfile 变了、或出现更新的失败运行，都会使证据 `STALE` 并以 `DEV_FULL_SUITE_EVIDENCE_STALE` 拒绝（退出码 1）。
 - AWAITING_APPROVAL（仅 STRICT）：用户批准精确 dev/main/verification 三元组后→PROMOTING；dev、main 或证据变化→STALE。FULL 下固定三元组后直接进入 PROMOTING，不停留此状态。
 - PROMOTING：核对批准与 Git 工作区安全后执行 dev→main；main 更新成功→RESTARTING。
 - RESTARTING：在 main 工作树执行 CLI stop，再执行 status 拉起并检查 Runtime；成功响应→SUCCEEDED。失败→RECOVERY_REQUIRED 并报告，不擅自回滚。
@@ -182,3 +187,44 @@ PENDING → IN_FLIGHT → ACKNOWLEDGED
 - 重启（`reconcileAtStartup`）把仍 `IN_FLIGHT` 的尝试按事实收口：期限已过 `TIMED_OUT`，无期限（被杀在途中）`FAILED/RUNTIME_RESTARTED`；**没有**自动重投。
 
 启动收敛（`reconcileStaleAgentSessions`）处理重启后 `agent_sessions`/`executions` 仍写 ACTIVE/RUNNING 的投影：按记录的 pid + start token 判所有权，得到 `PROVIDER_STOPPED` / `PROVIDER_STILL_RUNNING` / `PROVIDER_DESCENDANTS_ALIVE` / `PROVIDER_OWNERSHIP_UNVERIFIABLE` / `PROCESS_IDENTITY_MISSING` 之一，然后一律写 `DISCONNECTED`（Session，清空 current incarnation）+ `RECOVERY_REQUIRED`（Execution，保持 `resource_held=1`；workspace 与 Task 同样）。**绝不写 RUNNING/ACTIVE、绝不声称静止（进程树只是快照）、绝不发信号/杀进程、绝不删资源**；每次收敛向 `agent_session_startup_reconciliations` 追加一行（evidence 固定 `quiescenceProven:false`、`signalsSent:0`），幂等且不动本代 Runtime 仍持有的 Session。
+
+## 8. Wave I/J 新增的持久事实与命令面（FOUNDATION-074 补记）
+
+本节的目的是把「状态机文档落后于实现」这件事本身关掉：Wave I/J 之后新增的持久事实与命令面无一处改变上面 §1–§7 的状态集合，
+但它们确实进入了 Runtime 的对外事实面，因此需要登记。
+
+**新增的持久事实（DDL 与理由见 `sqlite-schema.md` §8）**
+
+| schema | 对象 | 与状态机的关系 |
+|---|---|---|
+| v23 | `tasks.pending_retry_from_execution_id`、`executions.retry_from_execution_id` | §1 的 `FAILED` → user retry 行：`FAILED → READY/BLOCKED` **不是自动的**，只有 `task retry` 写这两列，并产生 `TaskRetryRequested` |
+| v24 | 重建 `reclamation_records`（`source`、`kind='UNREGISTERED_DIRECTORY'`、可空 `task_id`、`outcome='RECOVERY_REQUIRED'`） | 不属于状态迁移：这是 ADR-0021 回收账本能表达「未登记目录」与「归属不可核验」的事实 |
+| v25 | `targeted_test_plans`、`dev_full_suite_evidence`（append-only）、`verification_runs.policy_source/plan_*`、`stable_promotions.full_suite_*` | 见 §4：提升前的全量证据是绑定三元组的一等对象，未完成的运行写不成终态 |
+| v26 | `knowledge_snapshots`、`execution_knowledge_snapshots`（两张 append-only） | 不在状态机里：绑定在 `reserveExecution` 的同一事务内写入，因此「Execution 存在」与「已绑定所用知识」不可分开观察（ADR-0041） |
+| v27 | `agent_configurations.plugin_selection_json` | 不在状态机里：见下节 |
+
+**命令组（零确认、`--json`、稳定退出码；全部是同一命令面，UI 不新增语义）**
+
+- `settings ui list|get|set|reset`（ADR-0045，**无 schema 变更、不占迁移号**）：`$CODEESTRA_HOME/ui-settings.json` 的五个界面效果键
+  （`theme`/`density`/`fontSize`/`motion`/`timeDisplay`）。它们是**设置不是门禁**：每次写入一条命令、零确认；未知键或非封闭取值在
+  边界拒绝（CLI 退出码 2，HTTP 为 `INVALID_REQUEST`）；读不懂的 settings 文件报 `INVALID_UI_SETTING` 而不是静默回退默认
+  （`settings ui reset` 是显式的出口）。**它们不驱动任何领域状态迁移**，因此本节没有对应状态。
+- `settings prose-question-attention [auto|record-only|off]`（ADR-0043）：决定 §1 的散文提问命中是否升级为一等等待；改它零确认，
+  且**不会**改写已经记录的等待。
+- `agent plugins list` / `agent plugins select`（ADR-0044，schema v27）：选择按作用域写入 `agent_configurations.plugin_selection_json`，
+  在 Execution 预留时解析成生效值并写入 `executions.agent_config_json`，因此**同一 Execution 的启动参数可事后读回**。选择里任一
+  无法加载的路径在写入前与 Session 启动前各核验一次，拒绝时**在任何副作用之前**（不创建 Execution）。`agent.config.get/list` 同时
+  报告生效值与它来自哪一层。
+
+**能力维度 `pluginSelection` 的如实声明（ADR-0044，`packages/contracts` 的 `AdapterCapabilities`）**
+
+| Adapter | 值 | 依据 |
+|---|---|---|
+| Pi | `SUPPORTED` | 受控启动可以只加载所选 sources，关掉发现机制（`packages/agent-adapters/src/pi-plugins.ts`） |
+| Codex | `UNSUPPORTED` | app-server 没有等价机制 |
+| Claude Code | `UNSUPPORTED` | 同上 |
+| deterministic fake / 测试 stub | `UNSUPPORTED` | 它们不启动任何 provider |
+
+`UNSUPPORTED` **不是占位符**：`agent plugins select` 对不支持该能力的 Adapter 以稳定码拒绝，而不是假装写入了选择；Agent 设置页在
+同一字段为 `UNSUPPORTED` 时**不显示候选列表**（`apps/ui/src/agent-settings.tsx`）。与 `nativeTerminalHandoff`/`safePointNotification` 一样，这里的「声明」不改变行为——本版本没有把脚本/交接路径改成
+「先查能力再决定」（ADR-0044 与 `agent-adapter-api.md` §1 均已如实记录这一点）。

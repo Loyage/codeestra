@@ -601,12 +601,11 @@ bun run codeestra scheduler reservations reconcile <project-id> [--json]
   以 `SLOT_HOLDER_STILL_RUNNING` 被拒表示记录的持有者进程可证明仍活着，且**没有被发信号**。
   `released: false` 表示「本来就已经释放了」——诚实的 no-op，**不是失败**（退出码 0）。
 - `prepare-workspace` 为一次预留准备 Task worktree 并绑定它。
+- `get` 按 id 读回单条预留与它自己的 append-only 历史（FOUNDATION-074 起已列入 `usage()`；本指南之前把它列在「未列入 usage()」之下）。
 - `reconcile` 复核每个活跃预留记录的持有者**与真实进程表**：证明消失的释放并记录；活着或无法核验的**保留槽位**
   （`RECOVERY_REQUIRED`）。**不发信号、不删资源。** 只有出现 `FAILED` 结果才是退出码 `1`。
 
-> **文档与实现不一致（如实列出）**：dispatch 代码里还存在
-> `bun run codeestra scheduler reservations get <project-id> <reservation-id>`
-> （对应契约命令 `scheduler.reservations.get`），但它**没有**出现在 `usage()` 里。以源码为准。
+> **已由 FOUNDATION-074 校准**：`scheduler reservations get` 现已在 `usage()` 里（本指南的「其他只在源码里出现的东西」行也已更新）。
 
 ---
 
@@ -871,7 +870,6 @@ Runtime 的本地 HTTP 面只绑定 `127.0.0.1`，端口在 `codeestra ui` 时�
 
 | 项 | 说明 |
 |---|---|
-| `scheduler reservations get` | 见 §14 的「文档与实现不一致」 |
 | `session handoff writer acquire --kind` | `AUTOMATED_RPC`（默认）/ `TERMINAL_ATTACHMENT` |
 | `session handoff attach --observer` | 显式声明观察者 attachment（默认就是 `OBSERVER`） |
 | `session handoff detach --since` | detach 也接受 `--since` |

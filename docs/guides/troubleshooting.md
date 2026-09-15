@@ -438,26 +438,36 @@ bun run codeestra events list --limit 1        # 或者从你保存的最后一�
 
 ---
 
-## 3. 文档与实现不一致（如实列出，未做静默改写）
+## 3. 文档与实现不一致的处置（FOUNDATION-074 校准）
 
-以下不一致**没有**在本次文档工作中被悄悄改掉。规格（`PROJECT_SPEC.md`）与 ADR（`docs/decisions/**`）
-按本任务要求**保持只读**，因此这里只列出、不裁决。
+J1（FOUNDATION-070）曾在上一版这里如实列出 10 项「文档与实现不一致」，并明确「没有在文档里被悄悄改掉、只列出不裁决」。
+FOUNDATION-074（Wave K / K1 文档校准）逐条处置了这份清单：**8 项已修**（含唯一一处代码改动：`apps/cli/src/main.ts` 的 `usage()` 文本），
+**2 项保留为「待裁决」**——它们需要用户裁决，本格没有自行改。
 
-| # | 位置 | 不一致的内容 | 源码事实 |
-|---|---|---|---|
-| 1 | `README.md`「当前状态」段 | 「尚无自动 Scheduler、长命令后台化、Task cancel/pause、revision 投递确认」 | 自动调度（`task schedule *`、`CODEESTRA_SCHEDULE_TICK_MS`，默认 5000ms）、长命令后台化与进度事件（ADR-0019/0027）、Task 暂停/取消/归档（ADR-0016）、revision 投递台账与 `resolve`（ADR-0028）都已实现 |
-| 2 | `README.md` 同段 | 「现有 Phase 1 `task.run` 代码仍按项目 `mainRef` 创建 worktree」 | Task worktree 基线已是 `project.devRef`（`apps/runtime/src/workspace-service.ts` 用 `devRef` / `inspectBaseRef(..., project.devRef)`），ADR-0018 的基线改造已完成 |
-| 3 | `README.md` 同段 | 「自动 Integration 阶段尚未实现」「任务取消超时、gate 拒绝路径、孤儿进程 reconcile 与 Integration/main 提升仍未实现」 | `task.integrate` + IntegrationBatch（ADR-0018）与 `promotion *`（ADR-0022/0038/0039）都已实现；`scheduler reservations reconcile` 也已实现 |
-| 4 | `README.md` 同段 | 「`task run`/`task verify` 仍同步占用连接，长命令进度事件尚未实现」 | `task verify --background` 与 `OperationProgressed` / `OperationSettled` 事件已实现（ADR-0019/0027） |
-| 5 | `README.md`「下一步」 | 「下一纵向小步是 **Task cancel**」 | `task cancel` 已实现（ADR-0016） |
-| 6 | `README.md` 同段 | 「ADR-0010 设计的原生 Pi TUI/PTY 接管……尚未实现，当前只支持结构化 Attention 交互」 | `session handoff *` 的原生终端面已实现（ADR-0010/0023/0026；事件 `TakeoverRequested` / `SessionHandoffCompleted` / `TerminalWriterLeaseChanged` 等已写入台账） |
-| 7 | `PROJECT_SPEC.md` §1 前的状态段 | 该段仍写「取消超时、gate 拒绝路径、Integration/main 提升与多任务并行仍未验收」与「`dev → main` 提升、Runtime 重启、多任务批次与批级 `STALE`/取消仍未实现」 | 同一文件的 §3 已声明 ADR-0038/0039 的分层测试与 `promotion.full-suite` 已实现；§2 不变量 14 也把稳定提升记录列为正式对象。**规格文件本身存在前后不一致**，本任务只读，未修改 |
-| 8 | `apps/cli/src/main.ts` 的 `usage()` | 未列出 `scheduler reservations get` | dispatch 里有 `reservationAction === 'get'` 分支，契约里有 `scheduler.reservations.get`。**以源码为准**：该子命令可用 |
-| 9 | `usage()` 的 `session handoff attach` 用法行 | 未列出 `--observer` | 解析器接受 `--observer`（默认就是 `OBSERVER`）与 `--writer` |
-| 10 | `packages/storage/src/migration.ts` 的 `intents.kind` | 允许 `CHANGE_PRIORITY`、`ANSWER_AGENT`、`SELF_MODIFICATION` | **没有任何 CLI 命令产生这三种 intent**；`task create` 也不接受 priority 参数（新建 Task 的 priority 为 0），所以调度排序里的「优先级降序」当前无法由用户改变 |
+| # | 位置 | 原不一致 | 本格处置 | 依据 |
+|---|---|---|---|---|
+| 1 | `README.md`「当前状态」段 | 「尚无自动 Scheduler、长命令后台化、Task cancel/pause、revision 投递确认」 | **已修**：README 的「当前状态」与「下一步」两段已按实现重写 | 契约 `task.schedule.run`（`packages/contracts/src/index.ts:1935`）、`task.cancel`（`:1126`）、`task.revision.delivery.*`；`CODEESTRA_SCHEDULE_TICK_MS`（`apps/runtime/src/main.ts:465`） |
+| 2 | `README.md` 同段 | 「现有 Phase 1 `task.run` 代码仍按项目 `mainRef` 创建 worktree」 | **已修**：改为如实描述 dev 基线 | `grep -n "devRef" apps/runtime/src/workspace-service.ts` → `93,120,172,312`（ADR-0018 已完成） |
+| 3 | `README.md` 同段 | 「自动 Integration 阶段尚未实现」「Integration/main 提升仍未实现」 | **已修**：README 与 `roadmap/mvp.md` 都改为如实描述 | 契约 `task.integrate`（`:1266`）、`promotion.prepare`（`:1471`）、`promotion.fullSuite.run`（`:1559`） |
+| 4 | `README.md` 同段 | 「`task run`/`task verify` 仍同步占用连接，长命令进度事件尚未实现」 | **已修**：改为「仍同步占用连接，但可用 `--background` 与 `task operation *` 脱离；进度事件已实现」 | `usage()` 的 `task verify … [--background]`、`task operation list/get/cancel`；事件 `OperationProgressed`/`OperationSettled`（`packages/storage/src/database.ts` 的 `domain_events` 写入名单） |
+| 5 | `README.md`「下一步」 | 「下一纵向小步是 **Task cancel**」 | **已修**：改为指向 `docs/tasks/README.md` 的 `## NEXT` 真实剩余项 | `task.cancel` 契约与 CLI 均在（`:1126`） |
+| 6 | `README.md` 同段 | 「ADR-0010 设计的原生 Pi TUI/PTY 接管……尚未实现，当前只支持结构化 Attention 交互」 | **已修**：改为「PTY 接管已实现（ADR-0026/FOUNDATION-046），Session Guidance 未实现」 | `usage()` 的 `session handoff attach/detach/release/admit`、`terminal read\|write`；`apps/runtime/src/session-handoff-service.ts` 的 `ptyTransport` 与 `ptyResize` |
+| 7 | `PROJECT_SPEC.md` §1 前状态段 | 该段仍写「取消超时、gate 拒绝路径、Integration/main 提升与多任务并行仍未验收」与「`dev → main` 提升、Runtime 重启、多任务批次与批级 `STALE`/取消仍未实现」，与同文件 §3 自相矛盾 | **待裁决（未改）**：用户裁决规格文件在本格**只读**。修它属于规格变更，不由文档格自行决定。本格只保留这一条，不静默改写 | 原样保留；改动需要用户裁决 |
+| 8 | `apps/cli/src/main.ts` 的 `usage()` | 未列出 `scheduler reservations get` | **已修**（本格唯一代码改动）：用法文本补上 `scheduler reservations get <project-id> <reservation-id> [--json]`，并给 `list` 的说明段补一句 `get` 的语义。同时同步了 `docs/guides/cli-reference.md` §14/§21 里「该命令不在 `usage()` 里」的两处描述（否则本格会自己造出新的假话） | 契约 `scheduler.reservations.get`（`:1859`）、分派 `reservationAction === 'get'`（`apps/cli/src/main.ts`） |
+| 9 | `usage()` 的 `session handoff attach` 用法行 | 未列出 `--observer` | **已修**：用法行改为 `[--writer\|--observer] [--since <cursor>]` | 解析器接受 `--observer`，且默认 attachment kind 就是 `OBSERVER`（`let attachmentKind: 'WRITER' \| 'OBSERVER' = 'OBSERVER'`） |
+| 10 | `packages/storage/src/migration.ts` 的 `intents.kind` | 允许 `CHANGE_PRIORITY`、`ANSWER_AGENT`、`SELF_MODIFICATION`，但**没有任何 CLI 命令产生这三种 intent** | **待裁决（未改）**：缩小 CHECK、补命令、或保留未用取值都是产品/规格决策；本格只允许文档 + 一处 usage 文本改动，没有自行改 schema 或新增命令 | 原样保留；改动需要用户裁决 |
 
-**本次文档的处理原则**：指南里描述的是**源码事实**（例如 §14 会写出 `reservations get` 可用），
-同时把不一致显式列在上表，而不是把指南改成迁就过时的 README，也不是改 README 去掩盖。
+**两份待裁决项为什么不能自行改**
+
+- 第 7 条：`PROJECT_SPEC.md` 是长期规格，本格按用户裁决保持只读。规格与自身 §3 的矛盾应由用户裁决后单独一格修订，不能由一个「文档校准」格顺手改掉规格。
+- 第 10 条：无论选哪条路都超出本格范围——缩小 `intents.kind` 的 CHECK 是 schema 变更（需要迁移与 ADR），补三个命令是新能力（需要命令面、状态迁移与测试）。因此本格只如实保留。
+
+**本格另外核对并修正的两处陈旧陈述（不在原 10 项内）**
+
+- `docs/architecture/scheduler.md` 的「本基线里没有调度引擎」与 `docs/architecture/README.md` 的 `phase1SchemaVersion = 21`：都已与实现不符（引擎由 ADR-0033/FOUNDATION-055 实现，schema 已是 v27），已在本次 doc-sync 中更正并标注更正来源。
+- `docs/architecture/agent-adapter-api.md` 的 Codex 段曾写「Runtime 目前没有 `FAILED → READY` 路径」：已由 ADR-0036/FOUNDATION-061 的 `task retry` 关闭，已在文中标注更正。
+
+**仍然保留的写法**：指南里描述的是**源码事实**（例如 §14 写出 `reservations get` 可用）；从本格起，已修的不一致不再留在清单里，只剩上面两条待裁决。
 
 ---
 
@@ -465,11 +475,17 @@ bun run codeestra events list --limit 1        # 或者从你保存的最后一�
 
 1. 真实 provider 的**并发运行**未完成受控验收（调度本身有实现与门禁）。
 2. 真实模型下的**暂停 / 恢复**未复验；ADR-0016 的编排由脚本 Adapter 覆盖。
-3. **Provider 是否真的读取** Project Knowledge 物化文件未验证（本轮 Adapter 不消费 `knowledgeSnapshotRefs`）。
+3. **Provider 是否真的读取** Project Knowledge 物化文件未验证（Adapter 尚不消费 `knowledgeSnapshotRefs`）。
 4. **token 级实时流**未实现；transcript 是按需读取 + 轮询。
 5. **Codeestra 自升级 / Self Promotion 的完整切换**未实现（Phase 7）。
-6. 本格（纯文档）未运行任何全量/聚合检查（ADR-0038）；实际执行的检查见
-   `docs/tasks/README.md` 的 FOUNDATION-070 一节。
+6. **Session Guidance 未实现**：`guide` 端口既未导出也未实现，`SessionGuidanceRecorded`/`SessionGuidanceDelivered` 仍未实现。
+7. **多成员 IntegrationBatch 与批级 `STALE`/`CANCELLED` 未实现**：`task.integrate` 每次只集成一个 Task；因此产品 `promotion prepare` 至今没有在这些提升候选上成立（三次真实提升走的是 AGENTS.md 的人工路径）。
+8. **Claude Code 的模型层全部未验证**（本机 `claude auth status` 为未登录）：该 Adapter 的 `structuredAttention`/`nativePermissionRouting`/`cooperativeStop`/`resumeAfterExit` 均报 `REQUIRES_VALIDATION`，不得当成 `SUPPORTED` 使用。
+9. **插件选择的真实效果未验证**（ADR-0044）：真实模型下「确实使用了所选 skill/theme」只有 argv 与命令面证据；themes 的显式路径加载未单独实测（ADR-0044 D06 标注为同构代码路径推断）；第三方 extension 是否能绕过 gate 未做对抗验证。
+10. **真实 provider 下的散文提问组合未验收**：`Task WAITING_FOR_USER` + `Execution RUNNING` + `Session EXITED` 只在存储/运行时单测与 stub e2e 下验证；Codex 侧的事实层未实现（只漏报、不谎报）。
+11. **观感类只能人工确认**（ADR-0008）：设置页与五个界面设置键的视觉效果、紧凑密度/字号/`reduced` 动效的观感、固定 shell 在窄屏与矮窗口的表现、Agent 设置页在窄屏下的排布，都没有机器断言。
+12. 本格（FOUNDATION-074，纯文档 + 一处 usage 文本）未运行任何全量/聚合检查（ADR-0038）；实际执行的定向检查（文档链接存在性、`bun run typecheck`、状态声明依据核对）见
+   `docs/tasks/README.md` 的 FOUNDATION-074 一节。
 
 ---
 

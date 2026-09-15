@@ -1,6 +1,6 @@
 # Agent Adapter API
 
-状态：Runtime port 设计，不是 Pi SDK API 的复述。当前代码导出 start/observation/typed-answer 子集与 deterministic fake、真实 `PiRpcAdapter`（自有子进程、身份采集、attention/completion/disconnect 映射、typed answer 写入），以及第二个真实 Adapter **`CodexAdapter`**（ADR-0029，`codex app-server --stdio`）；pause/revision/stop control 尚未落地。Runtime 已接入 adapter registry 与事件 pump；提交/回答仍由 CLI 显式触发。Pi 0.84.4 首轮文档核对、受控 RPC spike 与 adapter transport smoke 已完成，结论见 [`../spikes/pi-0.84.4.md`](../spikes/pi-0.84.4.md)；Codex 0.151.0 结论见 [`../spikes/codex-0.151.0.md`](../spikes/codex-0.151.0.md)；commit/trust 产品策略已确认，真实工具执行/取消门禁仍未验收。
+状态：Runtime port 设计，不是 Pi SDK API 的复述。当前代码导出 start/observation/typed-answer 子集与 deterministic fake、真实 `PiRpcAdapter`（自有子进程、身份采集、attention/completion/disconnect 映射、typed answer 写入）、第二个真实 Adapter **`CodexAdapter`**（ADR-0029，`codex app-server --stdio`）与第三个真实 Adapter **`ClaudeAdapter`**（ADR-0040，`claude --print` 控制通道）；pause/revision/stop control 尚未落地。Runtime 已接入 adapter registry 与事件 pump；提交/回答仍由 CLI 显式触发。Pi 0.84.4 首轮文档核对、受控 RPC spike 与 adapter transport smoke 已完成，结论见 [`../spikes/pi-0.84.4.md`](../spikes/pi-0.84.4.md)；Codex 0.151.0 结论见 [`../spikes/codex-0.151.0.md`](../spikes/codex-0.151.0.md)；Claude 2.1.268 结论见 [`../spikes/claude-2.1.268.md`](../spikes/claude-2.1.268.md)（本机无凭据，模型层全部未验证）；commit/trust 产品策略已确认，真实工具执行/取消门禁仍未验收。
 
 ## 1. 合约草案
 
@@ -22,6 +22,11 @@ interface AdapterCapabilities {
   // UNSUPPORTED 表示 provider 总会加载自己的配置，从而在 Codeestra 的 revision 快照之外
   // 改变 Agent 的输入；Adapter 必须如实报告，而不是暗示实现了隔离。
   controlledConfiguration: Support;
+  // ADR-0044：能否只加载用户选定的插件/资源（extensions/skills/prompt templates/themes）。
+  // Pi 的受控启动可以组合显式路径；Codex 与 Claude Code 没有等价机制，因此必须报告
+  // UNSUPPORTED，而不是在它们上面发明一个共同抽象。UNSUPPORTED 不是占位符：
+  // `agent plugins select` 对它以稳定码拒绝，且不写任何选择。
+  pluginSelection: Support;
 }
 interface SessionRef {
   id: string;                 // Codeestra identity
@@ -129,7 +134,16 @@ type AdapterEvent = {
 
 这是完整设计层类型；当前 `packages/contracts` 只导出 `AgentStartAdapter` / `AgentObserveAdapter` / `AgentAnswerAdapter` 及 attention/completed/disconnected event 子集，不用尚未实现的方法冒充完整 Adapter。
 
-实现层的 `AdapterCapabilities`（`packages/contracts/src/index.ts`）**已与本文类型一致**（FOUNDATION-063 / ADR-0035）：它包含 `controlledConfiguration`（ADR-0029），也已包含本文的 `nativeTerminalHandoff` 与 `safePointNotification` 两个维度。两个维度由各 Adapter **如实声明**，不是占位：Pi 按 ADR-0010/0023/0026 的实测声明两者 `SUPPORTED`（原生 TUI 在同一 provider session file 上接管、gate extension 上报 tool_start/tool_end/agent_settled）；Codex 按 `docs/spikes/codex-0.151.0.md` 的实测声明两者 `UNSUPPORTED`（app-server 无终端交接，其 TUI 是同一 thread 的第二个 writer；interrupted turn 不产生完成事实）；deterministic fake 与测试 stub 声明 `UNSUPPORTED`（它们不启动任何 provider）。**声明本身不改变行为**：本版本没有把交接路径改为「查能力再决定」，`session.handoff.*` 仍按 ADR-0023/0026 的平台与归属判定执行（在 macOS/unix 上可用），把 Pi 专属机制套到 Codex 上确实会被拒；是否加适配器能力门禁属另一次语义变更，未在本格实施。交接与终端的事实现在也有七个 domain event（`TakeoverRequested`、`TakeoverSafePointReached`、`SessionHandoffStarted`、`SessionHandoffCompleted`、`TerminalWriterLeaseChanged`、`TakeoverReleased`、`TakeoverFailed`，见 `event-model.md` §2.1）。**结构化问卷（ADR-0014）没有新增事件类型**：它复用 `attention`，把问卷放在 `prompt` 里（`kind: "codeestra.questionnaire"`），回答用 `AgentAnswer` 的 `QUESTIONNAIRE` 变体表达，因此“一条 Attention = 一个 provider 请求 = 一次 answer Operation”不变。自有 provider 进程的 Adapter 可额外实现可选的 `AgentProcessRelease`（`releaseSession`），供 Runtime shutdown 请求协作释放；缺少该能力时不假定已停止。观察事件经 Zod 校验；只有显式 `toolsQuiescent=true` 与 `ownedWritersStopped=true` 的 completion evidence 才能释放失败 Execution 的资源。`packages/agent-adapters` 的 deterministic fake 只验证协议与编排行为，不执行命令，也不能作为 Pi 验收。PTY 原始字节、resize、input 路由是独立 versioned TerminalTransport 合约，不混入 AdapterEvent。`guide`（会话指导）仍未导出或实现；原生接管、successor start 与 PTY attachment 已由 ADR-0026 实现，不能因本文类型存在就声称其他 provider 也能接管。
+实现层的 `AdapterCapabilities`（`packages/contracts/src/index.ts`）**已与本文类型一致**（FOUNDATION-063 / ADR-0035）：它包含 `controlledConfiguration`（ADR-0029）、`pluginSelection`（ADR-0044，FOUNDATION-074 补记）与本文的 `nativeTerminalHandoff`、`safePointNotification` 两个维度。这些维度由各 Adapter **如实声明**，不是占位：
+
+| 维度 | Pi | Codex | Claude Code |
+|---|---|---|---|
+| `nativeTerminalHandoff` | `SUPPORTED` | `UNSUPPORTED` | `UNSUPPORTED` |
+| `safePointNotification` | `SUPPORTED` | `UNSUPPORTED` | `UNSUPPORTED` |
+| `controlledConfiguration` | `SUPPORTED` | `UNSUPPORTED` | `SUPPORTED` |
+| `pluginSelection` | `SUPPORTED` | `UNSUPPORTED` | `UNSUPPORTED` |
+
+Pi 按 ADR-0010/0023/0026 的实测声明前两者 `SUPPORTED`（原生 TUI 在同一 provider session file 上接管、gate extension 上报 tool_start/tool_end/agent_settled）；Codex 按 `docs/spikes/codex-0.151.0.md` 的实测声明两者 `UNSUPPORTED`（app-server 无终端交接，其 TUI 是同一 thread 的第二个 writer；interrupted turn 不产生完成事实）；Claude Code 按 `docs/spikes/claude-2.1.268.md` 声明两者 `UNSUPPORTED`（`--print` 子进程无终端交接，控制通道不暴露工具级开始/结束）。deterministic fake 与测试 stub 声明 `pluginSelection: 'UNSUPPORTED'`（它们不启动任何 provider）。**声明本身不改变行为**：本版本没有把交接路径改为「查能力再决定」，`session.handoff.*` 仍按 ADR-0023/0026 的平台与归属判定执行（在 macOS/unix 上可用），把 Pi 专属机制套到 Codex 上确实会被拒；是否加适配器能力门禁属另一次语义变更，未在本格实施。Pi 自己的 `SessionHandoffCapabilities` 也如实报告残留差距（`crossHandoffPermissionModeMatrix: PARTIAL`、`parallelToolBatchSafePoint: UNVERIFIED`、`ptyResize: UNSUPPORTED`）。交接与终端的事实现在也有七个 domain event（`TakeoverRequested`、`TakeoverSafePointReached`、`SessionHandoffStarted`、`SessionHandoffCompleted`、`TerminalWriterLeaseChanged`、`TakeoverReleased`、`TakeoverFailed`，见 `event-model.md` §2.1）。**结构化问卷（ADR-0014）没有新增事件类型**：它复用 `attention`，把问卷放在 `prompt` 里（`kind: "codeestra.questionnaire"`），回答用 `AgentAnswer` 的 `QUESTIONNAIRE` 变体表达，因此“一条 Attention = 一个 provider 请求 = 一次 answer Operation”不变。自有 provider 进程的 Adapter 可额外实现可选的 `AgentProcessRelease`（`releaseSession`），供 Runtime shutdown 请求协作释放；缺少该能力时不假定已停止。观察事件经 Zod 校验；只有显式 `toolsQuiescent=true` 与 `ownedWritersStopped=true` 的 completion evidence 才能释放失败 Execution 的资源。`packages/agent-adapters` 的 deterministic fake 只验证协议与编排行为，不执行命令，也不能作为 Pi 验收。PTY 原始字节、resize、input 路由是独立 versioned TerminalTransport 合约，不混入 AdapterEvent。`guide`（会话指导）仍未导出或实现；原生接管、successor start 与 PTY attachment 已由 ADR-0026 实现，不能因本文类型存在就声称其他 provider 也能接管。
 
 ## 2. 语义
 
@@ -175,7 +189,39 @@ type AdapterEvent = {
 | `resumeAfterExit` | `SUPPORTED` | 实测同 thread / 同 rollout 路径 |
 | `controlledConfiguration` | `UNSUPPORTED` | app-server 没有 `--ignore-user-config`；环境 plugins/MCP servers/hooks 参与执行 |
 
-**Pi 的 PTY 交接机制不套用到 Codex**：ADR-0010/0023/0026 的 handoff fence、successor incarnation、PTY attach、`agent_settled` 安全点都是 Pi 实现。Codex 的 `attach`/`pause`/`revisionAcknowledgement`/`reconnectToLiveSession` 均为 `UNSUPPORTED`，因此**没有** Codex 的终端接管、**不**假设 Codex 能热更新 revision、也**不**把它当作可 attach 的 live 会话。`interrupted` 的 turn **不**产生 `completed` 证据（否则会写入假的 `toolsQuiescent`），而是报 `disconnected`。未完成项（ADR-0029 记录）：Runtime 目前没有 `FAILED → READY` 路径，因此「Execution 失败后换 Agent」只在 Execution 建立前失败或 pause→resume 路径上成立。
+**Pi 的 PTY 交接机制不套用到 Codex**：ADR-0010/0023/0026 的 handoff fence、successor incarnation、PTY attach、`agent_settled` 安全点都是 Pi 实现。Codex 的 `attach`/`pause`/`revisionAcknowledgement`/`reconnectToLiveSession` 均为 `UNSUPPORTED`，因此**没有** Codex 的终端接管、**不**假设 Codex 能热更新 revision、也**不**把它当作可 attach 的 live 会话。`interrupted` 的 turn **不**产生 `completed` 证据（否则会写入假的 `toolsQuiescent`），而是报 `disconnected`。
+
+> 更正（FOUNDATION-074）：本文曾写「Runtime 目前没有 `FAILED → READY` 路径，因此『Execution 失败后换 Agent』只在 Execution 建立前失败或 pause→resume 路径上成立」。**该缺口已由 ADR-0036/FOUNDATION-061 关闭**：`task retry <project-id> <task-id> <expected-version> [--adapter <pi|codex|claude>]` 显式重试一个 `FAILED` Task（不自动重试），默认复用上次的 Adapter、可换 Adapter，并把换 Agent 的事实写进 `TaskRetryRequested` 的 `adapterId`/`previousAdapterId`/`adapterChanged`。
+
+### 3.1 Claude Code（第三个真实 Adapter，ADR-0040）
+
+`ClaudeAdapter`（`packages/agent-adapters/src/claude-adapter.ts`，`adapterId = "claude"`）接入 Claude Code 2.1.268的 `--print` 控制通道（`claude-protocol.ts` + `claude-process.ts`）。实现 `AgentAnswerAdapter` + 可选 `AgentProcessRelease`。
+
+**能力的诚实边界（本机无凭据）**：spike 实测到「发出真实模型请求之前」为止——argv 的 STRICT/FULL 两套被真实 CLI 接受、`initialize` 往返与 `current_permission_mode` 回读、`--safe-mode` 对用户 hook/agent 的抑制、transcript 派生路径、`--resume` 加载记录会话、**鉴权失败以 `subtype:"success"` + `is_error:true` 到达**这一关键形状。凡需要模型产生的行为一律 `REQUIRES_VALIDATION`，**不写成 `SUPPORTED`**（`structuredAttention`、`nativePermissionRouting`、`cooperativeStop`、`resumeAfterExit`）。
+
+| 维度 | 值 | 依据 |
+|---|---|---|
+| `persistentSession` | `SUPPORTED` | `--session-id <uuid>` 固定 conversation，transcript 写在派生路径 |
+| `controlledConfiguration` | `SUPPORTED` | `--safe-mode --strict-mcp-config` 排除用户 hooks/agents/MCP，同时保留 OAuth/模型/内置工具（`--bare` 因会禁用 OAuth/keychain 被排除） |
+| `structuredAttention` | `REQUIRES_VALIDATION` | 有 `AskUserQuestion` 与 `request_user_dialog`，但哪条通道投递、答案如何编码未测 |
+| `nativePermissionRouting` | `REQUIRES_VALIDATION` | `can_use_tool` → `control_response` 的形状来自 CLI 自带协议文档与 SDK 客户端代码，未观测真实 prompt 往返 |
+| `cooperativeStop` | `REQUIRES_VALIDATION` | `control_request{interrupt}` 存在，但已在运行的工具是否停止未测 |
+| `resumeAfterExit` | `REQUIRES_VALIDATION` | `--resume <id>` 确实重开同一 session id；是否真的复述 conversation 内容需要模型回答 |
+| `attach` / `nativeTerminalHandoff` / `safePointNotification` / `reconnectToLiveSession` / `pauseWithQuiescence` / `revisionAcknowledgement` | `UNSUPPORTED` | 交互 TUI 是写同一 conversation 的另一个进程；`--print` 子进程失去 stdio 后不可重接；无 pause 原语；无 revision ACK 通道 |
+| `pluginSelection` | `UNSUPPORTED` | safe-mode 启动没有 per-resource 选择机制 |
+
+**已知简化**：所有 `can_use_tool`（含 `AskUserQuestion`）一律映射为既有 `PERMISSION`/`CONFIRM` Attention，**不实现问卷编码**；因此「用户批准 `AskUserQuestion` 后 provider 是否会在无人渲染的 dialog 上等待」**未验证**。`session.transcript` 仍是 Pi 专属，Claude Session 上以 `SESSION_FILE_NOT_OWNED` 明确失败，不显示执行过程。stub 测试只证明编排，不是真实 Agent 集成验收。
+
+### 3.2 Agent 插件 / 资源选择（ADR-0044，命令面）
+
+`pluginSelection` 是 ADR-0044 新增的第十二个能力维度（`packages/contracts/src/index.ts` 的 `AdapterCapabilities`）：
+
+- `agent plugins list [--project <id>] [--adapter <id>] [--json]` **只读**报出 provider 自己的候选插件/资源 + 当前选择 + 该 Adapter 的支持情况。检测只读 provider 用户配置目录（`PI_CODING_AGENT_DIR` 或 `~/.pi/agent`）与其中的 `settings.json`，**绝不扫描仓库内目录、不跟随符号链接进入 Git 工作树、零写入**。
+- `agent plugins select … [--extension <path>]… [--skill <path>]… [--prompt-template <path>]… [--theme <path>]… [--clear] [--json]` 写入**整份**选择（重复 flag 而非 JSON 文件，一个路径不需要第二条转义规则），零确认、幂等，退出码 0 applied / 1 refused / 2 usage。每个路径在写入前核验一次、在 Session 启动前再核验一次。
+- 选择按作用域持久化（`agent_configurations.plugin_selection_json`，schema v27），在 Execution 预留时解析成生效值并写入 `executions.agent_config_json`，因此同一 Execution 的启动参数可事后读回；`agent.config.get` 同时报告生效值与来源层。
+- 对 `pluginSelection: UNSUPPORTED` 的 Adapter，`agent plugins select` 以稳定码拒绝，**不写入选择**；Agent 设置页在同一字段为 `UNSUPPORTED` 时不显示候选列表。
+
+**未验证（不得当成已成立）**：真实模型下「确实使用了所选 skill/theme」只有 argv 与命令面证据；themes 的显式路径加载未单独实测（ADR-0044 D06 标注为同构代码路径推断）；第三方 extension 是否能绕过 gate 未做对抗验证。
 
 ## 4. Phase 1 Pi Spike 验收门禁
 

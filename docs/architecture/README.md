@@ -59,7 +59,8 @@ Self Task → Candidate → 自托管测试 → 用户 Promotion → 排空 → 
 - Runtime 独立于窗口，关闭客户端不结束任务。
 - 首个真实 Adapter 用 Pi；FULL 自动允许全部已注册工具，STRICT 保留原生审批与未知工具拒绝。
 - Agent 配置按 Adapter 持久化，分全局默认与每项目覆盖，逐字段 环境变量 > 项目 > 全局 > 适配器默认；仅新 Session 生效，生效值随 Execution 记录（ADR-0012）。
-- Agent 实际执行过程以**只读视图**呈现：`session.transcript` 直接读 Provider 自己的会话文件，不入库、不是 domain event、不是 attach、不新增确认；文件路径不离开 Runtime，仅限 Runtime 自己的 session 目录（ADR-0013）。
+- Agent 实际执行过程以**只读视图**呈现：`session.transcript` 直接读 Provider 自己的会话文件，不入库、不是 domain event、不是 attach、不新增确认；文件路径不离开 Runtime，仅限 Runtime 自己的 session 目录（ADR-0013）。Claude Code 的 Session 上该命令以 `SESSION_FILE_NOT_OWNED` 明确失败，不显示执行过程。
+- Agent 可加载的插件/资源按作用域持久化（`agent plugins list|select`、`agent.config.set --pluginSelection`，schema v27），只有声明 `pluginSelection: SUPPORTED` 的 Adapter 能应用；其余以稳定码拒绝而不假装写入（ADR-0044）。界面效果设置（`settings ui *`）是设置不是门禁，不驱动任何领域状态迁移（ADR-0045）。
 - 用户可从 Task 入口接管真实 Agent：Pi 在安全点从 RPC 交接到原生 TUI/PTY，普通输入是 Session Guidance，规格变化仍走 TaskRevision；任意时刻只有一个 Provider writer。
 - 取消协作停止，超时需人工处理；提高优先级不抢占。
 - Stable Promotion 排空活动任务后切换，不迁移活动 Session。
@@ -81,4 +82,4 @@ Self Task → Candidate → 自托管测试 → 用户 Promotion → 排空 → 
 
 完整产品的语义不可能用一次草案全部锁死。这里采用按阶段准入：Phase 0 的领域纯函数不涉及外部副作用；Phase 1 必须验证 Pi 协议并确认 Git 成果提交策略；Phase 2/4/7 的待决项只阻塞对应阶段，不被当作已批准默认值。
 
-SQLite 文档第 2–6 节为关系设计（含明确标注的待细化约束），第 8 节逐版本记录**已执行**的 migration（当前 `phase1SchemaVersion = 21`；v16 永久未使用）。API 为 Runtime port 合约草案，不是供应商能力承诺；`agent-adapter-api.md` 已记录 Pi 与 Codex 的实测能力矩阵。
+SQLite 文档第 2–6 节为关系设计（含明确标注的待细化约束），第 8 节逐版本记录**已执行**的 migration（当前 `phase1SchemaVersion = 27`；v16 永久未使用、v22 未占用）。API 为 Runtime port 合约草案，不是供应商能力承诺；`agent-adapter-api.md` 已记录 Pi、Codex 与 Claude Code 的实测能力矩阵。

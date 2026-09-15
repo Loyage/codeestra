@@ -1,6 +1,6 @@
 # Conservative Scheduler
 
-状态：§1–§6 是 Phase 2 设计（ADR-0030）；§7 记录**已实现的原语**（ADR-0032，schema v21）。**本基线里没有调度引擎**：`scheduler.ts` 目前只是 ADR-0024 的依赖判定器，自动 tick 由 FOUNDATION-055 在**本格之后**落地（见 §7.6）。
+状态：§1–§6 是 Phase 2 设计（ADR-0030）；§7 记录**已实现的原语**（ADR-0032，schema v21）。**调度引擎本体已由 ADR-0033 / FOUNDATION-055 实现**（`apps/runtime/src/schedule-service.ts` + `CODEESTRA_SCHEDULE_TICK_MS`，默认 5000ms），因此 §1.2 的触发模型与 §7.6 不再是「未实现」：它们已经是实现事实（保留原文的措辞只在下面显式标注更正，不重写历史）。
 
 ## 1. 调度输入和顺序
 
@@ -26,7 +26,7 @@
 
 ### 1.2 触发模型（ADR-0030 D04）
 
-> **本节是设计，尚未实现**：本基线里没有调度引擎，`scheduler.ts` 只是依赖判定器。自动 tick 由 FOUNDATION-055 在**本格之后**落地（见 §7.6）。
+> **本节曾标为「尚未实现」；已由 ADR-0033 / FOUNDATION-055 实现（FOUNDATION-074 更正）。** 触发模型就是现在的事实：一个相关事件（submit、集成进 dev、停止、修订投递、槽位释放、容量变化）触发一次 pass，另有一个周期恢复 pass 收敛崩溃遗留；`CODEESTRA_SCHEDULE_TICK_MS`（默认 5000ms）控制周期。`apps/runtime/src/scheduler.ts` 仍只是 ADR-0024 的依赖判定器——引擎在 `apps/runtime/src/schedule-service.ts`，候选排序与冲突/容量判定在那里接入。
 
 调度由 Runtime **自动 tick** 驱动，用户不需要手动「推」任务：
 
@@ -160,8 +160,16 @@ scheduler reservations reconcile <project-id> [--json]
 
 `acquire` 退出码：**0** = 拿到槽位，**3** = 容量等待/正在排水（`--json` 的 `wait.code` 是原因），**1** = 拒绝（依赖未满足、revision/版本过期、已有预留、未知 adapter、非法上限）。`prepare-workspace` 只有**本代创建**的 `RESERVED` 预留可用（否则 `SLOT_HELD_BY_ANOTHER_RUNTIME`），同一 commandId 重放不产生第二个 worktree。全部命令零新增确认、`--json`、退出码稳定。
 
-### 7.6 明确未实现：调度引擎（FOUNDATION-055）
+### 7.6 调度引擎（ADR-0033 / FOUNDATION-055，已实现）
 
-**本基线里没有引擎。** `apps/runtime/src/scheduler.ts` 目前只是 ADR-0024 的依赖判定器，一行未改为候选排序/冲突/容量判定接入；没有任何东西会自动 tick。ADR-0030 §1.2 的触发模型（事件驱动 tick + 周期恢复 tick + submit 后自动进入调度）是**设计**，**尚未实现**。调度引擎（候选排序、把冲突与容量判定接入、实际 diff 超出预测的处置、`--allow-unknown` 命令形态）由 **FOUNDATION-055** 在**本格之后**落地。
+> 本小节在 FOUNDATION-055 之前写的是「明确未实现：调度引擎」。**已由该格实现**（FOUNDATION-074 更正本节）：
+> `apps/runtime/src/schedule-service.ts` 提供自动 tick（事件驱动 + 周期恢复，`CODEESTRA_SCHEDULE_TICK_MS` 默认 5000ms）、
+> 确定性候选排序（优先级降序 → createdAt 升序 → ID 升序）、把 ADR-0024/0030/0031/0032 的依赖/冲突/容量判定接入启动门禁、等待原因
+> （`CONFLICT`/`CAPACITY`/`DRAINING`/`REVISION_REVIEW`，从不误用 `BLOCKED`）、实际 diff 超出预测时的撤销（`TaskImpactPredictionRevoked`）
+> 与 `--allow-unknown`（`task schedule clear-unknown` 的单次放行，绑定 assessed revision/baseline/analyzer/policy 版本，消费一次，不改写已记录的
+> 判定）。命令面为 `task schedule status/plan/explain/run/clear-unknown`（零确认、`--json`、退出码 0/1/3），其 UI 投影由 FOUNDATION-059 完成。
+>
+> **仍然未验证**：验收矩阵里「两个 SAFE 任务真的同时跑」只在调度器/命令面与测试夹具下验证过，真实 provider 的并发运行**未完成受控验收**
+> （`docs/guides/troubleshooting.md` §4 第 1 条），因此该验收项仍算未成立。
 
 因此在本格及其基线里：**不得写「自动 tick 已实现」或「两个 SAFE 任务真的会同时开始」。** Wave E 交付的是原语：E1 的 ImpactSnapshot/Conflict Analyzer 与 E2 的容量/槽位预留已经就位，但没有引擎驱动它们；本格的端到端证据只到「第三个任务得到容量等待」，没有两个 Task 真的同时跑。
