@@ -339,6 +339,24 @@ details summary { cursor: pointer; color: var(--muted); padding: 0.3rem 0; }
   { color: var(--warn); background: var(--warn-soft); }
 .state-implemented { color: var(--ok); background: var(--ok-soft); }
 
+/* Revision/delivery (ADR-0028) and the prose-question wait (ADR-0043 / FOUNDATION-069).
+   "Recorded", "dispatched" and "confirmed" are three separate facts, so they are three separately
+   coloured chips instead of one status word; only `confirmed` may ever look like a success. */
+.revision-panel { margin-top: 0.5rem; min-width: 0; }
+.revision-panel h4 { font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+.revision-panel h4 .hint { font-weight: normal; }
+.revision-panel h5 { font-size: 0.85rem; margin: 1.1rem 0 0.35rem; color: var(--muted); }
+.delivery-card { margin: 0.5rem 0; }
+.delivery-facts { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.4rem 0; font-size: 0.74rem; }
+.fact { border: 1px solid var(--line); border-radius: 6px; padding: 0.1rem 0.5rem; color: var(--muted); }
+.fact-recorded { color: var(--accent); border-color: var(--accent); }
+.fact-dispatched { color: var(--warn); border-color: var(--warn); }
+.fact-confirmed { color: var(--ok); border-color: var(--ok); }
+.revision-create { margin: 0.6rem 0; }
+.revision-create fieldset { display: flex; flex-direction: column; gap: 0.4rem; }
+.revision-create textarea { min-height: 4rem; }
+.prose-wait { border-left: 3px solid var(--warn); padding-left: 0.7rem; margin-top: 0.3rem; }
+
 /* Scheduling engine, capacity and conflict analysis (FOUNDATION-055 / ADR-0030, FOUNDATION-054 /
    ADR-0032, ADR-0031). These panels only project the Runtime's own facts. A wait is neither an
    error nor a success, and `UNKNOWN` is an attention fact — never the success colour. */

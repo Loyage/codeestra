@@ -9,6 +9,8 @@ import { TranscriptPanel } from './transcript.js';
 import { TerminalPanel } from './terminal.js';
 import { DependencyPanel } from './dependencies.js';
 import { PromotionPanel } from './promotion.js';
+import { RevisionDeliveryPanel } from './revisions.js';
+import { ProseQuestionWaitCard, isProseQuestionWait, readProseQuestionWait, proseQuestionResolveCommand } from './prose-wait.js';
 import { SchedulePanel, ScheduleExplainPanel, CapacityPanel } from './schedule.js';
 import { ImpactPolicyPanel, ImpactTaskPanel } from './impact.js';
 import {
@@ -27,6 +29,7 @@ import {
   type LiveOutputProgressView,
   type OperationProgressEventView,
   type OperationView,
+  type ProseQuestionResolutionResultView,
   type QuestionnaireView,
   type RepositoryIdentityView,
   type ResultCommitAuthorizationView,
@@ -1437,6 +1440,16 @@ function TasksTab(props: CommonProps & {
                 </section>
 
                 <section className="process-panel">
+                  <RevisionDeliveryPanel
+                    client={client}
+                    projectId={projectId}
+                    taskId={task.id}
+                    taskVersion={status?.task.version ?? task.version}
+                    adapterId={adapter}
+                    refreshToken={props.detailToken}
+                    run={props.run}
+                    onChanged={async () => { await props.loadDetail(projectId, task.id); }}
+                  />
                   <DependencyPanel
                     client={client}
                     projectId={projectId}
@@ -1652,7 +1665,7 @@ function QuestionnaireCard(props: {
   );
 }
 
-function AttentionTab(props: CommonProps & {
+export function AttentionTab(props: CommonProps & {
   readonly projectId: string | null;
   readonly attentions: readonly AttentionView[];
   readonly reload: () => Promise<void>;
@@ -1664,15 +1677,30 @@ function AttentionTab(props: CommonProps & {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   if (projectId === null) return <p className="muted">请选择一个项目。</p>;
   const open = attentions.filter((attention) => attention.status === 'OPEN');
+  // A prose-question wait looks like an ordinary Attention in `attention.list`, but it is a different
+  // fact: the provider process already exited and there is no dialog to answer (ADR-0043). Counting
+  // them here is what keeps the two kinds distinguishable at the top of the inbox.
+  const proseWaits = open.filter(isProseQuestionWait).length;
   return (
     <section className="card">
       <div className="section-heading"><h2>需要你的回答 <span className="badge">{open.length}</span></h2>
         <button type="button" disabled={actions.pending.has('reload')}
           onClick={() => { void actions.run('reload', '正在刷新待处理请求', reload); }}>刷新</button></div>
-      <p className="muted hint">只暂停对应任务。回答提交后由 Runtime 投递给 Agent，不需要离开工作台。</p>
+      <p className="muted hint">
+        只暂停对应任务。权限请求与问卷的回答会由 Runtime 投递给 Agent。
+        散文提问等待是另一类：provider 进程已退出，没有等待中的对话框，记录回答不会送进会话，
+        解除后需要显式重新运行才能让 Agent 继续。
+      </p>
+      {proseWaits === 0 ? null : (
+        <p className="muted hint">其中 {proseWaits} 条是散文提问等待
+          （启发式识别：无工具调用且以问号结束），用 attention resolve 的两种记录方式结束。</p>
+      )}
       <ul className="list">
         {open.map((attention) => {
           const questionnaire = questionnaireFromPrompt(attention.prompt);
+          // Read structurally, exactly like the questionnaire: a payload that does not validate is
+          // not treated as a prose question, so it can never be resolved through that route.
+          const proseWait = readProseQuestionWait(attention.prompt);
           const busy = actions.pending.has(attention.id);
           const run: CommonProps['run'] = (label, action) => actions.run(attention.id, label, action);
           const task = props.tasks?.find((item) => item.id === attention.taskId);
@@ -1686,9 +1714,29 @@ function AttentionTab(props: CommonProps & {
               <span className={`state state-${attention.kind.toLowerCase()}`}>
                 {labelValue(attention.kind)}
               </span>
+              {proseWait === null ? null : (
+                <span className="state state-waiting_for_user">散文提问等待 · provider 已退出</span>
+              )}
               <span className="muted mono">{labelValue(attention.responseType)}</span>
               <span className="muted">{new Date(attention.createdAt).toLocaleTimeString('zh-CN')}</span>
             </div>
+            {proseWait === null ? null : (
+              <ProseQuestionWaitCard
+                wait={proseWait}
+                busy={busy}
+                resolve={(request) => client.command<ProseQuestionResolutionResultView>(
+                  proseQuestionResolveCommand({
+                    projectId,
+                    attentionId: attention.id,
+                    commandId: crypto.randomUUID(),
+                    resolution: request.resolution,
+                    ...(request.text === undefined ? {} : { text: request.text }),
+                    ...(request.note === undefined ? {} : { note: request.note }),
+                  }))}
+                onResolved={reload}
+              />
+            )}
+            {proseWait !== null ? null : (<>
             {questionnaire !== null ? (
               <QuestionnaireCard
                 questionnaire={questionnaire}
@@ -1769,7 +1817,8 @@ function AttentionTab(props: CommonProps & {
                 });
               }}>拒绝回答此请求</button>
             ) : null}
-            {busy ? <p className="muted" role="status">正在发送回答…</p> : null}
+            </>)}
+            {busy && proseWait === null ? <p className="muted" role="status">正在发送回答…</p> : null}
             </fieldset>
           </li>
           );

@@ -1255,3 +1255,139 @@ export type StreamFrame =
   | { readonly schemaVersion: 1; readonly type: 'heartbeat'; readonly cursor: number }
   | { readonly schemaVersion: 1; readonly type: 'error'; readonly code: string;
       readonly message: string };
+
+// ---------------------------------------------------------------------------------------------
+// Task revision history and revision delivery (PROJECT_SPEC §2.11 / ADR-0028)
+//
+// These mirror `task revision list|create` and `task revision delivery list|get|resolve`. The three
+// facts they must keep apart are "recorded", "dispatched" and "confirmed": a delivery is satisfied
+// only by a structured acknowledgement or by a successor Execution the Runtime read back, never
+// because something was sent. The Runtime validates every response; this client only re-reads it.
+// ---------------------------------------------------------------------------------------------
+
+/** Domain FSM states of one delivery requirement (`packages/domain/src/revision-delivery.ts`). */
+export type RevisionDeliveryStateView =
+  | 'PENDING' | 'IN_FLIGHT' | 'ACKNOWLEDGED' | 'UNACKNOWLEDGED' | 'CHANNEL_UNSUPPORTED'
+  | 'TIMED_OUT' | 'FAILED' | 'SUPERSEDED_BY_RESTART';
+
+/** How a revision was (or was not) carried into the Execution. */
+export type RevisionDeliveryChannelView = 'PROVIDER_CONVERSATION' | 'STOP_AND_RESTART';
+
+/** One immutable revision as `task revision list` reports it; `current` marks the Task's current. */
+export interface TaskRevisionSummaryView {
+  readonly id: string;
+  readonly number: number;
+  readonly previousRevisionId: string | null;
+  readonly specification: string;
+  readonly constraints: readonly { readonly id: string; readonly text: string }[];
+  readonly reason: string;
+  readonly actor: string;
+  readonly createdAt: number;
+  readonly current: boolean;
+}
+
+/** One append-only attempt: which channel aimed the revision where, and the fact it produced. */
+export interface RevisionDeliveryAttemptView {
+  readonly id: string;
+  readonly attemptNumber: number;
+  readonly channel: RevisionDeliveryChannelView;
+  readonly executionId: string | null;
+  readonly sessionId: string | null;
+  readonly incarnationId: string | null;
+  readonly state: RevisionDeliveryStateView;
+  readonly evidenceRef: string | null;
+  readonly errorCode: string | null;
+  readonly detail: string;
+  readonly deadlineAt: number | null;
+  readonly startedAt: number;
+  readonly endedAt: number | null;
+}
+
+/**
+ * One delivery requirement as the ledger holds it. `satisfied` is the Runtime's verdict — true only
+ * for a structured acknowledgement or a verified successor Execution. `stale` means the Task has
+ * since moved on to a later revision, so a restart could never confirm this one.
+ */
+export interface RevisionDeliveryRecordView {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly revisionId: string;
+  readonly revisionNumber: number;
+  readonly executionId: string | null;
+  readonly sessionId: string | null;
+  readonly incarnationId: string | null;
+  readonly state: RevisionDeliveryStateView;
+  readonly attemptCount: number;
+  readonly channel: RevisionDeliveryChannelView | null;
+  readonly deadlineAt: number | null;
+  readonly evidenceRef: string | null;
+  readonly detail: string | null;
+  readonly supersededByExecutionId: string | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly acknowledgedAt: number | null;
+  readonly satisfied: boolean;
+  readonly stale: boolean;
+  readonly attempts: readonly RevisionDeliveryAttemptView[];
+}
+
+/** The list form adds one Runtime-side observation: an attempt is still in flight right now. */
+export interface RevisionDeliveryView extends RevisionDeliveryRecordView {
+  readonly attemptInFlight: boolean;
+}
+
+/** `task revision list` returns both ledgers of the specification history in one read. */
+export interface TaskRevisionListView {
+  readonly revisions: readonly TaskRevisionSummaryView[];
+  readonly deliveries: readonly RevisionDeliveryView[];
+}
+
+/** What `task revision create` produced; `deliveryId` is set only when an Execution was holding it. */
+export interface RevisionCreationView {
+  readonly taskId: string;
+  readonly taskVersion: number;
+  readonly revisionId: string;
+  readonly revisionNumber: number;
+  readonly previousRevisionId: string;
+  readonly deliveryId: string | null;
+  readonly executionId: string | null;
+  readonly sessionId: string | null;
+}
+
+/**
+ * The outcome of `task revision delivery resolve`. `RESOLVED` and `SUPERSEDED_BY_RESTART` are the
+ * only ones that leave the delivery confirmed; `UNSATISFIED` is recorded honesty, not a success.
+ */
+export interface RevisionDeliveryResolutionView {
+  readonly outcome: 'SUPERSEDED_BY_RESTART' | 'ALREADY_SATISFIED' | 'RESOLVED' | 'UNSATISFIED'
+    | 'RECOVERY_REQUIRED';
+  readonly delivery: RevisionDeliveryRecordView;
+  readonly taskState: string;
+  readonly taskVersion: number;
+  readonly successorExecutionId: string | null;
+  readonly predecessorExecutionId: string | null;
+  readonly detail: string;
+}
+
+/**
+ * The result of `attention.resolve` (FOUNDATION-069 / ADR-0043). It never claims a conversation was
+ * reached: `deliveredToProvider` is always false and the Session stays `EXITED`.
+ */
+export interface ProseQuestionResolutionResultView {
+  readonly attentionId: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly executionId: string;
+  readonly sessionId: string;
+  readonly resolution: 'ANSWERED' | 'DISMISSED_FALSE_POSITIVE';
+  readonly answerText: string | null;
+  readonly note: string | null;
+  readonly actor: string;
+  readonly taskState: string;
+  readonly executionState: string;
+  readonly sessionState: string;
+  readonly attentionStatus: string;
+  readonly deliveredToProvider: false;
+  readonly resolvedAt: number;
+}
