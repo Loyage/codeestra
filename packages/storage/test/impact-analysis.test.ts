@@ -106,7 +106,7 @@ describe('schema v20 impact analysis migration', () => {
       expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version')
         .get()?.user_version).toBe(phase1SchemaVersion);
       // Integration fix: this lane's own step is v20, but the capacity/slot step (v21) merged after
-      // it, so the current schema version is 21. The claim under test is that the upgrade reaches
+      // it, and later lanes keep appending. The claim under test is that the upgrade reaches
       // the current version and lands this lane's tables, not that this lane is last.
       expect(phase1SchemaVersion).toBe(24);
       expect(upgraded.sqlite.query<{ id: string }, []>(

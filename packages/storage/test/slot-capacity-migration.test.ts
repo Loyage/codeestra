@@ -104,8 +104,8 @@ const capacityTables = [
 function expectUpgradedToCapacitySchema(upgraded: Phase1Database): void {
   expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version)
     .toBe(phase1SchemaVersion);
-  // This lane's step is v21; the assertion is that the upgrade reaches whatever the current schema
-  // version is, not that this lane is the last one.
+  // Later lanes add steps after v21, so the claim is that this lane's step ran and the database
+  // reached the current version, not that this lane is last.
   expect(phase1SchemaVersion).toBeGreaterThanOrEqual(21);
   const tables = upgraded.sqlite.query<{ name: string }, []>(`
     SELECT name FROM sqlite_master WHERE type='table'
@@ -145,8 +145,8 @@ describe('capacity and slot reservation migration', () => {
       buildLegacyFile(filename, 16, 15);
       const upgraded = new Phase1Database(filename);
       try {
-        // Reaching 21 from 16 proves the 17/18/19 steps ran too: their tables exist and the
-        // verification progress table is the v17 one.
+        // Reaching the current version from 16 proves the 17/18/19 steps ran too: their tables exist
+        // and the verification progress table is the v17 one.
         expectUpgradedToCapacitySchema(upgraded);
         expect(upgraded.sqlite.query<{ name: string }, []>(
           "SELECT name FROM sqlite_master WHERE type='table' AND name='operation_progress_events'")

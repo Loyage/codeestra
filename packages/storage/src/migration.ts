@@ -1353,6 +1353,18 @@ CREATE TABLE execution_slot_reservation_events (
 `;
 
 /**
+ * Explicit retry of a failed Task (ADR-0036): `FAILED → READY | BLOCKED`, and a new Execution.
+ *
+ * The Task records the pending retry source before scheduling; the next reserved Execution copies
+ * that source and clears the pending relation in the same transaction. Version 22 remains unused,
+ * and version 23 is reserved for this additive migration.
+ */
+export const taskRetryMigration = `
+ALTER TABLE tasks ADD COLUMN pending_retry_from_execution_id TEXT REFERENCES executions(id);
+ALTER TABLE executions ADD COLUMN retry_from_execution_id TEXT REFERENCES executions(id);
+`;
+
+/**
  * Unregistered-directory disposition for reclamation (FOUNDATION-062, ADR-0037).
  *
  * ADR-0021 deliberately refused to touch anything the ledger did not claim: a directory in the

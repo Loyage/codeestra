@@ -42,6 +42,7 @@ import {
   stablePromotionMigration,
   taskControlMigration,
   taskDependenciesMigration,
+  taskRetryMigration,
   taskVerificationMigration,
   unregisteredReclamationMigration,
   verificationProgressMigration,
@@ -438,6 +439,45 @@ export interface TaskResumeRequest {
   readonly predecessorProviderSessionId: string | null;
 }
 
+/**
+ * How a retry treats the Task's own worktree (ADR-0036). `REUSE_VERIFIED` means the filesystem and
+ * Git confirmed the recorded worktree is this Task's own; `PREPARE_FRESH` means nothing is there at
+ * all, so the existing preparation path may create one. There is deliberately no "rebuild" mode: a
+ * reclamation leaves the Task branch behind, which the existing path refuses to re-use.
+ */
+export type TaskRetryWorkspaceMode = 'REUSE_VERIFIED' | 'PREPARE_FRESH';
+
+/** Result of an explicit retry of a failed Task, including the audit record it wrote. */
+export interface TaskRetryRequest {
+  readonly taskId: string;
+  /** `BLOCKED` when the dependency verdict was re-evaluated as unmet by the same command. */
+  readonly state: 'READY' | 'BLOCKED';
+  readonly version: number;
+  /** The append-only audit event this retry wrote. */
+  readonly retryId: string;
+  readonly failedExecutionId: string;
+  readonly failedAttemptNumber: number;
+  readonly adapterId: string;
+  readonly previousAdapterId: string | null;
+  readonly adapterChanged: boolean;
+  readonly workspaceMode: TaskRetryWorkspaceMode;
+  readonly workspaceId: string | null;
+  readonly workspaceEvidence: string | null;
+  readonly dependencyReasons: readonly TaskDependencyBlockReason[];
+}
+
+/** The most recent worktree record for one Task, in whatever state it was left. */
+export interface TaskWorkspaceRecord {
+  readonly workspaceId: string;
+  readonly taskId: string;
+  readonly path: string;
+  readonly branchRef: string;
+  readonly ownershipToken: string;
+  readonly baseCommit: string;
+  readonly state: WorkspaceLifecycleState;
+  readonly createdAt: number;
+}
+
 export type ExecutionLifecycleState = 'CREATED' | 'PREPARING' | 'STARTING' | 'RUNNING'
   | 'WAITING_FOR_USER' | 'PAUSING' | 'PAUSED' | 'STOPPING' | 'RECOVERY_REQUIRED' | 'SUCCEEDED'
   | 'FAILED' | 'CANCELLED' | 'SUPERSEDED';
@@ -612,6 +652,12 @@ export interface ExecutionSummary {
   readonly stopReason: 'USER_CANCEL' | 'USER_PAUSE' | 'REVISION_RESTART' | 'SHUTDOWN' | null;
   /** The Execution this attempt continued through provider conversation resume, if any. */
   readonly resumeFromExecutionId: string | null;
+  /**
+   * The failed Execution an explicit retry (`task retry`, ADR-0036) followed, if any. This is the
+   * relation a retry creates: a *new* Execution, not a continuation of the old conversation, so it
+   * is a different fact from `resumeFromExecutionId` and is stored in its own column.
+   */
+  readonly retryFromExecutionId: string | null;
   /** Effective Agent configuration this Execution started with, as recorded at reservation. */
   readonly agentConfig: StoredAgentConfiguration | null;
   readonly session: {
@@ -1220,6 +1266,8 @@ export class Phase1Database {
         // Version 21 is this step's own number, so a database stamped 17–20 still gets the
         // capacity/slot tables. No earlier number is ever inserted.
         if (version < 21) this.sqlite.exec(capacitySlotReservationMigration);
+        // Version 23 is the Task-retry step (ADR-0036); version 22 remains unoccupied.
+        if (version < 23) this.sqlite.exec(taskRetryMigration);
         // Version 24 is this step's own number, so a database stamped 21–23 still gets the
         // unregistered-directory ledger columns. No earlier number is ever inserted.
         if (version < 24) this.sqlite.exec(unregisteredReclamationMigration);
@@ -1586,7 +1634,7 @@ export class Phase1Database {
       resource_held: number; base_commit: string; revision_id: string;
       result_commit: string | null; error_json: string | null;
       agent_config_json: string | null; stop_reason: ExecutionSummary['stopReason'];
-      resume_from_execution_id: string | null;
+      resume_from_execution_id: string | null; retry_from_execution_id: string | null;
       session_id: string | null; session_state: AgentSessionLifecycleState | null;
       provider_session_id: string | null; observation_cursor: string | null;
       session_exit_json: string | null;
@@ -1595,7 +1643,7 @@ export class Phase1Database {
         execution.adapter_id,execution.adapter_version,execution.resource_held,execution.base_commit,
         execution.applied_revision_id AS revision_id,execution.result_commit,execution.error_json,
         execution.agent_config_json,
-        execution.stop_reason,execution.resume_from_execution_id,
+        execution.stop_reason,execution.resume_from_execution_id,execution.retry_from_execution_id,
         session.id AS session_id,session.state AS session_state,
         session.provider_session_id,session.observation_cursor,session.exit_json AS session_exit_json
       FROM executions execution LEFT JOIN agent_sessions session ON session.execution_id=execution.id
@@ -1614,6 +1662,7 @@ export class Phase1Database {
       error: parseExecutionError(row.error_json),
       stopReason: row.stop_reason,
       resumeFromExecutionId: row.resume_from_execution_id,
+      retryFromExecutionId: row.retry_from_execution_id,
       agentConfig: parseAgentConfiguration(row.agent_config_json),
       session: row.session_id === null || row.session_state === null ? null : {
         sessionId: row.session_id,
@@ -3787,10 +3836,12 @@ export class Phase1Database {
         const subject = database.query<{
           task_state: TaskLifecycleState; task_version: number; revision_id: string;
           workspace_state: string; workspace_path: string; ownership_token: string; base_commit: string;
+          pending_retry_from_execution_id: string | null;
         }, [string, string, string]>(`
           SELECT task.state AS task_state,task.version AS task_version,
             task.current_revision_id AS revision_id,workspace.state AS workspace_state,
-            workspace.path AS workspace_path,workspace.ownership_token,workspace.base_commit
+            workspace.path AS workspace_path,workspace.ownership_token,workspace.base_commit,
+            task.pending_retry_from_execution_id
           FROM tasks task
           JOIN project_trusts trust ON trust.project_id=task.project_id AND trust.status='ACTIVE'
           JOIN workspaces workspace ON workspace.task_id=task.id AND workspace.id=?3
@@ -3818,11 +3869,12 @@ export class Phase1Database {
         database.query(`
           INSERT INTO executions(id,task_id,attempt_number,initial_revision_id,applied_revision_id,
             workspace_id,adapter_id,adapter_version,state,resource_held,base_commit,version,
-            agent_config_json,resume_from_execution_id)
-          VALUES (?1,?2,?3,?4,?4,?5,?6,?7,'CREATED',1,?8,0,?9,?10)
+            agent_config_json,resume_from_execution_id,retry_from_execution_id)
+          VALUES (?1,?2,?3,?4,?4,?5,?6,?7,'CREATED',1,?8,0,?9,?10,?11)
         `).run(input.executionId, input.taskId, attempt.number, subject.revision_id,
           input.workspaceId, input.adapterId, input.adapterVersion, subject.base_commit,
-          agentConfigJson, input.resumeFromExecutionId ?? null);
+          agentConfigJson, input.resumeFromExecutionId ?? null,
+          subject.pending_retry_from_execution_id);
         const workspaceUpdate = database.query(
           "UPDATE workspaces SET state='IN_USE' WHERE id=?1 AND state='READY'",
         ).run(input.workspaceId);
@@ -3830,8 +3882,10 @@ export class Phase1Database {
           throw new StorageError('CONCURRENT_MODIFICATION', 'Workspace changed during Execution reservation');
         }
         const taskVersion = input.expectedTaskVersion + 1;
+        // The retry intent is consumed here and now: exactly one Execution becomes the failure's
+        // successor, and a later attempt cannot inherit a relation it did not earn.
         const taskUpdate = database.query(`
-          UPDATE tasks SET state='RUNNING',version=?1,updated_at=?2
+          UPDATE tasks SET state='RUNNING',version=?1,updated_at=?2,pending_retry_from_execution_id=NULL
           WHERE id=?3 AND project_id=?4 AND version=?5 AND state='READY'
         `).run(taskVersion, input.createdAt, input.taskId, input.projectId, input.expectedTaskVersion);
         if (taskUpdate.changes !== 1) {
@@ -3845,7 +3899,9 @@ export class Phase1Database {
           input.createdAt, JSON.stringify({ executionId: input.executionId, taskId: input.taskId,
             revisionId: subject.revision_id, workspaceId: input.workspaceId,
             ...(input.resumeFromExecutionId === undefined
-              ? {} : { resumeFromExecutionId: input.resumeFromExecutionId }) }));
+              ? {} : { resumeFromExecutionId: input.resumeFromExecutionId }),
+            ...(subject.pending_retry_from_execution_id === null
+              ? {} : { retryFromExecutionId: subject.pending_retry_from_execution_id }) }));
         database.query(`
           INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
             aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
@@ -4455,6 +4511,185 @@ export class Phase1Database {
       baseCommit: row.base_commit,
       ownershipToken: row.ownership_token,
     };
+  }
+
+  /**
+   * The most recent worktree recorded for one Task, in whatever state it was left (and even when it
+   * was reclaimed, so the caller can tell "nothing here" from "reclaimed but its branch survived").
+   * Used by the retry path to decide what to do with the Task's own worktree; it is a read, and the
+   * ownership check is done against the real filesystem by the caller.
+   */
+  getLatestTaskWorkspace(taskId: string): TaskWorkspaceRecord | null {
+    const row = this.sqlite.query<{
+      id: string; task_id: string; path: string; branch_ref: string; ownership_token: string;
+      base_commit: string; state: WorkspaceLifecycleState; created_at: number;
+    }, [string]>(`
+      SELECT id,task_id,path,branch_ref,ownership_token,base_commit,state,created_at FROM workspaces
+      WHERE task_id=?1 ORDER BY created_at DESC,id DESC LIMIT 1
+    `).get(taskId);
+    return row === null ? null : {
+      workspaceId: row.id,
+      taskId: row.task_id,
+      path: row.path,
+      branchRef: row.branch_ref,
+      ownershipToken: row.ownership_token,
+      baseCommit: row.base_commit,
+      state: row.state,
+      createdAt: row.created_at,
+    };
+  }
+
+  /**
+   * Explicit retry of a `FAILED` Task (ADR-0036): the source state is re-checked inside this command
+   * transaction, the Task is requeued (`READY`, or `BLOCKED` when the dependency verdict the caller
+   * re-evaluated is unmet), and the intent — which failure this retry follows — is recorded on the
+   * Task so the next Execution can name it. A worktree verified as this Task's own moves back to
+   * `READY` in the same transaction, so the new Execution reuses it instead of preparing a second
+   * one.
+   *
+   * The old Execution is not touched: its failure, error and evidence stay exactly as they were,
+   * because a retry is a new attempt rather than a rewrite of the previous one.
+   */
+  retryTask(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly expectedVersion: number;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly actor: string;
+    readonly adapterId: string;
+    readonly failedExecutionId: string;
+    readonly target: 'READY' | 'BLOCKED';
+    readonly dependencyReasons: readonly TaskDependencyBlockReason[];
+    readonly workspace: {
+      readonly mode: TaskRetryWorkspaceMode;
+      readonly workspaceId: string | null;
+      readonly evidence: string | null;
+    };
+    readonly taskEventId: string;
+    readonly retryEventId: string;
+    readonly requestedAt: number;
+  }): TaskRetryRequest {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.requestedAt,
+      apply: (database) => {
+        const task = database.query<{
+          state: TaskLifecycleState; version: number; archived_at: number | null;
+        }, [string, string]>(`
+          SELECT t.state,t.version,t.archived_at FROM tasks t
+          JOIN project_trusts trust ON trust.project_id=t.project_id AND trust.status='ACTIVE'
+          WHERE t.project_id=?1 AND t.id=?2
+        `).get(input.projectId, input.taskId);
+        if (task === null) throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
+        if (task.version !== input.expectedVersion) {
+          throw new StorageError('CONCURRENT_MODIFICATION', 'Task version did not match');
+        }
+        // The eligibility decision belongs to the domain, but the last word is the atomic read: a
+        // Task that moved between the caller's check and this transaction is refused, never retried.
+        if (task.archived_at !== null) {
+          throw new StorageError('INVALID_STATE', 'An archived Task is never retried');
+        }
+        if (task.state !== 'FAILED') {
+          throw new StorageError('INVALID_STATE', `Task cannot be retried from ${task.state}`);
+        }
+        const failed = database.query<{
+          attempt_number: number; state: ExecutionLifecycleState; adapter_id: string;
+        }, [string, string]>(`
+          SELECT attempt_number,state,adapter_id FROM executions WHERE id=?1 AND task_id=?2
+        `).get(input.failedExecutionId, input.taskId);
+        if (failed === null || failed.state !== 'FAILED') {
+          throw new StorageError('INVALID_STATE',
+            'A retry must name a FAILED Execution of this Task as the attempt it follows');
+        }
+        const newest = database.query<{ attempt_number: number | null }, [string]>(`
+          SELECT MAX(attempt_number) AS attempt_number FROM executions WHERE task_id=?1
+        `).get(input.taskId);
+        if (newest?.attempt_number !== failed.attempt_number) {
+          throw new StorageError('INVALID_STATE',
+            `Execution attempt ${failed.attempt_number} is not the failure that ended this Task;`
+            + ` attempt ${newest?.attempt_number ?? 0} is`);
+        }
+        if (input.target === 'BLOCKED' && input.dependencyReasons.length === 0) {
+          throw new StorageError('INVALID_STATE',
+            'A retry cannot requeue a Task as BLOCKED without naming the unmet dependency');
+        }
+        if (input.target === 'READY' && input.dependencyReasons.length > 0) {
+          throw new StorageError('INVALID_STATE',
+            'A retry cannot requeue a Task as READY while an unmet dependency is still named');
+        }
+        if (input.workspace.mode === 'REUSE_VERIFIED') {
+          if (input.workspace.workspaceId === null) {
+            throw new StorageError('INVALID_STATE',
+              'A verified reuse must name the workspace it verified');
+          }
+          const reused = database.query(`
+            UPDATE workspaces SET state='READY'
+            WHERE id=?1 AND task_id=?2 AND state IN ('READY','RETAINED')
+          `).run(input.workspace.workspaceId, input.taskId);
+          if (reused.changes !== 1) {
+            throw new StorageError('CONCURRENT_MODIFICATION',
+              'The workspace changed before it could be reused by this retry');
+          }
+        }
+        const version = task.version + 1;
+        const taskUpdate = database.query(`
+          UPDATE tasks SET state=?1,version=?2,updated_at=?3,pending_retry_from_execution_id=?4
+          WHERE project_id=?5 AND id=?6 AND version=?7 AND state='FAILED'
+        `).run(input.target, version, input.requestedAt, input.failedExecutionId,
+          input.projectId, input.taskId, input.expectedVersion);
+        if (taskUpdate.changes !== 1) {
+          throw new StorageError('CONCURRENT_MODIFICATION', 'Task changed during retry');
+        }
+        database.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'TaskStateChanged',1,'Task',?3,?4,?5,?5,?6,?7)
+        `).run(input.taskEventId, input.projectId, input.taskId, version, input.commandId,
+          input.requestedAt, JSON.stringify({ taskId: input.taskId, from: 'FAILED',
+            to: input.target,
+            reason: input.target === 'BLOCKED'
+              ? 'explicit retry; dependencies are unmet' : 'explicit retry',
+            retryFromExecutionId: input.failedExecutionId,
+            dependencies: input.dependencyReasons, actor: input.actor }));
+        // The retry's own audit record, append-only and separate from the state change it caused: it
+        // answers "who retried which failure, on which Agent, and with which workspace decision".
+        database.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'TaskRetryRequested',1,'Task',?3,?4,?5,?6,?7,?8)
+        `).run(input.retryEventId, input.projectId, input.taskId, version, input.commandId,
+          input.taskEventId, input.requestedAt, JSON.stringify({
+            taskId: input.taskId, from: 'FAILED', to: input.target,
+            failedExecutionId: input.failedExecutionId,
+            failedAttemptNumber: failed.attempt_number,
+            adapterId: input.adapterId,
+            previousAdapterId: failed.adapter_id,
+            adapterChanged: input.adapterId !== failed.adapter_id,
+            workspaceMode: input.workspace.mode,
+            workspaceId: input.workspace.workspaceId,
+            workspaceEvidence: input.workspace.evidence,
+            dependencies: input.dependencyReasons,
+            actor: input.actor }));
+        return {
+          taskId: input.taskId,
+          state: input.target,
+          version,
+          retryId: input.retryEventId,
+          failedExecutionId: input.failedExecutionId,
+          failedAttemptNumber: failed.attempt_number,
+          adapterId: input.adapterId,
+          previousAdapterId: failed.adapter_id,
+          adapterChanged: input.adapterId !== failed.adapter_id,
+          workspaceMode: input.workspace.mode,
+          workspaceId: input.workspace.workspaceId,
+          workspaceEvidence: input.workspace.evidence,
+          dependencyReasons: input.dependencyReasons,
+        };
+      },
+    });
   }
 
   /** Task, revision, repository facts and Execution attempts for verification decisions. */
