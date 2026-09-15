@@ -46,6 +46,8 @@ import {
   capacitySlotReservationMigration,
   impactAnalysisMigration,
   integrationPipelineMigration,
+  intentKindShrinkMigration,
+  intentKinds,
   knowledgeLayerMigration,
   operationProgressMigration,
   phase1Migration,
@@ -64,6 +66,29 @@ import {
   verificationProgressMigration,
   workspaceRetryMigration,
 } from './migration.js';
+import type { IntentKind } from './migration.js';
+
+/**
+ * The `intents.kind` values this build accepts (ADR-0046). The database CHECK is the last line of
+ * defence; this list is what a boundary refusal is checked against, so a removed kind fails with a
+ * stable code instead of surfacing as a raw SQLite constraint error.
+ */
+export { intentKinds };
+export type { IntentKind };
+
+/**
+ * Refuses an Intent kind the schema no longer declares. The writers of `intents` are internal
+ * (Task creation, revision creation, Attention answering), so this guard exists to keep a future
+ * caller from discovering the shrink as an opaque `CHECK constraint failed`.
+ */
+export function assertIntentKind(kind: string): IntentKind {
+  const match = intentKinds.find((candidate) => candidate === kind);
+  if (match === undefined) {
+    throw new StorageError('UNSUPPORTED_INTENT_KIND',
+      `Intent kind ${kind} is not one of ${intentKinds.join(', ')}`);
+  }
+  return match;
+}
 
 export class StorageError extends Error {
   constructor(
@@ -71,7 +96,10 @@ export class StorageError extends Error {
       | 'NOT_FOUND' | 'INVALID_STATE'
       // Prose-question waits carry their own stable codes (FOUNDATION-069), so a refusal names
       // exactly which part of the wait was wrong instead of a generic state error.
-      | ProseQuestionResolutionCode | 'PROSE_QUESTION_RESOLUTION_REQUIRED',
+      | ProseQuestionResolutionCode | 'PROSE_QUESTION_RESOLUTION_REQUIRED'
+      // The `intents.kind` CHECK was narrowed in schema v28 (ADR-0046), so a removed kind is a
+      // boundary refusal with its own code rather than a raw SQLite constraint error.
+      | 'UNSUPPORTED_INTENT_KIND',
     message: string,
   ) {
     super(message);
@@ -1495,9 +1523,10 @@ export class Phase1Database {
       throw new StorageError('UNSUPPORTED_SCHEMA', `Database schema ${version} is newer than ${phase1SchemaVersion}`);
     }
     if (version === phase1SchemaVersion) return;
-    // Rebuilding a table that other tables reference by name requires foreign keys to be off;
-    // they are re-enabled and verified before the connection is used.
-    const rebuildsTable = version < 9;
+    // `workspaces` (v7), `executions` (v9) and `intents` (v28) are each referenced by name from
+    // other tables, so every upgrade below the newest such step runs with foreign keys off and
+    // verifies the whole schema before the connection is used.
+    const rebuildsTable = version < 28;
     if (rebuildsTable) this.sqlite.exec('PRAGMA foreign_keys=OFF;');
     try {
       this.sqlite.transaction(() => {
@@ -1537,6 +1566,42 @@ export class Phase1Database {
         // Version 27 is this step's own number (FOUNDATION-071 / ADR-0044): agent plugin selection.
         // A database stamped 17–26 still gets it, and no earlier number is ever inserted.
         if (version < 27) this.sqlite.exec(agentPluginSelectionMigration);
+        if (version < 28) {
+          // ADR-0046 shrinks `intents.kind`. A row that still uses a removed kind must stop the
+          // upgrade with a named reason and leave the original database untouched rather than be
+          // dropped or rewritten: the rebuild below cannot express it, and silently losing history
+          // is exactly what the audit rules forbid.
+          //
+          // This pre-check is load-bearing, not decorative. Bun's `Database.exec()` swallows a
+          // *step-time* error inside a multi-statement script and keeps executing the rest, so if
+          // the `INSERT ... SELECT` inside the rebuild ever violated the narrowed CHECK, the
+          // following `DROP TABLE` would still run and the rows would be gone without an error.
+          // The comparison after the rebuild turns that failure mode into a loud rollback; any
+          // future migration that rebuilds a table must guard its copy the same way.
+          const stranded = this.sqlite.query<{ kind: string | null; rows: number }, []>(`
+            SELECT kind, COUNT(*) AS rows FROM intents
+            WHERE kind IS NOT NULL AND kind NOT IN ('CREATE_TASK','AMEND_TASK','ADD_CONSTRAINT',
+              'CANCEL_TASK','ANSWER_AGENT')
+            GROUP BY kind ORDER BY kind
+          `).all();
+          if (stranded.length > 0) {
+            const detail = stranded.map((row) => `${row.kind ?? 'NULL'} x${row.rows}`).join(', ');
+            throw new StorageError('INVALID_STATE',
+              'intents.kind shrinks to five kinds in schema v28 (ADR-0046) and this database still'
+              + ` holds rows using a removed kind: ${detail}. Migrate those rows deliberately`
+              + ' before upgrading; nothing was changed.');
+          }
+          const intentsBefore = this.sqlite.query<{ rows: number }, []>(
+            'SELECT COUNT(*) AS rows FROM intents').get()?.rows ?? 0;
+          this.sqlite.exec(intentKindShrinkMigration);
+          const intentsAfter = this.sqlite.query<{ rows: number }, []>(
+            'SELECT COUNT(*) AS rows FROM intents').get()?.rows ?? -1;
+          if (intentsAfter !== intentsBefore) {
+            throw new StorageError('INVALID_STATE',
+              `Schema v28 rebuild of intents lost rows (${intentsBefore} before, ${intentsAfter}`
+              + ' after); the upgrade was rolled back and nothing was changed');
+          }
+        }
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -1758,11 +1823,11 @@ export class Phase1Database {
         `).get(input.projectId);
         if (next === null) throw new Error('Could not allocate a Task display number');
 
-        database.query(`
-          INSERT INTO intents(id,project_id,idempotency_key,raw_text,kind,status,actor,created_at)
-          VALUES (?1,?2,?3,?4,'CREATE_TASK','APPLIED',?5,?6)
-        `).run(input.intentId, input.projectId, input.commandId, input.specification,
-          input.actor, input.createdAt);
+        this.insertIntent(database, {
+          id: input.intentId, projectId: input.projectId, idempotencyKey: input.commandId,
+          rawText: input.specification, kind: 'CREATE_TASK', status: 'APPLIED',
+          actor: input.actor, createdAt: input.createdAt,
+        });
         database.query(`
           INSERT INTO tasks(id,project_id,display_number,kind,current_revision_id,state,
             priority,version,created_at,updated_at)
@@ -2828,10 +2893,11 @@ export class Phase1Database {
             `${input.answer.type} answer does not match ${subject.response_type} Attention`);
         }
         const answerJson = JSON.stringify(input.answer);
-        database.query(`
-          INSERT INTO intents(id,project_id,idempotency_key,raw_text,kind,status,actor,created_at)
-          VALUES (?1,?2,?3,?4,'ANSWER_AGENT','APPLIED',?5,?6)
-        `).run(input.intentId, input.projectId, input.commandId, answerJson, input.actor, input.recordedAt);
+        this.insertIntent(database, {
+          id: input.intentId, projectId: input.projectId, idempotencyKey: input.commandId,
+          rawText: answerJson, kind: 'ANSWER_AGENT', status: 'APPLIED',
+          actor: input.actor, createdAt: input.recordedAt,
+        });
         database.query('INSERT INTO intent_attention_targets(intent_id,attention_id) VALUES (?1,?2)')
           .run(input.intentId, input.attentionId);
         database.query(`
@@ -7747,6 +7813,29 @@ export class Phase1Database {
     return input.expectedVersion + 1;
   }
 
+  /**
+   * The only place an `intents` row is written. Funnelling all three writers (Task creation,
+   * revision creation, Attention answering) through one guard is what makes the ADR-0046 shrink a
+   * boundary rule instead of three independent literals: a kind outside the narrowed set fails with
+   * `UNSUPPORTED_INTENT_KIND` before SQLite can answer with an opaque CHECK error.
+   */
+  private insertIntent(database: Database, input: {
+    readonly id: string;
+    readonly projectId: string;
+    readonly idempotencyKey: string;
+    readonly rawText: string;
+    readonly kind: string;
+    readonly status: 'RECORDED' | 'NEEDS_CLARIFICATION' | 'APPLIED' | 'REJECTED';
+    readonly actor: string;
+    readonly createdAt: number;
+  }): void {
+    database.query(`
+      INSERT INTO intents(id,project_id,idempotency_key,raw_text,kind,status,actor,created_at)
+      VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+    `).run(input.id, input.projectId, input.idempotencyKey, input.rawText,
+      assertIntentKind(input.kind), input.status, input.actor, input.createdAt);
+  }
+
   executeCommand<T extends object>(input: {
     readonly projectId: string;
     readonly commandId: string;
@@ -10331,11 +10420,11 @@ export class Phase1Database {
           SELECT COALESCE(MAX(number),0)+1 AS number FROM task_revisions WHERE task_id=?1
         `).get(input.taskId);
         if (next === null) throw new Error('Could not allocate a Task revision number');
-        database.query(`
-          INSERT INTO intents(id,project_id,idempotency_key,raw_text,kind,status,actor,created_at)
-          VALUES (?1,?2,?3,?4,?5,'APPLIED',?6,?7)
-        `).run(input.intentId, input.projectId, input.commandId, input.specification, input.kind,
-          input.actor, input.createdAt);
+        this.insertIntent(database, {
+          id: input.intentId, projectId: input.projectId, idempotencyKey: input.commandId,
+          rawText: input.specification, kind: input.kind, status: 'APPLIED',
+          actor: input.actor, createdAt: input.createdAt,
+        });
         database.query(`
           INSERT INTO task_revisions(id,task_id,number,previous_revision_id,specification,
             constraints_json,source_intent_id,actor,reason,created_at)

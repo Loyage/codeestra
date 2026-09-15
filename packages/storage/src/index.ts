@@ -1,4 +1,5 @@
 export { Phase1Database, SlotReservationError, StorageError, TaskDependencyError,
+  assertIntentKind,
   maxSlotReservationReadLimit, slotDependencyFingerprint, taskScheduleEventTypes } from './database.js';
 export type { TaskScheduleEventType } from './database.js';
 export type {
@@ -61,6 +62,7 @@ export {
   agentAnswerMigration, agentConfigurationMigration, agentDisconnectMigration,
   agentObservationMigration, agentPluginSelectionMigration, agentStartMigration, capacitySlotReservationMigration,
   impactAnalysisMigration, integrationPipelineMigration, knowledgeLayerMigration,
+  intentKindShrinkMigration, intentKinds,
   operationProgressMigration,
   phase1Migration, phase1SchemaVersion, reclamationMigration, sessionHandoffMigration,
   sessionTerminalMigration,
@@ -73,5 +75,6 @@ export {
 
   workspaceRetryMigration,
 } from './migration.js';
+export type { IntentKind } from './migration.js';
 export { agentThinkingLevelSchema, agentThinkingLevels, storedAgentConfigurationSchema }
   from './database.js';

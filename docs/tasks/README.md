@@ -4584,10 +4584,164 @@ EOF
 - **本格未核实**：历史记录章节里各条「已完成」的声明本身（本格只核对被本格改动的状态声明与 J1 的 10 项），以及
   `docs/architecture/*.md` 第 2–6 节的逻辑设计（第 8 节的实现记录才是权威）。
 
+## FOUNDATION-075 — 规格状态段对齐与 `intents.kind` 缩小（Wave K / K2，ADR-0046，schema v28）
+
+状态：**已完成（lane 分支 commit，未 push、未提升 `main`、未重启稳定 Runtime）。**
+基线：`dev = 8bc12629f8059bf28885058b79a6b451f8a5646e`（未 rebase）。工作树：
+`/Users/loyage/Documents/codeestra-wt/k2-spec-and-intent-kind`，分支 `lane/k2-spec-and-intent-kind`。
+
+用户 2026-09-15 就 J1/K1 留下的两条待裁决作出裁决：**①`PROJECT_SPEC.md` §1 的状态段与同文件 §3 自相矛盾**（明确授权本格修改规格文件，
+并要求把已实现/已真实执行的能力写成已完成、把真实未验收的保留为未验收）；**②`intents.kind` 的未使用取值 → 缩小 CHECK（要迁移）**。
+执行中途就「§8 的现状陈述是否也一并修正」追加提问，用户裁决**允许**，并额外要求：只改与 §3/实现矛盾的现状陈述、§8 的「本次交付范围」与
+「非目标」条款本身一字不动、每句都在下文逐句声明、§1.1/§2/§3–§9 的规范语义仍不得改动。
+
+### 交付物
+
+| 交付物 | 内容 | 位置 |
+|---|---|---|
+| A 规格对齐 | 第 3 行状态段重写；§1 intent 分类清单按 schema CHECK 调整；§8 两处现状陈述修正。共 3 行（见「本次规格修订」） | `PROJECT_SPEC.md` |
+| B schema v28 | `phase1SchemaVersion` 27 → 28；新增 `intentKindShrinkMigration`（重建 `intents`，CHECK 收窄为五个取值） | `packages/storage/src/migration.ts` |
+| B 迁移守卫与边界码 | v28 前置拒绝 + 升级后行数比对；`rebuildsTable` 放宽到 `version < 28`；新增 `UNSUPPORTED_INTENT_KIND`、`intentKinds`、`IntentKind`、`assertIntentKind` 与私有 `insertIntent`（三个写入点统一走它） | `packages/storage/src/database.ts`、`packages/storage/src/index.ts` |
+| C ADR-0046 | 背景（声明与产生路径不一致）、选项（缩小 CHECK / 补命令 / 保留未用取值 / 只加触发器）、决定 D01–D05、后果（含 `CHANGE_PRIORITY` 移除使 priority 惰性）、验证要求 | `docs/decisions/0046-intent-kind-check-shrink.md` + `docs/decisions/README.md` 表尾按号段升序加索引行 |
+| C 不一致清单收口 | §3 第 7、10 条改为已修并写明上一版的事实错误；稳定码表加 `UNSUPPORTED_INTENT_KIND`；§4 加第 13 条未验证登记 | `docs/guides/troubleshooting.md` |
+| C 文档同步 | `sqlite-schema.md`（状态行 v27→v28、§2 的 v1 DDL 加一行指向 §8 的注释、执行顺序 v1…v28、版本占用表、新增 §8「`intents.kind` 收窄」节）、`docs/architecture/README.md`（`phase1SchemaVersion = 28`） | `docs/architecture/sqlite-schema.md`、`docs/architecture/README.md` |
+| 定向测试 | 新文件 6 项 | `packages/storage/test/intent-kind-shrink.test.ts` |
+
+### schema v28 的关键实现事实
+
+- **CHECK 收窄为** `('CREATE_TASK','AMEND_TASK','ADD_CONSTRAINT','CANCEL_TASK','ANSWER_AGENT')`；`ANSWER_AGENT` **保留**。
+- 迁移**纯追加**：`migrate()` 只在既有升序链尾加 `if (version < 28)`；`phase1Migration` 里 v1 的七取值 DDL **一字未改**；
+  v16 继续永久未使用、v22 继续未占用。
+- 重建 `intents`（`intents_v28` → 复制 → `DROP TABLE intents` → `RENAME`）。三张引用表
+  （`task_revisions.source_intent_id`、`intent_targets.intent_id`、`intent_attention_targets.intent_id`）的外键子句与行原样保留；
+  `intents` 的主键与 `UNIQUE(project_id,idempotency_key)` 原样保留；`task_revisions` 的两个 append-only 触发器未受影响；
+  `intents` 在 v27 上没有任何触发器，v28 也不新增；迁移后 `PRAGMA foreign_key_check` 为空。
+- **对先例的两处刻意偏离**（ADR-0046 已记录）：①`rebuildsTable` 从 `version < 9` 放宽到 `version < 28`（v7/v9/v28 三者都被别的表
+  按名字引用，继续用旧谓词会让 v28 在真实库里撞外键）；②在 `migrate()` 里加了 v28 专属的**前置拒绝**与**升级后行数比对**，
+  既有 v7/v9/v24 的重建步骤未改。
+- **迁移前复核的真实数据（只读）**：本机稳定库 `~/.local/state/codeestra/runtime.sqlite` 当前仍是 v27，`intents` 共 33 行，取值只有
+  `ANSWER_AGENT`(24) 与 `CREATE_TASK`(9)，两个被移除取值各 0 行，因此真实升级路径不会触发拒绝。复核命令与输出：
+
+  ```sh
+  bun -e "const {Database}=require('bun:sqlite');
+    const d=new Database(process.env.HOME+'/.local/state/codeestra/runtime.sqlite',{readonly:true});
+    console.log(d.query('PRAGMA user_version').get());
+    console.log(d.query('SELECT COUNT(*) c FROM intents').get());
+    console.log(d.query('SELECT kind,COUNT(*) c FROM intents GROUP BY kind ORDER BY kind').all());
+    console.log(d.query('SELECT priority,COUNT(*) c FROM tasks GROUP BY priority').all()); d.close();"
+  # => { user_version: 27 }
+  # => { c: 33 }
+  # => [ { kind: 'ANSWER_AGENT', c: 24 }, { kind: 'CREATE_TASK', c: 9 } ]
+  # => [ { priority: 0, c: 9 } ]
+  ```
+
+  以 `{readonly:true}` 打开，**未写、未改、未停**稳定 Runtime；`tasks.priority` 9 行全为 0 也直接印证了 ADR-0046 记录的「priority 现状下惰性」。
+- **一个必须记录的实测事实**：Bun 1.4.2 的 `Database.exec()` 会**吞掉多语句脚本里的 step-time 错误**（语句报错后继续执行后面的语句、
+  不把错误交给调用方；`prepare` 阶段的错误仍会抛）。与本次迁移的形状放在一起就是一条真实的数据丢失路径：若 `INSERT ... SELECT` 因收窄后的
+  CHECK 被拒，后面的 `DROP TABLE intents` 仍会执行。因此 v28 的守卫**不能**依赖迁移脚本自己失败：`migrate()` 先拒绝有被移除取值的库，
+  再在重建前后比对 `intents` 行数，不等就报 `INVALID_STATE` 并回滚。既有重建步骤（v7/v9/v24）未改，但这条风险已写进 ADR-0046 D04。
+
+### 上一版记录的事实错误（必须单列）
+
+FOUNDATION-074（K1）在 `docs/guides/troubleshooting.md` §3 第 10 条与 FOUNDATION-074 的保留清单里写：**「`CHANGE_PRIORITY`、
+`ANSWER_AGENT`、`SELF_MODIFICATION` 三种取值都没有任何 CLI 产生路径」**。这半句是错的：
+
+- `ANSWER_AGENT` **有**产生路径：`packages/storage/src/database.ts` 的 `planAttentionAnswer`——Attention answer 的事务里写
+  `ANSWER_AGENT` intent（源文件行号 `2833`/`2846`，本格改动前的位置）与同名 `operations.kind`。本机稳定库 33 行 `intents` 里有 24 行是它。
+- 因此**删掉 `ANSWER_AGENT` 会直接弄坏 attention answer**。本格保留它并用测试钉住：新测试在 v28 库上调用 `planAttentionAnswer`
+  并断言写出 `ANSWER_AGENT` intent 与 `intent_attention_targets` 行；另有既有 `apps/runtime/test/workspace-service.test.ts`
+  （断言 `kind='ANSWER_AGENT'`、`status='APPLIED'`）与 `apps/runtime/test/cli-attention.test.ts`（真实 CLI + Runtime 的问答往返）。
+- 真正没有产生路径的只有 `CHANGE_PRIORITY` 与 `SELF_MODIFICATION`（`grep -rn` 的非测试命中只剩 CHECK 定义本身；测试也不使用这两个取值）。
+- 这条纠正**写在 FOUNDATION-075 与 `troubleshooting.md` §3 里**，**没有改写** FOUNDATION-074 的历史记录。
+
+### 本次规格修订（逐句）
+
+用户明确授权：这是**一次规格修订**，不是文档格的顺手改动。`git diff --stat PROJECT_SPEC.md` 为 `3 +++---`（只有三行）：
+
+| # | 位置 | 原句 | 改成 | 依据 |
+|---|---|---|---|---|
+| 1 | 第 3 行（文件开头状态段） | 「Phase 0 第一批与 Phase 1 storage/CLI-Runtime 骨架**已开始**……`task.run`/`task.verify` 仍是同步命令、**长命令进度不因此可见**……但取消超时、gate 拒绝路径、**Integration/main 提升与多任务并行仍未验收**」……结尾「**`dev → main` 提升、Runtime 重启、多任务批次与批级 `STALE`/取消仍未实现**」 | 改为「Phase 0 第一批与 Phase 1 骨架**已实现**，并已纵向贯通到 §3 描述的完整流水线」；把已实现能力逐项写成完成：成果 commit、Task verification、事件订阅、Web UI、ADR-0016 暂停/恢复/终止/归档、ADR-0018 IntegrationBatch 第一小步与 `dev` 基线、**ADR-0022 的 `dev → main` 提升与提升后重启（已真实执行三次）**、ADR-0019/0027 长命令 Operation、ADR-0030/0031/0032/0033 调度引擎与并行调度、ADR-0041 Project Knowledge 第一小步、ADR-0029/0040 两个真实 Adapter；`task.run`/`task.verify` 仍同步但「长命令进度不再只能靠等待」；随后单列**仍未验收/未实现**：真实 provider 并发、真实 provider revision ACK、真实模型下暂停/恢复、取消超时与 gate 拒绝路径的真实复验、多成员 IntegrationBatch 与批级 `STALE`/`CANCELLED`、Provider 是否真的读 Project Knowledge、Session Guidance、Phase 7 Self Evolution、Tauri/多用户/分布式 | 同文件 §3（ADR-0018/0022/0038/0039）；`README.md`「当前状态」；`docs/tasks/README.md` FOUNDATION-074 的「状态声明 → 依据」表；契约 `task.integrate`/`promotion.prepare`/`promotion.fullSuite.run`/`task.schedule.run`；`CODEESTRA_SCHEDULE_TICK_MS`；三次真实提升记录。**未把任何未验收项写成已完成** |
+| 2 | §1 第 3 段（intent 分类句） | 「系统将输入归类为 `CREATE_TASK`、`AMEND_TASK`、`ADD_CONSTRAINT`、`CANCEL_TASK`、`CHANGE_PRIORITY`、`ANSWER_AGENT` 或 `SELF_MODIFICATION`」 | 改为五个可产生取值，并明写「`CHANGE_PRIORITY` 与 `SELF_MODIFICATION` 是已声明但**当前不可产生**的取值：没有任何命令写它们，`intents.kind` 的 CHECK 自 schema v28 起（ADR-0046）不再接受；`SELF_MODIFICATION` 计划在 Phase 7 重新加入，届时要再做一次迁移」 | ADR-0046 D01/D02 与「后果」；三个写入点的实际 kind（`database.ts` 的 `createTask`/`planAttentionAnswer`/`appendRevision`） |
+| 3 | §8 倒数第二段（现状陈述） | 「现有 Phase 1 `task.run` 仍从项目 `mainRef` 建 worktree，尚未实现 ADR-0009 的 dev 基线。尚未实现 Integration/dev→main、并行调度、ADR-0010 的 TUI/PTY 接管、Tauri、自我升级、多用户或分布式能力。真实 Pi 的 FULL 模式端到端仍需在临时仓库复验」 | 「Task worktree 基线已是 ADR-0009/ADR-0018 的固定 `dev`（`projects.dev_ref`，仓库无 `dev` 时 trust 以 `DEV_REF_MISSING` 拒绝）」；「Integration 与 `dev → main` 提升、并行调度、ADR-0010 的 TUI/PTY 接管均已实现」；仍未实现的改为 Tauri、自我升级、多用户/分布式、Session Guidance 与多成员 IntegrationBatch；真实 Pi 一句改为「已在临时仓库完成首轮受控验收（FOUNDATION-019），但真实 provider 并发、revision ACK、真实模型下暂停/恢复与取消超时仍未复验」 | `grep -n "devRef" apps/runtime/src/workspace-service.ts`（dev 基线）、`task.integrate`/`promotion.*` 契约、`session-handoff-service.ts` 的 PTY 传输、FOUNDATION-019 的受控验收记录 |
+
+**没有改动**：§1.1 三条第一原则、§2 全部不变量、§3–§6 的规范语义、§8 的「本次交付范围」与「非目标」条款本身、§9 的决策纪律。
+用户就本条追加的约束（「只改与 §3/实现矛盾的现状陈述」）已逐句遵守：上表第 3 行只动了那两句矛盾的现状陈述与一句与 FOUNDATION-019 冲突的
+「仍需复验」，其余一字未动。
+
+### 实际运行的检查（定向，ADR-0038）
+
+**没跑**：`bun run check`、`just check`、`just verify`、`check:fast`（显式禁止；本格是 lane 分支）。
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| 类型检查 | `bun run typecheck` | 退出码 **0** |
+| 新增：v27→v28 真实文件库迁移 + 拒绝 + 边界 + `ANSWER_AGENT` 仍可写 | `bun test packages/storage/test/intent-kind-shrink.test.ts` | **6 pass / 0 fail**，54 expect |
+| 既有迁移与版本断言回归（storage） | `bun test packages/storage/test/{database,prose-question-attention,knowledge,agent-plugin-selection,task-dependencies,impact-analysis,slot-capacity-migration,task-retry,verification-layering}.test.ts` | **89 + 39 = 128 pass / 0 fail** |
+| `CREATE_TASK` 写入路径（本格重构成了 `insertIntent`） | `bun test apps/runtime/test/cli-task-create.test.ts` | **4 pass / 0 fail** |
+| `AMEND_TASK`/`ADD_CONSTRAINT` 写入路径（同前） | `bun test apps/runtime/test/revision-delivery.test.ts` | 含在下面 48 项里，全通过 |
+| 既有 `phase1SchemaVersion` / `user_version` 断言的运行时用例 | `bun test apps/runtime/test/{revision-delivery,verification-cancel,promotion-service}.test.ts` | **48 pass / 0 fail** |
+| 既有 migration/ledger 回归（含 v10 库升级与「基础 schema 不含新表」断言） | `bun test apps/runtime/test/{cli-reclaim,cli-reclaim-batch,operation-service}.test.ts` | **32 pass / 0 fail** |
+| `ANSWER_AGENT` 的产品路径 e2e（真实 CLI + Runtime） | `env -u http_proxy -u https_proxy -u all_proxy NO_PROXY=127.0.0.1,localhost CODEESTRA_HOME=/tmp/ce-k2 bun test apps/runtime/test/cli-attention.test.ts` | **3 pass / 0 fail**（含问卷问答往返） |
+| 断言 `intents.kind='ANSWER_AGENT'` 的既有用例 | 同上方式 `bun test apps/runtime/test/workspace-service.test.ts` | **21 pass / 0 fail** |
+| 文档链接存在性 | 见下「文档链接检查」 | 无断链 |
+| 规格状态段里两条强声明的交叉核对（只读） | 同上只读方式查稳定库：`SELECT COUNT(*) FROM stable_promotions` / `integration_batches` | 都为 **0**；配合 `docs/tasks/README.md` 的三次真实提升记录，支撑「三次真实提升走的是 AGENTS.md 的人工路径、未产生 `PromotionRecord`」 |
+
+**一个环境注意（否则上面的 e2e 会假失败）**：本机 shell 导出了 `http_proxy`/`https_proxy`/`all_proxy`（AGENTS.md 记录的本机代理），
+而 Bun 的 `fetch` 会把这些代理用在 `127.0.0.1` 上，于是 UI 传输面的用例会拿到代理返回的非 JSON 响应
+（表现为 `TypeError: null is not an object (evaluating 'envelope.ok')` 于 `apps/ui/src/api.ts:45`）。这是**环境问题，不是本次改动**：
+同一用例在取消代理环境变量后通过。上述涉及 HTTP/SSE 的 e2e 都是带 `-u http_proxy -u https_proxy -u all_proxy NO_PROXY=127.0.0.1,localhost` 跑的。
+
+**`package.json` 未改，原因**：`test:unit` 排除列表只列运行时 e2e 文件，而本格新增的
+`packages/storage/test/intent-kind-shrink.test.ts` 位于被 `test:unit` 整目录包含的 `packages/storage/test` 下，未被任何 ignore
+pattern 命中；本格也**没有**新增 `apps/runtime/test/**` 的 e2e 文件（只复用了既有四份）。因此没有可追加的行，而不是漏改。
+
+**文档链接检查（可复现命令）**：本格新增/改动的相对链接只有
+
+```sh
+cd /Users/loyage/Documents/codeestra-wt/k2-spec-and-intent-kind
+for p in docs/decisions/0046-intent-kind-check-shrink.md docs/decisions/README.md \
+         docs/tasks/README.md docs/guides/troubleshooting.md \
+         docs/architecture/sqlite-schema.md docs/architecture/README.md \
+         PROJECT_SPEC.md README.md; do test -f "$p" && echo "OK $p"; done
+grep -o "](\([0-9a-zA-Z._/-]*\.md\)" docs/decisions/README.md | sed 's/](//' | sort -u | \
+  while read -r l; do test -f "docs/decisions/$l" || echo "MISSING $l"; done
+```
+
+输出：8 个被改动文件全部 `OK`；`docs/decisions/README.md` 的相对链接全部存在（无 `MISSING` 行），
+新增的 `0046-intent-kind-check-shrink.md` 同目录解析成功。`PROJECT_SPEC.md`、`docs/tasks/README.md`、`troubleshooting.md`
+的链接未新增或改动（只改正文），因此未引入新的断链。
+
+**未跑与原因**：UI typecheck/构建（本格未改 `apps/ui/**`）；`apps/runtime/test/cli-task-create.test.ts` 等其余 e2e（与
+`intents.kind` 无关，本格未改其行为）。
+
+### 未验证 / 剩余问题
+
+- **真实稳定 Runtime 上的 v27→v28 升级未执行**：禁止触碰 `/Users/loyage/Documents/codeestra` 与稳定 Runtime，
+  真实库只做只读的取值分布复核（33 行 / `ANSWER_AGENT` 24 / `CREATE_TASK` 9）。
+- **「升级后行数比对」没有直接测试**：除 kind 列之外重建不引入新的约束，构造不出「复制被拒但前置检查看不到」的场景；
+  它是前置检查之外的第二道网，已在 ADR-0046 里如实标注。
+- **Bun `exec()` 吞错的行为只在本地 Bun 1.4.2 上实测**（`package.json` 的 `packageManager` 是 1.3.13，本机实际运行 1.4.2），
+  未验证其它版本；无论版本如何，v28 的守卫都不依赖它。
+- **`tasks.priority` 现在恒为 0**：移除 `CHANGE_PRIORITY` 的代价，ADR-0030 的「priority desc」在现状下是惰性的；
+  要恢复可变优先级需要另开一格补命令面并再做一次迁移。
+- `docs/decisions/README.md` 的 ADR 清单本身是**按号段升序**维护的，但历史上存在若干行序错位（如 ADR-0036 在 ADR-0037 之后）；
+  本格只按「加到表尾」的规则在 ADR-0045 之后插入 ADR-0046，**没有**重排历史行。
+- **一处刻意未改的措辞（登记，不当成已修）**：`docs/guides/cli-reference.md` 与 `docs/guides/workflow.md` 的排序说明写
+  「**提高**优先级只改变下一次顺序，不抢占」，这句话在句面上预设了「能提高优先级」的能力。它与本格没有直接矛盾
+  （ADR-0030 起就没有命令面，`docs/guides/features.md` 已明确写「优先级（**当前无命令面**）」），且不在本格的授权文档清单里，
+  因此**未改**；若要收紧措辞，应在后续文档格与 ADR-0030/0046 一起处理。
+
+### 交付说明：本次规格修订与上一版事实错误
+
+两节均在上文单列（「本次规格修订（逐句）」与「上一版记录的事实错误」），此处不重复。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），
 不依据任何任务记录里的说法。原 0–7 的编号保留在下面的对照表里；从剩余列表中移出的条目在文末单列。
+
+**2026-09-15 更新（FOUNDATION-075）**：原第 11 条（J1 第 7、10 条的两处待用户裁决不一致）已经用户裁决并由 FOUNDATION-075 收口，
+因此从剩余列表移出（依据见文末「本次从 NEXT 移除的条目及依据」与 FOUNDATION-075 一节）；剩余列表现在只有 1–10 号。
 
 ### 仍然剩余
 
@@ -4619,9 +4773,6 @@ EOF
    观感、固定 shell 在窄屏与矮窗口的表现、Agent 设置页在窄屏下的排布。
 10. **Phase 7 Self Evolution 全部未开始**：Self Task、Candidate、自托管测试、`PROMOTABLE`、用户 Promotion、独立 bootstrap
     与恢复演练；不可逆 migration 与 bootstrap 自身更新的策略仍是 Phase 7 的阻塞决策。
-11. **两处待用户裁决的不一致**（J1 第 7、10 条，见 `docs/guides/troubleshooting.md` §3）：`PROJECT_SPEC.md` §1 前状态段与
-    §3 的前后矛盾（规格只读，本格未改）；`intents.kind` 允许 `CHANGE_PRIORITY`/`ANSWER_AGENT`/`SELF_MODIFICATION`
-    三个没有任何 CLI 产生路径的取值。
 
 ### 原 0–7 编号对照
 
@@ -4664,9 +4815,17 @@ EOF
 | 「`## NEXT` 仍有历史漂移，属于单独一次 doc-sync/NEXT 校准格」 | 本格（FOUNDATION-074） |
 | 「剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、UI 投影」中的**UI 投影**一项 | FOUNDATION-050（promotion/dependency/terminal 投影） |
 | 「剩余：Phase 2 并行调度主体…未经引擎前，Phase 2 验收矩阵里『两个 SAFE 任务真的同时跑』仍然未成立」中的**前半**（引擎未实现） | ADR-0033/FOUNDATION-055：引擎已实现；**后半（真实并发验收）仍然成立**，保留在上面第 6 条 |
+| 原第 11 条前半：`PROJECT_SPEC.md` §1 前状态段与 §3 的前后矛盾（「规格只读，待用户裁决」） | 用户 2026-09-15 裁决「开一格修规格」并明确授权；FOUNDATION-075 重写第 3 行状态段，并追加授权修 §8 的现状陈述。`git diff PROJECT_SPEC.md` = 3 行，§1.1/§2/§3–§9 规范语义一字未改（见 FOUNDATION-075 的「本次规格修订（逐句）」） |
+| 原第 11 条后半：`intents.kind` 允许 `CHANGE_PRIORITY`/`ANSWER_AGENT`/`SELF_MODIFICATION` 三个「无产生路径」的取值 | 用户裁决「缩小 CHECK（要迁移）」；FOUNDATION-075 / ADR-0046（schema v28）把 CHECK 收窄为五个取值。**同时纠正原声明里的事实错误**：`ANSWER_AGENT` 并不属于「无产生路径」——`planAttentionAnswer` 会写它（稳定库 24/33 行），因此它被保留 |
+| 原第 11 条里「`intents.kind` 的三个取值都没有产生路径」这一措辞本身 | K1 的事实错误（把 `ANSWER_AGENT` 也算了进去），已在 FOUNDATION-075 与 `docs/guides/troubleshooting.md` §3 第 10 条改正；FOUNDATION-074 的历史记录未改写 |
 
 ### 需要用户裁决（本格不得自行决定）
 
-- `PROJECT_SPEC.md` §1 前状态段与 §3 的前后矛盾：规格只读，改它需要用户裁决（保留在 `troubleshooting.md` §3 第 7 条）。
-- `intents.kind` 的三个无产生路径取值：缩小 schema CHECK 或补命令都可能是正确答案，属产品/规格决策
-  （保留在 `troubleshooting.md` §3 第 10 条）。
+本节原先列着两项。**用户已于 2026-09-15 就两项作出裁决，FOUNDATION-075 已按裁决完成**，因此本节当前**没有待用户裁决的事项**：
+
+- `PROJECT_SPEC.md` §1 前状态段与 §3 的前后矛盾 → 用户裁决「开一格修规格」并授权修改规格文件；FOUNDATION-075 重写状态段
+  （并追加授权修 §8 的现状陈述）。见 `docs/guides/troubleshooting.md` §3 第 7 条与 FOUNDATION-075 的「本次规格修订」。
+- `intents.kind` 的未使用取值 → 用户裁决「缩小 CHECK（要迁移）」；FOUNDATION-075 / ADR-0046（schema v28）已落地。
+  见 `docs/guides/troubleshooting.md` §3 第 10 条。
+
+新增的待决项应重新列在这里，并写清「为何不能由执行者自行决定」。
