@@ -43,6 +43,12 @@ import { readProcessStartToken } from './pi-identity.js';
  * Everything whose verification needs a real model call is `REQUIRES_VALIDATION` instead, because
  * this machine has no Claude Code credentials: claiming those as verified would be a lie.
  */
+/**
+ * Claude Code has no per-resource launch selection (ADR-0044 D03): declared here so a read-only
+ * projection reports UNSUPPORTED without probing the provider.
+ */
+export const claudePluginSelectionSupport = 'UNSUPPORTED' as const;
+
 function claudeCapabilities(): AdapterCapabilities {
   return Object.freeze({
     // Measured: `--session-id <uuid>` pins the conversation and the transcript is written at
@@ -85,6 +91,9 @@ function claudeCapabilities(): AdapterCapabilities {
     // model selection, built-in tools and permissions stay available. `--bare` would also disable
     // OAuth/keychain reads, so it would break the user's own login and is not used.
     controlledConfiguration: 'SUPPORTED',
+    // Claude Code's safe-mode launch has no per-resource selection either; plugin selection is not
+    // supported in this step and is reported as such (ADR-0044 D03).
+    pluginSelection: claudePluginSelectionSupport,
   });
 }
 

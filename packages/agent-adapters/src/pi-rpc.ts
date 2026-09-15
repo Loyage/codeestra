@@ -5,8 +5,9 @@ import {
   questionnairePromptSchema,
   serializeQuestionnaireAnswer,
 } from '@codeestra/contracts';
-import type { AgentAnswer, AgentConfiguration, AgentObservedEvent } from '@codeestra/contracts';
+import type { AgentAnswer, AgentConfiguration, AgentObservedEvent, AgentPluginSelection } from '@codeestra/contracts';
 import { codeestraAskUserQuestionToolName } from './pi-question-extension.js';
+import { buildPiPluginArguments } from './pi-plugins.js';
 
 export class PiRpcProtocolError extends Error {
   constructor(
@@ -255,6 +256,11 @@ export function buildPiRpcArguments(input: {
   readonly permissionMode?: 'FULL' | 'STRICT';
   /** Reopen this persistent session file instead of starting a fresh conversation. */
   readonly resumeSessionFile?: string;
+  /**
+   * The plugin/resources the user selected for this Session (ADR-0044). Absent or empty means the
+   * unchanged controlled launch: discovery disabled and only Codeestra's own extensions loaded.
+   */
+  readonly pluginSelection?: AgentPluginSelection | null;
 }): readonly string[] {
   if (!isAbsolute(input.gateExtensionPath) || !isAbsolute(input.questionExtensionPath)
     || !isAbsolute(input.sessionDir)) {
@@ -282,6 +288,10 @@ export function buildPiRpcArguments(input: {
     '--no-themes',
     '--no-context-files',
   ];
+  // The user's selection is appended after Codeestra's own extension pair, so the gate stays the
+  // first extension Pi loads and the approval channel exists before any user extension runs. With
+  // no selection this appends nothing at all, leaving the launch byte-identical (ADR-0044 D02).
+  common.push(...buildPiPluginArguments(input.pluginSelection));
   // Full mode does not apply a tool allowlist: every tool registered by this controlled launch is active.
   if (mode === 'STRICT') common.push('--tools', tools);
   common.push('--session-dir', input.sessionDir);

@@ -4076,6 +4076,30 @@ verdict CONFLICTING (SAME_FILE)
 - **UI 一行未改**：五格都明确把 UI 投影排除在外（本波 `apps/ui/**` diff 为空）。
 - **`## NEXT` 仍有历史漂移**（例：第 7 条把已由 FOUNDATION-055/059 完成的调度引擎与 UI 投影写作「剩余」）。本波只如实更新了第 6 条，未做全面校准——那属于单独一次 doc-sync/NEXT 校准格。
 
+## FOUNDATION-071 — Agent 插件可定制与自动检测（ADR-0044，schema v27）
+
+用户原话：「需要可以定制化 agent，比如开启哪些插件，不开启哪些插件，最好有自动检测功能，在 agent 设定页面，就可以通过选择配置 agent 可以选用的模型/思考深度/插件开启等等模块。」
+
+本轮交付（wave J 的 J2 格，`lane/j2-agent-plugins`，基线 `dev@54ff3049e7a4b3e85726210e39c71c6751403b37`）：
+
+- **契约**：`packages/contracts/src/agent-plugins.ts` —— 四类选择（`extensions`/`skills`/`promptTemplates`/`themes`）严格 schema（绝对路径、无 `..`、非空白、无 NUL、每类 ≤64、未知字段拒绝）、检测候选/检测结果 schema、稳定 reason 枚举、`agentPluginTraceSchema`（类别 + 路径 + 来源层 + `thirdPartyExtensionApprovalRisk`）、Adapters 能力新增 `pluginSelection`。
+- **存储**：schema **v27**，只追加 `IF (version < 27)` 的 `ALTER TABLE agent_configurations ADD COLUMN plugin_selection_json`（**不重建表**）；`AgentConfigurationRecord.pluginSelection`、读写整体替换语义；`executions.agent_config_json` 记录 `plugins` 留痕。
+- **Adapter argv**：新增 `packages/agent-adapters/src/pi-plugins.ts`（`buildPiPluginArguments` 单一实现 + `inspectPiPluginPath`/`assertPiPluginSelectionUsable` 核验）；`pi-rpc.ts` 与 `pi-pty.ts` 共用同一参数块，插在 `--no-context-files` 之后；**零选择逐字节等于改动前**，gate/question extension 仍最先加载。
+- **只读检测**：`apps/runtime/src/agent-plugin-detection-service.ts` —— 只读 provider 用户配置目录（`PI_CODING_AGENT_DIR` 或 `~/.pi/agent`）+ 该目录 `settings.json`；绝不扫描仓库内目录、不跟随符号链接进入 Git 工作树、零写入；每项给出 kind/name/path/source/provider 启用状态/可启用性 + 稳定 reason。
+- **命令面**：`agent plugins list`（候选 + 当前选择 + adapter 支持情况，`--json`）与 `agent plugins select`（重复 flag 写整份选择 / `--clear`；零确认、幂等、退出码 0/1/2）；`agent.config.set` 新增 `pluginSelection`；`agent.config.get` payload 增加选择与来源层。
+- **UI**：新增 `apps/ui/src/agent-settings.tsx`（adapter/作用域/provider/model/思考深度/四类插件勾选/生效值与来源层/两条提示）；`App.tsx` 仅四处纯追加（Tab 类型、标签、导航项、渲染分支）。
+- **文档**：`docs/decisions/0044-agent-plugin-selection-and-detection.md`（含 gate 风险如实说明、v27、稳定码、实测证据与未验证清单）。
+
+验证（定向，ADR-0038；未跑全量）：`bun run typecheck`、`bun run typecheck:ui` 均 0 错误；新增 `packages/agent-adapters/test/pi-plugin-arguments.test.ts`、`packages/storage/test/agent-plugin-selection.test.ts`、`apps/runtime/test/agent-plugin-detection-service.test.ts`、`apps/runtime/test/cli-agent-plugins.test.ts`（e2e，独立临时 `CODEESTRA_HOME`/`PI_CODING_AGENT_DIR`，使用 `runtime-reclamation.ts` 回收）；回归定向 `cli-agent-config`、`database`、`agent-runtime-service`、`terminal-service`、`session-handoff-service` 全绿；真实 `pi` RPC `get_commands` 探测证明「关发现 + 显式路径」对 extensions/skills/prompt templates 生效（themes 未单独实测，如实标注为同构代码路径推断）。
+
+剩余问题：
+
+- 未用真实模型跑一次带插件选择的 `task.run`，「模型确实使用了所选 skill/theme」只有 argv 与命令面证据；未做第三方 extension 是否真能绕过 gate 的对抗验证。
+- themes 的显式路径加载未单独实测（理由与保守性论证见 ADR-0044 D06）。
+- Codex / Claude 的插件选择本轮如实报告 `UNSUPPORTED`，未实现。
+- 保存时的路径核验意味着「将来才会出现的路径」不能提前保存；需要时重新保存即可（未做延迟核验）。
+- 检测上限 512 候选，超限由 Runtime 边界拒绝（未做真实压力验证）。
+
 ## NEXT — 最小可用纵向切片
 
 

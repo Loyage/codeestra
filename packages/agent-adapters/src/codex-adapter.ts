@@ -34,6 +34,12 @@ import {
 import { readProcessStartToken } from './pi-identity.js';
 
 /** The measured matrix for `codex-cli 0.151.0`; see `docs/spikes/codex-0.151.0.md`. */
+/**
+ * Codex has no per-resource launch selection (ADR-0044 D03): declared here so a read-only
+ * projection reports UNSUPPORTED without probing the provider.
+ */
+export const codexPluginSelectionSupport = 'UNSUPPORTED' as const;
+
 function codexCapabilities(options: { readonly enableRequestUserInput: boolean }): AdapterCapabilities {
   return Object.freeze({
     persistentSession: 'SUPPORTED',
@@ -65,6 +71,9 @@ function codexCapabilities(options: { readonly enableRequestUserInput: boolean }
     resumeAfterExit: 'SUPPORTED',
     // Measured: app-server has no `--ignore-user-config`; ambient plugins/MCP servers/hooks run.
     controlledConfiguration: 'UNSUPPORTED',
+    // Codex has no per-resource selection on its launch: plugin selection is not supported in this
+    // step and is reported as such instead of being faked (ADR-0044 D03).
+    pluginSelection: codexPluginSelectionSupport,
   });
 }
 

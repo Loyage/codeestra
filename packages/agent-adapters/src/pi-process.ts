@@ -14,7 +14,9 @@ export type PiRpcErrorCode =
   | 'LIVE_SESSION_UNAVAILABLE'
   | 'SESSION_IDENTITY_MISMATCH'
   | 'CURSOR_EPOCH_MISMATCH'
-  | 'INVALID_PROVIDER_RESPONSE';
+  | 'INVALID_PROVIDER_RESPONSE'
+  /** A user-selected plugin/resource path could not be verified, so no process was started. */
+  | 'AGENT_PLUGIN_UNAVAILABLE';
 
 /**
  * `startMayHaveOccurred` and `deliveryMayHaveOccurred` describe what is known about the

@@ -27,6 +27,20 @@ export {
 export type {
   ProcessTableRow, ProviderOwnershipObservation, ProviderProcessRef, ProviderProcessTree,
 } from './pi-process.js';
+import { piPluginSelectionSupport } from './pi-adapter.js';
+import { codexPluginSelectionSupport } from './codex-adapter.js';
+import { claudePluginSelectionSupport } from './claude-adapter.js';
+
+export {
+  ancestorDirectories,
+  assertPiPluginSelectionUsable,
+  buildPiPluginArguments,
+  insideGitWorkingTree,
+  inspectPiPluginPath,
+  piSelectionLoadsExtensions,
+  PiPluginError,
+  resolveDetectionEntry,
+} from './pi-plugins.js';
 export { PiRpcClient, PiRpcProcessError } from './pi-process.js';
 export {
   buildPiTerminalArguments,
@@ -40,7 +54,25 @@ export type {
 export { defaultSessionFileReadCapBytes, readPiSessionFileFacts } from './pi-session-file.js';
 export type { PiSessionFileFacts } from './pi-session-file.js';
 export type { PiRpcEnvelope, PiRpcErrorCode } from './pi-process.js';
-export { PiRpcAdapter } from './pi-adapter.js';
+export {
+  piPluginSelectionSupport,
+  PiRpcAdapter,
+} from './pi-adapter.js';
+export { claudePluginSelectionSupport } from './claude-adapter.js';
+export { codexPluginSelectionSupport } from './codex-adapter.js';
+/**
+ * The plugin-selection capability each Adapter this build ships *declares*, for read-only
+ * projections (ADR-0044 D03/D05). It exists so the Agent settings page and `agent plugins list` never
+ * have to start or probe a provider to answer "can this Adapter load what I select?" — a capability
+ * reported as unsupported merely because a binary is missing would be a false statement about the
+ * Adapter. Execution still goes through the registered Adapter itself.
+ */
+export const declaredPluginSelectionSupport: Readonly<Record<string, 'SUPPORTED' | 'UNSUPPORTED'>> =
+  Object.freeze({
+    pi: piPluginSelectionSupport,
+    codex: codexPluginSelectionSupport,
+    claude: claudePluginSelectionSupport,
+  });
 export type { PiRpcAdapterOptions } from './pi-adapter.js';
 export { CodexAdapter } from './codex-adapter.js';
 export type { CodexAdapterOptions } from './codex-adapter.js';
@@ -148,6 +180,7 @@ const capabilities: AdapterCapabilities = Object.freeze({
   reconnectToLiveSession: 'SUPPORTED',
   resumeAfterExit: 'UNSUPPORTED',
   controlledConfiguration: 'SUPPORTED',
+  pluginSelection: 'UNSUPPORTED',
 });
 
 export type FakeObservedEvent = Readonly<

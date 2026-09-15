@@ -17,7 +17,20 @@ import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOpt
   type SlotReservationReconcileReport, type SlotReservationReleaseView,
   type SlotSnapshotRefusalDetail,
   type TaskRetryOutcomeView,
-  type VerificationPolicyInspection } from '@codeestra/contracts';
+  type AgentPluginDetection,
+  type VerificationPolicyInspection,
+  agentPluginKinds } from '@codeestra/contracts';
+
+/**
+ * The Agent configuration view the Runtime returns for `agent.config.get|set|clear`. Only the fields
+ * this client renders are named; anything else is ignored rather than invented.
+ */
+interface AgentConfigurationView {
+  readonly adapterId: string;
+  readonly pluginSelection: Record<string, readonly string[]> | null;
+  readonly pluginSelectionSource: 'GLOBAL' | 'PROJECT' | null;
+  readonly thirdPartyExtensionApprovalRisk: boolean;
+}
 import {
   inspectRuntimeHome,
   pidExists,
@@ -931,6 +944,57 @@ function splitFlagTokens(
   return { positionals, flags, bare };
 }
 
+/**
+ * Human-readable projection of one detection read. The lines are deliberately narrow: kind, name,
+ * the layer it came from, whether the provider has it enabled, whether Codeestra can enable it and
+ * the stable reason when it cannot. `--json` prints the Runtime's own payload instead.
+ */
+function printAgentPlugins(detection: AgentPluginDetection): void {
+  console.log(`adapter: ${detection.adapterId}`
+    + `  pluginSelection: ${detection.pluginSelectionSupport}`);
+  console.log(`provider config directory: ${detection.providerConfigDirectory}`
+    + `${detection.providerStateReadable ? '' : '  (settings.json unreadable: provider enablement is UNVERIFIED)'}`);
+  if (detection.pluginSelectionSupport !== 'SUPPORTED') {
+    console.log('This adapter does not support plugin selection; no candidates are reported.');
+    return;
+  }
+  if (detection.selection !== null) {
+    const paths = agentPluginKinds.flatMap((kind) => detection.selection?.[kind] ?? []);
+    console.log(`selected (${detection.selectionSource ?? 'UNKNOWN'}): ${paths.length === 0 ? '(none)' : ''}`);
+    for (const path of paths) console.log(`  - ${path}`);
+  } else {
+    console.log('selected: (none)');
+  }
+  console.log(`candidates: ${detection.candidates.length}`);
+  for (const candidate of detection.candidates) {
+    const enabled = candidate.providerEnabled === null ? 'provider?=UNVERIFIED'
+      : `provider=${candidate.providerEnabled ? 'on' : 'off'}`;
+    const usable = candidate.selectable ? 'selectable' : `UNUSABLE(${candidate.reason ?? 'UNKNOWN'})`;
+    console.log(`  [${candidate.selected ? 'x' : ' '}] ${candidate.kind.padEnd(15)}`
+      + ` ${candidate.name.padEnd(24)} ${enabled} ${usable} ${candidate.source} ${candidate.path}`);
+  }
+}
+
+/** Human-readable confirmation of one selection write, including the layers it applies to. */
+function printAgentPluginSelection(view: AgentConfigurationView): void {
+  const selection = view.pluginSelection;
+  const total = selection === null
+    ? 0
+    : agentPluginKinds.reduce((sum, kind) => sum + (selection[kind]?.length ?? 0), 0);
+  console.log(`pluginSelectionSource: ${view.pluginSelectionSource ?? '(none)'}`
+    + `  paths: ${total}`);
+  if (selection !== null) {
+    for (const kind of agentPluginKinds) {
+      for (const path of selection[kind] ?? []) console.log(`  ${kind} ${path}`);
+    }
+  }
+  if (view.thirdPartyExtensionApprovalRisk) {
+    console.log('note: a third-party extension is selected; it can influence or bypass '
+      + "Codeestra's approval channel (ADR-0044 D03).");
+  }
+  console.log('Applies to the next Agent Session; the effective list is recorded with the Execution.');
+}
+
 function usage(): never {
   console.error(`Usage:
   bun run codeestra status
@@ -944,6 +1008,17 @@ function usage(): never {
     [--provider <name>] [--model <id>] [--thinking <off|minimal|low|medium|high|xhigh|max>]
     [--unset provider|model|thinking]
   bun run codeestra agent config clear [--project <project-id>] [--adapter <id>]
+  bun run codeestra agent plugins list [--project <project-id>] [--adapter <id>] [--json]
+  bun run codeestra agent plugins select [--project <project-id>] [--adapter <id>]
+    [--extension <path>]… [--skill <path>]… [--prompt-template <path>]… [--theme <path>]…
+    [--clear] [--json]
+    # The four kinds are the scope the user approved (ADR-0044): extensions, skills, prompt
+    # templates and themes. "select" replaces the whole selection with exactly the flags given
+    # (repeatable flags rather than a JSON file, so a path never needs a second escaping rule);
+    # "--clear" removes the selection.
+    # Every selected path is verified before anything is written and again before a Session starts;
+    # a path that cannot be loaded is refused with a stable code and no Execution is created.
+    # Exit codes: 0 applied, 1 refused (unusable path or adapter without plugin selection), 2 usage.
   bun run codeestra project inspect [path]
   bun run codeestra project policy [path]
   bun run codeestra project trust [path] [--yes]
@@ -1996,6 +2071,60 @@ try {
           ? { thinkingLevel: null } : {})
           : { thinkingLevel: thinkingLevel as 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' }),
       }));
+    } else {
+      usage();
+    }
+  } else if (group === 'agent' && action === 'plugins') {
+    // Plugin/resource selection and read-only detection (ADR-0044). Both halves stay one command
+    // face with the Runtime: `list` projects the Runtime's detection, `select` writes the selection
+    // through the same request the settings page uses.
+    const subcommand = firstArgument;
+    const tokens = remainingArguments;
+    let projectId: string | undefined;
+    let adapterId = 'pi';
+    let json = false;
+    let clear = false;
+    const selection = {
+      extensions: [] as string[], skills: [] as string[], promptTemplates: [] as string[],
+      themes: [] as string[],
+    };
+    for (let index = 0; index < tokens.length; index += 1) {
+      const flag = tokens[index];
+      const value = tokens[index + 1];
+      if (flag === '--project' && value !== undefined) { projectId = value; index += 1; }
+      else if (flag === '--adapter' && value !== undefined) { adapterId = value; index += 1; }
+      else if (flag === '--json') { json = true; }
+      else if (flag === '--clear') { clear = true; }
+      else if (flag === '--extension' && value !== undefined) { selection.extensions.push(value); index += 1; }
+      else if (flag === '--skill' && value !== undefined) { selection.skills.push(value); index += 1; }
+      else if (flag === '--prompt-template' && value !== undefined) { selection.promptTemplates.push(value); index += 1; }
+      else if (flag === '--theme' && value !== undefined) { selection.themes.push(value); index += 1; }
+      else usage();
+    }
+    const scope = projectId === undefined ? 'GLOBAL' as const : 'PROJECT' as const;
+    if (subcommand === 'list') {
+      if (clear || Object.values(selection).some((paths) => paths.length > 0)) usage();
+      const detection = await call({
+        command: 'agent.plugins.list', adapterId,
+        ...(projectId === undefined ? {} : { projectId }),
+      }) as AgentPluginDetection;
+      if (json) print(detection);
+      else printAgentPlugins(detection);
+      // Exit 1 when the Adapter cannot apply a selection at all, so a script can tell "nothing
+      // found" from "not supported here" without parsing prose.
+      if (detection.pluginSelectionSupport !== 'SUPPORTED') process.exit(1);
+    } else if (subcommand === 'select') {
+      const chosen = agentPluginKinds.reduce(
+        (total, kind) => total + selection[kind].length, 0);
+      if (clear && chosen > 0) usage();
+      if (!clear && chosen === 0) usage();
+      const result = await call({
+        command: 'agent.config.set', adapterId, scope,
+        ...(projectId === undefined ? {} : { projectId }),
+        pluginSelection: clear ? null : selection,
+      }) as AgentConfigurationView;
+      if (json) print(result);
+      else printAgentPluginSelection(result);
     } else {
       usage();
     }

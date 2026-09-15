@@ -18,7 +18,7 @@
  * decide whether a release succeeded: FOUNDATION-040 measured that Ctrl+D and SIGTERM both exit 0.
  */
 import { isAbsolute, join } from 'node:path';
-import type { AgentConfiguration } from '@codeestra/contracts';
+import type { AgentConfiguration, AgentPluginSelection } from '@codeestra/contracts';
 import { readProcessStartToken } from './pi-identity.js';
 import {
   captureProviderProcessTree,
@@ -28,6 +28,7 @@ import {
   type ProviderProcessTree,
 } from './pi-process.js';
 import { buildPiModelArguments } from './pi-rpc.js';
+import { buildPiPluginArguments } from './pi-plugins.js';
 
 export class PiPtyError extends Error {
   constructor(readonly code: string, message: string) {
@@ -54,6 +55,12 @@ export function buildPiTerminalArguments(input: {
   readonly permissionMode?: 'FULL' | 'STRICT';
   readonly resumeSessionFile: string;
   readonly agentConfig?: AgentConfiguration;
+  /**
+   * The same plugin selection the RPC launch applies (ADR-0044 D06): the native terminal transport
+   * must not change what the Agent may load, so both transports compose these arguments from the one
+   * shared builder in `pi-plugins.ts`.
+   */
+  readonly pluginSelection?: AgentPluginSelection | null;
 }): readonly string[] {
   if (!isAbsolute(input.gateExtensionPath) || !isAbsolute(input.questionExtensionPath)
     || !isAbsolute(input.sessionDir) || !isAbsolute(input.resumeSessionFile)) {
@@ -75,6 +82,9 @@ export function buildPiTerminalArguments(input: {
     '--no-themes',
     '--no-context-files',
   ];
+  // User-selected resources are appended after Codeestra's own extension pair, exactly as the RPC
+  // launch appends them; with no selection nothing is added.
+  argv.push(...buildPiPluginArguments(input.pluginSelection));
   if (mode === 'STRICT') {
     argv.push('--tools', 'read,bash,edit,write,grep,find,ls,ask_user_question');
   }

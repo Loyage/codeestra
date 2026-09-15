@@ -10,6 +10,7 @@ import {
   type PiSessionFileFacts,
 } from '@codeestra/agent-adapters';
 import type { AgentConfiguration } from '@codeestra/contracts';
+import { resolveAgentPlugins } from './agent-config-service.js';
 import {
   Phase1Database,
   type SessionTerminalAttachmentRecord,
@@ -115,6 +116,13 @@ export interface TerminalServiceOptions {
   readonly resolveAgentConfig?: (input: {
     readonly projectId: string; readonly adapterId: string;
   }) => AgentConfiguration | null;
+  /**
+   * The same plugin resolution the RPC adapter uses (ADR-0044 D06): taking over a Session in a
+   * native terminal must not change which resources the Agent may load.
+   */
+  readonly resolveAgentPlugins?: (input: {
+    readonly projectId: string; readonly adapterId: string;
+  }) => ReturnType<typeof resolveAgentPlugins>;
   /** Test seam: launches the PTY-hosted provider. Defaults to the real `PiPtyTerminal`. */
   readonly launch?: (input: PiPtyLaunchInput) => Promise<PiPtyTerminal>;
   /** Test seam: the provider's session directory check and argv composition stay identical. */
@@ -189,6 +197,10 @@ export class TerminalService {
       ? (this.#options.resolveAgentConfig?.({ projectId: input.projectId,
           adapterId: input.adapterId }) ?? null)
       : input.agentConfig;
+    const resolvedPlugins = input.adapterId === 'pi'
+      ? (this.#options.resolveAgentPlugins?.({ projectId: input.projectId,
+          adapterId: input.adapterId }) ?? null)
+      : null;
     const terminalArguments = buildPiTerminalArguments({
       gateExtensionPath: this.#options.gateExtensionPath,
       questionExtensionPath: this.#options.questionExtensionPath,
@@ -197,6 +209,7 @@ export class TerminalService {
       permissionMode,
       resumeSessionFile: input.sessionFile,
       ...(resolvedConfig === null ? {} : { agentConfig: resolvedConfig }),
+      ...(resolvedPlugins === null ? {} : { pluginSelection: resolvedPlugins.selection }),
     });
     const piExecutable = this.#options.piExecutable
       ?? this.#options.environment['CODEESTRA_PI_EXECUTABLE'] ?? 'pi';
