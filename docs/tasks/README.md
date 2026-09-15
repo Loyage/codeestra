@@ -6396,6 +6396,53 @@ prompt 给的独占/共享槽位清单**没有覆盖**下面这些文件，但�
 | 零新增审批层/沙箱/门禁 | D06 |
 | schema v31 三张纯追加表、无「模型已读」列、只列可产生的 `source` 取值 | D07 |
 
+### 合并后才暴露的缺陷：新 e2e 让一个**没有 dev clone** 的项目通过 trust（已修）
+
+**现象**（协调者在合并 N3 + N1 + N2 之后的 `dev@a969739` 上跑完整 `bun run check`）：
+
+```
+apps/runtime/test/cli-session-guidance.test.ts:166-171
+  const opened = await cli(['open', main.repository, '--no-open'], environment);
+  expect(opened.exitCode).toBe(0);      // Expected: 0, Received: 1
+(fail) session guidance command face > records guidance, hands it to the next Execution and never becomes a TaskRevision
+```
+
+**根因**（不是猜测，已在隔离环境里对着合并后的代码复现）：N1（FOUNDATION-087 / ADR-0056，用户裁决「`dev_repo_path` 成为必需」）
+让 `project.trust` —— 因而组合了一次 trust 的 `open` —— **必须**带 `--dev-repo`，否则以 `DEV_REPO_REQUIRED` 拒绝（退出码 1）。
+本格的 e2e 沿用了旧形态 `open <repo> --no-open`：在本格的分支基线上它**合法且会成功**（`dev clone: 未记录`），于是测试一直是绿的；
+合并后才被拒，后续断言（`project list` 拿不到 projectId）全部落空。
+
+**因果证据**（三条命令，全部在**隔离**的 `CODEESTRA_HOME` 下跑，未触碰稳定 clone、稳定 Runtime 与协调者的 dev 实例）：
+
+| 命令（root 不同） | 结果 |
+|---|---|
+| 本格分支（基线 `f258c59`）：`codeestra open <repo> --no-open` | **exit 0**，stderr 写 `dev clone: 未记录（promotion prepare 会拒绝…）` —— 项目就这样被 trust 了，**没有任何 dev clone** |
+| 本格分支：`codeestra open <repo> --dev-repo <clone> --no-open` | **exit 2**（usage）—— 本格基线的 `open` **没有** `--dev-repo` 这个 flag，所以本格分支上写不出合并后的形态 |
+| 合并后代码（`/Users/loyage/Documents/codeestra-dev` @ `a969739`，`CODEESTRA_HOME=/tmp/ce-n2-repro-home`）：`codeestra open <repo> --no-open` | **exit 1**：`DEV_REPO_REQUIRED: A dev clone is required: ADR-0056 resolves every dev fact … from projects.dev_repo_path` |
+| 合并后代码：`codeestra project trust <repo> --dev-repo <verified clone> --yes` | **exit 0**，记录的 `devRepoPath` 为 `{verified: true, branchRef: "refs/heads/dev", devRefCommit: <sha>, originMatchesProject: true, gitCommonDir: <clone>/.git}` |
+
+**为什么本格分支上看不出来**：两个原因叠加。① N1 的改动在**另一条 lane** 上，本格分支的基线（`dev@f258c59`）里 `dev_repo_path` 仍是**可选**，
+`open` 连 `--dev-repo` 都还没有（上表第 2 行）；② 本格基线在 trust 时对「没有 dev clone」只说一句 `未记录`，**不拒绝**，
+所以一个「没建 dev clone 的夹具」在 lane 上完全绿灯。这正是「单格绿、合并才爆」的第三类形态（前两类是能力位必填字段与迁移号/索引冲突）。
+
+**修法**（不改 Runtime 的核验口径，一行都没碰 `dev-repo-service.ts`；那是 N1 的领地与用户裁决）：
+
+1. 夹具**真的造出** ADR-0056 要求的那第二个、独立 clone：裸 `origin` → 主检出 `remote add origin` + `push origin main dev`
+   → `git clone <origin> <dev-clone>` → 在 clone 里 `checkout dev` → 写夹具自己的局部 identity（`git clone` 不继承主检出的 identity，
+   而测试绝不允许解析开发者的全局 Git 身份）。返回 `realpathSync(clone)`，因为 Runtime 比较的是自己 inspect 出来的规范路径。
+   四项核验逐条被真 Git 对象满足：**另一个 clone**（worktree root 与 git common dir 都不同，`.git` 目录不共享）、
+   **同一个 origin**（主检出 push 到的裸仓库就是 clone 拉取的 origin，URL 字符串相同）、**HEAD 在 `refs/heads/dev`**、
+   **该分支在 clone 里存在**（push 已让 clone 有本地 `refs/heads/dev`）。
+2. 用例改用 `project trust <repo> --dev-repo <clone> --yes`（+ `project list` 取 projectId），而**不是** `open --dev-repo`：
+   前者在本格基线（`--dev-repo` 可选、给了就核验）与合并后的契约（没有就 `DEV_REPO_REQUIRED`）下**都被接受**；
+   后者在本格基线是用法错误（上表第 2 行），会让本格的测试文件只在本格分支上红——那正是本次要修的错误的镜像。
+   夹具里的 clone 只要四项核验任一不满足，`project trust` 自己就会拒绝，所以这里绿色的 `exit 0` 是**核验通过**的证据，不是放宽断言。
+3. 用例还断言**记录下来的事实**（`project inspect` 里的 `devRepoPath.verified === true` 且 `path` 等于夹具造的 clone），
+   而不是只断言夹具的意图；这样即使将来有人把信任路径改成「静默不记录」，用例也会红。
+
+**未触碰**：`apps/runtime/src/dev-repo-service.ts`、`packages/contracts` 的 trust 契约、N1 的 `apps/runtime/test/support/agent-fixture.ts`
+（本格的 dev clone 辅助函数写在**本格自己的** `cli-session-guidance.test.ts` 内部，因此与 N1 的 `provisionDevClone` 不产生冲突面）。
+
 ### 定向验证（实际执行的结果）
 
 按 ADR-0038，**未跑** `bun run check` / `just check` / `just verify` / `check:fast`；**未发任何真实模型请求**，**未用真实 provider 会话验收**。
@@ -6411,6 +6458,19 @@ prompt 给的独占/共享槽位清单**没有覆盖**下面这些文件，但�
 | `bun test apps/runtime/test/session-guidance.test.ts session-guidance-migration.test.ts cli-session-guidance.test.ts` | **14 pass / 0 fail** |
 | 因新增能力位/新增命令分支而受影响的既有运行时测试：`bun test apps/runtime/test/{agent-runtime-service,operation-service,revision-delivery,task-control-service}.test.ts` | **46 pass / 0 fail（4 文件）** |
 | `bun test apps/runtime/test/{http-api,adapter-registry,agent-observation-service,agent-config-service,agent-plugin-detection-service}.test.ts` | **71 pass / 0 fail（含 contracts 的 9 文件）** |
+
+**修复轮的全目录补跑**（本格收到「不再挑文件」的指示后，按反向依赖（`knowledgeContext` / `guidance` / `AdapterCapabilities` /
+`agent-start-service` / `startAutomationSuccessor`）先确认受影响面，再跑**整目录**；`env -u http_proxy -u https_proxy -u all_proxy`）：
+
+| 检查 | 结果 |
+|---|---|
+| `bun test apps/runtime/test`（64 文件，含全部 CLI e2e） | **459 pass / 0 fail** |
+| `bun test packages/storage/test packages/git/test packages/contracts/test packages/agent-adapters/test`（35 文件） | **390 pass / 0 fail** |
+| `bun run typecheck` | 退出码 0 |
+
+本轮**只改了** `apps/runtime/test/cli-session-guidance.test.ts`（夹具 + 断言），源码零改动；整目录补跑是「按文件名挑」的替代，
+用来抓住同类跨格后果。`bun run test`（vitest：packages/domain + apps/ui）**未跑**：本次改动是 apps/runtime 的测试文件，
+domain/ui 一行未动，且 ADR-0038 禁止在 lane 上跑全量（协调者在合并后的 `dev` 上的完整 `bun run check` 已给出 vitest 全绿的结果）。
 
 钉住的不变量（按 prompt 的「必测」清单逐条对应）：
 
