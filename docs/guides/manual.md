@@ -19,7 +19,7 @@
 2. [装好它](#2-装好它)
 3. [第一个项目](#3-第一个项目)
 4. [第一个任务](#4-第一个任务)
-5. [看它干活：会话、提问、执行过程、终端](#5-看它干活会话提问执行过程终端)
+5. [看它干活：会话、提问、指导、执行过程、终端](#5-看它干活会话提问指导执行过程终端)
 6. [审阅成果](#6-审阅成果)
 7. [任务验证](#7-任务验证)
 8. [合入 dev](#8-合入-dev)
@@ -402,7 +402,7 @@ bun run codeestra task archive|unarchive $PROJECT <task-id> <expected-version>
 
 ---
 
-## 5. 看它干活：会话、提问、执行过程、终端
+## 5. 看它干活：会话、提问、指导、执行过程、终端
 
 ### 5.1 Agent 会停下来问你
 
@@ -513,7 +513,32 @@ bun run codeestra session handoff release $PROJECT <session-id> [--no-resume]
 > 图：`07-terminal.png` — 「原生终端与会话交接」面板：会话/incarnation/写入租约/side channel 的键值表、
 > 「安全点与 fence」清单、请求接管/接管/取消/刷新按钮、原生终端投影区与输入框。
 
-### 5.5 运行事件（事实流）
+### 5.5 给运行中的会话一句话（Session Guidance）
+
+想对**正在跑的** Agent 说一句「怎么做」（比如「先用仓库的约定文件」），而**不想改验收标准**，就用 guidance：
+
+```sh
+bun run codeestra session guide $PROJECT $TASK --message "先用仓库的约定文件，不要自创风格"
+bun run codeestra session guidance list $PROJECT $TASK     # 台账：记录、尝试、每个 Execution 启动时带上它的产物
+bun run codeestra session guidance get  $PROJECT <guidance-id>
+```
+
+必须知道的边界：
+
+- **它不改变任务**：不产生 revision、不动 Task 的 revision 与 version、**不使任何验证失效**。
+  改规格、改约束、改验收目标**必须**走 `task amend`（`task revision create`），旧验证仍然因此失效。这两条通道不能互相代替。
+- **记录之后它不会随进程消失**：该 Task 的每条 guidance 会在**新建 Execution**（`task resume` 的 successor、`task retry`
+  的新 Execution）启动时随启动参数一并交给 provider。用户不需要为了让它生效而重发一遍。
+- **`0` 与 `1` 的意思不一样**：退出码 `0` = 已经交给运行中的 provider 通道（`DELIVERED`），**或**当时没有会话可交付而消息
+  已记录（`RECORDED`，等下一次启动交付）；退出码 `1` = provider/会话被问过却没交付（`CHANNEL_UNSUPPORTED` / `TIMED_OUT` /
+  `FAILED`），stderr 会打稳定码。用法错误是 `2`。
+- **“已投递”不等于“模型已读”**：`DELIVERED` 只表示 **provider 自己的通道接受了这条消息（入队）**。三个 provider 都没有
+  可核验「已生效」的通道（ADR-0051），所以命令面把这件事说出口：`--json` 里的 `modelAcknowledgement` 恒为 `UNSUPPORTED`。
+- **不是每个 provider 都有活会话通道**：Pi 有（RPC `steer`）；Codex 记 `REQUIRES_VALIDATION`、Claude Code 记 `UNSUPPORTED`，
+  在它们上面给**运行中**的会话发指导会得到 `CHANNEL_UNSUPPORTED` 与退出码 `1`（消息仍然被耐久记录，仍然会在下一次启动交付）。
+- **零新增确认**：FULL 与 STRICT 下都是同一条命令，没有确认步骤；guidance 不是审批通道。
+
+### 5.6 运行事件（事实流）
 
 ```sh
 bun run codeestra events list [--project $PROJECT] [--since <sequence>] [--limit <n>] [--json]

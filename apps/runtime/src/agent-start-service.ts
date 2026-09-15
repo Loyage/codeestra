@@ -12,6 +12,7 @@ import {
   type StoredAgentConfiguration,
 } from '@codeestra/storage';
 import { machineGeneratedRuntimeDirectory } from '@codeestra/domain';
+import { GuidanceContextError, guidanceContextForExecution } from './guidance-context.js';
 
 export class AgentStartServiceError extends Error {
   constructor(readonly code: string, message: string) {
@@ -174,6 +175,28 @@ export async function startReservedExecution(input: {
 
   input.storage.startAgentOperation(plan.operationId, now());
   try {
+    // The Task's recorded Session Guidance is materialized here, after every refusal path and
+    // immediately before the launch, so a start that never reaches the Adapter never claims to have
+    // carried guidance (ADR-0057). A Task with no guidance produces no field at all, which is what
+    // keeps its controlled launch byte-identical.
+    const guidance = await guidanceContextForExecution({
+      storage: input.storage,
+      runtimeHome: input.runtimeHome,
+      projectId: plan.projectId,
+      taskId: plan.taskId,
+      executionId: plan.executionId,
+      now,
+      randomUUID,
+    }).catch((error: unknown) => {
+      // The materialized guidance is verified by the Adapter too, but the Runtime owns the refusal
+      // here: a Task that has guidance and cannot produce its artifact must not start an Agent with
+      // less input than the ledger records (ADR-0057). The stable code is preserved so a caller sees
+      // `GUIDANCE_CONTEXT_UNAVAILABLE` rather than a generic start failure.
+      if (error instanceof GuidanceContextError) {
+        throw new AgentStartServiceError('GUIDANCE_CONTEXT_UNAVAILABLE', error.message);
+      }
+      throw error;
+    });
     const session = await input.adapter.start({
       operationId: plan.operationId,
       sessionId: plan.sessionId,
@@ -195,6 +218,7 @@ export async function startReservedExecution(input: {
         executionId: plan.executionId,
         runtimeHome: input.runtimeHome,
       }),
+      ...guidance,
       permissionMode,
       ...(input.resume === undefined ? {} : { resume: input.resume }),
       // The configuration resolved at reservation time, so the Adapter launches exactly what the

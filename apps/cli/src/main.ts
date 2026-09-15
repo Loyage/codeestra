@@ -1206,6 +1206,14 @@ function usage(): never {
   bun run codeestra session transcript <session-id> [--after <entry-id>] [--limit <n>] [--reverse]
     [--json]
   bun run codeestra session transcript part <session-id> <entry-id> <part-index>
+  bun run codeestra session guide <project-id> <task-id> --message <text> [--json]
+    # Session Guidance, not a TaskRevision: it never changes the specification and never invalidates
+    # a verification. exit 0 = handed to the running conversation or recorded with nothing running;
+    # 1 = a provider was asked and did not take it (CHANNEL_UNSUPPORTED/TIMED_OUT/FAILED).
+    # "delivered" means the provider's channel accepted the message (enqueued), not that the model
+    # read it (ADR-0051/0057).
+  bun run codeestra session guidance list <project-id> <task-id> [--json]
+  bun run codeestra session guidance get <project-id> <guidance-id> [--json]
   bun run codeestra session handoff status <project-id> <session-id> [--json]
   bun run codeestra session handoff request <project-id> <session-id> <takeover|return>
   bun run codeestra session handoff cancel <project-id> <session-id>
@@ -2642,6 +2650,54 @@ try {
       const read = await readTranscript(sessionId, flags);
       if (flags.json) print(read.view);
       else printTranscript(read, sessionId, flags.reverse);
+    }
+  } else if (group === 'session' && action === 'guide') {
+    // Session Guidance (ADR-0057): the other input channel of ADR-0010 D02. One command hands one
+    // message to a running conversation and records the fact it produced; it never creates a
+    // TaskRevision, never moves the Task's revision and never invalidates a verification. The exit
+    // code separates "handed over or recorded with nothing running" (0) from "a provider was asked
+    // and did not take it" (1), so a script never has to read prose to tell them apart.
+    const [projectId, taskId, ...tokens] = [firstArgument, ...remainingArguments]
+      .filter((token): token is string => token !== undefined);
+    if (projectId === undefined || taskId === undefined) usage();
+    let message: string | undefined;
+    for (let index = 0; index < tokens.length; index += 1) {
+      const flag = tokens[index];
+      const value = tokens[index + 1];
+      if (flag === '--message' && value !== undefined) { message = value; index += 1; }
+      else if (flag === '--json') continue;
+      else usage();
+    }
+    if (message === undefined || message.trim().length === 0) usage();
+    const recorded = await call({
+      command: 'session.guidance.record',
+      commandId: crypto.randomUUID(),
+      projectId,
+      taskId,
+      message,
+    }) as { readonly outcome: string; readonly code: string | null; readonly detail: string };
+    print(recorded);
+    if (recorded.outcome === 'DELIVERED' || recorded.outcome === 'RECORDED') process.exit(0);
+    console.error(`[guidance] the guidance is recorded but was not handed over: `
+      + `${recorded.code ?? recorded.outcome} — ${recorded.detail}`);
+    process.exit(1);
+  } else if (group === 'session' && action === 'guidance') {
+    // Read-only side of the same face: the durable record, its append-only attempt ledger and the
+    // artifact each Execution was launched with. `--json` is the default projection, as everywhere on
+    // this command surface.
+    const subcommand = firstArgument;
+    if (subcommand === 'list') {
+      const [projectId, taskId, ...extra] = remainingArguments;
+      if (projectId === undefined || taskId === undefined) usage();
+      for (const flag of extra) if (flag !== '--json') usage();
+      print(await call({ command: 'session.guidance.list', projectId, taskId }));
+    } else if (subcommand === 'get') {
+      const [projectId, guidanceId, ...extra] = remainingArguments;
+      if (projectId === undefined || guidanceId === undefined) usage();
+      for (const flag of extra) if (flag !== '--json') usage();
+      print(await call({ command: 'session.guidance.get', projectId, guidanceId }));
+    } else {
+      usage();
     }
   } else if (group === 'session' && action === 'handoff') {
     // `session handoff` is the control face of the Runtime-side handoff contract (ADR-0023): the

@@ -23,6 +23,7 @@ import {
   type AgentPluginResolution,
 } from './agent-config-service.js';
 import { executionKnowledgeRefs, prepareExecutionKnowledge } from './knowledge-service.js';
+import { guidanceContextForExecution } from './guidance-context.js';
 import { withDeadline } from './lifecycle.js';
 import {
   beginTaskRunOperation,
@@ -827,6 +828,18 @@ export class AgentRuntimeCoordinator {
         projectId: plan.projectId,
         executionId: plan.executionId,
         runtimeHome: this.#runtimeHome,
+      }),
+      // ...and the Task's recorded Session Guidance, materialized immediately before the launch so
+      // the guidance the user gave to the predecessor conversation does not die with it (ADR-0057).
+      // No recorded guidance yields no field at all, leaving this launch byte-identical.
+      ...await guidanceContextForExecution({
+        storage: this.#storage,
+        runtimeHome: this.#runtimeHome,
+        projectId: plan.projectId,
+        taskId: plan.taskId,
+        executionId: plan.executionId,
+        now: this.#now,
+        randomUUID: this.#randomUUID,
       }),
       permissionMode,
       resume: {

@@ -5,7 +5,7 @@ import {
   questionnairePromptSchema,
   serializeQuestionnaireAnswer,
 } from '@codeestra/contracts';
-import type { AgentAnswer, AgentConfiguration, AgentKnowledgeContext, AgentObservedEvent, AgentPluginSelection } from '@codeestra/contracts';
+import type { AgentAnswer, AgentConfiguration, AgentGuidanceContext, AgentKnowledgeContext, AgentObservedEvent, AgentPluginSelection } from '@codeestra/contracts';
 import { codeestraAskUserQuestionToolName } from './pi-question-extension.js';
 import { buildPiPluginArguments } from './pi-plugins.js';
 
@@ -262,6 +262,29 @@ export function buildPiKnowledgeArguments(
   if (!isAbsolute(context.filePath)) {
     throw new PiRpcProtocolError('INVALID_OPTIONS',
       'The knowledge context path handed to Pi must be absolute');
+  }
+  return ['--append-system-prompt', context.filePath];
+}
+
+/**
+ * Hands one Task's recorded Session Guidance to Pi at launch (ADR-0057).
+ *
+ * It uses the same Pi flag as knowledge, for the same measured reason: `--append-system-prompt`
+ * resolves to *file contents* when the value names an existing file, and Pi documents the flag as
+ * repeatable ("can be used multiple times"), so two appends keep the two artifacts separate instead
+ * of merging guidance into the knowledge file. The Adapter reads and digests the guidance file itself
+ * before the launch, which is what makes "the Agent was told what the user recorded" checkable.
+ *
+ * With no guidance this appends nothing at all, leaving the controlled launch byte-identical to the
+ * launch before this capability.
+ */
+export function buildPiGuidanceArguments(
+  context?: AgentGuidanceContext,
+): readonly string[] {
+  if (context === undefined) return [];
+  if (!isAbsolute(context.filePath)) {
+    throw new PiRpcProtocolError('INVALID_OPTIONS',
+      'The guidance context path handed to Pi must be absolute');
   }
   return ['--append-system-prompt', context.filePath];
 }

@@ -149,6 +149,24 @@ ADR-0042（从 reclaim 保留的 task branch 重建 owned worktree）**不新增
 - 这七个事件与它们描述的状态变更在**同一 SQLite 事务**内提交（`TakeoverFailed` 除外——拒绝本身没有状态变更，它自己就是那条事实，事件 id 由 command + stage + reason 推导，故同一命令重放不产生第二条）。
 - 单一 writer lease 的每一次更换都写 `TerminalWriterLeaseChanged`（acquire 与 release 各一条），因此「谁在写这个 conversation」可从日志复原，而不是只能从当前行推断。
 
+**会话指导（ADR-0057，schema v31）**
+
+| Event | aggregate | 关键 payload |
+|---|---|---|
+| `SessionGuidanceRecorded` | `SessionGuidance` | guidanceId, taskId, `source='COMMAND'`, executionId, sessionId, incarnationId, `bodyHash`, `bodyBytes`, actor, `attemptId`（当时有 Execution 持有 Task 时为那个 attempt，否则 null） |
+| `SessionGuidanceDelivered` | `SessionGuidance` | guidanceId, attemptId, `channel='PROVIDER_CONVERSATION'`, **`state`**（`DELIVERED`/`CHANNEL_UNSUPPORTED`/`TIMED_OUT`/`FAILED`）, capability, evidenceRef, errorCode, detail, executionId, sessionId, incarnationId, **`delivered`**（仅 `state='DELIVERED'` 时为 true） |
+
+这两个事件的事实边界与 revision 投递**不同**，必须分清：
+
+- `SessionGuidanceRecorded` 只说「这条指导已经耐久记录、并会在下一次 Execution 启动时交给 provider」，**不是**「已经投递」。
+- `SessionGuidanceDelivered` 是「一次尝试的结论」，**不是**「已经交付」的同义词：`DELIVERED` 只意味 provider 自己的通道**接受了这条消息（入队）**，
+  `CHANNEL_UNSUPPORTED`/`TIMED_OUT`/`FAILED` 是拒绝或未完成，必须带稳定 `state`/`errorCode` 读成拒绝。
+- **没有任何事件或列表达「模型已读/已生效」**：ADR-0051 实测三个 provider 都没有可核验通道，因此该事实在实现里不存在（命令面以
+  `modelAcknowledgement: 'UNSUPPORTED'` 显式说出口）。正文只在 `session_guidance.body` 里（ADR-0010 D02），**不进事件**（ADR-0010 D06），
+  事件只带 hash 与长度。
+- 两者都与它们描述的状态变更在同一 SQLite 事务内提交；guidance 不写 `task_revisions`、不动 `tasks.current_revision_id`、
+  不写 `VerificationInvalidated`（那是 `task amend` 的路径）。
+
 **显式重试与散文提问解除（Wave H / Wave I，本格补齐登记）**
 
 这两个事件本体分别由 FOUNDATION-061（ADR-0036）与 FOUNDATION-069（ADR-0043）实现，但一直只在正文里被引用、未进事件目录；
@@ -195,7 +213,7 @@ FOUNDATION-074 的 doc-sync 把它们补齐（名字都是实现先行的，按 
 | `ImpactAssessed` / `ConflictAssessed` | **未实现为 domain event**：ADR-0031 只把判定写进 `impact_assessments` 行 | 裁决：本格**不做**（判定类事件未列入实现范围） |
 | `TaskPriorityChanged` | 未实现（实现里没有 task priority 这一维度） | 设计名保留，未实现 |
 | `IntentClarificationRequested` | 未实现 | 设计名保留，未实现 |
-| `SessionGuidanceRecorded` / `SessionGuidanceDelivered` | 未实现 | 设计名保留；这是 Phase 3 的**功能**缺口，不是事件缺口，本格不顺手实现 |
+| `SessionGuidanceRecorded` / `SessionGuidanceDelivered` | **同名（本格实现，FOUNDATION-088 / ADR-0057）** | 设计名**采用**；两个事件都是实现写入的真实名字，`SessionGuidanceDelivered` 的 payload 带 `state` 与 `delivered`，因此「拒绝」不会被读成「已交付」（见 §2.1 会话指导一节） |
 | `ExecutionPauseRequested` / `ExecutionPaused` / `ExecutionCancelled` / `ExecutionSuperseded` | 未找到同名事件；暂停/取消的投影通过 `TaskStateChanged` / `ExecutionStateChanged` 与 Operation 状态表达 | **未验证**是否存在等价专名，本格不改动 |
 | `ResultCommitAuthorizationRequested` | 未实现同名事件（授权由 prepare/confirm 两步与 `ResultCommitAuthorized` 表达） | 设计名保留，未实现 |
 | `CandidateBuilt` / `SelfTestCompleted` / `StablePromoted` / `StableRollbackCompleted` | 未实现 | 设计名保留（Self Evolution 阶段） |

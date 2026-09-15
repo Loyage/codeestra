@@ -80,11 +80,17 @@ Task verification（ADR-0006）、Task 暂停/取消/归档（ADR-0016/FOUNDATIO
 原生 TUI 接管（ADR-0026/FOUNDATION-046，含 attach/detach/release/admit 与 `terminal read|write`）、只读 transcript 视图
 （ADR-0013）。
 
-**未实现**：**Session Guidance**——`guide` 端口既未导出也未实现（`event-model.md` §2.3 把 `SessionGuidanceRecorded`/
-`SessionGuidanceDelivered` 登记为「未实现，是功能缺口」），因此 Phase 3 交付里的这一项仍不成立。
+**已实现（FOUNDATION-088 / ADR-0057 / schema v31）**：**Session Guidance**——`session guide`（`session.guidance.record`）
+把一条指导交给运行中的会话并记录它产生的事实，`session guidance list|get` 读台账；`guide` 端口在 Pi 上实现
+（RPC `steer` + provider 自己的 `queue_update`），Codex 报 `REQUIRES_VALIDATION`、Claude Code 报 `UNSUPPORTED`；
+记录后每个新 Execution 启动时随启动参数交给 provider（`--append-system-prompt` / `developerInstructions`），
+artifact 在 Runtime 数据目录且**不写 Task worktree**。它**不产生 TaskRevision、不动 revision、不使验证失效**，
+而 `task amend` 仍然使旧验证失效。**「已投递」= provider 通道接收（入队），≠ 模型已读**（`modelAcknowledgement` 恒为 `UNSUPPORTED`）。
+`event-model.md` §2.3 已把 `SessionGuidanceRecorded`/`SessionGuidanceDelivered` 从「未实现」改为已实现。
 
 **未验证**：跨交接权限模式完整矩阵、并行工具批次的安全点、PTY resize（如实声明 `UNSUPPORTED`）、真实模型在 TUI 中键入后
-交还自动化的复验。
+交还自动化的复验；Session Guidance 的**模型侧**（真实模型是否读了 guidance、真实 Pi 在忙碌轮次里是否接受 `steer`）
+与 UI 投影仍未验证。
 
 ## Phase 4 — Integration Pipeline
 

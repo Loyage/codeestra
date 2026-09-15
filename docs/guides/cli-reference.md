@@ -377,6 +377,9 @@ bun run codeestra task revision delivery resolve <project-id> <task-id> <deliver
 - delivery 状态：`PENDING / IN_FLIGHT / ACKNOWLEDGED / UNACKNOWLEDGED / CHANNEL_UNSUPPORTED / TIMED_OUT / FAILED / SUPERSEDED_BY_RESTART`。
 - `resolve` **退出码 `0` 仅当投递最终被满足**（`SUPERSEDED_BY_RESTART` / `RESOLVED` / `ALREADY_SATISFIED`）；
   否则 `1`——例如在**没有确认通道**的 Adapter 上 `retry`，它会诚实地留在未确认状态。
+- **与 Session Guidance 的分界**（ADR-0010 D02 / ADR-0057）：本组命令改变的是**验收规格/约束**，因此产生不可变 revision
+  并使旧验证失效；只是想对**运行中的会话**说一句「怎么做」而不改验收标准，走 `session guide`（见 §6.1，它不产生 revision、
+  不动 `appliedRevisionId`、不使验证失效）。两者不能互相代替。
 
 稳定码：`TARGETED_TEST_PLAN_*` 不在此；投递相关有 `SUCCESSOR_NOT_RECORDED`、`SUCCESSOR_REVISION_MISMATCH`、
 `INVALID_REVISION`、`NO_SUBJECT_EXECUTION`、`UNEXPECTED_TASK_STATE`、`CONCURRENT_MODIFICATION`。
@@ -406,6 +409,56 @@ bun run codeestra session transcript part <session-id> <entry-id> <part-index>
 
 稳定码：`TRANSCRIPT_CURSOR_UNKNOWN`、`TRANSCRIPT_ENTRY_UNKNOWN`、`TRANSCRIPT_PART_UNKNOWN`、
 `SESSION_FILE_NOT_OWNED`、`SESSION_FILE_UNREADABLE`、`SESSION_FILE_MISSING`、`SESSION_FILE_TRUNCATED_READ`。
+
+---
+
+## 6.1 `session guide` / `session guidance`（Session Guidance）
+
+```sh
+bun run codeestra session guide <project-id> <task-id> --message <text> [--json]
+bun run codeestra session guidance list <project-id> <task-id> [--json]
+bun run codeestra session guidance get  <project-id> <guidance-id> [--json]
+```
+
+Session Guidance 是**另一条输入通道**（ADR-0010 D02 / ADR-0057）：它改变 Agent 「怎么做」，**不改变验收标准**。
+它**不产生 TaskRevision**、不动 Task 的 revision 与 version、**不使任何验证失效**；改规格仍然只能 `task amend`
+（`task revision create`），且旧验证仍然因此失效。
+
+- `--message` 必填、去空白后非空，上限 16000 字符；缺 message 或给空白文本是**用法错误**（退出码 `2`）。
+- `session guidance list|get` 只接受 `--json`（也是默认输出），其它 flag 是用法错误。
+
+**退出码**（这是本组命令最重要的约定）：
+
+| 码 | 含义 |
+|---|---|
+| `0` | 已交给运行中的 provider 通道（`DELIVERED`），**或**当时没有会话可交付而消息已记录（`RECORDED`——这是等待下一次 Execution 启动交付，不是拒绝） |
+| `1` | 有 provider/会话被问过却没有交付：`CHANNEL_UNSUPPORTED` / `TIMED_OUT` / `FAILED`（stderr 打印稳定码与 detail） |
+| `2` | 用法错误 |
+
+本命令**不使用退出码 `3`**：投递有界（deadline 到点就写 `TIMED_OUT`），每次调用都落下一个明确结论，不存在「稍后再看可能变好」的等待语义。
+
+**「已投递」到底指什么。** `DELIVERED` 只表示**provider 自己的通道接受了这条消息（入队）**，**不表示模型读了它**。
+三个 provider 都没有可核验「已生效」的通道（ADR-0051 实测），所以命令面把这件事说出口：`--json` 里的
+`modelAcknowledgement` 恒为 `UNSUPPORTED`。`state` 取值：`RECORDED` / `DELIVERED` / `CHANNEL_UNSUPPORTED` / `TIMED_OUT` / `FAILED`。
+
+**通道与能力**（如实声明，ADR-0057）：Pi `sessionGuidance: SUPPORTED`（RPC `steer`，evidence 里写明是否观察到 provider
+自己的 `queue_update`）；Codex `REQUIRES_VALIDATION`（`turn/steer` 需要活跃 turn，本 Adapter 不持有，且未验证）；
+Claude Code `UNSUPPORTED`（print 模式控制协议没有承载运行中消息的子类型）。**能力不是 `SUPPORTED` 的 provider 会记
+`CHANNEL_UNSUPPORTED`（退出码 1）**，不会降级、不会静默。
+
+**记录之后发生什么。** 该 Task 的每一条 guidance 会在**新建 Execution**（含 `task resume` 的 successor 与 `task retry` 的
+新 Execution）启动时随启动参数交给 provider，因此指导不随进程消失：Pi 用 `--append-system-prompt <绝对路径>`，
+Claude Code 用 `--append-system-prompt <已验证文本>`（knowledge 继续用 `-file` flag），Codex 把两件已核验产物合成
+`developerInstructions` 字符串。artifact 位于 `<CODEESTRA_HOME>/guidance/<project-id>/<task-id>/guidance-context.md`
+（**绝不写进 Task worktree**），交付事实可从 `session guidance list` 的 `launchedWith[]` 读到。
+**零 guidance 时启动参数逐字节不变**；Task 有 guidance 却拿不到 Runtime home 或 artifact 核验不过时**拒绝启动**
+（`GUIDANCE_CONTEXT_UNAVAILABLE`），不静默少注入。
+
+稳定码：`CHANNEL_UNSUPPORTED`、`NO_SESSION`、`NO_SUBJECT_EXECUTION`、`TIMED_OUT`、`MISSING_CHANNEL_EVIDENCE`、
+`GUIDANCE_DELIVERY_FAILED`、`RUNTIME_RESTARTED`、`NOT_FOUND`、`INVALID_STATE`、`CONCURRENT_MODIFICATION`、
+`GUIDANCE_CONTEXT_UNAVAILABLE`。
+
+**零新增确认**：FULL 与 STRICT 下都是同一条命令、同样 0 步 0 等待；guidance 不是审批通道，STRICT 的工具审批仍走既有 Attention。
 
 ---
 

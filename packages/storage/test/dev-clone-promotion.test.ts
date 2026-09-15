@@ -57,6 +57,13 @@ describe('dev clone promotion storage', () => {
         legacy.exec(`ALTER TABLE stable_promotions DROP COLUMN ${column}`);
       }
       legacy.exec('ALTER TABLE projects DROP COLUMN dev_repo_path');
+      // A version 28 database also predates every later step, so the tables added by schema v31
+      // (Session Guidance, ADR-0057) are removed too: the upgrade below must be exactly what a real
+      // v28 database runs.
+      for (const table of ['session_guidance_deliveries', 'execution_guidance_contexts',
+        'session_guidance']) {
+        legacy.exec(`DROP TABLE IF EXISTS ${table}`);
+      }
       legacy.exec('PRAGMA user_version=28');
       legacy.close();
 

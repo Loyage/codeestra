@@ -599,9 +599,47 @@ bun run codeestra task run    $PROJECT $TASK <version>
 - 被问了 → recipe 7
 - 用散文问了 → recipe 8
 - 想改规格 → recipe 6
+- 想让**跑着的** Agent 换个做法（不改验收标准）→ recipe 14
 - 该提交成果了 → recipe 1 的第 6 步
 - 冲突了 → recipe 4
 - 出事了 → recipe 11；实在看不懂 → [troubleshooting.md](./troubleshooting.md)
+
+---
+
+## 14. 我想让跑着的 Agent 换个做法（Session Guidance）
+
+**先分清两件事：**改「做到什么程度」= 规格变更 → 走 recipe 6（`task amend` / `task revision create`），它产生 revision
+并使旧验证失效；改「怎么做」= 会话指导 → 用 `session guide`，它**不产生 TaskRevision、不动 revision、不使验证失效**。
+
+```sh
+# 1. 确认它真的在跑（RUNNING），并拿到当前 version
+bun run codeestra task status $PROJECT $TASK
+
+# 2. 给一句话。它交给运行中的 provider 通道（Pi 的 RPC steer）
+bun run codeestra session guide $PROJECT $TASK --message "先用仓库的 .codeestra/instructions 里的约定，不要自创风格"
+echo $?      # 0 = 已交给运行中的会话或（当时没会话可交付而）已记录；1 = 被问过但没交付；2 = 用法错误
+
+# 3. 看台账：记录本身 + 尝试 + 每个 Execution 启动时带上它的产物
+bun run codeestra session guidance list $PROJECT $TASK
+bun run codeestra session guidance get  $PROJECT <guidance-id>
+```
+
+**做完看什么：**
+
+- `--json` 里的 `guidance.state`：`RECORDED`（已记录，无活会话可交付）/ `DELIVERED`（provider 通道接受了，**即入队**）/
+  `CHANNEL_UNSUPPORTED` / `TIMED_OUT` / `FAILED`；`attempts[]` 里有当时的 `capability` 与 `evidenceRef`。
+- `modelAcknowledgement` **恒为** `UNSUPPORTED`：没有任何 provider 能证明「模型已读」，所以不要把 `DELIVERED` 读成「它已经照做了」。
+- `launchedWith[]`：哪次 Execution 启动时带上了这条 guidance（artifact 在
+  `<CODEESTRA_HOME>/guidance/$PROJECT/$TASK/guidance-context.md`，**不在** Task 工作树里）。
+- 想确认它真的交给了 provider：`session guidance list` 的 `launchedWith[]` 会在下一次 Execution 启动后多一行；
+  也可以在任务的 argv 里看到 `--append-system-prompt <那个 artifact 路径>`（Pi）。
+
+**别做的事：**
+
+- 想改验收标准却发 guidance：它不会改任何验收标准，也不会使旧验证失效——请用 recipe 6。
+- 在 Codex / Claude Code 上指望它指导**正在运行**的一轮：两个 Adapter 都没有已验证的活会话通道
+  （Codex `REQUIRES_VALIDATION`、Claude `UNSUPPORTED`），你会得到退出码 `1` 与 `CHANNEL_UNSUPPORTED`；
+  消息仍然被耐久记录，并在下一次 Execution 启动时交给 provider。
 
 ---
 

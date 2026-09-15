@@ -56,6 +56,12 @@ describe('agent plugin selection storage', () => {
         legacy.exec(`ALTER TABLE stable_promotions DROP COLUMN ${column}`);
       }
       legacy.exec('ALTER TABLE projects DROP COLUMN dev_repo_path');
+      // ...and the same for the tables added by schema v31 (Session Guidance, ADR-0057): a real v26
+      // database does not have them either.
+      for (const table of ['session_guidance_deliveries', 'execution_guidance_contexts',
+        'session_guidance']) {
+        legacy.exec(`DROP TABLE IF EXISTS ${table}`);
+      }
       legacy.exec('PRAGMA user_version=26');
       legacy.close();
 

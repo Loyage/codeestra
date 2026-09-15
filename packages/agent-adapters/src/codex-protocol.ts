@@ -31,6 +31,8 @@ export type CodexAdapterErrorCode =
   | 'UNSUPPORTED_ANSWER'
   /** The Execution's materialized knowledge could not be read at its recorded digest (ADR-0051). */
   | 'KNOWLEDGE_CONTEXT_UNAVAILABLE'
+  /** The Task's recorded Session Guidance could not be read at its recorded digest (ADR-0057). */
+  | 'GUIDANCE_CONTEXT_UNAVAILABLE'
   | 'INVALID_PROVIDER_RESPONSE';
 
 /**

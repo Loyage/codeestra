@@ -2130,8 +2130,130 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     projectId: z.string().uuid(),
     taskId: z.string().uuid(),
   }),
+  /**
+   * Session Guidance (FOUNDATION-088 / ADR-0057, `PROJECT_SPEC.md` §2.11 and ADR-0010 D02).
+   *
+   * Guidance is the *other* input channel: it hands one message to a real provider conversation and
+   * changes what the Agent is doing without changing the acceptance specification. It never creates a
+   * TaskRevision, never moves `tasks.current_revision_id` and never invalidates a verification run —
+   * `task amend` is still the only path that changes the specification, and it still invalidates old
+   * evidence.
+   *
+   * `DELIVERED` in the answer means the provider's own channel **accepted** the message (it is
+   * enqueued). It does not mean the model read it, and nothing on this face claims that: ADR-0051
+   * measured that no provider here has a channel that can prove it. A provider whose capability is
+   * not `SUPPORTED`, or a Task with nothing running, is recorded as exactly that instead.
+   *
+   * `list` and `get` are read-only: they expose the durable record, its append-only attempt ledger
+   * and the artifact each Execution was launched with, so "the guidance survived the process" is
+   * readable rather than asserted.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('session.guidance.record'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    /** The guidance text. It is stored durably before delivery and never enters a domain event. */
+    message: z.string().min(1).max(16000)
+      .refine((value) => value.trim().length > 0, 'Guidance must not be blank'),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('session.guidance.list'),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('session.guidance.get'),
+    projectId: z.string().uuid(),
+    guidanceId: z.string().uuid(),
+  }),
 ]);
 export type RuntimeRequest = z.infer<typeof runtimeRequestSchema>;
+
+/**
+ * One guidance delivery attempt as a client reads it (ADR-0057).
+ *
+ * `state` is the attempt's own fact. `DELIVERED` means the provider channel accepted the message
+ * (enqueued); `capability` records what the Adapter reported at that moment, so "why nothing was
+ * sent" stays answerable after the fact.
+ */
+export interface SessionGuidanceDeliveryView {
+  readonly id: string;
+  readonly attemptNumber: number;
+  readonly channel: 'PROVIDER_CONVERSATION';
+  readonly state: 'IN_FLIGHT' | 'DELIVERED' | 'CHANNEL_UNSUPPORTED' | 'TIMED_OUT' | 'FAILED';
+  readonly executionId: string | null;
+  readonly sessionId: string | null;
+  readonly incarnationId: string | null;
+  readonly capability: string | null;
+  readonly evidenceRef: string | null;
+  readonly errorCode: string | null;
+  readonly detail: string;
+  readonly startedAt: number;
+  readonly endedAt: number | null;
+}
+
+/**
+ * One durable guidance record as a client reads it. The body travels with the record because the
+ * record *is* the durable copy of what the user said (ADR-0010 D02); the domain event does not carry
+ * it (ADR-0010 D06).
+ */
+export interface SessionGuidanceView {
+  readonly id: string;
+  readonly taskId: string;
+  readonly source: 'COMMAND';
+  readonly body: string;
+  readonly bodyHash: string;
+  readonly bodyBytes: number;
+  readonly actor: string;
+  readonly state: 'RECORDED' | 'DELIVERED' | 'CHANNEL_UNSUPPORTED' | 'TIMED_OUT' | 'FAILED';
+  readonly executionId: string | null;
+  readonly sessionId: string | null;
+  readonly incarnationId: string | null;
+  readonly evidenceRef: string | null;
+  readonly deliveryDetail: string | null;
+  readonly createdAt: number;
+  readonly deliveredAt: number | null;
+  readonly attempts: readonly SessionGuidanceDeliveryView[];
+}
+
+/** What `session.guidance.record` reports. */
+export interface SessionGuidanceRecordView {
+  readonly guidance: SessionGuidanceView;
+  readonly taskState: string;
+  readonly taskVersion: number;
+  /** The single conclusion a caller acts on; `RECORDED` means "recorded, not handed over yet". */
+  readonly outcome: 'DELIVERED' | 'RECORDED' | 'CHANNEL_UNSUPPORTED' | 'TIMED_OUT' | 'FAILED';
+  /** Stable code when the outcome is not a delivery; null on `DELIVERED` and on a plain record. */
+  readonly code: string | null;
+  readonly detail: string;
+  /**
+   * Always `UNSUPPORTED`. It is spelled out rather than omitted so a caller cannot read `DELIVERED`
+   * as "the model read it": no provider here has a channel that could prove that (ADR-0051).
+   */
+  readonly modelAcknowledgement: 'UNSUPPORTED';
+}
+
+/** The guidance artifact one Execution was launched with. */
+export interface ExecutionGuidanceContextView {
+  readonly executionId: string;
+  readonly guidanceIds: readonly string[];
+  readonly guidanceCount: number;
+  readonly contextDigest: string;
+  readonly contextBytes: number;
+  readonly recordedAt: number;
+}
+
+/** What `session.guidance.list` reports. */
+export interface SessionGuidanceListView {
+  readonly taskId: string;
+  readonly taskState: string;
+  readonly guidance: readonly SessionGuidanceView[];
+  readonly launchedWith: readonly ExecutionGuidanceContextView[];
+}
 
 /**
  * `task.recover`'s answer (ADR-0055 D01/D03).
@@ -2248,6 +2370,24 @@ export interface AdapterCapabilities {
    * `UNSUPPORTED` instead of a common abstraction being invented over them.
    */
   readonly pluginSelection: AdapterSupport;
+  /**
+   * Whether this Adapter can hand a guidance message to a **currently running** conversation through
+   * the provider's own channel, and observe the fact that the provider accepted it (ADR-0051/0057).
+   *
+   * `SUPPORTED` means the mechanism exists and was measured: Pi's RPC `steer` answers successfully
+   * and the provider reports its own `queue_update`, which is the strongest fact any of the three
+   * providers produces — the message is **enqueued**, not read. `REQUIRES_VALIDATION` means a
+   * provider primitive plausibly exists (Codex `turn/steer` needs an active turn id this Adapter never
+   * holds) but the Adapter has no validated channel. `UNSUPPORTED` means there is no channel at all
+   * (Claude Code's print-mode control protocol exposes `initialize`/`interrupt`/`can_use_tool` and
+   * nothing that accepts a message into a running turn). A value that is not `SUPPORTED` makes the
+   * Runtime record `CHANNEL_UNSUPPORTED` instead of claiming the conversation was told anything.
+   *
+   * This bit describes the **running conversation** channel only. Handing already-recorded guidance
+   * to a *new* Execution at launch is a separate mechanism each Adapter implements where it has a
+   * startup channel (ADR-0051's knowledge precedent), and is deliberately not gated by this bit.
+   */
+  readonly sessionGuidance: AdapterSupport;
 }
 /** Provider process evidence. A PID alone is never treated as proof of identity. */
 export const agentProcessIdentitySchema = z.strictObject({
@@ -2287,6 +2427,26 @@ export interface AgentKnowledgeContext {
   /** Size in bytes the file must have; a mismatch is a refusal, not a truncation. */
   readonly bytes: number;
 }
+/**
+ * The materialized Session Guidance artifact one Execution is launched with (ADR-0057).
+ *
+ * Guidance is a conversation fact, not a specification revision: it is rendered from the guidance
+ * records of the Task into a file inside the Runtime's own data directory — never into a Task
+ * worktree, and never mixed into the Project Knowledge artifact (the two are different things even
+ * though both reach a provider as an appended system prompt). The Adapter is the last component
+ * before a provider process sees it, so it verifies the file at this digest and the recorded byte
+ * count and refuses to start when either does not hold, with `GUIDANCE_CONTEXT_UNAVAILABLE`.
+ */
+export interface AgentGuidanceContext {
+  /** Absolute path of the materialized guidance context file in the Runtime data directory. */
+  readonly filePath: string;
+  /** Digest of exactly the bytes that file must contain for this launch. */
+  readonly digest: string;
+  /** Size in bytes the file must have; a mismatch is a refusal, not a truncation. */
+  readonly bytes: number;
+  /** The guidance records this artifact was rendered from, oldest first. */
+  readonly guidanceIds: readonly string[];
+}
 export interface AgentStartRequest {
   readonly operationId: string;
   readonly sessionId: string;
@@ -2303,6 +2463,18 @@ export interface AgentStartRequest {
    * Execution resolved no entry to hand over, and the controlled launch must not change.
    */
   readonly knowledgeContext?: AgentKnowledgeContext;
+  /**
+   * The Session Guidance artifact this Execution is launched with, when the Task has recorded any
+   * (ADR-0057). Absent means the Task has no guidance at all, and the controlled launch must stay
+   * byte-identical to the launch before this capability — exactly like an absent `knowledgeContext`.
+   *
+   * It is a *different* artifact from Project Knowledge and is passed as its own append, because the
+   * two say different things: knowledge is what the project declares, guidance is what the user just
+   * told this conversation. An Adapter that receives this field must verify the file (absolute path,
+   * plain file, digest and byte count) and refuse to start when it cannot, with
+   * `GUIDANCE_CONTEXT_UNAVAILABLE`.
+   */
+  readonly guidanceContext?: AgentGuidanceContext;
   /**
    * The plugin/resources this Session may load, exactly as recorded with its Execution (ADR-0044).
    * Absent means the Adapter's controlled default: the same launch as before this capability, with

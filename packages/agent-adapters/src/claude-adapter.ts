@@ -35,6 +35,7 @@ import {
 } from './claude-protocol.js';
 import { readProcessStartToken } from './pi-identity.js';
 import { KnowledgeContextError, knowledgeContextUnavailableCode, readVerifiedKnowledgeContext } from './knowledge-context.js';
+import { GuidanceContextError, guidanceContextUnavailableCode, readVerifiedGuidanceContext } from './guidance-context.js';
 
 /**
  * The measured matrix for `claude 2.1.268`; see `docs/spikes/claude-2.1.268.md`.
@@ -95,6 +96,12 @@ function claudeCapabilities(): AdapterCapabilities {
     // Claude Code's safe-mode launch has no per-resource selection either; plugin selection is not
     // supported in this step and is reported as such (ADR-0044 D03).
     pluginSelection: claudePluginSelectionSupport,
+    // ADR-0057: the print-mode control protocol exposes `initialize`/`interrupt`/`can_use_tool` and
+    // nothing that carries a message into a running turn (ADR-0040/0051 measured the control
+    // subtypes, and an unknown one is answered `Unsupported control request subtype`), so a Claude
+    // conversation has **no** channel for live session guidance. Recording `CHANNEL_UNSUPPORTED` is
+    // the honest answer; writing text into the child's stdin would be inventing a channel.
+    sessionGuidance: 'UNSUPPORTED',
   });
 }
 
@@ -284,6 +291,21 @@ export class ClaudeAdapter implements AgentAnswerAdapter, AgentProcessRelease {
         throw error;
       }
     }
+    // The Task's recorded Session Guidance is verified before anything is spawned, for the same
+    // reason and through the same shared rule (ADR-0057). Claude has no *live* guidance channel, but
+    // it does have a launch-time one, and that is what makes guidance survive the process it was
+    // originally given to.
+    let guidanceText: string | null = null;
+    if (request.guidanceContext !== undefined) {
+      try {
+        guidanceText = readVerifiedGuidanceContext(request.guidanceContext);
+      } catch (error) {
+        if (error instanceof GuidanceContextError) {
+          throw new ClaudeAdapterError(guidanceContextUnavailableCode, error.message, false, false);
+        }
+        throw error;
+      }
+    }
     // `buildClaudeArguments` refuses a thinking level the provider cannot express, before any
     // process exists, so an unusable configuration never becomes a launched Session.
     const argv = buildClaudeArguments({
@@ -296,6 +318,11 @@ export class ClaudeAdapter implements AgentAnswerAdapter, AgentProcessRelease {
       ...(request.knowledgeContext === undefined
         ? {}
         : { knowledgeContext: request.knowledgeContext }),
+      // The guidance text is inlined rather than passed as a second `-file` argument: Claude's CLI
+      // has a distinct `--append-system-prompt-file` precisely because the plain
+      // `--append-system-prompt` takes literal text, so one of each keeps the two artifacts separate
+      // without this Adapter relying on an unmeasured repeatability of either flag.
+      ...(guidanceText === null ? {} : { guidancePrompt: guidanceText }),
     });
     let child: Bun.Subprocess<'pipe', 'pipe', 'pipe'>;
     try {
