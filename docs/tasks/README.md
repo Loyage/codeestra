@@ -5971,6 +5971,41 @@ promotion criterion」，且其测试**断言**重启后 `uiRunning` 为 `false`
 4. **`docs/guides/**` 的版本头**（ADR-0050 D02）：本格改了 `cli-reference.md` / `troubleshooting.md` / `recipes.md` / `manual.md` 的正文，
    但**未改头部 SHA/日期**——头部记的是「本目录最后一次校对的 dev 基线」，而本格还在 lane 上；整合进 `dev` 时应一并刷新。
 
+## FOUNDATION-086 合入 `dev`（协调者记录，单格）
+
+状态：**已合入 `dev`；未 push、未提升 `main`、未触碰稳定 clone 与其上的稳定 Runtime。**
+
+| 事实 | 值 |
+|---|---|
+| 基线 | `dev@01b47c0a95309861f833927db9b93f6ccf6a3f49` |
+| lane 分支 | `lane/task-recover`（工作树 `/Users/loyage/Documents/codeestra-wt/task-recover`） |
+| lane 提交 | `585555d`（`.codeestra/impact.json`）→ `3d31533`（`task recover` 实现 + 定向测试）→ `a2b8bd7`（ADR-0055 + 本文件记录 + 指南同步） |
+| 合入方式 | `git merge --no-ff`，**零冲突** |
+| `dev` 合并提交 | `53bdd34` |
+
+### 合并时验证（在 `dev@53bdd34` 上跑**完整** `bun run check`，退出码 0）
+
+按 Wave M 起的约定（合并时跑完整检查，不再只跑 storage/git/promotion 子集）：
+
+- 根 `bun run typecheck` + `bun run typecheck:ui` → 退出码 0；
+- Vitest **19 文件 / 454 项通过**；
+- Bun 测试 **827 pass / 0 fail（94 文件、5575 断言）**；
+- `bun run build:ui` 成功。
+
+完整输出保存在 `/tmp/ce-wave-n-mergecheck.log`（本机临时文件，不入库）。本格**未**用产品 `promotion full-suite run` 产出提升证据：按 ADR-0038/0039，提升前全量必须在**当时固定的精确候选 SHA** 上重跑，本记录只作合并时验证。
+
+### 合入时发现的三处「记录与事实不符」（不改写 lane 记录，在此如实列出）
+
+1. FOUNDATION-086 的状态行写「**未提交**」，而该分支上实际已有三个提交（上表）。
+2. 同节「未做 / 待用户决定」第 3 条写「项目侧 `.codeestra/impact.json` **本格未写**」，而 `585555d` 已把该文件加入并**随本次合并进入 `dev`**（`.codeestra/impact.json` 现为已跟踪文件）。按 ADR-0031 它只从项目 `main` ref 读，因此在 `dev → main` 之前**稳定实例仍然 `POLICY_ABSENT`**——这一点该条说对了，错的只是「未写」。
+3. FOUNDATION-084 已记的文本漂移（`## NEXT` 第 7 条仍写 Adapter 不消费知识上下文）**本次仍未修**：它属于下一次 doc-sync / `## NEXT` 校准格，本格只做合入，不顺手改别人的记录。
+
+### 仍未做（留给后续格）
+
+- `lane/task-recover` 的工作树与分支**保留未回收**（已合入、工作区 clean）：回收需用户明确点头，或在下一次波次收尾时按归属核对后一并处理。
+- `#7` 用既有 `task cancel`、`#8` 用新的 `task recover` 的**现场收口**仍要等 `dev → main` 提升 + 稳定 Runtime 重启之后才在稳定实例里可用。
+- `docs/guides/**` 的版本/校对头按 ADR-0050 D02 未刷新（本格仍在合入流程中，不是该目录最后一次校对的时点）。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），
