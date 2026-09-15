@@ -116,3 +116,18 @@ ALTER TABLE executions ADD COLUMN retry_from_execution_id TEXT REFERENCES execut
 - `docs/architecture/scheduler.md` §1–§2（候选、门禁顺序）、§4（修订/恢复前重新核验）、§4.1（UNKNOWN 放行）、§7（已实现的原语与命令面）。
 - ADR-0001（运行修订先暂停、停止并新建 Execution）、ADR-0008（三条第一原则）、ADR-0011（FULL 零确认）、ADR-0016（暂停/恢复/终止/归档的既有语义）、ADR-0023/0026（incarnation 与单 writer）、ADR-0024（依赖与 `BLOCKED` 唯一含义）、ADR-0028（「停止并新建 Execution」的先例）、ADR-0029（记录本缺口的来源与 Adapter 能力矩阵）、ADR-0030（UNKNOWN 放行）、ADR-0031/0032/0033（判定、容量预留、调度引擎——本格不修改它们）。
 - `docs/roadmap/mvp.md` Phase 5（「失败后新 Execution 可更换 Agent」）；`docs/tasks/README.md` FOUNDATION-061。
+
+## 后续变更（FOUNDATION-068 / ADR-0042，不改写上文决策）
+
+上文 Decision 的其余部分全部仍然有效（不自动重试、只从 `FAILED` requeue、依赖重新判定、`--adapter` 语义、
+拒绝不写任何行、旧 Execution 证据不改写）。**只有「已 reclaim 的 worktree 无法重试」这一条被 ADR-0042 关闭**：
+
+- `reconcileWorkspace` 在本 ADR 的 retry 路径上由 `inspectOwnedWorktreeRebuild` 取代（同一四分类
+  `OWNED`/`MISSING`/`FOREIGN`/`UNCERTAIN`，另加分支事实），拒绝码集合不变；
+- 已 reclaim 且分支仍可证明归属时，`decideRetryWorkspace` 返回 `mode: 'REBUILD_OWNED'`（“核验通过、待重建”）；
+  真实重建在既有 workspace preparation 路径执行，`WORKSPACE_RECLAIMED` 只在无法证明归属时出现；
+- 上文 Verification 中「worktree 被 `reclaim` 后重试以 `WORKSPACE_RECLAIMED` 拒绝」一项已被
+  `apps/runtime/test/cli-task-retry.test.ts` 的新用例取代（改为断言重建成功、以及不可重建时的两种零写入拒绝）。
+
+未验证一栏里「被 reclaim 后重建 worktree」一项相应地移入 ADR-0042 的已知边界（真实 provider 未验收、
+`RELEASED` 且分支也不存在时的 `PREPARE_FRESH` 路径仍会撞 `workspaces.path` 唯一约束、UI 未投影）。

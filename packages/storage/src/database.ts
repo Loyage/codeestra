@@ -446,12 +446,14 @@ export interface TaskResumeRequest {
 }
 
 /**
- * How a retry treats the Task's own worktree (ADR-0036). `REUSE_VERIFIED` means the filesystem and
- * Git confirmed the recorded worktree is this Task's own; `PREPARE_FRESH` means nothing is there at
- * all, so the existing preparation path may create one. There is deliberately no "rebuild" mode: a
- * reclamation leaves the Task branch behind, which the existing path refuses to re-use.
+ * How a retry treats the Task's own worktree (ADR-0036, extended by ADR-0042). `REUSE_VERIFIED`
+ * means the filesystem and Git confirmed the recorded worktree is this Task's own; `PREPARE_FRESH`
+ * means nothing is there at all, so the existing preparation path may create one; `REBUILD_OWNED`
+ * means the recorded worktree was reclaimed but the Task branch it kept still descends from the
+ * recorded baseline, so the existing preparation path re-creates the worktree at the recorded path
+ * from that branch. `REBUILD_OWNED` is a verified plan, not a completed rebuild.
  */
-export type TaskRetryWorkspaceMode = 'REUSE_VERIFIED' | 'PREPARE_FRESH';
+export type TaskRetryWorkspaceMode = 'REUSE_VERIFIED' | 'PREPARE_FRESH' | 'REBUILD_OWNED';
 
 /** Result of an explicit retry of a failed Task, including the audit record it wrote. */
 export interface TaskRetryRequest {
@@ -7091,6 +7093,93 @@ export class Phase1Database {
         JSON.stringify({ workspaceId: input.workspaceId, taskId: input.taskId,
           path: input.expectedPath, previousState: workspace.state, reason: input.reason }));
       return { previousState: workspace.state, changed: true };
+    })();
+  }
+
+  /**
+   * Revives one reclaimed workspace after its worktree was re-created from the Task branch the
+   * reclamation kept (FOUNDATION-068 / ADR-0042).
+   *
+   * Only a `RELEASED` row can come back, and only while nothing live claims it: a held Execution or an
+   * active slot reservation still means another writer owns this workspace, so the transition is
+   * refused instead of racing it. The row keeps its id, path, branch and ownership token — a reclaimed
+   * workspace path is unique in this table, so a re-created worktree *is* that same workspace rather
+   * than a second one. The fact is recorded as the existing `WorkspacePrepared` event with the rebuild
+   * evidence in its payload, in the same transaction as the state change.
+   *
+   * A row already back in `READY` is reported as unchanged instead of failing: two preparations that
+   * observed the same re-created worktree must both end in "this workspace is ready".
+   */
+  markReclaimedWorkspaceRebuilt(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly workspaceId: string;
+    readonly expectedPath: string;
+    readonly expectedBranchRef: string;
+    readonly rebuild: Readonly<{
+      readonly outcome: 'REBUILT' | 'ADOPTED';
+      readonly reasonCode: string;
+      readonly detail: string;
+      readonly headCommit: string | null;
+    }>;
+    readonly eventId: string;
+    readonly rebuiltAt: number;
+  }): Readonly<{ previousState: WorkspaceLifecycleState; changed: boolean }> {
+    return this.sqlite.transaction(() => {
+      const workspace = this.sqlite.query<{
+        id: string; path: string; branch_ref: string; base_commit: string;
+        state: WorkspaceLifecycleState; project_id: string;
+      }, [string, string]>(`
+        SELECT w.id,w.path,w.branch_ref,w.base_commit,w.state,t.project_id FROM workspaces w
+        JOIN tasks t ON t.id=w.task_id
+        WHERE w.id=?1 AND w.task_id=?2
+      `).get(input.workspaceId, input.taskId);
+      if (workspace === null || workspace.project_id !== input.projectId) {
+        throw new StorageError('NOT_FOUND', 'Workspace was not found for this project and Task');
+      }
+      if (workspace.path !== input.expectedPath) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Workspace path changed before it could be rebuilt');
+      }
+      if (workspace.branch_ref !== input.expectedBranchRef) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Workspace branch changed before it could be rebuilt');
+      }
+      const held = this.sqlite.query<{ count: number }, [string]>(`
+        SELECT COUNT(*) AS count FROM executions WHERE task_id=?1 AND resource_held=1
+      `).get(input.taskId);
+      if ((held?.count ?? 0) > 0) {
+        throw new StorageError('INVALID_STATE', 'A held Execution still owns this workspace');
+      }
+      const reserved = this.sqlite.query<{ count: number }, [string, string]>(`
+        SELECT COUNT(*) AS count FROM execution_slot_reservations
+        WHERE project_id=?1 AND workspace_id=?2 AND state IN ('RESERVED','RECOVERY_REQUIRED')
+      `).get(input.projectId, input.workspaceId);
+      if ((reserved?.count ?? 0) > 0) {
+        throw new StorageError('INVALID_STATE',
+          'An active slot reservation still owns this workspace');
+      }
+      if (workspace.state === 'READY') return { previousState: 'READY' as const, changed: false };
+      if (workspace.state !== 'RELEASED') {
+        throw new StorageError('INVALID_STATE',
+          `Only a reclaimed workspace can be rebuilt; this one is ${workspace.state}`);
+      }
+      const updated = this.sqlite.query(
+        "UPDATE workspaces SET state='READY' WHERE id=?1 AND state='RELEASED'",
+      ).run(input.workspaceId);
+      if (updated.changes !== 1) {
+        throw new StorageError('CONCURRENT_MODIFICATION',
+          'Workspace state changed before it could be rebuilt');
+      }
+      this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES (?1,?2,'WorkspacePrepared',1,'Workspace',?3,0,?4,?4,?5,?6)
+      `).run(input.eventId, input.projectId, input.workspaceId, input.workspaceId, input.rebuiltAt,
+        JSON.stringify({ workspaceId: input.workspaceId, taskId: input.taskId, path: workspace.path,
+          branchRef: workspace.branch_ref, baseCommit: workspace.base_commit,
+          reattachedBranch: true, previousState: 'RELEASED', rebuild: input.rebuild }));
+      return { previousState: 'RELEASED' as const, changed: true };
     })();
   }
 

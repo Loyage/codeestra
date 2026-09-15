@@ -48,7 +48,7 @@ type CommandEnvelope<T extends string, P> = {
 | `ExecutionReserved` | `Execution` | executionId, taskId, revisionId, workspaceId |
 | `ExecutionStateChanged` | `Execution` | executionId, from, to, reason |
 | `ExecutionFailed` | `Execution` | executionId, reason, stopEvidenceRef |
-| `WorkspacePrepared` | `Workspace` | workspaceId, taskId, branch, baseCommit |
+| `WorkspacePrepared` | `Workspace` | workspaceId, taskId, branch, baseCommit（ADR-0042 重建时同事件另带 `reattachedBranch: true`、`previousState: 'RELEASED'`、`rebuild: {outcome, reasonCode, detail, headCommit}`；事件名不变） |
 | `AgentSessionStarted` | `AgentSession` | executionId, sessionId, adapterId, providerSessionId（provider 进程身份留在 session 行/incarnation 行，不在事件 payload 里） |
 | `AgentSessionStateChanged` | `AgentSession` | sessionId, from, to |
 | `AgentSessionCompleted` | `AgentSession` | executionId, sessionId, outcome, evidenceRef, 可选 `note`（FOUNDATION-056 的散文提问判据，随 append-only 完成事实一起落库） |
@@ -117,6 +117,10 @@ Phase 1（ADR-0006）的 `VerificationCompleted` 不写入命令原始输出；`
 **回收（ADR-0021）**
 
 `ResourcesReclaimed`（`Operation`）、`WorkspaceReclaimed`（`Workspace`）用于 ADR-0021 的回收账本事实。
+
+ADR-0042（从 reclaim 保留的 task branch 重建 owned worktree）**不新增事件名**：重建复用同一 workspace 行
+（`RELEASED → READY`）并在同一事务里写 `WorkspacePrepared`，`payload.rebuild.outcome` 区分 `REBUILT` 与
+`ADOPTED`。`TaskRetryRequested.workspaceMode` 增加 `REBUILD_OWNED`（既有字段的新取值，不是新事件）。
 
 **交接与原生终端（ADR-0023 / ADR-0026 / ADR-0035，本格新增）**
 

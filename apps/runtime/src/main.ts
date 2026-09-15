@@ -774,6 +774,7 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       // its own: it re-derives the dependency verdict and reuses the Task's own verified worktree.
       const retried = await retryFailedTask({
         storage,
+        runtimeHome: home,
         projectId: request.projectId,
         taskId: request.taskId,
         expectedVersion: request.expectedVersion,

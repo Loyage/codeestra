@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { reconcileWorkspace } from '@codeestra/git';
+import { join } from 'node:path';
+import { inspectOwnedWorktreeRebuild } from '@codeestra/git';
 import {
   decideRetryWorkspace,
   planTaskRetry,
@@ -192,6 +193,8 @@ export interface TaskRetryOutcome {
  */
 export async function retryFailedTask(input: {
   readonly storage: Phase1Database;
+  /** The Runtime data directory; its `worktrees` root is the owned root of Task worktrees. */
+  readonly runtimeHome: string;
   readonly projectId: string;
   readonly taskId: string;
   readonly expectedVersion: number;
@@ -250,6 +253,7 @@ export async function retryFailedTask(input: {
   const target: 'READY' | 'BLOCKED' = dependencies.blocked ? 'BLOCKED' : 'READY';
   const workspace = await decideWorkspace({
     storage: input.storage,
+    runtimeHome: input.runtimeHome,
     projectId: input.projectId,
     taskId: input.taskId,
   });
@@ -296,9 +300,15 @@ export async function retryFailedTask(input: {
  * The worktree half of the retry decision. The recorded row is not evidence of ownership, so the
  * real filesystem and the Git worktree registry are consulted; an unverifiable worktree is refused
  * instead of being handed to a new Agent.
+ *
+ * The observation also carries what the Task's own branch still says, because a reclaimed workspace
+ * is only rebuildable when the branch a reclamation kept is still this Task's own growth of the
+ * recorded baseline (FOUNDATION-068 / ADR-0042). Those facts are read for every recorded row so the
+ * reuse, fresh and rebuild verdicts all come from one reading.
  */
 async function decideWorkspace(input: {
   readonly storage: Phase1Database;
+  readonly runtimeHome: string;
   readonly projectId: string;
   readonly taskId: string;
 }): Promise<{
@@ -318,15 +328,18 @@ async function decideWorkspace(input: {
     };
   }
   const project = input.storage.getTrustedProject(input.projectId);
-  const reconciled = await reconcileWorkspace({
+  const observed = await inspectOwnedWorktreeRebuild({
     repositoryRoot: project.repoRoot,
+    ownedRoot: join(input.runtimeHome, 'worktrees'),
     path: recorded.path,
     branchRef: recorded.branchRef,
+    baseCommit: recorded.baseCommit,
   });
   const decision = decideRetryWorkspace({
     workspaceState: recorded.state,
-    observation: reconciled.state as RetryWorkspaceObservation,
-    evidence: reconciled.evidenceRef,
+    observation: observed.observation as RetryWorkspaceObservation,
+    evidence: observed.evidenceRef,
+    rebuild: observed,
   });
   if (!decision.allowed) {
     throw new TaskControlError(decision.code as string,
@@ -335,7 +348,7 @@ async function decideWorkspace(input: {
   return {
     mode: decision.mode as TaskRetryWorkspaceMode,
     workspaceId: recorded.workspaceId,
-    evidence: reconciled.evidenceRef,
+    evidence: observed.evidenceRef,
     detail: decision.message,
   };
 }

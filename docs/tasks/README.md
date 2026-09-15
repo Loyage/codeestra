@@ -3548,6 +3548,99 @@ UI **零改动**（事件联合是 `eventType: string`，`contracts` 变更不�
 - 未运行全量测试：本次仅改文档，且 ADR-0038 明确全量测试只在固定 dev 候选准备提升到 main 时执行。
 - 仅执行文档关键词、链接、diff 与 Git 状态检查；结果以本次交付说明为准。
 
+## FOUNDATION-068 — 从 reclaim 保留的 task branch 重建 owned worktree（ADR-0042，无 schema 变更）
+
+状态：lane 分支已提交（**未 push、未提升 `main`、未重启稳定 Runtime、未触碰 `/Users/loyage/Documents/codeestra`**）。
+基线固定 `dev = fd3d99871a40e578105036bc6728213adf302c6a`（未 rebase、未 merge、未 pull）。ADR：**0042**（用户已拍板，全部 8 项按 A 执行）。schema：**不变**（未动 `packages/storage/src/migration.ts`，不占 v25/v26）。
+
+任务来源：ADR-0036 / FOUNDATION-061 如实保留的缺口——“已被 reclaim 的 worktree 无法重试”。
+
+### 缺口（提交前逐条实测，不是猜测）
+
+- `packages/git/src/reclaim.ts` 明确**不删** task branch（`git worktree remove --force` + `prune`，只删目录与注册）。
+- `prepareWorkspace` 在「`refs/heads/task/<taskId>` 已存在」时以 `REF_CONFLICT` 拒绝建 worktree（它只做“从基线新建分支”）。
+- 于是 reclaimed 的 Task 跑不起来：`decideRetryWorkspace` 只能给 `WORKSPACE_RECLAIMED`，Execution 无法建立。
+- 另一个硬事实：`workspaces.path TEXT NOT NULL UNIQUE` + `one_live_workspace … WHERE state <> 'RELEASED'`，因此一个 Task 在账本里**永远只有一个 workspace 行**；“重建”在数据语义上只能是**复用同一行**（同一 `workspace_id`/`path`/`branch_ref`/`ownership_token`），不能是第二行。
+
+### 已实现（无 schema 变更；不引入第二套 Git 逻辑）
+
+- **`packages/git/src/rebuild.ts`（新，独占领地内）**：全部由既有原语组合而成（`inspectOwnedPath`、
+  `inspectOwnedWorktreeRegistration`、`readLocalRefCommit`、`isAncestor`、`listCheckedOutRefs`），而 `reconcileWorkspace` 完全未改：
+  - `inspectTaskBranch`：分支是否存在、commit、与账本 `base_commit` 的关系（`EQUAL`/`DESCENDANT`/`UNRELATED`/`UNKNOWN`，**不可读报 UNKNOWN 而不是猜 UNRELATED**）、该分支在哪些 worktree 被 checkout。
+  - `inspectOwnedWorktreeRebuild`：一次读取给出 `OWNED`/`MISSING`/`FOREIGN`/`UNCERTAIN`（与 `reconcileWorkspace` 同分类）+ 路径存在/注册/分支事实；字段名与领域 `RetryRebuildEvidence` 对齐，调用方无需翻译层。
+  - `rebuildOwnedWorktree`：在动作时**重新建立**全部不变式（路径必须是 `<ownedRoot>/<project>/<task>`、路径与 project 目录都不是 symlink、在 owned root 内、未注册目录一律拒绝不删、分支必须仍从 `base_commit` 生长、不得已在别处 checkout、无 held Execution/活跃预约），只跑 `git worktree add <path> <短分支名>`（**不带 `--force`**；带 `refs/heads/` 前缀会让 Git 检出 detached，所以用短名，并用 `symbolic-ref` 事后证明 attach 成功）。
+  - 幂等/崩溃：已注册且事实一致 → `ADOPTED`（**不跑任何 Git 命令**）；`add` 失败后重新观测，**仅当事实完全一致**（并发 preparation 赢了）才采纳，否则 `FAILED`；事后核验失败 `REBUILD_UNCONFIRMED` 且**故意不删**新建的 worktree（删除是 reclaim 的职责）。
+  - 稳定拒绝码（action 层，与 reclaim 的 reasonCode 同风格）：`BRANCH_ABSENT`/`BRANCH_DIVERGED`/`BRANCH_CHECKED_OUT_ELSEWHERE`/`UNREGISTERED_DIRECTORY`/`REGISTERED_WITHOUT_DIRECTORY`/`PATH_NOT_OWNED_LAYOUT`/`SYMLINK_ESCAPE`/`PATH_OUTSIDE_OWNED_ROOT`/`BRANCH_MISMATCH`/`HEAD_UNREADABLE`/`HEAD_MISMATCH`/`REBUILD_FAILED`/`REBUILD_UNCONFIRMED`。
+- **`packages/domain/src/task-retry.ts`**：新增 `RetryRebuildEvidence`（`pathPresent`/`registered`/`branchExists`/`relationToBase`/`checkedOutElsewhere`）与 `RetryWorkspaceMode = 'REUSE_VERIFIED' | 'PREPARE_FRESH' | 'REBUILD_OWNED'`；`decideRetryWorkspace` 在 `RELEASED` + `FOREIGN` + 全部事实成立时给 `REBUILD_OWNED`，其余仍是 `WORKSPACE_RECLAIMED`（**不新增拒绝码**，具体事实写进证据串）或 `WORKSPACE_OWNERSHIP_UNVERIFIABLE`；拒绝时仍是 `mode: null`（不记一个不会执行计划的 mode）。
+- **`packages/storage/src/database.ts`（仅最小纯追加）**：`TaskRetryWorkspaceMode` 加 `'REBUILD_OWNED'`（并改正已过时的“故意没有 rebuild 模式”注释）；新增 `markReclaimedWorkspaceRebuilt`：只接受 `RELEASED` 行，事务内重新核验 held Execution 与活跃预约，`RELEASED → READY` 与既有 `WorkspacePrepared` 事件（payload 带 `reattachedBranch: true`、`previousState: 'RELEASED'`、`rebuild: { outcome, reasonCode, detail, headCommit }`）同事务；行已是 `READY` 时返回 `changed: false`（两个并发 preparation 不会产生第二个 worktree）。既有方法语义与既有拒绝码一字未改。
+- **`apps/runtime/src/workspace-service.ts`（独占）**：`prepareTaskWorkspace` 在 READY 复用之后、新准备之前插入 `rebuildReclaimedTaskWorkspace`：用**同一个** `decideRetryWorkspace` 与同一份事实判定；`PREPARE_FRESH` 落回既有路径（既有行为一字不变）；无 live claim（活跃预约 / held Execution）即拒绝；重建成功才记账本；返回的 plan 复用原 `workspace_id`/`path`/`branch_ref`/`base_commit`/`ownership_token`。
+- **`apps/runtime/src/task-control-service.ts`（独占）**：retry 的观察改为 `inspectOwnedWorktreeRebuild`（不再调 `reconcileWorkspace`），并把分支事实交给领域判定；`retryFailedTask` 新增 `runtimeHome` 入参以定位 owned root；`retry` 仍然只 requeue（**真实重建在 preparation**），`--json` 里 `workspace.mode` 是“核验通过、待重建”，实际结果由 `WorkspacePrepared` 事件证明。
+- **`apps/runtime/src/main.ts`（纯接线一行）**：`retryFailedTask({ …, runtimeHome: home, … })`。
+- **`packages/contracts/src/index.ts`（纯追加）**：`TaskRetryOutcomeView.workspace.mode` 加 `'REBUILD_OWNED'`，并注明“这是经核验的计划，实际重建由 `WorkspacePrepared.payload.rebuild` 证明”。
+- **`docs/**`**：新增 `docs/decisions/0042-rebuild-reclaimed-worktree.md`；`docs/decisions/README.md` 加索引行并给 ADR-0036 行加 “Amended by ADR-0042” 注明（原文一字未删）；`docs/decisions/0036-*.md` 追加“后续变更”一节（不改写上文 Decision）；`docs/architecture/event-model.md` 注明 `WorkspacePrepared` 的重建载荷（**未新增事件名**）。
+- **`packages/git/src/reclaim.ts` 的一个小修正**：`pathExists` 对 `ENOTDIR`（祖先不是目录）也返回 false（之前会抛错）。这是本格重建路径上真实会遇到的形态（记录路径的 project 目录被换成文件），改成“不存在”比抛错更诚实，也不改变任何删除语义（该路径无论如何都不会被删）。
+
+### 测试
+
+- `packages/domain/test/task-retry.test.ts`（扩展）：`RELEASED + FOREIGN + EQUAL/DESCENDANT` → `REBUILD_OWNED`；分支缺失 / `UNRELATED` / `UNKNOWN` / 被别处 checkout / `pathPresent` / 已注册 / 事实未观察 → 全为 `WORKSPACE_RECLAIMED` 且 `mode: null`；`UNCERTAIN` 不因分支事实变绿。
+- `packages/git/test/rebuild.test.ts`（新，真实临时仓库，11 项）：重建成功（失败尝试**已提交**的 commit 仍在，`b` 文件可读）、幂等 `ADOPTED`（不再跑 Git、注册数仍为 1）、陈旧注册无目录被拒、分支分叉/缺失被拒、分支在别的 worktree 被拒（且那个 worktree 原样）、未注册残留目录被拒且文件原样、注册在别的分支被拒、非本 Task 布局路径被拒、symlink 被拒、布局无法创建报 `FAILED` 且不留下注册。
+- `apps/runtime/test/cli-task-retry.test.ts`（真实 CLI + Runtime + 临时 home/仓库 + 协议 stub）：替换原来“reclaimed 后拒绝”的用例为**重建成功**用例，并新增**零写入拒绝**用例（分支分叉、记录路径被未注册目录占用）。
+
+### 实际运行的检查与逐条结果
+
+只运行 `bun run typecheck` 与建分支时选定的定向测试（**未跑 `bun run check` / `check:fast` / `just check` / `just verify`**，按 ADR-0038）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `bun run typecheck` | 退出码 0（根 tsc `--noEmit`，无输出） |
+| `bun test packages/domain/test/task-retry.test.ts` | 8 pass / 0 fail / 51 expect() |
+| `bun test packages/git/test/rebuild.test.ts` | 11 pass / 0 fail / 59 expect() |
+| `bun test packages/git/test packages/domain/test packages/storage/test` | 18 文件，438 pass / 0 fail / 1375 expect() |
+| `bun test apps/runtime/test/cli-task-retry.test.ts` | 7 pass / 0 fail / 109 expect()（含重建成功与两类零写入拒绝） |
+| `bun test apps/runtime/test/workspace-service.test.ts apps/runtime/test/task-control-service.test.ts` | 24 pass / 0 fail / 114 expect() |
+| `bun test apps/runtime/test/cli-reclaim.test.ts` | 8 pass / 0 fail / 67 expect()（含回收 schema/reconcile） |
+| `bun test apps/runtime/test/scheduler.test.ts apps/runtime/test/cli-task-control.test.ts` | 9 pass / 0 fail / 69 expect() |
+
+测试卫生（FOUNDATION-057）：所有 CLI 类用例用 `apps/runtime/test/support/runtime-reclamation.ts` 的 `runCli`（强制临时
+`CODEESTRA_HOME`）并在每个用例末尾 `codeestra stop`，teardown 调 `reclaimTestResources()`；交付后实测
+`ps` 中没有任何命名本 worktree 的 Runtime 进程，`${TMPDIR}` 下也没有本格前缀（`codeestra-retry-*`、`codeestra-rebuild-*`）的残留夹具。
+
+### 未验证（不得当成已成立）
+
+- 真实 provider：全部重建/拒绝路径的 e2e 用**协议 stub provider**（`stopReason: 'error'` 模拟 Pi 失败轮次），不能证明真实 Pi/Codex 在重建出的 worktree 里的行为。
+- 真实并发/压力：两个 preparation 同时抢同一路径只做了“事实一致才采纳”的逻辑覆盖，没有做并发压测。
+- UI 投影：`apps/ui/**` 一行未动；`REBUILD_OWNED` 与 rebuild 事件在 Web UI 不可见。
+- 跨平台：git 语义在 macOS 上实测（短分支名才 attach、带 `refs/heads/` 会 detached），未在其它平台复验。
+
+### 已知缺口（如实记录，未静默绕过）
+
+- `RELEASED` 且**分支也已不存在**时，`decideRetryWorkspace` 仍按 ADR-0036 判 `PREPARE_FRESH`；但 `workspaces.path`
+  唯一约束使同 Task 无法再新建第二个 workspace 行，这条路径会以数据库约束错误收场。本格**不改** ADR-0036 的既有判定
+  （以免静默改规格），把它作为待决策缺口记录在 ADR-0042 Consequences。
+- 重建后的**首次启动**，impact/conflict 观察仍把该 Task 视为“尚无 workspace”（`getImpactCandidateTask` 过滤
+  `state <> 'RELEASED'`），因此第一次启动的改动集观察为空。这是既有语义，本格不改 `slot-reservation-service`。
+- 真实 `main` 提升、稳定 Runtime 重启、push 全部未做（本格明确不做）。
+
+### 改动边界（领地）
+
+独占：`packages/git/src/*`（新增 `rebuild.ts`、`index.ts` 追加导出、`reclaim.ts` 的 ENOTDIR 一行）、
+`packages/domain/src/task-retry.ts`、`apps/runtime/src/{workspace-service,task-control-service}.ts`、本格测试文件。
+纯追加：`packages/contracts/src/index.ts`、`packages/storage/src/database.ts`（类型取值 + 一个新方法，**无迁移**）、
+`apps/runtime/src/main.ts`（一行接线）、`docs/**`。
+**未改**：`packages/storage/src/migration.ts`、`packages/agent-adapters/**`、`apps/ui/**`、`schedule-service.ts`、
+`slot-reservation-service.ts`、`verification-service.ts`、`agent-runtime-service.ts`、`.codeestra/policies/verification.json`、
+`PROJECT_SPEC.md`、`AGENTS.md`、`package.json`（未新增 e2e 文件，故测试列表无需登记）；`## NEXT` 一字未动。
+
+### 建议如何更新 `## NEXT`（本节不改写 `## NEXT`）
+
+`## NEXT` 第 5 条只提到回收；ADR-0036/FOUNDATION-061 的缺口记在它自己的小节里。若要把本格的闭环写回
+`## NEXT`，建议在第 5 条之后追加一句（而不是修改第 5 条本身）：
+
+> 5b. ~~已被 `reclaim` 的 worktree 无法重建~~：已由 ADR-0042 / FOUNDATION-068 完成（`workspaceMode=REBUILD_OWNED` +
+>     preparation 侧从保留的 task branch attach 重建、`WorkspacePrepared.rebuild` 记录 `REBUILT`/`ADOPTED`、无 schema 变更）。
+>     **剩余**：`RELEASED` 且分支也不存在时的 `PREPARE_FRESH` 路径（撞 `workspaces.path` 唯一约束，需单独决策）、
+>     真实 provider 在重建 worktree 中的验收、重建的 UI 投影。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、~~UI 投影~~（已由 FOUNDATION-050 完成 promotion/dependency 投影）。

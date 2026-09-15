@@ -80,6 +80,18 @@ export type {
   OwnedWorktreeRemovalOutcome,
   OwnedWorktreeState,
 } from './reclaim.js';
+export {
+  inspectOwnedWorktreeRebuild,
+  inspectTaskBranch,
+  rebuildOwnedWorktree,
+} from './rebuild.js';
+export type {
+  OwnedWorktreeRebuild,
+  OwnedWorktreeRebuildObservation,
+  OwnedWorktreeRebuildOutcome,
+  TaskBranchEvidence,
+  TaskBranchRelation,
+} from './rebuild.js';
 
 async function git(cwd: string, args: readonly string[]): Promise<string> {
   const process = Bun.spawn(['git', '-C', cwd, ...args], {

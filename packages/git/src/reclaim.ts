@@ -55,7 +55,10 @@ async function pathExists(path: string): Promise<boolean> {
     await lstat(path);
     return true;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    // ENOENT: nothing is there. ENOTDIR: an ancestor is not a directory, so this path cannot exist
+    // either; both mean "not present", and neither is a reason to fail a reclamation.
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return false;
     throw error;
   }
 }
