@@ -261,6 +261,35 @@ Web UI 是**本地 Runtime 的便利前端**，不是另一个产品：
 | `合入 dev` | 见下 | `task.integrate` | 把成果 commit 合入 dev：先在独立工作树里合并，再跑独立集成验证，通过后才移动 dev 引用 |
 | `更多操作` → `终止` | 多数状态 | `task.cancel` | 终止是**终态**；协作停止 Agent，保留工作树与全部记录 |
 | `更多操作` → `归档` / `取消归档` | 见下 | `task.archive` / `task.unarchive` | 归档**只隐藏任务**，不删除记录或回收工作树；可随时取消归档 |
+| `更多操作` → `重试（task retry）` | **总是可见**（不做本地状态判断） | `task.retry` | 重新入队这个任务并请调度门禁尝试启动一次；被拒绝时显示 Runtime 返回的稳定码 |
+
+**（c2）`更多操作` 里的重试块（`task retry`）**
+
+`更多操作` 展开后，除 `终止` / `归档` 两个按钮外，还有一个重试块（源码位置：`apps/ui/src/task-retry.tsx`）。
+它的要点是**界面不重做命令面的状态判断**：按钮**只受「是否正在发请求」控制**，不会因为任务不是 `FAILED` 而隐藏或禁用；
+被拒绝时界面显示 Runtime 实际返回的稳定码。
+
+| 元素 | 内容（固定文案） |
+|---|---|
+| 标题 | `重试失败任务`（小字 `task retry · 会真的改状态`） |
+| 说明 | 只对 `FAILED` 生效；其它状态返回 `TASK_NOT_FAILED` / `TASK_CANCELLED` / `TASK_STILL_RUNNING` / `TASK_PAUSED` / `RECONCILE_REQUIRED` / `TASK_ARCHIVED`；按钮不做本地状态判断；重试会重新入队并发起「一次」启动请求，在同一条调度门禁后面排队 |
+| `当前版本` | `v<version>`——它会被原样作为 `expected-version`（CAS）发送；界面显示过期时返回 `CONCURRENT_MODIFICATION` |
+| `上一次运行的 Adapter` | 取该任务**最新一次执行记录**的 `adapterId`；这就是不带 `--adapter` 时命令面复用的那一个（`adapterSource: RECORDED`） |
+| `这次使用的 Adapter` | 下拉框：默认项 `沿用该任务上一次运行的 Adapter（<id>）`（无记录时为 `（无记录：回退到默认 Adapter）`），其余选项来自 `runtime.ping` 的 `adapters`；读不到时如实显示 `（读取失败：<错误码>）` |
+| 按钮 | `重试（task retry）`；发送 `task.retry`（选定 adapter 时才带 `adapterId`） |
+
+发完请求后出现的三种结果**分开呈现**（只有第一种是启动）：
+
+| 结果 | 界面 | 含义 |
+|---|---|---|
+| `STARTED` | 绿色 `已启动` + 「新执行已启动（命令面退出码 0）」 | 真的新建了 Execution；卡片另列 execution / session / 工作树路径 |
+| `WAIT` | 警示色 `已入队 · 在等待（退出码 3）` | 重试已记录、任务已重新入队，但**这次没有启动任何执行**；卡片列出等待理由（容量/冲突）与占着位置的 Task |
+| `REFUSED` | 红色 `已入队 · 启动被拒绝` | 重试已记录，但这次启动被拒绝（如 `DEPENDENCIES_UNMET`）；卡片列出稳定码与未满足依赖 |
+
+三种结果都额外显示 `已重新入队：state <READY | BLOCKED> · 版本 v<n> · 重试记录 <id>`、Adapter 及来源
+（`你这次指定` / `沿用该任务上一次运行的 Adapter` / `回退到默认 Adapter`）、工作树模式与启动答案的 `code`/`detail`。
+**没有启动时卡片不显示 execution / session 行**。而**命令本身**被拒绝（例如任务不是 `FAILED`）时，错误横幅显示形如
+`重试被拒绝：TASK_NOT_FAILED: <Runtime 的说明>（<本地词汇表的解释>）`——稳定码始终原样可见。
 
 三个「什么时候出现」的判据（源码核对）：
 
@@ -376,8 +405,15 @@ FULL 下这个区块**不出现**。
 
 - 没有终端时：`这个会话还没有原生终端。接管（上一步）成功启动 provider 后，这里会出现终端的 PTY、游标与附加状态。`
 - 有终端时显示键值表：`终端`（id · 状态 · 本 Runtime 是否持有）、`进程`（helper pid · provider pid · pty slave）、
-  `窗口`（含「resize 不支持（能力矩阵为 UNSUPPORTED）」）、`投影游标`（cursor · 保留字节 · 已产生字节 ·
+  `窗口`（`已应用`/`未应用` 的**初始**尺寸应用事实，另起一行显示
+  `ptyResize: <取值> · <一句解释>`）、`投影游标`（cursor · 保留字节 · 已产生字节 ·
   是否有界缓冲丢弃过）、`当前写入者`。
+  - `窗口` 行的 `ptyResize` 取值**直接来自** `session.handoff.status` 的能力矩阵，**不硬编码、不改写**：
+    `IMPLEMENTED`/`SUPPORTED` → `窗口大小可以改变`；`UNSUPPORTED` → `窗口大小不能改变`；
+    `PARTIAL` → `只在部分平台上可改变`（具体平台范围以命令面与 ADR 为准）；`UNVERIFIED` → `尚未验证`；
+    词汇表以外的取值只原样列出并明确写「本界面没有这个取值的词汇表，不作解释」。
+    命令面没有报告该项时显示「命令面没有报告 `ptyResize` 这一项」——**不会假装可用或不可用**。
+    因此这一行与下方 `能力矩阵` 表里的同一个值总是自洽的。
 - 折叠块 `N 条附加记录`：每条显示身份、holder、状态、附加/分离时间与原因。
 - 附加控制：`身份` 下拉框（`写入者（每个终端至多一个）` / `观察者（可多个，只读）`）+ holder 文本 +
   `附加` 或 `分离（当前：…）`。`title` 会说明为什么不给附加。
@@ -427,10 +463,25 @@ FULL 下这个区块**不出现**。
   外加一张表（`前置任务` / `已合入 commit` / `判定` / `原因` / `集成批次`）与一行上下游闭包。
   说明原文：`一条边只有在钉住的上游 revision 有真正到达 INTEGRATED 的合入、且该 commit 仍可从当前 dev
   到达时才算满足。BLOCKED 只表示依赖未满足；冲突等待、容量等待与 revision 等待不会被算成 BLOCKED。`
-- **`稳定提升记录 · dev → main`**（小字 `只读 · ADR-0022`）：只列出**包含本任务**的提升记录；
+- **`稳定提升记录 · dev → main`**（小字 `只读 · ADR-0022 / ADR-0052`）：只列出**包含本任务**的提升记录；
   表格列 `状态` / `候选 commit` / `dev 基线` / `main 结果` / `模式` / `重启` / `结果` / `时间` / `详情`。
-  `详情` 打开一个只读详情卡（含 `Runtime 重启` 的逐步表）。说明原文：
-  `提升是另一条流程：合入 dev 不等于提升到 main，main 已移动也不等于 Runtime 已完成重启。这里只显示记录里的事实。`
+  `状态` 单元格里有**两个分别的标记**：`state`（Runtime 的状态机）和**派生的 `phase`**——
+  `尚未推送` / `已推送、等待拉取` / `待重启核对` / `重启已记录、远端 main 未发布` / `已完成` / `记录已失效或未推进`。
+  只有 `已完成`（`phase: COMPLETE`）用成功色，其余阶段用等待/失败色调。另外两列各多一行**读回值**：
+  `origin/dev <SHA>`（push 后 `git ls-remote` 读回来的）与 `origin/main <SHA>`（推回并读回后才非空）。
+  说明原文：
+  `提升是另一条流程：合入 dev 不等于提升到 main，「已推送远端 dev」也不等于已提升——推送之后还需要你在 main 检出执行 git fetch origin + git merge --ff-only origin/dev，再次运行 promotion promote 才会核对、记录并执行重启，最后推回远端 main。main 已移动也不等于 Runtime 已完成重启。这里只显示记录里的事实。`
+  `phase` 为 `已推送、等待拉取` 时：`main 结果` 列显示 `尚未拉到 main 检出`（不是「未改动」），`重启` 列显示 `此阶段不记录`。
+  `详情` 打开一个只读详情卡：`阶段（派生）`、`远端读回`（两个 SHA + 推送/推回时间 + dev clone 路径，
+  并注明它们是读回来的观察值而不是输入）、`Runtime 重启` 的逐步表，以及一个 **`下一步`** 块。
+  `下一步` 按 `phase` 给出下一件真事：`AWAITING_PULL` 时标题为
+  `已推送 ≠ 已提升：候选已在远端 dev，main 检出还没有拉取`，下面是一个命令块
+  （`cd <检出 main 的那个 clone>` / `git fetch origin` / `git merge --ff-only origin/dev`），
+  并写明「本界面不执行 Git、不拉取、也不重启；这两条命令只能在 main 检出里由你执行」，
+  且「命令面在这一阶段退出码 3——那是等待，不是失败，也没有任何重启记账」；
+  `RESTART_PENDING` 时列出接下来会跑的四步（`bun install --frozen-lockfile` / `bun run build:ui` /
+  `bun run codeestra stop` / `bun run codeestra status`）；`MAIN_PUSH_PENDING` 时说明重跑只重试推回。
+  这个面板**不发任何命令**：它只读 `promotion.list` / `promotion.get`。
 
 **（m）调度判定与影响投影**
 
@@ -638,7 +689,8 @@ reconcile 结果卡：`reconcile 观测` + boot id；表格列 `预留` / `任�
 - `依赖与 BLOCKED 原因`：项目级的依赖图，**按依赖任务分组**，表格列
   `依赖任务` / `前置任务` / `已合入 commit` / `判定` / `原因` / `集成批次`。
 - `稳定提升记录 · dev → main`：这个项目的提升记录（最多 20 条，超出时界面会写明
-  `最多显示最近 20 条，可能还有更早的记录。`），列同任务详情里的那张表。
+  `最多显示最近 20 条，可能还有更早的记录。`），列与状态/阶段标记、读回值与 `详情` 卡（含 `下一步`）
+  都与任务详情里的一致；同样是**只读**投影，不发任何命令。
 
 ---
 
@@ -762,7 +814,8 @@ Runtime 后依然生效，命令行（codeestra settings ui …）读写的是�
 | 位置 | 元素 |
 |---|---|
 | 任务工作台 | 搜索 / 状态筛选 / 排序 / 含归档 / 重置 / 任务行 / 返回 / 各折叠块 / 执行·验证·集成记录 / 会话结束注记 |
-| 任务工作台 | `依赖与 BLOCKED 原因`（整块）、`稳定提升记录 · dev → main`（整块，含 `详情`） |
+| 任务工作台 | `依赖与 BLOCKED 原因`（整块）、`稳定提升记录 · dev → main`（整块，含 `详情`、`phase` 标记、`origin/dev`/`origin/main` 读回值与 `下一步` 块） |
+| 任务工作台 | `更多操作` 里重试块的**只读部分**：`当前版本` / `上一次运行的 Adapter` / `这次使用的 Adapter` 下拉框（只改本地选择，不发请求）/ 结果卡；`runtime.ping` 的 adapter 列表读取 |
 | 任务工作台 | `影响与冲突判定` 的 `刷新快照` 与 `解释判定（explain）` |
 | 任务工作台 | 原生终端面板的 `刷新状态`；`Agent 执行过程` 的 `刷新` / `排列` / 展开与加载更多 |
 | 待处理 | `刷新`、`任务 #n` 跳转、已回答/已关闭折叠块 |
@@ -790,6 +843,7 @@ Runtime 后依然生效，命令行（codeestra settings ui …）读写的是�
 | 任务详情 | `合入 dev` | `task.integrate` |
 | 任务详情 | `取消`（长命令行） | `task.operation.cancel` |
 | 任务详情 | `终止` / `归档` / `取消归档` | `task.cancel` / `task.archive` / `task.unarchive` |
+| 任务详情 | `更多操作` → `重试（task retry）` | `task.retry`（重新入队 + 一次启动请求；事件记录后仍可能只是等待或启动被拒） |
 | 任务详情 | 原生终端：`请求接管` / `接管` / `取消接管请求` / `附加` / `分离` / `写入` / `交还自动化` | `session.handoff.request` / `admit` / `cancel` / `attach` / `detach` / `terminal.write` / `release` |
 | 任务详情 | 调度判定：`记录单次放行` | `task.schedule.clearUnknown` |
 | 待处理 | `发送 N 个回答` / `允许` / `拒绝` / `发送` / `拒绝回答…` | `attention.answer` |

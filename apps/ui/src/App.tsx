@@ -9,6 +9,7 @@ import { TranscriptPanel } from './transcript.js';
 import { TerminalPanel } from './terminal.js';
 import { DependencyPanel } from './dependencies.js';
 import { PromotionPanel } from './promotion.js';
+import { TaskRetryControls } from './task-retry.js';
 import { RevisionDeliveryPanel } from './revisions.js';
 import { ProseQuestionWaitCard, isProseQuestionWait, readProseQuestionWait, proseQuestionResolveCommand } from './prose-wait.js';
 import { SchedulePanel, ScheduleExplainPanel, CapacityPanel } from './schedule.js';
@@ -1144,6 +1145,17 @@ function TasksTab(props: CommonProps & {
                       });
                     }}>{archived ? '取消归档' : '归档'}</button>
                 </div>
+                <TaskRetryControls
+                  client={client}
+                  projectId={projectId}
+                  task={task}
+                  executions={status?.executions ?? []}
+                  onChanged={async () => {
+                    await props.reloadTasks(projectId);
+                    await props.loadDetail(projectId, task.id);
+                  }}
+                  run={run}
+                />
                 <p className="muted hint">终止后不能重开；归档只隐藏任务，不删除记录或回收工作树。</p>
               </details>
             </div>

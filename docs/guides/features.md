@@ -35,7 +35,7 @@
 | 提交任务 | 用 expected version 把 `DRAFT` 转 `READY`，并在同一命令里核对依赖 + 跑一次调度 pass | `task submit <project> <task> <expected-version>` | 任务详情 → 提交 | — |
 | 运行任务 | 显式请求启动；同自动调度同一门禁（依赖/冲突/容量） | `task run <project> <task> <expected-version> [--adapter <id>] [--allow-unknown] [--json]` | 任务详情 → 启动 Agent | [0030](../decisions/0030-phase2-parallel-scheduling.md) |
 | 暂停 / 恢复 | 暂停是协作停止（确认 provider 退出后才 `PAUSED`）；恢复以 provider conversation resume 继续 | `task pause`、`task resume <…> [--adapter <id>] [--allow-unknown]` | 任务详情 → 暂停 / 继续 | [0016](../decisions/0016-task-pause-cancel-archive.md) |
-| 重试失败任务 | 只对 `FAILED` 生效；重新入队（可能需要先重建 worktree）后，用同一个门禁请求一次启动 | `task retry <project> <task> <expected-version> [--adapter <id>] [--json]` | —（界面无按钮；「更多操作」只有 `终止` 与 `归档`） | [0036](../decisions/0036-task-retry-after-failure.md)、[0042](../decisions/0042-rebuild-reclaimed-worktree.md) |
+| 重试失败任务 | 只对 `FAILED` 生效；重新入队（可能需要先重建 worktree）后，用同一个门禁请求一次启动 | `task retry <project> <task> <expected-version> [--adapter <id>] [--json]` | 任务详情 →「更多操作」→ `重试`（显示 CAS 版本与将使用的 Adapter，可换成已注册的 Adapter；被拒绝时显示 Runtime 的稳定码，「等待」与「已启动」分开显示） | [0036](../decisions/0036-task-retry-after-failure.md)、[0042](../decisions/0042-rebuild-reclaimed-worktree.md) |
 | 取消 / 归档 | 取消是终态（不自动重开）；归档是软删除（只写 `archived_at`，不删行、不回收） | `task cancel`、`task archive`、`task unarchive` | 任务详情 →「更多操作」 | [0016](../decisions/0016-task-pause-cancel-archive.md) |
 | 状态投影 | 列出 Execution / Session / 验证 / 集成投影，附 Agent 完成注记与散文提问等待 | `task status <project> <task> [--json]` | 任务详情（执行/验证/集成记录） | [0013](../decisions/0013-read-only-agent-transcript-view.md) |
 | 规格修订 | 创建新 revision（可只改理由、只加约束）并列出历史 | `task revision create`、`task revision list` | —（界面无入口） | [0028](../decisions/0028-revision-delivery-and-stale-session-startup-reconcile.md) |
@@ -53,7 +53,7 @@
 | 权限模式 | 默认 FULL 零确认；可无确认切 STRICT 恢复旧门禁（工具逐次审批、两步成果 commit、提升批准） | `permission get`、`permission set <full\|strict>` | 界面显示当前模式；STRICT 下出现 TRUST 输入与二次确认 | [0011](../decisions/0011-default-full-permission-mode.md)、[0023](../decisions/0023-strict-permission-attention-and-session-writer-lease.md) |
 | Agent 配置 | 持久化 provider/model/thinking，分全局默认与每项目覆盖；逐字段按 `环境变量 > 项目 > 全局 > Adapter 默认` 解析；只影响新 Session | `agent config get/set/clear [--project <id>] [--adapter <id>] [--provider/--model/--thinking/--unset]` | Agent 设置标签页（`当前生效值` 表与 `编辑并保存`） | [0012](../decisions/0012-agent-configuration-scopes.md) |
 | Agent 插件选择 | 选 Pi 的四类资源（extensions / skills / prompt templates / themes）；选择是**一个整体字段**（项目整份替换全局，不逐项合并）；生效值连同来源层与第三方扩展风险写进 Execution | `agent plugins list`、`agent plugins select [--extension/--skill/--prompt-template/--theme <path>]… [--clear]` | Agent 设置标签页（`插件候选` 与 `清除选择`） | [0044](../decisions/0044-agent-plugin-selection-and-detection.md) |
-| 多 Adapter | 注册 `pi`（默认）、`codex`、`claude`；每次运行绑定一个 Agent，换 Adapter 是新建 Execution | `task run/resume/retry --adapter <id>` | 任务详情 → 启动 Agent / 继续（`Agent` 下拉框，在 `READY` 与 `PAUSED` 时出现） | [0029](../decisions/0029-codex-adapter-transport-and-capabilities.md)、[0040](../decisions/0040-claude-code-adapter-transport-and-capabilities.md) |
+| 多 Adapter | 注册 `pi`（默认）、`codex`、`claude`；每次运行绑定一个 Agent，换 Adapter 是新建 Execution | `task run/resume/retry --adapter <id>` | 任务详情 → 启动 Agent / 继续（`Agent` 下拉框，在 `READY` 与 `PAUSED` 时出现）；重试入口另有自己的 Adapter 下拉框，默认「沿用该任务上一次运行的 Adapter」，选项来自 `runtime.ping` 的已注册列表 | [0029](../decisions/0029-codex-adapter-transport-and-capabilities.md)、[0040](../decisions/0040-claude-code-adapter-transport-and-capabilities.md) |
 
 ## 长命令与取消
 
@@ -89,7 +89,8 @@
 | 能力 | 能做什么 | CLI 入口 | UI 位置 | ADR |
 |---|---|---|---|---|
 | dev 全量测试证据 | 在精确 dev SHA 的 detached 副本上运行项目固定策略，**Runtime 观察结果**，客户端不能自报；证据绑定 SHA/策略 digest/锁文件 digest | `promotion full-suite run --dev-commit <full-sha>`、`promotion full-suite list` | —（界面无入口） | [0038](../decisions/0038-branch-targeted-tests-and-dev-full-suite.md)、[0039](../decisions/0039-layered-verification-evidence.md) |
-| 提升 prepare/approve/promote | `prepare` 固定三元组（不写 Git）；`promote` 在 main 工作树里 fast-forward 并跑 install/build/stop/status；重启仅在每步退 0 且 Runtime 回答 READY 时记录 | `promotion prepare/approve/promote/abandon/get/list` | 任务详情 → 稳定提升记录（**只读投影**，界面不执行提升） | [0009](../decisions/0009-main-dev-promotion-and-restart.md)、[0022](../decisions/0022-stable-branch-promotion.md) |
+| 提升 prepare/approve/promote | `prepare` 固定三元组与 dev clone（不写 Git）；`promote` 一次只推进一步：push 固定候选到远端 `dev` → 读回核对 → **已推送、等待拉取**（`phase: AWAITING_PULL`，退出码 3，不记录任何重启）→ 你在 main 检出 ff-only 拉取后再次调用 → 记录并执行 install/build/stop/status → 重启核对成功后推回远端 `main` | `promotion prepare/approve/promote/abandon/get/list` | 任务详情 → 稳定提升记录（**只读投影**，界面不推送、不拉取、不重启） | [0009](../decisions/0009-main-dev-promotion-and-restart.md)、[0022](../decisions/0022-stable-branch-promotion.md)、[0047](../decisions/0047-github-mediated-stable-promotion.md)、[0052](../decisions/0052-promotion-fact-layering.md) |
+| 「已推送 ≠ 已提升」投影 | 展示派生 `phase`、读回的 `origin/dev`/`origin/main` SHA 与「下一步」：`AWAITING_PULL` 时给出你必须在 main 检出执行的两条命令，且不把任何东西显示成已提升 | `promotion get/list --json` 的 `phase`/`remoteDevCommit`/`remoteMainCommit` | 任务详情与「项目」标签页 → `稳定提升记录 · dev → main`（**只读**） | [0047](../decisions/0047-github-mediated-stable-promotion.md)、[0052](../decisions/0052-promotion-fact-layering.md) |
 
 ## 资源与知识
 

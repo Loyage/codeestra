@@ -333,6 +333,23 @@ details summary { cursor: pointer; color: var(--muted); padding: 0.3rem 0; }
 .terminal-write input[aria-label="终端输入"] { flex: 1 1 14rem; }
 .promotion-detail { margin-top: 0.8rem; }
 .promotion-detail .section-heading h5 { margin: 0; }
+/* `task retry` (ADR-0036) lives in the task detail's 「更多操作」, which opens to full width.
+   The form states the CAS version and the Adapter choice before the button is usable. */
+.task-retry-panel { margin: 0.6rem 0 0.2rem; min-width: 0; }
+.task-retry-panel h4 { font-size: 0.9rem; margin: 0.2rem 0 0.4rem; }
+.task-retry-panel h4 .hint { font-weight: normal; }
+.task-retry-panel .kv { margin: 0.5rem 0; }
+.task-retry-panel select { max-width: 100%; }
+.retry-outcome { margin-top: 0.6rem; }
+.retry-outcome .section-heading h5 { margin: 0; }
+/* The promotion phase chip (ADR-0047 D03 / ADR-0052): "pushed" and "promoted" are different
+   facts, so the waiting phases never use the success colour, and the one manual step this UI
+   cannot perform (the pull in the main checkout) is spelled out with its commands. */
+.promotion-phase { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin: 0.5rem 0; }
+.promotion-next-step { margin: 0.6rem 0; }
+.promotion-next-step h5 { font-size: 0.85rem; margin: 0.6rem 0 0.35rem; color: var(--muted); }
+.next-step-commands { margin: 0.4rem 0 0; padding: 0.5rem 0.6rem; background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: 8px; font-size: 0.78rem; overflow-x: auto; }
 /* A dependency edge that is not satisfied, and a capability that is not implemented, both get the
    attention colour: neither is an error, and neither may look like success. */
 .state-blocked, .state-not_applied, .state-unsupported, .state-unverified, .state-partial

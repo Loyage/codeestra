@@ -726,6 +726,8 @@ bun run codeestra promotion list <project-id> [--limit <n>]
   2. main 检出尚未拉取 → 报**「已推送、等待拉取」**（`state: PROMOTING`，`phase: AWAITING_PULL`），**退出码 3**，
      **不执行也不记录任何重启步骤**。CLI 在 stderr 打印用户在 main 检出要执行的两条命令：
      `git fetch origin && git merge --ff-only origin/dev`。
+     **Web UI 投影同一组只读事实**（`promotion.list` / `promotion.get`，不发任何命令）：`phase`、读回的
+     `origin/dev` / `origin/main` SHA，并在这一阶段直接列出上面那两条命令；它**不把该状态显示成已提升或已完成**。
   3. 用户拉取后再次调用同一命令：核对 main 检出确实在候选上、且该候选是 expected main 的后代（fast-forward 而非
      merge/reset），记录重启计划，然后在 main 检出依次执行：
 
