@@ -4076,6 +4076,98 @@ verdict CONFLICTING (SAME_FILE)
 - **UI 一行未改**：五格都明确把 UI 投影排除在外（本波 `apps/ui/**` diff 为空）。
 - **`## NEXT` 仍有历史漂移**（例：第 7 条把已由 FOUNDATION-055/059 完成的调度引擎与 UI 投影写作「剩余」）。本波只如实更新了第 6 条，未做全面校准——那属于单独一次 doc-sync/NEXT 校准格。
 
+## FOUNDATION-070 — 中文用户指南与 CLI 命令参考（Wave J / J1，纯文档，无 ADR）
+
+状态：已完成（纯文档交付，未改动任何代码、规格、ADR 或 UI 资产）。用户原话是「开发指南文档，教用户如何使用软件，软件具有哪些功能」。
+语言：中文（专有名词、命令、环境变量、错误码保留英文原文）。
+
+### 交付物
+
+| 文件 | 内容 |
+|---|---|
+| `docs/guides/README.md` | 指南索引与三条读者路径（第一次用 / 查功能 / 查命令） |
+| `docs/guides/getting-started.md` | 依赖、`bun install --frozen-lockfile`、`bun run build:ui`、数据目录与单实例、`status`、`permission get/set`、`project inspect/policy/impact validate/trust`、`open`、`ui`、`stop` |
+| `docs/guides/concepts.md` | Task-first 与「Agent/Terminal/Conversation/Worktree 不是调度主实体」；Project / Task / Revision / Execution / Session / Attention / Verification / IntegrationBatch / Promotion / Reclaim / Knowledge；Runtime 单实例与 `0700` home + `0600` socket；FULL/STRICT；`main`/`dev` 双分支与 Task worktree 基线；**Task verification ≠ Integration verification**；调度三态 SAFE/UNKNOWN/CONFLICTING |
+| `docs/guides/workflow.md` | 端到端走查（每步给真实命令与预期输出形状）：创建 → submit（含同命令内调度 pass）→ `task run` 与自动 tick → Attention 回答 / 散文提问 `resolve` → 修订与投递 → 成果提交 → 验证与定向测试记录 → `task integrate` → `promotion full-suite` + `prepare/approve/promote` + 重启 → `reclaim` → `events`/transcript 观察 |
+| `docs/guides/features.md` | **功能清单**（用户要的「软件具有哪些功能」）：一行一能力 = 能力名 → 能做什么 → CLI 入口 → UI 位置 → 相关 ADR；覆盖任务、修订、会话/transcript、原生终端接管、结构化提问与散文提问等待、权限模式、长命令 Operation、调度与容量/槽位、影响分析与冲突判定、依赖 DAG、成果提交、任务验证与分层测试证据、集成批次、稳定提升、资源回收、Project Knowledge、事件订阅、Agent 配置、设置、Web UI；文末列「明确的未实现与未验证」 |
+| `docs/guides/ui.md` | 界面说明：布局、任务工作台（列表/详情/新建停靠条）、Attention Inbox、执行过程与事件流、终端面板、调度/影响/容量面板、依赖、提升、transcript、Agent 配置、项目、主题设置；并写清 UI 与 CLI 是**同一命令面**、以及当前「只有 CLI」的能力清单 |
+| `docs/guides/cli-reference.md` | **完整命令参考**：按命令组覆盖 `status` / `open` / `ui` / `stop` / `permission` / `agent config` / `project`（含 `impact`、`knowledge`）/ `task`（含 `revision`、`result`、`verify`、`tests`、`verification`、`operation`、`integrate`、`integration`、`depends`、`schedule`）/ `session`（含 `handoff`）/ `events` / `attention` / `settings` / `reclaim` / `scheduler` / `promotion`；含 `--json`、退出码语义、每个命令的常见稳定错误码；另有 HTTP/SSE 面（`/api/command`、`/api/events`）与游标语义、主要 domain 事件名清单 |
+| `docs/guides/troubleshooting.md` | 常见症状与稳定码速查表，覆盖 `UI_ASSETS_MISSING`、`INVALID_CURSOR`、`PROVIDER_VERSION_UNAVAILABLE`、`ATTACHMENT_BUSY`、`WORKSPACE_RECLAIMED`、`TASK_NOT_EXECUTED`、`CONCURRENT_MODIFICATION`、`VERIFICATION_POLICY_CHANGED`、`DEV_FULL_SUITE_EVIDENCE_MISSING/NOT_PASSED/STALE`、`RECOVERY_REQUIRED` 类状态等；另附**文档与实现不一致清单**与「未验证/未实现」清单 |
+| `README.md` | 「文档」一节新增「用户指南」入口，链到 `docs/guides/README.md` |
+
+### 核对方法（一切事实来自代码）
+
+1. `apps/cli/src/main.ts`：完整读了 `usage()`（第 934–1232 行）与整段命令分派（第 1232–3426 行），据此写出每个命令、参数、flag 组合与退出码路径（`process.exit(2)` = 用法错误、`3` = 等待/无可回收、`1` = 拒绝）。
+2. `packages/contracts/src/index.ts`：核对请求 schema（命令名字面量、`limit` 上下界与默认值：`maxEventReadLimit=500`、`maxTranscriptEntryReadLimit=200`、`defaultTranscriptEntryReadLimit=100`、`defaultConcurrencyLimit=2`、`maxConcurrencyLimit=16`）、`runtimePingResultSchema` / `runtimeStopResultSchema`、`sessionHandoffEventTypes`。
+3. `apps/runtime/src/**`：逐服务抽取实际抛出的稳定码，命令为
+   `for f in <service>.ts; do grep -rhoE "new [A-Za-z]*Error\('[A-Z_]+'" apps/runtime/src/$f.ts; done`，
+   得到 `task-control-service`（`CONCURRENT_MODIFICATION`/`TASK_NOT_FAILED`/`RECONCILE_REQUIRED`/`UNKNOWN_ADAPTER`）、`verification-service`、`integration-service`、`result-commit-service`、`promotion-service`、`reclaim-service`、`schedule-service`、`capacity-service`、`slot-reservation-service`、`session-handoff-service`、`knowledge-service`、`impact-analysis-service`、`operation-service`、`workspace-service`、`terminal-service` 的码表；另用 `grep -oE "failure\(request.requestId, '[A-Z_]+'" apps/runtime/src/main.ts` 取 dispatch 层拒绝码（`REPOSITORY_CHANGED`/`DEV_REF_MISSING`/`VERIFICATION_POLICY_CHANGED`/`IMPACT_POLICY_CHANGED`/`FULL_PERMISSION_REQUIRED`/`INVALID_AGENT_CONFIGURATION`）。
+4. `packages/storage/src/migration.ts`：核对 Task / Execution / Workspace / Attention / IntegrationBatch / Promotion / RevisionDelivery 等状态 union（`CHECK(state IN (...))`）与 `attention_requests.kind`（`PERMISSION`/`QUESTION`/`RECOVERY`）。
+5. `packages/storage/src/database.ts`：用 `grep -oE "'[A-Z][A-Za-z]+',[0-9]+,'[A-Za-z]+'"` 抽取实际写入 `domain_events` 的事件名，另取 `taskScheduleEventTypes`。
+6. `apps/runtime/src/http-api.ts` + `event-subscription-service.ts`：核对 HTTP 状态码与错误码（`UNAUTHORIZED`/`FOREIGN_ORIGIN`/`UNSUPPORTED_MEDIA_TYPE`/`INVALID_REQUEST`/`INVALID_JSON`/`NOT_AVAILABLE_OVER_HTTP`/`UI_ASSETS_MISSING`）与排他游标语义（未知游标发 `INVALID_CURSOR` 帧并结束订阅，**不静默裁剪**）。
+7. `apps/ui/src/**`：核对标签页名（任务工作台/待处理/调度/运行事件/Agent 配置/项目）、各面板标题与「只读」标注、`RuntimeClient` 走 `POST /api/command` 与 `GET /api/events`。
+8. `PROJECT_SPEC.md` §1.1/§2/§3/§4 与 `docs/decisions/README.md`：只作为术语与不变量的权威来源**阅读**，未修改一个字节。
+
+### 实际验证结果（本格只跑定向检查，未跑任何全量/聚合检查，遵守 ADR-0038）
+
+1. **文档内链接存在性检查** —— 命令与输出：
+
+   ```sh
+   for f in README.md docs/guides/*.md; do d=$(dirname "$f"); \
+     grep -oE '\]\([^)]+\)' "$f" | sed -E 's/^\]\(//; s/\)$//' | sed -E 's/#.*$//' | grep -E '\.md$' \
+     | while read -r l; do [ -e "$d/$l" ] || echo "MISSING: $f -> $l"; done; done; echo "--- link check done ---"
+   ```
+
+   结果：输出仅 `--- link check done ---`，**没有 MISSING**（覆盖 `README.md`、`docs/guides/README.md`、`getting-started.md`、`concepts.md`、`workflow.md`、`features.md`、`ui.md`、`cli-reference.md`、`troubleshooting.md` 里的全部本地 `.md` 链接，含 `../decisions/*.md`、`../../PROJECT_SPEC.md`、`../architecture/*.md`）。
+
+2. **文中 `codeestra …` 命令在 CLI 源码中的存在性核对** —— 从 `README.md` 与 `docs/guides/*.md` 抽出命令路径（`grep -ohE 'codeestra [a-z][a-z0-9-]*( [a-z][a-z0-9-]*){0,3}'`，去重得 91 条），把 `usage()` 文本（`sed -n '934,1232p' apps/cli/src/main.ts`）作为判据，对每条取**最长可命中前缀**：
+
+   - 91 条去重命令路径中，4 条是**只有 group 的命令**（`open` / `status` / `stop` / `ui`）命中长度 L=1，其余 **87 条 L≥2**（含全部三段式如 `task revision delivery resolve`、`session handoff writer acquire`、`promotion full-suite run`、`scheduler reservations prepare-workspace`，以及 4 段式 `task revision delivery list|get|resolve`、`session handoff terminal read|write`、`session handoff writer acquire|release`）。
+   - 几条例外停在更短的**合法前缀**上，因为 `usage()` 用「或」的写法列出取值：`permission set <full|strict>` 与 `settings prose-question-attention [auto|record-only|off]`（分别命中 `permission set` 与 `settings prose-question-attention`）。
+   - 只有一条需要单独指出：`scheduler reservations get` 的最长命中是 2（`scheduler reservations`）——该子命令**不在 `usage()`**，但 dispatch 里有 `reservationAction === 'get'`、契约里有 `scheduler.reservations.get`（见下「文档与实现不一致」第 8 项）。这是本检查的非空洞证据。
+   - 另做一次交叉检查：文中每个命令的 group/action token 都能在 `apps/cli/src/main.ts` 中找到，无 `NO-GROUP` / `NO-ACTION-TOKEN`。
+
+3. **稳定码存在性核对** —— 从全部指南文本抽出 412 个 `[A-Z][A-Z0-9_]{3,}` 形式 token，反查 `apps/` 与 `packages/` 的 `*.ts`：
+
+   ```sh
+   cat docs/guides/*.md | grep -oE '\b[A-Z][A-Z0-9_]{3,}\b' | sort -u \
+     | while read -r c; do grep -rqF "$c" apps packages --include=*.ts || echo "UNKNOWN: $c"; done
+   ```
+
+   结果：只有两项未命中，且**都不是错误码**——`AGENTS`（来自 `AGENTS.md` 文件名）与 `PROBLEM`（占位符 `<PROBLEM>`，真实码是 `INVALID_QUESTIONNAIRE_ANSWER:<PROBLEM>`）。**没有任何一个编造的错误码**。
+
+4. **`bun run typecheck`（即 `tsc --noEmit`，非聚合检查）** —— 已执行：
+
+   ```sh
+   bun run typecheck
+   # $ tsc --noEmit
+   # exit=0
+   ```
+
+   通过。本格 `git status` 无 `apps/**`、`packages/**` 改动，因此这一步只用于证明「没碰到代码」。
+
+5. **明确未执行**：`bun run check`、`bun run check:fast`、`bun run test`、`bun run test:unit`、`just check`、`just verify`、`bun run build:ui` 一律**未运行**——本格是纯文档，按 ADR-0038 开发分支只跑定向检查，全量测试只在 `dev` 准备提升到 `main` 时对精确 SHA 执行一次。
+
+### 文档与实现不一致（如实标注，未静默改写规格或 ADR）
+
+完整清单在 `docs/guides/troubleshooting.md` §3，共 10 项。要点：
+
+- `README.md`「当前状态」段仍把**已实现**的自动 Scheduler、长命令后台化与进度事件、Task cancel/pause、revision 投递确认、原生终端接管、Integration/main 提升写成「尚未实现」，并声称「现有 Phase 1 `task.run` 代码仍按项目 `mainRef` 创建 worktree」——而 `apps/runtime/src/workspace-service.ts` 实际用的是 `project.devRef`（ADR-0018）。
+- `README.md`「下一步」仍把已完成的 Task cancel 写作下一小步。
+- `PROJECT_SPEC.md` §1 前的状态段（「`dev → main` 提升、Runtime 重启……仍未实现」）与同一文件 §2 不变量 14、§3 已落地的 ADR-0038/0039 描述**互相冲突**；按任务要求 `PROJECT_SPEC.md` 与 `docs/decisions/**` 只读，本格**未修改、也未替用户裁决**。
+- `apps/cli/src/main.ts` 的 `usage()` 缺 `scheduler reservations get`，且 `session handoff attach` 用法行未列出实际被接受的 `--observer`。
+- `intents.kind` 的 DB CHECK 允许 `CHANGE_PRIORITY` / `ANSWER_AGENT` / `SELF_MODIFICATION`，但**没有任何命令产生它们**；`task create` 也不接受 priority，因而调度排序里的「优先级降序」当前无法由用户改变。
+
+本格的处理原则：**指南写源码事实**（例如 §14 明确写出 `reservations get` 可用），同时把不一致逐条列出，而不是让文档迁就过时描述，也不是改 README 去掩盖。
+
+### 未验证 / 限制
+
+- 本格**没有执行任何命令的真实运行**：所有「预期输出形状」来自源码（contracts schema 与 CLI 渲染代码），未在本机实际启动 Runtime、未创建 Task、未跑验证或提升。
+- 未做 UI 目视或自动化确认（ADR-0008 禁止用桌面/键鼠自动化验证 UI）；`ui.md` 的面板结构来自 `apps/ui/src/**` 源码。
+- `apps/ui/dist` 在本工作树不存在（gitignore 本地状态），因此 `UI_ASSETS_MISSING` 路径与 `bun run build:ui` 是**按源码描述**，未实测。
+- 未验证 pi/codex/claude 是否真正读取 `knowledge-context.md`（源码事实是 Adapter 不消费 `knowledgeSnapshotRefs`，已如实写入 `features.md` 与 `troubleshooting.md`）。
+- 只提交到 `lane/j1-user-guide`，未 push、未 rebase、未触碰 `main` 稳定工作树或其它 lane 的工作树。
+
 ## NEXT — 最小可用纵向切片
 
 
