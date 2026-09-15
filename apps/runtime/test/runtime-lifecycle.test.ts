@@ -204,7 +204,12 @@ console.log('guarded', Date.now() - beganAt);
     ]);
     const rawElapsed = Date.now() - rawStartedAt;
     expect(rawExit).toBe(0);
-    expect(rawStdout.trim()).toBe('raw 0');
+    // The invariant is that the script did not wait for the pending timer, not that its own clock
+    // read exactly 0ms: a loaded machine can bill a millisecond between two `Date.now()` calls, and
+    // asserting the literal 0 turned that scheduling jitter into a false red.
+    expect(rawStdout.trim()).toStartWith('raw');
+    const rawElapsedInsideScript = Number(/raw (\d+)/.exec(rawStdout)?.[1] ?? Number.NaN);
+    expect(rawElapsedInsideScript).toBeLessThan(1_000);
     expect(rawElapsed).toBeGreaterThanOrEqual(graceMs - 300);
 
     // The fix: `withDeadline` clears its timer, so the same work exits at once instead of at 3s.

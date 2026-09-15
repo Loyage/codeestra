@@ -722,7 +722,7 @@ describe('unregistered reclamation schema', () => {
     try {
       expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version')
         .get()?.user_version).toBe(phase1SchemaVersion);
-      expect(phase1SchemaVersion).toBe(24);
+      expect(phase1SchemaVersion).toBeGreaterThanOrEqual(24);
       expect(upgraded.sqlite.query<Record<string, unknown>, []>('PRAGMA foreign_key_check').all())
         .toHaveLength(0);
       const kept = upgraded.sqlite.query<{ id: string; source: string; task_id: string }, []>(

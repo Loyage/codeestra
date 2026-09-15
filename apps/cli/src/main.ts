@@ -983,7 +983,12 @@ function usage(): never {
   bun run codeestra task result prepare <project-id> <task-id> [execution-id]   # strict mode
   bun run codeestra task result commit <project-id> <task-id> <authorization-id> --confirm
   bun run codeestra task verify <project-id> <task-id> [execution-id] [--background]
+    [--policy <auto|targeted|project>]
   bun run codeestra task verification list <project-id> <task-id>
+  bun run codeestra task tests record <project-id> <task-id> [--commit <full-sha>]
+    [--expected-plan-digest <sha256>] [--json]
+  bun run codeestra task tests show <project-id> <task-id> [--json]
+  bun run codeestra task tests history <project-id> <task-id> [--limit <n>] [--json]
   bun run codeestra task operation list <project-id> <task-id> [--json]
   bun run codeestra task operation get <project-id> <operation-id> [--json]
   bun run codeestra task operation cancel <project-id> <task-id> <operation-id> [--json]
@@ -1034,6 +1039,8 @@ function usage(): never {
   bun run codeestra promotion abandon <project-id> <promotion-id> --reason <text>
   bun run codeestra promotion get <project-id> <promotion-id>
   bun run codeestra promotion list <project-id> [--limit <n>]
+  bun run codeestra promotion full-suite run <project-id> --dev-commit <full-sha> [--json]
+  bun run codeestra promotion full-suite list <project-id> [--limit <n>] [--json]
 
 --reverse prints the newest transcript entry first. It is a rendering choice for the human view
 only (it is refused together with --json), and because the command face reads forward from a cursor
@@ -1054,6 +1061,21 @@ main inside the worktree that has it checked out and then runs there: bun instal
 bun run build:ui, bun run codeestra stop, bun run codeestra status. The restart is recorded only when
 every step exits 0 and the restarted Runtime answers READY. STRICT additionally needs promotion
 approve for that exact triple; a dev/main/evidence move makes it invalid. Only SUCCEEDED exits 0.
+
+ADR-0038 splits verification cost by branch responsibility. A \`task/*\`, \`lane/*\` or feature branch
+commits its own small \`.codeestra/tests.json\` (a scope statement plus 1-16 argv commands, each with
+what it covers); \`task tests record\` snapshots that file into an append-only record bound to the
+exact task/revision/commit, and \`task verify\` runs that recorded plan -- never the file, so a scope
+change is an explicit audited append. A Task with no recorded plan keeps using the fixed project
+policy, and a recorded plan that belongs to another revision or commit is refused instead of being
+silently replaced by the project policy. The full suite moves to the promotion gate:
+\`promotion full-suite run <project-id> --dev-commit <full-sha>\` runs the fixed project policy
+against that exact candidate SHA in a detached copy (the Runtime observes the result; a client
+cannot submit one) and binds the evidence to the candidate commit, the policy digest at the
+project's main ref and the lockfile digest at that commit. \`promotion prepare/approve/promote\` all
+require a PASSED run of exactly that SHA with all three bindings unchanged; a policy edit on main, a
+lockfile change inside the candidate or a newer failing run makes the evidence stale and the
+promotion is refused with DEV_FULL_SUITE_EVIDENCE_STALE (exit 1).
 
 scheduler capacity get reports the concurrency facts a scheduler uses: the project-wide limit (and
 where it came from), each Adapter's limit and occupancy, the stable reason code a new acquisition
@@ -2131,10 +2153,24 @@ try {
     const [taskId, ...rest] = remainingArguments;
     if (firstArgument === undefined || taskId === undefined) usage();
     let background = false;
+    let policySource: 'AUTO' | 'PROJECT_POLICY' | 'TARGETED_TEST_PLAN' = 'AUTO';
     const positionals: string[] = [];
-    for (const token of rest) {
+    for (let index = 0; index < rest.length; index += 1) {
+      const token = rest[index] as string;
       if (token === '--background') background = true;
-      else if (token.startsWith('--')) usage();
+      else if (token === '--policy') {
+        const value = rest[index + 1];
+        if (value === 'targeted') policySource = 'TARGETED_TEST_PLAN';
+        else if (value === 'project') policySource = 'PROJECT_POLICY';
+        else if (value === 'auto') policySource = 'AUTO';
+        else {
+          console.error("`--policy` takes `auto`, `targeted` or `project`: 'auto' uses the Task's"
+            + ' recorded branch-targeted plan when it matches this exact revision and commit,'
+            + ' `targeted` requires such a plan, and `project` runs the fixed project policy');
+          process.exit(2);
+        }
+        index += 1;
+      } else if (token.startsWith('--')) usage();
       else positionals.push(token);
     }
     if (positionals.length > 1) usage();
@@ -2145,8 +2181,10 @@ try {
       projectId: firstArgument,
       taskId,
       background,
+      policySource,
       ...(executionId === undefined ? {} : { executionId }),
-    }) as { state: string; operationId?: string; verificationId?: string; message?: string };
+    }) as { state: string; operationId?: string; verificationId?: string; message?: string;
+      policySource?: string; policyLabel?: string };
     print(report);
     if (background) {
       // The Operation is durable and may still be running: exit 0 means "accepted", and the verdict
@@ -2156,6 +2194,56 @@ try {
     } else if (report.state !== 'PASSED') {
       process.exit(1);
     }
+  } else if (group === 'task' && action === 'tests') {
+    // `task tests <subcommand> …` lands the subcommand in firstArgument. The plan is a repository
+    // file (`--json` is the machine format for every subcommand); recording it is what makes it the
+    // command set verification runs, and each record is append-only (ADR-0038/0039).
+    const subcommand = firstArgument;
+    if (subcommand === 'record') {
+      const split = splitFlagTokens(remainingArguments,
+        ['--commit', '--expected-plan-digest'], ['--json']);
+      const [projectId, taskId, ...extra] = split.positionals;
+      if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
+      const commit = split.flags.get('--commit');
+      const expectedPlanDigest = split.flags.get('--expected-plan-digest');
+      const recorded = await call({
+        command: 'task.tests.record',
+        commandId: crypto.randomUUID(),
+        projectId,
+        taskId,
+        ...(commit === undefined ? {} : { commit }),
+        ...(expectedPlanDigest === undefined ? {} : { expectedPlanDigest }),
+      }) as {
+        created: boolean; planId: string; planLabel: string; testedCommit: string; scope: string;
+        revisionId: string; commands: readonly { readonly id: string;
+          readonly argv: readonly string[] }[];
+        replacedExistingScope: boolean;
+      };
+      print(recorded);
+      if (recorded.replacedExistingScope) {
+        console.error('已追加新的定向测试计划记录；旧记录保留为审计，本次范围变化不是静默生效。');
+      }
+    } else if (subcommand === 'show') {
+      const [projectId, taskId, ...flags] = remainingArguments;
+      if (projectId === undefined || taskId === undefined) usage();
+      jsonOnlyFlag(flags);
+      const plan = await call({ command: 'task.tests.show', projectId, taskId });
+      print(plan);
+      if (plan === null) {
+        console.error(`该 Task 没有已记录的定向测试计划；\`task verify\` 会用固定项目策略。`);
+      }
+    } else if (subcommand === 'history') {
+      const split = splitFlagTokens(remainingArguments, ['--limit'], ['--json']);
+      const [projectId, taskId, ...extra] = split.positionals;
+      if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
+      const limit = split.flags.get('--limit');
+      print(await call({
+        command: 'task.tests.history',
+        projectId,
+        taskId,
+        limit: limit === undefined ? 50 : Number(limit),
+      }));
+    } else usage();
   } else if (group === 'task' && action === 'verification') {
     // `task verification <subcommand> …` lands the subcommand in firstArgument.
     const [projectId, taskId, ...extra] = remainingArguments;
@@ -2605,6 +2693,41 @@ try {
         ...(until === undefined ? {} : { until }),
         limit: limit ?? 100 }));
     }
+  } else if (group === 'promotion' && action === 'full-suite') {
+    // The dev full-suite evidence face (ADR-0038 D03, ADR-0039). `run` executes the fixed project
+    // policy against the exact `dev` candidate commit in a detached copy and records what the
+    // Runtime observed; `list` reads the recorded evidence back. A client cannot submit a result.
+    const [subcommand, projectId, ...flags] = [firstArgument, ...remainingArguments];
+    if (subcommand === undefined || projectId === undefined) usage();
+    if (subcommand === 'run') {
+      const split = splitFlagTokens(flags, ['--dev-commit'], ['--json']);
+      if (split.positionals.length !== 0) usage();
+      const expectedDevCommit = split.flags.get('--dev-commit');
+      if (expectedDevCommit === undefined) {
+        console.error('--dev-commit <full-sha> is required: the evidence must name one exact dev SHA');
+        process.exit(2);
+      }
+      const report = await call({
+        command: 'promotion.fullSuite.run',
+        commandId: crypto.randomUUID(),
+        projectId,
+        expectedDevCommit,
+      }) as { state: string; evidenceId: string; policyDigest: string; lockfileDigest: string;
+        outcomeCode: string | null; alreadyRecorded: boolean };
+      print(report);
+      // Only a PASSED full-suite run of that exact SHA may carry a promotion, so a failed or
+      // unfinished run is exit code 1 for scripts.
+      if (report.state !== 'PASSED') process.exit(1);
+    } else if (subcommand === 'list') {
+      const split = splitFlagTokens(flags, ['--limit'], ['--json']);
+      if (split.positionals.length !== 0) usage();
+      const limit = split.flags.get('--limit');
+      print(await call({
+        command: 'promotion.fullSuite.list',
+        projectId,
+        limit: limit === undefined ? 20 : Number(limit),
+      }));
+    } else usage();
   } else if (group === 'promotion') {
     // The stable promotion face. `prepare` fixes the three facts and writes nothing to Git;
     // `promote` moves main inside its own worktree and then runs the recorded restart sequence in

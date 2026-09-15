@@ -42,9 +42,11 @@ Status：Accepted（用户明确要求：开发分支不跑全量测试；建分
 
 ### D04：当前自动化缺口必须如实报告
 
-- 当前 Runtime 的 Task verification 从 main ref 读取单一 `.codeestra/policies/verification.json`，本仓库该策略仍执行 `bun run check`；稳定提升目前复用 IntegrationBatch 的验证记录，并没有单独表达“精确 dev SHA 的提升前全量回归”。
-- 因此本 ADR 先确立所有开发分支立即遵守的协作规则，但**不声称产品命令面已经自动执行或强制该分层**。后续实现需要让 Task/branch 记录可绑定定向测试计划与证据，并让 promotion 消费独立的 dev 全量测试证据；在完成前不得把现有 `task verify`/Integration verification 误报为已满足本 ADR。
-- 本轮不静默改写人工维护的 `.codeestra/policies/verification.json`，因为固定项目级命令无法表达“按开发方向选择测试”；用另一个固定宽测试替换全量命令同样不满足 D01。
+> **Amended by ADR-0039（FOUNDATION-065，schema v25）**：本节记录的自动化缺口已关闭。`task tests record` 现在把分支的 `.codeestra/tests.json` 快照成绑定 `(task, revision, commit, digest)` 的 append-only 计划记录，`task verify` 只消费已记录的计划并如实记录 `policy_source`；`promotion.full-suite run` 由 Runtime 在精确 dev SHA 的 detached 副本上运行 `main` ref 的固定策略并观察结果，`promotion prepare/approve/promote` 强制消费该证据（缺失/非通过/任一绑定不符一律拒绝，promote 前重检且不推进任何 ref）。D01–D03 的规则因此**现在由命令面自动执行**，本节下面三条只作为历史记录保留。人工维护的 `.codeestra/policies/verification.json` 仍然没有被本格改写。
+
+- 当前 Runtime 的 Task verification 从 main ref 读取单一 `.codeestra/policies/verification.json`，本仓库该策略仍执行 `bun run check`；稳定提升目前复用 IntegrationBatch 的验证记录，并没有单独表达“精确 dev SHA 的提升前全量回归”。（实现见 ADR-0039）
+- 因此本 ADR 先确立所有开发分支立即遵守的协作规则，但**不声称产品命令面已经自动执行或强制该分层**。后续实现需要让 Task/branch 记录可绑定定向测试计划与证据，并让 promotion 消费独立的 dev 全量测试证据；在完成前不得把现有 `task verify`/Integration verification 误报为已满足本 ADR。（该后续实现即 ADR-0039）
+- 本轮不静默改写人工维护的 `.codeestra/policies/verification.json`，因为固定项目级命令无法表达“按开发方向选择测试”；用另一个固定宽测试替换全量命令同样不满足 D01。（ADR-0039 同样没有改写它：定向计划来自分支自己的 commit，固定策略继续作为项目级判定来源）
 
 ## Consequences
 

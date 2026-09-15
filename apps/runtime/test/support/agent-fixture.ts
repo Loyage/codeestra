@@ -67,7 +67,10 @@ export async function createAgentFixture(options: AgentFixtureOptions = {}): Pro
   await git(repo, ['config', 'user.name', 'Test']);
   await git(repo, ['config', 'user.email', 'test@example.invalid']);
   await Bun.write(join(repo, 'README.md'), 'temporary repository\n');
-  await git(repo, ['add', 'README.md']);
+  // The project lockfile: the dev full-suite evidence binds its digest (ADR-0039), and a fixture
+  // that modelled a Bun project without one could not exercise that binding at all.
+  await Bun.write(join(repo, 'bun.lock'), '{\n  "lockfileVersion": 1\n}\n');
+  await git(repo, ['add', 'README.md', 'bun.lock']);
   let verificationPolicy: AgentFixture['verificationPolicy'] = { state: 'ABSENT', digest: null };
   if (options.withoutVerificationPolicy !== true) {
     const commands = options.verificationCommands ?? defaultVerificationCommands;

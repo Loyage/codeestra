@@ -17,6 +17,7 @@ import {
   type StablePromotionPlan,
   type StablePromotionState,
 } from '@codeestra/storage';
+import { checkDevFullSuiteEvidence, PromotionEvidenceError } from './promotion-evidence-service.js';
 
 export class PromotionServiceError extends Error {
   constructor(readonly code: string, message: string) {
@@ -140,6 +141,39 @@ interface LiveFacts {
   readonly devCommit: string;
   readonly mainCommit: string;
   readonly mainWorktreePath: string;
+}
+
+/**
+ * The dev full-suite evidence a promotion fixes (ADR-0038 D03). The three bindings are read from
+ * Git, never from the evidence row alone: a `main`-ref policy edit or a lockfile change inside the
+ * candidate changes the digest the promotion is checked against, which is what makes the fixed
+ * evidence expire instead of quietly outliving the fact it described.
+ */
+async function requireFullSuiteEvidence(input: {
+  readonly storage: Phase1Database;
+  readonly projectId: string;
+  readonly repositoryRoot: string;
+  readonly mainRef: string;
+  readonly devCommit: string;
+  readonly objectFormat: 'sha1' | 'sha256';
+}): Promise<{ readonly evidenceId: string;
+  readonly bindings: Awaited<ReturnType<typeof checkDevFullSuiteEvidence>>['bindings'] }> {
+  try {
+    const check = await checkDevFullSuiteEvidence({
+      storage: input.storage,
+      projectId: input.projectId,
+      repositoryRoot: input.repositoryRoot,
+      mainRef: input.mainRef,
+      devCommit: input.devCommit,
+      objectFormat: input.objectFormat,
+    });
+    return { evidenceId: check.evidenceId, bindings: check.bindings };
+  } catch (error) {
+    if (error instanceof PromotionEvidenceError) {
+      throw new PromotionServiceError(error.code, error.message);
+    }
+    throw error;
+  }
 }
 
 /**
@@ -269,6 +303,17 @@ export async function prepareStablePromotion(input: {
     expectedDevCommit,
     expectedMainCommit,
   });
+  // ADR-0038 D03: a promotion additionally needs a PASSED full-suite run of this exact dev SHA,
+  // bound to the fixed project policy and to the lockfile at that commit. The bindings are read
+  // from Git here and fixed into the promotion, so a later policy or lockfile change is detectable.
+  const fullSuite = await requireFullSuiteEvidence({
+    storage: input.storage,
+    projectId: input.projectId,
+    repositoryRoot: candidates.repositoryRoot,
+    mainRef: candidates.mainRef,
+    devCommit: expectedDevCommit,
+    objectFormat: candidates.objectFormat,
+  });
   let begun;
   try {
     begun = input.storage.beginStablePromotion({
@@ -280,6 +325,9 @@ export async function prepareStablePromotion(input: {
       payloadHash: sha256(JSON.stringify({
         projectId: input.projectId, batchId: input.batchId, expectedDevCommit,
         expectedMainCommit, verificationId: evidence.verificationId,
+        fullSuiteEvidenceId: fullSuite.evidenceId,
+        fullSuitePolicyDigest: fullSuite.bindings.policyDigest,
+        fullSuiteLockfileDigest: fullSuite.bindings.lockfileDigest,
       })),
       createdEventId: randomUUID(),
       devRef: candidates.devRef,
@@ -288,6 +336,11 @@ export async function prepareStablePromotion(input: {
       expectedMainCommit,
       verificationId: evidence.verificationId,
       verificationTestedCommit: evidence.verificationTestedCommit,
+      fullSuiteEvidenceId: fullSuite.evidenceId,
+      fullSuiteDevCommit: fullSuite.bindings.devCommit,
+      fullSuitePolicyVersion: fullSuite.bindings.policyVersion,
+      fullSuitePolicyDigest: fullSuite.bindings.policyDigest,
+      fullSuiteLockfileDigest: fullSuite.bindings.lockfileDigest,
       permissionMode: input.permissionMode,
       actor: 'runtime-promotion',
       createdAt: now(),
@@ -375,15 +428,51 @@ export async function promoteStableBranch(input: {
     return report(restartPlan(plan), { created: false, replayed: false });
   }
 
+  // ADR-0038 D03, re-checked against Git immediately before any ref moves: the candidate SHA, the
+  // fixed project policy digest and the lockfile digest must still be exactly what this promotion
+  // fixed. `main` has not moved yet at this point, so a promotion that fails this check is marked
+  // STALE and has to be prepared again rather than re-pointed at whatever changed.
+  if (plan.fullSuite === null) {
+    throw new PromotionServiceError('DEV_FULL_SUITE_EVIDENCE_MISSING',
+      `Promotion ${plan.promotionId} was prepared without dev full-suite evidence; abandon it and`
+      + ' prepare it again (ADR-0038 requires a PASSED full-suite run of the exact dev candidate)');
+  }
+  try {
+    await checkDevFullSuiteEvidence({
+      storage: input.storage,
+      projectId: input.projectId,
+      repositoryRoot: plan.repositoryRoot,
+      mainRef: plan.mainRef,
+      devCommit: plan.candidateCommit,
+      objectFormat: plan.objectFormat,
+      recordedEvidenceId: plan.fullSuite.evidenceId,
+    });
+  } catch (error) {
+    if (!(error instanceof PromotionEvidenceError)) throw error;
+    if (plan.state === 'CREATED' || plan.state === 'AWAITING_APPROVAL') {
+      input.storage.markStablePromotionStale({
+        promotionId: plan.promotionId,
+        outcomeCode: error.code,
+        reason: error.message,
+        eventId: randomUUID(),
+        at: now(),
+      });
+      throw new PromotionServiceError(error.code,
+        `${error.message} — the promotion was marked STALE; prepare and approve it again`);
+    }
+    throw new PromotionServiceError(error.code, error.message);
+  }
+
   // FULL means zero confirmations (ADR-0011); STRICT keeps the one recorded approval.
   if (input.permissionMode === 'STRICT') {
     const approval = plan.approval;
     if (approval === null || approval.devCommit !== plan.candidateCommit
       || approval.mainCommit !== plan.expectedMainCommit
-      || approval.verificationId !== plan.verificationId) {
+      || approval.verificationId !== plan.verificationId
+      || approval.fullSuiteEvidenceId !== (plan.fullSuite?.evidenceId ?? null)) {
       throw new PromotionServiceError('PROMOTION_NOT_APPROVED',
-        'STRICT mode requires an approval of this exact dev/main/verification triple;'
-        + ' run promotion approve first');
+        'STRICT mode requires an approval of this exact dev/main/verification/full-suite-evidence'
+        + ' triple; run promotion approve first');
     }
     // The approval is only valid while the evidence it was given for still matches.
     const candidates = input.storage.getPromotionCandidates(input.projectId, plan.integrationBatchId);

@@ -1,6 +1,13 @@
 import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import {
+  parseTargetedTestPlan,
+  targetedTestPlanCommands,
+  targetedTestPlanDigest,
+  targetedTestPlanLabel,
+  targetedTestPlanPath,
+  targetedTestPlanVersion,
+  TargetedTestPlanError,
   parseVerificationPolicy,
   verificationPolicyDigest,
   verificationPolicyLabel,
@@ -8,6 +15,11 @@ import {
   verificationPolicyVersion,
   type VerificationPolicyInspection,
 } from '@codeestra/contracts';
+import {
+  planTargetedTestPlanReplacement,
+  selectTargetedTestPlan,
+  type TargetedTestPlanRef,
+} from '@codeestra/domain';
 import {
   createVerificationCopy,
   inspectVerificationCopy,
@@ -20,6 +32,7 @@ import {
   StorageError,
   type StoredVerificationCommand,
   type VerificationEvidence,
+  type VerificationPolicySource,
   type VerificationRunPlan,
 } from '@codeestra/storage';
 
@@ -109,6 +122,12 @@ export interface VerificationReport {
   readonly policyVersion: string;
   readonly policyDigest: string;
   readonly policyLabel: string;
+  /** Which record the executed commands came from (ADR-0038/0039). */
+  readonly policySource: VerificationPolicySource;
+  /** The recorded targeted test plan this run used, when that is the source. */
+  readonly planId: string | null;
+  readonly planVersion: string | null;
+  readonly planDigest: string | null;
   readonly mainCommit: string;
   readonly state: VerificationRunPlan['state'];
   readonly outcomeCode: string | null;
@@ -429,7 +448,13 @@ function reportFromPlan(
     testedTree: plan.testedTree,
     policyVersion: plan.policyVersion,
     policyDigest: plan.policyDigest,
-    policyLabel: verificationPolicyLabel(plan.policyDigest),
+    policyLabel: plan.policySource === 'TARGETED_TEST_PLAN'
+      ? targetedTestPlanLabel(plan.policyDigest)
+      : verificationPolicyLabel(plan.policyDigest),
+    policySource: plan.policySource,
+    planId: plan.planId,
+    planVersion: plan.planVersion,
+    planDigest: plan.planDigest,
     mainCommit: plan.mainCommit,
     state: plan.state,
     outcomeCode: plan.outcomeCode,
@@ -644,6 +669,213 @@ export async function executeVerificationPolicy(input: {
   };
 }
 
+/**
+ * What `task.tests.record` observed and recorded: the plan file at one exact commit, snapshotted
+ * into an append-only record bound to `(task, revision, commit, digest)` (ADR-0038/0039).
+ */
+export interface TargetedTestPlanSnapshot {
+  readonly planId: string;
+  /** False when the identical digest was already recorded for this exact subject. */
+  readonly created: boolean;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly revisionId: string;
+  readonly testedCommit: string;
+  readonly planVersion: string;
+  readonly planDigest: string;
+  readonly planLabel: string;
+  readonly sourcePath: string;
+  readonly scope: string;
+  readonly commands: readonly StoredVerificationCommand[];
+  readonly recordedBy: string;
+  readonly recordedAt: number;
+  /** True when this record replaced a different scope for the same subject (the old one stays). */
+  readonly replacedExistingScope: boolean;
+}
+
+/** One recorded plan as the read-only `task.tests.show` / `task.tests.history` commands report it. */
+export interface TargetedTestPlanView {
+  readonly planId: string;
+  readonly taskId: string;
+  readonly revisionId: string;
+  readonly testedCommit: string;
+  readonly planVersion: string;
+  readonly planDigest: string;
+  readonly planLabel: string;
+  readonly sourcePath: string;
+  readonly scope: string;
+  readonly commands: readonly StoredVerificationCommand[];
+  readonly recordedBy: string;
+  readonly recordedAt: number;
+}
+
+function planView(plan: {
+  readonly planId: string; readonly taskId: string; readonly revisionId: string;
+  readonly testedCommit: string; readonly planVersion: string; readonly planDigest: string;
+  readonly sourcePath: string; readonly scope: string;
+  readonly commands: readonly StoredVerificationCommand[]; readonly recordedBy: string;
+  readonly recordedAt: number;
+}): TargetedTestPlanView {
+  return {
+    planId: plan.planId,
+    taskId: plan.taskId,
+    revisionId: plan.revisionId,
+    testedCommit: plan.testedCommit,
+    planVersion: plan.planVersion,
+    planDigest: plan.planDigest,
+    planLabel: targetedTestPlanLabel(plan.planDigest),
+    sourcePath: plan.sourcePath,
+    scope: plan.scope,
+    commands: plan.commands,
+    recordedBy: plan.recordedBy,
+    recordedAt: plan.recordedAt,
+  };
+}
+
+/** Reads the recorded plans of one Task, newest first: the append-only audit of its test scope. */
+export function listTargetedTestPlanViews(input: {
+  readonly storage: Phase1Database;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly limit?: number;
+}): readonly TargetedTestPlanView[] {
+  return input.storage.listTargetedTestPlans(input.projectId, input.taskId,
+    input.limit ?? 100).map(planView);
+}
+
+/** The newest recorded plan of one Task, or null when this Task never recorded one. */
+export function latestTargetedTestPlanView(input: {
+  readonly storage: Phase1Database;
+  readonly projectId: string;
+  readonly taskId: string;
+}): TargetedTestPlanView | null {
+  const latest = input.storage.listTargetedTestPlans(input.projectId, input.taskId, 1)[0];
+  return latest === undefined ? null : planView(latest);
+}
+
+/**
+ * Reads `.codeestra/tests.json` at the exact commit being verified and appends it to the Task's
+ * plan audit.
+ *
+ * The commit is the Task's own captured result commit unless the caller names one, so the recorded
+ * binding is the one verification will look for. The file is never *consumed* at verification time:
+ * a plan only takes effect by being recorded, which is what makes a scope change an explicit,
+ * audited append instead of a silent edit inside a commit.
+ */
+export async function recordTargetedTestPlan(input: {
+  readonly storage: Phase1Database;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly executionId?: string;
+  /** A full object ID to bind instead of the Task's captured result commit. */
+  readonly commit?: string;
+  /** The digest the caller expects to replace; a different current digest is refused. */
+  readonly expectedPlanDigest?: string;
+  readonly recordedBy?: string;
+  readonly now?: () => number;
+  readonly randomUUID?: () => string;
+}): Promise<TargetedTestPlanSnapshot> {
+  const now = input.now ?? Date.now;
+  const randomUUID = input.randomUUID ?? (() => crypto.randomUUID());
+  const candidates = input.storage.getVerificationCandidates(input.projectId, input.taskId);
+  const revisionId = candidates.currentRevisionId;
+  let testedCommit: string;
+  if (input.commit !== undefined) {
+    const expectedLength = candidates.objectFormat === 'sha1' ? 40 : 64;
+    if (!new RegExp(`^[0-9a-f]{${expectedLength}}$`).test(input.commit)) {
+      throw new VerificationServiceError('INVALID_COMMIT_ID',
+        'A targeted test plan binds the exact commit it was chosen for, so --commit must be a full'
+        + ` ${candidates.objectFormat} object ID (${expectedLength} hex characters)`);
+    }
+    testedCommit = input.commit;
+  } else {
+    testedCommit = selectExecution(candidates, input.executionId).testedCommit;
+  }
+  let file;
+  try {
+    file = await readRefFile({
+      repositoryRoot: candidates.repositoryRoot,
+      ref: testedCommit,
+      path: targetedTestPlanPath,
+    });
+  } catch (error) {
+    throw new VerificationServiceError('TARGETED_TEST_PLAN_UNREADABLE',
+      `${targetedTestPlanPath} at ${testedCommit} could not be read:`
+      + ` ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (file.text === null) {
+    throw new VerificationServiceError('TARGETED_TEST_PLAN_ABSENT',
+      `There is no ${targetedTestPlanPath} at ${testedCommit}; commit the branch's targeted test`
+      + ' plan on the branch before recording it');
+  }
+  let plan;
+  try {
+    plan = parseTargetedTestPlan(file.text);
+  } catch (error) {
+    if (error instanceof TargetedTestPlanError) {
+      throw new VerificationServiceError(error.code, error.message);
+    }
+    throw error;
+  }
+  const planDigest = targetedTestPlanDigest(plan);
+  const current = input.storage.getLatestTargetedTestPlan({
+    projectId: input.projectId, taskId: input.taskId, revisionId, testedCommit,
+  });
+  const decision = planTargetedTestPlanReplacement({
+    current: current === null ? null : {
+      planId: current.planId, taskId: current.taskId, revisionId: current.revisionId,
+      testedCommit: current.testedCommit, planVersion: current.planVersion,
+      planDigest: current.planDigest,
+    },
+    nextDigest: planDigest,
+    ...(input.expectedPlanDigest === undefined
+      ? {} : { expectedDigest: input.expectedPlanDigest }),
+  });
+  if (!decision.ok) {
+    throw new VerificationServiceError(decision.code, decision.reason);
+  }
+  let recorded;
+  try {
+    recorded = input.storage.recordTargetedTestPlan({
+      planId: randomUUID(),
+      projectId: input.projectId,
+      taskId: input.taskId,
+      revisionId,
+      testedCommit,
+      planVersion: targetedTestPlanVersion,
+      planDigest,
+      sourcePath: targetedTestPlanPath,
+      scope: plan.scope,
+      commands: targetedTestPlanCommands(plan),
+      recordedBy: input.recordedBy ?? 'local-user',
+      recordedAt: now(),
+    });
+  } catch (error) {
+    if (error instanceof StorageError) {
+      throw new VerificationServiceError(error.code, error.message);
+    }
+    throw error;
+  }
+  return {
+    planId: recorded.plan.planId,
+    created: recorded.created,
+    projectId: recorded.plan.projectId,
+    taskId: recorded.plan.taskId,
+    revisionId: recorded.plan.revisionId,
+    testedCommit: recorded.plan.testedCommit,
+    planVersion: recorded.plan.planVersion,
+    planDigest: recorded.plan.planDigest,
+    planLabel: targetedTestPlanLabel(recorded.plan.planDigest),
+    sourcePath: recorded.plan.sourcePath,
+    scope: recorded.plan.scope,
+    commands: recorded.plan.commands,
+    recordedBy: recorded.plan.recordedBy,
+    recordedAt: recorded.plan.recordedAt,
+    replacedExistingScope: recorded.created && current !== null
+      && current.planDigest !== recorded.plan.planDigest,
+  };
+}
+
 export interface QueuedTaskVerification {
   readonly verificationId: string;
   readonly operationId: string;
@@ -678,6 +910,13 @@ export async function queueTaskVerification(input: {
   readonly executionId?: string;
   readonly commandId: string;
   readonly permissionMode?: 'FULL' | 'STRICT';
+  /**
+   * Which record defines the commands (ADR-0038/0039). `AUTO` uses the Task's newest recorded
+   * targeted test plan when it matches this exact revision and commit, the fixed project policy
+   * when the Task never recorded one, and refuses when a recorded plan belongs to another
+   * revision or commit — silently running a different command set would redefine the scope.
+   */
+  readonly policySource?: 'AUTO' | 'PROJECT_POLICY' | 'TARGETED_TEST_PLAN';
   readonly now?: () => number;
   readonly randomUUID?: () => string;
 }): Promise<QueuedTaskVerification> {
@@ -689,27 +928,74 @@ export async function queueTaskVerification(input: {
       `Task is ${candidates.taskState}; verification needs an EXECUTED Task with a captured result commit`);
   }
   const selected = selectExecution(candidates, input.executionId);
+  const plans: readonly TargetedTestPlanRef[] = input.storage
+    .listTargetedTestPlans(input.projectId, input.taskId, 200)
+    .map((plan) => ({
+      planId: plan.planId, taskId: plan.taskId, revisionId: plan.revisionId,
+      testedCommit: plan.testedCommit, planVersion: plan.planVersion, planDigest: plan.planDigest,
+    }));
+  const selection = selectTargetedTestPlan({
+    plans,
+    subject: {
+      taskId: input.taskId, revisionId: selected.revisionId, testedCommit: selected.testedCommit,
+    },
+  });
+  const requested = input.policySource ?? 'AUTO';
+  let useTargeted: boolean;
+  if (requested === 'PROJECT_POLICY') useTargeted = false;
+  else if (requested === 'TARGETED_TEST_PLAN') {
+    if (!selection.applies) {
+      throw new VerificationServiceError(selection.code, selection.reason);
+    }
+    useTargeted = true;
+  } else if (selection.applies) useTargeted = true;
+  else if (selection.code === 'TARGETED_TEST_PLAN_NOT_RECORDED') useTargeted = false;
+  else throw new VerificationServiceError(selection.code, selection.reason);
+  const planRecord = useTargeted
+    ? input.storage.getLatestTargetedTestPlan({
+        projectId: input.projectId, taskId: input.taskId, revisionId: selected.revisionId,
+        testedCommit: selected.testedCommit,
+      })
+    : null;
+  if (useTargeted && planRecord === null) {
+    throw new VerificationServiceError('TARGETED_TEST_PLAN_NOT_RECORDED',
+      'The targeted test plan that was selected could not be read back from its record');
+  }
   const inspection = await inspectVerificationPolicy({
     repositoryRoot: candidates.repositoryRoot,
     mainRef: candidates.mainRef,
   });
-  if (inspection.state === 'ABSENT') {
+  if (inspection.state === 'ABSENT' && !useTargeted) {
     throw new VerificationServiceError('VERIFICATION_POLICY_ABSENT',
       `No verification policy at ${candidates.mainRef}:${verificationPolicyPath}; add one and re-run project trust`);
   }
-  const digest = inspection.digest as string;
   if ((input.permissionMode ?? 'STRICT') === 'STRICT') {
+    // STRICT keeps ADR-0006's gate exactly: a confirmed project policy must still be the policy of
+    // record, whichever command set this run actually executes. The targeted plan changes *what*
+    // runs, not whether the project was trusted with a confirmed policy.
+    if (inspection.state !== 'PRESENT') {
+      throw new VerificationServiceError('VERIFICATION_POLICY_ABSENT',
+        `No verification policy at ${candidates.mainRef}:${verificationPolicyPath}; add one and re-run project trust`);
+    }
+    const confirmedDigest = inspection.digest as string;
     const confirmation = input.storage.getConfirmedVerificationPolicy(input.projectId);
     if (confirmation === null || confirmation.state !== 'PRESENT') {
       throw new VerificationServiceError('VERIFICATION_POLICY_NOT_CONFIRMED',
         'This project has no confirmed verification policy; run project trust to confirm it');
     }
-    if (confirmation.digest !== digest) {
+    if (confirmation.digest !== confirmedDigest) {
       throw new VerificationServiceError('VERIFICATION_POLICY_NOT_CONFIRMED',
         `The verification policy changed (confirmed ${confirmation.digest?.slice(0, 12) ?? 'none'},`
-        + ` now ${digest.slice(0, 12)}); run project trust to confirm the new policy`);
+        + ` now ${confirmedDigest.slice(0, 12)}); run project trust to confirm the new policy`);
     }
   }
+  const policySource: VerificationPolicySource = useTargeted
+    ? 'TARGETED_TEST_PLAN'
+    : 'PROJECT_POLICY';
+  const policyVersion = planRecord === null ? verificationPolicyVersion : planRecord.planVersion;
+  const digest = planRecord === null
+    ? (inspection.digest as string)
+    : planRecord.planDigest;
   const testedTree = await readCommitTree({
     repositoryRoot: candidates.repositoryRoot,
     commit: selected.testedCommit,
@@ -717,7 +1003,7 @@ export async function queueTaskVerification(input: {
   const verificationId = randomUUID();
   const operationId = randomUUID();
   const copyPath = join(resolve(input.copiesRoot), input.projectId, verificationId);
-  const commands = inspection.policy?.commands ?? [];
+  const commands = planRecord === null ? (inspection.policy?.commands ?? []) : planRecord.commands;
   let begun;
   try {
     begun = input.storage.beginVerificationRun({
@@ -727,8 +1013,12 @@ export async function queueTaskVerification(input: {
       revisionId: selected.revisionId,
       testedCommit: selected.testedCommit,
       testedTree,
-      policyVersion: verificationPolicyVersion,
+      policyVersion,
       policyDigest: digest,
+      policySource,
+      planId: planRecord?.planId ?? null,
+      planVersion: planRecord?.planVersion ?? null,
+      planDigest: planRecord?.planDigest ?? null,
       mainCommit: inspection.mainCommit,
       commands,
       copyPath,
@@ -737,7 +1027,8 @@ export async function queueTaskVerification(input: {
       commandId: input.commandId,
       payloadHash: sha256(JSON.stringify({
         projectId: input.projectId, taskId: input.taskId, executionId: selected.executionId,
-        testedCommit: selected.testedCommit, testedTree, policyDigest: digest,
+        testedCommit: selected.testedCommit, testedTree, policyDigest: digest, policySource,
+        planId: planRecord?.planId ?? null, planDigest: planRecord?.planDigest ?? null,
       })),
       queuedAt: now(),
     });
@@ -757,7 +1048,7 @@ export async function queueTaskVerification(input: {
       revisionId: selected.revisionId,
       testedCommit: selected.testedCommit,
       testedTree,
-      policyVersion: verificationPolicyVersion,
+      policyVersion,
       policyDigest: digest,
       mainCommit: inspection.mainCommit,
       repositoryRoot: candidates.repositoryRoot,
@@ -793,7 +1084,7 @@ export async function queueTaskVerification(input: {
     revisionId: selected.revisionId,
     testedCommit: selected.testedCommit,
     testedTree,
-    policyVersion: verificationPolicyVersion,
+    policyVersion,
     policyDigest: digest,
     mainCommit: inspection.mainCommit,
     repositoryRoot: candidates.repositoryRoot,
@@ -964,6 +1255,7 @@ export async function runTaskVerification(input: {
   readonly executionId?: string;
   readonly commandId: string;
   readonly permissionMode?: 'FULL' | 'STRICT';
+  readonly policySource?: 'AUTO' | 'PROJECT_POLICY' | 'TARGETED_TEST_PLAN';
   readonly now?: () => number;
   readonly randomUUID?: () => string;
 }): Promise<VerificationReport> {

@@ -30,6 +30,7 @@ import {
   promoteStableBranch,
   recordPromotionRestart,
 } from '../src/promotion-service.js';
+import { runDevFullSuite } from '../src/promotion-evidence-service.js';
 import { reconcileInterruptedPromotions } from '../src/recovery-service.js';
 import { captureResultCommit, prepareResultCommit } from '../src/result-commit-service.js';
 import { VerificationRunner, runTaskVerification } from '../src/verification-service.js';
@@ -49,15 +50,20 @@ interface PromotionFixture {
   readonly verificationId: string;
   readonly mainCommit: string;
   readonly mainWorktree: string;
+  /** The dev full-suite evidence the promotion is fixed to (ADR-0038 D03). */
+  readonly fullSuiteEvidenceId: string;
 }
 
 /**
  * A Task whose captured result commit is already integrated into `dev` with a PASSED independent
- * integration verification: the only state a promotion can be prepared from. The active lane
- * integration pipeline produces the records for real (fake adapter, real Git), so the promotion is
- * judged against genuine evidence rather than hand-written rows.
+ * integration verification, plus a PASSED dev full-suite run of that exact commit: the only state a
+ * promotion can be prepared from. The active lane integration pipeline produces the records for
+ * real (fake adapter, real Git), so the promotion is judged against genuine evidence rather than
+ * hand-written rows.
  */
-async function promotionFixture(): Promise<PromotionFixture> {
+async function promotionFixture(options: {
+  readonly withoutFullSuiteEvidence?: boolean;
+} = {}): Promise<PromotionFixture> {
   const value = await createAgentFixture();
   const adapter = new DeterministicFakeAdapter('SUCCEED', [{
     type: 'completed', eventId: 'fake-completed-1', cursor: 'cursor-1',
@@ -104,13 +110,30 @@ async function promotionFixture(): Promise<PromotionFixture> {
   if (batch === undefined || batch.verificationId === null) {
     throw new Error('the integration fixture did not record a verified batch');
   }
+  const candidateCommit = integrated.integratedCommit as string;
+  // ADR-0038 D03: the promotion gate needs the full suite to have passed on this exact dev SHA,
+  // observed by the Runtime in a detached copy of that commit.
+  let fullSuiteEvidenceId = '';
+  if (options.withoutFullSuiteEvidence !== true) {
+    const fullSuite = await runDevFullSuite({
+      storage: value.storage,
+      runner: new VerificationRunner(),
+      copiesRoot: join(value.home, 'verifications'),
+      projectId: value.projectId,
+      expectedDevCommit: candidateCommit,
+      commandId: crypto.randomUUID(),
+    });
+    expect(fullSuite.state).toBe('PASSED');
+    fullSuiteEvidenceId = fullSuite.evidenceId;
+  }
   return {
     value,
-    candidateCommit: integrated.integratedCommit as string,
+    candidateCommit,
     batchId: batch.batchId,
     verificationId: batch.verificationId,
     mainCommit: value.mainCommit,
     mainWorktree: value.repo,
+    fullSuiteEvidenceId,
   };
 }
 
@@ -344,6 +367,116 @@ describe('stable promotion preparation', () => {
       await git(fixture.mainWorktree, ['checkout', '--quiet', 'dev']);
       await expect(prepare(fixture)).rejects.toMatchObject({ code: 'MAIN_WORKTREE_MISSING' });
       await git(fixture.mainWorktree, ['checkout', '--quiet', 'main']);
+    } finally {
+      fixture.value.storage.close();
+    }
+  });
+});
+
+describe('dev full-suite evidence gates the promotion (ADR-0038 D03)', () => {
+  test('refuses to prepare a promotion with no full-suite run of the candidate', async () => {
+    const fixture = await promotionFixture({ withoutFullSuiteEvidence: true });
+    try {
+      await expect(prepare(fixture)).rejects.toMatchObject({
+        code: 'DEV_FULL_SUITE_EVIDENCE_MISSING',
+      });
+      expect(fixture.value.storage.listStablePromotions(fixture.value.projectId)).toHaveLength(0);
+    } finally {
+      fixture.value.storage.close();
+    }
+  });
+
+  test('a newer failing run is not rescued by the older passing one', async () => {
+    const fixture = await promotionFixture();
+    try {
+      const failing = fixture.value.storage.beginDevFullSuiteRun({
+        evidenceId: crypto.randomUUID(),
+        projectId: fixture.value.projectId,
+        devRef: 'refs/heads/dev',
+        devCommit: fixture.candidateCommit,
+        policyVersion: 'verification-policy-v1',
+        policyDigest: 'f'.repeat(64),
+        lockfilePath: 'bun.lock',
+        lockfilePresent: true,
+        lockfileDigest: 'e'.repeat(64),
+        commands: [],
+        copyPath: '/home/verifications/later',
+        commandId: crypto.randomUUID(),
+        payloadHash: 'later',
+        observedBy: 'runtime-full-suite',
+        startedAt: Date.now() + 1_000,
+      });
+      fixture.value.storage.completeDevFullSuiteRun({
+        evidenceId: failing.evidence.evidenceId, state: 'FAILED', outcomeCode: 'COMMAND_FAILED',
+        evidence: {}, endedAt: Date.now() + 1_001,
+      });
+      await expect(prepare(fixture)).rejects.toMatchObject({
+        code: 'DEV_FULL_SUITE_EVIDENCE_NOT_PASSED',
+      });
+    } finally {
+      fixture.value.storage.close();
+    }
+  });
+
+  test('fixes the candidate, policy and lockfile bindings on the promotion', async () => {
+    const fixture = await promotionFixture();
+    try {
+      const prepared = await prepare(fixture);
+      expect(prepared.fullSuite).toEqual({
+        evidenceId: fixture.fullSuiteEvidenceId,
+        devCommit: fixture.candidateCommit,
+        policyVersion: 'verification-policy-v1',
+        policyDigest: fixture.value.verificationPolicy.digest as string,
+        lockfileDigest: expect.stringMatching(/^[0-9a-f]{64}$/) as unknown as string,
+      });
+    } finally {
+      fixture.value.storage.close();
+    }
+  });
+
+  test('a policy edit on main invalidates the evidence and stops the promotion before any ref moves', async () => {
+    const fixture = await promotionFixture();
+    try {
+      const prepared = await prepare(fixture);
+      // The full suite's command set is the project policy at the main ref; editing it there is the
+      // real invalidation this binding exists for.
+      await Bun.write(join(fixture.mainWorktree, '.codeestra', 'policies', 'verification.json'),
+        `${JSON.stringify({ version: 1, commands: [{ id: 'smoke', argv: ['true'], cwd: '.',
+          timeoutSeconds: 60 }] })}\n`);
+      await git(fixture.mainWorktree, ['add', '.codeestra/policies/verification.json']);
+      await git(fixture.mainWorktree, ['commit', '-q', '-m', 'different judging commands']);
+
+      await expect(promote(fixture, prepared.promotionId)).rejects.toMatchObject({
+        code: 'DEV_FULL_SUITE_EVIDENCE_STALE',
+      });
+      const [record] = fixture.value.storage.listStablePromotions(fixture.value.projectId);
+      expect(record).toMatchObject({ state: 'STALE', outcomeCode: 'DEV_FULL_SUITE_EVIDENCE_STALE' });
+      // dev did not move and the promotion is unusable until it is prepared again.
+      expect(await readRef(fixture, 'refs/heads/dev')).toBe(fixture.candidateCommit);
+      expect(record?.promotedCommit).toBeNull();
+    } finally {
+      fixture.value.storage.close();
+    }
+  });
+
+  test('a STRICT approval only covers the exact full-suite evidence it was given for', async () => {
+    const fixture = await promotionFixture();
+    try {
+      const prepared = await prepare(fixture, { permissionMode: 'STRICT' });
+      approveStablePromotion({
+        storage: fixture.value.storage,
+        projectId: fixture.value.projectId,
+        promotionId: prepared.promotionId,
+        permissionMode: 'STRICT',
+      });
+      // Fault injection: an approval recorded against a different evidence row (as an older
+      // Runtime, or a hand-edited record, would leave behind).
+      fixture.value.storage.sqlite.query(
+        "UPDATE stable_promotions SET approved_full_suite_evidence_id=?1 WHERE id=?2",
+      ).run(crypto.randomUUID(), prepared.promotionId);
+      await expect(promote(fixture, prepared.promotionId, { permissionMode: 'STRICT' }))
+        .rejects.toMatchObject({ code: 'PROMOTION_NOT_APPROVED' });
+      expect(await readRef(fixture, 'refs/heads/main')).toBe(fixture.mainCommit);
     } finally {
       fixture.value.storage.close();
     }

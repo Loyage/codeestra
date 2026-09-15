@@ -6,6 +6,7 @@ import { impactPolicyConfirmationSchema } from './impact-policy.js';
 export * from './questionnaire.js';
 export * from './verification-policy.js';
 export * from './impact-policy.js';
+export * from './targeted-test-plan.js';
 
 export const repositoryIdentitySchema = z.strictObject({
   repoRoot: z.string().min(1),
@@ -1131,6 +1132,45 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     executionId: z.string().uuid().optional(),
     /** Return a durable Operation handle instead of blocking until the policy has run (ADR-0019). */
     background: z.boolean().default(false),
+    /**
+     * Which record defines the commands (ADR-0038/0039). `AUTO` prefers the Task's recorded
+     * branch-targeted plan for this exact revision and commit and falls back to the fixed project
+     * policy only when no plan was recorded; a recorded plan for another revision or commit is
+     * refused instead of being silently replaced by the project policy.
+     */
+    policySource: z.enum(['AUTO', 'PROJECT_POLICY', 'TARGETED_TEST_PLAN']).default('AUTO'),
+  }),
+  /**
+   * Records the branch's `.codeestra/tests.json` as an append-only plan bound to the exact
+   * `(task, revision, commit, digest)`. Recording is what makes a scope change take effect, so an
+   * edit inside a commit cannot silently widen or narrow what verification runs.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.tests.record'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    executionId: z.string().uuid().optional(),
+    /** A full object ID to bind instead of the Task's captured result commit. */
+    commit: z.string().min(7).max(64).optional(),
+    /** The digest the caller expects to replace; a different current digest is refused. */
+    expectedPlanDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  }),
+  /** The newest recorded targeted test plan of one Task, or null when none was recorded. */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.tests.show'),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+  }),
+  /** Every recorded plan of one Task, newest first: the append-only audit of its test scope. */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.tests.history'),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    limit: z.number().int().min(1).max(500).default(50),
   }),
   z.strictObject({
     ...requestBase,
@@ -1404,6 +1444,26 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
   z.strictObject({
     ...requestBase,
     command: z.literal('promotion.list'),
+    projectId: z.string().uuid(),
+    limit: z.number().int().min(1).max(200).default(20),
+  }),
+  /**
+   * Runs the fixed project policy — the full suite — against the exact `dev` candidate commit in a
+   * detached copy and records the observed result as append-only evidence (ADR-0038 D03). The
+   * Runtime runs and observes it; a client cannot submit a result.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('promotion.fullSuite.run'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    /** Full object ID of the current `dev` ref; the evidence names exactly this SHA. */
+    expectedDevCommit: z.string().min(7).max(64),
+  }),
+  /** Recorded dev full-suite evidence of one project, newest first (read-only). */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('promotion.fullSuite.list'),
     projectId: z.string().uuid(),
     limit: z.number().int().min(1).max(200).default(20),
   }),

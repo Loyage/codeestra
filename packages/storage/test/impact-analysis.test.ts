@@ -108,7 +108,7 @@ describe('schema v20 impact analysis migration', () => {
       // Integration fix: this lane's own step is v20, but the capacity/slot step (v21) merged after
       // it, and later lanes keep appending. The claim under test is that the upgrade reaches
       // the current version and lands this lane's tables, not that this lane is last.
-      expect(phase1SchemaVersion).toBe(24);
+      expect(phase1SchemaVersion).toBeGreaterThanOrEqual(24);
       expect(upgraded.sqlite.query<{ id: string }, []>(
         "SELECT id FROM task_revision_deliveries WHERE id='d1'",
       ).get()?.id).toBe('d1');

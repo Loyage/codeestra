@@ -3548,6 +3548,80 @@ UI **零改动**（事件联合是 `eventType: string`，`contracts` 变更不�
 - 未运行全量测试：本次仅改文档，且 ADR-0038 明确全量测试只在固定 dev 候选准备提升到 main 时执行。
 - 仅执行文档关键词、链接、diff 与 Git 状态检查；结果以本次交付说明为准。
 
+## FOUNDATION-065 — 分层验证证据：定向测试计划 + 精确 dev SHA 全量测试（ADR-0038 落地 / ADR-0039 / schema v25）
+
+状态：**在 lane 分支上实现并定向验证通过。** 基线 `dev = fd3d99871a40e578105036bc6728213adf302c6a`（lane 分支 `lane/i1-verification-evidence`，未 rebase/merge/pull/push，未提升 `main`，未重启稳定 Runtime）。本格关闭 ADR-0038 D04 记录的自动化缺口：该 ADR 的分层现在由命令面自动执行。
+
+### 决策（协调者已逐题裁决，全部按答复实现）
+
+- 定向测试计划载体：仓库跟踪文件 `.codeestra/tests.json` **从被测 commit 读取**并快照成 append-only 记录（不采用「只存 DB」或「塞进 TaskRevision」）。
+- dev 全量证据生产者：**Runtime** 在精确 dev SHA 的 detached 副本上运行并观察（**不采信客户端自报**）。
+- 全量命令来源与绑定：命令来自项目 `main` ref 的固定策略；证据绑 `dev SHA + 该策略 digest + 候选 commit 处锁文件 digest`。
+- 不修改本仓 `.codeestra/policies/verification.json`；UI 不在本格范围（未动 `apps/ui/**`）；占用 schema **v25**；新增稳定码 `DEV_FULL_SUITE_EVIDENCE_MISSING` / `..._NOT_PASSED` / `..._STALE`（均 exit 1），沿用既有 STALE 与批准失效语义；Task verification 默认 `AUTO` 并提供 `--policy auto|targeted|project`。
+
+### 修改清单
+
+- 新增 `packages/contracts/src/targeted-test-plan.ts`：`.codeestra/tests.json` 的 schema（`version`/`scope`/1–16 条带必填 `covers` 的 argv 命令）、路径与语义版本常量、`parseTargetedTestPlan` / `targetedTestPlanDigest` / `targetedTestPlanLabel` / `targetedTestPlanCommands`，以及锁文件路径常量。
+- 新增 `packages/domain/src/verification-evidence.ts`（纯领域，无 Bun/DB/Git）：`selectTargetedTestPlan`（精确 subject 匹配 / 未记录 / revision 不合 / commit 不合）、`planTargetedTestPlanReplacement`（幂等重放 + 显式 CAS）、`judgeDevFullSuiteEvidence`（缺证据 / 最新非通过 / 三项绑定逐字段失效）。
+- `packages/storage/src/migration.ts`：新增 `verificationLayeringMigration`（v25）——`targeted_test_plans`（append-only：唯一 `(project,task,revision,commit,digest)` 索引 + 拒绝 UPDATE/DELETE 的触发器）、`dev_full_suite_evidence`（每次运行一行，终态必须带 `ended_at`/`outcome_code`，`UNIQUE(project_id,command_id)`）、`verification_runs` 四个新列（`policy_source`/`plan_id`/`plan_version`/`plan_digest`）、`stable_promotions` 六个新列（三项绑定 + evidence id + 批准 evidence id）。`phase1SchemaVersion` → 25，runner 追加 `if (version < 25)`，未插入更早号段。
+- `packages/storage/src/database.ts` / `index.ts`：`VerificationRunSummary` 增加来源字段；新增 `recordTargetedTestPlan` / `getLatestTargetedTestPlan` / `listTargetedTestPlans`、`getDevFullSuiteCandidates` / `beginDevFullSuiteRun` / `completeDevFullSuiteRun` / `reconcileDevFullSuiteEvidence` / `get·list·listForCommit(devFullSuiteEvidence)`；`beginStablePromotion` 固定全 suite 证据三元组，`approveStablePromotion` 记录 `approved_full_suite_evidence_id`，`startStablePromotion` 的 STRICT 检查逐字段核对 evidence id。
+- `apps/runtime/src/verification-service.ts`：新增 `recordTargetedTestPlan` / `listTargetedTestPlanViews` / `latestTargetedTestPlanView`；`queueTaskVerification` 按 `policySource` 选择命令集并如实写入来源与 digest；响应带 `policySource`/`planId`/`planVersion`/`planDigest`（label 按来源生成）。
+- 新增 `apps/runtime/src/promotion-evidence-service.ts`：`runDevFullSuite`（读 `main` ref 策略 + 候选锁文件、校验 `dev` ref、精确 SHA detached 副本内跑、记录观察结果）、`listFullSuiteEvidence`、`readDevFullSuiteBindings`、`checkDevFullSuiteEvidence`。
+- `apps/runtime/src/promotion-service.ts`：`prepare` 要求全 suite 证据并固定三元组；`promote` 在**任何 ref 移动之前**重检三项绑定（不符即拒绝、标 `STALE`、不推进 ref）。
+- `apps/runtime/src/main.ts`：新命令 `task.tests.record|show|history`、`promotion.fullSuite.run|list`，`task.verify` 透传 `policySource`，启动时 `reconcileDevFullSuiteEvidence` 把上个 Runtime 遗留的 `RUNNING` 收口为 `ERROR/RUNTIME_RESTARTED`。
+- `apps/runtime/src/operation-service.ts`：`startVerification` 透传 `policySource`，`#report` 补全来源字段与按来源生成的 label。
+- `packages/contracts/src/index.ts`：四个新命令 schema + `task.verify.policySource`。
+- `apps/cli/src/main.ts`：`task tests record|show|history`、`task verify --policy auto|targeted|project`、`promotion full-suite run --dev-commit <full-sha>` / `list`，以及帮助文本与 ADR-0038 分层说明。
+- 测试：新增 `packages/domain/test/verification-evidence.test.ts`、`packages/storage/test/verification-layering.test.ts`、`apps/runtime/test/cli-targeted-tests.test.ts`；扩展 `apps/runtime/test/promotion-service.test.ts`（+5 条）与 `apps/runtime/test/cli-promotion.test.ts`（+2 条）；`package.json` 的 `test:unit` 忽略列表与 `test:e2e` 列表登记新 e2e 文件（并集）。
+- flake 修复：`apps/runtime/test/cli-impact.test.ts`、`apps/runtime/test/terminal-service.test.ts`、`apps/runtime/test/runtime-lifecycle.test.ts`（见下）。
+- 共享 fixture：`apps/runtime/test/support/agent-fixture.ts` 与 `apps/runtime/test/cli-promotion.test.ts` 的临时仓库补上锁文件（后者用 `file:` 依赖离线生成真实 `bun.lock` + `.gitignore`，因为提升后置步骤会真的执行 `bun install --frozen-lockfile`）。
+- 既有迁移断言去冻结：`revision-delivery.test.ts`、`verification-cancel.test.ts`（2 处）、`cli-reclaim-batch.test.ts`、`packages/storage/test/impact-analysis.test.ts` 的 `phase1SchemaVersion == 24` 改为 `>= 24`；`packages/storage/test/task-dependencies.test.ts` 的「已盖 14 的库」补执行 v13/v14 迁移（真实 v14 库本就有这两张表，否则 v25 的 `ALTER TABLE stable_promotions` 无表可改）。
+- 文档：新增 `docs/decisions/0039-layered-verification-evidence.md`；`docs/decisions/README.md` 追加 ADR-0039 索引行并修订 ADR-0022/0038 与阶段表的相关行；`docs/decisions/0038-...md` 的 D04 加 **Amended by ADR-0039** 说明（保留历史文字）；`PROJECT_SPEC.md` §3 该段更新为「已由 ADR-0039 实现」。
+
+### 实际运行的检查与结果
+
+基线提示：按 ADR-0038，本 lane 分支**未运行** `bun run check` / `bun run check:fast` / `just check` / `just verify`，全量测试只在 `dev` 候选提升前运行。
+
+| 命令 | 结果 |
+|---|---|
+| `bun run typecheck` | 退出码 0 |
+| `bun test packages/domain/test/verification-evidence.test.ts` | 18 pass / 0 fail |
+| `bun test packages/storage/test/verification-layering.test.ts` | 12 pass / 0 fail |
+| `bun test apps/runtime/test/cli-targeted-tests.test.ts` | 2 pass / 0 fail |
+| `bun test apps/runtime/test/promotion-service.test.ts` | 26 pass / 0 fail |
+| `bun test apps/runtime/test/cli-promotion.test.ts` | 6 pass / 0 fail |
+| `bun test packages/contracts/test packages/domain/test packages/storage/test` | 455 pass / 0 fail（18 文件） |
+| `bun test apps/runtime/test/verification-service.test.ts apps/runtime/test/verification-cancel.test.ts apps/runtime/test/revision-delivery.test.ts apps/runtime/test/operation-service.test.ts` | 全绿（24 + 5 + 29 合并运行；均 0 fail） |
+| `bun test apps/runtime/test/http-api.test.ts` | 6 pass / 0 fail |
+| `bun test apps/runtime/test/cli-reclaim-batch.test.ts` | 12 pass / 0 fail |
+| flake 1 `bun test apps/runtime/test/terminal-service.test.ts` ×5 | 5 次均 7 pass / 0 fail（15.12s / 14.61s / 14.67s / 14.76s / 15.38s） |
+| flake 2 `bun test apps/runtime/test/runtime-lifecycle.test.ts` ×5 | 5 次均 10 pass / 0 fail（10.41s / 10.72s / 9.94s / 9.41s / 9.11s） |
+| flake 3 `bun test apps/runtime/test/cli-impact.test.ts` ×5 | 5 次均 1 pass / 0 fail（4.51s / 4.75s / 4.55s / 4.57s / 4.78s） |
+
+### 三个 flake 的处置（证据：每处连续 5 次全绿）
+
+- `apps/runtime/test/cli-impact.test.ts:~376`：`task cancel <p> <t> '2'` 把 Task version 当常量。改为新增 `cancelWithCurrentVersion()`：从 `task status` 读真实 version，若仍遇 `CONCURRENT_MODIFICATION`（调度恢复 pass 的合法并发）则有界重读重试（≤5 次，间隔 250ms），断言「任务最终被取消」这个命令面承诺的结果，而不是断言调度器不并发。
+- `apps/runtime/test/terminal-service.test.ts`：release 断言建立在两个时序假设上。(a) 只等 TUI banner 就发 Ctrl+D——banner 在 `stty raw` **之前**打印，满载时 release 字节可能被行规程当成 EOF，于是「provider 追加了一条 entry」等断言假红；现在 fake provider 在 `stty raw` 之后打印 `raw-mode=ready`，所有 release 相关用例先 `waitForRawMode()`。(b) 归属检查比对的是「provider 存活期间捕获的进程树」，启动竞态可能没记录到，release 会（正确地）以 `PREDECESSOR_UNVERIFIED` 拒绝；`startHarness` 增加有界等待，等 Runtime 自己的定时刷新把进程树记下来。
+- `apps/runtime/test/runtime-lifecycle.test.ts:207`：`expect(rawStdout.trim()).toBe('raw 0')` 把「内联脚本自测耗时 0ms」当不变量，满载时得到 `'raw 1'`。改为断言事实：输出以 `raw` 开头且脚本内自测耗时 `< 1000ms`（即没有等那个 3s 定时器），外层「进程确实活满 grace」断言不变。
+
+### 未验证 / 已知缺口
+
+- **与 ADR-0038 D03 字面措辞的差异（需协调者知晓）**：D03 写「在 `dev` 工作树对精确候选 SHA 运行一次全量测试」，本实现改为在**该精确 SHA 的 detached 副本**（复用 ADR-0006/0027 的验证副本机制）中运行。实质要件（精确 SHA、固定策略、绑定候选/策略/锁文件）都满足，且不依赖 `dev` 是否被检出、不触碰用户工作树、运行不污染任何工作目录；但「在 dev 工作树内运行」这一字面要求未实现，已在该 ADR 的 Consequences 与本记录中如实标注。
+- 锁文件绑定在同一不可变 SHA 上按构造不会漂移：它保证证据自我描述并在证据行与 Git 事实不符时拒绝提升；同一候选上真正会漂移的是位于 `main` ref 的策略 digest（已在 e2e 中验证该路径）。ADR-0039 明确记录了这一点，不夸大锁文件绑定的作用。
+- 无 `promotion.full-suite run --background` / Operation 进度 / 取消：本格运行是同步命令（长命令期间只有 socket keepalive），`CANCELLED` 状态因此**没有**写进表的 CHECK，也不声称可取消；遗留的 `RUNNING` 行由启动 reconcile 收口为 `ERROR/RUNTIME_RESTARTED`。
+- 未做（明确排除）：UI 投影（未动 `apps/ui/**`）；未改本仓 `.codeestra/policies/verification.json`；未改 `packages/agent-adapters/**`、`packages/git/**`、`schedule-service.ts`、`slot-reservation-service.ts`；未新增任何确认/门禁/审批（FULL 仍 0 步）；未 push、未提升 `main`、未重启稳定 Runtime；未触碰 `/Users/loyage/Documents/codeestra`。
+- 已知残余 flake 风险（不在本格领地）：`pi-process.ts` 的 `captureProviderProcessTree` 可能把转瞬即逝的子进程（provider 的 `stty`）记为 `startToken: null`；该 PID 之后被复用时 `inspectProviderProcessOwnership` 会保守地返回 `UNVERIFIABLE`，release 于是拒绝。这是 `packages/agent-adapters` 的设计保守性而非测试时序假设，本格未改该包；测试已通过等待「已进入 raw mode」与「已记录进程树」两个事实把可确定的部分消除，5/5 全绿。
+- 未运行：全仓 `bun run check`（ADR-0038 禁止在开发分支运行；本格只跑 typecheck 与上述定向文件）、真实 Pi/Codex provider 的任何验收、真实 `main` 提升与稳定 Runtime 重启。
+- `AGENTS.md` 未改动：其「开发分支只跑定向测试」的既有措辞与本实现一致（定向计划现在由 `task tests record` 记录），为避免与其他 lane 的文档改动冲突本格未改人工规范文件。
+
+### 领地声明
+
+独占改动：`packages/domain/src/verification-evidence.ts`、`packages/domain/test/verification-evidence.test.ts`、`packages/contracts/src/targeted-test-plan.ts`、`packages/storage/test/verification-layering.test.ts`、`apps/runtime/src/promotion-evidence-service.ts`、`apps/runtime/src/verification-service.ts`、`apps/runtime/src/promotion-service.ts`、`apps/runtime/test/cli-targeted-tests.test.ts`。
+
+纯追加/小改：`packages/storage/src/migration.ts`（v25 号段）、`packages/storage/src/database.ts`、`packages/storage/src/index.ts`、`packages/contracts/src/index.ts`、`apps/runtime/src/main.ts`、`apps/runtime/src/operation-service.ts`、`apps/cli/src/main.ts`、`package.json`（测试列表）、`packages/domain/src/index.ts`、`docs/**`。
+
+为保持既有测试为绿的必要最小改动：`apps/runtime/test/{cli-impact,terminal-service,runtime-lifecycle,promotion-service,cli-promotion,revision-delivery,verification-cancel,cli-reclaim-batch}.test.ts`、`apps/runtime/test/support/agent-fixture.ts`、`packages/storage/test/{impact-analysis,task-dependencies}.test.ts`。未改 `.codeestra/policies/verification.json`、`apps/ui/**`、`packages/agent-adapters/**`、`packages/git/**`、`schedule-service.ts`、`slot-reservation-service.ts`。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、~~UI 投影~~（已由 FOUNDATION-050 完成 promotion/dependency 投影）。
