@@ -4839,6 +4839,24 @@ git ls-remote --heads origin            → 7292ddc refs/heads/dev / c50730f ref
 - dev clone 里的本地 `main` 不会自动前进（无定时 fetch）；需要最新 main ref 时显式 `git fetch`，本格未改为自动。
 - Orca 等外部工具若记录了旧的 worktree 身份，需要用户侧重新指向 dev clone；本格未修改这些外部工具的数据。
 
+## DOCUMENTATION-001 — 新开发者项目介绍（独立 HTML）
+
+状态：**文档已完成**；不涉及产品实现、规格修订、ADR 或稳定提升。
+基线：`dev = 036cf68`（FOUNDATION-076），开工时工作区 clean。
+
+交付：
+- 新增 `docs/project-introduction.html`：面向新开发者的中文导览，涵盖愿景、三条第一原则、核心实体、任务交付链、Runtime 架构、分阶段进展、剩余工作、开发规则与首次运行说明。
+- 单文件内联 CSS，无 JavaScript、远程字体 / 图片或运行时请求；含章节目录、窄屏规则、键盘焦点、减少动效与打印样式。仓库内参考文档使用相对链接，单独转发 HTML 不包含这些参考文件。
+- 已实现 / 未实现 / 未验收明确区分；尤其注明 ADR-0047 产品路径待实现、本仓库不得用旧 promotion 路径、真实 provider 并发待验收、知识 provider 消费未接通、Self Evolution 未开始。
+- 新增「设计精髓」对比海报章节（`#duel`，02 / 11）：普通 Agent 串行回合 vs 用户循环 ⇄ 开发循环双轨并行的流程图（用户提供的独立 HTML 改编，配色改为 scoped 深色海报样式，内嵌于文档设计系统）。章节内附现状标注：真实 provider 并行未验收、`CHANGE_PRIORITY` 当前不可产生（ADR-0046）。后续章节编号顺延至 03–11，侧边导航、锚点与首页按钮同步；打印时海报独立分页并保留配色。
+- `README.md` 新增导览入口。未修改 `PROJECT_SPEC.md`、`AGENTS.md` 或人工 instructions / skills / policies。
+
+实际定向验证（纯文档，未运行全量检查、UI 构建或产品 Runtime）：
+- `python3` 标准库临时静态断言：标签配对、唯一 ID、单一主标题、11 个章节（含 `#duel` 对比海报）、ARIA 引用、26 个链接 / 锚点与本地目标、无外部资源，以及打印 / 窄屏相关样式的静态检查通过；不代表视觉效果验收。
+- 本机临时 HTTP 读取：首次请求受环境代理影响返回 502；显式禁用该请求的代理后重跑，断言 `200`、`text/html`、响应字节与 HTML 文件相同通过。临时服务器已关闭。
+- `git diff --check` 通过。未执行桌面 / 浏览器自动化；实际排版、窄屏观感与 PDF 分页留给人工确认。
+- 未 commit、push、提升或重启稳定服务；现有 NEXT 产品剩余清单不变。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），
