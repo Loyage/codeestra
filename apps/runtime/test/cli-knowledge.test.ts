@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync,
   realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import {
   assertMachineGeneratedWriteTarget,
   writeRuntimeKnowledgeFile,
@@ -76,6 +76,9 @@ const sessionDirIndex = argv.indexOf('--session-dir');
 const sessionDir = sessionDirIndex >= 0 ? argv[sessionDirIndex + 1] : process.cwd();
 mkdirSync(sessionDir, { recursive: true });
 const taskId = basename(process.cwd());
+// The launch argv this Adapter handed to the provider, per Task: the end-to-end proof that the
+// Execution's Project Knowledge reached the provider as a launch argument (ADR-0051).
+writeFileSync(join(sessionDir, 'argv-report-' + taskId + '.json'), JSON.stringify({ argv }) + '\\n');
 const sessionFile = join(sessionDir, 'knowledge-session-' + taskId + '.jsonl');
 const emit = (record) => process.stdout.write(JSON.stringify(record) + '\\n');
 
@@ -323,6 +326,22 @@ describe('project knowledge', () => {
     // the worktree — and the binding records exactly those bytes.
     const contextPath = join(home, 'knowledge', projectId, task.id, 'knowledge-context.md');
     const contextText = readFileSync(contextPath, 'utf8');
+    // ...and the provider process was actually launched with that artifact (ADR-0051): the argv the
+    // Adapter handed to Pi names the Runtime-owned file, and it is the same file whose bytes the
+    // binding recorded. Nothing about the rest of the controlled launch changed.
+    const sessionDir = join(home, 'pi-sessions');
+    const launchArgv = (JSON.parse(readFileSync(
+      join(sessionDir, `argv-report-${task.id}.json`), 'utf8')) as { argv: readonly string[] }).argv;
+    expect(launchArgv.filter((argument) => argument === '--append-system-prompt'))
+      .toHaveLength(1);
+    const handedOver = launchArgv[launchArgv.indexOf('--append-system-prompt') + 1];
+    expect(handedOver).toBe(join(home, 'knowledge', projectId, task.id, 'knowledge-context.md'));
+    expect(readFileSync(handedOver ?? '', 'utf8')).toBe(contextText);
+    // The artifact the provider was pointed at is outside the Task worktree, even after resolving
+    // the symlinked temp directory the fixture lives under.
+    expect(relative(worktree, realpathSync(handedOver ?? ''))).toStartWith('..');
+    expect(launchArgv).toContain('--no-context-files');
+    expect(launchArgv).toContain('--no-extensions');
     expect(contextText).toContain('# Project knowledge');
     expect(contextText).toContain('Always run the focused test file');
     expect(contextText).not.toContain('Only self tasks read this');

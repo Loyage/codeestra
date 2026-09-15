@@ -16,7 +16,9 @@ export type PiRpcErrorCode =
   | 'CURSOR_EPOCH_MISMATCH'
   | 'INVALID_PROVIDER_RESPONSE'
   /** A user-selected plugin/resource path could not be verified, so no process was started. */
-  | 'AGENT_PLUGIN_UNAVAILABLE';
+  | 'AGENT_PLUGIN_UNAVAILABLE'
+  /** The Execution's materialized knowledge could not be read at its recorded digest (ADR-0051). */
+  | 'KNOWLEDGE_CONTEXT_UNAVAILABLE';
 
 /**
  * `startMayHaveOccurred` and `deliveryMayHaveOccurred` describe what is known about the

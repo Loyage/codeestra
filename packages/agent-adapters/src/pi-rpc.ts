@@ -5,7 +5,7 @@ import {
   questionnairePromptSchema,
   serializeQuestionnaireAnswer,
 } from '@codeestra/contracts';
-import type { AgentAnswer, AgentConfiguration, AgentObservedEvent, AgentPluginSelection } from '@codeestra/contracts';
+import type { AgentAnswer, AgentConfiguration, AgentKnowledgeContext, AgentObservedEvent, AgentPluginSelection } from '@codeestra/contracts';
 import { codeestraAskUserQuestionToolName } from './pi-question-extension.js';
 import { buildPiPluginArguments } from './pi-plugins.js';
 
@@ -240,6 +240,30 @@ export function buildPiModelArguments(config?: AgentConfiguration): readonly str
   if (config?.model !== undefined) arguments_.push('--model', config.model);
   if (config?.thinkingLevel !== undefined) arguments_.push('--thinking', config.thinkingLevel);
   return arguments_;
+}
+
+/**
+ * Hands one Execution's materialized Project Knowledge to Pi (ADR-0051).
+ *
+ * Pi's own flag is the channel: `--append-system-prompt <value>` resolves to *file contents* when
+ * the value names an existing file (measured in Pi 0.85.1's `resource-loader`, `resolvePromptInput`)
+ * and to literal text otherwise, so the Adapter passes the **verified absolute path** of the
+ * Runtime-owned artifact rather than inlining up to a MiB of text into `argv`. The Adapter reads and
+ * digests that file itself before the launch (`readVerifiedKnowledgeContext`), which is what makes
+ * "the provider was given the knowledge this Execution recorded" checkable instead of assumed.
+ *
+ * With no knowledge context this appends nothing at all, leaving the controlled launch
+ * byte-identical to the launch before this capability.
+ */
+export function buildPiKnowledgeArguments(
+  context?: AgentKnowledgeContext,
+): readonly string[] {
+  if (context === undefined) return [];
+  if (!isAbsolute(context.filePath)) {
+    throw new PiRpcProtocolError('INVALID_OPTIONS',
+      'The knowledge context path handed to Pi must be absolute');
+  }
+  return ['--append-system-prompt', context.filePath];
 }
 
 /**

@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { agentProcessIdentitySchema, type AgentStartRequest } from '@codeestra/contracts';
+import { agentProcessIdentitySchema, type AgentKnowledgeContext, type AgentStartRequest } from '@codeestra/contracts';
 import { ClaudeAdapter } from '../src/claude-adapter.js';
 import { ClaudeAdapterError, claudeProjectKey } from '../src/claude-protocol.js';
 
@@ -173,6 +174,15 @@ function temporaryDirectory(prefix: string): string {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
   directories.push(directory);
   return directory;
+}
+
+/** One materialized knowledge artifact, exactly as the Runtime records it for an Execution. */
+function knowledgeContext(text: string): AgentKnowledgeContext {
+  const directory = temporaryDirectory('codeestra-claude-knowledge-');
+  const filePath = join(directory, 'knowledge-context.md');
+  Bun.write(filePath, text);
+  const bytes = new TextEncoder().encode(text);
+  return { filePath, digest: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length };
 }
 
 /** A temporary directory kept in its unresolved spelling (`/var/...` instead of `/private/var/...`). */
@@ -393,6 +403,43 @@ describe('Claude adapter start', () => {
     const fixtureUnderTest = fixture('SETTLE', { agentConfig: { thinkingLevel: 'minimal' } });
     await expect(fixtureUnderTest.adapter.start(fixtureUnderTest.startRequest)).rejects
       .toMatchObject({ code: 'UNSUPPORTED_AGENT_CONFIGURATION' });
+    expect(existsSync(fixtureUnderTest.reportPath)).toBe(false);
+  });
+
+  test('hands the recorded Project Knowledge to Claude as --append-system-prompt-file', async () => {
+    const fixtureUnderTest = fixture('SETTLE');
+    const text = '# Project knowledge\n\nlayer: instructions | digest: 1111\n\nPrefer bun.\n';
+    const context = knowledgeContext(text);
+    await fixtureUnderTest.adapter.start({ ...fixtureUnderTest.startRequest, knowledgeContext: context });
+    const report = await waitForReport(fixtureUnderTest, (r) => r.userMessages.length > 0);
+    // Claude's own option names the file; the Adapter verified its bytes against the Execution record
+    // first, so the provider reads exactly the knowledge that Execution was bound to.
+    expect(report.argv.slice(-2)).toEqual(['--append-system-prompt-file', context.filePath]);
+    expect(report.argv.filter((argument) => argument === '--append-system-prompt-file')).toHaveLength(1);
+    expect(readFileSync(context.filePath, 'utf8')).toBe(text);
+    // The revision prompt is still the revision prompt.
+    expect(report.userMessages[0]).toContain('Codeestra revision revision-1');
+  });
+
+  test('leaves the controlled argv byte-identical when the Execution has no knowledge', async () => {
+    const fixtureUnderTest = fixture('SETTLE');
+    await fixtureUnderTest.adapter.start(fixtureUnderTest.startRequest);
+    const report = await waitForReport(fixtureUnderTest, (r) => r.userMessages.length > 0);
+    expect(report.argv).not.toContain('--append-system-prompt-file');
+    expect(report.argv).toEqual([
+      '--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
+      '--safe-mode', '--strict-mcp-config', '--permission-prompts', 'host',
+      '--permission-mode', 'manual', '--session-id', fixtureUnderTest.providerSessionId,
+    ]);
+  });
+
+  test('refuses to start when the knowledge file does not match its recorded digest', async () => {
+    const fixtureUnderTest = fixture('SETTLE');
+    const context = knowledgeContext('recorded knowledge\n');
+    Bun.write(context.filePath, 'tampered knowledge\n');
+    await expect(fixtureUnderTest.adapter.start({
+      ...fixtureUnderTest.startRequest, knowledgeContext: context,
+    })).rejects.toMatchObject({ code: 'KNOWLEDGE_CONTEXT_UNAVAILABLE' });
     expect(existsSync(fixtureUnderTest.reportPath)).toBe(false);
   });
 

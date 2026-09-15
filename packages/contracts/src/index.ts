@@ -2052,6 +2052,26 @@ export interface AgentSessionRef {
   readonly processIdentity?: AgentProcessIdentity;
   readonly sessionStorageRef?: string;
 }
+/**
+ * The materialized Project Knowledge artifact one Execution is bound to (ADR-0041 D05, ADR-0051).
+ *
+ * It names a file inside the Runtime's own data directory — never a Task worktree path — and the
+ * exact bytes the Runtime recorded for this Execution, so an Adapter can verify that what it hands
+ * to its provider is the knowledge the Execution actually used. An Adapter that cannot read the file
+ * at this digest must refuse to start instead of running the Agent with less input than recorded.
+ *
+ * The field is optional and additive: an Execution with no knowledge to hand over (no binding, or a
+ * binding with zero entries) yields no `knowledgeContext` at all, and its controlled launch stays
+ * byte-identical to the launch before this field existed.
+ */
+export interface AgentKnowledgeContext {
+  /** Absolute path of the materialized knowledge context file in the Runtime data directory. */
+  readonly filePath: string;
+  /** Digest of exactly the bytes that file must contain for this Execution. */
+  readonly digest: string;
+  /** Size in bytes the file must have; a mismatch is a refusal, not a truncation. */
+  readonly bytes: number;
+}
 export interface AgentStartRequest {
   readonly operationId: string;
   readonly sessionId: string;
@@ -2063,6 +2083,11 @@ export interface AgentStartRequest {
     readonly constraints: readonly { readonly id: string; readonly text: string }[];
   };
   readonly knowledgeSnapshotRefs: readonly string[];
+  /**
+   * The knowledge artifact this Execution is bound to, when it has one (ADR-0051). Absent means the
+   * Execution resolved no entry to hand over, and the controlled launch must not change.
+   */
+  readonly knowledgeContext?: AgentKnowledgeContext;
   /**
    * The plugin/resources this Session may load, exactly as recorded with its Execution (ADR-0044).
    * Absent means the Adapter's controlled default: the same launch as before this capability, with

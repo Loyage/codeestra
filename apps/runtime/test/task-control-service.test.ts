@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { join } from 'node:path';
 import type {
   AdapterCapabilities,
   AgentAnswerAdapter,
@@ -90,6 +91,55 @@ function createCoordinator(value: AgentFixture, adapter: AgentAnswerAdapter): Ag
   registry.register(adapter);
   return new AgentRuntimeCoordinator({ storage: value.storage, registry, runtimeHome: value.home });
 }
+
+describe('Project Knowledge across a pause and resume', () => {
+  test('carries the recorded knowledge into the continuation Execution', async () => {
+    const value = await createAgentFixture({
+      instructions: '---\nid: repo-conventions\n---\nAlways run the focused test file.\n',
+    });
+    const adapter = new ScriptedHoldAdapter();
+    const coordinator = createCoordinator(value, adapter);
+    try {
+      const run = await coordinator.runTask({
+        projectId: value.projectId, taskId: value.taskId, expectedTaskVersion: 1,
+        commandId: crypto.randomUUID(), adapterId: adapter.id,
+      });
+      await pauseOrCancelTask({
+        storage: value.storage, coordinator, kind: 'PAUSE', projectId: value.projectId,
+        taskId: value.taskId, expectedVersion: run.taskVersion, commandId: crypto.randomUUID(),
+        actor: 'local-user',
+      });
+      const afterPause = value.storage.getTask(value.projectId, value.taskId);
+      const paused = value.storage.listTaskExecutions(value.projectId, value.taskId)[0];
+      if (paused === undefined) throw new Error('the paused Execution was not recorded');
+      const binding = value.storage.getExecutionKnowledgeSnapshot(paused.executionId);
+      if (binding === null) throw new Error('the Execution recorded no knowledge binding');
+
+      const resumed = await resumePausedTask({
+        storage: value.storage, coordinator, projectId: value.projectId, taskId: value.taskId,
+        expectedVersion: afterPause?.version ?? 0, commandId: crypto.randomUUID(),
+        adapterId: adapter.id,
+      });
+      // The continuation is a *new* Execution, and the knowledge it is handed is the artifact its own
+      // binding recorded — resolved by the Runtime, not by re-reading the project's main ref here.
+      const continuation = adapter.starts[1];
+      expect(adapter.starts).toHaveLength(2);
+      expect(continuation?.resume).toBeDefined();
+      const continuationBinding = value.storage
+        .getExecutionKnowledgeSnapshot(resumed.executionId ?? '');
+      if (continuationBinding === null) throw new Error('the continuation recorded no binding');
+      expect(continuation?.knowledgeContext).toEqual({
+        filePath: join(value.home, 'knowledge', value.projectId, value.taskId, 'knowledge-context.md'),
+        digest: continuationBinding.contextDigest,
+        bytes: continuationBinding.contextBytes,
+      });
+      expect(continuationBinding.contextDigest).toBe(binding.contextDigest);
+      await coordinator.close();
+    } finally {
+      value.storage.close();
+    }
+  });
+});
 
 describe('Task pause, resume, and cancel command face', () => {
   test('pauses a running Task, then resumes it in a new Execution over the same workspace', async () => {

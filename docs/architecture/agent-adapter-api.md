@@ -48,6 +48,10 @@ interface StartRequest {
   workspace: { id: string; cwd: string; ownershipToken: string };
   revision: { id: string; specification: string; constraints: readonly Constraint[] };
   knowledgeSnapshotRefs: readonly string[];
+  // ADR-0051：该 Execution 绑定的**物化知识产物**（Runtime 数据目录内的绝对路径 + digest + 字节数）。
+  // 缺失 = 该 Execution 没有可交出的知识（无绑定或 entryCount 为 0），Adapter 的受控启动必须逐字节不变；
+  // Adapter 必须在 spawn 前核验 digest/字节数/文件形态，读不到即拒绝启动（KNOWLEDGE_CONTEXT_UNAVAILABLE）。
+  knowledgeContext?: { filePath: string; digest: string; bytes: number };
   permissionMode: 'FULL' | 'STRICT';
   // ADR-0012：本次 Execution 预留时解析出的生效配置；未设字段必须交由 Adapter 自身默认处理，
   // Adapter 不得在 start 时重新读取全局配置，否则实际启动参数会与 Execution 记录不一致。
@@ -211,6 +215,18 @@ Pi 按 ADR-0010/0023/0026 的实测声明前两者 `SUPPORTED`（原生 TUI 在�
 | `pluginSelection` | `UNSUPPORTED` | safe-mode 启动没有 per-resource 选择机制 |
 
 **已知简化**：所有 `can_use_tool`（含 `AskUserQuestion`）一律映射为既有 `PERMISSION`/`CONFIRM` Attention，**不实现问卷编码**；因此「用户批准 `AskUserQuestion` 后 provider 是否会在无人渲染的 dialog 上等待」**未验证**。`session.transcript` 仍是 Pi 专属，Claude Session 上以 `SESSION_FILE_NOT_OWNED` 明确失败，不显示执行过程。stub 测试只证明编排，不是真实 Agent 集成验收。
+
+### 3.1.1 Project Knowledge 的交付通道（ADR-0051）
+
+`AgentStartRequest.knowledgeContext` 是每个 Execution **自己**记录的那份物化知识（ADR-0041 D05 写在 Runtime 数据目录，绝不写 Task worktree）。Runtime 从 `execution_knowledge_snapshots` 回读并解析成绝对路径；Adapter 在 spawn 之前核验「绝对路径 + 普通文件（拒绝符号链接/目录）+ 原始字节 sha256 == digest + 字节数 == bytes + 合法 UTF-8」，任何一条不成立即 `KNOWLEDGE_CONTEXT_UNAVAILABLE` 拒绝启动（`startMayHaveOccurred: false`）。**每个 provider 用它自己的通道**，没有统一抽象、也没有新增能力位：
+
+| Adapter | 通道 | 交付形态 | 依据 |
+|---|---|---|---|
+| Pi | `--append-system-prompt <绝对路径>` | 路径（Pi 自己读文件内容） | Pi 0.85.1 `resolvePromptInput`：路径存在则读文件，否则按字面文本 |
+| Claude Code | `--append-system-prompt-file <绝对路径>` | 路径 | 真实 CLI 2.1.268 接受该选项（未知选项 exit 1），自身帮助把该对写作 `--append-system-prompt[-file]` |
+| Codex | `thread/start` / `thread/resume` 的 `developerInstructions` | 已核验文本（内联） | `generate-json-schema`（0.154.0）的 `ThreadStartParams`/`ThreadResumeParams`，真实 app-server 接受 |
+
+**零知识 == 现状**：无绑定或 `entryCount === 0` 时不产生该字段，受控启动的 argv/入参与改动前逐字节相同。三条启动路径（主启动、successor、pause→resume）都携带它。**未验证**：provider 是否真的读了这份知识、模型是否据此行动（需真实模型验收）。
 
 ### 3.2 Agent 插件 / 资源选择（ADR-0044，命令面）
 

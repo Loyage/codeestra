@@ -4839,6 +4839,86 @@ git ls-remote --heads origin            → 7292ddc refs/heads/dev / c50730f ref
 - dev clone 里的本地 `main` 不会自动前进（无定时 fetch）；需要最新 main ref 时显式 `git fetch`，本格未改为自动。
 - Orca 等外部工具若记录了旧的 worktree 身份，需要用户侧重新指向 dev clone；本格未修改这些外部工具的数据。
 
+## FOUNDATION-079 — Adapter 侧三个缺口：知识注入 / Codex 完成事实 / `applyRevision` 能力（Wave L / L3，ADR-0051，无 schema 变更、不占迁移号）
+
+状态：**本格三件事全部交付**（③ 以「评估结论 = 不可行、维持 `UNSUPPORTED`」的形式交付）。
+基线：`dev = 036cf681ec87127579c285bc51888c1f54d1f932`（未 rebase）；工作树 `/Users/loyage/Documents/codeestra-wt/l3-adapter-gaps`（`lane/l3-adapter-gaps`）。
+**协调者裁决（记录在案）**：ADR 号 **0051**（0050 归 L2）；`apps/runtime/src/agent-runtime-service.ts` 的**两处**最小改动由协调者授权，超出任务书最初的「允许改」清单，理由是不覆盖 successor/resume 则知识注入只在首次启动生效；注入范围规则「`entryCount > 0` 才注入，零知识时 argv/入参逐字节相同」由协调者批准；fail-closed 拒绝路径要求有测试。
+
+### 本格改了什么
+
+| 位置 | 改动 |
+|---|---|
+| `packages/contracts/src/index.ts` | 纯追加：`AgentKnowledgeContext { filePath, digest, bytes }` 与可选 `AgentStartRequest.knowledgeContext` |
+| `packages/agent-adapters/src/knowledge-context.ts`（新） | `readVerifiedKnowledgeContext()`：绝对路径、普通文件（拒绝符号链接/目录）、原始字节 sha256 == digest、字节数 == bytes、合法 UTF-8；稳定码 `KNOWLEDGE_CONTEXT_UNAVAILABLE` |
+| `packages/agent-adapters/src/pi-rpc.ts` / `pi-adapter.ts` | `buildPiKnowledgeArguments()` → `--append-system-prompt <绝对路径>`；启动前核验，失败即拒（不 spawn） |
+| `packages/agent-adapters/src/claude-protocol.ts` / `claude-adapter.ts` | `buildClaudeArguments` 新增可选 `knowledgeContext` → `--append-system-prompt-file <绝对路径>`；同样启动前核验 |
+| `packages/agent-adapters/src/codex-protocol.ts` / `codex-adapter.ts` | `developerInstructions`（内联**已核验文本**）随 `thread/start` 与 `thread/resume` 发送；同时新增完成事实收集（见 ②） |
+| `packages/agent-adapters/src/{pi-process,claude-protocol,codex-protocol}.ts` | 各自错误码联合纯追加 `KNOWLEDGE_CONTEXT_UNAVAILABLE` |
+| `apps/runtime/src/agent-start-service.ts` | 新增可选 `runtimeHome` 入参；新增导出 `knowledgeContextStartArgument()`（回读该 Execution 自己的绑定，解析到 `<home>/knowledge/<project-id>/<contextPath>` 并核验仍在根内；有绑定却无 home 即拒绝） |
+| `apps/runtime/src/agent-runtime-service.ts` | **仅两处**（协调者授权）：主启动与 successor/resume 的 `adapter.start` 各传 `runtimeHome` / `knowledgeContext` |
+| 测试 | `packages/agent-adapters/test/knowledge-context.test.ts`（新）、`{pi,claude,codex}-adapter.test.ts`、`apps/runtime/test/agent-runtime-service.test.ts`、`apps/runtime/test/task-control-service.test.ts`、`apps/runtime/test/support/agent-fixture.ts`（新增 `instructions` / `generatedKnowledge` 选项 + 机器层必需的 `.meta.json`） |
+| 文档 | `docs/decisions/0051-...md`（新）、`docs/decisions/README.md` 索引 + 优先级段 |
+
+### ① 知识注入：交给 provider 的是**该 Execution 自己记录的**那一份
+
+- 载体：`AgentKnowledgeContext`（路径 + digest + 字节数）。Runtime 从 `execution_knowledge_snapshots` 回读，**不重新读项目 main ref**；Adapter 在 spawn 之前按上述五条核验，任何一条不成立 → `KNOWLEDGE_CONTEXT_UNAVAILABLE`（`startMayHaveOccurred: false`）。
+- 通道按 provider 的事实分别实现：Pi `--append-system-prompt <路径>`（Pi 0.85.1 的 `resolvePromptInput` 对已存在路径读文件）、Claude `--append-system-prompt-file <路径>`（真实 CLI 接受该选项：未知选项 exit 1，该选项进程存活）、Codex `developerInstructions`（真实 app-server 接受该字段）。**不新增能力位、不伪造统一抽象。**
+- **零知识 == 现状**：无绑定或 `entryCount === 0` → 不产生 `knowledgeContext`，三个 Adapter 的 argv/入参逐字节相同（逐项断言）。
+- 人工层与机器生成层在物化文件里逐条带 `layer:` 与 `digest:`，Runtime 级测试断言两层同时出现且可区分。
+- 机器生成层仍**不写 Task worktree**：测试断言 worktree 内既无 `knowledge-context.md` 也无 `.codeestra/generated/`，且物化路径不在 worktree 之下。
+
+### ② Codex 完成事实：与 Pi 同形状、同语义，宁可漏报
+
+- `toolCallCount`：只数 Codex 自己命名为工具调用的 item 类型（`commandExecution`/`fileChange`/`mcpToolCall`/`dynamicToolCall`/`collabAgentToolCall`/`webSearch`/`imageGeneration`），按 provider item id 去重；不认识的 item 类型永不算工具调用。
+- `finalAssistantText`：只取**已完成**的 `agentMessage` item 的 `text`（半截 delta 不算），2000 字符截尾并置 `finalAssistantTextTruncated`。
+- `finalAssistantStopReason`：恒 `null`（Codex 不报消息级 stop reason，turn 终态已由完成事件承载）。
+- `disconnected`（崩溃 / `interrupted` / 未能确认停止）**不带** `facts`；事实不产生 Attention（Attention 是 Runtime 的判定）；Codex 的 completion 仍只在自己子进程确认退出后发出（ADR-0029 不变）。
+
+### ③ `applyRevision`：评估结论 = 不可行，维持 `UNSUPPORTED`
+
+**结论**：三个 provider 都只有「把消息送进运行中的会话」的通道，**没有任何 provider 侧事实能证明「新修订已在运行中的会话生效」**。按 ADR-0028 不得把传输接受当确认，也不得从模型散文推断 ACK，因此不实现 `applyRevision`、不改能力声明。
+
+真实 CLI 实测（**全程未发任何真实模型请求**，因此不耗额度；每个探针进程显式限时并在结束时 SIGTERM/SIGKILL；探针脚本在 `/tmp/l3probe/**`，不在仓库内）：
+
+| # | 命令 | 关键输出 | 事实 |
+|---|---|---|---|
+| 1 | `pi --version` / `codex --version` / `claude --version` | `0.85.1` / `codex-cli 0.154.0` / `2.1.268 (Claude Code)` | 本机实际版本（与 spike 记录的 0.84.4/0.151.0 不同的地方以本次为准） |
+| 2 | `pi --mode rpc --no-session`，依次发 `get_state` / `apply_revision` / `steer` | `{"id":"req_1",...,"command":"get_state","success":true,...}`；`{"id":"req_2","type":"response","command":"apply_revision","success":false,"error":"Unknown command: apply_revision"}`；`{"id":"req_3","type":"response","command":"steer","success":true}` + `{"type":"queue_update","steering":["probe"],"followUp":[]}` | 投递通道存在（`prompt`/`steer`/`follow_up`），但成功只表示**入队**；没有 revision 命令 |
+| 3 | `codex app-server generate-json-schema --out schema` | 97 个 client 方法；`TurnSteerParams` 必填 `expectedTurnId`；`TurnSteerResponse` 只有 `{turnId}`；`ThreadInjectItemsResponse` 是空对象 | 有投递方法、没有 revision-apply/ack 方法 |
+| 4 | `codex app-server --stdio`：`initialize` → `thread/start` → `turn/steer`（缺 `expectedTurnId`）→ `thread/inject_items`（空 items） | `{"error":{"code":-32600,"message":"Invalid request: missing field \`expectedTurnId\`"}}`；`{"error":{"code":-32600,"message":"items must not be empty"}}` | 两个投递方法都要求活跃 turn/非空输入，且响应不含「已生效」事实 |
+| 5 | 同上，`thread/start` 带 `developerInstructions` | `{"id":2,"result":{...,"instructionSources":[]}}`（无 error） | Codex 接受该字段（这正是 ① 用的通道）；`instructionSources` 不回报它 |
+| 6 | `claude --print --input-format stream-json --safe-mode --strict-mcp-config` + `control_request{apply_revision}` / `{interrupt}` | `{"type":"control_response","response":{"subtype":"error","request_id":"probe-1","error":"Unsupported control request subtype: apply_revision"}}`；`...{"subtype":"success","request_id":"probe-2","response":{"still_queued":[]}}` | 控制协议只有 `initialize`/`interrupt`/`can_use_tool`；无可投递修订的通道 |
+| 7 | 同上 + `--append-system-prompt-file <file>` 对照 `--definitely-not-a-real-flag` | 前者进程存活 6s 无错误；后者 `error: unknown option '--definitely-not-a-real-flag'`（exit 1） | ① 用的 Claude 选项是真实选项，不是被静默忽略的未知参数 |
+
+**否掉的替代方案**（ADR-0051 Options）：用 `turn/start.outputSchema` 让模型回 JSON ACK（模型自我陈述，不是 provider 对会话状态的事实）、写自有 extension 工具把工具调用当 ACK（发明通道）。两者都不满足 ADR-0028 的「结构化 ACK + evidence」。
+
+### 验证（定向，ADR-0038；**未跑全量**）
+
+| 命令 | 结果 |
+|---|---|
+| `bun run typecheck` | exit 0 |
+| `bun test packages/agent-adapters/test/knowledge-context.test.ts` | 6 pass / 0 fail |
+| `bun test packages/agent-adapters/test/pi-adapter.test.ts` | 14 pass / 0 fail |
+| `bun test packages/agent-adapters/test/claude-adapter.test.ts` | 32 pass / 0 fail |
+| `bun test packages/agent-adapters/test/codex-adapter.test.ts` | 31 pass / 0 fail（含四个事实序列 + 知识交接 4 条） |
+| `bun test apps/runtime/test/agent-runtime-service.test.ts` | 13 pass / 0 fail（含知识交接 4 条：主启动 / successor / 零知识 / 拒绝） |
+| `bun test apps/runtime/test/task-control-service.test.ts` | 4 pass / 0 fail（含 pause→resume continuation 的知识断言） |
+| `bun test apps/runtime/test/cli-knowledge.test.ts`（**CLI 级端到端**） | 5 pass / 0 fail。既有「layers out …」用例新增断言：真实 Runtime + stub provider 下，provider 的 argv 里恰有一次 `--append-system-prompt`，其值等于 `<home>/knowledge/<project>/<task>/knowledge-context.md`，该文件内容与记录绑定逐字节相同、位于 worktree 之外，且 `--no-context-files`/`--no-extensions` 仍在 |
+| `bun test apps/runtime/test/cli-prose-question.test.ts apps/runtime/test/cli-prose-question-attention.test.ts` | 6 pass / 0 fail（note 规则与升级路径未受影响） |
+| `bun test apps/runtime/test/cli-agent-plugins.test.ts apps/runtime/test/cli-claude-adapter.test.ts apps/runtime/test/cli-codex-adapter.test.ts` | 12 pass / 0 fail（受控启动参数与插件选择未受影响） |
+| `bun test packages/agent-adapters/test`（全部 adapter 单测，10 个文件） | 131 pass / 0 fail |
+
+三条启动路径各自有断言证据：**主启动**（`agent-runtime-service.test.ts` 断言 `knowledgeContext` == 记录绑定的 path/digest/bytes，且文件内容 digest 一致）；**successor**（`startAutomationSuccessor` 重开同一会话时携带同一份知识）；**pause→resume**（`task-control-service.test.ts` 断言 continuation Execution 收到它自己绑定记录的知识，且与 predecessor 的 snapshot digest 相同）。fail-closed 拒绝路径各一层：Runtime 侧（有绑定无 home → 抛 `KNOWLEDGE_CONTEXT_UNAVAILABLE`）、Adapter 侧（digest/缺失/尺寸/符号链接/非 UTF-8 → 拒绝且**没有** provider 进程被创建）。
+
+**没有跑什么、为什么**：按 ADR-0038 未跑 `bun run check` / `just check` / `just verify` / `check:fast`（开发分支禁止全量）；未跑 UI（`apps/ui/**` 属 L4 领地，本格零改动）；未做任何真实模型调用（需耗额度，且本格边界明确不含「provider 真的读了它」）；未做真实 provider 的端到端 `task run`（同上）。
+
+### 仍需真实模型验收 / 仍是推断的结论
+
+- **「我们把它交给了 provider」已证明，「provider 真的读了它」未证明**：Pi 的「已存在路径即读文件」来自 Pi 源码的路径解析规则；Claude 的 `--append-system-prompt-file` 语义来自 CLI 自身帮助（把该对选项写作 `--append-system-prompt[-file]`）与「未知选项会报错、该选项不会」的对照实测；Codex 的 `developerInstructions` 只证明 provider 接受了字段。三者的模型层效果都需要真实模型验收。
+- Codex 的 `developerInstructions` 内联内容受单条 JSON-RPC 记录上限约束（超限是启动失败，不截断）；Pi/Claude 走文件路径，但核验与 provider 自己读文件之间存在理论 TOCTOU 窗口（物化文件由 Runtime 独占写入，未引入锁）。
+- 本格未验证：多工具批次下的 Codex 事实计数（只有 stub 序列）、真实 Codex/Claude 会话中事实与 note 的端到端落库（Runtime 的 note 规则已由 FOUNDATION-056/ADR-0043 在 Pi 上验收）。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），

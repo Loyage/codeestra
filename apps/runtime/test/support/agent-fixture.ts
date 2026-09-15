@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -44,6 +44,17 @@ export interface AgentFixtureOptions {
   readonly verificationCommands?: readonly VerificationCommand[];
   /** Omit the policy file entirely, so the project has no verification policy. */
   readonly withoutVerificationPolicy?: boolean;
+  /**
+   * Contents of `.codeestra/instructions/conventions.md` committed to `main` **before** trust.
+   * Knowledge is read from the project's `main` ref, so a fixture that needs Project Knowledge has
+   * to commit it before the project is trusted (ADR-0041).
+   */
+  readonly instructions?: string;
+  /**
+   * Contents of one machine-generated knowledge entry (`<home>/knowledge/<project>/generated/...`)
+   * written before trust, so a fixture can tell the human layer apart from the machine layer.
+   */
+  readonly generatedKnowledge?: string;
 }
 
 const defaultVerificationCommands = [{ id: 'smoke', argv: ['echo', 'verification-ok'],
@@ -71,6 +82,25 @@ export async function createAgentFixture(options: AgentFixtureOptions = {}): Pro
   // that modelled a Bun project without one could not exercise that binding at all.
   await Bun.write(join(repo, 'bun.lock'), '{\n  "lockfileVersion": 1\n}\n');
   await git(repo, ['add', 'README.md', 'bun.lock']);
+  if (options.instructions !== undefined) {
+    mkdirSync(join(repo, '.codeestra', 'instructions'), { recursive: true });
+    await Bun.write(join(repo, '.codeestra', 'instructions', 'conventions.md'), options.instructions);
+    await git(repo, ['add', '.codeestra/instructions/conventions.md']);
+  }
+  // The machine-generated layer lives in the Runtime data directory, never in the repository
+  // (ADR-0041 D05), so a fixture that wants one writes it there. Provenance is mandatory in that
+  // layer: an entry without its `<name>.meta.json` sidecar is refused, not accepted as anonymous
+  // text (PROJECT_SPEC §4).
+  if (options.generatedKnowledge !== undefined) {
+    const generatedRoot = join(home, 'knowledge', projectId, 'generated');
+    mkdirSync(generatedRoot, { recursive: true });
+    await Bun.write(join(generatedRoot, 'machine-notes.md'), options.generatedKnowledge);
+    await Bun.write(join(generatedRoot, 'machine-notes.meta.json'), `${JSON.stringify({
+      version: 1,
+      source: 'fixture',
+      kind: 'generated',
+    }, null, 2)}\n`);
+  }
   let verificationPolicy: AgentFixture['verificationPolicy'] = { state: 'ABSENT', digest: null };
   if (options.withoutVerificationPolicy !== true) {
     const commands = options.verificationCommands ?? defaultVerificationCommands;

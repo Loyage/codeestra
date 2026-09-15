@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DeterministicFakeAdapter } from '@codeestra/agent-adapters';
@@ -15,7 +16,7 @@ import type {
 } from '@codeestra/contracts';
 import { prepareTaskWorkspace } from '../src/workspace-service.js';
 import { observeAgentEvents } from '../src/agent-observation-service.js';
-import { startReservedExecution } from '../src/agent-start-service.js';
+import { startReservedExecution, knowledgeContextStartArgument } from '../src/agent-start-service.js';
 import {
   AgentRuntimeCoordinator,
   deriveCommandId,
@@ -437,6 +438,145 @@ describe('Agent runtime coordinator', () => {
       expect(taskState(value)).toBe('RECOVERY_REQUIRED');
       expect(countRows(value, "SELECT count(*) AS count FROM workspaces WHERE state='RECOVERY_REQUIRED'")).toBe(1);
       expect(countRows(value, "SELECT count(*) AS count FROM domain_events WHERE event_type='RecoveryRequired'")).toBe(1);
+    } finally {
+      value.storage.close();
+    }
+  });
+});
+
+/**
+ * Project Knowledge reaching the Adapter (ADR-0041 D05, ADR-0051).
+ *
+ * The Runtime materializes one Markdown file per Execution inside its own data directory and records
+ * its path, digest and size with the Execution's knowledge binding. These tests assert the wiring
+ * that hands that artifact to the Adapter on the three start paths, that the human layer stays
+ * distinguishable from the machine layer, and that nothing is written into the Task worktree.
+ */
+describe('Project Knowledge handoff', () => {
+  const instructions = '---\nid: repo-conventions\n---\nAlways run the focused test file.\n';
+  const generated = 'Machine note: the previous release failed its smoke check.\n';
+
+  /** A scripted Adapter that records a provider session file, so a successor can reopen it. */
+  class ScriptedSuccessorAdapter extends ScriptedInteractiveAdapter {
+    override async start(request: AgentStartRequest): Promise<AgentSessionRef> {
+      const session = await super.start(request);
+      return { ...session, sessionStorageRef: join(request.workspace.cwd, 'session.jsonl') };
+    }
+  }
+
+  test('hands the materialized knowledge of this Execution to the Adapter, path and digest included',
+    async () => {
+      const value = await createAgentFixture({ instructions, generatedKnowledge: generated });
+      const adapter = new ScriptedInteractiveAdapter();
+      const coordinator = createCoordinator(value, adapter);
+      try {
+        await coordinator.runTask({
+          projectId: value.projectId, taskId: value.taskId, expectedTaskVersion: 1,
+          commandId: crypto.randomUUID(), adapterId: adapter.id,
+        });
+        const request = adapter.startRequests[0];
+        if (request === undefined) throw new Error('the Adapter was never started');
+        const binding = value.storage.getExecutionKnowledgeSnapshot(request.executionId);
+        if (binding === null) throw new Error('the Execution recorded no knowledge binding');
+        expect(binding.entryCount).toBe(2);
+        // The reference list is unchanged; the artifact is handed over next to it.
+        expect(request.knowledgeSnapshotRefs).toEqual(binding.refs);
+        expect(request.knowledgeContext).toEqual({
+          filePath: join(value.home, 'knowledge', value.projectId, value.taskId, 'knowledge-context.md'),
+          digest: binding.contextDigest,
+          bytes: binding.contextBytes,
+        });
+        // What the Adapter will hand over is exactly what the Execution recorded...
+        const text = readFileSync(request.knowledgeContext?.filePath ?? '', 'utf8');
+        expect(createHash('sha256').update(new TextEncoder().encode(text)).digest('hex'))
+          .toBe(binding.contextDigest);
+        expect(new TextEncoder().encode(text).length).toBe(binding.contextBytes);
+        // ...with the human and the machine layer told apart inside the artifact...
+        expect(text).toContain('## .codeestra/instructions/conventions.md');
+        expect(text).toContain('layer: instructions');
+        expect(text).toContain('layer: generated');
+        expect(text).toContain('Always run the focused test file.');
+        // ...and it lives outside the Task worktree, which stays free of machine-generated knowledge.
+        const worktree = request.workspace.cwd;
+        expect(request.knowledgeContext?.filePath.startsWith(`${worktree}/`)).toBe(false);
+        expect(existsSync(join(worktree, 'knowledge-context.md'))).toBe(false);
+        expect(existsSync(join(worktree, '.codeestra', 'generated'))).toBe(false);
+        await coordinator.close();
+      } finally {
+        value.storage.close();
+      }
+    });
+
+  test('hands the knowledge over again when a successor reopens the conversation', async () => {
+    const value = await createAgentFixture({ instructions });
+    const adapter = new ScriptedSuccessorAdapter();
+    const coordinator = createCoordinator(value, adapter);
+    try {
+      const run = await coordinator.runTask({
+        projectId: value.projectId, taskId: value.taskId, expectedTaskVersion: 1,
+        commandId: crypto.randomUUID(), adapterId: adapter.id,
+      });
+      const successor = await coordinator.startAutomationSuccessor({
+        sessionId: run.sessionId, commandId: crypto.randomUUID(), reason: 'test handoff',
+      });
+      expect(adapter.startRequests).toHaveLength(2);
+      const first = adapter.startRequests[0];
+      const second = adapter.startRequests[1];
+      if (first === undefined || second === undefined) throw new Error('expected two starts');
+      // The successor is a *resumed* start, and it carries the same recorded artifact.
+      expect(second?.resume?.sessionStorageRef).toBe(join(first?.workspace.cwd ?? '', 'session.jsonl'));
+      expect(second.knowledgeContext).toBeDefined();
+      expect(successor.executionId).toBe(first.executionId);
+      expect(second.knowledgeContext).toEqual(first.knowledgeContext);
+      await coordinator.close();
+    } finally {
+      value.storage.close();
+    }
+  });
+
+  test('leaves the start request without a knowledge context when the Execution resolved none',
+    async () => {
+      const value = await createAgentFixture();
+      const adapter = new ScriptedInteractiveAdapter();
+      const coordinator = createCoordinator(value, adapter);
+      try {
+        await coordinator.runTask({
+          projectId: value.projectId, taskId: value.taskId, expectedTaskVersion: 1,
+          commandId: crypto.randomUUID(), adapterId: adapter.id,
+        });
+        const request = adapter.startRequests[0];
+        // The Execution still records a binding (with zero entries), so the Adapter is not handed a
+        // header-only file: the controlled launch stays byte-identical to before this capability.
+        expect(value.storage.getExecutionKnowledgeSnapshot(request?.executionId ?? ''))
+          .toMatchObject({ entryCount: 0 });
+        expect(request?.knowledgeContext).toBeUndefined();
+        await coordinator.close();
+      } finally {
+        value.storage.close();
+      }
+    });
+
+  test('refuses to start rather than silently dropping a recorded knowledge binding', async () => {
+    const value = await createAgentFixture({ instructions });
+    const adapter = new ScriptedInteractiveAdapter();
+    const coordinator = createCoordinator(value, adapter);
+    try {
+      await coordinator.runTask({
+        projectId: value.projectId, taskId: value.taskId, expectedTaskVersion: 1,
+        commandId: crypto.randomUUID(), adapterId: adapter.id,
+      });
+      const request = adapter.startRequests[0];
+      const executionId = request?.executionId ?? '';
+      // With the Runtime home the artifact is located...
+      expect(knowledgeContextStartArgument({
+        storage: value.storage, projectId: value.projectId, executionId, runtimeHome: value.home,
+      }).knowledgeContext).toEqual(request?.knowledgeContext);
+      // ...and without it the start is refused: silently starting the Agent with less input than
+      // the Execution recorded would make "this Execution used knowledge K" false.
+      expect(() => knowledgeContextStartArgument({
+        storage: value.storage, projectId: value.projectId, executionId, runtimeHome: undefined,
+      })).toThrow(/no Runtime home was supplied/);
+      await coordinator.close();
     } finally {
       value.storage.close();
     }

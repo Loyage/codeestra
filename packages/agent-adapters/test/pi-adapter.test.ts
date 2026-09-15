@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { agentProcessIdentitySchema, type AgentStartRequest } from '@codeestra/contracts';
+import { agentProcessIdentitySchema, type AgentKnowledgeContext, type AgentStartRequest } from '@codeestra/contracts';
 import { PiRpcAdapter } from '../src/pi-adapter.js';
 import { PiRpcProcessError } from '../src/pi-process.js';
 
@@ -73,6 +74,15 @@ function temporaryDirectory(): string {
   return directory;
 }
 
+/** One materialized knowledge artifact, exactly as the Runtime records it for an Execution. */
+function knowledgeContext(text: string): AgentKnowledgeContext {
+  const directory = temporaryDirectory();
+  const filePath = join(directory, 'knowledge-context.md');
+  Bun.write(filePath, text);
+  const bytes = new TextEncoder().encode(text);
+  return { filePath, digest: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length };
+}
+
 afterEach(async () => {
   for (const adapter of adapters.splice(0)) {
     for (const session of ['session-under-test']) await adapter.releaseSession(session);
@@ -128,6 +138,49 @@ function fixture(mode: 'SUCCEED' | 'CRASH_AFTER_PROMPT' | 'PROVIDER_ERROR' | 'NO
 }
 
 describe('Pi RPC process adapter', () => {
+  test('hands the recorded Project Knowledge to Pi as --append-system-prompt and changes nothing else', async () => {
+    const { adapter, request, report } = fixture('NORMAL_TURN');
+    const text = '# Project knowledge\n\nlayer: instructions | digest: 1111\n\nPrefer bun.\n';
+    const context = knowledgeContext(text);
+    await withTimeout(adapter.start({ ...request, knowledgeContext: context }), 'start with knowledge');
+    // Pi's flag resolves an existing path to *file contents* (measured in Pi 0.85.1), so the
+    // Adapter passes the verified absolute path and Pi reads the same bytes the Execution recorded.
+    const promptFlag = report().argv.indexOf('--append-system-prompt');
+    expect(promptFlag).toBeGreaterThan(-1);
+    expect(report().argv[promptFlag + 1]).toBe(context.filePath);
+    expect(report().argv.at(-1)).toBe(context.filePath);
+    // ...and the file still holds exactly the recorded bytes.
+    expect(readFileSync(context.filePath, 'utf8')).toBe(text);
+    // The revision prompt is unchanged: the knowledge travels as a system-prompt addition, not as
+    // rewritten task text.
+    expect(report().commands.find((command) => command.type === 'prompt')?.message)
+      .toContain('Codeestra revision');
+  });
+
+  test('leaves the controlled argv byte-identical when the Execution has no knowledge', async () => {
+    const { adapter, request, report } = fixture('NORMAL_TURN');
+    await withTimeout(adapter.start(request), 'start without knowledge');
+    expect(report().argv).not.toContain('--append-system-prompt');
+  });
+
+  test('refuses to start when the knowledge file does not match its recorded digest', async () => {
+    const { adapter, request, reportPath, workspace } = fixture('NORMAL_TURN');
+    const context = knowledgeContext('recorded knowledge\n');
+    Bun.write(context.filePath, 'tampered knowledge\n');
+    await expect(adapter.start({ ...request, knowledgeContext: context }))
+      .rejects.toMatchObject({ code: 'KNOWLEDGE_CONTEXT_UNAVAILABLE', startMayHaveOccurred: false });
+    // No provider process was started: nothing wrote a report and the workspace is untouched.
+    expect(existsSync(reportPath)).toBe(false);
+    expect(existsSync(join(workspace, 'session.jsonl'))).toBe(false);
+  });
+
+  test('refuses to start when the knowledge file is gone', async () => {
+    const { adapter, request } = fixture('NORMAL_TURN');
+    const context = knowledgeContext('recorded knowledge\n');
+    rmSync(context.filePath);
+    await expect(adapter.start({ ...request, knowledgeContext: context }))
+      .rejects.toMatchObject({ code: 'KNOWLEDGE_CONTEXT_UNAVAILABLE' });
+  });
   test('launches controlled RPC arguments, captures process identity, and prompts with the revision', async () => {
     const { adapter, request, sessionDir, workspace, report } = fixture();
     const ref = await adapter.start(request);
