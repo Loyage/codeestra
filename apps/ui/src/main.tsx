@@ -1,9 +1,15 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App.js';
+import { channelBrandName, uiChannel } from './channel.js';
 import './styles.css';
 
 const tokenKey = 'codeestra.token';
+
+// ADR-0049: the channel is a build-time fact. The stable channel writes nothing here, so a stable
+// build stays byte-for-byte the shell it was before this feature; only dev marks the document.
+document.title = channelBrandName(uiChannel);
+if (uiChannel === 'dev') document.documentElement.dataset['channel'] = 'dev';
 
 /**
  * The CLI prints an address whose fragment carries the token, and fragments are never sent to the

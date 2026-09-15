@@ -96,10 +96,12 @@ interface IntegrationGitPort {
 3. 冻结 dev candidate（`merged_commit`），执行独立 Integration Verification（独立实体 `integration_verification_runs`，独立副本）；成功后以 expected old OID 保护更新 `dev`（`update-ref <ref> <new> <expected>`）。任何完成功能都必须先完成此层，不得直接进入 `main`。ADR-0038 规定开发 branch/worktree 只跑建分支时选定的定向测试，因此该层证据不能冒充稳定提升前的全量回归。
 3b. **实现边界（ADR-0018）**：目标是长期 `dev` 的 ref，且仅在该 ref 未被任何工作树检出时才推进（`DEV_REF_CHECKED_OUT` 否则）；integration worktree 位于 `<CODEESTRA_HOME>/integrations/<project-id>/<batch-id>/`；成功后才尝试 `git worktree remove`（不加 force），失败现场与副本保留。崩溃恢复以 ref 实际值为准，不猜测、不重放。
 4. 稳定提升固定 expectedDevCommit、expectedMainCommit 与 verification evidence；其中必须包含在长期 `dev` 工作树对该精确 expectedDevCommit 运行并通过的全量测试证据（ADR-0038），dev SHA、测试配置或锁文件变化即失效。FULL 下直接提升，STRICT 下需用户批准 dev/main/verification 三元组。当前 promotion 数据模型尚未存储这份独立全量证据，不得声称已自动强制。
+4a. **ADR-0047（已决策，产品实现待落）**：本机 `main` 与 `dev` 是**两个分别 clone 的独立仓库**（ADR-0048），稳定提升不再由 Runtime 在 main 工作树内直接 ff 本地 `dev` ref，改为：显式 push 固定候选到远端 `dev` 并**读回核对** → main 检出 `git fetch` + `git merge --ff-only origin/dev` → 重启并核对 Runtime → 才推回远端 `main`（重启失败不推回）。产品命令面的实现留到下一格（需要 `projects.dev_repo_path` / schema v29 才能拿到 dev clone 位置）；在此之前 `promotion prepare/approve/promote` 仍按下面第 4–6 条的本地 ff 路径实现，**本仓库自身不得使用它**（改按 `AGENTS.md` 的人工四步），且「已 push」不得被报告成已提升。
+
 5. 提升前核对成员 revision、dev/main SHA、dev candidate ancestry、验证证据与工作区安全；dev 或 main 移动使 STRICT 批准失效。
 6. main 未被 checkout 时可使用带 expected old OID 的 ref CAS；main 被 checkout 时不得直接 update-ref 导致 index/worktree 不一致。MVP 安全回退为拒绝自动提升并要求安全交接；自动更新已 checkout main 的具体策略 Phase 4 前确认。
 7. main 成功更新后立即在 main 工作树执行 `bun run codeestra stop`，再执行 `bun run codeestra status` 自动拉起并检查 Runtime。重启不新增确认；恢复响应前不得报告提升完成，失败时不擅自回滚。
-8. 不强制更新、不 push、不 reset 用户目录。任何 precondition 变化使 STRICT 批准失效，需重建候选与重验。
+8. 不强制更新、不 reset 用户目录；除 ADR-0047 的「固定候选 push 到远端 `dev`」与「重启核对后 fast-forward 推回远端 `main`」之外不 push 任何 ref。任何 precondition 变化使 STRICT 批准失效，需重建候选与重验。
 
 独立 worktree 不隔离 git config、hooks、对象库、凭据和操作系统权限；hooks/filters/子模块可能执行代码或访问网络。FULL 默认信任本机项目并执行 commit hooks（ADR-0011）；STRICT 下只有项目 trust 后才执行，且不把 trust 扩大解释为 main/push 授权。
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { ThemeSelector } from './theme.js';
+import { ChannelBanner, channelBrandName, uiChannel } from './channel.js';
 import { AgentSettingsPanel } from './agent-settings.js';
 import { SettingsPage, UiSettingsProvider } from './settings.js';
 import { usePendingAction } from './use-pending-action.js';
@@ -237,13 +238,16 @@ export function App({ initialToken, initialProjectId, tokenKey }: {
   const [token, setToken] = useState(initialToken);
   if (token === null) {
     return (
-      <div className="centered">
-        <div className="theme-corner"><ThemeSelector /></div>
-        <TokenForm onSubmit={(value) => {
-          window.sessionStorage.setItem(tokenKey, value);
-          setToken(value);
-        }} />
-      </div>
+      <>
+        <ChannelBanner channel={uiChannel} />
+        <div className="centered">
+          <div className="theme-corner"><ThemeSelector /></div>
+          <TokenForm onSubmit={(value) => {
+            window.sessionStorage.setItem(tokenKey, value);
+            setToken(value);
+          }} />
+        </div>
+      </>
     );
   }
   return <Console token={token} initialProjectId={initialProjectId} />;
@@ -577,10 +581,11 @@ function Console({ token, initialProjectId }: {
     <UiSettingsProvider client={client}>
     <div className="app">
       <a className="skip-link" href="#workspace">跳转到工作区</a>
+      <ChannelBanner channel={uiChannel} />
       <header className="app-header">
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">C</span>
-          <div><strong>Codeestra</strong><span className="brand-caption">让意图成为成果</span></div>
+          <div><strong>{channelBrandName(uiChannel)}</strong><span className="brand-caption">让意图成为成果</span></div>
         </div>
         <div className="header-controls">
           <select
