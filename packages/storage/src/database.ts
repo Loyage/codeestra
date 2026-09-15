@@ -4,15 +4,20 @@ import { z } from 'zod';
 import {
   DependencyGraphError,
   createDependencyGraph,
+  decideProseQuestionResolution,
   DomainError,
   noToolCallsWithTrailingQuestionMarkHeuristic,
+  proseQuestionPromptKind,
   PROSE_QUESTION_NO_TOOL_USE,
   revisionDeliverySatisfied,
   recheckImpactSnapshotGeneration,
   transitionRevisionDelivery,
+  validateProseQuestionResolution,
   wouldCreateCycle,
   type AgentCompletionFacts,
   type AgentCompletionNote,
+  type ProseQuestionResolution,
+  type ProseQuestionResolutionCode,
   type DependencyEdge,
   type ImpactSnapshotGeneration,
   type ImpactSnapshotRecheck,
@@ -60,7 +65,10 @@ import {
 export class StorageError extends Error {
   constructor(
     readonly code: 'UNSUPPORTED_SCHEMA' | 'COMMAND_CONFLICT' | 'CONCURRENT_MODIFICATION'
-      | 'NOT_FOUND' | 'INVALID_STATE',
+      | 'NOT_FOUND' | 'INVALID_STATE'
+      // Prose-question waits carry their own stable codes (FOUNDATION-069), so a refusal names
+      // exactly which part of the wait was wrong instead of a generic state error.
+      | ProseQuestionResolutionCode | 'PROSE_QUESTION_RESOLUTION_REQUIRED',
     message: string,
   ) {
     super(message);
@@ -375,6 +383,42 @@ export interface AgentAnswerPlan extends AttentionSummary {
   readonly answer: StoredAgentAnswer;
   readonly adapterId: string;
   readonly providerSessionId: string;
+}
+
+/**
+ * The recorded outcome of ending one prose-question wait. It states the resolved states in full so
+ * a caller never has to guess what happened: the provider is gone, the wait is closed, and the
+ * answer — if there was one — stayed on this side.
+ */
+export interface ProseQuestionResolutionPlan {
+  readonly attentionId: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly executionId: string;
+  readonly sessionId: string;
+  readonly resolution: ProseQuestionResolution;
+  readonly answerText: string | null;
+  readonly note: string | null;
+  readonly actor: string;
+  readonly taskState: 'RUNNING';
+  readonly executionState: 'RUNNING';
+  readonly sessionState: 'EXITED';
+  readonly attentionStatus: 'CLOSED';
+  readonly deliveredToProvider: false;
+  readonly resolvedAt: number;
+}
+
+/**
+ * The recorded shape of one escalated prose question. The Attention carries no provider request, so
+ * `providerRequestId` is a derived stand-in the Runtime can always recognize as its own, and the
+ * prompt is the FOUNDATION-056 note restated as a wait.
+ */
+export interface ProseQuestionWaitProjection {
+  readonly attentionId: string;
+  readonly attentionEventId: string;
+  readonly taskEventId: string;
+  readonly providerRequestId: string;
+  readonly prompt: unknown;
 }
 
 export interface AdapterEventResult {
@@ -2723,6 +2767,14 @@ export class Phase1Database {
           WHERE task.project_id=?1 AND attention.id=?2
         `).get(input.projectId, input.attentionId);
         if (subject === null) throw new StorageError('NOT_FOUND', 'Open Attention request was not found');
+        // A prose question has no provider dialog behind it. Answering it here would plan a
+        // delivery for a request that never existed, so it is refused with its own code and the
+        // caller is pointed at the command that actually ends that wait (FOUNDATION-069).
+        if (subject.prompt_kind === proseQuestionPromptKind) {
+          throw new StorageError('PROSE_QUESTION_RESOLUTION_REQUIRED',
+            'This Attention carries a prose question, not a provider dialog;'
+            + ' end the wait with attention.resolve instead of delivering an answer');
+        }
         if (subject.attention_status !== 'OPEN' || subject.session_state !== 'WAITING_FOR_USER'
           || subject.execution_state !== 'WAITING_FOR_USER' || subject.task_state !== 'WAITING_FOR_USER') {
           throw new StorageError('INVALID_STATE', 'Attention request is not open on a waiting Agent');
@@ -2937,6 +2989,140 @@ export class Phase1Database {
     })();
   }
 
+  /**
+   * Ends one prose-question wait, idempotently by command (FOUNDATION-069 / ADR-0043).
+   *
+   * A prose question is not a provider dialog: its Session already exited, so no answer is ever
+   * delivered and no conversation is resumed. What this records is how the wait ended — a false
+   * alarm the user dismissed, or an answer the user gave in prose — plus the Task going back to the
+   * state it was in before the escalation. The user's input is kept in `attention_answers` (the
+   * Attention answer ledger) and in append-only events; it is deliberately *not* recorded as an
+   * `ANSWER_AGENT` intent, because no Agent received it and inventing that intent would report a
+   * delivery that did not happen. `deliveredToProvider: false` is the same statement in the result.
+   *
+   * Every refusal is thrown *before* anything is written: a refused resolution leaves no partial
+   * wait behind, and its reason is the stable code the command face reports.
+   */
+  resolveProseQuestionAttention(input: {
+    readonly projectId: string;
+    readonly attentionId: string;
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly resolution: ProseQuestionResolution;
+    readonly text: string | null;
+    readonly note: string | null;
+    readonly actor: string;
+    readonly answerId: string;
+    readonly resolutionEventId: string;
+    readonly taskEventId: string;
+    readonly resolvedAt: number;
+  }): ProseQuestionResolutionPlan {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.resolvedAt,
+      apply: (database) => {
+        const payload = validateProseQuestionResolution({
+          resolution: input.resolution,
+          text: input.text,
+          note: input.note,
+        });
+        if (!payload.allowed) {
+          throw new StorageError(payload.code, payload.message);
+        }
+        const subject = database.query<{
+          kind: string; attention_status: string; prompt_json: string;
+          session_state: string; execution_state: string; task_state: string;
+          task_id: string; task_version: number; execution_id: string; session_id: string;
+        }, [string, string]>(`
+          SELECT attention.kind,attention.status AS attention_status,attention.prompt_json,
+            session.state AS session_state,execution.state AS execution_state,
+            task.state AS task_state,task.id AS task_id,task.version AS task_version,
+            execution.id AS execution_id,session.id AS session_id
+          FROM attention_requests attention JOIN agent_sessions session ON session.id=attention.session_id
+          JOIN executions execution ON execution.id=session.execution_id
+          JOIN tasks task ON task.id=execution.task_id JOIN project_trusts trust
+            ON trust.project_id=task.project_id AND trust.status='ACTIVE'
+          WHERE task.project_id=?1 AND attention.id=?2
+        `).get(input.projectId, input.attentionId);
+        if (subject === null) {
+          throw new StorageError('NOT_FOUND', 'Prose question Attention was not found');
+        }
+        const decision = decideProseQuestionResolution({
+          attentionKind: subject.kind,
+          attentionStatus: subject.attention_status,
+          prompt: JSON.parse(subject.prompt_json) as unknown,
+          sessionState: subject.session_state,
+          executionState: subject.execution_state,
+          taskState: subject.task_state,
+        });
+        if (!decision.allowed) {
+          throw new StorageError(decision.code, decision.message);
+        }
+        const answerJson = JSON.stringify({
+          type: 'PROSE_QUESTION_RESOLUTION',
+          resolution: input.resolution,
+          text: input.text,
+          note: input.note,
+          actor: input.actor,
+        });
+        database.query(`
+          INSERT INTO attention_answers(id,request_id,command_id,actor,answer_json,created_at)
+          VALUES (?1,?2,?3,?4,?5,?6)
+        `).run(input.answerId, input.attentionId, input.commandId, input.actor, answerJson,
+          input.resolvedAt);
+        const attentionUpdate = database.query(
+          "UPDATE attention_requests SET status='CLOSED' WHERE id=?1 AND status='OPEN'",
+        ).run(input.attentionId);
+        const taskUpdate = database.query(`
+          UPDATE tasks SET state='RUNNING',version=version+1,updated_at=?1
+          WHERE id=?2 AND state='WAITING_FOR_USER'
+        `).run(input.resolvedAt, subject.task_id);
+        if (attentionUpdate.changes !== 1 || taskUpdate.changes !== 1) {
+          throw new StorageError('CONCURRENT_MODIFICATION',
+            'Prose question resolution raced another change');
+        }
+        database.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'ProseQuestionAttentionResolved',1,'Attention',?3,1,?4,?4,?5,?6)
+        `).run(input.resolutionEventId, input.projectId, input.attentionId, input.commandId,
+          input.resolvedAt, JSON.stringify({ attentionId: input.attentionId,
+            resolution: input.resolution, answerText: input.text, note: input.note,
+            actor: input.actor, attentionStatus: 'CLOSED',
+            // The wait ended; nothing was sent to the Agent and no conversation was resumed.
+            deliveredToProvider: false,
+            reason: 'a prose question has no provider dialog to answer' }));
+        database.query(`
+          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+          VALUES (?1,?2,'TaskStateChanged',1,'Task',?3,?4,?5,?6,?7,?8)
+        `).run(input.taskEventId, input.projectId, subject.task_id, subject.task_version + 1,
+          input.commandId, input.resolutionEventId, input.resolvedAt,
+          JSON.stringify({ taskId: subject.task_id, from: 'WAITING_FOR_USER', to: 'RUNNING',
+            reason: 'prose question resolved by the user; no provider conversation was resumed' }));
+        return {
+          attentionId: input.attentionId,
+          projectId: input.projectId,
+          taskId: subject.task_id,
+          executionId: subject.execution_id,
+          sessionId: subject.session_id,
+          resolution: input.resolution,
+          answerText: input.text,
+          note: input.note,
+          actor: input.actor,
+          taskState: 'RUNNING' as const,
+          executionState: 'RUNNING' as const,
+          sessionState: 'EXITED' as const,
+          attentionStatus: 'CLOSED' as const,
+          deliveredToProvider: false as const,
+          resolvedAt: input.resolvedAt,
+        };
+      },
+    });
+  }
+
   private agentAnswerRow(operationId: string): AgentAnswerPlan | null {
     const row = this.sqlite.query<{
       operation_id: string; operation_state: AgentAnswerPlan['operationState']; project_id: string;
@@ -2991,6 +3177,15 @@ export class Phase1Database {
      * it is what makes "SUCCESS" explain itself; it changes no state and is not an Attention.
      */
     readonly note?: AgentCompletionNote;
+    /**
+     * The escalated wait for a note the Runtime decided to act on (FOUNDATION-069). It is projected
+     * in the same transaction as the completion, so "the Agent ended by asking in prose" and "this
+     * Task is waiting for a human" can never be recorded one without the other.
+     *
+     * Absent means the completion is not escalated — either the rule did not fire, or the runtime
+     * setting says `record-only`/`off`. Neither case is a wait, and neither is invented here.
+     */
+    readonly proseQuestion?: ProseQuestionWaitProjection;
     readonly sessionEventId: string;
     readonly executionEventId: string;
     readonly taskEventId: string;
@@ -3032,6 +3227,22 @@ export class Phase1Database {
           // The note travels with the append-only completion fact, so "why does this SUCCESS say
           // nothing happened" is answerable from the event log alone (FOUNDATION-056).
           ...(input.note === undefined ? {} : { note: input.note }) }));
+      // The escalation is part of this same transaction, not a follow-up the caller could skip:
+      // what is recorded is exactly "this completion, and this wait", or neither.
+      let proseQuestionAttentionId: string | null = null;
+      if (input.proseQuestion !== undefined
+        && this.#projectProseQuestionWait({
+          projectId: subject.projectId,
+          taskId: subject.taskId,
+          taskVersion: subject.taskVersion,
+          sessionId: input.sessionId,
+          executionId: input.executionId,
+          providerEventId: input.providerEventId,
+          observedAt: input.observedAt,
+          proseQuestion: input.proseQuestion,
+        })) {
+        proseQuestionAttentionId = input.proseQuestion.attentionId;
+      }
       if (input.outcome === 'FAILURE') {
         const executionUpdate = this.sqlite.query(`
           UPDATE executions SET state='FAILED',resource_held=0,version=version+1,
@@ -3069,8 +3280,72 @@ export class Phase1Database {
       }
       return { duplicate: false as const, eventId: input.providerEventId, cursor: input.cursor,
         sessionState: 'EXITED' as const,
-        executionState: input.outcome === 'FAILURE' ? 'FAILED' as const : 'RUNNING' as const };
+        executionState: input.outcome === 'FAILURE' ? 'FAILED' as const : 'RUNNING' as const,
+        ...(proseQuestionAttentionId === null ? {} : { attentionId: proseQuestionAttentionId }) };
     })();
+  }
+
+  /**
+   * Records one escalated prose question: the Attention, the `WAITING_FOR_USER` Task, and the two
+   * append-only events. Session and Execution are deliberately left alone — the provider process
+   * really did exit and the Execution really is still the attempt holding the workspace, so this
+   * wait is only ever expressed on the Task (invariant 10: it pauses that Task alone).
+   *
+   * The Task must be `RUNNING`. When it is not (a stop raced this completion), the wait is skipped
+   * and nothing is written: the completion keeps its note, but escalating a Task the user is
+   * already stopping would create a wait nobody can act on. Skipping is not a silent success — the
+   * caller records the note as always, and `attention list` simply has no new row.
+   *
+   * Returns whether the wait was recorded.
+   */
+  #projectProseQuestionWait(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly taskVersion: number;
+    readonly sessionId: string;
+    readonly executionId: string;
+    readonly providerEventId: string;
+    readonly observedAt: number;
+    readonly proseQuestion: ProseQuestionWaitProjection;
+  }): boolean {
+    const promptJson = JSON.stringify(input.proseQuestion.prompt);
+    if (promptJson === undefined) {
+      throw new StorageError('INVALID_STATE', 'Prose question Attention prompt is not JSON serializable');
+    }
+    // The Task moves first: it is the only conditional step, so a Task that is not RUNNING ends this
+    // helper before any row or event exists.
+    const taskUpdate = this.sqlite.query(`
+      UPDATE tasks SET state='WAITING_FOR_USER',version=version+1,updated_at=?1
+      WHERE id=?2 AND state='RUNNING'
+    `).run(input.observedAt, input.taskId);
+    if (taskUpdate.changes !== 1) return false;
+    this.sqlite.query(`
+      INSERT INTO attention_requests(id,session_id,provider_request_id,kind,prompt_json,status,
+        created_at,response_type)
+      VALUES (?1,?2,?3,'QUESTION',?4,'OPEN',?5,'VALUE')
+    `).run(input.proseQuestion.attentionId, input.sessionId,
+      input.proseQuestion.providerRequestId, promptJson, input.observedAt);
+    this.sqlite.query(`
+      INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+        aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+      VALUES (?1,?2,'UserAttentionRequested',1,'Attention',?3,0,?4,?5,?6,?7)
+    `).run(input.proseQuestion.attentionEventId, input.projectId,
+      input.proseQuestion.attentionId, input.executionId, input.providerEventId, input.observedAt,
+      JSON.stringify({ attentionId: input.proseQuestion.attentionId, sessionId: input.sessionId,
+        kind: 'QUESTION', responseType: 'VALUE',
+        providerRequestId: input.proseQuestion.providerRequestId,
+        // Says out loud that no provider dialog is behind this Attention, so a client never waits
+        // for a provider response that will not come.
+        proseQuestion: true }));
+    this.sqlite.query(`
+      INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+        aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+      VALUES (?1,?2,'TaskStateChanged',1,'Task',?3,?4,?5,?6,?7,?8)
+    `).run(input.proseQuestion.taskEventId, input.projectId, input.taskId,
+      input.taskVersion + 1, input.executionId, input.proseQuestion.attentionEventId,
+      input.observedAt, JSON.stringify({ taskId: input.taskId, from: 'RUNNING',
+        to: 'WAITING_FOR_USER', reason: 'agent asked its question in prose and ended the turn' }));
+    return true;
   }
 
   /** A lost provider transport keeps Execution/workspace ownership: quiescence was never proven. */

@@ -75,46 +75,104 @@ function fakeWith(factsValue: AgentCompletionFacts | undefined): DeterministicFa
 }
 
 describe('Agent completion notes', () => {
-  test('records a stable reason code when a run used no tool and ended with a question',
-    async () => {
-      const value = await createAgentFixture();
-      const adapter = fakeWith(facts());
-      try {
-        const session = await startSession(value, adapter);
-        const results = await observeAgentEvents({ storage: value.storage, adapter,
-          sessionId: session.sessionId });
+  test('records the note and, by default, the wait it stands for', async () => {
+    const value = await createAgentFixture();
+    const adapter = fakeWith(facts());
+    try {
+      const session = await startSession(value, adapter);
+      // No mode is passed: the product default (`auto`) is what a Runtime without an explicit
+      // setting uses, so this is the behaviour a user meets (FOUNDATION-069).
+      const results = await observeAgentEvents({ storage: value.storage, adapter,
+        sessionId: session.sessionId });
 
-        // The completion itself is still a SUCCESS: this lane annotates, it does not re-classify.
-        expect(results.map((result) => [result.duplicate, result.sessionState,
-          result.executionState])).toEqual([[false, 'EXITED', 'RUNNING']]);
-        const completion = completionOf(value, session.executionId);
-        expect(completion).toMatchObject({
-          outcome: 'SUCCESS',
-          evidenceRef: 'fake-quiescence',
-          failure: null,
-          note: {
-            code: PROSE_QUESTION_NO_TOOL_USE,
-            heuristic: noToolCallsWithTrailingQuestionMarkHeuristic,
-          },
-        });
-        // The note carries the provider facts it was applied to, so it can be re-checked.
-        expect(completion?.facts).toEqual(facts());
-        expect(completion?.note?.facts).toEqual(facts());
-        expect(completion?.note?.message).toContain('heuristic');
-        // Nothing about this is an Attention or a wait state (invariant 9/21/23).
-        expect(value.storage.listAttentionRequests(value.projectId)).toEqual([]);
-        expect(value.storage.listTasks(value.projectId)[0]?.state).toBe('RUNNING');
-        // And the append-only completion event says the same thing.
-        const events = completionEvents(value);
-        expect(events).toHaveLength(1);
-        expect(events[0]?.payload).toMatchObject({
-          outcome: 'SUCCESS',
-          note: { code: PROSE_QUESTION_NO_TOOL_USE },
-        });
-      } finally {
-        value.storage.close();
-      }
-    });
+      // The completion itself is still a SUCCESS: this lane annotates, it does not re-classify.
+      expect(results.map((result) => [result.duplicate, result.sessionState,
+        result.executionState])).toEqual([[false, 'EXITED', 'RUNNING']]);
+      const completion = completionOf(value, session.executionId);
+      expect(completion).toMatchObject({
+        outcome: 'SUCCESS',
+        evidenceRef: 'fake-quiescence',
+        failure: null,
+        note: {
+          code: PROSE_QUESTION_NO_TOOL_USE,
+          heuristic: noToolCallsWithTrailingQuestionMarkHeuristic,
+        },
+      });
+      // The note carries the provider facts it was applied to, so it can be re-checked.
+      expect(completion?.facts).toEqual(facts());
+      expect(completion?.note?.facts).toEqual(facts());
+      expect(completion?.note?.message).toContain('heuristic');
+      // The note also becomes exactly one wait: the Task waits, and the Attention is the note
+      // restated. The provider process is gone, so the Session stays EXITED and the Execution is
+      // untouched — this is a wait for a human, not a pretend live conversation.
+      const attentions = value.storage.listAttentionRequests(value.projectId);
+      expect(attentions).toHaveLength(1);
+      expect(attentions[0]).toMatchObject({ kind: 'QUESTION', status: 'OPEN',
+        providerRequestId: 'codeestra-prose-question:fake-settled-1', taskId: value.taskId });
+      expect(attentions[0]?.prompt).toMatchObject({ kind: 'codeestra.prose-question',
+        code: PROSE_QUESTION_NO_TOOL_USE, text: 'Which package manager should I use?' });
+      expect(results[0]?.attentionId).toBe(attentions[0]?.id);
+      expect(value.storage.listTaskExecutions(value.projectId, value.taskId)[0]?.session?.state)
+        .toBe('EXITED');
+      expect(value.storage.listTaskExecutions(value.projectId, value.taskId)[0]?.state)
+        .toBe('RUNNING');
+      expect(value.storage.listTasks(value.projectId)[0]?.state).toBe('WAITING_FOR_USER');
+      // And the append-only log says the same thing: the completion, the Attention, the wait.
+      const events = value.storage.listEventsAfter({ sinceSequence: 0, limit: 500,
+        projectId: value.projectId });
+      const completed = events.filter((event) => event.eventType === 'AgentSessionCompleted');
+      expect(completed).toHaveLength(1);
+      expect(completed[0]?.payload).toMatchObject({
+        outcome: 'SUCCESS',
+        note: { code: PROSE_QUESTION_NO_TOOL_USE },
+      });
+      expect(events.filter((event) => event.eventType === 'UserAttentionRequested')).toHaveLength(1);
+      expect(events.filter((event) => event.eventType === 'TaskStateChanged'
+        && (event.payload as { to?: string }).to === 'WAITING_FOR_USER')).toHaveLength(1);
+    } finally {
+      value.storage.close();
+    }
+  });
+
+  test('records the note alone when escalation is explicitly downgraded to record-only', async () => {
+    const value = await createAgentFixture();
+    const adapter = fakeWith(facts());
+    try {
+      const session = await startSession(value, adapter);
+      // FOUNDATION-056's behaviour, now reachable as an explicit setting: annotate, change nothing.
+      await observeAgentEvents({ storage: value.storage, adapter, sessionId: session.sessionId,
+        proseQuestionAttentionMode: 'record-only' });
+
+      expect(completionOf(value, session.executionId)?.note?.code).toBe(PROSE_QUESTION_NO_TOOL_USE);
+      expect(value.storage.listAttentionRequests(value.projectId)).toEqual([]);
+      expect(value.storage.listTasks(value.projectId)[0]?.state).toBe('RUNNING');
+      expect(value.storage.listEventsAfter({ sinceSequence: 0, limit: 500,
+        projectId: value.projectId }).filter((event) => event.eventType === 'UserAttentionRequested'))
+        .toHaveLength(0);
+    } finally {
+      value.storage.close();
+    }
+  });
+
+  test('records nothing at all when escalation is switched off', async () => {
+    const value = await createAgentFixture();
+    const adapter = fakeWith(facts());
+    try {
+      const session = await startSession(value, adapter);
+      await observeAgentEvents({ storage: value.storage, adapter, sessionId: session.sessionId,
+        proseQuestionAttentionMode: 'off' });
+
+      // `off` is the strictly smaller recording: no note, no wait, but the facts stay observable.
+      const completion = completionOf(value, session.executionId);
+      expect(completion?.outcome).toBe('SUCCESS');
+      expect(completion?.facts).toEqual(facts());
+      expect(completion?.note).toBeNull();
+      expect(value.storage.listAttentionRequests(value.projectId)).toEqual([]);
+      expect(value.storage.listTasks(value.projectId)[0]?.state).toBe('RUNNING');
+    } finally {
+      value.storage.close();
+    }
+  });
 
   test('leaves an ordinary completion unexplained only when nothing needed saying', async () => {
     const value = await createAgentFixture();
@@ -261,7 +319,8 @@ describe('Agent completion notes', () => {
         observedAt: Date.now(),
       };
       // A cursor/event that was already projected is answered as a duplicate instead of being
-      // recorded twice, so the note can never be duplicated by a replay.
+      // recorded twice, so the note — and the wait it stands for — can never be duplicated by a
+      // replay either.
       const replayed = value.storage.recordAgentCompleted(input);
       expect(replayed.duplicate).toBe(true);
       expect(value.storage.sqlite.query<{ count: number }, []>(
@@ -269,6 +328,7 @@ describe('Agent completion notes', () => {
         .toBe(1);
       expect(completionEvents(value)).toHaveLength(1);
       expect(completionOf(value, session.executionId)?.note?.code).toBe(PROSE_QUESTION_NO_TOOL_USE);
+      expect(value.storage.listAttentionRequests(value.projectId)).toHaveLength(1);
     } finally {
       value.storage.close();
     }

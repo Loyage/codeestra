@@ -2,11 +2,18 @@ import { z } from 'zod';
 import { questionnaireAnswerSchema } from './questionnaire.js';
 import { verificationPolicyConfirmationSchema } from './verification-policy.js';
 import { impactPolicyConfirmationSchema } from './impact-policy.js';
+import {
+  maxProseQuestionAnswerLength,
+  maxProseQuestionResolutionNoteLength,
+  proseQuestionAttentionModeSchema,
+  proseQuestionResolutionSchema,
+} from './prose-question.js';
 
 export * from './questionnaire.js';
 export * from './verification-policy.js';
 export * from './impact-policy.js';
 export * from './targeted-test-plan.js';
+export * from './prose-question.js';
 
 export const repositoryIdentitySchema = z.strictObject({
   repoRoot: z.string().min(1),
@@ -1265,6 +1272,33 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     projectId: z.string().uuid(),
     attentionId: z.string().uuid(),
     answer: agentAnswerSchema,
+  }),
+  /**
+   * Ends a prose-question wait (FOUNDATION-069). It is deliberately separate from
+   * `attention.answer`: that command answers a dialog the provider is still waiting on, while this
+   * one records how a wait ended after the provider process already exited. Neither variant
+   * resumes a conversation, and `text` is only accepted for `ANSWERED`.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('attention.resolve'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    attentionId: z.string().uuid(),
+    resolution: proseQuestionResolutionSchema,
+    text: z.string().trim().min(1).max(maxProseQuestionAnswerLength).optional(),
+    note: z.string().trim().min(1).max(maxProseQuestionResolutionNoteLength).optional(),
+  }),
+  /**
+   * Reads and writes the one global switch that decides whether a prose question becomes a wait.
+   * It is a setting, not a gate: changing it needs no confirmation and rewriting it never touches
+   * an already recorded wait.
+   */
+  z.strictObject({ ...requestBase, command: z.literal('settings.proseQuestionAttention.get') }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('settings.proseQuestionAttention.set'),
+    mode: proseQuestionAttentionModeSchema,
   }),
   /**
    * Read-only preview of what a reclamation would remove and why. This is the dry run: it

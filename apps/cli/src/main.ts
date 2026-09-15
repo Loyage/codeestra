@@ -214,6 +214,39 @@ function printCompletionNotes(view: unknown): void {
 }
 
 /**
+ * Renders the prose-question waits of a Task to stderr (FOUNDATION-069).
+ *
+ * The Task's own `state` already says `WAITING_FOR_USER`, but that state is shared with every other
+ * reason to wait, so the human-facing line names the reason and the command that ends it. It is a
+ * rendering of recorded facts: it changes nothing, and it never claims the Agent is still running.
+ *
+ * The list is only fetched for a Task that is actually waiting, so the common path pays nothing.
+ */
+async function printProseQuestionWaits(input: {
+  readonly projectId: string;
+  readonly view: unknown;
+  readonly call: (request: ClientRequest) => Promise<unknown>;
+}): Promise<void> {
+  const task = (input.view as { readonly task?: { readonly state?: unknown } } | null)?.task;
+  if (task?.state !== 'WAITING_FOR_USER') return;
+  const listed = await input.call({ command: 'attention.list', projectId: input.projectId });
+  if (!Array.isArray(listed)) return;
+  for (const candidate of listed as readonly {
+    readonly id?: unknown; readonly status?: unknown; readonly executionId?: unknown;
+    readonly prompt?: { readonly kind?: unknown; readonly text?: unknown } | null }[]) {
+    if (candidate.status !== 'OPEN') continue;
+    if (candidate.prompt?.kind !== 'codeestra.prose-question') continue;
+    const text = typeof candidate.prompt.text === 'string' ? candidate.prompt.text : 'no text';
+    console.error(`[waiting] ${typeof candidate.id === 'string' ? candidate.id : 'unknown attention'}`
+      + ` (${typeof candidate.executionId === 'string' ? candidate.executionId : 'unknown execution'})`
+      + ` recorded PROSE_QUESTION_NO_TOOL_USE: the Agent ended its turn asking in prose and`
+      + ` exited without using a tool. The provider is gone: nothing was delivered to it.`
+      + ` End the wait with attention resolve --answer <text> | --dismiss.`);
+    console.error(`[waiting] the Agent asked: ${text}`);
+  }
+}
+
+/**
  * An Attention answer as the Runtime command face accepts it. A questionnaire answer stays
  * structured here rather than pre-serialized, so a bad option number is rejected by the Runtime
  * with a code the caller can act on instead of reaching the Agent as an opaque string.
@@ -1022,6 +1055,9 @@ function usage(): never {
   bun run codeestra attention answer <project-id> <attention-id> cancel
   bun run codeestra attention answer <project-id> <attention-id> [--choose <question>:<options>]…
     [--text <question>=<text>]… [--cancel]
+  bun run codeestra attention resolve <project-id> <attention-id> --dismiss [--note <text>] [--json]
+  bun run codeestra attention resolve <project-id> <attention-id> --answer <text> [--note <text>] [--json]
+  bun run codeestra settings prose-question-attention [auto|record-only|off] [--json]
   bun run codeestra reclaim plan [--project <project-id> | --all-projects] [--task <task-id>]
     [--kind <TASK_WORKTREE|VERIFICATION_COPY|INTEGRATION_WORKTREE>]… [--include-failure-scenes]
     [--unregistered] [--scan-root <path-inside-home>] [--remove-unregistered <path>]… [--json]
@@ -1051,6 +1087,17 @@ function usage(): never {
   bun run codeestra promotion list <project-id> [--limit <n>]
   bun run codeestra promotion full-suite run <project-id> --dev-commit <full-sha> [--json]
   bun run codeestra promotion full-suite list <project-id> [--limit <n>] [--json]
+
+attention resolve ends a prose-question wait: an Agent that used no tool and ended its turn by
+asking its question in ordinary prose leaves a Task whose provider process already exited. The
+Runtime records that as its own Attention (a heuristic about the shape of the ending, never a claim
+about intent) and puts the Task in WAITING_FOR_USER; --dismiss records a false alarm, --answer
+records the user's own text. Neither resumes the conversation and neither is a TaskRevision: an
+answer is a statement about this wait, not an amendment of the specification. Delivering one through
+attention answer is refused with PROSE_QUESTION_RESOLUTION_REQUIRED, because there is no provider
+dialog to write to. settings prose-question-attention reads or writes the global switch that decides
+whether such a completion becomes a wait at all (auto, the default; record-only; off). Changing it
+needs no confirmation and never rewrites a wait that was already recorded.
 
 --reverse prints the newest transcript entry first. It is a rendering choice for the human view
 only (it is refused together with --json), and because the command face reads forward from a cursor
@@ -2194,6 +2241,7 @@ try {
     for (const flag of flags) if (flag !== '--json') usage();
     const view = await call({ command: 'task.status', projectId: firstArgument, taskId });
     printCompletionNotes(view);
+    await printProseQuestionWaits({ projectId: firstArgument, view, call });
     print(view);
   } else if (group === 'task' && action === 'transcript') {
     const [taskId, ...flags] = remainingArguments;
@@ -2754,6 +2802,60 @@ try {
       attentionId,
       answer: parseAttentionAnswer(answerType, answerArguments),
     }));
+  } else if (group === 'attention' && action === 'resolve') {
+    // A prose-question wait has no provider dialog behind it: the Agent's process already exited.
+    // This command records how the wait ended instead of pretending an answer was delivered, so
+    // exactly one of `--dismiss` (false alarm) and `--answer <text>` is required, and neither adds
+    // a confirmation step.
+    const [attentionId, ...flags] = remainingArguments;
+    if (firstArgument === undefined || attentionId === undefined) usage();
+    let dismiss = false;
+    let answer: string | undefined;
+    let note: string | undefined;
+    for (let index = 0; index < flags.length; index += 1) {
+      const flag = flags[index];
+      if (flag === '--dismiss') { dismiss = true; continue; }
+      if (flag === '--json') continue;
+      if (flag === '--note') {
+        const value = flags[index + 1];
+        if (value === undefined) usage();
+        note = value;
+        index += 1;
+        continue;
+      }
+      if (flag === '--answer') {
+        const value = flags[index + 1];
+        if (value === undefined) usage();
+        answer = value;
+        index += 1;
+        continue;
+      }
+      usage();
+    }
+    if (dismiss === (answer !== undefined)) usage();
+    print(await call({
+      command: 'attention.resolve',
+      commandId: crypto.randomUUID(),
+      projectId: firstArgument,
+      attentionId,
+      resolution: dismiss ? 'DISMISSED_FALSE_POSITIVE' : 'ANSWERED',
+      ...(answer === undefined ? {} : { text: answer }),
+      ...(note === undefined ? {} : { note }),
+    }));
+  } else if (group === 'settings' && action === 'prose-question-attention') {
+    // The switch that decides whether a prose question becomes a wait. Reading and writing are one
+    // command because the setting has exactly three values and no confirmation: `auto` (default),
+    // `record-only` (annotate the completion but record no wait), `off` (record nothing).
+    const tokens = [firstArgument, ...remainingArguments]
+      .filter((token): token is string => token !== undefined && token !== '--json');
+    if (tokens.length > 1) usage();
+    const mode = tokens[0]?.toLowerCase();
+    if (mode === undefined) {
+      print(await call({ command: 'settings.proseQuestionAttention.get' }));
+    } else {
+      if (mode !== 'auto' && mode !== 'record-only' && mode !== 'off') usage();
+      print(await call({ command: 'settings.proseQuestionAttention.set', mode }));
+    }
   } else if (group === 'task' && action === 'revision') {
     // The revision face of PROJECT_SPEC §2.11: creating a revision is one command, and the delivery
     // of that revision into a running Execution is separately readable and separately resolvable. A
