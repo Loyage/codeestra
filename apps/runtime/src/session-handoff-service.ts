@@ -305,6 +305,37 @@ function processIdentityOf(incarnation: SessionIncarnationRecord): {
   return { pid: candidate.pid, startToken: candidate.startToken };
 }
 
+/**
+ * The bounded evidence reference a handoff fact carries. It names the incarnation *and* the OS
+ * identity it was recorded with (pid plus start token), because a pid alone cannot distinguish this
+ * provider from a later process that reused the number — the same rule the ownership check uses.
+ * A reference that cannot be built is `null`, never a made-up value.
+ */
+function processEvidenceRef(incarnation: SessionIncarnationRecord): string | null {
+  const identity = processIdentityOf(incarnation);
+  if (identity === null) return null;
+  return `incarnation:${incarnation.id}#pid=${identity.pid}@${identity.startToken}`;
+}
+
+/**
+ * The stable reason code of a refusal.
+ *
+ * A `SessionHandoffServiceError` already carries one in `code`. A `StorageError` carries a generic
+ * class (`INVALID_STATE`), so the specific code of a *refusal* is the `CODE:` prefix the storage
+ * layer writes into its message (`HANDOFF_ALREADY_REQUESTED: …`). The prefix wins when both exist,
+ * because "which rule refused this" is what a client branches on.
+ */
+function refusalCode(error: unknown, fallback: string): string {
+  const message = error instanceof Error ? error.message : '';
+  const prefixed = /^([A-Z][A-Z0-9_]{2,}):/.exec(message);
+  if (prefixed !== null) return prefixed[1] as string;
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    const code = (error as { readonly code?: unknown }).code;
+    if (typeof code === 'string' && code.length > 0) return code;
+  }
+  return fallback;
+}
+
 /** What starting an automation successor (the `RETURN` direction) reports back. */
 export interface AutomationSuccessorStart {
   readonly adapterId: string;
@@ -687,24 +718,53 @@ export class SessionHandoffService {
     const session = this.#requireSession(input.projectId, input.sessionId);
     const current = this.#storage.getCurrentSessionIncarnation(input.sessionId);
     if (current === null) {
+      this.#recordHandoffFailure({
+        sessionId: input.sessionId, takeoverId: null, incarnationId: null, stage: 'REQUEST',
+        code: 'SESSION_INCARNATION_UNAVAILABLE',
+        detail: 'This Session has no current provider incarnation to hand over',
+        commandId: input.commandId,
+      });
       throw new SessionHandoffServiceError('SESSION_INCARNATION_UNAVAILABLE',
         'This Session has no current provider incarnation to hand over');
     }
     const lease = this.#storage.getSessionWriterLease(input.sessionId);
     if (input.kind === 'TAKEOVER' && lease !== null && lease.holderKind === 'TERMINAL_ATTACHMENT'
       && lease.incarnationId !== current.id) {
+      this.#recordHandoffFailure({
+        sessionId: input.sessionId, takeoverId: null, incarnationId: current.id, stage: 'REQUEST',
+        code: 'ATTACHMENT_BUSY',
+        detail: `Another terminal already holds the writer lease for this Session`
+          + ` (${lease.holderRef})`,
+        commandId: input.commandId, evidenceRef: processEvidenceRef(current),
+      });
       throw new SessionHandoffServiceError('ATTACHMENT_BUSY',
         `Another terminal already holds the writer lease for this Session (${lease.holderRef})`);
     }
-    const write = this.#storage.recordSessionHandoffRequest({
-      id: this.#randomUUID(),
-      sessionId: input.sessionId,
-      executionId: session.executionId,
-      incarnationId: current.id,
-      kind: input.kind,
-      commandId: input.commandId,
-      createdAt: this.#now(),
-    });
+    let write;
+    try {
+      write = this.#storage.recordSessionHandoffRequest({
+        id: this.#randomUUID(),
+        sessionId: input.sessionId,
+        executionId: session.executionId,
+        incarnationId: current.id,
+        kind: input.kind,
+        commandId: input.commandId,
+        createdAt: this.#now(),
+        // The intent and its `TakeoverRequested` event are one transaction inside storage: a request
+        // that was recorded without its event (or the reverse) would be a takeover nobody can audit.
+        eventId: this.#randomUUID(),
+      });
+    } catch (error) {
+      // A request storage refused (an open request already exists) leaves no `TakeoverRequested`
+      // fact, because no request was recorded; the refusal itself is the fact that must be visible.
+      this.#recordHandoffFailure({
+        sessionId: input.sessionId, takeoverId: null, incarnationId: current.id, stage: 'REQUEST',
+        code: refusalCode(error, 'HANDOFF_REQUEST_REFUSED'),
+        detail: error instanceof Error ? error.message : String(error),
+        commandId: input.commandId, evidenceRef: processEvidenceRef(current),
+      });
+      throw error;
+    }
     const channel = this.#findChannel(input.sessionId);
     if (channel !== null && !write.replayed) {
       this.#send(channel, { kind: 'fence', active: true });
@@ -761,12 +821,27 @@ export class SessionHandoffService {
     readonly commandId: string;
   }): Promise<SuccessorAdmission> {
     this.#requireSession(input.projectId, input.sessionId);
-    const refusal = (code: string, detail: string, observation = 'NOT_CHECKED'): SuccessorAdmission => ({
-      admitted: false, code, detail, predecessorObservation: observation,
-      successorMode: null, successorStarted: false, terminalTransport: 'NONE',
-      successorIncarnation: null, terminal: null, replayed: false,
-    });
+    // Every refusal below is recorded as a `TakeoverFailed` fact with its stable code: a takeover
+    // that did not happen is still something that happened, and "no event" would make a refusal
+    // indistinguishable from an attempt nobody made.
+    let takeoverId: string | null = null;
+    let incarnationId: string | null = null;
+    const refusal = (code: string, detail: string, observation = 'NOT_CHECKED'): SuccessorAdmission => {
+      this.#recordHandoffFailure({
+        sessionId: input.sessionId, takeoverId, incarnationId, stage: 'ADMIT',
+        code, detail, commandId: input.commandId,
+      });
+      return {
+        admitted: false, code, detail, predecessorObservation: observation,
+        successorMode: null, successorStarted: false, terminalTransport: 'NONE',
+        successorIncarnation: null, terminal: null, replayed: false,
+      };
+    };
     const request = this.#storage.getOpenSessionHandoffRequest(input.sessionId);
+    if (request !== null) {
+      takeoverId = request.id;
+      incarnationId = request.incarnationId;
+    }
     if (request === null) {
       // An admission that already happened is replayed from what it recorded: a repeated command
       // must never start a second provider on one conversation.
@@ -879,12 +954,19 @@ export class SessionHandoffService {
     readonly commandId: string;
   }): Promise<SuccessorAdmission> {
     const { request, incarnation, observation } = input;
-    const refusal = (code: string, detail: string): SuccessorAdmission => ({
-      admitted: false, code, detail, predecessorObservation: observation.state,
-      successorMode: 'HUMAN_TUI', successorStarted: false, terminalTransport: 'NONE',
-      successorIncarnation: null, terminal: this.#terminal?.view(request.sessionId) ?? null,
-      replayed: false,
-    });
+    const refusal = (code: string, detail: string): SuccessorAdmission => {
+      this.#recordHandoffFailure({
+        sessionId: request.sessionId, takeoverId: request.id, incarnationId: incarnation.id,
+        stage: 'ADMIT', code, detail, commandId: input.commandId,
+        evidenceRef: processEvidenceRef(incarnation),
+      });
+      return {
+        admitted: false, code, detail, predecessorObservation: observation.state,
+        successorMode: 'HUMAN_TUI', successorStarted: false, terminalTransport: 'NONE',
+        successorIncarnation: null, terminal: this.#terminal?.view(request.sessionId) ?? null,
+        replayed: false,
+      };
+    };
     const terminalService = this.#terminal;
     if (terminalService === null) {
       return refusal('TERMINAL_TRANSPORT_UNAVAILABLE',
@@ -907,16 +989,24 @@ export class SessionHandoffService {
         'This Session already has a running native terminal');
     }
     // The conversation must not be handed to a second writer: the predecessor stops claiming to be
-    // current, and its lease is released, before anything is launched.
-    this.#storage.markSessionIncarnationExited({
-      incarnationId: incarnation.id,
+    // current, its lease is released, and both facts (the handoff started, the writer lease changed)
+    // are committed with the state change in one transaction inside storage. This is not the hand
+    // over yet: nothing has been started, and a successor that cannot be launched becomes a
+    // `TakeoverFailed` while the predecessor's exit stays in the history.
+    this.#storage.beginSessionHandoff({
+      requestId: request.id,
+      sessionId: request.sessionId,
       at: this.#now(),
+      eventId: this.#randomUUID(),
+      leaseEventId: this.#randomUUID(),
+      sourceIncarnationId: incarnation.id,
+      targetMode: 'HUMAN_TUI',
+      predecessorObservation: observation.state,
+      processEvidenceRef: processEvidenceRef(incarnation),
       exit: { kind: 'HANDOFF', ownership: observation.state, detail: observation.detail,
         sessionFile },
-      detail: `superseded by a native terminal successor after ${observation.detail}`,
-    });
-    this.#storage.releaseSessionWriterLeaseForSession({
-      sessionId: request.sessionId, reason: 'handoff to a native terminal', releasedAt: this.#now(),
+      exitDetail: `superseded by a native terminal successor after ${observation.detail}`,
+      releaseReason: 'handoff to a native terminal',
     });
     let launched;
     try {
@@ -970,8 +1060,17 @@ export class SessionHandoffService {
     this.#storage.markSessionHandoffAdmitted({
       requestId: request.id,
       at: this.#now(),
+      eventId: this.#randomUUID(),
       detail: `native terminal started as incarnation ${write.incarnation.incarnationNumber};`
         + ` predecessor ownership ${observation.state}: ${observation.detail}`,
+      completion: {
+        successorIncarnationId: write.incarnation.id,
+        successorIncarnationNumber: write.incarnation.incarnationNumber,
+        terminalTransport: 'PTY',
+        terminalId: terminalService.view(request.sessionId)?.terminalId ?? null,
+        providerPid: launched.providerPid,
+        processEvidenceRef: processEvidenceRef(write.incarnation),
+      },
     });
     return {
       admitted: true,
@@ -999,12 +1098,19 @@ export class SessionHandoffService {
     readonly commandId: string;
   }): Promise<SuccessorAdmission> {
     const { request, incarnation, observation } = input;
-    const refusal = (code: string, detail: string): SuccessorAdmission => ({
-      admitted: false, code, detail, predecessorObservation: observation.state,
-      successorMode: 'AUTOMATED_RPC', successorStarted: false, terminalTransport: 'NONE',
-      successorIncarnation: null, terminal: this.#terminal?.view(request.sessionId) ?? null,
-      replayed: false,
-    });
+    const refusal = (code: string, detail: string): SuccessorAdmission => {
+      this.#recordHandoffFailure({
+        sessionId: request.sessionId, takeoverId: request.id, incarnationId: incarnation.id,
+        stage: 'ADMIT', code, detail, commandId: input.commandId,
+        evidenceRef: processEvidenceRef(incarnation),
+      });
+      return {
+        admitted: false, code, detail, predecessorObservation: observation.state,
+        successorMode: 'AUTOMATED_RPC', successorStarted: false, terminalTransport: 'NONE',
+        successorIncarnation: null, terminal: this.#terminal?.view(request.sessionId) ?? null,
+        replayed: false,
+      };
+    };
     const running = this.#storage.getRunningSessionTerminal(request.sessionId);
     if (running !== null) {
       return refusal('TERMINAL_STILL_RUNNING',
@@ -1023,15 +1129,20 @@ export class SessionHandoffService {
         'The predecessor has no recorded provider session file, so a successor cannot reopen the'
         + ' same conversation');
     }
-    this.#storage.markSessionIncarnationExited({
-      incarnationId: incarnation.id,
+    this.#storage.beginSessionHandoff({
+      requestId: request.id,
+      sessionId: request.sessionId,
       at: this.#now(),
+      eventId: this.#randomUUID(),
+      leaseEventId: this.#randomUUID(),
+      sourceIncarnationId: incarnation.id,
+      targetMode: 'AUTOMATED_RPC',
+      predecessorObservation: observation.state,
+      processEvidenceRef: processEvidenceRef(incarnation),
       exit: { kind: 'RELEASE', ownership: observation.state, detail: observation.detail,
         sessionFile },
-      detail: `released by an explicit terminal release after ${observation.detail}`,
-    });
-    this.#storage.releaseSessionWriterLeaseForSession({
-      sessionId: request.sessionId, reason: 'handoff back to automation', releasedAt: this.#now(),
+      exitDetail: `released by an explicit terminal release after ${observation.detail}`,
+      releaseReason: 'handoff back to automation',
     });
     let started: AutomationSuccessorStart;
     try {
@@ -1098,8 +1209,17 @@ export class SessionHandoffService {
     this.#storage.markSessionHandoffAdmitted({
       requestId: request.id,
       at: this.#now(),
+      eventId: this.#randomUUID(),
       detail: `automation successor started as incarnation`
         + ` ${write.incarnation.incarnationNumber} on the same provider session file`,
+      completion: {
+        successorIncarnationId: write.incarnation.id,
+        successorIncarnationNumber: write.incarnation.incarnationNumber,
+        terminalTransport: 'RPC',
+        terminalId: null,
+        providerPid: identityPid,
+        processEvidenceRef: processEvidenceRef(write.incarnation),
+      },
     });
     return {
       admitted: true,
@@ -1147,11 +1267,21 @@ export class SessionHandoffService {
     const session = this.#requireSession(input.projectId, input.sessionId);
     const terminalService = this.#terminal;
     if (terminalService === null) {
+      this.#recordHandoffFailure({
+        sessionId: input.sessionId, takeoverId: null, incarnationId: null, stage: 'RELEASE',
+        code: 'TERMINAL_TRANSPORT_UNAVAILABLE', detail: 'This Runtime has no terminal transport',
+        commandId: input.commandId, evidenceRef: null,
+      });
       throw new SessionHandoffServiceError('TERMINAL_TRANSPORT_UNAVAILABLE',
         'This Runtime has no terminal transport configured');
     }
     const running = this.#storage.getRunningSessionTerminal(input.sessionId);
     if (running === null) {
+      this.#recordHandoffFailure({
+        sessionId: input.sessionId, takeoverId: null, incarnationId: null, stage: 'RELEASE',
+        code: 'TERMINAL_NOT_RUNNING', detail: 'This Session has no running native terminal',
+        commandId: input.commandId, evidenceRef: null,
+      });
       throw new SessionHandoffServiceError('TERMINAL_NOT_RUNNING',
         'This Session has no running native terminal to release');
     }
@@ -1159,6 +1289,12 @@ export class SessionHandoffService {
     // explainable from the recorded request rather than invisible.
     const open = this.#storage.getOpenSessionHandoffRequest(input.sessionId);
     if (open !== null && open.kind !== 'RETURN') {
+      this.#recordHandoffFailure({
+        sessionId: input.sessionId, takeoverId: open.id, incarnationId: running.incarnationId,
+        stage: 'RELEASE', code: 'HANDOFF_KIND_MISMATCH',
+        detail: `This Session has an open ${open.kind} handoff request`,
+        commandId: input.commandId, evidenceRef: null,
+      });
       throw new SessionHandoffServiceError('HANDOFF_KIND_MISMATCH',
         `This Session has an open ${open.kind} handoff request; cancel it before releasing the terminal`);
     }
@@ -1170,6 +1306,7 @@ export class SessionHandoffService {
       kind: 'RETURN',
       commandId: `release:${input.commandId}`,
       createdAt: this.#now(),
+      eventId: this.#randomUUID(),
     }) : null;
     const request = recorded === null ? (open as SessionHandoffRequestRecord) : recorded.request;
     const outcome = await terminalService.release({
@@ -1177,6 +1314,15 @@ export class SessionHandoffService {
       commandId: input.commandId,
     });
     if (!outcome.released) {
+      // The release could not be proven (the provider is still running, a descendant survived, the
+      // session file was rewritten). That is a failed takeover release, not silence.
+      this.#recordHandoffFailure({
+        sessionId: input.sessionId, takeoverId: request.id, incarnationId: request.incarnationId,
+        stage: 'RELEASE', code: outcome.code, detail: outcome.detail,
+        commandId: input.commandId,
+        evidenceRef: outcome.terminalId === null ? null
+          : `terminal:${outcome.terminalId}#observation=${outcome.predecessorObservation}`,
+      });
       return { released: false, code: outcome.code, detail: outcome.detail,
         terminal: terminalService.view(input.sessionId), release: {
           exit: outcome.exit === null ? null
@@ -1187,11 +1333,26 @@ export class SessionHandoffService {
     }
     // A terminal release is its own safe point: no fence is involved (the human terminal was
     // released explicitly), so the facts *are* the evidence: recorded above by `release`.
+    //
+    // `TakeoverSafePointReached` and `TakeoverReleased` are committed in that one transaction with the
+    // request's move to its safe point. `TakeoverReleased` is written only for a release that was
+    // *proven* (provider exited, no recorded descendant alive, the session file still holds the
+    // predecessor's entries) — a release that could not be proven became a `TakeoverFailed` above.
     try {
       this.#storage.markSessionTerminalHandoffSafePoint({
         requestId: request.id,
         at: this.#now(),
+        eventId: this.#randomUUID(),
         detail: `terminal ${outcome.terminalId} released: ${outcome.detail}`,
+        release: {
+          releaseEventId: this.#randomUUID(),
+          terminalId: outcome.terminalId,
+          reason: outcome.detail,
+          predecessorObservation: outcome.predecessorObservation,
+          evidenceRef: outcome.terminalId === null ? null
+            : `terminal:${outcome.terminalId}#release=${input.commandId}`,
+          sessionFile: outcome.sessionFile,
+        },
       });
     } catch (error) {
       this.#logger('terminal release safe point could not be recorded', {
@@ -1659,18 +1820,65 @@ export class SessionHandoffService {
       reason: `Codeestra could not record this permission request: ${reason}` });
   }
 
+  /**
+   * Records a refused handoff attempt as a `TakeoverFailed` fact.
+   *
+   * A refusal is an event, not a silent `null`: "the takeover did not happen" is something that
+   * happened, and a subscriber must see it with the stable code a client branches on. Storage derives
+   * the event id from the command and the code, so replaying one command adds no second fact while a
+   * genuinely different refusal stays in the history. A fact that cannot be recorded is logged
+   * instead of replacing the refusal the caller asked about, so the gap stays visible.
+   */
+  #recordHandoffFailure(input: {
+    readonly sessionId: string;
+    readonly takeoverId: string | null;
+    readonly incarnationId: string | null;
+    readonly stage: 'REQUEST' | 'SAFE_POINT' | 'ADMIT' | 'RELEASE';
+    readonly code: string;
+    readonly detail: string;
+    readonly commandId: string;
+    readonly evidenceRef?: string | null;
+  }): void {
+    try {
+      this.#storage.recordSessionHandoffFailure({
+        sessionId: input.sessionId,
+        takeoverId: input.takeoverId,
+        incarnationId: input.incarnationId,
+        stage: input.stage,
+        reason: input.code,
+        detail: input.detail,
+        commandId: input.commandId,
+        evidenceRef: input.evidenceRef ?? null,
+        occurredAt: this.#now(),
+      });
+    } catch (error) {
+      this.#logger('handoff refusal could not be recorded as an event', {
+        sessionId: input.sessionId,
+        reason: input.code,
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   #evaluateSafePoint(sessionId: string, state: ChannelState): void {
     const open = this.#storage.getOpenSessionHandoffRequest(sessionId);
     if (open === null || open.state !== 'FENCED' || !open.fenceActive) return;
     if (state.activeTools.size > 0) return;
     if (open.settledAfterFenceAt === null) return;
     if (this.#storage.getOpenSessionPermissionRequest(sessionId) !== null) return;
+    const detail = `fence acknowledged; ${state.activeTools.size} active tool(s); settled after the`
+      + ' fence; no Attention is open';
     try {
       this.#storage.recordSessionHandoffSafePoint({
         requestId: open.id,
         at: this.#now(),
-        detail: `fence acknowledged; ${state.activeTools.size} active tool(s); settled after the fence;`
-          + ' no Attention is open',
+        detail,
+        eventId: this.#randomUUID(),
+        // The facts are the ones just checked: every condition held, so nothing is missing. They are
+        // stored rather than re-derived later, so the event says what the Runtime really observed.
+        activeTools: state.activeTools.size,
+        missing: [],
+        evidenceRef: `handoff:${open.id}#fence=${open.fenceConfirmedAt ?? 'unknown'}`,
       });
     } catch (error) {
       this.#logger('safe point could not be recorded', {

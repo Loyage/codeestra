@@ -51,6 +51,15 @@ function codexCapabilities(options: { readonly enableRequestUserInput: boolean }
     // The interactive TUI talks to the shared app-server daemon, not to this stdio child, so
     // attaching would be a second writer on one conversation.
     attach: 'UNSUPPORTED',
+    // Measured (docs/spikes/codex-0.151.0.md §3): the app-server protocol has no terminal handoff
+    // and Codex's own TUI is a different writer on the same thread. ADR-0010/0023/0026 are Pi
+    // mechanisms and are deliberately *not* assumed here; handing a Codex conversation to a terminal
+    // would need its own spike and its own ADR.
+    nativeTerminalHandoff: 'UNSUPPORTED',
+    // Measured: an interrupted turn produces no `completed` event, and there is no tool-level
+    // start/end notification. The Runtime therefore cannot know a Codex safe point; it must refuse
+    // the handoff (`SAFE_POINT_NOT_REACHED`) instead of guessing from output.
+    safePointNotification: 'UNSUPPORTED',
     reconnectToLiveSession: 'UNSUPPORTED',
     // Measured: `thread/resume` recovers the same thread id, rollout path and conversation.
     resumeAfterExit: 'SUPPORTED',

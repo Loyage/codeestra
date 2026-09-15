@@ -26,6 +26,8 @@ const capabilities: AdapterCapabilities = Object.freeze({
   revisionAcknowledgement: 'UNSUPPORTED',
   cooperativeStop: 'SUPPORTED',
   attach: 'STRUCTURED',
+  nativeTerminalHandoff: 'UNSUPPORTED',
+  safePointNotification: 'UNSUPPORTED',
   reconnectToLiveSession: 'UNSUPPORTED',
   resumeAfterExit: 'SUPPORTED',
   controlledConfiguration: 'SUPPORTED',

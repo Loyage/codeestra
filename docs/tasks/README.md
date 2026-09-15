@@ -3392,6 +3392,109 @@ task retry <project-id> <task-id> <expected-version> [--adapter <pi|codex>] [--j
 - **未验证**：真实 Pi/Codex 失败后的重试行为（协议 stub 只证明编排；真实提供者的失败只能在 `## NEXT` 第 1 项的真实验收里看）；取消后重做（`CANCELLED` 仍拒绝，属另一个决策）；跨 adapter 复用历史 conversation（retry 刻意新建 conversation）；被 reclaim 后重建 worktree（见下）；`task retry` 的 UI 投影（H1 领地）；真实并发/真实模型行为下的重试。
 - **已知缺口（如实报告，未静默绕过）**：`packages/git/src/reclaim.ts` 明确不删 task branch，因此**已被回收**的 worktree 无法由既有 preparation 路径重建（`prepareWorkspace` 的 `REF_CONFLICT` 会拒绝在既有分支上建 worktree）。本格选择**拒绝并给出稳定码** `WORKSPACE_RECLAIMED`，而不是引入第二套 Git 逻辑或悄悄复用别人的目录；若要把这一格补成「能从既有分支重建」，需要独立决策与领地安排。
 - **未改**：`apps/ui/**`（H1）、`packages/storage/src/migration.ts` 的 v22 号段（H2）、`reclaim-service.ts`（H4）、`session-handoff-service.ts`/`terminal-service.ts`/`packages/agent-adapters/**`（G1）、`schedule-service.ts`/`scheduler.ts`/`slot-reservation-service.ts`（引擎与预留）、`packages/git/**`、`PROJECT_SPEC.md`、`docs/architecture/**`。
+
+## FOUNDATION-063 — 事件名与事件面对齐（ADR-0035）
+
+状态：实现与本地验收完成，**待用户确认后才 commit**。本格来自用户对 FOUNDATION-051（doc-sync）交出的四条不一致的裁决：
+
+1. 事件命名方向（文档对齐实现名 + 新事件用设计名 + 已实现名永不重命名）；
+2. 只补交接/终端那 7 个事件，**不做** `ImpactAssessed`/`ConflictAssessed`、不做 Execution 专名事件、不顺手实现 Session Guidance；
+3. `AdapterCapabilities` 补进 `nativeTerminalHandoff` 与 `safePointNotification`，由适配器如实声明。
+
+**编号记录：**本格指令原写 ADR-0034 与 FOUNDATION-058，但固定基线 `dev@8058eb9275fbea87c1216c4ac9ea66b7e7d96022` 里这两个编号已被 `ADR-0034 紧凑任务信息行与主操作优先` / `FOUNDATION-058` 占用（同基线内的另一条 lane）。该 lane 原先顺延为 ADR-0035 + FOUNDATION-059；集成时 FOUNDATION-059 已由 H1 占用，因此保留 ADR-0035，并把本格任务记录顺延为 **FOUNDATION-063**，不重命名已合入的 H1–H4 记录。
+
+### 1. `event-model.md`：目录对齐到实现名 + 命名规则
+
+- §2 改为以实现实际写入的名字为准，逐条按 `packages/storage/src/database.ts` 与 `apps/runtime/src/**` 的写入点核对（不照抄原 §2.2 表，原表也一并校对）。§2.1 保留各领域（长命令进度/验证/修订投递/容量与调度/集成与提升/回收）的补充事实，并新增交接与终端一节。
+- **命名规则**（§2.2，长期有效）：① 已实现的事件名以实现为准，**永不重命名**（append-only 审计；重命名会让同一语义长期有两个名字，并使已发出的订阅游标、消费者幂等键与外部脚本失效）；② 新事件采用设计目录里的名字；③ 名字变更只能通过「新增事件 + 旧事件不再产生」实现，不迁移历史行、不把旧名行「升级」成新名。
+- §2.3 把原「交用户裁决」表改为**已裁决**并指向 ADR-0035：「已废弃」的设计名逐一标注（`TaskRevisionAppended`/`DependencyAdded`/`DependencyNeedsReview`/`RevisionDelivered`/`RevisionAcknowledged`/`ExecutionResultCaptured`/`DevIntegration*`/`StablePromotion*`），未实现的设计名如实登记（`IntentClarificationRequested`/`TaskPriorityChanged`/`SessionGuidance*`/`ResultCommitAuthorizationRequested`/`CandidateBuilt`/`SelfTestCompleted`/`StablePromoted`/`StableRollbackCompleted`/`ImpactAssessed`/`ConflictAssessed`），实现新增的名字反向登记。
+- §5 追加三条测试要求：同一 command 重放不产生第二个事件（含拒绝事实）；事件与状态变更同事务提交；旧设计名的历史行仍可读且未被改写。
+
+### 2. 七个交接/终端事件
+
+| Event | aggregate | 写入点（事务边界） |
+|---|---|---|
+| `TakeoverRequested` | `SessionHandoff` | `recordSessionHandoffRequest`：与 `session_handoff_requests` 行同事务；重放路径不写 |
+| `TakeoverSafePointReached` | `SessionHandoff` | `recordSessionHandoffSafePoint`（RPC fence）与 `markSessionTerminalHandoffSafePoint`（终端发布）：各与 `AT_SAFE_POINT` 迁移同事务 |
+| `SessionHandoffStarted` | `SessionHandoff` | `beginSessionHandoff`（新）：与「predecessor 置 EXITED + 释放 lease」同一事务 |
+| `SessionHandoffCompleted` | `SessionHandoff` | `markSessionHandoffAdmitted`：与 `ADMITTED` 迁移同事务（successor 无法描述则整体回滚） |
+| `TerminalWriterLeaseChanged` | `SessionWriterLease` | lease 行的插入（`#insertSessionWriterLease`）与两个释放方法；只在 `changes === 1` 时写 |
+| `TakeoverReleased` | `SessionHandoff` | `markSessionTerminalHandoffSafePoint`：与发布安全点同事务；只在发布**被证明**时写 |
+| `TakeoverFailed` | `SessionHandoff`（无 takeover 时以 sessionId 为 aggregate id） | `recordSessionHandoffFailure`：拒绝本身没有状态变更，所以单独成事务；event id = `sha256(commandId:stage:reason)`，重放不新增行 |
+
+payload 要点（均在 `packages/contracts/src/index.ts` 用 Zod `strictObject` 定义，存储写入前 `parse()`）：
+
+- `TakeoverRequested`：takeoverId, sessionId, executionId, incarnationId, `kind`（TAKEOVER/RETURN）, `targetMode`；
+- `TakeoverSafePointReached`：takeoverId, sessionId, executionId, incarnationId, `reachedFrom`（RPC_FENCE/TERMINAL_RELEASE）, `fenceAcknowledged`, `settledAfterFenceAt`, `activeTools`, `evidenceRef`, `lastEntryRef`, **`missing`**（未观测到的安全点事实）；
+- `SessionHandoffStarted`：takeoverId, source/targetSessionId, sourceIncarnationId, fromMode, toMode, `predecessorObservation`, `processEvidenceRef`；
+- `SessionHandoffCompleted`：上者 + successorIncarnationId/Number, `terminalTransport`(PTY/RPC/NONE), terminalId, providerPid, processEvidenceRef；
+- `TerminalWriterLeaseChanged`：takeoverId（开着的交接才有）, sessionId, leaseId, `action`(ACQUIRED/RELEASED), `before`/`after`（{incarnationId,holderKind,holderRef} 或 null）, reason；
+- `TakeoverReleased`：takeoverId, sessionId, executionId, incarnationId, terminalId, reason, predecessorObservation, evidenceRef, `sessionFile{file,entriesAtStart/Release,lastEntryIdAtStart/Release,predecessorEntrySurvived,truncated}`；
+- `TakeoverFailed`：takeoverId（可空）, sessionId, executionId, incarnationId（可空）, `stage`(REQUEST/SAFE_POINT/ADMIT/RELEASE), **`reason`（稳定码，不新增枚举）**, detail, evidenceRef。
+
+事实边界（不把愿望写成事实）：`TakeoverRequested` 与 `SessionHandoffStarted` **都不是**「已交接」（前者只是意图 + fence，后者只是 predecessor 不再是 writer、successor 尚未启动）；只有 `SessionHandoffCompleted` 表示 successor 进程真的启动、记录并持有单 writer lease。`TakeoverReleased` 只在发布被证明（provider 退出 + 记录的进程树无存活者 + provider session file 仍保有 predecessor 的 entry）时写；证明不了的是 `TakeoverFailed`。安全点事件经终端发布达成时如实写 `fenceAcknowledged: false`，绝不假装 fence 被 ack。
+
+实现细化：交接路径上的「predecessor 置 EXITED + 释放 lease」两步合并为 `beginSessionHandoff` **一个**事务（原来是两个事务），因此 `SessionHandoffStarted` 与 `TerminalWriterLeaseChanged(RELEASED)` 与两个状态写入同事务；这是**更**原子，不是行为变化。`recordSessionHandoffRequest` 新增一个显式 `NOT_FOUND`（incarnation 不存在）：该路径本来就会因 FK 违反而失败，现在给出可读的稳定错误。`TakeoverFailed` 的 reason 复用既有 CLI/服务已返回的稳定码（`HANDOFF_NOT_REQUESTED`/`SAFE_POINT_NOT_REACHED`/`ATTACHMENT_BUSY`/`HANDOFF_ALREADY_REQUESTED`/`PREDECESSOR_NOT_STOPPED`/`RELEASE_NOT_CONFIRMED`…），**未新增 reason code 枚举**。
+
+UI **零改动**（事件联合是 `eventType: string`，`contracts` 变更不导致 UI typecheck 失败；也未做任何视觉/交互改动）。CLI 唯一改动：`events list` 接受 `--json`（与 `task revision list` 一致，只是明确脚本意图；`list` 本来就输出 Runtime 投影）。
+
+### 3. `AdapterCapabilities` 补齐：所有构造点
+
+新增必填字段 `nativeTerminalHandoff` 与 `safePointNotification`（`packages/contracts/src/index.ts`，与设计类型语义一致）。**9 处**构造点全部显式声明（`bun run typecheck` 会逐处报错，漏一处不会静默通过）：
+
+| 构造点 | `nativeTerminalHandoff` | `safePointNotification` | 依据 |
+|---|---|---|---|
+| `packages/agent-adapters/src/pi-adapter.ts` | `SUPPORTED` | `SUPPORTED` | ADR-0026 实测：predecessor 停止写作→同一 session file 上启动原生 TUI（Runtime 拥有的 PTY）→单 writer lease；gate extension 上报 tool_start/tool_end/agent_settled。残留边界写在 `SessionHandoffCapabilities`（`crossHandoffPermissionModeMatrix: PARTIAL`、`parallelToolBatchSafePoint: UNVERIFIED`） |
+| `packages/agent-adapters/src/codex-adapter.ts` | `UNSUPPORTED` | `UNSUPPORTED` | `docs/spikes/codex-0.151.0.md`：app-server 无终端交接；Codex 自己的 TUI 是同一 thread 的第二个 writer；interrupted turn 不产生完成事实，无工具级安全点通知 |
+| `packages/agent-adapters/src/index.ts`（deterministic fake） | `UNSUPPORTED` | `UNSUPPORTED` | 不启动 provider、不说 side channel；声称支持会掩盖它存在的目的——拒绝路径 |
+| `apps/runtime/test/agent-runtime-service.test.ts` | `UNSUPPORTED` | `UNSUPPORTED` | 同上（测试 stub） |
+| `apps/runtime/test/operation-service.test.ts` | `UNSUPPORTED` | `UNSUPPORTED` | 同上 |
+| `apps/runtime/test/task-control-service.test.ts` | `UNSUPPORTED` | `UNSUPPORTED` | 同上 |
+| `apps/runtime/test/revision-delivery.test.ts` | `UNSUPPORTED` | `UNSUPPORTED` | 同上（另有 4 处 `{ ...unsupportedCapabilities, … }` 展开，继承声明） |
+| `packages/agent-adapters/test/pi-adapter.test.ts` | `SUPPORTED` | `SUPPORTED` | 断言能力矩阵（`toMatchObject`） |
+| `packages/agent-adapters/test/codex-adapter.test.ts` | `UNSUPPORTED` | `UNSUPPORTED` | 断言能力矩阵（`toEqual` 全量） |
+
+自检命令（应只列出上面 9 处 + 契约定义 + 注释）：`grep -rn "nativeTerminalHandoff\|safePointNotification" apps packages --include=*.ts`。Wave D 踩过的「单格绿、合并后才爆」由必填字段 + 全仓 typecheck 挡住。
+
+**未改交接路径的能力门禁**：把 Pi 专属机制套到别的 provider 上本就会被拒，但改成「先查能力再决定」会引入新的拒绝码与时序，属于另一次语义变更；交回报告作为建议，不在本格实施。
+
+### 4. 实际验证
+
+- `bun run check:fast`：退出码 0。
+- **完整 `bun run check`：退出码 0**（根/UI TypeScript、**272 项 Vitest + 576 项 Bun tests（67 文件）**、Vite 构建）。基线为 567 项 Bun tests，+9 为本格新增（6 单元 + 3 端到端）。日志：`/tmp/ce-g1-check.log`（check:fast 为 `/tmp/ce-g1-checkfast.log`）。
+- 新增单元测试（`apps/runtime/test/session-handoff-service.test.ts`，复用已有 harness）：同一 command 重放只产生一条 `TakeoverRequested`；lease 事件只在 lease 真变化时写（重复 release 不加事件）；安全点事件与其状态迁移同时出现、漏斗期不假写；用一个无法描述的 successor 让 ADMITTED **回滚**，验证状态与事件一起消失；拒绝按 command 幂等且不掩盖另一个拒绝；7 个 payload 的 `strictObject` 拒绝未描述字段。
+- 新增端到端测试（`apps/runtime/test/cli-session-handoff.test.ts`，真实 CLI + 真实 Runtime + 临时 `CODEESTRA_HOME` + **协议 stub provider**——stub 不是真实 Agent 集成，只复用 gate extension 说同一种 side channel）：7 个事件各自从 `events list --json` 读出并用契约 schema 解析；一个 takeover 的 aggregate version 严格递增；重复 `admit` 不产生第二条 `SessionHandoffCompleted`；构造一条旧设计名（`TaskRevisionAppended`）的历史行并读回，名字与 payload 原样。
+- 手工端到端证据（真实 CLI + 真实 Runtime + `CODEESTRA_HOME=/tmp/ce-g1` + 临时仓库 `/tmp/ce-g1-repo` + 协议 stub provider）：
+
+| 命令 | `events list --project … --json` 里的事件要点 |
+|---|---|
+| `task run <p> <t> 1` | `TerminalWriterLeaseChanged` ACQUIRED，takeoverId=null，after={holderKind:AUTOMATED_RPC}，aggregateVersion 1 |
+| `session handoff admit <p> <s>`（无请求，exit 1） | `TakeoverFailed` stage=ADMIT reason=`HANDOFF_NOT_REQUESTED` takeoverId=null（aggregate 落在 sessionId 上，v1） |
+| `session handoff request <p> <s> takeover` | `TakeoverRequested` kind=TAKEOVER targetMode=HUMAN_TUI incarnationId=<自动化 incarnation> v1 |
+| stub 回 `fence_ack`+`agent_settled` ⇢ `session handoff status` 显示 `AT_SAFE_POINT / reached=true / missing=[]` | `TakeoverSafePointReached` reachedFrom=RPC_FENCE fenceAcknowledged=true settledAfterFenceAt=1789450745647 activeTools=0 missing=[] evidenceRef=`handoff:<id>#fence=…` v2 |
+| `session handoff admit <p> <s>`（exit 0，successorMode=HUMAN_TUI terminalTransport=PTY predecessorObservation=STOPPED） | `SessionHandoffStarted` fromMode=AUTOMATED_RPC toMode=HUMAN_TUI predecessorObservation=STOPPED v3；`TerminalWriterLeaseChanged` RELEASED（before=AUTOMATED_RPC）+ ACQUIRED（after=TERMINAL_ATTACHMENT）；`SessionHandoffCompleted` successorIncarnationNumber=2 terminalId/providerPid 非空 v4 |
+| 再次 `session handoff admit`（`replayed: true`, exit 0） | **没有**第二条 `SessionHandoffStarted`/`SessionHandoffCompleted`（幂等） |
+| `session handoff release <p> <s> --no-resume`（exit 0，predecessorEntrySurvived=true） | `TakeoverRequested` kind=RETURN targetMode=AUTOMATED_RPC；`TakeoverSafePointReached` reachedFrom=TERMINAL_RELEASE fenceAcknowledged=false lastEntryRef=`g1-session` missing=[]；`TakeoverReleased` terminalId 非空 predecessorObservation=STOPPED sessionFile{entriesAtStart/Release=1, predecessorEntrySurvived:true, truncated:false} |
+| `codeestra events tail --project … --since 19` | 同一订阅传输从游标重放：seq 20–32 中七个名字均可读到（含 `OperationProgressed`/`OperationSettled` 混杂） |
+
+- 孤儿进程：完整 `check` 后**本工作树（`g1-event-model-alignment`）的 Runtime 进程为 0**；`ps` 中仍有 `/Users/loyage/Documents/codeestra`（main 稳定服务）与其它 worktree（h1/h2/h3）的 Runtime，**不属于本格**，未做任何处理。`/tmp/ce-g1*` 夹具经 `codeestra stop` 后确认无进程引用再删除。
+- 本格**未** `push`、未提升 `main`、未重启稳定 Runtime、未碰 `/Users/loyage/Documents/codeestra`；无浏览器/桌面/键鼠自动化。
+
+### 5. 未验证 / 边界
+
+- **真实 Pi 的 TUI 交接在这些事件下的实时表现未验证**：所有端到端证据用的是协议 stub provider，它只证明 Runtime 自己的事件契约与编排，不证明真实模型行为。UI 观感（人工目视）未做。
+- **「设计名 vs 实现名」是否还有本格判断不了的历史分歧**：只能根据本仓库代码与本基线数据库判定；无法确认某个被标为「未实现」的设计名是否曾在别的环境（早期分支/其他数据库）真实写入过。
+- 未验证：`TakeoverFailed` 在真实 provider 下的触发路径（本格测的是编排层拒绝：无请求、无安全点、已开请求）；`TakeoverReleased` 在真实 Pi TUI 下的 session-file 事实（本格 stub 只写一条 entry）。
+- **一个预先存在的 flake（与本格无关，已逐个证据确认，未修）**：`apps/runtime/test/cli-impact.test.ts` 末尾的 `task cancel <p> <t> '2'` 假定 Task 仍是 version 2；调度引擎的 5s 周期恢复 pass（ADR-0033 §4，`schedule-service.ts` 在禁改名单里）有时会在此之前把该 Task 置为 `PAUSED`/version 4，于是 cancel 以 `CONCURRENT_MODIFICATION: Task version did not match` 退出 1。证据：在本工作树上同一测试单独跑 3/3 通过、完整 `check` 第一次绿、第二次红；用**未修改的基线**（`git worktree add --detach /tmp/g1-base HEAD` + `bun install --frozen-lockfile`，OID `8058eb92`）跑 4 次同样在 `cli-impact.test.ts:376` 红 1 次（后来又复现一次）。未修：属调度/影响分析领域，不在本格范围。本格最终一次完整 `bun run check` 退出码 0（日志 `/tmp/ce-g1-check-final2.log`）。
+- 未做（明确排除）：`ImpactAssessed`/`ConflictAssessed`、Execution 专名事件、`SessionGuidance*`；未新增确认/门禁/审批，未占 schema 版本（仍 v21，未改 `migration.ts`）。
+
+### 6. 文档与决策
+
+- 新增 `docs/decisions/0035-event-name-and-handoff-faces.md`（ADR-0035）：三条裁决 + 被否掉的选项（重命名代码 / 保留只读别名；补判定类事件 / Execution 专名事件 / Session Guidance；从设计里删掉两个能力字段）+ 后果与未验证清单。
+- `docs/decisions/README.md` 表尾追加 ADR-0035 一行。
+- `docs/architecture/event-model.md`：§2 目录、§2.2 命名规则、§2.3 已裁决差异表、§5 测试要求。
+- `docs/architecture/agent-adapter-api.md`：§1 末尾那段「与实现契约不完全一致」改为**事实一致**，并说明两个维度的声明值与不改变行为。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、~~UI 投影~~（已由 FOUNDATION-050 完成 promotion/dependency 投影）。

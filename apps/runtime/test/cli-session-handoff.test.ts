@@ -2,6 +2,16 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Database } from 'bun:sqlite';
+import {
+  sessionHandoffEventTypes,
+  sessionHandoffCompletedPayloadSchema,
+  sessionHandoffStartedPayloadSchema,
+  takeoverFailedPayloadSchema,
+  takeoverReleasedPayloadSchema,
+  takeoverRequestedPayloadSchema,
+  takeoverSafePointReachedPayloadSchema,
+} from '@codeestra/contracts';
 import {
   reclaimTestResources,
   registerTemporaryDirectory,
@@ -185,6 +195,33 @@ async function startHandoffTask(mode: 'permission' | 'fence'): Promise<{
   readonly reportPath: string;
   readonly run: Bun.Subprocess<'ignore', 'pipe', 'pipe'>;
 }> {
+  const fixture = await handoffFixture(mode);
+  const created = JSON.parse((await cli(['task', 'create', fixture.projectId,
+    'Hand off one Agent session'], fixture.environment)).stdout) as { readonly id: string };
+  const taskId = created.id;
+  expect((await cli(['task', 'submit', fixture.projectId, taskId, '0'], fixture.environment)).exitCode)
+    .toBe(0);
+
+  const run = Bun.spawn({
+    cmd: [process.execPath, cliEntry, 'task', 'run', fixture.projectId, taskId, '1'],
+    cwd: repositoryRoot,
+    env: { ...Bun.env, ...fixture.environment, no_proxy: '127.0.0.1,localhost' },
+    stdin: 'ignore', stdout: 'pipe', stderr: 'pipe',
+  });
+  return { environment: fixture.environment, projectId: fixture.projectId,
+    reportPath: fixture.reportPath, run };
+}
+
+/**
+ * The trusted project, temporary home and protocol stub every test in this file drives. The provider
+ * is a stub that speaks the same side channel the controlled gate extension speaks; it is never a
+ * real Agent integration (see the note on `stubSource`).
+ */async function handoffFixture(mode: 'permission' | 'fence'): Promise<{
+  readonly environment: Record<string, string>;
+  readonly projectId: string;
+  readonly reportPath: string;
+  readonly repository: string;
+}> {
   const repository = temporaryDirectory('codeestra-handoff-repo-');
   const home = temporaryDirectory('codeestra-handoff-home-');
   const tools = temporaryDirectory('codeestra-handoff-tools-');
@@ -218,19 +255,7 @@ async function startHandoffTask(mode: 'permission' | 'fence'): Promise<{
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { id: string }[];
-  const projectId = projects[0]?.id as string;
-  const created = JSON.parse((await cli(['task', 'create', projectId,
-    'Hand off one Agent session'], environment)).stdout) as { readonly id: string };
-  const taskId = created.id;
-  expect((await cli(['task', 'submit', projectId, taskId, '0'], environment)).exitCode).toBe(0);
-
-  const run = Bun.spawn({
-    cmd: [process.execPath, cliEntry, 'task', 'run', projectId, taskId, '1'],
-    cwd: repositoryRoot,
-    env: { ...Bun.env, ...environment, no_proxy: '127.0.0.1,localhost' },
-    stdin: 'ignore', stdout: 'pipe', stderr: 'pipe',
-  });
-  return { environment, projectId, reportPath, run };
+  return { environment, projectId: projects[0]?.id as string, reportPath, repository };
 }
 
 /**
@@ -419,6 +444,221 @@ describe('codeestra session handoff', () => {
     } finally {
       run.kill('SIGTERM');
       await cli(['stop'], environment);
+    }
+  }, 60_000);
+});
+
+interface HandoffEventRow {
+  readonly eventId: string; readonly sequence: number; readonly eventType: string;
+  readonly aggregateType: string; readonly aggregateId: string; readonly aggregateVersion: number;
+  readonly correlationId: string; readonly payload: Record<string, unknown>;
+}
+
+/** `events list` prints the Runtime projection verbatim; `--json` states that intent for scripts. */
+async function readEvents(environment: Record<string, string>, projectId: string):
+Promise<readonly HandoffEventRow[]> {
+  const result = await cli(['events', 'list', '--project', projectId, '--limit', '500', '--json'],
+    environment);
+  if (result.exitCode !== 0) {
+    throw new Error(`events list failed (${result.exitCode}): ${result.stderr}`);
+  }
+  return (JSON.parse(result.stdout) as { readonly events: readonly HandoffEventRow[] }).events;
+}
+
+const eventsOfType = (events: readonly HandoffEventRow[], eventType: string): readonly HandoffEventRow[] =>
+  events.filter((event) => event.eventType === eventType);
+
+/**
+ * The seven handoff/terminal facts this lane adds, each asserted from a real command's output plus the
+ * event log (FOUNDATION-063, ADR-0035).
+ *
+ * The provider here is the protocol stub defined at the top of this file: it speaks the Runtime's
+ * handoff side channel (hello, fence acknowledgement, settled fact) and nothing else. It is not a
+ * real Agent integration, and this test proves the Runtime's own event contract — not model behaviour.
+ */
+describe('handoff and terminal events over the command face', () => {
+  test('every fact is readable from events list, in one aggregate per takeover', async () => {
+    const { environment, projectId, run } = await startHandoffTask('fence');
+    try {
+      const sessionId = await currentSessionId(environment, projectId, run);
+      await waitForStatus(environment, projectId, sessionId,
+        (candidate) => candidate.incarnation !== null && candidate.sideChannel !== null);
+
+      // `TerminalWriterLeaseChanged` (ACQUIRED): the automation incarnation took the single writer
+      // lease when the Session started, which is what makes a second writer a refusal.
+      const started = await readEvents(environment, projectId);
+      const automationLease = eventsOfType(started, 'TerminalWriterLeaseChanged');
+      expect(automationLease).toHaveLength(1);
+      expect(automationLease[0]).toMatchObject({ aggregateType: 'SessionWriterLease',
+        aggregateVersion: 1 });
+      expect(automationLease[0]?.payload).toMatchObject({ action: 'ACQUIRED', before: null,
+        takeoverId: null, sessionId,
+        after: { holderKind: 'AUTOMATED_RPC' } });
+
+      // `TakeoverFailed`: an admission with no request is refused *and* that refusal is a fact with
+      // the stable code a client branches on — never silence.
+      const refused = await cli(['session', 'handoff', 'admit', projectId, sessionId], environment);
+      expect(refused.exitCode).toBe(1);
+      expect(JSON.parse(refused.stdout)).toMatchObject({ admitted: false,
+        code: 'HANDOFF_NOT_REQUESTED' });
+      const refusedEvents = await readEvents(environment, projectId);
+      const failures = eventsOfType(refusedEvents, 'TakeoverFailed');
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.payload).toMatchObject({ reason: 'HANDOFF_NOT_REQUESTED', stage: 'ADMIT',
+        takeoverId: null, sessionId });
+      expect(takeoverFailedPayloadSchema.parse(failures[0]?.payload)).toMatchObject({
+        reason: 'HANDOFF_NOT_REQUESTED' });
+
+      // `TakeoverRequested`: the intent and its fence are one fact.
+      const requested = await cli(['session', 'handoff', 'request', projectId, sessionId, 'takeover'],
+        environment);
+      expect(requested.exitCode).toBe(0);
+      const takeoverId = (JSON.parse(requested.stdout) as
+        { readonly handoff: { readonly requestId: string } }).handoff.requestId;
+      const afterRequest = await readEvents(environment, projectId);
+      const intents = eventsOfType(afterRequest, 'TakeoverRequested');
+      expect(intents).toHaveLength(1);
+      expect(intents[0]).toMatchObject({ aggregateType: 'SessionHandoff', aggregateId: takeoverId,
+        aggregateVersion: 1 });
+      expect(takeoverRequestedPayloadSchema.parse(intents[0]?.payload)).toMatchObject({
+        takeoverId, kind: 'TAKEOVER', targetMode: 'HUMAN_TUI', sessionId,
+      });
+
+      // `TakeoverSafePointReached`: written with the safe-point state change, carrying the facts it
+      // was decided from (and the still-missing list, which is empty here).
+      await waitForStatus(environment, projectId, sessionId, (candidate) => candidate.safePoint.reached);
+      const afterSafePoint = await readEvents(environment, projectId);
+      const safePoints = eventsOfType(afterSafePoint, 'TakeoverSafePointReached');
+      expect(safePoints).toHaveLength(1);
+      expect(takeoverSafePointReachedPayloadSchema.parse(safePoints[0]?.payload)).toMatchObject({
+        takeoverId, reachedFrom: 'RPC_FENCE', fenceAcknowledged: true, activeTools: 0, missing: [],
+      });
+
+      // `SessionHandoffStarted` and `SessionHandoffCompleted`: the predecessor stopped being the
+      // writer, then a successor was really started and recorded. Two different facts.
+      const admitted = await cli(['session', 'handoff', 'admit', projectId, sessionId], environment);
+      expect(admitted.exitCode).toBe(0);
+      const afterAdmit = await readEvents(environment, projectId);
+      const begun = eventsOfType(afterAdmit, 'SessionHandoffStarted');
+      const completed = eventsOfType(afterAdmit, 'SessionHandoffCompleted');
+      expect(begun).toHaveLength(1);
+      expect(completed).toHaveLength(1);
+      expect(sessionHandoffStartedPayloadSchema.parse(begun[0]?.payload)).toMatchObject({
+        takeoverId, sourceSessionId: sessionId, targetSessionId: sessionId,
+        fromMode: 'AUTOMATED_RPC', toMode: 'HUMAN_TUI', predecessorObservation: 'STOPPED',
+      });
+      const completion = sessionHandoffCompletedPayloadSchema.parse(completed[0]?.payload);
+      expect(completion).toMatchObject({ takeoverId, fromMode: 'AUTOMATED_RPC', toMode: 'HUMAN_TUI',
+        successorIncarnationNumber: 2, terminalTransport: 'PTY' });
+      expect(completion.terminalId).not.toBeNull();
+      expect(completion.providerPid).toBeGreaterThan(0);
+      // The admission moved the lease twice: released from the automation, taken by the terminal.
+      const leases = eventsOfType(afterAdmit, 'TerminalWriterLeaseChanged');
+      expect(leases.map((event) => event.payload['action'])).toEqual(['ACQUIRED', 'RELEASED', 'ACQUIRED']);
+      expect(leases[1]?.payload).toMatchObject({ takeoverId, action: 'RELEASED',
+        before: { holderKind: 'AUTOMATED_RPC' }, after: null });
+      expect(leases[2]?.payload).toMatchObject({ takeoverId, action: 'ACQUIRED', before: null,
+        after: { holderKind: 'TERMINAL_ATTACHMENT' } });
+      // One aggregate per takeover, strictly increasing: the order of a takeover's facts is readable
+      // from the log alone. The refusal that happened before any request existed has no takeover to
+      // belong to, so it is version 1 of a `SessionHandoff` aggregate keyed on the Session.
+      expect(failures[0]).toMatchObject({ aggregateType: 'SessionHandoff', aggregateId: sessionId,
+        aggregateVersion: 1 });
+      expect([...intents, ...failures, ...safePoints, ...begun, ...completed]
+        .map((event) => event?.aggregateVersion)).toEqual([1, 1, 2, 3, 4]);
+      expect([intents[0], ...safePoints, ...begun, ...completed]
+        .every((event) => event?.aggregateId === takeoverId)).toBe(true);
+
+      // `TakeoverReleased`: the human terminal is released, and only a release that was *proven*
+      // (provider exited, nothing from its process tree alive, session file untouched) says so.
+      const released = await cli(['session', 'handoff', 'release', projectId, sessionId, '--no-resume'],
+        environment);
+      expect(released.exitCode).toBe(0);
+      expect(JSON.parse(released.stdout)).toMatchObject({ released: true });
+      const afterRelease = await readEvents(environment, projectId);
+      const releases = eventsOfType(afterRelease, 'TakeoverReleased');
+      expect(releases).toHaveLength(1);
+      const release = takeoverReleasedPayloadSchema.parse(releases[0]?.payload);
+      expect(release).toMatchObject({ sessionId, predecessorObservation: 'STOPPED',
+        sessionFile: { predecessorEntrySurvived: true, truncated: false } });
+      expect(release.terminalId).not.toBeNull();
+      // The release is also this handoff's safe point, and it says how it was reached.
+      const releaseSafePoint = eventsOfType(afterRelease, 'TakeoverSafePointReached')
+        .filter((event) => event.payload['takeoverId'] === release.takeoverId)[0];
+      expect(takeoverSafePointReachedPayloadSchema.parse(releaseSafePoint?.payload)).toMatchObject({
+        reachedFrom: 'TERMINAL_RELEASE', fenceAcknowledged: false, missing: [],
+      });
+
+      // All seven names of this lane are in the ledger, and every payload is a fact the contract
+      // describes (each was parsed against its schema above; this is the inventory check).
+      const names = new Set(afterRelease.map((event) => event.eventType));
+      for (const name of sessionHandoffEventTypes) expect([...names]).toContain(name);
+    } finally {
+      run.kill('SIGTERM');
+      await cli(['stop'], environment);
+    }
+  }, 90_000);
+
+  test('replaying an admission adds no second handoff fact', async () => {
+    const { environment, projectId, run } = await startHandoffTask('fence');
+    try {
+      const sessionId = await currentSessionId(environment, projectId, run);
+      await waitForStatus(environment, projectId, sessionId,
+        (candidate) => candidate.incarnation !== null && candidate.sideChannel !== null);
+      await cli(['session', 'handoff', 'request', projectId, sessionId, 'takeover'], environment);
+      await waitForStatus(environment, projectId, sessionId, (candidate) => candidate.safePoint.reached);
+
+      const first = await cli(['session', 'handoff', 'admit', projectId, sessionId], environment);
+      expect(first.exitCode).toBe(0);
+      // A repeated admission replays the recorded successor instead of starting a second provider.
+      const replayed = await cli(['session', 'handoff', 'admit', projectId, sessionId], environment);
+      expect(replayed.exitCode).toBe(0);
+      expect(JSON.parse(replayed.stdout)).toMatchObject({ admitted: true, replayed: true });
+
+      const events = await readEvents(environment, projectId);
+      expect(eventsOfType(events, 'SessionHandoffStarted')).toHaveLength(1);
+      expect(eventsOfType(events, 'SessionHandoffCompleted')).toHaveLength(1);
+      expect(eventsOfType(events, 'TakeoverRequested')).toHaveLength(1);
+      expect(eventsOfType(events, 'TakeoverSafePointReached')).toHaveLength(1);
+      // Two lease terms were taken and one released: the successor really is the only writer.
+      expect(eventsOfType(events, 'TerminalWriterLeaseChanged')).toHaveLength(3);
+      const status = await readStatus(environment, projectId, sessionId);
+      expect(status.incarnations).toHaveLength(2);
+    } finally {
+      run.kill('SIGTERM');
+      await cli(['stop'], environment);
+    }
+  }, 90_000);
+
+  test('keeps a historical event written under a superseded design name readable', async () => {
+    const fixture = await handoffFixture('fence');
+    const home = fixture.environment['CODEESTRA_HOME'] as string;
+    try {
+      // The event ledger is append-only, so a row that was written under a design name the catalogue
+      // later dropped (`TaskRevisionAppended` was implemented as `TaskRevisionCreated`) must read back
+      // unchanged: not renamed, not migrated, not hidden.
+      await cli(['stop'], fixture.environment);
+      const raw = new Database(join(home, 'runtime.sqlite'));
+      raw.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        VALUES ('legacy-event-1',?1,'TaskRevisionAppended',1,'Task','legacy-task',1,'legacy-command',
+          NULL,1,'{"taskId":"legacy-task","previousRevisionId":"r-1","revisionId":"r-2",
+          "affectedExecutionId":null}')
+      `).run(fixture.projectId);
+      raw.close();
+
+      const events = await readEvents(fixture.environment, fixture.projectId);
+      const legacy = eventsOfType(events, 'TaskRevisionAppended');
+      expect(legacy).toHaveLength(1);
+      expect(legacy[0]).toMatchObject({ eventId: 'legacy-event-1', aggregateType: 'Task',
+        aggregateId: 'legacy-task', aggregateVersion: 1, correlationId: 'legacy-command' });
+      expect(legacy[0]?.payload).toEqual({ taskId: 'legacy-task', previousRevisionId: 'r-1',
+        revisionId: 'r-2', affectedExecutionId: null });
+      // The implementation's own name is a *different* row: nothing was rewritten in place.
+      expect(eventsOfType(events, 'TaskRevisionCreated')).toHaveLength(0);
+    } finally {
+      await cli(['stop'], fixture.environment);
     }
   }, 60_000);
 });

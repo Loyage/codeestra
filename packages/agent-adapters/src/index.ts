@@ -105,6 +105,10 @@ const capabilities: AdapterCapabilities = Object.freeze({
   revisionAcknowledgement: 'UNSUPPORTED',
   cooperativeStop: 'UNSUPPORTED',
   attach: 'STRUCTURED',
+  // The deterministic fake starts no provider and speaks no side channel, so it must not claim the
+  // two handoff dimensions: a fake that claimed them would hide the refusal paths it exists to test.
+  nativeTerminalHandoff: 'UNSUPPORTED',
+  safePointNotification: 'UNSUPPORTED',
   reconnectToLiveSession: 'SUPPORTED',
   resumeAfterExit: 'UNSUPPORTED',
   controlledConfiguration: 'SUPPORTED',

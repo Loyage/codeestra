@@ -60,6 +60,10 @@ const unsupportedCapabilities: AdapterCapabilities = Object.freeze({
   revisionAcknowledgement: 'UNSUPPORTED',
   cooperativeStop: 'SUPPORTED',
   attach: 'STRUCTURED',
+  // This stub starts no provider at all, so it claims neither a native terminal handoff nor a safe
+  // point notification: a stub that declared them would make the Runtime's refusal paths untestable.
+  nativeTerminalHandoff: 'UNSUPPORTED',
+  safePointNotification: 'UNSUPPORTED',
   reconnectToLiveSession: 'UNSUPPORTED',
   resumeAfterExit: 'UNSUPPORTED',
   // Integration fix: this stub asserts runtime orchestration only. `controlledConfiguration` was

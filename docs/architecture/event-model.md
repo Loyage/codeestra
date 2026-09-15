@@ -31,53 +31,38 @@ type CommandEnvelope<T extends string, P> = {
 
 跨进程输入使用 Zod discriminated union；未知 schemaVersion 返回明确错误，不宽松吞掉新字段语义。
 
-## 2. 事件目录（核心字段）
+## 2. 事件目录（以实现实际写入的名字为准）
 
-| Event | payload |
-|---|---|
-| IntentRecorded / IntentClarificationRequested | intentId, kind / ambiguity |
-| TaskCreated | taskId, revisionId, kind |
-| TaskRevisionAppended | taskId, previousRevisionId, revisionId, affectedExecutionId |
-| TaskStateChanged | taskId, from, to, reason |
-| TaskPriorityChanged | taskId, oldPriority, newPriority |
-| DependencyAdded / DependencyNeedsReview | dependentId, prerequisiteId, requiredRevisionId |
-| ImpactAssessed / ConflictAssessed | assessmentId, revision/base references, verdict/reasons |
-| ExecutionReserved | executionId, taskId, revisionId, workspaceId |
-| ExecutionStateChanged | executionId, from, to, reason |
-| WorkspacePrepared | workspaceId, branch, baseCommit |
-| AgentSessionStarted | executionId, sessionId, adapterId, providerSessionId, processIdentity |
-| AgentSessionStateChanged | sessionId, from, to, reason |
-| AgentSessionCompleted | executionId, sessionId, outcome, evidenceRef |
-| SessionGuidanceRecorded / SessionGuidanceDelivered | executionId, sessionId, guidanceId, contentHash, length, behavior / providerEntryRef；正文不进事件 |
-| TakeoverRequested / TakeoverSafePointReached | takeoverId, executionId, sourceSessionId, targetMode / evidenceRef, lastEntryRef |
-| SessionHandoffStarted / SessionHandoffCompleted | takeoverId, sourceSessionId, targetSessionId, fromMode, toMode, processEvidenceRef |
-| TerminalWriterLeaseChanged | takeoverId, sessionId, attachmentId, action；不含 PTY bytes |
-| TakeoverReleased / TakeoverFailed | takeoverId, executionId, activeSessionId, reason/evidenceRef |
-| ExecutionPauseRequested / ExecutionPaused | executionId, reason, evidenceRef（已暂停事件必填） |
-| RevisionDelivered / RevisionAcknowledged | executionId, revisionId, deliveryKey, evidenceRef |
-| UserAttentionRequested | attentionId, sessionId, kind, responseType（敏感提示另存） |
-| UserAnswerRecorded / UserAnswerDelivered | attentionId, answerId；不默认广播敏感回答正文 |
-| ResultCommitAuthorizationRequested | executionId, revisionId, expectedHead, changeFingerprint；差异内容另按安全策略查询 |
-| ResultCommitAuthorized / ResultCommitAuthorizationInvalidated | authorizationId, executionId, revisionId, expectedHead, changeFingerprint, actor / reason |
-| ExecutionResultCaptured | executionId, appliedRevisionId, resultCommit, authorizationId |
-| ExecutionFailed / ExecutionCancelled / ExecutionSuperseded | executionId, reason, stopEvidenceRef |
-| RecoveryRequired | resourceType, resourceId, reason |
-| VerificationCompleted / VerificationInvalidated | verificationId, scope, testedCommit, revisionId/batchId, result/reason |
+本节是 `packages/storage/src/database.ts` 与 `apps/runtime/src/**` **真正写入 `domain_events` 的事件名与 payload**（ADR-0035 裁决后，目录以实现名为准）。设计名与实现名不一致的历史差异在第 2.3 节单列并标注废弃原因，不静默改写。
 
-Phase 1（ADR-0006）实际写入：`VerificationCompleted` 的 aggregate 为 `VerificationRun`，payload 携带 verificationId、taskId、executionId、revisionId、testedCommit、testedTree、policyVersion、policyDigest、mainCommit、state、outcomeCode 与非敏感 evidence；不写入命令原始输出。`VerificationInvalidated` 的 aggregate 为 `Task`，payload 携带 taskId、reason、verificationIds、testedCommit 与 policyDigest，旧 run 记录只追加 stale 原因，不重写历史。
-| DevIntegrationCandidateCreated | batchId, expectedDevCommit, candidateCommit, itemIds |
-| DevIntegrationCompleted | batchId, previousDevCommit, integratedCommit, verificationRunId |
-| StablePromotionApproved / StablePromotionApprovalInvalidated | approvalId, promotionId, devCommit, expectedMainCommit, verificationRunId |
-| MainPromoted | promotionId, previousMainCommit, promotedCommit, approvalId |
-| RuntimeRestartedAfterMainUpdate / RuntimeRestartFailed | promotionId, mainCommit, evidenceRef |
-| CandidateBuilt / SelfTestCompleted | candidateId, artifactHash, evidenceRef |
-| StablePromotionRequested / StablePromoted / StableRollbackCompleted | promotionId, oldVersion, newVersion, evidenceRef |
+**核心生命周期（实际写入名）**
 
-命名 SUCCEEDED 的 Agent 回调只产生执行事实，不能直接产生 Task integrated 事实。
+| Event | aggregate | payload 要点 |
+|---|---|---|
+| `IntentRecorded` | `Intent` | intentId, kind |
+| `TaskCreated` | `Task` | taskId, revisionId, kind |
+| `TaskStateChanged` | `Task` | taskId, from, to, reason |
+| `TaskArchived` / `TaskUnarchived` | `Task` | taskId, from, to（同态，只改 `archived_at`）, reason, actor |
+| `TaskRevisionCreated` | `Task` | taskId, revisionId, revisionNumber, previousRevisionId（首个修订为 null）, constraintCount, reason, actor（**设计名 `TaskRevisionAppended` 已废弃**） |
+| `TaskDependencyAdded` / `TaskDependencyRemoved` | `Task` | dependentId, prerequisiteId, requiredRevisionId（**设计名 `DependencyAdded`/`DependencyNeedsReview` 已废弃**） |
+| `ExecutionReserved` | `Execution` | executionId, taskId, revisionId, workspaceId |
+| `ExecutionStateChanged` | `Execution` | executionId, from, to, reason |
+| `ExecutionFailed` | `Execution` | executionId, reason, stopEvidenceRef |
+| `WorkspacePrepared` | `Workspace` | workspaceId, taskId, branch, baseCommit |
+| `AgentSessionStarted` | `AgentSession` | executionId, sessionId, adapterId, providerSessionId（provider 进程身份留在 session 行/incarnation 行，不在事件 payload 里） |
+| `AgentSessionStateChanged` | `AgentSession` | sessionId, from, to |
+| `AgentSessionCompleted` | `AgentSession` | executionId, sessionId, outcome, evidenceRef, 可选 `note`（FOUNDATION-056 的散文提问判据，随 append-only 完成事实一起落库） |
+| `UserAttentionRequested` | `Attention` | attentionId, sessionId, kind, responseType（敏感提示另存） |
+| `UserAnswerRecorded` / `UserAnswerDelivered` | `Attention` | attentionId, answerId；不广播敏感回答正文 |
+| `ResultCommitAuthorized` / `ResultCommitAuthorizationInvalidated` | `Execution` | authorizationId, executionId, revisionId, expectedHead, changeFingerprint, actor / reason |
+| `ResultCommitCreated` | `Execution` | authorizationId, executionId, revisionId, baseCommit, resultCommit, resultTree, identity, hookOutcome（**设计名 `ExecutionResultCaptured` 已废弃**） |
+| `RecoveryRequired` | `Execution` \| `Attention` \| `AgentSession` \| `Task` | `resourceType` + `resourceId` + `reason`（`Execution`/`Attention`/`AgentSession` 变体）；`Task` 变体是 taskId + from/to + reason + 可选 evidenceRef（投影到 `RECOVERY_REQUIRED`） |
+| `VerificationCompleted` | `VerificationRun` | verificationId, taskId, executionId, revisionId, testedCommit, testedTree, policyVersion, policyDigest, mainCommit, `state`, `outcomeCode`, 非敏感 evidence |
+| `VerificationInvalidated` | `Task` | taskId, reason, verificationIds, testedCommit, policyDigest |
 
-### 2.1 实现中实际写入的事件（以代码为准）
+Phase 1（ADR-0006）的 `VerificationCompleted` 不写入命令原始输出；`VerificationInvalidated` 只追加 stale 原因，不重写历史 run。命名 SUCCEEDED 的 Agent 回调只产生执行事实，不能直接产生 Task integrated 事实。
 
-上一节是设计目录；本节是 `packages/storage/src/database.ts` 与 `apps/runtime/src/**` **当前真正写入 `domain_events` 的事件名**。两者不是一一对应：有的设计名在实现里换了名字，有的设计事件尚未实现。差异在第 2.2 节单列，本文不把实现名静默回写成设计名。
+### 2.1 各领域的补充事实（实际写入名）
 
 **长命令进度（ADR-0019 / ADR-0027）**
 
@@ -88,15 +73,15 @@ Phase 1（ADR-0006）实际写入：`VerificationCompleted` 的 aggregate 为 `V
 
 `OperationSettled` 只声明「这条长命令结束了」，**不是判定**：`verdict:false` 永远如此。只对已发布过进度的 Operation 发布（workspace prepare、Agent start、result commit 等从不进进度流的操作不会凭空开一条流）。`OperationSettled` 的 `eventId` 由 Operation 推导（`sha256('OperationSettled:'+operationId)`），重试的终态写入只能发布同一个事实。
 
-**Verification（ADR-0006 / ADR-0027）**
+**验证（ADR-0006 / ADR-0027）**
 
 | Event | aggregate | 关键 payload |
 |---|---|---|
-| `VerificationCompleted` | `VerificationRun` | verificationId, taskId, executionId, revisionId, testedCommit, testedTree, policyVersion, policyDigest, mainCommit, `state`, `outcomeCode`, 非敏感 evidence |
-| `VerificationInvalidated` | `Task` | taskId, reason, verificationIds, testedCommit, policyDigest |
+| `VerificationCompleted` | `VerificationRun` | 见 §2 主表；`CANCELLED` 是它的一个 `state`，此时 `outcomeCode='CANCELLED_BY_USER'` |
+| `VerificationInvalidated` | `Task` | 见 §2 主表 |
 | `IntegrationVerificationCompleted` | `IntegrationBatch` | 集成验证自身的终态与证据（独立实体 `integration_verification_runs`） |
 
-`CANCELLED` 不新增事件类型：`VerificationCompleted` 的 `state` 可以是 `CANCELLED`，此时 `outcomeCode='CANCELLED_BY_USER'`，且同事务发布对应的 `OperationSettled`（Operation 置 `FAILED`）。schema v17 重建 `verification_runs` 把 `CANCELLED` 加进终态 CHECK，因此「未确认进程组静止」仍写不成终态；`integration_verification_runs` 保留自己的 CHECK（无 `CANCELLED`）。
+`CANCELLED` 不新增事件类型，且同事务发布对应的 `OperationSettled`（Operation 置 `FAILED`）。schema v17 重建 `verification_runs` 把 `CANCELLED` 加进终态 CHECK，因此「未确认进程组静止」仍写不成终态；`integration_verification_runs` 保留自己的 CHECK（无 `CANCELLED`）。
 
 **修订投递（ADR-0028，schema v19）**
 
@@ -106,7 +91,7 @@ Phase 1（ADR-0006）实际写入：`VerificationCompleted` 的 aggregate 为 `V
 | `TaskRevisionDeliveryAttempted` | `TaskRevisionDelivery` | deliveryId, taskId, revisionId, attemptNumber, `channel`, executionId, sessionId, incarnationId, `state='IN_FLIGHT'`, `deadlineAt` |
 | `TaskRevisionDeliveryResolved` | `TaskRevisionDelivery` | deliveryId, taskId, revisionId, attemptId, `state`, `channel`, evidenceRef, errorCode, detail, `satisfied`；`SUPERSEDED_BY_RESTART` 分支另带 predecessorExecutionId 与 successorExecutionId |
 
-**容量与槽位（ADR-0032，schema v21）**
+**容量与调度（ADR-0032 / ADR-0033，schema v21）**
 
 | Event | aggregate | 关键 payload |
 |---|---|---|
@@ -115,37 +100,72 @@ Phase 1（ADR-0006）实际写入：`VerificationCompleted` 的 aggregate 为 `V
 | `ExecutionSlotReleased` | `ExecutionSlot` | reservationId, taskId, `releaseKind`（`EXPLICIT`/`RECONCILED_HOLDER_EXITED`/`RECONCILED_PROCESS_ID_REUSED`）, `observation`, reason |
 | `ExecutionSlotReconciled` | `ExecutionSlot` | reservationId, taskId, `decision`, `observation`, previousState, projectedState, detail |
 | `SchedulerCapacityChanged` | `SchedulerCapacity` | projectId, `scope`（`GLOBAL`/`ADAPTER`）, adapterId, `from`, `to`, actor |
+| `TaskScheduleDecided` | `TaskSchedule` | taskId, revisionId, `verdict`, activeTaskIds, candidateSnapshotId… |
+| `TaskWaitingForConflict` / `TaskWaitingForCapacity` | `TaskSchedule` | taskId, 稳定等待码（`IMPORTANT_DIRECTORY_OVERLAP` 等 / `CAPACITY_GLOBAL_LIMIT_REACHED` 等）, blocking |
+| `TaskUnknownCleared` | `TaskSchedule` | taskId, revisionId, analyzerVersion/policyVersion/baseCommit 绑定 |
+| `TaskImpactPredictionRevoked` | `TaskSchedule` | taskId, added/removed 改动集, conflicts, reasons, pauseRequested |
 
-`SchedulerCapacityChanged` 只在值真正变化时发布（重复设置同一值不 bump 版本、不发事件）。`ExecutionSlotReconciled` 也会为「决定保持占用、状态未变」的观测发布——那是审计事实，不是状态迁移。
+`SchedulerCapacityChanged` 只在值真正变化时发布（重复设置同一值不 bump 版本、不发事件）。`ExecutionSlotReconciled` 也会为「决定保持占用、状态未变」的观测发布——那是审计事实，不是状态迁移。`TaskSchedule*` 的重放保护是 `(event_type, correlation_id, aggregate_id)`，不是 event id。
 
 **集成与提升（ADR-0018 / ADR-0022）**
 
 | Event | aggregate | 说明 |
 |---|---|---|
 | `IntegrationBatchCreated` / `IntegrationCompleted` / `IntegrationFailed` / `IntegrationReconcileRequired` | `IntegrationBatch` | 单成员批次从 `CREATED` 到 `INTEGRATED`/`FAILED`/`RECOVERY_REQUIRED` 的实际事实 |
-| `PromotionCreated` / `PromotionApproved` / `PromotionStarted` / `PromotionMainUpdated` / `PromotionRestartRecorded` / `PromotionStale` / `PromotionFailed` / `PromotionReconcileRequired` | `Promotion` | `dev → main` 提升的实际事实（固定三元组、观察到的 `main`、重启记账、ref/证据移动后的 `STALE` 与崩溃 reconcile） |
+| `PromotionCreated` / `PromotionApproved` / `PromotionStarted` / `PromotionMainUpdated` / `PromotionRestartRecorded` / `PromotionCompleted` / `PromotionStale` / `PromotionFailed` / `PromotionReconcileRequired` | `Promotion` | `dev → main` 提升的实际事实（固定三元组、观察到的 `main`、重启记账、ref/证据移动后的 `STALE` 与崩溃 reconcile） |
 
-**回收与既有核心事件（实际写入名）**
+**回收（ADR-0021）**
 
-`ResourcesReclaimed`（`Operation`）、`WorkspaceReclaimed`（`Workspace`）用于 ADR-0021 的回收账本事实。此外实际写入的核心名包括 `IntentRecorded`、`TaskCreated`、`TaskStateChanged`、`TaskRevisionCreated`、`TaskDependencyAdded`、`TaskDependencyRemoved`、`ExecutionReserved`、`ExecutionStateChanged`、`ExecutionFailed`、`WorkspacePrepared`、`AgentSessionStarted`、`AgentSessionStateChanged`、`AgentSessionCompleted`、`UserAttentionRequested`、`UserAnswerRecorded`、`UserAnswerDelivered`、`ResultCommitAuthorized`、`ResultCommitAuthorizationInvalidated`、`ResultCommitCreated`、`RecoveryRequired`（aggregate 可以是 `AgentSession`/`Attention`/`Execution`/`Task`）。
+`ResourcesReclaimed`（`Operation`）、`WorkspaceReclaimed`（`Workspace`）用于 ADR-0021 的回收账本事实。
 
-### 2.2 设计名与实现名的差异（交用户裁决，不在本文静默改写）
+**交接与原生终端（ADR-0023 / ADR-0026 / ADR-0035，本格新增）**
 
-设计目录里的名字与实现名不一致时，本文**不**把设计目录改成实现名；下列差异已记录在报告中，等待裁决：
+| Event | aggregate | 关键 payload |
+|---|---|---|
+| `TakeoverRequested` | `SessionHandoff` | takeoverId, sessionId, executionId, incarnationId, `kind`（`TAKEOVER`/`RETURN`）, `targetMode` |
+| `TakeoverSafePointReached` | `SessionHandoff` | takeoverId, sessionId, executionId, incarnationId, `reachedFrom`（`RPC_FENCE`/`TERMINAL_RELEASE`）, `fenceAcknowledged`, `settledAfterFenceAt`, `activeTools`, `evidenceRef`, `lastEntryRef`, **`missing`** |
+| `SessionHandoffStarted` | `SessionHandoff` | takeoverId, sourceSessionId, targetSessionId, sourceIncarnationId, fromMode, toMode, predecessorObservation, processEvidenceRef |
+| `SessionHandoffCompleted` | `SessionHandoff` | takeoverId, source/targetSessionId, sourceIncarnationId, successorIncarnationId, successorIncarnationNumber, fromMode, toMode, terminalTransport, terminalId, providerPid, processEvidenceRef |
+| `TakeoverReleased` | `SessionHandoff` | takeoverId, sessionId, executionId, incarnationId, terminalId, reason, predecessorObservation, evidenceRef, `sessionFile{…,predecessorEntrySurvived,truncated}` |
+| `TakeoverFailed` | `SessionHandoff`（无 takeover 时以 `sessionId` 为 aggregate id） | takeoverId（可空）, sessionId, executionId, incarnationId（可空）, `stage`（`REQUEST`/`SAFE_POINT`/`ADMIT`/`RELEASE`）, **`reason`（稳定码）**, detail, evidenceRef |
+| `TerminalWriterLeaseChanged` | `SessionWriterLease` | takeoverId（可空）, sessionId, leaseId, `action`（`ACQUIRED`/`RELEASED`）, `before`/`after`（`{incarnationId,holderKind,holderRef}` 或 null）, reason |
 
-| 设计目录（§2） | 实现实际写入 |
-|---|---|
-| `TaskRevisionAppended` | `TaskRevisionCreated` |
-| `DependencyAdded` / `DependencyNeedsReview` | `TaskDependencyAdded` / `TaskDependencyRemoved`（无 `NEEDS_REVIEW`） |
-| `RevisionDelivered` / `RevisionAcknowledged` | `TaskRevisionDeliveryRecorded` / `TaskRevisionDeliveryAttempted` / `TaskRevisionDeliveryResolved` |
-| `ExecutionResultCaptured` | `ResultCommitCreated` |
-| `DevIntegrationCandidateCreated` / `DevIntegrationCompleted` | `IntegrationBatchCreated` / `IntegrationCompleted`（另有 `IntegrationFailed`/`IntegrationReconcileRequired`/`IntegrationVerificationCompleted`） |
-| `StablePromotionApproved` / `StablePromotionApprovalInvalidated` / `MainPromoted` / `RuntimeRestartedAfterMainUpdate` / `RuntimeRestartFailed` / `StablePromotionRequested` | `PromotionApproved` / `PromotionCreated` / `PromotionStarted` / `PromotionMainUpdated` / `PromotionRestartRecorded` / `PromotionStale` / `PromotionFailed` / `PromotionReconcileRequired`（没有与 `StablePromotionApprovalInvalidated` 同名的事件） |
-| `ImpactAssessed` / `ConflictAssessed` | **未实现为 domain event**：ADR-0031 只把判定写进 `impact_assessments` 行 |
-| `TakeoverRequested` / `TakeoverSafePointReached` / `SessionHandoffStarted` / `SessionHandoffCompleted` / `TerminalWriterLeaseChanged` / `TakeoverReleased` / `TakeoverFailed` | **未实现为 domain event**：ADR-0023/0026 的交接与终端状态只写 `session_incarnations` / `session_writer_leases` / `session_handoff_requests` / `session_terminals` / `session_terminal_attachments` 行（唯一例外是 STRICT 权限经既有 `UserAttentionRequested` 进入事件流）。代码中不存在这些事件名 |
-| `ExecutionPauseRequested` / `ExecutionPaused` / `ExecutionCancelled` / `ExecutionSuperseded` | 未找到同名事件；暂停/取消的投影通过 `TaskStateChanged`/`ExecutionStateChanged` 与 Operation 状态表达，**未验证**是否存在等价专名 |
+这七个事件的事实边界：
 
-`SessionGuidanceRecorded`/`SessionGuidanceDelivered` 与 `TaskRevisionAppended` 中带 `affectedExecutionId` 的语义同样**未在实现中验证**；本轮只按代码里能指认的名字记录。
+- `TakeoverRequested`、`SessionHandoffStarted` 都**不是**「已交接」。前者只说明意图与 fence 被记录，后者只说明 predecessor 不再是 writer、successor 尚未启动。只有 `SessionHandoffCompleted` 表示 successor 进程真的启动、记录并持有单 writer lease。
+- `TakeoverReleased` 只在发布（provider 退出、记录的进程树无存活者、provider session file 仍保有 predecessor 的 entry）**被证明**时写入；证明不了的发布是 `TakeoverFailed`。
+- `TakeoverSafePointReached` 的 `missing` 是事实的一部分：安全点经 RPC fence 达成时为空，经终端发布达成时由 `reachedFrom` 与 `sessionFile` 事实表达，绝不假装 fence 被 ack。
+- 这七个事件与它们描述的状态变更在**同一 SQLite 事务**内提交（`TakeoverFailed` 除外——拒绝本身没有状态变更，它自己就是那条事实，事件 id 由 command + stage + reason 推导，故同一命令重放不产生第二条）。
+- 单一 writer lease 的每一次更换都写 `TerminalWriterLeaseChanged`（acquire 与 release 各一条），因此「谁在写这个 conversation」可从日志复原，而不是只能从当前行推断。
+
+### 2.2 命名规则（ADR-0035 裁决，长期有效）
+
+1. **已实现的事件名以实现为准，永不重命名。** 事件台账是 append-only 审计：重命名会让同一语义在历史里长期存在两个名字，并让已发出的订阅游标、消费者幂等键和外部脚本同时失效。设计目录里与之不同的名字标为**已废弃**。
+2. **新事件采用设计目录里的名字。** 设计目录是先行契约；实现某条设计事件时不另起名字（本格新增的七个交接/终端事件即为此例）。
+3. **名字变更只能通过「新增事件 + 旧事件不再产生」实现。** 不迁移历史行，不改写已有行，不把旧名行「升级」成新名；读者需要同时理解两个名字，第 2.3 节就是为此存在。
+
+### 2.3 设计名与实现名的差异（已裁决，ADR-0035）
+
+原「交用户裁决」清单已由用户裁决，结论记录在 [`../decisions/0035-event-name-and-handoff-faces.md`](../decisions/0035-event-name-and-handoff-faces.md)：**文档对齐实现名 + 新事件用设计名 + 已实现名永不重命名**。「已废弃」表示该设计名不会出现在任何新写入的行里；历史行（如果有）保持原样可读。
+
+| 设计目录（原 §2） | 实现实际写入 | 裁决 |
+|---|---|---|
+| `IntentRecorded`、`TaskCreated`、`TaskStateChanged`、`ExecutionReserved`、`ExecutionStateChanged`、`ExecutionFailed`、`WorkspacePrepared`、`AgentSessionStarted`、`AgentSessionStateChanged`、`AgentSessionCompleted`、`UserAttentionRequested`、`UserAnswerRecorded`、`UserAnswerDelivered`、`ResultCommitAuthorized`、`ResultCommitAuthorizationInvalidated`、`RecoveryRequired`、`VerificationCompleted`、`VerificationInvalidated` | 同名 | 一致 |
+| `TaskRevisionAppended` | `TaskRevisionCreated` | 设计名**已废弃**（语义相同：追加不可变修订） |
+| `DependencyAdded` / `DependencyNeedsReview` | `TaskDependencyAdded` / `TaskDependencyRemoved` | 两个设计名**已废弃**；实现没有 `NEEDS_REVIEW` 边状态 |
+| `RevisionDelivered` / `RevisionAcknowledged` | `TaskRevisionDeliveryRecorded` / `TaskRevisionDeliveryAttempted` / `TaskRevisionDeliveryResolved` | 设计名**已废弃**（投递是一等需求 + append-only 尝试台账，见 ADR-0028） |
+| `ExecutionResultCaptured` | `ResultCommitCreated` | 设计名**已废弃** |
+| `DevIntegrationCandidateCreated` / `DevIntegrationCompleted` | `IntegrationBatchCreated` / `IntegrationCompleted`（另有 `IntegrationFailed` / `IntegrationReconcileRequired` / `IntegrationVerificationCompleted`） | 设计名**已废弃** |
+| `StablePromotionApproved` / `StablePromotionApprovalInvalidated` / `MainPromoted` / `RuntimeRestartedAfterMainUpdate` / `RuntimeRestartFailed` / `StablePromotionRequested` | `PromotionCreated` / `PromotionApproved` / `PromotionStarted` / `PromotionMainUpdated` / `PromotionRestartRecorded` / `PromotionCompleted` / `PromotionStale` / `PromotionFailed` / `PromotionReconcileRequired` | 设计名**已废弃**；批准失效由 `PromotionStale` 表达，没有与 `StablePromotionApprovalInvalidated` 同名的事件 |
+| `TakeoverRequested` / `TakeoverSafePointReached` / `SessionHandoffStarted` / `SessionHandoffCompleted` / `TerminalWriterLeaseChanged` / `TakeoverReleased` / `TakeoverFailed` | **同名（本格实现，FOUNDATION-063）** | 设计名**采用**；`TerminalWriterLeaseChanged` 的 payload 以 lease 事实（`leaseId` + before/after holder）表达设计里的 `attachmentId`，因为实现的 writer lease 是以 `holder_ref` 计的 lease term，不引用 attachment 行 |
+| `ImpactAssessed` / `ConflictAssessed` | **未实现为 domain event**：ADR-0031 只把判定写进 `impact_assessments` 行 | 裁决：本格**不做**（判定类事件未列入实现范围） |
+| `TaskPriorityChanged` | 未实现（实现里没有 task priority 这一维度） | 设计名保留，未实现 |
+| `IntentClarificationRequested` | 未实现 | 设计名保留，未实现 |
+| `SessionGuidanceRecorded` / `SessionGuidanceDelivered` | 未实现 | 设计名保留；这是 Phase 3 的**功能**缺口，不是事件缺口，本格不顺手实现 |
+| `ExecutionPauseRequested` / `ExecutionPaused` / `ExecutionCancelled` / `ExecutionSuperseded` | 未找到同名事件；暂停/取消的投影通过 `TaskStateChanged` / `ExecutionStateChanged` 与 Operation 状态表达 | **未验证**是否存在等价专名，本格不改动 |
+| `ResultCommitAuthorizationRequested` | 未实现同名事件（授权由 prepare/confirm 两步与 `ResultCommitAuthorized` 表达） | 设计名保留，未实现 |
+| `CandidateBuilt` / `SelfTestCompleted` / `StablePromoted` / `StableRollbackCompleted` | 未实现 | 设计名保留（Self Evolution 阶段） |
+| （设计目录没有的实现新增名） | `TaskArchived` / `TaskUnarchived` / `WorkspaceReclaimed` / `ResourcesReclaimed` / `OperationProgressed` / `OperationSettled` / `ExecutionSlot*` / `SchedulerCapacityChanged` / `TaskSchedule*` / `TaskImpactPredictionRevoked` / `Promotion*` / `Integration*` | 反向登记：这些是实现先行的名字，同样永不重命名 |
 
 ## 3. 一致性、投递和恢复
 
@@ -196,3 +216,5 @@ CLI attach 使用 versioned terminal frame 协议而非一次性 JSON response�
 ## 5. 测试要求
 
 事务回滚无事实事件；重复命令相同返回；相同键异文拒绝；旧事件不复活终态；UI 重连无漏消息；消费者重复投递不重复启动；进程启动后 DB 回写前崩溃可核对恢复。
+
+ADR-0035 追加的三条：**同一 command 重放不产生第二个事件**（包括拒绝事实：`TakeoverFailed` 的 event id 由 command + stage + reason 推导）；**事件与它描述的状态变更同事务提交**（用一个无法描述的 successor 让 ADMITTED 回滚，验证状态与事件一起消失）；**旧设计名的历史行仍可读且未被改写**（构造一条旧名行，读回时名字与 payload 原样）。
