@@ -1,6 +1,6 @@
 # ADR-0006：Task Verification 命令来源与执行授权
 
-Status：Accepted；**Amended by ADR-0011**：FULL 下策略无需人工确认，STRICT 保留确认；策略来源、schema、隔离与证据语义不变。
+Status：Accepted；**Amended by ADR-0011/0038**：FULL 下策略无需人工确认；开发分支改为建分支时选定的定向测试，全量测试只在精确 dev 候选提升前运行。策略来源、隔离与证据绑定原则不变，但当前固定项目策略尚未实现该分层。
 
 ## Context
 

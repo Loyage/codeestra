@@ -16,7 +16,7 @@ typecheck:
 test:
     bun run test
 
-# 开发循环快速检查：类型检查、Vitest 与快速 Bun 单测（不含进程级 e2e）
+# 聚合快速检查（仍非开发分支默认；开发分支按 ADR-0038 运行选定的窄测试）
 check-fast:
     bun run check:fast
 
@@ -32,7 +32,7 @@ ui-typecheck:
 ui-build:
     bun run --cwd apps/ui build
 
-# 类型检查、Vitest、全部 Bun 测试与 UI 构建（成果提交/验证用的完整门禁）
+# 全量检查：仅在 dev 上、dev→main 前对精确候选 SHA 运行
 check:
     bun run check
 
@@ -40,6 +40,6 @@ check:
 audit:
     bun audit
 
-# 执行完整的本地验证（依赖漏洞检查见 just audit）
+# dev→main 前的完整本地验证（仅在 dev；依赖漏洞检查见 just audit）
 verify:
     bun run check

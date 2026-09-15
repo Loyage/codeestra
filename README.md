@@ -8,7 +8,7 @@ Task-first、local-first 的 AI Development Runtime。用户管理产品意图�
 2. **软件本体是服务，CLI 是完备命令面**：独立本地 Runtime 是本体；每个能力都能只靠 CLI 完成并可脚本化驱动。Web UI 只是方便交互的前端，走同一 versioned command/query/event 面与同一确认门禁，不新增语义、不绕过门禁。“只有 UI 能做”的能力视为缺陷。
 3. **测试仅限 CLI/命令面**：自动化测试与验收只用 CLI 命令与 Runtime 命令面（含其 HTTP/SSE 传输）断言；不使用 computer-use / 桌面或键鼠自动化，不获取用户电脑控制权。产品内 Agent 也不新增屏幕/桌面控制工具。
 
-完整表述见 [PROJECT_SPEC.md §1.1](PROJECT_SPEC.md)、[ADR-0008](docs/decisions/0008-efficiency-first-service-form.md) 与 [ADR-0011](docs/decisions/0011-default-full-permission-mode.md)。分支与稳定提升规则见 [ADR-0009](docs/decisions/0009-main-dev-promotion-and-restart.md)；运行中 Agent 的原生终端接管设计见 [ADR-0010](docs/decisions/0010-live-agent-terminal-takeover.md)。
+完整表述见 [PROJECT_SPEC.md §1.1](PROJECT_SPEC.md)、[ADR-0008](docs/decisions/0008-efficiency-first-service-form.md) 与 [ADR-0011](docs/decisions/0011-default-full-permission-mode.md)。分支与稳定提升规则见 [ADR-0009](docs/decisions/0009-main-dev-promotion-and-restart.md)，分支测试分层见 [ADR-0038](docs/decisions/0038-branch-targeted-tests-and-dev-full-suite.md)；运行中 Agent 的原生终端接管设计见 [ADR-0010](docs/decisions/0010-live-agent-terminal-takeover.md)。
 
 ## 分支与运行规则
 
@@ -16,6 +16,8 @@ Task-first、local-first 的 AI Development Runtime。用户管理产品意图�
 
 - `main`：用户日常实际运行 Codeestra、进行开发辅助工作的稳定分支。
 - `dev`：刚开发功能的实验与集成分支；所有功能任务从 `dev` 建基线，完成后先进入 `dev`，不得直接进入 `main`。
+
+`task/*`、`lane/*`、feature 与 Self Task candidate 分支在创建时按开发方向选定少量具体测试，只运行这些定向测试，不运行 `bun run check`、`just check`、`just verify` 或等价全仓检查。所有候选进入 `dev` 后，必须在准备 `dev → main` 前对精确 dev SHA 跑一次全量测试；候选变化后重跑。详见 ADR-0038。
 
 `dev → main` 必须固定 dev/main SHA 与验证证据；默认 FULL 无需批准，STRICT 保留批准。`main` 更新后立即在 main 工作树执行 `bun run codeestra stop`，再执行 `bun run codeestra status` 重新拉起并检查 Runtime；重启成功前不得报告提升完成。详见 ADR-0009。
 
@@ -65,17 +67,20 @@ Agent 结构化提问（ADR-0014）已实现：受控启动额外加载 Codeestr
 ```sh
 nix shell nixpkgs#bun nixpkgs#nodejs_24 nixpkgs#just
 just install
-just check-fast   # 开发循环（约 10s）
-just verify       # 提交前的完整门禁（约 46s），再加 just audit 查依赖漏洞
+# 开发分支：运行建分支时选定的少量具体测试，例如：
+bun test packages/domain/test/<相关测试>.test.ts
+# 仅 dev→main 前，在 dev 的精确候选 SHA 上运行：
+just verify
 ```
 
-可用命令通过 `just` 或 `just --list` 查看。检查分两层：
+可用命令通过 `just` 或 `just --list` 查看。检查分层如下：
 
-- `just check-fast`（约 10s）：类型检查、Vitest domain 测试与快速 Bun 单测（契约/存储/Git/Adapter 与不启进程的 Runtime 服务测试）。开发循环用这一个。
-- `just check`（约 46s）：在 `check-fast` 之上再跑进程级 e2e（`test:e2e`，12 个文件、Runtime/CLI 命令面）并构建 UI 资产；成果提交与 `.codeestra/policies/verification.json` 的 `check` 命令用它。两层合并覆盖全部 245 项 Bun 测试，`check` 不因分层而降低覆盖。
-- `just audit`：依赖漏洞检查需要网络且与本次代码改动无关，已从 `just verify` 移出，按需单独运行。
+- 开发 branch/worktree：创建时按改动方向写下少量具体测试文件或窄命令，开发中和交付前只跑这些定向测试；范围扩大时同步扩大计划。禁止运行 `bun run check`、`just check`、`just verify` 或等价全仓检查。
+- `just check-fast`：仍会聚合类型检查、Vitest 与快速 Bun 单测，不是“挑几个测试”的默认替代品；只有改动确实横跨其覆盖边界并在交付记录中说明理由时才使用。
+- `just check` / `just verify`：全量类型检查、测试与 UI 构建。只在长期 `dev` 上、准备 `dev → main` 前对精确候选 SHA 运行；候选、测试配置或锁文件变化后必须重跑。
+- `just audit`：依赖漏洞检查需要网络且与本次代码改动无关，按需单独运行。
 
-也可直接使用 `bun install --frozen-lockfile`、`bun run check:fast`、`bun run check`、`bun run test:e2e` 和 `bun audit`。当前 nixpkgs 没有仓库级 pin，精确可复现的 Nix devShell 是后续工程任务；项目依赖已由 `bun.lock` 固定。
+也可直接运行具体的 `bun test <test-file>` 等窄命令。当前 nixpkgs 没有仓库级 pin，精确可复现的 Nix devShell 是后续工程任务；项目依赖已由 `bun.lock` 固定。
 
 首次试运行可用临时数据目录（默认数据目录是 `$XDG_STATE_HOME/codeestra` 或 `~/.local/state/codeestra`）：
 
@@ -144,7 +149,7 @@ bun run codeestra agent config clear --project <project-id>                # 清
 
 默认 FULL 下 `open` 与验证策略变化都不要求确认。
 
-验证副本是固定 commit 的 `git worktree --detach`，**不含被 gitignore 的 `node_modules`**，所以策略的第一条命令是 `bun install --frozen-lockfile`（需要网络/缓存），第二条是 `bun run check`。
+当前验证副本是固定 commit 的 `git worktree --detach`，且本仓库 `.codeestra/policies/verification.json` 仍固定执行 `bun install --frozen-lockfile` 与 `bun run check`。这套现有 Task verification 自动化**尚不符合 ADR-0038 的按分支定向选测要求**，因此不得把它误报为已实现新的测试分层；需要后续为 Task 记录定向测试计划/证据，并为 promotion 增加精确 dev SHA 的独立全量证据。
 
 成果落在内部 `refs/heads/task/<task-id>` 上，**自动 Integration 阶段尚未实现**。如需人工回收，只能先在 `dev` 上合并并验证；不得直接合入 `main`：
 

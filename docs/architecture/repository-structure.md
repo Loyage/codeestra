@@ -49,4 +49,6 @@ Storage 使用 Bun 原生 SQLite，包含 Phase 1 子集 migration、revision ap
 
 测试边界（ADR-0008）：自动化测试与验收只通过 CLI 命令与 Runtime 命令面（含其 HTTP/SSE 传输）驱动断言；不使用 computer-use、OS 级键鼠/窗口自动化、桌面应用操作或真实桌面会话。UI 验证用 headless 命令面/HTTP 断言加用户在场时的人工确认。代码库不得引入这类依赖或脚本。
 
+测试分层（ADR-0038）：创建 task/lane/feature/Self candidate branch/worktree 时，按计划改动的模块与不变量选择少量具体测试；开发分支不运行 `bun run check`、`just check`、`just verify` 或等价全仓检查。全量测试只在长期 `dev` 上对精确候选 SHA 运行，并作为 `dev → main` 的必备证据；候选或测试输入变化后必须重跑。当前 Task verification 的固定项目策略与 promotion 的证据结构尚未自动表达该分层，这是明确实现缺口。
+
 Phase 0 测试不要求真实 Agent 凭据，也不访问真实用户仓库。

@@ -1,6 +1,6 @@
 # ADR-0009：固定 main/dev 双分支、提升授权与服务重启
 
-Status：Accepted；**Amended by ADR-0011**：FULL 下 dev→main 无需批准，STRICT 保留批准；固定分支/SHA/证据与重启要求不变。
+Status：Accepted；**Amended by ADR-0011/0038**：FULL 下 dev→main 无需批准，STRICT 保留批准；提升前必须在精确 dev 候选 SHA 上通过全量测试。固定分支/SHA/证据与重启要求不变。
 
 ## Context
 

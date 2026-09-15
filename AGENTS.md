@@ -44,7 +44,7 @@
 - 项目必须长期保留 `main` 与 `dev` 两个分支；不得删除、重命名或用临时 integration branch 取代它们。
 - `main` 是用户日常实际运行 Codeestra、进行开发辅助工作的稳定分支；不得直接在 `main` 开发新功能。
 - `dev` 是新功能实验与集成分支。所有功能 Task/worktree 从固定 `dev` commit 建立基线；功能完成、Task verification 通过后，经 IntegrationBatch 与独立 Integration verification 进入 `dev`，不得直接进入 `main`。
-- `dev → main` 是唯一稳定提升路径。每批固定 dev SHA、预期 main SHA 与验证证据；FULL 下不批准，STRICT 下保留用户批准且 ref/证据变化使批准失效。
+- `dev → main` 是唯一稳定提升路径。每批固定 dev SHA、预期 main SHA 与验证证据；FULL 下不批准，STRICT 下保留用户批准且 ref/证据变化使批准失效。提升前必须在 `dev` 工作树对精确候选 SHA 跑完全量测试；候选变化即证据失效并重跑。
 - `main` 成功更新后立即在 main 工作树执行 `bun run codeestra stop`，再执行 `bun run codeestra status` 自动拉起并检查 Runtime。该后置步骤不增加第二次确认；Runtime 恢复响应前不得报告提升完成。失败时立即报告，不擅自回滚。
 - 当前没有后台监控用户在系统外手动更新 `main` 的能力；不要声称已覆盖该场景。
 
@@ -91,6 +91,9 @@ bun run codeestra status
 - **不获取用户电脑控制权**：开发/验收中不使用 computer-use、OS 级键鼠或窗口自动化、桌面应用操作与真实桌面会话（包括用 computer-use 驱动浏览器验证 UI）。UI 验证改用 headless 命令面/HTTP 断言，加上用户在场时的人工确认。仓库内不引入此类依赖或脚本。
 - **产品内 Agent 工具集**：不新增屏幕读取、桌面操作、键鼠控制类工具；Agent 能力限于仓库读写、命令执行、Git 与验证编排。
 - 小步改动，围绕不变量测试。优先覆盖非法状态迁移、重复命令/事件、并发修订、崩溃恢复、Git 基线变化和验证失效。
+- **开发分支只跑定向测试（ADR-0038）**：创建 `task/*`、`lane/*`、feature 或 Self Task candidate branch/worktree 时，就按开发方向写下少量、具体的测试文件或窄命令及其覆盖目标；范围扩大时同步更新。交付时只报告实际执行结果。
+- **开发分支禁止全量测试**：不得在上述分支运行 `bun run check`、`just check`、`just verify` 或等价全仓测试/构建；`check:fast` 也是聚合检查，不是“挑几个测试”的默认替代品。仅当改动确实横跨其覆盖范围并在交付记录中说明理由时才可使用。
+- **全量测试只在 `dev` 执行**：所有候选集成完毕后，在准备 `dev → main` 前对精确 `dev` SHA 运行一次全量测试，这是稳定提升必做项；全量测试后 dev SHA、测试配置或锁文件变化都必须重跑。普通 dev 文档修改不触发立即全量测试。
 - Git 测试使用临时仓库；不要以真实用户仓库做破坏性测试。
 - Mock adapter 只能证明协议与编排行为，不可声称真实 Agent 集成已验收。
 - 记录实际运行的检查及结果；不能运行的检查标明原因，禁止声称未执行的测试通过。
@@ -99,5 +102,5 @@ bun run codeestra status
 ## Self Evolution
 
 - Self Task 在独立开发 worktree 中操作，不覆盖运行 Stable。
-- Candidate 测试与 Stable 数据隔离；Git 变更先进入 `dev`，用户显式批准 `dev → main` 且完成 Runtime 重启前不能切换 Stable。
+- Candidate 测试与 Stable 数据隔离；candidate 分支遵守 ADR-0038，只跑建分支时选定的定向测试。Git 变更先进入 `dev`，并在精确 dev 候选上完成提升前全量测试；用户显式批准 `dev → main` 且完成 Runtime 重启前不能切换 Stable。
 - 不绕过 bootstrap 恢复边界。涉及不可逆 migration 或 bootstrap 自身更新，先获明确决策。

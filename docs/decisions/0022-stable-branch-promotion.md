@@ -1,6 +1,6 @@
 # ADR-0022：稳定提升（`dev → main`）作为产品能力——固定证据、STRICT 批准失效与重启序列
 
-Status：Accepted（用户明确选择：后置步骤 = `bun install --frozen-lockfile` + `bun run build:ui` + `bun run codeestra stop` + `bun run codeestra status`；后置序列由 CLI 客户端执行；成功判定用 `status: READY` 并把 `uiRunning` 作为观察到的事实记录）
+Status：Accepted；**Amended by ADR-0038**：稳定提升必须额外绑定精确 dev 候选 SHA 的全量测试证据；当前 promotion 只消费 IntegrationBatch 验证，尚未实现该新增证据。后置重启序列与成功判定不变。
 
 ## Context
 

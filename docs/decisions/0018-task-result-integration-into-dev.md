@@ -1,6 +1,6 @@
 # ADR-0018：Task 成果合入 dev（IntegrationBatch 第一小步）
 
-Status：Accepted（用户明确选择：最小可用 `task.integrate`；能 ff 就 ff，否则 `--no-ff`；仅在 dev 未被任何工作树检出时才推进 ref；合并前必须有独立集成验证 PASSED；本轮直接落正式 IntegrationBatch（成员表）；本轮一并把 worktree 基线修正为固定 dev；任何失败一律保留现场且不推进 dev）
+Status：Accepted；**Amended by ADR-0038**：独立集成验证仍保留，但不能替代 `dev → main` 前对精确 dev SHA 的全量测试；当前实现仍使用同一固定项目策略，测试分层尚待实现。
 
 ## Context
 

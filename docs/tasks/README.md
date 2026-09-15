@@ -3526,6 +3526,28 @@ UI **零改动**（事件联合是 `eventType: string`，`contracts` 变更不�
 - H1 的视觉、窄屏、主题与键盘体验仍需用户人工目视确认；自动化验收未获取电脑控制权。
 - 真实 Pi/Codex 并发、真实 provider 失败后的 retry、真实 Pi TUI 下新增交接事件与跨平台未注册目录扫描仍未验证；协议 stub 与命令面测试不能替代这些验收。
 
+## FOUNDATION-064 — 开发分支定向测试 / dev 提升前全量测试（ADR-0038）
+
+状态：用户指示已固化为协作规则与 Accepted ADR；仅文档变更。Runtime 的验证/提升证据模型尚未自动实现该分层，不得声称产品已强制执行。
+
+### 已同步
+
+- `AGENTS.md`：所有 task/lane/feature/Self candidate branch/worktree 在创建时按开发方向写下少量具体测试；开发分支禁止 `bun run check`、`just check`、`just verify` 或等价全仓检查；全量测试只在 `dev` 上、准备 `dev → main` 前对精确候选 SHA 运行，候选变化即重跑。
+- `PROJECT_SPEC.md` 与 `docs/architecture/repository-structure.md` / `git-workspace-api.md`：区分开发分支定向验证和稳定提升前 dev 全量验证。
+- `README.md` / `Justfile`：不再把全量命令描述为普通开发循环或提交前门禁；保留其作为 dev 提升前命令。
+- 新增 `docs/decisions/0038-branch-targeted-tests-and-dev-full-suite.md`，并在决策索引及 ADR-0006/0009/0018/0022 标明覆盖关系。
+
+### 当前自动化缺口
+
+- `.codeestra/policies/verification.json` 仍是固定项目级策略并执行 `bun run check`，无法表达“建分支时按开发方向挑选测试”；本轮没有用另一个固定宽命令伪装成定向计划，也没有静默改写人工策略。
+- 当前 promotion 只消费 IntegrationBatch 的验证记录，没有单独的“精确 dev SHA 全量测试”证据。后续需要为 Task/branch 增加定向测试计划与结果绑定，并让 promotion 消费独立 dev 全量证据。
+- 已经存在且未合入最新 `dev` 的分支不会自动得到新 `AGENTS.md`；合并/rebase 到包含 ADR-0038 的 dev 基线后才会在文件层面看到该规则。未获授权不逐分支强推或改写历史。
+
+### 本次验证
+
+- 未运行全量测试：本次仅改文档，且 ADR-0038 明确全量测试只在固定 dev 候选准备提升到 main 时执行。
+- 仅执行文档关键词、链接、diff 与 Git 状态检查；结果以本次交付说明为准。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、~~UI 投影~~（已由 FOUNDATION-050 完成 promotion/dependency 投影）。

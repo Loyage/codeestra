@@ -93,9 +93,9 @@ interface IntegrationGitPort {
 
 1. 固定 expectedDevCommit 与有序 source commits；创建独立 integration worktree，候选目标为长期 `dev`。
 2. 在该工作树形成 dev candidate：能 ff 就 ff，否则 `--no-ff`（合并提交以固定基线为第一父，候选必须是其后代）。冲突保留现场（worktree 与 `MERGE_HEAD` 不清理），不调用 Agent 静默替用户解决产品语义冲突。
-3. 冻结 dev candidate（`merged_commit`），执行独立 Integration Verification（独立实体 `integration_verification_runs`，独立副本）；成功后以 expected old OID 保护更新 `dev`（`update-ref <ref> <new> <expected>`）。任何完成功能都必须先完成此层，不得直接进入 `main`。
+3. 冻结 dev candidate（`merged_commit`），执行独立 Integration Verification（独立实体 `integration_verification_runs`，独立副本）；成功后以 expected old OID 保护更新 `dev`（`update-ref <ref> <new> <expected>`）。任何完成功能都必须先完成此层，不得直接进入 `main`。ADR-0038 规定开发 branch/worktree 只跑建分支时选定的定向测试，因此该层证据不能冒充稳定提升前的全量回归。
 3b. **实现边界（ADR-0018）**：目标是长期 `dev` 的 ref，且仅在该 ref 未被任何工作树检出时才推进（`DEV_REF_CHECKED_OUT` 否则）；integration worktree 位于 `<CODEESTRA_HOME>/integrations/<project-id>/<batch-id>/`；成功后才尝试 `git worktree remove`（不加 force），失败现场与副本保留。崩溃恢复以 ref 实际值为准，不猜测、不重放。
-4. 稳定提升固定 expectedDevCommit、expectedMainCommit 与 verification evidence；FULL 下直接提升，STRICT 下需用户批准 dev/main/verification 三元组。
+4. 稳定提升固定 expectedDevCommit、expectedMainCommit 与 verification evidence；其中必须包含在长期 `dev` 工作树对该精确 expectedDevCommit 运行并通过的全量测试证据（ADR-0038），dev SHA、测试配置或锁文件变化即失效。FULL 下直接提升，STRICT 下需用户批准 dev/main/verification 三元组。当前 promotion 数据模型尚未存储这份独立全量证据，不得声称已自动强制。
 5. 提升前核对成员 revision、dev/main SHA、dev candidate ancestry、验证证据与工作区安全；dev 或 main 移动使 STRICT 批准失效。
 6. main 未被 checkout 时可使用带 expected old OID 的 ref CAS；main 被 checkout 时不得直接 update-ref 导致 index/worktree 不一致。MVP 安全回退为拒绝自动提升并要求安全交接；自动更新已 checkout main 的具体策略 Phase 4 前确认。
 7. main 成功更新后立即在 main 工作树执行 `bun run codeestra stop`，再执行 `bun run codeestra status` 自动拉起并检查 Runtime。重启不新增确认；恢复响应前不得报告提升完成，失败时不擅自回滚。
