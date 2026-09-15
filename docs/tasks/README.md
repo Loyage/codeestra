@@ -3024,7 +3024,7 @@ Adapter **报不出事实时不猜**：`facts` 字段整体缺席表示“未知
 
 ## FOUNDATION-059 — 调度、impact、容量与预留、完成注记的 UI 投影（Wave H / H1，纯投影，无 ADR，无迁移）
 
-状态：实现与自查完成，等待用户确认后才 commit。**未新增 ADR、未占 schema 版本、未改任何后端文件**（`apps/runtime/**`、`apps/cli/**`、`packages/**` 零改动）。视觉、窄屏与键盘体验仍需用户人工目视确认。
+状态：已提交为 `2db1514` 并合入 `dev`。**未新增 ADR、未占 schema 版本、未改任何后端文件**（`apps/runtime/**`、`apps/cli/**`、`packages/**` 零改动）。视觉、窄屏与键盘体验仍需用户人工目视确认。
 
 用户在本格明确选择（两项）：
 
@@ -3084,7 +3084,7 @@ Adapter **报不出事实时不猜**：`facts` 字段整体缺席表示“未知
 
 ## FOUNDATION-060 — 预留事务内的快照代重检（Wave H / H2，无新 ADR，无 schema 变更）
 
-状态：实现与自查完成，端到端证据已采集；**未提交**，等用户确认。基线固定 `dev@8058eb9275fbea87c1216c4ac9ea66b7e7d96022`（分支 `lane/h2-snapshot-recheck`，未 rebase、未合并新 dev）。
+状态：已提交为 `8ce269e` 并经 merge `ad2573b` 合入 `dev`；lane 的端到端证据与最终独立集成检查均通过。基线固定 `dev@8058eb9275fbea87c1216c4ac9ea66b7e7d96022`。
 
 ### 缺口（已在基线上实测确认）
 
@@ -3151,9 +3151,7 @@ Adapter **报不出事实时不猜**：`facts` 字段整体缺席表示“未知
 
 ## FOUNDATION-062 — `reclaim` 的跨项目批量与未注册目录处置（ADR-0037，schema v24）
 
-状态：**实现 + 自查完成，等用户确认后提交**（本格未 commit、未 push、未提升 `main`、未重启稳定 Runtime）。worktree
-`/Users/loyage/Documents/codeestra-wt/h4-reclaim-batch`，分支 `lane/h4-reclaim-batch`，基线**固定**
-`dev@8058eb9275fbea87c1216c4ac9ea66b7e7d96022`（未 rebase、未合并新 dev、未 pull）。ADR：**0037**（本格需要新决策：
+状态：**已提交为 `0d35b1c` 并经 merge `afadd96` 合入 `dev`**；未 push、未提升 `main`、未重启稳定 Runtime。lane 基线固定 `dev@8058eb9275fbea87c1216c4ac9ea66b7e7d96022`。ADR：**0037**（本格需要新决策：
 账本 schema 变化、批量 operation 语义、未注册目录门槛、ADR-0021 D03 退出码修订）。schema：**v24**（v22/v23 留给并行格，
 `if (version < 24)`，绝不插入 `if (version < 16)`）。
 
@@ -3332,7 +3330,7 @@ workspace 被 `execution_slot_reservations` 中 `RESERVED`/`RECOVERY_REQUIRED` �
 
 ## FOUNDATION-061 — `FAILED → READY`：显式 `task retry` 与失败后换 Agent（ADR-0036，schema v23）
 
-状态：实现与自查完成（Wave H / H3，分支 `lane/h3-failure-retry`）。**先向用户报告、等确认后才 commit**；未 push、未提升 `main`、未重启稳定 Runtime、未触碰 `/Users/loyage/Documents/codeestra`。
+状态：已提交为 `a0b7254` 并经 merge `4ecc630` 合入 `dev`；未 push、未提升 `main`、未重启稳定 Runtime、未触碰 `/Users/loyage/Documents/codeestra`。
 
 ### 缺口（提交前逐条实测确认，不是猜测）
 
@@ -3395,7 +3393,7 @@ task retry <project-id> <task-id> <expected-version> [--adapter <pi|codex>] [--j
 
 ## FOUNDATION-063 — 事件名与事件面对齐（ADR-0035）
 
-状态：实现与本地验收完成，**待用户确认后才 commit**。本格来自用户对 FOUNDATION-051（doc-sync）交出的四条不一致的裁决：
+状态：已提交为 `975fd15`，在顺序末尾经 merge `c8755d4` 合入 `dev`，最终独立集成检查通过。本格来自用户对 FOUNDATION-051（doc-sync）交出的四条不一致的裁决：
 
 1. 事件命名方向（文档对齐实现名 + 新事件用设计名 + 已实现名永不重命名）；
 2. 只补交接/终端那 7 个事件，**不做** `ImpactAssessed`/`ConflictAssessed`、不做 Execution 专名事件、不顺手实现 Session Guidance；
@@ -3494,6 +3492,39 @@ UI **零改动**（事件联合是 `eventType: string`，`contracts` 变更不�
 - `docs/decisions/README.md` 表尾追加 ADR-0035 一行。
 - `docs/architecture/event-model.md`：§2 目录、§2.2 命名规则、§2.3 已裁决差异表、§5 测试要求。
 - `docs/architecture/agent-adapter-api.md`：§1 末尾那段「与实现契约不完全一致」改为**事实一致**，并说明两个维度的声明值与不改变行为。
+
+## Wave H / G1 开发分支集成（H1 → H2 → H4 → H3 → G1）
+
+状态：**五条开发分支已按用户指定顺序合入 `dev`，独立集成检查通过。** 未 push、未提升 `main`、未重启稳定 Runtime。
+
+### 固定提交与合并顺序
+
+| 顺序 | 分支 | lane commit | `dev` 结果 |
+|---|---|---|---|
+| H1 | `lane/h1-scheduling-ui` | `2db1514` | fast-forward |
+| H2 | `lane/h2-snapshot-recheck` | `8ce269e` | merge `ad2573b` |
+| H4 | `lane/h4-reclaim-batch` | `0d35b1c` | merge `afadd96` |
+| H3 | `lane/h3-failure-retry` | `a0b7254` | merge `4ecc630` |
+| G1 | `lane/g1-event-model-alignment` | `975fd15` | merge `c8755d4` |
+
+### 集成处置
+
+- `docs/tasks/README.md` 的冲突均来自各 lane 在同一 `## NEXT` 锚点前追加记录；全部保留并按 H1/H2/H3/H4/G1 内容合并。H1 已占 `FOUNDATION-059`，因此 G1 的任务记录在集成时顺延为 **FOUNDATION-063**；ADR-0035 不变，相关代码注释、测试与架构文档引用同步更新。
+- `package.json` 的测试列表按并集合并：同时保留 `cli-snapshot-recheck`、`cli-reclaim-batch` 与 `cli-task-retry`。
+- schema 合并后当前版本为 **v24**：v23 先执行 `taskRetryMigration`，v24 再执行 `unregisteredReclamationMigration`；两者都导出。修正 H3 单 lane 测试对「当前版本必须等于 23」的假设，改为断言 v23 列已落地且当前版本不低于 23。
+- `packages/contracts` 同时保留 H3 的 `TaskRetryOutcomeView` 与 G1 的七类交接/终端事件 payload schema；CLI 同时导入 H2 的快照拒绝 detail 与 H3 的 retry 结果类型。
+- 旧 migration 回归里的版本断言统一指向合并后的当前版本；没有删除历史 migration、没有占用永久空缺的 v16/v22。
+
+### 独立集成验证
+
+- 在合并后的 `dev@c8755d4` 上执行 `CODEESTRA_HOME=/tmp/codeestra-integration-c8755d4 bun run check`：退出码 **0**。
+- 根/UI TypeScript、Vitest、Bun 全量测试与 UI 构建均通过；Bun 为 **622 pass / 0 fail（72 文件，4052 assertions）**，Vite 构建成功。
+- 检查使用独立 `CODEESTRA_HOME`；结束后该目录不存在，未发现指向该 home 或 dev Runtime 入口的残留进程。稳定 `main` Runtime 未触碰。
+
+### 仍未验证
+
+- H1 的视觉、窄屏、主题与键盘体验仍需用户人工目视确认；自动化验收未获取电脑控制权。
+- 真实 Pi/Codex 并发、真实 provider 失败后的 retry、真实 Pi TUI 下新增交接事件与跨平台未注册目录扫描仍未验证；协议 stub 与命令面测试不能替代这些验收。
 
 ## NEXT — 最小可用纵向切片
 
