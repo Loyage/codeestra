@@ -6,6 +6,8 @@ import { Socket } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { HandoffChannelCommand } from '@codeestra/agent-adapters';
 import type { AgentSessionRef, AgentStartRequest } from '@codeestra/contracts';
+import { takeoverFailedPayloadSchema,
+  takeoverRequestedPayloadSchema } from '@codeestra/contracts';
 import { DeterministicFakeAdapter } from '@codeestra/agent-adapters';
 import { Phase1Database } from '@codeestra/storage';
 import { AdapterRegistry } from '../../runtime/src/adapter-registry.js';
@@ -675,5 +677,250 @@ describe('session handoff service', () => {
       channel.close();
       harness.service.close();
     }
+  });
+});
+
+/** Every stored event of one type, in log order, with its payload already parsed. */
+function handoffEvents(storage: Phase1Database, eventType: string): readonly {
+  readonly eventId: string; readonly aggregateType: string; readonly aggregateId: string;
+  readonly aggregateVersion: number; readonly correlationId: string;
+  readonly payload: Record<string, unknown>;
+}[] {
+  return storage.sqlite.query<{
+    event_id: string; aggregate_type: string; aggregate_id: string; aggregate_version: number;
+    correlation_id: string; payload_json: string;
+  }, [string]>(`
+    SELECT event_id,aggregate_type,aggregate_id,aggregate_version,correlation_id,payload_json
+    FROM domain_events WHERE event_type=?1 ORDER BY sequence
+  `).all(eventType).map((row) => ({
+    eventId: row.event_id, aggregateType: row.aggregate_type, aggregateId: row.aggregate_id,
+    aggregateVersion: row.aggregate_version, correlationId: row.correlation_id,
+    payload: JSON.parse(row.payload_json) as Record<string, unknown>,
+  }));
+}
+
+/** A Session fenced and settled, which is the state an admission is decided from. */
+async function fenceToSafePoint(harness: Harness,
+  channel: TestProviderChannel, commandId: string): Promise<void> {
+  await channel.waitFor((command) => command.kind === 'welcome');
+  harness.service.requestHandoff({
+    projectId: harness.projectId, sessionId: harness.sessionId,
+    kind: 'TAKEOVER', commandId,
+  });
+  await channel.waitFor((command) => command.kind === 'fence');
+  channel.send({ kind: 'fence_ack', active: true });
+  channel.send({ kind: 'agent_settled' });
+  await waitFor(() => statusOf(harness).handoff?.state === 'AT_SAFE_POINT');
+}
+
+/**
+ * The domain facts of the handoff/takeover face (FOUNDATION-059, ADR-0035). These assert the
+ * storage-level contract the e2e CLI test drives end to end: one event per state change, in the same
+ * transaction, with the payload the contract describes.
+ */
+describe('handoff and terminal domain events', () => {
+  test('records the takeover intent once, with its event, however often the command is replayed', async () => {
+    const harness = await startHarness();
+    try {
+      const commandId = 'fixed-takeover-command';
+      const request = {
+        projectId: harness.projectId, sessionId: harness.sessionId,
+        kind: 'TAKEOVER' as const, commandId,
+      };
+      const first = harness.service.requestHandoff(request);
+      const takeoverId = first.handoff?.requestId as string;
+      const status = statusOf(harness);
+      const events = handoffEvents(harness.storage, 'TakeoverRequested');
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ aggregateType: 'SessionHandoff', aggregateId: takeoverId,
+        aggregateVersion: 1, correlationId: commandId });
+      expect(events[0]?.payload).toMatchObject({
+        takeoverId,
+        sessionId: harness.sessionId,
+        executionId: status.executionId,
+        incarnationId: status.incarnation?.incarnationId,
+        kind: 'TAKEOVER',
+        targetMode: 'HUMAN_TUI',
+      });
+
+      // The same command is a replay, not a second intent.
+      expect(harness.service.requestHandoff(request).handoff?.requestId).toBe(takeoverId);
+      expect(handoffEvents(harness.storage, 'TakeoverRequested')).toHaveLength(1);
+
+      // A *different* command while one request is open is refused, and the refusal is its own fact
+      // with a stable code — the refusal does not erase or duplicate the recorded intent.
+      expect(() => harness.service.requestHandoff({ ...request, commandId: crypto.randomUUID() }))
+        .toThrow(/HANDOFF_ALREADY_REQUESTED/);
+      expect(handoffEvents(harness.storage, 'TakeoverRequested')).toHaveLength(1);
+      const failures = handoffEvents(harness.storage, 'TakeoverFailed');
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.payload).toMatchObject({
+        reason: 'HANDOFF_ALREADY_REQUESTED', stage: 'REQUEST', takeoverId: null,
+        sessionId: harness.sessionId,
+      });
+    } finally {
+      harness.service.close();
+    }
+  });
+
+  test('publishes a writer-lease change with the lease it describes, and only when it changes', async () => {
+    const harness = await startHarness();
+    try {
+      const lease = harness.storage.getSessionWriterLease(harness.sessionId);
+      expect(lease).not.toBeNull();
+      const acquired = handoffEvents(harness.storage, 'TerminalWriterLeaseChanged');
+      expect(acquired).toHaveLength(1);
+      expect(acquired[0]).toMatchObject({ aggregateType: 'SessionWriterLease',
+        aggregateId: lease?.id as string, aggregateVersion: 1 });
+      expect(acquired[0]?.payload).toMatchObject({
+        takeoverId: null, sessionId: harness.sessionId, leaseId: lease?.id as string,
+        action: 'ACQUIRED', before: null, reason: null,
+        after: { incarnationId: lease?.incarnationId as string, holderKind: 'AUTOMATED_RPC',
+          holderRef: lease?.holderRef as string },
+      });
+
+      expect(harness.service.releaseWriterLease({
+        projectId: harness.projectId, sessionId: harness.sessionId,
+        holderRef: lease?.holderRef as string,
+      })).toMatchObject({ released: true, code: 'RELEASED' });
+      const released = handoffEvents(harness.storage, 'TerminalWriterLeaseChanged');
+      expect(released).toHaveLength(2);
+      expect(released[1]).toMatchObject({ aggregateId: lease?.id as string, aggregateVersion: 2 });
+      expect(released[1]?.payload).toMatchObject({ action: 'RELEASED', after: null,
+        before: { incarnationId: lease?.incarnationId as string, holderKind: 'AUTOMATED_RPC' } });
+
+      // Releasing again changes nothing, so it is not a fact and gets no event.
+      expect(harness.service.releaseWriterLease({
+        projectId: harness.projectId, sessionId: harness.sessionId,
+        holderRef: lease?.holderRef as string,
+      })).toMatchObject({ released: false, code: 'NO_LEASE' });
+      expect(handoffEvents(harness.storage, 'TerminalWriterLeaseChanged')).toHaveLength(2);
+    } finally {
+      harness.service.close();
+    }
+  });
+
+  test('publishes the safe point with the facts it was reached from, never before them', async () => {
+    const harness = await startHarness();
+    const channel = await openChannel(harness);
+    try {
+      await channel.waitFor((command) => command.kind === 'welcome');
+      harness.service.requestHandoff({
+        projectId: harness.projectId, sessionId: harness.sessionId,
+        kind: 'TAKEOVER', commandId: 'fenced-command',
+      });
+      await channel.waitFor((command) => command.kind === 'fence');
+
+      // No safe point yet: the refusal says so, and the log holds the refusal instead of a
+      // safe-point event the Runtime did not observe.
+      const refused = await harness.service.admitSuccessor({
+        projectId: harness.projectId, sessionId: harness.sessionId,
+        commandId: 'refused-admit',
+      });
+      expect(refused).toMatchObject({ admitted: false, code: 'SAFE_POINT_NOT_REACHED' });
+      expect(handoffEvents(harness.storage, 'TakeoverSafePointReached')).toHaveLength(0);
+      expect(handoffEvents(harness.storage, 'TakeoverFailed').at(-1)?.payload).toMatchObject({
+        reason: 'SAFE_POINT_NOT_REACHED', stage: 'ADMIT',
+      });
+
+      channel.send({ kind: 'fence_ack', active: true });
+      channel.send({ kind: 'agent_settled' });
+      await waitFor(() => statusOf(harness).handoff?.state === 'AT_SAFE_POINT');
+      const events = handoffEvents(harness.storage, 'TakeoverSafePointReached');
+      expect(events).toHaveLength(1);
+      // The aggregate is the takeover, and its facts stay ordered: the intent is version 1, the
+      // refused admission above is version 2, and the safe point is version 3.
+      expect(events[0]).toMatchObject({ aggregateType: 'SessionHandoff',
+        aggregateId: statusOf(harness).handoff?.requestId as string, aggregateVersion: 3 });
+      expect(events[0]?.payload).toMatchObject({
+        reachedFrom: 'RPC_FENCE', fenceAcknowledged: true, activeTools: 0, missing: [],
+        lastEntryRef: null,
+      });
+      expect(typeof events[0]?.payload['settledAfterFenceAt']).toBe('number');
+      expect(events[0]?.payload['evidenceRef']).toContain('fence=');
+    } finally {
+      channel.close();
+      harness.service.close();
+    }
+  });
+
+  test('rolls an admission fact back with the state change when the transaction fails', async () => {    const harness = await startHarness();
+    const channel = await openChannel(harness);
+    try {
+      await fenceToSafePoint(harness, channel, 'atomic-admit');
+      const request = statusOf(harness).handoff;
+      expect(request?.state).toBe('AT_SAFE_POINT');
+
+      // The UPDATE happens first and the event only after the successor was resolved, so a successor
+      // that does not exist has to roll back *both*: no ADMITTED state, no completion event.
+      expect(() => harness.storage.markSessionHandoffAdmitted({
+        requestId: request?.requestId as string,
+        at: Date.now(),
+        detail: 'an admission that cannot be described',
+        eventId: crypto.randomUUID(),
+        completion: {
+          successorIncarnationId: 'no-such-incarnation',
+          successorIncarnationNumber: 2,
+          terminalTransport: 'PTY',
+          terminalId: null,
+          providerPid: null,
+          processEvidenceRef: null,
+        },
+      })).toThrow(/incarnation that is gone/);
+      expect(statusOf(harness).handoff?.state).toBe('AT_SAFE_POINT');
+      expect(statusOf(harness).handoff?.admittedAt).toBeNull();
+      expect(handoffEvents(harness.storage, 'SessionHandoffCompleted')).toHaveLength(0);
+    } finally {
+      channel.close();
+      harness.service.close();
+    }
+  });
+
+  test('records one refusal per command, but never hides a different one', async () => {
+    const harness = await startHarness();
+    try {
+      const attempt = {
+        sessionId: harness.sessionId,
+        takeoverId: null,
+        incarnationId: null,
+        stage: 'ADMIT' as const,
+        reason: 'SAFE_POINT_NOT_REACHED',
+        detail: 'the handoff has not reached its safe point',
+        commandId: 'replayed-refusal',
+        evidenceRef: null,
+        occurredAt: 10,
+      };
+      // The event id is derived from the command and the code, so a replay is not a second fact.
+      expect(harness.storage.recordSessionHandoffFailure(attempt)).toBe(true);
+      expect(harness.storage.recordSessionHandoffFailure(attempt)).toBe(false);
+      expect(handoffEvents(harness.storage, 'TakeoverFailed')).toHaveLength(1);
+      // A *different* refusal is a different fact: the ledger never rewrites history to look cleaner.
+      expect(harness.storage.recordSessionHandoffFailure({ ...attempt,
+        reason: 'PREDECESSOR_NOT_STOPPED' })).toBe(true);
+      const failures = handoffEvents(harness.storage, 'TakeoverFailed');
+      expect(failures).toHaveLength(2);
+      expect(failures.map((event) => event.payload['reason']))
+        .toEqual(['SAFE_POINT_NOT_REACHED', 'PREDECESSOR_NOT_STOPPED']);
+      expect(failures.map((event) => event.aggregateVersion)).toEqual([1, 2]);
+    } finally {
+      harness.service.close();
+    }
+  });
+
+  test('keeps every event payload strict, so an undescribed shape cannot be stored', () => {
+    const payload = { takeoverId: 't', sessionId: 's', executionId: 'e', incarnationId: 'i',
+      kind: 'TAKEOVER', targetMode: 'HUMAN_TUI' };
+    expect(takeoverRequestedPayloadSchema.safeParse(payload).success).toBe(true);
+    // A field the contract does not describe is refused instead of being stored and read back later
+    // as an event the event catalogue cannot explain.
+    expect(takeoverRequestedPayloadSchema.safeParse({ ...payload, extra: 1 }).success).toBe(false);
+    expect(takeoverRequestedPayloadSchema.safeParse({ ...payload, executionId: undefined }).success)
+      .toBe(false);
+    expect(takeoverFailedPayloadSchema.safeParse({ takeoverId: null, sessionId: 's',
+      executionId: 'e', incarnationId: null, stage: 'RELEASE', reason: 'RELEASE_NOT_CONFIRMED',
+      detail: 'the provider did not exit', evidenceRef: null }).success).toBe(true);
+    expect(takeoverFailedPayloadSchema.safeParse({ takeoverId: null, sessionId: 's',
+      executionId: 'e', incarnationId: null, stage: 'NOT_A_STAGE', reason: 'X', detail: '',
+      evidenceRef: null }).success).toBe(false);
   });
 });

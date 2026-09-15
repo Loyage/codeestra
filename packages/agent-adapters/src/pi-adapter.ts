@@ -30,6 +30,18 @@ const piCapabilities: AdapterCapabilities = Object.freeze({
   revisionAcknowledgement: 'UNSUPPORTED',
   cooperativeStop: 'REQUIRES_VALIDATION',
   attach: 'STRUCTURED',
+  // ADR-0026 measured the whole chain with a real Pi 0.84.4 TUI: the predecessor stops being the
+  // writer, the successor TUI reopens the *same* provider session file on a PTY the Runtime owns,
+  // and a single writer lease is kept. Declaring it is what lets a reader tell Pi from a provider
+  // whose conversation cannot be handed to a terminal at all (Codex, ADR-0029). The residual gaps
+  // are narrower and are stated where they belong instead: the Runtime's own
+  // `SessionHandoffCapabilities` reports `crossHandoffPermissionModeMatrix: PARTIAL` and
+  // `parallelToolBatchSafePoint: UNVERIFIED`.
+  nativeTerminalHandoff: 'SUPPORTED',
+  // Pi's controlled gate extension reports `tool_start`/`tool_end`/`agent_settled`, which is exactly
+  // the fact set a safe point is admitted from (fence acknowledged, no tool running, a settled fact
+  // after the fence). Without them the Runtime could only guess from terminal bytes.
+  safePointNotification: 'SUPPORTED',
   reconnectToLiveSession: 'UNSUPPORTED',
   resumeAfterExit: 'SUPPORTED',
   // Pi is launched with `--no-extensions` plus only Codeestra's own extensions, so nothing

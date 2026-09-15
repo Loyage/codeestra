@@ -292,6 +292,8 @@ describe('Codex adapter capabilities', () => {
       revisionAcknowledgement: 'UNSUPPORTED',
       cooperativeStop: 'REQUIRES_VALIDATION',
       attach: 'UNSUPPORTED',
+      nativeTerminalHandoff: 'UNSUPPORTED',
+      safePointNotification: 'UNSUPPORTED',
       reconnectToLiveSession: 'UNSUPPORTED',
       resumeAfterExit: 'SUPPORTED',
       controlledConfiguration: 'UNSUPPORTED',

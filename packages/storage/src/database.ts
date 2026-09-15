@@ -17,9 +17,15 @@ import {
   type RevisionDeliveryChannel,
   type RevisionDeliveryState,
 } from '@codeestra/domain';
-import type { AgentAnswer, CapacityWaitReason, SlotCapacityCheck, SlotReservationDetailView,
-  SlotReservationView } from '@codeestra/contracts';
-import { defaultConcurrencyLimit, maxConcurrencyLimit } from '@codeestra/contracts';
+import type { AgentAnswer, CapacityWaitReason, SessionHandoffCompletedPayload,
+  SessionHandoffEventType, SessionHandoffStartedPayload, SlotCapacityCheck, SlotReservationDetailView,
+  SlotReservationView, TakeoverFailedPayload, TakeoverReleasedPayload, TakeoverRequestedPayload,
+  TakeoverSafePointReachedPayload, TerminalWriterLeaseChangedPayload } from '@codeestra/contracts';
+import { defaultConcurrencyLimit, maxConcurrencyLimit, sessionHandoffEventTypes,
+  sessionHandoffStartedPayloadSchema, sessionHandoffCompletedPayloadSchema,
+  takeoverFailedPayloadSchema, takeoverReleasedPayloadSchema, takeoverRequestedPayloadSchema,
+  takeoverSafePointReachedPayloadSchema,
+  terminalWriterLeaseChangedPayloadSchema } from '@codeestra/contracts';
 import {
   agentAnswerMigration,
   agentConfigurationMigration,
@@ -7554,13 +7560,20 @@ export class Phase1Database {
     readonly reason: string;
     readonly releasedAt: number;
   }): { readonly released: boolean; readonly code: 'RELEASED' | 'NO_LEASE' | 'HOLDER_MISMATCH' } {
-    const result = this.sqlite.query(`
-      UPDATE session_writer_leases SET released_at=?1,release_reason=?2
-      WHERE session_id=?3 AND holder_ref=?4 AND released_at IS NULL
-    `).run(input.releasedAt, input.reason, input.sessionId, input.holderRef);
-    if (result.changes === 1) return { released: true, code: 'RELEASED' };
-    const active = this.getSessionWriterLease(input.sessionId);
-    return { released: false, code: active === null ? 'NO_LEASE' : 'HOLDER_MISMATCH' };
+    return this.sqlite.transaction(() => {
+      const active = this.getSessionWriterLease(input.sessionId);
+      const result = this.sqlite.query(`
+        UPDATE session_writer_leases SET released_at=?1,release_reason=?2
+        WHERE session_id=?3 AND holder_ref=?4 AND released_at IS NULL
+      `).run(input.releasedAt, input.reason, input.sessionId, input.holderRef);
+      if (result.changes !== 1) {
+        return { released: false as const,
+          code: (active === null ? 'NO_LEASE' : 'HOLDER_MISMATCH') as 'NO_LEASE' | 'HOLDER_MISMATCH' };
+      }
+      if (active !== null) this.#appendWriterLeaseChangeForRelease(this.sqlite, active, input.reason,
+        input.releasedAt);
+      return { released: true as const, code: 'RELEASED' as const };
+    })();
   }
 
   releaseSessionWriterLeaseForSession(input: {
@@ -7568,11 +7581,17 @@ export class Phase1Database {
     readonly reason: string;
     readonly releasedAt: number;
   }): boolean {
-    const result = this.sqlite.query(`
-      UPDATE session_writer_leases SET released_at=?1,release_reason=?2
-      WHERE session_id=?3 AND released_at IS NULL
-    `).run(input.releasedAt, input.reason, input.sessionId);
-    return result.changes === 1;
+    return this.sqlite.transaction(() => {
+      const active = this.getSessionWriterLease(input.sessionId);
+      const result = this.sqlite.query(`
+        UPDATE session_writer_leases SET released_at=?1,release_reason=?2
+        WHERE session_id=?3 AND released_at IS NULL
+      `).run(input.releasedAt, input.reason, input.sessionId);
+      if (result.changes !== 1) return false;
+      if (active !== null) this.#appendWriterLeaseChangeForRelease(this.sqlite, active, input.reason,
+        input.releasedAt);
+      return true;
+    })();
   }
 
   /**
@@ -7587,6 +7606,8 @@ export class Phase1Database {
     readonly kind: SessionHandoffKind;
     readonly commandId: string;
     readonly createdAt: number;
+    /** The domain event id of the `TakeoverRequested` fact this insert is committed with. */
+    readonly eventId: string;
   }): { readonly request: SessionHandoffRequestRecord; readonly replayed: boolean } {
     return this.sqlite.transaction(() => {
       const replayed = this.sqlite.query<SessionHandoffRequestRow, [string, string]>(`
@@ -7602,12 +7623,27 @@ export class Phase1Database {
         throw new StorageError('INVALID_STATE',
           `HANDOFF_ALREADY_REQUESTED: ${open.kind} request ${open.id} is ${open.state}`);
       }
+      const existing = this.getSessionIncarnation(input.incarnationId);
+      if (existing === null) {
+        throw new StorageError('NOT_FOUND', 'Session incarnation was not found');
+      }
       this.sqlite.query(`
         INSERT INTO session_handoff_requests(id,session_id,execution_id,incarnation_id,kind,state,
           command_id,fence_active,detail,created_at,updated_at)
         VALUES (?1,?2,?3,?4,?5,'REQUESTED',?6,0,NULL,?7,?7)
       `).run(input.id, input.sessionId, input.executionId, input.incarnationId, input.kind,
         input.commandId, input.createdAt);
+      // The intent and its event are one fact: a recorded request without its event (or the reverse)
+      // would let a reader see a takeover that was never asked for.
+      this.#handoffEventScope(this.sqlite, input.sessionId, input.eventId, 'TakeoverRequested',
+        input.id, input.commandId, input.createdAt, {
+          takeoverId: input.id,
+          sessionId: input.sessionId,
+          executionId: input.executionId,
+          incarnationId: input.incarnationId,
+          kind: input.kind,
+          targetMode: existing.mode === 'AUTOMATED_RPC' ? 'HUMAN_TUI' : 'AUTOMATED_RPC',
+        } satisfies TakeoverRequestedPayload);
       return {
         request: this.getSessionHandoffRequest(input.id) as SessionHandoffRequestRecord,
         replayed: false,
@@ -7693,30 +7729,85 @@ export class Phase1Database {
     readonly requestId: string;
     readonly at: number;
     readonly detail: string;
+    readonly eventId: string;
+    /** Facts the Runtime observed when it decided the safe point; stored verbatim, never re-derived. */
+    readonly activeTools: number;
+    readonly missing: readonly string[];
+    readonly evidenceRef: string | null;
   }): SessionHandoffRequestRecord {
-    const result = this.sqlite.query(`
-      UPDATE session_handoff_requests SET state='AT_SAFE_POINT',safe_point_at=?1,detail=?2,updated_at=?1
-      WHERE id=?3 AND state='FENCED' AND fence_active=1
-    `).run(input.at, input.detail, input.requestId);
-    if (result.changes !== 1) {
-      throw new StorageError('INVALID_STATE', 'Safe point did not match a fenced handoff request');
-    }
-    return this.getSessionHandoffRequest(input.requestId) as SessionHandoffRequestRecord;
+    return this.sqlite.transaction(() => {
+      const result = this.sqlite.query(`
+        UPDATE session_handoff_requests SET state='AT_SAFE_POINT',safe_point_at=?1,detail=?2,updated_at=?1
+        WHERE id=?3 AND state='FENCED' AND fence_active=1
+      `).run(input.at, input.detail, input.requestId);
+      if (result.changes !== 1) {
+        throw new StorageError('INVALID_STATE', 'Safe point did not match a fenced handoff request');
+      }
+      const request = this.getSessionHandoffRequest(input.requestId) as SessionHandoffRequestRecord;
+      this.#handoffEventScope(this.sqlite, request.sessionId, input.eventId,
+        'TakeoverSafePointReached', request.id, request.commandId, input.at, {
+          takeoverId: request.id,
+          sessionId: request.sessionId,
+          executionId: request.executionId,
+          incarnationId: request.incarnationId,
+          reachedFrom: 'RPC_FENCE',
+          fenceAcknowledged: request.fenceActive,
+          settledAfterFenceAt: request.settledAfterFenceAt,
+          activeTools: input.activeTools,
+          evidenceRef: input.evidenceRef,
+          lastEntryRef: null,
+          missing: [...input.missing],
+        } satisfies TakeoverSafePointReachedPayload);
+      return request;
+    })();
   }
 
   markSessionHandoffAdmitted(input: {
     readonly requestId: string;
     readonly at: number;
     readonly detail: string;
+    readonly eventId: string;
+    /** The successor process that was really started, recorded and holding the writer lease. */
+    readonly completion: {
+      readonly successorIncarnationId: string;
+      readonly successorIncarnationNumber: number;
+      readonly terminalTransport: 'PTY' | 'RPC' | 'NONE';
+      readonly terminalId: string | null;
+      readonly providerPid: number | null;
+      readonly processEvidenceRef: string | null;
+    };
   }): SessionHandoffRequestRecord {
-    const result = this.sqlite.query(`
-      UPDATE session_handoff_requests SET state='ADMITTED',admitted_at=?1,detail=?2,updated_at=?1
-      WHERE id=?3 AND state='AT_SAFE_POINT'
-    `).run(input.at, input.detail, input.requestId);
-    if (result.changes !== 1) {
-      throw new StorageError('INVALID_STATE', 'Admission did not match a handoff request at its safe point');
-    }
-    return this.getSessionHandoffRequest(input.requestId) as SessionHandoffRequestRecord;
+    return this.sqlite.transaction(() => {
+      const result = this.sqlite.query(`
+        UPDATE session_handoff_requests SET state='ADMITTED',admitted_at=?1,detail=?2,updated_at=?1
+        WHERE id=?3 AND state='AT_SAFE_POINT'
+      `).run(input.at, input.detail, input.requestId);
+      if (result.changes !== 1) {
+        throw new StorageError('INVALID_STATE', 'Admission did not match a handoff request at its safe point');
+      }
+      const request = this.getSessionHandoffRequest(input.requestId) as SessionHandoffRequestRecord;
+      const source = this.getSessionIncarnation(request.incarnationId);
+      const successor = this.getSessionIncarnation(input.completion.successorIncarnationId);
+      if (source === null || successor === null) {
+        throw new StorageError('NOT_FOUND', 'The admitted handoff names an incarnation that is gone');
+      }
+      this.#handoffEventScope(this.sqlite, request.sessionId, input.eventId,
+        'SessionHandoffCompleted', request.id, request.commandId, input.at, {
+          takeoverId: request.id,
+          sourceSessionId: request.sessionId,
+          targetSessionId: request.sessionId,
+          sourceIncarnationId: request.incarnationId,
+          successorIncarnationId: successor.id,
+          successorIncarnationNumber: input.completion.successorIncarnationNumber,
+          fromMode: source.mode,
+          toMode: successor.mode,
+          terminalTransport: input.completion.terminalTransport,
+          terminalId: input.completion.terminalId,
+          providerPid: input.completion.providerPid,
+          processEvidenceRef: input.completion.processEvidenceRef,
+        } satisfies SessionHandoffCompletedPayload);
+      return request;
+    })();
   }
 
   /** An abandoned handoff releases its fence; the incarnation may run tools again. */
@@ -8097,6 +8188,20 @@ export class Phase1Database {
         released_at,release_reason FROM session_writer_leases WHERE id=?1
     `).get(id);
     if (row === null) throw new StorageError('INVALID_STATE', 'Session writer lease was not persisted');
+    // Only a lease that was really inserted produces a change fact: the callers return early on a
+    // replay, so a repeated command cannot append a second `TerminalWriterLeaseChanged`.
+    this.#appendWriterLeaseChangedEvent(this.sqlite, {
+      eventId: crypto.randomUUID(),
+      sessionId: input.sessionId,
+      leaseId: id,
+      action: 'ACQUIRED',
+      before: null,
+      after: { incarnationId: input.incarnationId, holderKind: input.holderKind,
+        holderRef: input.holderRef },
+      commandId: input.commandId,
+      reason: null,
+      occurredAt: input.acquiredAt,
+    });
     return mapSessionWriterLeaseRow(row);
   }
 
@@ -8382,6 +8487,261 @@ export class Phase1Database {
   }
 
   // -------------------------------------------------------------------------------------------
+  // Handoff and native-terminal domain events (FOUNDATION-059, ADR-0035)
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * Appends one handoff / native-terminal fact inside the caller's transaction.
+   *
+   * Two rules are enforced here rather than trusted to callers: the payload is parsed against its
+   * contract schema first, and the aggregate version is allocated per aggregate inside the same
+   * transaction, so a takeover's facts read back in the order they happened
+   * (`TakeoverRequested` → safe point → started → completed/failed).
+   */
+  #appendSessionHandoffEvent(database: Database, input: {
+    readonly eventId: string;
+    readonly eventType: SessionHandoffEventType;
+    readonly projectId: string;
+    readonly aggregateId: string;
+    readonly correlationId: string;
+    readonly occurredAt: number;
+    readonly payload: unknown;
+    readonly causationId?: string | null;
+  }): void {
+    if (!(sessionHandoffEventTypes as readonly string[]).includes(input.eventType)) {
+      throw new StorageError('INVALID_STATE',
+        `Unknown handoff event type ${String(input.eventType)}`);
+    }
+    const parsed = sessionHandoffPayloadSchemas[input.eventType].parse(input.payload);
+    const aggregateType = input.eventType === 'TerminalWriterLeaseChanged'
+      ? sessionWriterLeaseAggregateType : sessionHandoffAggregateType;
+    const next = database.query<{ version: number }, [string, string]>(`
+      SELECT COALESCE(MAX(aggregate_version),0)+1 AS version FROM domain_events
+      WHERE aggregate_type=?1 AND aggregate_id=?2
+    `).get(aggregateType, input.aggregateId)?.version ?? 1;
+    database.query(`
+      INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+        aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+      VALUES (?1,?2,?3,1,?4,?5,?6,?7,?8,?9,?10)
+    `).run(input.eventId, input.projectId, input.eventType, aggregateType, input.aggregateId,
+      next, input.correlationId, input.causationId ?? null, input.occurredAt,
+      JSON.stringify(parsed));
+  }
+
+  /** Appends one writer-lease change. The lease term is history, so a change is never an update. */
+  #appendWriterLeaseChangedEvent(database: Database, input: {
+    readonly eventId: string;
+    readonly sessionId: string;
+    readonly leaseId: string;
+    readonly action: 'ACQUIRED' | 'RELEASED';
+    readonly before: SessionWriterLeaseHolderFact | null;
+    readonly after: SessionWriterLeaseHolderFact | null;
+    readonly commandId: string;
+    readonly reason: string | null;
+    readonly occurredAt: number;
+  }): void {
+    const scope = this.#sessionEventScope(database, input.sessionId);
+    this.#appendSessionHandoffEvent(database, {
+      eventId: input.eventId,
+      eventType: 'TerminalWriterLeaseChanged',
+      projectId: scope.projectId,
+      aggregateId: input.leaseId,
+      correlationId: input.commandId,
+      occurredAt: input.occurredAt,
+      payload: {
+        takeoverId: this.#openTakeoverId(database, input.sessionId),
+        sessionId: input.sessionId,
+        leaseId: input.leaseId,
+        action: input.action,
+        before: input.before,
+        after: input.after,
+        reason: input.reason,
+      } satisfies TerminalWriterLeaseChangedPayload,
+    });
+  }
+
+  /** Appends the `RELEASED` half of a lease change for a term that was still active a moment ago. */
+  #appendWriterLeaseChangeForRelease(database: Database,
+    lease: SessionWriterLeaseRecord, reason: string, at: number): void {
+    this.#appendWriterLeaseChangedEvent(database, {
+      eventId: crypto.randomUUID(),
+      sessionId: lease.sessionId,
+      leaseId: lease.id,
+      action: 'RELEASED',
+      before: { incarnationId: lease.incarnationId, holderKind: lease.holderKind,
+        holderRef: lease.holderRef },
+      after: null,
+      commandId: lease.commandId,
+      reason,
+      occurredAt: at,
+    });
+  }
+
+  /** The project and execution a Session belongs to; every handoff fact is attributed to both. */
+  #sessionEventScope(database: Database, sessionId: string): {
+    readonly projectId: string; readonly executionId: string } {
+    const row = database.query<{ project_id: string; execution_id: string }, [string]>(`
+      SELECT task.project_id AS project_id,session.execution_id AS execution_id
+      FROM agent_sessions session JOIN executions execution ON execution.id=session.execution_id
+      JOIN tasks task ON task.id=execution.task_id WHERE session.id=?1
+    `).get(sessionId);
+    if (row === null) throw new StorageError('NOT_FOUND', 'Agent Session was not found');
+    return { projectId: row.project_id, executionId: row.execution_id };
+  }
+
+  /**
+   * The handoff request that was still open when a fact was recorded, if any. It is read inside the
+   * same transaction, so a lease change or a safe point is correlated with the takeover that really
+   * was in flight at that moment instead of with a later one.
+   */
+  #openTakeoverId(database: Database, sessionId: string): string | null {
+    const row = database.query<{ id: string }, [string]>(`
+      SELECT id FROM session_handoff_requests WHERE session_id=?1
+        AND state IN ('REQUESTED','FENCED','AT_SAFE_POINT') ORDER BY created_at DESC LIMIT 1
+    `).get(sessionId);
+    return row?.id ?? null;
+  }
+
+  #handoffEventScope(database: Database, sessionId: string, eventId: string, eventType:
+  SessionHandoffEventType, aggregateId: string, correlationId: string, occurredAt: number,
+  payload: unknown): void {
+    const scope = this.#sessionEventScope(database, sessionId);
+    this.#appendSessionHandoffEvent(database, {
+      eventId, eventType, projectId: scope.projectId, aggregateId, correlationId, occurredAt, payload,
+    });
+  }
+
+  /**
+   * Appends one observed refusal as a domain fact.
+   *
+   * A refusal has no state change to commit with, so it is the one event written on its own. It is
+   * idempotent by construction: the event id is derived from the command that produced it and the
+   * stable reason code, so replaying one command adds no second fact while a *different* refusal
+   * remains visible as history (a stored event is never rewritten to hide an earlier failure).
+   */
+  recordSessionHandoffFailure(input: {
+    readonly sessionId: string;
+    readonly takeoverId: string | null;
+    readonly incarnationId: string | null;
+    readonly stage: TakeoverFailedPayload['stage'];
+    readonly reason: string;
+    readonly detail: string;
+    readonly commandId: string;
+    readonly evidenceRef: string | null;
+    readonly occurredAt: number;
+  }): boolean {
+    return this.sqlite.transaction(() => {
+      const scope = this.#sessionEventScope(this.sqlite, input.sessionId);
+      const eventId = createHash('sha256')
+        .update(`${input.commandId}:${input.stage}:${input.reason}`).digest('hex');
+      const payload = takeoverFailedPayloadSchema.parse({
+        takeoverId: input.takeoverId,
+        sessionId: input.sessionId,
+        executionId: scope.executionId,
+        incarnationId: input.incarnationId,
+        stage: input.stage,
+        reason: input.reason,
+        detail: input.detail,
+        evidenceRef: input.evidenceRef,
+      } satisfies TakeoverFailedPayload);
+      const inserted = this.sqlite.query(`
+        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+        SELECT ?1,?2,'TakeoverFailed',1,?3,?4,COALESCE((
+          SELECT MAX(aggregate_version) FROM domain_events
+          WHERE aggregate_type=?3 AND aggregate_id=?4
+        ),0)+1,?5,NULL,?6,?7
+        WHERE NOT EXISTS(SELECT 1 FROM domain_events WHERE event_id=?1)
+      `).run(eventId, scope.projectId, sessionHandoffAggregateType,
+        input.takeoverId ?? input.sessionId, input.commandId, input.occurredAt,
+        JSON.stringify(payload));
+      return inserted.changes === 1;
+    })();
+  }
+
+  /**
+   * Ends the predecessor incarnation and releases its writer lease in one transaction, together with
+   * the two facts that describes: the handoff started, and the lease changed holder.
+   *
+   * This is *not* the hand over. It is the moment the automation stops being able to write, which is
+   * what has to happen before a successor may be launched. A successor that cannot be started after
+   * this point is reported as `TakeoverFailed`, and the predecessor's exit stays in the history.
+   */
+  beginSessionHandoff(input: {
+    readonly requestId: string;
+    readonly sessionId: string;
+    readonly at: number;
+    readonly eventId: string;
+    readonly leaseEventId: string;
+    readonly sourceIncarnationId: string;
+    readonly targetMode: SessionIncarnationRecord['mode'];
+    readonly predecessorObservation: string;
+    readonly processEvidenceRef: string | null;
+    readonly exit: Readonly<Record<string, unknown>>;
+    readonly exitDetail: string;
+    readonly releaseReason: string;
+  }): { readonly request: SessionHandoffRequestRecord;
+    readonly incarnation: SessionIncarnationRecord } {
+    return this.sqlite.transaction(() => {
+      const request = this.getSessionHandoffRequest(input.requestId);
+      if (request === null) throw new StorageError('NOT_FOUND', 'Handoff request was not found');
+      const incarnation = this.getSessionIncarnation(input.sourceIncarnationId);
+      if (incarnation === null) throw new StorageError('NOT_FOUND', 'Session incarnation was not found');
+      const active = incarnation.state !== 'EXITED';
+      if (active) {
+        this.sqlite.query(`
+          UPDATE session_incarnations SET state='EXITED',ended_at=?1,exit_json=?2
+          WHERE id=?3 AND state IN ('ACTIVE','FENCED')
+        `).run(input.at, JSON.stringify({ ...input.exit, detail: input.exitDetail }),
+          input.sourceIncarnationId);
+        this.sqlite.query(`
+          UPDATE agent_sessions SET current_incarnation_id=NULL
+          WHERE id=?1 AND current_incarnation_id=?2
+        `).run(incarnation.sessionId, input.sourceIncarnationId);
+      }
+      const lease = this.getSessionWriterLease(incarnation.sessionId);
+      let releasedLease: SessionWriterLeaseRecord | null = null;
+      if (lease !== null) {
+        const released = this.sqlite.query(`
+          UPDATE session_writer_leases SET released_at=?1,release_reason=?2
+          WHERE session_id=?3 AND released_at IS NULL
+        `).run(input.at, input.releaseReason, incarnation.sessionId);
+        if (released.changes === 1) releasedLease = lease;
+      }
+      this.#handoffEventScope(this.sqlite, incarnation.sessionId, input.eventId,
+        'SessionHandoffStarted', input.requestId, request.commandId, input.at, {
+          takeoverId: input.requestId,
+          sourceSessionId: incarnation.sessionId,
+          targetSessionId: incarnation.sessionId,
+          sourceIncarnationId: input.sourceIncarnationId,
+          fromMode: incarnation.mode,
+          toMode: input.targetMode,
+          predecessorObservation: input.predecessorObservation,
+          processEvidenceRef: input.processEvidenceRef,
+        } satisfies SessionHandoffStartedPayload);
+      if (releasedLease !== null) {
+        this.#appendWriterLeaseChangedEvent(this.sqlite, {
+          eventId: input.leaseEventId,
+          sessionId: incarnation.sessionId,
+          leaseId: releasedLease.id,
+          action: 'RELEASED',
+          before: { incarnationId: releasedLease.incarnationId,
+            holderKind: releasedLease.holderKind, holderRef: releasedLease.holderRef },
+          after: null,
+          commandId: request.commandId,
+          reason: input.releaseReason,
+          occurredAt: input.at,
+        });
+      }
+      return {
+        request: this.getSessionHandoffRequest(input.requestId) as SessionHandoffRequestRecord,
+        // `as`/`satisfies` may not follow a line break, so this assertion stays on one line.
+        incarnation: this.getSessionIncarnation(input.sourceIncarnationId) as SessionIncarnationRecord,
+      };
+    })();
+  }
+
+  // -------------------------------------------------------------------------------------------
   // Small additions the terminal handoff needs from the session-handoff contract. They are appended
   // here (rather than inside the FOUNDATION-043 block) so a concurrent lane's copy of that block
   // cannot conflict with them.
@@ -8427,16 +8787,58 @@ export class Phase1Database {
     readonly requestId: string;
     readonly at: number;
     readonly detail: string;
+    readonly eventId: string;
+    /** The release that was proven complete; it is what makes this a safe point. */
+    readonly release: {
+      readonly releaseEventId: string;
+      readonly terminalId: string | null;
+      readonly reason: string;
+      readonly predecessorObservation: string;
+      readonly evidenceRef: string | null;
+      readonly sessionFile: TakeoverReleasedPayload['sessionFile'];
+    };
   }): SessionHandoffRequestRecord {
-    const result = this.sqlite.query(`
-      UPDATE session_handoff_requests SET state='AT_SAFE_POINT',safe_point_at=?1,detail=?2,updated_at=?1
-      WHERE id=?3 AND state IN ('REQUESTED','FENCED') AND fence_active=0
-    `).run(input.at, input.detail, input.requestId);
-    if (result.changes !== 1) {
-      throw new StorageError('INVALID_STATE',
-        'Terminal release safe point did not match an unfenced open handoff request');
-    }
-    return this.getSessionHandoffRequest(input.requestId) as SessionHandoffRequestRecord;
+    return this.sqlite.transaction(() => {
+      const result = this.sqlite.query(`
+        UPDATE session_handoff_requests SET state='AT_SAFE_POINT',safe_point_at=?1,detail=?2,updated_at=?1
+        WHERE id=?3 AND state IN ('REQUESTED','FENCED') AND fence_active=0
+      `).run(input.at, input.detail, input.requestId);
+      if (result.changes !== 1) {
+        throw new StorageError('INVALID_STATE',
+          'Terminal release safe point did not match an unfenced open handoff request');
+      }
+      const request = this.getSessionHandoffRequest(input.requestId) as SessionHandoffRequestRecord;
+      this.#handoffEventScope(this.sqlite, request.sessionId, input.eventId,
+        'TakeoverSafePointReached', request.id, request.commandId, input.at, {
+          takeoverId: request.id,
+          sessionId: request.sessionId,
+          executionId: request.executionId,
+          incarnationId: request.incarnationId,
+          reachedFrom: 'TERMINAL_RELEASE',
+          fenceAcknowledged: false,
+          settledAfterFenceAt: null,
+          activeTools: 0,
+          evidenceRef: input.release.evidenceRef,
+          lastEntryRef: input.release.sessionFile.lastEntryIdAtRelease,
+          missing: [],
+        } satisfies TakeoverSafePointReachedPayload);
+      // `TakeoverReleased` is written here and not when the terminal row was marked RELEASED: only a
+      // release whose session file still holds the predecessor's entries has handed the conversation
+      // back. A release that could not be proven stays a `TakeoverFailed`.
+      this.#handoffEventScope(this.sqlite, request.sessionId, input.release.releaseEventId,
+        'TakeoverReleased', request.id, request.commandId, input.at, {
+          takeoverId: request.id,
+          sessionId: request.sessionId,
+          executionId: request.executionId,
+          incarnationId: request.incarnationId,
+          terminalId: input.release.terminalId,
+          reason: input.release.reason,
+          predecessorObservation: input.release.predecessorObservation,
+          evidenceRef: input.release.evidenceRef,
+          sessionFile: input.release.sessionFile,
+        } satisfies TakeoverReleasedPayload);
+      return request;
+    })();
   }
 
   /**
@@ -10720,6 +11122,41 @@ function insertSlotReservationEvent(database: Database, input: {
       WHERE reservation_id=?1),?2,?3,?4,?5,?6,?7,?8)
   `).run(input.reservationId, input.kind, input.domainEventId, input.commandId, input.actor,
     input.detail, JSON.stringify(input.evidence), input.occurredAt);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Session-handoff / native-terminal domain events (FOUNDATION-059, ADR-0035).
+ *
+ * The seven events are appended by the same storage methods that perform the state change they
+ * observe, inside that method's transaction, so the log cannot disagree with the state. Six of them
+ * ride an existing writer (`recordSessionHandoffRequest`, the two safe-point writers,
+ * `beginSessionHandoff`, `markSessionHandoffAdmitted`, the writer-lease writers); `TakeoverFailed` is
+ * the one fact with no state change of its own and therefore has its own writer.
+ * ------------------------------------------------------------------------------------------- */
+
+const sessionHandoffAggregateType = 'SessionHandoff';
+const sessionWriterLeaseAggregateType = 'SessionWriterLease';
+
+/**
+ * The contract schema of each event. It is applied on the write path, so a producer cannot store a
+ * payload shape the contract does not describe (the same fail-closed rule the Runtime boundary
+ * applies to commands).
+ */
+const sessionHandoffPayloadSchemas: Record<SessionHandoffEventType, { parse(value: unknown): unknown }> = {
+  TakeoverRequested: takeoverRequestedPayloadSchema,
+  TakeoverSafePointReached: takeoverSafePointReachedPayloadSchema,
+  SessionHandoffStarted: sessionHandoffStartedPayloadSchema,
+  SessionHandoffCompleted: sessionHandoffCompletedPayloadSchema,
+  TerminalWriterLeaseChanged: terminalWriterLeaseChangedPayloadSchema,
+  TakeoverReleased: takeoverReleasedPayloadSchema,
+  TakeoverFailed: takeoverFailedPayloadSchema,
+};
+
+/** One end of a writer-lease change, as stored in a `TerminalWriterLeaseChanged` payload. */
+interface SessionWriterLeaseHolderFact {
+  readonly incarnationId: string;
+  readonly holderKind: SessionWriterLeaseRecord['holderKind'];
+  readonly holderRef: string;
 }
 
 const sessionTerminalSelect = `

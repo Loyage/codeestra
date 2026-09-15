@@ -301,6 +301,10 @@ describe('Pi RPC process adapter', () => {
       reconnectToLiveSession: 'UNSUPPORTED',
       resumeAfterExit: 'SUPPORTED',
       attach: 'STRUCTURED',
+      // FOUNDATION-059 (ADR-0035): the two dimensions the design type always had. Pi's handoff chain
+      // is the measured one of ADR-0026, so it is declared rather than left out.
+      nativeTerminalHandoff: 'SUPPORTED',
+      safePointNotification: 'SUPPORTED',
     });
     expect(await adapter.probe()).toEqual(probe);
   });

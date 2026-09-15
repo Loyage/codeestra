@@ -946,7 +946,7 @@ function usage(): never {
   bun run codeestra task schedule explain <project-id> <task-id> [--adapter <id>] [--json]
   bun run codeestra task schedule run <project-id> [--adapter <id>] [--json]
   bun run codeestra task schedule clear-unknown <project-id> <task-id> [--json]
-  bun run codeestra events list [--project <project-id>] [--since <sequence>] [--limit <n>]
+  bun run codeestra events list [--project <project-id>] [--since <sequence>] [--limit <n>] [--json]
   bun run codeestra events tail [--project <project-id>] [--since <sequence>]
   bun run codeestra attention list <project-id>
   bun run codeestra attention answer <project-id> <attention-id> confirm <yes|no>
@@ -2262,6 +2262,9 @@ try {
         if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maxEventReadLimit) usage();
         limit = parsed;
         index += 1;
+      } else if (flag === '--json' && action === 'list') {
+        // `list` already prints the Runtime projection verbatim; the flag is accepted so a script
+        // can state its intent, exactly like `task revision list`.
       } else {
         usage();
       }

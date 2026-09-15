@@ -698,6 +698,174 @@ export interface ScheduleStartOutcomeView {
   readonly detail: string;
 }
 
+/* ---------------------------------------------------------------------------------------------
+ * Domain event payloads of the session-handoff and native-terminal facts (FOUNDATION-059, ADR-0035).
+ *
+ * Each one observes exactly one state change: the Runtime commits the event in the *same* SQLite
+ * transaction as that change, so neither "the state moved without an event" nor "an event without a
+ * state change" can be stored. The shapes are strict because `events list`, the subscription
+ * transport and the UI read them back, and history is append-only: these schemas may only ever gain
+ * optional fields, never rename or reinterpret one that has already been written.
+ *
+ * A refusal is the one fact with no accompanying state change — nothing happened except that an
+ * attempt was made and refused — so it is stored as its own event carrying the *stable reason code*
+ * a client branches on, instead of leaving the refusal invisible in the log.
+ * ------------------------------------------------------------------------------------------- */
+
+/** The seven event names this lane adds to the ledger, in the order their facts usually arrive. */
+export const sessionHandoffEventTypes = [
+  'TakeoverRequested',
+  'TakeoverSafePointReached',
+  'SessionHandoffStarted',
+  'SessionHandoffCompleted',
+  'TerminalWriterLeaseChanged',
+  'TakeoverReleased',
+  'TakeoverFailed',
+] as const;
+export type SessionHandoffEventType = typeof sessionHandoffEventTypes[number];
+
+/** One end of a writer-lease change: who held the single writer lease at that moment. */
+export const sessionWriterLeaseHolderSchema = z.strictObject({
+  incarnationId: z.string().min(1),
+  holderKind: z.enum(['AUTOMATED_RPC', 'TERMINAL_ATTACHMENT']),
+  holderRef: z.string().min(1),
+});
+export type SessionWriterLeaseHolder = z.infer<typeof sessionWriterLeaseHolderSchema>;
+
+/** One takeover/return intent was persisted together with its handoff fence. */
+export const takeoverRequestedPayloadSchema = z.strictObject({
+  takeoverId: z.string().min(1),
+  sessionId: z.string().min(1),
+  executionId: z.string().min(1),
+  incarnationId: z.string().min(1),
+  /** `TAKEOVER` is automation → native terminal, `RETURN` is native terminal → automation. */
+  kind: z.enum(['TAKEOVER', 'RETURN']),
+  /** The incarnation mode the successor will run as; never the mode it replaced. */
+  targetMode: z.enum(['AUTOMATED_RPC', 'HUMAN_TUI']),
+});
+export type TakeoverRequestedPayload = z.infer<typeof takeoverRequestedPayloadSchema>;
+
+/**
+ * The safe point a handoff is admitted from. The facts are stored verbatim, including the ones that
+ * were *not* observed (`missing`), so a reader can tell "everything needed was seen" from "the
+ * Runtime assumed something". Safe points reached through the terminal's own release say so through
+ * `reachedFrom` instead of pretending a fence was acknowledged.
+ */
+export const takeoverSafePointReachedPayloadSchema = z.strictObject({
+  takeoverId: z.string().min(1),
+  sessionId: z.string().min(1),
+  executionId: z.string().min(1),
+  incarnationId: z.string().min(1),
+  reachedFrom: z.enum(['RPC_FENCE', 'TERMINAL_RELEASE']),
+  fenceAcknowledged: z.boolean(),
+  settledAfterFenceAt: z.number().int().nonnegative().nullable(),
+  activeTools: z.number().int().nonnegative(),
+  /** Bounded reference to the evidence the safe point was decided from. */
+  evidenceRef: z.string().min(1).nullable(),
+  /** Provider session-file entry the predecessor was last known to have written, when known. */
+  lastEntryRef: z.string().min(1).nullable(),
+  /** Facts that were not available; empty means every safe-point fact was observed. */
+  missing: z.array(z.string()),
+});
+export type TakeoverSafePointReachedPayload =
+  z.infer<typeof takeoverSafePointReachedPayloadSchema>;
+
+/**
+ * The predecessor stopped being the writer and a successor process is about to be started on the same
+ * conversation. This is *not* the hand over: at this point nothing has been started yet, and a
+ * successor that cannot be launched is reported as `TakeoverFailed`.
+ */
+export const sessionHandoffStartedPayloadSchema = z.strictObject({
+  takeoverId: z.string().min(1),
+  sourceSessionId: z.string().min(1),
+  /** A handoff keeps the Session identity: the successor incarnation writes the same conversation. */
+  targetSessionId: z.string().min(1),
+  sourceIncarnationId: z.string().min(1),
+  fromMode: z.enum(['AUTOMATED_RPC', 'HUMAN_TUI']),
+  toMode: z.enum(['AUTOMATED_RPC', 'HUMAN_TUI']),
+  /** The ownership observation of the predecessor that allowed the switch. */
+  predecessorObservation: z.string().min(1),
+  processEvidenceRef: z.string().min(1).nullable(),
+});
+export type SessionHandoffStartedPayload = z.infer<typeof sessionHandoffStartedPayloadSchema>;
+
+/** The successor provider process was really started, recorded, and took the single writer lease. */
+export const sessionHandoffCompletedPayloadSchema = z.strictObject({
+  takeoverId: z.string().min(1),
+  sourceSessionId: z.string().min(1),
+  targetSessionId: z.string().min(1),
+  sourceIncarnationId: z.string().min(1),
+  successorIncarnationId: z.string().min(1),
+  successorIncarnationNumber: z.number().int().positive(),
+  fromMode: z.enum(['AUTOMATED_RPC', 'HUMAN_TUI']),
+  toMode: z.enum(['AUTOMATED_RPC', 'HUMAN_TUI']),
+  terminalTransport: z.enum(['PTY', 'RPC', 'NONE']),
+  terminalId: z.string().min(1).nullable(),
+  providerPid: z.number().int().positive().nullable(),
+  processEvidenceRef: z.string().min(1).nullable(),
+});
+export type SessionHandoffCompletedPayload = z.infer<typeof sessionHandoffCompletedPayloadSchema>;
+
+/**
+ * The Runtime-enforced single writer lease changed holder. The lease is a *term*, not a holder
+ * identity, so `before`/`after` describe the two ends of the change and the released term stays in
+ * the ledger. `takeoverId` is filled in only when a handoff request was open at that moment.
+ */
+export const terminalWriterLeaseChangedPayloadSchema = z.strictObject({
+  takeoverId: z.string().min(1).nullable(),
+  sessionId: z.string().min(1),
+  leaseId: z.string().min(1),
+  action: z.enum(['ACQUIRED', 'RELEASED']),
+  before: sessionWriterLeaseHolderSchema.nullable(),
+  after: sessionWriterLeaseHolderSchema.nullable(),
+  reason: z.string().min(1).nullable(),
+});
+export type TerminalWriterLeaseChangedPayload =
+  z.infer<typeof terminalWriterLeaseChangedPayloadSchema>;
+
+/**
+ * A native terminal takeover ended *and* the conversation was proven intact: the provider exited, no
+ * recorded descendant is still running, and the provider session file still holds the predecessor's
+ * entries. A release that cannot be proven is a `TakeoverFailed`, never this event.
+ */
+export const takeoverReleasedPayloadSchema = z.strictObject({
+  takeoverId: z.string().min(1),
+  sessionId: z.string().min(1),
+  executionId: z.string().min(1),
+  incarnationId: z.string().min(1),
+  terminalId: z.string().min(1).nullable(),
+  reason: z.string().min(1),
+  predecessorObservation: z.string().min(1),
+  evidenceRef: z.string().min(1).nullable(),
+  sessionFile: z.strictObject({
+    file: z.string().min(1).nullable(),
+    entriesAtStart: z.number().int().nonnegative().nullable(),
+    entriesAtRelease: z.number().int().nonnegative().nullable(),
+    lastEntryIdAtStart: z.string().min(1).nullable(),
+    lastEntryIdAtRelease: z.string().min(1).nullable(),
+    predecessorEntrySurvived: z.boolean().nullable(),
+    truncated: z.boolean(),
+  }),
+});
+export type TakeoverReleasedPayload = z.infer<typeof takeoverReleasedPayloadSchema>;
+
+/**
+ * A takeover or release attempt was refused, or a successor could not be started. `reason` is the
+ * stable code the CLI and the Runtime already return (`SAFE_POINT_NOT_REACHED`, `ATTACHMENT_BUSY`,
+ * `PREDECESSOR_NOT_STOPPED`, `RELEASE_NOT_CONFIRMED`, …); `detail` is the human-readable observation.
+ */
+export const takeoverFailedPayloadSchema = z.strictObject({
+  takeoverId: z.string().min(1).nullable(),
+  sessionId: z.string().min(1),
+  executionId: z.string().min(1),
+  incarnationId: z.string().min(1).nullable(),
+  stage: z.enum(['REQUEST', 'SAFE_POINT', 'ADMIT', 'RELEASE']),
+  reason: z.string().min(1),
+  detail: z.string(),
+  evidenceRef: z.string().min(1).nullable(),
+});
+export type TakeoverFailedPayload = z.infer<typeof takeoverFailedPayloadSchema>;
+
 export const runtimeRequestSchema = z.discriminatedUnion('command', [
   z.strictObject({ ...requestBase, command: z.literal('runtime.ping') }),
   z.strictObject({ ...requestBase, command: z.literal('runtime.stop') }),
@@ -1531,6 +1699,25 @@ export interface AdapterCapabilities {
   readonly revisionAcknowledgement: AdapterSupport;
   readonly cooperativeStop: AdapterSupport;
   readonly attach: 'STRUCTURED' | 'PTY' | 'BOTH' | 'UNSUPPORTED';
+  /**
+   * Whether this provider can be handed over to (and back from) a *native terminal* process on the
+   * same conversation, the way ADR-0010/0023/0026 implement for Pi: the Runtime ends the predecessor
+   * incarnation, starts a successor provider on the same provider session file and keeps a single
+   * writer. `SUPPORTED` states that the measured mechanism exists for this provider — Pi runs its own
+   * TUI on a PTY the Runtime owns and reopens the same session file; it does not claim that every
+   * mixed permission-mode transition or parallel-tool batch has been re-run (`REQUIRES_VALIDATION`
+   * says that instead). `UNSUPPORTED` means handing this provider's conversation to a terminal would
+   * be a second writer, so the Runtime must not offer it.
+   */
+  readonly nativeTerminalHandoff: AdapterSupport;
+  /**
+   * Whether the provider reports the structured facts a handoff safe point is decided from — tools
+   * started and ended, and a settled fact that arrives after the fence — instead of the Runtime
+   * having to guess from terminal bytes. Pi's controlled gate extension reports them (ADR-0026).
+   * `UNSUPPORTED` means the Runtime cannot know this provider's safe point and must not pretend it
+   * does: an unverifiable safe point is refused (`SAFE_POINT_NOT_REACHED`), never assumed.
+   */
+  readonly safePointNotification: AdapterSupport;
   readonly reconnectToLiveSession: AdapterSupport;
   readonly resumeAfterExit: AdapterSupport;
   /**
