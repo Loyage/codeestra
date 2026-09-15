@@ -5353,6 +5353,18 @@ IntegrationBatch 与独立集成验证进入 `dev` 后才对 `dev` 生效（本�
 （`lane/*`）跑全量检查；全量测试只在提升前的精确 `dev` 候选上执行。`bun run typecheck:ui` / `build:ui` 未跑：
 本格未触碰 `apps/ui/**`（M2 领地），UI 也不因新增命令而改变（它读的是同一份批次记录）。
 
+### 领地说明（诚实登记）
+
+按任务单「允许改」的清单之外，本格还改动了两处**非 M2/M3 领地**的文件，原因与内容如下（都最小化）：
+
+- `apps/runtime/src/main.ts`：Runtime 的命令分发器是**唯一**注册命令的地方（`switch (request.command)`），
+  没有它就无法让新命令面可达。改动只有 5 个 `case`（3 个新增命令 + 读取 + 取消）与 1 行 import；
+  没有触碰任何既有 case 的语义，也没有改 M2（`apps/ui/**`）或 M3（`terminal-service`/`session-handoff-service`/
+  `packages/agent-adapters/**`）领地。
+- `apps/runtime/src/recovery-service.ts`：`completeIntegrationBatch` 的签名（`taskEventId` → 每个成员一个
+  `taskEventIds`）由多成员决定，启动 reconcile 的那个调用点必须同步；同时给「按 ref 事实补记完成」加了
+  `try/catch`：成员在崩溃窗口里移动时不再让启动收敛整体失败，而是把两个事实都写进 `RECOVERY_REQUIRED` 的原因。
+
 ### 未做与已知边界
 
 - **没有真实 Agent 的多成员验收**：CLI e2e 用协议假 provider 驱动命令面，只证明协议与编排行为（AGENTS.md 的既有口径）。

@@ -133,6 +133,10 @@ JSON 输出；`--json` 在这些命令上是显式同义写法）。
 所有既有行本来就满足放宽后的 `CHECK`）。成员状态集合**不变**（`PREPARED` 就是「未处理」，
 文档里写明这一点），因此没有为成员新增取值。
 
+**成员清单不可被静默改写**：组成之后没有任何代码路径会 `UPDATE` `integration_batch_items` 的
+`task_id`/`revision_id`/`execution_id`/`candidate_commit`/`dev_commit`——只有 `state`/`detail`/`integrated_commit`
+/`completed_at` 会被推进。批次一旦组成，它「固定了哪些成员的哪个 revision 与哪个结果提交」就是只读事实。
+
 ### D08：`promotion prepare` 消费批级证据——无需改动 promotion-service
 
 `getPromotionCandidates` 的 `members` 一直取自 `integration_batch_items`，`requireIntegrationEvidence`
