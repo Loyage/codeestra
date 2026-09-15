@@ -34,8 +34,10 @@ import type {
  *   it, the request then omits `devRepoPath` instead of inventing one, and the input states why.
  * - It proves the local glossary covers every code the dev-clone inspection can answer with, read
  *   out of the `DevRepoCode` union in the Runtime source, plus the refusals of the trust face itself.
- *   The one documented code this tree cannot show (`DEV_REPO_REQUIRED`, FOUNDATION-087) is pinned in
- *   an explicit forward list, so it cannot grow silently.
+ *   The one documented code this tree cannot show is pinned in an explicit forward list, so it
+ *   cannot grow silently. That list is empty in the integrated tree: FOUNDATION-087 landed in the
+ *   same integration, so `DEV_REPO_REQUIRED` is now verified against the Runtime source like every
+ *   other code.
  * - It proves the identity rows render the Runtime's own verdict (verified / stable code / detail /
  *   branch / HEAD / dev ref commit / clean / origin) and never colour an unverified clone as success.
  * - It does **not** prove anything about a live Runtime: no request is made here, and whether a path
@@ -289,16 +291,15 @@ describe('the refusal glossary covers the dev-clone codes and the trust face', (
     }
   });
 
-  it('cannot grow an unverifiable code without an explicit edit', () => {
+  it('keeps no unverifiable code: every documented code is grounded in a source', () => {
     const sources = [contractsSource, devRepoSource, mainSource, storageSource, cliSource].join('\n');
     const forward = projectTrustForwardCodes();
-    // `DEV_REPO_REQUIRED` arrives with FOUNDATION-087 (the sibling lane that makes `dev_repo_path`
-    // mandatory); this tree has no source that can confirm it yet, so it is pinned here instead of
-    // being smuggled into the grounded glossary.
-    expect(forward).toEqual(['DEV_REPO_REQUIRED']);
+    // FOUNDATION-087 (ADR-0056) landed in the same integration as this UI, so `DEV_REPO_REQUIRED`
+    // is no longer a forward declaration: it is grounded in `apps/runtime/src/main.ts` and
+    // `dev-repo-service.ts`, and the loop below proves it like every other code.
+    expect(forward).toEqual([]);
     expect(projectTrustCodeNote('DEV_REPO_REQUIRED')).not.toBeNull();
     for (const code of projectTrustDocumentedCodes()) {
-      if (forward.includes(code)) continue;
       expect(sources).toContain(`'${code}'`);
     }
   });

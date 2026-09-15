@@ -270,6 +270,10 @@ const integrationCodeGlossary: Record<string, string> = {
   INVALID_REQUEST: '请求本身不合法（一个成员都没给，或同一个任务被写了两次）',
   // Baseline and repository refusals.
   DEV_REF_CHECKED_OUT: 'dev 正被某个工作树检出：先在那边切走，否则 ref 会移动而那个工作树还停在旧提交',
+  // ADR-0056: the dev clone's own `dev` checkout is the single exception. Integration advances it
+  // with Git's own fast-forward; when that fails (a concurrent edit, or a checkout that is no longer
+  // on the recorded baseline), nothing was merged and `dev` did not move.
+  DEV_CHECKOUT_FF_FAILED: 'dev clone 检出上的快进失败（并发改动，或检出已不在记录的基线上）：未合并、dev 未动',
   DEV_REF_MISSING: '项目基线 ref 不存在（例如重新 trust 时换了分支名）',
   REPOSITORY_CHANGED: '仓库身份变了（main ref 的可信记录不再成立）：需要重新 trust',
   VERIFICATION_POLICY_ABSENT: 'main ref 上没有验证策略：整批的集成验证没有命令可跑',

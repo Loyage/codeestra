@@ -132,6 +132,11 @@ const projectTrustCodeGlossary: Record<string, string> = {
   DEV_REPO_BRANCH_MISMATCH: '这个 clone 的 HEAD 不在项目的 dev 分支上（dev clone 就是长期检出 dev 的那个树）',
   DEV_REPO_DEV_REF_MISSING: '这个 clone 里没有本地 dev 分支',
   DEV_REPO_CANDIDATE_MISSING: '这个 clone 里没有要被推送的固定候选 commit（提升前要先在 dev clone 里抓到集成后的 dev）',
+  // ADR-0056 (FOUNDATION-087) makes the dev clone mandatory, so a trust without it is refused
+  // before anything is written. It used to live in an explicit "forward declared" list because the
+  // lane that introduced it was not merged yet; now that both are in `dev`, the ordinary guard below
+  // proves it against `apps/runtime/src/main.ts` instead of exempting it.
+  DEV_REPO_REQUIRED: '信任请求没有给出 dev clone 路径，因此在任何写入之前被拒绝（ADR-0056 起它变成必需）',
   // The trust face itself (apps/runtime/src/main.ts, `project.trust`).
   REPOSITORY_CHANGED: '你审阅的身份与实际读到的不一样（dev clone、dev 基线或仓库身份在这期间变了）：请重新检查再信任',
   DEV_REF_MISSING: '这个仓库没有 refs/heads/dev：项目必须长期保留 dev，先建它再信任',
@@ -142,16 +147,15 @@ const projectTrustCodeGlossary: Record<string, string> = {
 };
 
 /**
- * Codes that this UI documents although the tree it was written in cannot show them: FOUNDATION-087
- * (the sibling lane that makes `dev_repo_path` mandatory) introduces `DEV_REPO_REQUIRED` for a trust
- * that declares no dev clone. It is documented here so the interface explains it instead of printing
- * a bare code, and it is listed separately so the "every documented code is grounded in a source"
- * guard stays honest: the list is pinned by the test, so a second unverifiable code cannot be added
- * without an explicit edit.
+ * Codes that this UI documents although the tree it was written in cannot show them.
+ *
+ * The mechanism exists for cross-lane work: FOUNDATION-089 was written beside FOUNDATION-087, which
+ * is the lane that makes `dev_repo_path` mandatory, so `DEV_REPO_REQUIRED` could not be grounded in
+ * this tree's sources yet. Both lanes are now in `dev`, so the list is deliberately **empty**: every
+ * documented code is verified against a source by the guard, and a future ungrounded code has to be
+ * added here by an explicit edit (the test pins the list).
  */
-const forwardDeclaredTrustCodeNotes: Record<string, string> = {
-  DEV_REPO_REQUIRED: '信任请求没有给出 dev clone 路径，因此在任何写入之前被拒绝（FOUNDATION-087 起它变成必需）',
-};
+const forwardDeclaredTrustCodeNotes: Record<string, string> = {};
 const forwardDeclaredTrustCodes: readonly string[] = Object.keys(forwardDeclaredTrustCodeNotes);
 
 /** The glossary note for one code, or null when this code has no documented note. */
