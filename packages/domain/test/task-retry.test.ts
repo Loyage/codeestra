@@ -76,17 +76,55 @@ describe('task retry workspace decision', () => {
       .toMatchObject({ allowed: true, mode: 'PREPARE_FRESH' });
   });
 
-  it('refuses a reclaimed worktree whose branch survived, and never claims a rebuild', () => {
-    // This is the case the existing preparation path cannot handle: the directory is gone, the Git
-    // registration was pruned, and `refs/heads/task/<task>` is still there, so `git worktree add`
-    // would be refused by its own REF_CONFLICT guard.
-    const decision = decideRetryWorkspace({
-      workspaceState: 'RELEASED', observation: 'FOREIGN', evidence: 'workspace-unregistered:/w/t1',
-    });
-    expect(decision).toMatchObject({ allowed: false, mode: null, code: 'WORKSPACE_RECLAIMED' });
-    expect(decision.message).toContain('REF_CONFLICT');
-    // No mode is offered for a refusal: the caller must not record a plan it will not carry out.
-    expect(decision.mode).toBeNull();
+  it('rebuilds a reclaimed worktree whose surviving branch is this Task\'s own growth', () => {
+    // The case ADR-0036 could only report: the directory is gone, its Git registration was pruned,
+    // and `refs/heads/task/<task>` is still there at the recorded baseline. The branch is the
+    // ownership proof, so the retry records a verified plan instead of a refusal.
+    for (const relationToBase of ['EQUAL', 'DESCENDANT'] as const) {
+      const decision = decideRetryWorkspace({
+        workspaceState: 'RELEASED', observation: 'FOREIGN',
+        evidence: 'workspace-rebuild:FOREIGN:/w/t1',
+        rebuild: { pathPresent: false, registered: false, branchExists: true, relationToBase,
+          checkedOutElsewhere: false },
+      });
+      expect(decision).toMatchObject({ allowed: true, mode: 'REBUILD_OWNED', code: null });
+      expect(decision.message).toContain('does not exist yet');
+    }
+  });
+
+  it('refuses a reclaimed worktree that cannot be rebuilt, with one stable code', () => {
+    const base = { workspaceState: 'RELEASED' as const, observation: 'FOREIGN' as const };
+    const refusals = [
+      // The facts were never observed: the pre-ADR-0042 answer, unchanged.
+      decideRetryWorkspace({ ...base, evidence: 'workspace-unregistered:/w/t1' }),
+      // The branch is gone, so there is nothing left to re-create the worktree from.
+      decideRetryWorkspace({ ...base, rebuild: { pathPresent: false, registered: false,
+        branchExists: false, relationToBase: 'UNKNOWN', checkedOutElsewhere: false } }),
+      // The branch exists but is not this Task's growth of the recorded baseline.
+      decideRetryWorkspace({ ...base, rebuild: { pathPresent: false, registered: false,
+        branchExists: true, relationToBase: 'UNRELATED', checkedOutElsewhere: false } }),
+      decideRetryWorkspace({ ...base, rebuild: { pathPresent: false, registered: false,
+        branchExists: true, relationToBase: 'UNKNOWN', checkedOutElsewhere: false } }),
+      // Another worktree already has the branch; a second checkout is never created.
+      decideRetryWorkspace({ ...base, rebuild: { pathPresent: false, registered: false,
+        branchExists: true, relationToBase: 'DESCENDANT', checkedOutElsewhere: true } }),
+      // Something occupies the recorded path without a Git registration: never deleted to make room.
+      decideRetryWorkspace({ ...base, rebuild: { pathPresent: true, registered: false,
+        branchExists: true, relationToBase: 'EQUAL', checkedOutElsewhere: false } }),
+      // A registered worktree at that path is an adoption question, not a rebuild one.
+      decideRetryWorkspace({ ...base, rebuild: { pathPresent: true, registered: true,
+        branchExists: true, relationToBase: 'EQUAL', checkedOutElsewhere: false } }),
+    ];
+    for (const decision of refusals) {
+      expect(decision).toMatchObject({ allowed: false, mode: null, code: 'WORKSPACE_RECLAIMED' });
+      // No mode is offered for a refusal: the caller must not record a plan it will not carry out.
+      expect(decision.mode).toBeNull();
+    }
+    // The directory question being unanswerable is never read as a rebuildable source.
+    expect(decideRetryWorkspace({ workspaceState: 'RELEASED', observation: 'UNCERTAIN',
+      rebuild: { pathPresent: false, registered: false, branchExists: true,
+        relationToBase: 'EQUAL', checkedOutElsewhere: false } }))
+      .toMatchObject({ allowed: false, code: 'WORKSPACE_RECLAIMED' });
   });
 
   it('refuses a worktree that is not verifiably this Task\'s own', () => {

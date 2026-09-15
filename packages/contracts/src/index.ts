@@ -719,7 +719,14 @@ export interface TaskRetryOutcomeView {
   readonly adapterChanged: boolean;
   readonly adapterSource: 'REQUESTED' | 'RECORDED' | 'FALLBACK';
   readonly workspace: {
-    readonly mode: 'REUSE_VERIFIED' | 'PREPARE_FRESH';
+    /**
+     * `REUSE_VERIFIED` and `PREPARE_FRESH` are the worktree the Execution will use; `REBUILD_OWNED`
+     * is a verified *plan*: the reclamation kept this Task's branch, and the workspace preparation
+     * path re-creates the worktree from it (ADR-0042). The rebuild itself is attested by the
+     * `WorkspacePrepared` event whose payload carries the `rebuild` outcome, so a script can tell
+     * "verified, still to be created" from "created".
+     */
+    readonly mode: 'REUSE_VERIFIED' | 'PREPARE_FRESH' | 'REBUILD_OWNED';
     readonly workspaceId: string | null;
     readonly evidence: string | null;
     readonly detail: string;

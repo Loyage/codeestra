@@ -10,7 +10,8 @@
  *
  *  - which source states may be retried, and the stable code for each refusal;
  *  - which Adapter the new Execution binds (an explicit choice, else the Task's own record);
- *  - whether the Task's own worktree is reused, rebuilt from nothing, or refused.
+ *  - whether the Task's own worktree is reused, re-created from the Task branch a reclamation
+ *    kept, started from nothing, or refused (FOUNDATION-068 / ADR-0042).
  *
  * The IO (Git inspection, database transaction) stays with the caller, which is why the refusal
  * codes here are values rather than exceptions: a caller must be able to *report* a refusal with
@@ -123,7 +124,33 @@ export type RetryWorkspaceState = 'RESERVED' | 'PREPARING' | 'READY' | 'IN_USE'
 /** What the filesystem and Git actually say about the recorded worktree. */
 export type RetryWorkspaceObservation = 'OWNED' | 'MISSING' | 'FOREIGN' | 'UNCERTAIN';
 
-export type RetryWorkspaceMode = 'REUSE_VERIFIED' | 'PREPARE_FRESH';
+/**
+ * How the surviving Task branch relates to the baseline its workspace row recorded.
+ *
+ * `EQUAL` and `DESCENDANT` are the two facts that prove the branch is this Task's own growth from
+ * that baseline — a descendant is what a failed attempt that already committed looks like, and that
+ * committed work is exactly what a rebuild must not silently replace with a fresh start.
+ */
+export type RetryBranchRelation = 'EQUAL' | 'DESCENDANT' | 'UNRELATED' | 'UNKNOWN';
+
+/**
+ * The facts a rebuild decision needs when the recorded worktree directory is not there.
+ *
+ * Every one of them is observed, never assumed: `pathPresent` and `registered` describe the recorded
+ * path, and the rest describe the surviving branch. A missing fact is a refusal, not a default.
+ */
+export interface RetryRebuildEvidence {
+  /** A directory (or any filesystem entry) is present at the recorded path. */
+  readonly pathPresent: boolean;
+  /** Git registers a worktree at the recorded path. */
+  readonly registered: boolean;
+  readonly branchExists: boolean;
+  readonly relationToBase: RetryBranchRelation;
+  /** Some other worktree of this repository already has this branch checked out. */
+  readonly checkedOutElsewhere: boolean;
+}
+
+export type RetryWorkspaceMode = 'REUSE_VERIFIED' | 'PREPARE_FRESH' | 'REBUILD_OWNED';
 
 export type TaskRetryWorkspaceRefusalCode =
   | 'WORKSPACE_OWNERSHIP_UNVERIFIABLE'
@@ -137,23 +164,31 @@ export interface TaskRetryWorkspaceDecision {
 }
 
 /**
- * Reuse the Task's own worktree, start from nothing, or refuse.
+ * Reuse the Task's own worktree, re-create it from the Task branch a reclamation kept, start from
+ * nothing, or refuse.
  *
  * The retried Task keeps the worktree it already owns, so its uncommitted work is not thrown away by
  * a retry — but only when the ownership is *verified* from the filesystem and Git, never because a
- * row says so. Two facts are refused rather than papered over:
+ * row says so. Three facts are refused rather than papered over:
  *
  *  - a worktree that exists but is not the one this Task owns (a foreign directory, a different
  *    branch, a moved HEAD) must not be handed to an Agent;
- *  - a worktree that was reclaimed while its Task branch survived cannot be rebuilt by the existing
- *    preparation path, which refuses to create a worktree on an existing branch. Refusing here
- *    reports that fact instead of recording an intent that is already known to fail.
+ *  - a reclaimed worktree whose branch is gone, unrelated to the recorded baseline, or checked out
+ *    somewhere else cannot be rebuilt into this Task's path, so it is reported instead of guessed;
+ *  - a directory that is present at the recorded path without a Git registration is never deleted to
+ *    make room, because deleting it is an explicit reclamation decision, not a retry side effect.
+ *
+ * `REBUILD_OWNED` is a *verified plan*, not a completed rebuild: the worktree is created later, by
+ * the one preparation path every attempt goes through, which re-establishes the same invariants
+ * before it touches Git. Nothing here claims the directory exists.
  */
 export function decideRetryWorkspace(input: {
   readonly workspaceState: RetryWorkspaceState | null;
   readonly observation: RetryWorkspaceObservation;
   /** Caller-supplied evidence string (a Git observation), included in refusal messages. */
   readonly evidence?: string | undefined;
+  /** Facts about the surviving Task branch; absent when the caller did not observe them. */
+  readonly rebuild?: RetryRebuildEvidence | undefined;
 }): TaskRetryWorkspaceDecision {
   const evidence = input.evidence === undefined ? '' : ` (${input.evidence})`;
   if (input.workspaceState === null) {
@@ -175,10 +210,19 @@ export function decideRetryWorkspace(input: {
         + evidence };
   }
   if (input.workspaceState === 'RELEASED') {
+    const rebuild = input.rebuild;
+    if (input.observation === 'FOREIGN' && rebuild !== undefined && !rebuild.pathPresent
+      && !rebuild.registered && rebuild.branchExists && !rebuild.checkedOutElsewhere
+      && (rebuild.relationToBase === 'EQUAL' || rebuild.relationToBase === 'DESCENDANT')) {
+      return { allowed: true, mode: 'REBUILD_OWNED', code: null,
+        message: 'the reclamation kept this Task\'s own branch at the recorded baseline or below it, so'
+          + ' the existing preparation path re-creates the worktree at the recorded path from that'
+          + ` branch after re-verifying ownership; the directory does not exist yet${evidence}` };
+    }
     return { allowed: false, mode: null, code: 'WORKSPACE_RECLAIMED',
-      message: 'the Task worktree was reclaimed; its branch still exists, and the existing'
-        + ' preparation path refuses to create a worktree on an existing branch (REF_CONFLICT), so a'
-        + ` retry cannot rebuild it${evidence}` };
+      message: 'the Task worktree was reclaimed and cannot be rebuilt: the surviving branch is'
+        + ' absent, unrelated to the recorded baseline, already checked out in another worktree, or'
+        + ` the recorded path is occupied by something Git does not register${evidence}` };
   }
   return { allowed: false, mode: null, code: 'WORKSPACE_OWNERSHIP_UNVERIFIABLE',
     message: 'the Task worktree could not be verified as this Task\'s own, so it is never handed to a'

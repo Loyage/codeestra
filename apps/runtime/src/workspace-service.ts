@@ -4,8 +4,11 @@ import { join } from 'node:path';
 import {
   GitInspectionError,
   inspectBaseRef,
+  inspectOwnedWorktreeRebuild,
   prepareWorkspace,
+  rebuildOwnedWorktree,
 } from '@codeestra/git';
+import { decideRetryWorkspace } from '@codeestra/domain';
 import {
   Phase1Database,
   SlotReservationError,
@@ -97,6 +100,18 @@ export async function prepareTaskWorkspace(input: {
   }
 
   const project = input.storage.getTrustedProject(input.projectId);
+  // A worktree a reclamation removed is re-created from the Task branch that reclamation kept
+  // (FOUNDATION-068 / ADR-0042), before the fresh-preparation path can refuse it with a
+  // `REF_CONFLICT` it already knows about.
+  const rebuilt = await rebuildReclaimedTaskWorkspace({
+    storage: input.storage,
+    runtimeHome: input.runtimeHome,
+    projectId: input.projectId,
+    taskId: input.taskId,
+    now,
+    randomUUID,
+  });
+  if (rebuilt !== null) return rebuilt;
   let repository;
   let baseCommit;
   try {
@@ -191,6 +206,116 @@ export async function prepareTaskWorkspace(input: {
     });
     throw new WorkspaceServiceError(code, message);
   }
+}
+
+/**
+ * Re-creates, or adopts, the worktree of a Task whose workspace row a reclamation released
+ * (FOUNDATION-068 / ADR-0042).
+ *
+ * The reclaimed row is the ownership proof and the surviving Task branch is the source: the branch
+ * name, the recorded path, the Git registration and the recorded baseline are all re-derived here
+ * before anything is created, and `rebuildOwnedWorktree` re-establishes the same invariants at action
+ * time. Nothing is deleted (`--force` never runs, an occupied path is a refusal) and nothing is
+ * invented on a crash: a worktree created before the ledger write is *adopted* by the next attempt,
+ * because the registration and the branch are the durable facts.
+ *
+ * `null` means "this Task's recorded worktree is not a rebuildable source, so the existing
+ * preparation path decides", which keeps every pre-existing behaviour (a first attempt with no
+ * workspace row, a `MISSING` worktree and branch, a `READY` reuse) exactly as it was.
+ */
+async function rebuildReclaimedTaskWorkspace(input: {
+  readonly storage: Phase1Database;
+  readonly runtimeHome: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly now: () => number;
+  readonly randomUUID: () => string;
+}): Promise<WorkspacePreparationPlan | null> {
+  const recorded = input.storage.getLatestTaskWorkspace(input.taskId);
+  if (recorded === null || recorded.state !== 'RELEASED') return null;
+  const project = input.storage.getTrustedProject(input.projectId);
+  const worktreesRoot = await canonicalWorktreesRoot(input.runtimeHome);
+  const observed = await inspectOwnedWorktreeRebuild({
+    repositoryRoot: project.repoRoot,
+    ownedRoot: worktreesRoot,
+    path: recorded.path,
+    branchRef: recorded.branchRef,
+    baseCommit: recorded.baseCommit,
+  });
+  // The same domain decision the retry made, over the same facts: a rebuild is never authorised by a
+  // recorded *intent*, only by what the filesystem and Git say right now.
+  const decision = decideRetryWorkspace({
+    workspaceState: recorded.state,
+    observation: observed.observation,
+    evidence: observed.evidenceRef,
+    rebuild: observed,
+  });
+  if (decision.mode === 'PREPARE_FRESH') return null;
+  if (!decision.allowed || decision.mode !== 'REBUILD_OWNED') {
+    throw new WorkspaceServiceError(decision.code ?? 'WORKSPACE_OWNERSHIP_UNVERIFIABLE',
+      `Workspace ${recorded.workspaceId} (${recorded.state}): ${decision.message}`);
+  }
+  // A workspace another writer still claims is never re-created under it.
+  const reservation = input.storage.findActiveWorkspaceReservation({
+    projectId: input.projectId,
+    workspaceId: recorded.workspaceId,
+  });
+  if (reservation !== null) {
+    throw new WorkspaceServiceError('ACTIVE_RESERVATION',
+      `Slot reservation ${reservation.reservationId} (${reservation.state}) still claims workspace`
+      + ` ${recorded.workspaceId}; it is not rebuilt under a live claim`);
+  }
+  const held = input.storage.listTaskExecutions(input.projectId, input.taskId)
+    .find((execution) => execution.resourceHeld);
+  if (held !== undefined) {
+    throw new WorkspaceServiceError('ACTIVE_EXECUTION',
+      `Execution ${held.executionId} still holds this Task's resources; its worktree is not rebuilt`
+      + ' under a live writer');
+  }
+  const rebuilt = await rebuildOwnedWorktree({
+    repositoryRoot: project.repoRoot,
+    ownedRoot: worktreesRoot,
+    projectId: input.projectId,
+    taskId: input.taskId,
+    path: recorded.path,
+    branchRef: recorded.branchRef,
+    baseCommit: recorded.baseCommit,
+  });
+  if (rebuilt.outcome === 'REFUSED' || rebuilt.outcome === 'FAILED') {
+    throw new WorkspaceServiceError(rebuilt.reasonCode, rebuilt.detail);
+  }
+  input.storage.markReclaimedWorkspaceRebuilt({
+    projectId: input.projectId,
+    taskId: input.taskId,
+    workspaceId: recorded.workspaceId,
+    expectedPath: recorded.path,
+    expectedBranchRef: recorded.branchRef,
+    rebuild: {
+      outcome: rebuilt.outcome,
+      reasonCode: rebuilt.reasonCode,
+      detail: rebuilt.detail,
+      headCommit: rebuilt.headCommit,
+    },
+    eventId: input.randomUUID(),
+    rebuiltAt: input.now(),
+  });
+  return {
+    operationId: `rebuilt:${recorded.workspaceId}`,
+    operationState: 'SUCCEEDED',
+    projectId: input.projectId,
+    taskId: input.taskId,
+    workspaceId: recorded.workspaceId,
+    workspaceState: 'READY',
+    repoRoot: project.repoRoot,
+    gitCommonDir: project.gitCommonDir,
+    mainRef: project.mainRef,
+    devRef: project.devRef,
+    objectFormat: project.objectFormat,
+    baseCommit: recorded.baseCommit,
+    ownershipToken: recorded.ownershipToken,
+    branchRef: recorded.branchRef,
+    path: rebuilt.path,
+  };
 }
 
 /** One prepared workspace, bound to the reservation that owns it. */
