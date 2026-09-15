@@ -284,6 +284,33 @@ CLI 同时打印核验结果（`verified` / `code` / `detail`），因为 `proje
 `CAPACITY_GLOBAL_LIMIT_REACHED`、`CAPACITY_ADAPTER_SLOT_LIMIT_REACHED`、`SCHEDULER_DRAINING`、
 `DEPENDENCIES_UNMET`、`CONCURRENT_MODIFICATION`、`UNKNOWN_ADAPTER`、`TASK_NOT_FOUND`。
 
+### `task recover <project-id> <task-id> <expected-version> [--reason <text>] [--json]`
+
+`RECOVERY_REQUIRED` 的**对账**（ADR-0055）：`docs/architecture/state-machines.md` 承诺的那一步，在它之前**没有命令面实现**——
+`task cancel`/`retry`/`resume` 与 `task operation cancel` 都以 `RECONCILE_REQUIRED` 拒绝，`reclaim` 因 Task 属活跃集合而拒绝，
+`scheduler reservations reconcile` 只管预留行，启动收敛查询也排除 `DISCONNECTED`/`RECOVERY_REQUIRED`。
+
+它**只读事实**：记录的 provider 身份（按真实进程表 + start token 核对）、记录的后代进程快照、记录的 workspace 路径是否还在磁盘。
+
+| 观测 | 结果 | 退出码 |
+|---|---|---|
+| provider 仍以记录的 start token 存活 | 拒绝 `RECOVERY_PROVIDER_ALIVE`，**保持占用** | `1` |
+| provider 已消失但**记录过的**后代仍存活 | 拒绝 `RECOVERY_DESCENDANTS_ALIVE`，保持占用 | `1` |
+| 观测无法完成（进程表/start token 读不到） | 拒绝 `RECOVERY_OWNERSHIP_UNVERIFIABLE`，保持占用 | `1` |
+| Session 与 incarnation 都没记录可用身份 | 拒绝 `RECOVERY_PROCESS_IDENTITY_MISSING`，保持占用 | `1` |
+| provider 已消失 | **收口**：`Execution → FAILED`（`resource_held=0`）、`Session → EXITED`、workspace `→ RETAINED`、`Task → FAILED` | `0` |
+| Task 已离开 `RECOVERY_REQUIRED` 且 Execution 是终态 | `ALREADY_RECONCILED`（**只读**，不写任何行） | `0` |
+| Task 不是 `RECOVERY_REQUIRED` 而 Execution 仍非终态 | 拒绝 `TASK_NOT_IN_RECOVERY` | `1` |
+| `expected-version` 不符 | `CONCURRENT_MODIFICATION` | `1` |
+
+**它绝不做的事**：不发信号、不杀进程、不删或移动工作树、不删 Task 分支、不改写 `exit_json`、不动 operations 行，
+也**不声称工作树静止**（`quiescenceProven: false`、`signalsSent: 0` 是记录里的常量）。后代快照当时没记录时，结论里写
+`descendantRecord: "MISSING"`（孤儿写者无法被归属），收口目标 `FAILED` 不 resume、不集成，所以不需要更强的“静止”事实。
+
+收口后：`task retry` 可以重新排这个 Task，`task cancel` 可以作废它（`FAILED → CANCELLED` 是既有迁移），
+workspace 变成 `RETAINED` 后 `reclaim` 才能考虑它。`--reason <text>` 是你自己的陈述，**原文进审计，不参与判定**。
+同一 `commandId` 重放走到自己的回执（与 `promotion prepare` 同一规则）；同一 command id 配不同 payload 是 `COMMAND_CONFLICT`。
+
 ### `task pause <project-id> <task-id> <expected-version>`
 
 协作停止：先 `PAUSING`，确认 provider 进程退出后才 `PAUSED`；workspace 与会话证据保留。

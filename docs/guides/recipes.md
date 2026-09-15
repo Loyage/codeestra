@@ -522,7 +522,21 @@ bun run codeestra task operation list $PROJECT $TASK                 # 长命令
 ```
 
 **看到 `RECOVERY_REQUIRED` 时**：它是「有事实无法被证明，需要一次带审计的对账」，
-**不是**让你重试掩盖它。先看 `task status` 与 `events tail`，再决定是人工核对还是显式回收。
+**不是**让你重试掩盖它。先看 `task status` 与 `events tail`。
+
+Task/Execution 的 `RECOVERY_REQUIRED` 有**专门的命令**（ADR-0055）：
+
+```sh
+bun run codeestra task recover $PROJECT $TASK <expected-version> [--reason "…"]
+```
+
+它只读事实（记录的 provider 进程身份按真实进程表核对、记录的后代快照、workspace 是否还在磁盘）：
+只有**能证明 provider 已消失**才收口（`Execution`/`Task` → `FAILED`、Session → `EXITED`、workspace → `RETAINED`），
+其余（存活 / 后代存活 / 无法核验 / 无身份）一律拒绝并保持占用，退出码 `1`。它不发信号、不杀进程、不删工作树，
+也不声称工作树已静止。收口后想继续就 `task retry`，想作废就 `task cancel`。
+
+**如果它报 `RECOVERY_PROVIDER_ALIVE`**：那个进程不归 Codeestra 管（本机无受控句柄），自己去结束它再重跑这条命令。
+**如果等待的理由是某个占用者不可观测**：见 [troubleshooting.md](./troubleshooting.md) §1 的「占用者无法被观测」一节。
 
 ---
 

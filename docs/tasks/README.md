@@ -5908,6 +5908,69 @@ promotion criterion」，且其测试**断言**重启后 `uiRunning` 为 `false`
 - **`restart-dev` 不校验 dev clone 的分支是 `dev`**（只打印分支名），与 `restart-main` 的硬校验不对称：
   `AGENTS.md` 只对 main 侧要求「先确认路径与分支」，本格按规范的不对称保留，未自行加门禁。
 
+## FOUNDATION-086 — `task recover`：`RECOVERY_REQUIRED` 的对账命令面与「占用者不可观测」的可见性（`lane/task-recover`，ADR-0055，无 schema 变更、不占迁移号）
+
+状态：**代码 + 定向测试 + 文档已完成；未合入 `dev`、未提升、未提交**。基线 `dev = 01b47c0`；
+工作树 `/Users/loyage/Documents/codeestra-wt/task-recover`（`lane/task-recover`）。本格由用户 2026-09-16 就三件事显式授权：
+根治范围＝「三层都做」（本机收口 + 项目侧影响映射 + 补命令面），`#7` 处置＝`task cancel`，防护＝记录 + 可见性。
+
+### 为什么开这一格（真实故障，不是推断）
+
+用户在稳定实例里跑任务时得到 `UNKNOWN (INCOMPLETE_IMPACT)`、`占用冲突范围：#8、#7`。本格的原始勘察结论：
+
+- Task `#7`（`PAUSED`）与 `#8`（`RECOVERY_REQUIRED`）的工作树在 **2026-09-14 02:52 被外部 worktree 管理器（Orca）**
+  移进 `~/.local/state/codeestra/worktrees/<project>/.orca-worktree-trash/`（现仅剩空目录，Task 分支也一并消失）；
+  账本里 `workspaces` 仍是 `RETAINED`/`RECOVERY_REQUIRED`，`#8` 的 `executions.resource_held = 1`。
+- 因此影响分析器对这两侧恒为 `MISSING_IMPACT_SNAPSHOT`（无法观测），而候选侧因为 `main` ref 上没有
+  `.codeestra/impact.json` 是 `POLICY_ABSENT`（`INCOMPLETE_IMPACT`）——两者叠加 ⇒ 每次判定 `UNKNOWN` ⇒ 只能 `--allow-unknown`。
+- 而 `state-machines.md` 对 `RECOVERY_REQUIRED` 承诺的 **reconcile 在命令面上不存在**：`task cancel`/`retry`/`resume`、
+  `task operation cancel` 全部以 `RECONCILE_REQUIRED` 拒绝，`reclaim` 以 `TASK_NOT_TERMINAL`/`ACTIVE_EXECUTION` 拒绝，
+  `scheduler reservations reconcile` 只管预留行（`#8` 没有预留行），启动收敛查询 `listStaleAgentSessions` **排除**
+  `DISCONNECTED`/`RECOVERY_REQUIRED`。所以「需要人工对账」没有任何可执行落点——「永久阻塞」是设计事实而非暂时现象。
+- 事实面：`#8` 的 provider（pid `71909`）与托起它的旧 Runtime（pid `65545`）现**均已不存在**，`session_incarnations` 无行。
+
+### 已实现（ADR-0055）
+
+| 位置 | 改动 |
+|---|---|
+| `packages/contracts/src/index.ts` | 新命令 `task.recover`；`ScheduleAssessmentView.occupiers` + `ScheduleOccupierView`/`ScheduleOccupierCode`；`TaskRecoveryView` |
+| `packages/storage/src/database.ts` | `getTaskRecoverySubject`（只读事实）、`findTaskRecoveryOutcomeByCommand`（重放回执）、`convergeRecoveredTask`（幂等收口事务 + 四个事件）；`StorageError` 新增码 `TASK_NOT_IN_RECOVERY` |
+| `apps/runtime/src/task-recovery-service.ts`（新） | 观测 + 拒绝/收口决策；默认用 Adapter 自己的 `inspectProviderProcessOwnership`（PID 复用规则只实现一处），`inspectOwnership`/`pathExists` 可注入 |
+| `apps/runtime/src/main.ts` | `case 'task.recover'`（含 payloadHash）+ 收口后请求一次调度 tick |
+| `apps/runtime/src/impact-analysis-service.ts` | `observeWorkspacePath` / `occupierCodeOf`（两个消费者共用同一份事实）；`active[].code` 与候选的 `workspaceStatus` |
+| `apps/runtime/src/schedule-service.ts` | `occupiers` 投影（两处 view 构造）+ 诊断串 |
+| `apps/cli/src/main.ts` | `task recover` 解析/帮助/退出码/`[recovery] observed: …`；`printOccupierDiagnostics`（`task run` 等待、`schedule status/plan/run/explain` 的 stderr） |
+| `packages/domain/src/impact-analysis.ts` | 缺陷修复：`subjectHits` 对 `snapshot === null` 不再 `TypeError`（ADR-0055 D06） |
+| `apps/ui/**` | **未改**（用户选择「JSON + stderr + 文档」；`occupiers` 对 UI 是新增可选字段） |
+
+### 实际验证（定向，ADR-0038）
+
+- `bun test apps/runtime/test/task-recovery-service.test.ts`（**新，8 项，全通过**）：provider 已消失 → 收口
+  （`Execution`/`Task` `FAILED`、`resource_held=0`、Session `EXITED`、workspace `RETAINED`、工作树仍在磁盘且未被移动、
+  `TaskRecoveryReconciled` 带 `quiescenceProven:false`/`signalsSent:0`、事件顺序
+  `TaskRecoveryReconciled → AgentSessionStateChanged → ExecutionStateChanged → TaskStateChanged`）；
+  后代快照缺失 → 收口但记 `descendantRecord: "MISSING"`；**存活 / 后代存活 / 无法核验 → 拒绝且零行变化、零事件**；
+  无身份 → `RECOVERY_PROCESS_IDENTITY_MISSING`；已离开状态 → `ALREADY_RECONCILED` 且只读；
+  版本不符与 `TASK_NOT_IN_RECOVERY` → 拒绝且零写入；同一 `commandId` 重放 → 不再写第二组事件且答案相同；
+  占用者工作树被删除 → `project impact explain` 的 `active[].code === 'WORKSPACE_MISSING'` 且判定仍 `UNKNOWN`。
+- `bun test packages/domain/test/impact-analysis.test.ts`（35 项，含新增的「null 快照不崩」用例）+ `packages/contracts/test/request.test.ts`（20 项）：全通过。
+- 回归（受本格改动影响的既有 e2e）：`apps/runtime/test/cli-impact.test.ts`（1）、`cli-schedule.test.ts`（6）、
+  `cli-task-control.test.ts`（3）、`stale-session-reconcile.test.ts`（6）：全通过。
+- `bun run typecheck`（**全仓 tsc，超出 ADR-0038 的定向范围**）：通过。理由：本格新增/改动了**跨 4 个包的公共类型**
+  （contracts 的命令与视图、storage 的导出与错误码、runtime 的投影、CLI 的消费），而定向测试跑在 Bun 的转译器上**不做类型检查**，
+  这些类型正是本格的接口面。**未跑** `bun run check`/`check:fast`（未跑 vitest、未跑全量 bun test、未 build UI）。
+
+### 未做 / 待用户决定
+
+1. **`dev → main` 提升**：本格只做到「lane 分支完成 + 定向测试通过」。提升必须在精确 `dev` 候选 SHA 上跑全量测试（ADR-0038），
+   并经 GitHub 中转（ADR-0047）——需用户显式批准。
+2. **本机现场收口**：`#7` 用既有 `task cancel`（用户已选此路，本格记录时尚未执行）；`#8` 必须用**新命令**，
+   而它只在提升并重启稳定 Runtime 之后才在稳定实例里存在——**在此之前稳定实例仍需 `--allow-unknown`**。
+3. **项目侧 `.codeestra/impact.json`**（`main` ref，消除 `POLICY_ABSENT`）：本格未写，因为它是**人工声明的映射**，
+   内容直接决定什么算冲突；需用户就映射内容拍板后再走 `dev → main`。
+4. **`docs/guides/**` 的版本头**（ADR-0050 D02）：本格改了 `cli-reference.md` / `troubleshooting.md` / `recipes.md` / `manual.md` 的正文，
+   但**未改头部 SHA/日期**——头部记的是「本目录最后一次校对的 dev 基线」，而本格还在 lane 上；整合进 `dev` 时应一并刷新。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），

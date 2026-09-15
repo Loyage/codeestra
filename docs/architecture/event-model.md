@@ -57,6 +57,7 @@ type CommandEnvelope<T extends string, P> = {
 | `ResultCommitAuthorized` / `ResultCommitAuthorizationInvalidated` | `Execution` | authorizationId, executionId, revisionId, expectedHead, changeFingerprint, actor / reason |
 | `ResultCommitCreated` | `Execution` | authorizationId, executionId, revisionId, baseCommit, resultCommit, resultTree, identity, hookOutcome（**设计名 `ExecutionResultCaptured` 已废弃**） |
 | `RecoveryRequired` | `Execution` \| `Attention` \| `AgentSession` \| `Task` | `resourceType` + `resourceId` + `reason`（`Execution`/`Attention`/`AgentSession` 变体）；`Task` 变体是 taskId + from/to + reason + 可选 evidenceRef（投影到 `RECOVERY_REQUIRED`） |
+| `TaskRecoveryReconciled` | `Task` | `taskId`、`executionId`、`sessionId`、`workspaceId`、`workspacePath`、`providerPid`、`processState`（`STOPPED`/`ALIVE`/`DESCENDANTS_ALIVE`/`UNVERIFIABLE`/`IDENTITY_MISSING`）、`descendantRecord`（`RECORDED`/`MISSING`）、`descendantCount`、`workspacePresent`、`quiescenceProven`（恒为 `false`）、`signalsSent`（恒为 `0`）、`evidenceRef`、`reason`（可为 `null`）、`actor`（ADR-0055）。它只在**收口**时发布（`Execution`/`Task` 置 `FAILED`、Session `EXITED`、workspace `RETAINED` 的同一事务里），是三个状态投影的 causation 起点；**拒绝路径不写事件**（无状态变化） |
 | `VerificationCompleted` | `VerificationRun` | verificationId, taskId, executionId, revisionId, testedCommit, testedTree, policyVersion, policyDigest, mainCommit, `state`, `outcomeCode`, 非敏感 evidence |
 | `VerificationInvalidated` | `Task` | taskId, reason, verificationIds, testedCommit, policyDigest |
 
