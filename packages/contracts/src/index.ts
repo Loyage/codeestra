@@ -8,12 +8,14 @@ import {
   proseQuestionAttentionModeSchema,
   proseQuestionResolutionSchema,
 } from './prose-question.js';
+import { uiSettingKeySchema, uiSettingValueSchema } from './ui-settings.js';
 
 export * from './questionnaire.js';
 export * from './verification-policy.js';
 export * from './impact-policy.js';
 export * from './targeted-test-plan.js';
 export * from './prose-question.js';
+export * from './ui-settings.js';
 
 export const repositoryIdentitySchema = z.strictObject({
   repoRoot: z.string().min(1),
@@ -1309,6 +1311,31 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('settings.proseQuestionAttention.set'),
     mode: proseQuestionAttentionModeSchema,
+  }),
+  /**
+   * The interface-effect settings (FOUNDATION-073 / ADR-0045): one Runtime home, five keys, no
+   * confirmation anywhere. `list` reports every key with its effective value, its product default
+   * and whether it was explicitly chosen; `get`/`set` address one key; `reset` drops one explicit
+   * choice (or all of them) so the product default applies again. The key and value are enumerated
+   * here, so an unknown key or an unsupported value fails validation instead of reaching a file.
+   */
+  z.strictObject({ ...requestBase, command: z.literal('settings.ui.list') }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('settings.ui.get'),
+    key: uiSettingKeySchema,
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('settings.ui.set'),
+    key: uiSettingKeySchema,
+    value: uiSettingValueSchema,
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('settings.ui.reset'),
+    /** Absent means every key: that is the documented recovery from an unreadable file. */
+    key: uiSettingKeySchema.optional(),
   }),
   /**
    * Read-only preview of what a reclamation would remove and why. This is the dry run: it

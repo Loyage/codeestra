@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { ThemeSelector } from './theme.js';
+import { SettingsPage, UiSettingsProvider } from './settings.js';
 import { usePendingAction } from './use-pending-action.js';
 import { RuntimeClient, describeError } from './api.js';
 import { TranscriptPanel } from './transcript.js';
@@ -36,7 +37,7 @@ import {
   type VerificationRunView,
 } from './types.js';
 
-type Tab = 'tasks' | 'attention' | 'schedule' | 'events' | 'agent' | 'project';
+type Tab = 'tasks' | 'attention' | 'schedule' | 'events' | 'agent' | 'project' | 'settings';
 
 const tabLabels: Record<Tab, string> = {
   tasks: '任务工作台',
@@ -45,6 +46,7 @@ const tabLabels: Record<Tab, string> = {
   events: '运行事件',
   agent: 'Agent 配置',
   project: '项目',
+  settings: '设置',
 };
 
 const thinkingLevels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
@@ -579,6 +581,10 @@ function Console({ token, initialProjectId }: {
   };
 
   return (
+    // One provider for the whole console, so the interface-effect settings (ADR-0045) apply on every
+    // tab and the sidebar's theme selector and the settings page share one state. The element below
+    // keeps its own indentation so this wrapper stays a two-line change.
+    <UiSettingsProvider client={client}>
     <div className="app">
       <a className="skip-link" href="#workspace">跳转到工作区</a>
       <header className="app-header">
@@ -616,7 +622,7 @@ function Console({ token, initialProjectId }: {
       <aside className="sidebar">
       <nav aria-label="主导航">
         <span className="nav-caption">工作空间</span>
-        {(['tasks', 'attention', 'schedule', 'project', 'agent', 'events'] as const).map((name) => (
+        {(['tasks', 'attention', 'schedule', 'project', 'agent', 'events', 'settings'] as const).map((name) => (
           <button
             key={name}
             type="button"
@@ -729,6 +735,7 @@ function Console({ token, initialProjectId }: {
             tasks={state.tasks} refreshToken={state.detailToken} run={run} update={update}
             reloadProjects={loadProjects} />
         ) : null}
+        {tab === 'settings' ? <SettingsPage /> : null}
       </main>
 
       <footer className="muted">
@@ -752,6 +759,7 @@ function Console({ token, initialProjectId }: {
       )}
       </div>
     </div>
+    </UiSettingsProvider>
   );
 }
 

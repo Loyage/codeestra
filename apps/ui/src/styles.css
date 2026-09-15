@@ -343,3 +343,38 @@ details summary { cursor: pointer; color: var(--muted); padding: 0.3rem 0; }
 .events li.scheduling-event { flex-wrap: wrap; }
 .events li.scheduling-event .event-human { flex-basis: 100%; font-size: 0.78rem; }
 .events li.scheduling-event .event-human .hint { margin-left: 0.4rem; }
+
+/* FOUNDATION-073 / ADR-0045 — interface-effect settings.
+   These rules only add a root type scale, a tighter density rhythm and a motion switch driven by
+   the values the Runtime stores. Nothing here redefines a layout rule of the shell
+   (.app/.app-header/.sidebar/.workspace-shell): the settings page never owns the layout.
+
+   The default (medium/comfortable/full) intentionally has no rule at all, so a Runtime home that
+   has chosen nothing renders exactly as it did before this feature existed. */
+:root[data-font-size="small"] { font-size: 87.5%; }
+:root[data-font-size="large"] { font-size: 112.5%; }
+/* 0.875rem is 14px at a 16px browser default — the fixed size the workbench always used — but it now
+   follows the browser's own default font size instead of overriding it. */
+body { font-size: 0.875rem; }
+
+:root[data-density="compact"] .card { padding: 0.6rem; }
+:root[data-density="compact"] .card.nested { margin: 0.5rem 0; }
+:root[data-density="compact"] .list { gap: 0.3rem; margin: 0.5rem 0; }
+:root[data-density="compact"] .actions { margin: 0.55rem 0; }
+:root[data-density="compact"] .task-row { padding: 0.45rem 0.7rem; }
+:root[data-density="compact"] th, :root[data-density="compact"] td { padding: 0.35rem 0.5rem; }
+:root[data-density="compact"] .question-option { padding: 0.5rem; }
+:root[data-density="compact"] .kv { gap: 0.25rem 0.75rem; }
+
+/* `reduced` removes motion the system would allow. `full` deliberately adds nothing back, so the
+   existing prefers-reduced-motion rules keep winning for a user whose system asks for less motion. */
+:root[data-motion="reduced"] .is-moving > .status-indicator
+  { animation: none; border-right-color: currentColor; }
+:root[data-motion="reduced"] .task-row { transition: none; }
+
+.settings-page .settings-list { list-style: none; margin: 1rem 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.9rem; }
+.settings-row { border-top: 1px solid var(--line); padding-top: 0.75rem; }
+.settings-row:first-child { border-top: none; padding-top: 0; }
+.settings-row-head { display: flex; align-items: baseline; gap: 0.5rem; }
+.settings-row-control { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; margin: 0.4rem 0; }
+.settings-row-control select { min-width: 8rem; }

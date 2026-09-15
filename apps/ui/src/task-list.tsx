@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { updateTimeLabel, useTimeDisplay } from './ui-settings.js';
 import type { AttentionView, TaskView } from './types.js';
 
 const states: Record<string, { label: string; hint: string; tone: string; moving?: boolean }> = {
@@ -31,14 +32,6 @@ export function TaskStateBadge({ state, live = false }: { state: string; live?: 
   </span>;
 }
 
-function relativeTime(timestamp: number, now: number): string {
-  const minutes = Math.floor(Math.max(0, now - timestamp) / 60_000);
-  if (minutes < 1) return '刚刚更新';
-  if (minutes < 60) return `${minutes} 分钟前更新`;
-  if (minutes < 1440) return `${Math.floor(minutes / 60)} 小时前更新`;
-  return `${Math.floor(minutes / 1440)} 天前更新`;
-}
-
 export function TaskList({ tasks, attentions, query, filter, sort, showArchived, live, setQuery, setFilter,
   setSort, setShowArchived, selectTask }: {
   tasks: readonly TaskView[];
@@ -55,6 +48,9 @@ export function TaskList({ tasks, attentions, query, filter, sort, showArchived,
   selectTask: (taskId: string) => void;
 }) {
   const [now, setNow] = useState(Date.now);
+  // The time-display setting (ADR-0045) selects between the workbench's own relative wording and the
+  // local absolute time. Both keep the exact timestamps in the element's `title`.
+  const timeDisplay = useTimeDisplay();
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
     return () => window.clearInterval(timer);
@@ -132,7 +128,7 @@ export function TaskList({ tasks, attentions, query, filter, sort, showArchived,
                   <span>规格 r{task.currentRevision.number}</span><span title="数值越大优先级越高；只影响后续调度，不抢占">优先级 {task.priority}</span>
                   {task.currentRevision.constraints.length > 0 ? <span>{task.currentRevision.constraints.length} 条约束</span> : null}
                   <time dateTime={new Date(task.updatedAt).toISOString()} title={`更新：${new Date(task.updatedAt).toLocaleString('zh-CN')}；创建：${new Date(task.createdAt).toLocaleString('zh-CN')}`}>
-                    {relativeTime(task.updatedAt, now)}</time>
+                    {updateTimeLabel(task.updatedAt, now, timeDisplay)}</time>
                 </span>
               </span>
               <span className="task-row-status"><TaskStateBadge state={task.state} live={live} />
