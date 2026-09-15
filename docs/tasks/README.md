@@ -5218,6 +5218,52 @@ $ git diff --stat
 - 任务③待契约落地后再投影（本格按约定不做，未发明字段）。
 - 本格未新增依赖、未新增权限/审批/沙箱，因此不需要新 ADR；如后续要为「已推送≠已提升」加投影，应先落地契约字段。
 
+## Wave L 开发分支集成（L1 → L2 → L3 → L4，4 格经 Orca 受监督编排）
+
+状态：**四格已合入 `dev`，合并时定向验证通过。** 未 push、未提升 `main`、未触碰稳定 clone 与其上的稳定 Runtime。
+
+本波对应「继续检查还有哪些部分需要开发、哪些可以并行」的用户指示 + 用户新增要求「项目要有使用指南（写给用户的说明书）」。基线固定 `dev@036cf681ec87127579c285bc51888c1f54d1f932`（四格同基线，未 rebase）。schema 预分配：**L1 占 v29**，其余不占迁移号。
+
+### 固定提交与合并顺序
+
+| 顺序 | 分支 | lane commit | `dev` 合并 | FOUNDATION / ADR / schema |
+|---|---|---|---|---|
+| L1 | `lane/l1-promotion-github` | `ff93f26` + `a79ed9b` | merge `b900409` | 077 / ADR-0047 实现细则 / **v29** |
+| L2 | `lane/l2-user-manual` | `a902b31` | merge `1188933` | 078 / **ADR-0050** / 无 |
+| L3 | `lane/l3-adapter-gaps` | `e57a39e` | merge `eab10be` | 079 / **ADR-0051** / 无 |
+| L4 | `lane/l4-ui-projections` | `93bfb00` + `1dc40de` | merge `ad0d3fb` | **080**（见下）/ 无 / 无 |
+
+### 编号冲突与顺延（协调者在集成时处理，沿用 Wave I 的先例）
+
+- **ADR 撞号**：任务书给 L1 与 L2 都写了「下一个空号 0050」，两格各写了一个 `0050-*.md`。按引用面较小的那一侧顺延：**L1 的 `0050-promotion-fact-layering.md` → `0052-promotion-fact-layering.md`**（4 处引用），L2 保留 **ADR-0050**（6 处引用，含 `AGENTS.md`），L3 用 **ADR-0051**。已用全仓 `grep` 复核无残留旧引用（含 `event-model.md` 的 `ADR-0047/0050` 合并写法）。
+- **FOUNDATION 撞号**：L1 与 L4 都写了 `FOUNDATION-077`（L3/L4 的任务书漏写号段，由协调者在开工后补发裁决）。**L4 顺延为 FOUNDATION-080**（只改它自己记录里的 1 处标题），L3 = 079。
+- 记录顺序最终为 077（L1）→ 078（L2）→ 079（L3）→ 080（L4）。
+
+### 各格交付摘要
+
+- **L1（ADR-0047 产品实现，schema v29）**：`projects.dev_repo_path`（可空、空串被 CHECK 拒绝）+ `stable_promotions` 的远端读回列，**两个纯 `ALTER TABLE ADD COLUMN`、不重建表**；新 `dev-repo-service` 核验 dev clone（另一个 clone、同 `origin`、HEAD 在该项目 `dev` 分支），稳定码 `DEV_REPO_*`；`promotion promote` 一次只推进一步：push 固定候选到远端 `dev` → `ls-remote` **读回**核对 → `PROMOTING` 收窄为「**已推送、等待拉取**」并退**退出码 3**（不执行、不记录任何重启步骤）→ main 检出人工 `fetch`+`ff-only` 后收口并跑重启序列 → 重启核对成功才推回 `origin/main` 并读回；**旧的本机 ff 实现 `fastForwardCheckedOutWorktree` 已删除**（无双路径）；`REMOTE_DEV_*` 只写 outcome（可重试），`REMOTE_DEV_MOVED` 才置 `STALE` 且三个入口都拒绝。
+- **L2（说明书 + 文档纪律，ADR-0050）**：新建 `docs/guides/manual.md`（1098 行、14 节、可从「这是什么」读到「术语表」）、`recipes.md`（13 条常见任务）、`acceptance-checklist.md`（13 组人工勾选项）、`images/README.md`（17 张图的目标与图注 + 28 行占位）；`ui.md` 重写为**逐屏 UI 走查**（常驻外壳 + 7 个标签页，逐按钮标注所发命令，另给「只读投影 vs 真的改状态」汇总表）；`docs/guides/**` 全部加统一「适用版本/schema/最后校对」头；**`AGENTS.md` 加入「功能变更必须同步 `docs/guides/`」纪律（用户授权，本波唯一一次人工规范修改）**。
+- **L3（adapter 侧三件，ADR-0051）**：知识上下文按 Execution 绑定真正交给 provider（新增纯追加 `AgentKnowledgeContext{path,digest,bytes}`；Runtime 解析绝对路径，Adapter 在 spawn 前按「绝对路径 + 普通文件 + sha256 == digest + 字节数 + UTF-8」**fail-closed** 核验，稳定码 `KNOWLEDGE_CONTEXT_UNAVAILABLE`；交付通道各自为 Pi `--append-system-prompt <path>`、Claude `--append-system-prompt-file <path>`、Codex `developerInstructions`，**无统一抽象、无新能力位**；**零知识时 argv/入参逐字节不变**）；Codex 完成事实与 Pi 同形状（按 provider item id 去重、消息级 stop reason 恒 `null`、断连不带 facts 也不产生 Attention）；`applyRevision` 经**真实 CLI 实测判定不可行**（Pi steer 只回 `queue_update`；Codex 97 个 app-server 方法里 `turn/steer` 需活跃 turn 且只回 `{turnId}`、`thread/inject_items` 只追加历史；Claude 控制协议只有 `initialize`/`interrupt`/`can_use_tool`），**三者维持 `UNSUPPORTED`** 并否掉两个替代方案。
+- **L4（UI 投影补齐）**：任务详情「修订与投递」面板（`task revision list|create` + delivery `list|resolve`，把「已记录 / 已投递 / 已确认」显示为**三个不合并的事实**，`CHANNEL_UNSUPPORTED` 明说不支持热投递并给出「停止并新建执行」入口）；「待处理」里把**散文提问等待**与权限/问卷区分开，提供 `attention resolve --answer/--dismiss` 等价动作并写清「回答不会投递、需显式重新运行」。**一行后端代码未改**（已用 `grep` 证据核对）。
+
+### 合并时验证（在合并后的 `dev` 上执行，ADR-0038：dev 上只跑定向集）
+
+- 根 `bun run typecheck` 0、`bun run typecheck:ui` 0；`bun run test`（vitest：domain + `apps/ui`）**422 passed / 16 文件**。
+- L1 定向：`packages/storage/test` + `packages/git/test` **207 pass**；`promotion-service` + `dev-repo-service` + `cli-promotion` **38 pass**。
+- L3 定向：`packages/agent-adapters/test` **131 pass**；`agent-runtime-service` + `cli-knowledge` + `task-control-service` **22 pass**。
+- 版本/迁移断言敏感 e2e 7 文件（reclaim-batch / revision-delivery / verification-cancel / targeted-tests / impact / attention / prose-question-attention）**44 pass**。
+- `bun run build:ui` 退出码 0；全仓文档链接 **393 条 0 断**（独立复算）。
+- 各格在 lane 上还各自跑过：L2 的 333 链/107 命令行/58 flag/172 条界面文案核对（并**据此改掉 `features.md` 12 处错误 UI 位置**）、L4 的 `vitest apps/ui` 93 + `build:ui:dev`（`data-channel="dev"` 生效）、L1/L3 的迁移与 argv 断言。
+- **未跑全量**：按 ADR-0038，全量测试只在准备 `dev → main` 时对精确 SHA 跑一次。
+
+### 未验证 / 已知缺口（如实汇总）
+
+- **真实 provider 全线未验收**（与本波无关但仍是最大缺口）：并发两任务、暂停/恢复、revision 投递 ACK、真实模型是否真的消费被交付的知识、真实模型下第三方 extension 与 gate 的对抗。
+- **L1 留下的两处已知边界**（它自己写进记录）：全量证据仍从 `projects.repo_root`（main 检出）读取候选，而不是 dev clone；main 检出里作为过渡的本地 `dev` ref **未删除**（ADR-0047 说要以 `dev_repo_path` + 远端 `dev` 取代后再删）。
+- **L2 发现的新 UI 缺口**：`task retry` 在界面上**没有按钮**（「更多操作」只有终止/归档），文档已如实改为「界面无按钮」——这是一条新的投影缺口，记在 `## NEXT`。
+- **L4 未做**：`promotion` 的「已推送、等待拉取」状态投影当时因契约未定而未做；L1 合入后该字段已存在，可后续补（不影响本波结论）。
+- **观感类结论一律未验证**（ADR-0008 下只能人工）：L4 的两个新面板、L2 说明书的阅读体验与插图效果（清单一条未打勾）。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），
