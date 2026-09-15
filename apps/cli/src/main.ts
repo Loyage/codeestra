@@ -15,6 +15,7 @@ import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOpt
   type SessionTranscriptEntry, type SessionTranscriptView,
   type SlotReservationAcquisitionView,
   type SlotReservationReconcileReport, type SlotReservationReleaseView,
+  type SlotSnapshotRefusalDetail,
   type VerificationPolicyInspection } from '@codeestra/contracts';
 import {
   inspectRuntimeHome,
@@ -110,10 +111,10 @@ async function ensureRuntime(): Promise<void> {
 /**
  * A rejected Runtime command keeps its stable code. "A wait" and "a refusal" have to be told apart
  * without parsing prose (a conflict or capacity wait exits 3, a refusal exits 1), so the code
- * travels on the error itself.
+ * travels on the error itself, and the optional `detail` carries the facts the code cannot express.
  */
 class CliRuntimeError extends Error {
-  constructor(readonly code: string, message: string) {
+  constructor(readonly code: string, message: string, readonly detail?: unknown) {
     super(message);
     this.name = 'CliRuntimeError';
   }
@@ -123,12 +124,21 @@ function errorCodeOf(error: unknown): string | null {
   return error instanceof CliRuntimeError ? error.code : null;
 }
 
+/**
+ * A refusal detail only counts as one when it names a stable code: an unreadable payload is treated
+ * as "no facts attached" and the error keeps its ordinary rendering, never a half-rendered JSON.
+ */
+function isSnapshotRefusal(value: unknown): value is SlotSnapshotRefusalDetail {
+  return typeof value === 'object' && value !== null && 'code' in value
+    && (value.code === 'SNAPSHOT_STALE' || value.code === 'SNAPSHOT_UNAVAILABLE');
+}
+
 async function call(command: ClientRequest): Promise<unknown> {
   await ensureRuntime();
   const response = await request(command);
   if (!response.ok) {
     throw new CliRuntimeError(response.error.code,
-      `${response.error.code}: ${response.error.message}`);
+      `${response.error.code}: ${response.error.message}`, response.error.detail);
   }
   return response.result;
 }
@@ -965,7 +975,7 @@ function usage(): never {
   bun run codeestra scheduler reservations list <project-id> [--task <task-id>]
     [--include-released] [--limit <n>] [--json]
   bun run codeestra scheduler reservations acquire <project-id> <task-id> <expected-task-version>
-    --revision <revision-id> [--adapter <id>] [--json]
+    --revision <revision-id> [--snapshot <impact-snapshot-id>] [--adapter <id>] [--json]
   bun run codeestra scheduler reservations release <project-id> <reservation-id> --reason <text>
     [--json]
   bun run codeestra scheduler reservations prepare-workspace <project-id> <reservation-id>
@@ -1006,11 +1016,17 @@ Adapter is refused with its own stable code instead of being clamped. The defaul
 Tasks; an Adapter with no override follows the project limit.
 
 scheduler reservations acquire is the reservation primitive: it re-checks the Task version, the
-assessed revision, the dependency facts and both capacity dimensions inside one immediate
-transaction, then records a reservation together with the evidence of who created it (Runtime boot,
-pid, OS start token). Exit code 0 means a slot is held, 3 means a *capacity wait* (the reason code
-says which limit), and 1 means a refusal (unmet dependencies, a stale revision, an already-held
-slot, ...). Exit code 3 is never BLOCKED: BLOCKED means unmet dependencies only.
+assessed revision, the dependency facts, the cached ImpactSnapshot generation and both capacity
+dimensions inside one immediate transaction, then records a reservation together with the evidence of
+who created it (Runtime boot, pid, OS start token). --snapshot names the ImpactSnapshot the caller
+assessed against: the mapping version, analyzer version and observed change set are read again, and
+the Task revision and worktree baseline are re-read inside the write transaction, so a generation that
+moved is refused with SNAPSHOT_STALE (or SNAPSHOT_UNAVAILABLE when it cannot be confirmed at all)
+and no reservation row is written — the recheck is freshness, not a second conflict analysis. Exit code
+0 means a slot is held, 3 means a *capacity wait* (the reason code says which limit), and 1 means a
+refusal (unmet dependencies, a stale revision, a stale snapshot generation, an already-held slot, ...).
+A refusal that carries facts prints them as JSON and then exits 1. Exit code 3 is never BLOCKED:
+BLOCKED means unmet dependencies only.
 
 scheduler reservations list shows the active reservations of a project with their holder evidence and
 their append-only history (--include-released keeps the audit rows). release is explicit and requires
@@ -2636,10 +2652,12 @@ try {
       }
     } else if (subcommand === 'reservations') {
       const split = splitFlagTokens(tokens,
-        ['--task', '--revision', '--adapter', '--reason', '--limit'],
+        ['--task', '--revision', '--adapter', '--reason', '--limit', '--snapshot'],
         ['--include-released', '--json']);
       const [reservationAction, projectId, ...extra] = split.positionals;
       if (reservationAction === undefined || projectId === undefined) usage();
+      const snapshotId = split.flags.get('--snapshot');
+      if (snapshotId !== undefined && reservationAction !== 'acquire') usage();
       const limitText = split.flags.get('--limit');
       const limit = limitText === undefined ? undefined : Number(limitText);
       if (limitText !== undefined && (!Number.isSafeInteger(limit) || (limit as number) < 1
@@ -2664,15 +2682,31 @@ try {
         if (taskId === undefined || versionText === undefined || rest.length !== 0
           || revisionId === undefined || !Number.isSafeInteger(expectedTaskVersion)
           || expectedTaskVersion < 0) usage();
-        const result = await call({
-          command: 'scheduler.reservations.acquire',
-          commandId: crypto.randomUUID(),
-          projectId,
-          taskId,
-          expectedTaskVersion,
-          revisionId,
-          adapterId: split.flags.get('--adapter') ?? 'pi',
-        }) as SlotReservationAcquisitionView;
+        let result: SlotReservationAcquisitionView;
+        try {
+          result = await call({
+            command: 'scheduler.reservations.acquire',
+            commandId: crypto.randomUUID(),
+            projectId,
+            taskId,
+            expectedTaskVersion,
+            revisionId,
+            adapterId: split.flags.get('--adapter') ?? 'pi',
+            ...(snapshotId === undefined ? {} : { impactSnapshotId: snapshotId }),
+          }) as SlotReservationAcquisitionView;
+        } catch (error) {
+          const detail = error instanceof CliRuntimeError && isSnapshotRefusal(error.detail)
+            ? error.detail : undefined;
+          if (detail === undefined) throw error;
+          // A refusal whose code cannot carry its facts (the generation recheck names the components
+          // that moved) is printed as JSON and then reported through the exit code, the same way
+          // `project impact explain` and `task schedule run` report a refusal. Nothing was written:
+          // the transaction rolled back, so the facts a caller reads here are the whole failure.
+          const code = errorCodeOf(error) ?? 'REFUSED';
+          print({ outcome: 'REFUSED', code, message: (error as Error).message, detail });
+          console.error(`[scheduler] refused: ${code} — ${(error as Error).message}`);
+          process.exit(1);
+        }
         print(result);
         // A granted slot is a fact; a *wait* is a fact too, but a script needs to tell them apart
         // without parsing JSON, so a wait exits 3 and a refusal exits 1.

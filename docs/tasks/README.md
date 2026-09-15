@@ -3022,6 +3022,73 @@ Adapter **报不出事实时不猜**：`facts` 字段整体缺席表示“未知
 - 下一步执行者固定本次 dev 提交 OID，重新核对两个 ref 与 main 干净状态，在 main 工作树 fast-forward 固定 OID，随后按 install → build:ui → stop → status 执行；有需要时再启动 UI 并检查 READY + uiRunning。最终提交 OID、各步退出码与新 boot 由实际执行输出记录，不在提交前捏造发布结果。
 - 未授权 push；不直接 update-ref 已检出的 main，失败不回滚，不手工清理未知进程。新 UI token 不写入文档、日志或提交。
 
+## FOUNDATION-060 — 预留事务内的快照代重检（Wave H / H2，无新 ADR，无 schema 变更）
+
+状态：实现与自查完成，端到端证据已采集；**未提交**，等用户确认。基线固定 `dev@8058eb9275fbea87c1216c4ac9ea66b7e7d96022`（分支 `lane/h2-snapshot-recheck`，未 rebase、未合并新 dev）。
+
+### 缺口（已在基线上实测确认）
+
+`scheduler.md` §2 要求事务内「recheck cached snapshot generations」。基线里 `schedule-service.ts` 已经把 `assessment.view.candidateSnapshotId` 传给 `SlotReservationService.acquire`，而 `slot-reservation-service.ts` 全文只有两处 `snapshot`（声明 `impactSnapshotId` 与把它写进 `execution_slot_reservations.impact_snapshot_id`），**从不校验**。因此「SAFE 判定之后、真正预留之前」这段窗口里的 revision / 基线 / 映射 / 分析器 / 变更集变化不会被拦住。
+
+### 实现：重检的确切键与比较方式
+
+- 复用 E1 的判定而不是另写一套：`packages/domain/src/impact-analysis.ts` 把 `isSnapshotCurrent` 的规则抽成 `recheckImpactSnapshotGeneration({generation, observedFiles, context, currentRevisionId, observedChangeFingerprint})`，返回 `{current, reasonCodes, differing, assessed, observed}`；`isSnapshotCurrent` 现在就是它的 `{current, reasonCodes}` 视图（行为不变，既有 domain 测试未改）。新增纯函数：`ImpactSnapshotGeneration`（六元组 + `caseMode` + `files`）、`impactSnapshotGeneration`、`recheckImpactSnapshotGeneration`、`ImpactSnapshotStaleComponent`/`ImpactSnapshotGenerationSummary`/`ImpactSnapshotRecheck`。
+- **六元组的比较判据（哪一个在哪里被重读）**：
+
+| 分量 | 预留前观测（Git / 运行中二进制） | `BEGIN IMMEDIATE` 内重读（SQLite） | 拒绝时 `differing` |
+|---|---|---|---|
+| `revisionId` | 调用方断言的 revision（CAS） | `tasks.current_revision_id` | `revisionId` |
+| `baseCommit` | 有 worktree：`workspaces.base_commit`；无 worktree：`refs/heads/dev` 当前 commit | 有 worktree：同一行重读；无 worktree：调用方观测值（外部事实，见「未验证」） | `baseCommit` |
+| `analyzerVersion` | `impactAnalyzerVersion`（运行中二进制） | 不重读，断言等于本代常量 | `analyzerVersion` |
+| `policyVersion` | 项目 `main` ref 的 `.codeestra/impact.json` 重新解析（`impactPolicyVersionKey`） | 不重读（映射在 Git 里） | `policyVersion` |
+| 变更集（`changeFingerprint`） | 有 worktree：`inspectChangeSet` 的路径集合与 `treeFingerprint`；无 worktree：空集 | 不重读（工作树在 Git/文件系统里） | `changeSet` |
+| `taskId` | 预留的 Task | 快照行的 `task_id`（不一致即 `SNAPSHOT_UNAVAILABLE`） | — |
+
+- **变更集的比较方式是「路径集合精确相等」，不是指纹相等**：`isSnapshotCurrent`/E1 的重用判据就是路径集合（`caseMode` 感知）；`changeFingerprint` 还包含内容与 `HEAD`，而引擎在「路径不变、内容变了」时会继续选中同一行快照，严格比较指纹会让该 Task 永远预留不成功（活锁）。因此指纹与两侧路径数只作为拒绝事实回报，不参与判定。
+- 工作树形状也被重读：观测说有 worktree 而事务里已无（或反之，观测说没有而现在有了）→ `SNAPSHOT_STALE`（`STALE_BASE`）。
+
+### 失败原因码与「失败要干净」
+
+- 两个稳定码，与 `DEPENDENCY_STATE_CHANGED` 同一 `SlotReservationError` 联合类型、同一语法：`SNAPSHOT_STALE`（读到了，但已不再是当前那一代）、`SNAPSHOT_UNAVAILABLE`（快照读不到/不属于该 Task/当前事实无法观测）。**读不到快照绝不当作有效**（映射读失败、`dev` ref 读失败、变更集检查失败都拒绝）。
+- 判定发生在 `reserveExecutionSlot` 的 `apply` 内（事务边界 = 预留获取的同一个 `BEGIN IMMEDIATE`），拒绝走 **抛出** 而不是返回值：整笔事务回滚，因此**不留预留行、不留 `ExecutionSlotReserved` 事件、不留 command receipt**。测试用「同一 commandId 在事实恢复后再跑一次即成功」证明回执确实没写。
+- 拒绝携带结构化 `detail`：`{code, snapshotId, taskId, reasonCodes, differing, assessed{六元组+pathCount}, observed{...}}`。`reasonCodes` 是既有分析器码（`STALE_REVISION`/`STALE_BASE`/`STALE_POLICY`/`STALE_ANALYZER`/`ACTUAL_DIFF_EXCEEDS_SNAPSHOT`/`SNAPSHOT_SCOPE_MISMATCH`/`INVALID_SCOPE`）。
+- `impactSnapshotId` 为 null/未给时**不重检**，并如实记为 `impact_snapshot_id = NULL`：这是 `--allow-unknown` 显式放行后 `UNKNOWN` 评估的形状（引擎的 `#unavailableAssessment` 就传 null），语义是「没有缓存判定可失效」，不是「快照有效」。
+- 语义边界：重检只回答**新鲜度**，不重新做冲突分析，也不改判定；`UNKNOWN`/`CONFLICTING` 的评估只要是「当前那一代」就照样可以按既有流程预留。
+
+### 命令面（CLI 完备）
+
+- `scheduler reservations acquire … --snapshot <impact-snapshot-id>`（新增可选 flag，同时进入 `scheduler.reservations.acquire` 的请求 schema）。带 facts 的拒绝**先打印 JSON 再 exit 1**（与 `project impact explain`、`task schedule run` 的 `REFUSED` 同一惯例）：`{outcome:'REFUSED', code, message, detail}`；不带 facts 的拒绝保持既有「stderr + exit 1」形态（`cli-capacity-slots.test.ts` 不受影响）。RPC 错误封套新增可选 `error.detail`（append-only）。
+- 退出码不变：0 = 拿到槽位，3 = 容量等待/排水，1 = 拒绝（含两个新码）。`usage()` 增补该 flag 与「重检是新鲜度不是第二次冲突分析」的说明。
+
+### 测试清单
+
+- `apps/runtime/test/snapshot-generation-recheck.test.ts`（12 项，`test:unit`；真实临时仓库 + 内存库 + 真实 worktree）：当前代 → 预留成功；`STALE_REVISION`（改修订后仍 READY，只有快照重检能拦）；`STALE_BASE`（`dev` 前进）；`STALE_POLICY`（往 `main` 提交 `.codeestra/impact.json`）；`STALE_ANALYZER`（旧分析器版本）；`ACTUAL_DIFF_EXCEEDS_SNAPSHOT`（worktree 新增文件）；事务内重读工作树（worktree 在写前消失 → `STALE_BASE`）；反向形状（观测说无 worktree、写入时有 → 拒绝）；不可读/他人的快照 id → `SNAPSHOT_UNAVAILABLE`；拒绝零写入且 commandId 可复用；成功命令重放幂等（同一 reservationId、仍只有一行）；无快照的 Task 不重检且如实记 null。每例都断言「无残留行/无新事件」。
+- `apps/runtime/test/cli-snapshot-recheck.test.ts`（5 项，`test:e2e`；真实 CLI + Runtime + 临时 `CODEESTRA_HOME` + 临时仓库 + 协议 stub provider）：当前代预留成功 → 释放 → `dev` 前进 → 同一 id 被拒且 `differing:['baseCommit']`、两列表零残留、审计行保留；映射变化被拒 → 引擎重新派生的一代可以预留；**并发两个 acquire 同一代只有 1 个成功（另一个 `SLOT_ALREADY_RESERVED`）且只有一行**；不给 `--snapshot` 仍可用且记 null；引擎自身 pre-start 代仍能启动 Task（防回归：证明重检没有把引擎路径一起拦死）。
+- 领地与共享槽位：独占 `apps/runtime/src/slot-reservation-service.ts` 与本格测试文件；纯追加 `packages/domain/src/impact-analysis.ts`、`packages/storage/src/database.ts` + `src/index.ts`、`packages/contracts/src/index.ts`；接线 `apps/runtime/src/main.ts`、`apps/cli/src/main.ts`；`package.json` 只加本格测试文件名。**未改** `schedule-service.ts`/`scheduler.ts`/`agent-runtime-service.ts`/`reclaim-service.ts`/`session-handoff-service.ts`/`terminal-service.ts`/`packages/agent-adapters/**`/`apps/ui/**`/`PROJECT_SPEC.md`/`docs/architecture/**`；未改 `migration.ts`。
+
+### 端到端证据（`CODEESTRA_HOME=/tmp/ce-h2`，临时仓库 + 协议 stub provider）
+
+1. 快照有效 → 预留成功：`task schedule status --json` 得到引擎派生的缓存代（`verdict=UNKNOWN/INCOMPLETE_IMPACT`，`candidateSnapshotId=5aaaab72…`，`baseCommit=0978ab42…`，`policyVersion=impact-policy-v1#absent`）→ `scheduler reservations acquire <p> <t> 1 --revision 00db985a… --snapshot 5aaaab72… --json` **exit 0**，`outcome=RESERVED`、`reservation.impactSnapshotId` 正是该 id、`globalUsed=1`。
+2. 制造失效（`git commit-tree` + `update-ref refs/heads/dev`，`0978ab42… → 80d3a392…`）→ 同一 id 重试 **exit 1**，stdout JSON：`outcome=REFUSED`、`code=SNAPSHOT_STALE`、`reasonCodes=['STALE_BASE']`、`differing=['baseCommit']`、`assessed.baseCommit=0978ab42…`、`observed.baseCommit=80d3a392…`；stderr 同一句。
+3. 无残留：`scheduler reservations list --json` → `active rows: 0`；`--include-released --json` → 1 行（先前那次显式释放，`state=RELEASED`、`releaseReason` 保留）。
+4. 读不到的快照：`--snapshot 99999999-…` → exit 1，`outcome=REFUSED`、`code=SNAPSHOT_UNAVAILABLE`。
+5. `codeestra stop` exit 0（`status=STOPPED`、`identityVerified=true`、`verdict=NOT_RUNNING`），随后 `/tmp/ce-h2*` 夹具已删除，本工作树的 Runtime 进程数 **0**。
+
+### 实际验证
+
+- `bun run check:fast`：退出码 0（根/UI TypeScript + 272 Vitest + 369 Bun）。
+- 提交前完整 `bun run check`：退出码 0。Vitest **272/272**；Bun **584 pass / 0 fail（69 文件）**；`build:ui` ✓。日志 `/tmp/h2-check.log`。
+- 跑完后本工作树的孤儿 Runtime 进程 **0**（不属于本格的稳定 `main` Runtime 与兄弟工作树进程未被触碰、未计入）。此前调试留下的两个本工作树孤儿（pid 96373/96647，`cwd`=本工作树、argv 指向本工作树 runtime 入口、home 为 `T/codeestra-slot-home-*` 临时目录）已按三重归属证据 `SIGTERM`，均自行有序退出，其临时 home 一并回收。
+
+### 未验证 / 明确不做
+
+- **真实 provider 参与下的并发窗口未验证**：证据只到「两个并发 acquire 只有一个成功」，不等于「两个真 Agent 不会越界」。数据库预留不是 OS 隔离，本格只解决「判定与预留之间」的窗口。
+- **外部（Git）事实的残余窗口仍在**：映射版本、变更集、以及「无 worktree 时」的 `dev` 基线是预留前观测的，SQLite 无法在事务里重读它们。观测与 COMMIT 之间 Git 侧再变一次不会被本格拦住——`scheduler.md` §2/§4 把这一段交给预留后的外部基线复核（引擎已实现的 `assessedDevCommit` 比较）。
+- **「路径不变、内容变了」不构成失效**：按 E1 重用规则如此（见上），是把指纹当证据而非判据的有意取舍；若产品要「内容变了也要重算」，需改 analyzer 的重用键，属独立决策。
+- **「引擎侧是否也应重算」未做**：本格不重新做冲突分析；调度引擎在下一 tick 仍按自己的评估重新判定。
+- 非 Git 共享资源（端口/数据库/dev server）、`--allow-unknown` 的命令语义、UI 投影均不在本格；未使用浏览器/桌面/键鼠自动化。未 push、未提升 `main`、未重启稳定 Runtime、未触碰 `/Users/loyage/Documents/codeestra`。
+- **不新增 ADR**：本格实现的是 `scheduler.md` §2 已经写明的要求（「recheck … cached snapshot generations」），语义边界（重检 ≠ 重算、UNKNOWN ≠ SAFE、不新增门禁）在 ADR-0030/0031/0032 里已经成立，故 `docs/decisions/README.md` 未追加 ADR-0035。**不新增 schema**：重检比较的是既有 `impact_snapshot_id` 与既有事实，拒绝可由返回值解释，无需持久化新列，`migration.ts` 未改（v22 未占用）。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、~~UI 投影~~（已由 FOUNDATION-050 完成 promotion/dependency 投影）。

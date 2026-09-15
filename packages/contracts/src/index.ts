@@ -1429,6 +1429,13 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     expectedTaskVersion: z.number().int().nonnegative(),
     revisionId: z.string().uuid(),
     adapterId: nonBlankString.default('pi'),
+    /**
+     * The ImpactSnapshot the caller assessed against. When it is present the reservation rechecks its
+     * generation inside the write transaction and refuses with `SNAPSHOT_STALE`/`SNAPSHOT_UNAVAILABLE`
+     * instead of reserving on a superseded assessment; when it is absent the caller asserts no
+     * assessment at all (the shape an explicitly released `UNKNOWN` has, ADR-0030 D05).
+     */
+    impactSnapshotId: z.string().uuid().optional(),
   }),
   z.strictObject({
     ...requestBase,
@@ -1517,10 +1524,32 @@ export const runtimeResponseSchema = z.discriminatedUnion('ok', [
     requestId: z.string(),
     schemaVersion: z.literal(1),
     ok: z.literal(false),
-    error: z.strictObject({ code: z.string(), message: z.string() }),
+    /**
+     * `detail` is the machine-readable half of a refusal that has facts a code alone cannot carry
+     * (today: which generation components moved under a `SNAPSHOT_STALE`). It stays optional and
+     * opaque to the envelope: an error without facts is still exactly `{code, message}`.
+     */
+    error: z.strictObject({ code: z.string(), message: z.string(),
+      detail: z.unknown().optional() }),
   }),
 ]);
 export type RuntimeResponse = z.infer<typeof runtimeResponseSchema>;
+
+/**
+ * The facts behind a refused reservation (`SNAPSHOT_STALE` / `SNAPSHOT_UNAVAILABLE`): the generation
+ * the snapshot recorded, the generation observed now, and which components moved. A client renders
+ * it; the Runtime owns it.
+ */
+export interface SlotSnapshotRefusalDetail {
+  readonly code: 'SNAPSHOT_STALE' | 'SNAPSHOT_UNAVAILABLE';
+  readonly snapshotId: string;
+  readonly taskId: string;
+  readonly snapshotTaskId?: string;
+  readonly reasonCodes?: readonly string[];
+  readonly differing?: readonly string[];
+  readonly assessed?: Readonly<Record<string, unknown>>;
+  readonly observed?: Readonly<Record<string, unknown>>;
+}
 
 export type AdapterSupport = 'SUPPORTED' | 'UNSUPPORTED' | 'REQUIRES_VALIDATION';
 export interface AdapterCapabilities {

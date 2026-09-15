@@ -486,6 +486,127 @@ export interface ConflictAssessment {
 }
 
 /**
+ * The six components of a recorded `ImpactSnapshot` that decide whether it still describes the
+ * observed facts (ADR-0031 §6.3). They are exactly the reuse key `(task, revision, base, analyzer,
+ * mapping, change set)`, which is why they can be read back out of storage without rehydrating the
+ * whole snapshot: the reservation path applies the *same* judgment to the stored row.
+ */
+export interface ImpactSnapshotGeneration {
+  readonly taskId: string;
+  readonly revisionId: string;
+  readonly baseCommit: string;
+  readonly analyzerVersion: string;
+  readonly policyVersion: string;
+  readonly changeFingerprint: string;
+  /** The case behavior recorded with the snapshot; it is what makes the path comparison honest. */
+  readonly caseMode: ImpactPathCaseMode;
+  readonly files: readonly string[];
+}
+
+/** One component of the generation a recheck found out of date. */
+export type ImpactSnapshotStaleComponent = 'revisionId' | 'baseCommit' | 'analyzerVersion'
+  | 'policyVersion' | 'changeSet' | 'recordedScope';
+
+/** The generation as a snapshot recorded it, echoed so a refusal can name exactly what moved. */
+export interface ImpactSnapshotGenerationSummary {
+  readonly taskId: string;
+  readonly revisionId: string;
+  readonly baseCommit: string;
+  readonly analyzerVersion: string;
+  readonly policyVersion: string;
+  readonly changeFingerprint: string | null;
+  readonly pathCount: number;
+}
+
+/**
+ * The recheck of one recorded generation against the observed facts: the E1 judgment, plus the
+ * components that made it fail. Only `current`, `reasonCodes` and `differing` are decisions; the two
+ * summaries are evidence for the human reading a refusal, never inputs to it.
+ */
+export interface ImpactSnapshotRecheck {
+  readonly current: boolean;
+  readonly reasonCodes: readonly ImpactReasonCode[];
+  readonly differing: readonly ImpactSnapshotStaleComponent[];
+  readonly assessed: ImpactSnapshotGenerationSummary;
+  readonly observed: ImpactSnapshotGenerationSummary;
+}
+
+export function impactSnapshotGeneration(snapshot: ImpactSnapshot): ImpactSnapshotGeneration {
+  return {
+    taskId: snapshot.taskId,
+    revisionId: snapshot.revisionId,
+    baseCommit: snapshot.baseCommit,
+    analyzerVersion: snapshot.analyzerVersion,
+    policyVersion: snapshot.policyVersion,
+    changeFingerprint: snapshot.changeFingerprint,
+    caseMode: snapshot.caseMode,
+    files: snapshot.files,
+  };
+}
+
+/** Stable field order, so the same mismatch always reports the same list. */
+const staleComponentOrder: readonly ImpactSnapshotStaleComponent[] = ['revisionId', 'baseCommit',
+  'analyzerVersion', 'policyVersion', 'changeSet', 'recordedScope'];
+
+const staleComponentByReason: Readonly<Record<string, ImpactSnapshotStaleComponent>> = {
+  STALE_REVISION: 'revisionId',
+  STALE_BASE: 'baseCommit',
+  STALE_ANALYZER: 'analyzerVersion',
+  STALE_POLICY: 'policyVersion',
+  ACTUAL_DIFF_EXCEEDS_SNAPSHOT: 'changeSet',
+  SNAPSHOT_SCOPE_MISMATCH: 'changeSet',
+  INVALID_SCOPE: 'recordedScope',
+};
+
+/**
+ * Rechecks one recorded generation against the facts observed now.
+ *
+ * Unlike {@link isSnapshotCurrent} this reports *which* components moved and echoes both sides, which
+ * is what a refused reservation needs to be explainable ("the snapshot is stale" is not enough; the
+ * caller has to see that the baseline moved and not the revision, say). The decision itself is
+ * identical — {@link isSnapshotCurrent} is this function with `current` and `reasonCodes` kept.
+ */
+export function recheckImpactSnapshotGeneration(input: {
+  readonly generation: ImpactSnapshotGeneration;
+  readonly observedFiles: readonly string[];
+  readonly context: ImpactAssessmentContext;
+  readonly currentRevisionId: string;
+  /** The change-set fingerprint observed now, when it could be observed; evidence only. */
+  readonly observedChangeFingerprint?: string | null;
+}): ImpactSnapshotRecheck {
+  const codes = ordered(reasonCodeOrder,
+    subjectValidity(input.generation, input.observedFiles, input.context, input.currentRevisionId));
+  const present = new Set<ImpactSnapshotStaleComponent>();
+  for (const code of codes) {
+    const component = staleComponentByReason[code];
+    if (component !== undefined) present.add(component);
+  }
+  return Object.freeze({
+    current: codes.length === 0,
+    reasonCodes: codes,
+    differing: Object.freeze(staleComponentOrder.filter((component) => present.has(component))),
+    assessed: Object.freeze({
+      taskId: input.generation.taskId,
+      revisionId: input.generation.revisionId,
+      baseCommit: input.generation.baseCommit,
+      analyzerVersion: input.generation.analyzerVersion,
+      policyVersion: input.generation.policyVersion,
+      changeFingerprint: input.generation.changeFingerprint,
+      pathCount: input.generation.files.length,
+    }),
+    observed: Object.freeze({
+      taskId: input.generation.taskId,
+      revisionId: input.currentRevisionId,
+      baseCommit: input.context.baseCommit,
+      analyzerVersion: input.context.analyzerVersion,
+      policyVersion: input.context.policyVersion,
+      changeFingerprint: input.observedChangeFingerprint ?? null,
+      pathCount: input.observedFiles.length,
+    }),
+  });
+}
+
+/**
  * True when the recorded snapshot still describes the observed worktree exactly: same revision, base,
  * mapping and analyzer, and the same set of changed paths. A snapshot whose scope moved in *either*
  * direction is superseded: being wider keeps reporting conflicts on paths the worktree no longer
@@ -497,7 +618,8 @@ export function isSnapshotCurrent(input: {
   readonly context: ImpactAssessmentContext;
   readonly currentRevisionId: string;
 }): { readonly current: boolean; readonly reasonCodes: readonly ImpactReasonCode[] } {
-  const codes = subjectValidity(input.snapshot, input.observedFiles, input.context, input.currentRevisionId);
+  const codes = subjectValidity(impactSnapshotGeneration(input.snapshot), input.observedFiles,
+    input.context, input.currentRevisionId);
   return {
     current: codes.length === 0,
     reasonCodes: ordered(reasonCodeOrder, codes),
@@ -505,19 +627,19 @@ export function isSnapshotCurrent(input: {
 }
 
 function subjectValidity(
-  snapshot: ImpactSnapshot,
+  generation: ImpactSnapshotGeneration,
   observedFiles: readonly string[] | undefined,
   context: ImpactAssessmentContext,
   currentRevisionId: string,
 ): ImpactReasonCode[] {
   const codes: ImpactReasonCode[] = [];
-  if (snapshot.revisionId !== currentRevisionId) codes.push('STALE_REVISION');
-  if (snapshot.baseCommit !== context.baseCommit) codes.push('STALE_BASE');
-  if (snapshot.policyVersion !== context.policyVersion) codes.push('STALE_POLICY');
-  if (snapshot.analyzerVersion !== context.analyzerVersion) codes.push('STALE_ANALYZER');
+  if (generation.revisionId !== currentRevisionId) codes.push('STALE_REVISION');
+  if (generation.baseCommit !== context.baseCommit) codes.push('STALE_BASE');
+  if (generation.policyVersion !== context.policyVersion) codes.push('STALE_POLICY');
+  if (generation.analyzerVersion !== context.analyzerVersion) codes.push('STALE_ANALYZER');
   if (observedFiles !== undefined) {
-    const recorded = new Set(snapshot.files.map((path) => comparisonKey(path, snapshot.caseMode)));
-    const observed = new Set(observedFiles.map((path) => comparisonKey(path, snapshot.caseMode)));
+    const recorded = new Set(generation.files.map((path) => comparisonKey(path, generation.caseMode)));
+    const observed = new Set(observedFiles.map((path) => comparisonKey(path, generation.caseMode)));
     // The snapshot is reusable only while it describes the worktree *exactly*. A recorded superset
     // would be conservative but wrong in the other direction: it would keep reporting a conflict on
     // a path the worktree no longer changes, so removing a change re-records instead of lingering.
@@ -526,7 +648,7 @@ function subjectValidity(
     if (grew) codes.push('ACTUAL_DIFF_EXCEEDS_SNAPSHOT');
     else if (shrank) codes.push('SNAPSHOT_SCOPE_MISMATCH');
   }
-  if (snapshot.files.some((path) => {
+  if (generation.files.some((path) => {
     try {
       normalizeObservedImpactPath(path);
       return false;
