@@ -70,7 +70,10 @@ async function recordPreStartSnapshot(
   const inspection = await inspectImpactPolicy({
     repositoryRoot: project.repoRoot, mainRef: project.mainRef,
   });
-  const devCommit = await git(fixture.repo, ['rev-parse', project.devRef]);
+  // ADR-0056: the development baseline a pre-start prediction is made against is the **dev clone's**
+  // `dev` ref, so the snapshot has to record that commit — recording the stable checkout's own `dev`
+  // would describe a fact the recheck never reads.
+  const devCommit = await git(fixture.devRepo, ['rev-parse', project.devRef]);
   const caseDetection = await detectImpactPathCaseMode(project.repoRoot);
   const snapshot = createImpactSnapshot({
     taskId: fixture.taskId,
@@ -232,12 +235,17 @@ describe('snapshot generation recheck', () => {
     const snapshot = await recordPreStartSnapshot(harnessed);
     // `dev` advances after the prediction was recorded: a Task with no worktree is predicted against
     // the development baseline, so the whole prediction is about a base that no longer exists.
+    // ADR-0056: that baseline is the **dev clone's** `dev` ref, so the move happens in that clone, as a
+    // real commit — the kind of step that moves the baseline in practice (a hand-written `update-ref`
+    // in the stable checkout would not move it any more, which is exactly what this case used to do).
     const project = harnessed.fixture.storage.getTrustedProject(harnessed.fixture.projectId);
-    const tree = await git(harnessed.fixture.repo, ['rev-parse', 'HEAD^{tree}']);
-    const previous = await git(harnessed.fixture.repo, ['rev-parse', project.devRef]);
-    const moved = await git(harnessed.fixture.repo,
-      ['commit-tree', tree, '-p', previous, '-m', 'dev moves']);
-    await git(harnessed.fixture.repo, ['update-ref', project.devRef, moved]);
+    const previous = await git(harnessed.fixture.devRepo, ['rev-parse', project.devRef]);
+    await Bun.write(join(harnessed.fixture.devRepo, 'dev-moves.txt'), 'dev moves\n');
+    await git(harnessed.fixture.devRepo, ['add', 'dev-moves.txt']);
+    await git(harnessed.fixture.devRepo,
+      ['-c', 'user.name=Dev', '-c', 'user.email=dev@example.invalid', 'commit', '-q', '-m', 'dev moves']);
+    const moved = await git(harnessed.fixture.devRepo, ['rev-parse', 'HEAD']);
+    expect(moved).not.toBe(previous);
     const refused = await expectRefusal(acquire(harnessed, { impactSnapshotId: snapshot.id }));
     expect(refused.code).toBe('SNAPSHOT_STALE');
     expect(refused.detail?.['reasonCodes']).toEqual(['STALE_BASE']);
