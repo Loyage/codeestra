@@ -4027,7 +4027,57 @@ verdict CONFLICTING (SAME_FILE)
 - 本格夹具与进程已回收：`reclaimTestResources()` 在每个 e2e 的 `afterEach` 执行，各用例结束时 `codeestra stop`；
   跑完后核对本工作树无残留 Runtime 进程、`/tmp/codeestra-wait-*` 夹具目录已被回收。
 
+## Wave I 开发分支集成（I1 → I3 → I4 → I5 → I2，5 格经 Orca 受监督编排）
+
+状态：**五格已按用户指定顺序合入 `dev`，独立全量检查通过。** 未 push、未提升 `main`、未重启稳定 Runtime。
+
+本次与 Wave A–H 的差别：分支/worktree/prompt 惯例不变（固定基线、`lane/` 前缀、`codeestra-wt/` 路径、`~/.pi/agent/prompts/i*.md`），但 worker 由 **Orca 编排层**以 `pi` 拉起并受监督（Run `run_7af71877c21f`，每个 lane 一个 Task，另有一个事实纠正 Task），协调者负责中继决策 `ask` 与收集 `worker_done`。
+
+### 固定提交与合并顺序
+
+| 顺序 | 分支 | lane commit | `dev` 合并 |
+|---|---|---|---|
+| I1 | `lane/i1-verification-evidence` | `38d7faf` | merge `d8a76ce` |
+| I3 | `lane/i3-project-knowledge` | `fabf608` | merge `7bdff39` |
+| I4 | `lane/i4-reclaim-worktree-rebuild` | `88e7cdc` + `f1da1a5` | merge `7173d7e` |
+| I5 | `lane/i5-prose-question-attention` | `d8bc8d5` | merge `533e5a2` |
+| I2 | `lane/i2-claude-code-adapter` | `3c6df9e` | merge `c1a72db` |
+
+基线固定 `dev@fd3d99871a40e578105036bc6728213adf302c6a`（五格同基线，未 rebase）。schema 预分配按纪律执行：**I1 = v25、I3 = v26**，合并后 `phase1SchemaVersion = 26`；I2/I4/I5 未占迁移号。
+
+### 冲突处置
+
+- 冲突共 19 处，全部人工解决（不靠自动合并结果）：`migration.ts` 两段迁移按升序共存且版本 = 26；`database.ts` 两个步骤按升序执行；`package.json` 的 `test:unit` 忽略列表与 `test:e2e` 列表取并集（`cli-claude-adapter`、`cli-knowledge`、`cli-prose-question-attention`、`cli-targeted-tests`）；`docs/tasks/README.md` 按号段升序排序（064 → 065 → 066 → 067 → 068 → 069）；`docs/decisions/README.md` 的 ADR-0040 插到 0039 与 0041 之间；四个共享测试文件的 schema 版本断言（`cli-reclaim-batch`/`revision-delivery`/`verification-cancel`/`impact-analysis`）保留 `>= 24` 写法并统一注释（**Wave D/E 那两次「单格绿、合并后才爆」都出自写死版本号**）。
+- `apps/runtime/src/agent-runtime-service.ts` 被 I3 与 I5 同时修改，git 自动合并成功；**逐行核对了两侧语义都在**（I3 的 `prepareExecutionKnowledge` + `knowledgeSnapshotRefs`，I5 的 `proseQuestionAttentionMode` 与升级路径），不是只信自动合并。
+
+### 集成期发现并修掉的问题（各格单独跑时看不到）
+
+1. **聚合测试红（真实集成缺陷）**：I1 的 `packages/domain/test/verification-evidence.test.ts` 与 I3 的 `packages/domain/test/knowledge.test.ts` 用 `bun:test`，而 `vitest.config.ts` 的 include 是 `packages/domain/**/*.test.ts`。各格单独用 `bun test` 跑是绿的，合并后 `bun run test`（vitest）直接报 `Cannot find package 'bun:test'` 而中止。已改为 `vitest` 导入并单独记录为本格发现的集成缺陷（**lane 内的定向测试无法发现它，只有 dev 上的聚合检查能**）。
+2. **ADR 索引行残留被推翻的推断**：I4 的事实纠正（`f1da1a5`）改了 ADR-0042 正文与 FOUNDATION-068，但漏了 `docs/decisions/README.md` 的索引行，那里仍写着「`PREPARE_FRESH` 会撞 `workspaces.path` 唯一约束」。已在合并提交里按实测改正。
+3. **I3 迁移注释与最终裁决不符**：`migration.ts` 里 `execution_knowledge_snapshots` 的注释仍写「物化进该 Execution 的 worktree」，而第三轮裁决已把机器生成上下文移出 worktree（写 Runtime 数据目录）。已在合并提交里改正。
+4. **I4 原始记录的事实错误（本波自己踩的坑，已闭环）**：它把「RELEASED + 分支不存在时 `PREPARE_FRESH` 会以数据库约束错误收场」当成事实写进记录并立了一条「需独立决策」的 backlog 项。协调者用真实迁移链（v1→v24，`bun:sqlite` 内存库读 `sqlite_master`）证明 `workspaces.path` **没有**表级唯一约束（v7 重建表时已移除，只剩 `one_live_workspace_path … WHERE state <> 'RELEASED'`）；随后派了一个事实纠正 Task，由 I4 用受控实验实测该路径**可用**（`task retry` 退出 0、`PREPARE_FRESH`、attempt 2 STARTED、同一路径第二个 workspace 行、HEAD = `dev` commit），并在 `f1da1a5` 里逐处改正记录（含明写「这是本格自己的失误」）。
+5. **ADR-0038 措辞对齐实现（用户裁决）**：D03 原写「在 `dev` 工作树」跑全量，I1 实现为由 Runtime 在**精确 SHA 的隔离副本**上跑。用户确认改 D03 措辞对齐实现（副本对「精确候选 SHA」保证更强，且与 ADR-0006 的 detached 副本惯例一致）；已在本波提交里改 D03 与决策索引行，并如实写明这是改规格而不是改实现。
+
+### 用户裁决
+
+五格共中继四轮决策（I1 8 题、I5 8 题、I3 8+4+1 题、I4 8 题、I2 5+2 题）。协调者未代答任何一题，全部由用户拍板后原样下发；其中两处协调者偏离了 worker 自身推荐并说明理由（I4 的稳定码粒度、I3 的 generated 读位置）。完整的决策清单与理由见 `codeestra-wt/PARALLEL-PLAN.md` 的「Wave I」与「Wave I：用户已拍板的语义」两节。
+
+### 独立集成验证（ADR-0038 的 dev 全量证据）
+
+- 在合并后的 `dev` 候选 **`e40156463a5fdfedb6ec82c40ebf482f58bb6cbc`** 上执行 `bun run check`：**退出码 0**。
+- 根/UI TypeScript 均通过；**Vitest 10 文件 / 354 项全部通过**（本波前为 272）；`test:storage` **725 pass / 0 fail（81 文件，4753 断言）**（本波前为 622 / 72 文件 / 4052 断言）；UI `vite build` 成功。日志 `/tmp/iwave/dev-full-check2.log`；第一次同样候选前身的运行（退出码 1）与失败原因见 `/tmp/iwave/dev-full-check.log`。
+- **记录提交在检查之后**：本节的提交只改文档（`docs/tasks/README.md` 的 NEXT 第 6 条与本记录），按 ADR-0038 D03 的既有条款，`dev` 上的文档编辑不触发重跑；但它确实让 `dev` HEAD 与上面那个被验证的候选 SHA 不再相同（仅文档差异）。**准备 `dev → main` 时必须以当时固定的精确 SHA 重跑全量并以其证据为准**，不得把本节引用为提升证据。
+
+### 未验证 / 已知缺口（如实汇总，不得当成已成立）
+
+- **真实 provider 全部未验收**：Claude 能力矩阵 4 项为 `REQUIRES_VALIDATION`（本机 `claude` 未登录、无 API key，全程无真实模型调用）；Pi/Codex/Claude 的并发、失败后重试、revision ACK、散文等待的真实模型行为都仍未验证。
+- **provider 侧知识消费不成立**：Adapter 仍不消费 `knowledgeSnapshotRefs`，本波只做到「解析 + 绑定 + 审计 + 命令面 + 物化到 Runtime 数据目录」，adapter 侧注入属后续格。
+- **`session.transcript` 仍只认 Pi 会话目录**，Claude 会话以 `SESSION_FILE_NOT_OWNED` 失败（已在 ADR-0040 与 I2 记录中标为缺口）。
+- **UI 一行未改**：五格都明确把 UI 投影排除在外（本波 `apps/ui/**` diff 为空）。
+- **`## NEXT` 仍有历史漂移**（例：第 7 条把已由 FOUNDATION-055/059 完成的调度引擎与 UI 投影写作「剩余」）。本波只如实更新了第 6 条，未做全面校准——那属于单独一次 doc-sync/NEXT 校准格。
+
 ## NEXT — 最小可用纵向切片
+
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、~~UI 投影~~（已由 FOUNDATION-050 完成 promotion/dependency 投影）。
 1. 真实验证 ADR-0016：在一次性临时仓库中用真实 Pi 跑「启动 → 暂停 → 恢复 → 终止」，核对 provider 进程确实退出、`--session` 确实续接同一 conversation、超时进入 `RECOVERY_REQUIRED`；脚本 Adapter 不能替代该验收。
@@ -4035,5 +4085,5 @@ verdict CONFLICTING (SAME_FILE)
 3. ~~ADR-0010 Phase 3 技术 spike~~：已由 FOUNDATION-040 完成（真实 Pi session-file 双向 RPC↔TUI 恢复、PTY 生命周期、safe-point fence 与权限模式 side channel，见 `docs/spikes/pi-session-handoff.md`）。~~handoff Operation / Session incarnation~~：Runtime 侧契约与状态已由 ADR-0023 / FOUNDATION-043 完成（STRICT 权限转既有 Attention、incarnation 绑定 + 原子拒绝过期决议、单 writer lease 的 `ATTACHMENT_BUSY`、安全点与 predecessor 归属核验、重启按事实 reconcile），并已合入 `dev`；`session handoff status/request/cancel/writer/admit` 的 `--json` 退出码稳定。剩余：~~PTY transport 与 successor 进程启动、detach/reattach 编排、CLI attach~~：已由 ADR-0026 / FOUNDATION-046 完成（Runtime 拥有的 PTY helper 上运行真实 `pi` 原生 TUI、`admit` 真交接、attach/detach/reattach、`release` 交还自动化并回到同一 session file、能力投影改为真实值）。仍在剩余：跨交接权限模式**完整矩阵**、并行工具批次安全点、PTY resize、真实模型在 TUI 中键入后交还的复验。~~UI 终端~~：已由 FOUNDATION-050 完成（终端面板、交接/incarnation、依赖图与 BLOCKED 原因、promotion、verification `CANCELLED` 语义色；仅人工目视确认，未做浏览器/桌面自动化）。
 4. ~~revision 投递确认，以及 Runtime 重启后对 stale ACTIVE Session 的启动 reconcile。~~ 已由 ADR-0028 / FOUNDATION-048 完成：投递成为一等需求 + append-only 尝试台账（schema v19），只有结构化 ACK 或经核验的 successor Execution 才算确认（「消息发出去了」永不当作确认），能力如实（Pi 仍 `UNSUPPORTED`）、不支持时走既有「协作停止 + 新建 Execution」，超时/重启中断按事实收口；`task revision create|list` 与 `task revision delivery list|get|resolve` 零确认、`--json`、退出码稳定；`reconcileStaleAgentSessions` 收敛重启后仍写 ACTIVE/RUNNING 的投影（不写 RUNNING、不声称静止、不发信号、不删资源，一律 `RECOVERY_REQUIRED` 并记账）。剩余（不在本格）：真实 provider 的 ACK 行为（需先有 Adapter 实现 `applyRevision`）、真实模型对投递提示的理解、修订/投递的 UI 投影。
 5. ~~验证副本与失败现场的回收~~：已由 ADR-0021/FOUNDATION-041 完成（`reclaim plan/apply/records`、归属校验、append-only 账本、启动 reconcile、默认保留失败现场、不新增确认）；同轮决定 Attention 工具参数继续原样入库。剩余：未注册目录的人工处理与跨项目批量回收。
-6. ~~识别「Agent 不用工具、在散文里提问并结束轮次」的形态（FOUNDATION-030 剩余的一半）~~：**识别与显式记录部分已由 FOUNDATION-056 完成**（稳定码 `PROSE_QUESTION_NO_TOOL_USE` + provider 原始事实 + `task status --json` 的 `executions[].session.completion.note` + `AgentSessionCompleted` 事件 payload；启发式，宁可漏报，**不改状态机、不新增确认**）。仍未做、需要单独决策的部分：把它**自动升级为 Attention / `WAITING_FOR_USER`**（本格明确未做），以及 Codex 侧的事实层。
+6. ~~识别「Agent 不用工具、在散文里提问并结束轮次」的形态（FOUNDATION-030 剩余的一半）~~：**识别与显式记录部分已由 FOUNDATION-056 完成**（稳定码 `PROSE_QUESTION_NO_TOOL_USE` + provider 原始事实 + `task status --json` 的 `executions[].session.completion.note` + `AgentSessionCompleted` 事件 payload；启发式，宁可漏报，**不改状态机、不新增确认**）。~~仍未做、需要单独决策的部分：把它自动升级为 Attention / `WAITING_FOR_USER`~~：**已由 ADR-0043 / FOUNDATION-069（Wave I）完成**——命中即在同一完成事务内升级为一条 `QUESTION` Attention + Task `WAITING_FOR_USER`（默认 auto，可用 `codeestra settings prose-question-attention record-only|off` 降级），只由新增的 `task attention resolve … --dismiss|--answer` 解除，回答**不投递**给 provider；零 schema 变更。**剩余**：Codex 侧的事实层（本格明确未做）；真实 provider 下的「等待 + Session 已退出」组合未验收；UI 未投影。
 7. ~~Phase 2 并行调度主体~~（已在 `docs/roadmap/mvp.md` Phase 2 验收矩阵）：**规格、分析器与容量原语**已由 Wave E 完成（ADR-0030/0031/0032：`.codeestra/impact.json` 映射与确定性 ImpactSnapshot、`SAFE|UNKNOWN|CONFLICTING` 与稳定 reason code、全局默认 2 + 每 adapter 上限、reservation/release/崩溃 reconcile）；**剩余**：调度引擎本体（自动 tick、候选排序 + 冲突/容量判定接入、实际 diff 超出预测的处置、`--allow-unknown` 命令形态）与它的 UI 投影。未经引擎前，Phase 2 验收矩阵里「两个 SAFE 任务真的同时跑」仍然**未成立**。
