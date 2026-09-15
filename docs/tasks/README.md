@@ -3022,6 +3022,69 @@ Adapter **报不出事实时不猜**：`facts` 字段整体缺席表示“未知
 - 下一步执行者固定本次 dev 提交 OID，重新核对两个 ref 与 main 干净状态，在 main 工作树 fast-forward 固定 OID，随后按 install → build:ui → stop → status 执行；有需要时再启动 UI 并检查 READY + uiRunning。最终提交 OID、各步退出码与新 boot 由实际执行输出记录，不在提交前捏造发布结果。
 - 未授权 push；不直接 update-ref 已检出的 main，失败不回滚，不手工清理未知进程。新 UI token 不写入文档、日志或提交。
 
+## FOUNDATION-061 — `FAILED → READY`：显式 `task retry` 与失败后换 Agent（ADR-0036，schema v23）
+
+状态：实现与自查完成（Wave H / H3，分支 `lane/h3-failure-retry`）。**先向用户报告、等确认后才 commit**；未 push、未提升 `main`、未重启稳定 Runtime、未触碰 `/Users/loyage/Documents/codeestra`。
+
+### 缺口（提交前逐条实测确认，不是猜测）
+
+- `state-machines.md` §1 写了 `FAILED | user retry | 旧执行静止、依赖重验→READY 或 BLOCKED`，`mvp.md` Phase 5 验收写着「失败后新 Execution 可更换 Agent」，ADR-0029 明确记录了「Runtime 没有 `FAILED → READY` 路径」。
+- 实测：把 Task 写成 `FAILED` 的路径有多条，**没有任何一条**把它移出；`resumeTask` 只接受 `PAUSED`；`applyTaskDependencyState` 只在 `READY`/`BLOCKED` 间移动；调度引擎的候选集合是 `state === 'READY'`。一次真正跑失败的 Task 只能被新建 Task 取代，丢掉 revision、worktree、依赖边与审计关系。
+
+### 已实现（新增 ADR-0036；schema v23：两列，无新表）
+
+- `docs/decisions/0036-task-retry-after-failure.md`（Accepted），决策索引表尾追加一行；未改 `PROJECT_SPEC.md`、`AGENTS.md`、`docs/architecture/**`。
+- **纯领域判定** `packages/domain/src/task-retry.ts`：`planTaskRetry`（来源状态 → 允许/稳定拒绝码）、`selectRetryAdapter`（显式 > 该 Task 上次记录 > 默认）、`decideRetryWorkspace`（复用/从零/两种拒绝）。全部是值而不是异常，调用方必须如实报告。
+- **存储** `packages/storage/src/database.ts`：`retryTask`（同一 `executeCommand` 事务内重读状态与版本、校验被指向的失败 Execution 是**最新** attempt、把 Task 移向 `READY`/`BLOCKED`、把核验过的 worktree 从 `RETAINED`/`READY` 置回 `READY`、写 `TaskStateChanged` + `TaskRetryRequested` 两条 append-only 事件）；`getLatestTaskWorkspace`（读回最近一条 worktree 记录，回收后也能看出「不是没有，而是被回收了」）；`reserveExecution` 消费 `tasks.pending_retry_from_execution_id` 并写入 `executions.retry_from_execution_id`（**单次**：恰好一个新 Execution 成为那次失败的 successor），`ExecutionReserved` payload 同步带该字段；`ExecutionSummary` 增加 `retryFromExecutionId`（`task status --json` 可读）。
+- **迁移 v23**：`taskRetryMigration` 只加 `tasks.pending_retry_from_execution_id` 与 `executions.retry_from_execution_id` 两列（都 `REFERENCES executions(id)`，NULL 默认）。v22 留给 H2，v16 继续永久未使用，只追加 `if (version < 23)`，未插入更早的号。
+- **Runtime 接线** `apps/runtime/src/task-control-service.ts` 的 `retryFailedTask`：版本 CAS → eligibility → 找到最新失败 Execution → Adapter 选择与存在性校验（未知 adapter 在写入前以 `UNKNOWN_ADAPTER` 拒绝）→ `inspectTaskDependencies` 得出目标状态 → `reconcileWorkspace` 核验 worktree 归属 → `storage.retryTask`。**不在这里启动任何东西。**
+- **命令面** `apps/cli/src/main.ts` + `apps/runtime/src/main.ts`：`task retry <project-id> <task-id> <expected-version> [--adapter <pi|codex>] [--json]`，零新增确认。requeue 之后只对**该 Task** 调一次 `ScheduleService.runNow`（与 `task run` 完全同一条依赖→冲突→容量门禁），启动请求使用派生 command ID（`deriveCommandId(request.commandId,'retry-start')`），所以同一条命令重放幂等且不与 requeue 自己的回执冲突。`usage()` 明确写出它与 `resume` 的区别（`resume` 续接同一 conversation；`retry` 新建 Execution）。
+
+### 允许与拒绝的来源状态（拒绝不写任何行）
+
+| 来源 | 结果 | 稳定码 |
+|---|---|---|
+| `FAILED` | requeue（`READY`，或依赖未满足时 `BLOCKED`） | — |
+| `CANCELLED` | 拒绝 | `TASK_CANCELLED` |
+| `RECOVERY_REQUIRED` | 拒绝 | `RECONCILE_REQUIRED` |
+| `PAUSED` | 拒绝（用 `task resume`） | `TASK_PAUSED` |
+| `RUNNING`/`PAUSING`/`WAITING_FOR_USER`/`CANCELLING` | 拒绝 | `TASK_STILL_RUNNING` |
+| `DRAFT`/`BLOCKED`/`READY`/`EXECUTED`/`SUCCEEDED` | 拒绝 | `TASK_NOT_FAILED` |
+| 任意状态 + 已归档 | 拒绝 | `TASK_ARCHIVED` |
+| worktree 归属无法核验 | 拒绝 | `WORKSPACE_OWNERSHIP_UNVERIFIABLE` |
+| worktree 已被 reclaim（branch 仍在） | 拒绝 | `WORKSPACE_RECLAIMED` |
+
+### 命令用法、退出码与审计形态
+
+```text
+task retry <project-id> <task-id> <expected-version> [--adapter <pi|codex>] [--json]
+  0 = 新 Execution 已启动（start.outcome=STARTED）
+  3 = 重试已记录、Task 已 requeue 但在等待（wait.code 是 CAPACITY_* / 冲突码；Task 留在 READY 排队）
+  1 = 重试被拒绝（稳定码在 stderr），或已 requeue 但没有启动（例如落到 BLOCKED → REFUSED/DEPENDENCIES_UNMET）
+```
+
+- 版本 CAS **先于**状态判定（与 `submit`/`pause`/`resume` 一致）：版本过期报 `CONCURRENT_MODIFICATION`，让调用方先重新读取，
+  而不是按一个 Task 可能已经离开的状态给出结论；状态判定只在版本匹配时进行。
+- `--json` 把两件事分开报告：`state`/`version`/`retryId`/`failedExecutionId`/`failedAttemptNumber`/`adapterId`/`previousAdapterId`/`adapterChanged`/`adapterSource`/`workspace{mode,workspaceId,evidence}` 与 `start`（就是 `ScheduleStartOutcomeView`）。
+- 审计 = `TaskRetryRequested`（append-only 领域事件，`events list/tail` 可读）：`actor`、`failedExecutionId`、`failedAttemptNumber`、`adapterId`/`previousAdapterId`/`adapterChanged`、`workspaceMode`/`workspaceId`/`workspaceEvidence`、目标状态与依赖原因；关系另有 `executions.retry_from_execution_id` 落在行上。旧 Execution 的 `state=FAILED`/`error_json`/`ended_at` 一律不改写。
+- **`--adapter` 的已知边界**：它只作用于本次显式请求。若只得到 `wait`，Task 留在 `READY` 排队，由周期 tick 启动时用的是 Runtime 默认 adapter（引擎的 adapter 是整项目一个，本格未改引擎）。`adapterSource` 与 `start.outcome` 使这一点对脚本可见。
+
+### 实际验证（本机，实际退出码与计数）
+
+- `bun run typecheck`：通过。
+- `bun run check:fast`：退出码 0（vitest **279 pass / 6 文件**；`test:unit` **368 pass / 0 fail**）。
+- **`bun run check`：退出码 0**（根/UI TypeScript、vitest **279 pass**、`test:storage` 全部 bun 测试 **584 pass / 0 fail / 69 文件 / 3677 断言**、Vite `build:ui`）。最终一次完整日志：`/tmp/h3-check4.log`（`/tmp/h3-check2.log` 是更早一次同样退出码 0 的完整运行）。
+- 完整 `check` 首轮出现过 5 个失败，已逐个定位并分类：**其中 3 个（`revision-delivery.test.ts` ×1、`verification-cancel.test.ts` ×2）来自本格 schema 版本推进后失效的硬编码断言**，另在 `bun test packages/storage/test` 里还有 4 个同类失败（`impact-analysis.test.ts` ×2，`slot-capacity-migration.test.ts` ×2 个用例共用的一个断言）；它们全是写死的 `phase1SchemaVersion === 21`（即「本 lane 是最后一格」的过时断言），已按集成惯例改为断言常量本身或 `>= 21` 并逐处注明原因。剩下的三个失败都与本格改动无关，且都是**对负载敏感的既有断言**：**(a)** `cli-impact.test.ts`:376 的 `task cancel` 退出 1 已在基线 `8058eb9` 的干净检出（独立 `git worktree` + 自己的 `bun install`）上单独复现——同样的断言、同样的退出码——属 **pre-existing 失败**，在本格的最终一次完整运行里通过；**(b)** `terminal-service.test.ts` 的 PTY release 断言在基线单独运行通过、在本格两次满载全量运行中各失败一次（两次的断言不同：`released` 与 `SESSION_FILE_REWRITTEN`/`PREDECESSOR_UNVERIFIED`），单独重跑通过；**(c)** `runtime-lifecycle.test.ts` 的「a deadline that never fires cannot hold a process open」断言 `rawStdout` 恰好等于 `'raw 0'`（即内联脚本自测耗时 0ms），满载运行时拿到 `'raw 1'`——这处断言把「0ms 抖动」当成不变量；单独重跑 3/3 通过。三处都在其它格的领地（FOUNDATION-042 / ADR-0026 / FOUNDATION-053），本格**只报告、不改动**，建议后续单独修（把 `toBe('raw 0')` 放宽为对耗时上界的断言、把 PTY release 的等待改为对事实的有界轮询）。
+- 端到端（真实 CLI + 真实 Runtime + 临时 `CODEESTRA_HOME` + 临时仓库 + 协议 stub provider）：`apps/runtime/test/cli-task-retry.test.ts` **6 pass / 0 fail / 81 断言**。(1) 首次失败 → `task retry` 退出 0、attempt 2 建立、`REUSE_VERIFIED`、同一 worktree 里 `runs-<task>.log` 出现第二行（两次尝试确实复用同一 worktree）、`TaskRetryRequested` 与 `ExecutionReserved.retryFromExecutionId` 可读；(2) 未提交/`RUNNING`/`CANCELLED`/已归档各自以稳定码拒绝且版本不变、不产生 Execution，且版本过期先报 `CONCURRENT_MODIFICATION`；(3) `--adapter codex` 后新 Execution 真的由 Codex stub 启动（读 stub 自己的 report：`turns>=1`、prompt 含规格），审计记录 `adapterChanged`；(4) 容量 1 时重试退出 3 且 `CAPACITY_GLOBAL_LIMIT_REACHED`、Task 留在 `READY`、释放槽位后 attempt 2 才跑起来（排队而非插队）；(5) worktree 被 `reclaim` 后重试以 `WORKSPACE_RECLAIMED` 拒绝、版本不变、Execution 仍只有 1 条（并核对 `git branch --list task/<id>` 证明分支仍在）；(6) 依赖未满足时 requeue 到 `BLOCKED`、`start.outcome=REFUSED/DEPENDENCIES_UNMET`。
+- 单元：`packages/domain/test/task-retry.test.ts` 7 项（vitest，权限/拒绝码/Adapter 选择/workspace 决策矩阵）；`packages/storage/test/task-retry.test.ts` 11 项（真实 SQLite：requeue + worktree 交还 + 事件、单次关系消费、同 command 重放幂等、七种非 `FAILED` 来源拒绝且不留行、归档、非最新 attempt、换 Adapter、`BLOCKED` 原因约束、不交还未核验的 worktree、v23 两列无新表）。
+- 测试卫生：新 e2e 文件用 `apps/runtime/test/support/runtime-reclamation.ts` 的 `runCli` + `reclaimTestResources`（`afterEach`），并已加入 `package.json` 的 `test:unit` 忽略列表与 `test:e2e` 列表。**完整 `check` 之后本格无孤儿 Runtime**（`ps` 只看到 main 稳定工作树的 Runtime 进程与其它 lane 自己的进程；本格从未启动 `/tmp/ce-h3`，e2e 使用各自的临时 home 并由回收辅助统一 stop）。
+
+### 明确未做 / 未验证
+
+- **未验证**：真实 Pi/Codex 失败后的重试行为（协议 stub 只证明编排；真实提供者的失败只能在 `## NEXT` 第 1 项的真实验收里看）；取消后重做（`CANCELLED` 仍拒绝，属另一个决策）；跨 adapter 复用历史 conversation（retry 刻意新建 conversation）；被 reclaim 后重建 worktree（见下）；`task retry` 的 UI 投影（H1 领地）；真实并发/真实模型行为下的重试。
+- **已知缺口（如实报告，未静默绕过）**：`packages/git/src/reclaim.ts` 明确不删 task branch，因此**已被回收**的 worktree 无法由既有 preparation 路径重建（`prepareWorkspace` 的 `REF_CONFLICT` 会拒绝在既有分支上建 worktree）。本格选择**拒绝并给出稳定码** `WORKSPACE_RECLAIMED`，而不是引入第二套 Git 逻辑或悄悄复用别人的目录；若要把这一格补成「能从既有分支重建」，需要独立决策与领地安排。
+- **未改**：`apps/ui/**`（H1）、`packages/storage/src/migration.ts` 的 v22 号段（H2）、`reclaim-service.ts`（H4）、`session-handoff-service.ts`/`terminal-service.ts`/`packages/agent-adapters/**`（G1）、`schedule-service.ts`/`scheduler.ts`/`slot-reservation-service.ts`（引擎与预留）、`packages/git/**`、`PROJECT_SPEC.md`、`docs/architecture/**`。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、~~UI 投影~~（已由 FOUNDATION-050 完成 promotion/dependency 投影）。

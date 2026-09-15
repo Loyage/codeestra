@@ -39,6 +39,7 @@ export type {
   TaskDependencyBlockReason, TaskDependencyFact, TaskDependencyMutation, TaskDependencyRecord,
   TaskDependencyRemoval, TaskDependencyStateChange,
   TaskLifecycleState, TaskResumeRequest, TaskStopRequest, TaskSummary,
+  TaskRetryRequest, TaskRetryWorkspaceMode, TaskWorkspaceRecord,
   AgentSessionStartupReconciliationRecord, RevisionDeliveryAttemptState,
   StaleAgentSessionConvergence, StaleAgentSessionRecord, StaleSessionObservation,
   TaskRevisionCreation, TaskRevisionDeliveryAttemptRecord, TaskRevisionDeliveryChannel,
@@ -58,6 +59,7 @@ export {
   sessionTerminalMigration,
   revisionDeliveryMigration,
   stablePromotionMigration, taskControlMigration, taskDependenciesMigration, taskVerificationMigration,
+  taskRetryMigration,
   verificationProgressMigration,
 
   workspaceRetryMigration,

@@ -106,9 +106,10 @@ describe('schema v20 impact analysis migration', () => {
       expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version')
         .get()?.user_version).toBe(phase1SchemaVersion);
       // Integration fix: this lane's own step is v20, but the capacity/slot step (v21) merged after
-      // it, so the current schema version is 21. The claim under test is that the upgrade reaches
-      // the current version and lands this lane's tables, not that this lane is last.
-      expect(phase1SchemaVersion).toBe(21);
+      // it — and later lanes keep appending (v23 is the Task-retry step). The claim under test is
+      // that the upgrade reaches the current version and lands this lane's tables, not that this
+      // lane is last.
+      expect(phase1SchemaVersion).toBeGreaterThanOrEqual(21);
       expect(upgraded.sqlite.query<{ id: string }, []>(
         "SELECT id FROM task_revision_deliveries WHERE id='d1'",
       ).get()?.id).toBe('d1');
@@ -151,7 +152,7 @@ describe('schema v20 impact analysis migration', () => {
 
       const upgraded = new Phase1Database(filename);
       expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version')
-        .get()?.user_version).toBe(21);
+        .get()?.user_version).toBe(phase1SchemaVersion);
       expect(upgraded.sqlite.query<{ id: string }, []>(
         "SELECT id FROM tasks WHERE id='t1'",
       ).get()?.id).toBe('t1');

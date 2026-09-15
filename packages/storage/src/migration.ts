@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 21;
+export const phase1SchemaVersion = 23;
 
 
 export const phase1Migration = `
@@ -1350,4 +1350,29 @@ CREATE TABLE execution_slot_reservation_events (
   PRIMARY KEY(reservation_id,sequence),
   UNIQUE(reservation_id,command_id)
 ) STRICT, WITHOUT ROWID;
+`;
+
+/**
+ * Explicit retry of a failed Task (ADR-0036): `FAILED → READY | BLOCKED`, and a new Execution.
+ *
+ * Two additive columns and no new table. The audit of the retry (who asked, for which failed
+ * Execution, on which Adapter, with which workspace decision) is an append-only domain event
+ * (`TaskRetryRequested`), which already has a durable, ordered home; what a row *must* carry is the
+ * relation between an Execution and the failure it follows, so that "attempt 3 follows attempt 2's
+ * failure" is readable from `executions` itself instead of being reconstructed from a payload.
+ *
+ * `tasks.pending_retry_from_execution_id` is the retry's *intent*, recorded before any Execution
+ * exists. `reserveExecution` copies it onto the Execution it creates and clears it in the same
+ * transaction, which is what makes the relation single-shot: exactly one new Execution is the
+ * successor of the failure it names. It is deliberately not "the Task's last failure" — that is a
+ * question for `listTaskExecutions`.
+ *
+ * Version 22 belongs to the reservation snapshot-generation lane (H2) and version 16 stays
+ * permanently unused (a database may already be stamped 17–21 and would skip a later
+ * `version < 16` step), so this step only adds `if (version < 23)` after the existing ascending
+ * steps and never inserts an earlier number.
+ */
+export const taskRetryMigration = `
+ALTER TABLE tasks ADD COLUMN pending_retry_from_execution_id TEXT REFERENCES executions(id);
+ALTER TABLE executions ADD COLUMN retry_from_execution_id TEXT REFERENCES executions(id);
 `;

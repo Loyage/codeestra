@@ -104,7 +104,10 @@ const capacityTables = [
 function expectUpgradedToCapacitySchema(upgraded: Phase1Database): void {
   expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version)
     .toBe(phase1SchemaVersion);
-  expect(phase1SchemaVersion).toBe(21);
+  // Integration fix (Wave H / H3): later lanes add steps *after* this one (v23 is the Task-retry
+  // step), so the claim is "this lane's step ran and the database reached the current version",
+  // not "this lane is last". Pinning the number here made a legitimate append fail the suite.
+  expect(phase1SchemaVersion).toBeGreaterThanOrEqual(21);
   const tables = upgraded.sqlite.query<{ name: string }, []>(`
     SELECT name FROM sqlite_master WHERE type='table'
       AND name IN ('project_capacity_limits','project_adapter_slot_limits',
@@ -143,8 +146,8 @@ describe('capacity and slot reservation migration', () => {
       buildLegacyFile(filename, 16, 15);
       const upgraded = new Phase1Database(filename);
       try {
-        // Reaching 21 from 16 proves the 17/18/19 steps ran too: their tables exist and the
-        // verification progress table is the v17 one.
+        // Reaching the current version from 16 proves the 17/18/19 steps ran too: their tables exist
+        // and the verification progress table is the v17 one.
         expectUpgradedToCapacitySchema(upgraded);
         expect(upgraded.sqlite.query<{ name: string }, []>(
           "SELECT name FROM sqlite_master WHERE type='table' AND name='operation_progress_events'")

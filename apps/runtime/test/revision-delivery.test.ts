@@ -230,9 +230,11 @@ describe('revision delivery schema (v19)', () => {
       raw.close();
 
       const storage = new Phase1Database(path);
-      expect(phase1SchemaVersion).toBe(21);
+      // Integration fix (Wave H / H3): later lanes append steps after this one (v23 is the Task-retry
+      // step), so the claim is "the upgrade reached the current version", not "this lane is last".
+      expect(phase1SchemaVersion).toBeGreaterThanOrEqual(21);
       expect(storage.sqlite.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version)
-        .toBe(21);
+        .toBe(phase1SchemaVersion);
       expect(storage.sqlite.query<{ id: string }, []>('SELECT id FROM projects').all())
         .toEqual([{ id: 'p-1' }]);
       expect(storage.sqlite.query<{ event_id: string }, []>('SELECT event_id FROM domain_events').all())

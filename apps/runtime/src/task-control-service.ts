@@ -1,6 +1,21 @@
 import { createHash } from 'node:crypto';
-import { Phase1Database, StorageError, type TaskLifecycleState } from '@codeestra/storage';
+import { reconcileWorkspace } from '@codeestra/git';
+import {
+  decideRetryWorkspace,
+  planTaskRetry,
+  selectRetryAdapter,
+  type RetryWorkspaceObservation,
+  type TaskRetryState,
+} from '@codeestra/domain';
+import {
+  Phase1Database,
+  StorageError,
+  type TaskLifecycleState,
+  type TaskRetryRequest,
+  type TaskRetryWorkspaceMode,
+} from '@codeestra/storage';
 import type { AgentRuntimeCoordinator } from './agent-runtime-service.js';
+import { inspectTaskDependencies } from './scheduler.js';
 
 export class TaskControlError extends Error {
   constructor(readonly code: string, message: string) {
@@ -142,6 +157,186 @@ export async function pauseOrCancelTask(input: {
     executionId: requested.executionId,
     sessionId,
     detail: release.detail,
+  };
+}
+
+export interface TaskRetryOutcome {
+  /** The audit facts the retry transaction recorded, including the failure it follows. */
+  readonly retry: TaskRetryRequest;
+  /** Where the Adapter came from: an explicit `--adapter`, the Task's own record, or the fallback. */
+  readonly adapterSource: 'REQUESTED' | 'RECORDED' | 'FALLBACK';
+  readonly workspace: {
+    readonly mode: TaskRetryWorkspaceMode;
+    readonly workspaceId: string | null;
+    /** The Git observation the decision was made from, or null when there was nothing to observe. */
+    readonly evidence: string | null;
+    readonly detail: string;
+  };
+}
+
+/**
+ * Explicit retry of a `FAILED` Task (ADR-0036).
+ *
+ * The Task is requeued and a *new* Execution is expected to follow: the old Execution keeps its
+ * failure and evidence untouched, and nothing here counts attempts or schedules an automatic retry.
+ * The two facts that decide the retry are both re-derived rather than assumed:
+ *
+ *  - the dependency verdict, because the Task may have lost an upstream while it was failing — an
+ *    unmet dependency requeues it as `BLOCKED`, which is the only thing `BLOCKED` means;
+ *  - the Task's own worktree, because a retry reuses it only when the filesystem and Git confirm it
+ *    is still this Task's, and refuses (rather than guessing) when it is not.
+ *
+ * Starting the new Execution is deliberately *not* done here: the caller hands the requeued Task to
+ * the same scheduling gate every other start goes through, so a retry queues behind dependencies,
+ * conflicts and capacity exactly like a first attempt.
+ */
+export async function retryFailedTask(input: {
+  readonly storage: Phase1Database;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly expectedVersion: number;
+  readonly commandId: string;
+  /** The `--adapter` choice; absent means "the Adapter this Task last ran on". */
+  readonly adapterId?: string | undefined;
+  readonly knownAdapterIds: readonly string[];
+  readonly defaultAdapterId: string;
+  readonly actor: string;
+  readonly now?: () => number;
+  readonly randomUUID?: () => string;
+}): Promise<TaskRetryOutcome> {
+  const now = input.now ?? Date.now;
+  const randomUUID = input.randomUUID ?? (() => crypto.randomUUID());
+  const task = input.storage.getTask(input.projectId, input.taskId);
+  if (task === null) {
+    throw new TaskControlError('NOT_FOUND', 'Task was not found in this project');
+  }
+  // The version is compared before the state, exactly like `submit`/`pause`/`resume`: a caller whose
+  // view of the Task is stale is told to re-read it instead of being handed a verdict computed from
+  // a state the Task may already have left.
+  if (task.version !== input.expectedVersion) {
+    throw new StorageError('CONCURRENT_MODIFICATION',
+      `Task version is ${task.version}, not the expected ${input.expectedVersion}`);
+  }
+  const eligibility = planTaskRetry({
+    state: task.state as TaskRetryState,
+    archived: task.archivedAt !== null,
+  });
+  if (!eligibility.allowed) {
+    // A refusal writes nothing: no requeue, no workspace change, no audit claim about a state the
+    // Task was never in.
+    throw new TaskControlError(eligibility.code as string, eligibility.message);
+  }
+  // The failure this retry follows is the newest attempt — the one that ended the Task. Storage
+  // re-checks that inside the transaction, so a race cannot make the audit name a different one.
+  const failed = input.storage.listTaskExecutions(input.projectId, input.taskId)[0];
+  if (failed === undefined || failed.state !== 'FAILED') {
+    throw new TaskControlError('TASK_NOT_FAILED',
+      'The Task is FAILED but has no recorded failed Execution to retry from');
+  }
+  const adapter = selectRetryAdapter({
+    requested: input.adapterId,
+    recorded: failed.adapterId,
+    fallback: input.defaultAdapterId,
+  });
+  if (!input.knownAdapterIds.includes(adapter.adapterId)) {
+    throw new TaskControlError('UNKNOWN_ADAPTER',
+      `Adapter ${adapter.adapterId} is not registered; known: ${input.knownAdapterIds.join(', ') || 'none'}`);
+  }
+  const dependencies = await inspectTaskDependencies({
+    storage: input.storage,
+    projectId: input.projectId,
+    taskId: input.taskId,
+  });
+  const target: 'READY' | 'BLOCKED' = dependencies.blocked ? 'BLOCKED' : 'READY';
+  const workspace = await decideWorkspace({
+    storage: input.storage,
+    projectId: input.projectId,
+    taskId: input.taskId,
+  });
+  const retryPayloadHash = payloadHash({
+    command: 'task.retry',
+    projectId: input.projectId,
+    taskId: input.taskId,
+    expectedVersion: input.expectedVersion,
+    adapterId: adapter.adapterId,
+  });
+  const recorded = input.storage.retryTask({
+    projectId: input.projectId,
+    taskId: input.taskId,
+    expectedVersion: input.expectedVersion,
+    commandId: input.commandId,
+    payloadHash: retryPayloadHash,
+    actor: input.actor,
+    adapterId: adapter.adapterId,
+    failedExecutionId: failed.executionId,
+    target,
+    dependencyReasons: dependencies.blocked ? dependencies.blockedReasons : [],
+    workspace: {
+      mode: workspace.mode,
+      workspaceId: workspace.workspaceId,
+      evidence: workspace.evidence,
+    },
+    taskEventId: randomUUID(),
+    retryEventId: randomUUID(),
+    requestedAt: now(),
+  });
+  return {
+    retry: recorded,
+    adapterSource: adapter.source,
+    workspace: {
+      mode: workspace.mode,
+      workspaceId: workspace.workspaceId,
+      evidence: workspace.evidence,
+      detail: workspace.detail,
+    },
+  };
+}
+
+/**
+ * The worktree half of the retry decision. The recorded row is not evidence of ownership, so the
+ * real filesystem and the Git worktree registry are consulted; an unverifiable worktree is refused
+ * instead of being handed to a new Agent.
+ */
+async function decideWorkspace(input: {
+  readonly storage: Phase1Database;
+  readonly projectId: string;
+  readonly taskId: string;
+}): Promise<{
+  readonly mode: TaskRetryWorkspaceMode;
+  readonly workspaceId: string | null;
+  readonly evidence: string | null;
+  readonly detail: string;
+}> {
+  const recorded = input.storage.getLatestTaskWorkspace(input.taskId);
+  if (recorded === null) {
+    const decision = decideRetryWorkspace({ workspaceState: null, observation: 'MISSING' });
+    return {
+      mode: decision.mode as TaskRetryWorkspaceMode,
+      workspaceId: null,
+      evidence: null,
+      detail: decision.message,
+    };
+  }
+  const project = input.storage.getTrustedProject(input.projectId);
+  const reconciled = await reconcileWorkspace({
+    repositoryRoot: project.repoRoot,
+    path: recorded.path,
+    branchRef: recorded.branchRef,
+  });
+  const decision = decideRetryWorkspace({
+    workspaceState: recorded.state,
+    observation: reconciled.state as RetryWorkspaceObservation,
+    evidence: reconciled.evidenceRef,
+  });
+  if (!decision.allowed) {
+    throw new TaskControlError(decision.code as string,
+      `Workspace ${recorded.workspaceId} (${recorded.state}): ${decision.message}`);
+  }
+  return {
+    mode: decision.mode as TaskRetryWorkspaceMode,
+    workspaceId: recorded.workspaceId,
+    evidence: reconciled.evidenceRef,
+    detail: decision.message,
   };
 }
 

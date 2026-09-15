@@ -68,7 +68,7 @@ import {
   reconcileDependentTasks,
   reconcileTaskDependencyState,
 } from './scheduler.js';
-import { pauseOrCancelTask, resumePausedTask } from './task-control-service.js';
+import { pauseOrCancelTask, resumePausedTask, retryFailedTask } from './task-control-service.js';
 import {
   readSessionTranscript,
   readSessionTranscriptPart,
@@ -762,6 +762,55 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         ...resumed,
         conflictGate: { outcome: gate.outcome, assessment: gate.assessment,
           clearedUnknownBy: gate.clearedUnknownBy, detail: gate.detail },
+      });
+    }
+    case 'task.retry': {
+      // An explicit retry of a FAILED Task (ADR-0036). The requeue happens first and is durable on
+      // its own: it re-derives the dependency verdict and reuses the Task's own verified worktree.
+      const retried = await retryFailedTask({
+        storage,
+        projectId: request.projectId,
+        taskId: request.taskId,
+        expectedVersion: request.expectedVersion,
+        commandId: request.commandId,
+        ...(request.adapterId === undefined ? {} : { adapterId: request.adapterId }),
+        knownAdapterIds: registry.ids(),
+        defaultAdapterId: schedule.resolveAdapterId(undefined),
+        actor: 'local-user',
+      });
+      // The new Execution is *not* created here. The retried Task is handed to the same gate every
+      // other start goes through — dependencies, the conflict verdict against every active Task, and
+      // capacity — so a retry queues behind other work instead of jumping it. A retry that cannot
+      // start now stays READY and is picked up by the next tick; nothing is widened, and the
+      // start request uses its own derived command ID so a replayed `task retry` reaches the same
+      // receipts instead of colliding with the requeue's own receipt.
+      const outcome = await schedule.runNow({
+        projectId: request.projectId,
+        taskId: request.taskId,
+        expectedTaskVersion: retried.retry.version,
+        adapterId: retried.retry.adapterId,
+        commandId: deriveCommandId(request.commandId, 'retry-start'),
+        allowUnknown: false,
+        actor: 'local-user',
+      });
+      if (outcome.sessionId !== null) {
+        await handoff.recordAutomationIncarnation({ sessionId: outcome.sessionId });
+      }
+      return success(request.requestId, {
+        projectId: request.projectId,
+        taskId: request.taskId,
+        state: retried.retry.state,
+        version: retried.retry.version,
+        retryId: retried.retry.retryId,
+        failedExecutionId: retried.retry.failedExecutionId,
+        failedAttemptNumber: retried.retry.failedAttemptNumber,
+        adapterId: retried.retry.adapterId,
+        previousAdapterId: retried.retry.previousAdapterId,
+        adapterChanged: retried.retry.adapterChanged,
+        adapterSource: retried.adapterSource,
+        workspace: retried.workspace,
+        dependencyReasons: retried.retry.dependencyReasons,
+        start: outcome,
       });
     }
     case 'task.archive': {

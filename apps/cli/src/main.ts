@@ -15,6 +15,7 @@ import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOpt
   type SessionTranscriptEntry, type SessionTranscriptView,
   type SlotReservationAcquisitionView,
   type SlotReservationReconcileReport, type SlotReservationReleaseView,
+  type TaskRetryOutcomeView,
   type VerificationPolicyInspection } from '@codeestra/contracts';
 import {
   inspectRuntimeHome,
@@ -892,6 +893,17 @@ function usage(): never {
   bun run codeestra task pause <project-id> <task-id> <expected-version>
   bun run codeestra task resume <project-id> <task-id> <expected-version> [--adapter <pi|codex>]
     [--allow-unknown]
+    resume continues the *same* provider conversation of a PAUSED Task. A retry is a different
+    operation: it requeues a FAILED Task and a new Execution follows.
+  bun run codeestra task retry <project-id> <task-id> <expected-version> [--adapter <pi|codex>]
+    [--json]
+    Retries a FAILED Task. Nothing is automatic: only this command requeues it. Without --adapter
+    the Adapter this Task last ran on is reused. The Task goes back to READY (or BLOCKED when an
+    upstream dependency is unmet) and the Runtime then asks the same scheduling gate that
+    "task run" uses for one start of *that* Task, so a retry queues behind conflicts and capacity
+    instead of jumping them. Exit 0 only when the new Execution started, 3 when the Task is
+    requeued and waiting (the reason code is in --json and on stderr), 1 when the retry or the start
+    was refused.
   bun run codeestra task cancel <project-id> <task-id> <expected-version>
   bun run codeestra task archive <project-id> <task-id> <expected-version>
   bun run codeestra task unarchive <project-id> <task-id> <expected-version>
@@ -1793,6 +1805,38 @@ try {
         process.exit(3);
       }
       throw error;
+    }
+  } else if (group === 'task' && action === 'retry') {
+    const [taskId, versionText, ...flags] = remainingArguments;
+    const expectedVersion = Number(versionText);
+    if (firstArgument === undefined || taskId === undefined || versionText === undefined
+      || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
+    const split = splitFlagTokens(flags, ['--adapter'], ['--json']);
+    if (split.positionals.length !== 0) usage();
+    // `--adapter` is passed only when the user asked for it: an absent Adapter means "the one this
+    // Task last ran on", which the Runtime resolves from the failed Execution rather than the CLI
+    // assuming today's default.
+    const adapterId = split.flags.get('--adapter');
+    const result = await call({
+      command: 'task.retry',
+      commandId: crypto.randomUUID(),
+      projectId: firstArgument,
+      taskId,
+      expectedVersion,
+      ...(adapterId === undefined ? {} : { adapterId }),
+    }) as TaskRetryOutcomeView;
+    print(result);
+    // The retry's own facts are on stdout; the exit code answers "did a new Execution start".
+    if (result.start.outcome === 'WAIT') {
+      console.error(`[scheduler] the retry is recorded; the Task is requeued and waiting: `
+        + `${result.start.wait?.kind ?? 'WAIT'} ${result.start.wait?.code ?? result.start.code ?? ''}`
+        + ` — ${result.start.detail}`);
+      process.exit(3);
+    }
+    if (result.start.outcome === 'REFUSED') {
+      console.error(`[scheduler] the retry is recorded, but nothing started: `
+        + `${result.start.code ?? 'unknown'} — ${result.start.detail}`);
+      process.exit(1);
     }
   } else if (group === 'task' && action === 'status') {
     const [taskId, ...flags] = remainingArguments;

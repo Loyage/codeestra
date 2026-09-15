@@ -698,6 +698,35 @@ export interface ScheduleStartOutcomeView {
   readonly detail: string;
 }
 
+/**
+ * The result of `task retry` (ADR-0036): the audit facts the requeue recorded, plus the scheduling
+ * answer for the one start request the Runtime issued afterwards. The two are separate facts on
+ * purpose — a retry that was recorded but is waiting for capacity has still succeeded at requeuing
+ * the Task, and it says so instead of reporting a start that did not happen.
+ */
+export interface TaskRetryOutcomeView {
+  readonly projectId: string;
+  readonly taskId: string;
+  /** The Task's state after the requeue: `BLOCKED` when an upstream dependency is unmet. */
+  readonly state: 'READY' | 'BLOCKED';
+  readonly version: number;
+  readonly retryId: string;
+  readonly failedExecutionId: string;
+  readonly failedAttemptNumber: number;
+  readonly adapterId: string;
+  readonly previousAdapterId: string | null;
+  readonly adapterChanged: boolean;
+  readonly adapterSource: 'REQUESTED' | 'RECORDED' | 'FALLBACK';
+  readonly workspace: {
+    readonly mode: 'REUSE_VERIFIED' | 'PREPARE_FRESH';
+    readonly workspaceId: string | null;
+    readonly evidence: string | null;
+    readonly detail: string;
+  };
+  readonly dependencyReasons: readonly unknown[];
+  readonly start: ScheduleStartOutcomeView;
+}
+
 export const runtimeRequestSchema = z.discriminatedUnion('command', [
   z.strictObject({ ...requestBase, command: z.literal('runtime.ping') }),
   z.strictObject({ ...requestBase, command: z.literal('runtime.stop') }),
@@ -854,6 +883,23 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     expectedVersion: z.number().int().nonnegative(),
     adapterId: nonBlankString.default('pi'),
     allowUnknown: z.boolean().default(false),
+  }),
+  /**
+   * Explicit retry of a `FAILED` Task (ADR-0036). It requeues the Task (`READY`, or `BLOCKED` when
+   * an upstream is unmet) and the Runtime then asks the scheduling gate for one start of *that* Task,
+   * so a retry queues behind dependencies, conflicts and capacity like any other attempt.
+   *
+   * `adapterId` is optional on purpose: absent means "the Adapter this Task last ran on", which the
+   * Runtime resolves from the failed Execution instead of the client guessing it.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.retry'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    expectedVersion: z.number().int().nonnegative(),
+    adapterId: nonBlankString.optional(),
   }),
   /** Terminal stop: a running Agent is stopped cooperatively, everything else ends immediately. */
   z.strictObject({
