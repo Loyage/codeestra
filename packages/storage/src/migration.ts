@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 21;
+export const phase1SchemaVersion = 24;
 
 
 export const phase1Migration = `
@@ -1350,4 +1350,69 @@ CREATE TABLE execution_slot_reservation_events (
   PRIMARY KEY(reservation_id,sequence),
   UNIQUE(reservation_id,command_id)
 ) STRICT, WITHOUT ROWID;
+`;
+
+/**
+ * Unregistered-directory disposition for reclamation (FOUNDATION-062, ADR-0037).
+ *
+ * ADR-0021 deliberately refused to touch anything the ledger did not claim: a directory in the
+ * Runtime data directory without a `workspaces`/`verification_runs`/`integration_batches` row could
+ * only be handled by a person with `rm -rf`, which bypasses both ownership verification and the
+ * audit trail. Giving that case a real command face needs the ledger to be able to express it:
+ *
+ * - `source` records where the row came from, so `reclaim records` can be read back by source
+ *   (registered resource vs. unregistered directory) instead of by guessing from a reason code;
+ * - `kind` gains `UNREGISTERED_DIRECTORY`, because such a row is not one of the three recorded
+ *   resource kinds;
+ * - `task_id` becomes nullable: a leftover `verifications/<project>/<id>` directory has a project
+ *   (the segmentation of the layout) but no Task it can be honestly attributed to, and inventing
+ *   one would be exactly the false attribution this capability must not make;
+ * - `outcome` gains `RECOVERY_REQUIRED`, the honest outcome for a directory whose ownership could
+ *   not be verified (a live process inside it, an unreadable Git state, an unknown project).
+ *
+ * The table is rebuilt the same way `verification_runs_v17` was: every existing row is copied
+ * verbatim (stamped `REGISTERED`), and both indexes are recreated. Nothing references
+ * `reclamation_records` by foreign key, so the rebuild is safe with foreign keys enabled.
+ *
+ * Schema version 24 is reserved for this migration: 22 and 23 belong to the parallel H1/H3 lanes
+ * (which may reach `dev` after this branch), and 16 stays permanently unused — a database may
+ * already be stamped 17–23 and would skip a later `version < 16` step. The migration runner keeps
+ * every `version <` step and only adds `if (version < 24)` after the existing ascending ones.
+ */
+export const unregisteredReclamationMigration = `
+CREATE TABLE reclamation_records_v24 (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT REFERENCES tasks(id),
+  operation_id TEXT NOT NULL REFERENCES operations(id),
+  command_id TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'REGISTERED'
+    CHECK(source IN ('REGISTERED','UNREGISTERED_DIRECTORY')),
+  kind TEXT NOT NULL CHECK(kind IN ('TASK_WORKTREE','VERIFICATION_COPY','INTEGRATION_WORKTREE',
+    'UNREGISTERED_DIRECTORY')),
+  resource_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  ownership_token TEXT,
+  external_ref TEXT,
+  resource_state TEXT NOT NULL,
+  outcome TEXT NOT NULL CHECK(outcome IN ('RECLAIMED','ALREADY_ABSENT','RETAINED','REFUSED','FAILED',
+    'RECOVERY_REQUIRED')),
+  reason_code TEXT NOT NULL CHECK(length(trim(reason_code)) > 0),
+  detail TEXT,
+  evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0)
+) STRICT;
+INSERT INTO reclamation_records_v24(id,project_id,task_id,operation_id,command_id,source,kind,
+  resource_id,path,ownership_token,external_ref,resource_state,outcome,reason_code,detail,
+  evidence_json,created_at)
+  SELECT id,project_id,task_id,operation_id,command_id,'REGISTERED',kind,resource_id,path,
+    ownership_token,external_ref,resource_state,outcome,reason_code,detail,evidence_json,created_at
+  FROM reclamation_records;
+DROP TABLE reclamation_records;
+ALTER TABLE reclamation_records_v24 RENAME TO reclamation_records;
+CREATE INDEX reclamation_records_by_project ON reclamation_records(project_id,created_at,id);
+CREATE INDEX reclamation_records_by_task ON reclamation_records(project_id,task_id,created_at,id);
+CREATE INDEX reclamation_records_by_source ON reclamation_records(source,created_at,id);
+CREATE UNIQUE INDEX one_reclamation_record_per_resource
+  ON reclamation_records(operation_id,kind,resource_id);
 `;

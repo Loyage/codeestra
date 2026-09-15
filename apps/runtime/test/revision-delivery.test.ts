@@ -230,9 +230,11 @@ describe('revision delivery schema (v19)', () => {
       raw.close();
 
       const storage = new Phase1Database(path);
-      expect(phase1SchemaVersion).toBe(21);
+      expect(phase1SchemaVersion).toBe(24);
+      // The pinned version is the schema the migration runner targets, not this lane's own step: a
+      // later additive migration must not make this assertion wrong.
       expect(storage.sqlite.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version)
-        .toBe(21);
+        .toBe(phase1SchemaVersion);
       expect(storage.sqlite.query<{ id: string }, []>('SELECT id FROM projects').all())
         .toEqual([{ id: 'p-1' }]);
       expect(storage.sqlite.query<{ event_id: string }, []>('SELECT event_id FROM domain_events').all())

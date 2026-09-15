@@ -43,6 +43,7 @@ import {
   taskControlMigration,
   taskDependenciesMigration,
   taskVerificationMigration,
+  unregisteredReclamationMigration,
   verificationProgressMigration,
   workspaceRetryMigration,
 } from './migration.js';
@@ -1219,6 +1220,9 @@ export class Phase1Database {
         // Version 21 is this step's own number, so a database stamped 17–20 still gets the
         // capacity/slot tables. No earlier number is ever inserted.
         if (version < 21) this.sqlite.exec(capacitySlotReservationMigration);
+        // Version 24 is this step's own number, so a database stamped 21–23 still gets the
+        // unregistered-directory ledger columns. No earlier number is ever inserted.
+        if (version < 24) this.sqlite.exec(unregisteredReclamationMigration);
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -6684,10 +6688,19 @@ export class Phase1Database {
     const workspaces = this.sqlite.query<{
       id: string; task_id: string; path: string; branch_ref: string; ownership_token: string;
       base_commit: string; state: WorkspaceLifecycleState; resource_held: number;
+      active_reservation: string | null; active_reservation_id: string | null;
     }, [string] | [string, string]>(`
       SELECT w.id,w.task_id,w.path,w.branch_ref,w.ownership_token,w.base_commit,w.state,
         EXISTS(SELECT 1 FROM executions e WHERE e.task_id=w.task_id AND e.resource_held=1)
-          AS resource_held
+          AS resource_held,
+        (SELECT r.state FROM execution_slot_reservations r
+          WHERE r.project_id=t.project_id AND r.workspace_id=w.id
+            AND r.state IN ('RESERVED','RECOVERY_REQUIRED')
+          ORDER BY r.reserved_at,r.id LIMIT 1) AS active_reservation,
+        (SELECT r.id FROM execution_slot_reservations r
+          WHERE r.project_id=t.project_id AND r.workspace_id=w.id
+            AND r.state IN ('RESERVED','RECOVERY_REQUIRED')
+          ORDER BY r.reserved_at,r.id LIMIT 1) AS active_reservation_id
       FROM workspaces w JOIN tasks t ON t.id=w.task_id
       WHERE t.project_id=?1 ${workspaceFilter}
       ORDER BY w.created_at,w.id
@@ -6745,6 +6758,10 @@ export class Phase1Database {
         baseCommit: row.base_commit,
         state: row.state,
         resourceHeld: row.resource_held === 1,
+        /** A RESERVED or RECOVERY_REQUIRED slot still claims this workspace (ADR-0032). */
+        activeReservation: row.active_reservation !== null,
+        reservationState: row.active_reservation,
+        reservationId: row.active_reservation_id,
       })),
       verificationCopies: verificationCopies.map((row) => ({
         verificationId: row.id,
@@ -6805,6 +6822,16 @@ export class Phase1Database {
       `).get(input.taskId);
       if ((held?.count ?? 0) > 0) {
         throw new StorageError('INVALID_STATE', 'A held Execution still owns this workspace');
+      }
+      // A workspace a slot reservation still claims must not be released either: a RESERVED (or
+      // RECOVERY_REQUIRED) reservation outlives the Execution it will start, so releasing the row
+      // under it would let a reclaimed directory be handed to a Task that believes it owns it.
+      const reserved = this.sqlite.query<{ count: number }, [string, string]>(`
+        SELECT COUNT(*) AS count FROM execution_slot_reservations
+        WHERE project_id=?1 AND workspace_id=?2 AND state IN ('RESERVED','RECOVERY_REQUIRED')
+      `).get(input.projectId, input.workspaceId);
+      if ((reserved?.count ?? 0) > 0) {
+        throw new StorageError('INVALID_STATE', 'An active slot reservation still owns this workspace');
       }
       if (workspace.state === 'RELEASED') {
         return { previousState: 'RELEASED' as const, changed: false };
@@ -6895,13 +6922,13 @@ export class Phase1Database {
       }
       for (const record of input.records) {
         this.sqlite.query(`
-          INSERT INTO reclamation_records(id,project_id,task_id,operation_id,command_id,kind,
+          INSERT INTO reclamation_records(id,project_id,task_id,operation_id,command_id,source,kind,
             resource_id,path,ownership_token,external_ref,resource_state,outcome,reason_code,detail,
             evidence_json,created_at)
-          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
         `).run(record.id, input.projectId, record.taskId, input.operationId, input.commandId,
-          record.kind, record.resourceId, record.path, record.ownershipToken, record.externalRef,
-          record.resourceState, record.outcome, record.reasonCode, record.detail,
+          record.source, record.kind, record.resourceId, record.path, record.ownershipToken,
+          record.externalRef, record.resourceState, record.outcome, record.reasonCode, record.detail,
           JSON.stringify(record.evidence), input.completedAt);
       }
       const updated = this.sqlite.query(`
@@ -6933,37 +6960,62 @@ export class Phase1Database {
     `).all().map((row) => this.reclamationOperationPlan(row.id));
   }
 
-  /** The append-only reclamation ledger, newest first. */
+  /** The append-only reclamation ledger, newest first, filterable by task, source and time. */
   listReclamationRecords(
     projectId: string,
-    options: { readonly taskId?: string; readonly limit?: number } = {},
+    options: {
+      readonly taskId?: string;
+      readonly limit?: number;
+      readonly source?: ReclamationSource;
+      /** Inclusive lower bound on `created_at` (epoch milliseconds). */
+      readonly since?: number;
+      /** Exclusive upper bound on `created_at` (epoch milliseconds). */
+      readonly until?: number;
+    } = {},
   ): readonly ReclamationRecord[] {
     const limit = options.limit ?? 100;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
       throw new StorageError('INVALID_STATE', 'Reclamation record limit must be between 1 and 500');
     }
-    const filter = options.taskId === undefined ? '' : 'AND task_id=?2';
-    const parameters: [string, number] | [string, string, number] = options.taskId === undefined
-      ? [projectId, limit] : [projectId, options.taskId, limit];
-    const limitPlaceholder = options.taskId === undefined ? '?2' : '?3';
+    const parameters: (string | number)[] = [projectId];
+    const filters: string[] = [];
+    if (options.taskId !== undefined) {
+      parameters.push(options.taskId);
+      filters.push(`task_id=?${parameters.length}`);
+    }
+    if (options.source !== undefined) {
+      parameters.push(options.source);
+      filters.push(`source=?${parameters.length}`);
+    }
+    if (options.since !== undefined) {
+      parameters.push(options.since);
+      filters.push(`created_at>=?${parameters.length}`);
+    }
+    if (options.until !== undefined) {
+      parameters.push(options.until);
+      filters.push(`created_at<?${parameters.length}`);
+    }
+    parameters.push(limit);
     return this.sqlite.query<{
-      id: string; project_id: string; task_id: string; operation_id: string; command_id: string;
-      kind: ReclamationRecordInput['kind']; resource_id: string; path: string;
+      id: string; project_id: string; task_id: string | null; operation_id: string; command_id: string;
+      source: ReclamationSource; kind: ReclamationKind; resource_id: string; path: string;
       ownership_token: string | null; external_ref: string | null; resource_state: string;
       outcome: ReclamationOutcome; reason_code: string; detail: string | null;
       evidence_json: string; created_at: number;
-    }, [string, number] | [string, string, number]>(`
-      SELECT id,project_id,task_id,operation_id,command_id,kind,resource_id,path,ownership_token,
-        external_ref,resource_state,outcome,reason_code,detail,evidence_json,created_at
+    }, (string | number)[]>(`
+      SELECT id,project_id,task_id,operation_id,command_id,source,kind,resource_id,path,
+        ownership_token,external_ref,resource_state,outcome,reason_code,detail,evidence_json,
+        created_at
       FROM reclamation_records
-      WHERE project_id=?1 ${filter}
-      ORDER BY created_at DESC,id DESC LIMIT ${limitPlaceholder}
+      WHERE project_id=?1${filters.length === 0 ? '' : ` AND ${filters.join(' AND ')}`}
+      ORDER BY created_at DESC,id DESC LIMIT ?${parameters.length}
     `).all(...parameters).map((row) => ({
       id: row.id,
       projectId: row.project_id,
       taskId: row.task_id,
       operationId: row.operation_id,
       commandId: row.command_id,
+      source: row.source,
       kind: row.kind,
       resourceId: row.resource_id,
       path: row.path,
@@ -6976,6 +7028,65 @@ export class Phase1Database {
       evidence: JSON.parse(row.evidence_json) as Readonly<Record<string, unknown>>,
       createdAt: row.created_at,
     }));
+  }
+
+  /**
+   * The recorded resource that claims one exact path, if any. The unregistered-directory scan uses
+   * this so a directory can only ever be called "unregistered" after the ledger was asked about it;
+   * the check runs again immediately before any removal.
+   */
+  findReclaimPathClaim(path: string): ReclamationPathClaim | null {
+    const workspace = this.sqlite.query<{
+      id: string; project_id: string; task_id: string; state: string;
+    }, [string]>(`
+      SELECT w.id,t.project_id,w.task_id,w.state FROM workspaces w
+      JOIN tasks t ON t.id=w.task_id WHERE w.path=?1 ORDER BY w.created_at,w.id LIMIT 1
+    `).get(path);
+    if (workspace !== null) {
+      return { kind: 'TASK_WORKTREE', projectId: workspace.project_id, taskId: workspace.task_id,
+        resourceId: workspace.id, resourceState: workspace.state };
+    }
+    const verification = this.sqlite.query<{
+      id: string; project_id: string; task_id: string; state: string;
+    }, [string]>(
+      'SELECT id,project_id,task_id,state FROM verification_runs WHERE copy_path=?1 LIMIT 1',
+    ).get(path);
+    if (verification !== null) {
+      return { kind: 'VERIFICATION_COPY', projectId: verification.project_id,
+        taskId: verification.task_id, resourceId: verification.id,
+        resourceState: verification.state };
+    }
+    const integration = this.sqlite.query<{
+      id: string; project_id: string; state: string;
+    }, [string]>(
+      'SELECT id,project_id,state FROM integration_batches WHERE worktree_path=?1 LIMIT 1',
+    ).get(path);
+    if (integration === null) return null;
+    const member = this.sqlite.query<{ task_id: string }, [string]>(
+      'SELECT task_id FROM integration_batch_items WHERE batch_id=?1 ORDER BY created_at LIMIT 1',
+    ).get(integration.id);
+    return { kind: 'INTEGRATION_WORKTREE', projectId: integration.project_id,
+      taskId: member?.task_id ?? null, resourceId: integration.id,
+      resourceState: integration.state };
+  }
+
+  /**
+   * The active slot reservation that claims one workspace, if any. Read again right before a removal
+   * so a workspace can never be deleted under a reservation that was granted after the plan.
+   */
+  findActiveWorkspaceReservation(input: {
+    readonly projectId: string;
+    readonly workspaceId: string;
+  }): Readonly<{ reservationId: string; taskId: string; state: string; reservedAt: number }> | null {
+    const row = this.sqlite.query<{ id: string; task_id: string; state: string; reserved_at: number },
+      [string, string]>(`
+      SELECT id,task_id,state,reserved_at FROM execution_slot_reservations
+      WHERE project_id=?1 AND workspace_id=?2 AND state IN ('RESERVED','RECOVERY_REQUIRED')
+      ORDER BY reserved_at,id LIMIT 1
+    `).get(input.projectId, input.workspaceId);
+    if (row === null) return null;
+    return { reservationId: row.id, taskId: row.task_id, state: row.state,
+      reservedAt: row.reserved_at };
   }
 
   private reclamationOperationPlan(operationId: string): ReclamationOperationPlan {
@@ -11243,6 +11354,14 @@ export interface ReclamationWorkspaceRef {
   readonly state: WorkspaceLifecycleState;
   /** True while an Execution of this Task still holds its resources. */
   readonly resourceHeld: boolean;
+  /**
+   * True while a slot reservation (RESERVED or RECOVERY_REQUIRED) still claims this workspace.
+   * A reserved workspace that no Execution has started yet is just as unavailable as a running one.
+   */
+  readonly activeReservation: boolean;
+  readonly reservationState: string | null;
+  /** The reservation that still claims the workspace, when one does. */
+  readonly reservationId: string | null;
 }
 
 export interface ReclamationVerificationRef {
@@ -11276,12 +11395,22 @@ export interface ReclamationCandidates {
   readonly integrationWorktrees: readonly ReclamationIntegrationRef[];
 }
 
-export type ReclamationOutcome = 'RECLAIMED' | 'ALREADY_ABSENT' | 'RETAINED' | 'REFUSED' | 'FAILED';
+export type ReclamationOutcome = 'RECLAIMED' | 'ALREADY_ABSENT' | 'RETAINED' | 'REFUSED' | 'FAILED'
+  | 'RECOVERY_REQUIRED';
+
+/** Where a ledger row came from: a recorded resource, or a directory no record claimed. */
+export type ReclamationSource = 'REGISTERED' | 'UNREGISTERED_DIRECTORY';
+
+/** The resource kinds a ledger row can describe (ADR-0021 plus unregistered directories). */
+export type ReclamationKind = 'TASK_WORKTREE' | 'VERIFICATION_COPY' | 'INTEGRATION_WORKTREE'
+  | 'UNREGISTERED_DIRECTORY';
 
 export interface ReclamationRecordInput {
   readonly id: string;
-  readonly taskId: string;
-  readonly kind: 'TASK_WORKTREE' | 'VERIFICATION_COPY' | 'INTEGRATION_WORKTREE';
+  /** Null for an unregistered directory that cannot be attributed to a Task honestly. */
+  readonly taskId: string | null;
+  readonly kind: ReclamationKind;
+  readonly source: ReclamationSource;
   readonly resourceId: string;
   readonly path: string;
   readonly ownershipToken: string | null;
@@ -11298,6 +11427,18 @@ export interface ReclamationRecord extends ReclamationRecordInput {
   readonly operationId: string;
   readonly commandId: string;
   readonly createdAt: number;
+}
+
+/**
+ * A directory in the Runtime data directory that some record already claims by path. Used by the
+ * unregistered-directory scan so a leftover path can never be treated as unclaimed when it is not.
+ */
+export interface ReclamationPathClaim {
+  readonly kind: 'TASK_WORKTREE' | 'VERIFICATION_COPY' | 'INTEGRATION_WORKTREE';
+  readonly projectId: string;
+  readonly taskId: string | null;
+  readonly resourceId: string;
+  readonly resourceState: string;
 }
 
 export interface ReclamationOperationPlan {

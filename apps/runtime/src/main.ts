@@ -57,9 +57,12 @@ import {
 } from './promotion-service.js';
 import {
   applyReclamation,
+  applyReclamationBatch,
   listReclamationRecords,
   planReclamation,
+  planReclamationBatch,
   reconcileInterruptedReclamations,
+  resolveReclaimScope,
 } from './reclaim-service.js';
 import { captureResultCommit, prepareResultCommit } from './result-commit-service.js';
 import {
@@ -1084,32 +1087,69 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         projectId: request.projectId,
         ...(request.taskId === undefined ? {} : { taskId: request.taskId }),
       }));
-    case 'reclaim.plan':
-      return success(request.requestId, await planReclamation({
+    case 'reclaim.plan': {
+      // The scope selector is validated in the service so a missing project cannot silently widen
+      // into a batch: `--project` plans one project, everything else is an explicit batch.
+      const scope = resolveReclaimScope({
+        projectId: request.projectId,
+        allProjects: request.allProjects,
+        taskId: request.taskId,
+      });
+      const shared = {
         storage,
         runtimeHome: home,
-        projectId: request.projectId,
         ...(request.taskId === undefined ? {} : { taskId: request.taskId }),
         ...(request.kinds === undefined ? {} : { kinds: request.kinds }),
         includeFailureScenes: request.includeFailureScenes,
-      }));
-    case 'reclaim.apply':
-      return success(request.requestId, await applyReclamation({
+        unregistered: request.unregistered,
+        ...(request.scanRoot === undefined ? {} : { scanRoot: request.scanRoot }),
+        ...(request.removeUnregistered === undefined
+          ? {} : { removeUnregistered: request.removeUnregistered }),
+      };
+      return success(request.requestId, scope.kind === 'PROJECT'
+        ? await planReclamation({ ...shared, projectId: scope.projectId as string })
+        : await planReclamationBatch(shared));
+    }
+    case 'reclaim.apply': {
+      const scope = resolveReclaimScope({
+        projectId: request.projectId,
+        allProjects: request.allProjects,
+        taskId: request.taskId,
+      });
+      const shared = {
         storage,
         runtimeHome: home,
-        projectId: request.projectId,
         commandId: request.commandId,
         ...(request.taskId === undefined ? {} : { taskId: request.taskId }),
         ...(request.kinds === undefined ? {} : { kinds: request.kinds }),
         includeFailureScenes: request.includeFailureScenes,
-      }));
-    case 'reclaim.records':
+        unregistered: request.unregistered,
+        ...(request.scanRoot === undefined ? {} : { scanRoot: request.scanRoot }),
+        ...(request.removeUnregistered === undefined
+          ? {} : { removeUnregistered: request.removeUnregistered }),
+      };
+      return success(request.requestId, scope.kind === 'PROJECT'
+        ? await applyReclamation({ ...shared, projectId: scope.projectId as string })
+        : await applyReclamationBatch(shared));
+    }
+    case 'reclaim.records': {
+      const scope = resolveReclaimScope({
+        projectId: request.projectId,
+        allProjects: request.allProjects,
+        taskId: request.taskId,
+      });
       return success(request.requestId, listReclamationRecords({
         storage,
-        projectId: request.projectId,
+        ...(scope.kind === 'PROJECT'
+          ? { projectId: scope.projectId as string }
+          : { projectIds: storage.listTrustedProjects().map((project) => project.id) }),
         ...(request.taskId === undefined ? {} : { taskId: request.taskId }),
+        source: request.source,
+        ...(request.since === undefined ? {} : { since: request.since }),
+        ...(request.until === undefined ? {} : { until: request.until }),
         limit: request.limit,
       }));
+    }
     /**
      * Capacity and slot reservations (FOUNDATION-054 / ADR-0032). The command face mirrors the
      * primitive exactly: `capacity get` is the queryable capacity fact (limits, sources, occupancy,

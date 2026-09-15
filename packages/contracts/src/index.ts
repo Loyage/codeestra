@@ -1008,15 +1008,25 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
   /**
    * Read-only preview of what a reclamation would remove and why. This is the dry run: it
    * performs no deletion, writes nothing, and returns the same decision shape as `reclaim.apply`.
+   * Omitting `projectId` (or setting `allProjects`) covers every ACTIVE-trusted project and returns
+   * the same decisions grouped per project, so one project's refusal never hides another's.
    */
   z.strictObject({
     ...requestBase,
     command: z.literal('reclaim.plan'),
-    projectId: z.string().uuid(),
+    projectId: z.string().uuid().optional(),
+    /** Explicit "every trusted project" scope; the alternative to naming one project. */
+    allProjects: z.boolean().default(false),
     taskId: z.string().uuid().optional(),
     kinds: z.array(reclaimKindSchema).min(1).optional(),
     /** Failure scenes (failed/conflicted runs, dirty or unmerged worktrees) are retained by default. */
     includeFailureScenes: z.boolean().default(false),
+    /** Also scan the Runtime data directory for directories no ledger row claims (ADR-0037). */
+    unregistered: z.boolean().default(false),
+    /** Absolute path inside the Runtime home that bounds that scan. */
+    scanRoot: z.string().min(1).optional(),
+    /** Paths selected for removal, so a preview shows the same decision a real run would take. */
+    removeUnregistered: z.array(z.string().min(1)).max(200).optional(),
   }),
   /**
    * Executes one reclamation. It removes only Runtime-owned resources whose ownership was verified,
@@ -1026,17 +1036,34 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('reclaim.apply'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
+    projectId: z.string().uuid().optional(),
+    allProjects: z.boolean().default(false),
     taskId: z.string().uuid().optional(),
     kinds: z.array(reclaimKindSchema).min(1).optional(),
     includeFailureScenes: z.boolean().default(false),
+    /** Include unregistered directories in this run (they stay retained without a selection). */
+    unregistered: z.boolean().default(false),
+    scanRoot: z.string().min(1).optional(),
+    /**
+     * The explicit action that authorises deleting an unregistered directory. A path is only ever
+     * removed when it is named here *and* every ownership fact still agrees at removal time; a
+     * directory nobody named is reported, not deleted (FULL adds no confirmation step for this).
+     */
+    removeUnregistered: z.array(z.string().min(1)).max(200).optional(),
   }),
   /** The append-only ledger of reclamation decisions, newest first. */
   z.strictObject({
     ...requestBase,
     command: z.literal('reclaim.records'),
-    projectId: z.string().uuid(),
+    projectId: z.string().uuid().optional(),
+    allProjects: z.boolean().default(false),
     taskId: z.string().uuid().optional(),
+    /** Read the ledger back by origin: recorded resources or unregistered directories. */
+    source: z.enum(['ALL', 'REGISTERED', 'UNREGISTERED_DIRECTORY']).default('ALL'),
+    /** Inclusive lower bound on the record time (epoch milliseconds). */
+    since: z.number().int().nonnegative().optional(),
+    /** Exclusive upper bound on the record time (epoch milliseconds). */
+    until: z.number().int().nonnegative().optional(),
     limit: z.number().int().min(1).max(500).default(100),
   }),
   /**

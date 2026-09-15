@@ -50,6 +50,37 @@ type ClientRequest = RuntimeRequest extends infer Request
 const reclaimKindNames = ['TASK_WORKTREE', 'VERIFICATION_COPY', 'INTEGRATION_WORKTREE'] as const;
 type ReclaimKindName = (typeof reclaimKindNames)[number];
 const maxReclaimRecordLimit = 500;
+/** Mirrors the contract's bound on an explicit unregistered-directory selection. */
+const maxUnregisteredSelections = 200;
+
+/** The two shapes `reclaim plan` can answer with; `--project` gives one, batch gives the other. */
+interface ReclaimPlanGroupView {
+  readonly counts: { readonly reclaim: number; readonly recoveryRequired: number };
+  readonly unregistered?: { readonly counts: { readonly reclaim: number } } | null;
+}
+interface ReclaimPlanView extends ReclaimPlanGroupView {
+  readonly scope: 'PROJECT' | 'ALL_PROJECTS';
+  readonly projects?: readonly ReclaimPlanGroupView[];
+  /** Present only on a batch; `FAILED` means at least one project group could not be planned. */
+  readonly outcome?: 'SUCCEEDED' | 'FAILED';
+}
+interface ReclaimReportView extends ReclaimPlanView {
+  readonly outcome: 'SUCCEEDED' | 'FAILED';
+  readonly outcomeCounts: { readonly reclaimed: number };
+}
+
+function reclaimableCount(view: ReclaimPlanView): number {
+  const groups = view.scope === 'ALL_PROJECTS' ? view.projects ?? [] : [view];
+  return groups.reduce((sum, group) => sum
+    + group.counts.reclaim
+    + (group.unregistered?.counts.reclaim ?? 0), 0);
+}
+
+function reclaimedCount(view: ReclaimReportView): number {
+  const groups = view.scope === 'ALL_PROJECTS' ? view.projects ?? [] : [view];
+  return groups.reduce((sum, group) => sum
+    + (group as ReclaimReportView).outcomeCounts.reclaimed, 0);
+}
 
 const home = Bun.env.CODEESTRA_HOME
   ?? join(Bun.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'codeestra');
@@ -964,11 +995,15 @@ function usage(): never {
   bun run codeestra attention answer <project-id> <attention-id> cancel
   bun run codeestra attention answer <project-id> <attention-id> [--choose <question>:<options>]…
     [--text <question>=<text>]… [--cancel]
-  bun run codeestra reclaim plan [--project <project-id>] [--task <task-id>]
-    [--kind <TASK_WORKTREE|VERIFICATION_COPY|INTEGRATION_WORKTREE>]… [--include-failure-scenes] [--json]
-  bun run codeestra reclaim apply [--project <project-id>] [--task <task-id>] [--kind <kind>]…
-    [--include-failure-scenes] [--json]
-  bun run codeestra reclaim records [--project <project-id>] [--task <task-id>] [--limit <n>] [--json]
+  bun run codeestra reclaim plan [--project <project-id> | --all-projects] [--task <task-id>]
+    [--kind <TASK_WORKTREE|VERIFICATION_COPY|INTEGRATION_WORKTREE>]… [--include-failure-scenes]
+    [--unregistered] [--scan-root <path-inside-home>] [--remove-unregistered <path>]… [--json]
+  bun run codeestra reclaim apply [--project <project-id> | --all-projects] [--task <task-id>]
+    [--kind <kind>]… [--include-failure-scenes] [--unregistered] [--scan-root <path-inside-home>]
+    [--remove-unregistered <path>]… [--json]
+  bun run codeestra reclaim records [--project <project-id> | --all-projects] [--task <task-id>]
+    [--source <ALL|REGISTERED|UNREGISTERED_DIRECTORY>] [--since <epoch-ms|ISO>] [--until <epoch-ms|ISO>]
+    [--limit <n>] [--json]
   bun run codeestra scheduler capacity get <project-id> [--adapter <id>] [--json]
   bun run codeestra scheduler capacity set <project-id> --limit <n> [--adapter <id>] [--json]
   bun run codeestra scheduler capacity clear <project-id> --adapter <id> [--json]
@@ -2402,18 +2437,39 @@ try {
   } else if (group === 'reclaim') {
     // `reclaim` is the only destructive command face. `plan` is its read-only dry run and returns
     // exactly the decision shape `apply` records, so a preview can never disagree with the run.
+    // Without `--project` (or with `--all-projects`) the command covers every trusted project and
+    // groups its answer per project; an unregistered directory is never deleted unless the caller
+    // names that exact path with `--remove-unregistered` (ADR-0037).
     const [subcommand, ...flagTokens] = [action, firstArgument, ...remainingArguments]
       .filter((token): token is string => token !== undefined);
     if (subcommand !== 'plan' && subcommand !== 'apply' && subcommand !== 'records') usage();
     let projectId: string | undefined;
+    let allProjects = false;
     let taskId: string | undefined;
+    let scanRoot: string | undefined;
+    let unregistered = false;
+    let source: 'ALL' | 'REGISTERED' | 'UNREGISTERED_DIRECTORY' | undefined;
+    let since: number | undefined;
+    let until: number | undefined;
+    const removeUnregistered: string[] = [];
     const kinds: ReclaimKindName[] = [];
     let includeFailureScenes = false;
     let limit: number | undefined;
+    /** `--since`/`--until` accept epoch milliseconds or any ISO-8601 timestamp. */
+    const timestamp = (value: string): number => {
+      if (/^\d+$/.test(value)) {
+        const parsed = Number(value);
+        if (Number.isSafeInteger(parsed)) return parsed;
+      }
+      const parsed = Date.parse(value);
+      if (Number.isNaN(parsed)) usage();
+      return parsed;
+    };
     for (let index = 0; index < flagTokens.length; index += 1) {
       const flag = flagTokens[index];
       const value = flagTokens[index + 1];
       if (flag === '--project' && value !== undefined) { projectId = value; index += 1; }
+      else if (flag === '--all-projects') allProjects = true;
       else if (flag === '--task' && value !== undefined) { taskId = value; index += 1; }
       else if (flag === '--kind' && value !== undefined
         && (reclaimKindNames as readonly string[]).includes(value)) {
@@ -2421,6 +2477,30 @@ try {
         index += 1;
       } else if (flag === '--include-failure-scenes' && subcommand !== 'records') {
         includeFailureScenes = true;
+      } else if (flag === '--unregistered' && subcommand !== 'records') {
+        unregistered = true;
+      } else if (flag === '--scan-root' && value !== undefined && subcommand !== 'records') {
+        scanRoot = value;
+        unregistered = true;
+        index += 1;
+      } else if (flag === '--remove-unregistered' && value !== undefined
+        && subcommand !== 'records') {
+        if (removeUnregistered.length >= maxUnregisteredSelections) usage();
+        removeUnregistered.push(value);
+        unregistered = true;
+        index += 1;
+      } else if (flag === '--source' && value !== undefined && subcommand === 'records') {
+        const normalized = value.toUpperCase();
+        if (normalized !== 'ALL' && normalized !== 'REGISTERED'
+          && normalized !== 'UNREGISTERED_DIRECTORY') usage();
+        source = normalized;
+        index += 1;
+      } else if (flag === '--since' && value !== undefined && subcommand === 'records') {
+        since = timestamp(value);
+        index += 1;
+      } else if (flag === '--until' && value !== undefined && subcommand === 'records') {
+        until = timestamp(value);
+        index += 1;
       } else if (flag === '--json') {
         // Every reclaim subcommand already prints the Runtime result verbatim; the flag is
         // accepted so a script can state its intent without depending on that default.
@@ -2433,21 +2513,50 @@ try {
         usage();
       }
     }
-    if (projectId === undefined) usage();
-    const shared = { projectId, ...(taskId === undefined ? {} : { taskId }) };
+    if (projectId !== undefined && allProjects) usage();
+    if (taskId !== undefined && projectId === undefined) usage();
+    if (since !== undefined && until !== undefined && since >= until) usage();
+    // Both ways of naming a scope are explicit: one project, or every trusted project. A missing
+    // `--project` is not an error here, but it means "all projects" only in the batch sense.
+    const scope = projectId === undefined
+      ? { allProjects: true as const, projectId: undefined }
+      : { allProjects: false as const, projectId };
+    const shared = {
+      ...scope,
+      ...(taskId === undefined ? {} : { taskId }),
+      unregistered,
+      ...(scanRoot === undefined ? {} : { scanRoot }),
+    };
     if (subcommand === 'plan') {
-      print(await call({ command: 'reclaim.plan', ...shared,
-        ...(kinds.length === 0 ? {} : { kinds }), includeFailureScenes }));
+      const plan = await call({ command: 'reclaim.plan', ...shared,
+        ...(kinds.length === 0 ? {} : { kinds }),
+        ...(removeUnregistered.length === 0 ? {} : { removeUnregistered }),
+        includeFailureScenes }) as ReclaimPlanView;
+      print(plan);
+      // A group that could not even be planned makes the whole preview a failure; everything else
+      // ("nothing to reclaim") is a normal answer reported as exit 3, which keeps it apart from both
+      // a real error (1) and "there is work to do" (0) without parsing JSON. Nothing is written to
+      // stderr, so `--json` output stays the only thing a script has to read.
+      if (plan.outcome === 'FAILED') process.exit(1);
+      if (reclaimableCount(plan) === 0) process.exit(3);
     } else if (subcommand === 'apply') {
       const report = await call({ command: 'reclaim.apply', commandId: crypto.randomUUID(),
-        ...shared, ...(kinds.length === 0 ? {} : { kinds }), includeFailureScenes }) as
-        { readonly outcome: string };
+        ...shared, ...(kinds.length === 0 ? {} : { kinds }),
+        ...(removeUnregistered.length === 0 ? {} : { removeUnregistered }),
+        includeFailureScenes }) as ReclaimReportView;
       print(report);
-      // A resource that could not be removed is a real failure for scripts; retained and refused
-      // resources are intentional outcomes and stay exit code 0.
+      // A resource that could not be removed is a real failure for scripts. Retained and refused
+      // resources are intentional outcomes: a run that reclaimed nothing exits 3 (nothing was
+      // reclaimed) while one that reclaimed something exits 0.
       if (report.outcome === 'FAILED') process.exit(1);
+      if (reclaimedCount(report) === 0) process.exit(3);
     } else {
-      print(await call({ command: 'reclaim.records', ...shared, limit: limit ?? 100 }));
+      print(await call({ command: 'reclaim.records', ...scope,
+        ...(taskId === undefined ? {} : { taskId }),
+        source: source ?? 'ALL',
+        ...(since === undefined ? {} : { since }),
+        ...(until === undefined ? {} : { until }),
+        limit: limit ?? 100 }));
     }
   } else if (group === 'promotion') {
     // The stable promotion face. `prepare` fixes the three facts and writes nothing to Git;
