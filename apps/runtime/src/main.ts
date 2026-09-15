@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, rmSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
-import { devBranchRef, impactPolicyPath, runtimeRequestSchema, validateQuestionnaireAnswer,
+import { devBranchRef, impactPolicyPath, runtimeRequestSchema, uiSettingKeys,
+  validateQuestionnaireAnswer,
   questionnairePromptSchema,
   type RuntimeRequest, type RuntimeResponse,
   type RuntimeStreamFrame } from '@codeestra/contracts';
@@ -58,6 +59,7 @@ import { LongOperationService } from './operation-service.js';
 import { runtimeHome, runtimeSocketPath } from './paths.js';
 import { SessionHandoffService } from './session-handoff-service.js';
 import { TerminalService } from './terminal-service.js';
+import { inspectUiSettings, resetUiSettings, setUiSetting } from './ui-settings.js';
 import { readPermissionMode, writePermissionMode, type PermissionMode } from './permission-mode.js';
 import {
   readProseQuestionAttentionMode,
@@ -617,6 +619,26 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       proseQuestionAttentionMode = request.mode;
       writeProseQuestionAttentionMode(home, proseQuestionAttentionMode);
       return success(request.requestId, proseQuestionAttentionSettings());
+    // The interface-effect settings are read from and written to the Runtime home on every command
+    // (never from a cached copy), so an edit made outside the Runtime — or a second look after a
+    // restart — reports the file as it is. A broken file is refused with INVALID_UI_SETTING instead
+    // of being reported as defaults; `settings ui reset` is the explicit way out of that state.
+    case 'settings.ui.list':
+      return success(request.requestId, inspectUiSettings(home));
+    case 'settings.ui.get': {
+      const view = inspectUiSettings(home);
+      const entry = view.settings.find((candidate) => candidate.key === request.key);
+      if (entry === undefined) {
+        throw new RuntimeCommandError('UNKNOWN_UI_SETTING',
+          `${request.key} is not a UI setting; the keys are: ${uiSettingKeys.join(', ')}`);
+      }
+      return success(request.requestId, entry);
+    }
+    case 'settings.ui.set':
+      return success(request.requestId,
+        setUiSetting(home, request.key, request.value));
+    case 'settings.ui.reset':
+      return success(request.requestId, resetUiSettings(home, request.key));
     case 'agent.config.get':
       return success(request.requestId, agentConfigurationPayload(resolveAgentConfiguration({
         storage,

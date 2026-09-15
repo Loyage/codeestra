@@ -4265,6 +4265,72 @@ boot 身份不同（ADR-0022 的重启判定），且新进程确实运行新代
 
 - 未 push、未 rebase、未合并新的 `dev`、未提升 `main`、未触碰 `/Users/loyage/Documents/codeestra`（稳定工作树）与其上的稳定 Runtime；未运行任何 Runtime/CLI 命令，因此未使用 `CODEESTRA_HOME=/tmp/ce-j3`。
 - 未改任何业务逻辑、状态管理、命令面调用、后端文件，也未顺手重构与本次目标无关的样式。
+## FOUNDATION-073 — 全局设置（界面效果）：Runtime 持久化 + CLI 命令面 + 设置页（ADR-0045，**无 schema 变更、不占迁移号**）
+
+状态：**已实现，lane 分支 commit（未 push、未提升 `main`、未重启稳定 Runtime）。**
+基线：`dev = 54ff3049e7a4b3e85726210e39c71c6751403b37`（未 rebase）。工作树：`/Users/loyage/Documents/codeestra-wt/j4-global-settings`，分支 `lane/j4-global-settings`。
+
+用户原话：「需要全局设置功能，可以在界面中调整界面效果。」用户裁决：**范围 = 界面效果类设置；持久化 = Runtime（`CODEESTRA_HOME`）；CLI 必须完备**。因此本格把界面偏好从「某一个浏览器的 `localStorage`」升级为「这个 Runtime home 的一份设置」，并让 CLI 成为它的完整命令面。
+
+### 五个键（键名固定，取值封闭，默认固定）
+
+| 键 | 取值 | 默认 | 生效方式 |
+|---|---|---|---|
+| `theme` | `system` / `light` / `dark` | `system` | `document.documentElement.dataset.theme`（ADR-0015 语义不变） |
+| `density` | `comfortable` / `compact` | `comfortable` | `data-density` + 追加的紧凑间距规则 |
+| `fontSize` | `medium` / `small` / `large` | `medium` | 根字号 100% / 87.5% / 112.5% + `body { font-size: 0.875rem }` |
+| `motion` | `full` / `reduced` | `full` | `data-motion`；`reduced` 追加与既有 `prefers-reduced-motion` 同效的规则 |
+| `timeDisplay` | `relative` / `absolute` | `relative` | 任务列表更新时间的渲染 |
+
+默认值**故意没有对应 CSS 规则**，所以「没做任何选择」与「本格之前」渲染完全一致。
+
+### 修改
+
+- **`packages/contracts/src/ui-settings.ts`（新）+ `index.ts`（纯追加）**：键/取值/默认值清单与 `uiSettingEntrySchema`/`uiSettingsViewSchema`；四个请求变体 `settings.ui.list|get|set|reset`（键与取值在契约层就是枚举）。
+- **`apps/runtime/src/ui-settings.ts`（新）**：`$CODEESTRA_HOME/ui-settings.json` 的版本化严格 schema 读写（`version: 1`）、未知键/非法值/未知版本/损坏 JSON 一律 `INVALID_UI_SETTING`、临时文件 `rename` 原子替换 + 失败删临时文件并报 `UI_SETTINGS_WRITE_FAILED`、`0600`/`0700`、**每次读取都落盘（磁盘即真相）**。
+- **`apps/runtime/src/main.ts`（纯追加）**：四个命令的处理（`get` 返回单键，`list`/`set`/`reset` 返回完整设置面）。
+- **`apps/cli/src/main.ts`（纯追加）**：用法文本（四条命令 + 一段说明）、CLI 侧键/值校验（退出码 2）、四条命令的处理。
+- **`apps/ui/src/ui-settings.ts`（新）**：纯函数（主题解析、`documentAttributesFor`、时间措辞、标签、CLI 提示）+ 设置 Context/hook；DOM 面窄化为一个结构化 `DatasetTarget`，所以该模块能在 Node 下被类型检查与单测。
+- **`apps/ui/src/settings.tsx`（新）**：`UiSettingsProvider`（加载设置、应用到 `document`、共享状态）+ 设置页（每个键显示当前值/默认值/是否显式设置/来源/可取值 + 等价 CLI 命令 + 真实文件路径 + 「存在 Runtime，换浏览器/清缓存依然生效」的说明）。
+- **`apps/ui/src/theme.tsx`**：`ThemeSelector` 保留，存储由 `localStorage` 改为 Runtime 设置；登录前的 token 表单保留一个**什么都不写**的即时预览。
+- **`apps/ui/src/task-list.tsx`**：相对时间措辞原样搬到 `ui-settings.ts`，渲染改由 `timeDisplay` 选择。
+- **`apps/ui/src/App.tsx`（最小追加）**：一个导航项（`settings`）、一处渲染分支、一层 Provider 包裹（两行）；未触碰 `.app`/`app-header`/`sidebar`/`workspace-shell` 的样式与 shell 结构。
+- **`apps/ui/src/styles.css`（追加块）**：只在文件末尾追加 `data-*` 生效规则与设置页样式，全部带 `FOUNDATION-073` 注释。
+- **`package.json`**：把 `cli-ui-settings` 追加进 `test:unit` 忽略列表与 `test:e2e` 列表（按既有字母序插入同一行，未重排其它条目）。
+- **文档**：新增 `docs/decisions/0045-global-ui-settings.md`；`docs/decisions/README.md` 在 ADR-0043 行之后追加 0045 索引行（0044 留给 J2，按号段升序）。
+
+### 实际运行的检查与逐条结果
+
+| 命令 | 结果 |
+|---|---|
+| `bun run typecheck` | **退出码 0** |
+| `bun run typecheck:ui` | **退出码 0** |
+| `bun run build:ui` | **成功**（`dist/index.html` + css 21.09 kB + js 392.65 kB） |
+| `bun test apps/runtime/test/ui-settings.test.ts` | **8 pass / 0 fail**（60 断言，新文件） |
+| `bun test apps/runtime/test/cli-ui-settings.test.ts` | **5 pass / 0 fail**（81 断言，新 e2e：真实 CLI + 真实 Runtime + 临时 home） |
+| `bun run test apps/ui/src/ui-settings.test.ts`（vitest） | **9 passed (9)**（新文件） |
+| `bun test packages/contracts/test/request.test.ts` | **20 pass / 0 fail**（契约边界回归） |
+| `bun test ... --path-ignore-patterns='**/{cli-ui-settings}.test.ts'` | 只运行 `ui-settings.test.ts`（8 pass），确认新 e2e 确实被 `test:unit` 忽略列表排除 |
+| 一次性 SSR 渲染检查（**未提交**，脚本跑完即删） | 用 `react-dom/server` 静态渲染设置页成功：6 行（5 个真实键 + 1 个故意混入的未知键都被渲染）、每行一个 `<select>`，当前值/默认值/是否显式设置/等价 CLI 命令/文件路径都在输出里。**这不是测试**：它需要把脚本放进 `apps/ui/` 才能避免解析到两份 React（workspace 里 `react-dom` 与其 peer `react` 的解析路径不同），而且没有任何断言与回归保护，所以没有留在仓库里。 |
+
+新增覆盖的关键断言：默认值全景与「读不建文件」；单键写入后的文件内容与 `0600`；重复写入 **stdout 与文件字节都不变**；`reset <key>` 只去掉一个显式选择、`reset` 去掉全部；权限受限目录下写入失败报 `UI_SETTINGS_WRITE_FAILED`、**旧文件逐字节不变、无临时文件残留**；损坏/未知版本/未知字段/非法值 **读取与写入都拒绝且零写入**；**跨 Runtime 重启保持**（`stop` 前后 `status` 的 `bootId` 不同，值仍为显式设置）；**HTTP 命令面**（`/api/command`）读到与 CLI **逐字节相同**的设置面、HTTP 写入后 CLI 能读到、未知键/非法值在边界被拒（`INVALID_REQUEST`，HTTP 400）、损坏文件经 HTTP 得 `INVALID_UI_SETTING` 并可被 `reset` 修复；UI 单测覆盖主题解析/属性映射/DOM 属性写入与移除（结构化 dataset 替身）/相对与绝对时间/标签与文案回退/未知 key 的 CLI 提示。
+
+### 未验证与已知缺口（不得当成已成立）
+
+- **视觉/窄屏/动效观感只能人工确认**：本格未使用 computer-use、浏览器自动化、截图或桌面会话（ADR-0008），因此紧凑密度、字号三档、`reduced` 动效的**观感**与设置页在窄屏下的排布均无机器断言，需用户目视确认。
+- **实机 `system` 主题切换未验**：`theme=system` 跟随系统主题变化只由 `documentAttributesFor` 的纯函数断言覆盖，未在真实浏览器里切换系统外观复验。
+- **多标签页不实时同步**（如实记录）：Provider 只在挂载时读取一次，另一个标签页的改动不会推送到已打开的页面；「重新读取」或刷新会看到。ADR-0045 把它列为已知边界。
+- **`UNKNOWN_UI_SETTING` 目前不可经传输层到达**：请求契约本身枚举了键与取值，未知键在 HTTP 面上先得到边界拒绝 `INVALID_REQUEST`（HTTP 400），在 CLI 上是用法错误（退出码 2）；该稳定码保存在设置层供直接调用者使用，并由模块级单测钉住。**不声称它是网络可达的。**
+- **跨进程并发写**未加锁：同进程内读写同步因此不可能交错，跨进程是「最后一次完整替换胜出」，不会产生半截文件，但会丢失一次写入。
+- **本格未运行任何全量/聚合检查**（ADR-0038）：`bun run check`、`bun run check:fast`、`just check`、`just verify` 均未运行；`bun run test`（vitest 全量）与 `bun run test:unit`/`test:e2e` 全量也未运行，只跑了上表列出的定向文件与 `bun run test apps/ui/src/ui-settings.test.ts`。
+
+### 领地与未触碰
+
+- 未改动他人的工作树与 `/tmp/ce-j1|j2|j3`；未改 `.app`/`app-header`/`sidebar`/`workspace-shell` 的样式与 shell 结构（J3 领地）；未新建 `apps/ui/src/agent-settings.tsx`（J2 领地）。
+- 未改 `packages/storage/**`（**schema 仍 v26，`migration.ts` 未被触碰，未占迁移号**）；未改 `packages/domain/**`、`packages/git/**`、`packages/agent-adapters/**`。
+- 未 push、未提升 `main`、未触碰 `/Users/loyage/Documents/codeestra` 与其上的稳定 Runtime；全程只用 CLI/命令面（无 computer-use / 桌面 / 浏览器自动化）。
+- 夹具与进程已回收：手工冒烟测试用独立 `CODEESTRA_HOME=/tmp/ce-j4`（结束后已删除 `/tmp/ce-j4`、`/tmp/ce-j4-assets` 与临时脚本目录）；**可复现的 e2e 用例不写死 `/tmp/ce-j4`**，而是用回收辅助自己登记的临时 home（前缀 `ce-j4-home-`）——因为 `normalizeRuntimeEnvironment` 的安全底线要求测试 home 必须位于 `os.tmpdir()` 内，否则泄漏的 Runtime 无法归属到本工作树；`/tmp/ce-j4` 不满足该检查（macOS 上 `/tmp` → `/private/tmp`，与 `tmpdir()` 不同根）。
+- **孤儿 Runtime 已核验归属后回收**：手工冒烟测试留下了 3 个本工作树的 Runtime 进程（home 为 `/tmp/ce-j4`，其中 1 个仍持有 lock、2 个已成为 ppid=1 且 home 已删的不可达孤儿）。逐个用 `cwd == 本工作树` + `argv` 含本工作树的 `apps/runtime/src/main.ts` + `CODEESTRA_HOME=/tmp/ce-j4` 核验归属，持 lock 的那个另核对 `startToken` 匹配，全部 `SIGTERM` 后确认退出（未用 SIGKILL），且**未触碰** `/Users/loyage/Documents/codeestra` 上的稳定 Runtime（pid 50758 保持运行）。
 
 ## NEXT — 最小可用纵向切片
 
