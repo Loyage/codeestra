@@ -4735,6 +4735,110 @@ grep -o "](\([0-9a-zA-Z._/-]*\.md\)" docs/decisions/README.md | sed 's/](//' | s
 
 两节均在上文单列（「本次规格修订（逐句）」与「上一版记录的事实错误」），此处不重复。
 
+## FOUNDATION-076 — 稳定提升改走 GitHub 中转、dev 独立 clone 与 dev UI 通道标记（ADR-0047/0048/0049）
+
+状态：**已完成本格（底座）**。代码/规范提交 `7292ddc`（已 push 到 `origin/dev`），本记录是其后一个独立文档提交。
+**产品 `promotion` 的 push 语义未实现**（用户裁決分两格，下一格做），本仓库自身的提升改走 `AGENTS.md` 的人工四步。
+基线：`dev = 0e800d7`（未 rebase）；工作目录 `/Users/loyage/Documents/codeestra-dev`（本格执行中由 worktree 变为独立 clone）。
+
+用户 2026-09-15 重新定义了本机的项目构造，并就 8 个决策点作答：
+
+| # | 问题 | 用户裁决 |
+|---|---|---|
+| 1 | promotion 是否同时改产品语义 | **同时改**（产品只 push，拉取由用户手动） |
+| 2 | 是否现在做物理重构 | **现在做** |
+| 3 | 远端如何初始化 | **先推 main 再建 dev** |
+| 4 | dev 实例怎么跑 | **独立 home + 独立端口** |
+| 5 | promotion 怎么拿到 dev clone | **新增 `dev_repo_path` 事实**（下一格） |
+| 6 | 本轮做到哪一步 | **分两格，先底座** |
+| 7 | dev 怎么变独立仓库 | **原地脱离**（不删目录） |
+| 8 | pull 后是否推回 `origin/main` | **推回** |
+
+标注：dev UI 的标记机制用户选**构建期环境变量**，形态选**横幅 + 主题强调色**。
+
+### 交付物
+
+| 交付物 | 内容 | 位置 |
+|---|---|---|
+| A ADR-0047 | 稳定提升经 GitHub 中转：唯一路径、远端即事实来源（必须读回核对 `origin/dev`）、拉取是显式人工步骤（「已推送」不得报成 `SUCCEEDED`）、main 检出只跑稳定服务、所需产品改动、过渡规则、不声称覆盖的场景；Amends ADR-0009 D02/D03 与 ADR-0022 | `docs/decisions/0047-github-mediated-promotion.md` |
+| A ADR-0048 | dev 是独立 clone 与独立 Runtime 实例、main 检出只接受 pull/install/build-ui/stop/status、端口由 Runtime 自取空闲端口、保留 main clone 的过渡 `dev` ref、不做运行期通道推断 | `docs/decisions/0048-dev-clone-and-separate-runtime-home.md` |
+| A ADR-0049 | dev 构建的 UI 通道标记：构建期事实、HTML 标记在 JS 之前生效、横幅 + 橙色强调、验收边界与 fail-visible-absent 取舍 | `docs/decisions/0049-dev-ui-channel-marker.md` |
+| A 索引 | ADR-0009/0022 行加 ADR-0047 amend 标注；`优先级标注` 段补三条；表尾加 0047/0048/0049 三行 | `docs/decisions/README.md` |
+| B 人工规范 | 工作流改为 GitHub 中转四步、本仓库不得用旧 `promotion` 命令、`### 本机检出布局（ADR-0048）`、新增 `### dev 实例`、重启规程改在 main clone 且显式列出 fetch/ff-only/最后 push、`## Git 与文件安全` 措辞 | `AGENTS.md` |
+| C 规格修订 | 3 处（见下「本次规格修订」） | `PROJECT_SPEC.md` |
+| C 架构文档 | §3 新增第 4a 条（ADR-0047 路径与「实现待落」），第 8 条由「不 push」改为允许两类 push | `docs/architecture/git-workspace-api.md` |
+| D 通道实现 | `channel-value.ts`（纯规则 + `markChannelHtml`，vite 与运行时共用）、`src/channel.tsx`（运行时取值/品牌名/横幅）、`App.tsx`（表单页与 shell 都渲染横幅、品牌名带通道）、`main.tsx`（dev 写 `data-channel`、标题统一）、`styles.css`（`.app` 网格行 + `.dev-banner` + dev 强调色覆盖 + 850px `flex: none`）、`vite.config.ts`（`transformIndexHtml` 插件）、`package.json`（`build:ui:dev`） | `apps/ui/…`、`package.json` |
+| D 定向测试 | 新文件：通道纯函数、dev/stable 静态标记、`index.html` 变换、样式表覆盖与固定 shell 首行 | `apps/ui/test/channel-marker.test.ts` |
+
+### 本次规格修订（`PROJECT_SPEC.md`，共 3 处，逐句对照）
+
+- 第 3 行状态段：在「ADR-0022 的 `dev → main` 提升……——该路径**已真实执行三次**；」之后追加一句：ADR-0047 已把稳定提升改为经 GitHub 中转（push 固定候选到远端 `dev` 并读回核对 → main 检出 ff-only 拉取 → 重启并核对 → 才推回远端 `main`），**产品命令面的实现留到下一格**，落地前本仓库自身的提升不再使用该本地 merge 路径。
+- §2 不变量 12：`dev → main` 句中的「不隐式 push，不覆盖用户改动。」改为「提升必须经远端 `dev` 中转（ADR-0047）：显式 push 固定候选到远端 `dev` 并读回核对，main 检出以 fast-forward-only 拉取该候选，重启核对成功后才推回远端 `main`；除该固定候选外不 push 任何 ref、不覆盖用户改动。（远端中转的产品命令面实现待落；落地前本仓库自身的提升按 `AGENTS.md` 的人工四步执行，不得使用旧的本地 `git merge --ff-only` 路径。）」；同句「在 main 工作树」改为「在 main 检出」。
+- §6 技术方向：同句改为「FULL 下固定证据后**经远端 `dev` 中转**提升到 `main` 无需批准（ADR-0047）」。
+- **未改动**：§1.1 第一原则、§3、§4、§5、§7、§8、§9 一字未改（尤其 §8 的「本次交付范围」与「非目标」条款）。
+
+### 远端初始化（已执行并读回核对）
+
+```
+本机 main clone: main = c50730f（比原 origin/main fd3d998 领先 26 个提交）
+git push origin main:refs/heads/main     → fd3d998..c50730f（fast-forward）
+git push origin dev:refs/heads/dev       → * [new branch]（本地 dev 从未 push 过）
+git ls-remote --heads origin            → 7292ddc refs/heads/dev / c50730f refs/heads/main
+```
+
+`push` 前 `git ls-remote` 已能连通（SSH 认证正常）；只用显式 refspec，**未使用 `--force`**。
+
+### 目录分离（`~/Documents/codeestra-dev`：worktree → 独立 clone）
+
+先验证了「工作区已有文件、index 为空」时 `checkout` 的行为不会报 untracked 冲突（在 `/tmp` 的一次性仓库里跑完整序列），再在真实目录原地执行：
+
+1. `rm .git`（删的是指向 `codeestra/.git/worktrees/codeestra-dev` 的**指针文件**，不删任何工作文件）；
+2. `git -C ~/Documents/codeestra worktree prune` → 主 clone 的 `worktree list` 只剩自己；
+3. `git init -q -b dev` → `git remote add origin ssh://git@github.com/Loyage/codeestra.git` → `git fetch origin` →
+   `git read-tree origin/dev`（只写 index，不动工作区）→ `git checkout -B dev origin/dev`；
+4. `git branch --track main origin/main`（与真实 clone 一样拥有本地 `main`，供注册在 dev clone 上的项目读 main ref 策略）。
+
+前后事实：
+
+- 分离前：`dev` HEAD `7292ddc`、工作区 0 改动、`.git` 是指针文件、`worktree list` 含两个目录。
+- 分离后：`rev-parse --git-dir` = `.git`（**目录**）且与主 clone 的 `/Users/loyage/Documents/codeestra/.git` 不同；HEAD `7292ddc` = `origin/dev`；工作区 clean；本地分支 `dev`（上游 `origin/dev`）与 `main`（上游 `origin/main`）；两个 clone 的 `worktree list` 都不再出现对方。
+- **未删除任何东西**：`node_modules` 与 `apps/ui/dist` 原地保留；本地 `lane/*`、`task/*` 分支原本就都在 `dev` 里（已合并），随主 clone 的 ref 保留，本格未清理。
+- **过渡事实（ADR-0048 D04）**：主 clone 里仍保留本地 `refs/heads/dev`，稳定 Runtime 目前用它当 Task 基线（ADR-0018），它**不随 `origin/dev` 前进**，不得当作提升证据；下一格以 `dev_repo_path` 取代后才删。
+
+### dev 实例与通道标记（实际观察值）
+
+在 dev clone 里以 `CODEESTRA_HOME=~/.local/state/codeestra-dev` 启动，稳定实例全程未重启：
+
+| 事实 | 稳定实例 | dev 实例 |
+|---|---|---|
+| pid / bootId | `61512` / `f12ec062-fec1-4733-9cbb-6eee225f000e` | `82909` / `901a8052-bbfb-47ca-9e1e-a30228d9a414` |
+| home | `~/.local/state/codeestra` | `~/.local/state/codeestra-dev` |
+| Runtime 入口（ps 实读） | `…/codeestra/apps/runtime/src/main.ts` | `…/codeestra-dev/apps/runtime/src/main.ts` |
+| `status` / `uiRunning` | `READY` / true | `READY` / true |
+| UI 端口（自取空闲端口） | 58256 | 61221 |
+| `GET /` 的 `<title>` | `Codeestra` | `Codeestra DEV` |
+| `GET /` 中 `data-channel="dev"` | 0 处 | 1 处 |
+
+稳定实例在 dev 实例启动前后 pid/bootId **完全相同**，证明两者互不干扰；从 dev clone 不带 `CODEESTRA_HOME` 跑 `status` 会连到稳定 Runtime（home 口径决定），带独立 home 才走 dev 代码。**未记录任何实际 token**（token 只在 shell 变量中使用后 `unset`，且静态根路径不需要 token）。
+
+`bun run build:ui` / `bun run build:ui:dev` 的产物差异：`apps/ui/dist/index.html` 只有 `build:ui:dev` 带 `data-channel="dev"` 与 `Codeestra DEV`；除该标记外与 `apps/ui/index.html` 的差异仅为 vite 注入的 asset 标签。
+
+### 实际运行的检查与结果（定向，ADR-0038；未跑 `bun run check` / `just check` / `just verify` / `check:fast`）
+
+- `bun run --cwd apps/ui typecheck` → 退出码 0。
+- `bunx vitest run apps/ui/test/channel-marker.test.ts apps/ui/test/shell-layout.test.ts` → **2 files / 19 tests 全部通过**（新文件含通道纯函数与样式表/HTML 契约；`shell-layout` 是 FOUNDATION-072 的既有固定 shell 契约，未回归）。
+- 构建断言：见上（读 `dist/index.html`，不靠 grep JS bundle——两端 bundle 都含横幅字符串所属的代码，差异只在运行时的通道判定）。
+- 远端/目录/双实例断言：见上三节，均为命令面事实；**UI 的实际观感（横幅、橙色、窄屏、深色对比度）未经机器断言**，属用户在场的人工确认（ADR-0008）。
+- 本格**未运行任何 migration**（无 schema 变更，仍 v28），未改动 `packages/**` 与 `apps/runtime/**`。
+
+### 未验证 / 留给下一格
+
+- ADR-0047 的所有产品命令面断言（push 后读回核对失败即拒绝、push 成功但未拉取时报告「等待拉取」而不是 `SUCCEEDED`、拉取后再次调用才收口并重启、远端 `dev` 被移动即 `STALE`）**均未执行**——因为实现尚未存在；`promotion prepare/approve/promote` 目前仍是旧的本地 ff 代码，**本仓库自身不得调用**。
+- 下一格预定的产品改动：`projects.dev_repo_path`（可空，schema **v29**）、`project trust` 的显式 `--dev-repo` 核验、`promotion promote` 的 push + 读回核对 + 等待拉取 + 收口、证据同时绑定本地候选与远端 `dev` SHA。
+- 未配置 GitHub 侧分支保护/必经评审/CI 门禁；不声称已在后台监控系统外手动更新 `main`。
+- dev clone 里的本地 `main` 不会自动前进（无定时 fetch）；需要最新 main ref 时显式 `git fetch`，本格未改为自动。
+- Orca 等外部工具若记录了旧的 worktree 身份，需要用户侧重新指向 dev clone；本格未修改这些外部工具的数据。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），
@@ -4742,6 +4846,10 @@ grep -o "](\([0-9a-zA-Z._/-]*\.md\)" docs/decisions/README.md | sed 's/](//' | s
 
 **2026-09-15 更新（FOUNDATION-075）**：原第 11 条（J1 第 7、10 条的两处待用户裁决不一致）已经用户裁决并由 FOUNDATION-075 收口，
 因此从剩余列表移出（依据见文末「本次从 NEXT 移除的条目及依据」与 FOUNDATION-075 一节）；剩余列表现在只有 1–10 号。
+
+**2026-09-15 更新（FOUNDATION-076）**：用户重新定义了本机项目构造，稳定提升路径已改为**经 GitHub 中转**（ADR-0047），
+`dev` 与 `main` 已成为两个分别 clone 的独立仓库（ADR-0048），dev 构建的 UI 带构建期通道标记（ADR-0049）。
+因此新增下面第 11 条（ADR-0047 的产品实现）；本次**没有**从剩余列表移出任何条目。原第 10 条不变。
 
 ### 仍然剩余
 
@@ -4761,7 +4869,7 @@ grep -o "](\([0-9a-zA-Z._/-]*\.md\)" docs/decisions/README.md | sed 's/](//' | s
 5. **多成员 IntegrationBatch**（原第 0 条的剩余）：`integration_batch_items` 表存在，但 `task.integrate` 每次只集成一个
    Task；批级 `STALE`、批级 `CANCELLED`、任务集合级集成仍是后续合约（见 `docs/architecture/state-machines.md` §4）。
    三次真实的 `dev → main` 提升都走 AGENTS.md 的人工路径；产品命令 `promotion prepare` 需要 IntegrationBatch 的集成验证
-   证据，而这些批次没有产生它。
+   证据，而这些批次没有产生它。（**ADR-0047 后**：第四次起的人工路径本身也必须经远端 `dev` 中转，见上面第 11 条。）
 6. **Phase 2 验收矩阵里「两个 SAFE 任务真的同时跑」**：调度引擎本体已实现（ADR-0033），但真实 provider 的并发运行
    未完成受控验收（`docs/guides/troubleshooting.md` §4 第 1 条）。在此之前该验收项仍算未成立。
 7. **Phase 6 的 provider 消费**：`project knowledge *` 命令面与 Execution 绑定已实现（ADR-0041/schema v26），但 Adapter
@@ -4773,6 +4881,11 @@ grep -o "](\([0-9a-zA-Z._/-]*\.md\)" docs/decisions/README.md | sed 's/](//' | s
    观感、固定 shell 在窄屏与矮窗口的表现、Agent 设置页在窄屏下的排布。
 10. **Phase 7 Self Evolution 全部未开始**：Self Task、Candidate、自托管测试、`PROMOTABLE`、用户 Promotion、独立 bootstrap
     与恢复演练；不可逆 migration 与 bootstrap 自身更新的策略仍是 Phase 7 的阻塞决策。
+11. **ADR-0047 的产品实现（已定，下一格）**：`promotion` 命令面改为「push 固定候选到远端 `dev` + 读回核对」并在
+    main 检出尚未拉取时报告「等待拉取」而不是 `SUCCEEDED`；需要新增可空列 `projects.dev_repo_path`（schema **v29**）并让
+    `project trust` 显式核验它（两个 clone 分离后稳定 Runtime 手里没有 dev 候选对象）；提升证据需同时绑定本地候选 SHA
+    与读回的 `origin/dev` SHA，远端移动即 `STALE`。在此之前本仓库自身的提升只能走 `AGENTS.md` 的人工四步，
+    **不得调用旧的本机 ff 实现**。（本格只落了规范、目录分离与 dev UI 标记。）
 
 ### 原 0–7 编号对照
 
