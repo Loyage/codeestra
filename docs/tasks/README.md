@@ -6668,6 +6668,52 @@ domain/ui 一行未动，且 ADR-0038 禁止在 lane 上跑全量（协调者在
 **本增量如实报告的缺口（不属本格范围，未改）**：界面发送 `project.trust` 时仍**不发送** `expectedImpactPolicy`
 （契约里它是可选字段，CLI 总是发）：从界面信任的项目会记不到影响映射，于是影响判定恒为 `UNKNOWN`。
 这是本格之前就存在的 UI/CLI 差异，本增量只对齐 `devRepoPath`，所以把它列在这里。
+## Wave N 开发分支集成（N3 → N1 → N2，3 格经 Orca 受监督编排）
+
+状态：**三格已合入 `dev`，合并后的完整 `bun run check` 退出码 0**（Vitest 21 文件 / 502 项；Bun 862 pass / 0 fail）。未 push、未提升 `main`、未触碰稳定 clone 与其上的稳定 Runtime。
+
+本波对应用户「继续分析还有哪些开发项、哪些可并行」的指示。基线固定 `dev@f258c59da0126382b0448b85d71a1a80ca347d0c`（= FOUNDATION-086 合入后的 `dev`，三格同基线、未 rebase），Run `run_bd614ab9d2af`（Orca 受监督）。schema：**N2 占 v31**，其余两格不占迁移号。
+
+### 固定提交与合并顺序
+
+| 顺序 | 分支 | lane commit | `dev` 合并 | FOUNDATION / ADR / schema | 合并后完整检查 |
+|---|---|---|---|---|---|
+| N3 | `lane/n3-integration-batch-ui` | `405bd35` | merge `69b055e` | 089 / 无 / 无 | **exit 0**（Vitest 21/502、Bun 827/0） |
+| N1 | `lane/n1-dev-baseline` | `6d4430c` + `0fe8371` | merge `3837046`、fix merge `f814fc5` | 087 / **ADR-0056** / 无 | 首次 **exit 1**（Bun 839/1）→ 集成修复 `441b742` → N1 修复后 **exit 0**（Bun 840/0） |
+| N2 | `lane/n2-session-guidance` | `41b8661` + `24c63af` | merge `a969739`、fix merge `bd7568d` | 088 / **ADR-0057** / **v31** | 首次 **exit 1**（Bun 861/1）→ N2 修复后 **exit 0**（Bun 862/0） |
+
+最终 `dev` = `bd7568d`（`phase1SchemaVersion = 31`）。
+
+### 协调者在合并期的两次裁决（N1 实测推翻指示，均已写进 ADR-0056）
+
+1. **ADR-0048 的 `dev` 长期检出 vs ADR-0018 的 `DEV_REF_CHECKED_OUT`**：**选 A**——只有 dev clone 自己的 `dev` 检出是「允许被推进」的唯一例外（三项前置：HEAD 在 `refs/heads/dev`、`status --porcelain` 为空、HEAD/ref 都等于批次基线 OID），其它工作树检出 `dev` 仍一律拒绝。
+2. **上述推进方式的实现**：N1 实测发现 `HEAD` 是 `refs/heads/dev` 的符号引用，因此「`update-ref` + `rev-parse HEAD == rev-parse refs/heads/dev`」**平凡成立却不证明检出已更新**（`git status` 会显示新提交引入的文件为 `D`，`merge --ff-only` 还打印 “Already up to date.”）——照原指示写会产出「核验通过但检出落后」的假成功报告。改为 **B**：`git -C <dev clone> merge --ff-only <merged>`，**成功判据含 `status` 为空**，失败记 `DEV_CHECKOUT_FF_FAILED` 且不回滚、不变造现场。
+
+### 合并后才暴露的集成缺陷（三次，全部已修）
+
+| # | 缺陷 | 归属与修法 |
+|---|---|---|
+| 1 | `apps/ui/test/integration-batches.test.ts` 的漂移守卫（读 `integration-service.ts` 源码里的稳定码）报缺 `DEV_CHECKOUT_FF_FAILED`（ADR-0056 在该命令面上新增的唯一拒绝码） | 协调者在 `dev` 提交 `441b742`：补进 UI 词汇表；**同时**移除 `apps/ui/test/project-trust.test.ts` 里「`DEV_REPO_REQUIRED` 只是前向声明」的豁免（N1 合入后它已能被源码证明，继续豁免就是假陈述）——该码移入 grounded 词汇表、前向列表清空、测试改为断言列表为空且每个文档码都能在源码找到 |
+| 2 | `apps/runtime/test/snapshot-generation-recheck.test.ts` 的 `STALE_BASE` 用例：它把 `dev` ref 移在 fixture **主仓**里，而 N1 之后基线从 **dev clone** 读 → 不再拒绝 | **N1 漏跑的受检文件**（其自查清单里只有 `cli-snapshot-recheck` e2e）。派回 N1：先在自己分支复现同一条失败 → `0fe8371` 让快照基线改读 dev clone、用例改为在 dev clone 里真实提交推进 `dev`（**断言一字未改**）→ 记录新增「合并后才暴露的缺陷」节并写明漏检原因（按「是否实例化我改过的服务」挑文件，而该文件经 `SlotReservationService.acquire` + fixture 间接引用） |
+| 3 | `apps/runtime/test/cli-session-guidance.test.ts` 用 `open <repo> --no-open` 断言退出码 0，而 N1 让 trust/`open` **必须**带 `--dev-repo` → 实际 1 | **跨格后果**（N2 分支上看不到 N1 的改动）。派回 N2：夹具真的造出第二个独立 clone（裸 origin → 主检出 push `main`+`dev` → `git clone` → checkout `dev`，四项 ADR-0056 核验由**真 Git 对象**满足），用例改用 `project trust --dev-repo … --yes` + `project inspect`（断言 `devRepoPath.verified === true` 且 path 等于夹具 clone），提交 `24c63af` |
+
+**教训（写进两格记录并要求后续格照办）**：定向测试的**选取方式**要按**反向依赖**（grep 自己改过的 API/字段名）而不是按文件名前缀；N1 与 N2 各自都因此补跑了 `apps/runtime/test` **整目录**（N1：453 pass / 0 fail；N2：459 pass / 0 fail）与四个 packages。
+
+### 本波修订的既有语义（不得静默）
+
+- **ADR-0056 amends ADR-0018**：集成推进从「ref 未被任何工作树检出才可 CAS」改为「dev clone 自己的检出是唯一例外，且以 Git 自己的 `--ff-only` 前移 + `status` 为空的成功判据」；`git-workspace-api.md` §3b 同步。
+- **`projects.dev_repo_path` 变为必需**：`project trust` 省略或 `none` 一律 `DEV_REPO_REQUIRED`（在任何写入之前、不改写已有行）；已信任但为空的项目在任何需要 dev 基线的操作上同样拒绝并给补救命令；**不回退**到某个 clone 自己的本地 `dev` ref。
+
+### 如实记录的已知边界与遗留
+
+- **dev clone 自己作为项目根时无法接入**（实测 `DEV_REPO_BRANCH_MISMATCH`，因为 `dev_repo_path` 必须是「另一个 clone」）→ dev 实例不能对 dev clone 自身跑 Task；稳定实例（项目根 = main 检出）不受影响。
+- **一次性人工补救**（提升 + 重启之后，在 main clone）：`bun run codeestra project trust /Users/loyage/Documents/codeestra --dev-repo /Users/loyage/Documents/codeestra-dev`；随后在确认「没有任何已信任项目缺 dev clone」之后，由人工删除 main 检出里那个落后的过渡 `dev` ref（当前 `7292ddc`）。
+- **测试卫生（未修）**：`cli-attention` 的 workbench HTTP 用例在导出 `http_proxy/https_proxy` 的 shell 里会失败（UI 的 `fetch` 把 loopback 请求发给 Clash → 502 空 body → `TypeError`）。N1 用「设代理 2 pass/1 fail、`env -u` 后 3 pass/0 fail」的证据矩阵证明它**与本波无关、也不是基线缺陷**，并把原「基线就红」的结论**撤回**。可选加固（这些用例显式禁用代理或设 `NO_PROXY=127.0.0.1`）留给后续格。
+- **N1 汇报期的一次误执行**：新 CLI 连到了旧代码的稳定 Runtime（旧 Runtime 不返回 `devRefRetirement`，新 CLI 崩），已修掉该兼容缺陷。协调者独立只读核验：稳定实例仍是一个项目、`devRepoPath: null`、`trustedAt` 仍是 2026-09-13，**稳定库未被改动**。
+- **未验证**：Session Guidance 的真实模型效果（模型是否读了 guidance、真实 Pi 在忙碌轮次里是否接受 `steer`、Codex `turn/steer`）、guidance 的 UI 投影、N3 报告的多成员批次命令面缺口（批级无进度/耗时；`task.integration.get` 的 `members` 缺字段；`integrate`/`cancel` 的过期表现为批级 `STALE` 而非 `CONCURRENT_MODIFICATION`；`INTEGRATED` 的 `outcomeCode` 为 `null`；任务详情既有的「合入 dev」按钮仍按本地允许清单隐藏）。
+- **N2 的新 e2e 用 `project trust --dev-repo` 而非 `open --dev-repo`**（因为后者在它的基线分支上还不存在），因此 `open` 组合 trust 的路径在本波**没有**新的 e2e 覆盖；已知并如实记录。
+- **仍未做**：`## NEXT` 与 `docs/roadmap/mvp.md` 的校准（NEXT 第 3/4/7/12/13 条文字已被 Wave L/M 的实现推翻，见 PARALLEL-PLAN 的 Wave N §9 表）、`docs/guides/**` 的版本/校对头刷新（ADR-0050 D02）、本波的 `dev → main` 提升与重启。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），
