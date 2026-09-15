@@ -7,6 +7,7 @@ import {
   registerTemporaryDirectory,
   runCli,
 } from './support/runtime-reclamation.js';
+import { provisionDevClone } from './support/agent-fixture.js';
 
 /**
  * End-to-end evidence for `project impact` (ADR-0031) through the real CLI and the real Runtime:
@@ -120,6 +121,8 @@ const impactMapping = {
 
 interface RepositoryFixture {
   readonly repository: string;
+  /** The dev clone the project is trusted with (ADR-0056). */
+  readonly devRepo: string;
   readonly tools: string;
 }
 
@@ -145,13 +148,16 @@ async function createRepository(input: {
   await git(repository, ['add', '.']);
   await git(repository, ['commit', '-q', '-m', 'fixture']);
   await git(repository, ['branch', 'dev']);
+  // ADR-0056: every dev fact comes from a second clone of the same origin that sits on
+  // `dev`; the project is trusted with it explicitly.
+  const devRepo = await provisionDevClone({ repository: repository });
 
   const stubPath = join(tools, 'stub-pi.ts');
   const shimPath = join(tools, 'pi');
   await Bun.write(stubPath, stubSource);
   await Bun.write(shimPath, `#!/bin/sh\nexec "${process.execPath}" "${stubPath}" "$@"\n`);
   chmodSync(shimPath, 0o755);
-  return { repository, tools: shimPath };
+  return { repository, devRepo, tools: shimPath };
 }
 
 interface TaskPayload {
@@ -237,7 +243,7 @@ describe('project impact', () => {
     const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets,
       CODEESTRA_PI_EXECUTABLE: main.tools };
 
-    const opened = await cli(['open', main.repository, '--no-open'], environment);
+    const opened = await cli(['open', main.repository, '--dev-repo', main.devRepo, '--no-open'], environment);
     expect(opened.exitCode).toBe(0);
     expect(opened.stderr).toContain('Impact mapping');
     const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
@@ -349,7 +355,7 @@ describe('project impact', () => {
     // UNKNOWN: a project that declares no impact mapping can never prove anything.
     const bare = await createRepository({ prefix: 'codeestra-impact-bare', withImpactMapping: false });
     const bareEnvironment = { ...environment, CODEESTRA_PI_EXECUTABLE: bare.tools };
-    expect((await cli(['open', bare.repository, '--no-open'], bareEnvironment)).exitCode).toBe(0);
+    expect((await cli(['open', bare.repository, '--dev-repo', bare.devRepo, '--no-open'], bareEnvironment)).exitCode).toBe(0);
     const bareProjects = JSON.parse((await cli(['project', 'list'], bareEnvironment)).stdout) as
       readonly { readonly id: string; readonly name: string }[];
     const bareProjectId = bareProjects.find((entry) => entry.id !== projectId)?.id as string;
@@ -380,7 +386,7 @@ describe('project impact', () => {
     await Bun.write(join(main.repository, '.codeestra', 'impact.json'), '{ not json }\n');
     await git(main.repository, ['add', '.codeestra/impact.json']);
     await git(main.repository, ['commit', '-q', '-m', 'break the mapping']);
-    expect((await cli(['open', main.repository, '--no-open'], environment)).exitCode).toBe(0);
+    expect((await cli(['open', main.repository, '--dev-repo', main.devRepo, '--no-open'], environment)).exitCode).toBe(0);
     const invalid = await cli(['project', 'impact', 'validate', main.repository, '--json'], environment);
     expect(invalid.exitCode).toBe(1);
     expect(JSON.parse(invalid.stdout)).toMatchObject({

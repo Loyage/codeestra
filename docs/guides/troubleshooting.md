@@ -73,10 +73,26 @@ CODEESTRA_HOME=/tmp/codeestra-dev bun run codeestra status
 
 同一个 home 上有两个 Runtime 应答过。这是事实，不是文案问题：先确认哪个是你想要的，再决定停谁。
 
-### `project trust` 报 `DEV_REF_MISSING`
+### `project trust` 报 `DEV_REPO_REQUIRED`
 
 Codeestra 要求项目长期保留 `main` 与 `dev`（ADR-0009），并且**所有功能 Task 从固定 `dev` commit 建基线**。
-先在项目里创建 `dev` 分支，再 trust。
+从 ADR-0056 起，那个 `dev` 分支由项目的 **dev clone**（`projects.dev_repo_path`）提供，不是主检出自己的本地 ref。
+`--dev-repo` 因此是必需的；省略它（或写 `none`）会在**任何写入之前**以 `DEV_REPO_REQUIRED` 拒绝。
+补救：`git clone <origin> /path/to/dev-clone && git -C /path/to/dev-clone checkout dev`，然后
+`project trust <repo> --dev-repo /path/to/dev-clone`。dev clone 上没有 `dev` 分支报 `DEV_REPO_DEV_REF_MISSING`。
+
+### 已经正常跑过一段时间的项目突然报 `DEV_REPO_REQUIRED`
+
+它的 `dev_repo_path` 仍是空的（在这条裁决之前 trust 的）。补救同样是补一次
+`project trust <repo> --dev-repo <dev-clone>`：拒绝只影响需要 dev 基线的操作，不会改写已有行。
+`project inspect` 会只读地告诉你哪些已信任项目还没有 dev clone（`devRefRetirement.projectsWithoutDevRepo`）。
+
+### 集成报 `DEV_CHECKOUT_NOT_ON_DEV` / `DEV_CHECKOUT_DIRTY` / `DEV_CHECKOUT_MOVED`
+
+集成要把 dev clone 里的 `refs/heads/dev` **和它的工作树**一起快进，所以它先核验那个检出：必须在 `dev` 上、
+`git status --porcelain` 为空、且 HEAD 与 `refs/heads/dev` 都等于批次固定的基线。三查任一不成立即拒绝、
+不合并、不推进。最常⻅的原因是你在 dev clone 里留了未提交或未跟踪的文件 —— 提交或移走它们再集成
+（Runtime **不会**用 `reset --hard` / `checkout -f` 覆盖你的工作）。
 
 ### `project trust` 报 `VERIFICATION_POLICY_CHANGED` / `IMPACT_POLICY_CHANGED` / `REPOSITORY_CHANGED`
 

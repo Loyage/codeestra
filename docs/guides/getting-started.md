@@ -179,14 +179,15 @@ bun run codeestra project impact validate /path/to/repo --json
 
 ```sh
 # FULL（默认）：无确认
-bun run codeestra project trust /path/to/repo
+bun run codeestra project trust /path/to/repo --dev-repo /path/to/dev-clone
 
 # STRICT：需要确认，交互输入 TRUST，或脚本传 --yes
 bun run codeestra permission set strict
-bun run codeestra project trust /path/to/repo --yes
+bun run codeestra project trust /path/to/repo --dev-repo /path/to/dev-clone --yes
 ```
 
-**前提**：仓库是合法 Git 仓库；`dev` 分支存在；`main` ref 可读。
+**前提**：仓库是合法 Git 仓库；`main` ref 可读；**另有一个同 origin 的 dev clone 检出 `dev`**
+（ADR-0056：`--dev-repo` 必需，它是全部 dev 事实的唯一来源；省略该 flag 以 `DEV_REPO_REQUIRED` 拒绝且不写入任何东西）。
 
 **影响**：一旦 trust，Agent 工具、验证命令与 Git hooks 会**以你的用户权限**运行。STRICT 下文本明确写着：
 这**不**授权 commit、更新 main、push 或使用未知工具。
@@ -273,7 +274,9 @@ bun run codeestra stop --wait 30      # 最多等 30 秒（0–600）
 
 1. **UI 打不开、报 `UI_ASSETS_MISSING`** → 先 `bun run build:ui`。
 2. **CLI 打到了别的 Runtime** → 检查 `CODEESTRA_HOME`；一个 home 只跑一个 Runtime。
-3. **`project trust` 报 `DEV_REF_MISSING`** → 项目要先有 `dev` 分支（ADR-0009 要求长期保留）。
+3. **`project trust` 报 `DEV_REPO_REQUIRED`** → 没有给出（或没记录）dev clone。先 clone 一份同 origin 的
+   检出并 `git checkout dev`，再 `project trust <repo> --dev-repo <dev-clone>`（ADR-0056）。
+   dev clone 上没有 `dev` 分支时报 `DEV_REPO_DEV_REF_MISSING`。
 
 更多报错见 [troubleshooting.md](./troubleshooting.md)。
 

@@ -104,6 +104,109 @@ export async function listCheckedOutRefs(repositoryRoot: string): Promise<readon
   return checkedOut;
 }
 
+/**
+ * The state of the one checkout an integration is allowed to advance: the dev clone's own long-lived
+ * `dev` worktree (ADR-0056, amending ADR-0018).
+ *
+ * Advancing a ref that a worktree has checked out normally leaves that worktree's index and files
+ * behind the ref, which is why the integration refuses. The dev clone is the single exception, and
+ * only because the integration keeps it consistent: it reads these facts before the ref moves, and
+ * fast-forwards that same worktree immediately afterwards. The dirty judgement therefore includes
+ * untracked files (`git status --porcelain`), because an untracked file is exactly what a
+ * fast-forward would have to overwrite.
+ */
+export interface DevCheckoutState {
+  readonly path: string;
+  /** The branch HEAD is symbolically on, or null when HEAD is detached. */
+  readonly branchRef: string | null;
+  readonly headCommit: string | null;
+  /** True only when `git status --porcelain` reports nothing at all, untracked files included. */
+  readonly clean: boolean;
+  /** Bounded evidence for a refusal; empty when the worktree is clean. */
+  readonly statusDetail: string;
+}
+
+export async function inspectDevCheckout(input: {
+  readonly path: string;
+}): Promise<DevCheckoutState> {
+  const branch = await runGit(input.path, ['symbolic-ref', '-q', 'HEAD']);
+  const branchRef = branch.exitCode === 0 && branch.stdout.trim().length > 0
+    ? branch.stdout.trim()
+    : null;
+  const head = await runGit(input.path, ['rev-parse', '--verify', 'HEAD']);
+  const headCommit = head.exitCode === 0 ? head.stdout.trim() : null;
+  // `--porcelain` without `-z`: the refusal detail must stay a bounded, human-readable list. The
+  // judgement itself is "is this output empty", which is why untracked files are included here and
+  // not filtered out the way a tracked-only comparison would.
+  const status = await runGit(input.path, ['status', '--porcelain']);
+  if (status.exitCode !== 0) {
+    throw new GitInspectionError('COMMAND_FAILED',
+      status.stderr.trim() || `git status exited with ${status.exitCode}`);
+  }
+  const statusDetail = status.stdout.trim();
+  return {
+    path: input.path,
+    branchRef,
+    headCommit,
+    clean: statusDetail.length === 0,
+    statusDetail: statusDetail.slice(0, 4_000),
+  };
+}
+
+/**
+ * Moves the dev clone's own `dev` worktree forward with **Git's own fast-forward**, so the ref, the
+ * index and the working tree move in one operation.
+ *
+ * ADR-0056 requires this shape, and the reason is a measured one: `HEAD` in that checkout is a
+ * symbolic reference to `refs/heads/dev`, so after `git update-ref refs/heads/dev <new>` both
+ * `rev-parse HEAD` and `rev-parse refs/heads/dev` already report `<new>` while the index and the
+ * working tree are still at the old commit — `git status` shows the files the new commit introduced as
+ * `D`, and a following `git merge --ff-only <new>` prints "Already up to date" and does nothing. The
+ * three-way equality therefore proves nothing on its own, which is why success is judged by
+ * `git status --porcelain` being empty as well. Doing the advance with `merge --ff-only` (and no
+ * hand-written ref write) is what makes a consistent checkout possible without `reset --hard`,
+ * `checkout -f` or `--force`: the expected-value protection is a read-compare-refuse in the caller,
+ * not an atomic compare-and-swap.
+ *
+ * Nothing here repairs a failure: a refused fast-forward is reported with the facts it observed (ref
+ * value, HEAD value, dirty paths) and the caller records them.
+ */
+export async function fastForwardCheckedOutWorktree(input: {
+  readonly path: string;
+  readonly branchRef: string;
+  readonly newCommit: string;
+}): Promise<{
+  readonly advanced: boolean;
+  readonly refCommit: string | null;
+  readonly headCommit: string | null;
+  /** Null when the status could not be read; a successful move requires exactly `true`. */
+  readonly clean: boolean | null;
+  readonly detail: string;
+}> {
+  const merge = await runGit(input.path, ['merge', '--ff-only', input.newCommit]);
+  const refCommit = await readLocalRefCommit({ repositoryRoot: input.path, ref: input.branchRef });
+  const head = await runGit(input.path, ['rev-parse', '--verify', 'HEAD']);
+  const headCommit = head.exitCode === 0 ? head.stdout.trim() : null;
+  const status = await runGit(input.path, ['status', '--porcelain']);
+  const statusDetail = status.exitCode === 0 ? status.stdout.trim() : null;
+  const clean = statusDetail === null ? null : statusDetail.length === 0;
+  const observed = `ref ${refCommit ?? 'a missing ref'} · HEAD ${headCommit ?? 'unreadable'}`
+    + `${statusDetail === null ? ' · status unreadable'
+      : statusDetail.length === 0 ? ' · worktree clean' : ` · worktree not clean: ${statusDetail.slice(0, 500)}`}`;
+  if (merge.exitCode !== 0) {
+    return { advanced: false, refCommit, headCommit, clean,
+      detail: `${(merge.stderr.trim() || merge.stdout.trim()
+        || `git merge --ff-only exited with ${merge.exitCode}`).slice(0, 4_000)} (${observed})` };
+  }
+  if (refCommit !== input.newCommit || headCommit !== input.newCommit || clean !== true) {
+    return { advanced: false, refCommit, headCommit, clean,
+      detail: `the fast-forward was attempted but ${input.branchRef} did not end up at`
+        + ` ${input.newCommit} in a clean checkout (${observed})` };
+  }
+  return { advanced: true, refCommit, headCommit, clean: true,
+    detail: `${input.branchRef}, its index and its working tree are all at ${input.newCommit}` };
+}
+
 export async function isAncestor(input: {
   readonly repositoryRoot: string;
   readonly ancestor: string;

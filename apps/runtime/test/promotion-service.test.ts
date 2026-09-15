@@ -221,14 +221,18 @@ async function promotionFixture(options: {
   // The bare remote is local, so no test ever writes to a real GitHub repository.
   const remote = temporaryDirectory('codeestra-promotion-remote-');
   await git(remote, ['init', '--bare', '-b', 'main']);
-  await git(value.repo, ['remote', 'add', 'origin', remote]);
+  // The fixture repository already carries the origin its own dev clone shares; this test needs
+  // *its* bare remote to be that origin so the dev clone it re-records is a clone of the same one
+  // (ADR-0056 compares them).
+  await git(value.repo, ['remote', 'set-url', 'origin', remote]);
   await git(value.repo, ['push', '-q', 'origin', 'refs/heads/main:refs/heads/main']);
   const devClone = temporaryDirectory('codeestra-promotion-devclone-');
   await git(devClone, ['clone', '-q', remote, '.']);
-  // The candidate only exists in the main checkout; it reaches the dev clone the way the dev clone
-  // would get it in reality (fetch the integrated dev branch), and never through the remote — the
-  // promotion is the only thing allowed to push it.
-  await git(devClone, ['fetch', '-q', value.repo, 'refs/heads/dev:refs/heads/dev']);
+  // The candidate exists in the project's dev clone (ADR-0056: the integration advances *that* `dev`
+  // ref, not the main checkout's); it reaches this second clone the way it would in reality (fetch the
+  // integrated dev branch), and never through the remote — the promotion is the only thing allowed to
+  // push it.
+  await git(devClone, ['fetch', '-q', value.devRepo, 'refs/heads/dev:refs/heads/dev']);
   await git(devClone, ['checkout', '-q', 'dev']);
   await recordDevClone(value, devClone);
   return {
@@ -485,8 +489,11 @@ describe('preparing a promotion', () => {
       await expect(prepare(fixture, { expectedMainCommit: 'f'.repeat(40) }))
         .rejects.toMatchObject({ code: 'MAIN_REF_MOVED' });
       expect(fixture.value.storage.listStablePromotions(fixture.value.projectId)).toEqual([]);
-      // main already at the candidate: there is nothing to promote.
-      await git(fixture.mainWorktree, ['merge', '--ff-only', '-q', fixture.candidateCommit]);
+      // main already at the candidate: there is nothing to promote. The candidate is an object of the
+      // dev clone (ADR-0056), so the main checkout reaches it the way the user's pull does: fetch the
+      // integrated dev branch and fast-forward onto it.
+      await git(fixture.mainWorktree, ['fetch', '-q', fixture.devClone, 'refs/heads/dev']);
+      await git(fixture.mainWorktree, ['merge', '--ff-only', '-q', 'FETCH_HEAD']);
       await expect(prepare(fixture, { expectedMainCommit: fixture.candidateCommit }))
         .rejects.toMatchObject({ code: 'PROMOTION_NOTHING_TO_PROMOTE' });
       expect(fixture.value.storage.listStablePromotions(fixture.value.projectId)).toEqual([]);

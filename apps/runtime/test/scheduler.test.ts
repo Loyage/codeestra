@@ -162,9 +162,9 @@ describe('dependency scheduler', () => {
     ).get()?.count).toBe(0);
 
     // The upstream result reaches dev: an INTEGRATED batch whose merged commit is on dev.
-    const devBefore = await git(fixture.repo, ['rev-parse', 'refs/heads/dev']);
-    const integrated = await commitTree(fixture.repo, devBefore, 'upstream result');
-    await git(fixture.repo, ['update-ref', 'refs/heads/dev', integrated]);
+    const devBefore = await git(fixture.devRepo, ['rev-parse', 'refs/heads/dev']);
+    const integrated = await commitTree(fixture.devRepo, devBefore, 'upstream result');
+    await git(fixture.devRepo, ['update-ref', 'refs/heads/dev', integrated]);
     recordIntegrationFact(storage, { projectId, taskId: upstreamTaskId,
       revisionId: upstreamRevisionId, executionId: 'execution-upstream', batchId: 'batch-1',
       integratedCommit: integrated, devCommit: devBefore });
@@ -195,10 +195,10 @@ describe('dependency scheduler', () => {
     const { storage, projectId, taskId: upstreamTaskId, revisionId: upstreamRevisionId } = fixture;
     createSubmittedTask(storage, projectId, 'downstream', 'downstream-revision', 'Consume the upstream');
     await addDependency(storage, fixture, 'downstream', upstreamTaskId, 'dep-add-1');
-    const devStart = await git(fixture.repo, ['rev-parse', 'refs/heads/dev']);
-    const integrated = await commitTree(fixture.repo, devStart, 'upstream result');
-    const advanced = await commitTree(fixture.repo, integrated, 'later dev work');
-    await git(fixture.repo, ['update-ref', 'refs/heads/dev', advanced]);
+    const devStart = await git(fixture.devRepo, ['rev-parse', 'refs/heads/dev']);
+    const integrated = await commitTree(fixture.devRepo, devStart, 'upstream result');
+    const advanced = await commitTree(fixture.devRepo, integrated, 'later dev work');
+    await git(fixture.devRepo, ['update-ref', 'refs/heads/dev', advanced]);
     recordIntegrationFact(storage, { projectId, taskId: upstreamTaskId, revisionId: upstreamRevisionId,
       executionId: 'execution-upstream', batchId: 'batch-1', integratedCommit: integrated,
       devCommit: devStart });
@@ -208,8 +208,8 @@ describe('dependency scheduler', () => {
     })).state).toBe('READY');
 
     // dev is rewritten from the same starting point, so the upstream commit is no longer reachable.
-    const divergent = await commitTree(fixture.repo, devStart, 'rewritten dev');
-    await git(fixture.repo, ['update-ref', 'refs/heads/dev', divergent]);
+    const divergent = await commitTree(fixture.devRepo, devStart, 'rewritten dev');
+    await git(fixture.devRepo, ['update-ref', 'refs/heads/dev', divergent]);
     const reblocked = await reconcileTaskDependencyState({
       storage, projectId, taskId: 'downstream', commandId: 'reconcile-2', actor: 'local-user',
     });
@@ -233,9 +233,9 @@ describe('dependency scheduler', () => {
     expect(storage.getTask(projectId, 'middle')?.state).toBe('BLOCKED');
     expect(storage.getTask(projectId, 'leaf')?.state).toBe('BLOCKED');
 
-    const devStart = await git(fixture.repo, ['rev-parse', 'refs/heads/dev']);
-    const integrated = await commitTree(fixture.repo, devStart, 'upstream result');
-    await git(fixture.repo, ['update-ref', 'refs/heads/dev', integrated]);
+    const devStart = await git(fixture.devRepo, ['rev-parse', 'refs/heads/dev']);
+    const integrated = await commitTree(fixture.devRepo, devStart, 'upstream result');
+    await git(fixture.devRepo, ['update-ref', 'refs/heads/dev', integrated]);
     recordIntegrationFact(storage, { projectId, taskId: upstreamTaskId, revisionId: upstreamRevisionId,
       executionId: 'execution-upstream', batchId: 'batch-1', integratedCommit: integrated,
       devCommit: devStart });
@@ -322,7 +322,7 @@ describe('dependency scheduler', () => {
       executionId: 'execution-upstream', batchId: 'batch-1', integratedCommit: 'd'.repeat(40),
       devCommit: 'd'.repeat(40) });
     // Deleting the branch removes the only baseline that could make the fact true.
-    await git(fixture.repo, ['update-ref', '-d', 'refs/heads/dev']);
+    await git(fixture.devRepo, ['update-ref', '-d', 'refs/heads/dev']);
     const view = await inspectTaskDependencies({ storage, projectId, taskId: 'downstream' });
     expect(view.devCommit).toBeNull();
     expect(view.edges[0]?.satisfied).toBe(false);

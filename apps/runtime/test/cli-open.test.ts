@@ -8,6 +8,7 @@ import {
   registerTemporaryDirectory,
   runCli,
 } from './support/runtime-reclamation.js';
+import { provisionDevClone } from './support/agent-fixture.js';
 
 const repositoryRoot = join(import.meta.dir, '..', '..', '..');
 const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
@@ -39,7 +40,8 @@ async function git(cwd: string, args: readonly string[]): Promise<void> {
  * person runs: the fixture carries a policy at its main ref and the trusted project must appear in
  * `project list` with the preselection the UI reads out of the URL fragment.
  */
-async function fixture(): Promise<{ repository: string; home: string; assets: string }> {
+async function fixture(): Promise<{ repository: string; devRepo: string; home: string;
+  assets: string }> {
   const repository = temporaryDirectory('codeestra-open-repo-');
   const home = temporaryDirectory('codeestra-open-home-');
   const assets = temporaryDirectory('codeestra-open-assets-');
@@ -55,15 +57,18 @@ async function fixture(): Promise<{ repository: string; home: string; assets: st
   await git(repository, ['commit', '-q', '-m', 'fixture']);
   // ADR-0009: the long-lived dev branch is the baseline every workspace is created from.
   await git(repository, ['branch', 'dev']);
-  return { repository, home, assets };
+  // ADR-0056: every dev fact comes from a second clone of the same origin that sits on
+  // `dev`; the project is trusted with it explicitly.
+  const devRepo = await provisionDevClone({ repository: repository });
+  return { repository, devRepo, home, assets };
 }
 
 describe('codeestra open', () => {
   test('trusts the repository and points the UI at that project', async () => {
-    const { repository, home, assets } = await fixture();
+    const { repository, devRepo, home, assets } = await fixture();
     const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
 
-    const opened = await cli(['open', repository, '--no-open'], environment);
+    const opened = await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
     expect(opened.stderr).toContain('FULL permission mode: registering this project without confirmation');
     expect(opened.stderr).toContain('Verification policy');
     expect(opened.stderr).toContain('check: bun run check');
@@ -87,12 +92,55 @@ describe('codeestra open', () => {
     expect(stopped.exitCode).toBe(0);
   }, 60_000);
 
-  test('opening another worktree of an already trusted repository is idempotent', async () => {
+  test('requires a dev clone for trust and refuses without one, writing nothing', async () => {
+    // ADR-0056 made the dev clone the single source of dev facts, so a trust that does not state one
+    // is refused with a stable code and the remedy — and no project is recorded.
     const { repository, home, assets } = await fixture();
+    const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
+    const refused = await cli(['project', 'trust', repository], environment);
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stderr).toContain('DEV_REPO_REQUIRED');
+    expect(refused.stderr).toContain('--dev-repo');
+    const listed = await cli(['project', 'list'], environment);
+    expect(JSON.parse(listed.stdout)).toEqual([]);
+
+    // The old spelling that cleared the path is refused the same way: the clone is required, so
+    // `none` can never be a valid trust input again.
+    const cleared = await cli(['project', 'trust', repository, '--dev-repo', 'none'], environment);
+    expect(cleared.exitCode).toBe(1);
+    expect(cleared.stderr).toContain('DEV_REPO_REQUIRED');
+    await cli(['stop'], environment);
+  }, 60_000);
+
+  test('inspects the dev baseline from the dev clone and reports the local ref retirement evidence',
+    async () => {
+      const { repository, devRepo, home, assets } = await fixture();
+      const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
+      const inspected = await cli(['project', 'inspect', repository, '--dev-repo', devRepo],
+        environment);
+      expect(inspected.exitCode).toBe(0);
+      // The baseline is the dev clone's `dev`, and the inspected checkout's own `dev` ref is reported
+      // as transitional evidence — never as the baseline (ADR-0048 D04 / ADR-0056).
+      expect(inspected.stderr).toContain('dev baseline (from the dev clone): refs/heads/dev · ');
+      expect(inspected.stderr).toContain('transitional local refs/heads/dev in this checkout: present at');
+      expect(inspected.stderr).toContain('no trusted project lacks a dev clone');
+      const report = JSON.parse(inspected.stdout) as { readonly devCommit: string | null };
+      expect(report.devCommit).toMatch(/^[0-9a-f]{40}$/);
+
+      // Once a project is trusted, its own `dev` ref is no longer anything the Runtime reads, and the
+      // report says so: this is the read-only proof a human uses before deleting it by hand.
+      await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
+      const again = await cli(['project', 'inspect', repository, '--dev-repo', devRepo], environment);
+      expect(again.stderr).toContain('no trusted project lacks a dev clone');
+      await cli(['stop'], environment);
+    }, 60_000);
+
+  test('opening another worktree of an already trusted repository is idempotent', async () => {
+    const { repository, devRepo, home, assets } = await fixture();
     const alternate = `${repository}-dev-worktree`;
     const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
     try {
-      expect((await cli(['open', repository, '--yes', '--no-open'], environment)).exitCode).toBe(0);
+      expect((await cli(['open', repository, '--dev-repo', devRepo, '--yes', '--no-open'], environment)).exitCode).toBe(0);
       await git(repository, ['worktree', 'add', '-q', '-b', 'alternate', alternate, 'main']);
       const opened = await cli(['open', alternate, '--no-open'], environment);
       expect(opened.exitCode).toBe(0);
@@ -109,12 +157,12 @@ describe('codeestra open', () => {
   }, 60_000);
 
   test('does not ask for a second confirmation while the confirmed policy still matches', async () => {
-    const { repository, home, assets } = await fixture();
+    const { repository, devRepo, home, assets } = await fixture();
     const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
-    expect((await cli(['open', repository, '--yes', '--no-open'], environment)).exitCode).toBe(0);
+    expect((await cli(['open', repository, '--dev-repo', devRepo, '--yes', '--no-open'], environment)).exitCode).toBe(0);
 
     // stdin is /dev/null: anything that still asked for TRUST would fail instead of reopening.
-    const again = await cli(['open', repository, '--no-open'], environment);
+    const again = await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
     expect(again.exitCode).toBe(0);
     expect(again.stderr).toContain('Already trusted');
     expect(again.stdout).toContain('project=');
@@ -122,26 +170,26 @@ describe('codeestra open', () => {
   }, 60_000);
 
   test('does not ask again when the main ref moves without touching the policy', async () => {
-    const { repository, home, assets } = await fixture();
+    const { repository, devRepo, home, assets } = await fixture();
     const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
-    expect((await cli(['open', repository, '--yes', '--no-open'], environment)).exitCode).toBe(0);
+    expect((await cli(['open', repository, '--dev-repo', devRepo, '--yes', '--no-open'], environment)).exitCode).toBe(0);
 
     // Ordinary development: commit code to the main ref, which is not a policy change.
     await Bun.write(join(repository, 'README.md'), 'fixture\nsecond line\n');
     await git(repository, ['add', '.']);
     await git(repository, ['commit', '-q', '-m', 'develop']);
 
-    const again = await cli(['open', repository, '--no-open'], environment);
+    const again = await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
     expect(again.exitCode).toBe(0);
     expect(again.stderr).toContain('Already trusted');
     await cli(['stop'], environment);
   }, 60_000);
 
   test('asks again once the policy at the main ref changes', async () => {
-    const { repository, home, assets } = await fixture();
+    const { repository, devRepo, home, assets } = await fixture();
     const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
     expect((await cli(['permission', 'set', 'strict'], environment)).exitCode).toBe(0);
-    expect((await cli(['open', repository, '--yes', '--no-open'], environment)).exitCode).toBe(0);
+    expect((await cli(['open', repository, '--dev-repo', devRepo, '--yes', '--no-open'], environment)).exitCode).toBe(0);
 
     await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'), JSON.stringify({
       version: 1,
@@ -150,7 +198,7 @@ describe('codeestra open', () => {
     await git(repository, ['add', '.']);
     await git(repository, ['commit', '-q', '-m', 'change the policy']);
 
-    const stale = await cli(['open', repository, '--no-open'], environment);
+    const stale = await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
     expect(stale.exitCode).toBe(1);
     expect(stale.stderr).toContain('no longer matches this repository');
     expect(stale.stderr).toContain('Project trust was not confirmed');
@@ -158,11 +206,11 @@ describe('codeestra open', () => {
   }, 60_000);
 
   test('refuses to trust without the confirmation gate', async () => {
-    const { repository, home, assets } = await fixture();
+    const { repository, devRepo, home, assets } = await fixture();
     const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
     expect((await cli(['permission', 'set', 'strict'], environment)).exitCode).toBe(0);
     // Strict mode preserves the opt-in confirmation path; stdin is /dev/null so it must fail.
-    const refused = await runCli(['open', repository, '--no-open'], environment,
+    const refused = await runCli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment,
       { entry: cliEntry });
     expect(refused.exitCode).toBe(1);
     expect(refused.stderr).toContain('Project trust was not confirmed');

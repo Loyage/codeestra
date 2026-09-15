@@ -22,6 +22,7 @@ import {
 import { impactPolicyVersionKey, inspectImpactPolicy } from './impact-analysis-service.js';
 import { isProcessRunning, readProcessStartToken } from './lifecycle.js';
 import { assertDependenciesSatisfied } from './scheduler.js';
+import { requireRecordedDevRepoPath } from './dev-repo-service.js';
 
 /**
  * Slot reservations: the primitive a scheduler reserves with before it prepares a workspace or
@@ -219,12 +220,15 @@ export class SlotReservationService {
     const facts = this.#storage.listTaskDependencyFacts(input.projectId, { taskId: input.taskId });
     const dependencyFingerprint = slotDependencyFingerprint(facts);
     const project = this.#storage.getTrustedProject(input.projectId);
+    // ADR-0056: the development baseline is the dev clone's `dev` ref. A project without a dev
+    // clone is refused here, before this command writes a reservation.
+    const devRepoPath = requireRecordedDevRepoPath(project);
     // Recorded as the baseline this assessment was made against. The dependency verdict itself was
     // decided by the guard above from the same ref; a ref that moves between the two reads is
     // therefore recorded honestly as "assessed against this commit", and the engine re-checks the
     // external baseline before it starts an agent (scheduler.md §2).
     const assessedDevCommit = await readLocalRefCommit({
-      repositoryRoot: project.repoRoot, ref: project.devRef,
+      repositoryRoot: devRepoPath, ref: project.devRef,
     }).catch(() => null);
     // Anything the caller assessed against a cached snapshot generation is rechecked against the
     // generation observed *now*: the mapping version, the analyzer version and the Task's change set
@@ -347,8 +351,10 @@ export class SlotReservationService {
     }
     // No worktree yet: the observation a pre-start prediction was made from is "this Task has not
     // changed anything, against the current development baseline".
+    // ADR-0056: resolved first, so a missing dev clone is refused rather than read as "no baseline".
+    const devRepoPath = requireRecordedDevRepoPath(input.project);
     const baseCommit = await readLocalRefCommit({
-      repositoryRoot: input.project.repoRoot, ref: input.project.devRef,
+      repositoryRoot: devRepoPath, ref: input.project.devRef,
     }).catch(() => null);
     if (baseCommit === null) {
       throw refuse(`the ${input.project.devRef} baseline could not be read, so the empty observation`

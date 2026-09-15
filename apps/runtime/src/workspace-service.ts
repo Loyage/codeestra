@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import {
   GitInspectionError,
   inspectBaseRef,
+  inspectRepository,
   inspectOwnedWorktreeRebuild,
   prepareWorkspace,
   rebuildOwnedWorktree,
@@ -15,6 +16,7 @@ import {
   StorageError,
   type WorkspacePreparationPlan,
 } from '@codeestra/storage';
+import { requireProjectDevRepository, type ProjectDevRepository } from './dev-repo-service.js';
 
 export class WorkspaceServiceError extends Error {
   constructor(readonly code: string, message: string) {
@@ -42,6 +44,38 @@ async function canonicalWorktreesRoot(runtimeHome: string): Promise<string> {
   const requested = join(runtimeHome, 'worktrees');
   await mkdir(requested, { recursive: true, mode: 0o700 });
   return await realpath(requested);
+}
+
+/**
+ * Re-reads the identity of the trusted main checkout before a worktree is planned.
+ *
+ * ADR-0056 moved the worktree to the dev clone, but the trust is still recorded *against this
+ * checkout*: it owns the identity the user confirmed and the `main` ref that carries the verification
+ * policy. A checkout that changed, or that cannot be read at all, therefore invalidates the trust
+ * exactly as it did before — a dev clone that happens to be reachable must not hide that.
+ */
+async function assertTrustedMainCheckout(input: {
+  readonly storage: Phase1Database;
+  readonly project: { readonly id: string; readonly repoRoot: string;
+    readonly gitCommonDir: string; readonly objectFormat: 'sha1' | 'sha256' };
+  readonly now: () => number;
+}): Promise<void> {
+  let repository;
+  try {
+    repository = await inspectRepository(input.project.repoRoot);
+  } catch (error) {
+    input.storage.invalidateProjectTrust(input.project.id, input.now());
+    const code = error instanceof GitInspectionError ? error.code : 'INVALID_REPOSITORY';
+    throw new WorkspaceServiceError(code,
+      `Project trust invalidated: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (repository.repoRoot !== input.project.repoRoot
+    || repository.gitCommonDir !== input.project.gitCommonDir
+    || repository.objectFormat !== input.project.objectFormat) {
+    input.storage.invalidateProjectTrust(input.project.id, input.now());
+    throw new WorkspaceServiceError('REPOSITORY_CHANGED',
+      'Project trust invalidated after identity changed');
+  }
 }
 
 export async function prepareTaskWorkspace(input: {
@@ -77,9 +111,14 @@ export async function prepareTaskWorkspace(input: {
   // A resumed Execution continues in the workspace it already owns. Reusing it avoids a second
   // worktree and keeps the paused Task's uncommitted work in place; the path/ownership token are
   // already recorded, so no Git side effect runs here.
+  //
+  // ADR-0056: the project's dev clone is resolved (and `DEV_REPO_REQUIRED` refused) before any path
+  // is planned, because the worktree, its baseline and its branch all belong to that clone.
+  const project = input.storage.getTrustedProject(input.projectId);
+  await assertTrustedMainCheckout({ storage: input.storage, project, now });
+  const dev = await requireProjectDevRepository(project);
   const reusable = input.storage.findReusableWorkspace(input.taskId);
   if (reusable !== null) {
-    const project = input.storage.getTrustedProject(input.projectId);
     return {
       operationId: `reused:${reusable.workspaceId}`,
       operationState: 'SUCCEEDED' as const,
@@ -87,7 +126,7 @@ export async function prepareTaskWorkspace(input: {
       taskId: input.taskId,
       workspaceId: reusable.workspaceId,
       workspaceState: 'READY' as const,
-      repoRoot: project.repoRoot,
+      repoRoot: dev.devRepoPath,
       gitCommonDir: project.gitCommonDir,
       mainRef: project.mainRef,
       devRef: project.devRef,
@@ -99,7 +138,6 @@ export async function prepareTaskWorkspace(input: {
     };
   }
 
-  const project = input.storage.getTrustedProject(input.projectId);
   // A worktree a reclamation removed is re-created from the Task branch that reclamation kept
   // (FOUNDATION-068 / ADR-0042), before the fresh-preparation path can refuse it with a
   // `REF_CONFLICT` it already knows about.
@@ -108,6 +146,7 @@ export async function prepareTaskWorkspace(input: {
     runtimeHome: input.runtimeHome,
     projectId: input.projectId,
     taskId: input.taskId,
+    dev,
     now,
     randomUUID,
   });
@@ -116,20 +155,30 @@ export async function prepareTaskWorkspace(input: {
   let baseCommit;
   try {
     // Every new Task worktree is based on the project's fixed `dev` ref, never on `main` and
-    // never on whichever branch happens to be checked out where the project was trusted.
-    const inspected = await inspectBaseRef(project.repoRoot, project.devRef);
+    // never on whichever branch happens to be checked out where the project was trusted. The ref
+    // is the *dev clone's*, so the baseline commit and the worktree live in the same repository.
+    const inspected = await inspectBaseRef(dev.devRepoPath, dev.devRef);
     repository = inspected.repository;
     baseCommit = inspected.commit;
   } catch (error) {
-    input.storage.invalidateProjectTrust(input.projectId, now());
     if (error instanceof GitInspectionError) {
-      throw new WorkspaceServiceError(error.code, `Project trust invalidated: ${error.message}`);
+      throw new WorkspaceServiceError(error.code, error.message);
     }
     throw error;
   }
-  if (repository.repoRoot !== project.repoRoot
-    || repository.gitCommonDir !== project.gitCommonDir
-    || repository.objectFormat !== project.objectFormat) {
+  // The dev clone was verified moments ago, so a mismatch here means the repository changed
+  // underneath this command. The recorded dev clone path is the user's statement about *which*
+  // second clone to use, not part of the main checkout's identity, so the trust is not invalidated;
+  // the refusal names the fact instead.
+  if (repository.repoRoot !== dev.devRepoPath
+    || repository.gitCommonDir !== dev.devGitCommonDir
+    || repository.objectFormat !== dev.objectFormat) {
+    throw new WorkspaceServiceError('REPOSITORY_CHANGED',
+      `The dev clone ${dev.devRepoPath} changed after it was verified`);
+  }
+  if (repository.repoRoot !== dev.devRepoPath
+    || repository.gitCommonDir !== dev.devGitCommonDir
+    || repository.objectFormat !== dev.objectFormat) {
     input.storage.invalidateProjectTrust(input.projectId, now());
     throw new WorkspaceServiceError('REPOSITORY_CHANGED', 'Project trust invalidated after identity changed');
   }
@@ -166,7 +215,7 @@ export async function prepareTaskWorkspace(input: {
   try {
     const prepared = await prepareWorkspace({
       operationId: plan.operationId,
-      repositoryRoot: plan.repoRoot,
+      repositoryRoot: dev.devRepoPath,
       worktreesRoot,
       projectId: plan.projectId,
       baseRef: plan.devRef,
@@ -228,6 +277,7 @@ async function rebuildReclaimedTaskWorkspace(input: {
   readonly runtimeHome: string;
   readonly projectId: string;
   readonly taskId: string;
+  readonly dev: ProjectDevRepository;
   readonly now: () => number;
   readonly randomUUID: () => string;
 }): Promise<WorkspacePreparationPlan | null> {
@@ -236,7 +286,8 @@ async function rebuildReclaimedTaskWorkspace(input: {
   const project = input.storage.getTrustedProject(input.projectId);
   const worktreesRoot = await canonicalWorktreesRoot(input.runtimeHome);
   const observed = await inspectOwnedWorktreeRebuild({
-    repositoryRoot: project.repoRoot,
+    // The recorded worktree is a worktree of the dev clone (ADR-0056), so Git has to be asked there.
+    repositoryRoot: input.dev.devRepoPath,
     ownedRoot: worktreesRoot,
     path: recorded.path,
     branchRef: recorded.branchRef,
@@ -273,7 +324,7 @@ async function rebuildReclaimedTaskWorkspace(input: {
       + ' under a live writer');
   }
   const rebuilt = await rebuildOwnedWorktree({
-    repositoryRoot: project.repoRoot,
+    repositoryRoot: input.dev.devRepoPath,
     ownedRoot: worktreesRoot,
     projectId: input.projectId,
     taskId: input.taskId,
@@ -306,7 +357,7 @@ async function rebuildReclaimedTaskWorkspace(input: {
     taskId: input.taskId,
     workspaceId: recorded.workspaceId,
     workspaceState: 'READY',
-    repoRoot: project.repoRoot,
+    repoRoot: input.dev.devRepoPath,
     gitCommonDir: project.gitCommonDir,
     mainRef: project.mainRef,
     devRef: project.devRef,

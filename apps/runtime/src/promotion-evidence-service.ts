@@ -19,6 +19,7 @@ import {
   inspectVerificationPolicy,
   type VerificationRunner,
 } from './verification-service.js';
+import { requireRecordedDevRepoPath } from './dev-repo-service.js';
 
 /**
  * The independent "the full suite passed on this exact `dev` SHA" evidence ADR-0038 D03 requires
@@ -142,13 +143,21 @@ export interface DevFullSuiteBindingsRead {
  * Reads the three bindings from Git as they are *right now* for one candidate commit: the fixed
  * project policy at the project's `main` ref and the lockfile at the candidate commit.
  *
+ * ADR-0056 separates the two repositories the bindings come from: the policy is a human-maintained
+ * fact of the stable `main` ref, while the candidate commit — and therefore the lockfile at it — is
+ * an object of the project's **dev clone**, which is where the integration produced it. A binding
+ * read from the wrong clone would either not resolve at all or silently describe a different tree.
+ *
  * `prepare` and `promote` both call this, which is what makes the evidence's invalidation real: a
  * policy edit on `main` or a lockfile change inside the candidate produces a different digest, and
  * a promotion prepared or approved against the old ones is refused instead of silently re-pointed.
  */
 export async function readDevFullSuiteBindings(input: {
-  readonly repositoryRoot: string;
+  /** The stable main checkout: `mainRef` and the fixed full-suite policy are read from there. */
+  readonly mainRepositoryRoot: string;
   readonly mainRef: string;
+  /** The dev clone: the candidate commit and its lockfile are objects of this repository. */
+  readonly devRepositoryRoot: string;
   readonly devCommit: string;
   readonly objectFormat: 'sha1' | 'sha256';
 }): Promise<DevFullSuiteBindingsRead> {
@@ -156,7 +165,7 @@ export async function readDevFullSuiteBindings(input: {
   let inspection;
   try {
     inspection = await inspectVerificationPolicy({
-      repositoryRoot: input.repositoryRoot,
+      repositoryRoot: input.mainRepositoryRoot,
       mainRef: input.mainRef,
     });
   } catch (error) {
@@ -171,7 +180,7 @@ export async function readDevFullSuiteBindings(input: {
       + ' a promotion cannot be judged without one');
   }
   const lockfile = await readRefFile({
-    repositoryRoot: input.repositoryRoot,
+    repositoryRoot: input.devRepositoryRoot,
     ref: devCommit,
     path: devFullSuiteLockfilePath,
   });
@@ -209,9 +218,13 @@ export async function runDevFullSuite(input: {
   const now = input.now ?? Date.now;
   const randomUUID = input.randomUUID ?? (() => crypto.randomUUID());
   const candidates = input.storage.getDevFullSuiteCandidates(input.projectId);
+  // ADR-0056: the candidate commit and its lockfile are objects of the dev clone. Refusing here keeps
+  // a project without one from having the suite run against the stable checkout by accident.
+  requireRecordedDevRepoPath(input.storage.getTrustedProject(input.projectId));
   const bindings = await readDevFullSuiteBindings({
-    repositoryRoot: candidates.repositoryRoot,
+    mainRepositoryRoot: candidates.mainRepositoryRoot,
     mainRef: candidates.mainRef,
+    devRepositoryRoot: candidates.repositoryRoot,
     devCommit: input.expectedDevCommit,
     objectFormat: candidates.objectFormat,
   });
@@ -224,7 +237,7 @@ export async function runDevFullSuite(input: {
       + ` ${bindings.devCommit}; the full suite must run against the exact candidate`);
   }
   const inspection = await inspectVerificationPolicy({
-    repositoryRoot: candidates.repositoryRoot,
+    repositoryRoot: candidates.mainRepositoryRoot,
     mainRef: candidates.mainRef,
   });
   const commands = inspection.policy?.commands ?? [];
@@ -388,8 +401,10 @@ export async function checkDevFullSuiteEvidence(input: {
   readonly recordedEvidenceId?: string;
 }): Promise<FullSuiteEvidenceCheck> {
   const bindings = await readDevFullSuiteBindings({
-    repositoryRoot: input.repositoryRoot,
+    mainRepositoryRoot: input.repositoryRoot,
     mainRef: input.mainRef,
+    devRepositoryRoot: requireRecordedDevRepoPath(
+      input.storage.getTrustedProject(input.projectId)),
     devCommit: input.devCommit,
     objectFormat: input.objectFormat,
   });

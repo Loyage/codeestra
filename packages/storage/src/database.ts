@@ -832,6 +832,12 @@ export interface WorkspacePreparationPlan {
   readonly taskId: string;
   readonly workspaceId: string;
   readonly workspaceState: 'RESERVED' | 'PREPARING' | 'READY' | 'RECOVERY_REQUIRED' | 'RELEASED';
+  /**
+   * The repository that owns this worktree: the project's dev clone (ADR-0056). It is what a
+   * restart re-reads when it reconciles an interrupted preparation (`git worktree list` has to be
+   * asked in the clone the worktree was created in). The record's `gitCommonDir` and `mainRef`
+   * stay the trusted main checkout's facts.
+   */
   readonly repoRoot: string;
   readonly gitCommonDir: string;
   readonly mainRef: string;
@@ -1109,7 +1115,14 @@ export interface VerificationCandidates {
   readonly taskDisplayNumber: number;
   readonly taskState: TaskLifecycleState;
   readonly currentRevisionId: string;
+  /**
+   * The repository the *tested commits* live in: the project's dev clone (ADR-0056). A Task's
+   * candidate is captured in a Task worktree, and every Task worktree is a worktree of the dev
+   * clone, so a detached verification copy has to be created from that clone.
+   */
   readonly repositoryRoot: string;
+  /** The stable main checkout: its `main` ref carries the verification policy (ADR-0006). */
+  readonly mainRepositoryRoot: string;
   readonly gitCommonDir: string;
   readonly mainRef: string;
   readonly objectFormat: 'sha1' | 'sha256';
@@ -1209,7 +1222,10 @@ export interface DevFullSuiteEvidenceRecord {
 /** Repository facts a dev full-suite run needs; no Task is involved in this evidence. */
 export interface DevFullSuiteCandidates {
   readonly projectId: string;
+  /** The dev clone: the fixed candidate commit is an object of this clone (ADR-0056). */
   readonly repositoryRoot: string;
+  /** The stable main checkout, whose `main` ref carries the fixed full-suite policy. */
+  readonly mainRepositoryRoot: string;
   readonly gitCommonDir: string;
   readonly mainRef: string;
   readonly devRef: string;
@@ -1461,7 +1477,10 @@ export interface IntegrationBatchMemberFacts {
 export interface IntegrationBatchCandidates {
   readonly projectId: string;
   readonly batchId: string;
+  /** The dev clone: the batch's `dev` ref, merge and compare-and-swap all happen there (ADR-0056). */
   readonly repositoryRoot: string;
+  /** The stable main checkout; the verification policy is read from its `main` ref. */
+  readonly mainRepositoryRoot: string;
   readonly gitCommonDir: string;
   readonly mainRef: string;
   readonly devRef: string;
@@ -1478,7 +1497,10 @@ export interface IntegrationCandidates {
   readonly taskState: TaskLifecycleState;
   readonly taskVersion: number;
   readonly currentRevisionId: string;
+  /** The dev clone: the project's `dev` ref and every Task branch commit live there (ADR-0056). */
   readonly repositoryRoot: string;
+  /** The stable main checkout; the verification policy is read from its `main` ref. */
+  readonly mainRepositoryRoot: string;
   readonly gitCommonDir: string;
   readonly mainRef: string;
   readonly devRef: string;
@@ -1494,6 +1516,10 @@ export interface IntegrationBatchPlan extends IntegrationBatchSummary {
   readonly operationId: string;
   readonly operationState: 'PLANNED' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'RECONCILE_REQUIRED';
   readonly worktreeOwnershipToken: string;
+  /**
+   * The dev clone: a restart reconciles an interrupted batch by reading the `dev` ref *there*
+   * (ADR-0056). The plan's `mainRef` stays the stable main ref the policy came from.
+   */
   readonly repositoryRoot: string;
   readonly mainRef: string;
   readonly objectFormat: 'sha1' | 'sha256';
@@ -2211,7 +2237,8 @@ export class Phase1Database {
         state: TaskLifecycleState; version: number; repo_root: string; git_common_dir: string;
         main_ref: string; dev_ref: string; object_format: 'sha1' | 'sha256';
       }, [string, string]>(`
-        SELECT task.state,task.version,p.repo_root,p.git_common_dir,p.main_ref,p.dev_ref,p.object_format
+        SELECT task.state,task.version,COALESCE(p.dev_repo_path,p.repo_root) AS repo_root,
+               p.git_common_dir,p.main_ref,p.dev_ref,p.object_format
         FROM tasks task JOIN projects p ON p.id=task.project_id
         JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
         WHERE task.project_id=?1 AND task.id=?2
@@ -2388,7 +2415,8 @@ export class Phase1Database {
     }, [string]>(`
       SELECT operation.id AS operation_id,operation.state AS operation_state,
         operation.project_id,workspace.task_id,workspace.id AS workspace_id,
-        workspace.state AS workspace_state,p.repo_root,p.git_common_dir,p.main_ref,p.dev_ref,
+        workspace.state AS workspace_state,COALESCE(p.dev_repo_path,p.repo_root) AS repo_root,
+        p.git_common_dir,p.main_ref,p.dev_ref,
         p.object_format,workspace.base_commit,workspace.ownership_token,workspace.branch_ref,workspace.path
       FROM workspaces workspace JOIN tasks task ON task.id=workspace.task_id
       JOIN projects p ON p.id=task.project_id
@@ -5454,11 +5482,13 @@ export class Phase1Database {
   getVerificationCandidates(projectId: string, taskId: string): VerificationCandidates {
     const task = this.sqlite.query<{
       id: string; project_id: string; display_number: number; state: TaskLifecycleState;
-      current_revision_id: string; repo_root: string; git_common_dir: string; main_ref: string;
+      current_revision_id: string; repo_root: string; main_repo_root: string;
+      git_common_dir: string; main_ref: string;
       object_format: 'sha1' | 'sha256';
     }, [string, string]>(`
       SELECT task.id,task.project_id,task.display_number,task.state,task.current_revision_id,
-             p.repo_root,p.git_common_dir,p.main_ref,p.object_format
+             COALESCE(p.dev_repo_path,p.repo_root) AS repo_root,p.repo_root AS main_repo_root,
+             p.git_common_dir,p.main_ref,p.object_format
       FROM tasks task
       JOIN projects p ON p.id=task.project_id
       JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
@@ -5488,6 +5518,7 @@ export class Phase1Database {
       taskState: task.state,
       currentRevisionId: task.current_revision_id,
       repositoryRoot: task.repo_root,
+      mainRepositoryRoot: task.main_repo_root,
       gitCommonDir: task.git_common_dir,
       mainRef: task.main_ref,
       objectFormat: task.object_format,
@@ -5804,11 +5835,13 @@ export class Phase1Database {
   getIntegrationCandidates(projectId: string, taskId: string): IntegrationCandidates {
     const task = this.sqlite.query<{
       id: string; project_id: string; display_number: number; state: TaskLifecycleState;
-      version: number; current_revision_id: string; repo_root: string; git_common_dir: string;
+      version: number; current_revision_id: string; repo_root: string; main_repo_root: string;
+      git_common_dir: string;
       main_ref: string; dev_ref: string; object_format: 'sha1' | 'sha256';
     }, [string, string]>(`
       SELECT task.id,task.project_id,task.display_number,task.state,task.version,
-             task.current_revision_id,p.repo_root,p.git_common_dir,p.main_ref,p.dev_ref,p.object_format
+             task.current_revision_id,COALESCE(p.dev_repo_path,p.repo_root) AS repo_root,
+             p.repo_root AS main_repo_root,p.git_common_dir,p.main_ref,p.dev_ref,p.object_format
       FROM tasks task
       JOIN projects p ON p.id=task.project_id
       JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
@@ -5839,6 +5872,7 @@ export class Phase1Database {
       taskVersion: task.version,
       currentRevisionId: task.current_revision_id,
       repositoryRoot: task.repo_root,
+      mainRepositoryRoot: task.main_repo_root,
       gitCommonDir: task.git_common_dir,
       mainRef: task.main_ref,
       devRef: task.dev_ref,
@@ -5856,10 +5890,12 @@ export class Phase1Database {
    */
   getIntegrationBatchCandidates(projectId: string, batchId: string): IntegrationBatchCandidates {
     const project = this.sqlite.query<{
-      repo_root: string; git_common_dir: string; main_ref: string; dev_ref: string;
+      repo_root: string; main_repo_root: string; git_common_dir: string; main_ref: string;
+      dev_ref: string;
       object_format: 'sha1' | 'sha256';
     }, [string, string]>(`
-      SELECT p.repo_root,p.git_common_dir,p.main_ref,p.dev_ref,p.object_format
+      SELECT COALESCE(p.dev_repo_path,p.repo_root) AS repo_root,p.repo_root AS main_repo_root,
+             p.git_common_dir,p.main_ref,p.dev_ref,p.object_format
       FROM projects p
       JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
       WHERE p.id=?1 AND EXISTS(SELECT 1 FROM integration_batches b WHERE b.id=?2 AND b.project_id=p.id)
@@ -5912,6 +5948,7 @@ export class Phase1Database {
       projectId,
       batchId,
       repositoryRoot: project.repo_root,
+      mainRepositoryRoot: project.main_repo_root,
       gitCommonDir: project.git_common_dir,
       mainRef: project.main_ref,
       devRef: project.dev_ref,
@@ -6817,10 +6854,13 @@ export class Phase1Database {
   /** Repository refs a dev full-suite run binds its evidence to; no Task is involved. */
   getDevFullSuiteCandidates(projectId: string): DevFullSuiteCandidates {
     const row = this.sqlite.query<{
-      id: string; repo_root: string; git_common_dir: string; main_ref: string; dev_ref: string;
+      id: string; repo_root: string; main_repo_root: string; git_common_dir: string;
+      main_ref: string; dev_ref: string;
       object_format: 'sha1' | 'sha256';
     }, [string]>(`
-      SELECT p.id,p.repo_root,p.git_common_dir,p.main_ref,p.dev_ref,p.object_format FROM projects p
+      SELECT p.id,COALESCE(p.dev_repo_path,p.repo_root) AS repo_root,
+             p.repo_root AS main_repo_root,p.git_common_dir,p.main_ref,p.dev_ref,p.object_format
+      FROM projects p
       JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
       WHERE p.id=?1
     `).get(projectId);
@@ -6828,6 +6868,7 @@ export class Phase1Database {
     return {
       projectId: row.id,
       repositoryRoot: row.repo_root,
+      mainRepositoryRoot: row.main_repo_root,
       gitCommonDir: row.git_common_dir,
       mainRef: row.main_ref,
       devRef: row.dev_ref,
@@ -8007,7 +8048,8 @@ export class Phase1Database {
       repo_root: string; main_ref: string; object_format: 'sha1' | 'sha256';
       ownership_token: string;
     }, [string]>(`
-      SELECT p.repo_root,p.main_ref,p.object_format,batch.worktree_ownership_token
+      SELECT COALESCE(p.dev_repo_path,p.repo_root) AS repo_root,p.main_ref,p.object_format,
+             batch.worktree_ownership_token
       FROM integration_batches batch
       JOIN projects p ON p.id=batch.project_id
       WHERE batch.id=?1
@@ -8572,10 +8614,13 @@ export class Phase1Database {
     options: { readonly taskId?: string } = {},
   ): ReclamationCandidates {
     const project = this.sqlite.query<{
-      id: string; name: string; repo_root: string; git_common_dir: string; main_ref: string;
+      id: string; name: string; repo_root: string; dev_repo_path: string | null;
+      git_common_dir: string; main_ref: string;
       dev_ref: string; object_format: 'sha1' | 'sha256';
     }, [string]>(`
-      SELECT p.id,p.name,p.repo_root,p.git_common_dir,p.main_ref,p.dev_ref,p.object_format
+      SELECT p.id,p.name,COALESCE(p.dev_repo_path,p.repo_root) AS repo_root,p.dev_repo_path,
+             p.git_common_dir,
+             p.main_ref,p.dev_ref,p.object_format
       FROM projects p
       JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
       WHERE p.id=?1
@@ -8653,6 +8698,7 @@ export class Phase1Database {
         repoRoot: project.repo_root,
         gitCommonDir: project.git_common_dir,
         mainRef: project.main_ref,
+        devRepoPath: project.dev_repo_path,
         devRef: project.dev_ref,
         objectFormat: project.object_format,
       },
@@ -14273,7 +14319,14 @@ function parseJsonValue(json: string | null): unknown {
 export interface ReclamationProjectRef {
   readonly projectId: string;
   readonly name: string;
+  /** The dev clone: Task worktrees, Task branches and the `dev` ref all live there (ADR-0056). */
   readonly repoRoot: string;
+  /**
+   * The recorded dev clone path, or null. A reclamation proves ownership by asking the repository
+   * that owns the worktree, so a project without one is refused (`DEV_REPO_REQUIRED`) instead of
+   * having its `repoRoot` silently read as the stable checkout's.
+   */
+  readonly devRepoPath: string | null;
   readonly gitCommonDir: string;
   readonly mainRef: string;
   readonly devRef: string;

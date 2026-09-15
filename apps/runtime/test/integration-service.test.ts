@@ -121,15 +121,14 @@ async function rewritePolicy(fixture: VerifiedFixture, commands: readonly unknow
 
 /** Commits to `dev` through a temporary worktree, so the next integration cannot fast-forward. */
 async function advanceDev(fixture: VerifiedFixture, content: string, file = 'dev-only.txt') {
-  const worktree = join(fixture.value.repo, '..', `dev-worktree-${crypto.randomUUID()}`);
-  await git(fixture.value.repo, ['worktree', 'add', '-q', worktree, 'dev']);
-  await Bun.write(join(worktree, file), content);
-  await git(worktree, ['add', file]);
-  await git(worktree, ['-c', 'user.name=Dev', '-c', 'user.email=dev@example.invalid',
+  // ADR-0056: `dev` is checked out in the project's dev clone (and only there), so the user's own
+  // commit to the long-lived branch happens in that clone.
+  const devRepo = fixture.value.devRepo;
+  await Bun.write(join(devRepo, file), content);
+  await git(devRepo, ['add', file]);
+  await git(devRepo, ['-c', 'user.name=Dev', '-c', 'user.email=dev@example.invalid',
     'commit', '-q', '-m', 'dev moves on']);
-  const commit = await git(worktree, ['rev-parse', 'HEAD']);
-  await git(fixture.value.repo, ['worktree', 'remove', '-f', worktree]);
-  return commit;
+  return await git(devRepo, ['rev-parse', 'HEAD']);
 }
 
 describe('task result integration into dev', () => {
@@ -148,7 +147,7 @@ describe('task result integration into dev', () => {
       });
       expect(report.verificationState).toBe('PASSED');
       // The ref moved, `main` did not, and the Task reached its integration-driven terminal state.
-      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.resultCommit);
+      expect(await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.resultCommit);
       expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/main'])).toBe(fixture.value.mainCommit);
       expect(await git(fixture.value.repo, ['status', '--porcelain'])).toBe('');
       expect(fixture.value.storage.listTasks(fixture.value.projectId)[0]?.state).toBe('SUCCEEDED');
@@ -166,7 +165,7 @@ describe('task result integration into dev', () => {
       // Runtime's own checkout is left behind.
       expect(report.worktreePath).not.toBeNull();
       expect(existsSync(report.worktreePath as string)).toBe(false);
-      expect(await git(fixture.value.repo, ['worktree', 'list', '--porcelain']))
+      expect(await git(fixture.value.devRepo, ['worktree', 'list', '--porcelain']))
         .not.toContain(report.worktreePath as string);
 
       // The Task worktree still holds the Agent's uncommitted edits: integration commits a
@@ -183,10 +182,10 @@ describe('task result integration into dev', () => {
       const devBefore = await advanceDev(fixture, 'dev change\n');
       const report = await integrate(fixture);
       expect(report).toMatchObject({ state: 'INTEGRATED', mergeStrategy: 'MERGE_COMMIT' });
-      const integrated = await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev']);
+      const integrated = await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev']);
       expect(integrated).toBe(report.integratedCommit as string);
-      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev^1'])).toBe(devBefore);
-      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev^2'])).toBe(fixture.resultCommit);
+      expect(await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev^1'])).toBe(devBefore);
+      expect(await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev^2'])).toBe(fixture.resultCommit);
       expect(fixture.value.storage.listTasks(fixture.value.projectId)[0]?.state).toBe('SUCCEEDED');
     } finally {
       fixture.value.storage.close();
@@ -199,14 +198,15 @@ describe('task result integration into dev', () => {
       // `dev` moved, so the integration needs a merge commit; the hook refuses to create it while
       // leaving the merge in progress. That is a Git failure, not a content conflict.
       const devBefore = await advanceDev(fixture, 'dev change\n');
-      const hooks = join(fixture.value.repo, '.git', 'hooks');
+      // Hooks are read from the repository the commit is written in: the dev clone (ADR-0056).
+      const hooks = join(fixture.value.devRepo, '.git', 'hooks');
       await Bun.write(join(hooks, 'commit-msg'), '#!/bin/sh\necho "policy: refusing the message" >&2\nexit 1\n');
       await chmod(join(hooks, 'commit-msg'), 0o755);
       const report = await integrate(fixture);
       expect(report).toMatchObject({ state: 'FAILED', outcomeCode: 'MERGE_FAILED',
         integratedCommit: null, mergeStrategy: 'MERGE_COMMIT' });
       expect(report.detail).toContain('still in progress');
-      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(devBefore);
+      expect(await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(devBefore);
       expect(fixture.value.storage.listTasks(fixture.value.projectId)[0]?.state).toBe('EXECUTED');
       // The scene is kept: the batch is terminal, so a later attempt is not blocked by it.
       expect(fixture.value.storage.listIntegrationBatches(fixture.value.projectId,
@@ -225,7 +225,7 @@ describe('task result integration into dev', () => {
       await git(fixture.value.repo, ['config', '--unset', 'user.email']);
       const report = await integrate(fixture);
       expect(report).toMatchObject({ state: 'INTEGRATED', mergeStrategy: 'FAST_FORWARD' });
-      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.resultCommit);
+      expect(await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.resultCommit);
     } finally {
       fixture.value.storage.close();
     }
@@ -242,7 +242,7 @@ describe('task result integration into dev', () => {
       await expect(integrate(fixture)).rejects.toMatchObject({
         code: 'TASK_VERIFICATION_NOT_PASSED',
       });
-      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.value.mainCommit);
+      expect(await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.value.mainCommit);
       expect(fixture.value.storage.listTasks(fixture.value.projectId)[0]?.state).toBe('EXECUTED');
       expect(fixture.value.storage.listIntegrationBatches(
         fixture.value.projectId, fixture.value.taskId)).toHaveLength(0);
@@ -251,24 +251,40 @@ describe('task result integration into dev', () => {
     }
   });
 
-  test('refuses to advance a dev ref that some worktree has checked out', async () => {
-    const fixture = await verifiedTask();
-    try {
-      const checkedOut = join(fixture.value.repo, '..', `dev-checkout-${crypto.randomUUID()}`);
-      await git(fixture.value.repo, ['worktree', 'add', '-q', checkedOut, 'dev']);
+  test('refuses to advance dev unless the dev clone checkout is on dev, clean and at the baseline',
+    async () => {
+      // ADR-0056 amends ADR-0018: the one checkout allowed to hold `dev` is the dev clone's own,
+      // and only while it can be fast-forwarded with the ref. Every other state is refused before
+      // anything is merged, so `dev` and the Tasks keep their values.
+      const dirty = await verifiedTask();
       try {
-        await expect(integrate(fixture)).rejects.toMatchObject({ code: 'DEV_REF_CHECKED_OUT' });
-        expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.value.mainCommit);
-        expect(fixture.value.storage.listTasks(fixture.value.projectId)[0]?.state).toBe('EXECUTED');
-        expect(fixture.value.storage.listIntegrationBatches(
-          fixture.value.projectId, fixture.value.taskId)).toHaveLength(0);
+        await Bun.write(join(dirty.value.devRepo, 'uncommitted.txt'), 'work in progress\n');
+        await expect(integrate(dirty)).rejects.toMatchObject({ code: 'DEV_CHECKOUT_DIRTY' });
+        expect(await git(dirty.value.devRepo, ['rev-parse', 'refs/heads/dev']))
+          .toBe(dirty.value.mainCommit);
+        expect(dirty.value.storage.listTasks(dirty.value.projectId)[0]?.state).toBe('EXECUTED');
+        expect(dirty.value.storage.listIntegrationBatches(
+          dirty.value.projectId, dirty.value.taskId)).toHaveLength(0);
       } finally {
-        await git(fixture.value.repo, ['worktree', 'remove', '-f', checkedOut]);
+        dirty.value.storage.close();
       }
-    } finally {
-      fixture.value.storage.close();
-    }
-  });
+
+      const elsewhere = await verifiedTask();
+      try {
+        await git(elsewhere.value.devRepo, ['checkout', '-q', 'main']);
+        // The dev clone is verified as sitting on `dev` before any dev fact is read, so a clone whose
+        // checkout moved elsewhere is refused by that verification (ADR-0052); `DEV_CHECKOUT_NOT_ON_DEV`
+        // remains the same check repeated immediately before the ref moves, inside the race window.
+        await expect(integrate(elsewhere)).rejects
+          .toMatchObject({ code: 'DEV_REPO_BRANCH_MISMATCH' });
+        expect(await git(elsewhere.value.devRepo, ['rev-parse', 'refs/heads/dev']))
+          .toBe(elsewhere.value.mainCommit);
+        expect(elsewhere.value.storage.listTasks(elsewhere.value.projectId)[0]?.state)
+          .toBe('EXECUTED');
+      } finally {
+        elsewhere.value.storage.close();
+      }
+    });
 
   test('keeps dev unchanged and retains the worktree when the merge conflicts', async () => {
     const fixture = await verifiedTask();
@@ -278,11 +294,11 @@ describe('task result integration into dev', () => {
       const report = await integrate(fixture);
       expect(report).toMatchObject({ state: 'CONFLICTED', outcomeCode: 'MERGE_CONFLICT',
         integratedCommit: null, alreadyCompleted: false });
-      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(devBefore);
+      expect(await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(devBefore);
       expect(await git(fixture.value.repo, ['status', '--porcelain'])).toBe('');
       expect(fixture.value.storage.listTasks(fixture.value.projectId)[0]?.state).toBe('EXECUTED');
       // The failure scene is kept: the integration worktree is still registered with the conflict.
-      expect(await git(fixture.value.repo, ['worktree', 'list', '--porcelain']))
+      expect(await git(fixture.value.devRepo, ['worktree', 'list', '--porcelain']))
         .toContain(report.worktreePath as string);
       expect(await git(report.worktreePath as string, ['rev-parse', '--verify', 'MERGE_HEAD']))
         .toBe(fixture.resultCommit);
@@ -297,14 +313,14 @@ describe('task result integration into dev', () => {
       // `dev-only.txt` only exists after the dev-side commit, so the policy passes for the Task
       // verification but fails on the merged commit the integration verification tests.
       await advanceDev(fixture, 'dev change\n');
-      const devBefore = await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev']);
+      const devBefore = await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev']);
       await rewritePolicy(fixture, [{ id: 'smoke', argv: ['sh', '-c', 'test ! -f dev-only.txt'],
         cwd: '.', timeoutSeconds: 60 }]);
       const report = await integrate(fixture);
       expect(report).toMatchObject({ state: 'FAILED', outcomeCode: 'INTEGRATION_VERIFICATION_FAILED',
         integratedCommit: null });
       expect(report.verificationState).toBe('FAILED');
-      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(devBefore);
+      expect(await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(devBefore);
       expect(fixture.value.storage.listTasks(fixture.value.projectId)[0]?.state).toBe('EXECUTED');
       // The failed merged commit stays inspectable in the retained integration worktree.
       expect(existsSync(report.worktreePath as string)).toBe(true);
@@ -320,9 +336,10 @@ describe('task result integration into dev', () => {
     // The policy command moves `dev` behind the Runtime's back, which is exactly the race the
     // compare-and-swap exists for. The integration must not claim success afterwards.
     const fixture = await verifiedTask();
-    const repo = fixture.value.repo;
+    // ADR-0056: `dev` is the dev clone's ref, so that is the ref the command moves behind the
+    // Runtime's back.
+    const repo = fixture.value.devRepo;
     const marker = fixture.resultCommit;
-    // The policy command moves `dev` behind the Runtime's back while the integration is running.
     await rewritePolicy(fixture, [{ id: 'move-dev',
       argv: ['sh', '-c', `git -C ${repo} update-ref refs/heads/dev ${marker}`],
       cwd: '.', timeoutSeconds: 60 }]);
@@ -367,7 +384,7 @@ describe('task result integration into dev', () => {
     try {
       const report = await integrate(fixture, { permissionMode: 'STRICT' });
       expect(report).toMatchObject({ state: 'INTEGRATED', mergeStrategy: 'FAST_FORWARD' });
-      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.resultCommit);
+      expect(await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.resultCommit);
     } finally {
       fixture.value.storage.close();
     }
@@ -382,7 +399,7 @@ describe('task result integration into dev', () => {
       await expect(integrate(fixture, { permissionMode: 'STRICT' })).rejects.toMatchObject({
         code: 'VERIFICATION_POLICY_NOT_CONFIRMED',
       });
-      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.value.mainCommit);
+      expect(await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.value.mainCommit);
     } finally {
       fixture.value.storage.close();
     }
@@ -421,7 +438,7 @@ describe('task result integration into dev', () => {
       expect(batch?.state).toBe('RECOVERY_REQUIRED');
       expect(batch?.detail).toContain('the dev ref was not advanced');
       // The ref is untouched and the Task is not reported as integrated.
-      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.value.mainCommit);
+      expect(await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.value.mainCommit);
       expect(fixture.value.storage.listTasks(fixture.value.projectId)[0]?.state).toBe('EXECUTED');
       await expect(integrate(fixture)).rejects.toMatchObject({ code: 'INTEGRATION_IN_PROGRESS' });
     } finally {
@@ -473,7 +490,7 @@ describe('task result integration into dev', () => {
       expect(recovered?.detail).toContain('reconciled after a restart');
       expect(fixture.value.storage.listTasks(fixture.value.projectId)[0]?.state).toBe('SUCCEEDED');
       // The ref was read, not written a second time: it is still exactly the merged commit.
-      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.resultCommit);
+      expect(await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.resultCommit);
     } finally {
       fixture.value.storage.close();
     }
@@ -507,7 +524,7 @@ describe('task result integration into dev', () => {
         "UPDATE tasks SET state='EXECUTED',version=?1 WHERE id=?2",
       ).run(recordedVersion, fixture.value.taskId);
       // The ref is moved away from the recorded merge, as if the write never happened.
-      await git(fixture.value.repo, ['update-ref', 'refs/heads/dev', fixture.value.mainCommit]);
+      await git(fixture.value.devRepo, ['update-ref', 'refs/heads/dev', fixture.value.mainCommit]);
 
       const results = await reconcileInterruptedIntegrations({
         storage: fixture.value.storage, readRefCommit: readDev,
@@ -519,7 +536,7 @@ describe('task result integration into dev', () => {
       expect(recovered?.outcomeCode).toBe('DEV_REF_OBSERVED');
       expect(recovered?.detail).toContain(fixture.value.mainCommit);
       expect(fixture.value.storage.listTasks(fixture.value.projectId)[0]?.state).toBe('EXECUTED');
-      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.value.mainCommit);
+      expect(await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.value.mainCommit);
     } finally {
       fixture.value.storage.close();
     }
@@ -646,7 +663,7 @@ describe('multi-member IntegrationBatch (ADR-0053)', () => {
       expect(created).toMatchObject({ state: 'CREATED', created: true, devCommit: fixture.value.mainCommit });
       expect(created.members).toHaveLength(2);
       // A composed batch writes no Git side effect: `dev` is still the baseline it fixed.
-      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.value.mainCommit);
+      expect(await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.value.mainCommit);
 
       const report = await integrateBatch(fixture, created.batchId);
       expect(report).toMatchObject({ state: 'INTEGRATED', mergeStrategy: 'MERGE_COMMIT',
@@ -654,11 +671,12 @@ describe('multi-member IntegrationBatch (ADR-0053)', () => {
       expect(report.members).toHaveLength(2);
       expect(report.members.every((member) => member.state === 'INTEGRATED')).toBe(true);
       const integratedCommit = report.integratedCommit as string;
-      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(integratedCommit);
+      expect(await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(integratedCommit);
       // Both members' work is in the integrated tree, and both Tasks only reached SUCCEEDED here.
-      expect(await git(fixture.value.repo, ['ls-tree', '--name-only', integratedCommit]))
+      // The integrated commit is an object of the dev clone (ADR-0056).
+      expect(await git(fixture.value.devRepo, ['ls-tree', '--name-only', integratedCommit]))
         .toContain('agent-output.txt');
-      expect(await git(fixture.value.repo, ['ls-tree', '--name-only', integratedCommit]))
+      expect(await git(fixture.value.devRepo, ['ls-tree', '--name-only', integratedCommit]))
         .toContain('second-member.txt');
       expect(fixture.value.storage.listTasks(fixture.value.projectId)
         .every((task) => task.state === 'SUCCEEDED')).toBe(true);
@@ -675,7 +693,7 @@ describe('multi-member IntegrationBatch (ADR-0053)', () => {
       // Replaying the same command ID reports the recorded batch and does not advance dev twice.
       const replay = await integrateBatch(fixture, created.batchId, { commandId: report.batchId });
       expect(replay).toMatchObject({ state: 'INTEGRATED', alreadyCompleted: true });
-      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(integratedCommit);
+      expect(await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(integratedCommit);
       expect(fixture.value.storage.listIntegrationBatches(fixture.value.projectId)).toHaveLength(1);
     } finally {
       fixture.value.storage.close();
@@ -720,7 +738,7 @@ describe('multi-member IntegrationBatch (ADR-0053)', () => {
         integratedCommit: null });
       expect(report.detail).toContain(second.taskId);
       // Nothing was merged and `dev` kept its value; the members stay readable as they were.
-      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.value.mainCommit);
+      expect(await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.value.mainCommit);
       expect(report.members.map((member) => member.state)).toEqual(['PREPARED', 'PREPARED']);
       expect(fixture.value.storage.listTasks(fixture.value.projectId)
         .some((task) => task.state === 'SUCCEEDED')).toBe(false);
@@ -745,7 +763,7 @@ describe('multi-member IntegrationBatch (ADR-0053)', () => {
       const report = await integrateBatch(fixture, created.batchId);
       expect(report).toMatchObject({ state: 'STALE', outcomeCode: 'DEV_REF_MOVED',
         integratedCommit: null });
-      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(devBefore);
+      expect(await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(devBefore);
       // The stale batch does not block composing a new one: it is terminal, not in flight.
       const fresh = await createBatch(fixture, [
         { taskId: fixture.value.taskId,
@@ -775,7 +793,7 @@ describe('multi-member IntegrationBatch (ADR-0053)', () => {
       const report = await integrateBatch(fixture, created.batchId);
       expect(report).toMatchObject({ state: 'CONFLICTED', outcomeCode: 'MERGE_CONFLICT',
         integratedCommit: null });
-      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.value.mainCommit);
+      expect(await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.value.mainCommit);
       // The members are merged in `task_id` order: the one that merged first is MERGED, the member
       // that conflicted is CONFLICTED, and no member is reported as integrated.
       const byState = new Map(report.members.map((member) => [member.taskId, member.state]));
@@ -809,7 +827,7 @@ describe('multi-member IntegrationBatch (ADR-0053)', () => {
       });
       expect(cancelled).toMatchObject({ state: 'CANCELLED', outcomeCode: 'CANCELLED_BY_USER',
         integratedCommit: null });
-      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.value.mainCommit);
+      expect(await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(fixture.value.mainCommit);
       // A cancelled batch holds nothing, so the same members can be composed again.
       const again = await createBatch(fixture, members);
       expect(again.state).toBe('CREATED');
@@ -881,7 +899,7 @@ describe('multi-member IntegrationBatch (ADR-0053)', () => {
       expect(fixture.value.storage.listTasks(fixture.value.projectId)
         .every((task) => task.state === 'SUCCEEDED')).toBe(true);
       // The ref was read, not written a second time.
-      expect(await git(fixture.value.repo, ['rev-parse', 'refs/heads/dev'])).toBe(integratedCommit);
+      expect(await git(fixture.value.devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(integratedCommit);
     } finally {
       fixture.value.storage.close();
     }

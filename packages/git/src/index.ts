@@ -32,6 +32,8 @@ export type { SensitivePathHit } from './sensitive-paths.js';
 export {
   advanceLocalRef,
   createIntegrationWorktree,
+  fastForwardCheckedOutWorktree,
+  inspectDevCheckout,
   isAncestor,
   listCheckedOutRefs,
   mergeResultCommit,
@@ -40,6 +42,7 @@ export {
 } from './integration.js';
 export type {
   CheckedOutRef,
+  DevCheckoutState,
   IntegrationWorktree,
   MergeOutcome,
   MergeResult,

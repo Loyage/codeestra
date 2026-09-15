@@ -7,6 +7,7 @@ import {
   registerTemporaryDirectory,
   runCli,
 } from './support/runtime-reclamation.js';
+import { provisionDevClone } from './support/agent-fixture.js';
 
 /**
  * End-to-end native terminal handoff through the CLI and the real Runtime, with the real PTY
@@ -245,6 +246,9 @@ async function startTask(options: { readonly permissionMode?: 'FULL' | 'STRICT' 
   await git(repository, ['add', '.']);
   await git(repository, ['commit', '-q', '-m', 'fixture']);
   await git(repository, ['branch', 'dev']);
+  // ADR-0056: every dev fact comes from a second clone of the same origin that sits on
+  // `dev`; the project is trusted with it explicitly.
+  const devRepo = await provisionDevClone({ repository: repository });
 
   const stubPath = join(tools, 'stub-pi.ts');
   const shimPath = join(tools, 'pi');
@@ -264,7 +268,7 @@ async function startTask(options: { readonly permissionMode?: 'FULL' | 'STRICT' 
     CODEESTRA_STUB_TUI_EXIT: '7',
     CODEESTRA_HANDOFF_CONNECT_MS: '2000',
   };
-  const opened = await cli(['open', repository, '--no-open',
+  const opened = await cli(['open', repository, '--dev-repo', devRepo, '--no-open',
     ...(options.permissionMode === 'STRICT' ? ['--yes'] : [])], environment);
   expect(opened.exitCode).toBe(0);
   if (options.permissionMode === 'STRICT') {

@@ -8,6 +8,7 @@ import {
   registerTemporaryDirectory,
   runCli,
 } from './support/runtime-reclamation.js';
+import { provisionDevClone } from './support/agent-fixture.js';
 
 const repositoryRoot = join(import.meta.dir, '..', '..', '..');
 const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
@@ -161,6 +162,9 @@ async function runOneTask(): Promise<{
   await git(repository, ['commit', '-q', '-m', 'fixture']);
   // ADR-0009: the long-lived dev branch is the baseline every workspace is created from.
   await git(repository, ['branch', 'dev']);
+  // ADR-0056: every dev fact comes from a second clone of the same origin that sits on
+  // `dev`; the project is trusted with it explicitly.
+  const devRepo = await provisionDevClone({ repository: repository });
 
   // A shim executable keeps the production Adapter path untouched: the Runtime still launches
   // `pi <controlled argv>`, only the program behind that name is replaceable in a test.
@@ -175,7 +179,7 @@ async function runOneTask(): Promise<{
     CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: shimPath,
   };
-  const opened = await cli(['open', repository, '--no-open'], environment);
+  const opened = await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { id: string }[];

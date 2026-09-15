@@ -6006,6 +6006,234 @@ promotion criterion」，且其测试**断言**重启后 `uiRunning` 为 `false`
 - `#7` 用既有 `task cancel`、`#8` 用新的 `task recover` 的**现场收口**仍要等 `dev → main` 提升 + 稳定 Runtime 重启之后才在稳定实例里可用。
 - `docs/guides/**` 的版本/校对头按 ADR-0050 D02 未刷新（本格仍在合入流程中，不是该目录最后一次校对的时点）。
 
+## FOUNDATION-087 — `dev` 基线事实来源收口：`dev_repo_path` 取代过渡的本地 `dev` ref（Wave N / `lane/n1-dev-baseline`，ADR-0056，**无 schema 变更、不占迁移号**）
+
+状态：**已实现 + 已定向验证 + 用户已确认提交**；本格只提交到 `lane/n1-dev-baseline`
+（提交信息 `feat(runtime): make the dev clone the single dev fact source (FOUNDATION-087 / ADR-0056)`；SHA 由协调者在合入前用
+`git log -1` 读取），**未 push、未合入 `dev`、未提升、未重启任何 Runtime**，也**未触碰稳定 clone
+`/Users/loyage/Documents/codeestra` 与稳定 Runtime**。基线 `dev@f258c59`（未 rebase、未合并新 dev）；
+工作树 `/Users/loyage/Documents/codeestra-wt/n1-dev-baseline`。
+
+**本轮（协调者复核后）追加答复**：① `cli-attention` 的「基线就红」结论**撤回**并给出可复现的代理环境证据 →
+见「实际运行的检查与结果」一节；② 领地例外**完整表** → 见「领地例外」一节（含"授权但未使用"的两项）；
+③ 提交前重跑的数字与**最关键那条断言到底断言了什么** → 见「实际运行的检查与结果」一节。
+
+用户裁决（口径按原样执行，未扩大也未缩小）：① `dev_repo_path` **成为必需**，`project trust` 不带 `--dev-repo` 以稳定码拒绝，
+已信任但为空的项目在任何需要 dev 基线的操作上以新稳定码拒绝并给补救命令，**拒绝在任何副作用之前**且不改写已有行，
+**不静默回退**到过渡 ref；② 过渡 ref 的删除是**人工**步骤（本格只让代码不再读它，并提供只读退役证据）；
+③ 同时收口 FOUNDATION-077 的残留（全量证据的候选对象/副本根/锁文件从 dev clone 读，验证策略仍从 main ref 读，
+`promotion prepare/approve/promote` 的事实分层不放宽）；④ 集成推进方式必须与「保持 dev clone 自己的工作树一致」相容
+（用户就本格实测出的缺陷专门裁决，见「实测发现」一节）。
+
+### 交付物
+
+| 交付物 | 内容 | 位置 |
+|---|---|---|
+| A 单一 dev 事实来源 | `requireRecordedDevRepoPath` / `requireProjectDevRepository`（读 dev clone 的本地 `refs/heads/dev`，核验「另一个 clone、同 origin、HEAD 在 dev」）；**运行期不联网、不 fetch** | `apps/runtime/src/dev-repo-service.ts` |
+| B `dev_repo_path` 必需 | `project.trust` 省略 `--dev-repo`（或 `none`）→ `DEV_REPO_REQUIRED`，**任何写入之前**拒绝；`project.inspect` 的 `devCommit`/`devRefPresent` 改读 **dev clone**，新增只读退役证据 `devRefRetirement` | `apps/runtime/src/main.ts`、`packages/contracts/src/index.ts` |
+| C 需要 dev 基线的操作拒绝 | workspace 准备（含重建）、依赖判定与收敛、槽位预留、结果 commit 归属、Task 验证、集成、回收、调度启动前重检、影响分析基线、`promotion full-suite run`：路径为空即 `DEV_REPO_REQUIRED`（只读的 `project inspect` 不拒绝） | 见下表「领地例外」 |
+| D 根分工（两仓库） | workspace / verification / integration / reclamation 投影的 `*repoRoot` 解析到 **dev clone**（各新增显式 `mainRepositoryRoot`）；`StablePromotionPlan`/`PromotionCandidates` 保持 main（`promotion-service.ts` **一行未改**）；历史记录用 `COALESCE(dev_repo_path, repo_root)` | `packages/storage/src/database.ts`、`docs/architecture/git-workspace-api.md` §2 表 |
+| E 集成推进（Amends ADR-0018） | 读 `dev` 比对批次基线（不等即批级 `STALE`/`DEV_REF_MOVED`）→ 三项前置（在 dev 上、`status --porcelain` 空、HEAD 与 `refs/heads/dev` 都等于基线；`DEV_CHECKOUT_NOT_ON_DEV`/`DEV_CHECKOUT_DIRTY`/`DEV_CHECKOUT_MOVED`）→ `git merge --ff-only` 由 Git 把 ref+索引+工作区一起前移 → 事后核验「ref == HEAD == merged **且** `status` 为空」，失败记 `DEV_CHECKOUT_FF_FAILED`、不回滚、不 `reset --hard`/`checkout -f`/`--force` | `apps/runtime/src/integration-service.ts`、`packages/git/src/integration.ts` |
+| F 全量证据根 | 候选对象、detached 副本与锁文件从 **dev clone** 读；固定全量策略仍从 **main ref** 读（绑定仍是「精确 dev SHA + policy digest + 候选锁文件 digest」，只有根变了） | `apps/runtime/src/promotion-evidence-service.ts` |
+| G CLI | `project trust <path> --dev-repo <dev-clone>` 必需；`project inspect` 打印 dev 基线来源与退役结论；`open` 透传 `--dev-repo`；`usage()` 对应行 | `apps/cli/src/main.ts` |
+| H ADR 与架构文档 | ADR-0056（含**Amends ADR-0018** 一节、实测证据、根分工表、失败形态、退役条件）；索引与优先级段；`git-workspace-api.md` §2/§3/§3b/§4a；`state-machines.md` §4 + §8 行 | `docs/decisions/0056-*.md` 等 |
+| I 用户文档（ADR-0050） | 见下面「文档同步」一节 | `docs/guides/*` |
+| J 定向测试 | 新增 `apps/runtime/test/dev-baseline.test.ts`（6）、`packages/git/test/dev-checkout.test.ts`（5）；既有 e2e 夹具补齐 dev clone（约 30 个测试文件） | `apps/runtime/test/*`、`packages/git/test/*` |
+
+### 领地例外（照 Wave M 的 M1 先例；**完整表**）
+
+**(1) 用户已明确授权的 6 个文件（全部都用到了，无一闲置）**
+
+| 文件 | 函数 / 位置 | 改了什么 | 为什么必须改 |
+|---|---|---|---|
+| `apps/runtime/src/verification-service.ts` | `queueTaskVerification`、`QueuedTaskVerification.repositoryRoot` 文档 | 新增 `requireRecordedDevRepoPath` 前置；策略读取改用 `candidates.mainRepositoryRoot` | 被测 commit 是 dev clone 的对象，detached 副本只能在那里建；策略仍必须来自 main ref（ADR-0006） |
+| `apps/runtime/src/result-commit-service.ts` | `prepareResultCommit` / `captureResultCommit` 里的 `assertOwnedWorkspace`（2 处） | 归属核验 `repositoryRoot` 改为 dev clone | 否则对一个活着的 worktree 报 `MISSING`（它注册在 dev clone 里） |
+| `apps/runtime/src/reclaim-service.ts` | `evaluateUnregisteredCandidate`、`recheckUnregisteredCandidate`、`buildPlan` | 注册/归属核验与 `dev` 可达性读 dev clone；无 dev clone 时 `DEV_REPO_REQUIRED`；未注册目录路径给 `RECOVERY_REQUIRED` 且不删除；`buildPlan` 的根解析改为 `requireRecordedDevRepoPath(candidates.project)` | worktree 注册、Task branch 与 `dev` ref 都在 dev clone；不能凭错仓库删用户资源（跨项目批次仍按 ADR-0037 逐项目报告失败） |
+| `apps/runtime/src/impact-analysis-service.ts` | 新增 `readProjectDevCommit`（原 `devBranchRef` 两处读取） | 开发基线读 dev clone | 否则影响分析的基线永远是那个不前进的旧指针 |
+| `apps/runtime/src/schedule-service.ts` | 启动前基线重检、`#observeSnapshotGeneration` 的空观测基线（2 处） | 同上，且把根解析提到读取之前（拒绝不会被 `.catch(() => null)` 吞成「没有基线」） | 同上：`STALE_BASE` 必须针对真正的基线 |
+| `apps/runtime/src/task-control-service.ts` | `decideRetryWorkspace` 里的 `inspectOwnedWorktreeRebuild`（**只此一处**，未做其它重构） | 根来源改 dev clone | worktree 属 dev clone，否则重建判定的归属证据是错的 |
+
+`impact-analysis-service.ts` 原有的策略读取与 `core.ignorecase` 探测（协调者按行号点到的那两处）**刻意未改**：那是
+main ref 上的策略事实与仓库配置探测，不是 dev 事实；实现以事实为准并在此点明。
+
+**(2) 同一文件内的块外例外（1 处，请复核）**
+
+| 文件 | 位置 | 改了什么 | 为什么必须改 |
+|---|---|---|---|
+| `apps/cli/src/main.ts` | `group === 'open'` 的参数解析与内层 `project.inspect`/`project.trust` 调用（**不在 `project`/`promotion` 块内**） | `open` 新增并透传 `--dev-repo`；`describeDevRefRetirement`/`describeDevRepo` 等打印 | `open` 组合一次 trust，而 trust 现在要求 dev clone；不改就等于让 `codeestra open` 对每个新项目都失败（违反「CLI 必须完备」）。这是本格唯一的块外改动 |
+
+**(3) 共享槽位（按约定只能追加 / 最小必要）**
+
+| 文件 | 改了什么 | 为什么不能换个做法 |
+|---|---|---|
+| `packages/storage/src/database.ts` | 追加投影字段：`VerificationCandidates.mainRepositoryRoot`、`DevFullSuiteCandidates.mainRepositoryRoot`、`IntegrationCandidates.mainRepositoryRoot`、`IntegrationBatchCandidates.mainRepositoryRoot`、`ReclamationProjectRef.devRepoPath`；**最小必要的 SQL 解析改动**（workspace 计划 / verification / integration / full-suite / reclamation / `integrationBatchPlan` 的 `repoRoot` 用 `COALESCE(p.dev_repo_path, p.repo_root)`）；**不改任何既有方法签名、不占迁移号** | `WorkspacePreparationPlan.repoRoot` 与 `IntegrationBatchPlan.repositoryRoot` 分别被**不在授权范围**的 `recovery-service.ts` 与 `main.ts` wiring 直接消费；改成新增字段会让重启收敛继续在错仓库里找 worktree/ref。`COALESCE` 只作用于**本 ADR 之前就存在**的历史记录（那些副作用确实发生在 main 检出），新操作在服务层先以 `DEV_REPO_REQUIRED` 拒绝 |
+| `packages/contracts/src/index.ts` | `devRefRetirementSchema`（新增）+ `projectIdentitySchema` 增加 `devRefRetirement`；`project.inspect` 的 `devCommit`/`devRefPresent` 文档改为「dev clone 的」；`project.trust.devRepoPath` 文档写明现在必需（形状仍可行可选，为的是让遗漏得到**稳定码**而不是边界错误） | 退役证据必须随身份回显（否则 CLI/UI 无法核对用户看过的那份状态）；只动 `project.*` 区，未碰 `session.*`、未新开 group |
+| `apps/runtime/src/main.ts` | `project.inspect`（dev 基线改读 dev clone + 计算退役证据）、`project.trust`（`DEV_REPO_REQUIRED` 前置、核验、回显比较、写入） | 只接线与自己的 dispatch 分支 |
+| `apps/cli/src/main.ts`（`project` 块） | `project inspect` 打印 dev 基线来源与退役结论；`project trust` 打印新稳定码与补救命令；`usage()` 对应行 | 同上 |
+| `docs/*`（decisions / architecture / tasks / guides，见「文档同步」一节） | ADR-0056、索引与优先级段、§2 根分工表、§3/§3b 集成推进、§8 行、FOUNDATION-087 记录、六篇用户指南 | 规格/文档面按约定格子 |
+
+**(4) 本格独占的代码与新测试**
+
+| 文件 | 改了什么 |
+|---|---|
+| `apps/runtime/src/dev-repo-service.ts` | 新增 `DEV_REPO_REQUIRED`、`requireRecordedDevRepoPath`、`requireProjectDevRepository`（含 `ProjectDevRepository` 两仓库根） |
+| `apps/runtime/src/promotion-evidence-service.ts` | `readDevFullSuiteBindings` 拆成 main/dev 两个根；`runDevFullSuite`/`checkDevFullSuiteEvidence` 从 dev clone 读候选与锁文件、从 main ref 读策略，并各自加 `DEV_REPO_REQUIRED` 前置 |
+| `apps/runtime/src/scheduler.ts` | `readDevCommit` 改为读 dev clone；`inspectTaskDependencies` 先把根解析一次（拒绝先于任何边判定） |
+| `apps/runtime/src/slot-reservation-service.ts` | `assessedDevCommit` 与空观测基线读 dev clone（根解析前置） |
+| `apps/runtime/src/workspace-service.ts` | 解析并核验 dev clone；worktree 创建/重建/身份核验改 dev clone；保留 `assertTrustedMainCheckout`（main 检出身份变化仍然**失效信任**，与改动前一致） |
+| `apps/runtime/src/integration-service.ts` | `inspectIntegrationTarget` 接收 `ProjectDevRepository`（合并/验证/推进都在 dev clone，策略从 main 读）；`assertDevRefAdvanceable`（三项前置 + 其它工作树 `DEV_REF_CHECKED_OUT`）；推进改为「读 ref 比对基线 → 前置 → `merge --ff-only` → 核验 ref/HEAD/`status`」，失败记 `DEV_CHECKOUT_FF_FAILED` |
+| `packages/git/src/integration.ts` | 新增 `inspectDevCheckout`（在 dev 上 / 干净（含未跟踪）/ HEAD）；`fastForwardCheckedOutWorktree` 重写为「Git 自己快进 + ref/HEAD/`status` 三重成功判据」，并在注释里留下 `update-ref` + 三等式不成立的实测说明 |
+| `packages/git/src/index.ts` | 追加导出这两个函数与 `DevCheckoutState` 类型 |
+| `apps/runtime/test/dev-baseline.test.ts`（**新建**，6 例） | 需要 dev clone 的固定失败形态（含"拒绝先于任何写入"）、dev clone 是唯一来源（只存在于该 clone 的候选可被验证/集成/全量证据覆盖）、脏检出在组批前拒绝且不留批次 |
+| `packages/git/test/dev-checkout.test.ts`（**新建**，5 例） | `inspectDevCheckout` 三类事实；快进的成功判据（ref+HEAD+`status` 空 **且新提交引入的文件在磁盘上**）与「本地改动会被覆盖时拒绝且不动现场」 |
+
+**(5) 既有测试文件的改动（**不在原授权清单内**，但为让既有 e2e 继续成立所必需；仅测试夹具与断言，无产品语义）**
+
+| 文件 | 改了什么 | 为什么必须改 |
+|---|---|---|
+| `apps/runtime/test/support/agent-fixture.ts` | 新增 `provisionDevClone`（建临时裸 origin → main 检出 push `main`+`dev` → 真正 `git clone` → `checkout dev` → **把本地 Git 身份复制到 clone**）与 `syncDevClone`；`createAgentFixture` 记录 `devRepoPath` 并返回 `devRepo` | ADR-0056 之后没有 dev clone 的项目读不到任何 dev 事实；测试不允许依赖开发者的全局 Git 配置 |
+| 27 个 CLI e2e（`cli-agent-config`、`cli-attention`、`cli-capacity-slots`、`cli-claude-adapter`、`cli-codex-adapter`、`cli-impact`、`cli-integrate`、`cli-integration-batch`、`cli-knowledge`、`cli-open`、`cli-promotion`、`cli-prose-question`、`cli-prose-question-attention`、`cli-reclaim`、`cli-reclaim-batch`、`cli-schedule`、`cli-session-attach`、`cli-session-handoff`、`cli-snapshot-recheck`、`cli-targeted-tests`、`cli-task-control`、`cli-task-create`、`cli-task-depends`、`cli-task-retry`、`cli-task-run-progress`、`cli-transcript`、`runtime-lifecycle`） | 夹具新增 dev clone 并把 `--dev-repo` 传给 `open`；断言/操作用例改读 dev clone（详见下） | 同一条命令面变化的必然结果：项目必须有 dev clone，且 `dev` ref / Task branch / worktree 注册 / Git hooks 现在都属 dev clone |
+| 其中断言/操作改到 dev clone 的（按改点）：`cli-integrate`、`cli-integration-batch`（`rev-parse dev`、`ls-tree`、把"dev 移动"改成在 dev clone 里提交、STALE 用例）、`cli-task-retry`（branch/worktree 注册/orphan 分支）、`cli-reclaim` + `cli-reclaim-batch`（worktree 注册、Task branch、未注册目录的注册证据、recheck 的 repositoryRoot、`devRepositories[]`）、`cli-task-depends`（`rev-parse dev`）、`cli-snapshot-recheck`（`advanceDev` 移到 dev clone）、`cli-impact`/`cli-knowledge`/`cli-open`/`cli-reclaim-batch`（夹具返回值与类型新增 `devRepo`）、`cli-open`（**新增 2 例**：trust 缺 `--dev-repo`/`none` → `DEV_REPO_REQUIRED` 且不登记；`project inspect` 的 dev 基线来源与退役证据文案） | — |
+| `cli-promotion` | 两个 clone 共享同一个临时裸远端（双方 `remote set-url`）；`devClone` 就是夹具的 dev clone（去掉"第二个 clone + fetch"这一步） | 候选现在产在 dev clone 里（ADR-0056），"候选在另一个 clone 里再同步过来"不再是真实形状 |
+| `promotion-service` | `remote add` → `remote set-url`；候选从**夹具的 dev clone** fetch；「main 已在候选」用例改为先 fetch+ff（main 检出里没有候选对象） | 同上 |
+| `integration-service` | `advanceDev` 改成在 dev clone 里直接提交（`dev` 已在别处检出，不能再建第二个 worktree）；断言 dev ref/`ls-tree`/worktree 列表改读 dev clone；hooks 装到 dev clone 的 `.git/hooks`；`DEV_REF_CHECKED_OUT` 用例改写为 `DEV_CHECKOUT_DIRTY` + `DEV_REPO_BRANCH_MISMATCH` 两例 | hooks 属"提交所在仓库"，现在就是 dev clone；`dev` 只能被检出一次，旧用例的构造方式不再成立 |
+| `scheduler` | 13 处 dev ref 操作/提交对象改到 dev clone | 依赖判定读 dev clone 的 `dev` |
+| `workspace-service` | 夹具新增 dev clone；`REF_CONFLICT` 用例在 dev clone 建冲突分支；返回值新增 `devRepo` | worktree 建在 dev clone |
+| `schedule-service` | `branch -f dev` 之后新增 `syncDevClone`（基线移动用例）；夹具返回值加 `devRepo` | 基线是 dev clone 的 `dev` |
+| `result-commit-service` | hook 装到 dev clone；夹具返回 `devRepo` | 同 hooks/仓库归属 |
+| `socket-response`、`event-subscription-ipc` | 夹具新增 dev clone；`project.trust` 请求带上 `devRepoPath`，`project.inspect` 也带同一路径（回显必须一致） | trust 现在要求 dev clone，且回显会核对它 |
+| `packages/contracts/test/request.test.ts` | `expectedIdentity` 夹具新增 `devRefRetirement` 字段 | strict schema 现在包含该字段，回显缺它就不合法 |
+| `revision-delivery` | 夹具新增 dev clone 并把 `--dev-repo` 传给 `open` | 同 CLI 夹具 |
+
+**(6) 授权但**未使用**的**
+
+- `packages/git/src/promotion.ts`：**未改**（本格不需要动 `ls-remote`/push 的那些函数）。因此"`packages/git/src/**` 可自由改"这条授权只用到了 `integration.ts` 与 `index.ts`。
+- `apps/runtime/test/dev-repo-service.test.ts`：**未改**（它是 FOUNDATION-077 的既有用例，本格只重跑：6 pass / 0 fail）。
+- `docs/architecture/*` 只动了 `git-workspace-api.md` 与 `state-machines.md`（授权范围内）。
+
+### 实测发现（写进 ADR-0056 的证据；促成集成推进方式改为 B）
+
+- dev clone 的 `HEAD` 是 `refs/heads/dev` 的**符号引用**。临时仓库实测：`git update-ref refs/heads/dev <new>` 之后
+  `rev-parse HEAD` 与 `rev-parse refs/heads/dev` **都已经是 `<new>`**，而索引/工作区仍停在旧提交
+  （`git status --porcelain` 把新提交引入的文件报成 `D`），紧随其后的 `git merge --ff-only <new>` 只打印
+  `Already up to date.` 且什么都不做。
+- 因此「`update-ref` CAS + 三等式核验」会**报告成功而把用户的 dev 检出留在旧提交**。用户据此裁决改为：
+  读 ref 比对基线（读取-比对-拒绝，非原子 CAS）→ `git merge --ff-only` 前移 ref+索引+工作区 →
+  成功判据**必须包含** `git status --porcelain` 为空（测试同时钉住「新提交引入的文件确实在磁盘上」）。
+  残余竞态窗口（读 ref 之后、快进之前）如实写进 ADR 与 `git-workspace-api.md` §3b。
+- 顺带确认：`DEV_CHECKOUT_NOT_ON_DEV` 在正常路径上由更早的 dev clone 核验（`DEV_REPO_BRANCH_MISMATCH`）先拦下，
+  它自己是「核验之后、快进之前」的重复检查；`DEV_REF_CHECKED_OUT`（其它工作树检出 `dev`）在双 clone 布置下几乎不可达，
+  两个码都按原样保留而不是删掉。
+
+### 与旧版 Runtime 的兼容（实测发现 + 一处修正）
+
+本格在汇报过程中**误**让 shell 执行了一条内联命令（反引号被替换），那条命令是
+`project trust /Users/loyage/Documents/codeestra --dev-repo /Users/loyage/Documents/codeestra-dev`，
+它在本格 CLI（新代码）上连到了**稳定 Runtime（旧代码）**。结果暴露了一个真实缺陷：
+旧 Runtime 的 `project.inspect` 响应里**没有** `devRefRetirement`，新 CLI 直接解引用它就崩了
+（`undefined is not an object (evaluating 'retirement.localDevRefPresent')`）。
+**副作用核对**：该命令在崩溃点之前没有发出任何 `project.trust`，稳定库核对为
+`projects.dev_repo_path` 仍为空、最新一条 `project_trusts` 仍是 2026-09-13（不是本次），**稳定 Runtime 与其数据未被改动**。
+修正：`describeDevRefRetirement` 对缺失字段**直接返回**（「缺报告不是崩溃」，与 `runtime.ping` 新字段的既有规则一致），
+且 `dev baseline (from the dev clone)` 这句只在响应确实带 `devRefRetirement` 时使用 —— 否则退回旧措辞，
+不让 UI 文案陈述 Runtime 没有发来的事实。修正后实测：在**稳定的旧 Runtime** 上执行只读的
+`project inspect /Users/loyage/Documents/codeestra --dev-repo /Users/loyage/Documents/codeestra-dev` → 退出码 0、正常输出。
+（这条只读核验是唯一一次与稳定 Runtime 交互，无写入。）
+
+### 实际运行的检查与结果（定向，ADR-0038；**未跑** `bun run check` / `just check` / `just verify` / `check:fast`）
+
+- **提交前的最后一轮重跑（本格 lane 分支，全部用临时仓库/临时 home）**：
+
+  | 命令 | 结果 |
+  |---|---|
+  | `bun run typecheck` | 退出码 **0** |
+  | `bun test apps/runtime/test/dev-baseline.test.ts packages/git/test/dev-checkout.test.ts apps/runtime/test/dev-repo-service.test.ts apps/runtime/test/cli-open.test.ts` | **25 pass / 0 fail**（dev-baseline 6、git dev-checkout 5、dev-repo-service 6、cli-open 8） |
+  | `bun test apps/runtime/test/cli-promotion.test.ts apps/runtime/test/promotion-service.test.ts apps/runtime/test/cli-integrate.test.ts apps/runtime/test/cli-schedule.test.ts apps/runtime/test/workspace-service.test.ts apps/runtime/test/cli-snapshot-recheck.test.ts`（协调者点名的 6 个） | **67 pass / 0 fail** |
+  | `bun test` 更宽的受影响面 12 文件（`cli-integration-batch`/`integration-service`/`verification-service`/`scheduler`/`schedule-service`/`result-commit-service`/`task-control-service`/`cli-reclaim`/`cli-reclaim-batch`/`cli-task-retry`/`cli-task-depends`/`slot-reservation-service`） | **117 pass / 0 fail** |
+  | `bun test packages/storage/test packages/git/test packages/contracts/test` | **255 pass / 0 fail**（24 文件；含 v12→当前与 v26/v27 回滚夹具、`PRAGMA foreign_key_check`） |
+  | 其余受影响 CLI/e2e：13 文件 | **60 pass / 0 fail** |
+  | 其余受影响 CLI/e2e：17 文件 | **111 pass / 0 fail** |
+  | `cli-attention`（**取消代理变量**后，协调者那条命令的等价形式） | **3 pass / 0 fail** |
+
+- **本格最关键的一条断言（值得单独点出）**：`packages/git/test/dev-checkout.test.ts` 的
+  “moves the ref, the index and the working tree, and needs a clean status to call it done” 不只断言
+  `rev-parse HEAD == refs/heads/dev == merged`（这条**平凡成立**，见「实测发现」一节），还断言
+  **`git status --porcelain` 为空**（`expect(await run(repo, ['status','--porcelain'])).toBe('')`）**以及新提交引入的文件真的出现在磁盘上**
+  （`expect(await Bun.file(join(repo, 'integrated.txt')).text()).toBe('integrated\n')`）。
+  服务层同一条判据由 `apps/runtime/test/dev-baseline.test.ts` 的集成用例把住：
+  `expect(await git(value.devRepo, ['status','--porcelain'])).toBe('')` 与
+  `expect(await Bun.file(join(value.devRepo, 'agent-output.txt')).text()).toBe('work\n')`。
+  两处一起才排除了「ref 已前移、工作区仍落后却被报告成功」这一本格最初踩到的陷阱。
+- **未跑**：`bun run check` / `just check` / `just verify` / `check:fast`（ADR-0038 禁止在 lane 跑全量；
+  全量由协调者在合入 `dev` 后逐格执行）；`bun run typecheck:ui` 与 `bun run build:ui`（未改 `apps/ui/**`）；
+  真实 provider 与真实 GitHub 的任何操作。
+- **`cli-attention` 那条先前的「基线就红」结论：撤回，原因是我的工作 shell 里的代理环境变量**（协调者在 `dev` 上单跑
+  3 pass / 0 fail，并质疑了该结论；质疑是对的）。完整证据（都在本工作树、只影响临时 home）：
+
+  | 命令（`apps/runtime/test/cli-attention.test.ts` 单跑） | 结果 |
+  |---|---|
+  | 我的 shell 默认（`http_proxy=http://127.0.0.1:7897`、`https_proxy=…`、`all_proxy=socks5://127.0.0.1:7897` 都已导出） | **2 pass / 1 fail**（workbench HTTP 那条） |
+  | `env -u http_proxy -u https_proxy -u all_proxy` | **3 pass / 0 fail** |
+  | 只设 `all_proxy=socks5://127.0.0.1:7897` | 3 pass / 0 fail |
+  | 只设 `http_proxy`/`https_proxy=http://127.0.0.1:7897`（取消 `all_proxy`） | **2 pass / 1 fail** |
+
+  失败原文（逐字）：`TypeError: null is not an object (evaluating 'envelope.ok')`，位置
+  `apps/ui/src/api.ts:45:9`，由 `apps/runtime/test/cli-attention.test.ts:263:50` 的 `RuntimeClient.command` 触发。
+  独立探针（临时脚本、本机 loopback 服务）说明机制：同一进程内 `fetch('http://127.0.0.1:<port>/api/command')`
+  在设了 `http_proxy` 时被路由到 Clash，得到 **HTTP 502 + 空 body**（读完 `text()` 是 `""`）；不设代理时是 200 与正常 JSON。
+  也就是说：这条失败与 N1 无关，而是「UI 的 HTTP 客户端继承环境代理、把 loopback 请求也发给代理」的**环境效应**
+  （仓库里已有同类先例记录：DOCUMENTATION-001 提到首次 HTTP 读取受代理影响返回 502）。因此本格**不改**任何东西：
+  它既不是基线缺陷，也不是本格引入，且 `apps/ui/**` 是 N3 领地。（可选的测试侧加固——给这些用例显式禁用代理或设 `NO_PROXY=127.0.0.1`——
+  属另一个格子的决定，本格只如实报告。）
+- 全部 Git 操作用临时仓库与临时目录；**未对真实 GitHub 做任何写操作、未动稳定 clone、未提升、未重启任何 Runtime**；
+  未新建 worktree、未 rebase、未 push。
+
+### 稳定实例需要执行的一次性补救命令（提升 + 重启之后，人工）
+
+稳定 Runtime 的项目 `codeestra`（`repo_root=/Users/loyage/Documents/codeestra`）目前 `dev_repo_path` 为空，
+因此在提升与重启之后，需要**在 main clone 里**补一次 trust 才恢复 dev 基线操作（只读核验过该命令现在可用：
+dev clone 干净、HEAD 在 `refs/heads/dev`、`origin` 与 main 检出逐字符一致）：
+
+```sh
+cd /Users/loyage/Documents/codeestra
+bun run codeestra project trust /Users/loyage/Documents/codeestra   --dev-repo /Users/loyage/Documents/codeestra-dev
+```
+
+过渡 `dev` ref 的删除**不在本格**：先用
+`bun run codeestra project inspect /Users/loyage/Documents/codeestra --dev-repo /Users/loyage/Documents/codeestra-dev`
+看 `devRefRetirement`（当前实测：该 clone 里仍有本地 `refs/heads/dev`，指向落后的 `7292ddc`），
+在没有任何已信任项目缺 dev clone 之后，再由人工执行 `git -C /Users/loyage/Documents/codeestra branch -D dev`。
+
+### 未验证 / 已知残留（如实）
+
+- **真实提升与重启未执行**：本格只改代码与测试；`dev → main` 仍按 `AGENTS.md` 的人工四步，且必须先完成上面的补救 trust。
+- **`apps/ui` 的「添加项目」会以 `DEV_REPO_REQUIRED` 拒绝**（它不发送 `devRepoPath`）：**N3 领地**，需在 UI 增加
+  dev clone 路径输入（等价于 `--dev-repo`）。本格未改 `apps/ui/**`。
+- **dev clone 自己作为项目根的实例**（本机 dev 实例 `~/.local/state/codeestra-dev`）：`--dev-repo` 找不到合法值
+  （实测 `DEV_REPO_BRANCH_MISMATCH`，因为 main 检出在 `main` 上），因此它的 dev 基线操作会被拒绝。这是「dev_repo_path 必需」的
+  直接后果，作为已知边界记录，本格不修（也未重启该实例）。
+- **`DEV_CHECKOUT_FF_FAILED` 后的恢复路径**：批次落终态而 `dev` 可能已前进；人工按 detail 里的命令对齐检出后，
+  产品路径**不能**就同一候选重做集成（「合并一个已在 `dev` 里的候选」在既有实现里会判 `MERGE_FAILED`）。
+  如实记录为残留，未自行放宽或加旁路。
+- **过渡 ref 的真实删除**未执行（人工步骤），也未验证删除后稳定实例仍正常（需要先做上面的补救 trust）。
+- 真实 provider、真实 GitHub、UI 观感一律未验收（与本格无关）。
+
+### 文档同步（ADR-0050）
+
+- 命令面 → `docs/guides/cli-reference.md`：§1 `open`（新增必需 `--dev-repo`）、§3 `project inspect`（dev 基线来源改为
+  dev clone、新增 `devRefRetirement` 字段表、两个 clone 各自拥有什么的分工表）、§3 `project trust`（`--dev-repo` 必需、
+  `DEV_REPO_REQUIRED` 行、移除「省略时保留原值 / `none` 清除」）、§15（提升路径的 `DEV_REPO_PATH_MISSING` 与本格
+  `DEV_REPO_REQUIRED` 的区别，以及全量证据「副本/锁文件从 dev clone、策略从 main ref」）。
+- 日常做法 → `docs/guides/manual.md` §3.1/§3.1.1（dev clone 的准备与要求）/§3.2（trust 必需 flag 与「集成会推进 dev 检出」）/
+  §3.3（`open --dev-repo`）/新增 §3.4（过渡 ref 何时可删 + 只读核验命令）；`docs/guides/recipes.md`（trust 与 `open` 两条）。
+- 同一处功能变更的其它指南（**本格实际改了，超出任务书点名范围但避免文档说谎**）：
+  `getting-started.md` §4.4 与 §7 第 3 条、`troubleshooting.md`（`DEV_REF_MISSING` 节改写为 `DEV_REPO_REQUIRED` +
+  新增两条症状：老项目突然报 `DEV_REPO_REQUIRED`、集成报 `DEV_CHECKOUT_*`）、`features.md`（项目识别/接入/一条命令接入三行的
+  命令面与 ADR 链接，新增「dev 事实的唯一来源」一行）。
+- 权限语义（FULL/STRICT 差异）**未变**（本格零新增确认/门禁），因此 `concepts.md` 无需修改；`ui.md` 未改（`apps/ui/**` 禁改，
+  且 UI 行为未变——但上面的 UI 缺口记在「未验证/已知残留」）。
+- `docs/guides/**` 的版本/校对头按 ADR-0050 D02 **保持原样**（本格在 lane 上，未 bump SHA/schema 头）。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），

@@ -2,8 +2,9 @@ import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { verificationPolicyPath, verificationPolicyVersion } from '@codeestra/contracts';
 import {
-  advanceLocalRef,
   createIntegrationWorktree,
+  fastForwardCheckedOutWorktree,
+  inspectDevCheckout,
   inspectRepository,
   isAncestor,
   listCheckedOutRefs,
@@ -31,6 +32,7 @@ import {
   type VerificationRunner,
   type VerificationTreeEvidence,
 } from './verification-service.js';
+import { requireProjectDevRepository, type ProjectDevRepository } from './dev-repo-service.js';
 
 export class IntegrationServiceError extends Error {
   constructor(readonly code: string, message: string) {
@@ -316,19 +318,60 @@ function isFinished(state: IntegrationBatchState): boolean {
 }
 
 /**
- * Refuses to advance the `dev` ref while any worktree has it checked out: `git update-ref` would
- * move the ref while that worktree's index and files stayed on the old commit.
+ * The codes that describe *why* the one checkout an integration may advance is not usable.
+ *
+ * ADR-0056 amends ADR-0018's refusal: `refs/heads/dev` being checked out is no longer an automatic
+ * refusal, but the single exception is narrow. The dev clone's own long-lived checkout may hold the
+ * ref only if it is on that branch, clean, and still at the batch's fixed baseline — and then Git's
+ * own fast-forward moves the ref, the index and that working tree together in one step. Every other
+ * worktree holding the ref is still refused with `DEV_REF_CHECKED_OUT` exactly as before.
  */
-async function assertDevRefNotCheckedOut(input: {
+const DEV_CHECKOUT_CODES = {
+  notOnDev: 'DEV_CHECKOUT_NOT_ON_DEV',
+  dirty: 'DEV_CHECKOUT_DIRTY',
+  moved: 'DEV_CHECKOUT_MOVED',
+} as const;
+
+/**
+ * Refuses to advance the `dev` ref unless advancing it can be kept consistent with the worktree
+ * that has it checked out.
+ *
+ * A worktree other than the dev clone's own checkout is refused outright: the Runtime does not own
+ * it and must not move a ref under someone else's working tree. The dev clone's own checkout is the
+ * one exception (ADR-0056): it must be on `dev`, clean (untracked files included, because those are
+ * exactly what a fast-forward would overwrite) and at the baseline the batch was composed against,
+ * so that the fast-forward the caller performs afterwards can only succeed.
+ */
+async function assertDevRefAdvanceable(input: {
   readonly repositoryRoot: string;
   readonly devRef: string;
+  readonly expectedCommit: string;
 }): Promise<void> {
   const holder = (await listCheckedOutRefs(input.repositoryRoot))
-    .find((entry) => entry.ref === input.devRef);
+    .find((entry) => entry.ref === input.devRef && entry.path !== input.repositoryRoot);
   if (holder !== undefined) {
     throw new IntegrationServiceError('DEV_REF_CHECKED_OUT',
       `${input.devRef} is checked out in ${holder.path}; merge it there yourself, or integrate from`
       + ' a layout where dev is not checked out, so the branch and its working tree never disagree');
+  }
+  const checkout = await inspectDevCheckout({ path: input.repositoryRoot });
+  if (checkout.branchRef !== input.devRef) {
+    throw new IntegrationServiceError(DEV_CHECKOUT_CODES.notOnDev,
+      `The dev clone ${input.repositoryRoot} has${checkout.branchRef === null
+        ? ' a detached HEAD'
+        : ` ${checkout.branchRef} checked out`}, not ${input.devRef}; an integration advances`
+      + ' a checkout it can fast-forward in the same step, so it refuses to move the ref alone');
+  }
+  if (checkout.headCommit !== input.expectedCommit) {
+    throw new IntegrationServiceError(DEV_CHECKOUT_CODES.moved,
+      `The dev clone checkout is at ${checkout.headCommit ?? 'an unreadable commit'}, not the`
+      + ` batch's baseline ${input.expectedCommit}; re-read the baseline and compose the batch again`);
+  }
+  if (!checkout.clean) {
+    throw new IntegrationServiceError(DEV_CHECKOUT_CODES.dirty,
+      `The dev clone ${input.repositoryRoot} has uncommitted or untracked changes:`
+      + ` ${checkout.statusDetail}. Commit or remove them first: a fast-forward would overwrite`
+      + ' exactly that working tree, and the integration never discards a user\'s work');
   }
 }
 
@@ -391,7 +434,10 @@ function markBatchStale(input: {
 
 /** The repository, policy and `dev` facts every integration has to re-read before touching a ref. */
 interface IntegrationPreflight {
+  /** The dev clone: the `dev` ref, the merge worktree and the ref advance all happen there (ADR-0056). */
   readonly repositoryRoot: string;
+  /** The stable main checkout, whose `main` ref carries the verification policy. */
+  readonly mainRepositoryRoot: string;
   readonly devCommit: string;
   readonly policyDigest: string;
   readonly policy: Awaited<ReturnType<typeof inspectVerificationPolicy>>;
@@ -400,41 +446,43 @@ interface IntegrationPreflight {
 async function inspectIntegrationTarget(input: {
   readonly storage: Phase1Database;
   readonly projectId: string;
-  readonly repositoryRoot: string;
-  readonly gitCommonDir: string;
-  readonly objectFormat: 'sha1' | 'sha256';
-  readonly mainRef: string;
-  readonly devRef: string;
+  /** The dev clone, already verified as this project's dev repository (ADR-0052/ADR-0056). */
+  readonly dev: ProjectDevRepository;
   readonly permissionMode: 'FULL' | 'STRICT';
   readonly now: () => number;
 }): Promise<IntegrationPreflight> {
   // Identity is re-validated before any ref is read or written; a changed repository invalidates
-  // the trust the baseline ref name came from.
-  const repository = await inspectRepository(input.repositoryRoot);
-  if (repository.repoRoot !== input.repositoryRoot
-    || repository.gitCommonDir !== input.gitCommonDir
-    || repository.objectFormat !== input.objectFormat) {
+  // the trust the baseline ref name came from. Both repositories are checked: the dev clone holds
+  // the ref this command moves, and the main checkout holds the policy that judges the merge.
+  const repository = await inspectRepository(input.dev.devRepoPath);
+  if (repository.repoRoot !== input.dev.devRepoPath
+    || repository.gitCommonDir !== input.dev.devGitCommonDir
+    || repository.objectFormat !== input.dev.objectFormat) {
     input.storage.invalidateProjectTrust(input.projectId, input.now());
     throw new IntegrationServiceError('REPOSITORY_CHANGED',
-      'Project trust invalidated after the repository identity changed');
+      'Project trust invalidated after the dev clone identity changed');
   }
   const devCommit = await readLocalRefCommit({
-    repositoryRoot: repository.repoRoot, ref: input.devRef,
+    repositoryRoot: input.dev.devRepoPath, ref: input.dev.devRef,
   });
   if (devCommit === null) {
     throw new IntegrationServiceError('DEV_REF_MISSING',
-      `The project has no ${input.devRef}; integration needs the long-lived dev branch`);
+      `The dev clone has no ${input.dev.devRef}; integration needs the long-lived dev branch`);
   }
-  await assertDevRefNotCheckedOut({
-    repositoryRoot: repository.repoRoot, devRef: input.devRef,
+  // ADR-0056: the preconditions on the one checkout allowed to hold `dev` are checked here as well as
+  // immediately before the ref moves. Checking them before a batch is composed means a dirty or
+  // moved-aside dev clone refuses without leaving a record that would block the next attempt; the
+  // second check right before the fast-forward narrows the race window to nothing useful.
+  await assertDevRefAdvanceable({
+    repositoryRoot: input.dev.devRepoPath, devRef: input.dev.devRef, expectedCommit: devCommit,
   });
   const policy = await inspectVerificationPolicy({
-    repositoryRoot: repository.repoRoot,
-    mainRef: input.mainRef,
+    repositoryRoot: input.dev.mainRepositoryRoot,
+    mainRef: input.dev.mainRef,
   });
   if (policy.state === 'ABSENT') {
     throw new IntegrationServiceError('VERIFICATION_POLICY_ABSENT',
-      `No verification policy at ${input.mainRef}:${verificationPolicyPath}; an integration`
+      `No verification policy at ${input.dev.mainRef}:${verificationPolicyPath}; an integration`
       + ' needs an independent verification, so add one and re-run project trust');
   }
   const digest = policy.digest as string;
@@ -450,7 +498,13 @@ async function inspectIntegrationTarget(input: {
         + ` now ${digest.slice(0, 12)}); run project trust to confirm the new policy`);
     }
   }
-  return { repositoryRoot: repository.repoRoot, devCommit, policyDigest: digest, policy };
+  return {
+    repositoryRoot: repository.repoRoot,
+    mainRepositoryRoot: input.dev.mainRepositoryRoot,
+    devCommit,
+    policyDigest: digest,
+    policy,
+  };
 }
 
 /**
@@ -507,7 +561,8 @@ async function composeBatch(input: {
 
 /**
  * Merges every member into the batch's fixed `dev` baseline, runs one independent integration
- * verification over the whole result, and only then advances `dev` by compare-and-swap.
+ * verification over the whole result, and only then advances `dev` (and the dev clone's own checkout)
+ * with Git's own fast-forward.
  *
  * Member merges happen in one detached integration worktree, in `task_id` order. A member that
  * cannot be merged ends the batch with its own item state recorded and every later member left
@@ -701,29 +756,58 @@ async function integrateComposedBatch(input: {
       verificationState: verification.state, alreadyCompleted: false, created: true });
   }
 
-  // The ref moves last, and only if it still points at the baseline the merge started from. The
-  // batch records INTEGRATING_DEV first, so an interrupted write is resolvable by comparing the
-  // recorded merge with the ref instead of guessing.
-  await assertDevRefNotCheckedOut({
-    repositoryRoot: input.target.repositoryRoot, devRef: batch.devRef,
+  // The ref and its checkout move last, and only while `dev` still points at the baseline the merge
+  // started from. The batch records INTEGRATING_DEV first, so an interrupted write is resolvable by
+  // comparing the recorded merge with the ref instead of guessing.
+  //
+  // ADR-0056: the move is Git's own fast-forward on the dev clone's checkout — the ref, the index and
+  // the working tree advance in one operation. A hand-written `update-ref` cannot do that: the dev
+  // clone's HEAD is a symbolic reference to this branch, so `update-ref` alone leaves the checkout
+  // behind while `rev-parse HEAD` already reports the new commit. The expected-value protection is
+  // therefore a read-compare-refuse — a moved `dev` is the batch-level `STALE` (`DEV_REF_MOVED`), a
+  // checkout that is not on `dev`, not clean or not at the baseline is refused with the ADR-0056
+  // codes — and success is judged by the ref, HEAD *and* a clean `git status` naming the merged commit.
+  const liveDev = await readLocalRefCommit({
+    repositoryRoot: input.target.repositoryRoot, ref: batch.devRef,
   });
-  storage.startIntegrationDevUpdate({ batchId: batch.batchId, updatedAt: now() });
-  const advanced = await advanceLocalRef({
-    repositoryRoot: input.target.repositoryRoot,
-    ref: batch.devRef,
-    expectedCommit: batch.devCommit,
-    newCommit: mergedCommit,
-  });
-  if (!advanced.advanced) {
-    // The batch's fixed baseline stopped being the current `dev`: the batch is stale, not failed.
-    // `dev` keeps whatever it holds, and the merge/verification evidence stays readable.
+  if (liveDev !== batch.devCommit) {
     const stale = markBatchStale({
       storage, batchId: batch.batchId, outcomeCode: 'DEV_REF_MOVED',
-      reason: `${batch.devRef} was not advanced from the recorded baseline ${batch.devCommit}:`
-        + ` ${advanced.detail}`,
+      reason: `The batch was composed against ${batch.devRef} at ${batch.devCommit}, but it now`
+        + ` points at ${liveDev ?? 'a missing ref'}; nothing was merged and dev was not advanced`,
       randomUUID, now,
     });
     return report(stale, { commands: execution.outcomes, tree: execution.tree,
+      verificationState: verification.state, alreadyCompleted: false, created: true });
+  }
+  await assertDevRefAdvanceable({
+    repositoryRoot: input.target.repositoryRoot, devRef: batch.devRef,
+    expectedCommit: batch.devCommit,
+  });
+  storage.startIntegrationDevUpdate({ batchId: batch.batchId, updatedAt: now() });
+  const advanced = await fastForwardCheckedOutWorktree({
+    path: input.target.repositoryRoot,
+    branchRef: batch.devRef,
+    newCommit: mergedCommit,
+  });
+  if (!advanced.advanced) {
+    // Either the fast-forward was refused (a concurrent change to that checkout) or the post-check
+    // found the ref, HEAD and the working tree not all at the merged commit. Nothing is rolled back
+    // and nothing is hidden: the recorded facts say where the ref and the checkout actually are.
+    const failed = failBatch({
+      storage, batchId: batch.batchId, state: 'FAILED',
+      outcomeCode: 'DEV_CHECKOUT_FF_FAILED',
+      detail: boundedDetail(`${batch.devRef} and its checkout could not be fast-forwarded to the`
+        + ` integrated commit ${mergedCommit}: ${advanced.detail}. The batch is not reported as`
+        + ' integrated: the ref may or may not have moved, and the checkout is where the observed'
+        + ' facts above say it is. Nothing was rolled back — inspect'
+        + ` \`git -C ${input.target.repositoryRoot} status\`, then re-compose the batch from the`
+        + ' current dev baseline before integrating again'),
+      mergeStrategy: strategy,
+      mergedCommit,
+      randomUUID, now,
+    });
+    return report(failed, { commands: execution.outcomes, tree: execution.tree,
       verificationState: verification.state, alreadyCompleted: false, created: true });
   }
 
@@ -833,14 +917,14 @@ export async function createIntegrationBatch(input: {
     storage: input.storage, projectId: input.projectId,
     taskIds: planned.map((member) => member.taskId),
   });
+  // ADR-0056: every dev fact comes from the dev clone. Resolved (and refused with
+  // `DEV_REPO_REQUIRED` when none is recorded) before this command writes anything at all.
+  const dev = await requireProjectDevRepository(
+    input.storage.getTrustedProject(input.projectId));
   const target = await inspectIntegrationTarget({
     storage: input.storage,
     projectId: input.projectId,
-    repositoryRoot: candidates[0]?.candidates.repositoryRoot as string,
-    gitCommonDir: candidates[0]?.candidates.gitCommonDir as string,
-    objectFormat: candidates[0]?.candidates.objectFormat as 'sha1' | 'sha256',
-    mainRef: candidates[0]?.candidates.mainRef as string,
-    devRef: candidates[0]?.candidates.devRef as string,
+    dev,
     permissionMode: input.permissionMode ?? 'STRICT',
     now,
   });
@@ -859,7 +943,8 @@ export async function createIntegrationBatch(input: {
 
 /**
  * Integrates a composed batch: one merge per member, one independent verification over the whole
- * batch, and only then a compare-and-swap advance of `dev` from the recorded baseline.
+ * batch, and only then an advance of `dev` from the recorded baseline (read-compare-refuse, then
+ * `git merge --ff-only` on the dev clone's own checkout).
  *
  * The batch's fixed evidence is re-checked against the current facts first. A member whose revision
  * or result commit moved, or a `dev` that is no longer the recorded baseline, makes the batch
@@ -928,14 +1013,12 @@ export async function integrateIntegrationBatch(input: {
     return report(stale, { commands: [], tree: null, verificationState: null,
       alreadyCompleted: false, created: false });
   }
+  const dev = await requireProjectDevRepository(
+    input.storage.getTrustedProject(input.projectId));
   const target = await inspectIntegrationTarget({
     storage: input.storage,
     projectId: input.projectId,
-    repositoryRoot: candidates.repositoryRoot,
-    gitCommonDir: candidates.gitCommonDir,
-    objectFormat: candidates.objectFormat,
-    mainRef: candidates.mainRef,
-    devRef: candidates.devRef,
+    dev,
     permissionMode: input.permissionMode ?? 'STRICT',
     now,
   });
@@ -1029,13 +1112,16 @@ export async function cancelIntegrationBatch(input: {
  * `task integration integrate` (ADR-0053); this path stays as it was for a single Task.
  *
  * Every step is recorded around its Git side effect:
- *   1. the `dev` ref is read, and it must not be checked out in any worktree;
+ *   1. the `dev` ref is read from the project's dev clone (ADR-0056), and the only worktree allowed
+ *      to have it checked out is that clone's own long-lived checkout (ADR-0018, amended);
  *   2. the merge happens in a detached integration worktree inside the Runtime data directory;
  *   3. the merged commit is verified by an independent integration verification run;
- *   4. only after PASS does a compare-and-swap advance `dev` from the recorded baseline.
+ *   4. only after PASS does Git's own fast-forward move `dev`, the index and the dev clone's working
+ *      tree to the merged commit in one step, verified by the ref, HEAD and a clean `git status`.
  *
- * A conflict, a failed verification, a moved `dev` ref, or a crash all leave `dev` untouched and
- * keep the integration worktree for inspection.
+ * A conflict, a failed verification, a moved `dev` ref, a dev clone whose checkout cannot be moved
+ * with the ref, or a crash all leave the recorded facts explicit and keep the integration worktree
+ * for inspection.
  */
 export async function integrateTaskResult(input: {
   readonly storage: Phase1Database;
@@ -1077,14 +1163,14 @@ export async function integrateTaskResult(input: {
   assertNoMembersInFlight({
     storage: input.storage, projectId: input.projectId, taskIds: [input.taskId],
   });
+  // ADR-0056: the dev clone is resolved and verified before any Git side effect; a project without
+  // one is refused with `DEV_REPO_REQUIRED` instead of integrating into some other clone's `dev`.
+  const dev = await requireProjectDevRepository(
+    input.storage.getTrustedProject(input.projectId));
   const target = await inspectIntegrationTarget({
     storage: input.storage,
     projectId: input.projectId,
-    repositoryRoot: candidates.repositoryRoot,
-    gitCommonDir: candidates.gitCommonDir,
-    objectFormat: candidates.objectFormat,
-    mainRef: candidates.mainRef,
-    devRef: candidates.devRef,
+    dev,
     permissionMode: input.permissionMode ?? 'STRICT',
     now,
   });

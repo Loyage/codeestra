@@ -785,26 +785,38 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
     }
     case 'project.inspect': {
       const identity = await inspectRepository(request.path);
-      // The baseline ref is reported together with the repository identity so a client can see
-      // which commit new Task worktrees would start from (ADR-0009) before trusting the project.
-      const baseline = await readLocalRefCommit({
-        repositoryRoot: identity.repoRoot, ref: devBranchRef,
-      });
-      // ADR-0047 D05: the dev clone is reported as a verified fact, not as a recorded string, so a
-      // client can tell whether this project can promote at all. An explicitly supplied path is
-      // inspected (that is how a user checks a candidate clone before trusting it); otherwise the
-      // path a previous trust recorded is used.
-      const devRepoPath = request.devRepoPath ?? storage.listTrustedProjects()
+      // ADR-0056: the development baseline is the **dev clone's** `dev` ref, never this checkout's
+      // own local `dev` branch. An explicitly supplied path is inspected (that is how a user checks
+      // a candidate clone before trusting it); otherwise the path a previous trust recorded is used.
+      // Without one the baseline is reported as absent — the transitional ref is never substituted.
+      const recordedDevRepoPath = storage.listTrustedProjects()
         .find((project) => project.repoRoot === identity.repoRoot
           || project.gitCommonDir === identity.gitCommonDir)?.devRepoPath ?? null;
+      const requestedDevRepoPath = request.devRepoPath ?? recordedDevRepoPath;
+      const devRepoPath = requestedDevRepoPath === null ? null : await inspectDevRepo({
+        repositoryRoot: identity.repoRoot, devRef: devBranchRef, devRepoPath: requestedDevRepoPath,
+      });
+      // Read-only retirement evidence for the *inspected* checkout's own local `dev` ref — the
+      // transitional pointer of ADR-0048 D04 that ADR-0056 stopped reading. `projectsWithoutDevRepo`
+      // names the projects that still have no dev clone of their own: until that list is empty, that
+      // ref is the only `dev` those projects have, so deleting it would remove their last copy.
+      const localDevRefCommit = await readLocalRefCommit({
+        repositoryRoot: identity.repoRoot, ref: devBranchRef,
+      }).catch(() => null);
       return success(request.requestId, {
         ...identity,
         devRef: devBranchRef,
-        devCommit: baseline,
-        devRefPresent: baseline !== null,
-        devRepoPath: devRepoPath === null ? null : await inspectDevRepo({
-          repositoryRoot: identity.repoRoot, devRef: devBranchRef, devRepoPath,
-        }),
+        devCommit: devRepoPath?.verified === true ? devRepoPath.devRefCommit : null,
+        devRefPresent: devRepoPath?.verified === true && devRepoPath.devRefCommit !== null,
+        devRepoPath,
+        devRefRetirement: {
+          localDevRefPresent: localDevRefCommit !== null,
+          localDevRefCommit,
+          projectsWithoutDevRepo: storage.listTrustedProjects()
+            .filter((project) => project.devRepoPath === null)
+            .map((project) => ({ projectId: project.id, name: project.name,
+              repoRoot: project.repoRoot })),
+        },
       });
     }
     case 'project.verificationPolicy': {
@@ -1925,31 +1937,45 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
     }
     case 'project.trust': {
       const identity = await inspectRepository(request.path);
-      const baselineCommit = await readLocalRefCommit({
-        repositoryRoot: identity.repoRoot, ref: devBranchRef,
-      });
+      // ADR-0056: the dev clone is the single source of every dev fact, so trust has to state one.
+      // This is refused before anything is read or written, and it never falls back to a previously
+      // recorded path or to this checkout's own local `dev` ref: a project that ended up without a
+      // dev clone could not read a Task baseline, integrate, or promote at all.
+      if (request.devRepoPath === undefined || request.devRepoPath === null) {
+        return failure(request.requestId, 'DEV_REPO_REQUIRED',
+          'A dev clone is required: ADR-0056 resolves every dev fact — the Task baseline, the'
+          + ' integration target and a promotion\'s candidate — from `projects.dev_repo_path`.'
+          + ` Run \`project trust ${identity.repoRoot} --dev-repo <dev-clone>\``);
+      }
       // The dev clone (ADR-0047 D05) is verified *before* anything is compared or written: a path
       // that is not a separate clone of this origin sitting on `dev` is refused with a stable code,
       // so trust never records a path it could not establish and never silently leaves it empty.
-      const requestedDevRepoPath = request.devRepoPath === undefined
-        ? storage.listTrustedProjects().find((project) => project.repoRoot === identity.repoRoot
-            || project.gitCommonDir === identity.gitCommonDir)?.devRepoPath ?? null
-        : request.devRepoPath;
-      const devRepoPath = requestedDevRepoPath === null ? null : await inspectDevRepo({
-        repositoryRoot: identity.repoRoot, devRef: devBranchRef, devRepoPath: requestedDevRepoPath,
+      const devRepoPath = await inspectDevRepo({
+        repositoryRoot: identity.repoRoot, devRef: devBranchRef, devRepoPath: request.devRepoPath,
       });
-      if (devRepoPath !== null && !devRepoPath.verified) {
+      if (!devRepoPath.verified) {
         return failure(request.requestId, devRepoPath.code ?? 'DEV_REPO_NOT_A_REPOSITORY',
           devRepoPath.detail ?? 'The dev clone could not be verified');
       }
       // The client echoes exactly what `project.inspect` reported, so this comparison also pins the
       // development baseline and the dev clone the user saw, not only the repository identity.
+      const localDevRefCommit = await readLocalRefCommit({
+        repositoryRoot: identity.repoRoot, ref: devBranchRef,
+      }).catch(() => null);
       const actual = {
         ...identity,
         devRef: devBranchRef,
-        devCommit: baselineCommit,
-        devRefPresent: baselineCommit !== null,
+        devCommit: devRepoPath.devRefCommit,
+        devRefPresent: devRepoPath.devRefCommit !== null,
         devRepoPath,
+        devRefRetirement: {
+          localDevRefPresent: localDevRefCommit !== null,
+          localDevRefCommit,
+          // The cross-project list is a read-only *report* about the transitional ref, not part of
+          // the identity this command pins: another project's trust must not make this one look as
+          // if the reviewed repository changed.
+          projectsWithoutDevRepo: request.expectedIdentity.devRefRetirement.projectsWithoutDevRepo,
+        },
       };
       if (JSON.stringify(actual) !== JSON.stringify(request.expectedIdentity)) {
         return failure(request.requestId, 'REPOSITORY_CHANGED', 'Repository identity changed after confirmation');
@@ -1957,9 +1983,10 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       // `dev` is the development baseline every Task worktree and every integration target uses.
       // Refusing trust without it is explicit: silently falling back to another branch would make
       // "integrated into dev" mean something different per project.
-      if (baselineCommit === null) {
+      if (devRepoPath.devRefCommit === null) {
         return failure(request.requestId, 'DEV_REF_MISSING',
-          `This repository has no ${devBranchRef}; create the long-lived dev branch before trusting it`);
+          `The dev clone ${devRepoPath.path} has no ${devBranchRef}; create the long-lived dev`
+          + ' branch there before trusting this project');
       }
       const policy = await inspectVerificationPolicy({
         repositoryRoot: actual.repoRoot,
@@ -2002,11 +2029,10 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         gitCommonDir: actual.gitCommonDir,
         mainRef: actual.mainRef,
         devRef: devBranchRef,
-        // Only a declared path is written: `undefined` keeps whatever the project recorded, and an
-        // explicit null clears it. Both are the user's own statement about the dev clone.
-        ...(request.devRepoPath === undefined
-          ? {}
-          : { devRepoPath: request.devRepoPath, recordDevRepoPath: true }),
+        // ADR-0056 makes the dev clone required, so it is always written: the path the user stated
+        // (already verified above). There is no "leave it untouched" case any more.
+        devRepoPath: request.devRepoPath,
+        recordDevRepoPath: true,
         objectFormat: actual.objectFormat,
         policyVersion: 1,
         verificationPolicyConfirmationId: crypto.randomUUID(),
@@ -2025,7 +2051,7 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         permissionMode,
         repository: identity,
         devRef: devBranchRef,
-        devCommit: baselineCommit,
+        devCommit: devRepoPath.devRefCommit,
         devRepoPath,
         verificationPolicy: policy,
         impactPolicy: impactPolicyReport({ inspection: impactPolicy, confirmation: null }),

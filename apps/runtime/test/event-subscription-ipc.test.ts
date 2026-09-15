@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { runtimeStreamFrameSchema, type RuntimeRequest, type RuntimeStreamFrame,
   type ProjectIdentity } from '@codeestra/contracts';
-import { git } from './support/agent-fixture.js';
+import { git, provisionDevClone } from './support/agent-fixture.js';
 import {
   reclaimTestResources,
   registerRuntimeProcess,
@@ -30,6 +30,8 @@ type ClientRequest = RuntimeRequest extends infer Request
 interface RuntimeHarness {
   readonly home: string;
   readonly repo: string;
+  /** The dev clone ADR-0056 requires: every dev fact, including a Task baseline, comes from it. */
+  readonly devRepo: string;
   readonly socketPath: string;
 }
 
@@ -46,12 +48,14 @@ async function startRuntime(): Promise<RuntimeHarness> {
   await git(repo, ['commit', '-m', 'initial']);
   // ADR-0009: trust requires the long-lived dev branch; it is the workspace baseline.
   await git(repo, ['branch', 'dev']);
+  // ADR-0056: the long-lived dev branch is read from a second clone of the same origin.
+  const devRepo = await provisionDevClone({ repository: repo });
   const child = Bun.spawn([process.execPath, 'run', runtimeEntry], {
     stdin: 'ignore', stdout: 'ignore', stderr: 'ignore',
     env: { ...Bun.env, CODEESTRA_HOME: home },
   });
   registerRuntimeProcess(child.pid, home);
-  const harness = { home, repo, socketPath: join(home, 'runtime.sock') } as const;
+  const harness = { home, repo, devRepo, socketPath: join(home, 'runtime.sock') } as const;
   await waitForRuntime(harness);
   return harness;
 }
@@ -165,13 +169,16 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<voi
 }
 
 async function trustedProject(harness: RuntimeHarness): Promise<string> {
+  // The identity a trust echoes back pins the dev clone too (ADR-0056), so it is inspected with the
+  // same explicit path the trust will state.
   const identity = (await call(harness, {
-    command: 'project.inspect', path: harness.repo,
+    command: 'project.inspect', path: harness.repo, devRepoPath: harness.devRepo,
   })) as unknown as ProjectIdentity;
   await call(harness, {
     command: 'project.trust',
     path: harness.repo,
     expectedIdentity: identity,
+    devRepoPath: harness.devRepo,
     expectedVerificationPolicy: { state: 'ABSENT', mainCommit: identity.headCommit },
   });
   const projects = (await call(harness, { command: 'project.list' })) as unknown as

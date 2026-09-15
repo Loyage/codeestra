@@ -58,8 +58,35 @@ export const devRepoInspectionSchema = z.strictObject({
 });
 export type DevRepoInspection = z.infer<typeof devRepoInspectionSchema>;
 
+/**
+ * What `project inspect` reports about the *inspected checkout's own* local `dev` branch, and whether
+ * any trusted project still depends on one.
+ *
+ * ADR-0048 D04 kept that branch in the stable checkout as a transitional Task baseline and said it
+ * must not be treated as promotion evidence; ADR-0056 stopped reading it (every dev fact now comes
+ * from `projects.dev_repo_path`). This report is the read-only evidence for retiring it by hand:
+ * `localDevRef*` is a fact about the clone that was inspected, and `projectsWithoutDevRepo` names the
+ * projects that still have no dev clone of their own, which are the only ones whose last copy of
+ * `dev` that ref could be. It is a report, never a fall back to that ref.
+ */
+export const devRefRetirementSchema = z.strictObject({
+  localDevRefPresent: z.boolean(),
+  localDevRefCommit: z.string().nullable(),
+  projectsWithoutDevRepo: z.array(z.strictObject({
+    projectId: z.string().min(1),
+    name: z.string(),
+    repoRoot: z.string().min(1),
+  })),
+});
+export type DevRefRetirement = z.infer<typeof devRefRetirementSchema>;
+
 export const projectIdentitySchema = repositoryIdentitySchema.extend({
   devRef: z.string().min(1),
+  /**
+   * Commit of the **dev clone's** local `dev` ref (ADR-0047 D05 / ADR-0056), or null when the project
+   * has no verifiable dev clone. It is the baseline a Task worktree would start from, which is why
+   * it is part of the identity a client echoes back.
+   */
   devCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/).nullable(),
   devRefPresent: z.boolean(),
   /**
@@ -70,6 +97,8 @@ export const projectIdentitySchema = repositoryIdentitySchema.extend({
    * different fact than the one the user reviewed.
    */
   devRepoPath: devRepoInspectionSchema.nullable(),
+  /** Read-only retirement evidence for the stable checkout's transitional local `dev` ref. */
+  devRefRetirement: devRefRetirementSchema,
 });
 export type ProjectIdentity = z.infer<typeof projectIdentitySchema>;
 
@@ -1075,8 +1104,13 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     /**
      * The dev clone to record (ADR-0047 D05). The Runtime verifies it (another clone, same origin,
      * on the dev branch) and refuses with a stable code when it cannot; it never records an empty
-     * path in place of one it could not verify. `null` clears a previously recorded path and an
-     * omitted field leaves it untouched.
+     * path in place of one it could not verify.
+     *
+     * FOUNDATION-087 / ADR-0056 made this clone the **single source of dev facts**, so the field is
+     * now required: an omitted or `null` value is refused with `DEV_REPO_REQUIRED` and the remedy
+     * command, *before* anything is written. The shape stays optional-but-nullable on purpose — a
+     * missing value must produce that stable code, not a generic boundary error, and a client that
+     * still sends the old `none` gets the same refusal instead of silently clearing the path.
      */
     devRepoPath: z.string().min(1).nullable().optional(),
     expectedVerificationPolicy: verificationPolicyConfirmationSchema,

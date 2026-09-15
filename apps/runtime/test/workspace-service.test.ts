@@ -15,6 +15,7 @@ import {
   reconcileWorkspacePreparations,
 } from '../src/recovery-service.js';
 import { prepareTaskWorkspace } from '../src/workspace-service.js';
+import { provisionDevClone } from './support/agent-fixture.js';
 
 const directories: string[] = [];
 afterEach(() => {
@@ -33,6 +34,7 @@ async function run(cwd: string, args: readonly string[]): Promise<string> {
 async function fixture(): Promise<{
   storage: Phase1Database;
   repo: string;
+  devRepo: string;
   home: string;
   projectId: string;
   taskId: string;
@@ -44,8 +46,10 @@ async function fixture(): Promise<{
   await Bun.write(join(repo, 'README.md'), 'temporary repository\n');
   await run(repo, ['add', 'README.md']);
   await run(repo, ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'initial']);
-  // The baseline for every workspace is the long-lived `dev` branch (ADR-0009).
+  // The baseline for every workspace is the long-lived `dev` branch (ADR-0009), and ADR-0056 reads it
+  // from the project's dev clone, so the fixture provisions one.
   await run(repo, ['branch', 'dev']);
+  const devRepo = await provisionDevClone({ repository: repo });
   const identity = await inspectRepository(repo);
   const storage = new Phase1Database();
   const projectId = '10000000-0000-4000-8000-000000000001';
@@ -58,6 +62,8 @@ async function fixture(): Promise<{
     gitCommonDir: identity.gitCommonDir,
     mainRef: identity.mainRef,
     devRef: 'refs/heads/dev',
+    devRepoPath: devRepo,
+    recordDevRepoPath: true,
     objectFormat: identity.objectFormat,
     policyVersion: 1,
     verificationPolicyConfirmationId: 'b0000000-0000-4000-8000-00000000000b',
@@ -95,7 +101,7 @@ async function fixture(): Promise<{
     actor: 'local-user',
     submittedAt: 3,
   });
-  return { storage, repo: identity.repoRoot, home: realpathSync(home), projectId, taskId };
+  return { storage, repo: identity.repoRoot, devRepo, home: realpathSync(home), projectId, taskId };
 }
 
 function uuidSequence(start = 10): () => string {
@@ -283,7 +289,9 @@ describe('workspace preparation service', () => {
 
   test('records a pre-side-effect ref conflict as failed without claiming recovery uncertainty', async () => {
     const value = await fixture();
-    await run(value.repo, ['branch', `task/${value.taskId}`, 'HEAD']);
+    // ADR-0056: the Task worktree is created in the dev clone, so the conflicting branch has to exist
+    // there for the preparation to refuse it before any side effect.
+    await run(value.devRepo, ['branch', `task/${value.taskId}`, 'HEAD']);
     try {
       await expect(prepareTaskWorkspace({
         storage: value.storage,

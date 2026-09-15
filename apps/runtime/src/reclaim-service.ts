@@ -23,6 +23,7 @@ import {
   type TaskLifecycleState,
   type TrustedProject,
 } from '@codeestra/storage';
+import { DevRepoError, requireRecordedDevRepoPath } from './dev-repo-service.js';
 
 export class ReclaimServiceError extends Error {
   constructor(readonly code: string, message: string) {
@@ -665,10 +666,16 @@ async function evaluateUnregisteredCandidate(input: {
   }
   let registration: Awaited<ReturnType<typeof inspectOwnedWorktreeRegistration>>;
   try {
+    // ADR-0056: a Runtime-created worktree is registered in the project's dev clone, so its
+    // ownership can only be established by asking that clone.
     registration = await inspectOwnedWorktreeRegistration({
-      repositoryRoot: trusted.repoRoot, path: input.path,
+      repositoryRoot: requireRecordedDevRepoPath(trusted), path: input.path,
     });
   } catch (error) {
+    if (error instanceof DevRepoError) {
+      return recovery(error.code,
+        `${error.message}; this directory's Git registration cannot be attributed to a repository`);
+    }
     return recovery('GIT_INSPECTION_FAILED',
       `The Git worktree registry could not be read: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -805,7 +812,7 @@ async function recheckUnregisteredCandidate(input: {
   });
   const repositoryRoot = input.target.projectId === null
     ? ''
-    : input.context.trustedProjects.get(input.target.projectId)?.repoRoot ?? '';
+    : input.context.trustedProjects.get(input.target.projectId)?.devRepoPath ?? '';
   const fresh = evaluation.target;
   const evidence = fresh?.evidence ?? { recheck: 'CLAIMED_BY_LEDGER' };
   const facts = {
@@ -822,6 +829,14 @@ async function recheckUnregisteredCandidate(input: {
       evidence, ...facts };
   }
   if (fresh.action === 'RECLAIM' && evaluation.removable) {
+    // A removable directory must name the repository that owns it: without a dev clone the
+    // ownership cannot be re-proven at removal time, so the recheck refuses instead of deleting.
+    if (repositoryRoot.length === 0) {
+      return { removable: false, outcome: 'RECOVERY_REQUIRED', reasonCode: 'DEV_REPO_REQUIRED',
+        detail: 'This directory names a project without a recorded dev clone (ADR-0056), so the'
+          + ' repository that owns it cannot be verified at removal time',
+        evidence, ...facts };
+    }
     return { removable: true, outcome: 'RECLAIMED', reasonCode: fresh.reasonCode,
       detail: fresh.detail, evidence, ...facts };
   }
@@ -1049,7 +1064,10 @@ async function buildPlan(input: ReclaimPlanInput): Promise<BuiltPlan> {
     if (error instanceof StorageError) throw new ReclaimServiceError(error.code, error.message);
     throw error;
   }
-  const repositoryRoot = candidates.project.repoRoot;
+  // ADR-0056: every recorded worktree, Task branch and the `dev` ref live in the project's dev
+  // clone, so a project without one is refused before a single path is considered. A cross-project
+  // batch reports this per project (ADR-0037) instead of skipping it silently.
+  const repositoryRoot = requireRecordedDevRepoPath(candidates.project);
   let devCommit: string | null = null;
   try {
     devCommit = await readLocalRefCommit({ repositoryRoot, ref: candidates.project.devRef });

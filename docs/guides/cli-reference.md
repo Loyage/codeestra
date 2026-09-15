@@ -119,14 +119,19 @@ bun run codeestra ui [--no-open]
 ### `open`
 
 ```sh
-bun run codeestra open [path] [--yes] [--no-open]
+bun run codeestra open [path] --dev-repo <dev-clone> [--yes] [--no-open]
 ```
 
 一条命令完成：`project.inspect` → 展示验证策略与影响映射 →（必要时）确认 → `project.trust` → `runtime.ui` 并预选该项目。
 `path` 默认当前目录；`--yes` 是 STRICT 下的非交互确认；`--no-open` 不打开浏览器。
 
+`--dev-repo <dev-clone>` 是**必需**的：这条命令会组合一次 `project trust`，而 trust 必须显式给出 dev clone
+（ADR-0056，见下面 `project trust`）。省略时 trust 以 `DEV_REPO_REQUIRED` 拒绝。
+（打开一个**已信任**仓库的另一个工作树时 trust 会被跳过，因此那条路径不需要该 flag。）
+
 已经确认过且策略 digest 未变时会跳过确认（正常路径**一次项目一次确认**；FULL 下没有这一步）。
-失败：确认被拒（`Project trust was not confirmed`）、trust 后项目未出现在列表中、`DEV_REF_MISSING`。
+失败：确认被拒（`Project trust was not confirmed`）、trust 后项目未出现在列表中、`DEV_REPO_REQUIRED`、
+`DEV_REPO_*`。
 
 ---
 
@@ -156,27 +161,45 @@ Adapter 不支持的字段会被拒绝而不是静默忽略。稳定码：`INVAL
 
 ### `project inspect [path] [--dev-repo <dev-clone>]`
 
-读仓库身份：`repoRoot`、`mainRef`、`objectFormat`、`headCommit`、`devRef`、`devCommit`、`devRefPresent`、`gitCommonDir`，
+读仓库身份：`repoRoot`、`mainRef`、`objectFormat`、`headCommit`、`gitCommonDir`，
 以及 `devRepoPath` —— 项目记录的 dev clone 的**核验结果**（ADR-0047 D05）：`verified`、`code`、`detail`、`repoRoot`、
 `gitCommonDir`、`headCommit`、`branchRef`、`devRefCommit`、`originUrl`、`originMatchesProject`、`clean`。
 `path` 默认当前目录；`--dev-repo <path>` 改为核验**指定**的那个 clone（在 trust 之前先看它是否可用），省略时核验已记录的那个。
 
-`devRepoPath` 为 `null` 表示项目没有记录 dev clone：**稳定提升此时不可用**（`promotion prepare` 会以
-`DEV_REPO_PATH_MISSING` 拒绝），因为经 GitHub 中转的提升必须从第二个 clone 推送候选。失败码含 `INVALID_REPOSITORY`、
-`UNSAFE_CHECKOUT`、`GIT_INSPECTION_FAILED`；dev clone 的拒绝是上面的 `DEV_REPO_*`（见下）。
+**开发基线来自 dev clone（ADR-0056）**：`devRef` / `devCommit` / `devRefPresent` 描述的是**dev clone 的**本地 `dev`
+分支 —— 也就是 Task 基线、集成目标与提升候选的来源。没有可核验的 dev clone 时 `devCommit` 是 `null`、`devRefPresent`
+是 `false`：这不是「没有 dev 分支」，而是「没有可读 dev 事实的仓库」，此时**任何需要 dev 基线的操作**都以
+`DEV_REPO_REQUIRED` 拒绝并打印补救命令。
+
+`devRefRetirement` 是**只读的退役证据**（ADR-0048 D04 / ADR-0056），描述的是**被检查的那个检出自己**的本地 `dev` ref：
+
+| 字段 | 含义 |
+|---|---|
+| `localDevRefPresent` / `localDevRefCommit` | 该检出里是否仍有过渡的本地 `dev` ref，以及它指向哪个 commit |
+| `projectsWithoutDevRepo[]` | 仍**没有** dev clone 的已信任项目（`projectId`/`name`/`repoRoot`） |
+
+Runtime **不再从那个 ref 读任何 dev 事实**。该列表为空表示没有任何项目依赖它 —— 这是「可以人工删除它」的只读依据
+（见 `docs/guides/manual.md` §3.4）。失败码含 `INVALID_REPOSITORY`、`UNSAFE_CHECKOUT`、`GIT_INSPECTION_FAILED`；
+dev clone 的拒绝是 `DEV_REPO_*`（见下）。
 
 ### `project policy [path]`
 
 打印 `main` ref 上 `.codeestra/policies/verification.json` 的检查结果：`state`（`PRESENT` / `ABSENT` / `INVALID`）、
 `mainCommit`、`digest`、逐条 `commands`。缺失时提示「task verify 会拒绝直到该 ref 上存在此文件」。
 
-### `project trust [path] [--yes] [--dev-repo <dev-clone>|none]`
+### `project trust [path] --dev-repo <dev-clone> [--yes]`
 
-接入项目。**前提**：合法 Git 仓库；`dev` 分支存在。**影响**：Agent 工具、验证命令与 Git hooks 会以你的用户权限运行。
-FULL 无确认；STRICT 需要输入 `TRUST` 或 `--yes`。
+接入项目。**前提**：合法 Git 仓库；dev clone 上的 `dev` 分支存在。**影响**：Agent 工具、验证命令与 Git hooks
+会以你的用户权限运行。FULL 无确认；STRICT 需要输入 `TRUST` 或 `--yes`。
 
-`--dev-repo <path>` 把 dev clone 作为**显式输入**记录（ADR-0047 D05）。Runtime 逐条核验，任一条不成立即用稳定码拒绝，
-**不会**写入一个空路径而继续：
+`--dev-repo <path>` 是**必需**的（ADR-0056）：dev clone 是**全部 dev 事实的唯一来源**（Task 基线、集成目标、提升候选、
+全量证据的副本根与锁文件），因此 trust 必须显式声明它。
+
+| 稳定码 | 含义 |
+|---|---|
+| `DEV_REPO_REQUIRED` | 省略 `--dev-repo`，或写了 `--dev-repo none`：dev clone 是必需的，拒绝发生在**任何写入之前**，项目不会被登记；补救命令就打印在消息里 |
+
+Runtime 对给出的路径逐条核验，任一条不成立即用稳定码拒绝，**不会**写入一个空路径而继续：
 
 | 稳定码 | 含义 |
 |---|---|
@@ -187,12 +210,19 @@ FULL 无确认；STRICT 需要输入 `TRUST` 或 `--yes`。
 | `DEV_REPO_BRANCH_MISMATCH` | 它的 HEAD 不在项目的 `dev` 分支上 |
 | `DEV_REPO_DEV_REF_MISSING` | 它没有本地 `dev` 分支 |
 
-`--dev-repo none` 显式清除已记录的路径；**省略该 flag 时保留原值**（重 trust 不会静默清空）。失败时退 `1`；
-CLI 同时打印核验结果（`verified` / `code` / `detail`），因为 `project trust` 会先打印身份、策略与结果三份文档。
+重 trust 也必须给出 `--dev-repo`（`--dev-repo none` 不再有意义：清除它只会让项目读不到任何 dev 事实）。
+失败时退 `1`；CLI 同时打印核验结果（`verified` / `code` / `detail`），因为 `project trust` 会先打印身份、策略与结果三份文档。
 
 防漂移：若在你查看与确认之间身份/策略/映射/dev clone 发生变化，返回 `REPOSITORY_CHANGED`、
-`VERIFICATION_POLICY_CHANGED`、`IMPACT_POLICY_CHANGED`。`dev` 缺失返回 `DEV_REF_MISSING`。
+`VERIFICATION_POLICY_CHANGED`、`IMPACT_POLICY_CHANGED`。dev clone 上没有 `dev` 分支返回 `DEV_REPO_DEV_REF_MISSING`。
 同一仓库的其他工作树（同一 Git common dir）重复 trust 是幂等的。
+
+**两个 clone 各自拥有什么（ADR-0056）**：
+
+| 事实 | 仓库 | 谁读 |
+|---|---|---|
+| 仓库身份、`main` ref、`.codeestra/policies/verification.json`、`.codeestra/impact.json` | main 检出（`projects.repo_root`） | `project policy`、`project impact *`、Task 验证与集成的策略读取、提升的重启序列 |
+| 长期 `dev` 分支、Task 分支与 worktree、集成 worktree 与 ref 推进、提升候选对象、全量证据的副本与锁文件 | dev clone（`projects.dev_repo_path`） | Task 基线、依赖判定、验证副本、结果 commit、回收、`promotion full-suite run`、`promotion promote` 的 push |
 
 ### `project list`
 
@@ -738,6 +768,9 @@ bun run codeestra promotion list <project-id> [--limit <n>]
 
 - `prepare` 固定「已验证的 dev commit / 预期旧 main commit / 该 commit 的集成验证与 dev 全量证据」，并固定**推送用的 dev
   clone**（`projects.dev_repo_path`；未记录或无法核验时以 `DEV_REPO_PATH_MISSING` / `DEV_REPO_*` 拒绝）。
+  该路径的这条拒绝沿用它原有的 `DEV_REPO_PATH_MISSING`（FOUNDATION-077），与「开发基线操作」用的 `DEV_REPO_REQUIRED`
+  （ADR-0056）是**两条不同的命令面**，都指向同一条补救命令 `project trust <repo> --dev-repo <dev-clone>`。
+  全量证据的**副本与锁文件从 dev clone 读**，**策略仍从 main ref 读**（ADR-0039 + ADR-0056）。
   **不写任何 Git，也不写远端**。远端 `dev` 已经移到非候选 SHA 时拒绝（`REMOTE_DEV_MOVED`，`STALE`）。
 - 集成证据是**批次级**的（ADR-0053）：`<batch-id>` 可以是一个多成员批次，`prepare` 会把该批次的
   **全部成员**（`taskId`/`revisionId`/`candidateCommit`）固定进提升记录（输出里的 `members[]`），

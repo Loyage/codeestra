@@ -57,6 +57,7 @@ import {
   type ImpactPathCaseDetection,
 } from './impact-analysis-service.js';
 import { inspectTaskDependencies, reconcileTaskDependencyState } from './scheduler.js';
+import { requireRecordedDevRepoPath } from './dev-repo-service.js';
 import type { SlotReservationService } from './slot-reservation-service.js';
 
 /**
@@ -961,8 +962,12 @@ export class ScheduleService {
     // 4. Before starting: re-check the external baseline and the revision this reservation was
     //    assessed against. A `dev` that moved in between invalidates the assessment, so nothing is
     //    started; the slot is released with the reason and the Task waits with `STALE_BASE`.
+    // ADR-0056: the baseline this reservation was assessed against is the dev clone's `dev` ref. The
+    // refusal for a project without one is raised before the read, so it is never swallowed as "no
+    // baseline" (which would be read as "the baseline moved").
+    const devRepoPath = requireRecordedDevRepoPath(project);
     const currentDev = await readLocalRefCommit({
-      repositoryRoot: project.repoRoot, ref: project.devRef,
+      repositoryRoot: devRepoPath, ref: project.devRef,
     }).catch(() => null);
     if (currentDev !== reservation.assessedDevCommit) {
       await this.#releaseReservation({
@@ -1450,8 +1455,11 @@ export class ScheduleService {
       });
       return null;
     }
+    // ADR-0056: the development baseline lives in the project's dev clone (resolved first, so a
+    // missing clone is a refusal and never an empty observation).
+    const devRepoPath = requireRecordedDevRepoPath(project);
     const baseCommit = await readLocalRefCommit({
-      repositoryRoot: project.repoRoot, ref: project.devRef,
+      repositoryRoot: devRepoPath, ref: project.devRef,
     }).catch(() => null);
     if (baseCommit === null) return null;
     const confirmation: ConfirmedImpactPolicy | null =
