@@ -225,7 +225,7 @@ bun run codeestra task operation list $PROJECT <task-id>
 | `PROMOTION_IN_PROGRESS` | 该项目已有一个未结束的 promotion（数据库有唯一索引保证） |
 | `PROMOTION_FINISHED` / `PROMOTION_STATE_INVALID` | 该 promotion 已结束 / 状态不允许这一步 |
 | `MAIN_WORKTREE_MISSING` / `MAIN_WORKTREE_DIRTY` | 没有检出 main 的工作树 / 它不干净。**提升必须能推进 ref、index 与工作文件**，所以要求工作树可用且干净 |
-| `MAIN_REF_MOVED` / `DEV_REF_MOVED` / `MAIN_NOT_UPDATED` / `MAIN_UPDATE_FAILED` | ref 事实与预期不符 / 推进失败 |
+| `MAIN_REF_MOVED` / `DEV_REF_MOVED` / `REMOTE_DEV_MOVED` / `REMOTE_DEV_UNREACHABLE` / `DEV_PUSH_REFUSED` / `REMOTE_DEV_READBACK_MISMATCH` / `MAIN_PUSH_REFUSED` / `REMOTE_MAIN_READBACK_MISMATCH` | ref 事实与预期不符 / 远端读回与固定候选不符 / 远端不可达或被拒（ADR-0047 后本机 ff 路径与 `MAIN_NOT_UPDATED`/`MAIN_UPDATE_FAILED` 已删除） |
 | `RESTART_STEP_FAILED` / `RESTART_UNPROVEN` / `RUNTIME_NOT_OBSERVED` / `RUNTIME_NOT_RESTARTED` / `RUNTIME_NOT_READY` / `RESTART_PLAN_MISMATCH` | 后置步骤或重启无法核验。**重启只在每步退 0 且 Runtime 回答 READY 时被记录** |
 | `BATCH_NOT_INTEGRATED` | 引用的集成批次还没到 `INTEGRATED` |
 | `INVALID_COMMIT_ID` / `REPOSITORY_CHANGED` | commit 参数不合法 / 仓库身份变化 |

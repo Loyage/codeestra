@@ -34,9 +34,10 @@ bun run codeestra <group> [<action>] [<argument>…] [--flag …]
 | `0` | 成功。注意：某些命令的成功是「已受理」而不是「已完成」（见各命令说明） |
 | `1` | 拒绝或失败（含 `RECOVERY_REQUIRED` 这类需要人处理的状态） |
 | `2` | **用法错误**：参数个数/取值不合法、未知 flag、缺少必填 flag（`usage()` 与个别显式 `process.exit(2)`） |
-| `3` | **等待**（调度冲突/容量等待、draining）或**没什么可做**（reclaim 计划/执行没有可回收项） |
+| `3` | **等待**（调度冲突/容量等待、draining、`promotion promote` 的「已推送、等待拉取」）或**没什么可做**（reclaim 计划/执行没有可回收项） |
 
 `3` 从不表示 `BLOCKED`：`BLOCKED` 只表示**依赖未满足**，它属于「需要处理」而不是「等一等」。
+`3` 也从不表示「已完成」：提升在「已推送、等待拉取」时退 `3`，该状态下没有任何重启记账。
 
 ### 0.3 环境变量
 
@@ -148,22 +149,43 @@ Adapter 不支持的字段会被拒绝而不是静默忽略。稳定码：`INVAL
 
 ## 3. `project`
 
-### `project inspect [path]`
+### `project inspect [path] [--dev-repo <dev-clone>]`
 
-读仓库身份：`repoRoot`、`mainRef`、`objectFormat`、`headCommit`、`devRef`、`devCommit`、`devRefPresent`、`gitCommonDir`。
-`path` 默认当前目录。失败码含 `INVALID_REPOSITORY`、`UNSAFE_CHECKOUT`、`GIT_INSPECTION_FAILED`。
+读仓库身份：`repoRoot`、`mainRef`、`objectFormat`、`headCommit`、`devRef`、`devCommit`、`devRefPresent`、`gitCommonDir`，
+以及 `devRepoPath` —— 项目记录的 dev clone 的**核验结果**（ADR-0047 D05）：`verified`、`code`、`detail`、`repoRoot`、
+`gitCommonDir`、`headCommit`、`branchRef`、`devRefCommit`、`originUrl`、`originMatchesProject`、`clean`。
+`path` 默认当前目录；`--dev-repo <path>` 改为核验**指定**的那个 clone（在 trust 之前先看它是否可用），省略时核验已记录的那个。
+
+`devRepoPath` 为 `null` 表示项目没有记录 dev clone：**稳定提升此时不可用**（`promotion prepare` 会以
+`DEV_REPO_PATH_MISSING` 拒绝），因为经 GitHub 中转的提升必须从第二个 clone 推送候选。失败码含 `INVALID_REPOSITORY`、
+`UNSAFE_CHECKOUT`、`GIT_INSPECTION_FAILED`；dev clone 的拒绝是上面的 `DEV_REPO_*`（见下）。
 
 ### `project policy [path]`
 
 打印 `main` ref 上 `.codeestra/policies/verification.json` 的检查结果：`state`（`PRESENT` / `ABSENT` / `INVALID`）、
 `mainCommit`、`digest`、逐条 `commands`。缺失时提示「task verify 会拒绝直到该 ref 上存在此文件」。
 
-### `project trust [path] [--yes]`
+### `project trust [path] [--yes] [--dev-repo <dev-clone>|none]`
 
 接入项目。**前提**：合法 Git 仓库；`dev` 分支存在。**影响**：Agent 工具、验证命令与 Git hooks 会以你的用户权限运行。
 FULL 无确认；STRICT 需要输入 `TRUST` 或 `--yes`。
 
-防漂移：若在你查看与确认之间身份/策略/映射发生变化，返回 `REPOSITORY_CHANGED`、
+`--dev-repo <path>` 把 dev clone 作为**显式输入**记录（ADR-0047 D05）。Runtime 逐条核验，任一条不成立即用稳定码拒绝，
+**不会**写入一个空路径而继续：
+
+| 稳定码 | 含义 |
+|---|---|
+| `DEV_REPO_NOT_A_REPOSITORY` | 路径不存在或不是 Git work tree |
+| `DEV_REPO_NOT_SEPARATE` | 它是 main 检出自身或 main 检出的一个 worktree（同一个 Git common dir），不是另一个 clone |
+| `DEV_REPO_ORIGIN_UNKNOWN` | main 检出或该 clone 没有 `origin`，无法比较 |
+| `DEV_REPO_ORIGIN_MISMATCH` | 它的 `origin` 与 main 检出的 `origin` 不同 |
+| `DEV_REPO_BRANCH_MISMATCH` | 它的 HEAD 不在项目的 `dev` 分支上 |
+| `DEV_REPO_DEV_REF_MISSING` | 它没有本地 `dev` 分支 |
+
+`--dev-repo none` 显式清除已记录的路径；**省略该 flag 时保留原值**（重 trust 不会静默清空）。失败时退 `1`；
+CLI 同时打印核验结果（`verified` / `code` / `detail`），因为 `project trust` 会先打印身份、策略与结果三份文档。
+
+防漂移：若在你查看与确认之间身份/策略/映射/dev clone 发生变化，返回 `REPOSITORY_CHANGED`、
 `VERIFICATION_POLICY_CHANGED`、`IMPACT_POLICY_CHANGED`。`dev` 缺失返回 `DEV_REF_MISSING`。
 同一仓库的其他工作树（同一 Git common dir）重复 trust 是幂等的。
 
@@ -632,39 +654,63 @@ bun run codeestra promotion list <project-id> [--limit <n>]
 - `run` 退出码 `0` 仅当 `state === "PASSED"`。
 - `list` 的 `--limit` 默认 20（上限 200）。
 
-### `prepare / approve / promote / abandon`
+### `prepare / approve / promote / abandon`（ADR-0047：唯一提升路径经 GitHub 中转）
 
-- `prepare` 固定「已验证的 dev commit / 预期旧 main commit / 该 commit 的集成验证与 dev 全量证据」，
-  **不写任何 Git**。
-- `approve` **仅 STRICT 需要**；它针对**那一组精确三元组**，dev/main/证据任一移动即失效。
-- `promote` 在**检出 main 的那个工作树里**做 fast-forward，然后在那里依次执行：
+- `prepare` 固定「已验证的 dev commit / 预期旧 main commit / 该 commit 的集成验证与 dev 全量证据」，并固定**推送用的 dev
+  clone**（`projects.dev_repo_path`；未记录或无法核验时以 `DEV_REPO_PATH_MISSING` / `DEV_REPO_*` 拒绝）。
+  **不写任何 Git，也不写远端**。远端 `dev` 已经移到非候选 SHA 时拒绝（`REMOTE_DEV_MOVED`，`STALE`）。
+- `approve` **仅 STRICT 需要**；它针对**那一组精确三元组**，dev/main/证据/远端 `dev` 任一移动即失效。
+- `promote` 一次只推进**一步**，且每一步都要读回事实：
 
-  ```text
-  bun install --frozen-lockfile
-  bun run build:ui
-  bun run codeestra stop
-  bun run codeestra status
-  ```
+  1. **push 固定候选到远端 `dev`**（源是候选 OID，不是分支名；从不 `--force`），然后 `git ls-remote` **读回核对**。
+     push 退 0 但读回不等 → `REMOTE_DEV_READBACK_MISMATCH`，**不记**已推送；push 被拒或远端不可达 → `DEV_PUSH_REFUSED`
+     / `REMOTE_DEV_UNREACHABLE`，记录保持可重试（**不**标 `STALE`），因为记录本身仍然正确。
+  2. main 检出尚未拉取 → 报**「已推送、等待拉取」**（`state: PROMOTING`，`phase: AWAITING_PULL`），**退出码 3**，
+     **不执行也不记录任何重启步骤**。CLI 在 stderr 打印用户在 main 检出要执行的两条命令：
+     `git fetch origin && git merge --ff-only origin/dev`。
+  3. 用户拉取后再次调用同一命令：核对 main 检出确实在候选上、且该候选是 expected main 的后代（fast-forward 而非
+     merge/reset），记录重启计划，然后在 main 检出依次执行：
 
-  每个后置步骤的输出会打到 stderr（stdout 保持为机器可读记录），证据只记录**摘要与字节数**，不记录文本。
-  **重启只在每一步退 0 且重启后的 Runtime 回答 `READY` 时才被记录。**
-- `promote` 的退出码：只有 `SUCCEEDED` 是 `0`。若 main 已被推进但重启序列失败，CLI 明确打印
-  「main 已被推进且未回滚；Runtime 恢复应答后重跑 `promotion promote` 会重跑已记录的后置步骤」，并退 `1`。
-- `abandon` **必须**给 `--reason`（否则报错）：放弃的 promotion 保留记录与观察到的 ref 状态以便审计。
+     ```text
+     bun install --frozen-lockfile
+     bun run build:ui
+     bun run codeestra stop
+     bun run codeestra status
+     ```
+
+     每个后置步骤的输出会打到 stderr（stdout 保持为机器可读记录），证据只记录**摘要与字节数**，不记录文本。
+     **重启只在每一步退 0、重启后的 Runtime 回答 `READY`、且应答的 boot 与发出计划的 boot 不同时才被记录。**
+  4. 重启记录成功**之后**才把候选 push 回远端 `main` 并读回核对，然后 `SUCCEEDED`。推回失败 → `MAIN_PUSH_REFUSED`
+     /`REMOTE_MAIN_READBACK_MISMATCH`，记录保持 `RESTARTING`（`phase: MAIN_PUSH_PENDING`），再次调用**只重试推回**，
+     不会重复停 Runtime。
+- `promote` 的退出码：`0` 仅当 `SUCCEEDED`；`1` 拒绝或失败；`2` 用法错误；**`3` 已推送、等待拉取**（与 `SUCCEEDED` 不同，
+  且该状态下没有任何重启记账）。后置步骤失败时退 `1`，CLI 明确打印「main 检出已在候选上且未回滚；远端 `main` 未发布」，
+  重跑 `promotion promote` 会重跑已记录的后置步骤（推回仍只在重启记录成功后才尝试）。
+- `--json` 给出可区分的事实：`phase`（`READY_TO_PUSH` / `AWAITING_PULL` / `RESTART_PENDING` /
+  `MAIN_PUSH_PENDING` / `COMPLETE` / `REFUSED`）、`devRepoPath`、`remoteDevCommit`、`remoteMainCommit`、
+  `pushedAt`、`mainPushedAt`（读回值，不是输入）。
+- `abandon` **必须**给 `--reason`（否则报错）：放弃的 promotion 保留记录与观察到的 ref 状态以便审计（包括已读回的远端
+  `dev` SHA）。
 - `--limit` 范围 1–200；`promotion list` 默认 20。
+- 任何一次调用都**不**用 `update-ref`、**不** ff 已检出的 `main`、**不**推除固定候选之外的 ref、**不**覆盖远端已有提交；
+  断网/认证失败/远端不可达一律不推进任何 ref。
 
-稳定码：`DEV_FULL_SUITE_EVIDENCE_MISSING`、`DEV_FULL_SUITE_EVIDENCE_NOT_PASSED`、
+稳定码：`DEV_REPO_PATH_MISSING`、`DEV_REPO_PATH_CHANGED`、`DEV_REPO_NOT_A_REPOSITORY`、`DEV_REPO_NOT_SEPARATE`、
+`DEV_REPO_ORIGIN_UNKNOWN`、`DEV_REPO_ORIGIN_MISMATCH`、`DEV_REPO_BRANCH_MISMATCH`、`DEV_REPO_DEV_REF_MISSING`、
+`DEV_REPO_CANDIDATE_MISSING`、`DEV_REPO_BASE_MISSING`、`DEV_PUSH_REFUSED`、`REMOTE_DEV_UNREACHABLE`、
+`REMOTE_DEV_MOVED`、`REMOTE_DEV_READBACK_MISMATCH`、`MAIN_PUSH_REFUSED`、`REMOTE_MAIN_READBACK_MISMATCH`、
+`DEV_FULL_SUITE_EVIDENCE_MISSING`、`DEV_FULL_SUITE_EVIDENCE_NOT_PASSED`、
 `DEV_FULL_SUITE_EVIDENCE_STALE`、`PROMOTION_EVIDENCE_MISMATCH`、`PROMOTION_NOT_APPROVED`、
 `PROMOTION_NOT_FAST_FORWARD`、`PROMOTION_NOTHING_TO_PROMOTE`、`PROMOTION_STALE`、`PROMOTION_STATE_INVALID`、
 `PROMOTION_IN_PROGRESS`、`PROMOTION_FINISHED`、`APPROVAL_NOT_REQUIRED`、`BATCH_NOT_INTEGRATED`、
-`MAIN_REF_MOVED`、`MAIN_WORKTREE_MISSING`、`MAIN_WORKTREE_DIRTY`、`MAIN_NOT_UPDATED`、`MAIN_UPDATE_FAILED`、
+`MAIN_REF_MOVED`、`MAIN_WORKTREE_MISSING`、`MAIN_WORKTREE_DIRTY`、`DEV_REF_MISSING`、
 `DEV_REF_MOVED`、`VERIFICATION_NOT_PASSED`、`RESTART_PLAN_MISMATCH`、`RUNTIME_NOT_OBSERVED`、
 `RUNTIME_NOT_RESTARTED`、`RUNTIME_NOT_READY`、`RESTART_STEP_FAILED`、`RESTART_UNPROVEN`、
 `INVALID_COMMIT_ID`、`REPOSITORY_CHANGED`、`(UNBORN_MAIN)`。
 
-事件名：`PromotionCreated`、`PromotionApproved`、`PromotionStarted`、`PromotionMainUpdated`、
-`PromotionRestartRecorded`、`PromotionCompleted`、`PromotionFailed`、`PromotionStale`、
-`PromotionReconcileRequired`。
+事件名：`PromotionCreated`、`PromotionApproved`、`PromotionDevPushed`、`PromotionPushRefused`、
+`PromotionMainUpdated`、`PromotionRestartRecorded`、`PromotionMainPushRefused`、`PromotionCompleted`、
+`PromotionFailed`、`PromotionStale`、`PromotionReconcileRequired`（旧的 `PromotionStarted` 随本机 ff 路径一起删除）。
 
 > `promotion.restart.record` 是 CLI 在重启后调用的命令面成员：它把「刚刚应答 `runtime.ping` 的那个 boot」
   连同各步骤结果一起记录，Runtime 会核对**正在应答这次记录调用的 boot 与它相同**——所以一个**从未被停止过**
@@ -754,7 +800,7 @@ bun run codeestra events tail [--project <project-id>] [--since <sequence>]
 | 调度 | `TaskScheduleDecided`、`TaskWaitingForConflict`、`TaskWaitingForCapacity`、`TaskUnknownCleared`、`TaskImpactPredictionRevoked` |
 | 容量 / 槽位 | `SchedulerCapacityChanged`、`ExecutionSlotReserved`、`ExecutionSlotReleased`、`ExecutionSlotReconciled`、`ExecutionSlotWorkspaceBound` |
 | Operation | `OperationProgressed`、`OperationSettled`、`ResourcesReclaimed` |
-| 提升 | `PromotionCreated`、`PromotionApproved`、`PromotionStarted`、`PromotionMainUpdated`、`PromotionRestartRecorded`、`PromotionCompleted`、`PromotionFailed`、`PromotionStale`、`PromotionReconcileRequired` |
+| 提升 | `PromotionCreated`、`PromotionApproved`、`PromotionDevPushed`、`PromotionPushRefused`、`PromotionMainUpdated`、`PromotionRestartRecorded`、`PromotionMainPushRefused`、`PromotionCompleted`、`PromotionFailed`、`PromotionStale`、`PromotionReconcileRequired` |
 | 交接 / 终端 | `TakeoverRequested`、`TakeoverSafePointReached`、`SessionHandoffStarted`、`SessionHandoffCompleted`、`TerminalWriterLeaseChanged`、`TakeoverReleased`、`TakeoverFailed` |
 | 修订投递 | `TaskRevisionDeliveryRecorded` |
 
