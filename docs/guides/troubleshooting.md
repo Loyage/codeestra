@@ -84,7 +84,6 @@ Codeestra 要求项目长期保留 `main` 与 `dev`（ADR-0009），并且**所�
 这是防漂移，不是 bug。重新执行一次 `project trust`（或 `open`），重新看一遍再确认。
 
 ### 所有冲突判定都是 `UNKNOWN`，任务绝不并行
-
 看映射：
 
 ```sh
@@ -101,8 +100,39 @@ bun run codeestra project impact validate /path/to/repo
 bun run codeestra project impact explain $PROJECT <task-id> --json
 ```
 
-### 任务一直不跑（退出码 3）
+### 占用者无法被观测：工作树已经不在磁盘上（ADR-0055）
 
+症状：某个 Task 一直等，stderr 说「无法与 N 个活跃/已预留 Task 证明不相交」，判定是 `UNKNOWN`，
+理由码是 `MISSING_IMPACT_SNAPSHOT`，而 `--json` 里的 `occupiers[]` 给出 `code: "WORKSPACE_MISSING"`
+（`project impact explain` 的 `active[].code` 是同一个事实）。
+
+含义：账本里还写着一个 workspace 路径，但那目录已经不在磁盘上了。因此那一侧的变更集**永远观测不到**，
+调度器不能证明它不相交，于是每个新任务都要等。`UNKNOWN` 不是「无冲突」，这里也不是“等一等就好”。
+
+怎么办（按占用者的状态）：
+
+```sh
+bun run codeestra task schedule explain $PROJECT $TASK --json   # 看 occupiers[] 里到底是谁、什么码
+bun run codeestra task status    $PROJECT $OCCUPIER            # 看它的 state 与 version
+
+# RECOVERY_REQUIRED 的占用者：对账（只读事实；只有能证明 provider 已消失才收口）
+bun run codeestra task recover $PROJECT $OCCUPIER <expected-version>
+
+# PAUSED 的占用者：继续它或作废它
+bun run codeestra task resume   $PROJECT $OCCUPIER <expected-version>
+bun run codeestra task cancel   $PROJECT $OCCUPIER <expected-version>
+```
+
+只有把占用者从活跃集合里移出去（或修好它自己的工作树），后续任务才可能重新变回 `SAFE_TO_PARALLELIZE`。
+在这一刻之前，唯一的临时出路仍然是显式的 `--allow-unknown`（单次、有审计，但**不改判定**）。
+
+> **不要用外部 worktree 管理器（例如 Orca）清理 `CODEESTRA_HOME/worktrees`。**
+> 那些目录同时是本仓库的 **git worktree**，外部工具会把它们当成“可回收的 worktree”移进自己的 trash 目录，
+> 而 Codeestra 的账本不会因此改变：`workspaces` 行仍写 `RETAINED`/`RECOVERY_REQUIRED`，Task 分支可能被一并删除。
+> 本机 2026-09-14 就发生过一次（全部任务 worktree 被移走，`#7`/`#8` 因此变成不可观测的占用者）。
+> 要回收请用 `reclaim plan` / `reclaim apply`——那是唯一带归属校验与审计的路径。
+
+### 任务一直不跑（退出码 3）
 `3` 表示**等待**，不是失败。三种互不相同的答案：
 
 | 现象 | 含义 |
@@ -375,6 +405,8 @@ bun run codeestra events list --limit 1        # 或者从你保存的最后一�
 `INVALID_IMPACT_MAPPING`、`INVALID_IMPACT_SCOPE`、`EMPTY_MAPPING`、`MISSING_IMPACT_SNAPSHOT`、
 `IMPACT_SNAPSHOT_UNAVAILABLE`、`IMPACT_WORKSPACE_ABSENT`、`SNAPSHOT_STALE`、`SNAPSHOT_UNAVAILABLE`、
 `SNAPSHOT_SCOPE_MISMATCH`、`STALE_ANALYZER`、
+`RECOVERY_PROVIDER_ALIVE`、`RECOVERY_DESCENDANTS_ALIVE`、`RECOVERY_OWNERSHIP_UNVERIFIABLE`、
+`RECOVERY_PROCESS_IDENTITY_MISSING`、`TASK_NOT_IN_RECOVERY`（`task recover` 的拒绝码，ADR-0055）、
 以及所有 `KNOWLEDGE_*`（在 [cli-reference.md](./cli-reference.md) 的 `project knowledge` 一节与
 [features.md](./features.md) 列全）。
 

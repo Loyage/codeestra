@@ -1061,7 +1061,15 @@ bun run codeestra task status $PROJECT <task-id>     # 执行 / 验证 / 会话�
 ### 13.5 看到 `RECOVERY_REQUIRED`
 
 这是**多个实体都有的状态**，含义是「有事实无法被证明，需要一次带审计的对账」，
-**不是**让你重试掩盖它。先看 `task status` 与 `events tail`，再决定是人工核对还是显式回收现场。
+**不是**让你重试掩盖它。先看 `task status` 与 `events tail`。
+
+Task/Execution 的 `RECOVERY_REQUIRED` 用 **`task recover <project-id> <task-id> <expected-version>`**（ADR-0055）：
+只读事实（记录的 provider 身份按真实进程表核对、后代快照、workspace 是否还在磁盘），
+只有能证明 provider 已消失才收口为 `FAILED`（workspace 保留、不发信号、不声称静止），
+否则拒绝并保持占用（退出码 `1`，码为 `RECOVERY_PROVIDER_ALIVE` / `RECOVERY_DESCENDANTS_ALIVE` /
+`RECOVERY_OWNERSHIP_UNVERIFIABLE` / `RECOVERY_PROCESS_IDENTITY_MISSING`）。收口后 `task retry` 可重排、
+`task cancel` 可作废。IntegrationBatch 与 Promotion 的 `RECOVERY_REQUIRED` 各自有自己的收口命令，见
+[cli-reference.md](./cli-reference.md)。
 
 ### 13.6 完整的错误码表在哪
 

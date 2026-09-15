@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "importantDirectories": [],
+  "modules": [
+    { "id": "domain", "paths": ["packages/domain/**"] },
+    { "id": "contracts", "paths": ["packages/contracts/**"] },
+    { "id": "storage", "paths": ["packages/storage/**"] },
+    { "id": "git", "paths": ["packages/git/**"] },
+    { "id": "agent-adapters", "paths": ["packages/agent-adapters/**"] },
+    {
+      "id": "runtime-schedule",
+      "paths": [
+        "apps/runtime/src/schedule-service.ts",
+        "apps/runtime/src/scheduler.ts",
+        "apps/runtime/src/capacity-service.ts",
+        "apps/runtime/src/slot-reservation-service.ts",
+        "apps/runtime/src/impact-analysis-service.ts"
+      ]
+    },
+    {
+      "id": "runtime-task-control",
+      "paths": [
+        "apps/runtime/src/task-control-service.ts",
+        "apps/runtime/src/task-recovery-service.ts",
+        "apps/runtime/src/operation-service.ts",
+        "apps/runtime/src/recovery-service.ts",
+        "apps/runtime/src/result-commit-service.ts"
+      ]
+    },
+    {
+      "id": "runtime-verify-integrate-promote",
+      "paths": [
+        "apps/runtime/src/verification-service.ts",
+        "apps/runtime/src/integration-service.ts",
+        "apps/runtime/src/promotion-service.ts",
+        "apps/runtime/src/promotion-evidence-service.ts",
+        "apps/runtime/src/dev-repo-service.ts"
+      ]
+    },
+    {
+      "id": "runtime-agent-session",
+      "paths": [
+        "apps/runtime/src/agent-runtime-service.ts",
+        "apps/runtime/src/agent-start-service.ts",
+        "apps/runtime/src/agent-answer-service.ts",
+        "apps/runtime/src/agent-config-service.ts",
+        "apps/runtime/src/agent-observation-service.ts",
+        "apps/runtime/src/agent-plugin-detection-service.ts",
+        "apps/runtime/src/adapter-registry.ts",
+        "apps/runtime/src/knowledge-service.ts",
+        "apps/runtime/src/lifecycle.ts",
+        "apps/runtime/src/workspace-service.ts",
+        "apps/runtime/src/revision-delivery-service.ts"
+      ]
+    },
+    {
+      "id": "runtime-terminal-session",
+      "paths": [
+        "apps/runtime/src/session-handoff-service.ts",
+        "apps/runtime/src/session-transcript-service.ts",
+        "apps/runtime/src/terminal-service.ts",
+        "apps/runtime/src/event-subscription-service.ts",
+        "apps/runtime/src/event-delivery-service.ts",
+        "apps/runtime/src/http-api.ts"
+      ]
+    },
+    {
+      "id": "runtime-support",
+      "paths": [
+        "apps/runtime/src/paths.ts",
+        "apps/runtime/src/permission-mode.ts",
+        "apps/runtime/src/ui-settings.ts",
+        "apps/runtime/src/prose-question-attention-settings.ts",
+        "apps/runtime/src/reclaim-service.ts"
+      ]
+    },
+    { "id": "cli", "paths": ["apps/cli/src/**"] },
+    { "id": "ui", "paths": ["apps/ui/**"] }
+  ],
+  "globalResources": [
+    {
+      "id": "root-config",
+      "kind": "BUILD_CONFIG",
+      "paths": ["package.json", "bun.lock", "tsconfig.json", "vitest.config.ts"],
+      "consumers": { "state": "UNKNOWN" }
+    },
+    {
+      "id": "schema-migration",
+      "kind": "SCHEMA_MIGRATION",
+      "paths": ["packages/storage/src/migration.ts"],
+      "consumers": { "state": "DECLARED", "paths": ["packages/storage/**"] }
+    },
+    {
+      "id": "composition-root",
+      "kind": "PUBLIC_API",
+      "paths": ["apps/runtime/src/main.ts"],
+      "consumers": { "state": "UNKNOWN" }
+    },
+    {
+      "id": "command-face",
+      "kind": "PUBLIC_API",
+      "paths": ["packages/contracts/src/index.ts", "apps/cli/src/main.ts"],
+      "consumers": { "state": "UNKNOWN" }
+    },
+    {
+      "id": "governance",
+      "kind": "PROJECT_POLICY",
+      "paths": ["PROJECT_SPEC.md", "AGENTS.md", ".codeestra/**"],
+      "consumers": { "state": "UNKNOWN" }
+    }
+  ]
+}

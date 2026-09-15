@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { realpath } from 'node:fs/promises';
 import {
@@ -263,6 +264,40 @@ export interface ImpactSubjectResolution {
   /** `RECORDED` = first observation, `REUSED` = an existing snapshot still described the facts. */
   readonly disposition: 'RECORDED' | 'REUSED' | 'UNAVAILABLE';
   readonly detail: string | null;
+  /** Whether the Task's recorded workspace could be looked at at all (ADR-0055 D04). */
+  readonly workspaceStatus: WorkspaceObservationStatus;
+}
+
+/**
+ * What can be said about a Task's recorded workspace *before* any change set is read (ADR-0055 D04).
+ *
+ * The three states are deliberately distinct, because they are different facts with different
+ * remedies: `ABSENT` is a Task that has no (live) workspace row at all — a candidate that has not
+ * started yet, for instance; `MISSING` is a path the ledger still names but the disk no longer has,
+ * which is what an external tool moving the worktree (or an unobserved reclamation) leaves behind;
+ * `PRESENT` is a path that exists, so the only remaining question is whether Git can read it.
+ */
+export type WorkspaceObservationStatus = 'ABSENT' | 'MISSING' | 'PRESENT';
+
+export function observeWorkspacePath(
+  workspacePath: string | null,
+  pathExists: (path: string) => boolean = existsSync,
+): WorkspaceObservationStatus {
+  if (workspacePath === null) return 'ABSENT';
+  return pathExists(workspacePath) ? 'PRESENT' : 'MISSING';
+}
+
+/**
+ * The scheduling-side code for one occupier, from the two facts that decide it: whether its recorded
+ * workspace is on disk, and whether a change set could actually be derived from it.
+ */
+export function occupierCodeOf(
+  status: WorkspaceObservationStatus,
+  observable: boolean,
+): 'OBSERVABLE' | 'WORKSPACE_MISSING' | 'WORKSPACE_UNREADABLE' | 'NO_WORKSPACE' {
+  if (status === 'ABSENT') return 'NO_WORKSPACE';
+  if (status === 'MISSING') return 'WORKSPACE_MISSING';
+  return observable ? 'OBSERVABLE' : 'WORKSPACE_UNREADABLE';
 }
 
 async function resolveImpactSubject(input: {
@@ -276,7 +311,7 @@ async function resolveImpactSubject(input: {
   readonly caseDetail: string;
   readonly now: number;
 }): Promise<ImpactSubjectResolution> {
-  const unavailable = (detail: string): ImpactSubjectResolution => ({
+  const unavailable = (detail: string): Omit<ImpactSubjectResolution, 'workspaceStatus'> => ({
     ref: input.ref,
     snapshot: null,
     observedFiles: Object.freeze([]),
@@ -285,8 +320,16 @@ async function resolveImpactSubject(input: {
     detail,
   });
   if (input.ref.workspacePath === null || input.ref.workspaceBaseCommit === null) {
-    return unavailable(`${input.ref.taskId} has no live workspace, so its change set cannot be`
-      + ' observed; no overlap with it can be excluded');
+    return { ...unavailable(`${input.ref.taskId} has no live workspace, so its change set cannot be`
+      + ' observed; no overlap with it can be excluded'), workspaceStatus: 'ABSENT' };
+  }
+  if (observeWorkspacePath(input.ref.workspacePath) === 'MISSING') {
+    // The ledger still names a workspace path the disk no longer has. Saying only "the change set
+    // could not be inspected" would hide the actionable fact (nothing is left to observe) and the
+    // remedy (reconcile the Task, then reclaim or rebuild its worktree), so the path is named here.
+    return { ...unavailable(`${input.ref.taskId} records the workspace at`
+      + ` ${input.ref.workspacePath} but nothing is there on disk, so its change set cannot be`
+      + ' observed; no overlap with it can be excluded'), workspaceStatus: 'MISSING' };
   }
   let paths: readonly string[];
   let changeFingerprint: string;
@@ -298,8 +341,8 @@ async function resolveImpactSubject(input: {
     paths = changeSetPaths(changeSet);
     changeFingerprint = changeSet.treeFingerprint;
   } catch (error) {
-    return unavailable(`${input.ref.taskId} change set could not be inspected:`
-      + ` ${error instanceof Error ? error.message : String(error)}`);
+    return { ...unavailable(`${input.ref.taskId} change set could not be inspected:`
+      + ` ${error instanceof Error ? error.message : String(error)}`), workspaceStatus: 'PRESENT' };
   }
   const policyVersion = impactPolicyVersionKey(input.inspection);
   const context: ImpactAssessmentContext = {
@@ -334,6 +377,7 @@ async function resolveImpactSubject(input: {
       changeFingerprint: candidate.changeFingerprint,
       disposition: 'REUSED',
       detail: null,
+      workspaceStatus: 'PRESENT',
     };
   }
 
@@ -392,6 +436,7 @@ async function resolveImpactSubject(input: {
     changeFingerprint,
     disposition: 'RECORDED',
     detail: null,
+    workspaceStatus: 'PRESENT',
   };
 }
 
@@ -574,6 +619,8 @@ export interface ImpactSnapshotReport {
   };
   readonly snapshot: ImpactSnapshotRecord | null;
   readonly unavailableDetail: string | null;
+  /** Whether the Recorded workspace was on disk when this report was produced (ADR-0055 D04). */
+  readonly workspaceStatus: WorkspaceObservationStatus;
 }
 
 /**
@@ -631,6 +678,7 @@ export async function inspectTaskImpact(input: {
     },
     snapshot: resolution.snapshot,
     unavailableDetail: resolution.snapshot === null ? resolution.detail : null,
+    workspaceStatus: resolution.workspaceStatus,
   };
 }
 
@@ -649,6 +697,8 @@ export interface ImpactAssessmentReport {
     readonly incompleteReasons: readonly string[];
     readonly changeFingerprint: string | null;
     readonly detail: string | null;
+    /** `OBSERVABLE` / `WORKSPACE_MISSING` / `WORKSPACE_UNREADABLE` / `NO_WORKSPACE` (ADR-0055 D04). */
+    readonly code: string;
   }[];
   readonly assessment: ConflictAssessment;
   readonly explanation: readonly string[];
@@ -778,6 +828,7 @@ export async function assessTaskImpact(input: {
       },
       snapshot: candidate.snapshot,
       unavailableDetail: candidate.snapshot === null ? candidate.detail : null,
+      workspaceStatus: candidate.workspaceStatus,
     },
     active: active.map((resolution) => ({
       taskId: resolution.ref.taskId,
@@ -789,6 +840,7 @@ export async function assessTaskImpact(input: {
       incompleteReasons: resolution.snapshot?.incompleteReasons ?? Object.freeze([]),
       changeFingerprint: resolution.snapshot?.changeFingerprint ?? null,
       detail: resolution.detail,
+      code: occupierCodeOf(resolution.workspaceStatus, resolution.snapshot !== null),
     })),
     assessment,
     explanation: explainAssessment(assessment),

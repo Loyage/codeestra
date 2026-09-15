@@ -10,6 +10,7 @@ import {
   type ScheduleDisposition,
   type ScheduleExplanationView,
   type ScheduleImpactGrowthView,
+  type ScheduleOccupierView,
   type ScheduleOverviewView,
   type ScheduleProjectReport,
   type ScheduleStartOutcomeView,
@@ -50,6 +51,8 @@ import {
   impactPolicyVersionKey,
   inspectImpactPolicy,
   inspectTaskImpact,
+  occupierCodeOf,
+  observeWorkspacePath,
   toDomainSnapshot,
   type ImpactPathCaseDetection,
 } from './impact-analysis-service.js';
@@ -211,15 +214,50 @@ interface UnknownRelease {
 }
 
 /** A UUID derived from stable parts, so a replayed decision keeps one command identity. */
+function actorOf(value: string): string {
+  return value.trim().length === 0 ? 'runtime-scheduler' : value;
+}
+
+/**
+ * One entry per active/reserved Task: who is occupying a resource and whether that occupation could
+ * be observed at all (ADR-0055 D04).
+ *
+ * The verdict already *is* the analyzer's; this projection adds the fact the verdict cannot carry —
+ * "the occupier's workspace is not on disk any more, so nothing about it can ever be proven" — which
+ * is what a user needs to stop waiting and start reconciling. It changes no decision: `UNKNOWN`
+ * stays `UNKNOWN`.
+ */
+function occupierViews(
+  refs: readonly ImpactActiveTaskRef[],
+  observable: (taskId: string) => boolean,
+): readonly ScheduleOccupierView[] {
+  return Object.freeze(refs.map((ref) => {
+    const path = ref.workspacePath ?? null;
+    const code = occupierCodeOf(observeWorkspacePath(path), observable(ref.taskId));
+    return Object.freeze({
+      taskId: ref.taskId,
+      taskState: ref.taskState,
+      executionState: ref.executionState,
+      code,
+      workspacePath: path,
+      detail: code === 'WORKSPACE_MISSING'
+        ? `the ledger records the workspace at ${path ?? 'unknown'} but nothing is there on disk, so`
+          + ' this occupier cannot be observed at all'
+        : code === 'WORKSPACE_UNREADABLE'
+          ? 'the workspace exists but its change set could not be read'
+          : code === 'NO_WORKSPACE'
+            ? 'this occupier holds a resource without a (live) workspace row'
+            : "the occupier's change set was observed",
+    });
+  }));
+}
 export function derivedScheduleId(...parts: readonly string[]): string {
   const hex = createHash('sha256').update(parts.join('\u0000')).digest('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}`
     + `-${hex.slice(20, 32)}`;
 }
 
-function actorOf(value: string): string {
-  return value.trim().length === 0 ? 'runtime-scheduler' : value;
-}
+/** A UUID derived from stable parts, so a replayed decision keeps one command identity. */
 
 export class ScheduleService {
   readonly #storage: Phase1Database;
@@ -1238,6 +1276,8 @@ export class ScheduleService {
         comparedTaskIds: assessment.comparedTaskIds,
         activeTaskIds: activeRefs.map((ref) => ref.taskId),
         explanation,
+        occupiers: occupierViews(activeRefs,
+          (taskId) => (peers.snapshots.get(taskId) ?? null) !== null),
       },
       verdict: assessment.verdict,
       reasonCodes: assessment.reasonCodes,
@@ -1328,6 +1368,9 @@ export class ScheduleService {
         comparedTaskIds: assessment.comparedTaskIds,
         activeTaskIds: input.activeRefs.map((ref) => ref.taskId),
         explanation: explainAssessment(assessment),
+        occupiers: occupierViews(input.activeRefs,
+          (taskId) => (input.activeSubjects.find((subject) => subject.taskId === taskId)?.snapshot
+            ?? null) !== null),
       },
       verdict: 'UNKNOWN',
       reasonCodes: assessment.reasonCodes,

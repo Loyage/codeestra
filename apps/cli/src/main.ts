@@ -10,7 +10,9 @@ import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOpt
   type ProjectIdentity, type QuestionnaireAnswer, type RuntimeRequest,
   type RuntimeResponse,
   type ImpactPolicyConfirmation,
-  type ScheduleExplanationView, type ScheduleStartOutcomeView, type ScheduleTickReport,
+  type ScheduleExplanationView, type ScheduleOverviewView, type ScheduleStartOutcomeView,
+  type ScheduleTickReport,
+  type ScheduleAssessmentView, type ScheduleCandidateView,
   type ScheduleUnknownReleaseView,
   type SessionTranscriptEntry, type SessionTranscriptView,
   type SlotReservationAcquisitionView,
@@ -249,6 +251,54 @@ interface TaskStatusExecutionListing {
  * rendering of a recorded fact: it changes no state, adds no confirmation, and never claims the
  * Agent is waiting for an answer (FOUNDATION-056).
  */
+/**
+ * ADR-0055 D04: name the active/reserved Tasks whose occupation could not be observed, in words, on
+ * stderr — together with the command that can reconcile them.
+ *
+ * This is a diagnostic, not a verdict: the assessment is `UNKNOWN` either way, and the reason codes
+ * are unchanged. What it removes is the guessing: a user facing "cannot be proven disjoint from 2
+ * active Task(s)" now also reads *which* of them has a workspace that is not on disk any more, and
+ * what to run about it.
+ */
+function printOccupierDiagnostics(
+  projectId: string,
+  assessment: ScheduleAssessmentView | null,
+  activeTaskIds: readonly string[],
+): void {
+  const occupiers = assessment?.occupiers ?? [];
+  const reported = new Set<string>();
+  for (const occupier of occupiers) {
+    if (occupier.code === 'OBSERVABLE') continue;
+    reported.add(occupier.taskId);
+    const remedy = occupier.taskState === 'RECOVERY_REQUIRED'
+      ? `reconcile it from facts with \`task recover ${projectId} ${occupier.taskId}`
+        + ' <expected-version>\` (the version is in `task status`)'
+      : occupier.taskState === 'PAUSED'
+        ? `resume it with \`task resume\` or retire it with \`task cancel\``
+        : 'inspect it with `task status`';
+    console.error(`[scheduler] occupier ${occupier.taskId} (${occupier.taskState}/`
+      + `${occupier.executionState}) ${occupier.code}: ${occupier.detail}`
+      + `${occupier.workspacePath === null ? '' : ` [${occupier.workspacePath}]`} → ${remedy}`);
+  }
+  // A Task can be in the active set with no assessment row at all (for example when the candidate's own
+  // impact was unavailable, so no comparison ran). Saying only "it is active" is still better than
+  // silence, because it names the exact Task the wait is about.
+  for (const taskId of activeTaskIds) {
+    if (reported.has(taskId)) continue;
+    console.error(`[scheduler] occupier ${taskId}: active (no assessment row was produced for it)`);
+  }
+}
+
+/** One line per candidate: which of its occupiers cannot be observed, and what to do about it. */
+function printOccupierDiagnosticsForCandidates(
+  projectId: string,
+  candidates: readonly ScheduleCandidateView[],
+): void {
+  for (const candidate of candidates) {
+    printOccupierDiagnostics(projectId, candidate.assessment, candidate.assessment?.activeTaskIds ?? []);
+  }
+}
+
 function printCompletionNotes(view: unknown): void {
   if (typeof view !== 'object' || view === null) return;
   const executions = (view as { readonly executions?: unknown }).executions;
@@ -1122,6 +1172,18 @@ function usage(): never {
     instead of jumping them. Exit 0 only when the new Execution started, 3 when the Task is
     requeued and waiting (the reason code is in --json and on stderr), 1 when the retry or the start
     was refused.
+  bun run codeestra task recover <project-id> <task-id> <expected-version> [--reason <text>] [--json]
+    The reconcile of a RECOVERY_REQUIRED Task (ADR-0055), the step the state machine promised and no
+    command face had. It reads real facts only — the recorded provider process identity (checked
+    against the real process table, start token and descendants), the recorded descendant snapshot,
+    and whether the recorded workspace is still on disk — and it changes something only when the
+    provider is provably gone: Execution and Task become FAILED (the resource is released), the
+    Session becomes EXITED, and the workspace becomes RETAINED. It never signals a process, never
+    removes or moves a worktree, never rewrites exit_json and never claims quiescence
+    (quiescenceProven: false, signalsSent: 0). A refusal changes nothing and exits 1 with
+    RECOVERY_PROVIDER_ALIVE / RECOVERY_DESCENDANTS_ALIVE / RECOVERY_OWNERSHIP_UNVERIFIABLE /
+    RECOVERY_PROCESS_IDENTITY_MISSING; TASK_NOT_IN_RECOVERY is exit 1 as well, ALREADY_RECONCILED is
+    exit 0 and read-only. After it, "task retry" can requeue the Task and "task cancel" can retire it.
   bun run codeestra task cancel <project-id> <task-id> <expected-version>
   bun run codeestra task archive <project-id> <task-id> <expected-version>
   bun run codeestra task unarchive <project-id> <task-id> <expected-version>
@@ -2806,6 +2868,7 @@ try {
     if (result.outcome === 'WAIT') {
       console.error(`[scheduler] ${result.wait?.kind ?? 'WAIT'} wait: `
         + `${result.wait?.code ?? result.code ?? 'unknown'} — ${result.detail}`);
+      printOccupierDiagnostics(firstArgument, result.assessment, result.assessment?.activeTaskIds ?? []);
       process.exit(3);
     }
     if (result.outcome === 'REFUSED') {
@@ -3677,9 +3740,16 @@ try {
       const adapterId = split.flags.get('--adapter');
       const adapter = adapterId === undefined ? {} : { adapterId };
       if (subcommand === 'status') {
-        print(await call({ command: 'task.schedule.status', projectId, ...adapter }));
+        const view = await call({ command: 'task.schedule.status', projectId, ...adapter }) as
+          ScheduleOverviewView;
+        print(view);
+        printOccupierDiagnosticsForCandidates(projectId, view.candidates);
       } else if (subcommand === 'plan') {
-        print(await call({ command: 'task.schedule.plan', projectId, ...adapter }));
+        // `plan` is the dry run of `status`, so it answers with the same overview shape (dryRun: true).
+        const overview = await call({ command: 'task.schedule.plan', projectId, ...adapter }) as
+          ScheduleOverviewView;
+        print(overview);
+        printOccupierDiagnosticsForCandidates(projectId, overview.candidates);
       } else {
         const report = await call({
           command: 'task.schedule.run',
@@ -3695,6 +3765,7 @@ try {
             console.error(`[scheduler] ${candidate.disposition} ${candidate.taskId}`
               + `: ${candidate.detail}`);
           }
+          printOccupierDiagnosticsForCandidates(projectId, project.candidates);
         }
       }
     } else if (subcommand === 'explain') {
@@ -3710,6 +3781,7 @@ try {
       }) as ScheduleExplanationView;
       print(view);
       console.error(`[scheduler] ${view.decision}: ${view.detail}`);
+      printOccupierDiagnostics(view.projectId, view.assessment, view.activeTaskIds);
       // 0 = it is running or would start now, 3 = it is waiting (conflict or capacity — a wait is not
       // BLOCKED), 1 = it will not start for a reason that needs attention (unmet dependencies, or a
       // state that is not schedulable at all).

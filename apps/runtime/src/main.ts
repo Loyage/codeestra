@@ -58,6 +58,7 @@ import {
   showProjectKnowledge,
   validateProjectKnowledge,
 } from './knowledge-service.js';
+import { recoverTask } from './task-recovery-service.js';
 import {
   RuntimeDrainState,
   clearAdapterCapacity,
@@ -920,6 +921,38 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       // the scheduling engine is asked to look again; the answer is reported, not assumed.
       const scheduling = await scheduleTick('TASK_STOPPED', request.projectId);
       return success(request.requestId, { ...paused, schedule: scheduling });
+    }
+    case 'task.recover': {
+      // The reconcile `state-machines.md` promises for `RECOVERY_REQUIRED` (ADR-0055). It only reads
+      // facts first: a refusal changes nothing, and only a provably gone provider closes the run.
+      const payloadHash = createHash('sha256').update(JSON.stringify({
+        command: 'task.recover',
+        projectId: request.projectId,
+        taskId: request.taskId,
+        expectedVersion: request.expectedVersion,
+        reason: request.reason ?? null,
+      })).digest('hex');
+      const recovery = await recoverTask({
+        storage,
+        projectId: request.projectId,
+        taskId: request.taskId,
+        expectedVersion: request.expectedVersion,
+        commandId: request.commandId,
+        ...(request.reason === undefined ? {} : { reason: request.reason }),
+        actor: 'local-user',
+        payloadHash,
+      });
+      if (recovery.outcome === 'REFUSED') {
+        // A refusal is a value, not an exception: the observation is the answer, and a script needs
+        // the code together with the facts that produced it.
+        return success(request.requestId, { ...recovery, schedule: null });
+      }
+      if (recovery.outcome === 'ALREADY_RECONCILED') {
+        return success(request.requestId, { ...recovery, schedule: null });
+      }
+      // The recoverable set changed, so the engine is asked to look again; the answer is reported.
+      const scheduling = await scheduleTick('TASK_RECOVERED', request.projectId);
+      return success(request.requestId, { ...recovery, schedule: scheduling });
     }
     case 'task.cancel': {
       const cancelled = await pauseOrCancelTask({

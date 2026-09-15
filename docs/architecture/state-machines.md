@@ -29,7 +29,7 @@
 | DRAFT / BLOCKED / READY / EXECUTED / FAILED | cancel | 没有活动写入或正在提升的竞争操作→CANCELLED |
 | RUNNING / PAUSING / PAUSED / WAITING_FOR_USER | cancel | →CANCELLING，协作中断 |
 | CANCELLING | confirmed stopped | →CANCELLED，保留 workspace |
-| RECOVERY_REQUIRED | reconcile | 依据真实事实回到已证实状态；必须审计，不能直接释放资源 |
+| RECOVERY_REQUIRED | reconcile | 依据真实事实回到已证实状态；必须审计，不能直接释放资源。命令面是 `task recover <project> <task> <expected-version>`（ADR-0055）：只读事实（记录的 provider 身份按真实进程表 + start token + 后代核对、记录的后代快照、workspace 路径是否仍在磁盘），**只有能证明 provider 已消失**才收口为 `FAILED`（同时 `Execution → FAILED`、`resource_held=0`、Session `→ EXITED`、workspace `→ RETAINED`）；存活 / 后代存活 / 无法核验 / 无身份一律**拒绝并保持占用**（退出码 1、零行变化）。收口**不主张工作树静止**（`quiescenceProven:false`、`signalsSent:0`），不发信号、不删工作树 |
 
 READY 的等待原因单独派生为 CONFLICT / CAPACITY / DRAINING / REVISION_REVIEW 等，不误用 BLOCKED。依赖未满足是 BLOCKED 唯一含义。SUCCEEDED/CANCELLED 不自动重开。
 
