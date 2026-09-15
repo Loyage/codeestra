@@ -4408,6 +4408,66 @@ boot 身份不同（ADR-0022 的重启判定），且新进程确实运行新代
 - 验证：`bun run typecheck` 0、`bun run typecheck:ui` 0、`bunx vitest run apps/ui` **42 passed**、`bun run build:ui` 0（bundle 从 401.19 kB 降到 397.02 kB，与删除旧面板一致）；`bun test apps/runtime/test/cli-agent-config.test.ts` **4 pass**（确认 `agent.config.clear` 的请求形状与新页面一致）。
 - 未验证：设置页的视觉与交互仍需用户人工目视确认（ADR-0008，未使用浏览器/桌面自动化）。
 
+## 第三次真实 `dev → main` 提升（`main` `54ff304` → `c50730f`，12 个提交，Wave J + Agent 标签收口）
+
+状态：**已执行并成功**（用户显式授权）。这是 Wave J 四格（ADR-0044/0045）与用户裁决的 Agent 标签合并进入稳定分支，也是**第一次真正跑通产品路径的全量证据机制**（`promotion full-suite run`，ADR-0039）的提升。
+
+| 项 | 值 |
+|---|---|
+| 提升前 `main` | `54ff3049e7a4b3e85726210e39c71c6751403b37` |
+| 提升后 `main` | `c50730f14aaa35f402d01430051853eb69840e41`（= 被验证的精确 dev 候选） |
+| 推进的提交数 | 12 |
+| 方式 | 在已检出的 main 工作树内 `git merge --ff-only c50730f…`（ref/index/工作文件同时前进，退出码 0；提升前后 `git status --porcelain` 均为 0 行） |
+| 提升后 `phase1SchemaVersion` | 27 |
+| 稳定库 schema | 提升前 `user_version = 26` → 新 Runtime 启动后 **27**；新列 `agent_configurations.plugin_selection_json`；`PRAGMA foreign_key_check` 0 行违规 |
+
+### 提升前全量证据（ADR-0038 D03 / ADR-0039，**产品命令面**）
+
+在**精确候选 SHA** 上用产品命令跑：
+
+```sh
+CODEESTRA_HOME=/tmp/ce-j-promote bun run codeestra promotion full-suite run <project-id> \
+  --dev-commit c50730f14aaa35f402d01430051853eb69840e41 --json
+```
+
+| 字段 | 值 |
+|---|---|
+| `evidenceId` | `db1c24d6-3b58-4806-b34b-98038648a77b` |
+| `devCommit` / `testedTree` | `c50730f14aaa35f402d01430051853eb69840e41`（两者相同） |
+| `state` / `outcomeCode` | `PASSED` / `PASSED` |
+| `policyDigest` | `7d72c8222a06d1159ee3c099b3aba698dc9ed163987af52e73a13a2e2c28799b` |
+| `lockfileDigest`（`bun.lock`） | `08f20225891ab97b42352780d64aa31214ed60b80a3e095bc646a19a64ea9df8` |
+| 执行的命令 | `bun install --frozen-lockfile`（timeout 600s）、`bun run check`（timeout 1800s），argv 读自项目 main ref 的 `.codeestra/policies/verification.json` |
+| 墙钟耗时 | 6 分 03 秒 |
+| 副本 | `copyRemoved: true`（成功后由 Runtime 删除隔离副本） |
+
+这是 `promotion full-suite run` 自 ADR-0039 落地以来**第一次在真实仓库上运行**（Wave I 的记录曾把它标为未验收项）。
+
+### 重启序列与证据（AGENTS.md 「重启 main 稳定服务」规程）
+
+在 `/Users/loyage/Documents/codeestra` 按顺序执行，每步退出码均 0：
+
+1. `bun install --frozen-lockfile` → 0（`Checked 65 installs across 84 packages (no changes)`）。
+2. `bun run build:ui` → 0（`index-C8FIklpL.css` / `index-DvlOvtCM.js`）。
+3. `bun run codeestra stop` → 0（旧 Runtime 退出：`holderAlive: false`、`present: false`）。
+4. `bun run codeestra status` → 0：`status: "READY"`、`permissionMode: "FULL"`、`adapters: ["pi","codex","claude"]`、`activeSessions: []`。
+5. `bun run codeestra ui --no-open` → 0；再次 `status` 得 `uiRunning: true`（AGENTS.md 要求 READY 与 uiRunning 同时成立）。带 token 的输出**未写入**任何文档、日志或提交。
+
+| | boot id | pid |
+|---|---|---|
+| 提升前 | `5cc84fdd-e843-42bb-9d37-03c91a4ea3a9` | 50758 |
+| 提升后 | `f12ec062-fec1-4733-9cbb-6eee225f000e` | 61512 |
+
+boot 身份不同，且新进程确实运行新代码（启动后稳定库已迁到 v27、并出现 `plugin_selection_json` 列）。
+
+### 记录与诚实边界
+
+- **仍然没有产生领域 `PromotionRecord` 行**：本次走 AGENTS.md 规定的人工路径（main 工作树内 `git merge --ff-only <固定候选>`）。产品命令 `promotion prepare` 需要 `batchId` + IntegrationBatch 的集成验证证据，而 Wave J 的四个 lane 是协调者手工解冲突合入 `dev` 的，**没有 IntegrationBatch**，因此产品路径对该候选在语义上无法 prepare。这与前两次提升是同一个缺口，本次仍未补。
+- **证据绑定的 policy 来自 `refs/heads/dev`**：注册在隔离 Runtime 里的项目是 `~/Documents/codeestra-dev`（检出 `dev`），因此 `project inspect` 报的 `mainRef` 是 `refs/heads/dev`。Wave J 未改动 `.codeestra/policies/verification.json`，main 与 dev 的策略内容与 digest 相同，故对本候选没有实际差别；但下一次若要严格绑定 `refs/heads/main` 的策略，应在 main 工作树上注册项目再跑证据。
+- **证据只保留元数据与 digest**：`full-suite run` 不保留原始输出日志，成功的副本按设计被删除，因此本次没有可贴出的原始日志文件；可复核的是上面那张表的字段与 `promotion full-suite list`。
+- 本记录是**提升之后**在 `dev` 上新增的提交，因此 `main != dev`（main 停在 `c50730f`，dev 比 main 多这一条记录提交）。下一次提升会把它一起带上。
+- 未在 `main` 工作树上额外跑全量：`main` 与被执行全量的精确候选 SHA 完全相同、两边工作树 clean，额外再跑不增加信息（沿用前两次的处置）。
+
 ## NEXT — 最小可用纵向切片
 
 
