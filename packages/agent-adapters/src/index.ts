@@ -69,6 +69,42 @@ export type {
 } from './codex-protocol.js';
 export { CodexAppServerClient } from './codex-process.js';
 export type { CodexFrame, CodexPendingServerRequest } from './codex-process.js';
+export { ClaudeAdapter } from './claude-adapter.js';
+export type { ClaudeAdapterOptions } from './claude-adapter.js';
+export {
+  assertClaudeAcceptsAgentConfiguration,
+  assertOwnedClaudeTranscript,
+  buildClaudeArguments,
+  claudeCompletionFacts,
+  claudeControlSubtypes,
+  claudeEfforts,
+  claudeFrameTypes,
+  claudePermissionPolicy,
+  claudePermissionPrompt,
+  claudePermissionResult,
+  claudeProjectKey,
+  claudeResultVerdict,
+  ClaudeAdapterError,
+  ClaudeJsonlDecoder,
+  ClaudeProtocolError,
+  claudeThinkingEffort,
+  claudeTranscriptPath,
+  claudeUserMessage,
+  collectClaudeCompletionFacts,
+  defaultClaudeConfigDir,
+  encodeClaudeRecord,
+  expectedReportedPermissionMode,
+  newClaudeFactAccumulator,
+  parseClaudeInit,
+  parseClaudePermissionRequest,
+  parseClaudeResult,
+} from './claude-protocol.js';
+export type {
+  ClaudeAdapterErrorCode, ClaudeEffort, ClaudeFactAccumulator, ClaudeInitFacts,
+  ClaudePermissionRequest, ClaudeResultFacts,
+} from './claude-protocol.js';
+export { ClaudeStreamClient } from './claude-process.js';
+export type { ClaudeFrame, ClaudePendingControlRequest } from './claude-process.js';
 
 import type {
   AdapterCapabilities,

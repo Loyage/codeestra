@@ -217,7 +217,7 @@ describe('capacity configuration', () => {
     expect(attempt(1.5)).toThrow(SlotReservationError);
     expect(attempt(100)).toThrow(SlotReservationError);
     let unknownAdapter: unknown = null;
-    try { attempt(2, 'claude')(); } catch (error) { unknownAdapter = error; }
+    try { attempt(2, 'claude-code')(); } catch (error) { unknownAdapter = error; }
     expect((unknownAdapter as SlotReservationError).code).toBe('UNKNOWN_ADAPTER');
     // Nothing was written by any refused attempt.
     expect(capacityView(harnessed).globalLimitSource).toBe('DEFAULT');

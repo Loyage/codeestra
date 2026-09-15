@@ -30,7 +30,24 @@ export interface AgentConfigurationResolution {
   readonly sources: Readonly<Record<'provider' | 'model' | 'thinkingLevel', AgentConfigurationSource>>;
 }
 
-type EnvironmentVariableNames = Readonly<Record<'provider' | 'model' | 'thinkingLevel', string>>;
+type EnvironmentVariableNames = Readonly<Partial<Record<'provider' | 'model' | 'thinkingLevel', string>>>;
+
+/**
+ * Which Agent configuration fields an Adapter's scope can actually carry. A field this Adapter's
+ * scope does not name (for example `provider` for Claude Code, which has no provider launch
+ * parameter) is refused instead of being stored and silently ignored.
+ */
+export function agentConfigurationUnsupportedFields(
+  adapterId: string,
+): readonly ('provider' | 'model' | 'thinkingLevel')[] {
+  const names = (agentConfigurationEnvironmentVariables as Readonly<
+    Record<string, EnvironmentVariableNames>
+  >)[adapterId];
+  // An Adapter this build knows nothing about is left to that Adapter's own boundary: this module
+  // only refuses fields for scopes it is the authority on.
+  if (names === undefined) return [];
+  return (['provider', 'model', 'thinkingLevel'] as const).filter((field) => names[field] === undefined);
+}
 
 function nonBlank(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
@@ -51,9 +68,11 @@ export function environmentAgentConfiguration(
     Record<string, EnvironmentVariableNames>
   >)[adapterId];
   if (names === undefined) return null;
-  const provider = nonBlank(environment[names.provider]);
-  const model = nonBlank(environment[names.model]);
-  const rawThinking = nonBlank(environment[names.thinkingLevel]);
+  const provider = names.provider === undefined ? undefined : nonBlank(environment[names.provider]);
+  const model = names.model === undefined ? undefined : nonBlank(environment[names.model]);
+  const rawThinking = names.thinkingLevel === undefined
+    ? undefined
+    : nonBlank(environment[names.thinkingLevel]);
   let thinkingLevel: ThinkingLevel | undefined;
   if (rawThinking !== undefined) {
     const parsed = thinkingLevelSchema.safeParse(rawThinking);
@@ -87,6 +106,17 @@ export function resolveAgentConfiguration(input: {
   const project = input.projectId === null
     ? null
     : input.storage.getAgentConfiguration('PROJECT', input.projectId, input.adapterId);
+  // A field this Adapter cannot carry must be refused wherever it was configured, including the
+  // environment and a persisted scope: storing it and never applying it would make the Execution's
+  // recorded configuration untrue (ADR-0012).
+  for (const field of agentConfigurationUnsupportedFields(input.adapterId)) {
+    const fromEnvironment = environment?.[field];
+    const fromProject = project?.[field] ?? null;
+    const fromGlobal = global?.[field] ?? null;
+    if (fromEnvironment === undefined && fromProject === null && fromGlobal === null) continue;
+    throw new AgentConfigurationError('INVALID_AGENT_CONFIGURATION',
+      `The ${input.adapterId} Adapter does not accept ${field}; clear it before using this Adapter`);
+  }
   const fields = ['provider', 'model', 'thinkingLevel'] as const;
   const effective: Record<string, string> = {};
   const sources = { provider: 'DEFAULT', model: 'DEFAULT', thinkingLevel: 'DEFAULT' } as

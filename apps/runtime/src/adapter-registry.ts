@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { CodexAdapter, PiRpcAdapter } from '@codeestra/agent-adapters';
+import { ClaudeAdapter, CodexAdapter, PiRpcAdapter } from '@codeestra/agent-adapters';
 import type { AgentAnswerAdapter } from '@codeestra/contracts';
 
 export class AdapterRegistryError extends Error {
@@ -57,9 +57,9 @@ export function piSessionDirectory(input: {
 }
 
 /**
- * Phase 1 production registry. Pi and Codex are the real registered Adapters (ADR-0029); a
- * deterministic fake is never registered here because a fake Session must not be reported as a
- * real execution.
+ * Phase 1 production registry. Pi, Codex and Claude are the real registered Adapters
+ * (ADR-0029, ADR-0040); a deterministic fake is never registered here because a fake Session must
+ * not be reported as a real execution.
  */
 /**
  * One place that decides what a *controlled* Pi launch consists of: which gate and question
@@ -139,6 +139,16 @@ export function createAdapterRegistry(input: {
     // Opt-in: the provider's structured question tool only exists behind an under-development
     // feature flag, so the default launch does not enable it and capabilities say so.
     enableRequestUserInput: (input.environment ?? {})['CODEESTRA_CODEX_REQUEST_USER_INPUT'] === '1',
+    environment: adapterEnvironment,
+  }));
+  // Claude Code is the third real Adapter (ADR-0040). It spawns `claude --print` with the
+  // stream-json SDK control channel (the only channel that can carry a permission answer) and owns
+  // that child. Its provider session files live in the provider's own config home
+  // (`$CLAUDE_CONFIG_DIR` when set, else `~/.claude`), which is therefore also the ownership root
+  // for resuming a conversation; the launch itself is controlled with
+  // `--safe-mode --strict-mcp-config`.
+  registry.register(new ClaudeAdapter({
+    claudeExecutable: (input.environment ?? {})['CODEESTRA_CLAUDE_EXECUTABLE'] ?? 'claude',
     environment: adapterEnvironment,
   }));
   return registry;

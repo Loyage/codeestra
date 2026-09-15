@@ -3548,6 +3548,63 @@ UI **零改动**（事件联合是 `eventType: string`，`contracts` 变更不�
 - 未运行全量测试：本次仅改文档，且 ADR-0038 明确全量测试只在固定 dev 候选准备提升到 main 时执行。
 - 仅执行文档关键词、链接、diff 与 Git 状态检查；结果以本次交付说明为准。
 
+## FOUNDATION-066 — 第三个真实 Adapter：Claude Code（ADR-0040，无 schema 变更）
+
+状态：**完成（协议层交付 + 定向测试通过）**。基线 `dev = fd3d99871a40e578105036bc6728213adf302c6a`；lane 分支 `lane/i2-claude-code-adapter`；未 push、未提升 `main`、未触碰稳定工作树 `/Users/loyage/Documents/codeestra`。
+
+**本格最重要的前提**：本机 `claude 2.1.268` **没有可用凭据**（`claude auth status` → `{"loggedIn":false,"authMethod":"none"}`，env 无 `ANTHROPIC_API_KEY`，无 `~/.claude/.credentials.json`），因此**没有任何一次真实模型调用**。所有实测证据到"发出真实模型请求之前"为止；凡需要模型产生的行为一律 `REQUIRES_VALIDATION`，不写成 `SUPPORTED`。真实模型验收是需要凭据与用户在场的独立后续项。
+
+### 1. 交付内容
+
+- **真实受控 spike**：`docs/spikes/claude-2.1.268.md`。逐项记录实测事实与未验证项：传输与 framing、`initialize` 往返与字段全集、`system/init`、终态 `result` 帧（含**鉴权失败以 `subtype:"success"` + `is_error:true` 到达**这一关键形状）、argv 接受性（STRICT/FULL 两套）、受控启动对比（`--safe-mode` / `--setting-sources ''` / `--restricted` / `--bare` 的实测差异与 `--bare` 被排除的理由）、transcript 派生规则（3 例）、`CLAUDE_CONFIG_DIR` 重定位、`--resume` 会话加载、permission mode 语义（含"`manual` = provider `default`，不是逐工具审批"）、以及来自 CLI 自带协议文档与它自己的 SDK 客户端代码的 control 协议形状。
+- **Adapter 实现**：`packages/agent-adapters/src/claude-protocol.ts`（framing、argv、权限策略、帧解析、答案编码、facts、transcript 归属校验）、`src/claude-process.ts`（一个子进程的 stdio、控制请求路由、`withDeadline` 清理 timer 的停止流程）、`src/claude-adapter.ts`（`AgentAnswerAdapter` + `AgentProcessRelease`，`adapterId = "claude"`）。能力矩阵**全部 12 个字段**如实声明（`persistentSession`/`controlledConfiguration: SUPPORTED`；`nativePermissionRouting`/`structuredAttention`/`cooperativeStop`/`resumeAfterExit: REQUIRES_VALIDATION`；其余 `UNSUPPORTED`）。
+- **Runtime registry 接线**：`apps/runtime/src/adapter-registry.ts` 注册 `ClaudeAdapter`（`CODEESTRA_CLAUDE_EXECUTABLE`、config home 取 `CLAUDE_CONFIG_DIR`/`~/.claude`）；`packages/agent-adapters/src/index.ts` 导出新模块；CLI usage 的 `--adapter` 列表加入 `claude`（`apps/cli/src/main.ts`）。
+- **ADR-0012 配置解析与留痕**：`packages/contracts/src/index.ts` 增加 `claude` 作用域（`CODEESTRA_CLAUDE_MODEL`/`CODEESTRA_CLAUDE_THINKING`，**不含 provider**）；`apps/runtime/src/agent-config-service.ts` 新增 `agentConfigurationUnsupportedFields`，解析路径对不支持的字段报 `INVALID_AGENT_CONFIGURATION`；`apps/runtime/src/main.ts` 的 `agent.config.set` 在**写入前**拒绝并报同一码。`model` → `--model`，`thinkingLevel` → `--effort`（`off`/`minimal` 在 Adapter 边界以 `UNSUPPORTED_AGENT_CONFIGURATION` 明确拒绝，不静默降级），`provider` 在该 scope 拒收（first-party Claude Code 无 provider 启动参数）。
+- **ADR**：`docs/decisions/0040-claude-code-adapter-transport-and-capabilities.md` + `docs/decisions/README.md` 索引行。
+- **定向测试**：`packages/agent-adapters/test/claude-adapter.test.ts`（29 项）、`apps/runtime/test/cli-claude-adapter.test.ts`（5 项，真实 CLI + Runtime + 临时 `CODEESTRA_HOME`/仓库 + 协议 stub provider），并按 ADR-0038 登记进 `package.json` 的 `test:e2e` 列表与 `test:unit` 忽略列表（`cli-claude-adapter`）。
+
+### 2. 实测与验证（实际运行的命令与逐条结果）
+
+| 命令 | 退出码 | 结果 |
+|---|---|---|
+| `bun run typecheck` | 0 | `tsc --noEmit` 无输出（含新增 3 个源文件、2 个测试文件与 contracts/runtime 改动） |
+| `bun test packages/agent-adapters/test/claude-adapter.test.ts` | 0 | 29 pass / 0 fail，72 expect() 调用 |
+| `bun test apps/runtime/test/cli-claude-adapter.test.ts` | 0 | 5 pass / 0 fail，67 expect() 调用 |
+| `bun test apps/runtime/test/adapter-registry.test.ts apps/runtime/test/slot-reservation-service.test.ts apps/runtime/test/agent-config-service.test.ts` | 0 | 27 pass / 0 fail（含按新事实更新的断言） |
+| `bun test apps/runtime/test/cli-capacity-slots.test.ts` | 0 | 6 pass / 0 fail |
+| `bun test apps/runtime/test/cli-agent-config.test.ts` | 0 | 4 pass / 0 fail |
+
+按 ADR-0038，**未运行** `bun run check` / `check:fast` / `just check` / `just verify`（开发分支禁止全量/聚合测试）。
+
+spike 的真实 CLI 观测（脚本与原始输出在 `/tmp/ce-i2-spike/`，不入库）：
+
+- 无 user turn 的本地探针（不发模型请求）：Adapter 实际使用的 **STRICT 与 FULL 两套 argv** 被真实 CLI 接受，`initialize` 往返成功并回读 `current_permission_mode`（`manual`→`default`、`bypassPermissions`→`bypassPermissions`），退出码 0。
+- 3 次**无凭据** `--print` 尝试（协调者授权范围内）：每次都因 `account.tokenSource:"none"` 停在鉴权失败，`total_cost_usd: 0`、退出码 1，**未发出真实模型请求**；实测到鉴权失败帧形状、transcript 确实写在派生路径、`--resume <id>` 加载记录会话并保留同一 session id、`bypassPermissions` 不需要 danger flag 即生效。
+- `--safe-mode` 抑制用户 `SessionStart` hook 与用户 agent（`initialize` 响应 agents 列表对比）；`--bare` 因禁用 OAuth/keychain 被排除。
+
+测试卫生：新 e2e 测试使用 `apps/runtime/test/support/runtime-reclamation.ts`，每个用例内含 `codeestra stop`，teardown 走 `reclaimTestResources()`；跑完核对无 `claude-stub` 残留进程、无 `codeestra-claude-*` 残留夹具目录（本格未杀任何不属于本格的进程，未触碰 `~/Documents/codeestra` 的稳定 Runtime 与 `~/Documents/codeestra-dev` 的运行实例）。
+
+### 3. 按新事实更新的既有断言（逐处）
+
+三处断言的前提是"`claude` 未注册"，注册后必须改，改动限于探针 id，不改变测试意图：
+
+1. `apps/runtime/test/adapter-registry.test.ts`：`expect(registry.ids()).toEqual(['pi','codex'])` → `['pi','codex','claude']`；未知 id 探针 `resolve('claude-code')` 保留（provider 产品名不是 adapter id），并从"`claude` 未注册"的隐含前提改为显式注释该理由。
+2. `apps/runtime/test/slot-reservation-service.test.ts`：注入的 `knownAdapterIds: ['pi']` 下探测未知 adapter 的 id 由 `'claude'` 改为 `'claude-code'`（该用例断言的是"服务遵守注入的已知集合"，换成一个仍然未知的 id 才能保持原意）。
+3. `apps/runtime/test/cli-capacity-slots.test.ts`：`scheduler capacity set --adapter claude` 期望 `UNKNOWN_ADAPTER` 的探针改为 `--adapter claude-code`。
+
+### 4. 未验证与已知缺口
+
+- **模型层全部未验证**（无凭据）：`can_use_tool` 的真实 fail-closed 往返、interrupt 后已在运行的工具是否停止、结构化提问（`AskUserQuestion`）的真实投递路径与答案编码、`--resume` 是否真的复述同一 conversation 内容、多工具批次、`set_permission_mode`、`--include-partial-messages`/`--include-hook-events`、Windows、CLI 版本升级后的协议兼容。因此对应能力报 `REQUIRES_VALIDATION`。
+- **结构化提问本轮按工具级审批诚实降级**：所有 `can_use_tool`（含 `AskUserQuestion`）一律映射为既有 `PERMISSION`/`CONFIRM` Attention，不实现问卷编码；已知风险：用户批准 `AskUserQuestion` 后 provider 是否会在无人渲染的 dialog 上等待**未验证**（用户可取消/停止任务）。
+- **`session.transcript` 仍是 Pi 专属**：Claude Session 上会以 `SESSION_FILE_NOT_OWNED` 明确失败，而不是显示执行过程；把它做成 provider-agnostic 需另立一格（本格未改 `apps/runtime/src/session-transcript-service.ts`）。
+- **stub 只能证明编排**：`cli-claude-adapter.test.ts` 的 provider 是协议 stub，不是真实 Agent 集成验收。
+- **既有的注册缺口（本格未改，如实记录）**：`apps/runtime/test/cli-codex-adapter.test.ts` 既不在 `test:e2e` 列表、也不在 `test:unit` 忽略列表中（ADR-0029 的 D2 格遗留），因此它当前运行在 `test:unit` 里；本格只登记自己的 e2e 文件，未顺带改动无关列表。
+- **架构文档 doc-sync 仍未做**：`docs/architecture/agent-adapter-api.md` 的 `AdapterCapabilities` 清单仍写 9 项（沿用 ADR-0019/0027/0029 的先例，本格不改架构文档，已在 ADR-0040 显式记录）。
+
+### 5. 领地
+
+独占：`packages/agent-adapters/src/claude-*.ts`、`packages/agent-adapters/test/claude-adapter.test.ts`、`apps/runtime/src/adapter-registry.ts`、`apps/runtime/test/cli-claude-adapter.test.ts`、`docs/spikes/claude-2.1.268.md`。纯追加：`packages/contracts/src/index.ts`、`apps/runtime/src/agent-config-service.ts`、`apps/runtime/src/main.ts`、`apps/cli/src/main.ts`、`package.json`（测试列表）、`docs/**`。未改：`apps/ui/**`、`schedule-service.ts`、`verification-service.ts`、`promotion-service.ts`、`packages/git/**`、`migration.ts`（不占迁移号），也未改 Pi/Codex 的既有行为与能力声明。
+
 ## NEXT — 最小可用纵向切片
 
 0. ~~落实 ADR-0009 的 dev 基线~~：已由 ADR-0018 完成（`projects.dev_ref` 固定为 `refs/heads/dev`，仓库无 dev 时 trust 拒绝，workspace 从该 ref 的 OID 建立；已有 workspace 不回改）。~~剩余：`dev → main` 提升与重启~~：已由 ADR-0022/FOUNDATION-042 完成为产品能力（`promotion prepare/approve/promote`、fast-forward 已检出的 `main`、CLI 客户端执行 stop/status 重启序列、STRICT 批准失效、崩溃按 ref 事实 reconcile）。剩余：真实 `main` 提升与稳定 Runtime 重启的实测（需用户显式同意）、多批次合并提升、~~UI 投影~~（已由 FOUNDATION-050 完成 promotion/dependency 投影）。
