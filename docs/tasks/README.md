@@ -5397,6 +5397,100 @@ IntegrationBatch 与独立集成验证进入 `dev` 后才对 `dev` 生效（本�
 | `docs/guides/ui.md` / `getting-started.md` / `acceptance-checklist.md` / `README.md` | **确认无需修改**：本格未触碰 `apps/ui/**`，UI 的页签/按钮/文案/只读分界一字未变（因此 `ui.md` 不适用）；`getting-started.md` 讲的是安装与第一次运行，不涉及集成命令；`acceptance-checklist.md` 是人工观感清单，无机器断言可加；`README.md` 是目录页，条目未变 |
 | `docs/guides/concepts.md` 的权限语义段 / `manual.md` §权限 / `features.md` 的 FULL/STRICT 差异 | **确认无需修改**：FULL/STRICT 语义一字未改（ADR-0011），本格不新增任何门禁或确认；`manual.md` 只改了 §8（合入 dev） |
 
+## FOUNDATION-083 — M3 交接/终端剩余边界：PTY resize、并行工具批次安全点、跨交接权限模式矩阵（Wave M / `lane/m3-terminal-boundaries`，ADR-0054，无 schema 变更、不占迁移号）
+
+状态：**三个子项完成**；已提交到本 branch，**未 push、未合并、未提升 `main`、未触碰稳定 clone 与其上的稳定 Runtime**。
+基线固定 `dev@75fa7b8`（`bun install --frozen-lockfile` 已就位），未 rebase、未合并新的 `dev`。
+
+### ① PTY resize（ADR-0054 D01/D02/D05）
+
+- 传输层：`PiPtyTerminal.resize()` → `{t:'resize',cols,rows}`（versioned TerminalTransport v1，plan 带 `transport: 1`、`ready` 回显、版本不符即接
+  `PTY_TRANSPORT_PROTOCOL_MISMATCH`）；helper 用 **`stty rows/cols` on the terminal's slave fd** 应用，并以
+  `{t:'resized',cols,rows,applied,detail}` 回一个**确定性结果**（`stty`/`STTY_FAILED`/`INVALID_SIZE`/`PROVIDER_EXITED`，永不“没回答”）。
+  helper 因此保留 slave 副本到终端结束；provider 退出仍由 `waitpid` 判定（实测 master 不保证报 EOF），既有 terminal-service 7 项测试全绿。
+  `ioctl(TIOCSWINSZ)` 经 Bun FFI 在本机 darwin/arm64 返回 0 却写入垃圾尺寸（AArch64 变参 ABI：`stty size` 读到 `7448 1545` / `56600 2122`，
+  `TIOCGWINSZ` 回读 `0 0`），理由写入 `pi-pty-host.ts` 注释。取值域 `1..1000` 在 CLI / Runtime / helper / Zod 四处拒绝。
+- 命令面：`session handoff terminal resize <project-id> <session-id> --cols <n> --rows <n> [--holder <ref>] [--json]`，
+  退出码 `0`（Transport 自己回 `APPLIED`）/ `1`（拒绝或未生效）/ `2`（越界，stderr 打 `TERMINAL_RESIZE_INVALID_SIZE`）；
+  `usage()` 与 `docs/guides/cli-reference.md` §7 同步。状态投影新增 `terminal.currentSize`（启动时的 `windowSize` 不是“现在的尺寸”）。
+- 两个拒绝都来自已有事实，**不是新门禁、零新增确认**：不持有终端 → `TERMINAL_NOT_HELD`；已有 `WRITER` attachment 时只有它能 resize，
+  其他 holder → `TERMINAL_RESIZE_WRITER_BUSY`（报出当前 holder）。
+- 能力：`ptyResize: UNSUPPORTED → IMPLEMENTED`（**平台范围 = POSIX**；Windows 随 `ptyTransport` 保持 `UNSUPPORTED`；Linux 同代码路径未实测）。
+
+### ② 并行工具批次的安全点（ADR-0054 D03）
+
+**结论：可行**，按现有规则（fence 已确认 + 活动工具 0 + fence 之后 `agent_settled` + 无待决 Attention）判定，规则**未放宽**。
+`parallelToolBatchSafePoint: UNVERIFIED → IMPLEMENTED`。证据分三层：
+
+- **真实 Pi 实测**（`docs/spikes/pi-parallel-tool-batch.md`，可复跑探针 `rpc-fence-probe.ts`，本机 0 额度）：
+  同一 assistant 消息的两个 `bash` → `tool_start` ×2 先于任何 `tool_end`，`tool_end` 按完成顺序，`agent_settled` 在最后一个 `tool_end` 之后（+8ms）；
+  批次进行中下发 fence → `fence_ack`、**两个在跑的工具不被 abort**（真实输出 `PROBE-A-END`/`PROBE-B-END`，`isError=false`）、
+  下一个工具调用被 terminating block（`CODEESTRA_HANDOFF_FENCE: no new tools after the safe point`）、随后 1ms 内 `agent_settled`。
+- **代码级佐证**（`pi-agent-core/src/agent-loop.ts#executeToolCallsParallel`）：预检串行、执行并发；immediate（被拦）分支**也会**发 `tool_execution_end`，
+  所以活动计数不会泄漏；`agent-session.js#_runAgentPrompt` 的 `finally` 才发 `agent_settled`。
+- **Runtime 测试**：`session-handoff-service.test.ts` 新增「counts a parallel tool batch, and will not call it a safe point while a STRICT approval is open」。
+- **未实测（未进声明）**：fence 恰好落在同批次预检中间（亚毫秒窗口，仅代码推断）。
+
+### ③ 跨交接权限模式矩阵（ADR-0054 D04）
+
+`crossHandoffPermissionModeMatrix` **保持 `PARTIAL`**，但矩阵逐格给出证据并把**不成立的那一格**写死（同时写入
+`docs/architecture/agent-adapter-api.md` §7）：
+
+- FULL / STRICT × 交接前 / 接管中（原生 TUI）/ 交还后：**每一格**都有真 CLI e2e（每个 incarnation 从 provider **自己**的 argv + env 读回
+  `--approve`/`--no-approve`、`CODEESTRA_PERMISSION_MODE`、STRICT 的 `--tools` 白名单）或**真实 Pi 原生 TUI**实测
+  （FULL：0 条 `permission_request`；STRICT：每个 `bash` 一条 `permission_request`、`piMode=tui`、决议经 side channel 生效、
+  ALLOW 真执行 / DENY 不执行且不挂死）。
+- 交接本身不新增确认；incarnation 绑定的过期决议原子拒绝（既有测试）。
+- **不成立的那一格**：真实 provider + **由人经记录下来的 Attention 决定** + 原生 TUI 接管的组合。两半各自有证据（真 Pi → side channel；
+  Runtime Attention → 投递与原子拒绝），合起来没跑过；工具类别也只实测了 `bash`。
+- 命令面证据：`apps/runtime/test/cli-session-attach.test.ts` 新增「keeps the permission mode across the handoff in both directions, in both modes」。
+
+### 实际运行的定向验证（ADR-0038：本 branch 只跑定向；**未跑**全量）
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| 类型检查 | `bun run typecheck` | 退出码 0 |
+| PTY 传输（含新增 resize 用例） | `bun test packages/agent-adapters/test/pi-pty.test.ts` | 8 pass / 0 fail（provider 自己读到 `30 100` → `33 99` → `12 40`；非法尺寸 `INVALID_WINDOW_SIZE`；退出后 `TERMINAL_EXITED`） |
+| 终端服务（含 resize + writer 座位 + 不持有终端） | `bun test apps/runtime/test/terminal-service.test.ts` | 8 pass / 0 fail（`currentSize` 反映真实尺寸；`TERMINAL_RESIZE_INVALID_SIZE` / `TERMINAL_RESIZE_WRITER_BUSY` / `TERMINAL_NOT_HELD`） |
+| 交接与终端 CLI e2e（含 resize 退出码 0/1/2 与模式矩阵） | `bun test apps/runtime/test/cli-session-attach.test.ts` | 2 pass / 0 fail |
+| 交接服务（含并行批次 + 待决 Attention） | `bun test apps/runtime/test/session-handoff-service.test.ts` | 18 pass / 0 fail |
+| 真实 Pi 探针 | `bun docs/spikes/pi-parallel-tool-batch/rpc-fence-probe.ts …`、`… tui-permission-probe.ts …` | 见 spike 文档的原始输出（FULL/STRICT/STRICT-deny 三组） |
+
+新增/修改测试都在**既有**测试文件里，因此**不需要**改 `package.json` 的两个测试列表；被改的文件本来就在列表内。
+**未跑**（并说明原因）：`bun run check` / `just check` / `just verify` / `check:fast` 与本 branch 的全量测试——ADR-0038 明确禁止；
+`bun run test`（vitest：domain + `apps/ui`）与本格改动无关且 UI 属 M2 领地，未跑；`bun run build:ui` 未跑（未改 UI）。
+
+### 未验证 / 需要真实 provider 或人工验收（如实单列）
+
+- **本格用真实 Pi 的地方是「真实 Pi + 脚本化模型」**：模型是一个本机 OpenAI 兼容端点，按请求序号回一条带两个 tool call 的 assistant 消息。
+  真实模型下的工具选择、并行度、对 fence 与审批的反应**未验证**（需真实模型/额度）。
+- **真人经记录下来的 Attention 决定后进入原生 TUI 的完整链路**（矩阵里不成立的那一格）——需真实 provider + 真人决定。
+- 工具类别只实测 `bash`；`edit`/`write`/未知工具靠分类器单元测试。
+- Linux / Windows / Codex / Claude 未覆盖；TUI 原生对话框与 side channel 竞争仍未验证（沿用 FOUNDATION-040 §3.6）。
+- resize 后的实际重排观感只能人工确认（ADR-0008：不做桌面/浏览器自动化）。
+
+### 已知缺口与跨格交接（如实）
+
+- **`apps/ui/src/terminal.tsx:580` 硬编码了「· resize 不支持（能力矩阵为 UNSUPPORTED）」**。本格**未改 `apps/ui/**`**（M2 领地）；
+  协调者已裁决由 **M2 改为按能力值动态渲染**。在此之前 UI 会显示自相矛盾的「IMPLEMENTED · resize 不支持」——这是已知投影缺口，不是本格主张。
+- 陈旧引用未改（交下次 doc-sync / 属主）：`packages/agent-adapters/src/pi-adapter.ts:54` 的注释、`docs/decisions/0026-*.md:159`、
+  `docs/decisions/0035-*.md:58` 仍写旧取值；既有 ADR 正文按规矩不改，由 **ADR-0054 amend**。
+- 协调者第一次给出的能力取值词汇是 `AdapterCapabilities` 的 `SUPPORTED/UNSUPPORTED/REQUIRES_VALIDATION`，本格核对代码后指出
+  `SessionHandoffCapabilities` 用的是 `IMPLEMENTED/UNSUPPORTED/PARTIAL/UNVERIFIED`（`apps/ui/src/types.ts:545` 同集且没有 `SUPPORTED`），
+  协调者随后纠正并裁定用本表既有词汇。此纠正已写入 ADR-0054 D05。
+
+### 文档同步（ADR-0050 纪律，逐篇写清改了哪一节）
+
+| 文件 | 改了什么 |
+|---|---|
+| `docs/decisions/0054-*.md` | **新增** ADR-0054（协调者裁决号段：本格用 0054，M1 占 0053） |
+| `docs/decisions/README.md` | 索引新增 ADR-0054 行（插在 0052 行之后，0053 由 M1 插入）；「优先级标注」段提及 ADR-0054；Phase 3 表格行更新为「已由 ADR-0054 补齐三项」 |
+| `docs/architecture/agent-adapter-api.md` | §2 末段能力说明改为新取值并点明取值集；**新增 §5 TerminalTransport、§6 并行批次安全点、§7 权限模式矩阵** |
+| `docs/guides/cli-reference.md` | §7 新增 `session handoff terminal resize` 命令、三种退出码与稳定码、`--holder` 语义、`terminal.currentSize`；§「flag 差异」表新增两行；顶部版本头改为 `dev@75fa7b8` 并注明 §7 由 FOUNDATION-083 校对 |
+| `docs/spikes/pi-parallel-tool-batch.md` + `docs/spikes/pi-parallel-tool-batch/*.ts` | **新增**：真实 Pi 探针证据与两个可复跑探针脚本 |
+| `docs/tasks/README.md` | 本记录；`## NEXT` 第 2 条改写为“已收口的部分 + 仍剩余的部分” |
+| 不需要改 | `docs/guides/manual.md` / `recipes.md`：用户日常做法没有变化（resize 是**新增**能力，不是现有流程的改变；UI 也尚未投影它）。`docs/guides/ui.md`：UI 行为未变（本格一行 UI 未改），其“resize 不支持”的描述**仍是当前 UI 的事实**，等 M2 改为动态渲染后再同步。`docs/guides/concepts.md` / `features.md`：权限语义（FULL/STRICT）未变，本格没有新增门禁或改变 FULL/STRICT 差异 |
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），

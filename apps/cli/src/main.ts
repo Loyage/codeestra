@@ -1157,6 +1157,10 @@ function usage(): never {
   bun run codeestra session handoff release <project-id> <session-id> [--no-resume]
   bun run codeestra session handoff terminal read <project-id> <session-id> [--since <cursor>]
   bun run codeestra session handoff terminal write <project-id> <session-id> --text <text>
+  bun run codeestra session handoff terminal resize <project-id> <session-id> --cols <n> --rows <n>
+    [--holder <ref>] [--json]
+    # exit 0 only when the PTY really changed size (the transport's own answer), 1 when it refused
+    # (not held, writer seat taken) or did not take effect, 2 for an out-of-range size
   bun run codeestra task result capture <project-id> <task-id> [execution-id]
   bun run codeestra task result prepare <project-id> <task-id> [execution-id]   # strict mode
   bun run codeestra task result commit <project-id> <task-id> <authorization-id> --confirm
@@ -2592,6 +2596,8 @@ try {
     let attachmentKind: 'WRITER' | 'OBSERVER' = 'OBSERVER';
     let since: number | undefined;
     let terminalText: string | undefined;
+    let cols: number | undefined;
+    let rows: number | undefined;
     let noResume = false;
     for (let index = 0; index < tokens.length; index += 1) {
       const token = tokens[index] as string;
@@ -2615,6 +2621,8 @@ try {
         continue;
       }
       if (token === '--text' && value !== undefined) { terminalText = value; index += 1; continue; }
+      if (token === '--cols' && value !== undefined) { cols = Number(value); index += 1; continue; }
+      if (token === '--rows' && value !== undefined) { rows = Number(value); index += 1; continue; }
       if (token.startsWith('--')) usage();
       positional.push(token);
     }
@@ -2722,16 +2730,19 @@ try {
       }
     } else if (subcommand === 'terminal') {
       // The projected terminal stream is the CLI-complete form of the native terminal: reading it is
-      // a normal command with a stable cursor, and writing to it is input, not an approval.
+      // a normal command with a stable cursor, writing to it is input, and resizing it is a fact about
+      // the terminal device. None of the three is an approval channel.
       const [terminalAction, projectId, sessionId, ...extra] = positional;
-      if (terminalAction !== 'read' && terminalAction !== 'write') usage();
+      if (terminalAction !== 'read' && terminalAction !== 'write' && terminalAction !== 'resize') {
+        usage();
+      }
       if (projectId === undefined || sessionId === undefined || extra.length !== 0) usage();
       if (terminalAction === 'read') {
         print(await call({
           command: 'session.handoff.terminal.read', projectId, sessionId,
           ...(since === undefined ? {} : { since }),
         }));
-      } else {
+      } else if (terminalAction === 'write') {
         if (terminalText === undefined) usage();
         const written = await call({
           command: 'session.handoff.terminal.write',
@@ -2742,6 +2753,29 @@ try {
         }) as { readonly cursor: number };
         print(written);
         process.exitCode = 0;
+      } else {
+        // The size bound is the contract's own (ADR-0054), and it is checked here so an out-of-range
+        // size is a stable, named refusal (exit 2) instead of a generic schema error from the Runtime.
+        if (cols === undefined || rows === undefined) usage();
+        if (!Number.isSafeInteger(cols) || !Number.isSafeInteger(rows)
+          || cols < 1 || rows < 1 || cols > 1000 || rows > 1000) {
+          console.error(`TERMINAL_RESIZE_INVALID_SIZE: --cols/--rows must be integers in 1..1000, got`
+            + ` ${String(cols)}x${String(rows)}`);
+          process.exit(2);
+        }
+        const resized = await call({
+          command: 'session.handoff.terminal.resize',
+          commandId: crypto.randomUUID(),
+          projectId,
+          sessionId,
+          cols,
+          rows,
+          ...(holderRef === undefined ? {} : { holderRef }),
+        }) as { readonly applied: string };
+        print(resized);
+        // The transport's own answer decides the exit code: a resize that did not take effect is a
+        // refusal (exit 1), never a silent success.
+        if (resized.applied !== 'APPLIED') process.exit(1);
       }
     } else {
       usage();

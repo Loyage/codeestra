@@ -69,6 +69,20 @@ if (!sessionArg) {
 }
 
 const emit = (record) => process.stdout.write(JSON.stringify(record) + '\\n');
+// The mode this provider process was REALLY launched with, read from its own argv and environment:
+// a cross-handoff assertion has to be about what the successor process received, not about what the
+// Runtime meant to pass. One JSONL line per incarnation, in launch order.
+const modesPath = process.env.CODEESTRA_HANDOFF_MODES;
+const modeFacts = {
+  incarnation: rpc ? 'AUTOMATED_RPC' : 'HUMAN_TUI',
+  permissionMode: process.env.CODEESTRA_PERMISSION_MODE ?? null,
+  argvMode: argv.includes('--approve') ? 'FULL' : (argv.includes('--no-approve') ? 'STRICT' : null),
+  toolsFlag: argv.includes('--tools') ? argv[argv.indexOf('--tools') + 1] : null,
+  pid: process.pid,
+};
+const reportMode = () => {
+  if (modesPath) appendFileSync(modesPath, JSON.stringify(modeFacts) + '\\n');
+};
 let socket = null;
 let controlBuffer = '';
 const send = (frame) => { try { socket?.write(JSON.stringify(frame) + '\\n'); } catch {} };
@@ -77,7 +91,9 @@ function openChannel() {
   socket.setEncoding('utf8');
   socket.on('connect', () => {
     send({ kind: 'hello', protocol: 1, mode: rpc ? 'rpc' : 'tui', hasUI: !rpc,
-      permissionMode: 'FULL', pid: process.pid, providerSessionId, providerSessionFile: sessionFile });
+      permissionMode: modeFacts.permissionMode, pid: process.pid,
+      providerSessionId, providerSessionFile: sessionFile });
+    reportMode();
     reportNow({ kind: 'channel', mode: rpc ? 'rpc' : 'tui', providerSessionId, sessionFile,
       pid: process.pid, resumed: sessionArg !== null });
   });
@@ -123,6 +139,12 @@ if (!rpc) {
     const text = decoder.decode(chunk);
     seen += text;
     process.stdout.write('STUB-TUI-ECHO:' + text.replace(/\\r?\\n/g, '') + '\\n');
+    // The provider reads its own geometry from its own terminal: the same fact a real TUI reflows on.
+    if (text.includes('SIZE?')) {
+      const size = Bun.spawnSync(['stty', 'size'], { stdio: ['inherit', 'pipe', 'pipe'] })
+        .stdout.toString().trim();
+      process.stdout.write('STUB-TUI-SIZE:' + size + '\\n');
+    }
     if (seen.includes('\\u0004')) break;
   }
   // The release is recorded in the provider's own conversation file before it exits, with the exit
@@ -172,10 +194,12 @@ interface Status {
   readonly terminal: {
     readonly terminalId: string; readonly state: string; readonly held: boolean;
     readonly providerPid: number | null; readonly windowSize: string; readonly cursor: number;
+    readonly currentSize: { readonly cols: number; readonly rows: number } | null;
     readonly writer: { readonly holderRef: string } | null;
     readonly release: { readonly exit: { readonly code: number | null } | null };
   } | null;
   readonly capabilities: Readonly<Record<string, string>>;
+  readonly permissionMode: 'FULL' | 'STRICT';
 }
 
 async function readStatus(environment: Record<string, string>, projectId: string,
@@ -199,11 +223,12 @@ async function waitForStatus(environment: Record<string, string>, projectId: str
   throw new Error(`Timed out waiting for handoff state; last was ${JSON.stringify(last)}`);
 }
 
-async function startTask(): Promise<{
+async function startTask(options: { readonly permissionMode?: 'FULL' | 'STRICT' } = {}): Promise<{
   readonly environment: Record<string, string>;
   readonly projectId: string;
   readonly sessionId: string;
   readonly reportPath: string;
+  readonly modesPath: string;
   readonly run: Bun.Subprocess<'ignore', 'pipe', 'pipe'>;
 }> {
   const repository = temporaryDirectory('codeestra-attach-repo-');
@@ -224,6 +249,7 @@ async function startTask(): Promise<{
   const stubPath = join(tools, 'stub-pi.ts');
   const shimPath = join(tools, 'pi');
   const reportPath = join(tools, 'report.json');
+  const modesPath = join(tools, 'modes.jsonl');
   await Bun.write(stubPath, stubSource);
   await Bun.write(shimPath, `#!/bin/sh\nexec "${process.execPath}" "${stubPath}" "$@"\n`);
   chmodSync(shimPath, 0o755);
@@ -233,12 +259,19 @@ async function startTask(): Promise<{
     CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: shimPath,
     CODEESTRA_HANDOFF_REPORT: reportPath,
+    CODEESTRA_HANDOFF_MODES: modesPath,
     // The terminal provider exits with 7: a release must not read any success from that.
     CODEESTRA_STUB_TUI_EXIT: '7',
     CODEESTRA_HANDOFF_CONNECT_MS: '2000',
   };
-  const opened = await cli(['open', repository, '--no-open'], environment);
+  const opened = await cli(['open', repository, '--no-open',
+    ...(options.permissionMode === 'STRICT' ? ['--yes'] : [])], environment);
   expect(opened.exitCode).toBe(0);
+  if (options.permissionMode === 'STRICT') {
+    // The mode is a persisted Runtime setting that every launch reads, and the switch itself is
+    // exactly one command with no confirmation.
+    expect((await cli(['permission', 'set', 'strict'], environment)).exitCode).toBe(0);
+  }
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { id: string }[];
   const projectId = projects[0]?.id as string;
@@ -259,7 +292,7 @@ async function startTask(): Promise<{
       readonly session: { readonly sessionId: string } | null }[] };
     const sessionId = parsed.executions[0]?.session?.sessionId;
     if (sessionId !== undefined) {
-      return { environment, projectId, sessionId, reportPath, run };
+      return { environment, projectId, sessionId, reportPath, modesPath, run };
     }
     await Bun.sleep(100);
   }
@@ -268,7 +301,7 @@ async function startTask(): Promise<{
 
 describe('codeestra session handoff attach / detach / release', () => {
   test('takes over into a real PTY, survives detach/reattach, and hands back to automation', async () => {
-    const { environment, projectId, sessionId, reportPath, run } = await startTask();
+    const { environment, projectId, sessionId, reportPath, modesPath, run } = await startTask();
     try {
       // 1. An automation incarnation exists and the capability projection is honest.
       const initial = await waitForStatus(environment, projectId, sessionId,
@@ -280,7 +313,7 @@ describe('codeestra session handoff attach / detach / release', () => {
         successorProcessStart: 'IMPLEMENTED',
         nativeTerminalAttach: 'IMPLEMENTED',
         attachToLiveRpcProcess: 'UNSUPPORTED',
-        ptyResize: 'UNSUPPORTED',
+        ptyResize: 'IMPLEMENTED',
         windows: 'UNSUPPORTED',
         crossHandoffPermissionModeMatrix: 'PARTIAL',
       });
@@ -350,7 +383,40 @@ describe('codeestra session handoff attach / detach / release', () => {
       expect(JSON.parse(observer.stdout)).toMatchObject({
         attachment: { kind: 'OBSERVER', holderRef: 'ui-c' } });
 
-      // 6. Detach does not stop the terminal: same provider process, still writable.
+      // 6. The terminal's geometry is a transport fact the CLI can change, and the provider reads the
+      // new size from its own terminal. A size outside the contract's bound is a stable, named
+      // refusal (exit 2), and a caller that is not the terminal's writer seat is refused (exit 1).
+      const invalidSize = await cli(['session', 'handoff', 'terminal', 'resize', projectId, sessionId,
+        '--cols', '0', '--rows', '40'], environment);
+      expect(invalidSize.exitCode).toBe(2);
+      expect(invalidSize.stderr).toContain('TERMINAL_RESIZE_INVALID_SIZE');
+      const oversize = await cli(['session', 'handoff', 'terminal', 'resize', projectId, sessionId,
+        '--cols', '40', '--rows', '1001'], environment);
+      expect(oversize.exitCode).toBe(2);
+      expect(oversize.stderr).toContain('TERMINAL_RESIZE_INVALID_SIZE');
+      const notTheWriter = await cli(['session', 'handoff', 'terminal', 'resize', projectId, sessionId,
+        '--cols', '90', '--rows', '30', '--holder', 'cli-b'], environment);
+      expect(notTheWriter.exitCode).toBe(1);
+      expect(`${notTheWriter.stdout}${notTheWriter.stderr}`).toContain('TERMINAL_RESIZE_WRITER_BUSY');
+      const resized = await cli(['session', 'handoff', 'terminal', 'resize', projectId, sessionId,
+        '--cols', '90', '--rows', '30', '--holder', 'cli-a'], environment);
+      expect(resized.exitCode).toBe(0);
+      expect(JSON.parse(resized.stdout)).toMatchObject({
+        cols: 90, rows: 30, applied: 'APPLIED', detail: 'stty',
+        terminal: { currentSize: { cols: 90, rows: 30 } } });
+      const resizedCursor = (JSON.parse((await cli(['session', 'handoff', 'terminal', 'read',
+        projectId, sessionId], environment)).stdout) as { readonly cursor: number }).cursor;
+      expect((await cli(['session', 'handoff', 'terminal', 'write', projectId, sessionId,
+        '--text', 'SIZE?\n'], environment)).exitCode).toBe(0);
+      const sizeReport = await cli(['session', 'handoff', 'terminal', 'read', projectId, sessionId,
+        '--since', String(resizedCursor)], environment);
+      expect((JSON.parse(sizeReport.stdout) as { readonly data: string }).data)
+        .toContain('STUB-TUI-SIZE:30 90');
+      // The projection states the geometry only for a terminal this Runtime still holds.
+      const afterResize = await readStatus(environment, projectId, sessionId);
+      expect(afterResize.terminal?.currentSize).toEqual({ cols: 90, rows: 30 });
+
+      // 7. Detach does not stop the terminal: same provider process, still writable.
       const providerPid = attached.terminal?.providerPid;
       expect((await cli(['session', 'handoff', 'detach', projectId, sessionId, '--holder', 'cli-a'],
         environment)).exitCode).toBe(0);
@@ -364,14 +430,14 @@ describe('codeestra session handoff attach / detach / release', () => {
       expect((await cli(['session', 'handoff', 'detach', projectId, sessionId, '--holder', 'nobody'],
         environment)).exitCode).toBe(1);
 
-      // 7. Reattach continues the same terminal stream.
+      // 8. Reattach continues the same terminal stream.
       const reattach = await cli(['session', 'handoff', 'attach', projectId, sessionId,
         '--holder', 'cli-d', '--writer', '--since', String(stream.cursor)], environment);
       expect(reattach.exitCode).toBe(0);
       expect(JSON.parse(reattach.stdout)).toMatchObject({
         attachment: { kind: 'WRITER', holderRef: 'cli-d' } });
 
-      // 8. The explicit release writes the terminal's own release byte, verifies the exit, the
+      // 9. The explicit release writes the terminal's own release byte, verifies the exit, the
       // ownership and the session file, and hands the conversation back to automation. The provider
       // exits with code 7 and that code decides nothing.
       const fileBefore = readFileSync(await sessionFilePath(environment, sessionId), 'utf8');
@@ -424,7 +490,7 @@ describe('codeestra session handoff attach / detach / release', () => {
       expect(report).toMatchObject({ mode: 'rpc', resumed: true });
       expect(report.sessionFile).toBe(await sessionFilePath(environment, sessionId));
 
-      // 9. A repeated admission does not start a second successor, and a released terminal cannot be
+      // 10. A repeated admission does not start a second successor, and a released terminal cannot be
       // released again.
       const again = await cli(['session', 'handoff', 'admit', projectId, sessionId], environment);
       expect(JSON.parse(again.stdout)).toMatchObject({ admitted: true, replayed: true });
@@ -433,12 +499,95 @@ describe('codeestra session handoff attach / detach / release', () => {
         environment);
       expect(secondRelease.exitCode).toBe(1);
       expect(`${secondRelease.stdout}${secondRelease.stderr}`).toContain('TERMINAL_NOT_RUNNING');
+      // The FULL mode is what the automation, the native TUI and the returned automation were all
+      // launched with — read from each provider process's own argv and environment.
+      const modes = await readIncaricationModes(modesPath);
+      expect(modes.map((entry) => entry.incarnation))
+        .toEqual(['AUTOMATED_RPC', 'HUMAN_TUI', 'AUTOMATED_RPC']);
+      expect([...new Set(modes.map((entry) => entry.permissionMode))]).toEqual(['FULL']);
+      expect([...new Set(modes.map((entry) => entry.argvMode))]).toEqual(['FULL']);
+      expect(returned.permissionMode).toBe('FULL');
     } finally {
       run.kill('SIGTERM');
       await cli(['stop'], environment);
     }
   }, 180_000);
+
+  test('keeps the permission mode across the handoff in both directions, in both modes', async () => {
+    // The matrix cell this covers: the mode is one persisted setting the Runtime reads at every
+    // launch, so the automation, the native TUI successor and the returned automation must all be
+    // launched with it — and none of the three handoff commands may ask for anything extra.
+    for (const permissionMode of ['FULL', 'STRICT'] as const) {
+      const { environment, projectId, sessionId, modesPath, run }
+        = await startTask({ permissionMode });
+      try {
+        const initial = await waitForStatus(environment, projectId, sessionId,
+          (status) => status.incarnation !== null && status.terminal === null);
+        expect(initial.permissionMode).toBe(permissionMode);
+        expect((await cli(['session', 'handoff', 'request', projectId, sessionId, 'takeover'],
+          environment)).exitCode).toBe(0);
+        await waitForStatus(environment, projectId, sessionId, (status) => status.safePoint.reached);
+        const admitted = await cli(['session', 'handoff', 'admit', projectId, sessionId], environment);
+        expect(admitted.exitCode).toBe(0);
+        await waitForStatus(environment, projectId, sessionId,
+          (status) => status.terminal !== null && status.terminal.state === 'RUNNING');
+        // Hand-back, and the successor automation is launched by the same Runtime.
+        const released = await cli(['session', 'handoff', 'release', projectId, sessionId], environment);
+        expect(released.exitCode).toBe(0);
+        await waitForStatus(environment, projectId, sessionId,
+          (status) => status.incarnation?.mode === 'AUTOMATED_RPC'
+            && status.incarnation.incarnationNumber === 3);
+
+        const modes = await waitForIncaricationModes(modesPath, 3);
+        expect(modes.map((entry) => entry.incarnation))
+          .toEqual(['AUTOMATED_RPC', 'HUMAN_TUI', 'AUTOMATED_RPC']);
+        // Every incarnation received this mode, on both channels the provider reads it from.
+        expect([...new Set(modes.map((entry) => entry.permissionMode))]).toEqual([permissionMode]);
+        expect([...new Set(modes.map((entry) => entry.argvMode))]).toEqual([permissionMode]);
+        // STRICT additionally pins the tool allowlist on every launch; FULL adds no such flag.
+        const expectedTools = permissionMode === 'STRICT'
+          ? 'read,bash,edit,write,grep,find,ls,ask_user_question' : null;
+        expect([...new Set(modes.map((entry) => entry.toolsFlag))]).toEqual([expectedTools]);
+        expect((await readStatus(environment, projectId, sessionId)).permissionMode)
+          .toBe(permissionMode);
+      } finally {
+        run.kill('SIGTERM');
+        await cli(['stop'], environment);
+      }
+    }
+  }, 300_000);
 });
+
+interface IncarnationMode {
+  readonly incarnation: string;
+  readonly permissionMode: string | null;
+  readonly argvMode: string | null;
+  readonly toolsFlag: string | null;
+  readonly pid: number;
+}
+
+/**
+ * The modes each provider process was really launched with, in launch order, read from the JSONL the
+ * stub provider appends on its own side-channel hello.
+ */
+async function readIncaricationModes(modesPath: string): Promise<readonly IncarnationMode[]> {
+  const file = Bun.file(modesPath);
+  if (!await file.exists()) return [];
+  return (await file.text()).split('\n').filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as IncarnationMode);
+}
+
+async function waitForIncaricationModes(modesPath: string, count: number):
+Promise<readonly IncarnationMode[]> {
+  const deadline = Date.now() + 30_000;
+  let last: readonly IncarnationMode[] = [];
+  while (Date.now() < deadline) {
+    last = await readIncaricationModes(modesPath);
+    if (last.length >= count) return last;
+    await Bun.sleep(100);
+  }
+  return last;
+}
 
 /**
  * The provider session file the Session owns, read from the same projection the Runtime reports

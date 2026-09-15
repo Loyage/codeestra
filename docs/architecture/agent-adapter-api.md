@@ -147,7 +147,7 @@ type AdapterEvent = {
 | `controlledConfiguration` | `SUPPORTED` | `UNSUPPORTED` | `SUPPORTED` |
 | `pluginSelection` | `SUPPORTED` | `UNSUPPORTED` | `UNSUPPORTED` |
 
-Pi 按 ADR-0010/0023/0026 的实测声明前两者 `SUPPORTED`（原生 TUI 在同一 provider session file 上接管、gate extension 上报 tool_start/tool_end/agent_settled）；Codex 按 `docs/spikes/codex-0.151.0.md` 的实测声明两者 `UNSUPPORTED`（app-server 无终端交接，其 TUI 是同一 thread 的第二个 writer；interrupted turn 不产生完成事实）；Claude Code 按 `docs/spikes/claude-2.1.268.md` 声明两者 `UNSUPPORTED`（`--print` 子进程无终端交接，控制通道不暴露工具级开始/结束）。deterministic fake 与测试 stub 声明 `pluginSelection: 'UNSUPPORTED'`（它们不启动任何 provider）。**声明本身不改变行为**：本版本没有把交接路径改为「查能力再决定」，`session.handoff.*` 仍按 ADR-0023/0026 的平台与归属判定执行（在 macOS/unix 上可用），把 Pi 专属机制套到 Codex 上确实会被拒；是否加适配器能力门禁属另一次语义变更，未在本格实施。Pi 自己的 `SessionHandoffCapabilities` 也如实报告残留差距（`crossHandoffPermissionModeMatrix: PARTIAL`、`parallelToolBatchSafePoint: UNVERIFIED`、`ptyResize: UNSUPPORTED`）。交接与终端的事实现在也有七个 domain event（`TakeoverRequested`、`TakeoverSafePointReached`、`SessionHandoffStarted`、`SessionHandoffCompleted`、`TerminalWriterLeaseChanged`、`TakeoverReleased`、`TakeoverFailed`，见 `event-model.md` §2.1）。**结构化问卷（ADR-0014）没有新增事件类型**：它复用 `attention`，把问卷放在 `prompt` 里（`kind: "codeestra.questionnaire"`），回答用 `AgentAnswer` 的 `QUESTIONNAIRE` 变体表达，因此“一条 Attention = 一个 provider 请求 = 一次 answer Operation”不变。自有 provider 进程的 Adapter 可额外实现可选的 `AgentProcessRelease`（`releaseSession`），供 Runtime shutdown 请求协作释放；缺少该能力时不假定已停止。观察事件经 Zod 校验；只有显式 `toolsQuiescent=true` 与 `ownedWritersStopped=true` 的 completion evidence 才能释放失败 Execution 的资源。`packages/agent-adapters` 的 deterministic fake 只验证协议与编排行为，不执行命令，也不能作为 Pi 验收。PTY 原始字节、resize、input 路由是独立 versioned TerminalTransport 合约，不混入 AdapterEvent。`guide`（会话指导）仍未导出或实现；原生接管、successor start 与 PTY attachment 已由 ADR-0026 实现，不能因本文类型存在就声称其他 provider 也能接管。
+Pi 按 ADR-0010/0023/0026 的实测声明前两者 `SUPPORTED`（原生 TUI 在同一 provider session file 上接管、gate extension 上报 tool_start/tool_end/agent_settled）；Codex 按 `docs/spikes/codex-0.151.0.md` 的实测声明两者 `UNSUPPORTED`（app-server 无终端交接，其 TUI 是同一 thread 的第二个 writer；interrupted turn 不产生完成事实）；Claude Code 按 `docs/spikes/claude-2.1.268.md` 声明两者 `UNSUPPORTED`（`--print` 子进程无终端交接，控制通道不暴露工具级开始/结束）。deterministic fake 与测试 stub 声明 `pluginSelection: 'UNSUPPORTED'`（它们不启动任何 provider）。**声明本身不改变行为**：本版本没有把交接路径改为「查能力再决定」，`session.handoff.*` 仍按 ADR-0023/0026 的平台与归属判定执行（在 macOS/unix 上可用），把 Pi 专属机制套到 Codex 上确实会被拒；是否加适配器能力门禁属另一次语义变更，未在本格实施。Pi 自己的 `SessionHandoffCapabilities` 也如实报告残留差距，其取值集是 `IMPLEMENTED / UNSUPPORTED / PARTIAL / UNVERIFIED`（**不是** `AdapterCapabilities` 的 `SUPPORTED/UNSUPPORTED/REQUIRES_VALIDATION`）：`ptyResize: IMPLEMENTED`（ADR-0054，平台范围 = POSIX，见 §5）、`parallelToolBatchSafePoint: IMPLEMENTED`（ADR-0054，真实 Pi 实测，见 §6）、`crossHandoffPermissionModeMatrix: PARTIAL`（ADR-0054，矩阵与**不成立的那一格**见 §7）、`attachToLiveRpcProcess`/`sessionCompactionDuringHandoff`/`windows` 仍 `UNSUPPORTED`。交接与终端的事实现在也有七个 domain event（`TakeoverRequested`、`TakeoverSafePointReached`、`SessionHandoffStarted`、`SessionHandoffCompleted`、`TerminalWriterLeaseChanged`、`TakeoverReleased`、`TakeoverFailed`，见 `event-model.md` §2.1）。**结构化问卷（ADR-0014）没有新增事件类型**：它复用 `attention`，把问卷放在 `prompt` 里（`kind: "codeestra.questionnaire"`），回答用 `AgentAnswer` 的 `QUESTIONNAIRE` 变体表达，因此“一条 Attention = 一个 provider 请求 = 一次 answer Operation”不变。自有 provider 进程的 Adapter 可额外实现可选的 `AgentProcessRelease`（`releaseSession`），供 Runtime shutdown 请求协作释放；缺少该能力时不假定已停止。观察事件经 Zod 校验；只有显式 `toolsQuiescent=true` 与 `ownedWritersStopped=true` 的 completion evidence 才能释放失败 Execution 的资源。`packages/agent-adapters` 的 deterministic fake 只验证协议与编排行为，不执行命令，也不能作为 Pi 验收。PTY 原始字节、resize、input 路由是独立 versioned TerminalTransport 合约，不混入 AdapterEvent（契约与帧表见 §5）。`guide`（会话指导）仍未导出或实现；原生接管、successor start 与 PTY attachment 已由 ADR-0026 实现，不能因本文类型存在就声称其他 provider 也能接管。
 
 ## 2. 语义
 
@@ -240,7 +240,6 @@ Pi 按 ADR-0010/0023/0026 的实测声明前两者 `SUPPORTED`（原生 TUI 在�
 **未验证（不得当成已成立）**：真实模型下「确实使用了所选 skill/theme」只有 argv 与命令面证据；themes 的显式路径加载未单独实测（ADR-0044 D06 标注为同构代码路径推断）；第三方 extension 是否能绕过 gate 未做对抗验证。
 
 ## 4. Phase 1 Pi Spike 验收门禁
-
 1. [已完成首轮] 阅读 Pi 0.84.4 SDK/RPC/Session/extension 文档与 examples，固定版本 0.84.4、MIT、Node `>=22.19.0`。
 2. [部分完成] RPC framing、按权限模式选择的受控 gate（STRICT fail-closed；FULL 全工具自动允许，ADR-0011）、真实 `PiRpcAdapter` 子进程（受控 argv、get_state 身份、prompt 注入 revision、attention/completion/disconnect 映射、typed answer 写入）与持久 answer Operation 已实现；仍需真实 Pi 的 FULL 工具执行验收。
 3. [部分完成] 内置 bash abort/process-group spike 通过；任意 extension/逃逸进程不在保证内，限定工具集仍需逐项验证。
@@ -249,3 +248,62 @@ Pi 按 ADR-0010/0023/0026 的实测声明前两者 `SUPPORTED`（原生 TUI 在�
 6. [部分完成] fake 已覆盖启动部分失败、answer 投递失败与 provider event/outbox 重投；Pi adapter 已覆盖受控 argv/身份/断连/答案往返的 stub-transport 测试；真实 Pi 的修订 fallback、取消超时、事件重投与孤儿进程仍未完成。
 
 Pi 0.84.4 没有 pause/resume 与可靠 revision ACK 原语。Phase 1 运行中修订必须走停止、确认静止、旧 Execution `SUPERSEDED`、新 Execution 完整启动的 fallback。真实运行的 Git 授权按权限模式处理（FULL 单步 capture、无敏感路径拦截；STRICT 保留 prepare/confirm）；fake adapter 不能替代这些验收。
+
+## 5. TerminalTransport（versioned 合约，ADR-0026 + ADR-0054）
+
+PTY 的原始字节、input 路由与**窗口尺寸**是 Runtime 与它锁拥有的 PTY host helper 之间的传输事实，
+**不是** `AdapterEvent`，也永远不从终端字节推断任何业务状态（ADR-0010 D06）。合约版本号显式协商：
+Runtime 在 spawn plan 里带 `transport: 1`，helper 只接受它支持的那一版并在 `ready` 帧回显，版本不符即拒绝
+（`PTY_TRANSPORT_PROTOCOL_MISMATCH`），不猜、不降级。帧表（v1）：
+
+| 方向 | 帧 | 含义 |
+|---|---|---|
+| helper → Runtime | `ready { providerPid, slave, transport, cols, rows, windowSize }` | provider 已在真实终端上运行；`windowSize: 'APPLIED' \| 'NOT_APPLIED'` 只描述**启动时**那一次设置 |
+| helper → Runtime | `output { data }` / `exit { code, signal }` / `error { code, message }` | 投影字节流与进程退出事实（退出码只作审计） |
+| helper → Runtime | `resized { cols, rows, applied, detail }` | 一次 resize 的**结果**。`detail` 是稳定原因串（`stty` / `STTY_FAILED` / `INVALID_SIZE` / `PROVIDER_EXITED`），**永不出现「没有回答」** |
+| Runtime → helper | `resize { cols, rows }` | 改变终端几何 |
+| Runtime → helper | `input { data }` / `eof` / `signal` / `shutdown` | 输入与停止 |
+
+- **机制**：`stty rows R cols C` 作用在**该终端的 slave fd** 上——与启动时设初始尺寸用的是同一个接口，
+  也是 provider 自己读尺寸的接口（`TIOCGWINSZ`）。因此 helper 保留自己的 slave 副本到终端结束；
+  provider 是否退出由 `waitpid` 判定（实测 master 在 provider 退出后不保证报 EOF）。
+  `ioctl(TIOCSWINSZ)` 经 Bun FFI 在本机 darwin/arm64 会返回 0 却写入垃圾尺寸（AArch64 变参 ABI），理由写在代码注释里。
+- **取值域是合约的一部分**：`1..1000` 的整数行列，Runtime / helper / Zod 三处都拒绝越界。
+- **命令面**：`session handoff terminal resize`（`docs/guides/cli-reference.md` §7）。退出码 `0` 只有真的改了尺寸；
+  `1` 拒绝或未生效；`2` 越界。`session.handoff.status` 的 `terminal.currentSize` 只在**本 Runtime 仍持有该终端**时非 null：
+  启动时的 `windowSize` 不是「现在的尺寸」。
+- **写入者座位拥有视口**：已有客户端持有该终端的 `WRITER` attachment 时，只有它能 resize；其他 holder 得到
+  `TERMINAL_RESIZE_WRITER_BUSY`（当前 holder 被报出）。这与 `attach` 的单 writer 规则是同一条，**不是新增审批**。
+- **实测**：真实 PTY 上 provider 自己读到 `30 100` → `33 99` → `12 40`；真实 Pi 原生 TUI 收到 `120x40` 后回 `APPLIED`。
+- **平台范围**：POSIX（Runtime 持有的 PTY）为 `IMPLEMENTED`；Windows 没有 PTY 传输，随 `ptyTransport`/`windows` 一起 `UNSUPPORTED`；
+  Linux 走同一段代码路径但本机未实测。
+
+## 6. 并行工具批次下的安全点（ADR-0054）
+
+安全点规则**没有改变**（ADR-0010 D03）：`fence 已确认` + `活动工具计数 == 0` + `fence 之后有 agent_settled` + `无待决 Attention`。
+本格用真实 Pi（脚本化模型、生产 gate、真实 side channel）实测它在**同一 assistant 消息的多个 tool call** 下仍可判定且不会被绕过：
+
+- 每个 tool call 各上报一次 `tool_start`/`tool_end`（按 provider `toolCallId`）；**全部 `tool_start` 先于任何 `tool_end`**，
+  `tool_end` 按完成顺序，`agent_settled` 在最后一个 `tool_end` 之后。Runtime 因此在整个批次中看到 `activeTools > 0`。
+- 批次进行中打开 fence：**已开始的兄弟调用不被 abort**（真实输出、`isError=false`），下一个到达的工具调用被 terminating block
+  （`CODEESTRA_HANDOFF_FENCE: no new tools after the safe point`），随后 `agent_settled`。被拦下的调用**也有** `tool_end`
+  （Pi 的 immediate 分支），所以活动计数不会泄漏成「永不静止」。
+- 待决的 STRICT Attention 即使 `settled` 且 `activeTools === 0` 也**不构成安全点**（`#evaluateSafePoint` 的 open-Attention 分支）。
+- **未实测**：「fence 恰好落在同批次预检中间」的亚毫秒窗口（只有代码推断，见 spike §3/§5）。
+
+证据与可复跑探针：`docs/spikes/pi-parallel-tool-batch.md`、`docs/spikes/pi-parallel-tool-batch/*.ts`。
+
+## 7. 跨交接权限模式矩阵（ADR-0054）
+
+`crossHandoffPermissionModeMatrix` 保持 **`PARTIAL`**：下面每一格都有测试或明确的「无法在本机验证」，并点名**不成立的那一格**。
+
+| 阶段 | FULL | STRICT |
+|---|---|---|
+| 交接前（`AUTOMATED_RPC`） | 工具零确认；argv `--approve`、env `CODEESTRA_PERMISSION_MODE=FULL`（CLI e2e 逐 incarnation 从 provider 自己读回） | argv `--no-approve` + `--tools <白名单>`；工具经**既有** Attention（分类器单元测试 + Runtime Attention/原子拒绝测试） |
+| 接管中（原生 TUI） | **零** `permission_request`，工具真执行（真实 Pi TUI + 生产 gate + 生产 PTY） | 每个 `bash` 一条 `permission_request`（`piMode=tui`），决议经 side channel 生效；ALLOW 真执行、DENY 不执行且不挂死（同一套真实环境） |
+| 交还后（`AUTOMATED_RPC`） | argv/env 与工具白名单逐字保持（CLI e2e，两个模式各双向一遍） | 同上 |
+| 交接本身是否新增确认 | **否**：`request`/`admit`/`attach`/`detach`/`release` 全零确认（命令面没有确认输入） | 同左 |
+| incarnation 绑定的过期决议 | 原子拒绝 `INCARNATION_NOT_CURRENT`；两个 answer 不可能都成功 | 同左 |
+| **不成立的那一格** | — | **真实 provider + 由人经记录下来的 Attention 决定 + 原生 TUI 接管的组合**：两半各自有证据（真实 Pi → side channel；Runtime Attention → 投递与原子拒绝），合起来没跑过。工具类别也只实测了 `bash`；`edit`/`write` 与未知工具的 fail-closed 由分类器单元测试覆盖 |
+
+`agent_settled` **不等于成功**（被 gate 拒绝或被 fence 拦截的轮次同样会 settled），完成判定仍由 Adapter 的终止性 block 事实参与。
