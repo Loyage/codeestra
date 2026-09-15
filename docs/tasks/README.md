@@ -6008,9 +6008,10 @@ promotion criterion」，且其测试**断言**重启后 `uiRunning` 为 `false`
 
 ## FOUNDATION-087 — `dev` 基线事实来源收口：`dev_repo_path` 取代过渡的本地 `dev` ref（Wave N / `lane/n1-dev-baseline`，ADR-0056，**无 schema 变更、不占迁移号**）
 
-状态：**已实现 + 已定向验证 + 用户已确认提交**；本格只提交到 `lane/n1-dev-baseline`
-（提交信息 `feat(runtime): make the dev clone the single dev fact source (FOUNDATION-087 / ADR-0056)`；SHA 由协调者在合入前用
-`git log -1` 读取），**未 push、未合入 `dev`、未提升、未重启任何 Runtime**，也**未触碰稳定 clone
+状态：**已实现 + 已定向验证 + 已修复合并后才暴露的缺陷 + 用户已确认提交**；本格提交两个 commit 到
+`lane/n1-dev-baseline`：`feat(runtime): make the dev clone the single dev fact source (FOUNDATION-087 / ADR-0056)`
+（`6d4430c`）与 `fix(runtime): snapshot recheck follows the recorded dev clone baseline (FOUNDATION-087)`
+（SHA 由协调者用 `git log -2` 读取）；**未 push、未合入 `dev`、未提升、未重启任何 Runtime**，也**未触碰稳定 clone
 `/Users/loyage/Documents/codeestra` 与稳定 Runtime**。基线 `dev@f258c59`（未 rebase、未合并新 dev）；
 工作树 `/Users/loyage/Documents/codeestra-wt/n1-dev-baseline`。
 
@@ -6140,6 +6141,54 @@ main ref 上的策略事实与仓库配置探测，不是 dev 事实；实现以
 `project inspect /Users/loyage/Documents/codeestra --dev-repo /Users/loyage/Documents/codeestra-dev` → 退出码 0、正常输出。
 （这条只读核验是唯一一次与稳定 Runtime 交互，无写入。）
 
+### 合并后才暴露的缺陷（协调者在合并后的 `dev` 上跑完整检查发现）
+
+**现象**：协调者把 N3 + 本格 087 合入后，在 `dev@3837046` 上跑完整 `bun run check`：Vitest 全绿（21 文件 / 502 项），
+Bun 测试 **839 pass / 1 fail**，唯一失败是
+
+```
+apps/runtime/test/snapshot-generation-recheck.test.ts:
+(fail) snapshot generation recheck > a baseline that moved after the assessment is refused as STALE_BASE
+  at expectRefusal (…:136) → expect(refused).toBeInstanceOf(SlotReservationError)   // received null
+```
+
+**本格先在自己分支上复现**（证明是本格缺陷，不是合并产物）：
+
+```
+$ CODEESTRA_HOME=/tmp/ce-n1 bun test apps/runtime/test/snapshot-generation-recheck.test.ts
+ 11 pass
+ 1 fail
+Ran 12 tests across 1 file. [4.76s]
+  → (fail) … > a baseline that moved after the assessment is refused as STALE_BASE
+    error: expect(received).toBeInstanceOf(expected) / Received value: null
+    at expectRefusal (…/snapshot-generation-recheck.test.ts:136:19)
+    at async <anonymous> (…/snapshot-generation-recheck.test.ts:241:27)
+```
+
+**根因**：该用例的意图是「评估之后基线移动 → 以 `STALE_BASE` 拒绝且不写入」。它的夹具做两件事：
+① `recordPreStartSnapshot` 用 **fixture 主仓**（`projects.repo_root`）的 `project.devRef` 记录快照的 `baseCommit`；
+② 用例随后在**主仓**里 `git update-ref project.devRef <moved>`。
+ADR-0056 之后产品侧读的是 **dev clone** 的 `dev`（`slot-reservation-service` 的 `#observeSnapshotGeneration`），
+所以「动主仓的 ref」不再改变基线 —— 快照的 `baseCommit` 与当前基线仍然相等，重检判定为「没有变化」，于是没有拒绝、
+`expectRefusal` 拿到 `null`。这不是断言太严，而是**夹具仍在旧的事实来源上制造移动**。
+
+**修法**（保住用例原意，断言一字未改）：
+- `recordPreStartSnapshot` 改为从 **dev clone** 读基线（`git(fixture.devRepo, ['rev-parse', project.devRef])`）并加注释说明
+  「快照必须记录产品真正会读的那个 commit」；这也让**其余 11 个用例**从"两个 ref 恰好相等才通过"变成真正针对新来源。
+- 该用例的移动改成在 **dev clone 里提交**（写文件 → `git add` → `git commit`，与用户推进 `dev` 的真实形状一致），
+  再取新 `HEAD` 作为 `moved`；并加一条夹具守卫 `expect(moved).not.toBe(previous)`，防止将来又退化成"空操作"。
+- 断言保持原样：`code === 'SNAPSHOT_STALE'`、`reasonCodes === ['STALE_BASE']`、`differing === ['baseCommit']`、
+  `assessed.baseCommit === snapshot.baseCommit`、`observed.baseCommit === moved`、`rows(...)` 长度为 0（**不写入**）。
+
+修后：`bun test apps/runtime/test/snapshot-generation-recheck.test.ts` → **12 pass / 0 fail**。
+
+**为什么上一轮的定向清单没覆盖它**：我的清单是按"文件是否直接实例化我改过的服务"挑的，而
+`snapshot-generation-recheck.test.ts` 走的是 `SlotReservationService.acquire` + `createAgentFixture`（它不 `trustProject`
+也不写 `devRepo`，因此没落进我 `grep provisionDevClone` / `grep trustProject` 的两张网），我却跑了名字相似的
+`cli-snapshot-recheck.test.ts` e2e —— **同名前缀不同文件**。教训（已按此补跑）：受检清单应当由**反向依赖搜索**得出
+（`grep` 我改过的 API/字段：`project.devRef`、`update-ref`、`commit-tree`、`SlotReservationService`、`reserveExecution`、
+`impactSnapshotId`），而不是靠文件名相似或"服务是否被直接构造"。
+
 ### 实际运行的检查与结果（定向，ADR-0038；**未跑** `bun run check` / `just check` / `just verify` / `check:fast`）
 
 - **提交前的最后一轮重跑（本格 lane 分支，全部用临时仓库/临时 home）**：
@@ -6187,6 +6236,21 @@ main ref 上的策略事实与仓库配置探测，不是 dev 事实；实现以
   属另一个格子的决定，本格只如实报告。）
 - 全部 Git 操作用临时仓库与临时目录；**未对真实 GitHub 做任何写操作、未动稳定 clone、未提升、未重启任何 Runtime**；
   未新建 worktree、未 rebase、未 push。
+
+- **修复轮（协调者复核后）补跑：整目录，不再挑文件**——本格 lane 分支、取消代理变量
+  （否则会多出 `cli-attention` 那条已知的环境失败，见上一节）：
+
+  | 命令 | 结果 |
+  |---|---|
+  | `CODEESTRA_HOME=/tmp/ce-n1 bun test apps/runtime/test/snapshot-generation-recheck.test.ts`（**修前**） | **11 pass / 1 fail**（同一条 `STALE_BASE` 用例，`expectRefusal` 得到 `null`） |
+  | 同上（**修后**） | **12 pass / 0 fail** |
+  | `env -u http_proxy -u https_proxy -u all_proxy bun test apps/runtime/test`（整目录，62 个 `*.test.ts` 全部被收集） | **453 pass / 0 fail**（4144 断言，501.78s） |
+  | `bun test packages/storage/test packages/git/test packages/contracts/test packages/agent-adapters/test` | **387 pass / 0 fail**（34 文件，1505 断言） |
+  | `bun run test`（vitest：`packages/domain/test` + `apps/ui`） | **454 passed / 19 files**（本 lane 不含 N3，故比协调者在 `dev@3837046` 上的 21 文件 / 502 项少） |
+
+  说明：本 lane = `f258c59` + 本格 087（**不含 N3**），所以上面这些数字与协调者在 `dev@3837046` 的
+  「839 pass / 94 文件」不可直接相加；两边唯一的失败都指向同一个文件、同一条断言（已修）。带代理变量跑整目录时
+  唯一多出的失败仍只有 `cli-attention` 的 workbench HTTP 用例。
 
 ### 稳定实例需要执行的一次性补救命令（提升 + 重启之后，人工）
 
