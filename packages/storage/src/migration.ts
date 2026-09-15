@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 26;
+export const phase1SchemaVersion = 27;
 
 
 export const phase1Migration = `
@@ -1605,4 +1605,22 @@ BEGIN SELECT RAISE(ABORT,'execution knowledge bindings are append-only'); END;
 CREATE TRIGGER execution_knowledge_snapshots_no_delete
   BEFORE DELETE ON execution_knowledge_snapshots
 BEGIN SELECT RAISE(ABORT,'execution knowledge bindings are append-only'); END;
+`;
+
+/**
+ * Agent plugin/resource selection (FOUNDATION-071 / ADR-0044).
+ *
+ * A selection is a list, so it cannot live in the three scalar override columns: it is appended as
+ * one JSON column on the existing `agent_configurations` table. The table is not rebuilt — an
+ * `ALTER TABLE ... ADD COLUMN` keeps every existing row (including both partial unique indexes)
+ * exactly as it was, and a row that predates this capability simply has no selection.
+ *
+ * Schema version 27 is this step's own number: 25 is FOUNDATION-065/ADR-0039, 26 is
+ * FOUNDATION-067/ADR-0041, and 16 stays permanently unused. A database may already be stamped
+ * 17–26 and would skip a later `version < 16` step, so the migration runner only appends
+ * `if (version < 27)` after the existing ascending steps and never inserts an earlier number.
+ */
+export const agentPluginSelectionMigration = `
+ALTER TABLE agent_configurations ADD COLUMN plugin_selection_json TEXT
+  CHECK(plugin_selection_json IS NULL OR json_valid(plugin_selection_json));
 `;

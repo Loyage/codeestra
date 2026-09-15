@@ -33,10 +33,13 @@ import { defaultConcurrencyLimit, maxConcurrencyLimit, sessionHandoffEventTypes,
   sessionHandoffStartedPayloadSchema, sessionHandoffCompletedPayloadSchema,
   takeoverFailedPayloadSchema, takeoverReleasedPayloadSchema, takeoverRequestedPayloadSchema,
   takeoverSafePointReachedPayloadSchema,
+  agentPluginSelectionSchema, agentPluginTraceSchema,
   terminalWriterLeaseChangedPayloadSchema } from '@codeestra/contracts';
+import type { AgentPluginSelection } from '@codeestra/contracts';
 import {
   agentAnswerMigration,
   agentConfigurationMigration,
+  agentPluginSelectionMigration,
   agentDisconnectMigration,
   agentObservationMigration,
   agentStartMigration,
@@ -646,6 +649,12 @@ export const storedAgentConfigurationSchema = z.strictObject({
   provider: z.string().min(1).max(200).optional(),
   model: z.string().min(1).max(200).optional(),
   thinkingLevel: agentThinkingLevelSchema.optional(),
+  /**
+   * The plugin/resources this Execution's Agent Session was allowed to load, with the layer that
+   * supplied them and the recorded third-party-extension approval risk (ADR-0044 D04). Absent means
+   * "the controlled launch with no user resource", which is the same launch Codeestra always used.
+   */
+  plugins: agentPluginTraceSchema.optional(),
 });
 export type StoredAgentConfiguration = z.infer<typeof storedAgentConfigurationSchema>;
 
@@ -671,6 +680,12 @@ export interface AgentConfigurationRecord {
   readonly provider: string | null;
   readonly model: string | null;
   readonly thinkingLevel: AgentThinkingLevel | null;
+  /**
+   * This scope's plugin selection, or `null` when this scope overrides nothing. A selection is a
+   * whole-field override: a scope that names plugins replaces the lower-precedence scope's list
+   * rather than adding to it (ADR-0044 D01).
+   */
+  readonly pluginSelection: AgentPluginSelection | null;
   readonly updatedAt: number;
   readonly updatedBy: string;
 }
@@ -683,6 +698,7 @@ interface AgentConfigurationRow {
   readonly provider: string | null;
   readonly model: string | null;
   readonly thinking_level: AgentThinkingLevel | null;
+  readonly plugin_selection_json: string | null;
   readonly updated_at: number;
   readonly updated_by: string;
 }
@@ -1430,9 +1446,27 @@ function mapAgentConfigurationRow(row: AgentConfigurationRow): AgentConfiguratio
     provider: row.provider,
     model: row.model,
     thinkingLevel: row.thinking_level,
+    pluginSelection: parsePluginSelection(row.plugin_selection_json),
     updatedAt: row.updated_at,
     updatedBy: row.updated_by,
   };
+}
+
+/**
+ * A stored selection is re-validated on read: the column only guarantees JSON, and a row edited
+ * outside this path must not turn into launch arguments for a provider process.
+ */
+function parsePluginSelection(json: string | null): AgentPluginSelection | null {
+  if (json === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json) as unknown;
+  } catch {
+    return null;
+  }
+  const result = agentPluginSelectionSchema.safeParse(parsed);
+  if (!result.success) return null;
+  return result.data;
 }
 
 export class Phase1Database {
@@ -1500,6 +1534,9 @@ export class Phase1Database {
         // second. Version 16 stays permanently unused and no earlier number is ever inserted.
         if (version < 25) this.sqlite.exec(verificationLayeringMigration);
         if (version < 26) this.sqlite.exec(knowledgeLayerMigration);
+        // Version 27 is this step's own number (FOUNDATION-071 / ADR-0044): agent plugin selection.
+        // A database stamped 17–26 still gets it, and no earlier number is ever inserted.
+        if (version < 27) this.sqlite.exec(agentPluginSelectionMigration);
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -4150,6 +4187,11 @@ export class Phase1Database {
     readonly provider?: string | null;
     readonly model?: string | null;
     readonly thinkingLevel?: string | null;
+    /**
+     * A whole-list override, or `null` to clear it. A malformed selection is refused here rather
+     * than stored, so the Execution's recorded selection is always one the Runtime could apply.
+     */
+    readonly pluginSelection?: AgentPluginSelection | null;
     readonly updatedAt: number;
     readonly updatedBy: string;
   }): AgentConfigurationRecord | null {
@@ -4170,24 +4212,37 @@ export class Phase1Database {
       throw new StorageError('INVALID_STATE',
         `Invalid Agent configuration: ${parsed.error.message}`);
     }
+    const mergedSelection = input.pluginSelection === undefined
+      ? parsePluginSelection(existing?.plugin_selection_json ?? null)
+      : input.pluginSelection;
+    const selectionResult = mergedSelection === null
+      ? null
+      : agentPluginSelectionSchema.safeParse(mergedSelection);
+    if (selectionResult !== null && !selectionResult.success) {
+      throw new StorageError('INVALID_STATE',
+        `Invalid Agent plugin selection: ${selectionResult.error.message}`);
+    }
+    const selection = selectionResult === null ? null : selectionResult.data;
+    const selectionJson = selection === null ? null : JSON.stringify(selection);
     return this.sqlite.transaction(() => {
-      if (Object.keys(parsed.data).length === 0) {
+      if (Object.keys(parsed.data).length === 0 && selection === null) {
         this.clearAgentConfiguration(input);
         return null;
       }
       if (existing === null) {
         this.sqlite.query(`
           INSERT INTO agent_configurations(id,scope,project_id,adapter_id,provider,model,
-            thinking_level,updated_at,updated_by)
-          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+            thinking_level,plugin_selection_json,updated_at,updated_by)
+          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
         `).run(input.id, input.scope, input.projectId, input.adapterId,
-          merged.provider, merged.model, merged.thinkingLevel, input.updatedAt, input.updatedBy);
+          merged.provider, merged.model, merged.thinkingLevel, selectionJson,
+          input.updatedAt, input.updatedBy);
       } else {
         this.sqlite.query(`
           UPDATE agent_configurations SET provider=?1,model=?2,thinking_level=?3,
-            updated_at=?4,updated_by=?5 WHERE id=?6
-        `).run(merged.provider, merged.model, merged.thinkingLevel, input.updatedAt,
-          input.updatedBy, existing.id);
+            plugin_selection_json=?4,updated_at=?5,updated_by=?6 WHERE id=?7
+        `).run(merged.provider, merged.model, merged.thinkingLevel, selectionJson,
+          input.updatedAt, input.updatedBy, existing.id);
       }
       const saved = this.agentConfigurationRow(input.scope, input.projectId, input.adapterId);
       if (saved === null) throw new Error('Agent configuration was not persisted');
@@ -4236,7 +4291,8 @@ export class Phase1Database {
     adapterId: string,
   ): AgentConfigurationRow | null {
     return this.sqlite.query<AgentConfigurationRow, [string, string | null, string]>(`
-      SELECT id,scope,project_id,adapter_id,provider,model,thinking_level,updated_at,updated_by
+      SELECT id,scope,project_id,adapter_id,provider,model,thinking_level,plugin_selection_json,
+        updated_at,updated_by
       FROM agent_configurations
       WHERE scope=?1 AND adapter_id=?3 AND ((project_id IS NULL AND ?2 IS NULL) OR project_id=?2)
     `).get(scope, projectId, adapterId);

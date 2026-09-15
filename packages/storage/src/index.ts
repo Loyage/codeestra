@@ -59,7 +59,7 @@ export type {
 } from './database.js';
 export {
   agentAnswerMigration, agentConfigurationMigration, agentDisconnectMigration,
-  agentObservationMigration, agentStartMigration, capacitySlotReservationMigration,
+  agentObservationMigration, agentPluginSelectionMigration, agentStartMigration, capacitySlotReservationMigration,
   impactAnalysisMigration, integrationPipelineMigration, knowledgeLayerMigration,
   operationProgressMigration,
   phase1Migration, phase1SchemaVersion, reclamationMigration, sessionHandoffMigration,

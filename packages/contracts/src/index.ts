@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { AgentPluginSelection } from './agent-plugins.js';
 import { questionnaireAnswerSchema } from './questionnaire.js';
 import { verificationPolicyConfirmationSchema } from './verification-policy.js';
 import { impactPolicyConfirmationSchema } from './impact-policy.js';
@@ -16,6 +17,7 @@ export * from './impact-policy.js';
 export * from './targeted-test-plan.js';
 export * from './prose-question.js';
 export * from './ui-settings.js';
+export * from './agent-plugins.js';
 
 export const repositoryIdentitySchema = z.strictObject({
   repoRoot: z.string().min(1),
@@ -954,6 +956,28 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     provider: z.string().min(1).max(200).nullable().optional(),
     model: z.string().min(1).max(200).nullable().optional(),
     thinkingLevel: thinkingLevelSchema.nullable().optional(),
+    /**
+     * The plugin/resources this scope selects (ADR-0044). A whole-list override: absent leaves the
+     * scope's selection unchanged, `null` clears it, and a selection replaces the lower-precedence
+     * scope's list entirely. Nothing is written when any selected path cannot be verified.
+     *
+     * It is validated *in the handler* with `agentPluginSelectionSchema` rather than here, so a
+     * malformed selection is refused with the capability's own stable code
+     * (`INVALID_AGENT_PLUGIN_SELECTION`) and its offending paths, instead of a generic request
+     * error. The value is still parsed by that strict schema before anything is written.
+     */
+    pluginSelection: z.union([z.record(z.string(), z.unknown()), z.null()]).optional(),
+  }),
+  /**
+   * Lists every Agent plugin/resource the provider itself has, together with the current selection.
+   * Read-only: the Runtime never writes provider configuration and never scans a repository
+   * directory (ADR-0044 D05). Adapters that cannot apply a selection report `UNSUPPORTED`.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('agent.plugins.list'),
+    adapterId: nonBlankString.default('pi'),
+    projectId: z.string().uuid().optional(),
   }),
   z.strictObject({
     ...requestBase,
@@ -2003,6 +2027,12 @@ export interface AdapterCapabilities {
    * Codeestra's revision snapshot, so the Adapter must say so instead of implying isolation.
    */
   readonly controlledConfiguration: AdapterSupport;
+  /**
+   * Whether this Adapter can load exactly the plugin/resources the user selected (ADR-0044). Pi
+   * composes a controlled launch, so it can; Codex and Claude Code have no equivalent, so they say
+   * `UNSUPPORTED` instead of a common abstraction being invented over them.
+   */
+  readonly pluginSelection: AdapterSupport;
 }
 /** Provider process evidence. A PID alone is never treated as proof of identity. */
 export const agentProcessIdentitySchema = z.strictObject({
@@ -2033,6 +2063,12 @@ export interface AgentStartRequest {
     readonly constraints: readonly { readonly id: string; readonly text: string }[];
   };
   readonly knowledgeSnapshotRefs: readonly string[];
+  /**
+   * The plugin/resources this Session may load, exactly as recorded with its Execution (ADR-0044).
+   * Absent means the Adapter's controlled default: the same launch as before this capability, with
+   * no user resource loaded. An Adapter that cannot verify a selected path must refuse to start.
+   */
+  readonly pluginSelection?: AgentPluginSelection;
   readonly permissionMode: 'FULL' | 'STRICT';
   /**
    * Effective Agent configuration for this start, resolved by the Runtime from environment,

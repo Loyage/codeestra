@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { ThemeSelector } from './theme.js';
+import { AgentSettingsPanel } from './agent-settings.js';
 import { SettingsPage, UiSettingsProvider } from './settings.js';
 import { usePendingAction } from './use-pending-action.js';
 import { RuntimeClient, describeError } from './api.js';
@@ -37,7 +38,7 @@ import {
   type VerificationRunView,
 } from './types.js';
 
-type Tab = 'tasks' | 'attention' | 'schedule' | 'events' | 'agent' | 'project' | 'settings';
+type Tab = 'tasks' | 'attention' | 'schedule' | 'events' | 'agent' | 'plugins' | 'project' | 'settings';
 
 const tabLabels: Record<Tab, string> = {
   tasks: '任务工作台',
@@ -45,6 +46,7 @@ const tabLabels: Record<Tab, string> = {
   schedule: '调度',
   events: '运行事件',
   agent: 'Agent 配置',
+  plugins: 'Agent 设置',
   project: '项目',
   settings: '设置',
 };
@@ -622,7 +624,7 @@ function Console({ token, initialProjectId }: {
       <aside className="sidebar">
       <nav aria-label="主导航">
         <span className="nav-caption">工作空间</span>
-        {(['tasks', 'attention', 'schedule', 'project', 'agent', 'events', 'settings'] as const).map((name) => (
+        {(['tasks', 'attention', 'schedule', 'project', 'agent', 'plugins', 'events', 'settings'] as const).map((name) => (
           <button
             key={name}
             type="button"
@@ -729,6 +731,9 @@ function Console({ token, initialProjectId }: {
         ) : null}
         {tab === 'agent' ? (
           <AgentTab key={projectId} client={client} projectId={projectId} run={run} />
+        ) : null}
+        {tab === 'plugins' ? (
+          <AgentSettingsPanel key={projectId} client={client} projectId={projectId} run={run} />
         ) : null}
         {tab === 'project' ? (
           <ProjectTab client={client} permissionMode={state.permissionMode} projectId={projectId}

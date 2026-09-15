@@ -1,8 +1,13 @@
 import { createHash } from 'node:crypto';
-import type { AgentStartAdapter } from '@codeestra/contracts';
+import {
+  agentPluginSelectionFromTrace,
+  agentPluginSelectionIsEmpty,
+  type AgentStartAdapter,
+} from '@codeestra/contracts';
 import {
   Phase1Database,
   type AgentStartPlan,
+  type StoredAgentConfiguration,
 } from '@codeestra/storage';
 
 export class AgentStartServiceError extends Error {
@@ -22,6 +27,20 @@ function startOccurrence(error: unknown): 'NO' | 'YES' | 'UNKNOWN' {
     return error.startMayHaveOccurred ? 'YES' : 'NO';
   }
   return 'UNKNOWN';
+}
+
+/**
+ * The plugin selection this Session may load, read back from the Execution's own recorded trace.
+ * An Execution with no recorded plugins gets no `pluginSelection` argument at all, which is what
+ * keeps its provider launch byte-identical to the launch before this capability (ADR-0044 D02).
+ */
+function pluginSelectionStartArgument(
+  configuration: StoredAgentConfiguration | null,
+): { readonly pluginSelection?: ReturnType<typeof agentPluginSelectionFromTrace> } {
+  const trace = configuration?.plugins;
+  if (trace === undefined) return {};
+  const selection = agentPluginSelectionFromTrace(trace);
+  return agentPluginSelectionIsEmpty(selection) ? {} : { pluginSelection: selection };
 }
 
 export async function startReservedExecution(input: {
@@ -118,6 +137,9 @@ export async function startReservedExecution(input: {
       // The configuration resolved at reservation time, so the Adapter launches exactly what the
       // Execution records as its input rather than re-reading mutable configuration here.
       ...(plan.agentConfig === null ? {} : { agentConfig: plan.agentConfig }),
+      // The plugin selection is read back from the recorded trace, so a replay (including one after
+      // a Runtime restart) launches the same resources the Execution row names (ADR-0044 D04).
+      ...pluginSelectionStartArgument(plan.agentConfig),
       environment: input.environment ?? {},
     });
     if (session.id !== plan.sessionId || session.executionId !== plan.executionId

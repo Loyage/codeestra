@@ -326,6 +326,7 @@ describe('Claude adapter capabilities', () => {
       reconnectToLiveSession: 'UNSUPPORTED',
       resumeAfterExit: 'REQUIRES_VALIDATION',
       controlledConfiguration: 'SUPPORTED',
+      pluginSelection: 'UNSUPPORTED',
     });
     expect(adapter.capabilities()).toEqual(probe.capabilities);
   });

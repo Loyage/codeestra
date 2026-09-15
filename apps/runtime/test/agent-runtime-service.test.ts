@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { DeterministicFakeAdapter } from '@codeestra/agent-adapters';
 import type {
   AdapterCapabilities,
@@ -40,6 +43,7 @@ const capabilities: AdapterCapabilities = Object.freeze({
   reconnectToLiveSession: 'UNSUPPORTED',
   resumeAfterExit: 'UNSUPPORTED',
   controlledConfiguration: 'SUPPORTED',
+  pluginSelection: 'UNSUPPORTED',
 });
 
 class ScriptedAnswerError extends Error {
@@ -66,6 +70,8 @@ class ScriptedInteractiveAdapter implements AgentAnswerAdapter, AgentProcessRele
   startCount = 0;
   readonly answerAttempts: string[] = [];
   readonly releasedSessions: string[] = [];
+  /** Every start request, so a test can assert what the Adapter was actually launched with. */
+  readonly startRequests: AgentStartRequest[] = [];
   failNextAnswerWithProof = false;
   readonly #attentionObserved = deferred();
   readonly #answered = deferred();
@@ -85,6 +91,7 @@ class ScriptedInteractiveAdapter implements AgentAnswerAdapter, AgentProcessRele
 
   async start(request: AgentStartRequest): Promise<AgentSessionRef> {
     this.startCount += 1;
+    this.startRequests.push(request);
     return {
       id: request.sessionId,
       executionId: request.executionId,
@@ -176,6 +183,83 @@ function countRows(value: AgentFixture, sql: string): number {
 }
 
 describe('Agent runtime coordinator', () => {
+  test('a resolved plugin selection reaches the Adapter and is recorded with the Execution', async () => {
+    const value = await createAgentFixture();
+    const adapter = new ScriptedInteractiveAdapter();
+    const registry = new AdapterRegistry();
+    registry.register(adapter);
+    // A skill directory that passes the same verification the Adapter runs, so this test proves the
+    // wiring rather than the (separately tested) verifier.
+    const skillDirectory = mkdtempSync(join(tmpdir(), 'codeestra-plugin-wiring-'));
+    mkdirSync(skillDirectory, { recursive: true });
+    await Bun.write(join(skillDirectory, 'SKILL.md'), '---\nname: wiring\ndescription: wiring\n---\nbody\n');
+    const coordinator = new AgentRuntimeCoordinator({
+      storage: value.storage,
+      registry,
+      runtimeHome: value.home,
+      resolveAgentConfig: () => ({ model: 'wiring-model' }),
+      resolveAgentPlugins: () => ({
+        selection: { extensions: [], skills: [skillDirectory], promptTemplates: [], themes: [] },
+        source: 'GLOBAL',
+      }),
+    });
+    try {
+      await coordinator.runTask({
+        projectId: value.projectId, taskId: value.taskId, expectedTaskVersion: 1,
+        commandId: crypto.randomUUID(), adapterId: adapter.id,
+      });
+      // The Adapter is launched with exactly the recorded selection...
+      expect(adapter.startRequests[0]?.pluginSelection)
+        .toEqual({ extensions: [], skills: [skillDirectory], promptTemplates: [], themes: [] });
+      // ...and the Execution records it, with its layer and no invented risk for a skill-only choice.
+      const executions = value.storage.listTaskExecutions(value.projectId, value.taskId);
+      expect(executions[0]?.agentConfig).toEqual({
+        model: 'wiring-model',
+        plugins: {
+          source: 'GLOBAL',
+          entries: [{ kind: 'skills', path: skillDirectory, source: 'GLOBAL' }],
+          thirdPartyExtensionApprovalRisk: false,
+        },
+      });
+      await coordinator.close();
+    } finally {
+      rmSync(skillDirectory, { recursive: true, force: true });
+      value.storage.close();
+    }
+  });
+
+  test('refuses an unusable selected path before an Execution exists', async () => {
+    const value = await createAgentFixture();
+    const adapter = new ScriptedInteractiveAdapter();
+    const registry = new AdapterRegistry();
+    registry.register(adapter);
+    const coordinator = new AgentRuntimeCoordinator({
+      storage: value.storage,
+      registry,
+      runtimeHome: value.home,
+      resolveAgentPlugins: () => ({
+        selection: { extensions: [], skills: ['/definitely/not/here'], promptTemplates: [],
+          themes: [] },
+        source: 'GLOBAL',
+      }),
+    });
+    try {
+      await expect(coordinator.runTask({
+        projectId: value.projectId, taskId: value.taskId, expectedTaskVersion: 1,
+        commandId: crypto.randomUUID(), adapterId: adapter.id,
+      })).rejects.toMatchObject({ code: 'AGENT_PLUGIN_UNAVAILABLE' });
+      expect(adapter.startCount).toBe(0);
+      expect(countRows(value, 'SELECT count(*) AS count FROM executions')).toBe(0);
+      // The worktree prepared before the refusal is retained, exactly as every other pre-start
+      // refusal leaves it: nothing is deleted behind the user's back, and the Task can be retried
+      // after the selection is fixed.
+      expect(countRows(value, 'SELECT count(*) AS count FROM workspaces')).toBe(1);
+      expect(taskState(value)).toBe('READY');
+    } finally {
+      value.storage.close();
+    }
+  });
+
   test('runs one Session end to end and delivers a recorded answer before completion', async () => {
     const value = await createAgentFixture();
     const adapter = new ScriptedInteractiveAdapter();

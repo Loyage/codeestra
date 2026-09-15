@@ -11,6 +11,7 @@ import {
   type AgentObservedEvent,
   type AgentProcessRelease,
   type AgentSessionRef,
+  type AgentPluginSelection,
   type AgentStartRequest,
 } from '@codeestra/contracts';
 import { readProcessStartToken } from './pi-identity.js';
@@ -21,6 +22,18 @@ import {
   mapPiExtensionUiRequest,
   piExtensionUiResponseRecord,
 } from './pi-rpc.js';
+import {
+  assertPiPluginSelectionUsable,
+  PiPluginError,
+} from './pi-plugins.js';
+
+/**
+ * Whether Pi can load exactly the resources the user selected (ADR-0044 D02/D06). Declared here as a
+ * constant so a read-only projection (the Agent settings page) can answer without starting or
+ * measuring the provider: a capability must not become "unsupported" merely because no provider
+ * binary happens to be installed in this environment.
+ */
+export const piPluginSelectionSupport = 'SUPPORTED' as const;
 
 const piCapabilities: AdapterCapabilities = Object.freeze({
   persistentSession: 'SUPPORTED',
@@ -47,6 +60,9 @@ const piCapabilities: AdapterCapabilities = Object.freeze({
   // Pi is launched with `--no-extensions` plus only Codeestra's own extensions, so nothing
   // ambient changes the Agent's input for a revision.
   controlledConfiguration: 'SUPPORTED',
+  // Pi's launch composes explicit paths under `--no-extensions`/`--no-skills`/`--no-prompt-templates`
+  // /`--no-themes`, so the user's selection is exactly what loads (ADR-0044 D02/D06).
+  pluginSelection: piPluginSelectionSupport,
 });
 
 export interface PiRpcAdapterOptions {
@@ -80,6 +96,11 @@ interface LiveSession {
   readonly permissionMode: 'FULL' | 'STRICT';
   /** Effective configuration this process was launched with; part of the stop evidence. */
   readonly agentConfig: AgentConfiguration;
+  /**
+   * The plugin selection this process was launched with. It belongs in the evidence hash: two
+   * Sessions that loaded different resources are not the same launch, even if the model matches.
+   */
+  readonly pluginSelection: AgentPluginSelection | null;
 }
 
 function composeRevisionPrompt(revision: AgentStartRequest['revision']): string {
@@ -304,6 +325,18 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
 
   async start(request: AgentStartRequest): Promise<AgentSessionRef> {
     const agentConfig = request.agentConfig ?? {};
+    // Fail-closed before anything is spawned: a selected path that cannot be loaded refuses this
+    // Session with the stable code instead of running the Agent with a silently reduced selection
+    // (ADR-0044 D02). The Runtime checks the same selection before reserving an Execution; this is
+    // the Adapter's own boundary, so no caller can start a provider with an unusable path.
+    try {
+      assertPiPluginSelectionUsable(request.pluginSelection);
+    } catch (error) {
+      if (error instanceof PiPluginError) {
+        throw new PiRpcProcessError('AGENT_PLUGIN_UNAVAILABLE', error.message, false, false);
+      }
+      throw error;
+    }
     // A resumed conversation file must be one this Runtime's session directory owns; a recorded
     // path is never trusted just because a database column returned it.
     if (request.resume !== undefined) {
@@ -324,6 +357,7 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
         platform: this.#options.platform,
         permissionMode: request.permissionMode,
         ...(request.resume === undefined ? {} : { resumeSessionFile: request.resume.sessionStorageRef }),
+        ...(request.pluginSelection === undefined ? {} : { pluginSelection: request.pluginSelection }),
       }),
       ...buildPiModelArguments(agentConfig),
     ];
@@ -375,6 +409,7 @@ export class PiRpcAdapter implements AgentAnswerAdapter, AgentProcessRelease {
       this.#sessions.set(request.sessionId, {
         client, providerSessionId, sessionStorageRef, processIdentity,
         permissionMode: request.permissionMode, agentConfig,
+        pluginSelection: request.pluginSelection ?? null,
       });
       return {
         id: request.sessionId,
@@ -436,7 +471,8 @@ const evidenceRef = `pi-rpc:agent_settled:session=${live.providerSessionId}`
         .update([...buildPiRpcArguments({ gateExtensionPath: this.gateExtensionPath,
           questionExtensionPath: this.questionExtensionPath,
           sessionDir: this.sessionDir, platform: this.#options.platform,
-          permissionMode: live.permissionMode }), ...buildPiModelArguments(live.agentConfig)].join(' '))
+          permissionMode: live.permissionMode,
+          pluginSelection: live.pluginSelection }), ...buildPiModelArguments(live.agentConfig)].join(' '))
         .digest('hex').slice(0, 16)}`;
     let turnFailure: string | null = null;
     // Provider facts for the completion note. They are counted/collected from Pi's own records and

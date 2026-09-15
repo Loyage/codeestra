@@ -31,6 +31,7 @@ const capabilities: AdapterCapabilities = Object.freeze({
   reconnectToLiveSession: 'UNSUPPORTED',
   resumeAfterExit: 'SUPPORTED',
   controlledConfiguration: 'SUPPORTED',
+  pluginSelection: 'UNSUPPORTED',
 });
 
 interface Deferred { readonly promise: Promise<void>; readonly resolve: () => void }

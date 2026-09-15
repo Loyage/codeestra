@@ -21,7 +21,15 @@ import {
   agentConfigurationPayload,
   agentConfigurationUnsupportedFields,
   resolveAgentConfiguration,
+  resolveAgentPlugins,
 } from './agent-config-service.js';
+import {
+  detectAgentPlugins,
+  piProviderConfigDirectory,
+} from './agent-plugin-detection-service.js';
+import { declaredPluginSelectionSupport, inspectPiPluginPath } from '@codeestra/agent-adapters';
+import { agentPluginKinds, agentPluginSelectionSchema,
+  type AgentPluginSelection } from '@codeestra/contracts';
 import { AgentRuntimeCoordinator, deriveCommandId } from './agent-runtime-service.js';
 import { EventSubscriptionHub, type EventSubscriptionHandle } from './event-subscription-service.js';
 import { integrateTaskResult } from './integration-service.js';
@@ -221,6 +229,8 @@ const coordinator = new AgentRuntimeCoordinator({
     });
     return Object.keys(effective).length === 0 ? null : effective;
   },
+  resolveAgentPlugins: ({ projectId, adapterId }) =>
+    resolveAgentPlugins({ storage, adapterId, projectId }),
   permissionMode: () => permissionMode,
   proseQuestionAttentionMode: () => proseQuestionAttentionMode,
   logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
@@ -249,6 +259,8 @@ const terminals = new TerminalService({
     });
     return Object.keys(effective).length === 0 ? null : effective;
   },
+  resolveAgentPlugins: ({ projectId, adapterId }) =>
+    resolveAgentPlugins({ storage, adapterId, projectId }),
   logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
 });
 /**
@@ -581,6 +593,37 @@ async function scheduleTick(trigger: string, projectId?: string): Promise<{
   }
 }
 
+/**
+ * Whether one Adapter declares that it can load exactly the plugins the user selected (ADR-0044).
+ * The capability comes from the Adapter itself, never from a table here: Codex and Claude Code say
+ * `UNSUPPORTED` and the settings page shows that instead of an empty picker that would do nothing.
+ */
+/**
+ * Whether this build's Adapter for `adapterId` can load exactly the plugins the user selected
+ * (ADR-0044 D03). It reads the Adapter's own declaration instead of probing a provider: a projection
+ * must not report "unsupported" because a provider binary could not be started right now.
+ */
+function adapterSupportsPluginSelection(
+  registry: ReturnType<typeof createAdapterRegistry>,
+  adapterId: string,
+): boolean {
+  if (!registry.has(adapterId)) return false;
+  return declaredPluginSelectionSupport[adapterId] === 'SUPPORTED';
+}
+
+/** The first selected path that cannot be loaded, or `null` when every path is usable. */
+function firstUnusablePluginPath(
+  selection: AgentPluginSelection,
+): { readonly kind: string; readonly path: string; readonly reason: string } | null {
+  for (const kind of agentPluginKinds) {
+    for (const path of selection[kind]) {
+      const verdict = inspectPiPluginPath(kind, path);
+      if (!verdict.ok) return { kind, path, reason: verdict.reason };
+    }
+  }
+  return null;
+}
+
 async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
   switch (request.command) {
     case 'runtime.ui': {
@@ -658,6 +701,32 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         return failure(request.requestId, 'INVALID_AGENT_CONFIGURATION',
           `The ${request.adapterId} Adapter does not accept ${refused}; nothing was written`);
       }
+      // Plugin selection is parsed with its own strict schema here, so a malformed selection is
+      // refused with the capability's stable code and the offending paths, not a generic request
+      // error; nothing is written.
+      let pluginSelection: AgentPluginSelection | null = null;
+      if (request.pluginSelection !== undefined && request.pluginSelection !== null) {
+        const parsed = agentPluginSelectionSchema.safeParse(request.pluginSelection);
+        if (!parsed.success) {
+          return failure(request.requestId, 'INVALID_AGENT_PLUGIN_SELECTION',
+            `Invalid Agent plugin selection; nothing was written: ${parsed.error.issues
+              .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`).join('; ')}`);
+        }
+        pluginSelection = parsed.data;
+        // Refused for an Adapter that cannot apply it, instead of being stored and ignored (D03).
+        if (!adapterSupportsPluginSelection(registry, request.adapterId)) {
+          return failure(request.requestId, 'AGENT_PLUGIN_KIND_UNSUPPORTED',
+            `The ${request.adapterId} Adapter does not support plugin selection; nothing was written`);
+        }
+        // A selected path that cannot be loaded is refused here too, so a scope never holds a
+        // selection the Runtime would have to reject at every start (stable code, zero writes).
+        const unusable = firstUnusablePluginPath(pluginSelection);
+        if (unusable !== null) {
+          return failure(request.requestId, 'AGENT_PLUGIN_UNAVAILABLE',
+            `The selected ${unusable.kind} path ${JSON.stringify(unusable.path)} cannot be loaded`
+            + ` (${unusable.reason}); nothing was written`);
+        }
+      }
       storage.setAgentConfiguration({
         id: crypto.randomUUID(),
         scope: request.scope,
@@ -666,6 +735,7 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         ...(request.provider === undefined ? {} : { provider: request.provider }),
         ...(request.model === undefined ? {} : { model: request.model }),
         ...(request.thinkingLevel === undefined ? {} : { thinkingLevel: request.thinkingLevel }),
+        ...(request.pluginSelection === undefined ? {} : { pluginSelection }),
         updatedAt: Date.now(),
         // Unlike project trust in FULL mode, changing configuration is always the user's own
         // explicit command, so the actor is the local user in either permission mode.
@@ -690,6 +760,23 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         })),
         cleared,
       });
+    }
+    case 'agent.plugins.list': {
+      const projectId = request.projectId ?? null;
+      if (!registry.has(request.adapterId)) {
+        return failure(request.requestId, 'UNKNOWN_ADAPTER',
+          `No Agent Adapter is registered for ${request.adapterId}`);
+      }
+      const plugins = resolveAgentPlugins({ storage, adapterId: request.adapterId, projectId });
+      return success(request.requestId, detectAgentPlugins({
+        adapterId: request.adapterId,
+        pluginSelectionSupport: adapterSupportsPluginSelection(registry, request.adapterId)
+          ? 'SUPPORTED' : 'UNSUPPORTED',
+        selection: plugins?.selection ?? null,
+        selectionSource: plugins?.source ?? null,
+        environment: Bun.env,
+        configDirectory: piProviderConfigDirectory(Bun.env),
+      }));
     }
     case 'project.inspect': {
       const identity = await inspectRepository(request.path);

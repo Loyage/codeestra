@@ -13,10 +13,15 @@ import {
   type AgentAnswerPlan,
   type ObservableAgentSession,
 } from '@codeestra/storage';
+import { assertPiPluginSelectionUsable } from '@codeestra/agent-adapters';
 import type { AdapterRegistry } from './adapter-registry.js';
 import { deliverAgentAnswer } from './agent-answer-service.js';
 import { observeAgentEvents } from './agent-observation-service.js';
 import { startReservedExecution } from './agent-start-service.js';
+import {
+  agentLaunchConfiguration,
+  type AgentPluginResolution,
+} from './agent-config-service.js';
 import { executionKnowledgeRefs, prepareExecutionKnowledge } from './knowledge-service.js';
 import { withDeadline } from './lifecycle.js';
 import {
@@ -88,6 +93,14 @@ export interface AgentRuntimeCoordinatorOptions {
     readonly projectId: string;
     readonly adapterId: string;
   }) => AgentConfiguration | null;
+  /**
+   * The plugin/resources this Execution's Agent may load, resolved from the same persisted scopes
+   * and recorded with the Execution (ADR-0044 D04).
+   */
+  readonly resolveAgentPlugins?: (input: {
+    readonly projectId: string;
+    readonly adapterId: string;
+  }) => AgentPluginResolution | null;
   readonly permissionMode?: () => 'FULL' | 'STRICT';
   /**
    * The prose-question escalation setting (FOUNDATION-069). It is read per Session start so a
@@ -121,6 +134,10 @@ export class AgentRuntimeCoordinator {
     readonly projectId: string;
     readonly adapterId: string;
   }) => AgentConfiguration | null;
+  readonly #resolveAgentPlugins: (input: {
+    readonly projectId: string;
+    readonly adapterId: string;
+  }) => AgentPluginResolution | null;
   readonly #permissionMode: () => 'FULL' | 'STRICT';
   readonly #proseQuestionAttentionMode: () => ProseQuestionAttentionMode;
   readonly #now: () => number;
@@ -136,6 +153,7 @@ export class AgentRuntimeCoordinator {
     this.#runtimeHome = options.runtimeHome;
     this.#environment = options.environment ?? {};
     this.#resolveAgentConfig = options.resolveAgentConfig ?? (() => null);
+    this.#resolveAgentPlugins = options.resolveAgentPlugins ?? (() => null);
     this.#permissionMode = options.permissionMode ?? (() => 'FULL');
     this.#proseQuestionAttentionMode = options.proseQuestionAttentionMode
       ?? (() => defaultProseQuestionAttentionMode);
@@ -283,9 +301,23 @@ export class AgentRuntimeCoordinator {
     const adapter = input.adapter;
       // Resolved before the reservation, so the effective configuration is part of the Execution's
       // recorded input and the Adapter cannot be started with something else.
-      const agentConfig = this.#resolveAgentConfig({
+      const resolvedConfiguration = this.#resolveAgentConfig({
         projectId: input.projectId,
         adapterId: adapter.id,
+      });
+      const resolvedPlugins = this.#resolveAgentPlugins({
+        projectId: input.projectId,
+        adapterId: adapter.id,
+      });
+      // Fail-closed, before the Execution exists: a selected path that cannot be loaded refuses this
+      // Session with the stable code `AGENT_PLUGIN_UNAVAILABLE` instead of starting an Agent with a
+      // selection the Execution would then have recorded untruthfully (ADR-0044 D02).
+      assertPiPluginSelectionUsable(resolvedPlugins?.selection ?? null);
+      // The recorded input is exactly what the Adapter is launched with; the Adapter reads the
+      // selection back from this record rather than resolving configuration a second time.
+      const agentConfig = agentLaunchConfiguration({
+        configuration: resolvedConfiguration,
+        plugins: resolvedPlugins,
       });
       // Project Knowledge (FOUNDATION-067 / ADR-0041) is resolved, validated and materialized
       // *before* the Execution row exists. A knowledge layer that cannot be loaded refuses the start

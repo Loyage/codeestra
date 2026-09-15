@@ -297,6 +297,7 @@ describe('Codex adapter capabilities', () => {
       reconnectToLiveSession: 'UNSUPPORTED',
       resumeAfterExit: 'SUPPORTED',
       controlledConfiguration: 'UNSUPPORTED',
+      pluginSelection: 'UNSUPPORTED',
     });
   });
 
