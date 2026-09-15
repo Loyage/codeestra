@@ -15,5 +15,12 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["packages/**/*.ts", "apps/**/*.ts", "vitest.config.ts"]
+  "include": ["packages/**/*.ts", "apps/**/*.ts", "vitest.config.ts"],
+  // The Web UI is its own TypeScript project (apps/ui/tsconfig.json: react-jsx + DOM lib). The root
+  // project has no `jsx` and no DOM lib, so it can only check the UI partially: `apps/**/*.ts` picks
+  // up UI `.ts` files but resolves their `.tsx` imports without JSX support. That asymmetry made a UI
+  // test that imports `App.tsx` fail the root check while `typecheck:ui` never saw the file at all
+  // (FOUNDATION-072 integration defect). Exclude the whole UI app from the root project and let
+  // `apps/ui/tsconfig.json` own `src/**` and `test/**`; `bun run check` runs both projects.
+  "exclude": ["apps/ui"]
 }
