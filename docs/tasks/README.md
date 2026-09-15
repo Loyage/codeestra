@@ -5770,6 +5770,61 @@ $ git diff --check
 - **观感类**：M2 的两个新 UI 面板与 M4 runbook 的执行效果都只做了静态/命令面断言，人眼确认未做。
 - **M4 记录的文本漂移**：`## NEXT` 第 7 条仍写「Adapter 尚不消费 `knowledgeSnapshotRefs`」而 ADR-0051 已接通；本波未静默重写，留待下一次 doc-sync。
 
+## 第四次真实 `dev → main` 提升（`main` `c50730f` → `90478a7`，33 个提交，Wave K/L/M）
+
+状态：**已执行并成功**（用户显式授权）。这是 Wave K（文档校准/规格对齐）、Wave L（提升路径产品化、说明书、adapter 三件、UI 投影）与 Wave M（多成员批次、PTY resize、验收 runbook、两个 UI 投影）进入稳定分支，也是**第一次按 ADR-0047 的 GitHub 中转人工四步**完成的提升（此前三次都是本机 ff）。
+
+| 项 | 值 |
+|---|---|
+| 提升前 `main` | `c50730f14aaa35f402d01430051853eb69840e41` |
+| 提升后 `main` | `90478a7ceec4683e6eb8e555361e7f286ecc1018`（= 被验证的精确 dev 候选） |
+| 推进的提交数 | 33 |
+| 方式 | ①push 固定候选到 `origin/dev` 并读回核对 ②main clone `git fetch` + `git merge --ff-only origin/dev` ③重启并核对 ④推回 `origin/main` 并读回 |
+| `origin/dev` | `036cf68` → **`90478a7`**（读回值逐字符等于候选） |
+| `origin/main` | `c50730f` → **`90478a7`**（读回值逐字符等于候选） |
+| main clone 工作树 | 提升前 clean、提升后 clean（`git status --porcelain` 0 行） |
+| `phase1SchemaVersion` | 30 |
+
+### 提升前全量证据（ADR-0038 D03 / ADR-0039，产品命令面）
+
+```sh
+CODEESTRA_HOME=/tmp/ce-m-promote bun run codeestra promotion full-suite run <project-id> \
+  --dev-commit 90478a7ceec4683e6eb8e555361e7f286ecc1018 --json
+```
+
+| 字段 | 值 |
+|---|---|
+| `evidenceId` | `468c98c0-a111-4d15-9ac8-b08abb378dd5` |
+| `devCommit` / `testedTree` | `90478a7ceec4683e6eb8e555361e7f286ecc1018`（两者相同） |
+| `state` / `outcomeCode` | `PASSED` / `PASSED` |
+| `policyDigest` | `7d72c8222a06d1159ee3c099b3aba698dc9ed163987af52e73a13a2e2c28799b` |
+| `lockfileDigest`（`bun.lock`） | `08f20225891ab97b42352780d64aa31214ed60b80a3e095bc646a19a64ea9df8` |
+| 墙钟耗时 | 7 分 14 秒（434s） |
+| 副本 | `copyRemoved: true` |
+
+### 重启序列与证据（`AGENTS.md` 规程，在 main clone 执行）
+
+每步退出码均 0：`bun install --frozen-lockfile`（`Checked 65 installs … (no changes)`）→ `bun run build:ui`（`index-BIpfwy8h.js`）→ `bun run codeestra stop`（旧 Runtime 退出、lock 释放）→ `bun run codeestra status`（新 boot）→ `bun run codeestra ui --no-open`（`uiRunning: true`）。
+
+| | boot id | pid |
+|---|---|---|
+| 提升前 | `f12ec062-fec1-4733-9cbb-6eee225f000e` | 61512 |
+| 提升后 | `8d829c62-57ca-490f-b49a-e303bf696a18` | 59049 |
+
+**稳定库迁移 27 → 30**（重启时由新代码完成），迁移后核对的事实：`intents.kind` 的定义里**已无 `CHANGE_PRIORITY`**（ADR-0046 的 v28 收窄）、`projects.dev_repo_path` 列存在（ADR-0047 的 v29）、`integration_batches` 的状态定义含 `CANCELLED`（ADR-0053 的 v30）、`PRAGMA foreign_key_check` **0 行违规**。
+
+### 附带完成的资源回收（用户裁决）
+
+**遗留进程 `pi-pty-host` pid 50394**（启动于 2026-09-14 15:02，早于 Wave K/L/M）已按用户裁决核验后回收。归属证据：`ppid = 1`（父进程已死）、stdio 的 unix socket 对端 `->(none)`、其子进程（`bash -c "echo hi-from-child; exit 3"`，即测试夹具）已退出、持有的 `/dev/ptmx` + `/dev/ttys022` 无其它进程占用、唯一存活的 Runtime（稳定服务）`activeSessions: []` 不认领它。处置：SIGTERM → 确认退出（未使用 SIGKILL）。
+
+### 记录与诚实边界
+
+- **仍然没有产生领域 `PromotionRecord` 行**：本次按 ADR-0047 D06 走 `AGENTS.md` 的人工四步（产品 `promotion` 命令面已在本候选里实现，但**跑它的稳定 Runtime 那时还是旧代码**，且本仓库没有 IntegrationBatch 证据）。产品路径在**下一次**提升才可能真正使用；这仍是长期缺口。
+- **证据绑定的 policy 来自 `refs/heads/dev`**：注册在隔离 Runtime 里的项目是 dev clone（`mainRef = refs/heads/dev`）。本候选未改动 `.codeestra/policies/verification.json`，main 与 dev 的策略 digest 相同（与第三次提升同为 `7d72c822…`），因此没有实际差别。
+- **本记录是提升之后**在 dev clone 上新增的提交，**未推送**：按 `AGENTS.md`「只 push 固定候选这一个 ref」，`origin/dev` 仍停在被提升的 `90478a7`，`dev` 本地比它多这一条记录。下一次提升会带上。
+- **未在 main clone 额外跑全量**：`main` 与被执行全量的精确候选 SHA 完全相同、工作树 clean。
+- **真实 provider 仍未验收**：本波把验收做成了可执行的 runbook 与 dry-run 脚手架（`docs/notes/real-provider-acceptance-runbook.md`、`scripts/real-provider-acceptance.sh`），但 A1–A8 **一条都还没跑过**。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），
