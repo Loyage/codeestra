@@ -441,8 +441,10 @@ function validateAgentConfigurationScope(
   return null;
 }
 
-function failure(requestId: string, code: string, message: string): RuntimeResponse {
-  return { requestId, schemaVersion: 1, ok: false, error: { code, message } };
+function failure(requestId: string, code: string, message: string,
+  detail?: unknown): RuntimeResponse {
+  return { requestId, schemaVersion: 1, ok: false,
+    error: { code, message, ...(detail === undefined ? {} : { detail }) } };
 }
 
 /** A rejected command carries a stable code so a script can branch on it. */
@@ -1172,6 +1174,8 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         adapterId: request.adapterId,
         actor: 'local-user',
         commandId: request.commandId,
+        ...(request.impactSnapshotId === undefined
+          ? {} : { impactSnapshotId: request.impactSnapshotId }),
       }));
     case 'scheduler.reservations.release': {
       const released = await slotReservations.release({
@@ -1623,7 +1627,12 @@ async function handleLine(socket: Bun.Socket<SocketState>, line: string): Promis
       ? error.code
       : 'INVALID_REQUEST';
     const message = error instanceof Error ? error.message : 'Unknown Runtime error';
-    await sendAndClose(socket, `${JSON.stringify(failure(requestId, code, message))}\n`);
+    // A refusal whose code cannot carry its facts (a stale snapshot generation names the components
+    // that moved) passes them through as a structured detail; a client renders them, so a script
+    // never has to parse the sentence above.
+    const detail = typeof error === 'object' && error !== null && 'detail' in error
+      ? error.detail : undefined;
+    await sendAndClose(socket, `${JSON.stringify(failure(requestId, code, message, detail ?? undefined))}\n`);
   }
 }
 

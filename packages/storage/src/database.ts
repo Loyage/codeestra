@@ -8,11 +8,14 @@ import {
   noToolCallsWithTrailingQuestionMarkHeuristic,
   PROSE_QUESTION_NO_TOOL_USE,
   revisionDeliverySatisfied,
+  recheckImpactSnapshotGeneration,
   transitionRevisionDelivery,
   wouldCreateCycle,
   type AgentCompletionFacts,
   type AgentCompletionNote,
   type DependencyEdge,
+  type ImpactSnapshotGeneration,
+  type ImpactSnapshotRecheck,
   type RevisionDelivery,
   type RevisionDeliveryChannel,
   type RevisionDeliveryState,
@@ -155,6 +158,32 @@ export interface ExecutionSlotAcquisition {
   readonly reservation: SlotReservationDetail | null;
 }
 
+/**
+ * What one acquisition observed about the ImpactSnapshot generation it names, handed to the write
+ * transaction so the *same* E1 judgment (`scheduler.md` §2: "recheck cached snapshot generations")
+ * is applied again under the write lock.
+ *
+ * The observation is not the decision: `files`, `policyVersion`, `analyzerVersion` and (before a
+ * worktree exists) `baseCommit` are facts the caller read from Git, because they are not persisted
+ * anywhere the transaction could re-read. What the transaction *can* re-read — the snapshot row, the
+ * Task's current revision, and the worktree's baseline — is re-read here, so a writer that moved one
+ * of them between the caller's observation and this write is a refusal rather than a reservation on
+ * a stale assessment.
+ */
+export interface SlotSnapshotRecheckInput {
+  readonly snapshotId: string;
+  /** The change set observed for the Task right now: worktree paths, or empty without a worktree. */
+  readonly files: readonly string[];
+  readonly policyVersion: string;
+  readonly analyzerVersion: string;
+  /** Where the baseline came from: the Task's own worktree, or the development ref before one. */
+  readonly baselineSource: 'WORKSPACE' | 'DEV_REF';
+  /** The observed baseline; re-read from the worktree row when `baselineSource` is `WORKSPACE`. */
+  readonly baseCommit: string;
+  /** Evidence for the refusal facts only; the change-set decision is the exact path set. */
+  readonly changeFingerprint: string | null;
+}
+
 export interface SlotReservationAcquireInput {
   readonly projectId: string;
   readonly taskId: string;
@@ -164,6 +193,12 @@ export interface SlotReservationAcquireInput {
   readonly adapterId: string;
   readonly workspaceId: string | null;
   readonly impactSnapshotId: string | null;
+  /**
+   * The generation recheck, or `null`/absent when the caller asserted no impact assessment at all.
+   * `null` is not "the snapshot is valid": it means there is no cached generation to be stale, which
+   * is the shape an explicitly released `UNKNOWN` assessment has (ADR-0030 D05).
+   */
+  readonly snapshotRecheck?: SlotSnapshotRecheckInput | null;
   /** Fingerprint of the Task's dependency facts as the caller assessed them. */
   readonly dependencyFingerprint: string;
   readonly assessedDevCommit: string | null;
@@ -196,13 +231,22 @@ export interface SlotReservationReconcileOutcome {
 
 /**
  * A refused reservation carries its own stable code: "the dependency graph moved", "the Task is not
- * reservable", "a slot is already held" and "the revision changed" are different answers.
+ * reservable", "a slot is already held" and "the revision changed" are different answers, and so is
+ * "the cached snapshot generation this reservation was assessed against is no longer current".
+ *
+ * `SNAPSHOT_STALE` and `SNAPSHOT_UNAVAILABLE` are deliberately separate: the first says the snapshot
+ * was read and no longer describes the Task (with `detail` naming the components that moved), the
+ * second says the snapshot could not be read or the current facts could not be observed at all — and
+ * an unreadable snapshot is never treated as a valid one.
  */
 export class SlotReservationError extends Error {
   constructor(readonly code: 'CAPACITY_LIMIT_INVALID' | 'CAPACITY_LIMIT_OUT_OF_RANGE'
     | 'UNKNOWN_ADAPTER' | 'TASK_NOT_RESERVABLE' | 'REVISION_CHANGED' | 'DEPENDENCY_STATE_CHANGED'
     | 'SLOT_ALREADY_RESERVED' | 'SLOT_NOT_ACTIVE' | 'SLOT_ALREADY_BOUND'
-    | 'SLOT_HELD_BY_ANOTHER_RUNTIME' | 'SLOT_HOLDER_STILL_RUNNING', message: string) {
+    | 'SLOT_HELD_BY_ANOTHER_RUNTIME' | 'SLOT_HOLDER_STILL_RUNNING'
+    | 'SNAPSHOT_STALE' | 'SNAPSHOT_UNAVAILABLE', message: string,
+  /** Machine-readable facts behind the code, so a script never has to parse the sentence. */
+  readonly detail: Readonly<Record<string, unknown>> | null = null) {
     super(message);
     this.name = 'SlotReservationError';
   }
@@ -9904,12 +9948,16 @@ export class Phase1Database {
    *
    * Everything that decides the outcome is re-read *inside* the `BEGIN IMMEDIATE` transaction: the
    * Task version and revision (the caller's compare-and-swap), the dependency facts (against the
-   * fingerprint the caller assessed), the draining fact, and the capacity of both dimensions. Two
-   * concurrent acquirers therefore cannot both see a free slot: the second one blocks on the write
-   * lock and then observes the committed row, and the partial unique index is the second guard.
+   * fingerprint the caller assessed), the cached ImpactSnapshot generation (against the generation the
+   * caller observed, with the Task revision and worktree baseline re-read here), the draining fact,
+   * and the capacity of both dimensions. Two concurrent acquirers therefore cannot both see a free
+   * slot: the second one blocks on the write lock and then observes the committed row, and the partial
+   * unique index is the second guard.
    *
-   * A refused acquisition writes nothing but the command receipt, so a capacity wait is a recorded
-   * observation rather than a side effect.
+   * A refused acquisition writes nothing at all: the transaction rolls back, so a capacity wait and a
+   * `SNAPSHOT_STALE` refusal are both observations rather than side effects. (A capacity wait returns a
+   * value and therefore does record its command receipt, which is what makes a repeated wait answer the
+   * same way; a refusal throws, so retrying the same command also re-evaluates it.)
    */
   reserveExecutionSlot(input: SlotReservationAcquireInput): ExecutionSlotAcquisition {
     return this.executeCommand({
@@ -9945,6 +9993,92 @@ export class Phase1Database {
         if (fingerprint !== input.dependencyFingerprint) {
           throw new SlotReservationError('DEPENDENCY_STATE_CHANGED',
             'The dependency facts changed since they were assessed; re-assess before reserving');
+        }
+        // scheduler.md §2: recheck the *cached snapshot generation* this reservation was assessed
+        // against, inside this same immediate transaction. The caller observed the Git-side facts
+        // (mapping version, change set, and the development baseline of a Task with no worktree yet);
+        // what a concurrent writer can move in the meantime is re-read here — the stored row, the
+        // Task's current revision, and the worktree's baseline — and fed to the analyzer's own
+        // `recheckImpactSnapshotGeneration`, so this is the same verdict the analyzer would give, not
+        // a second opinion with weaker rules.
+        const expected = input.snapshotRecheck ?? null;
+        if (expected !== null) {
+          const row = database.query<ImpactSnapshotRow, [string, string]>(`
+            ${impactSnapshotSelect} WHERE project_id=?1 AND id=?2
+          `).get(input.projectId, expected.snapshotId);
+          if (row === null) {
+            throw new SlotReservationError('SNAPSHOT_UNAVAILABLE',
+              `ImpactSnapshot ${expected.snapshotId} is not readable in this project, so the`
+              + ' generation it was assessed from cannot be confirmed; nothing was reserved',
+              { code: 'SNAPSHOT_UNAVAILABLE', snapshotId: expected.snapshotId,
+                taskId: input.taskId });
+          }
+          if (row.task_id !== input.taskId) {
+            throw new SlotReservationError('SNAPSHOT_UNAVAILABLE',
+              `ImpactSnapshot ${row.id} belongs to Task ${row.task_id}, not to the Task being`
+              + ' reserved; nothing was reserved',
+              { code: 'SNAPSHOT_UNAVAILABLE', snapshotId: row.id, taskId: input.taskId,
+                snapshotTaskId: row.task_id });
+          }
+          // The worktree row is read in this transaction: a Task without a live worktree was assessed
+          // against the caller's development-ref observation, which SQLite cannot re-read, and one
+          // with a worktree has a baseline this transaction can and does confirm.
+          const worktree = database.query<{ base_commit: string }, [string]>(`
+            SELECT base_commit FROM workspaces WHERE task_id=?1 AND state<>'RELEASED'
+            ORDER BY created_at DESC,id DESC LIMIT 1
+          `).get(input.taskId);
+          if (expected.baselineSource === 'WORKSPACE' && worktree === null) {
+            throw slotSnapshotStaleRefusal({
+              row,
+              taskId: input.taskId,
+              currentRevisionId: task.current_revision_id,
+              reasonCodes: ['STALE_BASE'],
+              differing: ['baseCommit'],
+              observedBaseCommit: null,
+              observedPolicyVersion: expected.policyVersion,
+              observedAnalyzerVersion: expected.analyzerVersion,
+              observedChangeFingerprint: expected.changeFingerprint,
+              observedPathCount: expected.files.length,
+              detail: `ImpactSnapshot ${row.id} was assessed against worktree baseline`
+                + ` ${expected.baseCommit.slice(0, 12)}, but this Task has no live worktree any more`,
+            });
+          }
+          if (expected.baselineSource === 'DEV_REF' && worktree !== null) {
+            // The caller observed "no worktree, predicted against the development baseline" and the
+            // Task now has one: the facts the prediction described are not the facts of this write.
+            throw slotSnapshotStaleRefusal({
+              row,
+              taskId: input.taskId,
+              currentRevisionId: task.current_revision_id,
+              reasonCodes: ['STALE_BASE'],
+              differing: ['baseCommit'],
+              observedBaseCommit: worktree.base_commit,
+              observedPolicyVersion: expected.policyVersion,
+              observedAnalyzerVersion: expected.analyzerVersion,
+              observedChangeFingerprint: expected.changeFingerprint,
+              observedPathCount: expected.files.length,
+              detail: `ImpactSnapshot ${row.id} was assessed while this Task had no worktree, and it`
+                + ` now has one at ${worktree.base_commit.slice(0, 12)}`,
+            });
+          }
+          const recheck = slotSnapshotGenerationRecheck({
+            row,
+            currentRevisionId: task.current_revision_id,
+            baseCommit: worktree?.base_commit ?? expected.baseCommit,
+            files: expected.files,
+            policyVersion: expected.policyVersion,
+            analyzerVersion: expected.analyzerVersion,
+            changeFingerprint: expected.changeFingerprint,
+          });
+          if (!recheck.current) {
+            throw new SlotReservationError('SNAPSHOT_STALE',
+              `ImpactSnapshot ${row.id} is no longer the current assessment of Task`
+              + ` ${input.taskId}: ${recheck.reasonCodes.join(', ')}`
+              + ` (${recheck.differing.join(', ')} differ); nothing was reserved`,
+              { code: 'SNAPSHOT_STALE', snapshotId: row.id, taskId: input.taskId,
+                reasonCodes: recheck.reasonCodes, differing: recheck.differing,
+                assessed: recheck.assessed, observed: recheck.observed });
+          }
         }
         const existing = database.query<{ id: string; state: SlotReservationState }, [string]>(`
           SELECT id,state FROM execution_slot_reservations
@@ -10588,6 +10722,94 @@ function mapSlotReservationRow(row: SlotReservationRow): ExecutionSlotReservatio
     releaseObservation: row.release_observation,
     detail: row.detail,
   };
+}
+
+/**
+ * The six-component generation of a stored snapshot row. Building it here (rather than rehydrating the
+ * whole snapshot) keeps the reservation recheck independent of the fields the reuse key does not
+ * contain — a snapshot's `complete` flag or evidence cannot make it current.
+ */
+function slotSnapshotGenerationFromRow(row: ImpactSnapshotRow): ImpactSnapshotGeneration {
+  return {
+    taskId: row.task_id,
+    revisionId: row.revision_id,
+    baseCommit: row.base_commit,
+    analyzerVersion: row.analyzer_version,
+    policyVersion: row.policy_version,
+    changeFingerprint: row.change_fingerprint,
+    caseMode: row.case_mode,
+    files: JSON.parse(row.files_json) as readonly string[],
+  };
+}
+
+/**
+ * A refusal the generation judgment cannot express: the *shape* of the observation no longer matches
+ * the Task (the worktree it was made in is gone, or one appeared where the prediction assumed none).
+ * It reports the same facts as {@link slotSnapshotGenerationRecheck} — the recorded generation, the
+ * observed one, and which component moved — so a caller reads one shape either way.
+ */
+function slotSnapshotStaleRefusal(input: {
+  readonly row: ImpactSnapshotRow;
+  readonly taskId: string;
+  readonly currentRevisionId: string;
+  readonly reasonCodes: readonly string[];
+  readonly differing: readonly string[];
+  readonly observedBaseCommit: string | null;
+  readonly observedPolicyVersion: string;
+  readonly observedAnalyzerVersion: string;
+  readonly observedChangeFingerprint: string | null;
+  readonly observedPathCount: number;
+  readonly detail: string;
+}): SlotReservationError {
+  const files = JSON.parse(input.row.files_json) as readonly string[];
+  return new SlotReservationError('SNAPSHOT_STALE', `${input.detail}; nothing was reserved`, {
+    code: 'SNAPSHOT_STALE',
+    snapshotId: input.row.id,
+    taskId: input.taskId,
+    reasonCodes: input.reasonCodes,
+    differing: input.differing,
+    assessed: { taskId: input.row.task_id, revisionId: input.row.revision_id,
+      baseCommit: input.row.base_commit, analyzerVersion: input.row.analyzer_version,
+      policyVersion: input.row.policy_version, changeFingerprint: input.row.change_fingerprint,
+      pathCount: files.length },
+    observed: { taskId: input.taskId, revisionId: input.currentRevisionId,
+      baseCommit: input.observedBaseCommit, analyzerVersion: input.observedAnalyzerVersion,
+      policyVersion: input.observedPolicyVersion,
+      changeFingerprint: input.observedChangeFingerprint,
+      pathCount: input.observedPathCount },
+  });
+}
+
+/**
+ * Applies the analyzer's own generation judgment to a stored row, with the facts the reservation
+ * transaction re-read (`currentRevisionId`, the live worktree baseline) and the facts the caller
+ * observed from Git (the change set, the mapping version, the analyzer version).
+ *
+ * The change-set comparison is the *exact path set*, which is how E1 itself decides reuse; the
+ * fingerprint is carried as evidence only. A fingerprint also covers file contents and `HEAD`, so
+ * requiring it to be equal would refuse a snapshot the analyzer still considers current — a Task
+ * whose diff changed only in content would never be reservable.
+ */
+function slotSnapshotGenerationRecheck(input: {
+  readonly row: ImpactSnapshotRow;
+  readonly currentRevisionId: string;
+  readonly baseCommit: string;
+  readonly files: readonly string[];
+  readonly policyVersion: string;
+  readonly analyzerVersion: string;
+  readonly changeFingerprint: string | null;
+}): ImpactSnapshotRecheck {
+  return recheckImpactSnapshotGeneration({
+    generation: slotSnapshotGenerationFromRow(input.row),
+    observedFiles: input.files,
+    context: {
+      baseCommit: input.baseCommit,
+      policyVersion: input.policyVersion,
+      analyzerVersion: input.analyzerVersion,
+    },
+    currentRevisionId: input.currentRevisionId,
+    observedChangeFingerprint: input.changeFingerprint,
+  });
 }
 
 /**

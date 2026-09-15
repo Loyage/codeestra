@@ -7,7 +7,8 @@ import {
   type SlotReservationReconcileOutcomeView,
   type SlotReservationReconcileReport,
 } from '@codeestra/contracts';
-import { readLocalRefCommit } from '@codeestra/git';
+import { changeSetPaths, inspectChangeSet, readLocalRefCommit } from '@codeestra/git';
+import { impactAnalyzerVersion } from '@codeestra/domain';
 import {
   Phase1Database,
   SlotReservationError,
@@ -15,7 +16,10 @@ import {
   slotDependencyFingerprint,
   type ExecutionSlotReservationRecord,
   type SlotReservationAcquireInput,
+  type SlotSnapshotRecheckInput,
+  type TrustedProject,
 } from '@codeestra/storage';
+import { impactPolicyVersionKey, inspectImpactPolicy } from './impact-analysis-service.js';
 import { isProcessRunning, readProcessStartToken } from './lifecycle.js';
 import { assertDependenciesSatisfied } from './scheduler.js';
 
@@ -37,6 +41,14 @@ import { assertDependenciesSatisfied } from './scheduler.js';
  * - **It never releases on a timeout.** No heartbeat, no waiting duration and no disappearing client
  *   frees a slot. Release is explicit and audited, or it is the reconcile's decision after a holder
  *   was *proven* gone, and both are appended to the reservation's history.
+ * - **It does not reserve on a stale assessment.** A reservation names the ImpactSnapshot it was
+ *   assessed against, and the generation is rechecked: the mapping version, analyzer version and
+ *   observed change set are read again here from Git, and the reused-row verdict (`isSnapshotCurrent`,
+ *   ADR-0031 §6.3) plus the persisted facts are re-applied inside the reservation's immediate
+ *   transaction. "SAFE a moment ago" is therefore not silently read as "SAFE now": a revision, a
+ *   baseline, a mapping, an analyzer or a change set that moved is a refusal with no reservation row.
+ *   The recheck decides *freshness*, never the verdict — a re-analysis is the engine's job, not this
+ *   service's (scheduler.md §2, §7.6).
  */
 export type SlotHolderObservationState = 'HOLDER_STOPPED' | 'HOLDER_PROCESS_ID_REUSED'
   | 'HOLDER_STILL_RUNNING' | 'HOLDER_OWNERSHIP_UNVERIFIABLE' | 'PROCESS_IDENTITY_MISSING';
@@ -162,9 +174,17 @@ export class SlotReservationService {
    *
    * The order is the one scheduler.md §2 prescribes: dependencies first (a Task that is waiting for an
    * upstream is `BLOCKED`, not capacity-waiting), then the compare-and-swap on the revision the caller
-   * assessed, then the reservation itself — which re-checks everything inside one immediate
-   * transaction. A wait is returned as a *value*, never as an error: it is a fact about capacity, and
-   * the reason codes are the ones a scheduler surfaces as waiting.
+   * assessed, then the cached snapshot generation, then the reservation itself — which re-checks
+   * everything inside one immediate transaction. A wait is returned as a *value*, never as an error: it
+   * is a fact about capacity, and the reason codes are the ones a scheduler surfaces as waiting. A
+   * refusal is an error, and a refusal writes nothing at all — not even a command receipt, so the same
+   * command can be retried once the facts are current.
+   *
+   * When the caller names an ImpactSnapshot, this is also where the generation is rechecked: the
+   * mapping version, analyzer version and observed change set are read again here, and the persisted
+   * row, the Task revision and the worktree baseline are re-read inside the write transaction. A
+   * generation that moved is `SNAPSHOT_STALE` with the components that moved, and one that cannot be
+   * confirmed at all is `SNAPSHOT_UNAVAILABLE`; neither is ever treated as "still current".
    */
   async acquire(input: {
     readonly projectId: string;
@@ -174,6 +194,11 @@ export class SlotReservationService {
     readonly adapterId: string;
     readonly actor: string;
     readonly commandId: string;
+    /**
+     * The ImpactSnapshot this acquisition was assessed against. Absent or `null` means the caller
+     * asserts no impact assessment at all (the shape of an explicitly released `UNKNOWN`, ADR-0030
+     * D05); it never means "the snapshot is valid".
+     */
     readonly impactSnapshotId?: string | null;
   }): Promise<SlotReservationAcquisitionView> {
     // Dependencies first, and through the scheduler's own guard: the verdict and the "just became
@@ -201,6 +226,18 @@ export class SlotReservationService {
     const assessedDevCommit = await readLocalRefCommit({
       repositoryRoot: project.repoRoot, ref: project.devRef,
     }).catch(() => null);
+    // Anything the caller assessed against a cached snapshot generation is rechecked against the
+    // generation observed *now*: the mapping version, the analyzer version and the Task's change set
+    // (or, before a worktree exists, its empty observation against the development baseline) are read
+    // here, and the persisted facts are re-read again inside the write transaction below.
+    const snapshotRecheck = input.impactSnapshotId === undefined || input.impactSnapshotId === null
+      ? null
+      : await this.#observeSnapshotGeneration({
+        project,
+        projectId: input.projectId,
+        taskId: input.taskId,
+        snapshotId: input.impactSnapshotId,
+      });
     const reservationId = this.#randomUUID();
     const acquisition: SlotReservationAcquireInput = {
       projectId: input.projectId,
@@ -211,6 +248,7 @@ export class SlotReservationService {
       adapterId: input.adapterId,
       workspaceId: null,
       impactSnapshotId: input.impactSnapshotId ?? null,
+      snapshotRecheck,
       dependencyFingerprint,
       assessedDevCommit,
       holder: {
@@ -246,6 +284,84 @@ export class SlotReservationService {
       wait,
       reservation: null,
       holderEvidence,
+    };
+  }
+
+  /**
+   * The generation of the ImpactSnapshot the caller named, as the facts are *now*.
+   *
+   * This is the impure half of the recheck (`scheduler.md` §2 "recheck cached snapshot generations"):
+   * the mapping version comes from the project `main` ref, the change set from the Task's own owned
+   * worktree (or the empty pre-start observation against the development ref), and the analyzer
+   * version from this running binary. The judgment itself stays in the analyzer's pure
+   * `recheckImpactSnapshotGeneration`, applied again inside the reservation transaction — so the
+   * service never invents a rule the analyzer does not have.
+   *
+   * Every branch that cannot observe these facts refuses instead of assuming the snapshot is current:
+   * "the mapping could not be read" and "the worktree could not be inspected" are not evidence that a
+   * prediction still holds, and an unreadable snapshot is never treated as a valid one.
+   */
+  async #observeSnapshotGeneration(input: {
+    readonly project: TrustedProject;
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly snapshotId: string;
+  }): Promise<SlotSnapshotRecheckInput> {
+    const refuse = (detail: string,
+      extra: Readonly<Record<string, unknown>> = {}): SlotReservationError =>
+      new SlotReservationError('SNAPSHOT_UNAVAILABLE',
+        `ImpactSnapshot ${input.snapshotId} cannot be confirmed as current: ${detail}; nothing was`
+        + ' reserved', { code: 'SNAPSHOT_UNAVAILABLE', snapshotId: input.snapshotId,
+        taskId: input.taskId, ...extra });
+    let policyVersion: string;
+    try {
+      policyVersion = impactPolicyVersionKey(await inspectImpactPolicy({
+        repositoryRoot: input.project.repoRoot, mainRef: input.project.mainRef,
+      }));
+    } catch (error) {
+      throw refuse(`the mapping at ${input.project.mainRef} could not be read (${
+        error instanceof Error ? error.message : String(error)})`);
+    }
+    const workspace = this.#storage.getImpactCandidateTask(input.projectId, input.taskId);
+    if (workspace !== null && workspace.workspacePath !== null
+      && workspace.workspaceBaseCommit !== null) {
+      let changeSet: Awaited<ReturnType<typeof inspectChangeSet>>;
+      try {
+        changeSet = await inspectChangeSet({
+          workspacePath: workspace.workspacePath, baseCommit: workspace.workspaceBaseCommit,
+        });
+      } catch (error) {
+        throw refuse(`the change set of worktree ${workspace.workspacePath} could not be inspected`
+          + ` (${error instanceof Error ? error.message : String(error)})`,
+        { workspacePath: workspace.workspacePath });
+      }
+      return {
+        snapshotId: input.snapshotId,
+        files: changeSetPaths(changeSet),
+        policyVersion,
+        analyzerVersion: impactAnalyzerVersion,
+        baselineSource: 'WORKSPACE',
+        baseCommit: workspace.workspaceBaseCommit,
+        changeFingerprint: changeSet.treeFingerprint,
+      };
+    }
+    // No worktree yet: the observation a pre-start prediction was made from is "this Task has not
+    // changed anything, against the current development baseline".
+    const baseCommit = await readLocalRefCommit({
+      repositoryRoot: input.project.repoRoot, ref: input.project.devRef,
+    }).catch(() => null);
+    if (baseCommit === null) {
+      throw refuse(`the ${input.project.devRef} baseline could not be read, so the empty observation`
+        + ' this Task was assessed from cannot be reproduced');
+    }
+    return {
+      snapshotId: input.snapshotId,
+      files: Object.freeze([]),
+      policyVersion,
+      analyzerVersion: impactAnalyzerVersion,
+      baselineSource: 'DEV_REF',
+      baseCommit,
+      changeFingerprint: null,
     };
   }
 

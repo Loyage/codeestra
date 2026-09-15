@@ -7,6 +7,7 @@ export type {
   AdapterSlotLimitRecord, ExecutionSlotAcquisition, ExecutionSlotReservationRecord,
   ProjectCapacityChange, ProjectCapacityClearance, ProjectCapacityRecord,
   SlotHolderObservationKind, SlotOccupancy, SlotOccupant, SlotReservationAcquireInput,
+  SlotSnapshotRecheckInput,
   SlotReservationDetail, SlotReservationEventKind, SlotReservationReconcileOutcome,
   SlotReservationReleaseKind, SlotReservationReleaseResult, SlotReservationState,
   CommandResult, ConfirmedVerificationPolicy, ExecutionError, ExecutionLifecycleState,
