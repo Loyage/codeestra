@@ -3,6 +3,7 @@
 > **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
 > 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> 权限模式的命令拼写由 FOUNDATION-098 同步为 `settings permission get|set`（ADR-0064：顶层 `permission` 已移除；§19 另新增 `settings list` 总览）。
 > 「全局暂停」一节的稳定码由 FOUNDATION-097 新增（ADR-0061 D08/D09）；`task purge` 的拒绝码一节由 FOUNDATION-090 新增（ADR-0058）；冲突判定与 `--feature` 的拒绝码由
 > FOUNDATION-091 新增/改写（ADR-0059）。
 > 「报 `DEV_REPO_REQUIRED`」一节由 FOUNDATION-093 第三轮重写（ADR-0060 修订）。
@@ -446,7 +447,7 @@ recorded path is occupied by something Git does not register
 切到 STRICT 就恢复确认：
 
 ```sh
-bun run codeestra permission set strict
+bun run codeestra settings permission set strict
 bun run codeestra project trust /path/to/repo    # 重新确认当前策略 digest
 ```
 

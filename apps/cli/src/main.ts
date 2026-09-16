@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOptions,
   maxQuestionnaireQuestions,
   maxSlotReservationReadLimit,
@@ -30,6 +30,7 @@ import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOpt
   isValidUiSettingValue,
   uiSettingKeysAsText,
   uiSettingValuesAsText,
+  type SettingsListView,
   type UiSettingKey } from '@codeestra/contracts';
 /**
  * The Agent configuration view the Runtime returns for `agent.config.get|set|clear`. Only the fields
@@ -1166,6 +1167,30 @@ function printAgentPluginSelection(view: AgentConfigurationView): void {
   console.log('Applies to the next Agent Session; the effective list is recorded with the Execution.');
 }
 
+/**
+ * The settings overview as a person reads it: one line per setting with its effective value, whether
+ * that value is this Runtime home's own choice or the product default, the values it accepts, and
+ * where it is stored. `--json` prints the Runtime's payload verbatim instead — that payload is the
+ * complete record, including what a change to each setting applies to.
+ */
+function printSettingsList(view: SettingsListView): void {
+  console.log(`Runtime settings (${view.home})`);
+  const keyWidth = Math.max(...view.settings.map((entry) => entry.key.length));
+  const valueWidth = Math.max(...view.settings.map((entry) => String(entry.value).length));
+  for (const entry of view.settings) {
+    const accepted = entry.values === null
+      ? `${String(entry.range?.min)}-${String(entry.range?.max)}`
+      : entry.values.join('|');
+    const stored = entry.store === 'RUNTIME_FILE' && entry.file !== null
+      ? basename(entry.file) : 'Runtime database';
+    console.log(`  ${entry.key.padEnd(keyWidth)}  ${String(entry.value).padEnd(valueWidth)}`
+      + `  ${entry.source === 'RUNTIME' ? 'set    ' : 'default'}`
+      + `  accepted ${accepted} · default ${String(entry.default)} · ${stored}`);
+  }
+  console.log(`  ${view.appliesTo}`);
+  console.log('  `settings list --json` prints the full record, including what each change applies to.');
+}
+
 function usage(): never {
   console.error(`Usage:
   bun run codeestra status
@@ -1175,8 +1200,6 @@ function usage(): never {
     # the folder's checked out branch and the dev-only commands refuse until one is recorded.
   bun run codeestra ui [--no-open]
   bun run codeestra stop [--wait <seconds>]
-  bun run codeestra permission get
-  bun run codeestra permission set <full|strict>
   bun run codeestra agent config get [--project <project-id>] [--adapter <id>]
   bun run codeestra agent config set [--project <project-id>] [--adapter <id>]
     [--provider <name>] [--model <id>] [--thinking <off|minimal|low|medium|high|xhigh|max>]
@@ -1385,6 +1408,9 @@ function usage(): never {
     [--text <question>=<text>]… [--cancel]
   bun run codeestra attention resolve <project-id> <attention-id> --dismiss [--note <text>] [--json]
   bun run codeestra attention resolve <project-id> <attention-id> --answer <text> [--note <text>] [--json]
+  bun run codeestra settings list [--json]
+  bun run codeestra settings permission get [--json]
+  bun run codeestra settings permission set <full|strict> [--json]
   bun run codeestra settings prose-question-attention [auto|record-only|off] [--json]
   bun run codeestra settings auto-reclaim [on|off] [--json]
   bun run codeestra settings ui list [--json]
@@ -1452,7 +1478,24 @@ about intent) and puts the Task in WAITING_FOR_USER; --dismiss records a false a
 records the user's own text. Neither resumes the conversation and neither is a TaskRevision: an
 answer is a statement about this wait, not an amendment of the specification. Delivering one through
 attention answer is refused with PROSE_QUESTION_RESOLUTION_REQUIRED, because there is no provider
-dialog to write to. settings prose-question-attention reads or writes the global switch that decides
+dialog to write to.
+
+settings list is the overview of every Runtime-level setting (ADR-0064): the permission mode, the
+prose-question switch, the five interface-effect preferences and the one concurrency limit, each
+with its effective value, its product default, whether it is this Runtime home's own choice or the
+product default, the values it accepts and where it is stored. It answers "what settings exist and
+what are they set to" from the Runtime itself, and every entry comes from the same read its own
+command uses, so the list cannot disagree with settings permission get, settings
+prose-question-attention, settings ui get or scheduler capacity get. Human-readable by default;
+--json prints the whole record, including what a change to each setting applies to.
+
+settings permission reads or writes the permission mode (ADR-0011). It is a setting like any other:
+get reports the mode in force with the product default, set accepts a case-insensitive full|strict,
+needs no confirmation, and writes $CODEESTRA_HOME/permission-mode.json (0600, atomic replacement).
+The mode applies to new operations and new Agent sessions; a Session already running keeps the mode
+it started with.
+
+settings prose-question-attention reads or writes the global switch that decides
 whether such a completion becomes a wait at all (auto, the default; record-only; off). Changing it
 needs no confirmation and never rewrites a wait that was already recorded.
 
@@ -2404,13 +2447,6 @@ try {
       });
       if (!exit.exited) process.exit(1);
     }
-  } else if (group === 'permission' && action === 'get'
-    && firstArgument === undefined && remainingArguments.length === 0) {
-    print(await call({ command: 'permission.get' }));
-  } else if (group === 'permission' && action === 'set') {
-    if (firstArgument === undefined || remainingArguments.length !== 0
-      || !['full', 'strict'].includes(firstArgument.toLowerCase())) usage();
-    print(await call({ command: 'permission.set', mode: firstArgument.toUpperCase() as 'FULL' | 'STRICT' }));
   } else if (group === 'agent' && action === 'config') {
     // Agent configuration is per Adapter and per scope. Omitting --project means the global
     // default; supplying it means that project's override. Every field is optional, so `set`
@@ -3653,6 +3689,37 @@ try {
       ...(answer === undefined ? {} : { text: answer }),
       ...(note === undefined ? {} : { note }),
     }));
+  } else if (group === 'settings' && action === 'list') {
+    // The settings overview (ADR-0064): one read that enumerates every Runtime-level setting, so
+    // "which settings exist and what are they set to" is answered by the Runtime rather than by a
+    // list this client maintains. Human-readable by default — a person asks this question — and
+    // `--json` prints the Runtime's payload verbatim for a script.
+    const tokens = [firstArgument, ...remainingArguments]
+      .filter((token): token is string => token !== undefined);
+    const json = tokens.includes('--json');
+    if (tokens.length > 1 || tokens.some((token) => token !== '--json')) usage();
+    const view = await call({ command: 'settings.list' }) as SettingsListView;
+    if (json) print(view);
+    else printSettingsList(view);
+  } else if (group === 'settings' && action === 'permission') {
+    // The permission mode is a setting (ADR-0011 / ADR-0064), so it is read and written where the
+    // other Runtime-level switches are. Only the CLI spelling moved: the Runtime command, its file
+    // (`permission-mode.json`) and its zero-confirmation semantics are unchanged.
+    const tokens = [firstArgument, ...remainingArguments]
+      .filter((token): token is string => token !== undefined && token !== '--json');
+    if (tokens.some((token) => token.startsWith('--'))) usage();
+    const [subcommand, mode, ...extra] = tokens;
+    if (extra.length !== 0) usage();
+    if (subcommand === 'get') {
+      if (mode !== undefined) usage();
+      print(await call({ command: 'permission.get' }));
+    } else if (subcommand === 'set') {
+      if (mode === undefined || !['full', 'strict'].includes(mode.toLowerCase())) usage();
+      print(await call({
+        command: 'permission.set',
+        mode: mode.toUpperCase() as 'FULL' | 'STRICT',
+      }));
+    } else usage();
   } else if (group === 'settings' && action === 'prose-question-attention') {
     // The switch that decides whether a prose question becomes a wait. Reading and writing are one
     // command because the setting has exactly three values and no confirmation: `auto` (default),

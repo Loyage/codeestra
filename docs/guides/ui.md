@@ -3,6 +3,7 @@
 > **适用版本** `dev@de03448` + 本格分支 `Loyage/glc-pause-ui`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
 > 版本会前进：`dev@4667d32` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> 权限模式的命令拼写由 FOUNDATION-098 同步为 `settings permission get|set`（ADR-0064：顶层 `permission` 已移除；§19 另新增 `settings list` 总览）。
 > 项目接入的「dev 基线」一行小字、依赖原因码文案与影响投影的「项目基线」一行由 FOUNDATION-093 第三轮同步（ADR-0060 修订）；其余内容沿用 FOUNDATION-091 的校对基线。
 > §1.2.1 的「全局负载控制条」与 §4.2 的容量卡改名由 FOUNDATION-097 新增/改写（ADR-0061 D09）。
 > 任务工作台的「永久删除」块由 FOUNDATION-090 新增（ADR-0058）；**声明的功能一行、`SAME_UNFINISHED_FEATURE`
@@ -113,7 +114,7 @@ Web UI 是**本地 Runtime 的便利前端**，不是另一个产品：
 | 元素 | 文案 | 说明 |
 |---|---|---|
 | 外观 | 标签 `外观` + 下拉框 `aria-label="界面主题"` | **改状态**：写入 Runtime 的 `theme` 设置（与「设置」标签页的同一项是同一个值） |
-| 权限模式 | `FULL · 全权限，零确认` 或 `STRICT · 严格模式` | **只读**：显示当前模式，**界面不提供切换**（切换用 CLI `permission set`） |
+| 权限模式 | `FULL · 全权限，零确认` 或 `STRICT · 严格模式` | **只读**：显示当前模式，**界面不提供切换**（切换用 CLI `settings permission set`） |
 | 事件流 | `● 事件流 · 实时` / `正在重连（第 N 次）` / `连接中` / `已停止` | **只读**：断线自动重连，用上次的**排他游标**续订，所以不会重复也不会漏 |
 
 > 图：`13-narrow-layout.png` — 窄屏（≤850px）下的外壳：标题栏保持不动、导航变成横向一条、
@@ -1099,7 +1100,7 @@ Runtime 后依然生效，命令行（codeestra settings ui …）读写的是�
 | 设置 | 五个下拉框（改动时）、`恢复默认`、`全部恢复默认` | `settings.ui.set` / `settings.ui.reset` |
 
 **注意 `刷新` 不是 `重启`**：界面**不提供**停止或重启 Runtime 的控件（那是 CLI `stop` / `status`），
-也**不提供**权限模式切换（那是 CLI `permission set`）。
+也**不提供**权限模式切换（那是 CLI `settings permission set`）。
 
 ---
 
@@ -1122,7 +1123,7 @@ Runtime 后依然生效，命令行（codeestra settings ui …）读写的是�
 | `session handoff writer acquire/release`、`terminal read` | 界面终端面板提供附加/输入/交接的主要动作，完整控制面在 CLI |
 | `scheduler reservations acquire/release/prepare-workspace` 的获取与准备 | 界面提供容量设置、预留查看、释放与 reconcile；预留的获取/准备控制面在 CLI |
 | `agent plugins select` 的 flag 形式（`--extension` / `--clear`） | 界面提供等价的勾选与「清除选择」 |
-| `stop` / `permission set` / `status` | 界面只显示权限模式与事件流状态；停止与切换用 CLI |
+| `stop` / `settings permission set` / `status` | 界面只显示权限模式与事件流状态；停止与切换用 CLI |
 | `events list` | 界面只做实时订阅 |
 
 `events.subscribe` 与 `runtime.ui` 这两个命令在 HTTP 上会被明确拒绝（`NOT_AVAILABLE_OVER_HTTP`）：

@@ -436,7 +436,7 @@ describe('codeestra promotion', () => {
     const { environment, repository, projectId, mainCommit, resultCommit, batchId, remote } =
       integrated;
     try {
-      expect((await cli(['permission', 'set', 'strict'], environment)).exitCode).toBe(0);
+      expect((await cli(['settings', 'permission', 'set', 'strict'], environment)).exitCode).toBe(0);
       const plan = JSON.parse((await cli(['promotion', 'prepare', projectId, batchId, resultCommit,
         mainCommit], environment)).stdout) as PromotionPayload;
       // STRICT without an approval of the exact triple: refused before anything is pushed.
@@ -467,7 +467,7 @@ describe('codeestra promotion', () => {
           remoteDevCommit: resultCommit });
       expect(await git(repository, ['rev-parse', 'refs/heads/main'])).toBe(mainCommit);
     } finally {
-      await cli(['permission', 'set', 'full'], environment);
+      await cli(['settings', 'permission', 'set', 'full'], environment);
       await cli(['stop'], environment);
     }
   }, 300_000);

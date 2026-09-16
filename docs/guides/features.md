@@ -9,6 +9,8 @@
 > 「任务」表的「列出任务」与「状态投影」两行，以及新增的「Agent 运行结局与最后输出」一行，
 > 由用户任务 `Loyage/simplize_task_ui`（2026-09-16）同步（无新命令：只用已有的 `task list` / `task status` 字段）。
 > 「接入与项目」表的 dev 事实来源一行由 FOUNDATION-093 第三轮同步（ADR-0060 修订）；
+> 「设置」表新增「设置总览」一行，「权限模式」一行的 CLI 入口改为 `settings permission …`
+> 并链接 0064（FOUNDATION-098 / ADR-0064：`settings list` 总览，权限模式移入 `settings`）。
 > 「调度、容量与冲突」的容量与上限、槽位预留两行由 **FOUNDATION-096** 改写（ADR-0061：唯一 Runtime 全局上限），
 > 同一表的「全局暂停」一行由 **FOUNDATION-097** 从「尚未实现」改为实现事实（ADR-0061 D04–D10：持久屏障与
 > Provider 主进程冻结，Pi 为 `SUPPORTED`、Codex/Claude 为 `REQUIRES_VALIDATION`）；
@@ -67,7 +69,8 @@
 | 原生终端接管 | 单一 writer lease + 安全点 + 准入决策：attach 读投影终端流、detach 保持运行、release 写释放字节并验证 provider 已退出且会话文件仍在 | `session handoff status/request/cancel`、`writer acquire/release`、`admit/attach/detach/release`、`terminal read/write` | 任务详情 → 原生终端与会话交接 | [0010](../decisions/0010-live-agent-terminal-takeover.md)、[0023](../decisions/0023-strict-permission-attention-and-session-writer-lease.md)、[0026](../decisions/0026-native-terminal-pty-transport.md) |
 | 结构化提问 | Agent 用 `ask_user_question` 一次提 1–4 题（每题 2–4 个可选项、可多选、可用自己的话答）；一份问卷 = 一条 Attention = 一次 answer | `attention list`、`attention answer … --choose/--text/--cancel` | 待处理（单选/多选 + 自由文本） | [0014](../decisions/0014-agent-structured-question-channel.md) |
 | 散文提问等待 | 识别「没用工具、正文提问并结束轮次」，记成一条独立 Attention 与 `WAITING_FOR_USER`，并给出明确退出方式 | `attention resolve … --answer/--dismiss`、`settings prose-question-attention` | —（CLI-only） | [0043](../decisions/0043-prose-question-attention-escalation.md) |
-| 权限模式 | 默认 FULL 零确认；可无确认切 STRICT 恢复旧门禁（工具逐次审批、两步成果 commit、提升批准） | `permission get`、`permission set <full\|strict>` | 界面显示当前模式；STRICT 下出现 TRUST 输入与二次确认 | [0011](../decisions/0011-default-full-permission-mode.md)、[0023](../decisions/0023-strict-permission-attention-and-session-writer-lease.md) |
+| 设置总览 | 一条只读命令列出全部九项 Runtime 级设置（权限模式 / 散文开关 / 自动回收 / 五个界面键 / 并发上限），每项给出生效值、产品默认、取值、是否显式设置与存储位置；每项都由它自己那条命令的同一次读取填充，因此不会与专命令读出不一致 | `settings list [--json]` | —（CLI-only） | [0064](../decisions/0064-settings-list-and-permission-as-a-setting.md) |
+| 权限模式 | 默认 FULL 零确认；可无确认切 STRICT 恢复旧门禁（工具逐次审批、两步成果 commit、提升批准） | `settings permission get`、`settings permission set <full\|strict>` | 界面显示当前模式；STRICT 下出现 TRUST 输入与二次确认 | [0011](../decisions/0011-default-full-permission-mode.md)、[0023](../decisions/0023-strict-permission-attention-and-session-writer-lease.md)、[0064](../decisions/0064-settings-list-and-permission-as-a-setting.md) |
 | Agent 配置 | 持久化 provider/model/thinking，分全局默认与每项目覆盖；逐字段按 `环境变量 > 项目 > 全局 > Adapter 默认` 解析；只影响新 Session | `agent config get/set/clear [--project <id>] [--adapter <id>] [--provider/--model/--thinking/--unset]` | Agent 设置标签页（`当前生效值` 表与 `编辑并保存`） | [0012](../decisions/0012-agent-configuration-scopes.md) |
 | Agent 插件选择 | 选 Pi 的四类资源（extensions / skills / prompt templates / themes）；选择是**一个整体字段**（项目整份替换全局，不逐项合并）；生效值连同来源层与第三方扩展风险写进 Execution | `agent plugins list`、`agent plugins select [--extension/--skill/--prompt-template/--theme <path>]… [--clear]` | Agent 设置标签页（`插件候选` 与 `清除选择`） | [0044](../decisions/0044-agent-plugin-selection-and-detection.md) |
 | 多 Adapter | 注册 `pi`（默认）、`codex`、`claude`；每次运行绑定一个 Agent，换 Adapter 是新建 Execution | `task run/resume/retry --adapter <id>` | 任务详情 → 启动 Agent / 继续（`Agent` 下拉框，在 `READY` 与 `PAUSED` 时出现）；重试入口另有自己的 Adapter 下拉框，默认「沿用该任务上一次运行的 Adapter」，选项来自 `runtime.ping` 的已注册列表 | [0029](../decisions/0029-codex-adapter-transport-and-capabilities.md)、[0040](../decisions/0040-claude-code-adapter-transport-and-capabilities.md) |
@@ -131,7 +134,7 @@
 | 界面效果设置 | 五个键（`theme`/`density`/`fontSize`/`motion`/`timeDisplay`）存在 Runtime home 的 `ui-settings.json`，CLI 与界面读写同一份值；换浏览器、清缓存、重启 Runtime 后仍生效 | `settings ui list/get/set/reset` | 设置标签页（`界面效果`）+ 侧栏底部「外观」下拉框 | [0045](../decisions/0045-global-ui-settings.md) |
 | 并发上限设置 | 全局并发上限也可以从设置面读与改：`settings concurrency` 与 `scheduler capacity` 是**同一事实**（同一 `runtime_capacity_settings` 行、同一条事件），改完立刻生效且零确认 | `settings concurrency get/set --limit/reset` | —（CLI-only；界面容量卡仍显示调度面的同一数字） | [0061](../decisions/0061-runtime-global-load-control.md) D01/D02 |
 | Web UI | 本地 `127.0.0.1` HTTP + SSE，一次性内存 token，只走 `/api/command` 与 `/api/events` | `ui [--no-open]` | 全部界面 | [0007](../decisions/0007-local-web-ui-entry.md)、[0015](../decisions/0015-task-workbench-and-themes.md)、[0017](../decisions/0017-new-task-dock.md)、[0034](../decisions/0034-compact-task-workbench.md) |
-| Runtime 生命周期 | 单实例、自动拉起、两阶段 stop 与 ownership 报告 | `status`、`stop [--wait <s>]`、`permission get` | 侧栏底部的权限模式与事件流状态指示（**界面不提供停止/重启/切权限模式**） | [0025](../decisions/0025-runtime-lifecycle-stop-and-single-instance.md) |
+| Runtime 生命周期 | 单实例、自动拉起、两阶段 stop 与 ownership 报告 | `status`、`stop [--wait <s>]`、`settings permission get` | 侧栏底部的权限模式与事件流状态指示（**界面不提供停止/重启/切权限模式**） | [0025](../decisions/0025-runtime-lifecycle-stop-and-single-instance.md)、[0064](../decisions/0064-settings-list-and-permission-as-a-setting.md) |
 | 界面主题 | 亮/暗主题切换（不改任何业务语义；ADR-0045 后由 Runtime 持久化） | `settings ui set theme system\|light\|dark` | 侧栏底部「外观」下拉框（登录前的令牌表单里还有一个只预览、不写入的） | [0015](../decisions/0015-task-workbench-and-themes.md)、[0045](../decisions/0045-global-ui-settings.md) |
 | HTTP / SSE 面 | 与 socket 传输**同一 Zod 请求 schema**；`events.subscribe` 与 `runtime.ui` 在 HTTP 上被拒（`NOT_AVAILABLE_OVER_HTTP`） | `POST /api/command`、`GET /api/events` | 界面内部使用 | [0007](../decisions/0007-local-web-ui-entry.md)、[0008](../decisions/0008-efficiency-first-service-form.md) |
 

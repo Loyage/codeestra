@@ -3,6 +3,7 @@
 > **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
 > 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> 权限模式的命令拼写由 FOUNDATION-098 同步为 `settings permission get|set`（ADR-0064：顶层 `permission` 已移除；§19 另新增 `settings list` 总览）。
 > 拆分说明（ADR-0063）：原来这一篇 1322 行的参考已**按功能拆成 [`cli/`](./cli/README.md) 下的九篇**。
 > 正文逐行搬移、一句未改；本次**未重新核对源码**，所以最后校对日期不变，逐节的校对注随各节搬到对应文件。
 
@@ -17,7 +18,7 @@
 | 旧章节 | 现在在 |
 |---|---|
 | §0 通用约定（连接 / 自动启动 / 退出码 / 环境变量） | [cli/README.md](./cli/README.md) |
-| §1 Runtime 生命周期与权限（`status`/`stop`/`permission`/`ui`/`open`） | [cli/runtime.md](./cli/runtime.md) |
+| §1 Runtime 生命周期（`status`/`stop`/`ui`/`open`；权限模式已移入 §19） | [cli/runtime.md](./cli/runtime.md) |
 | §2 `agent config` | [cli/runtime.md](./cli/runtime.md) |
 | §3 `project`（含 `project impact *`、`project knowledge *`） | [cli/project.md](./cli/project.md) |
 | §4 `task`：生命周期（`create` 到 `purge`/`status`）与 `--feature` | [cli/task-lifecycle.md](./cli/task-lifecycle.md) |
@@ -36,7 +37,7 @@
 | §16 `reclaim`（资源回收） | [cli/integration-dag-scheduler.md](./cli/integration-dag-scheduler.md) |
 | §17 `events`（订阅） | [cli/interface.md](./cli/interface.md) |
 | §18 `attention` | [cli/interface.md](./cli/interface.md) |
-| §19 `settings` | [cli/runtime.md](./cli/runtime.md) |
+| §19 `settings`（含 `settings permission`、`settings list`） | [cli/runtime.md](./cli/runtime.md) |
 | §20 HTTP / SSE 面（Web UI 用） | [cli/interface.md](./cli/interface.md) |
 | §21 其他只在源码里出现的东西 | [cli/interface.md](./cli/interface.md) |
 | 相关阅读 | [cli/README.md](./cli/README.md) |

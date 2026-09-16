@@ -241,7 +241,7 @@ async function fixture(options: { readonly strict?: boolean;
   };
   if (options.strict === true) {
     // STRICT is a live Runtime switch; the project trust then needs the explicit confirmation flag.
-    expect((await cli(['permission', 'set', 'strict'], environment)).exitCode).toBe(0);
+    expect((await cli(['settings', 'permission', 'set', 'strict'], environment)).exitCode).toBe(0);
   }
   const opened = await cli(['open', repository, '--dev-repo', devRepo, '--no-open',
     ...(options.strict === true ? ['--yes'] : [])], environment);
@@ -315,7 +315,7 @@ describe('codeestra task run --adapter codex', () => {
       const { environment, projectId, taskId, taskVersion, codexReportPath } =
         await fixture({ strict: true });
       // FULL would launch Codex with `approvalPolicy: never`; STRICT must ask.
-      expect((await cli(['permission', 'get'], environment)).stdout)
+      expect((await cli(['settings', 'permission', 'get'], environment)).stdout)
         .toContain('"mode": "STRICT"');
       const ran = await cli(['task', 'run', projectId, taskId, String(taskVersion), '--adapter', 'codex'],
         environment);
