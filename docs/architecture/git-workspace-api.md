@@ -70,14 +70,15 @@ interface IntegrationGitPort {
 
 ## 2. Task Workspace
 
-- prepare 以固定 dev SHA 为基线（ADR-0009；基线 ref 名由 `projects.dev_ref` 记录，ADR-0018），独立 `refs/heads/task/<task-id>` 与 Runtime 数据目录 `worktrees/<project-id>/<task-id>/`（ADR-0005）。ref/path 只使用校验后的内部 UUID，不把用户文本当 ref/path，也不在用户仓库根目录创建 worktree。
-- **这个基线 ref 在 dev clone 里解析**（ADR-0056）：`projects.dev_repo_path` 指向的第二个 clone 拥有长期 `dev` 分支，因此 Task worktree、Task branch、结果 commit 与集成都发生在那个 clone 的仓库里。`projects.repo_root`（稳定 main 检出）仍然拥有仓库身份与 `main` ref（判定策略、影响映射、提升的重启序列）。**两个 clone 各自拥有什么、哪些投影字段指向哪个仓库**见下表：
+- prepare 以**项目基线**的固定 SHA 为基线（ADR-0009 / ADR-0060），独立 `refs/heads/task/<task-id>` 与 Runtime 数据目录 `worktrees/<project-id>/<task-id>/`（ADR-0005）。ref/path 只使用校验后的内部 UUID，不把用户文本当 ref/path，也不在用户仓库根目录创建 worktree。
+- **基线 ref 有两种来源，由「有没有记 dev clone」分派**（ADR-0056 / ADR-0060）：有 dev clone 的项目在该 clone 里解析长期 `dev` 分支（Task worktree、Task branch、结果 commit 与集成都发生在那个 clone）；**没有** dev clone 的项目（managed）在**项目文件夹**（`projects.repo_root`）里取**建 workspace 时当前检出的分支**，把 ref 与 commit 一起固定进 `workspaces.base_ref`/`base_commit`（此后切分支不会移动已建 Task 的基线），`task run --base-ref <refs/heads/…>` 可以显式选一条本地分支。`projects.repo_root`（稳定 main 检出）仍然拥有仓库身份与 `main` ref（判定策略、影响映射、提升的重启序列）。**哪个根指向哪个仓库**见下表：
 
 | 根字段 / 事实 | 代表哪个仓库 | 谁消费它 |
 |---|---|---|
 | `TrustedProject.repoRoot` / `gitCommonDir` / `mainRef` | 稳定 main 检出 | 身份校验、`inspectVerificationPolicy`、`inspectImpactPolicy`、knowledge、提升的重启序列与 `main` 推回 |
-| `TrustedProject.devRepoPath` | dev clone | 所有 dev 事实的入口（下同） |
-| `WorkspacePreparationPlan.repoRoot` | **dev clone**（`gitCommonDir`/`mainRef` 仍是 main 检出的、与该计划无冲突的事实） | `prepareTaskWorkspace`、重启时 `reconcileWorkspacePreparations` 的 `reconcileWorkspace` |
+| `TrustedProject.devRepoPath` | dev clone，或 null（managed，ADR-0060） | dev 事实的入口；为空时 Task 基线改取项目文件夹的检出分支，dev-only 操作以 `DEV_REPO_REQUIRED` 拒绝 |
+| `WorkspacePreparationPlan.repoRoot` | **dev clone，或项目文件夹**（`COALESCE(dev_repo_path, repo_root)`，ADR-0060）（`gitCommonDir`/`mainRef` 仍是 main 检出的、与该计划无冲突的事实） | `prepareTaskWorkspace`、重启时 `reconcileWorkspacePreparations` 的 `reconcileWorkspace` |
+| `WorkspacePreparationPlan.devRef` | 该 Task 实际使用的基线 ref（`workspaces.base_ref`，回退到 v33 之前的 `projects.dev_ref`） | worktree 创建、回收重建、报告 |
 | `VerificationCandidates.repositoryRoot` | **dev clone**（被验证的 commit 是那里的对象） | 验证副本的创建、`testedCommit` 的 tree/计划文件读取 |
 | `VerificationCandidates.mainRepositoryRoot`（新增） | 稳定 main 检出 | 验证策略读取（ADR-0006：策略是 main ref 的事实） |
 | `DevFullSuiteCandidates.repositoryRoot` | **dev clone** | 全量证据的 detached 副本、候选 commit 的 tree、候选上的锁文件 |
@@ -85,8 +86,8 @@ interface IntegrationGitPort {
 | `IntegrationCandidates` / `IntegrationBatchCandidates`.repositoryRoot | **dev clone** | dev ref 读取、detached 合并 worktree、集成验证副本、ref 快进 |
 | 两者的 `mainRepositoryRoot`（新增） | 稳定 main 检出 | 集成验证策略读取 |
 | `IntegrationBatchPlan.repositoryRoot` | **dev clone** | 重启收敛时读 `dev` ref（`reconcileInterruptedIntegrations`） |
-| `ReclamationProjectRef.repoRoot` | **dev clone** | worktree 注册与归属核验、Task branch、`dev` 可达性 |
-| `ReclamationProjectRef.devRepoPath`（新增，可空） | dev clone（可空用于显式拒绝） | 回收入口的 `DEV_REPO_REQUIRED` 判定 |
+| `ReclamationProjectRef.repoRoot` | **dev clone，或项目文件夹**（`COALESCE`，ADR-0060） | worktree 注册与归属核验、Task branch、`dev` 可达性（managed 的「已合并」按该 workspace 记录的 `base_ref` 判定） |
+| `ReclamationProjectRef.devRepoPath`（可空） | dev clone 路径，或 null。**ADR-0060 起不再作为拒绝依据**：回收按 `repoRoot` 归属核验，managed 项目的 worktree 同样可回收 | 回收的仓库根选择 |
 | `StablePromotionPlan` / `PromotionCandidates.repositoryRoot` | 稳定 main 检出（不变） | 提升的 `main` ref、预期旧 main commit、重启序列（`promotion-service.ts` 本格未改） |
 | `PromotionCandidates.devRepoPath` / `StablePromotionPlan.devRepoPath` | dev clone（不变） | push 源与候选对象核验 |
 - Git 尚无首个 commit 的仓库返回 UNBORN_MAIN 并明确指引用户初始化；不擅自提交用户文件。本 Codeestra 开发仓库的初始化与产品处理外部项目是不同操作。

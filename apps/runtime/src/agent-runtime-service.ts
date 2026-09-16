@@ -180,6 +180,11 @@ export class AgentRuntimeCoordinator {
     readonly expectedTaskVersion: number;
     readonly commandId: string;
     readonly adapterId: string;
+    /**
+     * Explicit baseline ref for a **new** workspace (ADR-0060). It is refused when the Task already
+     * has a recorded workspace, so the baseline a Task started from can never move afterwards.
+     */
+    readonly baseRef?: string | null;
     /** Present when this attempt continues a paused Execution through provider conversation resume. */
     readonly resume?: {
       readonly resumeFromExecutionId: string;
@@ -213,6 +218,7 @@ export class AgentRuntimeCoordinator {
         projectId: input.projectId,
         taskId: input.taskId,
         expectedTaskVersion: input.expectedTaskVersion,
+        baseRef: input.baseRef ?? null,
         now: this.#now,
         randomUUID: this.#randomUUID,
       });
@@ -451,6 +457,8 @@ export class AgentRuntimeCoordinator {
     readonly reservationId: string;
     readonly commandId: string;
     readonly actor: string;
+    /** Explicit baseline ref for a new workspace (ADR-0060); see `ScheduledStartRequest.baseRef`. */
+    readonly baseRef?: string | null;
   }): Promise<RunTaskResult> {
     const adapter = this.#registry.resolve(input.adapterId);
     const operationId = deriveCommandId(input.commandId, 'scheduled-run-operation');
@@ -490,6 +498,7 @@ export class AgentRuntimeCoordinator {
         reservationId: input.reservationId,
         expectedTaskVersion: input.expectedTaskVersion,
         actor: input.actor,
+        baseRef: input.baseRef ?? null,
         now: this.#now,
         randomUUID: this.#randomUUID,
       });

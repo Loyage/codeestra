@@ -124,18 +124,31 @@ describe('codeestra open', () => {
         environment);
       expect(inspected.exitCode).toBe(0);
       // The baseline is the dev clone's `dev`, and the inspected checkout's own `dev` ref is reported
-      // as transitional evidence — never as the baseline (ADR-0048 D04 / ADR-0056).
+      // as transitional evidence — never as the baseline (ADR-0048 D04 / ADR-0056). ADR-0060 replaced
+      // the old "which projects still lack a dev clone" proxy with the fact that decides whether
+      // deleting it can lose history: whether a remote-tracking ref already contains that commit.
       expect(inspected.stderr).toContain('dev baseline (from the dev clone): refs/heads/dev · ');
       expect(inspected.stderr).toContain('transitional local refs/heads/dev in this checkout: present at');
-      expect(inspected.stderr).toContain('no trusted project lacks a dev clone');
-      const report = JSON.parse(inspected.stdout) as { readonly devCommit: string | null };
+      expect(inspected.stderr).toContain('so deleting this local ref loses no history');
+      const report = JSON.parse(inspected.stdout) as {
+        readonly devCommit: string | null;
+        readonly devRefRetirement: {
+          readonly localDevRefPresent: boolean; readonly localDevRefCommit: string | null;
+          readonly remoteRefsContainingLocalDevCommit: readonly string[];
+          readonly publishedOnRemote: boolean;
+        };
+      };
       expect(report.devCommit).toMatch(/^[0-9a-f]{40}$/);
+      expect(report.devRefRetirement.localDevRefPresent).toBe(true);
+      expect(report.devRefRetirement.remoteRefsContainingLocalDevCommit)
+        .toEqual(['refs/remotes/origin/dev', 'refs/remotes/origin/main']);
+      expect(report.devRefRetirement.publishedOnRemote).toBe(true);
 
       // Once a project is trusted, its own `dev` ref is no longer anything the Runtime reads, and the
       // report says so: this is the read-only proof a human uses before deleting it by hand.
       await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
       const again = await cli(['project', 'inspect', repository, '--dev-repo', devRepo], environment);
-      expect(again.stderr).toContain('no trusted project lacks a dev clone');
+      expect(again.stderr).toContain('so deleting this local ref loses no history');
       await cli(['stop'], environment);
     }, 60_000);
 

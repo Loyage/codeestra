@@ -228,7 +228,9 @@ export function DevRepoInspectionRows({ inspection }: {
         <dt>dev clone（这次会记录）</dt>
         <dd className="muted">
           未指定：检查时没有给 dev clone 路径，也没有已记录的路径。
-          <div>信任需要它（CLI：<span className="mono">project trust … --dev-repo &lt;path&gt;</span>）。</div>
+          <div>不要 dev clone 也能用（ADR-0060）：Task 基线取该项目文件夹当前检出的分支；
+            <span className="mono">task integrate</span> / <span className="mono">promotion</span> 会在需要 dev
+            分支时以 <span className="mono">DEV_REPO_REQUIRED</span> 拒绝。</div>
         </dd>
       </>
     );

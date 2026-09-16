@@ -6,7 +6,7 @@ import { devBranchRef, impactPolicyPath, runtimeRequestSchema, uiSettingKeys,
   questionnairePromptSchema,
   type RuntimeRequest, type RuntimeResponse,
   type RuntimeStreamFrame } from '@codeestra/contracts';
-import { inspectRepository, readLocalRefCommit } from '@codeestra/git';
+import { inspectRepository, listRemoteRefsContainingCommit, readLocalRefCommit } from '@codeestra/git';
 import {
   inspectDevRepo,
 } from './dev-repo-service.js';
@@ -832,12 +832,16 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         repositoryRoot: identity.repoRoot, devRef: devBranchRef, devRepoPath: requestedDevRepoPath,
       });
       // Read-only retirement evidence for the *inspected* checkout's own local `dev` ref — the
-      // transitional pointer of ADR-0048 D04 that ADR-0056 stopped reading. `projectsWithoutDevRepo`
-      // names the projects that still have no dev clone of their own: until that list is empty, that
-      // ref is the only `dev` those projects have, so deleting it would remove their last copy.
+      // transitional pointer of ADR-0048 D04 that ADR-0056 stopped reading. ADR-0060 replaced the old
+      // "which projects still lack a dev clone" proxy with the question that actually decides whether
+      // deleting it can lose history: does any remote-tracking ref already contain that commit?
       const localDevRefCommit = await readLocalRefCommit({
         repositoryRoot: identity.repoRoot, ref: devBranchRef,
       }).catch(() => null);
+      const remoteRefsContainingLocalDevCommit = localDevRefCommit === null ? []
+        : await listRemoteRefsContainingCommit({
+          repositoryRoot: identity.repoRoot, commit: localDevRefCommit,
+        }).catch(() => []);
       return success(request.requestId, {
         ...identity,
         devRef: devBranchRef,
@@ -847,6 +851,10 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         devRefRetirement: {
           localDevRefPresent: localDevRefCommit !== null,
           localDevRefCommit,
+          remoteRefsContainingLocalDevCommit,
+          publishedOnRemote: remoteRefsContainingLocalDevCommit.length > 0,
+          // Read-only report: a project without a dev clone is a normal state (ADR-0060), so this list
+          // no longer decides anything; it never was a fall back to that ref either.
           projectsWithoutDevRepo: storage.listTrustedProjects()
             .filter((project) => project.devRepoPath === null)
             .map((project) => ({ projectId: project.id, name: project.name,
@@ -1309,6 +1317,7 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         commandId: request.commandId,
         allowUnknown: request.allowUnknown,
         actor: 'local-user',
+        ...(request.baseRef === undefined ? {} : { baseRef: request.baseRef }),
       });
       if (outcome.sessionId !== null) {
         // The automation takes the Session's single writer lease as soon as it owns a provider
@@ -2058,6 +2067,12 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       const localDevRefCommit = await readLocalRefCommit({
         repositoryRoot: identity.repoRoot, ref: devBranchRef,
       }).catch(() => null);
+      // The identity a client echoes back pins which commit the transitional ref holds and whether it
+      // is already on a remote, because both are part of what the user reviewed (ADR-0060).
+      const remoteRefsContainingLocalDevCommit = localDevRefCommit === null ? []
+        : await listRemoteRefsContainingCommit({
+          repositoryRoot: identity.repoRoot, commit: localDevRefCommit,
+        }).catch(() => []);
       const actual = {
         ...identity,
         devRef: devBranchRef,
@@ -2067,6 +2082,8 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         devRefRetirement: {
           localDevRefPresent: localDevRefCommit !== null,
           localDevRefCommit,
+          remoteRefsContainingLocalDevCommit,
+          publishedOnRemote: remoteRefsContainingLocalDevCommit.length > 0,
           // The cross-project list is a read-only *report* about the transitional ref, not part of
           // the identity this command pins: another project's trust must not make this one look as
           // if the reviewed repository changed.

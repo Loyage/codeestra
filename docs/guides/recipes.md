@@ -598,7 +598,9 @@ bun run build:ui                                   # 需要 Web UI 时
 bun run codeestra status                           # 拉起 Runtime，看 READY
 
 bun run codeestra open /path/to/your-repo --dev-repo /path/to/dev-clone --no-open \
-  # 接入项目（FULL 零确认）并拿到界面地址；--dev-repo 是必需的（ADR-0056）
+  # 接入项目（FULL 零确认）并拿到界面地址；--dev-repo 可选（ADR-0060）：
+  # 给了它才有 dev 基线与 dev → main 提升；不给（managed）时 Task 基线取该项目文件夹当前检出的分支，
+  # 成果留在 task 分支由你自己合。上面这一行是“我想要 dev → main 提升”时用的写法。
 bun run codeestra permission get                    # 确认权限模式
 
 bun run codeestra task create $PROJECT "一项具体的改动" --constraint "一条具体约束"

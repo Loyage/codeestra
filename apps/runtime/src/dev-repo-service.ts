@@ -172,7 +172,8 @@ export async function inspectDevRepo(input: {
  * The code a Task baseline resolution refuses with (ADR-0060). Both are facts about the requested
  * baseline, not about trust: a project stays trusted when its folder is on a detached HEAD.
  */
-export type TaskBaselineCode = 'TASK_BASE_REF_UNRESOLVED' | 'TASK_BASE_REF_MISSING';
+export type TaskBaselineCode = 'TASK_BASE_REF_UNRESOLVED' | 'TASK_BASE_REF_MISSING'
+  | 'TASK_BASE_REF_NOT_A_BRANCH' | 'TASK_BASE_REF_ALREADY_FIXED';
 
 export class TaskBaselineError extends Error {
   constructor(readonly code: TaskBaselineCode, message: string) {
@@ -290,6 +291,11 @@ export async function resolveTaskBaselineRepository(project: {
 
 /** Reads one local branch as the baseline commit, or refuses with the fact that is missing. */
 async function readBaselineRef(repositoryRoot: string, baseRef: string): Promise<string> {
+  if (!baseRef.startsWith('refs/heads/')) {
+    throw new TaskBaselineError('TASK_BASE_REF_NOT_A_BRANCH',
+      `An explicit Task baseline must be a local branch (refs/heads/...), not ${baseRef}; a tag or a`
+      + ' remote-tracking ref is not a baseline a Task worktree can be based on');
+  }
   try {
     const inspected = await inspectBaseRef(repositoryRoot, baseRef);
     return inspected.commit;

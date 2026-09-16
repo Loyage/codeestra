@@ -124,6 +124,22 @@ async function git(cwd: string, args: readonly string[]): Promise<string> {
   return stdout.trim();
 }
 
+/**
+ * Remote-tracking refs whose history contains `commit` (ADR-0060).
+ *
+ * This is the fact behind "is that commit already published?": an empty answer means the commit (and
+ * whatever only it reaches) exists **only in this clone**, so deleting the local ref it hangs off
+ * would lose it. One `for-each-ref` call; no ref is ever updated.
+ */
+export async function listRemoteRefsContainingCommit(input: {
+  readonly repositoryRoot: string;
+  readonly commit: string;
+}): Promise<readonly string[]> {
+  const output = await git(input.repositoryRoot, ['for-each-ref', '--contains', input.commit,
+    '--format=%(refname)', 'refs/remotes/']);
+  return output.split('\n').map((line) => line.trim()).filter((line) => line.length > 0);
+}
+
 async function refExists(cwd: string, ref: string): Promise<boolean> {
   const process = Bun.spawn(['git', '-C', cwd, 'show-ref', '--verify', '--quiet', ref], {
     stdout: 'ignore', stderr: 'pipe', env: { PATH: Bun.env.PATH ?? '' },

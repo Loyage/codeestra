@@ -239,11 +239,17 @@ Runtime 数据目录（不进 Git，机器生成）
 
 ### 双分支与 Task 工作树基线
 
-- 项目**长期保留 `main` 与 `dev`**：`main` 是你日常实际运行的稳定分支，`dev` 是新功能实验与集成分支。
-- **所有功能 Task 从固定的 `dev` commit 建立基线**（`projects.dev_ref`；仓库没有 `dev` 时 trust 直接拒绝）。
+两种基线（**ADR-0060**：main/dev 双分支模型**只属于 Codeestra 自身**，被管理的其它项目不被要求这么搭）：
+
+- **记了 dev clone 的项目**（含 Codeestra 自身）：长期保留 `main` 与 `dev`；所有功能 Task 从该 clone 的
+  固定 `dev` commit 建立基线（`projects.dev_ref`）；成果经 `task integrate` 进入 `dev`，`dev → main` 只能经
+  `promotion` 走（ADR-0009）。
+- **没记 dev clone 的项目（managed）**：Task 从**项目文件夹当前检出的分支**建基线（建 workspace 时读 HEAD，
+  把 ref 与 commit 一起固定进 `workspaces.base_ref`）；成果留在 `refs/heads/task/<task-id>`，**由你自己合**；
+  `task integrate` / `promotion` 需要长期 `dev` 分支，所以会以 `DEV_REPO_REQUIRED` 拒绝。文件夹处于
+  detached HEAD 时以 `TASK_BASE_REF_UNRESOLVED` 拒绝（没有分支可名）；`task run --base-ref <refs/heads/…>`
+  可以显式指定一条本地分支作基线（只对新 workspace 生效）。
 - owned worktree 位于 Runtime 数据目录 `worktrees/<project-id>/<task-id>/`，**不污染你的主工作区**。
-- Task 成果落在内部 `refs/heads/task/<task-id>`；正常路径是经 `task integrate` 进入 `dev`，
-  `dev → main` 只能经 `promotion` 走（ADR-0009）。
 
 ### 调度三态：SAFE / UNKNOWN / CONFLICTING
 

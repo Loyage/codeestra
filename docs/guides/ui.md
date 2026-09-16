@@ -699,17 +699,17 @@ reconcile 结果卡：`reconcile 观测` + boot id；表格列 `预留` / `任�
 | 元素 | 文案 | 行为 |
 |---|---|---|
 | 主路径输入 | `aria-label="Git 仓库绝对路径"`，占位 `/仓库/路径` | 改动它会清空下面已检查出的结果（以及信任被拒绝的提示） |
-| dev clone 路径输入 | `aria-label="dev clone 绝对路径"`，标签 `dev clone 路径（必填）`，占位 `/另一个检出 dev 的 clone` | **必填**（CLI 的 `--dev-repo`，字段 `project.trust` 的 `devRepoPath`）；改动它同样清空已检查出的结果 |
+| dev clone 路径输入 | `aria-label="dev clone 绝对路径"`，标签 `dev clone 路径（可留空）`，占位 `/另一个检出 dev 的 clone` | **可选**（CLI 的 `--dev-repo`，字段 `project.trust` 的 `devRepoPath`，ADR-0060）；改动它同样清空已检查出的结果 |
 | 检查项目 | `检查项目` | **只读**：并发发 `project.inspect`（带上填好的 `devRepoPath`）与 `project.verificationPolicy` |
 
-dev clone 路径输入下面固定一行小字（原文）：`与 CLI 的 --dev-repo 同一个字段（project.trust 的 devRepoPath）：稳定提升会用这个 clone 把固定候选推到远端 dev。值原样放进请求；能不能用由 Runtime 核验 —— 拒绝时这里显示它返回的 DEV_REPO_* 稳定码与解释。`；该输入为空时（含只有空格）额外出现一行提示：`还没有填 dev clone 路径：project.trust 需要它，所以下面的「添加项目 / 信任项目」按钮不会启用（不会假装成功）。`（带 `data-project-trust="dev-repo-missing"`）。
+dev clone 路径输入下面固定一行小字（原文）：`与 CLI 的 --dev-repo 同一个字段（project.trust 的 devRepoPath）：记了它，稳定提升就用这个 clone 把固定候选推到远端 dev。值原样放进请求；能不能用由 Runtime 核验 —— 拒绝时这里显示它返回的 DEV_REPO_* 稳定码与解释。`；该输入为空时（含只有空格）额外出现一行提示：`留空 = 这个项目没有 dev clone（ADR-0060）：Task 基线取该项目文件夹当前检出的分支，task integrate 与 promotion 会在需要 dev 分支时以 DEV_REPO_REQUIRED 拒绝。`（带 `data-project-trust="dev-repo-missing"`；它是**说明**，不再阻止提交）。
 
 检查结果分两段：
 
 - **仓库身份**键值表：`仓库根目录` / `main 引用` / `对象格式` / `HEAD`，加两行开发基线相关的新行：
   - `dev 基线`：`refs/heads/dev <commit 前 12 位>`（不存在时写 `DEV_REF_MISSING` 会被拒）。
   - `dev clone（这次会记录）`：键值表里的一项，内容**全部来自 `project.inspect` 返回的核验结果**，界面不自己判断路径：路径、徽标 `已核验（这个 clone 可以作为该项目的 dev clone）` 或 `未通过核验 · <稳定码>`、Runtime 的 `detail`、稳定码对应的本地解释，以及核验读到的事实（dev 分支 / HEAD 的 ref / dev ref commit / HEAD / 工作树干净 / origin 与主检出相同 / origin）。`clean` 与 `originMatchesProject` 为 `null` 时写 `未核验`（“没核实到”，不是“否”）。
-  - 未给 dev clone 路径且项目也没记录过时，这一行写 `未指定：检查时没有给 dev clone 路径，也没有已记录的路径。` 与 `信任需要它（CLI：project trust … --dev-repo <path>）。`。
+  - 未给 dev clone 路径且项目也没记录过时，这一行写 `未指定：检查时没有给 dev clone 路径，也没有已记录的路径。` 与 `不要写 dev clone 就能用：Task 基线取项目文件夹当前检出的分支；task integrate / promotion 会在需要 dev 分支时以 DEV_REPO_REQUIRED 拒绝（ADR-0060）。`。
 - **验证策略**：`ABSENT` 时显示
   `main 引用上没有策略。您仍可信任此项目，但在 .codeestra/policies/verification.json 存在之前，验证会被拒绝。`；
   存在时是一张表 `ID` / `命令` / `工作目录` / `超时`（秒），下面是 `main <sha12> · 摘要 <sha12>`。
@@ -721,9 +721,9 @@ dev clone 路径输入下面固定一行小字（原文）：`与 CLI 的 --dev-
 | `FULL` | `添加此项目` | `全权限模式已默认开启：Agent、未知工具、验证命令和 Git 钩子均以当前用户权限运行，不再请求确认。` | 无 | `添加项目` |
 | `STRICT` | `信任此项目` | `严格模式下，信任后 Agent、验证命令和 Git 钩子可使用您的用户权限运行，但提交和未知工具仍受门禁。` | 输入框 `aria-label="输入 TRUST 以确认信任"`，占位 `输入 TRUST 以确认`；不输入 `TRUST` 按钮不可点 | `信任项目` |
 
-按钮上方固定一行小字：`这个按钮会发出 project.trust：把你审阅的身份（含上面的 dev clone 核验结果）、验证策略 digest 与 dev clone 路径一起提交。dev clone 路径为空时按钮不可点 —— 信任需要它，界面不假装成功；路径能不能用由 Runtime 核验。`
+按钮上方固定一行小字：`这个按钮会发出 project.trust：把你审阅的身份（含上面的 dev clone 核验结果）、验证策略 digest 与 dev clone 路径一起提交。dev clone 路径为空表示这个项目没有 dev clone（ADR-0060）：Task 基线取该项目文件夹当前检出的分支；路径能不能用由 Runtime 核验。`
 
-**按钮的可用条件只有两条**（都能在界面上看到原因）：dev clone 路径非空，且在 `STRICT` 下已输入 `TRUST`。
+**按钮的可用条件只有一条**（能在界面上看到原因）：在 `STRICT` 下已输入 `TRUST`。dev clone 路径留空**不再**阻止提交（ADR-0060：留空就是 managed，界面不把它当成错误）。
 按钮发的是 `project.trust`，并**把刚刚看到的身份（含 dev clone 核验结果与 dev 基线）与策略 digest 一起提交**（防漂移：这期间它们变了会被拒为 `REPOSITORY_CHANGED` / `VERIFICATION_POLICY_CHANGED`）。若被拒绝，按钮下方出现红字 `信任被拒绝：<稳定码>: <Runtime 说明>（<本地词汇表一句解释>）`——**稳定码逐字保留**，词汇表覆盖 `DEV_REPO_*` 家族（含 `DEV_REPO_REQUIRED`）与信任面本身的拒绝码。成功后清空确认输入并重新加载项目列表。
 
 > 图：`02-project-trust.png` — 「项目」标签页的「添加本地项目」区块：路径输入与「检查项目」、

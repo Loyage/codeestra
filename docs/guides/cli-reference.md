@@ -182,7 +182,9 @@ Adapter 不支持的字段会被拒绝而不是静默忽略。稳定码：`INVAL
 | 字段 | 含义 |
 |---|---|
 | `localDevRefPresent` / `localDevRefCommit` | 该检出里是否仍有过渡的本地 `dev` ref，以及它指向哪个 commit |
-| `projectsWithoutDevRepo[]` | 仍**没有** dev clone 的已信任项目（`projectId`/`name`/`repoRoot`） |
+| `remoteRefsContainingLocalDevCommit[]` | 哪些**远端跟踪 ref**（`refs/remotes/…`）的历史已包含那个 commit |
+| `publishedOnRemote` | 上表非空时为 `true`：该 commit 已经在远端，删掉本地 ref 不丢历史（**ADR-0060 起这就是删不删的判据**；为 `false` 时说明它只存在于这个 clone） |
+| `projectsWithoutDevRepo[]` | 仍**没有** dev clone 的已信任项目（`projectId`/`name`/`repoRoot`）；ADR-0060 起这只是只读报告，**不再是删除判据** |
 
 Runtime **不再从那个 ref 读任何 dev 事实**。该列表为空表示没有任何项目依赖它 —— 这是「可以人工删除它」的只读依据
 （见 `docs/guides/manual.md` §3.4）。失败码含 `INVALID_REPOSITORY`、`UNSAFE_CHECKOUT`、`GIT_INSPECTION_FAILED`；
@@ -303,9 +305,11 @@ ADR-0059 之后**未声明功能的 Task 会在容量允许时就在这个命令
 想让它等，就声明一个已被别的未完成任务声明的功能（`--feature`），或用已满的容量。
 版本不符 → 乐观冲突拒绝（`VERSION_CONFLICT` / `CONCURRENT_MODIFICATION`）。
 
-### `task run <project-id> <task-id> <expected-version> [--adapter <pi|codex|claude>] [--allow-unknown] [--json]`
+### `task run <project-id> <task-id> <expected-version> [--adapter <pi|codex|claude>] [--base-ref <refs/heads/…>] [--allow-unknown] [--json]`
 
 显式启动请求，走与自动调度**同一个门禁**。`--adapter` 默认 `pi`。
+
+`--base-ref <refs/heads/…>` 显式指定**新 workspace** 的基线（ADR-0060）：本地的分支名，在有 dev clone 的项目里从那个 clone 读，在 managed 项目里从项目文件夹读。省略时用项目默认（dev clone 的 `dev`，或项目文件夹**当前检出的分支**）。**已有 workspace 的 Task 保持已记录的基线**，此时给这个 flag 会被拒为 `TASK_BASE_REF_ALREADY_FIXED`（不是静默忽略）；自动调度从不选基线。
 
 **换 `--adapter` 是新建 Execution，不是在同一个 Execution 里换 Agent。**
 
@@ -320,7 +324,9 @@ ADR-0059 之后当前规则**不再产生 `UNKNOWN`**，所以这条路日常不
 
 相关稳定码：`TASK_NOT_STARTABLE`、`TASK_ARCHIVED`、`CONFLICT_WAIT`、`CAPACITY_WAIT`、
 `CAPACITY_GLOBAL_LIMIT_REACHED`、`CAPACITY_ADAPTER_SLOT_LIMIT_REACHED`、`SCHEDULER_DRAINING`、
-`DEPENDENCIES_UNMET`、`CONCURRENT_MODIFICATION`、`UNKNOWN_ADAPTER`、`TASK_NOT_FOUND`。
+`DEPENDENCIES_UNMET`、`CONCURRENT_MODIFICATION`、`UNKNOWN_ADAPTER`、`TASK_NOT_FOUND`；基线相关：
+`TASK_BASE_REF_ALREADY_FIXED`、`TASK_BASE_REF_NOT_A_BRANCH`（给的不是本地分支）、`TASK_BASE_REF_MISSING`
+（该分支不存在）、`TASK_BASE_REF_UNRESOLVED`（managed 项目文件夹处于 detached HEAD）。
 
 ### `task recover <project-id> <task-id> <expected-version> [--reason <text>] [--json]`
 

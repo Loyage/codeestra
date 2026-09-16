@@ -120,6 +120,12 @@ export interface ScheduledStartRequest {
   readonly commandId: string;
   readonly actor: string;
   readonly impactSnapshotId: string | null;
+  /**
+   * Explicit baseline ref for a **new** workspace (ADR-0060). Only an explicit `task.run` carries it:
+   * the automatic tick never chooses a baseline, so an automatically started Task always gets the
+   * project's default (the dev clone's `dev`, or the project folder's checked out branch).
+   */
+  readonly baseRef?: string | null;
 }
 
 export interface ScheduledStartResult {
@@ -564,6 +570,8 @@ export class ScheduleService {
     readonly commandId: string;
     readonly allowUnknown: boolean;
     readonly actor: string;
+    /** Explicit baseline ref for a new workspace (ADR-0060); see `ScheduledStartRequest.baseRef`. */
+    readonly baseRef?: string | null;
   }): Promise<ScheduleStartOutcomeView> {
     const project = this.#storage.getTrustedProject(input.projectId);
     const task = this.#storage.getTask(project.id, input.taskId);
@@ -592,6 +600,7 @@ export class ScheduleService {
       exclusiveUnknown: true,
       commandId: input.commandId,
       actor: input.actor,
+      baseRef: input.baseRef ?? null,
       simulatedExtraSlots: 0,
     });
     const started = evaluation.startedDetail;
@@ -835,6 +844,8 @@ export class ScheduleService {
     readonly exclusiveUnknown: boolean;
     readonly commandId: string;
     readonly actor: string;
+    /** Explicit baseline ref for a new workspace (ADR-0060); absent on the automatic path. */
+    readonly baseRef?: string | null;
     readonly simulatedExtraSlots: number;
   }): Promise<CandidateEvaluation> {
     const { project, task } = input;
@@ -1017,6 +1028,7 @@ export class ScheduleService {
         reservationId: reservation.reservationId,
         commandId: input.commandId,
         actor: input.actor,
+        baseRef: input.baseRef ?? null,
         impactSnapshotId: assessment.view.candidateSnapshotId,
       });
       // The Execution now holds the resource, so the reservation has done its job and is handed

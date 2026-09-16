@@ -132,6 +132,15 @@ export async function prepareTaskWorkspace(input: {
   // folder has checked out right now.
   const project = input.storage.getTrustedProject(input.projectId);
   await assertTrustedMainCheckout({ storage: input.storage, project, now });
+  // An explicit baseline only ever applies to a *new* workspace (ADR-0060): a Task that already has a
+  // workspace row (reusable, or released and rebuildable/replaceable) keeps the baseline that row's
+  // `base_ref`/`base_commit` recorded. Refusing is the honest answer — silently ignoring the flag
+  // would make "which commit did this Task start from" depend on when the command was replayed.
+  if ((input.baseRef ?? null) !== null && input.storage.getLatestTaskWorkspace(input.taskId) !== null) {
+    throw new WorkspaceServiceError('TASK_BASE_REF_ALREADY_FIXED',
+      `Task ${input.taskId} already has a recorded workspace, whose baseline is already fixed; an`
+      + ' explicit base ref only applies when a new workspace is prepared');
+  }
   const baseline = await resolveTaskBaselineRepository(project, { baseRef: input.baseRef ?? null });
   const reusable = input.storage.findReusableWorkspace(input.taskId);
   if (reusable !== null) {
@@ -433,6 +442,8 @@ export async function prepareReservedWorkspace(input: {
   readonly reservationId: string;
   readonly expectedTaskVersion: number;
   readonly actor: string;
+  /** Explicit baseline ref for a new workspace (ADR-0060); see `ScheduledStartRequest.baseRef`. */
+  readonly baseRef?: string | null;
   readonly now?: () => number;
   readonly randomUUID?: () => string;
 }): Promise<ReservedWorkspacePreparation> {

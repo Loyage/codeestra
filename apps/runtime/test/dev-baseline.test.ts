@@ -135,6 +135,55 @@ describe('Task baselines and dev facts are two different things (ADR-0056 / ADR-
       value.storage.close();
     });
 
+  test('uses an explicit base ref for a new workspace and refuses a fixed Task (ADR-0060)',
+    async () => {
+      const value = await createAgentFixture();
+      withoutDevRepo(value);
+      const devCommit = await git(value.repo, ['rev-parse', 'refs/heads/dev']);
+      // The folder is on `main`; the override picks another local branch, and the recorded baseline is
+      // the ref that was asked for — not the checked out one.
+      const workspace = await prepareTaskWorkspace({
+        storage: value.storage, runtimeHome: value.home, commandId: crypto.randomUUID(),
+        projectId: value.projectId, taskId: value.taskId, expectedTaskVersion: 1,
+        baseRef: 'refs/heads/dev',
+      });
+      expect(workspace.devRef).toBe('refs/heads/dev');
+      expect(workspace.baseCommit).toBe(devCommit);
+      expect(await git(workspace.path, ['rev-parse', 'HEAD'])).toBe(devCommit);
+
+      // A Task that already has a workspace keeps its recorded baseline: the flag is refused rather
+      // than ignored, because "which commit did this Task start from" must not depend on replay.
+      await expect(prepareTaskWorkspace({
+        storage: value.storage, runtimeHome: value.home, commandId: crypto.randomUUID(),
+        projectId: value.projectId, taskId: value.taskId, expectedTaskVersion: 1,
+        baseRef: 'refs/heads/main',
+      })).rejects.toMatchObject({ code: 'TASK_BASE_REF_ALREADY_FIXED' });
+
+      // A ref that is not a local branch, and a branch that does not exist, are two different facts.
+      const other = value.storage.createTask({
+        projectId: value.projectId, commandId: crypto.randomUUID(),
+        payloadHash: crypto.randomUUID(), intentId: crypto.randomUUID(),
+        taskId: crypto.randomUUID(), revisionId: crypto.randomUUID(),
+        intentEventId: crypto.randomUUID(), taskEventId: crypto.randomUUID(),
+        specification: 'second', constraints: [], features: [], kind: 'DEVELOPMENT',
+        actor: 'local-user', createdAt: Date.now(),
+      });
+      await expect(prepareTaskWorkspace({
+        storage: value.storage, runtimeHome: value.home, commandId: crypto.randomUUID(),
+        projectId: value.projectId, taskId: other.id, expectedTaskVersion: 0,
+        baseRef: 'refs/tags/v1',
+      })).rejects.toMatchObject({ code: 'TASK_BASE_REF_NOT_A_BRANCH' });
+      await expect(prepareTaskWorkspace({
+        storage: value.storage, runtimeHome: value.home, commandId: crypto.randomUUID(),
+        projectId: value.projectId, taskId: other.id, expectedTaskVersion: 0,
+        baseRef: 'refs/heads/nope',
+      })).rejects.toMatchObject({ code: 'TASK_BASE_REF_MISSING' });
+      // Neither refusal left anything behind.
+      expect(value.storage.getLatestTaskWorkspace(other.id)).toBeNull();
+      expect(value.storage.listIncompleteWorkspacePreparations()).toEqual([]);
+      value.storage.close();
+    });
+
   test('refuses a managed workspace when the project folder has a detached HEAD (ADR-0060)',
     async () => {
       const value = await createAgentFixture();
@@ -153,22 +202,42 @@ describe('Task baselines and dev facts are two different things (ADR-0056 / ADR-
       value.storage.close();
     });
 
-  test('refuses the dependency projection, a reclamation plan and a full-suite run', async () => {
+  test('refuses dev-only operations, but reclaims a managed workspace (ADR-0060)', async () => {
     const value = await createAgentFixture();
     withoutDevRepo(value);
+    // These two need the long-lived `dev` baseline itself, so a project that never declared one is
+    // refused with the code that names the missing branch — not with a new approval.
     await expect(inspectTaskDependencies({
       storage: value.storage, projectId: value.projectId, taskId: value.taskId,
-    })).rejects.toMatchObject({ code: 'DEV_REPO_REQUIRED' });
-    await expect(planReclamation({
-      storage: value.storage, runtimeHome: value.home, projectId: value.projectId,
     })).rejects.toMatchObject({ code: 'DEV_REPO_REQUIRED' });
     await expect(runDevFullSuite({
       storage: value.storage, runner: new VerificationRunner(),
       copiesRoot: join(value.home, 'verifications'), projectId: value.projectId,
       expectedDevCommit: value.mainCommit, commandId: crypto.randomUUID(),
     })).rejects.toMatchObject({ code: 'DEV_REPO_REQUIRED' });
-    // Nothing was written by any of them.
     expect(value.storage.listDevFullSuiteEvidence(value.projectId)).toEqual([]);
+
+    // Reclamation is *not* dev-only: the worktree and the branch live in the project folder, so the
+    // plan is built against that repository and measures "already merged" against the ref the
+    // workspace was based on (`refs/heads/main` here, because the folder is on `main`).
+    const workspace = await prepareTaskWorkspace({
+      storage: value.storage, runtimeHome: value.home, commandId: crypto.randomUUID(),
+      projectId: value.projectId, taskId: value.taskId, expectedTaskVersion: 1,
+    });
+    const plan = await planReclamation({
+      storage: value.storage, runtimeHome: value.home, projectId: value.projectId,
+    });
+    const target = plan.targets.find((candidate) => candidate.path === workspace.path);
+    expect(target).toBeDefined();
+    // The evidence is read from the **project folder**: the worktree registration was found there,
+    // and "already merged" is measured against the ref this workspace was based on
+    // (`refs/heads/main` here, because the folder is on `main`).
+    expect(target?.evidence['registered']).toBe(true);
+    expect(target?.evidence['registeredBranch']).toBe(workspace.branchRef);
+    expect(target?.evidence['mergeTargetRef']).toBe('refs/heads/main');
+    // This Task has not finished, so nothing is deleted yet — and that refusal is about the Task, not
+    // about a missing dev clone.
+    expect(target?.reasonCode).toBe('TASK_NOT_TERMINAL');
     value.storage.close();
   });
 });

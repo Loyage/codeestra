@@ -7181,7 +7181,7 @@ cd /Users/loyage/Documents/codeestra-dev && just check   # 等价 bun run check
 
 ## FOUNDATION-093 — 被管理项目的 Task 基线改为「项目文件夹当前检出的分支」；`dev clone` 变为可选（ADR-0060，schema v33）
 
-状态：**主路径已实现并跑过定向测试**；剩余子项见文末（未做完的部分不当作已完成）。
+状态：**实现与定向测试已完成**（两轮：主路径 → `--base-ref` / `reclaim` / 退役判据 / 剩余文档）；剩余边界（UI 无 base-ref 输入、retry/resume 不接受该 flag、未跑全量）见文末「仍未做」。
 
 本格在独立分支与 worktree 上开发（ADR-0038）：
 
@@ -7239,22 +7239,30 @@ cd /Users/loyage/Documents/codeestra-dev && just check   # 等价 bun run check
 `cli-open` + `project-trust` + `dev-repo-service` 共 **30 项通过**；`cli-impact` + `cli-integrate` +
 `integration-service` + `promotion-service` 共 **52 项通过**（总计 **270 项，0 失败**）。
 
-### 未做完 / 剩余（不得当作已完成）
+### 第二轮（本轮：按 1→2→3→4 继续）
 
-1. **`--base-ref` 显式覆盖未接线**：`prepareTaskWorkspace` 已接受 `baseRef` 参数且两条路径都能解析它，但 `task.run`
-   的命令面/契约/UI 未传该值，因此目前只能用默认（dev clone 的 `dev`，或项目文件夹当前检出分支）。detached HEAD
-   的项目文件夹目前只能靠「切到一条分支」恢复。
-2. **`reclaim` 的 managed 语义未改**：`planReclamation`/`reclaim-service` 仍以 `DEV_REPO_REQUIRED` 拒绝没有 dev clone
-   的项目（`dev-baseline.test.ts` 仍按现实现断言），所以 managed 项目的 Task worktree 目前不能经 `reclaim` 回收。
-3. **过渡 `dev` ref 的退役判据未重定义**：`projectsWithoutDevRepo` 现在会永久包含合法的 managed 项目，ADR-0056 D03 的
-   「没有任何项目仍缺 dev clone」判据不再可用；CLI 已改为如实报告、不再声称该列表决定删除，但真正的判据要另开一格。
-4. **`docs/guides/**` 未全部同步**（ADR-0050）：本格改了 `cli-reference.md`（`open`/`project trust`/`project inspect`/
-   基线说明）与 `features.md`（项目识别、项目接入、Task 基线、dev 事实来源四行），并新增 ADR-0060 索引与
-   `sqlite-schema.md` 的 v33 节；**`manual.md`、`getting-started.md`、`concepts.md`、`workflow.md`、`recipes.md`
-   里「trust 必须给 dev clone」的叙述未改**，这是已知文档债。
-5. **未做**：`project inspect` 输出里的 `devRef` 字段在 managed 模式下仍打印 `refs/heads/dev`（它不是基线，但读数容易误会）；
-   managed 项目的依赖判定/槽位/结果 commit 归属未逐条重验（它们走 `COALESCE(dev_repo_path, repo_root)`，代码上成立、
-   本格未逐一写测试）。
+| 项 | 结果 |
+|---|---|
+| 1 `--base-ref` 命令面 | `task.run` 契约新增可选 `baseRef`；CLI `task run --base-ref <refs/heads/…>`；经 `ScheduledStartRequest` → `runScheduledExecution` → `prepareReservedWorkspace` → `prepareTaskWorkspace` 透传。已有 workspace 的 Task 给该 flag 以 `TASK_BASE_REF_ALREADY_FIXED` 拒绝（不静默忽略）；不是本地分支→`TASK_BASE_REF_NOT_A_BRANCH`；分支不存在→`TASK_BASE_REF_MISSING`；自动 tick 从不传它 |
+| 2 `reclaim` 的 managed 语义 | `ReclamationProjectRef.repoRoot` 就是 `COALESCE(dev_repo_path, repo_root)`，回收不再要求 dev clone；每个 workspace 的「已合并」按它自己记录的 `base_ref`（回退 `projects.dev_ref`）判定，证据新增 `mergeTargetRef`；storage 的候选投影带上 `ReclamationWorkspaceRef.baseRef`；未注册目录的归属重检也从同一个根出发 |
+| 3 过渡 `dev` ref 的退役判据 | `devRefRetirement` 新增 `remoteRefsContainingLocalDevCommit[]` 与 `publishedOnRemote`（`git for-each-ref --contains … refs/remotes/`，新增 `listRemoteRefsContainingCommit`）：判据从 ADR-0056 D03 的代理（「还有项目缺 dev clone」，ADR-0060 下永不成立）改为「那个 commit 是否已在远端」；CLI 报告随之改写，`projectsWithoutDevRepo` 降级为只读报告 |
+| 4 文档同步 | `concepts.md`（双分支与 Task 基线一节重写）、`recipes.md`（open 一行）、`ui.md`（dev clone 输入「（可留空）」、按钮门禁、两段固定文案）与 `apps/ui/src/project-trust.tsx` 的对应文案同改；`cli-reference.md`（`task run --base-ref`、四个 `TASK_BASE_REF_*`、退役证据新字段）、`git-workspace-api.md`（基线来源与回收根表）；`workflow.md` 检查后**无需修改**（其中的「dev clone」只出现在提升语境） |
+
+### 第二轮实际跑过的检查
+
+- `bun run typecheck` + `bun run typecheck:ui`：通过。
+- `dev-baseline` + `workspace-service` + `dev-repo-service` + `packages/storage/test` + `packages/contracts/test` + `packages/git/test`：**297 项通过**（含新增：显式 `--base-ref`、非分支/缺失分支/已有 workspace 三种拒绝、managed 回收计划的根与 `mergeTargetRef` 证据）。
+- `cli-open` + `project-trust`(UI) + `cli-reclaim` + `test-resource-reclamation`：**38 项通过**（含退役证据新字段的 CLI 断言与 UI 文案断言）。
+- `cli-impact` + `cli-integrate` + `integration-service` + `promotion-service` + `cli-task-run-progress`：**54 项通过**。
+- 仍未跑全量（ADR-0038）。
+
+### 仍未做 / 已知边界（不得当作已完成）
+
+1. **UI 不提供 `--base-ref` 输入**：界面「Run task」始终用项目默认基线（PROJECT_SPEC §1.1：UI 是 CLI 能力的子集投影）。CLI 完备，此差异是有意的。
+2. **`task retry` / `task resume` 不接受 `--base-ref`**：前者要么复用已记录的 workspace（基线已固定），要么按当时检出的分支重新取基线；要显式指定就先 `task run --base-ref`。
+3. **impact 分析在 managed 下的基线**取项目文件夹 HEAD commit（detached 或不可读时为 `null`，报告如实为未知）——没有引入新的判定规则；`project inspect` 的 `devRef` 字段在 managed 下仍打印 `refs/heads/dev`（它不是基线，读数容易误会，已在 `cli-reference.md` 写明）。
+4. **未逐一写测试**：managed 项目的槽位预留与结果 commit 归属走 `COALESCE(dev_repo_path, repo_root)`（代码上成立，本格未逐条覆盖）；`reclaim` 的 managed 分支只验到「计划成立 + 证据来自项目文件夹 + 未完成的 Task 不删」。
+5. 未跑全量测试；未在真实稳定实例上验证（本分支不动稳定 clone）。
 
 ## NEXT — 最小可用纵向切片
 
@@ -7348,8 +7356,9 @@ cd /Users/loyage/Documents/codeestra-dev && just check   # 等价 bun run check
 14. **被管理项目的分支/基线形态：方向已定、已实现主路径，剩余子项待做**（FOUNDATION-092 → FOUNDATION-093 / ADR-0060）：
     用户 2026-09-16 已裁定 main/dev 双分支模型只属于 Codeestra 自身；被管理项目的 Task 基线取**项目文件夹当前检出的分支**、
     成果留 task 分支由用户自己合、`dev_repo_path` 变回可选，schema v33 与 CLI/UI/命令面已按此实现（见 FOUNDATION-093）。
-    **仍未做**：`--base-ref` 命令面接线、`reclaim` 的 managed 语义、过渡 `dev` ref 退役判据重定义、
-    `docs/guides/**` 其余段落（manual / getting-started / concepts / workflow / recipes）。这些不再需要用户新裁决。
+    **仍未做（不再需要用户裁决）**：UI 不提供 `--base-ref` 输入（有意子集）、`task retry`/`resume` 不接受该 flag、
+    managed 项目的槽位/结果 commit 归属未逐一写测试、未跑全量测试。`--base-ref` 命令面、`reclaim` 的 managed 语义与
+    过渡 `dev` ref 的退役判据（`publishedOnRemote`）已在第二轮完成。
 
 ### 原 0–7 编号对照
 

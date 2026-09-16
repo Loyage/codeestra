@@ -9072,10 +9072,10 @@ export class Phase1Database {
     const workspaceFilter = options.taskId === undefined ? '' : 'AND w.task_id=?2';
     const workspaces = this.sqlite.query<{
       id: string; task_id: string; path: string; branch_ref: string; ownership_token: string;
-      base_commit: string; state: WorkspaceLifecycleState; resource_held: number;
+      base_commit: string; base_ref: string | null; state: WorkspaceLifecycleState; resource_held: number;
       active_reservation: string | null; active_reservation_id: string | null;
     }, [string] | [string, string]>(`
-      SELECT w.id,w.task_id,w.path,w.branch_ref,w.ownership_token,w.base_commit,w.state,
+      SELECT w.id,w.task_id,w.path,w.branch_ref,w.ownership_token,w.base_commit,w.base_ref,w.state,
         EXISTS(SELECT 1 FROM executions e WHERE e.task_id=w.task_id AND e.resource_held=1)
           AS resource_held,
         (SELECT r.state FROM execution_slot_reservations r
@@ -9142,6 +9142,7 @@ export class Phase1Database {
         branchRef: row.branch_ref,
         ownershipToken: row.ownership_token,
         baseCommit: row.base_commit,
+        baseRef: row.base_ref,
         state: row.state,
         resourceHeld: row.resource_held === 1,
         /** A RESERVED or RECOVERY_REQUIRED slot still claims this workspace (ADR-0032). */
@@ -15355,7 +15356,11 @@ function parseJsonValue(json: string | null): unknown {
 export interface ReclamationProjectRef {
   readonly projectId: string;
   readonly name: string;
-  /** The dev clone: Task worktrees, Task branches and the `dev` ref all live there (ADR-0056). */
+  /**
+   * The repository that owns this project's Task worktrees: the dev clone when one is recorded
+   * (ADR-0056), otherwise the project folder itself (ADR-0060) — `COALESCE(dev_repo_path, repo_root)`.
+   * Ownership is proven by asking this repository, so it is never guessed from a path.
+   */
   readonly repoRoot: string;
   /**
    * The recorded dev clone path, or null. A reclamation proves ownership by asking the repository
@@ -15385,6 +15390,13 @@ export interface ReclamationWorkspaceRef {
   readonly branchRef: string;
   readonly ownershipToken: string;
   readonly baseCommit: string;
+  /**
+   * The ref this workspace was based on (ADR-0060), or null for rows written before schema v33. This
+   * is the ref a Task's result would be merged into, so it is what "already merged" is measured
+   * against: the dev clone's `dev` for a promoting project, the project folder's branch for a managed
+   * one.
+   */
+  readonly baseRef: string | null;
   readonly state: WorkspaceLifecycleState;
   /** True while an Execution of this Task still holds its resources. */
   readonly resourceHeld: boolean;

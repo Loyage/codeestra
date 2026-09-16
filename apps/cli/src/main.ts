@@ -1193,11 +1193,17 @@ function usage(): never {
   bun run codeestra task list <project-id> [--all]
   bun run codeestra task submit <project-id> <task-id> <expected-version>
   bun run codeestra task run <project-id> <task-id> <expected-version> [--adapter <pi|codex|claude>]
-    [--allow-unknown] [--json]
+    [--base-ref <refs/heads/...>] [--allow-unknown] [--json]
     Adapters: pi (default), codex, claude. Every run is bound to one Agent; changing --adapter starts a
     new Execution rather than switching the Agent inside one. This is the explicit start request of
     the same gate the automatic scheduler applies, so it exits 3 when the Task is *waiting* (the
     conflict or capacity reason code is in --json and on stderr) and 1 when it is refused.
+    --base-ref fixes the baseline of a **new** workspace (ADR-0060): a local branch of the project's
+    dev clone when one is recorded, otherwise a local branch of the project folder itself. Omitted,
+    the baseline is the project's default (the dev clone's dev, or the project folder's currently
+    checked out branch). A Task that already has a workspace keeps its recorded baseline and the flag
+    is refused with TASK_BASE_REF_ALREADY_FIXED instead of being ignored; a ref that is not a local
+    branch exits 1 with TASK_BASE_REF_NOT_A_BRANCH, and a missing one with TASK_BASE_REF_MISSING.
   bun run codeestra task pause <project-id> <task-id> <expected-version>
   bun run codeestra task resume <project-id> <task-id> <expected-version> [--adapter <pi|codex|claude>]
     [--allow-unknown]
@@ -1686,21 +1692,25 @@ function describeDevRefRetirement(retirement: DevRefRetirement | undefined): voi
     + (retirement.localDevRefPresent
       ? ` present at ${retirement.localDevRefCommit ?? 'an unreadable commit'}`
       : ' absent'));
-  if (retirement.projectsWithoutDevRepo.length === 0) {
-    console.error('  no trusted project lacks a dev clone, so nothing reads that ref: after a'
-      + ' promotion and restart you may delete it by hand (git -C <checkout> branch -D dev)');
-    return;
+  if (retirement.localDevRefPresent) {
+    // ADR-0060: nothing reads this ref any more (ADR-0056), so the only question that decides whether
+    // deleting it by hand can lose history is whether its commit already exists on a remote.
+    console.error(retirement.publishedOnRemote
+      ? `  that commit is contained by ${retirement.remoteRefsContainingLocalDevCommit.join(', ')},`
+        + ' so deleting this local ref loses no history: git -C <checkout> branch -D dev'
+      : '  no remote-tracking ref contains that commit: it exists only in this clone, so deleting the'
+        + ' ref by hand can lose commits (push it first, or keep the ref)');
   }
-  console.error(`  ${retirement.projectsWithoutDevRepo.length} trusted project(s) have no dev clone:`);
-  for (const project of retirement.projectsWithoutDevRepo) {
-    console.error(`    ${project.projectId} ${project.name} ${project.repoRoot}`);
+  if (retirement.projectsWithoutDevRepo.length > 0) {
+    // ADR-0060: a project without a dev clone is a normal state — its Task baselines come from its own
+    // folder — so this list is a read-only report and no longer decides whether the ref can go.
+    console.error(`  ${retirement.projectsWithoutDevRepo.length} trusted project(s) have no dev clone`
+      + ' (their Task baselines come from their own folder; their dev-only commands refuse until one is'
+      + ' recorded):');
+    for (const project of retirement.projectsWithoutDevRepo) {
+      console.error(`    ${project.projectId} ${project.name} ${project.repoRoot}`);
+    }
   }
-  // ADR-0060: a project without a dev clone is a normal state — its Task baselines come from its own
-  // folder — so this list alone no longer decides whether the transitional ref may be deleted. The
-  // retirement criterion (ADR-0056 D03) is a separate follow-up and is not invented here.
-  console.error('  a project without a dev clone is a normal state now (ADR-0060: its Task baselines'
-    + ' come from its own folder); whether the transitional ref is still needed is a separate'
-    + ' criterion, not decided by this list.');
 }
 
 function describeImpactPolicy(report: ImpactPolicyValidationView['policy']): void {
@@ -3059,7 +3069,7 @@ try {
     const expectedTaskVersion = Number(versionText);
     if (firstArgument === undefined || taskId === undefined || versionText === undefined
       || !Number.isSafeInteger(expectedTaskVersion) || expectedTaskVersion < 0) usage();
-    const split = splitFlagTokens(flags, ['--adapter'], ['--allow-unknown', '--json']);
+    const split = splitFlagTokens(flags, ['--adapter', '--base-ref'], ['--allow-unknown', '--json']);
     if (split.positionals.length !== 0) usage();
     // `task run` is the explicit start request of the same gate the automatic tick applies: the
     // dependency verdict, the conflict verdict against every active/reserved Task, and capacity.
@@ -3073,6 +3083,7 @@ try {
       expectedTaskVersion,
       adapterId: split.flags.get('--adapter') ?? 'pi',
       allowUnknown: split.bare.has('--allow-unknown'),
+      ...(split.flags.has('--base-ref') ? { baseRef: split.flags.get('--base-ref') } : {}),
     }) as ScheduleStartOutcomeView;
     print(result);
     // A wait is a fact about *now*, not a failure: exit 3 keeps it apart from a refusal (exit 1),

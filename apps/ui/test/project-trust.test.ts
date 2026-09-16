@@ -352,11 +352,13 @@ describe('the identity review shows the dev clone verdict verbatim', () => {
     expect(html).toContain('未核验');
   });
 
-  it('says a trust without a dev clone path needs one', () => {
+  it('states what a trust without a dev clone path means (ADR-0060)', () => {
     const html = markup(createElement(DevRepoInspectionRows, { inspection: null }));
     expect(html).toContain('dev clone（这次会记录）');
     expect(html).toContain('未指定');
-    expect(html).toContain('信任需要它');
+    // A project without a dev clone is a supported state, not a missing requirement.
+    expect(html).toContain('不要 dev clone 也能用');
+    expect(html).toContain('DEV_REPO_REQUIRED');
     expect(html).not.toContain('state-ready');
   });
 

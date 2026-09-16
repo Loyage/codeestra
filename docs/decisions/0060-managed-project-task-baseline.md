@@ -1,8 +1,6 @@
 # ADR-0060：被管理项目的 Task 基线是「指定的项目文件夹」；dev clone 变为可选
 
-Status：Accepted（用户 2026-09-16 决策）。**主路径已实现**（FOUNDATION-093，schema **v33**）；**未做完的部分逐条列在
-`docs/tasks/README.md` 的 FOUNDATION-093 「未做完 / 剩余」一节**（`--base-ref` 命令面、`reclaim` 的 managed 语义、
-过渡 `dev` ref 的退役判据、剩余 guides 段落），不得当作已完成。
+Status：Accepted（用户 2026-09-16 决策）。**已实现**（FOUNDATION-093，schema **v33**），包括 D01 里的显式 `--base-ref` 覆盖（`task run --base-ref`，已有 workspace 的 Task 以 `TASK_BASE_REF_ALREADY_FIXED` 拒绝而非忽略）、D02（managed 的集成/提升仍以 `DEV_REPO_REQUIRED` 拒绝，`reclaim` 不再要求 dev clone）与 D04 的退役判据重定义（`publishedOnRemote`）。**未做的部分与已知边界**逐条列在 `docs/tasks/README.md` 的 FOUNDATION-093「仍未做」一节（UI 无 base-ref 输入、retry/resume 不接受该 flag、未跑全量），不得当作已完成。
 **Amends ADR-0056 的必需性**（`dev_repo_path` 由必需改为可选）与 **ADR-0018/0056 的基线来源**（无 dev clone
 的项目从项目文件夹取基线）。**不放宽任何其它不变量**（不新增确认、不新增门禁、FULL 常态路径仍是 0 步）。
 
@@ -68,6 +66,14 @@ ref 建基线，集成与提升也都写回那个 clone。用户 2026-09-16 更�
 - worktree 的属主仓库（`repoRoot`）继续用 `COALESCE(projects.dev_repo_path, projects.repo_root)`：managed 项目
   的 worktree 属于项目文件夹自己，回收/核对按同一个根走。
 - 不做运行期「按路径/分支名猜通道」（ADR-0048 D05 不变）。
+
+### D05 新增/重定义的稳定码（用户可见）
+
+- `TASK_BASE_REF_UNRESOLVED`：managed 项目的文件夹处于 detached HEAD，没有分支可作基线（切到一条分支，或用 `--base-ref`）。
+- `TASK_BASE_REF_MISSING`：显式给出的 ref 在该仓库里不存在。
+- `TASK_BASE_REF_NOT_A_BRANCH`：显式给出的 ref 不是本地分支（`refs/heads/…`）。
+- `TASK_BASE_REF_ALREADY_FIXED`：Task 已有记录的 workspace，基线已固定；该 flag 只对新 workspace 生效，**拒绝而不是忽略**。
+- `DEV_REPO_REQUIRED` 保留，但**不再是 trust 的拒绝码**：它只出现在需要长期 `dev` 分支的操作上（`task integrate`、`promotion *`、依赖判定、提升前全量证据）。
 
 ## Consequences
 

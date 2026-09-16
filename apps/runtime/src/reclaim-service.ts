@@ -23,7 +23,7 @@ import {
   type TaskLifecycleState,
   type TrustedProject,
 } from '@codeestra/storage';
-import { DevRepoError, requireRecordedDevRepoPath } from './dev-repo-service.js';
+import { DevRepoError } from './dev-repo-service.js';
 
 export class ReclaimServiceError extends Error {
   constructor(readonly code: string, message: string) {
@@ -666,10 +666,10 @@ async function evaluateUnregisteredCandidate(input: {
   }
   let registration: Awaited<ReturnType<typeof inspectOwnedWorktreeRegistration>>;
   try {
-    // ADR-0056: a Runtime-created worktree is registered in the project's dev clone, so its
-    // ownership can only be established by asking that clone.
+    // The owned worktree is registered in the repository that owns it: the project's dev clone when
+    // one is recorded, otherwise the project folder itself (ADR-0056 / ADR-0060).
     registration = await inspectOwnedWorktreeRegistration({
-      repositoryRoot: requireRecordedDevRepoPath(trusted), path: input.path,
+      repositoryRoot: trusted.devRepoPath ?? trusted.repoRoot, path: input.path,
     });
   } catch (error) {
     if (error instanceof DevRepoError) {
@@ -812,7 +812,13 @@ async function recheckUnregisteredCandidate(input: {
   });
   const repositoryRoot = input.target.projectId === null
     ? ''
-    : input.context.trustedProjects.get(input.target.projectId)?.devRepoPath ?? '';
+    : (() => {
+      const trusted = input.context.trustedProjects.get(input.target.projectId as string);
+      // ADR-0060: the owning repository is the dev clone when one is recorded, otherwise the project
+      // folder (`COALESCE(dev_repo_path, repo_root)`) — the same repository the worktree was created
+      // in, so ownership can be re-proven at removal time either way.
+      return trusted === undefined ? '' : trusted.devRepoPath ?? trusted.repoRoot;
+    })();
   const fresh = evaluation.target;
   const evidence = fresh?.evidence ?? { recheck: 'CLAIMED_BY_LEDGER' };
   const facts = {
@@ -833,8 +839,8 @@ async function recheckUnregisteredCandidate(input: {
     // ownership cannot be re-proven at removal time, so the recheck refuses instead of deleting.
     if (repositoryRoot.length === 0) {
       return { removable: false, outcome: 'RECOVERY_REQUIRED', reasonCode: 'DEV_REPO_REQUIRED',
-        detail: 'This directory names a project without a recorded dev clone (ADR-0056), so the'
-          + ' repository that owns it cannot be verified at removal time',
+        detail: 'This directory names a project whose owning repository cannot be named at removal'
+          + ' time, so ownership cannot be re-proven; nothing is deleted',
         evidence, ...facts };
     }
     return { removable: true, outcome: 'RECLAIMED', reasonCode: fresh.reasonCode,
@@ -1064,10 +1070,11 @@ async function buildPlan(input: ReclaimPlanInput): Promise<BuiltPlan> {
     if (error instanceof StorageError) throw new ReclaimServiceError(error.code, error.message);
     throw error;
   }
-  // ADR-0056: every recorded worktree, Task branch and the `dev` ref live in the project's dev
-  // clone, so a project without one is refused before a single path is considered. A cross-project
-  // batch reports this per project (ADR-0037) instead of skipping it silently.
-  const repositoryRoot = requireRecordedDevRepoPath(candidates.project);
+  // ADR-0056 / ADR-0060: every recorded worktree and Task branch lives in the repository that owns
+  // them — the dev clone when one is recorded, otherwise the project folder itself (`repoRoot` is
+  // already that `COALESCE`). No project is refused for lacking a dev clone: a managed project's
+  // worktrees are just as reclaimable as a promoting project's.
+  const repositoryRoot = candidates.project.repoRoot;
   let devCommit: string | null = null;
   try {
     devCommit = await readLocalRefCommit({ repositoryRoot, ref: candidates.project.devRef });
@@ -1093,13 +1100,22 @@ async function buildPlan(input: ReclaimPlanInput): Promise<BuiltPlan> {
         ? await inspectWorktreeState({ path: workspace.path })
         : null;
       let merged: boolean | null = null;
-      if (task.resultCommit !== null && devCommit !== null) {
-        try {
-          merged = await isAncestor({
-            repositoryRoot, ancestor: task.resultCommit, descendant: devCommit,
-          });
-        } catch {
-          merged = null;
+      if (task.resultCommit !== null) {
+        // ADR-0060: "already merged" is measured against the ref this workspace was based on — the
+        // dev clone's `dev` for a promoting project, the project folder's branch for a managed one.
+        // A result that is not reachable from that ref is *not* merged, so the worktree is retained.
+        const mergeTargetRef = workspace.baseRef ?? candidates.project.devRef;
+        const mergeTarget = await readLocalRefCommit({
+          repositoryRoot, ref: mergeTargetRef,
+        }).catch(() => null);
+        if (mergeTarget !== null) {
+          try {
+            merged = await isAncestor({
+              repositoryRoot, ancestor: task.resultCommit, descendant: mergeTarget,
+            });
+          } catch {
+            merged = null;
+          }
         }
       }
       const evidence: Record<string, unknown> = {
@@ -1123,6 +1139,7 @@ async function buildPlan(input: ReclaimPlanInput): Promise<BuiltPlan> {
         activeReservationId: workspace.reservationId,
         resultCommit: task.resultCommit,
         devCommit,
+        mergeTargetRef: workspace.baseRef ?? candidates.project.devRef,
         merged,
         clean: state === null ? null : state.clean,
         trackedModifications: state?.trackedModifications ?? [],

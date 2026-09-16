@@ -60,18 +60,31 @@ export type DevRepoInspection = z.infer<typeof devRepoInspectionSchema>;
 
 /**
  * What `project inspect` reports about the *inspected checkout's own* local `dev` branch, and whether
- * any trusted project still depends on one.
+ * that ref still carries anything nobody else has.
  *
  * ADR-0048 D04 kept that branch in the stable checkout as a transitional Task baseline and said it
  * must not be treated as promotion evidence; ADR-0056 stopped reading it (every dev fact now comes
  * from `projects.dev_repo_path`). This report is the read-only evidence for retiring it by hand:
- * `localDevRef*` is a fact about the clone that was inspected, and `projectsWithoutDevRepo` names the
- * projects that still have no dev clone of their own, which are the only ones whose last copy of
- * `dev` that ref could be. It is a report, never a fall back to that ref.
+ * `localDevRef*` is a fact about the clone that was inspected, and `remoteRefsContainingLocalDevCommit`
+ * (with the derived `publishedOnRemote`) says whether that commit already exists on a remote — the
+ * only question that decides whether deleting the local ref can lose history.
+ *
+ * ADR-0060 removed the old proxy criterion: `projectsWithoutDevRepo` used to mean "these projects'
+ * last copy of `dev` is that ref". A project without a dev clone is now a normal, supported state
+ * (its Task baselines come from its own folder), so that list is a read-only report and no longer
+ * decides anything. It never was — and still is not — a fall back to that ref.
  */
 export const devRefRetirementSchema = z.strictObject({
   localDevRefPresent: z.boolean(),
   localDevRefCommit: z.string().nullable(),
+  /** Remote-tracking refs (`refs/remotes/...`) whose history contains the local `dev` tip. */
+  remoteRefsContainingLocalDevCommit: z.array(z.string()),
+  /**
+   * True when at least one remote-tracking ref contains the local `dev` tip: the commit is already
+   * elsewhere, so deleting this clone's ref removes a local convenience, not history. False for a ref
+   * that is absent (nothing to publish) and for a local-only commit (deleting it can lose commits).
+   */
+  publishedOnRemote: z.boolean(),
   projectsWithoutDevRepo: z.array(z.strictObject({
     projectId: z.string().min(1),
     name: z.string(),
@@ -1258,6 +1271,17 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     expectedTaskVersion: z.number().int().nonnegative(),
     adapterId: nonBlankString.default('pi'),
     allowUnknown: z.boolean().default(false),
+    /**
+     * Explicit Task baseline ref for a **new** workspace (ADR-0060): a local branch of whichever
+     * repository provides the baseline — the project's dev clone when one is recorded, otherwise the
+     * project folder itself. Omitted, the baseline is the project's default: the dev clone's `dev`,
+     * or the project folder's **currently checked out branch**.
+     *
+     * A Task that already has a workspace keeps the baseline it recorded, so passing this flag there
+     * is refused with `TASK_BASE_REF_ALREADY_FIXED` instead of being ignored: "which commit did this
+     * Task start from" must never depend on when the command was replayed.
+     */
+    baseRef: z.string().min(1).optional(),
   }),
   z.strictObject({
     ...requestBase,
