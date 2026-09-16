@@ -7411,7 +7411,8 @@ cd /Users/loyage/Documents/codeestra-dev && just check   # 等价 bun run check
 
 ## 用户任务（`task/930f5325`）— 让出错的任务可以被删除（ADR-0058 修订 D02，无 schema 变更、不占迁移号）
 
-状态：已实现并定向验证；**未合入 `dev`、未运行全量测试**（ADR-0038，开发分支只跑定向测试）。
+状态：已实现并定向验证，**已以 merge commit `8441ee0` 合入本地 `dev`**（改动提交 `bb1dd9a`，基线 `de03448`）；
+**未 push `origin/dev`、未运行全量测试**（ADR-0038，开发分支只跑定向测试；全量测试留到 `dev → main` 前）。
 
 用户原话：`让出错的任务可以被删除`。背景：真实 Runtime 里 Task #1（`bd2250e4`）在 Runtime shutdown 时留下
 `RECOVERY_REQUIRED` + 仍占用的 Execution/workspace；`task purge` 当时一律以 `RECONCILE_REQUIRED` 拒绝并要求先手动
@@ -7436,7 +7437,15 @@ cd /Users/loyage/Documents/codeestra-dev && just check   # 等价 bun run check
 - `bunx vitest run apps/ui/test/task-purge.test.ts` 4 项通过。
 - `bun run typecheck`、`bun run typecheck:ui` 通过。
 
-剩余 / 未做：未合入 `dev`、未跑全量测试、未提升 `main`、未重启稳定 Runtime；UI 对 `RECOVERY_REQUIRED` 任务仍只显示
+合入前复核（用户任务交付者之外的一次复跑，在 `task/930f5325` worktree 的 `bb1dd9a` 上）：
+`bun test apps/runtime/test/task-purge-recovery.test.ts apps/runtime/test/cli-task-purge.test.ts
+apps/runtime/test/task-recovery-service.test.ts packages/storage/test/task-purge.test.ts packages/git/test/purge.test.ts`
+共 **20 项通过**；`bunx vitest run apps/ui/test/task-purge.test.ts` 4 项通过。`typecheck` 未复跑（本次只合入，未改动类型面之外的代码）。
+
+合入方式：以 `git merge --no-ff` 把 `task/930f5325-35d7-47c8-9a83-1394a4b37aac` 合入 dev clone（`~/Documents/codeestra-dev`）
+的 `dev`，无冲突；**未 push `origin/dev`、未提升 `main`、未重启任何 Runtime**（本仓库自身提升仍走 runbook 人工四步）。
+
+剩余 / 未做：未 push `origin/dev`、未跑全量测试、未提升 `main`、未重启稳定 Runtime；UI 对 `RECOVERY_REQUIRED` 任务仍只显示
 「永久删除」，未单独加 `task recover` 按钮（本次按「让删除自己完成对账」实现，recover 入口仍缺）。
 
 ## NEXT — 最小可用纵向切片
