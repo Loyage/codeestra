@@ -283,6 +283,13 @@ const requestBase = {
 const taskKindSchema = z.enum(['DEVELOPMENT', 'SELF']);
 const nonBlankString = z.string().min(1).refine((value) => value.trim().length > 0, 'Must not be blank');
 const constraintSchema = z.strictObject({ id: z.string().min(1), text: nonBlankString });
+/**
+ * A declared feature is a module id from the project's `.codeestra/impact.json` (ADR-0059). The
+ * schema only bounds the shape — the id is validated against the project's own mapping before it is
+ * written, because "which features exist" is a property of the repository, not of this contract.
+ */
+export const maxTaskFeatures = 32;
+export const taskFeaturesSchema = z.array(nonBlankString).max(maxTaskFeatures);
 export const agentAnswerSchema = z.discriminatedUnion('type', [
   z.strictObject({ type: z.literal('CONFIRM'), confirmed: z.boolean() }),
   z.strictObject({ type: z.literal('VALUE'), value: z.string() }),
@@ -609,6 +616,11 @@ export interface ScheduleConflictHitView {
   readonly directories: readonly string[];
   readonly modules: readonly string[];
   readonly globalResources: readonly string[];
+  /**
+   * The feature ids both sides declared, for `SAME_UNFINISHED_FEATURE` (ADR-0059). Empty for the
+   * historical codes, which were about paths and declared scopes rather than about a declaration.
+   */
+  readonly features: readonly string[];
   readonly relation: string | null;
   readonly detail: string;
 }
@@ -1202,6 +1214,13 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     projectId: z.string().uuid(),
     specification: nonBlankString,
     constraints: constraintsSchema.default([]),
+    /**
+     * The features this Task declares (ADR-0059): module ids from the project's
+     * `.codeestra/impact.json`. They are validated against that mapping before anything is written,
+     * so an undeclared id is refused (`UNKNOWN_FEATURE`) instead of stored. An omitted list means the
+     * Task declares no feature, which is why it can never be in a feature conflict.
+     */
+    features: taskFeaturesSchema.default([]),
     kind: taskKindSchema.default('DEVELOPMENT'),
   }),
   z.strictObject({
@@ -1994,6 +2013,13 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     /** Absent means "keep the current specification and only add constraints". */
     specification: nonBlankString.optional(),
     constraints: constraintsSchema.default([]),
+    /**
+     * The features of the *new* revision. Absent means "inherit the current revision's declaration"
+     * (ADR-0059 D03) — amending a specification must not silently drop the Task out of the feature
+     * rule. An explicit empty list *does* clear the declaration, which is how a Task stops declaring
+     * a feature.
+     */
+    features: taskFeaturesSchema.optional(),
     reason: nonBlankString,
   }),
   z.strictObject({

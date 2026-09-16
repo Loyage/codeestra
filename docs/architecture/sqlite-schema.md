@@ -83,6 +83,10 @@ CREATE TABLE task_revisions (
   previous_revision_id TEXT,
   specification TEXT NOT NULL CHECK(length(trim(specification)) > 0),
   constraints_json TEXT NOT NULL CHECK(json_valid(constraints_json)),
+  -- schema v32 (FOUNDATION-091 / ADR-0059)：声明的功能（modules[].id），纯 ADD COLUMN，
+  -- 历史行一律 '[]'（在引入该列之前没有任何声明，而「没声明」的安全读法就是不参与功能冲突）。
+  features_json TEXT NOT NULL DEFAULT '[]'
+    CHECK(json_valid(features_json) AND json_type(features_json) = 'array'),
   source_intent_id TEXT REFERENCES intents(id),
   actor TEXT NOT NULL,
   reason TEXT NOT NULL,

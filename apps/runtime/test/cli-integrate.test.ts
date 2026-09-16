@@ -168,9 +168,9 @@ async function capturedTask(options: { readonly failingPolicy?: boolean } = {}):
   const created = JSON.parse((await cli(['task', 'create', projectId, 'Write a file'],
     environment)).stdout) as { readonly id: string };
   const taskId = created.id;
+  // Submission immediately enters scheduling. Under ADR-0059 an undeclared Task is SAFE, so the
+  // automatic pass starts it without a second `task run` command.
   expect((await cli(['task', 'submit', projectId, taskId, '0'], environment)).exitCode).toBe(0);
-  const ran = await cli(['task', 'run', projectId, taskId, '1'], environment);
-  expect(ran.exitCode).toBe(0);
   // The Agent process exits on its own; capture needs the Session to be observed as EXITED.
   const deadline = Date.now() + 30_000;
   let exited = false;

@@ -11,6 +11,8 @@ import {
   type ScheduledStartResult,
 } from '../src/schedule-service.js';
 import { SlotReservationService } from '../src/slot-reservation-service.js';
+import { pauseOrCancelTask } from '../src/task-control-service.js';
+import type { AgentRuntimeCoordinator } from '../src/agent-runtime-service.js';
 import {
   cleanupTemporaryDirectories,
   createAgentFixture,
@@ -192,7 +194,11 @@ async function harness(options: { withMapping: boolean }): Promise<Harness> {
 }
 
 /** A second READY Task in the same project. `specification` is the Task's text, as the user writes it. */
-function addTask(fixture: AgentFixture, specification: string): { taskId: string; version: number } {
+function addTask(
+  fixture: AgentFixture,
+  specification: string,
+  features: readonly string[] = [],
+): { taskId: string; version: number } {
   const taskId = nextId();
   fixture.storage.createTask({
     projectId: fixture.projectId,
@@ -205,6 +211,7 @@ function addTask(fixture: AgentFixture, specification: string): { taskId: string
     taskEventId: nextId(),
     specification,
     constraints: [],
+    features,
     kind: 'DEVELOPMENT',
     actor: 'local-user',
     createdAt: Date.now(),
@@ -220,6 +227,60 @@ function addTask(fixture: AgentFixture, specification: string): { taskId: string
     submittedAt: Date.now(),
   });
   return { taskId, version: 1 };
+}
+
+/**
+ * Appends a revision that declares features on an existing Task (ADR-0059). The conflict rule reads
+ * the *current* revision, so this is how a test gives the fixture's own Task a declaration without
+ * rebuilding it.
+ */
+function declareFeature(fixture: AgentFixture, taskId: string, features: readonly string[]): void {
+  const task = taskOf(fixture, taskId);
+  fixture.storage.createTaskRevision({
+    projectId: fixture.projectId,
+    taskId,
+    expectedVersion: task.version,
+    commandId: nextId(),
+    payloadHash: `feature-${taskId}-${features.join('-')}`,
+    intentId: nextId(),
+    revisionId: nextId(),
+    deliveryId: nextId(),
+    intentEventId: nextId(),
+    revisionEventId: nextId(),
+    deliveryEventId: nextId(),
+    specification: task.currentRevision.specification,
+    constraints: task.currentRevision.constraints,
+    features,
+    kind: 'AMEND_TASK',
+    reason: 'declare a feature for the conflict test',
+    actor: 'local-user',
+    createdAt: Date.now(),
+  });
+}
+
+/**
+ * Cancels a Task that holds no provider process (the `TERMINAL` path never asks the Adapter).
+ *
+ * A *running* Task needs the Adapter to confirm its process exited; this harness never started one
+ * (the start step is injected), so the stub answers exactly that — the same shape the real
+ * coordinator returns after it has verified the provider is gone.
+ */
+const idleCoordinator = {
+  releaseExecutionProcess: async () => ({ sessionId: null, released: true, detail: 'test stop' }),
+} as unknown as AgentRuntimeCoordinator;
+
+async function cancelIdleTask(fixture: AgentFixture, taskId: string): Promise<void> {
+  await pauseOrCancelTask({
+    storage: fixture.storage,
+    coordinator: idleCoordinator,
+    kind: 'CANCEL',
+    projectId: fixture.projectId,
+    taskId,
+    expectedVersion: taskOf(fixture, taskId).version,
+    commandId: nextId(),
+    actor: 'test-user',
+    randomUUID: nextId,
+  });
 }
 
 /** One Task's row, so a test can read the state the scheduler left it in. */
@@ -303,109 +364,81 @@ describe('scheduling loop', () => {
     expect(executionsOf(harnessed.fixture, third.taskId)).toHaveLength(0);
   });
 
-  test('waits on UNKNOWN, then starts it exclusively, and only a release starts it beside a peer', async () => {
-    const harnessed = await harness({ withMapping: false });
-    const first = harnessed.primary;
-    const second = addTask(harnessed.fixture, 'Unknown second');
-    // The automatic pass starts only what it can prove: with no mapping nothing is provably disjoint.
-    const automatic = await harnessed.tick();
-    expect(automatic.projects[0]?.candidates.map((candidate) => candidate.disposition))
-      .toEqual(['WAITING', 'WAITING']);
-    expect(automatic.projects[0]?.candidates[0]?.wait?.kind).toBe('CONFLICT');
-    expect(automatic.projects[0]?.candidates[0]?.wait?.code).toBe('INCOMPLETE_IMPACT');
-    expect(taskOf(harnessed.fixture, first.taskId).state).toBe('READY');
+  test('waits while a peer declares the same feature, and starts once that peer is finished', async () => {
+    const harnessed = await harness({ withMapping: true });
+    // The fixture's own Task declares nothing, so it is never in a feature conflict; take it out of
+    // the picture so the capacity arithmetic below is about the two Tasks under test.
+    const idle = harnessed.primary;
+    await cancelIdleTask(harnessed.fixture, idle.taskId);
+    // The rule is symmetric, so the second Task is created *after* the first one started — which is
+    // also how this happens in practice: the user starts improving a feature, then asks for another
+    // Task on the same feature before the first one is finished.
+    const first = addTask(harnessed.fixture, 'Improve the core module', ['core-module']);
+    const started = await harnessed.runNow({ taskId: first.taskId, version: first.version });
+    expect(started.outcome).toBe('STARTED');
+    expect(started.assessment?.verdict).toBe('SAFE_TO_PARALLELIZE');
+    const second = addTask(harnessed.fixture, 'Improve it differently', ['core-module']);
 
-    // An explicit request may run a lone UNKNOWN Task exclusively (scheduler.md §2).
-    const exclusive = await harnessed.runNow({ taskId: first.taskId, version: first.version });
-    expect(exclusive.outcome).toBe('STARTED');
-    expect(exclusive.assessment?.verdict).toBe('UNKNOWN');
-
-    // With a peer holding a resource the same request *waits*, with the analyzer's own reason code.
+    // The second one declares the same feature while the first is unfinished, so it waits — and the
+    // reason code names the *declaration*, not a file.
     const waited = await harnessed.runNow({ taskId: second.taskId, version: second.version });
     expect(waited.outcome).toBe('WAIT');
     expect(waited.wait?.kind).toBe('CONFLICT');
-    expect(waited.wait?.code).toBe('INCOMPLETE_IMPACT');
+    expect(waited.wait?.code).toBe('SAME_UNFINISHED_FEATURE');
     expect(waited.wait?.blocking).toContain(first.taskId);
     expect(taskOf(harnessed.fixture, second.taskId).state).toBe('READY');
 
-    // The explicit single-shot release starts it *concurrently* with the first Task.
-    const released = await harnessed.runNow({
-      taskId: second.taskId, version: second.version, allowUnknown: true,
-    });
-    expect(released.outcome).toBe('STARTED');
-    expect(released.assessment?.verdict).toBe('UNKNOWN');
-    expect(released.clearedUnknownBy).toBeTruthy();
+    // A CANCELLED peer is finished, so the same feature no longer conflicts with anything: this is
+    // the boundary the user chose ("only while that feature is not developed yet").
+    await cancelIdleTask(harnessed.fixture, first.taskId);
+    const afterRetirement = await harnessed.runNow({ taskId: second.taskId, version: second.version });
+    expect(afterRetirement.outcome).toBe('STARTED');
+    expect(afterRetirement.assessment?.verdict).toBe('SAFE_TO_PARALLELIZE');
     expect(taskOf(harnessed.fixture, second.taskId).state).toBe('RUNNING');
-    expect(taskOf(harnessed.fixture, first.taskId).state).toBe('RUNNING');
-
-    // The release is audited with its binding, and the assessment itself is still UNKNOWN: the
-    // release widened one start decision, it did not rewrite a verdict.
-    const events = harnessed.fixture.storage.listTaskScheduleEvents({
-      projectId: harnessed.fixture.projectId, taskId: second.taskId, limit: 50,
-    });
-    const release = events.find((event) => event.eventType === 'TaskUnknownCleared');
-    expect(release).toBeDefined();
-    const payload = release?.payload as Record<string, unknown>;
-    expect(payload['verdict']).toBe('UNKNOWN');
-    expect(payload['reasonCodes']).toEqual(['INCOMPLETE_IMPACT']);
-    expect(payload['revisionId']).toBe(taskOf(harnessed.fixture, second.taskId).currentRevision.id);
-    expect(typeof payload['baseCommit']).toBe('string');
-    expect(payload['analyzerVersion']).toBe('impact-analyzer-v1');
-    expect(payload['releasedBy']).toBe('test-user');
-    const decision = events.find((event) => event.eventType === 'TaskScheduleDecided');
-    expect((decision?.payload as Record<string, unknown>)['clearedUnknownBy']).toBe(release?.eventId);
-    const assessments = harnessed.fixture.storage.listImpactAssessments({
-      projectId: harnessed.fixture.projectId, taskId: second.taskId, limit: 10,
-    });
-    expect(assessments.every((assessment) => assessment.verdict === 'UNKNOWN')).toBe(true);
   });
 
-  test('consumes a single-shot release and expires it when the assessment changes', async () => {
-    const harnessed = await harness({ withMapping: false });
-    const task = harnessed.primary;
-    const peer = addTask(harnessed.fixture, 'Peer');
-    expect((await harnessed.runNow({ taskId: peer.taskId, version: peer.version })).outcome)
-      .toBe('STARTED');
-    const released = await harnessed.service.clearUnknown({
-      projectId: harnessed.fixture.projectId,
-      taskId: task.taskId,
-      commandId: nextId(),
-      actor: 'test-user',
-    });
-    expect(released.state).toBe('RECORDED');
-    const started = await harnessed.runNow({ taskId: task.taskId, version: task.version });
-    expect(started.outcome).toBe('STARTED');
-    expect(started.clearedUnknownBy).toBe(released.releaseId);
-    // The decision names the release it consumed, so the audit chain is closed.
-    const decision = harnessed.fixture.storage.listTaskScheduleEvents({
-      projectId: harnessed.fixture.projectId, taskId: task.taskId, limit: 20,
-    }).find((event) => event.eventType === 'TaskScheduleDecided');
-    expect((decision?.payload as Record<string, unknown>)['clearedUnknownBy'])
-      .toBe(released.releaseId);
+  test('an archived peer is out of the feature rule, and a feature conflict is never released', async () => {
+    const harnessed = await harness({ withMapping: true });
+    await cancelIdleTask(harnessed.fixture, harnessed.primary.taskId);
+    const archived = addTask(harnessed.fixture, 'Declared, then set aside', ['core-module']);
+    const candidate = addTask(harnessed.fixture, 'Wants the same feature', ['core-module']);
 
-    // A release whose *assessment* changed has expired: it binds the baseline, so a `dev` that moved
-    // makes it inapplicable instead of silently authorizing a start on a new baseline.
-    const later = addTask(harnessed.fixture, 'Unknown after the baseline moved');
-    const second = await harnessed.service.clearUnknown({
-      projectId: harnessed.fixture.projectId,
-      taskId: later.taskId,
-      commandId: nextId(),
-      actor: 'test-user',
+    // A READY peer that declares the feature blocks the candidate...
+    const blocked = await harnessed.runNow({ taskId: candidate.taskId, version: candidate.version });
+    expect(blocked.outcome).toBe('WAIT');
+    expect(blocked.wait?.code).toBe('SAME_UNFINISHED_FEATURE');
+
+    // ...but the single-shot release exists for *unprovable* verdicts, and a proven declaration
+    // overlap is not one of them: the request is refused, not widened.
+    const released = await harnessed.runNow({
+      taskId: candidate.taskId, version: candidate.version, allowUnknown: true,
     });
-    expect(second.state).toBe('RECORDED');
-    await git(harnessed.fixture.repo, ['commit', '--allow-empty', '-m', 'the baseline moves']);
-    await git(harnessed.fixture.repo, ['branch', '-f', 'dev', 'HEAD']);
-    // ADR-0056: the baseline the release binds is the dev clone's, so moving the main checkout's
-    // `dev` is not enough for an expiry test.
-    await syncDevClone({ devRepo: harnessed.fixture.devRepo, repository: harnessed.fixture.repo });
-    const afterMove = await harnessed.runNow({ taskId: later.taskId, version: later.version });
-    expect(afterMove.outcome).toBe('WAIT');
-    expect(afterMove.wait?.reasonCodes).toEqual(
-      expect.arrayContaining([expect.stringMatching(/STALE_BASE|SNAPSHOT_SCOPE_MISMATCH|INCOMPLETE/)]),
-    );
+    // A `CONFLICTING` verdict is a *proven* overlap: the single-shot release exists for verdicts the
+    // analyzer could not prove, so it is reported as a wait that carries no release.
+    expect(released.outcome).toBe('WAIT');
+    expect(released.wait?.code).toBe('SAME_UNFINISHED_FEATURE');
+    expect(released.clearedUnknownBy ?? null).toBeNull();
+    expect(taskOf(harnessed.fixture, candidate.taskId).state).toBe('READY');
+
+    // Archiving the peer is the user saying "not in flight", so it stops blocking.
+    harnessed.fixture.storage.archiveTask({
+      projectId: harnessed.fixture.projectId,
+      taskId: archived.taskId,
+      expectedVersion: taskOf(harnessed.fixture, archived.taskId).version,
+      commandId: nextId(),
+      payloadHash: nextId(),
+      eventId: nextId(),
+      actor: 'test-user',
+      archivedAt: Date.now(),
+    });
+    const afterArchive = await harnessed.runNow({
+      taskId: candidate.taskId, version: candidate.version,
+    });
+    expect(afterArchive.outcome).toBe('STARTED');
+    expect(afterArchive.assessment?.verdict).toBe('SAFE_TO_PARALLELIZE');
   });
 
-  test('revokes a prediction whose observed diff grew and asks the grown Task to pause', async () => {
+  test('reports a grown diff without pausing anyone, because a change set is not a declaration', async () => {
     const harnessed = await harness({ withMapping: true });
     const first = harnessed.primary;
     const second = addTask(harnessed.fixture, 'Second important area');
@@ -418,31 +451,24 @@ describe('scheduling loop', () => {
     await writeInto(harnessed, second.taskId, 'core/second.ts', 'export const second = 1;\n');
     const grown = await harnessed.tick('GROWTH');
     const growths = grown.projects[0]?.impactGrowth ?? [];
-    // Both Tasks grew past their prediction and both now provably overlap the other, so each of them
-    // is asked to pause: the pair that was allowed to run on empty observations no longer is.
+    // Both Tasks grew past the empty scope they were allowed to start on. Under ADR-0059 that is
+    // *not* a conflict any more: neither declares a feature, so the grown change set is reported as a
+    // fact and nobody is asked to pause for it.
     expect(growths).toHaveLength(2);
     const growth = growths.find((entry) => entry.taskId === first.taskId);
     expect(growth?.addedPaths).toContain('core/first.ts');
-    expect(growth?.pauseRequested).toBe(true);
-    expect(growth?.conflictingTaskIds).toContain(second.taskId);
-    expect(growth?.reasonCodes).toContain('IMPORTANT_DIRECTORY_OVERLAP');
-    expect(growth?.reasonCodes).toContain('SAME_MODULE');
-    expect(harnessed.pauses.map((pause) => pause.taskId).sort())
-      .toEqual([first.taskId, second.taskId].sort());
-    // The revocation itself is a fact in the ledger, with both snapshots so the audit shows what
-    // changed and which active Task it now provably overlaps.
+    expect(growth?.pauseRequested).toBe(false);
+    expect(growth?.conflictingTaskIds).toEqual([]);
+    expect(harnessed.pauses).toEqual([]);
+    // No revocation is written either: the growth pass records a revocation only when the declaration
+    // comparison finds a conflict, and a change set is not a declaration.
     const revoked = harnessed.fixture.storage.listTaskScheduleEvents({
       projectId: harnessed.fixture.projectId, taskId: first.taskId, limit: 20,
     }).find((event) => event.eventType === 'TaskImpactPredictionRevoked');
-    expect(revoked).toBeDefined();
-    const payload = revoked?.payload as Record<string, unknown>;
-    expect(payload['conflictingTaskIds']).toEqual([second.taskId]);
-    expect(payload['pauseRequested']).toBe(true);
-    expect(typeof payload['previousSnapshotId']).toBe('string');
-    expect(typeof payload['snapshotId']).toBe('string');
+    expect(revoked).toBeUndefined();
   });
 
-  test('refuses to start a candidate whose observed scope overlaps an active Task', async () => {
+  test('resumes beside a peer whose observed scope overlaps but whose declaration does not', async () => {
     const harnessed = await harness({ withMapping: true });
     const first = harnessed.primary;
     const second = addTask(harnessed.fixture, 'Wants core/shared.ts too');
@@ -486,19 +512,11 @@ describe('scheduling loop', () => {
       allowUnknown: false,
       actor: 'test-user',
     });
-    expect(gate.outcome).toBe('REFUSED');
-    expect(gate.wait?.code).toBe('SAME_FILE');
-    expect(gate.assessment?.verdict).toBe('CONFLICTING');
-    // SAME_FILE is a *proven* overlap, so the explicit single-shot release does not lift it.
-    const withRelease = await harnessed.service.assertResumeAllowed({
-      projectId: harnessed.fixture.projectId,
-      taskId: second.taskId,
-      adapterId: 'pi',
-      commandId: nextId(),
-      allowUnknown: true,
-      actor: 'test-user',
-    });
-    expect(withRelease.outcome).toBe('REFUSED');
+    // Both Tasks changed the very same file, and that is no longer a conflict: the resume gate answers
+    // the declaration question, and neither Task declared a feature.
+    expect(gate.outcome).toBe('ALLOWED');
+    expect(gate.assessment?.verdict).toBe('SAFE_TO_PARALLELIZE');
+    expect(gate.assessment?.reasonCodes).toEqual(['NO_CONFLICT']);
   });
 
   test('a paused Task still takes part in the active set, even though it holds no slot', async () => {
@@ -541,6 +559,11 @@ describe('scheduling loop', () => {
     expect(harnessed.fixture.storage.countActiveSlotOccupants({
       projectId: harnessed.fixture.projectId,
     }).globalUsed).toBe(0);
+    // Both paused Tasks declare the same feature, which is the current reason a resume has to wait:
+    // the peer is unfinished (`PAUSED`) and its declaration overlaps.
+    for (const taskId of [first.taskId, second.taskId]) {
+      declareFeature(harnessed.fixture, taskId, ['core-module']);
+    }
     const gate = await harnessed.service.assertResumeAllowed({
       projectId: harnessed.fixture.projectId,
       taskId: first.taskId,
@@ -551,6 +574,7 @@ describe('scheduling loop', () => {
     });
     expect(gate.outcome).toBe('REFUSED');
     expect(gate.assessment?.verdict).toBe('CONFLICTING');
+    expect(gate.wait?.code).toBe('SAME_UNFINISHED_FEATURE');
     expect(gate.assessment?.activeTaskIds).toEqual([second.taskId]);
     // ...and the same question asked about a Task that is *not* active stays answerable: a READY Task
     // in this project is a candidate, and its own verdict is taken against the paused one too.

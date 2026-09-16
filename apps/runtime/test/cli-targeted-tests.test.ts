@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import {
   reclaimTestResources,
   registerTemporaryDirectory,
+  createFixtureTaskForExplicitStart,
   runCli,
 } from './support/runtime-reclamation.js';
 import { provisionDevClone } from './support/agent-fixture.js';
@@ -147,6 +148,7 @@ async function fixture(): Promise<{
     CODEESTRA_HOME: home,
     CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: shimPath,
+    CODEESTRA_SCHEDULE_TICK_MS: '600000',
   };
   const opened = await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);
@@ -159,13 +161,14 @@ async function capturedTask(input: {
   readonly environment: Record<string, string>;
   readonly projectId: string;
 }): Promise<{ readonly taskId: string; readonly resultCommit: string }> {
-  const created = JSON.parse((await cli(['task', 'create', input.projectId, 'Write a file'],
-    input.environment)).stdout) as { readonly id: string };
-  const taskId = created.id;
-  expect((await cli(['task', 'submit', input.projectId, taskId, '0'], input.environment)).exitCode)
-    .toBe(0);
-  expect((await cli(['task', 'run', input.projectId, taskId, '1'], input.environment)).exitCode)
-    .toBe(0);
+  await cli(['stop'], input.environment);
+  const ready = await createFixtureTaskForExplicitStart({
+    home: input.environment.CODEESTRA_HOME!, environment: input.environment,
+    projectId: input.projectId, specification: 'Write a file', startable: true,
+  });
+  const taskId = ready.taskId;
+  expect((await cli(['task', 'run', input.projectId, taskId, String(ready.expectedVersion)],
+    input.environment)).exitCode).toBe(0);
   const deadline = Date.now() + 30_000;
   let exited = false;
   while (Date.now() < deadline) {

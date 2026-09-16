@@ -33,9 +33,11 @@ import { AgentRuntimeCoordinator } from '../src/agent-runtime-service.js';
 import { AdapterRegistry } from '../src/adapter-registry.js';
 import { captureResultCommit, prepareResultCommit } from '../src/result-commit-service.js';
 import {
+  createFixtureTaskForExplicitStart,
   reclaimTestResources,
   registerTemporaryDirectory,
   runCli,
+  submitFixtureTaskWithoutScheduling,
 } from './support/runtime-reclamation.js';
 import { provisionDevClone } from './support/agent-fixture.js';
 
@@ -136,7 +138,8 @@ async function fixtureWithProjects(
   }
   const assets = temporaryDirectory('codeestra-reclaim-batch-assets-');
   await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
-  const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
+  const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets,
+    CODEESTRA_SCHEDULE_TICK_MS: '600000' };
   const repositories: string[] = [];
   const devRepositories: string[] = [];
   for (let index = 0; index < count; index += 1) {
@@ -175,9 +178,8 @@ async function seededExecutedTask(
 ): Promise<SeededTask> {
   const created = JSON.parse((await cli(['task', 'create', projectId, specification],
     fixture.environment)).stdout) as { readonly id: string };
-  const submitted = await cli(['task', 'submit', projectId, created.id, '0'], fixture.environment);
-  expect(submitted.exitCode).toBe(0);
   await cli(['stop'], fixture.environment);
+  submitFixtureTaskWithoutScheduling({ home: fixture.home, projectId, taskId: created.id });
   return await withStorage(fixture.home, async (storage) => {
     const adapter = new DeterministicFakeAdapter('SUCCEED', [{
       type: 'completed', eventId: 'fake-completed-1', cursor: 'cursor-1',
@@ -219,15 +221,16 @@ async function reservedTaskWorkspace(
   options: { readonly cancel?: boolean } = {},
 ): Promise<{ readonly taskId: string; readonly workspacePath: string;
   readonly reservationId: string; readonly reservationState: string }> {
-  const created = JSON.parse((await cli(['task', 'create', projectId, 'Reserved work'],
-    fixture.environment)).stdout) as { readonly id: string };
-  const submitted = await cli(['task', 'submit', projectId, created.id, '0'], fixture.environment);
-  expect(submitted.exitCode).toBe(0);
-  const status = JSON.parse((await cli(['task', 'status', projectId, created.id],
+  await cli(['stop'], fixture.environment);
+  const ready = await createFixtureTaskForExplicitStart({
+    home: fixture.home, environment: fixture.environment, projectId,
+    specification: 'Reserved work',
+  });
+  const status = JSON.parse((await cli(['task', 'status', projectId, ready.taskId],
     fixture.environment)).stdout) as {
     readonly task: { readonly version: number; readonly currentRevision: { readonly id: string } };
   };
-  const acquired = await cli(['scheduler', 'reservations', 'acquire', projectId, created.id,
+  const acquired = await cli(['scheduler', 'reservations', 'acquire', projectId, ready.taskId,
     String(status.task.version), '--revision', status.task.currentRevision.id, '--json'],
   fixture.environment);
   expect(acquired.exitCode).toBe(0);
@@ -240,13 +243,13 @@ async function reservedTaskWorkspace(
     .workspace;
   expect(existsSync(workspace.path)).toBe(true);
   if (options.cancel === true) {
-    const current = JSON.parse((await cli(['task', 'status', projectId, created.id],
+    const current = JSON.parse((await cli(['task', 'status', projectId, ready.taskId],
       fixture.environment)).stdout) as { readonly task: { readonly state: string;
         readonly version: number } };
-    const cancelled = await cli(['task', 'cancel', projectId, created.id,
+    const cancelled = await cli(['task', 'cancel', projectId, ready.taskId,
       String(current.task.version)], fixture.environment);
     expect(cancelled.exitCode).toBe(0);
-    const after = JSON.parse((await cli(['task', 'status', projectId, created.id],
+    const after = JSON.parse((await cli(['task', 'status', projectId, ready.taskId],
       fixture.environment)).stdout) as { readonly task: { readonly state: string } };
     expect(after.task.state).toBe('CANCELLED');
   }
@@ -256,7 +259,7 @@ async function reservedTaskWorkspace(
       readonly reservationId: string; readonly state: string }[] };
   const reservation = listed.reservations.find((entry) => entry.reservationId === reservationId);
   expect(reservation?.state).not.toBe('RELEASED');
-  return { taskId: created.id, workspacePath: workspace.path, reservationId,
+  return { taskId: ready.taskId, workspacePath: workspace.path, reservationId,
     reservationState: reservation?.state as string };
 }
 

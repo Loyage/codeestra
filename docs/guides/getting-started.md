@@ -1,8 +1,9 @@
 # 安装与第一次运行
 
-> **适用版本** `dev@036cf68`（2026-09-15） · **schema** v28 · **最后校对** 2026-09-15
-> 版本会前进：`dev@036cf68` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@17b4dd6`（2026-09-16） · **schema** v32 · **最后校对** 2026-09-16
+> 版本会前进：`dev@17b4dd6` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> §4.3 的影响映射含义提醒已按 ADR-0059 改写（FOUNDATION-091）；其余内容沿用原有校对基线。
 
 本文带你从零把 Codeestra 跑起来：安装依赖 → 启动 Runtime → 接入第一个 Git 项目 → 打开 Web UI。
 
@@ -172,8 +173,9 @@ bun run codeestra project policy /path/to/repo
 bun run codeestra project impact validate /path/to/repo --json
 ```
 
-读取 `main` ref 上的 `.codeestra/impact.json`。**没有映射就不可能有「已证明无冲突」**：所有冲突判定都是
-`UNKNOWN`，因而不能并行。退出码 `0` 仅当映射存在**且**是已确认的那一份（`OK` / `OK_UNTRUSTED`）；否则 `1`。
+读取 `main` ref 上的 `.codeestra/impact.json`。这张映射只被 `--feature` 的**写入校验**与快照证据用到；
+**判定不再读映射**，所以没有映射不会让任务互相等待（ADR-0059）。退出码 `0` 仅当映射存在**且**是已确认的那一份
+（`OK` / `OK_UNTRUSTED`）；否则 `1`。
 
 ### 4.4 `project trust`：正式接入
 

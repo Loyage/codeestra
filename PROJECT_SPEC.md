@@ -32,7 +32,7 @@ User Intent → Task / Task DAG → Dependency Analysis → Conflict Analysis
 3. Minimum Useful Decomposition：仅当拆分明显改善并行性、依赖管理、风险隔离、上下文规模、独立验证或合并边界时才拆分。2～8 个任务是常见范围，不是约束。
 4. 依赖图必须是 DAG；新增或修改依赖时检测环，失败则不部分应用。
 5. 开始执行必须同时满足依赖条件、并发安全和 Agent 资源可用。功能 Task/worktree 从固定 `dev` commit 建立基线；依赖上游必须通过集成验证并进入 `dev`，下游 `dev` 基线必须包含所需上游结果。仅 Task verification 成功不释放依赖；进入 `dev` 也不等于已提升到稳定 `main`。
-6. Conflict assessment 为 `SAFE_TO_PARALLELIZE | UNKNOWN | CONFLICTING`。只有 SAFE 允许直接并发；未知不等于无冲突。UNKNOWN 默认等待（不启动、不并行）；用户可用显式单次放行命令（`--allow-unknown`）在承担风险的前提下启动该 Task，**允许其与当前活跃任务并发**；放行必须绑定 revision 与评估版本、写入审计，且默认路径不增加任何确认步骤。
+6. Conflict assessment 为 `SAFE_TO_PARALLELIZE | UNKNOWN | CONFLICTING`，但**默认是 `SAFE_TO_PARALLELIZE`**：判定只比较**声明**，即两个 Task 的 revision 是否声明了**同一功能**（feature，取自项目 `.codeestra/impact.json` 的 `modules[].id`，`task create --feature`）。**只有当双方声明同一功能、且对方仍未完成**（状态不是 `SUCCEEDED`/`CANCELLED`，且未归档）时才是 `CONFLICTING`。**文件路径重叠、同一目录、同一模块路径、共享构建/依赖/schema 资源都不再构成冲突**——它们仍是可观测事实并进入解释输出，但不再阻止并发。`UNKNOWN` 保留为取值（历史 assessment 与客户端仍能渲染），当前规则**没有产生它的路径**：映射缺失/未确认/不完整、基线移动、worktree 不可观测都不再使判定变成 `UNKNOWN`。`--allow-unknown` 与一次性放行命令面保留，但只对 `UNKNOWN` 有意义，**永不放宽 `CONFLICTING`**。功能 id 在写入时按项目 main ref 的映射校验（未声明即 `UNKNOWN_FEATURE`，映射不可读即拒绝），因此判定本身不需要读映射。默认路径确认步数为 0。（原保守语义见 ADR-0031，已被 ADR-0059 取代。）
 7. 每个运行中 Task 独占 branch 和 worktree；不允许多个 Task 操作同一工作目录。branch 使用内部稳定 ID；owned worktree 位于 Runtime 数据目录 `worktrees/<project-id>/<task-id>/`，不得污染用户主工作区。
 8. Core 只依赖 Agent Adapter 合约，不能依赖某个 Agent 的命令行参数、SDK 类型或输出格式。
 9. AgentSession 是有身份、生命周期和恢复信息的运行实体，不是一次命令调用。用户可从 Task 入口请求接管运行中的真实 Agent；Pi 采用安全点 RPC→原生 TUI/PTY 进程交接，而不是把日志浏览伪装成 attach。一个 Execution 可保留有序 Session process incarnation，但任意时刻最多一个 Provider writer；旧进程未确认退出不得启动 successor（ADR-0010）。

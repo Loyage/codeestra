@@ -191,8 +191,11 @@ interface SnapshotReport {
 
 interface ExplainReport extends SnapshotReport {
   readonly candidate: SnapshotReport;
-  readonly active: readonly { readonly taskId: string; readonly complete: boolean }[];
-  readonly assessment: { readonly verdict: string; readonly reasonCodes: readonly string[] };
+  readonly active: readonly { readonly taskId: string; readonly complete: boolean;
+    /** The comparable Task's declared features (ADR-0059); the judged fact of a conflict. */
+    readonly features: readonly string[] }[];
+  readonly assessment: { readonly verdict: string; readonly reasonCodes: readonly string[];
+    readonly hits: readonly { readonly features: readonly string[] }[] };
   readonly explanation: readonly string[];
   readonly recordedAssessments: readonly { readonly otherTaskId: string; readonly verdict: string;
     readonly reasonCodes: readonly string[] }[];
@@ -235,7 +238,7 @@ async function cancelWithCurrentVersion(
 }
 
 describe('project impact', () => {
-  test('derives SAFE, CONFLICTING, and UNKNOWN verdicts from real change sets', async () => {
+  test('derives SAFE and declared-feature verdicts from real change sets', async () => {
     const home = temporaryDirectory('codeestra-impact-home-');
     const assets = temporaryDirectory('codeestra-impact-assets-');
     await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
@@ -272,7 +275,8 @@ describe('project impact', () => {
     await waitFor(() => Bun.file(join(firstWorktree, 'src', 'agent', `${first.id}.ts`)).size > 0);
     await waitFor(() => Bun.file(join(secondWorktree, 'src', 'agent', `${second.id}.ts`)).size > 0);
 
-    // SAFE: disjoint files, nothing important, no shared resource.
+    // SAFE: neither Task declares a feature, so there is nothing to conflict with — and under the
+    // current rule that is the answer whatever the files look like.
     const safe = await cli(['project', 'impact', 'explain', projectId, second.id, '--json'],
       environment);
     expect(safe.exitCode).toBe(0);
@@ -280,10 +284,10 @@ describe('project impact', () => {
     expect(safeReport.assessment).toMatchObject({
       verdict: 'SAFE_TO_PARALLELIZE', reasonCodes: ['NO_CONFLICT'],
     });
-    expect(safeReport.active.map((entry) => entry.taskId)).toEqual([first.id]);
-    expect(safeReport.recordedAssessments).toEqual([
-      { otherTaskId: first.id, verdict: 'SAFE_TO_PARALLELIZE', reasonCodes: ['NO_CONFLICT'] },
-    ]);
+    // Only Tasks that declared a feature are compared (ADR-0059), so nothing was compared here and
+    // nothing is recorded as a pair.
+    expect(safeReport.active).toEqual([]);
+    expect(safeReport.recordedAssessments).toEqual([]);
     expect(safeReport.candidate.snapshot?.complete).toBe(true);
     expect(safeReport.candidate.snapshot?.files).toEqual([`src/agent/${second.id}.ts`]);
     expect(safeReport.candidate.caseModeSource).toBe('FILESYSTEM');
@@ -305,27 +309,39 @@ describe('project impact', () => {
     expect(withSymlink.snapshot?.complete).toBe(true);
     rmSync(join(firstWorktree, 'escape-link'), { force: true });
 
-    // CONFLICTING: both revisions now change a different file of the declared `core` subtree, so the
-    // important directory and the module overlap even though no file does.
+    // Overlapping change sets are still *observed* — and still not a conflict. Both Tasks now change
+    // files of the declared `core` subtree, including the very same file, and the verdict stays SAFE:
+    // this is the deliberate reversal of the old file-overlap rule (ADR-0059).
     await Bun.write(join(firstWorktree, 'core', 'first.ts'), 'export const first = 1;\n');
-    await Bun.write(join(secondWorktree, 'core', 'second.ts'), 'export const second = 2;\n');
+    await Bun.write(join(secondWorktree, 'core', 'shared.ts'), 'export const shared = 2;\n');
+    await Bun.write(join(firstWorktree, 'core', 'shared.ts'), 'export const shared = 3;\n');
+    const overlapping = JSON.parse((await cli(['project', 'impact', 'explain', projectId, second.id,
+      '--json'], environment)).stdout) as ExplainReport;
+    expect(overlapping.assessment.verdict).toBe('SAFE_TO_PARALLELIZE');
+    expect(overlapping.explanation.join('\n'))
+      .toContain('the rule compares declarations, not file overlap');
+
+    // Declaring the same feature on both revisions is what makes them conflict, and the reason code
+    // names the declaration rather than any path.
+    for (const task of [first, second]) {
+      const status = JSON.parse((await cli(['task', 'status', projectId, task.id],
+        environment)).stdout) as { readonly task: { readonly version: number } };
+      const declared = await cli(['task', 'revision', 'create', projectId, task.id,
+        String(status.task.version), '--feature', 'core-module', '--reason', 'declare the feature',
+        '--json'], environment);
+      expect(declared.exitCode).toBe(0);
+    }
     const conflicting = await cli(['project', 'impact', 'explain', projectId, second.id, '--json'],
       environment);
+    // `explain` exits 0 only for SAFE; a declared overlap waits.
     expect(conflicting.exitCode).toBe(1);
     const conflictingReport = JSON.parse(conflicting.stdout) as ExplainReport;
     expect(conflictingReport.assessment.verdict).toBe('CONFLICTING');
-    expect(conflictingReport.assessment.reasonCodes).toEqual([
-      'IMPORTANT_DIRECTORY_OVERLAP', 'SAME_MODULE',
-    ]);
-    expect(conflictingReport.explanation.join('\n')).toContain('directories core');
-
-    // CONFLICTING on the same file, reported with the intersecting path.
-    await Bun.write(join(secondWorktree, 'src', 'agent', `${first.id}.ts`),
-      'export const copied = true;\n');
-    const sameFile = JSON.parse((await cli(['project', 'impact', 'explain', projectId, second.id,
-      '--json'], environment)).stdout) as ExplainReport;
-    expect(sameFile.assessment.reasonCodes).toContain('SAME_FILE');
-    expect(sameFile.explanation.join('\n')).toContain(`paths src/agent/${first.id}.ts`);
+    expect(conflictingReport.assessment.reasonCodes).toEqual(['SAME_UNFINISHED_FEATURE']);
+    expect(conflictingReport.active.map((entry) => entry.taskId)).toEqual([first.id]);
+    expect(conflictingReport.active[0]?.features).toEqual(['core-module']);
+    expect(conflictingReport.assessment.hits[0]?.features).toEqual(['core-module']);
+    expect(conflictingReport.explanation.join('\n')).toContain('features core-module');
 
     // Amending the Task revision makes the stored snapshot stale: a new one is recorded for the new
     // revision instead of the old prediction being reused.
@@ -346,13 +362,16 @@ describe('project impact', () => {
       environment)).stdout) as SnapshotReport;
     expect(third.disposition).toBe('REUSED');
     expect(third.snapshot?.id).toBe(afterAmendment.snapshot?.id);
+    // An amendment that omits `--feature` inherits the declaration, so the conflict survives it: a
+    // specification change must not quietly drop the Task out of the feature rule.
     const explainAfterAmendment = await cli(['project', 'impact', 'explain', projectId, second.id,
       '--json'], environment);
-    // The candidate was amended, but its active peer is on a different revision now, so the pair is
-    // unknown rather than silently safe.
     expect(explainAfterAmendment.exitCode).toBe(1);
+    expect((JSON.parse(explainAfterAmendment.stdout) as ExplainReport).assessment
+      .reasonCodes).toEqual(['SAME_UNFINISHED_FEATURE']);
 
-    // UNKNOWN: a project that declares no impact mapping can never prove anything.
+    // A project with no mapping cannot *declare* a feature — that is now the refusal, instead of every
+    // verdict being UNKNOWN.
     const bare = await createRepository({ prefix: 'codeestra-impact-bare', withImpactMapping: false });
     const bareEnvironment = { ...environment, CODEESTRA_PI_EXECUTABLE: bare.tools };
     expect((await cli(['open', bare.repository, '--dev-repo', bare.devRepo, '--no-open'], bareEnvironment)).exitCode).toBe(0);
@@ -364,25 +383,27 @@ describe('project impact', () => {
       bareEnvironment);
     expect(bareValidated.exitCode).toBe(1);
     expect(JSON.parse(bareValidated.stdout)).toMatchObject({ code: 'POLICY_ABSENT' });
+    const refusedFeature = await cli(['task', 'create', bareProjectId, 'Change something',
+      '--feature', 'core-module'], bareEnvironment);
+    expect(refusedFeature.exitCode).toBe(1);
+    expect(refusedFeature.stderr).toContain('IMPACT_POLICY_ABSENT');
+    // ...while a Task that declares nothing is perfectly usable, and its verdict is SAFE rather than
+    // UNKNOWN: the missing mapping is a fact about the mapping, not about this Task.
     const bareTask = await createAndSubmit(bareEnvironment, bareProjectId, 'Change something');
-    expect((await cli(['task', 'run', bareProjectId, bareTask.id, String(bareTask.version)],
-      bareEnvironment)).exitCode).toBe(0);
     const bareWorktree = join(realpathSync(home), 'worktrees', bareProjectId, bareTask.id);
     await waitFor(() => Bun.file(join(bareWorktree, 'src', 'agent', `${bareTask.id}.ts`)).size > 0);
-    const unknown = await cli(['project', 'impact', 'explain', bareProjectId, bareTask.id, '--json'],
-      bareEnvironment);
-    expect(unknown.exitCode).toBe(1);
-    const unknownReport = JSON.parse(unknown.stdout) as ExplainReport;
-    expect(unknownReport.assessment.verdict).toBe('UNKNOWN');
-    expect(unknownReport.candidate.snapshot?.complete).toBe(false);
-    expect(unknownReport.explanation.join('\n')).toContain('POLICY_ABSENT');
+    const withoutMapping = await cli(['project', 'impact', 'explain', bareProjectId, bareTask.id,
+      '--json'], bareEnvironment);
+    expect(withoutMapping.exitCode).toBe(0);
+    const withoutMappingReport = JSON.parse(withoutMapping.stdout) as ExplainReport;
+    expect(withoutMappingReport.assessment.verdict).toBe('SAFE_TO_PARALLELIZE');
+    // The snapshot still says, factually, that the mapping it observed is absent.
+    expect(withoutMappingReport.candidate.snapshot?.complete).toBe(false);
+    expect(withoutMappingReport.candidate.snapshot?.incompleteReasons).toEqual(['POLICY_ABSENT']);
 
-    // A mapping that no longer parses is reported as INVALID, not as "no mapping". Every
-    // overlapping change is removed first, so the only remaining reason the verdict cannot be SAFE
-    // is the mapping itself.
-    rmSync(join(secondWorktree, 'src', 'agent', `${first.id}.ts`), { force: true });
-    rmSync(join(secondWorktree, 'core'), { recursive: true, force: true });
-    rmSync(join(firstWorktree, 'core'), { recursive: true, force: true });
+    // A mapping that no longer parses is reported as INVALID, not as "no mapping". It does not change
+    // the verdict (the verdict is about declarations, and nothing consulted the mapping here), but the
+    // snapshot records it and `validate` refuses.
     await Bun.write(join(main.repository, '.codeestra', 'impact.json'), '{ not json }\n');
     await git(main.repository, ['add', '.codeestra/impact.json']);
     await git(main.repository, ['commit', '-q', '-m', 'break the mapping']);
@@ -392,15 +413,17 @@ describe('project impact', () => {
     expect(JSON.parse(invalid.stdout)).toMatchObject({
       code: 'POLICY_INVALID', policy: { state: 'INVALID', errorCode: 'INVALID_IMPACT_POLICY' },
     });
+    // The *declaration* itself is still what decides, and it is still the same declaration.
     const invalidExplain = await cli(['project', 'impact', 'explain', projectId, second.id,
       '--json'], environment);
     expect(invalidExplain.exitCode).toBe(1);
-    const invalidReport = JSON.parse(invalidExplain.stdout) as ExplainReport;
-    expect(invalidReport.assessment).toMatchObject({
-      verdict: 'UNKNOWN', reasonCodes: ['INCOMPLETE_IMPACT'],
-    });
-    expect(invalidReport.candidate.snapshot?.incompleteReasons).toEqual(['POLICY_INVALID']);
-    expect(invalidReport.explanation.join('\n')).toContain('POLICY_INVALID');
+    expect((JSON.parse(invalidExplain.stdout) as ExplainReport).assessment
+      .reasonCodes).toEqual(['SAME_UNFINISHED_FEATURE']);
+    // A *new* declaration, on the other hand, is refused while the mapping cannot be read.
+    const declareOnInvalid = await cli(['task', 'create', projectId, 'A brand new Task',
+      '--feature', 'core-module'], environment);
+    expect(declareOnInvalid.exitCode).toBe(1);
+    expect(declareOnInvalid.stderr).toContain('INVALID_IMPACT_POLICY');
 
     // Only the command face is used above; the Runtime is stopped through the CLI like any client.
     // The Task version is re-read instead of assumed: the scheduling engine's recovery pass can

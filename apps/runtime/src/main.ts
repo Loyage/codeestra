@@ -102,6 +102,7 @@ import {
   reconcileTaskDependencyState,
 } from './scheduler.js';
 import { pauseOrCancelTask, resumePausedTask, retryFailedTask } from './task-control-service.js';
+import { resolveDeclaredFeatures } from './impact-analysis-service.js';
 import { purgeTask } from './task-purge-service.js';
 import {
   readSessionTranscript,
@@ -345,7 +346,18 @@ const schedule = new ScheduleService({
   storage,
   adapters: registry,
   slots: slotReservations,
-  start: (request) => coordinator.runScheduledExecution(request),
+  // An Execution the engine started owns its Session exactly as an explicitly requested one does:
+  // the incarnation history and the single writer lease (ADR-0023) are facts about the provider
+  // process, and the automatic path produces the same provider process `task.run` does. Recording
+  // them only on the explicit paths left every automatically started Session without an incarnation,
+  // so a terminal handoff had no predecessor to verify (ADR-0026).
+  start: async (request) => {
+    const outcome = await coordinator.runScheduledExecution(request);
+    if (outcome.sessionId !== null) {
+      await handoff.recordAutomationIncarnation({ sessionId: outcome.sessionId });
+    }
+    return outcome;
+  },
   // §4: an execution whose observed diff grew past the prediction its concurrency was allowed on is
   // asked to pause through the existing cooperative stop; a stop that cannot be confirmed becomes
   // RECOVERY_REQUIRED there, with the failure scene retained and nothing integrated.
@@ -1163,6 +1175,12 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         commandId: request.commandId,
         ...(request.specification === undefined ? {} : { specification: request.specification }),
         constraints: request.constraints,
+        // Validated against the project's mapping like `task create`; absent means "inherit".
+        features: request.features === undefined
+          ? null
+          : await resolveDeclaredFeatures({
+            storage, projectId: request.projectId, features: request.features,
+          }),
         reason: request.reason,
         actor: 'local-user',
       }));
@@ -1978,11 +1996,18 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       });
     }
     case 'task.create': {
+      // Declared features are validated before anything is written (ADR-0059 D03): an id that the
+      // project's mapping does not declare is a refusal with its own code, not a stored string that a
+      // later judgment would have to guess about.
+      const features = await resolveDeclaredFeatures({
+        storage, projectId: request.projectId, features: request.features,
+      });
       const payloadHash = createHash('sha256').update(JSON.stringify({
         projectId: request.projectId,
         specification: request.specification,
         constraints: request.constraints,
         kind: request.kind,
+        features,
       })).digest('hex');
       return success(request.requestId, storage.createTask({
         projectId: request.projectId,
@@ -1995,6 +2020,7 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         taskEventId: crypto.randomUUID(),
         specification: request.specification,
         constraints: request.constraints,
+        features,
         kind: request.kind,
         actor: 'local-user',
         createdAt: Date.now(),

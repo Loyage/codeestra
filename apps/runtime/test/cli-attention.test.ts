@@ -15,6 +15,12 @@ import { provisionDevClone } from './support/agent-fixture.js';
 const repositoryRoot = join(import.meta.dir, '..', '..', '..');
 const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
 
+// The Web UI's own client (`RuntimeClient`) talks to the Runtime's loopback HTTP surface from this
+// process, and a developer proxy in the environment would answer for it (a 502 with an empty body).
+// Child CLI invocations already set this for themselves; the in-process fetch needs the same floor.
+process.env.no_proxy = '127.0.0.1,localhost';
+process.env.NO_PROXY = '127.0.0.1,localhost';
+
 afterEach(async () => { await reclaimTestResources(); });
 
 function temporaryDirectory(prefix: string): string {
@@ -119,7 +125,6 @@ async function startQuestionnaireTask(title: string): Promise<{
   readonly projectId: string;
   readonly taskId: string;
   readonly reportPath: string;
-  readonly run: Bun.Subprocess<'ignore', 'pipe', 'pipe'>;
 }> {
   const repository = temporaryDirectory('codeestra-question-repo-');
   const home = temporaryDirectory('codeestra-question-home-');
@@ -162,15 +167,9 @@ async function startQuestionnaireTask(title: string): Promise<{
   const created = JSON.parse((await cli(['task', 'create', projectId,
     'Ask before choosing a package manager'], environment)).stdout) as { readonly id: string };
   const taskId = created.id;
+  // Submission starts this undeclared Task immediately under ADR-0059.
   expect((await cli(['task', 'submit', projectId, taskId, '0'], environment)).exitCode).toBe(0);
-
-  const run = Bun.spawn({
-    cmd: [process.execPath, cliEntry, 'task', 'run', projectId, taskId, '1'],
-    cwd: repositoryRoot,
-    env: { ...Bun.env, ...environment, no_proxy: '127.0.0.1,localhost' },
-    stdin: 'ignore', stdout: 'pipe', stderr: 'pipe',
-  });
-  return { environment, projectId, taskId, reportPath, run };
+  return { environment, projectId, taskId, reportPath };
 }
 
 /** Poll the same command face a user would use until the Agent's question is waiting. */
@@ -193,7 +192,7 @@ async function waitForAttention(
 
 describe('codeestra attention answer', () => {
   test('carries one structured questionnaire to the CLI and the answer back to the Agent', async () => {
-    const { environment, projectId, taskId, reportPath, run } =
+    const { environment, projectId, taskId, reportPath } =
       await startQuestionnaireTask(encodeQuestionnaireDialogTitle(questionnaire));
     try {
       const attention = await waitForAttention(environment, projectId);
@@ -224,8 +223,6 @@ describe('codeestra attention answer', () => {
       expect(answered.exitCode).toBe(0);
       expect(JSON.parse(answered.stdout)).toMatchObject({ status: 'DELIVERED' });
 
-      expect(await run.exited).toBe(0);
-      await new Response(run.stdout).text();
       // The Adapter encoded the structured answer for its own dialog; the stub saw exactly that.
       const report = JSON.parse(readFileSync(reportPath, 'utf8')) as
         { readonly value: string; readonly cancelled: boolean };
@@ -244,13 +241,12 @@ describe('codeestra attention answer', () => {
       expect(status.taskState).not.toBe('WAITING_FOR_USER');
       expect(status.executions[0]?.session?.state).toBe('EXITED');
     } finally {
-      run.kill('SIGTERM');
       await cli(['stop'], environment);
     }
   });
 
   test('workbench HTTP client reads tasks and answers while a task awaits user input', async () => {
-    const { environment, projectId, taskId, run } =
+    const { environment, projectId, taskId } =
       await startQuestionnaireTask(encodeQuestionnaireDialogTitle(questionnaire));
     try {
       await waitForAttention(environment, projectId);
@@ -304,9 +300,8 @@ describe('codeestra attention answer', () => {
           answers: [{ type: 'CHOICES', questionIndex: 0, choiceIndexes: [1] },
             { type: 'TEXT', questionIndex: 1, text: '只验证命令面' }] } },
       });
-      expect(await run.exited).toBe(0);
-      // task.run may already have returned WAITING_FOR_USER; answer delivery is not completion.
-      // Wait for the independently projected provider exit through the command face, not a delay.
+      // Answer delivery is not completion. Wait for the independently projected provider exit
+      // through the command face, not a delay.
       let ended = await client.command<TaskStatusView>({ command: 'task.status', projectId, taskId });
       const deadline = Date.now() + 5_000;
       while (ended.executions[0]?.session?.state !== 'EXITED' && Date.now() < deadline) {
@@ -335,7 +330,6 @@ describe('codeestra attention answer', () => {
       expect((await client.command<TaskView[]>({ command: 'task.list', projectId }))
         .find((item) => item.id === draft.id)?.archivedAt).toBeNull();
     } finally {
-      run.kill('SIGTERM');
       await cli(['stop'], environment);
     }
   }, 30_000);
@@ -344,7 +338,8 @@ describe('codeestra attention answer', () => {
     // The same stub, but its dialog carries an ordinary title: the Attention is a plain provider
     // question, so a structured answer would be a shape nothing can read. It must be refused with
     // a stable code, while the raw VALUE path stays available for a real host that can answer it.
-    const { environment, projectId, run } = await startQuestionnaireTask('Which package manager?');
+    const { environment, projectId, taskId } =
+      await startQuestionnaireTask('Which package manager?');
     try {
       const attention = await waitForAttention(environment, projectId);
       expect(attention.prompt.kind).toBeUndefined();
@@ -355,9 +350,18 @@ describe('codeestra attention answer', () => {
 
       const raw = await cli(['attention', 'answer', projectId, attention.id, 'value', 'bun'], environment);
       expect(raw.exitCode).toBe(0);
-      expect(await run.exited).toBe(0);
+      const deadline = Date.now() + 5_000;
+      let state = '';
+      while (Date.now() < deadline) {
+        const current = JSON.parse((await cli(['task', 'status', projectId, taskId],
+          environment)).stdout) as { readonly executions: readonly {
+            readonly session: { readonly state: string } | null }[] };
+        state = current.executions[0]?.session?.state ?? '';
+        if (state === 'EXITED') break;
+        await Bun.sleep(50);
+      }
+      expect(state).toBe('EXITED');
     } finally {
-      run.kill('SIGTERM');
       await cli(['stop'], environment);
     }
   });

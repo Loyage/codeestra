@@ -320,12 +320,8 @@ describe('project knowledge', () => {
     expect(resolution.snapshotDigest).toBe(validation.snapshotDigest);
     expect(validation.state).toBe('VALID');
 
-    // `task run` is the explicit start request of the same gate the scheduler applies, and it goes
-    // through the same Execution path. This project declares no `.codeestra/impact.json`, so the
-    // automatic pass could never prove it SAFE; naming it explicitly is the honest way to start it.
-    const run = await cli(['task', 'run', projectId, task.id, String(task.version)], environment);
-    expect(run.exitCode).toBe(0);
-    // Wait for the fact that it ran rather than for the command to have returned.
+    // ADR-0059 makes an undeclared Task SAFE, so submission already started the same Execution path.
+    // Wait for the fact that it ran rather than assuming process completion from the submit response.
     const worktree = join(realpathSync(home), 'worktrees', projectId, task.id);
     await waitFor(() => Bun.file(join(worktree, 'src', 'agent', `${task.id}.ts`)).size > 0);
 
@@ -499,14 +495,10 @@ describe('project knowledge', () => {
       CODEESTRA_PI_EXECUTABLE: main.tools };
     const projectId = await openAndIdentify(environment, main.repository, main.devRepo);
 
+    // Neither Task declares a feature, so both are SAFE under ADR-0059 and submission starts them
+    // without an UNKNOWN override. This is the concurrency behavior the regression now protects.
     const first = await createAndSubmit(environment, projectId, 'First area');
-    expect((await cli(['task', 'run', projectId, first.id, String(first.version)],
-      environment)).exitCode).toBe(0);
     const second = await createAndSubmit(environment, projectId, 'Second area');
-    // This fixture declares no impact mapping, so the second Task is UNKNOWN against an active set;
-    // the explicit single-shot release is the documented way to run it anyway.
-    expect((await cli(['task', 'run', projectId, second.id, String(second.version),
-      '--allow-unknown'], environment)).exitCode).toBe(0);
 
     const worktrees = join(home, 'worktrees', projectId);
     await waitFor(() => Bun.file(join(worktrees, first.id, 'src', 'agent',

@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  createFixtureTaskForExplicitStart,
   reclaimTestResources,
   registerTemporaryDirectory,
   runCli,
@@ -149,12 +150,36 @@ async function fixture(withMapping: boolean): Promise<Fixture> {
     CODEESTRA_HOME: home,
     CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: shimPath,
+    // The fixtures below deliberately leave a READY Task in place; the recovery pass must not run
+    // often enough for a test to observe a start it did not ask for.
+    CODEESTRA_SCHEDULE_TICK_MS: '600000',
   };
   const opened = await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { readonly id: string }[];
   return { environment, repository, devRepo, projectId: projects[0]?.id as string };
+}
+
+/**
+ * A READY Task no scheduling pass will start: it and one unfinished peer declare the same feature, so
+ * every pass judges it `CONFLICTING` (ADR-0059). The generation recheck under test here is the
+ * reservation primitive's, which runs on a READY Task whatever the conflict verdict says.
+ */
+async function conflictHeldTask(fixtureState: Fixture, specification: string): Promise<TaskRef> {
+  await cli(['stop'], fixtureState.environment);
+  const ready = await createFixtureTaskForExplicitStart({
+    home: fixtureState.environment.CODEESTRA_HOME as string,
+    environment: fixtureState.environment, projectId: fixtureState.projectId, specification,
+  });
+  const status = await cli(['task', 'status', fixtureState.projectId, ready.taskId],
+    fixtureState.environment);
+  expect(status.exitCode).toBe(0);
+  const payload = JSON.parse(status.stdout) as {
+    readonly task: { readonly id: string; readonly version: number; readonly state: string;
+      readonly currentRevision: { readonly id: string } } };
+  return { id: payload.task.id, version: payload.task.version, state: payload.task.state,
+    revisionId: payload.task.currentRevision.id };
 }
 
 interface TaskRef {
@@ -164,7 +189,8 @@ interface TaskRef {
   readonly state: string;
 }
 
-async function createReadyTask(
+/** Submits one Task through the CLI and reports the scheduling answer the command returned. */
+async function submittedTask(
   fixtureState: Fixture,
   specification: string,
 ): Promise<{ readonly task: TaskRef; readonly submit: { readonly started: readonly unknown[];
@@ -195,6 +221,9 @@ interface Generation {
   readonly revisionId: string;
   readonly baseCommit: string;
   readonly policyVersion: string;
+  /** What the engine would do with this candidate, and why — the other half of "it did not start". */
+  readonly disposition: string;
+  readonly waitCode: string | null;
 }
 
 /**
@@ -208,6 +237,8 @@ async function generationOf(fixtureState: Fixture, taskId: string): Promise<Gene
   expect(status.exitCode).toBe(0);
   const report = JSON.parse(status.stdout) as {
     readonly candidates: readonly { readonly taskId: string; readonly revisionId: string;
+      readonly disposition: string;
+      readonly wait: { readonly code: string } | null;
       readonly assessment: { readonly candidateSnapshotId: string | null;
         readonly baseCommit: string; readonly policyVersion: string } | null }[] };
   const candidate = report.candidates.find((entry) => entry.taskId === taskId);
@@ -222,6 +253,8 @@ async function generationOf(fixtureState: Fixture, taskId: string): Promise<Gene
     revisionId: candidate?.revisionId as string,
     baseCommit: assessment.baseCommit,
     policyVersion: assessment.policyVersion,
+    disposition: candidate?.disposition as string,
+    waitCode: candidate?.wait?.code ?? null,
   };
 }
 
@@ -280,12 +313,14 @@ describe('scheduler reservations acquire --snapshot', () => {
   test('reserves on a current generation and refuses one whose baseline moved, writing nothing',
     async () => {
       const fixtureState = await fixture(false);
-      const { task, submit } = await createReadyTask(fixtureState, 'Independent work');
-      // Without a mapping nothing can be proven complete, so the engine predicts and waits rather
-      // than starting: the Task keeps a READY state and a cached generation to be checked.
-      expect(submit.started).toHaveLength(0);
+      const task = await conflictHeldTask(fixtureState, 'Independent work');
+      // The engine starts nothing and leaves the Task READY — under ADR-0059 because an unfinished
+      // peer declares the same feature, not because an absent mapping was unprovable. What matters
+      // here is that a cached generation exists for the recheck to judge.
       expect(task.state).toBe('READY');
       const generation = await generationOf(fixtureState, task.id);
+      expect(generation.disposition).toBe('WAITING');
+      expect(generation.waitCode).toBe('SAME_UNFINISHED_FEATURE');
       expect(generation.policyVersion).toBe('impact-policy-v1#absent');
 
       // A generation that is still current is reserved, and the reservation records exactly it.
@@ -323,7 +358,7 @@ describe('scheduler reservations acquire --snapshot', () => {
   test('refuses a generation whose mapping changed, and accepts the regenerated one',
     async () => {
       const fixtureState = await fixture(false);
-      const { task } = await createReadyTask(fixtureState, 'Mapping recheck');
+      const task = await conflictHeldTask(fixtureState, 'Mapping recheck');
       const generation = await generationOf(fixtureState, task.id);
       expect(generation.policyVersion).toBe('impact-policy-v1#absent');
 
@@ -354,7 +389,7 @@ describe('scheduler reservations acquire --snapshot', () => {
 
   test('two concurrent acquisitions of one generation produce exactly one reservation', async () => {
     const fixtureState = await fixture(false);
-    const { task } = await createReadyTask(fixtureState, 'Concurrent reservation');
+    const task = await conflictHeldTask(fixtureState, 'Concurrent reservation');
     const generation = await generationOf(fixtureState, task.id);
     const [left, right] = await Promise.all([
       acquire(fixtureState, task, generation.snapshotId),
@@ -372,7 +407,7 @@ describe('scheduler reservations acquire --snapshot', () => {
 
   test('omitting --snapshot keeps the primitive working and records no assessment', async () => {
     const fixtureState = await fixture(false);
-    const { task } = await createReadyTask(fixtureState, 'No asserted assessment');
+    const task = await conflictHeldTask(fixtureState, 'No asserted assessment');
     const reserved = await acquire(fixtureState, task);
     expect(reserved.exitCode).toBe(0);
     expect(reserved.payload).toMatchObject({
@@ -385,7 +420,7 @@ describe('scheduler reservations acquire --snapshot', () => {
     // (empty change set, development baseline) through the same recheck the CLI uses. A `SKIPPED`
     // decision carrying `SNAPSHOT_STALE` would show up here instead of a start.
     const fixtureState = await fixture(true);
-    const { task, submit } = await createReadyTask(fixtureState, 'Engine start');
+    const { task, submit } = await submittedTask(fixtureState, 'Engine start');
     expect(submit.started).toHaveLength(1);
     expect(submit.waiting).toHaveLength(0);
     const status = await cli(['task', 'status', fixtureState.projectId, task.id],

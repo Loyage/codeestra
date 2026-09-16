@@ -301,8 +301,8 @@ describe('codeestra task depends', () => {
     expect(existsSync(join(realpathSync(home), 'worktrees', projectId, downstream))).toBe(false);
 
     // Drive the upstream to a verified result commit and integrate it into dev.
+    // The undeclared upstream is SAFE under ADR-0059, so submission starts it immediately.
     expect((await cli(['task', 'submit', projectId, upstream, '0'], environment)).exitCode).toBe(0);
-    expect((await cli(['task', 'run', projectId, upstream, '1'], environment)).exitCode).toBe(0);
     const deadline = Date.now() + 30_000;
     let exited = false;
     while (Date.now() < deadline) {
@@ -334,17 +334,21 @@ describe('codeestra task depends', () => {
     expect(view.edges[0]?.reason).toBeNull();
     expect(view.edges[0]).toMatchObject({ satisfied: true, integratedCommit: resultCommit,
       reason: null });
-    expect(view.taskState).toBe('READY');
-    expect((await status(environment, projectId, downstream)).task.state).toBe('READY');
+    // Dependency reconciliation triggers the scheduler. The undeclared downstream is SAFE under
+    // ADR-0059, so it starts immediately instead of lingering in READY.
+    expect(view.taskState).toBe('RUNNING');
+    expect((await status(environment, projectId, downstream)).task.state).toBe('RUNNING');
 
-    // Removing the edge then leaves the Task READY with no edges at all.
+    // A running Task keeps the dependency set it was scheduled with, so the edit is refused with a
+    // stable code instead of silently reshaping what the running Agent was started against.
     const downstreamVersion = (await status(environment, projectId, downstream)).task.version;
-    const removed = await cli(['task', 'depends', 'remove', projectId, downstream,
+    const refused = await cli(['task', 'depends', 'remove', projectId, downstream,
       String(downstreamVersion), upstream], environment);
-    expect(removed.exitCode).toBe(0);
-    const after = await dependsList(environment, projectId, downstream);
-    expect(after.edges).toEqual([]);
-    expect(after.blocked).toBe(false);
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stderr).toContain('INVALID_STATE');
+    const stillEdged = await dependsList(environment, projectId, downstream);
+    expect(stillEdged.edges).toHaveLength(1);
+    expect(stillEdged.blocked).toBe(false);
     await cli(['stop'], environment);
   }, 180_000);
 });

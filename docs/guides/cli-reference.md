@@ -1,8 +1,11 @@
 # CLI 命令参考
 
-> **适用版本** `dev@75fa7b8`（2026-09-15） · **schema** v30 · **最后校对** 2026-09-15
-> 版本会前进：`dev@75fa7b8` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@17b4dd6`（2026-09-16） · **schema** v32 · **最后校对** 2026-09-16
+> 版本会前进：`dev@17b4dd6` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> §7 的 `session handoff terminal resize` 一节由 FOUNDATION-083 校对（ADR-0054）；
+> §3 的 `project impact *` 与 §4 的 `task submit`/`task resume`/`--feature` 由 FOUNDATION-091 新增/改写（ADR-0059）；
+> §4 的 `task purge` 一节由 FOUNDATION-090 新增（ADR-0058，其余 §4 内容沿用 FOUNDATION-070 的校对基线）。
 > §7 的 `session handoff terminal resize` 一节由 FOUNDATION-083 校对（ADR-0054）。
 
 本文覆盖 `apps/cli/src/main.ts` 中 `usage()` 列出的**每一个命令组**，以及 Runtime 的 HTTP/SSE 面。
@@ -234,7 +237,8 @@ Runtime 对给出的路径逐条核验，任一条不成立即用稳定码拒绝
 `POLICY_INVALID` / `POLICY_NOT_CONFIRMED`）、映射摘要（重要目录 / 模块 / 全局资源数量）、`analyzerVersion` 与警告。
 **退出码 `0` 仅当映射存在且是已确认的那一份**；否则 `1`。
 
-含义提醒：没有映射就不可能证明「可并行」，所以每个冲突判定都是 `UNKNOWN`，任何东西都不会并行。
+含义提醒：映射只用于两件事：`--feature` 的**写入校验**与快照证据。**判定不再读映射**，所以映射缺失/未确认
+不会让判定变成 `UNKNOWN`，也不会阻止任何东西并行（ADR-0059）。
 
 ### `project impact show <project-id> <task-id> [--json]`
 
@@ -244,8 +248,8 @@ Runtime 对给出的路径逐条核验，任一条不成立即用稳定码拒绝
 
 ### `project impact explain <project-id> <task-id> [--json]`
 
-在 `show` 的基础上，与**每一个活跃/已预留 Task** 比较，并给出 `assessment.verdict` 与理由码。
-**退出码 `0` 仅当 `SAFE_TO_PARALLELIZE`**；`UNKNOWN` 与 `CONFLICTING` 都是 `1`（代码在 `--json` 里）。
+在 `show` 的基础上，与**每一个未完成且声明了功能的 Task** 比较，并给出 `assessment.verdict` 与理由码。
+**退出码 `0` 仅当 `SAFE_TO_PARALLELIZE`**；`UNKNOWN`（历史值）与 `CONFLICTING` 都是 `1`（代码在 `--json` 里）。
 
 ### `project knowledge validate <project-id> [--json]`
 
@@ -279,7 +283,7 @@ Runtime 对给出的路径逐条核验，任一条不成立即用稳定码拒绝
 
 ## 4. `task`：生命周期
 
-### `task create <project-id> <specification> [--constraint <text>]… [--kind DEVELOPMENT]`
+### `task create <project-id> <specification> [--constraint <text>]… [--feature <module-id>]… [--kind DEVELOPMENT]`
 
 原子创建：原始意图 + 首 revision + 事实事件 + 幂等回执在同一事务。`--kind` 只接受 `DEVELOPMENT`。
 至少需要一个非空规格；`--constraint` 不可为空字符串（用法错误）。
@@ -294,6 +298,8 @@ Runtime 对给出的路径逐条核验，任一条不成立即用稳定码拒绝
 
 用 expected version 把 `DRAFT` 转 `READY`，并**在同一命令里**核对依赖 + 跑一次调度 pass。
 返回里除提交结果外还有 `state` / `version` / `dependencyState` 与 `schedule`。
+ADR-0059 之后**未声明功能的 Task 会在容量允许时就在这个命令里被启动**（`schedule.started` 非空）；
+想让它等，就声明一个已被别的未完成任务声明的功能（`--feature`），或用已满的容量。
 版本不符 → 乐观冲突拒绝（`VERSION_CONFLICT` / `CONCURRENT_MODIFICATION`）。
 
 ### `task run <project-id> <task-id> <expected-version> [--adapter <pi|codex|claude>] [--allow-unknown] [--json]`
@@ -303,6 +309,7 @@ Runtime 对给出的路径逐条核验，任一条不成立即用稳定码拒绝
 **换 `--adapter` 是新建 Execution，不是在同一个 Execution 里换 Agent。**
 
 `--allow-unknown` 是 UNKNOWN 判定的**显式单次放行**（ADR-0030 D05）：放宽门禁，**不新增确认**，写入审计台账。
+ADR-0059 之后当前规则**不再产生 `UNKNOWN`**，所以这条路日常不可达；`CONFLICTING` 永远不放行。
 
 | 退出码 | 条件 |
 |---|---|
@@ -349,8 +356,8 @@ workspace 变成 `RETAINED` 后 `reclaim` 才能考虑它。`--reason <text>` �
 ### `task resume <project-id> <task-id> <expected-version> [--adapter <…>] [--allow-unknown]`
 
 恢复是「继续**同一条** provider conversation」，所以 adapter 是请求的一部分；`--adapter` 默认 `pi`。
-它同时是**启动路径**，因此走与 `task run` 相同的冲突门禁：无法证明与活跃集合不相交时保持 paused，
-除非显式 `--allow-unknown`（单次、有审计）。等待时退出码 `3`。
+它同时是**启动路径**，因此走与 `task run` 相同的冲突门禁：与某个**未完成且声明了同一功能**的 Task 冲突时保持 paused；
+其他情形默认允许（ADR-0059 之后当前规则不再产生 `UNKNOWN`，`--allow-unknown` 这条路日常不可达）。等待时退出码 `3`。
 
 > 恢复 ≠ 重试：重试是重新入队一个 `FAILED` Task 然后新建 Execution。
 
@@ -378,10 +385,22 @@ workspace 变成 `RETAINED` 后 `reclaim` 才能考虑它。`--reason <text>` �
 
 三者都需要 expected version，多余参数是用法错误。
 
+### `--feature <module-id>`（`task create` 与 `task revision create`，可重复）
+
+冲突判定（ADR-0059）只比较**声明**：两个未完成任务声明同一功能才算冲突，所以「我想改进哪个功能」要写在 Task 上。
+
+- id 必须是项目 **main ref** 的 `.codeestra/impact.json` 里 `modules[].id` 之一；Runtime 在写入前校验，未声明 → `UNKNOWN_FEATURE`，映射读不到 → `IMPACT_POLICY_ABSENT`，映射坏掉 → `INVALID_IMPACT_POLICY`（都退出码 1，且什么都没写）。**不要求**该映射已被 `project trust` 确认。
+- `task create --feature a --feature b`：新任务声明这两个功能。
+- `task revision create ... --feature <id>`：设置**新 revision** 的声明，整体替换；**完全省略 `--feature` 则继承**当前 revision 的声明（改规格不会静默把任务踢出功能规则）；只改声明本身也是合法 revision。
+- 未声明任何功能的任务**永远不参与功能冲突**，因此提交后会在容量允许时立即开始——这是与 ADR-0031 时代相反的默认行为。
+- `task status` / `task list` 的 JSON 里，`currentRevision.features` 就是声明的内容。
+
 ### `task purge <project-id> <task-id> <expected-version> --yes [--reason <text>] [--json]`
+
 **本命令不可撤销。** 它删掉这个任务**拥有的一切**：全部 revision、Execution、AgentSession、终端/guidance/Attention 记录、验证运行、
 impact 快照与它的配对判定、槽位预留、回收记录、依赖边、`intents` 的 target，以及**它自己的 worktree、验证副本与 `task/<id>` 分支**，
 最后删除任务行本身，并在同一个事务里写一条 `TaskPurged` 事件。
+
 | 情形 | 行为 / 退出码 |
 |---|---|
 | 成功 | `0`；stdout 是结果 JSON（`--json` 只用于声明意图），含逐表 `rowsDeleted`、`dependencyEdgesRemoved`、`plan`、`branchFacts`（每个被删分支的 `tipCommit`） |
@@ -391,7 +410,9 @@ impact 快照与它的配对判定、槽位预留、回收记录、依赖边、`
 | 非终态任务 | 先走一次协作停止：能确认 provider 退出才继续删除；无法确认则 `1` / `RECONCILE_REQUIRED`，**什么都不删** |
 | `RECOVERY_REQUIRED` 任务 | `1` / `RECONCILE_REQUIRED`，先用 `task recover` 对账 |
 | 记录的 worktree/验证副本/分支无法证明属于它 | `1` / `PURGE_RESOURCE_NOT_OWNED`，**一行都不删** |
+
 固定事实（不只是约定）：
+
 - **`--yes` 是整个产品唯一一次显式确认，且不在任何常态路径上**：接入、工具、成果 commit、验证策略、调度、提升、`cancel`/`archive`
   都不需要它。它不是审批层：Runtime 不再叠第二次询问，`confirmed` 是调用者自己的声明。
 - **`SUCCEEDED` 任务实际上不可 purge**：按定义它的成果已进 `dev`（ADR-0053），因此会被 `TASK_INTEGRATED_INTO_DEV` 拒绝，
@@ -401,6 +422,7 @@ impact 快照与它的配对判定、槽位预留、回收记录、依赖边、`
   以及最后那条 `TaskPurged`。**除逐表行数与分支 tip 之外不可恢复**（无墓碑、无备份）。
 - **会连带删掉指向它的依赖边**（条数在 `dependencyEdgesRemoved` 里），下游任务会因此重新判定；也会删掉**另一方**与它配对的那条 impact 判定。
 - 本命令**不使用退出码 3**。
+
 ### `task status <project-id> <task-id> [--json]`
 
 - 输出是 JSON（`--json` 是**默认**，可用脚本声明意图）；任何其他 flag 是用法错误。
@@ -415,7 +437,7 @@ impact 快照与它的配对判定、槽位预留、回收记录、依赖边、`
 
 ```sh
 bun run codeestra task revision create <project-id> <task-id> <expected-version>
-  [--specification <text>] [--constraint <text>]… [--reason <text>] [--json]
+  [--specification <text>] [--constraint <text>]… [--feature <module-id>]… [--reason <text>] [--json]
 bun run codeestra task revision list <project-id> <task-id> [--json]
 
 bun run codeestra task revision delivery list <project-id> <task-id> [--json]
@@ -759,6 +781,7 @@ bun run codeestra task schedule clear-unknown <project-id> <task-id> [--json]
 - `run` 退出码 `0` 表示**这一趟 pass 跑了**（不代表有东西启动）；每个候选的 `disposition` 与 `detail` 打到 stderr。
 - `clear-unknown` 记录 UNKNOWN 判定的**显式单次放行**：绑定已评估 revision、基线与分析器/策略版本，
   写入审计台账，被恰好一次启动消费，**不改变已记录的判定**（仍是 UNKNOWN）。
+  ADR-0059 之后当前规则不再产生 `UNKNOWN`，所以这里通常是 `recorded:false`。
   **`CONFLICTING` 永远不放行**（`state === "CONFLICTING"` → 退出码 `1`）。
 - `--adapter` 可选；省略时不指定 Adapter。
 

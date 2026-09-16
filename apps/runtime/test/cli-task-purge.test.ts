@@ -11,6 +11,7 @@ import {
   reclaimTestResources,
   registerTemporaryDirectory,
   runCli,
+  submitFixtureTaskWithoutScheduling,
 } from './support/runtime-reclamation.js';
 import { provisionDevClone } from './support/agent-fixture.js';
 
@@ -76,7 +77,8 @@ async function openedProject(): Promise<PurgeFixture> {
   await git(repo, ['commit', '-q', '-m', 'fixture']);
   await git(repo, ['branch', 'dev']);
   const devRepo = await provisionDevClone({ repository: repo });
-  const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
+  const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets,
+    CODEESTRA_SCHEDULE_TICK_MS: '600000' };
   const opened = await cli(['open', repo, '--dev-repo', devRepo, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
@@ -101,10 +103,10 @@ async function seededExecutedTask(
 ): Promise<SeededTask> {
   const created = JSON.parse((await cli(['task', 'create', fixture.projectId, specification],
     fixture.environment)).stdout) as { readonly id: string };
-  const submitted = await cli(['task', 'submit', fixture.projectId, created.id, '0'],
-    fixture.environment);
-  expect(submitted.exitCode).toBe(0);
   await cli(['stop'], fixture.environment);
+  submitFixtureTaskWithoutScheduling({
+    home: fixture.home, projectId: fixture.projectId, taskId: created.id,
+  });
   const storage = new Phase1Database(join(fixture.home, 'runtime.sqlite'));
   try {
     const adapter = new DeterministicFakeAdapter('SUCCEED', [{

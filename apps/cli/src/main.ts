@@ -577,6 +577,8 @@ interface TaskCreateInput {
   readonly specification: string;
   /** Mutable array: the IPC request type is not readonly. */
   readonly constraints: { readonly id: string; readonly text: string }[];
+  /** Declared feature ids (`--feature <id>`, repeatable); validated by the Runtime. */
+  readonly features: string[];
   readonly kind: 'DEVELOPMENT';
 }
 
@@ -592,11 +594,18 @@ interface TaskCreateInput {
 function parseTaskCreateFlags(tokens: readonly string[]): TaskCreateInput {
   const specification: string[] = [];
   const constraints: { id: string; text: string }[] = [];
+  const features: string[] = [];
   let kind: 'DEVELOPMENT' = 'DEVELOPMENT';
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index] as string;
     const value = tokens[index + 1];
-    if (token === '--constraint') {
+    if (token === '--feature') {
+      // The id is validated against the project's declared mapping by the Runtime, not here: which
+      // features exist is a property of the repository (ADR-0059).
+      if (value === undefined || value.trim().length === 0) usage();
+      features.push(value.trim());
+      index += 1;
+    } else if (token === '--constraint') {
       if (value === undefined || value.trim().length === 0) usage();
       constraints.push({ id: crypto.randomUUID(), text: value.trim() });
       index += 1;
@@ -618,7 +627,7 @@ function parseTaskCreateFlags(tokens: readonly string[]): TaskCreateInput {
     }
   }
   if (specification.length === 0) usage();
-  return { specification: specification.join(' '), constraints, kind };
+  return { specification: specification.join(' '), constraints, features, kind };
 }
 
 /**
@@ -628,10 +637,14 @@ function parseTaskCreateFlags(tokens: readonly string[]): TaskCreateInput {
 function parseRevisionFlags(tokens: readonly string[]): {
   readonly specification: string | undefined;
   readonly constraints: readonly { readonly id: string; readonly text: string }[];
+  /** Absent means "inherit the current revision's declaration" (ADR-0059 D03). */
+  readonly features: readonly string[] | undefined;
   readonly reason: string;
 } {
   const specification: string[] = [];
   const constraints: { id: string; text: string }[] = [];
+  const features: string[] = [];
+  let featuresGiven = false;
   let reason = 'user revision request';
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index] as string;
@@ -643,6 +656,13 @@ function parseRevisionFlags(tokens: readonly string[]): {
     } else if (token === '--constraint') {
       if (value === undefined || value.trim().length === 0) usage();
       constraints.push({ id: crypto.randomUUID(), text: value.trim() });
+      index += 1;
+    } else if (token === '--feature') {
+      // An explicit `--feature` is how a Task begins (or stops) declaring a feature: repeated flags
+      // build the list, and no flag at all inherits the previous declaration instead of clearing it.
+      if (value === undefined || value.trim().length === 0) usage();
+      features.push(value.trim());
+      featuresGiven = true;
       index += 1;
     } else if (token === '--reason') {
       if (value === undefined || value.trim().length === 0) usage();
@@ -660,6 +680,7 @@ function parseRevisionFlags(tokens: readonly string[]): {
   return {
     specification: specification.length === 0 ? undefined : specification.join(' '),
     constraints,
+    features: featuresGiven ? features : undefined,
     reason,
   };
 }
@@ -1158,7 +1179,11 @@ function usage(): never {
     # the project has no recorded snapshot; resolve reports what the next Execution would use and
     # exits 1 only when no honest answer exists.
   bun run codeestra task create <project-id> <specification> [--constraint <text>]…
-    [--kind DEVELOPMENT]
+    [--feature <module-id>]… [--kind DEVELOPMENT]
+    # --feature declares the feature(s) this Task works on: module ids from the project's
+    # .codeestra/impact.json as read from its main ref. The Runtime refuses an id the mapping does
+    # not declare (UNKNOWN_FEATURE), and refuses any declaration when the mapping cannot be read.
+    # A Task that declares nothing is never in a feature conflict (ADR-0059).
   bun run codeestra task list <project-id> [--all]
   bun run codeestra task submit <project-id> <task-id> <expected-version>
   bun run codeestra task run <project-id> <task-id> <expected-version> [--adapter <pi|codex|claude>]
@@ -1213,7 +1238,10 @@ function usage(): never {
     # assistant text ends with a question mark). The note is printed to stderr.
     # --json is accepted and is the default, so a script can state its intent.
   bun run codeestra task revision create <project-id> <task-id> <expected-version>
-    [--specification <text>] [--constraint <text>]… [--reason <text>] [--json]
+    [--specification <text>] [--constraint <text>]… [--feature <module-id>]… [--reason <text>] [--json]
+    # --feature sets the feature declaration of the new revision (validated against the project's
+    # mapping). Omitting it inherits the current revision's declaration; passing it at all replaces
+    # the declaration with the ids given (ADR-0059).
   bun run codeestra task revision list <project-id> <task-id> [--json]
   bun run codeestra task revision delivery list <project-id> <task-id> [--json]
   bun run codeestra task revision delivery get <project-id> <delivery-id> [--json]
@@ -2611,6 +2639,7 @@ try {
       projectId: firstArgument,
       specification: input.specification,
       constraints: input.constraints,
+      features: input.features,
       kind: input.kind,
     }));
   } else if (group === 'task' && action === 'list') {
@@ -3563,6 +3592,7 @@ try {
         expectedVersion,
         ...(input.specification === undefined ? {} : { specification: input.specification }),
         constraints: [...input.constraints],
+        ...(input.features === undefined ? {} : { features: [...input.features] }),
         reason: input.reason,
       }));
     } else if (subcommand === 'list') {

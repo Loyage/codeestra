@@ -57,6 +57,7 @@ import {
   reclamationMigration,
   revisionDeliveryMigration,
   sessionGuidanceMigration,
+  taskRevisionFeaturesMigration,
   sessionHandoffMigration,
   sessionTerminalMigration,
   stablePromotionMigration,
@@ -1074,11 +1075,29 @@ export interface ImpactActiveTaskRef {
   readonly workspaceState: WorkspaceLifecycleState | null;
 }
 
+/**
+ * One Task a feature conflict is decided against (ADR-0059): its state, its archive flag and the
+ * features its current revision declares. `features` is never empty — the projection that produces
+ * this shape excludes Tasks that declare nothing, because a Task with no declaration cannot share a
+ * feature with anyone.
+ */
+export interface FeatureConflictPeerRef {
+  readonly taskId: string;
+  readonly displayNumber: number;
+  readonly taskState: TaskLifecycleState;
+  readonly archived: boolean;
+  readonly revisionId: string;
+  readonly features: readonly string[];
+}
+
 /** The Task an assessment is made for, plus the newest workspace it could still produce changes in. */
 export interface ImpactCandidateTaskRef {
   readonly taskId: string;
   readonly taskState: TaskLifecycleState;
   readonly revisionId: string;
+  readonly archived: boolean;
+  /** The declared features of the current revision; the only judged fact of a conflict (ADR-0059). */
+  readonly features: readonly string[];
   readonly workspaceId: string | null;
   readonly workspacePath: string | null;
   readonly workspaceBaseCommit: string | null;
@@ -1574,6 +1593,12 @@ export interface TaskSummary {
     readonly number: number;
     readonly specification: string;
     readonly constraints: readonly StoredConstraint[];
+    /**
+     * The feature ids this revision declares (ADR-0059). They are the only judged fact of a conflict:
+     * two unfinished Tasks that declare the same feature conflict, and a Task that declares none is
+     * never in a feature conflict.
+     */
+    readonly features: readonly string[];
     readonly createdAt: number;
   };
   readonly createdAt: number;
@@ -1675,6 +1700,18 @@ function promotionPhase(input: {
   if (input.state === 'CREATED' || input.state === 'AWAITING_APPROVAL') return 'READY_TO_PUSH';
   if (input.state === 'PROMOTING') return 'AWAITING_PULL';
   return input.restart === null ? 'RESTART_PENDING' : 'MAIN_PUSH_PENDING';
+}
+
+/**
+ * A stored feature list is re-validated on read (ADR-0059). The column only guarantees that the JSON
+ * parses as an array; a row edited outside this path must not become a judged fact, and a non-string
+ * element would otherwise reach the comparison as `undefined`.
+ */
+function parseTaskFeatures(json: string): readonly string[] {
+  const parsed = JSON.parse(json) as unknown;
+  if (!Array.isArray(parsed)) return Object.freeze([]);
+  return Object.freeze(parsed.filter((value): value is string =>
+    typeof value === 'string' && value.trim().length > 0));
 }
 
 function mapAgentConfigurationRow(row: AgentConfigurationRow): AgentConfigurationRecord {
@@ -1840,6 +1877,10 @@ export class Phase1Database {
         // `PRAGMA foreign_key_check` because an upgrade from any older stamped version may rebuild a
         // table on the way. No earlier number is ever inserted.
         if (version < 31) this.sqlite.exec(sessionGuidanceMigration);
+        // Version 32 is this step's own number (FOUNDATION-091 / ADR-0059): declared features on a
+        // Task revision. A pure `ADD COLUMN`, so it needs no foreign-key handling of its own; a
+        // database stamped 17–31 still gets it, and no earlier number is ever inserted.
+        if (version < 32) this.sqlite.exec(taskRevisionFeaturesMigration);
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -2062,6 +2103,12 @@ export class Phase1Database {
     readonly taskEventId: string;
     readonly specification: string;
     readonly constraints: readonly StoredConstraint[];
+    /**
+     * Feature ids already validated against the project's declared mapping (ADR-0059). Omitting the
+     * list means exactly what an empty list means: this Task declares no feature, so it can never be
+     * in a feature conflict.
+     */
+    readonly features?: readonly string[];
     readonly kind: 'DEVELOPMENT' | 'SELF';
     readonly actor: string;
     readonly createdAt: number;
@@ -2095,10 +2142,11 @@ export class Phase1Database {
           input.revisionId, input.createdAt);
         database.query(`
           INSERT INTO task_revisions(id,task_id,number,previous_revision_id,specification,
-            constraints_json,source_intent_id,actor,reason,created_at)
-          VALUES (?1,?2,1,NULL,?3,?4,?5,?6,'initial task creation',?7)
+            constraints_json,features_json,source_intent_id,actor,reason,created_at)
+          VALUES (?1,?2,1,NULL,?3,?4,?5,?6,?7,'initial task creation',?8)
         `).run(input.revisionId, input.taskId, input.specification,
-          JSON.stringify(input.constraints), input.intentId, input.actor, input.createdAt);
+          JSON.stringify(input.constraints), JSON.stringify(input.features ?? []), input.intentId,
+          input.actor, input.createdAt);
         database.query('INSERT INTO intent_targets(intent_id,task_id) VALUES (?1,?2)')
           .run(input.intentId, input.taskId);
         database.query(`
@@ -2113,7 +2161,8 @@ export class Phase1Database {
           VALUES (?1,?2,'TaskCreated',1,'Task',?3,0,?4,?5,?6,?7)
         `).run(input.taskEventId, input.projectId, input.taskId, input.commandId,
           input.intentEventId, input.createdAt,
-          JSON.stringify({ taskId: input.taskId, revisionId: input.revisionId, kind: input.kind }));
+          JSON.stringify({ taskId: input.taskId, revisionId: input.revisionId, kind: input.kind,
+        features: input.features ?? [] }));
         return {
           id: input.taskId,
           projectId: input.projectId,
@@ -2127,6 +2176,7 @@ export class Phase1Database {
             number: 1,
             specification: input.specification,
             constraints: input.constraints,
+            features: Object.freeze([...(input.features ?? [])]),
             createdAt: input.createdAt,
           },
           createdAt: input.createdAt,
@@ -2147,11 +2197,13 @@ export class Phase1Database {
     return this.sqlite.query<{
       id: string; project_id: string; display_number: number; kind: 'DEVELOPMENT' | 'SELF';
       state: TaskLifecycleState; priority: number; version: number; revision_id: string; revision_number: number;
-      specification: string; constraints_json: string; revision_created_at: number;
+      specification: string; constraints_json: string; features_json: string;
+      revision_created_at: number;
       created_at: number; updated_at: number; archived_at: number | null;
     }, [string]>(`
       SELECT t.id,t.project_id,t.display_number,t.kind,t.state,t.priority,t.version,
         r.id AS revision_id,r.number AS revision_number,r.specification,r.constraints_json,
+        r.features_json,
         r.created_at AS revision_created_at,t.created_at,t.updated_at,t.archived_at
       FROM tasks t JOIN task_revisions r ON r.task_id=t.id AND r.id=t.current_revision_id
       WHERE t.project_id=?1 ${archivedClause} ORDER BY t.display_number
@@ -2168,11 +2220,13 @@ export class Phase1Database {
     const row = this.sqlite.query<{
       id: string; project_id: string; display_number: number; kind: 'DEVELOPMENT' | 'SELF';
       state: TaskLifecycleState; priority: number; version: number; revision_id: string; revision_number: number;
-      specification: string; constraints_json: string; revision_created_at: number;
+      specification: string; constraints_json: string; features_json: string;
+      revision_created_at: number;
       created_at: number; updated_at: number; archived_at: number | null;
     }, [string, string]>(`
       SELECT t.id,t.project_id,t.display_number,t.kind,t.state,t.priority,t.version,
         r.id AS revision_id,r.number AS revision_number,r.specification,r.constraints_json,
+        r.features_json,
         r.created_at AS revision_created_at,t.created_at,t.updated_at,t.archived_at
       FROM tasks t JOIN task_revisions r ON r.task_id=t.id AND r.id=t.current_revision_id
       WHERE t.project_id=?1 AND t.id=?2
@@ -2183,7 +2237,8 @@ export class Phase1Database {
   private mapTaskSummary(row: {
     id: string; project_id: string; display_number: number; kind: 'DEVELOPMENT' | 'SELF';
     state: TaskLifecycleState; priority: number; version: number; revision_id: string; revision_number: number;
-    specification: string; constraints_json: string; revision_created_at: number;
+    specification: string; constraints_json: string; features_json: string;
+    revision_created_at: number;
     created_at: number; updated_at: number; archived_at: number | null;
   }): TaskSummary {
     return {
@@ -2199,6 +2254,7 @@ export class Phase1Database {
         number: row.revision_number,
         specification: row.specification,
         constraints: JSON.parse(row.constraints_json) as readonly StoredConstraint[],
+        features: parseTaskFeatures(row.features_json),
         createdAt: row.revision_created_at,
       },
       createdAt: row.created_at,
@@ -11480,6 +11536,12 @@ export class Phase1Database {
     readonly deliveryEventId: string;
     readonly specification: string;
     readonly constraints: readonly StoredConstraint[];
+    /**
+     * The feature declaration of the *new* revision. An omitted list inherits the previous
+     * revision's declaration instead of silently dropping it: amending a specification is not a
+     * statement that the Task stopped working on that feature (ADR-0059 D03).
+     */
+    readonly features?: readonly string[] | null;
     readonly kind: 'AMEND_TASK' | 'ADD_CONSTRAINT';
     readonly reason: string;
     readonly actor: string;
@@ -11515,13 +11577,20 @@ export class Phase1Database {
           rawText: input.specification, kind: input.kind, status: 'APPLIED',
           actor: input.actor, createdAt: input.createdAt,
         });
+        const requested = input.features ?? null;
+        const inherited = requested === null
+          ? database.query<{ features_json: string }, [string]>(
+            'SELECT features_json FROM task_revisions WHERE id=?1').get(task.current_revision_id)
+          : null;
+        const features = requested
+          ?? (inherited === null ? [] : JSON.parse(inherited.features_json) as readonly string[]);
         database.query(`
           INSERT INTO task_revisions(id,task_id,number,previous_revision_id,specification,
-            constraints_json,source_intent_id,actor,reason,created_at)
-          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+            constraints_json,features_json,source_intent_id,actor,reason,created_at)
+          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
         `).run(input.revisionId, input.taskId, next.number, task.current_revision_id,
-          input.specification, JSON.stringify(input.constraints), input.intentId, input.actor,
-          input.reason, input.createdAt);
+          input.specification, JSON.stringify(input.constraints), JSON.stringify(features),
+          input.intentId, input.actor, input.reason, input.createdAt);
         const taskVersion = input.expectedVersion + 1;
         const taskUpdate = database.query(`
           UPDATE tasks SET current_revision_id=?1,version=?2,updated_at=?3
@@ -11548,7 +11617,7 @@ export class Phase1Database {
           input.intentEventId, input.createdAt,
           JSON.stringify({ taskId: input.taskId, revisionId: input.revisionId,
             revisionNumber: next.number, previousRevisionId: task.current_revision_id,
-            constraintCount: input.constraints.length, reason: input.reason,
+            constraintCount: input.constraints.length, features, reason: input.reason,
             actor: input.actor }));
         const running = database.query<{
           execution_id: string; session_id: string | null; incarnation_id: string | null;
@@ -13036,13 +13105,17 @@ export class Phase1Database {
   getImpactCandidateTask(projectId: string, taskId: string): ImpactCandidateTaskRef | null {
     const row = this.sqlite.query<{
       task_id: string; task_state: TaskLifecycleState; revision_id: string;
+      archived_at: number | null; features_json: string;
       workspace_id: string | null; workspace_path: string | null;
       workspace_base_commit: string | null; workspace_state: WorkspaceLifecycleState | null;
     }, [string, string]>(`
       SELECT task.id AS task_id,task.state AS task_state,task.current_revision_id AS revision_id,
+        task.archived_at,revision.features_json,
         workspace.id AS workspace_id,workspace.path AS workspace_path,
         workspace.base_commit AS workspace_base_commit,workspace.state AS workspace_state
       FROM tasks task
+      JOIN task_revisions revision ON revision.task_id=task.id
+        AND revision.id=task.current_revision_id
       LEFT JOIN workspaces workspace
         ON workspace.task_id=task.id AND workspace.state <> 'RELEASED'
       WHERE task.project_id=?1 AND task.id=?2
@@ -13053,11 +13126,49 @@ export class Phase1Database {
       taskId: row.task_id,
       taskState: row.task_state,
       revisionId: row.revision_id,
+      archived: row.archived_at !== null,
+      features: parseTaskFeatures(row.features_json),
       workspaceId: row.workspace_id,
       workspacePath: row.workspace_path,
       workspaceBaseCommit: row.workspace_base_commit,
       workspaceState: row.workspace_state,
     };
+  }
+
+  /**
+   * The Tasks a feature conflict can be decided against (ADR-0059): every Task of the project that is
+   * **unfinished** (any state other than `SUCCEEDED`/`CANCELLED`) and **not archived**, and that
+   * **declares at least one feature**. A Task that declares nothing can never share a feature, so it
+   * is excluded here rather than compared and answered `SAFE` — the rule is about declarations, not
+   * about every Task the project happens to contain.
+   *
+   * This projection replaces "Tasks holding an Execution resource" as the conflict input (ADR-0031
+   * D06): a `READY` Task that has not started yet is exactly the case the rule is about, so the judge
+   * can no longer be limited to Tasks that already hold a worktree.
+   */
+  listFeatureConflictPeers(projectId: string, excludeTaskId?: string): readonly FeatureConflictPeerRef[] {
+    return this.sqlite.query<{
+      task_id: string; display_number: number; task_state: TaskLifecycleState;
+      archived_at: number | null; revision_id: string; features_json: string;
+    }, [string, string]>(`
+      SELECT task.id AS task_id,task.display_number,task.state AS task_state,task.archived_at,
+        revision.id AS revision_id,revision.features_json
+      FROM tasks task
+      JOIN task_revisions revision ON revision.task_id=task.id
+        AND revision.id=task.current_revision_id
+      WHERE task.project_id=?1 AND (?2 = '' OR task.id <> ?2)
+        AND task.archived_at IS NULL
+        AND task.state NOT IN ('SUCCEEDED','CANCELLED')
+        AND json_array_length(revision.features_json) > 0
+      ORDER BY task.id
+    `).all(projectId, excludeTaskId ?? '').map((row) => ({
+      taskId: row.task_id,
+      displayNumber: row.display_number,
+      taskState: row.task_state,
+      archived: row.archived_at !== null,
+      revisionId: row.revision_id,
+      features: parseTaskFeatures(row.features_json),
+    }));
   }
   // ---------------------------------------------------------------------------------------------
   // Project Knowledge (FOUNDATION-067 / ADR-0041).

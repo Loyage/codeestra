@@ -6759,6 +6759,90 @@ domain/ui 一行未动，且 ADR-0038 禁止在 lane 上跑全量（协调者在
 ②「冲突判定放宽」尚未开始：按用户答复，下一格会改为「默认 SAFE，只有两侧声明同一 feature（复用 `.codeestra/impact.json` 的 `modules[].id`）
 且对方为**任何非终态**时才 `CONFLICTING`」，保留三值判定但默认路径不再产出 `UNKNOWN`，并写新 ADR supersede ADR-0031、修订 `PROJECT_SPEC.md` §2.6。
 
+## FOUNDATION-091 — 冲突判定改为「声明同一功能且对方未完成」（格 2，ADR-0059，schema **v32**）
+
+状态：**实现完成 + 收尾完成（旧默认断言已按新语义重写、文档已同步），全量 `bun test apps/runtime/test` 469 项全绿**；未提交、未 push、未合入 `dev`、未跑仓库全量 `check`（ADR-0038）。基线 `dev@17b4dd6`，工作分支 `lane/p1-task-purge`（与格 1 同分支）。
+
+### 交付了什么
+
+1. **判定规则反转**：唯一判据是「两侧声明同一功能且对方未完成」（未完成 = 非 `SUCCEEDED`/`CANCELLED` 且未归档）。命中 `SAME_UNFINISHED_FEATURE`；否则 `SAFE_TO_PARALLELIZE`。**同文件、同目录、同模块、同全局资源一律不再冲突**。
+2. **默认 SAFE、无 UNKNOWN 产生路径**：映射缺失/非法/未确认、基线移动、worktree 不可观测都不再让判定变成 `UNKNOWN`（`UNKNOWN`、`--allow-unknown`、`clear-unknown` 保留但日常不可达；`clear-unknown` 对 `CONFLICTING` 继续拒绝）。
+3. **功能声明**：`task create --feature <module-id>` / `task revision create --feature <module-id>`（省略即继承、显式即替换、只改声明也是合法 revision），写入时按项目 main ref 的 `.codeestra/impact.json` 的 `modules[].id` 校验（`UNKNOWN_FEATURE` / `IMPACT_POLICY_ABSENT` / `INVALID_IMPACT_POLICY`）；**不要求映射已被 trust 确认**（UI 信任流程不发映射摘要，否则界面信任的项目无法声明功能）。
+4. **schema v32**：`task_revisions.features_json`（纯 `ADD COLUMN`，历史行 `'[]'`；`v16` 继续永久未使用）。
+5. **调度接线**：peer 集合换成 `listFeatureConflictPeers`（非终态 + 未归档 + 有声明），删除 `#refreshSubjects`（每 tick 为每个活跃任务派生快照，是调度 pass 最贵的一步）与 `#unavailableAssessment`；增长检测保留但**不再因 diff 增长而暂停任何人**。
+6. **UI**：`SAME_UNFINISHED_FEATURE` 标签、任务详情显示声明的功能、冲突命中显示功能 id。
+7. **规格**：`PROJECT_SPEC.md` §2.6 重写（这是本轮用户批准的人工规格修订）；`conflict-analyzer.md` 增加 §8「当前判定」，§1–§4 标注为 ADR-0031 的历史设计。
+
+### 实际运行的验证（本格最终状态）
+
+| 命令 | 结果 |
+|---|---|
+| `packages/domain/test/impact-analysis.test.ts`（按新规则重写，19 项） | pass |
+| `bun test packages/storage/test packages/domain/test`（474 项） | pass |
+| `apps/runtime/test/schedule-service.test.ts`（10 项，5 项重写） | pass |
+| `apps/runtime/test/cli-schedule.test.ts`（6 项，3 项重写） | pass |
+| `apps/runtime/test/cli-impact.test.ts`（1 项端到端，重写） | pass |
+| `bun test apps/runtime/test`（66 文件） | **469 pass / 0 fail**（收尾前是 395 pass / 74 fail） |
+| `bun x vitest run`（22 文件） | **490 pass / 0 fail** |
+| `bun run typecheck` + `bun run typecheck:ui` | 0 类型错误 |
+
+未运行：仓库全量 `bun run check` / `just check` / `just verify`（ADR-0038：功能分支不跑全量，提升前在 `dev` 上跑），
+以及任何浏览器/桌面/键鼠自动化（ADR-0008）。UI 只验证了纯函数投影与静态标记，**没有**真实点击。
+
+### 收尾做了什么（本次修复）
+
+失败面是**同一个行为反转**造成的旧 fixture 假设（「提交后停在 `READY`」），不是新规则的缺陷。按语义分四类处理：
+
+1. **不需要显式启动的 fixture**（attention / prose-question / knowledge / transcript / integrate / integration-batch /
+   promotion / depends / task-control / task-purge / reclaim / lifecycle…）：删掉多余的 `task run`，断言改成「提交即开始」，
+   或改用 `support/runtime-reclamation.ts` 的新 helper `submitFixtureTaskWithoutScheduling`（直接写 READY，不经调度）。
+2. **需要「READY 且不被自动启动」的 fixture**（`task run` 的定向测试、抢位预留、snapshot 重检、控制命令）：
+   新 helper `createFixtureTaskForExplicitStart` 给候选与一个 **DRAFT 的同伴 Task 声明同一功能**，于是每个 pass
+   （含新 Runtime 的 STARTUP pass）都判它 `CONFLICTING` 而不启动它；只有在测试确实要 `task run` 成功时才用
+   `startable: true` 把同伴归档。这样不依赖 `CODEESTRA_SCHEDULE_TICK_MS` 的取值就能稳定保住 READY。
+3. **新增事实的跟随修复**：`analyzerVersion` → `impact-analyzer-v2`；`active[]`/`hits[]` 新增 `features`；
+   新稳定码 `UNKNOWN_FEATURE` / `IMPACT_POLICY_ABSENT` / `INVALID_IMPACT_POLICY` / `INVALID_FEATURE`；
+   `phase1SchemaVersion` = **32**（迁移 fixture 不再写死 31）。
+4. **两个真实缺陷（不是测试问题）**：
+   - **调度启动的 Session 没有 incarnation**：`handoff.recordAutomationIncarnation` 只在 `task.run`/`task.resume`/
+     `task.retry` 调用，而 ADR-0059 让**自动 tick / submit 自动启动成为常态**，于是这类 Execution 没有 incarnation、
+     没有单 writer lease，原生终端接管无 predecessor 可核（ADR-0023/0026）。修法：`ScheduleService` 的 `start` 回调
+     包一层，启动出 Session 后记同一个 incarnation（`apps/runtime/src/main.ts`）。
+   - **测试进程的 loopback fetch 被开发者代理拦下**：`cli-attention.test.ts` 里 `RuntimeClient` 从测试进程直连
+     Runtime HTTP，环境里的 `http_proxy` 会回 502 空 body（子进程 CLI 早已各自设了 `no_proxy`）。修法：该文件在
+     导入期把 `no_proxy`/`NO_PROXY` 设为 `127.0.0.1,localhost`。
+
+### 文档同步（ADR-0050）
+
+改动过的篇与节（逐条对应）：
+
+| 文件 | 改了什么 |
+|---|---|
+| `docs/guides/cli-reference.md` | 头；§3 `project impact validate/show/explain` 的含义提醒；§4 `task create`/`task revision create` 的 `--feature`、`task submit`（提交即可能启动）、`task run`/`task resume` 的门禁描述、`task schedule clear-unknown` |
+| `docs/guides/concepts.md` | 头；Task 持有 `features`；**「调度三态」整节按 ADR-0059 重写** |
+| `docs/guides/features.md` | 头；调度一节新增「声明功能」行，「冲突判定」行改为声明语义并指向 ADR-0059 |
+| `docs/guides/manual.md` | 头；§3.1 影响映射的作用；§4.3 `task run` 门禁；§4.5 `READY` 行；**§10.1 整体重写**；§10.3 的 `WAIT_CONFLICT` 与 `clear-unknown`；名词表「Conflict assessment」 |
+| `docs/guides/recipes.md` | 头；recipe 3（默认可并行、怎么表达互斥）、recipe 4（退出码表与“路 C”） |
+| `docs/guides/troubleshooting.md` | 头；把旧的「所有冲突判定都是 UNKNOWN」一节改为「为什么这两个任务不冲突了（ADR-0059）」+ 新增 `--feature` 四个拒绝码一节 + 改写「占用者无法被观测」一节 + `WAIT_CONFLICT` 行 |
+| `docs/guides/ui.md` | 头；任务详情新增「声明的功能」一行；调度/影响面板的文案（verdict、快照完整性、映射未确认、无法派生快照）按实际渲染改写；`SAME_UNFINISHED_FEATURE` 与命中里的功能 id；UNKNOWN 放行块注明日常不可达 |
+| `docs/architecture/scheduler.md` | 状态行；§1 活跃集合拆分为**占用/容量**与**冲突**两个集合；§2 增加当前判定流程的显式更正 |
+| `docs/architecture/domain-model.md` | TaskRevision 的 `features` 与写入时校验；ImpactAssessment/ConflictAssessment 一节补 ADR-0059 的取代说明 |
+| `docs/architecture/sqlite-schema.md` | `task_revisions.features_json`（v32） |
+| `docs/architecture/event-model.md` | `TaskRevisionCreated` payload 新增 `features` |
+| `docs/architecture/conflict-analyzer.md` | §8.4 补充收尾后的覆盖（已由格 2 原文记录，本次只补测试面） |
+| `docs/decisions/0059-…md` | 「未通过」一节改为收尾结果；补两个真实缺陷与文档同步记录 |
+
+另有两处**产品 UI 文案**跟着语义改（不是纯文档）：`apps/ui/src/impact.tsx`（快照/映射不再决定判定、基线不同不再 UNKNOWN）、
+`apps/ui/src/schedule.tsx`（`complete=false` 的注解）、`apps/ui/src/scheduling-labels.ts`（verdict 与 `POLICY_ABSENT`/`POLICY_INVALID` 文案），
+对应断言在 `apps/ui/test/scheduling-labels.test.ts` 里同步改写（489 → 490 项）。
+
+### 如实记录的边界
+
+- 未验证：真实 provider 下两个 `SAFE` 任务真的同时跑；UI 实际点击（ADR-0008 边界）。
+- `impact_assessments` 的配对行只覆盖「两侧都有快照」的配对，判定审计以 `TaskScheduleDecided`/`TaskWaitingForConflict` 事件为准（ADR-0059 D04）。
+- 未验证：真实 provider 下「调度启动的 Session」能被原生终端接管（本格的 incarnation 修复只在协议 stub 上验收过）。
+- 未提交、未 push、未合入 `dev`、未跑全量 `check`：需要用户授权并在 `dev` 上跑提升前全量测试（ADR-0038）。
+
 ## Wave N 开发分支集成（N3 → N1 → N2，3 格经 Orca 受监督编排）
 
 状态：**三格已合入 `dev`，合并后的完整 `bun run check` 退出码 0**（Vitest 21 文件 / 502 项；Bun 862 pass / 0 fail）。未 push、未提升 `main`、未触碰稳定 clone 与其上的稳定 Runtime。

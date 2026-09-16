@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 31;
+export const phase1SchemaVersion = 32;
 
 /** The kinds `intents.kind` accepts (ADR-0046) and the only kinds any command can write. */
 export const intentKinds = ['CREATE_TASK', 'AMEND_TASK', 'ADD_CONSTRAINT', 'CANCEL_TASK',
@@ -1855,6 +1855,34 @@ CREATE TABLE execution_guidance_contexts (
 ) STRICT;
 CREATE INDEX execution_guidance_contexts_by_task
   ON execution_guidance_contexts(task_id,recorded_at,id);
+`;
+
+/**
+ * Declared features on a Task revision (FOUNDATION-091 / ADR-0059).
+ *
+ * The conflict verdict is "two unfinished Tasks declare the same feature", so the declaration has to
+ * be a durable fact of the revision it belongs to — not something derived at judgment time from a
+ * change set, which a not-yet-started Task does not have at all.
+ *
+ * A pure `ADD COLUMN` step: `task_revisions` is not rebuilt, no existing row is rewritten, and every
+ * historical revision keeps `'[]'` — which is exactly right, because nothing declared a feature
+ * before this column existed, and "no feature declared" is the safe reading (a Task that declared
+ * nothing is never in a feature conflict).
+ *
+ * The CHECK is the same shape the table's own `constraints_json` uses, so a row edited outside this
+ * path cannot turn into an unreadable feature list. Feature ids are validated against the project's
+ * declared mapping before they are written; this column only guarantees the JSON shape.
+ *
+ * Schema version 32 is this step's own number: 25 is FOUNDATION-065/ADR-0039, 26 is
+ * FOUNDATION-067/ADR-0041, 27 is FOUNDATION-071/ADR-0044, 28 is FOUNDATION-075/ADR-0046, 29 is
+ * FOUNDATION-077/ADR-0052, 30 is FOUNDATION-081/ADR-0053, 31 is FOUNDATION-088/ADR-0057, and 16
+ * stays permanently unused (22 is skipped by the wave's numbering convention). A database may
+ * already be stamped 17–31 and would skip a later `version < 16` step, so the migration runner only
+ * appends `if (version < 32)` after the existing ascending steps and never inserts an earlier number.
+ */
+export const taskRevisionFeaturesMigration = `
+ALTER TABLE task_revisions ADD COLUMN features_json TEXT NOT NULL DEFAULT '[]'
+  CHECK(json_valid(features_json) AND json_type(features_json)='array');
 `;
 
 export const integrationBatchTerminalStatesMigration = `

@@ -329,45 +329,25 @@ describe('task recover — the RECOVERY_REQUIRED reconcile', () => {
       rmSync(harness.workspacePath, { recursive: true, force: true });
       expect(observeWorkspacePath(harness.workspacePath)).toBe('MISSING');
       expect(occupierCodeOf('MISSING', false)).toBe('WORKSPACE_MISSING');
-      const other = harness.fixture.storage.createTask({
-        projectId: harness.fixture.projectId,
-        commandId: crypto.randomUUID(),
-        payloadHash: 'second',
-        intentId: crypto.randomUUID(),
-        taskId: crypto.randomUUID(),
-        revisionId: crypto.randomUUID(),
-        intentEventId: crypto.randomUUID(),
-        taskEventId: crypto.randomUUID(),
-        specification: 'Second Task',
-        constraints: [],
-        kind: 'DEVELOPMENT',
-        actor: 'local-user',
-        createdAt: 20,
-      });
-      harness.fixture.storage.submitTask({
-        projectId: harness.fixture.projectId,
-        taskId: other.id,
-        expectedVersion: other.version,
-        commandId: crypto.randomUUID(),
-        payloadHash: 'submit-second',
-        eventId: crypto.randomUUID(),
-        actor: 'local-user',
-        submittedAt: 21,
-      });
-      // The unobservable occupier is reported as a fact next to the verdict, and the verdict itself
-      // is unchanged by it: the candidate has no mapping, so it is UNKNOWN either way.
+
+      // The Task holding the vanished workspace is the one assessed. ADR-0059 changed who counts as
+      // a conflict peer (a declared feature, not a held resource), so the missing workspace is a fact
+      // about this candidate's own observation rather than a line about an occupier.
       const report = await assessTaskImpact({
         storage: harness.fixture.storage,
         projectId: harness.fixture.projectId,
-        taskId: other.id,
+        taskId: harness.fixture.taskId,
         now: 22,
       });
-      expect(report.active[0]).toMatchObject({
-        taskId: harness.fixture.taskId,
-        executionState: 'RECOVERY_REQUIRED',
-        code: 'WORKSPACE_MISSING',
-      });
-      expect(report.assessment.verdict).toBe('UNKNOWN');
+      expect(report.candidate.workspaceStatus).toBe('MISSING');
+      expect(report.candidate.snapshot).toBeNull();
+      // The lost path itself is named: "the change set could not be inspected" alone would hide what
+      // is actionable (reconcile the Task, then reclaim or rebuild its worktree).
+      expect(report.candidate.unavailableDetail).toContain(harness.workspacePath);
+      // And the missing workspace no longer turns the verdict into `UNKNOWN`: ADR-0059 makes the
+      // verdict a statement about declared features, so an unobservable worktree is reported as a
+      // fact next to it rather than as a reason to keep every Task serialized.
+      expect(report.assessment.verdict).toBe('SAFE_TO_PARALLELIZE');
     } finally {
       await closeHarness(harness);
     }

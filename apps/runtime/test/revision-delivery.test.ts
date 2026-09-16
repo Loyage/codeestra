@@ -40,6 +40,7 @@ import {
   supportsRevisionDelivery,
   type RevisionDeliveryPort,
 } from '../../runtime/src/revision-delivery-service.js';
+import { createFixtureTaskForExplicitStart } from './support/runtime-reclamation.js';
 import {
   cleanupTemporaryDirectories,
   createAgentFixture,
@@ -768,11 +769,16 @@ describe('revision delivery through the CLI and the Runtime', () => {
     const fixture = await cliFixture();
     const { environment, projectId } = fixture;
     try {
-      const created = JSON.parse((await cli(['task', 'create', projectId, 'Write a file'],
-        environment)).stdout) as { readonly id: string };
-      const taskId = created.id;
-      expect((await cli(['task', 'submit', projectId, taskId, '0'], environment)).exitCode).toBe(0);
-      const ran = await cli(['task', 'run', projectId, taskId, '1'], environment);
+      // Keep the Task READY so this test exercises the explicit `task run` command. A public submit
+      // would immediately auto-start it under ADR-0059.
+      await cli(['stop'], environment);
+      const ready = await createFixtureTaskForExplicitStart({
+        home: environment.CODEESTRA_HOME!, environment, projectId, specification: 'Write a file',
+        startable: true,
+      });
+      const taskId = ready.taskId;
+      const ran = await cli(['task', 'run', projectId, taskId, String(ready.expectedVersion)],
+        environment);
       expect(ran.exitCode).toBe(0);
       // The stub settles its turn (like a real provider finishing one turn) and stays alive; the
       // Session projection is what the Runtime observed, and the Execution still holds the Task.
@@ -991,6 +997,7 @@ async function cliFixture(): Promise<{ readonly environment: Record<string, stri
     CODEESTRA_HOME: home,
     CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: shimPath,
+    CODEESTRA_SCHEDULE_TICK_MS: '600000',
   };
   const opened = await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);

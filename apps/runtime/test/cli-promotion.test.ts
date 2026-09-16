@@ -249,8 +249,9 @@ async function integratedTask(options: { readonly failingStep?: string;
   const created = JSON.parse((await cli(['task', 'create', projectId, 'Write a file'],
     environment)).stdout) as { readonly id: string };
   const taskId = created.id;
+  // Submission immediately enters scheduling; with no feature declaration this Task is SAFE and
+  // starts in the automatic pass.
   expect((await cli(['task', 'submit', projectId, taskId, '0'], environment)).exitCode).toBe(0);
-  expect((await cli(['task', 'run', projectId, taskId, '1'], environment)).exitCode).toBe(0);
   const deadline = Date.now() + 30_000;
   let exited = false;
   while (Date.now() < deadline) {

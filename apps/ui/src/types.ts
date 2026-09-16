@@ -20,6 +20,11 @@ export interface TaskRevisionView {
   readonly number: number;
   readonly specification: string;
   readonly constraints: readonly { readonly id: string; readonly text: string }[];
+  /**
+   * The features this revision declares (ADR-0059): module ids from the project's
+   * `.codeestra/impact.json`. Empty means the Task never participates in a feature conflict.
+   */
+  readonly features: readonly string[];
   readonly createdAt: number;
 }
 
@@ -1063,6 +1068,8 @@ export interface ConflictHitView {
   readonly directories: readonly string[];
   readonly modules: readonly string[];
   readonly globalResources: readonly string[];
+  /** The feature ids both sides declared (`SAME_UNFINISHED_FEATURE`); empty for older codes. */
+  readonly features?: readonly string[];
   readonly relation: string | null;
   readonly detail: string;
 }

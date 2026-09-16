@@ -15,7 +15,16 @@ import { DomainError } from './errors.js';
  */
 
 /** Version of the *analysis semantics*. A change here invalidates every stored snapshot. */
-export const impactAnalyzerVersion = 'impact-analyzer-v1';
+/**
+ * The analysis-semantics version that goes into a snapshot's reuse key (ADR-0031 §6.3).
+ *
+ * `v2` is ADR-0059: the verdict is "two unfinished Tasks declare the same feature", so the analyzer
+ * no longer reads file overlap, the declared mapping's completeness, or the baseline at all. The
+ * version had to move because the *meaning* of a stored verdict moved: an `impact-analyzer-v1`
+ * snapshot's `complete` flag and `files` list answered a different question, and reusing them under
+ * the new rule would silently reinterpret history.
+ */
+export const impactAnalyzerVersion = 'impact-analyzer-v2';
 /** Upper bound for one change set; a larger one is recorded as incomplete, never as safe. */
 export const maxImpactFiles = 4_000;
 /** How many intersecting paths one finding reports before it is summarized by count. */
@@ -48,8 +57,19 @@ export type ImpactIncompleteReason =
   /** The change set was too large to describe completely. */
   | 'UNBOUNDED_SCOPE';
 
-/** Stable reason codes. They are the machine-readable half of an explanation. */
+/**
+ * Stable reason codes. They are the machine-readable half of an explanation.
+ *
+ * **Which of these a verdict can still be made of (ADR-0059 D04):** under the current rule the
+ * analyzer produces exactly `SAME_UNFINISHED_FEATURE` and `NO_CONFLICT`. Everything else is retained
+ * in the union — and in `impactReasonClass` — because historical `impact_assessments` rows and the
+ * `TaskWaitingForConflict` events of previous Versions contain them, and a client must keep being
+ * able to render what was actually recorded. They are **not** produced any more, and this is the
+ * only place that says so.
+ */
 export type ImpactReasonCode =
+  /** The only conflict the current rule can find (ADR-0059 D02). */
+  | 'SAME_UNFINISHED_FEATURE'
   | 'SAME_FILE'
   | 'IMPORTANT_DIRECTORY_OVERLAP'
   | 'SAME_MODULE'
@@ -75,6 +95,7 @@ export type ImpactReasonClass = 'CONFLICT' | 'INCOMPLETE' | 'STALE_OR_INVALID' |
 
 export function impactReasonClass(code: ImpactReasonCode): ImpactReasonClass {
   switch (code) {
+    case 'SAME_UNFINISHED_FEATURE':
     case 'SAME_FILE':
     case 'IMPORTANT_DIRECTORY_OVERLAP':
     case 'SAME_MODULE':
@@ -177,6 +198,9 @@ const incompleteReasonOrder: readonly ImpactIncompleteReason[] = [
 ];
 
 const reasonCodeOrder: readonly ImpactReasonCode[] = [
+  // The code the current rule produces comes first; the rest are retained so a historical set of
+  // reason codes still sorts deterministically (ADR-0059 D04).
+  'SAME_UNFINISHED_FEATURE',
   'SAME_FILE', 'IMPORTANT_DIRECTORY_OVERLAP', 'SAME_MODULE', 'GLOBAL_RESOURCE',
   'GLOBAL_RESOURCE_DEPENDENCY', 'INCOMPLETE_IMPACT', 'MISSING_IMPACT_SNAPSHOT',
   'STALE_BASE', 'STALE_REVISION', 'STALE_POLICY', 'STALE_ANALYZER',
@@ -435,14 +459,37 @@ export interface ImpactAssessmentContext {
   readonly analyzerVersion: string;
 }
 
+/**
+ * Whether a Task is "not finished yet" for the purpose of the conflict rule (ADR-0059 D01): every
+ * state except the two terminal ones, and an archived Task never counts — archiving a Task is the
+ * user saying "this is not in flight", and a `DRAFT` that was archived must not block anybody.
+ */
+export function taskIsUnfinishedForConflict(input: {
+  readonly state: string;
+  readonly archived: boolean;
+}): boolean {
+  if (input.archived) return false;
+  return input.state !== 'SUCCEEDED' && input.state !== 'CANCELLED';
+}
+
 export interface ImpactSubject {
   readonly taskId: string;
   /** The Task's *current* revision, so a snapshot taken before an amendment is detectable. */
   readonly currentRevisionId: string;
+  /** The feature ids this revision declares; the only fact the verdict is made of (ADR-0059). */
+  readonly features: readonly string[];
+  /** The Task's lifecycle state, used with {@link taskIsUnfinishedForConflict}. */
+  readonly taskState: string;
+  readonly archived: boolean;
+  /**
+   * The observed change set, kept as evidence of *what was looked at*. It no longer decides
+   * anything: a not-yet-started Task has no change set at all, and the conflict rule must still be
+   * able to answer (ADR-0059 D02).
+   */
   readonly snapshot: ImpactSnapshot | null;
   /** The change set observed now; when it exceeds the snapshot, the snapshot is superseded. */
   readonly observedFiles?: readonly string[];
-  /** Why no snapshot exists, for `MISSING_IMPACT_SNAPSHOT`. */
+  /** Why no snapshot exists, for the evidence line. */
   readonly unavailableDetail?: string;
 }
 
@@ -459,7 +506,9 @@ export interface ImpactHit {
   readonly directories: readonly string[];
   readonly modules: readonly string[];
   readonly globalResources: readonly string[];
-  /** How the scope intersected: `SAME_FILE`, `SAME_DIRECTORY`, `ANCESTOR_DIRECTORY`, … */
+  /** The feature ids both sides declared, sorted. Non-empty exactly for `SAME_UNFINISHED_FEATURE`. */
+  readonly features: readonly string[];
+  /** How the scope intersected: `SAME_FEATURE`, `SAME_FILE`, `SAME_DIRECTORY`, … */
   readonly relation: string | null;
   readonly detail: string;
 }
@@ -473,7 +522,7 @@ export interface ConflictAssessment {
   readonly candidateChangeFingerprint: string;
   readonly candidateComplete: boolean;
   readonly candidateIncompleteReasons: readonly ImpactIncompleteReason[];
-  /** Active/reserved Tasks actually compared, in the order they were reported. */
+  /** Unfinished Tasks that declared at least one feature, in the order they were compared. */
   readonly comparedTaskIds: readonly string[];
   readonly hits: readonly ImpactHit[];
   /** Pairs with no finding at all: the only pairs the evidence claims are safe. */
@@ -661,38 +710,9 @@ function subjectValidity(
   return codes;
 }
 
-function boundedPaths(paths: readonly string[]): { readonly paths: readonly string[];
-  readonly pathCount: number } {
-  return {
-    paths: Object.freeze(paths.slice(0, maxImpactHitPaths)),
-    pathCount: paths.length,
-  };
-}
-
-function intersectByKey(
-  left: readonly string[],
-  right: readonly string[],
-  caseMode: ImpactPathCaseMode,
-): { readonly leftPaths: readonly string[]; readonly rightPaths: readonly string[] } {
-  const rightByKey = new Map<string, string[]>();
-  for (const path of right) {
-    const key = comparisonKey(path, caseMode);
-    const bucket = rightByKey.get(key);
-    if (bucket === undefined) rightByKey.set(key, [path]);
-    else bucket.push(path);
-  }
-  const leftPaths: string[] = [];
-  const rightPaths: string[] = [];
-  for (const path of left) {
-    const matches = rightByKey.get(comparisonKey(path, caseMode));
-    if (matches === undefined) continue;
-    leftPaths.push(path);
-    rightPaths.push(...matches);
-  }
-  return { leftPaths, rightPaths };
-}
-
 function compareHits(left: ImpactHit, right: ImpactHit): number {
+  // Deterministic order: conflicts first, then by stable reason order, Task id and feature id. The
+  // verdict must not depend on the order the peers were read in.
   const leftRank = impactReasonClass(left.reason) === 'CONFLICT' ? 0
     : impactReasonClass(left.reason) === 'INCOMPLETE' ? 1 : 2;
   const rightRank = impactReasonClass(right.reason) === 'CONFLICT' ? 0
@@ -701,76 +721,62 @@ function compareHits(left: ImpactHit, right: ImpactHit): number {
   const leftIndex = reasonCodeOrder.indexOf(left.reason);
   const rightIndex = reasonCodeOrder.indexOf(right.reason);
   if (leftIndex !== rightIndex) return leftIndex - rightIndex;
-  if ((left.taskId ?? '') !== (right.taskId ?? '')) return (left.taskId ?? '') < (right.taskId ?? '') ? -1 : 1;
-  if ((left.relation ?? '') !== (right.relation ?? '')) {
-    return (left.relation ?? '') < (right.relation ?? '') ? -1 : 1;
-  }
-  return (left.paths[0] ?? '') < (right.paths[0] ?? '') ? -1 : 1;
+  const leftTask = left.taskId ?? '';
+  const rightTask = right.taskId ?? '';
+  if (leftTask !== rightTask) return leftTask < rightTask ? -1 : 1;
+  return (left.features[0] ?? '') < (right.features[0] ?? '') ? -1 : 1;
 }
 
-function subjectHits(
-  subject: ImpactSubject,
-  context: ImpactAssessmentContext,
-): readonly ImpactHit[] {
-  // A subject without a snapshot has no generation to validate. Returning no hits here is not "no
-  // problem": the caller reports `MISSING_IMPACT_SNAPSHOT` for it (a null candidate and a null peer
-  // each get exactly one such hit), which is what makes the verdict `UNKNOWN` instead of `SAFE`. It
-  // used to dereference the null generation instead, so explaining a Task whose workspace had been
-  // removed crashed instead of explaining it (FOUNDATION-086).
-  if (subject.snapshot === null) return Object.freeze([]);
-  const codes = subjectValidity(subject.snapshot, subject.observedFiles, context,
-    subject.currentRevisionId);
-  return ordered(reasonCodeOrder, codes).map((code) => Object.freeze({
-    reason: code,
-    class: impactReasonClass(code),
-    taskId: subject.taskId,
-    revisionId: subject.snapshot?.revisionId ?? null,
+/** The declared features both sides have in common, sorted. */
+function sharedFeatures(left: readonly string[], right: readonly string[]): readonly string[] {
+  if (left.length === 0 || right.length === 0) return Object.freeze([]);
+  const rightSet = new Set(right);
+  return Object.freeze([...new Set(left.filter((feature) => rightSet.has(feature)))].sort());
+}
+
+function conflictHit(input: {
+  readonly peer: ImpactSubject;
+  readonly features: readonly string[];
+}): ImpactHit {
+  const features = input.features;
+  return Object.freeze({
+    reason: 'SAME_UNFINISHED_FEATURE' as const,
+    class: 'CONFLICT' as const,
+    taskId: input.peer.taskId,
+    revisionId: input.peer.currentRevisionId,
     paths: Object.freeze([]),
     pathCount: 0,
     directories: Object.freeze([]),
     modules: Object.freeze([]),
     globalResources: Object.freeze([]),
-    relation: null,
-    detail: staleDetail(code, subject),
-  }));
-}
-
-function staleDetail(code: ImpactReasonCode, subject: ImpactSubject): string {
-  const snapshot = subject.snapshot;
-  switch (code) {
-    case 'STALE_REVISION':
-      return `snapshot was taken for revision ${snapshot?.revisionId ?? 'unknown'}, the Task is now`
-        + ` on ${subject.currentRevisionId}`;
-    case 'STALE_BASE':
-      return `snapshot was taken against base ${snapshot?.baseCommit.slice(0, 12) ?? 'unknown'}`;
-    case 'STALE_POLICY':
-      return `snapshot used mapping ${snapshot?.policyVersion ?? 'unknown'}`;
-    case 'STALE_ANALYZER':
-      return `snapshot was produced by analyzer ${snapshot?.analyzerVersion ?? 'unknown'}`;
-    case 'ACTUAL_DIFF_EXCEEDS_SNAPSHOT':
-      return 'the worktree now changes paths the snapshot did not record, so its scope is no longer'
-        + ' an over-approximation';
-    case 'SNAPSHOT_SCOPE_MISMATCH':
-      return 'the recorded change set no longer matches the worktree (paths were removed or renamed'
-        + ' away), so the prediction is superseded';
-    case 'INVALID_SCOPE':
-      return 'the recorded change set contains a path that is not a repository-relative path';
-    default:
-      return code;
-  }
+    features,
+    relation: 'SAME_FEATURE' as const,
+    detail: `both Tasks declare feature(s) ${features.join(', ')} and ${input.peer.taskId} is`
+      + ` ${input.peer.taskState}, which is not finished yet`,
+  });
 }
 
 /**
- * The pure judgement of `docs/architecture/conflict-analyzer.md` §3.
+ * The pure judgement of ADR-0059 D02, which supersedes the conservative rule of ADR-0031.
  *
- * Order of decisions per pair, and of the verdict overall:
- * 1. a candidate that is stale or invalid makes the whole assessment `UNKNOWN` (nothing about it can
- *    be trusted);
- * 2. an active/reserved Task whose snapshot is stale, incomplete, or missing is `UNKNOWN` for that
- *    pair — never silently "no overlap";
- * 3. real overlaps are `CONFLICTING`, and they outrank incompleteness, so a found conflict is never
- *    hidden behind an unknown;
- * 4. everything else is `SAFE_TO_PARALLELIZE`, with the compared pairs as evidence.
+ * **The rule:** the candidate and each peer are compared by the features they *declare*. A pair
+ * conflicts when the two declarations intersect **and** the peer is unfinished
+ * ({@link taskIsUnfinishedForConflict}). Everything else is safe to parallelize. Nothing else is
+ * consulted: not the change set, not the declared mapping's completeness, not the baseline, not the
+ * age of a snapshot.
+ *
+ * **Why there is no longer an `UNKNOWN` by default:** `UNKNOWN` used to be how the analyzer expressed
+ * "I cannot prove there is no file overlap" — a missing mapping, an unconfirmed mapping, a moved
+ * baseline, an unobservable worktree. Every one of those made the product unusable in practice
+ * (measured on this very repository: `package.json`, `bun.lock` and `apps/runtime/src/main.ts` are
+ * declared with `consumers: UNKNOWN`, so almost any Task was `UNKNOWN` and nothing ever ran in
+ * parallel). ADR-0059 replaces "cannot prove disjoint" with "shares a declared feature", which is a
+ * statement about the user's own declaration, so the default is `SAFE` and a missing mapping simply
+ * means nothing was declared.
+ *
+ * `UNKNOWN` remains a *value* the verdict type, the DB CHECK and every client still accept, because
+ * historical assessments recorded it and a client must keep rendering them; the new rule has no path
+ * that produces it.
  */
 export function assessCandidate(input: {
   readonly candidate: ImpactSubject;
@@ -778,8 +784,7 @@ export function assessCandidate(input: {
   readonly context: ImpactAssessmentContext;
 }): ConflictAssessment {
   const { candidate, context } = input;
-  const candidateHits = subjectHits(candidate, context);
-  const hits: ImpactHit[] = [...candidateHits];
+  const hits: ImpactHit[] = [];
   const comparedTaskIds: string[] = [];
   const safePairs: { taskId: string; revisionId: string; changeFingerprint: string }[] = [];
 
@@ -789,111 +794,49 @@ export function assessCandidate(input: {
 
   for (const peer of peers) {
     comparedTaskIds.push(peer.taskId);
-    if (peer.snapshot === null) {
-      hits.push(Object.freeze({
-        reason: 'MISSING_IMPACT_SNAPSHOT' as const,
-        class: 'INCOMPLETE' as const,
+    const shared = sharedFeatures(candidate.features, peer.features);
+    if (shared.length === 0) {
+      safePairs.push({
         taskId: peer.taskId,
         revisionId: peer.currentRevisionId,
-        paths: Object.freeze([]),
-        pathCount: 0,
-        directories: Object.freeze([]),
-        modules: Object.freeze([]),
-        globalResources: Object.freeze([]),
-        relation: null,
-        detail: peer.unavailableDetail
-          ?? 'no ImpactSnapshot could be derived for this active Task, so no overlap can be excluded',
-      }));
+        changeFingerprint: peer.snapshot?.changeFingerprint ?? '',
+      });
       continue;
     }
-    if (candidate.snapshot === null) continue;
-    const peerFindings = subjectHits(peer, context);
-    if (peerFindings.length > 0) {
-      hits.push(...peerFindings);
+    if (!taskIsUnfinishedForConflict({ state: peer.taskState, archived: peer.archived })) {
+      // The rule is about a feature that is *not finished yet*: if the only other Task working on it
+      // is `SUCCEEDED`/`CANCELLED` (or archived), the feature the candidate wants to improve is no
+      // longer in flight, so there is nothing to conflict with.
+      safePairs.push({
+        taskId: peer.taskId,
+        revisionId: peer.currentRevisionId,
+        changeFingerprint: peer.snapshot?.changeFingerprint ?? '',
+      });
       continue;
     }
-    const pairFindings = pairHits(candidate.snapshot, peer.snapshot);
-    if (pairFindings.length > 0) {
-      hits.push(...pairFindings);
-      continue;
-    }
-    if (!candidate.snapshot.complete || !peer.snapshot.complete) {
-      // A safe pair is only ever claimed when *both* sides are complete: the candidate's own
-      // incompleteness is reported once below, the peer's is attributed to the peer here.
-      if (!peer.snapshot.complete) {
-        hits.push(Object.freeze({
-          reason: 'INCOMPLETE_IMPACT' as const,
-          class: 'INCOMPLETE' as const,
-          taskId: peer.taskId,
-          revisionId: peer.snapshot.revisionId,
-          paths: Object.freeze([]),
-          pathCount: 0,
-          directories: Object.freeze([]),
-          modules: Object.freeze([]),
-          globalResources: Object.freeze([]),
-          relation: null,
-          detail: `impact of ${peer.taskId} is incomplete: ${peer.snapshot.incompleteReasons.join(', ')}`,
-        }));
-      }
-      continue;
-    }
-    safePairs.push({
-      taskId: peer.taskId,
-      revisionId: peer.snapshot.revisionId,
-      changeFingerprint: peer.snapshot.changeFingerprint,
-    });
-  }
-
-  if (candidate.snapshot === null) {
-    hits.push(Object.freeze({
-      reason: 'MISSING_IMPACT_SNAPSHOT' as const,
-      class: 'INCOMPLETE' as const,
-      taskId: candidate.taskId,
-      revisionId: candidate.currentRevisionId,
-      paths: Object.freeze([]),
-      pathCount: 0,
-      directories: Object.freeze([]),
-      modules: Object.freeze([]),
-      globalResources: Object.freeze([]),
-      relation: null,
-      detail: candidate.unavailableDetail
-        ?? 'no ImpactSnapshot could be derived for the candidate, so no overlap can be excluded',
-    }));
-  } else if (!candidate.snapshot.complete) {
-    hits.push(Object.freeze({
-      reason: 'INCOMPLETE_IMPACT' as const,
-      class: 'INCOMPLETE' as const,
-      taskId: candidate.taskId,
-      revisionId: candidate.snapshot.revisionId,
-      paths: Object.freeze([]),
-      pathCount: 0,
-      directories: Object.freeze([]),
-      modules: Object.freeze([]),
-      globalResources: Object.freeze([]),
-      relation: null,
-      detail: `impact is incomplete: ${candidate.snapshot.incompleteReasons.join(', ')}`,
-    }));
+    hits.push(conflictHit({ peer, features: shared }));
   }
 
   const sorted = hits.sort(compareHits);
   const hasConflict = sorted.some((hit) => hit.class === 'CONFLICT');
-  const candidateInvalid = candidateHits.length > 0;
-  const verdict: ImpactVerdict = candidateInvalid || (!hasConflict && sorted.length > 0)
-    ? 'UNKNOWN'
-    : hasConflict ? 'CONFLICTING' : 'SAFE_TO_PARALLELIZE';
+  const verdict: ImpactVerdict = hasConflict ? 'CONFLICTING' : 'SAFE_TO_PARALLELIZE';
+  const declared = candidate.features.length === 0
+    ? [`candidate declares no feature, so it cannot be in a feature conflict`
+      + ` (${peerCount(peers.length)})`]
+    : [`candidate declares feature(s) ${candidate.features.join(', ')}`];
   const evidence = Object.freeze([
     `candidate ${candidate.taskId} revision ${candidate.currentRevisionId}`,
-    `compared ${comparedTaskIds.length} active/reserved Task(s):`
+    `compared ${comparedTaskIds.length} unfinished Task(s) that declared a feature:`
       + ` ${comparedTaskIds.length === 0 ? 'none' : comparedTaskIds.join(', ')}`,
-    `baseline ${context.baseCommit.slice(0, 12)}, mapping ${context.policyVersion},`
-      + ` analyzer ${context.analyzerVersion}`,
-    ...(candidate.snapshot === null ? [] : candidate.snapshot.evidence.slice(0, 6)),
+    ...declared,
+    `baseline ${context.baseCommit.slice(0, 12)}, analyzer ${context.analyzerVersion}`,
+    ...(candidate.snapshot === null
+      ? [`no change set was observed for the candidate${candidate.unavailableDetail === undefined
+        ? '' : ` (${candidate.unavailableDetail})`}; the verdict does not depend on one`]
+      : candidate.snapshot.evidence.slice(0, 4)),
     ...(verdict === 'SAFE_TO_PARALLELIZE'
-      ? [`no file, important directory, module, or shared resource intersected with`
-        + ` ${safePairs.length} compared Task(s)`]
-      : []),
-    ...(verdict === 'UNKNOWN' && sorted.length === 0
-      ? ['no comparison was possible; this is not a statement that no conflict exists']
+      ? ['no declared feature is shared with an unfinished Task. This is not a guarantee that two'
+        + " Agents will never touch the same file: it is the user's own declaration that is compared"]
       : []),
   ]);
   return Object.freeze({
@@ -914,134 +857,8 @@ export function assessCandidate(input: {
   });
 }
 
-function pairHits(candidate: ImpactSnapshot, peer: ImpactSnapshot): readonly ImpactHit[] {
-  const hits: ImpactHit[] = [];
-  const otherTaskId = peer.taskId;
-  const otherRevisionId = peer.revisionId;
-
-  const fileOverlap = intersectByKey(candidate.files, peer.files, candidate.caseMode);
-  if (fileOverlap.leftPaths.length > 0) {
-    const bounded = boundedPaths(fileOverlap.leftPaths);
-    hits.push(Object.freeze({
-      reason: 'SAME_FILE' as const,
-      class: 'CONFLICT' as const,
-      taskId: otherTaskId,
-      revisionId: otherRevisionId,
-      paths: bounded.paths,
-      pathCount: bounded.pathCount,
-      directories: Object.freeze([]),
-      modules: Object.freeze([]),
-      globalResources: Object.freeze([]),
-      relation: 'SAME_FILE',
-      detail: `${bounded.pathCount} file(s) changed by both${caseOnlyDetail(fileOverlap, candidate.caseMode)}`,
-    }));
-  }
-
-  const directoryPairs: { left: string; right: string }[] = [];
-  for (const left of candidate.importantDirectories) {
-    for (const right of peer.importantDirectories) {
-      if (impactDirectoriesOverlap(comparisonKey(left, candidate.caseMode),
-        comparisonKey(right, candidate.caseMode))) {
-        directoryPairs.push({ left, right });
-      }
-    }
-  }
-  if (directoryPairs.length > 0) {
-    hits.push(Object.freeze({
-      reason: 'IMPORTANT_DIRECTORY_OVERLAP' as const,
-      class: 'CONFLICT' as const,
-      taskId: otherTaskId,
-      revisionId: otherRevisionId,
-      // The intersecting range of a directory conflict is the directories themselves; reporting
-      // them as "paths" too would describe the same finding twice.
-      paths: Object.freeze([]),
-      pathCount: 0,
-      directories: Object.freeze([...new Set(directoryPairs.flatMap((pair) => [pair.left, pair.right]))]
-        .sort()),
-      modules: Object.freeze([]),
-      globalResources: Object.freeze([]),
-      relation: directoryPairs.some((pair) => pair.left === pair.right)
-        ? 'SAME_DIRECTORY' : 'ANCESTOR_DIRECTORY',
-      detail: directoryPairs.some((pair) => pair.left === pair.right)
-        ? `both revisions change files inside important director(ies)`
-          + ` ${[...new Set(directoryPairs.map((pair) => pair.left))].sort().join(', ')}`
-          + ` (other revision: ${[...new Set(directoryPairs.map((pair) => pair.right))].sort().join(', ')})`
-        : `important director(ies) of one revision contain the other's:`
-          + ` ${directoryPairs.map((pair) => `${pair.left} ⊃ ${pair.right}`).sort().join(', ')}`,
-    }));
-  }
-
-  const moduleIds = candidate.modules.filter((id) => peer.modules.includes(id));
-  if (moduleIds.length > 0) {
-    hits.push(Object.freeze({
-      reason: 'SAME_MODULE' as const,
-      class: 'CONFLICT' as const,
-      taskId: otherTaskId,
-      revisionId: otherRevisionId,
-      paths: Object.freeze([]),
-      pathCount: 0,
-      directories: Object.freeze([]),
-      modules: Object.freeze([...moduleIds].sort()),
-      globalResources: Object.freeze([]),
-      relation: 'SAME_MODULE',
-      detail: `both revisions change files of module(s) ${[...moduleIds].sort().join(', ')}`,
-    }));
-  }
-
-  const peerById = new Map(peer.globalResources.map((resource) => [resource.id, resource]));
-  const writesBoth: string[] = [];
-  const writeRead: string[] = [];
-  for (const resource of candidate.globalResources) {
-    const other = peerById.get(resource.id);
-    if (other === undefined) continue;
-    if (resource.written && other.written) writesBoth.push(resource.id);
-    else if ((resource.written && other.read) || (other.written && resource.read)) {
-      writeRead.push(resource.id);
-    }
-  }
-  if (writesBoth.length > 0) {
-    hits.push(Object.freeze({
-      reason: 'GLOBAL_RESOURCE' as const,
-      class: 'CONFLICT' as const,
-      taskId: otherTaskId,
-      revisionId: otherRevisionId,
-      paths: Object.freeze([]),
-      pathCount: 0,
-      directories: Object.freeze([]),
-      modules: Object.freeze([]),
-      globalResources: Object.freeze(writesBoth.sort()),
-      relation: 'WRITE_WRITE',
-      detail: `both revisions change shared resource(s) ${writesBoth.sort().join(', ')}`,
-    }));
-  }
-  if (writeRead.length > 0) {
-    hits.push(Object.freeze({
-      reason: 'GLOBAL_RESOURCE_DEPENDENCY' as const,
-      class: 'CONFLICT' as const,
-      taskId: otherTaskId,
-      revisionId: otherRevisionId,
-      paths: Object.freeze([]),
-      pathCount: 0,
-      directories: Object.freeze([]),
-      modules: Object.freeze([]),
-      globalResources: Object.freeze(writeRead.sort()),
-      relation: 'READ_WRITE',
-      detail: `one revision changes shared resource(s) ${writeRead.sort().join(', ')} while the other`
-        + ' changes a file declared to depend on them',
-    }));
-  }
-  return hits;
-}
-
-function caseOnlyDetail(
-  overlap: { readonly leftPaths: readonly string[]; readonly rightPaths: readonly string[] },
-  caseMode: ImpactPathCaseMode,
-): string {
-  if (caseMode !== 'INSENSITIVE') return '';
-  const differing = overlap.leftPaths.filter((path, index) => path !== overlap.rightPaths[index]);
-  return differing.length === 0
-    ? ''
-    : `; ${differing.length} of them differ only by case on this case-insensitive file system`;
+function peerCount(compared: number): string {
+  return compared === 0 ? 'no peer was compared' : `${compared} peer(s) declared no shared feature`;
 }
 
 /** Human-readable, stable explanation lines for `project impact explain` and the UI. */
@@ -1049,8 +866,8 @@ export function explainAssessment(assessment: ConflictAssessment): readonly stri
   const lines: string[] = [];
   lines.push(`verdict ${assessment.verdict} (${assessment.reasonCodes.join(', ')})`);
   if (assessment.verdict === 'SAFE_TO_PARALLELIZE') {
-    lines.push(`reason no file, important directory, module, or shared resource was changed by both`
-      + ` the candidate and a Task it was compared with`);
+    lines.push(`reason no declared feature is shared with an unfinished Task`
+      + ` (the rule compares declarations, not file overlap)`);
   }
   for (const hit of assessment.hits) {
     const scope: string[] = [];
@@ -1063,6 +880,7 @@ export function explainAssessment(assessment: ConflictAssessment): readonly stri
     if (hit.globalResources.length > 0) {
       scope.push(`shared resources ${hit.globalResources.join(', ')}`);
     }
+    if (hit.features.length > 0) scope.push(`features ${hit.features.join(', ')}`);
     const where = hit.taskId === null || hit.taskId === assessment.candidateTaskId
       ? 'on the candidate'
       : `against ${hit.taskId}`;

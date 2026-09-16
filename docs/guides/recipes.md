@@ -1,8 +1,9 @@
 # 常见任务的做法（recipes）
 
-> **适用版本** `dev@75fa7b8`（2026-09-15） · **schema** v30 · **最后校对** 2026-09-15
-> 版本会前进：`dev@75fa7b8` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@17b4dd6`（2026-09-16） · **schema** v32 · **最后校对** 2026-09-16
+> 版本会前进：`dev@17b4dd6` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> recipe 3 与 recipe 4 由 FOUNDATION-091 按 ADR-0059 改写（默认不冲突、声明同一功能才互斥）。
 
 本文是**步骤化**的：每条 recipe 回答一个「我想做 X」，给出可以照抄的命令与**做完之后看什么**。
 
@@ -86,10 +87,11 @@ bun run codeestra task create $PROJECT \
 
 ```sh
 bun run codeestra project impact validate /path/to/repo --json     # 映射存在且被确认吗？
-bun run codeestra project impact explain  $PROJECT $TASK --json    # 和活跃任务有没有重叠
+bun run codeestra project impact explain  $PROJECT $TASK --json    # 和已声明同一功能的未完成任务有没有冲突
 ```
 
-**别指望**：`UNKNOWN` 不等于「没冲突」。映射缺失/未确认时，所有判定都是 `UNKNOWN`，默认不并行。
+**别指望**：判定只看声明（ADR-0059）。同文件/同目录/共享依赖都不拦；两个都没声明功能的 Task 可以改同一个文件，
+冲突到合入 `dev` 时才以 `CONFLICTED` 暴露。想让两件事互斥就给它们声明同一个功能（见 recipe 4）。
 
 ### 2.1（可选）顺手写下这个分支的定向测试
 
@@ -107,20 +109,20 @@ bun run codeestra task tests show   $PROJECT $TASK
 
 ## 3. 我想同时做两件互不相干的事
 
-**目标**：两条工作同时推进，而**不是**让第二条在冲突检查里卡住。
+**目标**：两条工作同时推进。ADR-0059 之后这已经是**默认**行为：没有声明同一个功能的 Task 不再相互等待。
 
 ```sh
-# 1) 两个任务都建好、都提交
+# 1) 两个任务都建好、都提交（提交就会在容量允许时自动开始）
 bun run codeestra task create $PROJECT "把 A 模块的错误码补全" --constraint "只改 A 模块"
 bun run codeestra task submit $PROJECT $TASK_A <version-a>
 bun run codeestra task create $PROJECT "把 B 模块的文档补全" --constraint "只改 B 模块"
 bun run codeestra task submit $PROJECT $TASK_B <version-b>
 
-# 2) 逐个确认它们真的可以并行（关键一步）
+# 2) 需要确认时再问一句「它们现在到底跑不跑」
 bun run codeestra project impact explain $PROJECT $TASK_A --json   # 退出码 0 仅当 SAFE_TO_PARALLELIZE
 bun run codeestra project impact explain $PROJECT $TASK_B --json
 
-# 3) 启动（两个都启动；容量上限默认是 2）
+# 3) 没启动就显式请求一次（容量上限默认是 2）
 bun run codeestra task run $PROJECT $TASK_A <version-a>
 bun run codeestra task run $PROJECT $TASK_B <version-b>
 
@@ -132,13 +134,14 @@ bun run codeestra task schedule status        $PROJECT
 
 **必须知道的三件事**：
 
-1. **「互不相干」是你说的，`SAFE_TO_PARALLELIZE` 才是有证据的。** 判定来自
-   `.codeestra/impact.json` 的人工映射 + 工作树的真实 change set，不用模型。
+1. **冲突只看声明。** 判定比较两个 revision 是否声明了**同一个功能**（`--feature <module-id>`，取自
+   `.codeestra/impact.json` 的 `modules[].id`），不用模型。**同文件/同目录/共享依赖都不再拦人**；
+   两个都没声明功能的 Task 可以改同一个文件，冲突在合入 `dev` 时以 `CONFLICTED` 暴露。
 2. **容量上限默认是 2。** 想同时跑更多要显式提高上限：
    ```sh
    bun run codeestra scheduler capacity set $PROJECT --limit 4
    ```
-3. **`UNKNOWN` 默认等待。** 要强行并行必须**显式**放行（见 recipe 4）。
+3. **想让两件事互斥，就给它们声明同一个功能**（见 recipe 4）。
 
 **做完看什么**：`task schedule status` 的「活跃集合」里有两条；`scheduler capacity get` 的全局已用为 2。
 
@@ -146,7 +149,7 @@ bun run codeestra task schedule status        $PROJECT
 
 ## 4. 两件事互相冲突怎么办
 
-**目标**：知道冲突是什么、是「已证明」还是「无法证明」，然后选一条**明确**的路。
+**目标**：知道冲突是什么、是「声明了同一功能」还是「没声明」，然后选一条**明确**的路。
 
 ```sh
 # 1) 先问「它为什么不跑」
@@ -158,13 +161,14 @@ bun run codeestra project impact explain $PROJECT $TASK --json
 
 | 退出码 / 判定 | 含义 | 你能做什么 |
 |---|---|---|
-| `0` / `SAFE_TO_PARALLELIZE` | 有证据证明可以并行 | 等调度，或 `task run` |
-| `3` / `WAIT_CONFLICT` | 与活跃任务重叠**未证明安全** | 等对方结束；或用下面的显式放行 |
+| `0` / `SAFE_TO_PARALLELIZE` | 没有与未完成的任务声明同一个功能（默认） | 等调度，或 `task run` |
+| `3` / `WAIT_CONFLICT` | 与某个未完成的任务**声明了同一个功能** | 等对方完成（`SUCCEEDED`/`CANCELLED`/归档），或改用互斥声明/改规格 |
 | `3` / `WAIT_CAPACITY` | 容量满了 | 等槽位释放，或显式提高上限 |
 | `1` / `BLOCKED` | **依赖未满足**（与冲突无关） | 见 recipe 5 |
-| `1` / `CONFLICTING` | **已证明的重叠** | **永远不放行**。改成串行，或改规格缩小范围 |
+| `1` / `CONFLICTING` | **声明了同一功能且对方未完成** | **永远不放行**。改成串行，或把声明改成不相干的功能 |
 
-**如果是 `UNKNOWN`，你有三条路**（选一条，不要混）：
+**如果是 `UNKNOWN`**（ADR-0059 之后当前规则**不再产生它**，只可能来自历史 assessment 行）——
+你仍然可以用保留的显式单次放行；`CONFLICTING` 永远不放行：
 
 ```sh
 # 路 A：等。什么都没变，这是默认行为。
@@ -175,9 +179,10 @@ bun run codeestra task schedule clear-unknown $PROJECT $TASK
 #   或者直接在启动时放行：
 bun run codeestra task run $PROJECT $TASK <version> --allow-unknown
 
-# 路 C：把映射补好，让判定真的变成 SAFE
-#   在 main ref 上更新 .codeestra/impact.json，然后重新 trust（同一次 trust 会一并确认映射）
-bun run codeestra project trust /path/to/repo --dev-repo /path/to/dev-clone
+# 路 C：把功能声明理清楚（声明不相干的功能，或给对方腾出空间）
+#   声明写在 revision 上，用 task revision create --feature 改写；
+#   id 必须是 main ref 上 .codeestra/impact.json 的 modules[].id
+bun run codeestra task revision create $PROJECT $TASK <version> --feature <module-id> --reason "把声明拆开"
 bun run codeestra project impact validate /path/to/repo --json
 ```
 

@@ -195,8 +195,10 @@ async function createTask(
   environment: Record<string, string>,
   projectId: string,
   specification: string,
+  /** Extra flags after the specification, e.g. `--feature <module-id>` (ADR-0059). */
+  flags: readonly string[] = [],
 ): Promise<string> {
-  const created = JSON.parse((await cli(['task', 'create', projectId, specification],
+  const created = JSON.parse((await cli(['task', 'create', projectId, specification, ...flags],
     environment)).stdout) as { readonly id: string };
   return created.id;
 }
@@ -314,7 +316,7 @@ describe('codeestra task schedule', () => {
     expect(decisions).toHaveLength(2);
     expect(decisions[0]?.payload).toMatchObject({
       taskId: first, verdict: 'SAFE_TO_PARALLELIZE', reasonCodes: ['NO_CONFLICT'],
-      activeTaskIds: [], analyzerVersion: 'impact-analyzer-v1',
+      activeTaskIds: [], analyzerVersion: 'impact-analyzer-v2',
     });
     expect(decisions[1]?.payload).toMatchObject({
       taskId: second, verdict: 'SAFE_TO_PARALLELIZE', reasonCodes: ['NO_CONFLICT'],
@@ -346,11 +348,10 @@ describe('codeestra task schedule', () => {
     expect((await executions(value.environment, value.projectId, third))).toHaveLength(0);
   }, 120_000);
 
-  test('a proven same-file overlap keeps a paused Task paused with the analyzer reason codes', async () => {
+  test('a shared declared feature keeps a paused Task paused with the feature reason code', async () => {
     const value = await fixture({ withMapping: true, prefix: 'codeestra-schedule-conflict' });
-    // Both write the *same* file. They were started on empty predictions, which is exactly the
-    // residual risk the conflict gate cannot see yet; once both have observed the file, resuming
-    // either of them beside the other is a proven overlap.
+    // Both Tasks change the very *same* file. That is no longer a conflict, so they are both started;
+    // what stops a resume is a shared declaration, which is added below (ADR-0059).
     const first = await createTask(value.environment, value.projectId, 'write:core/shared.ts');
     const second = await createTask(value.environment, value.projectId, 'write:core/shared.ts');
     expect((await submit(value.environment, value.projectId, first)).schedule.started).toHaveLength(1);
@@ -365,7 +366,17 @@ describe('codeestra task schedule', () => {
     expect(paused.exitCode).toBe(0);
     expect(JSON.parse(paused.stdout)).toMatchObject({ state: 'PAUSED', stop: 'RELEASED' });
 
-    // `explain` answers why it is not running, with the intersecting path and the Task it hits.
+    // Declaring the same feature on both revisions is what makes the pair conflict — and a revision
+    // that only changes the declaration is a legitimate revision.
+    for (const taskId of [first, second]) {
+      const ref = await taskRef(value.environment, value.projectId, taskId);
+      const declared = await cli(['task', 'revision', 'create', value.projectId, taskId,
+        String(ref.version), '--feature', 'core-module', '--reason', 'declare the feature', '--json'],
+        value.environment);
+      expect(declared.exitCode).toBe(0);
+    }
+
+    // `explain` answers why it is not running, naming the shared declaration and the Task it hits.
     const explained = await cli(['task', 'schedule', 'explain', value.projectId, second, '--json'],
       value.environment);
     expect(explained.exitCode).toBe(3);
@@ -374,13 +385,13 @@ describe('codeestra task schedule', () => {
       readonly assessment: { readonly verdict: string } | null;
       readonly wait: { readonly kind: string; readonly code: string;
         readonly blocking: readonly string[];
-        readonly hits: readonly { readonly paths: readonly string[];
+        readonly hits: readonly { readonly features: readonly string[];
           readonly taskId: string | null }[] } | null;
     };
     expect(view.decision).toBe('WAIT_CONFLICT');
     expect(view.assessment?.verdict).toBe('CONFLICTING');
-    expect(view.wait?.code).toBe('SAME_FILE');
-    expect(view.wait?.hits[0]?.paths).toContain('core/shared.ts');
+    expect(view.wait?.code).toBe('SAME_UNFINISHED_FEATURE');
+    expect(view.wait?.hits[0]?.features).toContain('core-module');
     expect(view.wait?.hits[0]?.taskId).toBe(first);
 
     // Resuming is a start path, so it is refused and the Task stays paused. A *proven* overlap is a
@@ -389,11 +400,10 @@ describe('codeestra task schedule', () => {
       value.environment);
     expect(resumed.exitCode).toBe(1);
     expect(resumed.stderr).toContain('CONFLICTING');
-    expect(resumed.stderr).toContain('SAME_FILE');
     expect(JSON.parse((await cli(['task', 'status', value.projectId, second],
       value.environment)).stdout)).toMatchObject({ task: { state: 'PAUSED' } });
-    // A proven overlap is never released: `--allow-unknown` widens the gate for an *unproven* one
-    // only, and `clear-unknown` says so instead of pretending it worked.
+    // A shared declaration is never released: `--allow-unknown` widens the gate for an *unproven*
+    // verdict only, and `clear-unknown` says so instead of pretending it worked.
     const releasedResume = await cli(['task', 'resume', value.projectId, second,
       String(secondRef.version), '--allow-unknown'], value.environment);
     expect(releasedResume.exitCode).toBe(1);
@@ -401,105 +411,79 @@ describe('codeestra task schedule', () => {
     const cleared = await cli(['task', 'schedule', 'clear-unknown', value.projectId, second, '--json'],
       value.environment);
     expect(cleared.exitCode).toBe(1);
-    expect(JSON.parse(cleared.stdout)).toMatchObject({
-      recorded: false, state: 'CONFLICTING', reasonCodes: expect.arrayContaining(['SAME_FILE']),
-    });
+    const clearedView = JSON.parse(cleared.stdout) as {
+      readonly recorded: boolean; readonly state: string; readonly reasonCodes: readonly string[];
+    };
+    expect(clearedView.recorded).toBe(false);
+    expect(clearedView.state).toBe('CONFLICTING');
+    expect(clearedView.reasonCodes).toContain('SAME_UNFINISHED_FEATURE');
     expect(JSON.parse((await cli(['task', 'status', value.projectId, second],
       value.environment)).stdout)).toMatchObject({ task: { state: 'PAUSED' } });
   }, 120_000);
 
-  test('waits on UNKNOWN, starts it exclusively on request, and releases it explicitly beside a peer', async () => {
-    const value = await fixture({ withMapping: false, prefix: 'codeestra-schedule-unknown' });
-    const first = await createTask(value.environment, value.projectId, 'Unknown first');
-    const second = await createTask(value.environment, value.projectId, 'Unknown second');
-    // Without a mapping nothing is provably disjoint, so the automatic pass waits: UNKNOWN is not a
-    // silent concurrency decision, it is a wait with the analyzer's own reason code.
+  test('waits while a peer declares the same feature, and starts once that peer is cancelled', async () => {
+    const value = await fixture({ withMapping: true, prefix: 'codeestra-schedule-feature' });
+    // The second Task is created *after* the first one started: the rule is symmetric, so two Tasks
+    // declaring the same feature never start together, whichever one the user writes first.
+    const first = await createTask(value.environment, value.projectId, 'Improve the core module',
+      ['--feature', 'core-module']);
     const firstSubmit = await submit(value.environment, value.projectId, first);
-    expect(firstSubmit.schedule.started).toEqual([]);
-    expect(firstSubmit.schedule.waiting).toEqual([
-      { taskId: first, kind: 'CONFLICT', code: 'INCOMPLETE_IMPACT' },
+    expect(firstSubmit.schedule.started.map((entry) => entry.taskId)).toEqual([first]);
+    const second = await createTask(value.environment, value.projectId, 'Improve it differently',
+      ['--feature', 'core-module']);
+    const secondSubmit = await submit(value.environment, value.projectId, second);
+    expect(secondSubmit.schedule.started).toEqual([]);
+    expect(secondSubmit.schedule.waiting).toEqual([
+      { taskId: second, kind: 'CONFLICT', code: 'SAME_UNFINISHED_FEATURE' },
     ]);
-    expect((await executions(value.environment, value.projectId, first))).toHaveLength(0);
-    const firstRef = await taskRef(value.environment, value.projectId, first);
-    // An explicit request may run a lone UNKNOWN Task exclusively (scheduler.md §2).
-    const exclusive = await cli(['task', 'run', value.projectId, first, String(firstRef.version),
-      '--json'], value.environment);
-    expect(exclusive.exitCode).toBe(0);
-    expect(JSON.parse(exclusive.stdout)).toMatchObject({
-      outcome: 'STARTED', assessment: { verdict: 'UNKNOWN', reasonCodes: ['INCOMPLETE_IMPACT'] },
-      clearedUnknownBy: null,
-    });
-    expect(JSON.parse(exclusive.stdout)).toMatchObject({ sessionId: expect.any(String) });
 
-    // The same request for a second Task now waits: a peer holds a resource.
-    await submit(value.environment, value.projectId, second);
+    // The explicit request waits with the same reason, and the release does not widen it: this is a
+    // *proven* declaration overlap, not an unprovable verdict.
     const secondRef = await taskRef(value.environment, value.projectId, second);
     const waited = await cli(['task', 'run', value.projectId, second, String(secondRef.version),
       '--json'], value.environment);
     expect(waited.exitCode).toBe(3);
     expect(JSON.parse(waited.stdout)).toMatchObject({
-      outcome: 'WAIT', wait: { kind: 'CONFLICT', code: 'INCOMPLETE_IMPACT', blocking: [first] },
+      outcome: 'WAIT',
+      wait: { kind: 'CONFLICT', code: 'SAME_UNFINISHED_FEATURE', blocking: [first] },
     });
-
-    // The explicit single-shot release starts it *beside* the running Task: a released Task is not
-    // downgraded to an exclusive one, and no other Task is stopped for it.
     const released = await cli(['task', 'run', value.projectId, second, String(secondRef.version),
       '--allow-unknown', '--json'], value.environment);
-    expect(released.exitCode).toBe(0);
-    const releasedView = JSON.parse(released.stdout) as {
-      readonly outcome: string; readonly clearedUnknownBy: string | null;
-    };
-    expect(releasedView.outcome).toBe('STARTED');
-    expect(releasedView.clearedUnknownBy).toBeTruthy();
-    for (const taskId of [first, second]) {
-      const status = JSON.parse((await cli(['task', 'status', value.projectId, taskId],
-        value.environment)).stdout) as { readonly task: { readonly state: string } };
-      expect(status.task.state).toBe('RUNNING');
-    }
-
-    // The audit shows who released which revision and which assessment, and the start names the
-    // release it consumed.
-    const events = await scheduleEvents(value.environment, value.projectId);
-    const cleared = events.find((event) => event.eventType === 'TaskUnknownCleared');
-    expect(cleared?.payload).toMatchObject({
-      taskId: second, verdict: 'UNKNOWN', reasonCodes: ['INCOMPLETE_IMPACT'],
-      releasedBy: 'local-user', scope: 'SINGLE_START', analyzerVersion: 'impact-analyzer-v1',
+    expect(released.exitCode).toBe(3);
+    expect(JSON.parse(released.stdout)).toMatchObject({
+      outcome: 'WAIT', clearedUnknownBy: null,
     });
-    expect(typeof cleared?.payload['baseCommit']).toBe('string');
-    expect(typeof cleared?.payload['policyVersion']).toBe('string');
-    const decision = events.find((event) => event.eventType === 'TaskScheduleDecided'
-      && event.payload['taskId'] === second);
-    expect(decision?.payload['clearedUnknownBy']).toBe(cleared?.eventId);
-
-    // The release did not rewrite the assessment: the analyzer still says UNKNOWN.
-    const explained = await cli(['project', 'impact', 'explain', value.projectId, second, '--json'],
+    const cleared = await cli(['task', 'schedule', 'clear-unknown', value.projectId, second, '--json'],
       value.environment);
-    expect(explained.exitCode).toBe(1);
-    expect(JSON.parse(explained.stdout)).toMatchObject({
-      assessment: { verdict: 'UNKNOWN', reasonCodes: ['INCOMPLETE_IMPACT'] },
+    expect(cleared.exitCode).toBe(1);
+    expect(JSON.parse(cleared.stdout)).toMatchObject({
+      recorded: false, state: 'CONFLICTING',
     });
-    // ...and it was single-shot: there is nothing left to reuse for another start.
-    const again = await cli(['task', 'schedule', 'clear-unknown', value.projectId, second, '--json'],
-      value.environment);
-    expect(JSON.parse(again.stdout)).toMatchObject({ state: 'RECORDED' });
+    expect((await executions(value.environment, value.projectId, second))).toHaveLength(0);
+    // The peer is still unfinished, so the wait is the correct answer and stays it: the Task has no
+    // Execution and no release. (That a *finished* peer stops blocking is covered by the
+    // schedule-service test, where the peer's state can be moved deterministically.)
+    expect(JSON.parse((await cli(['task', 'status', value.projectId, second],
+      value.environment)).stdout)).toMatchObject({ task: { state: 'READY' } });
   }, 120_000);
 
   test('two ticks and two concurrent start requests never create a second Execution', async () => {
     const value = await fixture({ withMapping: false, prefix: 'codeestra-schedule-unique' });
     const task = await createTask(value.environment, value.projectId, 'Exactly once');
-    // Without a mapping the automatic pass starts nothing, so the Task stays READY while the passes
-    // run — and every pass must still decide the same thing.
-    expect((await submit(value.environment, value.projectId, task)).schedule.started).toEqual([]);
+    // The Task starts on submit (a missing mapping is no longer a reason to wait), so every later
+    // pass and every concurrent request must decide the same thing: exactly one Execution.
+    expect((await submit(value.environment, value.projectId, task)).schedule.started
+      .map((entry) => entry.taskId)).toEqual([task]);
     for (const _pass of [1, 2]) {
       const tick = await cli(['task', 'schedule', 'run', value.projectId, '--json'], value.environment);
       expect(tick.exitCode).toBe(0);
     }
-    expect(await executions(value.environment, value.projectId, task)).toHaveLength(0);
+    expect(await executions(value.environment, value.projectId, task)).toHaveLength(1);
     expect(JSON.parse((await cli(['task', 'status', value.projectId, task],
-      value.environment)).stdout)).toMatchObject({ task: { state: 'READY' } });
+      value.environment)).stdout)).toMatchObject({ task: { state: 'RUNNING' } });
 
-    // A query command must not start anything either: `status` and `plan` report what a pass *would*
-    // do, and neither reserves nor starts — even for exactly the candidate a pass would start.
+    // A query command never starts anything: with the Task already RUNNING there is no candidate, so
+    // `status`/`plan` report exactly that and change nothing.
     for (const read of [['task', 'schedule', 'status'], ['task', 'schedule', 'plan']]) {
       const view = await cli([...read, value.projectId, '--json'], value.environment);
       expect(view.exitCode).toBe(0);
@@ -509,40 +493,28 @@ describe('codeestra task schedule', () => {
           readonly disposition: string }[];
       };
       expect(parsed.dryRun).toBe(read[2] === 'plan');
-      expect(parsed.candidates.map((candidate) => [candidate.taskId, candidate.disposition]))
-        .toEqual([[task, 'WOULD_START']]);
-      expect(await executions(value.environment, value.projectId, task)).toHaveLength(0);
+      expect(parsed.candidates).toEqual([]);
+      expect(await executions(value.environment, value.projectId, task)).toHaveLength(1);
       expect(JSON.parse((await cli(['task', 'status', value.projectId, task],
-        value.environment)).stdout)).toMatchObject({ task: { state: 'READY' } });
+        value.environment)).stdout)).toMatchObject({ task: { state: 'RUNNING' } });
     }
 
-    // Two concurrent explicit start requests for the same READY Task: exactly one start, one refusal.
+    // Two concurrent explicit start requests for the same already-running Task: neither may start a
+    // second Execution, and both are refused for the same reason.
     const ref = await taskRef(value.environment, value.projectId, task);
     const [left, right] = await Promise.all([
       cli(['task', 'run', value.projectId, task, String(ref.version), '--json'], value.environment),
       cli(['task', 'run', value.projectId, task, String(ref.version), '--json'], value.environment),
     ]);
-    expect([left.exitCode, right.exitCode].sort()).toEqual([0, 1]);
-    expect(JSON.parse((left.exitCode === 0 ? left : right).stdout)).toMatchObject({
-      outcome: 'STARTED',
-    });
-    expect(await executions(value.environment, value.projectId, task)).toHaveLength(1);
-    // A further pass over a Task that holds its resource starts nothing for it, and an explicit
-    // request for it is refused instead of restarted.
-    expect((await cli(['task', 'schedule', 'run', value.projectId, '--json'],
-      value.environment)).exitCode).toBe(0);
-    const afterStart = await taskRef(value.environment, value.projectId, task);
-    const refused = await cli(['task', 'run', value.projectId, task, String(afterStart.version)],
-      value.environment);
-    expect(refused.exitCode).toBe(1);
-    expect(refused.stderr).toContain('TASK_NOT_STARTABLE');
+    expect([left.exitCode, right.exitCode]).toEqual([1, 1]);
+    for (const attempt of [left, right]) expect(attempt.stderr).toContain('TASK_NOT_STARTABLE');
     expect(await executions(value.environment, value.projectId, task)).toHaveLength(1);
     // One Agent process in total: the stub logs one start line per Task and no more.
     const log = await Bun.file(value.stubLog).text();
     expect(log.trim().split('\n').filter((line) => line.includes(task))).toHaveLength(1);
   }, 120_000);
 
-  test('revokes a SAFE prediction whose diff grew and asks the grown Task to pause', async () => {
+  test('reports a grown diff without pausing anyone, because a change set is not a declaration', async () => {
     const value = await fixture({ withMapping: true, prefix: 'codeestra-schedule-growth' });
     // Capacity four, so nothing in this test can be a capacity wait.
     expect((await cli(['scheduler', 'capacity', 'set', value.projectId, '--limit', '4'],
@@ -568,38 +540,22 @@ describe('codeestra task schedule', () => {
     };
     const growth = report.projects[0]?.impactGrowth ?? [];
     expect(growth.length).toBeGreaterThan(0);
-    expect(growth[0]?.pauseRequested).toBe(true);
-    expect(growth[0]?.pauseOutcome).toContain('PAUSED');
+    // Under ADR-0059 a grown change set is reported as a fact and nobody is paused for it: neither
+    // Task declares a feature, so there is nothing to conflict with.
+    expect(growth[0]?.pauseRequested).toBe(false);
+    expect(growth[0]?.conflictingTaskIds).toEqual([]);
+    expect(growth[0]?.addedPaths.length).toBeGreaterThan(0);
     const revoked = (await scheduleEvents(value.environment, value.projectId))
       .filter((event) => event.eventType === 'TaskImpactPredictionRevoked');
-    expect(revoked.length).toBeGreaterThan(0);
-    expect(revoked[0]?.payload['pauseRequested']).toBe(true);
-    expect(revoked[0]?.payload['addedPaths']).toBeDefined();
-    // The grown Tasks were asked to pause through the existing cooperative stop, and the pause is a
-    // recorded state, not a kill.
+    expect(revoked).toEqual([]);
+    // Both Tasks keep running: a change set is not a declaration, so no pause is requested and none
+    // is recorded.
     const states = await Promise.all([first, second].map(async (taskId) => {
       const status = JSON.parse((await cli(['task', 'status', value.projectId, taskId],
         value.environment)).stdout) as { readonly task: { readonly state: string } };
       return status.task.state;
     }));
-    expect(states.every((state) => state === 'PAUSED')).toBe(true);
-
-    // Related Tasks are not started again: both grown Tasks hold a proven overlap with the other, so
-    // resuming either of them beside the other is refused. Nothing is preempted and nothing is
-    // restarted to resolve the conflict; the failure scene (both worktrees) is retained.
-    for (const taskId of [first, second]) {
-      const ref = await taskRef(value.environment, value.projectId, taskId);
-      const resumed = await cli(['task', 'resume', value.projectId, taskId, String(ref.version)],
-        value.environment);
-      expect(resumed.exitCode).toBe(1);
-      expect(resumed.stderr).toContain('CONFLICTING');
-      expect(JSON.parse((await cli(['task', 'status', value.projectId, taskId],
-        value.environment)).stdout)).toMatchObject({ task: { state: 'PAUSED' } });
-    }
-    expect(existsSync(join(realpathSync(value.home), 'worktrees', value.projectId, first, 'core',
-      'first.ts'))).toBe(true);
-    expect(existsSync(join(realpathSync(value.home), 'worktrees', value.projectId, second, 'core',
-      'second.ts'))).toBe(true);
+    expect(states.every((state) => state === 'RUNNING')).toBe(true);
   }, 120_000);
 
   test('a crash while a Task runs is converged without starting a second Agent', async () => {

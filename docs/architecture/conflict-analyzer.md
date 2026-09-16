@@ -1,6 +1,11 @@
-# 第一版 Conflict Analyzer
+# Conflict Analyzer
 
-## 1. 目标与限制
+> **状态（ADR-0059 取代本文 §1–§4 的判定语义）：** 当前实现的判定规则是「两侧声明同一功能且对方未完成 → `CONFLICTING`，否则 `SAFE_TO_PARALLELIZE`」，
+> 见本文 §8。§1–§4 保留为 ADR-0031 那版保守规则的设计记录（历史行、历史事件与 `impactReasonCode` 的类型仍然包含那些码），
+> **其中的文件路径 / 重要目录 / 模块 / 全局资源重叠规则与 UNKNOWN 语义都不再是当前行为**；§5 的测试矩阵对应当前规则的部分见 §8.4。
+> `impact_analyzer_version` 因此从 `impact-analyzer-v1` 前进到 `impact-analyzer-v2`。
+
+## 1. 目标与限制（ADR-0031 的设计，已不是当前判定）
 
 优先低误判安全率，而不是最大并发。分析是保守预测，不是锁系统、更不是安全沙箱。LLM 可辅助预测影响，但“没有提到同文件”不能作为 SAFE 的唯一依据。
 
@@ -128,3 +133,43 @@ project impact explain <project-id> <task-id> [--json]# 给出判定与理由；
 
 - 不得写「自动 tick 已实现」或「两个 SAFE 任务真的会同时开始」；
 - 本节§6 描述的是一组**原语 + 只读命令面**，不是一个会自己跑起来的调度器。
+
+## 8. 当前判定（ADR-0059 / FOUNDATION-091）
+
+### 8.1 规则
+
+```
+对每个 peer（同项目、非终态、未归档、声明了至少一个功能的 Task，排除自己）：
+  若 shared = candidate.features ∩ peer.features 非空，且 peer 未完成：
+     命中 SAME_UNFINISHED_FEATURE（class=CONFLICT，features=shared，relation=SAME_FEATURE）
+  否则：该对记为 SAFE pair
+聚合：有命中 → CONFLICTING；否则 → SAFE_TO_PARALLELIZE
+```
+
+「未完成」= 状态不是 `SUCCEEDED` 也不是 `CANCELLED`，且未归档（`taskIsUnfinishedForConflict`）。声明了功能的 Task 与未声明的 Task 之间永远 `SAFE`。
+判定**不读**快照、不读映射、不读基线、不读文件集合：一个还没启动、没有任何变更集的 `READY` Task 与一个正在跑的 Task 被同等对待。
+
+### 8.2 功能从哪来
+
+- `task_revisions.features_json`（schema **v32**，纯 `ADD COLUMN`，历史行一律 `'[]'`）。
+- `task create --feature <module-id>`（可重复）与 `task revision create --feature <module-id>`（可重复；**省略即继承**当前 revision 的声明，显式给出则整体替换；只改声明也是合法 revision）。
+- id 必须是项目 **main ref** 的 `.codeestra/impact.json` 里 `modules[].id` 之一，在写入时校验：`UNKNOWN_FEATURE` / `IMPACT_POLICY_ABSENT` / `INVALID_IMPACT_POLICY`。**不需要**该映射已被 trust 确认（UI 的 trust 流程不发送映射摘要，要求确认会让 UI 信任的项目无法声明功能）；是否已确认仍由 `project impact validate` 报告。
+
+### 8.3 保留而不产生的东西
+
+- `UNKNOWN`、`--allow-unknown`、`scheduler.unknown.clear` / `TaskUnknownCleared` 全部保留（**没有产生 `UNKNOWN` 的路径**，因此日常不可达；`clear-unknown` 对 `CONFLICTING` 一律拒绝并如实报告）。
+- 旧的 reason code（`SAME_FILE`、`IMPORTANT_DIRECTORY_OVERLAP`、`SAME_MODULE`、`GLOBAL_RESOURCE*`、`INCOMPLETE_IMPACT`、`MISSING_IMPACT_SNAPSHOT`、`STALE_*`、`ACTUAL_DIFF_EXCEEDS_SNAPSHOT`、`SNAPSHOT_SCOPE_MISMATCH`、`INVALID_SCOPE`）仍在类型与 `impactReasonClass` 里，因为历史 `impact_assessments` 行与 `TaskWaitingForConflict` 事件含它们；分析器不再产出。
+- ImpactSnapshot 仍然派生与记录（`project impact show`、槽位预留的代际重检），但它对**判定**没有影响。
+- `impact_assessments` 仍按「两侧都有可观测快照」写配对行（部分覆盖，不是判定审计）；判定的审计是 `TaskScheduleDecided` / `TaskWaitingForConflict` 事件与解释输出。
+
+### 8.4 定向测试
+
+`packages/domain/test/impact-analysis.test.ts`（19 项）固定当前规则：同一功能 + 各种非终态 → `CONFLICTING`；`SUCCEEDED`/`CANCELLED`/已归档 / 声明不相交 / 任一侧未声明 → `SAFE`；**同文件、同目录、同模块、同全局资源一律 `SAFE`**；无快照也是按声明判定（既不是冲突也不是 UNKNOWN）；对若干输入断言永不产生 `UNKNOWN`；顺序无关的确定性；解释文本。
+运行期：`apps/runtime/test/schedule-service.test.ts`（10 项）、`apps/runtime/test/cli-schedule.test.ts`（6 项）、`apps/runtime/test/cli-impact.test.ts`（1 项端到端）覆盖「等待 / 不等待 / 拒绝放行 / 归档与终态不再拦」。
+
+**全量命令面（FOUNDATION-091 收尾后）**：`bun test apps/runtime/test` 469 项全绿。其中有两点值得单独记，因为它们是**新默认**的直接后果，而不是某个 fixture 的巧合：
+
+- `apps/runtime/test/cli-task-depends.test.ts`：上游进入 `dev` 后下游不再停在 `READY`（判定 `SAFE`）而被自动启动，
+  于是「依赖边仍不可编辑」成为新断言（`INVALID_STATE`）。
+- `apps/runtime/test/task-recovery-service.test.ts`：工作树丢失不再是 `UNKNOWN` 的理由，但仍是可观测事实
+  —— 断言改为候选自身的 `workspaceStatus: MISSING` 与 `unavailableDetail` 里的路径。

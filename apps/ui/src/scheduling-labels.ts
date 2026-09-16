@@ -7,8 +7,9 @@
  *
  * Two rules are load-bearing and are tested:
  *
- * 1. `UNKNOWN` is never rendered as a soft `SAFE` or as "no conflict". It means "cannot be proven",
- *    which is a refusal, not a green light.
+ * 1. `SAFE_TO_PARALLELIZE` means exactly "no unfinished peer declares the same feature" and
+ *    `CONFLICTING` means the opposite (ADR-0059); a historical `UNKNOWN` is never rendered as a soft
+ *    `SAFE` or as "no conflict".
  * 2. A capacity wait and a conflict wait are never folded into `BLOCKED` (PROJECT_SPEC §2.10);
  *    `BLOCKED` only ever means an unmet dependency.
  *
@@ -25,12 +26,13 @@ function label(map: Readonly<Record<string, string>>, code: string): string {
 
 /* -- Verdicts ------------------------------------------------------------------------------------- */
 
-/** `SAFE_TO_PARALLELIZE` is the only verdict that is evidence of disjointness. */
+/** The verdicts of the current rule (ADR-0059); `UNKNOWN` is rendered as the historical value. */
 export function verdictLabel(verdict: string): string {
   return label({
-    SAFE_TO_PARALLELIZE: '已证明可并行（SAFE_TO_PARALLELIZE）',
-    UNKNOWN: '无法证明（UNKNOWN）：不是「没有冲突」，也不是 SAFE',
-    CONFLICTING: '已证明冲突（CONFLICTING）',
+    SAFE_TO_PARALLELIZE: '默认并行（SAFE_TO_PARALLELIZE）：没有与任何未完成的任务声明同一个功能',
+    UNKNOWN: '无法判定（UNKNOWN）：旧判定的历史记录，当时表示「无法证明不相交」；'
+      + '当前规则不再产生它，也不等于 SAFE',
+    CONFLICTING: '冲突（CONFLICTING）：与某个未完成的任务声明了同一个功能',
   }, verdict);
 }
 
@@ -59,7 +61,10 @@ export function waitReasonLabel(code: string): string {
     CAPACITY_GLOBAL_LIMIT_REACHED: '全局并发上限已满',
     CAPACITY_ADAPTER_SLOT_LIMIT_REACHED: '该 adapter 的槽位上限已满',
     SCHEDULER_DRAINING: 'Runtime 正在排水，拒绝新的预留',
-    // analyzer (conflict-analyzer.md §6.4)
+    // the current rule (ADR-0059; conflict-analyzer.md §6.4)
+    SAME_UNFINISHED_FEATURE: '两侧声明了同一功能，而对方还没开发完',
+    // The codes below are retained because historical assessments and events contain them; the
+    // current rule does not produce them.
     SAME_FILE: '两侧变更集包含同一路径',
     IMPORTANT_DIRECTORY_OVERLAP: '声明的重要目录有祖先/相等关系，或一侧文件落入另一侧的重要目录',
     SAME_MODULE: '两侧命中同一声明模块',
@@ -74,7 +79,7 @@ export function waitReasonLabel(code: string): string {
     ACTUAL_DIFF_EXCEEDS_SNAPSHOT: '实际 diff 超出了快照记录的预测范围',
     SNAPSHOT_SCOPE_MISMATCH: '快照作用域与当前事实不匹配',
     INVALID_SCOPE: '作用域无效，无法评估',
-    NO_CONFLICT: '在声明映射与观测事实下没有发现重叠',
+    NO_CONFLICT: '没有与任何未完成任务共享声明的功能',
   }, code);
 }
 
@@ -220,8 +225,8 @@ export function impactValidationCodeLabel(code: string): string {
   return label({
     OK: '映射存在且已确认，正在生效',
     OK_UNTRUSTED: '映射存在且有效，但仓库尚未被信任',
-    POLICY_ABSENT: 'main 引用上没有映射；所有判定都会是 UNKNOWN',
-    POLICY_INVALID: '映射存在但不是有效 JSON/结构；所有判定都会是 UNKNOWN',
+    POLICY_ABSENT: 'main 引用上没有映射；无法用 --feature 声明功能（判定只看声明，不看映射）',
+    POLICY_INVALID: '映射存在但不是有效 JSON/结构；无法用 --feature 声明功能',
     POLICY_NOT_CONFIRMED: '映射与已确认的摘要不一致；重新信任项目即可（FULL 下 0 步）',
   }, code);
 }

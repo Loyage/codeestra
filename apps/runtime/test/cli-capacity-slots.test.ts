@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { Phase1Database } from '@codeestra/storage';
 import { pidExists } from '../src/lifecycle.js';
 import {
+  createFixtureTaskForExplicitStart,
   reclaimTestResources,
   registerTemporaryDirectory,
   runCli,
@@ -117,6 +118,9 @@ async function fixture(): Promise<Fixture> {
     CODEESTRA_HOME: home,
     CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: shimPath,
+    // These tests exercise the reservation primitive on a READY Task, so the recovery pass must not
+    // start it on its own default adapter while they are setting up.
+    CODEESTRA_SCHEDULE_TICK_MS: '600000',
   };
   const opened = await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);
@@ -136,13 +140,17 @@ async function createReadyTask(
   environment: Record<string, string>,
   projectId: string,
   specification: string,
+  options: { readonly keepRuntime?: boolean } = {},
 ): Promise<TaskRef> {
-  const created = await cli(['task', 'create', projectId, specification], environment);
-  expect(created.exitCode).toBe(0);
-  const taskId = (JSON.parse(created.stdout) as { readonly id: string }).id;
-  const submitted = await cli(['task', 'submit', projectId, taskId, '0'], environment);
-  expect(submitted.exitCode).toBe(0);
-  return await taskRef(environment, projectId, taskId);
+  // ADR-0059 starts an undeclared Task the moment it is submitted, which would consume the very
+  // slot these tests reserve. The shared helper leaves the fixture READY behind a real feature
+  // conflict; it writes the fixture database directly, so the Runtime is stopped first unless the
+  // caller is holding reservations it must not have reconciled (`keepRuntime`).
+  if (options.keepRuntime !== true) await cli(['stop'], environment);
+  const ready = await createFixtureTaskForExplicitStart({
+    home: environment.CODEESTRA_HOME as string, environment, projectId, specification,
+  });
+  return await taskRef(environment, projectId, ready.taskId);
 }
 
 async function taskRef(
@@ -472,7 +480,10 @@ describe('codeestra scheduler capacity and reservations', () => {
       expect(view.globalUsed).toBe(1);
       const waiting = await acquire(environment, projectId, second);
       expect(waiting.exitCode).toBe(0);
-      const third = await createReadyTask(environment, projectId, 'Third Task');
+      // The Runtime must stay up here: stopping it would reconcile `second`'s own reservation and
+      // free the slot this assertion is about.
+      const third = await createReadyTask(environment, projectId, 'Third Task',
+        { keepRuntime: true });
       expect((await acquire(environment, projectId, third)).exitCode).toBe(3);
       // An explicit reconcile does not quietly free it either.
       const explicit = await cli(['scheduler', 'reservations', 'reconcile', projectId, '--json'],
