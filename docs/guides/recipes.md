@@ -6,6 +6,7 @@
 > recipe 3 与 recipe 4 由 FOUNDATION-091 按 ADR-0059 改写（默认不冲突、声明同一功能才互斥）；
 > recipe 3 的容量命令由 **FOUNDATION-096** 同步（ADR-0061：上限是唯一的 Runtime 全局值，命令不带 project 参数；
 > 同一值另有设置面拼写 `settings concurrency`，也在本 recipe 里给出）。
+> recipe 12 补充「集成成功后自动回收」（ADR-0062）。
 
 本文是**步骤化**的：每条 recipe 回答一个「我想做 X」，给出可以照抄的命令与**做完之后看什么**。
 
@@ -15,7 +16,7 @@
 - `$TASK` = `task create` 返回的 task id；
 - `<version>` = 该 Task 当前的 `version`（乐观版本号）。**它每次改状态都会变**——用 `task status` 或
   上一条命令的输出重新取，不要凭记忆复用。
-- 每条命令的完整参数与退出码见 [cli-reference.md](./cli-reference.md)；
+- 每条命令的完整参数与退出码见 [cli/README.md](./cli/README.md)（九篇索引）；
   报错怎么办见 [troubleshooting.md](./troubleshooting.md)。
 
 ---
@@ -561,6 +562,10 @@ bun run codeestra task recover $PROJECT $TASK <expected-version> [--reason "…"
 
 **目标**：把 Runtime 数据目录下不再需要的资源清掉，**并且知道每一样为什么被清或被留**。
 
+> 从 ADR-0062 起，**集成成功后会自动回收**该批成员里「clean + 已合并」的 Task worktree（默认开启）。
+> 这一步不再需要你记得跑；要关掉用 `settings auto-reclaim off`。下面仍然是那个**带审计的手动路径**，
+> 失败现场、未合并成果与任何手动选定都靠它。
+
 ```sh
 # 1) 先看（plan 是只读试运行，返回的结构与 apply 完全相同）
 bun run codeestra reclaim plan --project $PROJECT --json
@@ -698,6 +703,6 @@ bun run codeestra scheduler control resume --json
 - 从头读到尾的说明书：[manual.md](./manual.md)
 - 端到端流程与预期输出：[workflow.md](./workflow.md)
 - 逐屏 UI 走查（每个按钮做什么）：[ui.md](./ui.md)
-- 每条命令的参数与退出码：[cli-reference.md](./cli-reference.md)
+- 每条命令的参数与退出码：[cli/README.md](./cli/README.md)
 - 报错怎么办：[troubleshooting.md](./troubleshooting.md)
 - 人工观感核对清单：[acceptance-checklist.md](./acceptance-checklist.md)

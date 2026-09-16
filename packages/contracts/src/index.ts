@@ -1665,6 +1665,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     mode: proseQuestionAttentionModeSchema,
   }),
   /**
+  /**
    * The interface-effect settings (FOUNDATION-073 / ADR-0045): one Runtime home, five keys, no
    * confirmation anywhere. `list` reports every key with its effective value, its product default
    * and whether it was explicitly chosen; `get`/`set` address one key; `reset` drops one explicit

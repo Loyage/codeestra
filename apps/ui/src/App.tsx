@@ -29,6 +29,8 @@ import {
 } from './scheduling-labels.js';
 import { NewTaskDock } from './new-task-dock.js';
 import { TaskList, TaskStateBadge } from './task-list.js';
+import { AgentRunCard } from './agent-run-card.js';
+import { agentRunCapturable, taskNextStep, type AgentRunFactView } from './agent-run.js';
 import {
   operationProgressFromEvent,
   questionnaireFromPrompt,
@@ -834,29 +836,29 @@ function TasksTab(props: CommonProps & {
     verification.state === 'PASSED'
     && verification.revisionId === task?.currentRevision.id
     && verification.testedCommit === latestExecution?.resultCommit) ?? null;
-  const canCapture = task?.state === 'RUNNING'
-    && latestExecution?.state === 'RUNNING' && latestExecution.resourceHeld
-    && latestExecution.session?.state === 'EXITED';
+  // The newest attempt in the shape the shared helpers take, so the workbench row and this view
+  // apply one capture predicate and one ending vocabulary instead of two copies of each.
+  const latestRun: AgentRunFactView | null = latestExecution === null ? null : {
+    state: latestExecution.state,
+    resourceHeld: latestExecution.resourceHeld,
+    sessionState: latestExecution.session?.state ?? null,
+    completionOutcome: latestExecution.session?.completion?.outcome ?? null,
+  };
+  const canCapture = task?.state === 'RUNNING' && agentRunCapturable(latestRun);
   const taskAttentions = props.attentions.filter((attention) => attention.taskId === taskId);
   const waiting = taskAttentions.filter((attention) => attention.status === 'OPEN').length;
   const verifying = status?.verifications.some((verification) =>
     ['QUEUED', 'RUNNING'].includes(verification.state)) ?? false;
-  const nextStep = task === null ? '' : archived ? '任务已归档，记录与现场保留；可在「更多操作」中取消归档。'
-    : waiting > 0 ? '有待处理请求，请在下方回答。其他任务不受影响。'
-    : task.state === 'DRAFT' ? '提交后进入自动调度，满足依赖、冲突与容量条件才会启动。创建草稿不会自动运行。'
-    : task.state === 'READY' ? '任务等待调度；可手动尝试启动，Runtime 会核对依赖、冲突与容量，不保证立即运行。'
-    : task.state === 'BLOCKED' ? '正在等待上游依赖满足。展开下方任务依赖，查看尚未满足的条件。'
-    : verifying ? '任务验证进行中。下方显示实际步骤，可请求取消。'
-    : canCapture ? 'Agent 会话已退出。若有代码变更，可提交成果，然后独立验证。'
-    : task.state === 'EXECUTED' ? (passedVerification === null
-      ? '成果已提交。先在固定 commit 上运行任务验证。'
-      : '验证已通过。成果停在 task 分支上，由你自己合并。')
-    : task.state === 'RUNNING' ? '查看下方执行过程；可暂停（保留现场、稍后继续）或终止。'
-    : task.state === 'PAUSED' ? '任务已暂停，provider 进程已确认退出；「继续」会在同一工作树新建一次执行并复用该会话。'
-    : task.state === 'CANCELLED' ? '任务已终止，不会自动重开；需要重做请新建任务。'
-    : task.state === 'RECOVERY_REQUIRED' ? '执行状态需要人工检查，请展开执行与验证记录查看原因；不会自动重试。'
-    : task.state === 'FAILED' ? '本次执行失败，请查看执行记录中的错误原因。'
-    : `当前状态：${labelValue(task.state)}。详情以 Runtime 记录为准。`;
+  const nextStep = task === null ? '' : taskNextStep({
+    taskState: task.state,
+    archived,
+    openAttentionCount: waiting,
+    verifying,
+    canCapture,
+    verificationPassed: passedVerification !== null,
+    agentRun: latestRun,
+    failureCode: latestExecution?.error?.code ?? null,
+  });
   // A failed start can leave an Execution without a Session; such an attempt has no process to
   // show, so only attempts with a recorded Session are offered here.
   const transcriptExecutions = (status?.executions ?? [])
@@ -864,6 +866,12 @@ function TasksTab(props: CommonProps & {
   const transcriptExecution = transcriptExecutions
     .find((execution) => execution.executionId === transcriptExecutionId)
     ?? transcriptExecutions[0] ?? null;
+  /**
+   * The in-page anchor the run card links to. It sits on the transcript block rather than on the
+   * whole 「Agent 会话与执行过程」 section, because the native terminal above it can be long enough
+   * that landing at the top of the section would show none of the recorded process.
+   */
+  const transcriptAnchorId = 'agent-session-transcript';
 
   if (projectId === null) {
     return <section className="card empty-state">
@@ -902,17 +910,14 @@ function TasksTab(props: CommonProps & {
               {canCapture ? <span className="muted hint">会话已退出 · 等待提交成果</span> : null}
               {task.archivedAt === null ? null : <span className="muted">已归档</span>}</div>
             <p className="muted hint">规格 r{task.currentRevision.number} · 状态版本 v{task.version}</p>
-            <p className="muted hint" title="声明的功能（ADR-0059）：两个未完成任务声明同一功能时才会被判为冲突">
-              声明的功能：{task.currentRevision.features.length === 0 ? '（未声明，永不参与功能冲突）'
-                : task.currentRevision.features.join('、')}
-            </p>
-            <pre className="spec">{task.currentRevision.specification}</pre>
-            {task.currentRevision.constraints.length === 0 ? null : (
-              <ul>
-                {task.currentRevision.constraints.map((constraint) => (
-                  <li key={constraint.id}>{constraint.text}</li>
-                ))}
-              </ul>
+
+            {latestRun === null ? null : (
+              <AgentRunCard
+                run={latestRun}
+                attemptNumber={latestExecution?.attemptNumber ?? 0}
+                completion={latestExecution?.session?.completion ?? null}
+                transcriptAnchorId={transcriptExecution === null ? null : transcriptAnchorId}
+              />
             )}
 
             <div className="next-step"><span className="eyebrow">下一步</span><p>{nextStep}</p></div>
@@ -1127,6 +1132,23 @@ function TasksTab(props: CommonProps & {
                 />
               </details>
             </div>
+
+            {/* The Task's own definition sits below the run result and the actions: what was asked
+                and how the newest attempt ended are read first, and the buttons stay reachable
+                without scrolling past the whole specification. */}
+            <p className="muted hint" title="声明的功能（ADR-0059）：两个未完成任务声明同一功能时才会被判为冲突">
+              声明的功能：{task.currentRevision.features.length === 0 ? '（未声明，永不参与功能冲突）'
+                : task.currentRevision.features.join('、')}
+            </p>
+            <pre className="spec">{task.currentRevision.specification}</pre>
+            {task.currentRevision.constraints.length === 0 ? null : (
+              <ul>
+                {task.currentRevision.constraints.map((constraint) => (
+                  <li key={constraint.id}>{constraint.text}</li>
+                ))}
+              </ul>
+            )}
+
             {waiting === 0 ? null : (
               <AttentionTab key={task.id} client={client} projectId={projectId}
                 attentions={taskAttentions} run={props.run} update={update} reload={props.reloadAttentions} />
@@ -1373,14 +1395,16 @@ function TasksTab(props: CommonProps & {
                       refreshToken={props.detailToken}
                       run={props.run}
                     />
-                    <TranscriptPanel
-                      key={transcriptExecution.session.sessionId}
-                      client={client}
-                      sessionId={transcriptExecution.session.sessionId}
-                      executionState={transcriptExecution.state}
-                      sessionState={transcriptExecution.session.state}
-                      run={props.run}
-                    />
+                    <div id={transcriptAnchorId}>
+                      <TranscriptPanel
+                        key={transcriptExecution.session.sessionId}
+                        client={client}
+                        sessionId={transcriptExecution.session.sessionId}
+                        executionState={transcriptExecution.state}
+                        sessionState={transcriptExecution.session.state}
+                        run={props.run}
+                      />
+                    </div>
                   </>
                 )}
                 </section>

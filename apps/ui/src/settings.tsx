@@ -118,6 +118,7 @@ export function SettingsPage() {
   }
   const { view, entries, error, busy, loading, setValue, reset, refresh } = settings;
   return (
+    <>
     <section className="card settings-page">
       <div className="section-heading">
         <h2>界面效果</h2>
@@ -192,5 +193,7 @@ export function SettingsPage() {
         </p>
       )}
     </section>
+    </>
   );
 }
+

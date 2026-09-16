@@ -52,7 +52,7 @@
 - [ADR-0047](0047-github-mediated-promotion.md)：`dev → main` 必须经 GitHub 中转，**拉取是用户显式的人工步骤**；只 push 固定候选、不 `--force`、不对已检出的 `main` 用 `update-ref`。**落地细则见 ADR-0052**。
 - [ADR-0048](0048-dev-clone-and-separate-runtime-home.md)：`~/Documents/codeestra`（main）与 `codeestra-dev`（dev）是两个独立 clone（非 worktree）；dev 用独立 `CODEESTRA_HOME`。**范围口径见 ADR-0060**。
 - [ADR-0049](0049-dev-ui-channel-marker.md)：dev 通道是构建期事实（`VITE_CODEESTRA_CHANNEL=dev`），产物带 `data-channel="dev"` + 横幅 + 橙色强调；未设置即无标记。
-- [ADR-0050](0050-user-manual-and-doc-sync-discipline.md)：单份主线说明书（`docs/guides/manual.md`）+ 八篇参考；功能变更必须同步 `docs/guides/` 对应段落，人工规范、不加机器门禁。
+- [ADR-0050](0050-user-manual-and-doc-sync-discipline.md)：单份主线说明书（`docs/guides/manual.md`）+ 八篇参考；功能变更必须同步 `docs/guides/` 对应段落，人工规范、不加机器门禁。**Amended by ADR-0063**：命令面参考由单篇 `cli-reference.md` 拆为 [`docs/guides/cli/`](../guides/cli/README.md) 九篇（章节号沿用拆分前编号、`cli-reference.md` 保留为索引与旧 §N 对照表），D03 的映射目标改为该目录下覆盖该命令的那一篇；D02 的版本/校对头规则不变。
 - [ADR-0051](0051-knowledge-handoff-codex-facts-and-revision-channel-evaluation.md)：知识按 Execution 绑定交给 provider，每个 provider 用自己的通道；`applyRevision` 经实测不可行，三个 provider 一律 `UNSUPPORTED`。
 - [ADR-0052](0052-promotion-fact-layering.md)：经 GitHub 中转提升的命令面事实分层：可重试拒绝 vs 记录 `STALE`、`AWAITING_PULL` 退 3 且不执行重启、推回失败可续、`DEV_REPO_*` 核验口径（schema v29）。
 - [ADR-0053](0053-multi-member-integration-batch.md)：多成员 IntegrationBatch（schema v30）：组成与集成分离、成员按 `task_id` 排序、批级 `STALE`/`CANCELLED`、成员级部分失败如实。
@@ -64,7 +64,9 @@
 - [ADR-0059](0059-feature-declaration-conflict-rule.md)：冲突判定只看「两侧声明同一功能且对方未完成」；文件/目录/模块/共享资源重叠与映射完整性都不再影响判定（schema v32）。**Supersedes ADR-0031 的判定语义**。
 - [ADR-0060](0060-managed-project-task-baseline.md)：被管理项目的 Task 基线取「项目文件夹当前检出的分支」，`dev clone` 变为可选（schema v33）。**Amends ADR-0056** 的必需性与 **ADR-0018** 的基线来源。**第三轮修订（2026-09-16，FOUNDATION-093）**：依赖判定从 dev-only 清单移出（它位于 `task submit`/`task run` 的常态路径），`DEV_REPO_REQUIRED` 只剩集成与提升。
 - [ADR-0061](0061-runtime-global-load-control.md)：Runtime 全局负载控制 —— 只保留一个跨全部项目/Adapter 的并行上限（默认 2、范围 1–16，旧显式值取最小值迁移）；全局暂停 = 持久启动屏障 + 按 `pid + start token + incarnation` 可核验的 Provider 主进程冻结（不改 Task 状态、不向工具子进程发停止信号、跨重启保持，只有显式继续才解除）。**Amends ADR-0030/0032/0033 的容量层级**。**两半都已实现**（schema v34）：容量上半是 FOUNDATION-096（`runtime_capacity_settings`、全局事件 `project_id = NULL`、命令面 `scheduler capacity get|set|reset`），暂停下半是 FOUNDATION-097（`runtime_pause_control`/`runtime_pause_targets`、持久屏障、`scheduler control status|pause|resume|reconcile`、UI 全局 shell）。Provider 冻结能力按 Adapter 如实声明：Pi `SUPPORTED`，Codex / Claude Code `REQUIRES_VALIDATION`。
-- [ADR-0064](0064-remove-dev-clone-and-dual-baseline.md)：**删除 dev clone、双基线、dev 集成与稳定提升；Task 基线只有一种**（项目文件夹建 workspace 时当前检出的分支，schema **v35**，不可逆 DROP）。删除 `task integrate`、`task integration *`、`promotion *` 命令；依赖判定改为「上游 result commit 对当前基线可达」；dev 构建通道（ADR-0049）也删。**Supersedes / Amends ADR-0009/0018/0022/0038(产品部分)/0039/0047/0048(产品语义)/0049/0052/0053/0056/0060**。本仓库自身的 `main`/`dev` 人工四步只是仓库约定（`AGENTS.md`），不再是产品能力。
+- [ADR-0062](0062-automatic-worktree-reclamation-after-integration.md)：集成成功后自动回收该批成员的 Task worktree（默认开启，`settings auto-reclaim on|off` 可关闭；复用 `reclaim` 的同一套归属校验与 append-only 账本，失败现场仍默认保留；无 schema 变更）。**Superseded by ADR-0064**：它的唯一触发点 `task integrate` 已随集成一起删除，实现与设置项已移除；`reclaim` 仍是显式命令。
+- [ADR-0063](0063-split-cli-reference-by-command-group.md)：CLI 命令参考按功能拆为 [`docs/guides/cli/`](../guides/cli/README.md) 九篇；各篇**沿用拆分前的章节号**，`cli-reference.md` 保留为索引 + 旧 §N 对照表（历史记录里的 §N 引用仍可解析）；正文逐行搬移、不重新核对、逐节校对注随节搬迁。**Amends ADR-0050** 的文件集合（D02）与 D03 的映射目标。**无代码、无 schema、无命令面变化**。
+- [ADR-0064](0064-remove-dev-clone-and-dual-baseline.md)：**删除 dev clone、双基线、dev 集成与稳定提升；Task 基线只有一种**（项目文件夹建 workspace 时当前检出的分支，schema **v35**，不可逆 DROP）。删除 `task integrate`、`task integration *`、`promotion *` 命令；依赖判定改为「上游 result commit 对当前基线可达」；dev 构建通道（ADR-0049）也删。**Supersedes / Amends ADR-0009/0018/0022/0038(产品部分)/0039/0047/0048(产品语义)/0049/0052/0053/0056/0060、ADR-0062**。本仓库自身的 `main`/`dev` 人工四步只是仓库约定（`AGENTS.md`），不再是产品能力。
 
 ## 当前有效语义（与旧 ADR 冲突时按此执行）
 
@@ -72,17 +74,17 @@
 - **测试范围与时机**：ADR-0038/0039 —— task/lane/feature/Self candidate 分支只跑建分支时选定的定向测试；全量只在精确 `dev` 候选上、作为提升前必备证据。**注（ADR-0064）**：产品侧的「提升前全量证据」随提升一起删除；本条作为本仓库自身的开发/发布纪律仍在 `AGENTS.md` 生效。
 - **稳定提升路径**：**ADR-0064 起产品不再有提升能力**（`promotion *`、IntegrationBatch、`task integrate` 已删除）。本仓库自身的 `dev → main` 仍走 ADR-0047/0048 的人工四步（push 固定候选到远端 `dev` 并读回 → main 检出 ff-only 拉取 → 重启并核对 → 推回远端 `main`），写在 `AGENTS.md`。
 - **分支职责与重启**：ADR-0009（**由 ADR-0064 收窄为仓库约定**）—— 本仓库自身长期保留 `main`/`dev`；`main` 更新后立即 `stop` + `status`。产品不再建模这两个分支。
-- **本机布局与 dev 通道**：ADR-0048（**产品语义部分由 ADR-0064 删除**）—— 两个独立 clone 的拆分只服务 Codeestra 自身的开发；ADR-0049 的 dev 构建通道（`VITE_CODEESTRA_CHANNEL`、`data-channel`、横幅、橙色强调）已删，UI 只有一种构建产物：
+- **本机布局与 dev 通道**：ADR-0048（**产品语义部分由 ADR-0064 删除**）—— 两个独立 clone 的拆分只服务 Codeestra 自身的开发；ADR-0049 的 dev 构建通道（`VITE_CODEESTRA_CHANNEL`、`data-channel`、横幅、橙色强调）已删，UI 只有一种构建产物。
 - **`dev` 事实与 Task 基线**：ADR-0064 —— 只有一种基线：项目文件夹建 workspace 时当前检出的分支；`HEAD` detached 以 `TASK_BASE_REF_UNRESOLVED` 拒绝，`--base-ref` 单次覆盖。没有 dev clone、没有 `DEV_REPO_*` 稳定码、没有 `TASK_IN_STABLE_PROMOTION` / `TASK_INTEGRATED_INTO_DEV`。
-- **用户文档纪律**：ADR-0050 —— 功能变更同步 `docs/guides/` 对应段落，交付说明写明改了哪一篇的哪一节。
+- **用户文档纪律**：ADR-0050 —— 功能变更同步 `docs/guides/` 对应段落，交付说明写明改了哪一篇的哪一节；**ADR-0063** —— 命令面变更的落点具体是 [`docs/guides/cli/`](../guides/cli/README.md) 里覆盖该命令的那一篇，旧 §N 对照表在 `docs/guides/cli-reference.md`。
 - **Project Knowledge**：ADR-0041/0051 —— 每个 provider 用自己的通道注入；`applyRevision` 三者 `UNSUPPORTED`。
-- **IntegrationBatch**：ADR-0053 —— 一次覆盖整批的集成验证、批级 `STALE`/`CANCELLED`、成员按 `task_id` 排序、部分失败如实。
 - **终端与交接**：ADR-0054 —— PTY resize 合约（POSIX 范围）；并行工具批次安全点规则与 ADR-0010 相同；跨交接权限矩阵仍 `PARTIAL`。
 - **`RECOVERY_REQUIRED` 对账**：ADR-0055 —— 只读事实、能证明 provider 已消失才收口、不声称静止、不发信号、不删资源。
 - **Session Guidance**：ADR-0057 —— 会话级事实；命令面写明「已入队 ≠ 模型已读」，无通道即 `CHANNEL_UNSUPPORTED`。
 - **任务永久删除**：ADR-0058 —— 唯一显式 `--yes`，不在常态路径；`cancel` 仍是终态、`archive` 仍是软删除；被拒绝时可用 `--force`（同一条命令的放宽，D09）删掉本来会被拒绝的任务，代价逐项写在 `forced` 与审计事件里。
 - **冲突判定**：ADR-0059 —— 默认 `SAFE_TO_PARALLELIZE`；`--allow-unknown` 保留且永不放宽 `CONFLICTING`。
 - **全局负载控制**：ADR-0061 —— 一个 Runtime 只有一个跨项目并行上限（**实现事实**：FOUNDATION-096，schema v34，命令面 `scheduler capacity get/set/reset`，项目级/Adapter 级覆写已退役）；全局暂停 = 持久启动屏障 + 可核验 Provider 主进程冻结（**实现事实**：FOUNDATION-097，同一 v34，命令面 `scheduler control status/pause/resume/reconcile`），不替 ADR-0016 的单 Task pause，也不自动跨重启恢复；`pauseState` 可能是五个控制状态之一。**能冻结哪些 Adapter** 按各自的 `providerProcessSuspension` 如实声明（当前只有 Pi 是 `SUPPORTED`）。
+- **资源回收**：ADR-0021/0037 —— 显式 `reclaim plan/apply/records`，只删归属校验通过的三类资源、默认保留失败现场、append-only 账本。ADR-0062 的「集成成功后自动回收」随 ADR-0064 删除集成而移除，没有自动路径。
 
 以上各条都**不放宽**既有不变量：保留失败现场、不 `--force`、命令幂等、崩溃按事实收敛；也都不新增权限门禁或审批层。（「失败不动 `dev`」与「CAS 推进 ref」随 ADR-0064 删除 dev 集成而不再适用。）
 

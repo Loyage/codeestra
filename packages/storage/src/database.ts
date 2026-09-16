@@ -1261,6 +1261,59 @@ export interface TaskSummary {
   readonly updatedAt: number;
   /** Set when the Task is archived (soft-deleted); archived Tasks keep every row and worktree. */
   readonly archivedAt: number | null;
+  /**
+   * The newest Execution attempt and the Agent Session it started, as recorded facts — or `null`
+   * when the Task has never started one. This exists so a *list* read can tell "the newest attempt
+   * is still running" from "its Session already recorded an ending" without a second read per row,
+   * and so `task list` and `task status` answer that question the same way.
+   *
+   * Nothing here is derived or judged: `state`/`resourceHeld` are the Execution's own columns and
+   * `completionOutcome` is the outcome the provider reported. An absent outcome means "not
+   * recorded" — never "failed" and never "succeeded".
+   */
+  readonly latestExecution: TaskLatestExecutionSummary | null;
+}
+
+/**
+ * The newest Execution attempt of one Task, plus the ending its Agent Session recorded, if any.
+ * `sessionState` is `null` when that attempt never recorded a Session (for example a failed start);
+ * `completionOutcome` is `null` when no completion with a recorded outcome exists — a disconnect
+ * reason or a start failure is not a completion.
+ */
+export interface TaskLatestExecutionSummary {
+  readonly executionId: string;
+  readonly attemptNumber: number;
+  readonly state: ExecutionLifecycleState;
+  /** True while this attempt still owns its reservation and workspace. */
+  readonly resourceHeld: boolean;
+  readonly sessionState: AgentSessionLifecycleState | null;
+  readonly completionOutcome: 'SUCCESS' | 'FAILURE' | null;
+}
+
+/** The row `listTasks`/`getTask` select: the Task's own columns plus its newest attempt. */
+interface TaskSummaryRow {
+  readonly id: string;
+  readonly project_id: string;
+  readonly display_number: number;
+  readonly kind: 'DEVELOPMENT' | 'SELF';
+  readonly state: TaskLifecycleState;
+  readonly priority: number;
+  readonly version: number;
+  readonly revision_id: string;
+  readonly revision_number: number;
+  readonly specification: string;
+  readonly constraints_json: string;
+  readonly features_json: string;
+  readonly revision_created_at: number;
+  readonly created_at: number;
+  readonly updated_at: number;
+  readonly archived_at: number | null;
+  readonly latest_execution_id: string | null;
+  readonly latest_attempt_number: number | null;
+  readonly latest_execution_state: ExecutionLifecycleState | null;
+  readonly latest_resource_held: number | null;
+  readonly latest_session_state: AgentSessionLifecycleState | null;
+  readonly latest_session_exit_json: string | null;
 }
 
 /** What `task.purge` would delete, read without touching anything (ADR-0058). */
@@ -1948,6 +2001,9 @@ export class Phase1Database {
           createdAt: input.createdAt,
           updatedAt: input.createdAt,
           archivedAt: null,
+          // A Task that was just created has never started an Execution, so there is no attempt to
+          // report — not an unknown one.
+          latestExecution: null,
         };
       },
     });
@@ -1960,18 +2016,19 @@ export class Phase1Database {
     `).get(projectId);
     if (project === null) throw new StorageError('NOT_FOUND', 'Trusted project was not found');
     const archivedClause = options?.includeArchived === true ? '' : 'AND t.archived_at IS NULL';
-    return this.sqlite.query<{
-      id: string; project_id: string; display_number: number; kind: 'DEVELOPMENT' | 'SELF';
-      state: TaskLifecycleState; priority: number; version: number; revision_id: string; revision_number: number;
-      specification: string; constraints_json: string; features_json: string;
-      revision_created_at: number;
-      created_at: number; updated_at: number; archived_at: number | null;
-    }, [string]>(`
+    return this.sqlite.query<TaskSummaryRow, [string]>(`
       SELECT t.id,t.project_id,t.display_number,t.kind,t.state,t.priority,t.version,
         r.id AS revision_id,r.number AS revision_number,r.specification,r.constraints_json,
         r.features_json,
-        r.created_at AS revision_created_at,t.created_at,t.updated_at,t.archived_at
+        r.created_at AS revision_created_at,t.created_at,t.updated_at,t.archived_at,
+        latest.id AS latest_execution_id,latest.attempt_number AS latest_attempt_number,
+        latest.state AS latest_execution_state,latest.resource_held AS latest_resource_held,
+        latest_session.state AS latest_session_state,
+        latest_session.exit_json AS latest_session_exit_json
       FROM tasks t JOIN task_revisions r ON r.task_id=t.id AND r.id=t.current_revision_id
+      LEFT JOIN executions latest ON latest.id=(
+        SELECT e.id FROM executions e WHERE e.task_id=t.id ORDER BY e.attempt_number DESC LIMIT 1)
+      LEFT JOIN agent_sessions latest_session ON latest_session.execution_id=latest.id
       WHERE t.project_id=?1 ${archivedClause} ORDER BY t.display_number
     `).all(projectId).map((row) => this.mapTaskSummary(row));
   }
@@ -1983,30 +2040,25 @@ export class Phase1Database {
         ON t.project_id=p.id AND t.status='ACTIVE' WHERE p.id=?1
     `).get(projectId);
     if (project === null) throw new StorageError('NOT_FOUND', 'Trusted project was not found');
-    const row = this.sqlite.query<{
-      id: string; project_id: string; display_number: number; kind: 'DEVELOPMENT' | 'SELF';
-      state: TaskLifecycleState; priority: number; version: number; revision_id: string; revision_number: number;
-      specification: string; constraints_json: string; features_json: string;
-      revision_created_at: number;
-      created_at: number; updated_at: number; archived_at: number | null;
-    }, [string, string]>(`
+    const row = this.sqlite.query<TaskSummaryRow, [string, string]>(`
       SELECT t.id,t.project_id,t.display_number,t.kind,t.state,t.priority,t.version,
         r.id AS revision_id,r.number AS revision_number,r.specification,r.constraints_json,
         r.features_json,
-        r.created_at AS revision_created_at,t.created_at,t.updated_at,t.archived_at
+        r.created_at AS revision_created_at,t.created_at,t.updated_at,t.archived_at,
+        latest.id AS latest_execution_id,latest.attempt_number AS latest_attempt_number,
+        latest.state AS latest_execution_state,latest.resource_held AS latest_resource_held,
+        latest_session.state AS latest_session_state,
+        latest_session.exit_json AS latest_session_exit_json
       FROM tasks t JOIN task_revisions r ON r.task_id=t.id AND r.id=t.current_revision_id
+      LEFT JOIN executions latest ON latest.id=(
+        SELECT e.id FROM executions e WHERE e.task_id=t.id ORDER BY e.attempt_number DESC LIMIT 1)
+      LEFT JOIN agent_sessions latest_session ON latest_session.execution_id=latest.id
       WHERE t.project_id=?1 AND t.id=?2
     `).get(projectId, taskId);
     return row === null ? null : this.mapTaskSummary(row);
   }
 
-  private mapTaskSummary(row: {
-    id: string; project_id: string; display_number: number; kind: 'DEVELOPMENT' | 'SELF';
-    state: TaskLifecycleState; priority: number; version: number; revision_id: string; revision_number: number;
-    specification: string; constraints_json: string; features_json: string;
-    revision_created_at: number;
-    created_at: number; updated_at: number; archived_at: number | null;
-  }): TaskSummary {
+  private mapTaskSummary(row: TaskSummaryRow): TaskSummary {
     return {
       id: row.id,
       projectId: row.project_id,
@@ -2026,6 +2078,16 @@ export class Phase1Database {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       archivedAt: row.archived_at,
+      latestExecution: row.latest_execution_id === null || row.latest_execution_state === null
+        ? null
+        : {
+          executionId: row.latest_execution_id,
+          attemptNumber: row.latest_attempt_number ?? 0,
+          state: row.latest_execution_state,
+          resourceHeld: row.latest_resource_held === 1,
+          sessionState: row.latest_session_state,
+          completionOutcome: parseSessionCompletion(row.latest_session_exit_json)?.outcome ?? null,
+        },
     };
   }
 

@@ -44,7 +44,7 @@ export type {
   StoredAgentAnswer, StoredConstraint, StoredEventEnvelope, StoredVerificationCommand,
   TaskDependencyBlockReason, TaskDependencyFact, TaskDependencyMutation, TaskDependencyRecord,
   TaskDependencyRemoval, TaskDependencyStateChange,
-  TaskLifecycleState, TaskResumeRequest, TaskStopRequest, TaskSummary,
+  TaskLatestExecutionSummary, TaskLifecycleState, TaskResumeRequest, TaskStopRequest, TaskSummary,
   TaskPurgeBranchFact, TaskPurgeForcedFacts, TaskPurgeInput,
   TaskPurgeReclaimedResource, TaskPurgeResult, TaskPurgeSubject,
   TaskRetryRequest, TaskRetryWorkspaceMode, TaskWorkspaceRecord,

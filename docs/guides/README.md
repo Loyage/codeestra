@@ -23,7 +23,7 @@ Codeestra 是 Task-first、local-first 的 AI Development Runtime：你管理产
 | 先搞懂 Project / Task / Execution 这些词是什么意思 | [concepts.md](./concepts.md) |
 | 走一遍「从建任务到合入 dev 再到稳定提升」的完整流程 | [workflow.md](./workflow.md) |
 | 查「这软件到底有哪些功能」 | [features.md](./features.md) |
-| 查「这条命令怎么用、参数是什么、退出码是什么」 | [cli-reference.md](./cli-reference.md) |
+| 查「这条命令怎么用、参数是什么、退出码是什么」 | [cli/README.md](./cli/README.md)（九篇索引 + §0 通用约定） |
 | 认一下界面上的每个面板、每个按钮做什么 | [ui.md](./ui.md)（逐屏走查） |
 | 想做某件具体的事（改 bug / 并行 / 换 Agent / **暂停全部** / 发布…） | [recipes.md](./recipes.md) |
 | 想人工核对界面观感（窄屏、主题、字号、焦点…） | [acceptance-checklist.md](./acceptance-checklist.md) |
