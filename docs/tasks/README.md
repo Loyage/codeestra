@@ -7842,7 +7842,7 @@ FOUNDATION-096 的容量上半，因此这次合并本身就是 ADR-0061 两半�
 
 ## 用户任务（`task/83d058f8`）— 优化资源管理回收：集成成功后自动删除 Task worktree（ADR-0062，无 schema 变更、不占迁移号）
 
-状态：**已实现并定向验证，未 commit、未 push、未提升 `main`、未重启任何 Runtime**。基线 `dev@7425556`；
+状态：**已实现并定向验证，已合入本地 `dev`（merge `1bdddcf`）**；**未 push `origin/dev`、未提升 `main`、未重启任何 Runtime**。基线 `dev@7425556`（合入前 `dev` 已前进到 `4c28d8d`）；
 worktree `/Users/loyage/.local/state/codeestra/worktrees/8efee84e-33c7-4c9d-95ce-a3b29389829e/83d058f8-e32f-4da8-bbcd-bf807eaa8c96`，
 分支 `task/83d058f8-e32f-4da8-bbcd-bf807eaa8c96`。
 
@@ -7887,8 +7887,33 @@ worktree `/Users/loyage/.local/state/codeestra/worktrees/8efee84e-33c7-4c9d-95ce
 `settings auto-reclaim off` 后同一集成不删目录、显式 `reclaim apply --task --kind TASK_WORKTREE` 仍能删；设置默认/写读/0600/坏文件回退与修复；
 Web UI HTTP 面读写同一条命令。
 
+合入方式：按用户本轮裁决走**人工 `git merge --no-ff`**（与 `task/930f5325`、`lane/purge-force`、`Loyage/simplize_task_ui` 相同）——
+改动提交 `973a329` 以 merge commit **`1bdddcf`** 合入 dev clone（`~/Documents/codeestra-dev`）的 `dev`（合入前 `dev = 4c28d8d`）。
+**没有走产品 `task integration` 的 IntegrationBatch 路径**，如实记录：本 Task 停在 `RECOVERY_REQUIRED`（Pi 会话断开、无 capture 的成果 commit、
+无 PASSED 验证），产品路径在语义上无法消费本分支；本仓库历次 `dev` 合入也一律是人工 merge（缺口另见 `Loyage/simplize_task_ui` 一格与 NEXT 第 5 条）。
+
+冲突 2 个文件，都是「两侧各自追加」，逐处保留两侧原文：`docs/guides/cli-reference.md` 头部校对注（dev 的 `latestExecution` 一行 +
+本格的 `settings auto-reclaim` 一行）与 `docs/tasks/README.md` 末尾追加段（dev 的 `Loyage/simplize_task_ui` 段 + 本格这段）。
+被两侧都改过、由 Git 自动合并的 7 个文件（`apps/ui/src/App.tsx`、`apps/ui/src/types.ts`、`docs/guides/{ui,manual,features}.md` 等）
+逐文件与两个父提交做了 numstat 对账，双方改动一行未丢。
+
+独立集成验证（在合并结果 `dev@1bdddcf` 上重跑，用 dev clone 自己的 `node_modules`）：
+
+| 命令 | 结果 |
+|---|---|
+| `bun run typecheck` / `bun run typecheck:ui` | 退出码 0 / 0 |
+| `bunx vitest run apps/ui` | 16 文件 / **213 pass / 0 fail**（含 dev 侧新增的 agent-run 两文件） |
+| `bun test apps/runtime/test/{cli-auto-reclaim,cli-integrate,cli-reclaim,cli-reclaim-batch}.test.ts` | **27 pass / 0 fail** |
+| `bun test apps/runtime/test/cli-task-control.test.ts packages/storage/test` | **188 pass / 0 fail**（dev 侧 `latestExecution` 投影 + 并入无关回归） |
+| `bun test packages/contracts/test apps/runtime/test/integration-service.test.ts` | **63 pass / 0 fail** |
+
+合并本身仍未在 `dev@1bdddcf` 上跑全量；`dev → main` 提升前必须在精确 dev SHA 上跑全量（ADR-0038 / runbook §3）。
+
+顺带观察（**未修改，不属本格范围**）：`docs/tasks/README.md` 里 FOUNDATION-097 段末尾有一行既有的标题重复
+（`### 剩余问题 / 未做### 剩余问题 / 未做`）。它在合并的两个父提交里**都已存在**，不是本次合并引入，留给后续文档格处理。
+
 仍未做 / 已知边界（不得当作已完成）：
-- **未 commit、未 push、未合入 `dev`、未提升 `main`、未重启任何 Runtime**（未获用户授权）。
+- **未 push `origin/dev`、未提升 `main`、未重启任何 Runtime**（本轮用户明确选择「不 push」，与前几次合入一致）。
 - **未跑全量** `bun run check` / `just check` / `just verify`（ADR-0038：全量只在 `dev` 候选上跑）。
 - 真实 provider 长跑后的自动回收未验收（本格 e2e 用协议 stub provider）；多成员批次在同一次集成里的回收顺序与部分失败未单独端到端；Windows 未验证。
 - **集成成功但 Runtime 在自动回收前崩溃的窗口**：worktree 会留到下一次显式 `reclaim`（用户明确选择「不做后台周期扫描」，ADR-0062 D01 如实记录，不伪装成已自动收尾）。
