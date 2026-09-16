@@ -42,10 +42,12 @@ interface Fixture {
   readonly base: string;
   readonly path: string;
   readonly branchRef: string;
+  /** The Task's namespace inside the owned root (ADR-0065 D03). */
+  readonly workspaceName: string;
 }
 
 /** Temporary repository, one Task worktree, and the reclamation that removes the directory. */
-async function reclaimedRepository(): Promise<Fixture> {
+async function reclaimedRepository(workspaceName: string = taskId): Promise<Fixture> {
   const repo = mkdtempSync(join(tmpdir(), 'codeestra-rebuild-git-'));
   const home = mkdtempSync(join(tmpdir(), 'codeestra-rebuild-home-'));
   directories.push(repo, home);
@@ -59,11 +61,11 @@ async function reclaimedRepository(): Promise<Fixture> {
   // The OS temp directory may sit behind a symlink; the owned root is recorded canonically.
   const canonicalHome = realpathSync(home);
   const worktreesRoot = join(canonicalHome, 'worktrees');
-  const path = join(worktreesRoot, projectId, taskId);
-  const branchRef = `refs/heads/task/${taskId}`;
+  const path = join(worktreesRoot, projectId, workspaceName);
+  const branchRef = `refs/heads/task/${workspaceName}`;
   mkdirSync(dirname(path), { recursive: true });
-  await run(repo, ['worktree', 'add', '-b', `task/${taskId}`, path, base]);
-  return { repo, home: canonicalHome, worktreesRoot, base, path, branchRef };
+  await run(repo, ['worktree', 'add', '-b', `task/${workspaceName}`, path, base]);
+  return { repo, home: canonicalHome, worktreesRoot, base, path, branchRef, workspaceName };
 }
 
 /** The same fixture, with the recorded worktree reclaimed the way `reclaim apply` removes it. */
@@ -86,6 +88,7 @@ function rebuild(fixture: Fixture, path = fixture.path) {
     ownedRoot: fixture.worktreesRoot,
     projectId,
     taskId,
+    workspaceName: fixture.workspaceName,
     path,
     branchRef: fixture.branchRef,
     baseCommit: fixture.base,
@@ -236,6 +239,22 @@ describe('rebuilding a reclaimed Task worktree', () => {
     expect(result).toMatchObject({ outcome: 'REFUSED', reasonCode: 'PATH_NOT_OWNED_LAYOUT',
       created: false });
     expect(existsSync(foreign)).toBe(false);
+  });
+
+  test('re-establishes the layout of a workspace named after the Task (ADR-0065 D03)', async () => {
+    // A Task created through the product is named `<displayNumber>-<namingTitle>`, so the rebuild must
+    // derive that layout from the recorded name instead of assuming the internal Task id.
+    const fixture = await reclaimedRepository('12-parser-crlf-case');
+    const removal = await removeOwnedWorktree({
+      repositoryRoot: fixture.repo, ownedRoot: fixture.worktreesRoot, path: fixture.path,
+      expectedBranchRef: fixture.branchRef,
+    });
+    expect(removal.outcome).toBe('REMOVED');
+    const result = await rebuild(fixture);
+    expect(result).toMatchObject({ outcome: 'REBUILT', created: true });
+    expect(existsSync(fixture.path)).toBe(true);
+    expect(await run(fixture.path, ['symbolic-ref', '-q', 'HEAD']))
+      .toBe('refs/heads/task/12-parser-crlf-case');
   });
 
   test('refuses a symlinked path instead of following it out of the owned root', async () => {

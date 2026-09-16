@@ -208,8 +208,8 @@ export async function startReservedExecution(input: {
       },
       revision: {
         id: plan.revisionId,
+        displayTitle: plan.displayTitle,
         specification: plan.specification,
-        constraints: plan.constraints,
       },
       knowledgeSnapshotRefs: input.knowledgeSnapshotRefs ?? [],
       ...knowledgeContextStartArgument({

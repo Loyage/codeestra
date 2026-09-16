@@ -19,7 +19,6 @@ export interface TaskRevisionView {
   readonly id: string;
   readonly number: number;
   readonly specification: string;
-  readonly constraints: readonly { readonly id: string; readonly text: string }[];
   /**
    * The features this revision declares (ADR-0059): module ids from the project's
    * `.codeestra/impact.json`. Empty means the Task never participates in a feature conflict.
@@ -32,7 +31,13 @@ export interface TaskView {
   readonly id: string;
   readonly projectId: string;
   readonly displayNumber: number;
-  readonly kind: 'DEVELOPMENT' | 'SELF';
+  /** The one-line summary the task list shows (ADR-0065). */
+  readonly displayTitle: string;
+  /**
+   * The Task's name inside its branch and worktree directory (ADR-0065). `null` only for Tasks
+   * created before the field existed; their Git naming falls back to the internal identity.
+   */
+  readonly namingTitle: string | null;
   readonly state: string;
   readonly priority: number;
   readonly version: number;
@@ -1478,7 +1483,6 @@ export interface TaskRevisionSummaryView {
   readonly number: number;
   readonly previousRevisionId: string | null;
   readonly specification: string;
-  readonly constraints: readonly { readonly id: string; readonly text: string }[];
   readonly reason: string;
   readonly actor: string;
   readonly createdAt: number;

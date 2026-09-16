@@ -63,6 +63,7 @@ import {
   runtimePauseControlMigration,
   sessionGuidanceMigration,
   taskBaselineRefMigration,
+  taskInputFieldsMigration,
   taskRevisionFeaturesMigration,
   sessionHandoffMigration,
   sessionTerminalMigration,
@@ -362,11 +363,6 @@ export interface TrustedProject {
   readonly trustedAt: number;
 }
 
-export interface StoredConstraint {
-  readonly id: string;
-  readonly text: string;
-}
-
 export type TaskLifecycleState = 'DRAFT' | 'BLOCKED' | 'READY' | 'RUNNING' | 'PAUSING'
   | 'PAUSED' | 'WAITING_FOR_USER' | 'RECOVERY_REQUIRED' | 'EXECUTED' | 'FAILED'
   | 'CANCELLING' | 'CANCELLED' | 'SUCCEEDED';
@@ -395,8 +391,9 @@ export interface AgentStartPlan {
   readonly workspacePath: string;
   readonly ownershipToken: string;
   readonly revisionId: string;
+  /** The Task-level one-line summary; part of every prompt (ADR-0065 D02). */
+  readonly displayTitle: string;
   readonly specification: string;
-  readonly constraints: readonly StoredConstraint[];
   readonly providerSessionId: string | null;
   /** Effective Agent configuration this Execution was reserved with; `null` means defaults. */
   readonly agentConfig: StoredAgentConfiguration | null;
@@ -1619,7 +1616,14 @@ export interface TaskSummary {
   readonly id: string;
   readonly projectId: string;
   readonly displayNumber: number;
-  readonly kind: 'DEVELOPMENT' | 'SELF';
+  /** The Task-level one-line summary (ADR-0065); never a revision fact. */
+  readonly displayTitle: string;
+  /**
+   * The Task's name inside its branch and worktree directory (ADR-0065). `null` only for Tasks
+   * created before the field existed: the Runtime does not invent a name for them, and their Git
+   * naming falls back to the internal identity.
+   */
+  readonly namingTitle: string | null;
   readonly state: TaskLifecycleState;
   readonly priority: number;
   readonly version: number;
@@ -1627,7 +1631,6 @@ export interface TaskSummary {
     readonly id: string;
     readonly number: number;
     readonly specification: string;
-    readonly constraints: readonly StoredConstraint[];
     /**
      * The feature ids this revision declares (ADR-0059). They are the only judged fact of a conflict:
      * two unfinished Tasks that declare the same feature conflict, and a Task that declares none is
@@ -1830,11 +1833,11 @@ export class Phase1Database {
       throw new StorageError('UNSUPPORTED_SCHEMA', `Database schema ${version} is newer than ${phase1SchemaVersion}`);
     }
     if (version === phase1SchemaVersion) return;
-    // `workspaces` (v7), `executions` (v9), `intents` (v28), `integration_batches` (v30) and
-    // `domain_events` (v34) are each referenced by name from other tables, so every upgrade below
-    // the newest such step runs with foreign keys off and verifies the whole schema before the
-    // connection is used.
-    const rebuildsTable = version < 34;
+    // `workspaces` (v7), `executions` (v9), `intents` (v28), `integration_batches` (v30),
+    // `domain_events` (v34), `tasks` and `task_revisions` (v35) are each referenced by name from
+    // other tables, so every upgrade below the newest such step runs with foreign keys off and
+    // verifies the whole schema before the connection is used.
+    const rebuildsTable = version < 35;
     if (rebuildsTable) this.sqlite.exec('PRAGMA foreign_keys=OFF;');
     try {
       this.sqlite.transaction(() => {
@@ -1959,6 +1962,11 @@ export class Phase1Database {
           this.migrateRuntimeGlobalCapacity();
           this.migrateRuntimePauseControl();
         }
+        // Version 35 is the Task input fields step (ADR-0065): the two Task-level titles and the
+        // deletion of `kind` and `constraints_json`. It rebuilds `tasks` and `task_revisions`, so
+        // its copy is guarded by a row-count comparison for the same reason the v28/v30 rebuilds
+        // are. No earlier number is ever inserted.
+        if (version < 35) this.migrateTaskInputFields();
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -2074,6 +2082,75 @@ export class Phase1Database {
       throw new StorageError('INVALID_STATE',
         'Schema v34 promised one runtime_pause_control singleton row; the upgrade was rolled back'
         + ' and nothing was changed');
+    }
+  }
+
+  /**
+   * Schema v35 (ADR-0065): the Task-level titles, and the deletion of `kind` / `constraints_json`.
+   *
+   * The script rebuilds both tables, so the copy is guarded twice. First by row counts: Bun's
+   * `Database.exec()` swallows a step-time error inside a multi-statement script and keeps going, so
+   * an `INSERT ... SELECT` rejected by a new CHECK would otherwise be followed by `DROP TABLE` and
+   * the rows would be gone without an error. Then by the end state: the two new columns must exist,
+   * `kind` must not, and the append-only triggers of `task_revisions` must have been recreated — a
+   * rebuild that forgot them would silently make revisions mutable.
+   */
+  private migrateTaskInputFields(): void {
+    // A detail with no non-whitespace character cannot produce a non-blank display title, and the new
+    // column requires one. SQLite's `trim(X,Y)` removes the characters in `Y`, so the check names the
+    // whitespace set explicitly (one-argument `trim()` removes spaces only). The product boundary has
+    // always refused such a detail, so this can only be a hand-edited database: refusing it with a
+    // named reason leaves everything untouched instead of failing halfway through the rebuild.
+    const untitleable = this.sqlite.query<{ id: string }, []>(`
+      SELECT task.id FROM tasks task
+      JOIN task_revisions revision ON revision.id=task.current_revision_id
+      WHERE length(trim(revision.specification,' ' || char(9) || char(10) || char(13))) = 0
+      ORDER BY task.project_id, task.display_number
+    `).all().map((row) => row.id);
+    if (untitleable.length > 0) {
+      throw new StorageError('INVALID_STATE',
+        'Schema v35 derives a Task display title from its detail, and these Tasks have a detail with'
+        + ` no non-whitespace character: ${untitleable.join(', ')}. Give them a detail deliberately`
+        + ' before upgrading; nothing was changed.');
+    }
+    const tasksBefore = this.sqlite.query<{ rows: number }, []>(
+      'SELECT COUNT(*) AS rows FROM tasks').get()?.rows ?? 0;
+    const revisionsBefore = this.sqlite.query<{ rows: number }, []>(
+      'SELECT COUNT(*) AS rows FROM task_revisions').get()?.rows ?? 0;
+    this.sqlite.exec(taskInputFieldsMigration);
+    const tasksAfter = this.sqlite.query<{ rows: number }, []>(
+      'SELECT COUNT(*) AS rows FROM tasks').get()?.rows ?? -1;
+    const revisionsAfter = this.sqlite.query<{ rows: number }, []>(
+      'SELECT COUNT(*) AS rows FROM task_revisions').get()?.rows ?? -1;
+    if (tasksAfter !== tasksBefore || revisionsAfter !== revisionsBefore) {
+      throw new StorageError('INVALID_STATE',
+        'Schema v35 rebuild of tasks/task_revisions lost rows'
+        + ` (tasks ${tasksBefore} -> ${tasksAfter}, revisions ${revisionsBefore} ->`
+        + ` ${revisionsAfter}); the upgrade was rolled back and nothing was changed`);
+    }
+    const taskColumns = this.sqlite.query<{ name: string }, []>(
+      "PRAGMA table_info('tasks')").all().map((column) => column.name);
+    for (const column of ['display_title', 'naming_title']) {
+      if (!taskColumns.includes(column)) {
+        throw new StorageError('INVALID_STATE',
+          `Schema v35 promised tasks.${column} and the rebuilt table does not have it; the upgrade`
+          + ' was rolled back and nothing was changed');
+      }
+    }
+    if (taskColumns.includes('kind')) {
+      throw new StorageError('INVALID_STATE',
+        'Schema v35 deletes tasks.kind and the rebuilt table still has it; the upgrade was rolled'
+        + ' back and nothing was changed');
+    }
+    const triggers = this.sqlite.query<{ name: string }, []>(
+      "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='task_revisions'")
+      .all().map((row) => row.name);
+    for (const trigger of ['task_revisions_no_update', 'task_revisions_no_delete']) {
+      if (!triggers.includes(trigger)) {
+        throw new StorageError('INVALID_STATE',
+          `Schema v35 rebuild of task_revisions did not restore its ${trigger} trigger; the upgrade`
+          + ' was rolled back and nothing was changed');
+      }
     }
   }
 
@@ -2283,15 +2360,23 @@ export class Phase1Database {
     readonly revisionId: string;
     readonly intentEventId: string;
     readonly taskEventId: string;
+    /** The one-line summary the task list shows (ADR-0065); required, with no derived default. */
+    readonly displayTitle: string;
+    /**
+     * The Task's name inside its branch and worktree directory (ADR-0065); required. `null` is
+     * accepted only for fixtures and for the pre-v35 rows the migration leaves without a name: the
+     * `task create` boundary always supplies one, and a null falls back to the internal identity in
+     * Git naming rather than being rendered into a path.
+     */
+    readonly namingTitle: string | null;
+    /** The Task detail: the body of the first revision. */
     readonly specification: string;
-    readonly constraints: readonly StoredConstraint[];
     /**
      * Feature ids already validated against the project's declared mapping (ADR-0059). Omitting the
      * list means exactly what an empty list means: this Task declares no feature, so it can never be
      * in a feature conflict.
      */
     readonly features?: readonly string[];
-    readonly kind: 'DEVELOPMENT' | 'SELF';
     readonly actor: string;
     readonly createdAt: number;
   }): TaskSummary {
@@ -2317,18 +2402,17 @@ export class Phase1Database {
           actor: input.actor, createdAt: input.createdAt,
         });
         database.query(`
-          INSERT INTO tasks(id,project_id,display_number,kind,current_revision_id,state,
-            priority,version,created_at,updated_at)
-          VALUES (?1,?2,?3,?4,?5,'DRAFT',0,0,?6,?6)
-        `).run(input.taskId, input.projectId, next.display_number, input.kind,
-          input.revisionId, input.createdAt);
+          INSERT INTO tasks(id,project_id,display_number,display_title,naming_title,
+            current_revision_id,state,priority,version,created_at,updated_at)
+          VALUES (?1,?2,?3,?4,?5,?6,'DRAFT',0,0,?7,?7)
+        `).run(input.taskId, input.projectId, next.display_number, input.displayTitle,
+          input.namingTitle, input.revisionId, input.createdAt);
         database.query(`
           INSERT INTO task_revisions(id,task_id,number,previous_revision_id,specification,
-            constraints_json,features_json,source_intent_id,actor,reason,created_at)
-          VALUES (?1,?2,1,NULL,?3,?4,?5,?6,?7,'initial task creation',?8)
+            features_json,source_intent_id,actor,reason,created_at)
+          VALUES (?1,?2,1,NULL,?3,?4,?5,?6,'initial task creation',?7)
         `).run(input.revisionId, input.taskId, input.specification,
-          JSON.stringify(input.constraints), JSON.stringify(input.features ?? []), input.intentId,
-          input.actor, input.createdAt);
+          JSON.stringify(input.features ?? []), input.intentId, input.actor, input.createdAt);
         database.query('INSERT INTO intent_targets(intent_id,task_id) VALUES (?1,?2)')
           .run(input.intentId, input.taskId);
         database.query(`
@@ -2343,13 +2427,15 @@ export class Phase1Database {
           VALUES (?1,?2,'TaskCreated',1,'Task',?3,0,?4,?5,?6,?7)
         `).run(input.taskEventId, input.projectId, input.taskId, input.commandId,
           input.intentEventId, input.createdAt,
-          JSON.stringify({ taskId: input.taskId, revisionId: input.revisionId, kind: input.kind,
+          JSON.stringify({ taskId: input.taskId, revisionId: input.revisionId,
+        displayTitle: input.displayTitle, namingTitle: input.namingTitle,
         features: input.features ?? [] }));
         return {
           id: input.taskId,
           projectId: input.projectId,
           displayNumber: next.display_number,
-          kind: input.kind,
+          displayTitle: input.displayTitle,
+          namingTitle: input.namingTitle,
           state: 'DRAFT' as const,
           priority: 0,
           version: 0,
@@ -2357,7 +2443,6 @@ export class Phase1Database {
             id: input.revisionId,
             number: 1,
             specification: input.specification,
-            constraints: input.constraints,
             features: Object.freeze([...(input.features ?? [])]),
             createdAt: input.createdAt,
           },
@@ -2377,15 +2462,15 @@ export class Phase1Database {
     if (project === null) throw new StorageError('NOT_FOUND', 'Trusted project was not found');
     const archivedClause = options?.includeArchived === true ? '' : 'AND t.archived_at IS NULL';
     return this.sqlite.query<{
-      id: string; project_id: string; display_number: number; kind: 'DEVELOPMENT' | 'SELF';
+      id: string; project_id: string; display_number: number; display_title: string;
+      naming_title: string | null;
       state: TaskLifecycleState; priority: number; version: number; revision_id: string; revision_number: number;
-      specification: string; constraints_json: string; features_json: string;
+      specification: string; features_json: string;
       revision_created_at: number;
       created_at: number; updated_at: number; archived_at: number | null;
     }, [string]>(`
-      SELECT t.id,t.project_id,t.display_number,t.kind,t.state,t.priority,t.version,
-        r.id AS revision_id,r.number AS revision_number,r.specification,r.constraints_json,
-        r.features_json,
+      SELECT t.id,t.project_id,t.display_number,t.display_title,t.naming_title,t.state,t.priority,
+        t.version,r.id AS revision_id,r.number AS revision_number,r.specification,r.features_json,
         r.created_at AS revision_created_at,t.created_at,t.updated_at,t.archived_at
       FROM tasks t JOIN task_revisions r ON r.task_id=t.id AND r.id=t.current_revision_id
       WHERE t.project_id=?1 ${archivedClause} ORDER BY t.display_number
@@ -2400,15 +2485,15 @@ export class Phase1Database {
     `).get(projectId);
     if (project === null) throw new StorageError('NOT_FOUND', 'Trusted project was not found');
     const row = this.sqlite.query<{
-      id: string; project_id: string; display_number: number; kind: 'DEVELOPMENT' | 'SELF';
+      id: string; project_id: string; display_number: number; display_title: string;
+      naming_title: string | null;
       state: TaskLifecycleState; priority: number; version: number; revision_id: string; revision_number: number;
-      specification: string; constraints_json: string; features_json: string;
+      specification: string; features_json: string;
       revision_created_at: number;
       created_at: number; updated_at: number; archived_at: number | null;
     }, [string, string]>(`
-      SELECT t.id,t.project_id,t.display_number,t.kind,t.state,t.priority,t.version,
-        r.id AS revision_id,r.number AS revision_number,r.specification,r.constraints_json,
-        r.features_json,
+      SELECT t.id,t.project_id,t.display_number,t.display_title,t.naming_title,t.state,t.priority,
+        t.version,r.id AS revision_id,r.number AS revision_number,r.specification,r.features_json,
         r.created_at AS revision_created_at,t.created_at,t.updated_at,t.archived_at
       FROM tasks t JOIN task_revisions r ON r.task_id=t.id AND r.id=t.current_revision_id
       WHERE t.project_id=?1 AND t.id=?2
@@ -2417,9 +2502,10 @@ export class Phase1Database {
   }
 
   private mapTaskSummary(row: {
-    id: string; project_id: string; display_number: number; kind: 'DEVELOPMENT' | 'SELF';
+    id: string; project_id: string; display_number: number; display_title: string;
+    naming_title: string | null;
     state: TaskLifecycleState; priority: number; version: number; revision_id: string; revision_number: number;
-    specification: string; constraints_json: string; features_json: string;
+    specification: string; features_json: string;
     revision_created_at: number;
     created_at: number; updated_at: number; archived_at: number | null;
   }): TaskSummary {
@@ -2427,7 +2513,8 @@ export class Phase1Database {
       id: row.id,
       projectId: row.project_id,
       displayNumber: row.display_number,
-      kind: row.kind,
+      displayTitle: row.display_title,
+      namingTitle: row.naming_title,
       state: row.state,
       priority: row.priority,
       version: row.version,
@@ -2435,7 +2522,6 @@ export class Phase1Database {
         id: row.revision_id,
         number: row.revision_number,
         specification: row.specification,
-        constraints: JSON.parse(row.constraints_json) as readonly StoredConstraint[],
         features: parseTaskFeatures(row.features_json),
         createdAt: row.revision_created_at,
       },
@@ -2872,12 +2958,12 @@ export class Phase1Database {
       const subject = this.sqlite.query<{
         task_id: string; execution_state: string; execution_version: number; adapter_id: string;
         adapter_version: string; workspace_id: string; workspace_path: string; ownership_token: string;
-        revision_id: string; specification: string; constraints_json: string;
+        revision_id: string; display_title: string; specification: string;
       }, [string, string]>(`
         SELECT task.id AS task_id,execution.state AS execution_state,
           execution.version AS execution_version,execution.adapter_id,execution.adapter_version,
           workspace.id AS workspace_id,workspace.path AS workspace_path,workspace.ownership_token,
-          revision.id AS revision_id,revision.specification,revision.constraints_json
+          revision.id AS revision_id,task.display_title,revision.specification
         FROM executions execution JOIN tasks task ON task.id=execution.task_id
         JOIN workspaces workspace ON workspace.id=execution.workspace_id AND workspace.task_id=task.id
         JOIN task_revisions revision ON revision.id=execution.applied_revision_id AND revision.task_id=task.id
@@ -3089,7 +3175,7 @@ export class Phase1Database {
       task_id: string; task_version: number; execution_id: string; execution_version: number; session_id: string;
       session_state: AgentStartPlan['sessionState']; adapter_id: string; adapter_version: string;
       workspace_id: string; workspace_path: string; ownership_token: string; revision_id: string;
-      specification: string; constraints_json: string; provider_session_id: string | null;
+      display_title: string; specification: string; provider_session_id: string | null;
       agent_config_json: string | null;
     }, [string]>(`
       SELECT operation.id AS operation_id,operation.state AS operation_state,operation.project_id,
@@ -3097,7 +3183,7 @@ export class Phase1Database {
         execution.version AS execution_version,
         session.id AS session_id,session.state AS session_state,execution.adapter_id,execution.adapter_version,
         workspace.id AS workspace_id,workspace.path AS workspace_path,workspace.ownership_token,
-        revision.id AS revision_id,revision.specification,revision.constraints_json,session.provider_session_id,
+        revision.id AS revision_id,task.display_title,revision.specification,session.provider_session_id,
         execution.agent_config_json
       FROM agent_sessions session JOIN executions execution ON execution.id=session.execution_id
       JOIN tasks task ON task.id=execution.task_id JOIN workspaces workspace ON workspace.id=execution.workspace_id
@@ -3123,8 +3209,8 @@ export class Phase1Database {
       workspacePath: row.workspace_path,
       ownershipToken: row.ownership_token,
       revisionId: row.revision_id,
+      displayTitle: row.display_title,
       specification: row.specification,
-      constraints: JSON.parse(row.constraints_json) as readonly StoredConstraint[],
       providerSessionId: row.provider_session_id,
       agentConfig: parseAgentConfiguration(row.agent_config_json),
     };
@@ -11745,14 +11831,12 @@ export class Phase1Database {
     readonly revisionEventId: string;
     readonly deliveryEventId: string;
     readonly specification: string;
-    readonly constraints: readonly StoredConstraint[];
     /**
      * The feature declaration of the *new* revision. An omitted list inherits the previous
      * revision's declaration instead of silently dropping it: amending a specification is not a
      * statement that the Task stopped working on that feature (ADR-0059 D03).
      */
     readonly features?: readonly string[] | null;
-    readonly kind: 'AMEND_TASK' | 'ADD_CONSTRAINT';
     readonly reason: string;
     readonly actor: string;
     readonly createdAt: number;
@@ -11784,7 +11868,9 @@ export class Phase1Database {
         if (next === null) throw new Error('Could not allocate a Task revision number');
         this.insertIntent(database, {
           id: input.intentId, projectId: input.projectId, idempotencyKey: input.commandId,
-          rawText: input.specification, kind: input.kind, status: 'APPLIED',
+          // A revision is always an amendment since ADR-0065 D04: the constraint feature (and with
+          // it the historical `ADD_CONSTRAINT` classification) no longer exists in the product.
+          rawText: input.specification, kind: 'AMEND_TASK', status: 'APPLIED',
           actor: input.actor, createdAt: input.createdAt,
         });
         const requested = input.features ?? null;
@@ -11796,10 +11882,10 @@ export class Phase1Database {
           ?? (inherited === null ? [] : JSON.parse(inherited.features_json) as readonly string[]);
         database.query(`
           INSERT INTO task_revisions(id,task_id,number,previous_revision_id,specification,
-            constraints_json,features_json,source_intent_id,actor,reason,created_at)
-          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+            features_json,source_intent_id,actor,reason,created_at)
+          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
         `).run(input.revisionId, input.taskId, next.number, task.current_revision_id,
-          input.specification, JSON.stringify(input.constraints), JSON.stringify(features),
+          input.specification, JSON.stringify(features),
           input.intentId, input.actor, input.reason, input.createdAt);
         const taskVersion = input.expectedVersion + 1;
         const taskUpdate = database.query(`
@@ -11817,7 +11903,7 @@ export class Phase1Database {
             aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
           VALUES (?1,?2,'IntentRecorded',1,'Intent',?3,0,?4,?4,?5,?6)
         `).run(input.intentEventId, input.projectId, input.intentId, input.commandId,
-          input.createdAt, JSON.stringify({ intentId: input.intentId, kind: input.kind,
+          input.createdAt, JSON.stringify({ intentId: input.intentId, kind: 'AMEND_TASK',
             taskId: input.taskId }));
         database.query(`
           INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
@@ -11827,8 +11913,7 @@ export class Phase1Database {
           input.intentEventId, input.createdAt,
           JSON.stringify({ taskId: input.taskId, revisionId: input.revisionId,
             revisionNumber: next.number, previousRevisionId: task.current_revision_id,
-            constraintCount: input.constraints.length, features, reason: input.reason,
-            actor: input.actor }));
+            features, reason: input.reason, actor: input.actor }));
         const running = database.query<{
           execution_id: string; session_id: string | null; incarnation_id: string | null;
         }, [string]>(`
@@ -11879,16 +11964,15 @@ export class Phase1Database {
     if (task === null) throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
     return this.sqlite.query<{
       id: string; number: number; previous_revision_id: string | null; specification: string;
-      constraints_json: string; reason: string; actor: string; created_at: number;
+      reason: string; actor: string; created_at: number;
     }, [string]>(`
-      SELECT id,number,previous_revision_id,specification,constraints_json,reason,actor,created_at
+      SELECT id,number,previous_revision_id,specification,reason,actor,created_at
       FROM task_revisions WHERE task_id=?1 ORDER BY number
     `).all(taskId).map((row) => ({
       id: row.id,
       number: row.number,
       previousRevisionId: row.previous_revision_id,
       specification: row.specification,
-      constraints: JSON.parse(row.constraints_json) as readonly StoredConstraint[],
       reason: row.reason,
       actor: row.actor,
       createdAt: row.created_at,
@@ -15485,7 +15569,6 @@ export interface TaskRevisionSummary {
   readonly number: number;
   readonly previousRevisionId: string | null;
   readonly specification: string;
-  readonly constraints: readonly StoredConstraint[];
   readonly reason: string;
   readonly actor: string;
   readonly createdAt: number;

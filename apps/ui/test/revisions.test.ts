@@ -217,31 +217,27 @@ describe('an Adapter without an acknowledgement channel is told apart from a con
 // ---------------------------------------------------------------------------------------------
 
 describe('task revision create is built like the CLI command', () => {
-  it('sends the specification, one id per constraint and the reason', () => {
+  it('sends the trimmed detail and the reason, and nothing else', () => {
     const command = revisionCreateCommand({
       projectId: 'project-1', taskId: 'task-1', expectedVersion: 7, commandId: 'cmd-1',
-      specification: '  new specification  ', constraints: ['first', '  second  ', '   '],
-      reason: '  用户修订请求  ', constraintIdFactory: (() => {
-        let next = 0;
-        return () => `constraint-${(next += 1)}`;
-      })(),
+      specification: '  new detail  ',
+      reason: '  用户修订请求  ',
     });
     expect(command).toEqual({
       command: 'task.revision.create', commandId: 'cmd-1', projectId: 'project-1',
-      taskId: 'task-1', expectedVersion: 7, specification: 'new specification',
-      constraints: [{ id: 'constraint-1', text: 'first' }, { id: 'constraint-2', text: 'second' }],
+      taskId: 'task-1', expectedVersion: 7, specification: 'new detail',
       reason: '用户修订请求',
     });
+    // ADR-0065 D04: the removed fields must not reappear as empty payload keys.
+    expect('constraints' in command).toBe(false);
+    expect('kind' in command).toBe(false);
   });
 
-  it('omits the specification when only constraints are added', () => {
+  it('defaults a missing reason and accepts an explicit empty naming of the reason', () => {
     const command = revisionCreateCommand({
       projectId: 'project-1', taskId: 'task-1', expectedVersion: 1, commandId: 'cmd-2',
-      specification: '   ', constraints: ['one more constraint'], reason: '',
-      constraintIdFactory: () => 'constraint-id',
+      specification: 'new detail', reason: '',
     });
-    expect('specification' in command).toBe(false);
-    expect(command['constraints']).toEqual([{ id: 'constraint-id', text: 'one more constraint' }]);
     // The CLI's own default for a missing reason; the Runtime records it verbatim.
     expect(command['reason']).toBe('user revision request');
   });
@@ -249,8 +245,12 @@ describe('task revision create is built like the CLI command', () => {
   it('refuses a revision that would change nothing before it reaches the Runtime', () => {
     expect(() => revisionCreateCommand({
       projectId: 'project-1', taskId: 'task-1', expectedVersion: 1, commandId: 'cmd-3',
-      specification: '   ', constraints: ['  '], reason: 'x',
-    })).toThrow(/必须修改规格或至少追加一条约束/u);
+      specification: '   ', reason: 'x',
+    })).toThrow(/必须修改任务详情/u);
+    expect(() => revisionCreateCommand({
+      projectId: 'project-1', taskId: 'task-1', expectedVersion: 1, commandId: 'cmd-4',
+      specification: null, reason: 'x',
+    })).toThrow(/必须修改任务详情/u);
   });
 });
 
@@ -305,8 +305,6 @@ describe('task revision delivery resolve is built like the CLI command', () => {
 const revision: TaskRevisionSummaryView = {
   id: 'revision-2', number: 2, previousRevisionId: 'revision-1',
   specification: 'Add the revision delivery ledger\nwith a second line', reason: 'user request',
-  constraints: [{ id: 'constraint-1', text: 'never claim a delivery' },
-    { id: 'constraint-2', text: 'keep the ledger append-only' }],
   actor: 'local-user', createdAt: 1_000, current: true,
 };
 
@@ -315,14 +313,15 @@ function markup(element: Parameters<typeof renderToStaticMarkup>[0]): string {
 }
 
 describe('rendered revision/delivery projection', () => {
-  it('renders the revision history with the current marker and both constraints', () => {
+  it('renders the revision history with the current marker and the full detail on demand', () => {
     const html = markup(createElement(RevisionTable, { revisions: [revision] }));
     expect(html).toContain('r2');
     expect(html).toContain('当前');
-    expect(html).toContain('never claim a delivery');
-    expect(html).toContain('keep the ledger append-only');
-    // The full specification stays readable even though the table shows a summary.
+    // The full detail stays readable even though the table shows a summary, and the removed
+    // constraint column must not reappear (ADR-0065 D04).
     expect(html).toContain('Add the revision delivery ledger');
+    expect(html).toContain('完整任务详情');
+    expect(html).not.toContain('约束');
   });
 
   it('shows an unsupported channel as three facts plus the stop-and-restart control only', () => {
@@ -364,7 +363,7 @@ describe('rendered revision/delivery projection', () => {
     const html = markup(createElement(RevisionCreateForm, {
       busy: false, taskVersion: 3, onCreate: () => {},
     }));
-    expect(html).toContain('会追加一条不可变的规格版本');
+    expect(html).toContain('会追加一条不可变的任务详情版本');
     expect(html).toContain('会额外记录一条投递要求');
     expect(html).toContain('记录投递要求不等于投递，更不等于确认');
     expect(html).toContain('新建修订（追加版本）');

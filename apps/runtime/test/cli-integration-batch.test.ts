@@ -151,7 +151,8 @@ async function status(fixture: BatchFixture, taskId: string): Promise<TaskStatus
 
 /** Drives one Task to a captured result commit and a PASSED Task verification through the CLI. */
 async function capturedTask(fixture: BatchFixture): Promise<{ readonly taskId: string }> {
-  const created = JSON.parse((await cli(['task', 'create', fixture.projectId, 'Write a file'],
+  const created = JSON.parse((await cli(['task', 'create', fixture.projectId, 'Write a file',
+    '--title', 'Write a file', '--name', 'write-a-file'],
     fixture.environment)).stdout) as { readonly id: string };
   const taskId = created.id;
   // Submission immediately enters scheduling; with no feature declaration this Task is SAFE and

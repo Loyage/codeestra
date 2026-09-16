@@ -44,11 +44,10 @@ async function git(cwd: string, args: readonly string[]): Promise<void> {
 
 interface TaskCreateView {
   readonly id: string;
-  readonly kind: string;
-  readonly currentRevision: {
-    readonly specification: string;
-    readonly constraints: readonly { readonly id: string; readonly text: string }[];
-  };
+  readonly displayNumber: number;
+  readonly displayTitle: string;
+  readonly namingTitle: string | null;
+  readonly currentRevision: { readonly specification: string };
 }
 
 /**
@@ -84,56 +83,58 @@ async function trustedProject(): Promise<{ environment: Record<string, string>; 
 }
 
 describe('codeestra task create', () => {
-  test('carries repeatable constraints and an explicit kind into the revision', async () => {
+  test('stores the two required titles and the detail on the first revision (ADR-0065)', async () => {
     const { environment, projectId } = await trustedProject();
-    const created = await cli(['task', 'create', projectId, 'Fix the parser',
-      '--constraint', '不要改动 apps/ui 之外的文件',
-      '--constraint', '保持现有 CLI 输出格式',
-      '--kind', 'DEVELOPMENT'], environment);
+    const created = await cli(['task', 'create', projectId, 'Fix', 'the', 'parser',
+      '--title', '修复 parser 的 CRLF 输入', '--name', 'fix-parser-crlf'],
+    environment);
     expect(created.exitCode).toBe(0);
     const view = JSON.parse(created.stdout) as TaskCreateView;
-    expect(view.kind).toBe('DEVELOPMENT');
+    expect(view.displayTitle).toBe('修复 parser 的 CRLF 输入');
+    expect(view.namingTitle).toBe('fix-parser-crlf');
+    // The positional text stays a free-form multi-word detail, exactly as before.
     expect(view.currentRevision.specification).toBe('Fix the parser');
-    expect(view.currentRevision.constraints.map((constraint) => constraint.text))
-      .toEqual(['不要改动 apps/ui 之外的文件', '保持现有 CLI 输出格式']);
-    // Constraint IDs are the stable identity inside one revision; the Runtime rejects duplicates.
-    const identifiers = view.currentRevision.constraints.map((constraint) => constraint.id);
-    expect(new Set(identifiers).size).toBe(2);
-    expect(identifiers.every((id) => id.trim().length > 0)).toBe(true);
 
-    // The constraint is part of the stored revision, not just an echo of the command.
+    // The three fields are stored facts, not just an echo of the command.
     const listed = JSON.parse((await cli(['task', 'list', projectId], environment)).stdout) as
       readonly TaskCreateView[];
-    expect(listed[0]?.currentRevision.constraints.length).toBe(2);
+    expect(listed[0]).toMatchObject({
+      displayTitle: '修复 parser 的 CRLF 输入',
+      namingTitle: 'fix-parser-crlf',
+      currentRevision: { specification: 'Fix the parser' },
+    });
   });
 
-  test('keeps the unquoted multi-token specification working with no flags', async () => {
+  test('requires both titles and refuses the removed flags without creating anything', async () => {
     const { environment, projectId } = await trustedProject();
-    const created = await cli(['task', 'create', projectId, 'fix', 'the', 'bug'], environment);
-    expect(created.exitCode).toBe(0);
-    const view = JSON.parse(created.stdout) as TaskCreateView;
-    expect(view.currentRevision.specification).toBe('fix the bug');
-    expect(view.currentRevision.constraints).toEqual([]);
-  });
-
-  test('refuses SELF with a stated reason instead of creating a development task', async () => {
-    const { environment, projectId } = await trustedProject();
-    const refused = await cli(['task', 'create', projectId, 'Self modify', '--kind', 'SELF'],
+    const titleOnly = await cli(['task', 'create', projectId, 'Detail', '--title', 'A title'],
       environment);
-    expect(refused.exitCode).toBe(1);
-    expect(refused.stderr).toContain('TASK_KIND_UNSUPPORTED');
-    // Nothing may be created: silently falling back to DEVELOPMENT would hide the missing capability.
+    expect(titleOnly.exitCode).toBe(2);
+    const nameOnly = await cli(['task', 'create', projectId, 'Detail', '--name', 'a-name'],
+      environment);
+    expect(nameOnly.exitCode).toBe(2);
+    const noDetail = await cli(['task', 'create', projectId, '--title', 'A title',
+      '--name', 'a-name'], environment);
+    expect(noDetail.exitCode).toBe(2);
+    // ADR-0065 D04: `--constraint` and `--kind` are gone, so they are unknown flags now.
+    for (const removed of [['--constraint', 'x'], ['--kind', 'DEVELOPMENT']]) {
+      const refused = await cli(['task', 'create', projectId, 'Detail', '--title', 'A title',
+        '--name', 'a-name', ...removed], environment);
+      expect(refused.exitCode).toBe(2);
+    }
     expect(JSON.parse((await cli(['task', 'list', projectId], environment)).stdout)).toEqual([]);
   });
 
-  test('rejects an unknown flag and a blank constraint without creating anything', async () => {
+  test('refuses a naming title that is not a lowercase slug, and an unknown flag', async () => {
     const { environment, projectId } = await trustedProject();
-    const unknown = await cli(['task', 'create', projectId, 'Spec', '--nope'], environment);
+    for (const namingTitle of ['Has Spaces', 'Upper', 'trailing-', 'double--dash', '1-leading']) {
+      const refused = await cli(['task', 'create', projectId, 'Detail', '--title', 'A title',
+        '--name', namingTitle], environment);
+      expect(refused.exitCode).toBe(2);
+    }
+    const unknown = await cli(['task', 'create', projectId, 'Spec', '--title', 'A title',
+      '--name', 'a-name', '--nope'], environment);
     expect(unknown.exitCode).toBe(2);
-    const blank = await cli(['task', 'create', projectId, 'Spec', '--constraint', '   '], environment);
-    expect(blank.exitCode).toBe(2);
-    const missingValue = await cli(['task', 'create', projectId, 'Spec', '--constraint'], environment);
-    expect(missingValue.exitCode).toBe(2);
     expect(JSON.parse((await cli(['task', 'list', projectId], environment)).stdout)).toEqual([]);
   });
 });

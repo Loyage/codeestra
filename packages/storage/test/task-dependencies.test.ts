@@ -43,11 +43,12 @@ function seed(storage: Phase1Database): void {
       ['t3', 'r3', 3, 'READY'],
     ] as const) {
       db.query(`INSERT INTO tasks
-        (id,project_id,display_number,kind,current_revision_id,state,created_at,updated_at)
-        VALUES (?1,'p1',?2,'DEVELOPMENT',?3,?4,2,2)`).run(taskId, displayNumber, revisionId, state);
+        (id,project_id,display_number,display_title,naming_title,current_revision_id,state,
+          created_at,updated_at)
+        VALUES (?1,'p1',?2,?1,?1,?3,?4,2,2)`).run(taskId, displayNumber, revisionId, state);
       db.query(`INSERT INTO task_revisions
-        (id,task_id,number,previous_revision_id,specification,constraints_json,actor,reason,created_at)
-        VALUES (?1,?2,1,NULL,'Do work','[]','user','initial',2)`).run(revisionId, taskId);
+        (id,task_id,number,previous_revision_id,specification,actor,reason,created_at)
+        VALUES (?1,?2,1,NULL,'Do work','user','initial',2)`).run(revisionId, taskId);
     }
   })();
 }

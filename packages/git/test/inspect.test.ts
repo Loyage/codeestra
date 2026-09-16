@@ -64,6 +64,7 @@ describe('inspectRepository', () => {
       worktreesRoot: realpathSync(worktreesRoot),
       projectId,
       baseRef: identity.mainRef,
+      workspaceName: '12-parser-crlf-case',
       taskId,
       workspaceId: '33333333-3333-4333-8333-333333333333',
       ownershipToken: '44444444-4444-4444-8444-444444444444',
@@ -71,8 +72,11 @@ describe('inspectRepository', () => {
       expectedBaseCommit: identity.headCommit,
     });
 
-    expect(workspace.path).toBe(realpathSync(join(worktreesRoot, projectId, taskId)));
-    expect(await output(workspace.path, ['symbolic-ref', 'HEAD'])).toBe(`refs/heads/task/${taskId}`);
+    // The workspace namespace is <displayNumber>-<namingTitle>, not the internal Task id (ADR-0065).
+    expect(workspace.path)
+      .toBe(realpathSync(join(worktreesRoot, projectId, '12-parser-crlf-case')));
+    expect(await output(workspace.path, ['symbolic-ref', 'HEAD']))
+      .toBe('refs/heads/task/12-parser-crlf-case');
     expect(await output(workspace.path, ['rev-parse', 'HEAD'])).toBe(identity.headCommit);
     expect(await output(directory, ['status', '--porcelain'])).toBe('');
     await expect(reconcileWorkspace({
@@ -91,6 +95,7 @@ describe('inspectRepository', () => {
       worktreesRoot: realpathSync(worktreesRoot),
       projectId,
       baseRef: identity.mainRef,
+      workspaceName: '12-parser-crlf-case',
       taskId,
       workspaceId: '66666666-6666-4666-8666-666666666666',
       ownershipToken: '77777777-7777-4777-8777-777777777777',
@@ -124,6 +129,7 @@ describe('inspectRepository', () => {
       worktreesRoot: requestedRoot,
       projectId,
       baseRef: identity.mainRef,
+      workspaceName: '12-parser-crlf-case',
       taskId,
       workspaceId: '33333333-3333-4333-8333-333333333333',
       ownershipToken: '44444444-4444-4444-8444-444444444444',
@@ -132,7 +138,8 @@ describe('inspectRepository', () => {
     });
 
     // The recorded path is canonical, which is also what `git worktree list` reports.
-    expect(workspace.path).toBe(realpathSync(join(realRoot, 'worktrees', projectId, taskId)));
+    expect(workspace.path)
+      .toBe(realpathSync(join(realRoot, 'worktrees', projectId, '12-parser-crlf-case')));
     expect(await output(workspace.path, ['rev-parse', 'HEAD'])).toBe(identity.headCommit);
     expect(await output(directory, ['status', '--porcelain'])).toBe('');
     await expect(reconcileWorkspace({
@@ -157,12 +164,42 @@ describe('inspectRepository', () => {
       worktreesRoot: realpathSync(directory),
       projectId: '88888888-8888-4888-8888-888888888888',
       baseRef: identity.mainRef,
+      workspaceName: '12-parser-crlf-case',
       taskId: '11111111-1111-4111-8111-111111111111',
       workspaceId: '33333333-3333-4333-8333-333333333333',
       ownershipToken: '44444444-4444-4444-8444-444444444444',
       baseCommit: stale,
       expectedBaseCommit: stale,
     })).rejects.toMatchObject({ code: 'STALE_BASE' });
+    expect(await output(directory, ['branch', '--list', 'task/*'])).toBe('');
+  });
+
+  test('refuses a workspace name that is not a safe single path segment', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'codeestra-bad-name-'));
+    directories.push(directory);
+    await run(directory, ['init', '-b', 'main']);
+    await Bun.write(join(directory, 'README.md'), 'temporary repository\n');
+    await run(directory, ['add', 'README.md']);
+    await run(directory, ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+      'commit', '-m', 'initial']);
+    const identity = await inspectRepository(directory);
+    // The Runtime derives the name from validated parts, so this layer checks the shape rather than
+    // trusting the caller: `../escape` would otherwise leave the worktrees root (ADR-0065 D03).
+    for (const workspaceName of ['../escape', 'Upper', 'with space', 'has/slash', '']) {
+      await expect(prepareWorkspace({
+        operationId: '22222222-2222-4222-8222-222222222222',
+        repositoryRoot: directory,
+        worktreesRoot: realpathSync(directory),
+        projectId: '88888888-8888-4888-8888-888888888888',
+        baseRef: identity.mainRef,
+        workspaceName,
+        taskId: '11111111-1111-4111-8111-111111111111',
+        workspaceId: '33333333-3333-4333-8333-333333333333',
+        ownershipToken: '44444444-4444-4444-8444-444444444444',
+        baseCommit: identity.headCommit,
+        expectedBaseCommit: identity.headCommit,
+      })).rejects.toMatchObject({ code: 'FOREIGN_RESOURCE' });
+    }
     expect(await output(directory, ['branch', '--list', 'task/*'])).toBe('');
   });
 

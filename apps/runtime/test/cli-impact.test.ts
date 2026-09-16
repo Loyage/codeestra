@@ -8,6 +8,7 @@ import {
   runCli,
 } from './support/runtime-reclamation.js';
 import { provisionDevClone } from './support/agent-fixture.js';
+import { taskWorkspaceName } from '@codeestra/domain';
 
 /**
  * End-to-end evidence for `project impact` (ADR-0031) through the real CLI and the real Runtime:
@@ -162,8 +163,31 @@ async function createRepository(input: {
 
 interface TaskPayload {
   readonly id: string;
+  readonly displayNumber: number;
+  readonly namingTitle: string | null;
   readonly state: string;
   readonly version: number;
+}
+
+/**
+ * The worktree directory name of a Task, derived by the same rule the Runtime uses (ADR-0065 D03):
+ * `<displayNumber>-<namingTitle>`, or the internal identity for a Task that predates the titles.
+ */
+function workspaceName(task: { readonly id: string; readonly displayNumber: number;
+  readonly namingTitle: string | null }): string {
+  return taskWorkspaceName({
+    taskId: task.id, displayNumber: task.displayNumber, namingTitle: task.namingTitle,
+  });
+}
+
+/**
+ * The worktree directory of a Task, derived the way the Runtime derives it (ADR-0065 D03):
+ * `<displayNumber>-<namingTitle>`, or the internal identity for a Task that predates the titles.
+ */
+function workspacePath(home: string, projectId: string,
+  task: { readonly id: string; readonly displayNumber: number; readonly namingTitle: string | null },
+): string {
+  return join(realpathSync(home), 'worktrees', projectId, workspaceName(task));
 }
 
 interface SnapshotReport {
@@ -206,7 +230,8 @@ async function createAndSubmit(
   projectId: string,
   specification: string,
 ): Promise<TaskPayload> {
-  const created = JSON.parse((await cli(['task', 'create', projectId, specification],
+  const created = JSON.parse((await cli(['task', 'create', projectId, specification,
+    '--title', 'fixture task', '--name', 'fixture-task'],
     environment)).stdout) as TaskPayload;
   const submitted = await cli(['task', 'submit', projectId, created.id, '0'], environment);
   expect(submitted.exitCode).toBe(0);
@@ -275,11 +300,12 @@ describe('project impact', () => {
     // Both Tasks enter scheduling on submit and the Runtime starts them there (ADR-0030 D04), so the
     // fixture no longer pushes each one by hand: it waits for the fact that both ran, which is what
     // gives both a held resource and a real worktree with a real change set.
-    const worktrees = join(realpathSync(home), 'worktrees', projectId);
-    const firstWorktree = join(worktrees, first.id);
-    const secondWorktree = join(worktrees, second.id);
-    await waitFor(() => Bun.file(join(firstWorktree, 'src', 'agent', `${first.id}.ts`)).size > 0);
-    await waitFor(() => Bun.file(join(secondWorktree, 'src', 'agent', `${second.id}.ts`)).size > 0);
+    const firstWorktree = workspacePath(home, projectId, first);
+    const secondWorktree = workspacePath(home, projectId, second);
+    await waitFor(() => Bun.file(join(firstWorktree, 'src', 'agent', `${workspaceName(first)}.ts`))
+      .size > 0);
+    await waitFor(() => Bun.file(join(secondWorktree, 'src', 'agent', `${workspaceName(second)}.ts`))
+      .size > 0);
 
     // SAFE: neither Task declares a feature, so there is nothing to conflict with — and under the
     // current rule that is the answer whatever the files look like.
@@ -295,7 +321,7 @@ describe('project impact', () => {
     expect(safeReport.active).toEqual([]);
     expect(safeReport.recordedAssessments).toEqual([]);
     expect(safeReport.candidate.snapshot?.complete).toBe(true);
-    expect(safeReport.candidate.snapshot?.files).toEqual([`src/agent/${second.id}.ts`]);
+    expect(safeReport.candidate.snapshot?.files).toEqual([`src/agent/${workspaceName(second)}.ts`]);
     expect(safeReport.candidate.caseModeSource).toBe('FILESYSTEM');
     expect(safeReport.candidate.baseline.matchesProjectDev).toBe(true);
 
@@ -390,14 +416,15 @@ describe('project impact', () => {
     expect(bareValidated.exitCode).toBe(1);
     expect(JSON.parse(bareValidated.stdout)).toMatchObject({ code: 'POLICY_ABSENT' });
     const refusedFeature = await cli(['task', 'create', bareProjectId, 'Change something',
-      '--feature', 'core-module'], bareEnvironment);
+      '--title', 'Change something', '--name', 'change-something', '--feature', 'core-module'], bareEnvironment);
     expect(refusedFeature.exitCode).toBe(1);
     expect(refusedFeature.stderr).toContain('IMPACT_POLICY_ABSENT');
     // ...while a Task that declares nothing is perfectly usable, and its verdict is SAFE rather than
     // UNKNOWN: the missing mapping is a fact about the mapping, not about this Task.
     const bareTask = await createAndSubmit(bareEnvironment, bareProjectId, 'Change something');
-    const bareWorktree = join(realpathSync(home), 'worktrees', bareProjectId, bareTask.id);
-    await waitFor(() => Bun.file(join(bareWorktree, 'src', 'agent', `${bareTask.id}.ts`)).size > 0);
+    const bareWorktree = workspacePath(home, bareProjectId, bareTask);
+    await waitFor(() => Bun.file(join(bareWorktree, 'src', 'agent', `${workspaceName(bareTask)}.ts`))
+      .size > 0);
     const withoutMapping = await cli(['project', 'impact', 'explain', bareProjectId, bareTask.id,
       '--json'], bareEnvironment);
     expect(withoutMapping.exitCode).toBe(0);
@@ -427,7 +454,7 @@ describe('project impact', () => {
       .reasonCodes).toEqual(['SAME_UNFINISHED_FEATURE']);
     // A *new* declaration, on the other hand, is refused while the mapping cannot be read.
     const declareOnInvalid = await cli(['task', 'create', projectId, 'A brand new Task',
-      '--feature', 'core-module'], environment);
+      '--title', 'A brand new Task', '--name', 'a-brand-new-task', '--feature', 'core-module'], environment);
     expect(declareOnInvalid.exitCode).toBe(1);
     expect(declareOnInvalid.stderr).toContain('INVALID_IMPACT_POLICY');
 

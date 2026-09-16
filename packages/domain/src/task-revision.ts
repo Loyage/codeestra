@@ -1,14 +1,8 @@
 import { DomainError, requireText, requireVersion } from './errors.js';
 
-export interface Constraint {
-  readonly id: string;
-  readonly text: string;
-}
-
 export interface RevisionInput {
   readonly id: string;
   readonly specification: string;
-  readonly constraints: readonly Constraint[];
   readonly actor: string;
   readonly reason: string;
   readonly sourceIntentId: string | null;
@@ -43,23 +37,12 @@ function snapshot(
   if (!Number.isSafeInteger(input.createdAt) || input.createdAt < 0) {
     throw new DomainError('INVALID_VALUE', 'createdAt must be UTC epoch milliseconds');
   }
-  const ids = new Set<string>();
-  const constraints = input.constraints.map((constraint) => {
-    requireText(constraint.id, 'constraint.id');
-    requireText(constraint.text, 'constraint.text');
-    if (ids.has(constraint.id)) {
-      throw new DomainError('INVALID_VALUE', 'Duplicate constraint ID');
-    }
-    ids.add(constraint.id);
-    return Object.freeze({ id: constraint.id, text: constraint.text });
-  });
   return Object.freeze({
     id: input.id,
     taskId,
     number,
     previousRevisionId,
     specification: input.specification,
-    constraints: Object.freeze(constraints),
     actor: input.actor,
     reason: input.reason,
     sourceIntentId: input.sourceIntentId,

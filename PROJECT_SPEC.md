@@ -8,7 +8,7 @@
 
 Codeestra 是 Task-first、local-first 的 AI Development Runtime。用户管理产品意图，Codeestra 管理软件工程。它不是以聊天、终端或 Agent 为中心的助手，也不是简单的多 Agent UI。
 
-用户可持续输入开发意图，系统把输入归类为 `CREATE_TASK`、`AMEND_TASK`、`ADD_CONSTRAINT`、`CANCEL_TASK` 或 `ANSWER_AGENT`，并保留原始输入、分类结果、关联任务和审计记录。`CHANGE_PRIORITY` 与 `SELF_MODIFICATION` 是已声明但**当前不可产生**的取值：没有任何命令写它们，`intents.kind` 的 CHECK 自 schema v28 起（ADR-0046）不再接受；`SELF_MODIFICATION` 计划在 Phase 7 重新加入，届时要再做一次迁移。目标任务不明确时不能静默修改任务，应请求澄清。
+用户可持续输入开发意图，系统把输入归类为 `CREATE_TASK`、`AMEND_TASK`、`CANCEL_TASK` 或 `ANSWER_AGENT`，并保留原始输入、分类结果、关联任务和审计记录。`ADD_CONSTRAINT` 自 ADR-0065 起**不再产生**（约束功能已删除），仅为已记录的历史行保留在 `intents.kind` 的 CHECK 里。`CHANGE_PRIORITY` 与 `SELF_MODIFICATION` 是已声明但**当前不可产生**的取值：没有任何命令写它们，`intents.kind` 的 CHECK 自 schema v28 起（ADR-0046）不再接受；`SELF_MODIFICATION` 计划在 Phase 7 重新加入，届时要再做一次迁移。目标任务不明确时不能静默修改任务，应请求澄清。
 
 主流水线：
 
@@ -30,16 +30,16 @@ User Intent → Task / Task DAG → Dependency Analysis → Conflict Analysis
 ## 2. 核心不变量
 
 1. Task 是业务主实体。Execution 是一次执行尝试，每次只绑定一个主 Agent。更换主 Agent 建立新的 Execution。
-2. Task 持有当前 specification、不可覆盖的 revision history、constraints、priority、dependencies、predicted impact、conflict state、execution history、branch/worktree、validation/integration state。
+2. Task 持有当前 specification、不可覆盖的 revision history、priority、dependencies、predicted impact、conflict state、execution history、branch/worktree、validation/integration state，以及两个 Task 级标题（显示标题与命名标题，ADR-0065）。
 3. Minimum Useful Decomposition：仅当拆分明显改善并行性、依赖管理、风险隔离、上下文规模、独立验证或合并边界时才拆分。2～8 个任务是常见范围，不是约束。
 4. 依赖图必须是 DAG；新增或修改依赖时检测环，失败则不部分应用。
 5. 开始执行必须同时满足依赖条件、并发安全和 Agent 资源可用。容量是**每个 Runtime 一个跨所有项目的唯一并行上限**（ADR-0061）：任意时刻运行中的 Task 总数不超过该值，其余等待，不按 Project 或 Adapter 另设额度。功能 Task/worktree 从固定基线 commit 建立（ADR-0060：有 dev clone 的项目从该 clone 的 `dev`，被管理项目从项目文件夹当前检出的分支）；依赖上游必须通过集成验证并进入 `dev`，下游**基线**（同上两种来源）必须包含所需上游结果，基线读不到时按未满足阻塞而**不**拒绝命令（ADR-0060 第三轮修订 / FOUNDATION-093；原因码 `DEV_*` 沿用 ADR-0024 的有界枚举）。仅 Task verification 成功不释放依赖；进入 `dev` 也不等于已提升到稳定 `main`。
 6. Conflict assessment 为 `SAFE_TO_PARALLELIZE | UNKNOWN | CONFLICTING`，但**默认是 `SAFE_TO_PARALLELIZE`**：判定只比较**声明**，即两个 Task 的 revision 是否声明了**同一功能**（feature，取自项目 `.codeestra/impact.json` 的 `modules[].id`，`task create --feature`）。**只有当双方声明同一功能、且对方仍未完成**（状态不是 `SUCCEEDED`/`CANCELLED`，且未归档）时才是 `CONFLICTING`。**文件路径重叠、同一目录、同一模块路径、共享构建/依赖/schema 资源都不再构成冲突**——它们仍是可观测事实并进入解释输出，但不再阻止并发。`UNKNOWN` 保留为取值（历史 assessment 与客户端仍能渲染），当前规则**没有产生它的路径**：映射缺失/未确认/不完整、基线移动、worktree 不可观测都不再使判定变成 `UNKNOWN`。`--allow-unknown` 与一次性放行命令面保留，但只对 `UNKNOWN` 有意义，**永不放宽 `CONFLICTING`**。功能 id 在写入时按项目 main ref 的映射校验（未声明即 `UNKNOWN_FEATURE`，映射不可读即拒绝），因此判定本身不需要读映射。默认路径确认步数为 0。（原保守语义见 ADR-0031，已被 ADR-0059 取代。）
-7. 每个运行中 Task 独占 branch 和 worktree；不允许多个 Task 操作同一工作目录。branch 使用内部稳定 ID；owned worktree 位于 Runtime 数据目录 `worktrees/<project-id>/<task-id>/`，不得污染用户主工作区。
+7. 每个运行中 Task 独占 branch 和 worktree；不允许多个 Task 操作同一工作目录。branch 与 owned worktree 用 Task 的命名标题（ADR-0065 D03）：`task/<编号>-<命名标题>` 与 `worktrees/<project-id>/<编号>-<命名标题>/`；创建于命名标题落地之前的 Task 继续使用内部 ID（`task/<task-id>` 与 `<task-id>`），迁移不改名。owned worktree 位于 Runtime 数据目录，不得污染用户主工作区。
 8. Core 只依赖 Agent Adapter 合约，不能依赖某个 Agent 的命令行参数、SDK 类型或输出格式。
 9. AgentSession 是有身份、生命周期和恢复信息的运行实体，不是一次命令调用。用户可从 Task 入口请求接管运行中的真实 Agent；Pi 采用安全点 RPC→原生 TUI/PTY 进程交接，而不是把日志浏览伪装成 attach。一个 Execution 可保留有序 Session process incarnation，但任意时刻最多一个 Provider writer；旧进程未确认退出不得启动 successor（ADR-0010）。
 10. `WAITING_FOR_USER` 仅暂停对应 Task，其他合格任务继续执行。`BLOCKED` 专指依赖条件未满足；冲突等待、容量等待、全局暂停等待和故障不能都归为 BLOCKED。全局暂停中的待启动 Task 以独立等待原因表达，不改写为 `BLOCKED`。
-11. 运行中的 Task 可以修订；追加约束必须生成 TaskRevision，请求暂停 Agent，并记录暂停、投递和应用确认。确认新约束后才恢复；无法可靠暂停或确认时保留现场并重新执行。旧 revision 的验证不能作为新 revision 的交付证据。
+11. 运行中的 Task 可以修订；改变任务详情或功能声明必须生成 TaskRevision，请求暂停 Agent，并记录暂停、投递和应用确认。确认新修订后才恢复；无法可靠暂停或确认时保留现场并重新执行。旧 revision 的验证不能作为新 revision 的交付证据。
 12. Task 验证与 Integration 验证是不同实体/记录，不能互相替代。项目必须长期保留 `main` 与 `dev`：`main` 是可运行稳定实例、不被开发中代码干扰的稳定分支，`dev` 是新功能实验与集成分支。**该 main/dev 双分支（双检出）模型只属于 Codeestra 自身**（ADR-0060）：被管理的其它项目**不要求**有 `dev` 分支或走 `dev → main` 提升——它们的 Task 基线取**项目文件夹当前检出的分支**，成果留在 task 分支由用户自己合并；`projects.dev_repo_path` 因此**可选**，只有需要长期 `dev` 分支的操作（`task integrate`、`promotion *`）仍以 `DEV_REPO_REQUIRED` 拒绝。Task branch 不得绕过 integration pipeline，任何完成功能必须先进入 `dev`。`dev → main` 固定 dev SHA、预期 main SHA 与验证证据；FULL 下无需批准，STRICT 下保留旧批准语义。提升必须经远端 `dev` 中转（ADR-0047，细则见 ADR-0052）：显式 push 固定候选到远端 `dev` 并读回核对，main 检出以 fast-forward-only 拉取该候选，重启核对成功后才推回远端 `main`；除该固定候选外不 push 任何 ref、不覆盖用户改动。本仓库自身的提升按 `AGENTS.md` 的人工四步执行，不使用产品 `promotion prepare/approve/promote`。`main` 更新后必须立即在 main 检出执行 CLI `stop` 再执行 `status` 重新拉起并检查 Runtime；重启成功前不得报告提升完成。
 13. Runtime 创建成果 commit 时固定 HEAD/ChangeSet/revision，并且只在已核验归属的 task worktree 提交，沿用现有仓库 identity 并正常执行 hooks。FULL 下 `task result capture` 单命令提交、不确认且不应用敏感路径拒绝；STRICT 下保留 prepare/confirm 与敏感路径 deny policy。
 14. IntegrationBatch 是正式领域对象，记录任务集合、对应 revision、commit、固定 dev 基线、dev 集成结果和验证证据；`dev → main` 另由稳定提升记录绑定权限模式、dev/main SHA、验证证据与 Runtime 重启结果。
@@ -49,7 +49,7 @@ User Intent → Task / Task DAG → Dependency Analysis → Conflict Analysis
 18. 能力完备性以 CLI 为准：任何领域能力都必须有对应的 CLI 命令路径；UI/桌面只是同一命令面的前端。不得存在仅 UI 可用的能力。
 19. 自动化测试与验收只通过 CLI/命令面驱动；不引入桌面或键鼠控制自动化。FULL 模式不得新增任何确认步骤。
 20. Runtime 保持本机单用户模型，不提供 RBAC、多用户/租户、路径沙箱、网络策略或密钥托管。权限模式只分为默认 `FULL` 与显式 opt-in 的 `STRICT`；FULL 使用当前用户可获得的全部主机权限。
-21. 人工介入采用双通道：Session Guidance 进入真实 provider conversation、立即影响当前执行但不修改验收规格；改变规格/约束必须显式生成 TaskRevision。Pi 接管等待当前工具完成后的结构化安全点，不为接管强杀工具；接管、detach、交还与 writer lease 全部经 CLI/Runtime 命令面表达，不新增确认门禁。
+21. 人工介入采用双通道：Session Guidance 进入真实 provider conversation、立即影响当前执行但不修改验收规格；改变任务详情或功能声明必须显式生成 TaskRevision。Pi 接管等待当前工具完成后的结构化安全点，不为接管强杀工具；接管、detach、交还与 writer lease 全部经 CLI/Runtime 命令面表达，不新增确认门禁。
 22. Agent 执行过程可以只读观察（ADR-0013）：`session.transcript` 直接读取 Provider 自己的持久会话文件并展示工具调用与返回、助手文本、thinking 与 token/成本。该视图不写数据库、不产生 domain event、不构成投递或业务事实、不是 attach 也不是终端接管；provider 文件路径不离开 Runtime，只允许读取 Runtime 自己 session 目录内经规范化的普通文件。
 23. Agent 可以结构化提问（ADR-0014）：Codeestra 自有的受控扩展向 Agent 提供 `ask_user_question`（1–4 题，每题 2–4 个带描述的可选项，可多选，可用自己的话回答）。一份问卷整体对应**一个** Provider dialog、**一条** `QUESTION` Attention 与**一次** answer Operation；回答以结构化 `QUESTIONNAIRE` 表达，Runtime 必须按被问的那份问卷校验后才记录。选项越界、重复题号或单选多选个数不符都必须返回稳定错误码并保持请求 OPEN，**不得**降级为“用户拒绝回答”或静默作废已答内容；只有用户明确的 `CANCEL` 才是拒绝。提问不是审批：FULL 不新增确认，STRICT 也不把它当作需要审批的副作用工具。该通道不改变受控启动策略（仍以 `--no-extensions` 只加载 Codeestra 自己的扩展）。
 24. 用户可以暂停、终止、归档任务（ADR-0016）。暂停为协作停止：先落 `PAUSING`、确认 provider 进程已退出后才落 `PAUSED`，workspace 与会话证据保留；恢复在同一工作树新建 Execution，并以 provider conversation resume（`--session <file>`）继续，旧 Execution 为 `SUPERSEDED`，不把进程间恢复伪装成原地 pause。终止是终态 `CANCELLED`，不自动重开，旧审计与证据保留。归档是软删除：只写 `tasks.archived_at`，默认列表隐藏，不删除任何行、不回收 worktree/branch；物理删除由 ADR-0058 的 `task purge` 单独承担，不在取消流程中隐式执行。三项能力都有完整 CLI 命令，且不新增确认。
@@ -57,7 +57,7 @@ User Intent → Task / Task DAG → Dependency Analysis → Conflict Analysis
 
 ## 3. 任务修订与执行证据
 
-TaskRevision 保留原始意图来源、作者、前一 revision、规格与约束快照以及修改原因。Execution、VerificationRun 和 IntegrationBatchItem 必须指向精确 revision 与 Git commit，而不是只读取 Task 的最新文本。
+TaskRevision 保留原始意图来源、作者、前一 revision、规格快照以及修改原因。Execution、VerificationRun 和 IntegrationBatchItem 必须指向精确 revision 与 Git commit，而不是只读取 Task 的最新文本。
 
 已完成执行不代表已验证，已验证不代表已集成到 `dev`，已进入 `dev` 不代表已获批提升到 `main`，`main` 已更新也不代表 Runtime 已完成重启。禁止用单个 SUCCESS 含糊表达整条流水线的完成。
 

@@ -6,7 +6,7 @@
 
 内部 ID 为随机 UUID，显示编号（T102）在 Project 内唯一，不用于安全路径。时间为 UTC epoch milliseconds。aggregateVersion 为非负整数，用于 compare-and-swap（CAS）；revisionNumber 从 1 单调递增。Git OID 接受仓库对象格式，不硬编码为仅 SHA-1。
 
-Specification 是人类可读文本，constraints 是带稳定 ID 的文本条目。机器解释必须保存来源，不能丢弃用户原文。TaskRevision 存完整快照，MVP 不使用难以独立解释的增量 patch。
+Specification 是人类可读文本。机器解释必须保存来源，不能丢弃用户原文。TaskRevision 存完整快照，MVP 不使用难以独立解释的增量 patch。
 
 ## 2. 聚合与归属
 
@@ -32,7 +32,7 @@ Specification 是人类可读文本，constraints 是带稳定 ID 的文本条�
 
 ### Task（聚合根）
 
-- identity：id、projectId、displayNumber、kind（DEVELOPMENT / SELF）。
+- identity：id、projectId、displayNumber、**显示标题 displayTitle 与命名标题 namingTitle**（ADR-0065；Task 级、创建后不可修订，命名标题用于分支与 worktree 目录）。
 - currentRevisionId、aggregateVersion、priority（整数越大越优先，默认 0）。
 - lifecycleState；verification/integration 用独立状态和对象表达。
 - 通过关系持有 revisions、dependencies、impact assessments、pair conflicts、executions、workspace、verifications、integration items。
@@ -41,7 +41,7 @@ Specification 是人类可读文本，constraints 是带稳定 ID 的文本条�
 
 ### TaskRevision
 
-id、taskId、number、previousRevisionId、specification、constraints、**features**、intentId、actor、reason、createdAt。append-only。所有代码成果和验证绑定精确 revision。
+id、taskId、number、previousRevisionId、specification、**features**、intentId、actor、reason、createdAt。append-only。所有代码成果和验证绑定精确 revision。`constraints` 自 ADR-0065 起不再是 revision 字段（约束功能已删除）。
 
 **`features` 是功能声明（ADR-0059，schema v32）**：字符串数组，取值必须是项目 `main` ref 上
 `.codeestra/impact.json` 的 `modules[].id`（**写入时**校验：`UNKNOWN_FEATURE` / `IMPACT_POLICY_ABSENT` /

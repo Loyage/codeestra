@@ -250,9 +250,9 @@ function addTask(storage: Phase1Database, projectId: string, specification: stri
     intentEventId: nextId(),
     taskEventId: nextId(),
     specification,
-    constraints: [],
+    displayTitle: 'fixture task',
+    namingTitle: null,
     features: [],
-    kind: 'DEVELOPMENT',
     actor: 'local-user',
     createdAt: Date.now(),
   });

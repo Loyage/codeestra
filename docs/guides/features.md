@@ -1,8 +1,9 @@
 # 功能清单：「这软件能做什么」
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
-> 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v35 · **最后校对** 2026-09-17
+> 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> 「创建任务」与「规格修订」两行由本分支按 **ADR-0065** 改写（三个必填字段；约束与任务类型已删除）。
 > 「调度、容量与冲突」一节新增「全局暂停」一行，并由 FOUNDATION-097 标明容量行的目标语义（ADR-0061 D01–D03）；
 > 「任务」表的「永久删除」一行由 FOUNDATION-090 新增（ADR-0058）；「调度、容量与冲突」一节的声明功能与
 > 冲突判定两行由 FOUNDATION-091 改写（ADR-0059）。
@@ -42,7 +43,7 @@
 
 | 能力 | 能做什么 | CLI 入口 | UI 位置 | ADR |
 |---|---|---|---|---|
-| 创建任务 | 原子保存原始意图、首 revision、事实事件与幂等回执 | `task create <project> <spec> [--constraint <t>]… [--kind DEVELOPMENT]` | 新建任务停靠条 | — |
+| 创建任务 | 原子保存原始意图、首 revision、事实事件与幂等回执；三个必填字段：显示标题、命名标题、任务详情（ADR-0065） | `task create <project> <详情…> --title <显示标题> --name <命名标题>` | 新建任务停靠条 | [0065](../decisions/0065-task-input-fields.md) |
 | 列出任务 | 列出任务（默认隐藏归档，`--all` 含归档） | `task list <project> [--all]` | 任务工作台列表（含搜索/筛选/排序） | [0034](../decisions/0034-compact-task-workbench.md) |
 | 提交任务 | 用 expected version 把 `DRAFT` 转 `READY`，并在同一命令里核对依赖 + 跑一次调度 pass | `task submit <project> <task> <expected-version>` | 任务详情 → 提交 | — |
 | 运行任务 | 显式请求启动；同自动调度同一门禁（依赖/冲突/容量） | `task run <project> <task> <expected-version> [--adapter <id>] [--allow-unknown] [--json]` | 任务详情 → 启动 Agent | [0030](../decisions/0030-phase2-parallel-scheduling.md) |
@@ -51,7 +52,7 @@
 | 取消 / 归档 | 取消是终态（不自动重开）；归档是软删除（只写 `archived_at`，不删行、不回收） | `task cancel`、`task archive`、`task unarchive` | 任务详情 →「更多操作」 | [0016](../decisions/0016-task-pause-cancel-archive.md) |
 | 永久删除 | **不可撤销**：删掉任务的全部记录（含 append-only 的修订/impact/定向测试计划/知识绑定）与它自己的 worktree、验证副本、`task/<id>` 分支，并写一条 `TaskPurged`；需 `--yes`；非终态先协作停止，`RECOVERY_REQUIRED` 先按观察对账（无法确认进程已退出则拒绝）；**成果已进 `dev`/`main` 的任务默认拒绝**（只能归档）。被拒绝时 `--force` 可删：先按记录的身份终止 provider，再删掉本来会拒绝的行（含 `dev`/`main` 的来源记录，必要时连同那条提升记录），归属不明的目录/分支留在磁盘上并逐项列出 | `task purge <project> <task> <expected-version> --yes [--force] [--reason <text>]` | 任务详情 →「更多操作」→「永久删除」（输入任务编号才启用）；被拒绝后多一个「仍要强制删除」 | [0058](../decisions/0058-task-purge.md) |
 | 状态投影 | 列出 Execution / Session / 验证 / 集成投影，附 Agent 完成注记与散文提问等待 | `task status <project> <task> [--json]` | 任务详情（执行 / 验证 / `集成批次 · dev` 记录，后者含每个批次的成员表） | [0013](../decisions/0013-read-only-agent-transcript-view.md) |
-| 规格修订 | 创建新 revision（可只改理由、只加约束）并列出历史 | `task revision create`、`task revision list` | —（界面无入口） | [0028](../decisions/0028-revision-delivery-and-stale-session-startup-reconcile.md) |
+| 规格修订 | 创建新 revision（改任务详情或功能声明，二者至少其一）并列出历史 | `task revision create`、`task revision list` | —（界面无入口） | [0028](../decisions/0028-revision-delivery-and-stale-session-startup-reconcile.md)、[0065](../decisions/0065-task-input-fields.md) |
 | Revision 投递台账 | 单独读取与解决「修订是否真的到达运行中的 Execution」 | `task revision delivery list/get/resolve` | —（界面无投影） | [0028](../decisions/0028-revision-delivery-and-stale-session-startup-reconcile.md) |
 | 优先级（**当前无命令面**） | 优先级是 Task 模型与调度排序的一部分（降序优先），但**没有任何 CLI 命令可以改它**：`task create` 不接受 priority 参数，新建 Task 的 priority 为 0 | —（无入口） | 任务工作台排序 | [0030](../decisions/0030-phase2-parallel-scheduling.md) |
 

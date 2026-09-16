@@ -153,9 +153,9 @@ export async function createFixtureTaskForExplicitStart(input: {
     intentEventId: crypto.randomUUID(),
     taskEventId: crypto.randomUUID(),
     specification,
-    constraints: [],
+    displayTitle: 'fixture task',
+    namingTitle: null,
     features: [feature],
-    kind: 'DEVELOPMENT' as const,
     actor: 'test-fixture',
     createdAt: Date.now(),
   });

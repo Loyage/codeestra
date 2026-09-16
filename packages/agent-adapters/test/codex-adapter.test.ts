@@ -286,7 +286,7 @@ function fixture(mode: string, options: {
     sessionId: 'session-under-test',
     executionId: 'execution-1',
     workspace: { id: 'workspace-1', cwd: root, ownershipToken: 'token-1' },
-    revision: { id: 'revision-1', specification: 'Do the thing', constraints: [{ id: 'c1', text: 'Be safe' }] },
+    revision: { id: 'revision-1', displayTitle: 'Do the thing', specification: 'Do the thing' },
     knowledgeSnapshotRefs: [],
     permissionMode: 'STRICT',
     environment: {},
@@ -395,7 +395,9 @@ describe('Codex adapter start', () => {
       approvalPolicy: 'untrusted', sandbox: 'workspace-write',
     });
     expect(report.prompt).toContain('Codeestra revision revision-1');
-    expect(report.prompt).toContain('- c1: Be safe');
+    // ADR-0065 D02: the prompt is the title plus the detail; the removed constraint section is gone.
+    expect(report.prompt).toContain('Task: Do the thing');
+    expect(report.prompt).not.toContain('Constraints:');
   });
 
   test('uses the FULL policy and passes model, provider and reasoning effort', async () => {

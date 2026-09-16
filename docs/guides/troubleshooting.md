@@ -1,8 +1,9 @@
 # 常见故障与稳定码表
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
-> 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v35 · **最后校对** 2026-09-17
+> 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> 第 15 条（ADR-0065 的未验证项）由本分支新增；`task create` 的 `--constraint`/`--kind` 已删除，不再是稳定码来源。
 > 「全局暂停」一节的稳定码由 FOUNDATION-097 新增（ADR-0061 D08/D09）；`task purge` 的拒绝码一节由 FOUNDATION-090 新增（ADR-0058）；冲突判定与 `--feature` 的拒绝码由
 > FOUNDATION-091 新增/改写（ADR-0059）。
 > 「报 `DEV_REPO_REQUIRED`」一节由 FOUNDATION-093 第三轮重写（ADR-0060 修订）。
@@ -674,6 +675,10 @@ K1 留下的两条待裁决已由 FOUNDATION-075 收口，因此这份清单**�
    实际跑的只有两类可复现断言：文档内链接存在性，以及命令/标签页/按钮文案对源码的核对；命令与结果见
    `docs/tasks/README.md` 的 FOUNDATION-078 一节。**未验证**：全部观感类结论（见 [acceptance-checklist.md](./acceptance-checklist.md)）、
    插图的真实效果（图尚未提供）、以及浏览器里的真实点击路径。
+15. **ADR-0065（任务输入字段：两个必填标题 + 删除约束与任务类型，schema v35）**：**未验证**的是真实稳定 Runtime 上的 v34→v35 升级
+   （禁止触碰稳定工作树与稳定 Runtime）与停靠条三字段的排版/焦点/窄屏换行（观感类，只能人工确认，见 [acceptance-checklist.md](./acceptance-checklist.md) J1–J5）。
+   **已补的不是缺口**：v35 重建两张表，其复制失败防护（行数比对 + 结束态断言）与「正文没有任何非空白字符、无法派生标题」的拒绝路径都有直接测试
+   `packages/storage/test/task-input-fields-migration.test.ts`——这正是上面第 13 条记的 v28「第二道网没有直接测试」在本步被补上的部分。
 
 ---
 

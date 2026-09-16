@@ -1,8 +1,10 @@
 # CLI 命令参考
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
-> 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v35 · **最后校对** 2026-09-17
+> 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> §4 的 `task create` 与 §5 的 `task revision create` 由本分支按 **ADR-0065** 重写：新增必填的 `--title`/`--name`，
+> `--constraint` 与 `--kind` 已删除（传入即未知 flag，退出码 2）。
 > §7 的 `session handoff terminal resize` 一节由 FOUNDATION-083 校对（ADR-0054）；
 > §14 新增 `scheduler control` 一节，并把 §0.2 的退出码与「等待码」表补上 `SCHEDULER_GLOBALLY_PAUSED`（FOUNDATION-097 / ADR-0061 D08/D09）；
 > §3 的 `project impact *` 与 §4 的 `task submit`/`task resume`/`--feature` 由 FOUNDATION-091 新增/改写（ADR-0059）；
@@ -298,10 +300,23 @@ dev clone 的拒绝是 `DEV_REPO_*`（见下）。
 
 ## 4. `task`：生命周期
 
-### `task create <project-id> <specification> [--constraint <text>]… [--feature <module-id>]… [--kind DEVELOPMENT]`
+### `task create <project-id> <任务详情…> --title <显示标题> --name <命名标题> [--feature <module-id>]…`
 
-原子创建：原始意图 + 首 revision + 事实事件 + 幂等回执在同一事务。`--kind` 只接受 `DEVELOPMENT`。
-至少需要一个非空规格；`--constraint` 不可为空字符串（用法错误）。
+原子创建：原始意图 + 首 revision + 事实事件 + 幂等回执在同一事务。
+
+三个字段**都必须给出**（ADR-0065 D01）；缺任何一个、或值不合法都是用法错误（退出码 2）：
+
+| 字段 | 形状 | 用途 |
+|---|---|---|
+| `<任务详情…>`（位置参数） | 非空文本，多词原样拼接 | revision 正文，Agent 提示词的主体 |
+| `--title <显示标题>` | 非空、单行、≤ 200 字符 | 任务列表与任务详情渲染的一句话摘要 |
+| `--name <命名标题>` | `^[a-z][a-z0-9]*(-[a-z0-9]+)*$`，≤ 50 字符 | 分支与 worktree 目录名：`task/<编号>-<name>` |
+
+两个标题是 **Task 级**字段：它们不是 revision 事实，创建后没有命令可以修改（要改标题就新建任务）。
+`--title` 里的换行与超长、`--name` 里的大写/空格/连续短横线/首字符非字母都会在客户端与契约两层被拒。
+
+**已删除的 flag**：`--constraint` 与 `--kind`（ADR-0065 D04）。约束功能与任务类型都不再存在，所以它们是未知 flag（退出码 2），
+不会静默忽略；旧脚本需要改写。
 
 命令面**总是**带一个随机 `commandId`，因此重放同一命令不会产生第二个 Task（幂等回执）。
 
@@ -469,7 +484,7 @@ impact 快照与它的配对判定、槽位预留、回收记录、依赖边、`
 
 ```sh
 bun run codeestra task revision create <project-id> <task-id> <expected-version>
-  [--specification <text>] [--constraint <text>]… [--feature <module-id>]… [--reason <text>] [--json]
+  [--specification <text>] [--feature <module-id>]… [--reason <text>] [--json]
 bun run codeestra task revision list <project-id> <task-id> [--json]
 
 bun run codeestra task revision delivery list <project-id> <task-id> [--json]
@@ -478,13 +493,13 @@ bun run codeestra task revision delivery resolve <project-id> <task-id> <deliver
   --action <stop-and-restart|retry> [--adapter <id>] [--json]
 ```
 
-- `create` 至少需要 `--specification` 或 `--constraint` 之一（及其非空文本）。
+- `create` 至少需要 `--specification` 或 `--feature` 之一：什么都没改的修订会被拒为 `INVALID_REVISION`（ADR-0065 之后约束不再是可改的第三样东西）。`--constraint` 已删除，传入即错误用法。
 - `--reason` 用于说明修订原因；缺省是 `initial task creation` 之外的自定义原因。
 - `--action` 必填，且只接受那两个值。
 - delivery 状态：`PENDING / IN_FLIGHT / ACKNOWLEDGED / UNACKNOWLEDGED / CHANNEL_UNSUPPORTED / TIMED_OUT / FAILED / SUPERSEDED_BY_RESTART`。
 - `resolve` **退出码 `0` 仅当投递最终被满足**（`SUPERSEDED_BY_RESTART` / `RESOLVED` / `ALREADY_SATISFIED`）；
   否则 `1`——例如在**没有确认通道**的 Adapter 上 `retry`，它会诚实地留在未确认状态。
-- **与 Session Guidance 的分界**（ADR-0010 D02 / ADR-0057）：本组命令改变的是**验收规格/约束**，因此产生不可变 revision
+- **与 Session Guidance 的分界**（ADR-0010 D02 / ADR-0057）：本组命令改变的是**验收规格**，因此产生不可变 revision
   并使旧验证失效；只是想对**运行中的会话**说一句「怎么做」而不改验收标准，走 `session guide`（见 §6.1，它不产生 revision、
   不动 `appliedRevisionId`、不使验证失效）。两者不能互相代替。
 

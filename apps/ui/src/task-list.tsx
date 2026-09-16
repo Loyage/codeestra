@@ -70,7 +70,8 @@ export function TaskList({ tasks, attentions, query, filter, sort, showArchived,
   const available = showArchived ? tasks : current;
   const search = query.trim().toLocaleLowerCase().replace(/^#(?=\d)/, '');
   const visible = available.filter((task) => matchesFilter(task)
-    && `${task.displayNumber} ${task.currentRevision.specification}`.toLocaleLowerCase().includes(search));
+    && `${task.displayNumber} ${task.displayTitle} ${task.namingTitle ?? ''} ${task.currentRevision.specification}`
+      .toLocaleLowerCase().includes(search));
   if (sort === 'updated') visible.sort((a, b) => b.updatedAt - a.updatedAt || b.displayNumber - a.displayNumber);
   if (sort === 'priority') visible.sort((a, b) => b.priority - a.priority || a.createdAt - b.createdAt || a.id.localeCompare(b.id));
   const overview = [
@@ -96,7 +97,7 @@ export function TaskList({ tasks, attentions, query, filter, sort, showArchived,
         </span>
       </div>
       <div className="task-filters">
-        <input type="search" aria-label="搜索任务" placeholder="搜索任务内容或 #编号" value={query}
+        <input type="search" aria-label="搜索任务" placeholder="搜索标题、命名、内容或 #编号" value={query}
           onChange={(event) => setQuery(event.target.value)} />
         <select aria-label="按任务状态筛选" value={filter} onChange={(event) => setFilter(event.target.value)}>
           <option value="all">全部状态</option><option value="attention">需要你处理</option>
@@ -123,10 +124,11 @@ export function TaskList({ tasks, attentions, query, filter, sort, showArchived,
                   {task.archivedAt !== null ? <span className="muted hint">已归档</span> : null}
                   {count > 0 ? <span className="request-count">{count} 项待处理</span> : null}
                 </span>
-                <span className="task-title">{task.currentRevision.specification}</span>
+                <span className="task-title">{task.displayTitle}</span>
                 <span className="task-meta">
+                  {task.namingTitle === null ? null
+                    : <span className="mono" title="分支与 worktree 目录使用的命名标题（ADR-0065）">{task.namingTitle}</span>}
                   <span>规格 r{task.currentRevision.number}</span><span title="数值越大优先级越高；只影响后续调度，不抢占">优先级 {task.priority}</span>
-                  {task.currentRevision.constraints.length > 0 ? <span>{task.currentRevision.constraints.length} 条约束</span> : null}
                   <time dateTime={new Date(task.updatedAt).toISOString()} title={`更新：${new Date(task.updatedAt).toLocaleString('zh-CN')}；创建：${new Date(task.createdAt).toLocaleString('zh-CN')}`}>
                     {updateTimeLabel(task.updatedAt, now, timeDisplay)}</time>
                 </span>
@@ -140,7 +142,7 @@ export function TaskList({ tasks, attentions, query, filter, sort, showArchived,
         })}
         {visible.length === 0 ? <li className="list-empty muted">
           <strong>{tasks.length === 0 ? '从一个任务开始' : '没有匹配的任务'}</strong>
-          <span>{tasks.length === 0 ? '在底部描述你的需求，创建草稿；提交后才进入调度。' : '试试其他关键词、状态，或显示已归档的任务。'}</span>
+          <span>{tasks.length === 0 ? '在底部填写显示标题、命名标题与任务详情，创建草稿；提交后才进入调度。' : '试试其他关键词、状态，或显示已归档的任务。'}</span>
           {tasks.length > 0 ? <button type="button" onClick={reset}>重置筛选</button> : null}
         </li> : null}
       </ul>

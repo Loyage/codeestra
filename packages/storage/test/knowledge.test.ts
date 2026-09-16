@@ -74,13 +74,27 @@ function seedProject(database: Database): void {
   database.query(`INSERT INTO project_trusts
     (id,project_id,repo_root,git_common_dir,object_format,policy_version,actor,status,accepted_at)
     VALUES ('trust1','p1','/repo','/repo/.git','sha1',1,'user','ACTIVE',1)`).run();
+  // Seeded into either a legacy database stamped 24 that is then upgraded or a current
+  // `Phase1Database`; schema v35 (ADR-0065) removed `tasks.kind` / `constraints_json` and added the
+  // two titles, so the stamped version decides which shape is legal.
+  const current = (database.query<{ user_version: number }, []>('PRAGMA user_version')
+    .get()?.user_version ?? 0) >= 35;
   database.transaction(() => {
-    database.query(`INSERT INTO tasks
-      (id,project_id,display_number,kind,current_revision_id,state,created_at,updated_at)
-      VALUES ('t1','p1',1,'DEVELOPMENT','r1','READY',2,2)`).run();
-    database.query(`INSERT INTO task_revisions
-      (id,task_id,number,previous_revision_id,specification,constraints_json,actor,reason,created_at)
-      VALUES ('r1','t1',1,NULL,'Do work','[]','user','initial',2)`).run();
+    database.query(current
+      ? `INSERT INTO tasks
+          (id,project_id,display_number,display_title,naming_title,current_revision_id,state,
+            created_at,updated_at)
+          VALUES ('t1','p1',1,'Do work','do-work','r1','READY',2,2)`
+      : `INSERT INTO tasks
+          (id,project_id,display_number,kind,current_revision_id,state,created_at,updated_at)
+          VALUES ('t1','p1',1,'DEVELOPMENT','r1','READY',2,2)`).run();
+    database.query(current
+      ? `INSERT INTO task_revisions
+          (id,task_id,number,previous_revision_id,specification,actor,reason,created_at)
+          VALUES ('r1','t1',1,NULL,'Do work','user','initial',2)`
+      : `INSERT INTO task_revisions
+          (id,task_id,number,previous_revision_id,specification,constraints_json,actor,reason,created_at)
+          VALUES ('r1','t1',1,NULL,'Do work','[]','user','initial',2)`).run();
   })();
   database.query(`INSERT INTO workspaces
     (id,task_id,branch_ref,path,ownership_token,base_commit,state,created_at)

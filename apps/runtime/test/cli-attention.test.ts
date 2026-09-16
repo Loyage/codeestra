@@ -165,7 +165,8 @@ async function startQuestionnaireTask(title: string): Promise<{
     readonly { id: string }[];
   const projectId = projects[0]?.id as string;
   const created = JSON.parse((await cli(['task', 'create', projectId,
-    'Ask before choosing a package manager'], environment)).stdout) as { readonly id: string };
+    'Ask before choosing a package manager', '--title', 'Ask before choosing a package manager',
+    '--name', 'ask-package-manager'], environment)).stdout) as { readonly id: string };
   const taskId = created.id;
   // Submission starts this undeclared Task immediately under ADR-0059.
   expect((await cli(['task', 'submit', projectId, taskId, '0'], environment)).exitCode).toBe(0);
@@ -266,8 +267,8 @@ describe('codeestra attention answer', () => {
 
       // The UI's actual transport can still create/read another draft while the run is blocked.
       const draft = await client.command<TaskView>({ command: 'task.create', projectId,
-        commandId: crypto.randomUUID(), specification: '另一个任务 · 不自动运行',
-        constraints: [], kind: 'DEVELOPMENT' });
+        commandId: crypto.randomUUID(), displayTitle: '另一个任务 · 不自动运行',
+        namingTitle: 'another-task', specification: '另一个任务 · 不自动运行' });
       expect(draft.state).toBe('DRAFT');
       expect(draft.currentRevision.number).toBe(1);
       // Compact task rows use these existing command projections, not per-row task.status reads
@@ -279,7 +280,6 @@ describe('codeestra attention answer', () => {
       expect(listedDraft).toMatchObject({ displayNumber: draft.displayNumber, priority: draft.priority,
         createdAt: draft.createdAt, updatedAt: draft.updatedAt, archivedAt: null });
       expect(Number.isFinite(listedDraft.updatedAt)).toBe(true);
-      expect(listedDraft.currentRevision.constraints).toEqual([]);
       expect(list.find((item) => item.id === taskId)?.state).toBe('WAITING_FOR_USER');
       expect(attentions.filter((item) => item.taskId === taskId && item.status === 'OPEN')).toHaveLength(1);
       const detail = await client.command<TaskStatusView>({ command: 'task.status', projectId,

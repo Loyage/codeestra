@@ -37,11 +37,12 @@ function seedProjectAndTask(target: Database): void {
       (id,project_id,repo_root,git_common_dir,object_format,policy_version,actor,status,accepted_at)
       VALUES ('trust1','p1','/repo','/repo/.git','sha1',1,'user','ACTIVE',1)`).run();
     target.query(`INSERT INTO tasks
-      (id,project_id,display_number,kind,current_revision_id,state,version,created_at,updated_at)
-      VALUES ('t1','p1',1,'DEVELOPMENT','r1','EXECUTED',2,2,2)`).run();
+      (id,project_id,display_number,display_title,naming_title,current_revision_id,state,version,
+        created_at,updated_at)
+      VALUES ('t1','p1',1,'Do work','do-work','r1','EXECUTED',2,2,2)`).run();
     target.query(`INSERT INTO task_revisions
-      (id,task_id,number,previous_revision_id,specification,constraints_json,actor,reason,created_at)
-      VALUES ('r1','t1',1,NULL,'Do work','[]','user','initial',2)`).run();
+      (id,task_id,number,previous_revision_id,specification,actor,reason,created_at)
+      VALUES ('r1','t1',1,NULL,'Do work','user','initial',2)`).run();
   })();
 }
 

@@ -10,7 +10,11 @@ import {
   prepareWorkspace,
   rebuildOwnedWorktree,
 } from '@codeestra/git';
-import { decideRetryWorkspace } from '@codeestra/domain';
+import {
+  decideRetryWorkspace,
+  taskWorkspaceName,
+  taskWorkspaceNameFromBranchRef,
+} from '@codeestra/domain';
 import {
   Phase1Database,
   SlotReservationError,
@@ -216,9 +220,23 @@ export async function prepareTaskWorkspace(input: {
   const operationId = randomUUID();
   const workspaceId = randomUUID();
   const ownershipToken = randomUUID();
-  const branchRef = `refs/heads/task/${input.taskId}`;
+  // ADR-0065 D03: a Task created after the title fields carries `<displayNumber>-<namingTitle>` as
+  // its Git namespace; a Task that predates them keeps its internal identity (and therefore the
+  // branch and directory it already has). Nothing is renamed, and `null` naming never becomes the
+  // literal string "null" inside a path.
+  const namingTask = input.storage.getTask(input.projectId, input.taskId);
+  if (namingTask === null) {
+    throw new WorkspaceServiceError('NOT_FOUND',
+      `No Task ${input.taskId} in project ${input.projectId}`);
+  }
+  const workspaceName = taskWorkspaceName({
+    taskId: namingTask.id,
+    displayNumber: namingTask.displayNumber,
+    namingTitle: namingTask.namingTitle,
+  });
+  const branchRef = `refs/heads/task/${workspaceName}`;
   const worktreesRoot = await canonicalWorktreesRoot(input.runtimeHome);
-  const path = join(worktreesRoot, input.projectId, input.taskId);
+  const path = join(worktreesRoot, input.projectId, workspaceName);
   const plan = input.storage.reserveWorkspacePreparation({
     operationId,
     idempotencyKey: input.commandId,
@@ -250,6 +268,7 @@ export async function prepareTaskWorkspace(input: {
       worktreesRoot,
       projectId: plan.projectId,
       baseRef: plan.devRef,
+      workspaceName,
       taskId: plan.taskId,
       workspaceId: plan.workspaceId,
       ownershipToken: plan.ownershipToken,
@@ -355,11 +374,20 @@ async function rebuildReclaimedTaskWorkspace(input: {
       `Execution ${held.executionId} still holds this Task's resources; its worktree is not rebuilt`
       + ' under a live writer');
   }
+  // The recorded branch is the fact of what this workspace is called (ADR-0065 D03): a Task created
+  // before the titles has `task/<task-id>` and keeps the directory it already has.
+  const recordedWorkspaceName = taskWorkspaceNameFromBranchRef(recorded.branchRef);
+  if (recordedWorkspaceName === null) {
+    throw new WorkspaceServiceError('WORKSPACE_OWNERSHIP_UNVERIFIABLE',
+      `Workspace ${recorded.workspaceId} records a branch outside the Task namespace`
+      + ` (${recorded.branchRef}); its layout cannot be established`);
+  }
   const rebuilt = await rebuildOwnedWorktree({
     repositoryRoot: input.baseline.repositoryRoot,
     ownedRoot: worktreesRoot,
     projectId: input.projectId,
     taskId: input.taskId,
+    workspaceName: recordedWorkspaceName,
     path: recorded.path,
     branchRef: recorded.branchRef,
     baseCommit: recorded.baseCommit,

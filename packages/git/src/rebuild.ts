@@ -309,16 +309,24 @@ function sourceVerdict(observation: OwnedWorktreeRebuildObservation): Verdict {
  * (possibly crashed) attempt already created.
  *
  * Every invariant is re-established here, at action time: the path is this Task's own layout path
- * under an owned root, neither it nor its project directory is a symlink, an occupied path Git does
- * not register is refused rather than deleted, the branch must still descend from the recorded
- * baseline, and it must not be checked out anywhere else. `git worktree add` runs without `--force`;
- * Git's own refusal to attach an already-attached branch is kept as evidence, never bypassed.
+ * under an owned root (`<ownedRoot>/<projectId>/<workspaceName>`, ADR-0065 D03), neither it nor its
+ * project directory is a symlink, an occupied path Git does not register is refused rather than
+ * deleted, the branch must still descend from the recorded baseline, and it must not be checked out
+ * anywhere else. `git worktree add` runs without `--force`; Git's own refusal to attach an
+ * already-attached branch is kept as evidence, never bypassed.
  */
 export async function rebuildOwnedWorktree(input: {
   readonly repositoryRoot: string;
   readonly ownedRoot: string;
   readonly projectId: string;
   readonly taskId: string;
+  /**
+   * The Task's namespace inside the owned root: `<displayNumber>-<namingTitle>`, or the Task id for
+   * a Task created before the titles existed. It is read from the recorded branch (the fact of what
+   * the workspace is called) and checked to be a safe single path segment here, because the layout
+   * this function re-establishes is derived from it.
+   */
+  readonly workspaceName: string;
   readonly path: string;
   readonly branchRef: string;
   readonly baseCommit: string;
@@ -327,6 +335,10 @@ export async function rebuildOwnedWorktree(input: {
     if (!stableId.test(value)) {
       throw new GitInspectionError('FOREIGN_RESOURCE', `${name} must be a UUID`);
     }
+  }
+  if (!/^[0-9a-z][0-9a-z-]{0,63}$/.test(input.workspaceName)) {
+    throw new GitInspectionError('FOREIGN_RESOURCE',
+      'workspaceName must be a lowercase path segment of letters, digits and hyphens');
   }
   if (!isAbsolute(input.ownedRoot) || !isAbsolute(input.path)) {
     throw new GitInspectionError('UNSAFE_CHECKOUT', 'Owned root and worktree path must be absolute');
@@ -339,7 +351,7 @@ export async function rebuildOwnedWorktree(input: {
   const observed = await inspectOwnedWorktreeRebuild(input);
   const evidence: Record<string, unknown> = { ...observed };
   const projectDirectory = join(observed.ownedRoot, input.projectId);
-  const expectedLayout = join(projectDirectory, input.taskId);
+  const expectedLayout = join(projectDirectory, input.workspaceName);
   evidence['expectedLayout'] = expectedLayout;
   if (observed.symlink) {
     return refused('SYMLINK_ESCAPE',

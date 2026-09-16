@@ -84,8 +84,8 @@ function addTask(fixture: Harness['fixture'], name: string): string {
     intentEventId: nextId(),
     taskEventId: nextId(),
     specification: `Work for ${name}`,
-    constraints: [],
-    kind: 'DEVELOPMENT',
+    displayTitle: 'fixture task',
+    namingTitle: null,
     actor: 'local-user',
     createdAt: 100,
   });

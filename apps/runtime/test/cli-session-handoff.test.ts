@@ -197,7 +197,8 @@ async function startHandoffTask(mode: 'permission' | 'fence'): Promise<{
 }> {
   const fixture = await handoffFixture(mode);
   const created = JSON.parse((await cli(['task', 'create', fixture.projectId,
-    'Hand off one Agent session'], fixture.environment)).stdout) as { readonly id: string };
+    'Hand off one Agent session', '--title', 'Hand off one Agent session',
+    '--name', 'hand-off-one-session'], fixture.environment)).stdout) as { readonly id: string };
   const taskId = created.id;
   // ADR-0059: submitting an undeclared Task starts it in the same command (the automatic pass
   // judges it SAFE), so the Agent Session this file drives exists without a second `task run`.

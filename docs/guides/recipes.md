@@ -1,8 +1,10 @@
 # 常见任务的做法（recipes）
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
-> 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v35 · **最后校对** 2026-09-17
+> 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> recipe 1/2/3 的创建命令与 §「我想改一个 bug」后的修订示例由本分支按 **ADR-0065** 改写
+> （必填 `--title`/`--name`；`--constraint` 已删除，限制写进详情）。
 > recipe 3 与 recipe 4 由 FOUNDATION-091 按 ADR-0059 改写（默认不冲突、声明同一功能才互斥）；
 > recipe 3 的容量命令由 **FOUNDATION-096** 同步（ADR-0061：上限是唯一的 Runtime 全局值，命令不带 project 参数；
 > 同一值另有设置面拼写 `settings concurrency`，也在本 recipe 里给出）。
@@ -38,11 +40,12 @@ bun run codeestra task status $PROJECT $TASK  # 这个任务现在到底是什�
 **目标**：把一个具体的缺陷修掉，让改动经过验证并进入 `dev`。
 
 ```sh
-# 1) 描述得具体一点：现象、期望、边界、验收方式。约束能写就写。
-#    （规格是一整段文本，双引号里直接写；需要多行时用 shell 的 $'…' 或 heredoc。）
+# 1) 描述得具体一点：现象、期望、边界、验收方式。过去写作约束的限制直接写进正文。
+#    （详情是一整段文本，双引号里直接写；需要多行时用 shell 的 $'…' 或 heredoc。）
+#    另两个字段：--title 是任务列表显示的一句话；--name 是分支/目录名（小写短横线 slug）。
 bun run codeestra task create $PROJECT \
-  "修复 CRLF 输入被 parser 吞掉的缺陷：现象是含 CRLF 的输入末尾多出一个 token，期望与 LF 输入结果一致，验收方式是新增一个覆盖 CRLF 的用例" \
-  --constraint "不要改动公开 API"
+  "修复 CRLF 输入被 parser 吞掉的缺陷：现象是含 CRLF 的输入末尾多出一个 token，期望与 LF 输入结果一致，验收方式是新增一个覆盖 CRLF 的用例；不得改动公开 API" \
+  --title "修复 CRLF 输入被 parser 吞掉" --name "fix-parser-crlf"
 
 # 2) 提交（这一步会顺手核对依赖并跑一次调度 pass）
 bun run codeestra task submit $PROJECT $TASK <version>
@@ -78,9 +81,8 @@ bun run codeestra task integrate $PROJECT $TASK <version>
 
 ```sh
 bun run codeestra task create $PROJECT \
-  "为 status 输出增加 adapters 列表：目标是 runtime.ping 已返回 adapters、CLI status 也打印它，范围只改 apps/cli 的输出，验收是 status 输出里能看到三个 adapter id" \
-  --constraint "不改 packages/contracts" \
-  --constraint "不改 apps/runtime"
+  "为 status 输出增加 adapters 列表：目标是 runtime.ping 已返回 adapters、CLI status 也打印它，范围只改 apps/cli 的输出，不改 packages/contracts 与 apps/runtime，验收是 status 输出里能看到三个 adapter id" \
+  --title "status 输出增加 adapters 列表" --name "status-adapters-list"
 ```
 
 其余步骤同 recipe 1。
@@ -115,9 +117,11 @@ bun run codeestra task tests show   $PROJECT $TASK
 
 ```sh
 # 1) 两个任务都建好、都提交（提交就会在容量允许时自动开始）
-bun run codeestra task create $PROJECT "把 A 模块的错误码补全" --constraint "只改 A 模块"
+bun run codeestra task create $PROJECT "把 A 模块的错误码补全；只改 A 模块" \
+  --title "A 模块错误码补全" --name "module-a-error-codes"
 bun run codeestra task submit $PROJECT $TASK_A <version-a>
-bun run codeestra task create $PROJECT "把 B 模块的文档补全" --constraint "只改 B 模块"
+bun run codeestra task create $PROJECT "把 B 模块的文档补全；只改 B 模块" \
+  --title "B 模块文档补全" --name "module-b-docs"
 bun run codeestra task submit $PROJECT $TASK_B <version-b>
 
 # 2) 需要确认时再问一句「它们现在到底跑不跑」
@@ -290,11 +294,11 @@ bun run codeestra task pause  $PROJECT $TASK <version> && bun run codeestra task
 界面不做本地状态判断：任务不是 `FAILED` 时会如实显示 `TASK_NOT_FAILED`（同理
 `TASK_CANCELLED` / `TASK_STILL_RUNNING` / `TASK_PAUSED` / `RECONCILE_REQUIRED` / `TASK_ARCHIVED`）。
 
-**如果还要改规格**，用 revision（append-only，不被覆盖），而不是改文字：
+**如果还要改任务详情**，用 revision（append-only，不被覆盖），而不是改文字：
 
 ```sh
 bun run codeestra task revision create $PROJECT $TASK <version> \
-  --specification "新的一句话要求" --constraint "新增的约束" --reason "因为 …"
+  --specification "新的一句话要求" --reason "因为 …"
 bun run codeestra task revision list   $PROJECT $TASK
 ```
 
@@ -609,7 +613,8 @@ bun run codeestra open /path/to/your-repo --dev-repo /path/to/dev-clone --no-ope
   # 成果留在 task 分支由你自己合。上面这一行是“我想要 dev → main 提升”时用的写法。
 bun run codeestra permission get                    # 确认权限模式
 
-bun run codeestra task create $PROJECT "一项具体的改动" --constraint "一条具体约束"
+bun run codeestra task create $PROJECT "一项具体的改动" \
+  --title "一项具体的改动" --name "a-concrete-change"
 bun run codeestra task submit $PROJECT $TASK <version>
 bun run codeestra task run    $PROJECT $TASK <version>
 ```
