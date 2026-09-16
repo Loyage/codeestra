@@ -7921,8 +7921,13 @@ Web UI HTTP 面读写同一条命令。
 
 ## 用户任务（`lane/cli-reference-split`）— CLI 命令参考按功能拆为九篇（ADR-0063，纯文档：无代码、无 schema、无命令面变化）
 
-状态：**已改完并定向验证通过，但按要求未提交、未 push、未合入 `dev`**。基线 `dev = 81dd3a8`；
+状态：**已改完、定向验证通过、已合入 `dev`（merge `6119eef`，分支提交 `a6933a8`）**；
+**未 push `origin/dev`、未提升 `main`、未重启任何 Runtime**。基线 `dev = 81dd3a8`；
 分支 `lane/cli-reference-split`（在 dev clone `/Users/loyage/Documents/codeestra-dev` 上，未建独立 worktree）。
+
+合入路径（如实记录）：按仓库里既有 lane 分支的人工合并形态（与 `lane/purge-force`、`lane/fix-impact-capacity-fixture` 相同）
+在 dev clone 上 merge 进 `dev`；**没有走产品 `IntegrationBatch`，也没有跑“独立集成验证”** —— 本格是仓库自身的纯文档改动，
+不含任何代码路径，因此没有可被集成验证断言的命令面行为。
 
 用户原话：「cli-reference.md太长了，我需要你按功能分别存放」。
 用户逐项裁决（本轮问答的实际答复，未答复项不作批准）：
@@ -7988,7 +7993,8 @@ Web UI HTTP 面读写同一条命令。
    的显示——本仓库没有渲染器，**不能断言**；对照表因此刻意不用锚点，只给「文件 + §N」。
 
 仍未做 / 已知问题：
-- **未提交**（用户要求先审阅）：本分支工作区有改动，未 commit、未 push、未合入 `dev`、未重启任何 Runtime。
+- **已提交并合入 `dev`（`a6933a8` → merge `6119eef`）**；未 push `origin/dev`、未提升 `main`、未重启任何 Runtime
+  （纯文档，dev 实例的代码与 UI 资产未变，不需要 `just restart-dev`）。
 - **既有断链（不在本格范围，未修，等你裁决）**：`docs/guides/features.md` 第 35 与 37 行共 4 处链接写的是
   `../decisions/0047-github-mediated-stable-promotion.md`，实际文件名是 `0047-github-mediated-promotion.md`；
   HEAD 版本已有（`git show HEAD:docs/guides/features.md | grep -c` = 2 行）。修它属另一件事，本格没有静默改掉。
