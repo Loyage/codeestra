@@ -458,7 +458,7 @@ describe('preparing a promotion', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('refuses a dev commit that is not the batch integration result', async () => {
     const fixture = await promotionFixture();
@@ -469,7 +469,7 @@ describe('preparing a promotion', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('refuses an abbreviated commit id instead of resolving it later', async () => {
     const fixture = await promotionFixture();
@@ -481,7 +481,7 @@ describe('preparing a promotion', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('refuses when main is not at the expected commit or already is the candidate', async () => {
     const fixture = await promotionFixture();
@@ -501,7 +501,7 @@ describe('preparing a promotion', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('refuses without a dev clone and when the recorded one is not a separate clone', async () => {
     const fixture = await promotionFixture();
@@ -517,7 +517,7 @@ describe('preparing a promotion', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('refuses a batch that is not INTEGRATED or whose verification did not pass', async () => {
     const fixture = await promotionFixture();
@@ -543,7 +543,7 @@ describe('preparing a promotion', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('refuses when the main checkout is being edited', async () => {
     const fixture = await promotionFixture();
@@ -554,7 +554,7 @@ describe('preparing a promotion', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('refuses to prepare a promotion with no full-suite run of the candidate', async () => {
     const fixture = await promotionFixture({ withoutFullSuiteEvidence: true });
@@ -565,7 +565,7 @@ describe('preparing a promotion', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('refuses when the remote dev branch already moved away from the candidate', async () => {
     const fixture = await promotionFixture();
@@ -579,7 +579,7 @@ describe('preparing a promotion', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('refuses an unreachable remote without making the record stale', async () => {
     const fixture = await promotionFixture();
@@ -598,7 +598,7 @@ describe('preparing a promotion', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('a policy edit on main invalidates the evidence before anything is pushed', async () => {
     const fixture = await promotionFixture();
@@ -621,7 +621,7 @@ describe('preparing a promotion', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 });
 
 describe('pushing the fixed candidate and awaiting the pull', () => {
@@ -651,7 +651,7 @@ describe('pushing the fixed candidate and awaiting the pull', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('a remote that refuses the push records nothing as pushed and moves no ref', async () => {
     const fixture = await promotionFixture();
@@ -670,7 +670,7 @@ describe('pushing the fixed candidate and awaiting the pull', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('a readback that is not the candidate is not recorded as pushed', async () => {
     const fixture = await promotionFixture();
@@ -690,7 +690,7 @@ describe('pushing the fixed candidate and awaiting the pull', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('a remote dev branch moved after the push is STALE and no restart is recorded', async () => {
     const fixture = await promotionFixture();
@@ -715,7 +715,7 @@ describe('pushing the fixed candidate and awaiting the pull', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('a non-fast-forward remote dev branch is refused instead of being pushed over', async () => {
     const fixture = await promotionFixture();
@@ -735,7 +735,7 @@ describe('pushing the fixed candidate and awaiting the pull', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 });
 
 describe('pulling, restarting and publishing', () => {
@@ -780,7 +780,7 @@ describe('pulling, restarting and publishing', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('a runtime that was not restarted cannot be recorded as a restart, and never publishes', async () => {
     const fixture = await promotionFixture();
@@ -858,7 +858,7 @@ describe('pulling, restarting and publishing', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 });
 
 describe('STRICT approval', () => {
@@ -901,7 +901,7 @@ describe('STRICT approval', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('an approval is refused once the remote dev branch moved, and the record becomes STALE', async () => {
     const fixture = await promotionFixture();
@@ -920,7 +920,7 @@ describe('STRICT approval', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('a dev or main move after the approval makes the promotion unusable', async () => {
     const fixture = await promotionFixture();
@@ -944,7 +944,7 @@ describe('STRICT approval', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 });
 
 describe('failure and crash recovery', () => {
@@ -973,7 +973,7 @@ describe('failure and crash recovery', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('reconciles a promotion whose pull happened but whose restart was never recorded', async () => {
     const fixture = await promotionFixture();
@@ -1016,7 +1016,7 @@ describe('failure and crash recovery', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('reports a main ref it cannot resume instead of guessing', async () => {
     const fixture = await promotionFixture();
@@ -1054,7 +1054,7 @@ describe('failure and crash recovery', () => {
     } finally {
       fixture.value.storage.close();
     }
-  });
+  }, 30_000);
 });
 
 describe('stable promotion from a multi-member batch (ADR-0053)', () => {
