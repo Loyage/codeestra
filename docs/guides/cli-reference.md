@@ -10,6 +10,8 @@
 > §14 的 `scheduler capacity` 一节由 **FOUNDATION-096** 重写（ADR-0061 D02：破坏性变更——命令去掉 project/adapter 参数，
 > 旧 `get|set|clear <project-id>` 形态被移除）；§14 的 `scheduler control` 一节由 **FOUNDATION-097** 新增
 > （同一个 schema v34 的暂停半边，两半已合并在同一次集成里）。
+> §4 的 `task list` / `task status` 由用户任务 `Loyage/simplize_task_ui`（2026-09-16）补上 `latestExecution` 投影字段的说明
+> （只读字段，无新命令、无 flag、无退出码变化）。
 > 同一事实还有一个设置面拼写：`settings concurrency get|set --limit|reset`（见 §19），它发的是同一条 Runtime 命令。
 > §7 的 `session handoff terminal resize` 一节由 FOUNDATION-083 校对（ADR-0054）。
 > §3 的 `project inspect`/`project trust` 段、§1 `open` 的失败码、§4 的 `task run` 与 `task depends` 两节由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目的常态路径不再出现 `DEV_REPO_REQUIRED`）；其余段落沿用 FOUNDATION-091 的校对基线。
@@ -308,6 +310,16 @@ dev clone 的拒绝是 `DEV_REPO_*`（见下）。
 ### `task list <project-id> [--all]`
 
 默认隐藏归档；`--all` 含归档。其他参数是用法错误。
+
+每行除 Task 本身外还带一个 **`latestExecution`**：这个 Task 的最新一次 Execution 尝试加上它的 Agent Session
+记录到的结局；`null` 表示这个 Task **从未启动过**（不是「未知」）：
+`{ executionId, attemptNumber, state, resourceHeld, sessionState, completionOutcome }`。
+
+- `completionOutcome` 是 `SUCCESS` / `FAILURE` / `null`；**`null` 读作「没有记录到结局」**，不是失败也不是成功——
+  会话断开时 `exit_json` 里只有断开原因，并没有 outcome。
+- 这是一个**读取投影**：只重述已经存在的列（含 `exit_json` 里的 completion），不新增语义、不参与任何判定。
+- 它存在的理由是不必为了知道「Agent 是否已经退出」而逐行再读一次 `task status`：工作台列表行用它区分
+  「Agent 正在跑」与「Agent 已退出待提交成果」（见 [ui.md](./ui.md) §2.2）。`task status` 返回的 `task` 是同一个投影。
 
 ### `task submit <project-id> <task-id> <expected-version>`
 

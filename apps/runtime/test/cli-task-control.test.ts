@@ -42,6 +42,19 @@ interface TaskPayload {
   readonly state: string;
   readonly version: number;
   readonly archivedAt: number | null;
+  /**
+   * The newest Execution attempt of this Task, from the `task list`/`task status` projection. It is
+   * what lets a list row tell "the Agent is still running" from "its Session already recorded an
+   * ending" without a second read per row; `null` means the Task never started an attempt.
+   */
+  readonly latestExecution: {
+    readonly executionId: string;
+    readonly attemptNumber: number;
+    readonly state: string;
+    readonly resourceHeld: boolean;
+    readonly sessionState: string | null;
+    readonly completionOutcome: 'SUCCESS' | 'FAILURE' | null;
+  } | null;
 }
 
 /** Trusted temporary project with no Agent execution: enough to drive the Task control commands. */
@@ -128,6 +141,9 @@ describe('codeestra task control', () => {
         readonly TaskPayload[];
       const archivedRow = all.find((entry) => entry.id === task.id);
       expect(archivedRow?.archivedAt).not.toBeNull();
+      // A Task that never started an attempt reports no attempt — not an unknown one. The field is
+      // read by the workbench row, so it has to survive the whole command face, not just storage.
+      expect(archivedRow?.latestExecution).toBeNull();
 
       // The archived Task is still readable by ID, and unarchive restores it.
       const status = JSON.parse((await cli(['task', 'status', projectId, task.id],

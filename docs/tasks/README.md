@@ -7775,6 +7775,67 @@ FOUNDATION-096 的容量上半，因此这次合并本身就是 ADR-0061 两半�
 - 容量半边的全局命令面（`scheduler capacity get|set|reset`）由 FOUNDATION-096 实现并已同在 `dev` 上；本格的容量卡 `scope` 已可切换到 `GLOBAL`（切点是一行 prop）。
 - 本次集成**只合并了两个分支，没有运行全量测试**：`dev → main` 提升前必须在精确 `dev` SHA 上跑一次全量（ADR-0038/runbook §3）。
 
+## 用户任务（`Loyage/simplize_task_ui`）— 把 Agent 运行结局与最后的输出摆到任务详情最前面（无 ADR、**无 schema 变更**、不占迁移号、新命令面无）
+
+状态：**已实现并定向验证**；**未 commit、未 push、未提升 `main`、未重启任何 Runtime**（工作区分支 `Loyage/simplize_task_ui`，
+基线 `dev@7425556`，无独立 worktree）。
+
+用户原话（两轮）：
+1. `简化任务详情页面的信息，目前这套太难关注到关键信息了，你先列出所有模块，我来选择哪些保留`；
+2. `细化状态提示吧，task内的agent运行完毕的时候，需要有提示，并且把agent最后的输出摆放到最前面来`。
+
+第一轮先给出了详情页 24 个模块的清单（含可见条件与所占体量），**未动手改版**；第二轮用户逐项裁决：
+1. 提示形态与位置：**标题下新增「Agent 运行结果」卡片**（而不是只改文字、也不是页面顶部整宽横幅）。
+2. 「最后的输出」来源：**用 Runtime 已记录的事实**（`executions[].session.completion.facts.finalAssistantText`），
+   不额外读会话文件。
+3. 提示范围：**详情页 + 任务列表行**（即需要给 Runtime 列表投影新增字段）。
+
+**第一轮的「精简模块」尚未执行**：模块清单里的取舍（第 3–24 项保留哪些）**未得到用户答复**，因此本次只做了第二轮明确要求的部分，
+并未删除或收起任何现有模块。不得把本次读成「详情页已精简」。
+
+改了什么：
+- `packages/storage/src/database.ts`：`TaskSummary` 新增 **`latestExecution`**（新 `TaskLatestExecutionSummary`）——最新一次 Execution 尝试
+  的 `executionId`/`attemptNumber`/`state`/`resourceHeld` 与它那个 Session 的 `sessionState`/`completionOutcome`；`listTasks`/`getTask`
+  各加两个 `LEFT JOIN`（`executions` 的最新一次 by `attempt_number DESC` + 它的 `agent_sessions`），共用新的 `TaskSummaryRow`；
+  `createTask` 的字面量显式给 `latestExecution: null`（从未启动过 ≠ 未知）。**纯读取投影**：不新增列、不新增表、不参与任何判定。
+- `packages/storage/src/index.ts`：导出 `TaskLatestExecutionSummary`。
+- `apps/ui/src/types.ts`：`TaskView` 同步 `latestExecution`。
+- `apps/ui/src/agent-run.ts`（新增，纯函数）：`agentRunPhase` 把事实分成
+  `NOT_STARTED/STARTING/RUNNING/WAITING_FOR_USER/PAUSED/ENDED_OK/ENDED_FAILED/ENDED_UNRECORDED` 七类，
+  `agentRunCapturable`（与 Runtime 的 `task.result.capture` 同一条判据，详情页按钮与列表行共用），`agentRunLabel`/`agentRunHeadline`/`agentRunTone`，
+  `agentRunFactLines`/`agentFinalOutput`，`taskNextStep`（把 `App.tsx` 里的 20 多分支 if 链搬出来并按结局细化），`agentRunRowHint`。
+  `taskNextStep` 顺带补上了原先会落到「当前状态：X。详情以 Runtime 记录为准。」的 `PAUSING` / `CANCELLING` 两档（只说
+  「确认静止后才进入下一态」，不断言已完成）。
+- `apps/ui/src/agent-run-card.tsx`（新增）：标题下的只读卡片；**规格正文/声明的功能被下移到操作按钮组之后**，让「Agent 说了什么 + 下一步该做什么」成为首先读到的两块。
+- `apps/ui/src/App.tsx`：`canCapture` 改用 `agentRunCapturable`；`nextStep` 改用 `taskNextStep`；卡片接到 `latestExecution` 的
+  `attemptNumber`/`session.completion`；给会话记录块加 `id="agent-session-transcript"` 作为卡片跳转锚点。
+- `apps/ui/src/task-list.tsx`：行尾提示改由 `agentRunRowHint` 优先给出（无更具体事实时回退到原表）。
+- `apps/ui/src/styles.css`：`.agent-run-card` 全套样式（**故意不用 `.card`**：`.task-detail > .card` 会把嵌套卡片染成警示色）。
+- 文档：`docs/guides/ui.md`（头部校对行 + §2.2 行尾提示替换表 + §2.3 「运行结果卡片」/重写的「下一步」表 + 顺序变更）、
+  `docs/guides/cli-reference.md` §4（`latestExecution` 字段）、`docs/guides/features.md`（任务表两行 + 新增一行）、
+  `docs/guides/manual.md` §6（图文说明），以及本记录。**未新增/修改 ADR**（无新的产品语义、无新门禁、无新命令）。
+
+定向验证（ADR-0038，开发分支只跑定向测试；全部通过）：
+- `bun test packages/storage/test/task-latest-execution.test.ts`（**新增，8 项**）：从未启动过 → `null`；Session `ACTIVE` → 无 outcome；
+  `SUCCESS` completion 下尝试仍 `RUNNING` + 持资源（这正是「已退出、待提交成果」）；`FAILURE` → 尝试 `FAILED`/不再持资源；
+  `exit_json` 里只有断开原因 → **不是** completion outcome；最新一次尝试胜过老的一次；`listTasks` 与 `getTask` 同一投影；归档不影响。
+- `bun test packages/storage/test`（**185 项**，含上面 8 项）：既有夹具全部通过（含 `one_held_execution` 单占用约束对新增 JOIN 无影响）。
+- `bunx vitest run apps/ui`（**16 文件 / 213 项**）：含新增的 `apps/ui/test/agent-run.test.ts`（分类、
+  `agentRunCapturable` 与 Runtime 判据一致、无 outcome 不渲染成成功、`taskNextStep` 各分支、列表行提示）与
+  `apps/ui/test/agent-run-card.test.ts`（静态渲染：输出在卡上、截断如实标注、无文本时不渲染空 `<pre>`、无 Session 时不给跳转）。
+- `bun test apps/runtime/test/cli-task-control.test.ts`（3 项）：`TaskPayload` 新增 `latestExecution` 断言，证明字段走通了**真实 CLI + 真实 Runtime + 真实 git** 的整条命令面。
+- `bun run typecheck`、`bun run typecheck:ui` 通过。
+- **未跑** `bun run check` / `just check` / `just verify` / `check:fast`（ADR-0038：全量只在 `dev` 候选上跑）。
+
+仍未做 / 已知边界（不得当作已完成）：
+- **第一轮的模块精简未执行**（用户尚未选保留哪些模块）；本次只新增与重排，未删除任何模块。
+- **未做 UI 的真实点击走查**（ADR-0008 边界）：卡片、跳转锚点、列表行提示的观感与窄屏排布只有源码/纯函数/静态渲染断言，
+  没有真实浏览器会话；`04-task-detail.png` 仍是**旧图**，截图未更新。
+- 卡片只显示最新一次尝试；用户在下拉框里选了另一次执行时，卡片**不会**跟着换（有意：它就是「最后一次说了什么」）。
+- `finalAssistantText` 依赖 Adapter 报告 facts；无 facts 时只能如实说「没有记录 provider 事实」，不回退去读会话文件（用户已选择该取舍）。
+- 未验证：超长输出在真实浏览器里的滚动高度、`#agent-session-transcript` 在非根滚动容器（`.workspace-shell`）里的实际落点。
+- 未 commit/push/提升/重启；`docs/guides/ui.md` 头部已把适用版本写成 `dev@7425556 + 本格分支`。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { agentRunRowHint } from './agent-run.js';
 import { updateTimeLabel, useTimeDisplay } from './ui-settings.js';
 import type { AttentionView, TaskView } from './types.js';
 
@@ -132,7 +133,10 @@ export function TaskList({ tasks, attentions, query, filter, sort, showArchived,
                 </span>
               </span>
               <span className="task-row-status"><TaskStateBadge state={task.state} live={live} />
-                <span className="task-state-hint">{states[task.state]?.hint ?? '以 Runtime 记录为准'}</span>
+                <span className="task-state-hint">
+                  {agentRunRowHint(task.state, task.latestExecution ?? null)
+                    ?? states[task.state]?.hint ?? '以 Runtime 记录为准'}
+                </span>
               </span>
               <span className="task-open" aria-hidden="true">查看详情 →</span>
             </button>
