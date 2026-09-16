@@ -63,6 +63,7 @@
 - [ADR-0058](0058-task-purge.md)：`task purge` 永久删除任务：全产品唯一一次显式 `--yes` 且不在任何常态路径上；append-only 只在 purge 事务内让路、触发器缺失即拒绝；成果已进 `dev`/`main` 即拒绝。
 - [ADR-0059](0059-feature-declaration-conflict-rule.md)：冲突判定只看「两侧声明同一功能且对方未完成」；文件/目录/模块/共享资源重叠与映射完整性都不再影响判定（schema v32）。**Supersedes ADR-0031 的判定语义**。
 - [ADR-0060](0060-managed-project-task-baseline.md)：被管理项目的 Task 基线取「项目文件夹当前检出的分支」，`dev clone` 变为可选（schema v33）。**Amends ADR-0056** 的必需性与 **ADR-0018** 的基线来源。**第三轮修订（2026-09-16，FOUNDATION-093）**：依赖判定从 dev-only 清单移出（它位于 `task submit`/`task run` 的常态路径），`DEV_REPO_REQUIRED` 只剩集成与提升。
+- [ADR-0061](0061-runtime-global-load-control.md)：Runtime 全局负载控制 —— 只保留一个跨全部项目/Adapter 的并行上限（默认 2、范围 1–16，旧显式值取最小值迁移）；全局暂停 = 持久启动屏障 + 按 `pid + start token + incarnation` 可核验的 Provider 主进程冻结（不改 Task 状态、不向工具子进程发停止信号、跨重启保持，只有显式继续才解除）。**Amends ADR-0030/0032/0033 的容量层级**。**已接受设计、尚未实现**（计划 schema v34；计划命令面 `scheduler capacity get|set|reset` 与 `scheduler control status|pause|resume|reconcile`）。
 
 ## 当前有效语义（与旧 ADR 冲突时按此执行）
 
@@ -80,6 +81,7 @@
 - **Session Guidance**：ADR-0057 —— 会话级事实；命令面写明「已入队 ≠ 模型已读」，无通道即 `CHANNEL_UNSUPPORTED`。
 - **任务永久删除**：ADR-0058 —— 唯一显式 `--yes`，不在常态路径；`cancel` 仍是终态、`archive` 仍是软删除。
 - **冲突判定**：ADR-0059 —— 默认 `SAFE_TO_PARALLELIZE`；`--allow-unknown` 保留且永不放宽 `CONFLICTING`。
+- **全局负载控制**：ADR-0061（已接受、待实现）—— 一个 Runtime 只有一个跨项目并行上限，项目级/Adapter 级覆写退役；全局暂停 = 持久启动屏障 + 可核验 Provider 主进程冻结，不替 ADR-0016 的单 Task pause，也不自动跨重启恢复；实现合入前，现有项目级/Adapter 级容量命令与「没有全局暂停」仍是代码事实。
 
 以上各条都**不放宽**既有不变量：失败不动 `dev`、保留失败现场、不 `--force`、CAS 推进、命令幂等、崩溃按事实收敛；也都不新增权限门禁或审批层。
 
@@ -94,6 +96,7 @@
 | Phase 2 | 真实 provider 的并发运行 | 两个 `SAFE` 任务真的同时跑、真实模型下的调度与 `--allow-unknown` 常态使用尚未验收 |
 | Phase 2 | 上游被修订时依赖锁定的 revision 怎么更新 | 未明确前继续钉旧 revision 并保持 `BLOCKED`（ADR-0024），不自行跟随；自动改钉与「选择版本后激活」未实现 |
 | Phase 2 | 影响分析未覆盖的语义 | 非 Git 共享资源（端口/数据库/dev server）、gitignore 产物、映射未声明路径的语义未定 |
+| Phase 2 | Runtime 全局负载控制（唯一跨项目上限、全局暂停） | ADR-0061 已接受设计、尚未实现：v34 迁移（旧显式值取最小值）、`scheduler capacity get\|set\|reset`、`scheduler control status\|pause\|resume\|reconcile`、跨重启持久屏障、三 Adapter 进程归属 spike 与 UI 投影都还没做；在定向验收前不得把目标语义当作已交付 |
 | Phase 3 | revision 投递的真实 ACK | 无 Adapter 实现 `applyRevision`；真实 provider ACK 与真实模型对投递提示的理解未验收 |
 | Phase 3 | 原生终端接管的真实验证 | 真实模型在 TUI 中键入后交还 RPC 的完整复验、跨交接权限模式完整矩阵（ADR-0054 仍 `PARTIAL`）、Windows 未验证 |
 | Phase 4 | `main` 未检出时的提升路径、多批次合并提升 | 不自动推断，需另立决策 |

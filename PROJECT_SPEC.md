@@ -33,12 +33,12 @@ User Intent → Task / Task DAG → Dependency Analysis → Conflict Analysis
 2. Task 持有当前 specification、不可覆盖的 revision history、constraints、priority、dependencies、predicted impact、conflict state、execution history、branch/worktree、validation/integration state。
 3. Minimum Useful Decomposition：仅当拆分明显改善并行性、依赖管理、风险隔离、上下文规模、独立验证或合并边界时才拆分。2～8 个任务是常见范围，不是约束。
 4. 依赖图必须是 DAG；新增或修改依赖时检测环，失败则不部分应用。
-5. 开始执行必须同时满足依赖条件、并发安全和 Agent 资源可用。功能 Task/worktree 从固定基线 commit 建立（ADR-0060：有 dev clone 的项目从该 clone 的 `dev`，被管理项目从项目文件夹当前检出的分支）；依赖上游必须通过集成验证并进入 `dev`，下游**基线**（同上两种来源）必须包含所需上游结果，基线读不到时按未满足阻塞而**不**拒绝命令（ADR-0060 第三轮修订 / FOUNDATION-093；原因码 `DEV_*` 沿用 ADR-0024 的有界枚举）。仅 Task verification 成功不释放依赖；进入 `dev` 也不等于已提升到稳定 `main`。
+5. 开始执行必须同时满足依赖条件、并发安全和 Agent 资源可用。容量是**每个 Runtime 一个跨所有项目的唯一并行上限**（ADR-0061）：任意时刻运行中的 Task 总数不超过该值，其余等待，不按 Project 或 Adapter 另设额度。功能 Task/worktree 从固定基线 commit 建立（ADR-0060：有 dev clone 的项目从该 clone 的 `dev`，被管理项目从项目文件夹当前检出的分支）；依赖上游必须通过集成验证并进入 `dev`，下游**基线**（同上两种来源）必须包含所需上游结果，基线读不到时按未满足阻塞而**不**拒绝命令（ADR-0060 第三轮修订 / FOUNDATION-093；原因码 `DEV_*` 沿用 ADR-0024 的有界枚举）。仅 Task verification 成功不释放依赖；进入 `dev` 也不等于已提升到稳定 `main`。
 6. Conflict assessment 为 `SAFE_TO_PARALLELIZE | UNKNOWN | CONFLICTING`，但**默认是 `SAFE_TO_PARALLELIZE`**：判定只比较**声明**，即两个 Task 的 revision 是否声明了**同一功能**（feature，取自项目 `.codeestra/impact.json` 的 `modules[].id`，`task create --feature`）。**只有当双方声明同一功能、且对方仍未完成**（状态不是 `SUCCEEDED`/`CANCELLED`，且未归档）时才是 `CONFLICTING`。**文件路径重叠、同一目录、同一模块路径、共享构建/依赖/schema 资源都不再构成冲突**——它们仍是可观测事实并进入解释输出，但不再阻止并发。`UNKNOWN` 保留为取值（历史 assessment 与客户端仍能渲染），当前规则**没有产生它的路径**：映射缺失/未确认/不完整、基线移动、worktree 不可观测都不再使判定变成 `UNKNOWN`。`--allow-unknown` 与一次性放行命令面保留，但只对 `UNKNOWN` 有意义，**永不放宽 `CONFLICTING`**。功能 id 在写入时按项目 main ref 的映射校验（未声明即 `UNKNOWN_FEATURE`，映射不可读即拒绝），因此判定本身不需要读映射。默认路径确认步数为 0。（原保守语义见 ADR-0031，已被 ADR-0059 取代。）
 7. 每个运行中 Task 独占 branch 和 worktree；不允许多个 Task 操作同一工作目录。branch 使用内部稳定 ID；owned worktree 位于 Runtime 数据目录 `worktrees/<project-id>/<task-id>/`，不得污染用户主工作区。
 8. Core 只依赖 Agent Adapter 合约，不能依赖某个 Agent 的命令行参数、SDK 类型或输出格式。
 9. AgentSession 是有身份、生命周期和恢复信息的运行实体，不是一次命令调用。用户可从 Task 入口请求接管运行中的真实 Agent；Pi 采用安全点 RPC→原生 TUI/PTY 进程交接，而不是把日志浏览伪装成 attach。一个 Execution 可保留有序 Session process incarnation，但任意时刻最多一个 Provider writer；旧进程未确认退出不得启动 successor（ADR-0010）。
-10. `WAITING_FOR_USER` 仅暂停对应 Task，其他合格任务继续执行。`BLOCKED` 专指依赖条件未满足；冲突等待、容量等待和故障不能都归为 BLOCKED。
+10. `WAITING_FOR_USER` 仅暂停对应 Task，其他合格任务继续执行。`BLOCKED` 专指依赖条件未满足；冲突等待、容量等待、全局暂停等待和故障不能都归为 BLOCKED。全局暂停中的待启动 Task 以独立等待原因表达，不改写为 `BLOCKED`。
 11. 运行中的 Task 可以修订；追加约束必须生成 TaskRevision，请求暂停 Agent，并记录暂停、投递和应用确认。确认新约束后才恢复；无法可靠暂停或确认时保留现场并重新执行。旧 revision 的验证不能作为新 revision 的交付证据。
 12. Task 验证与 Integration 验证是不同实体/记录，不能互相替代。项目必须长期保留 `main` 与 `dev`：`main` 是可运行稳定实例、不被开发中代码干扰的稳定分支，`dev` 是新功能实验与集成分支。**该 main/dev 双分支（双检出）模型只属于 Codeestra 自身**（ADR-0060）：被管理的其它项目**不要求**有 `dev` 分支或走 `dev → main` 提升——它们的 Task 基线取**项目文件夹当前检出的分支**，成果留在 task 分支由用户自己合并；`projects.dev_repo_path` 因此**可选**，只有需要长期 `dev` 分支的操作（`task integrate`、`promotion *`）仍以 `DEV_REPO_REQUIRED` 拒绝。Task branch 不得绕过 integration pipeline，任何完成功能必须先进入 `dev`。`dev → main` 固定 dev SHA、预期 main SHA 与验证证据；FULL 下无需批准，STRICT 下保留旧批准语义。提升必须经远端 `dev` 中转（ADR-0047，细则见 ADR-0052）：显式 push 固定候选到远端 `dev` 并读回核对，main 检出以 fast-forward-only 拉取该候选，重启核对成功后才推回远端 `main`；除该固定候选外不 push 任何 ref、不覆盖用户改动。本仓库自身的提升按 `AGENTS.md` 的人工四步执行，不使用产品 `promotion prepare/approve/promote`。`main` 更新后必须立即在 main 检出执行 CLI `stop` 再执行 `status` 重新拉起并检查 Runtime；重启成功前不得报告提升完成。
 13. Runtime 创建成果 commit 时固定 HEAD/ChangeSet/revision，并且只在已核验归属的 task worktree 提交，沿用现有仓库 identity 并正常执行 hooks。FULL 下 `task result capture` 单命令提交、不确认且不应用敏感路径拒绝；STRICT 下保留 prepare/confirm 与敏感路径 deny policy。
@@ -53,6 +53,7 @@ User Intent → Task / Task DAG → Dependency Analysis → Conflict Analysis
 22. Agent 执行过程可以只读观察（ADR-0013）：`session.transcript` 直接读取 Provider 自己的持久会话文件并展示工具调用与返回、助手文本、thinking 与 token/成本。该视图不写数据库、不产生 domain event、不构成投递或业务事实、不是 attach 也不是终端接管；provider 文件路径不离开 Runtime，只允许读取 Runtime 自己 session 目录内经规范化的普通文件。
 23. Agent 可以结构化提问（ADR-0014）：Codeestra 自有的受控扩展向 Agent 提供 `ask_user_question`（1–4 题，每题 2–4 个带描述的可选项，可多选，可用自己的话回答）。一份问卷整体对应**一个** Provider dialog、**一条** `QUESTION` Attention 与**一次** answer Operation；回答以结构化 `QUESTIONNAIRE` 表达，Runtime 必须按被问的那份问卷校验后才记录。选项越界、重复题号或单选多选个数不符都必须返回稳定错误码并保持请求 OPEN，**不得**降级为“用户拒绝回答”或静默作废已答内容；只有用户明确的 `CANCEL` 才是拒绝。提问不是审批：FULL 不新增确认，STRICT 也不把它当作需要审批的副作用工具。该通道不改变受控启动策略（仍以 `--no-extensions` 只加载 Codeestra 自己的扩展）。
 24. 用户可以暂停、终止、归档任务（ADR-0016）。暂停为协作停止：先落 `PAUSING`、确认 provider 进程已退出后才落 `PAUSED`，workspace 与会话证据保留；恢复在同一工作树新建 Execution，并以 provider conversation resume（`--session <file>`）继续，旧 Execution 为 `SUPERSEDED`，不把进程间恢复伪装成原地 pause。终止是终态 `CANCELLED`，不自动重开，旧审计与证据保留。归档是软删除：只写 `tasks.archived_at`，默认列表隐藏，不删除任何行、不回收 worktree/branch；物理删除由 ADR-0058 的 `task purge` 单独承担，不在取消流程中隐式执行。三项能力都有完整 CLI 命令，且不新增确认。
+25. 用户可以全局冻结 / 继续 Agent 模型驱动（ADR-0061）。全局冻结先持久化启动屏障，再按 `pid + OS start token + incarnation` 核验并冻结每个受控 Provider 主进程；不向已经运行的工具子进程发停止或终止信号，不取消已发出的模型请求。只有全部目标被证实停止才报告全局 `PAUSED`，否则保持屏障并报 `RECOVERY_REQUIRED`。该状态跨 Runtime 重启保持，只有显式继续才解除；它不改写 Task/Execution/Session 生命周期状态，也不替代 ADR-0016 的单 Task 暂停。
 
 ## 3. 任务修订与执行证据
 
@@ -116,13 +117,13 @@ Self-hosting test 不应污染 Stable 的数据库、工作树、真实运行任
 
 Agent 配置（provider/model/thinking level）按 ADR-0012 分全局默认与每项目覆盖持久化，逐字段按 环境变量 > 项目 > 全局 > 适配器默认 解析，仅影响新 Session，生效值随 Execution 记录。Agent 执行过程按 ADR-0013 只读展示，不入库、不是事件、不是 attach，文件路径不离开 Runtime。
 
-被管理项目的分支与基线按 ADR-0060：记了 dev clone 的取该 clone 的本地 `dev`；没记的（managed）取项目文件夹当前检出的分支。Codeestra 自身固定使用 `main`/`dev` 双分支（本机为两个独立 clone，ADR-0048）：功能从 `dev` 建基线并先集成回 `dev`；FULL 下固定证据后经远端 `dev` 中转提升到 `main` 无需批准（ADR-0047），更新后立即以 CLI `stop` + `status` 重启并检查 Runtime（ADR-0009/0011）。取消采用协作停止，超时请求人工处理并保留资源；优先级只影响后续调度、不抢占。用户可对任务执行暂停/恢复、终止与归档（ADR-0016）：均经 CLI 与同一命令面完成，暂停/恢复复用 provider conversation，终止为终态，归档只隐藏且不删除审计和 worktree，三者都不新增确认。
+被管理项目的分支与基线按 ADR-0060：记了 dev clone 的取该 clone 的本地 `dev`；没记的（managed）取项目文件夹当前检出的分支。Codeestra 自身固定使用 `main`/`dev` 双分支（本机为两个独立 clone，ADR-0048）：功能从 `dev` 建基线并先集成回 `dev`；FULL 下固定证据后经远端 `dev` 中转提升到 `main` 无需批准（ADR-0047），更新后立即以 CLI `stop` + `status` 重启并检查 Runtime（ADR-0009/0011）。取消采用协作停止，超时请求人工处理并保留资源；优先级只影响后续调度、不抢占。用户可对任务执行暂停/恢复、终止与归档（ADR-0016）：均经 CLI 与同一命令面完成，暂停/恢复复用 provider conversation，终止为终态，归档只隐藏且不删除审计和 worktree，三者都不新增确认。ADR-0061 进一步确定：每个 Runtime 只保留一个跨项目全局并行上限；全局暂停采用持久启动屏障 + 可核验的 Provider 主进程冻结，UI 的“暂停全部/继续全部”必须只是 `scheduler control pause|resume` 命令面的投影。
 
 ## 7. 阶段
 
 - Phase 0：Architecture Foundation。
 - Phase 1：Single Task Runtime。
-- Phase 2：Task DAG + Scheduler + Parallel Worktrees。
+- Phase 2：Task DAG + Scheduler + Parallel Worktrees + Runtime 全局负载控制（ADR-0061：唯一跨项目并行上限与持久全局 Provider 冻结）。
 - Phase 3：Interactive Agent Sessions（Session Guidance、原生终端接管、PTY 重连、RPC↔TUI 安全点交接）。
 - Phase 4：Integration Pipeline（Task 结果集成到 `dev`；固定证据后由 `dev` 提升到 `main` 并立即重启 Runtime；仅 STRICT 要求批准）。
 - Phase 5：Multiple Agent Adapters。

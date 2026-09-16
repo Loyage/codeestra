@@ -10,7 +10,7 @@ type EventEnvelope<T extends string, P> = {
   sequence: number;                 // SQLite 分配，本 Runtime 数据库内有序
   eventType: T;
   schemaVersion: number;
-  projectId: string;
+  projectId: string | null;          // 当前实现非空；ADR-0061/v34 计划允许 null 表示 Runtime 全局事实
   aggregateType: string;
   aggregateId: string;
   aggregateVersion: number;
@@ -22,7 +22,7 @@ type EventEnvelope<T extends string, P> = {
 type CommandEnvelope<T extends string, P> = {
   commandId: string;
   type: T;
-  projectId: string;
+  projectId: string | null;          // ADR-0061 的 scheduler global commands 为 null；当前实现仍要求项目命令非空
   expectedVersion?: number;         // 修改聚合时必填，创建时例外
   actor: string;                    // 从受信入口赋值，不相信任意外部声明
   payload: P;
@@ -93,7 +93,7 @@ Phase 1（ADR-0006）的 `VerificationCompleted` 不写入命令原始输出；`
 | `TaskRevisionDeliveryAttempted` | `TaskRevisionDelivery` | deliveryId, taskId, revisionId, attemptNumber, `channel`, executionId, sessionId, incarnationId, `state='IN_FLIGHT'`, `deadlineAt` |
 | `TaskRevisionDeliveryResolved` | `TaskRevisionDelivery` | deliveryId, taskId, revisionId, attemptId, `state`, `channel`, evidenceRef, errorCode, detail, `satisfied`；`SUPERSEDED_BY_RESTART` 分支另带 predecessorExecutionId 与 successorExecutionId |
 
-**容量与调度（ADR-0032 / ADR-0033，schema v21）**
+**容量与调度（当前实现：ADR-0032 / ADR-0033，schema v21；目标修订：ADR-0061）**
 
 | Event | aggregate | 关键 payload |
 |---|---|---|
@@ -108,6 +108,19 @@ Phase 1（ADR-0006）的 `VerificationCompleted` 不写入命令原始输出；`
 | `TaskImpactPredictionRevoked` | `TaskSchedule` | taskId, added/removed 改动集, conflicts, reasons, pauseRequested |
 
 `SchedulerCapacityChanged` 只在值真正变化时发布（重复设置同一值不 bump 版本、不发事件）。`ExecutionSlotReconciled` 也会为「决定保持占用、状态未变」的观测发布——那是审计事实，不是状态迁移。`TaskSchedule*` 的重放保护是 `(event_type, correlation_id, aggregate_id)`，不是 event id。
+
+ADR-0061 实现后，`SchedulerCapacityChanged` 与 `CAPACITY_ADAPTER_SLOT_LIMIT_REACHED` **不再产生新事实**（历史行原样保留），改用下列 Runtime 全局事件。它们均以 `project_id = NULL`、`aggregate_type='RuntimeSchedulerControl'` 写入；这是**已接受设计、尚未实现**：
+
+| Event | 关键 payload |
+|---|---|
+| `SchedulerGlobalCapacityChanged` | from, to, source（DEFAULT/EXPLICIT/MIGRATED_MINIMUM）, actor |
+| `SchedulerGlobalPauseRequested` | pauseEpoch, actor, targets[]（只含 identity/归属元数据，不含输出） |
+| `SchedulerGlobalPaused` | pauseEpoch, settledAt, targets[] 的 stopped/exited 事实 |
+| `SchedulerGlobalResumeRequested` | pauseEpoch, actor, targetCount |
+| `SchedulerGlobalResumed` | pauseEpoch, settledAt, resumed/exited 事实 |
+| `SchedulerGlobalControlRecoveryRequired` | pauseEpoch, stage（PAUSE/RESUME/STARTUP_RECONCILE）, reasonCode, target observations |
+
+`PauseRequested` 不等于 `Paused`，`ResumeRequested` 不等于 `Resumed`；部分结果只能写 `...RecoveryRequired`，不能用完成事件粉饰。全局控制的 command receipt 进入独立 `runtime_command_receipts`，因为命令不属于任何 Project。
 
 **集成与提升（ADR-0018 / ADR-0053 / ADR-0022）**
 
@@ -218,6 +231,7 @@ FOUNDATION-074 的 doc-sync 把它们补齐（名字都是实现先行的，按 
 | `ExecutionPauseRequested` / `ExecutionPaused` / `ExecutionCancelled` / `ExecutionSuperseded` | 未找到同名事件；暂停/取消的投影通过 `TaskStateChanged` / `ExecutionStateChanged` 与 Operation 状态表达 | **未验证**是否存在等价专名，本格不改动 |
 | `ResultCommitAuthorizationRequested` | 未实现同名事件（授权由 prepare/confirm 两步与 `ResultCommitAuthorized` 表达） | 设计名保留，未实现 |
 | `CandidateBuilt` / `SelfTestCompleted` / `StablePromoted` / `StableRollbackCompleted` | 未实现 | 设计名保留（Self Evolution 阶段） |
+| `SchedulerGlobalCapacityChanged` / `SchedulerGlobalPauseRequested` / `SchedulerGlobalPaused` / `SchedulerGlobalResumeRequested` / `SchedulerGlobalResumed` / `SchedulerGlobalControlRecoveryRequired` | **ADR-0061 设计名，尚未实现** | 名字已随 Accepted ADR 固定；实现时采用这些名字，不另起一套。`Requested` 与完成事实必须分开，部分结果只能写 RecoveryRequired |
 | `ProseQuestionAttentionResolved` | **实现先行名**（FOUNDATION-069 新增，本格补登记） | 本格**登记为长期名**；`UserAnswerDelivered` 不适用于散文提问（它没有 provider 请求），因此不合并 |
 | `TaskRetryRequested` | **实现先行名**（FOUNDATION-061 新增，本格补登记） | 本格**登记为长期名**；与 `TaskStateChanged` 同事务、不取代它 |
 | （设计目录没有的实现新增名） | `TaskArchived` / `TaskUnarchived` / **`TaskPurged`（FOUNDATION-090 / ADR-0058）** / `WorkspaceReclaimed` / `ResourcesReclaimed` / `OperationProgressed` / `OperationSettled` / `ExecutionSlot*` / `SchedulerCapacityChanged` / `TaskSchedule*` / `TaskImpactPredictionRevoked` / `Promotion*` / `Integration*`（含 ADR-0053 的 `IntegrationMemberMerged` / `IntegrationBatchStale` / `IntegrationBatchCancelled`） | 反向登记：这些是实现先行的名字，同样永不重命名。`TaskPurged` 是**唯一一条在它自己的聚合根行被删除的同一个事务里写入的事件**：它没有外键，因此任务行消失后它仍在 `events.list`/SSE 里可读，并且是「这个任务存在过、什么时候被谁删除、删掉了什么」的最后一条记录（ADR-0058 D08） |
@@ -246,7 +260,7 @@ Runtime 的本地 socket 同时承载一次性命令与长连接订阅；两者�
 - 订阅只读：不写事件、不写 `event_deliveries`、不重放任何 command，也不改变 Task/Execution 状态；崩溃或断开只影响该订阅，重连凭 cursor 继续。因此订阅不构成"已交付"证据，投递语义仍由 outbox 与消费者幂等决定。
 - 读取失败（如日志不可读）是终止性错误：Runtime 发出 `EVENT_READ_FAILED` 终止帧并移除该订阅，不假装仍在跟踪。
 - 订阅连接是一条命令一条连接：客户端在订阅建立后继续发送 command 属于协议违约，Runtime 直接关闭该连接。
-- 可选 `projectId` 过滤只影响交付；游标仍会前进，因此过滤订阅的 resume 语义与全量订阅一致。Phase 1 未实现按 project 的权限隔离——本地单用户 socket 权限（0600）是这一层的边界。
+- 可选 `projectId` 过滤只影响交付；游标仍会前进，因此过滤订阅的 resume 语义与全量订阅一致。**ADR-0061/v34 实现后，Project 过滤必须交付“该 Project 的事件 + `project_id IS NULL` 的 Runtime 全局事件”**，因为全局容量/暂停会影响每个 Project；cursor 仍按同一 sequence 前进。Phase 1 未实现按 project 的权限隔离——本地单用户 socket 权限（0600）是这一层的边界。
 - 投影由 Runtime 的事件写入路径负责；订阅不引入第二个事件源，也不允许客户端写入事件。
 - 本地 Web UI 经 `RuntimeHttpApi` 的 `/api/events` 消费同一组帧（SSE 编码，`fetch` 流式读取而非 `EventSource`，因此 bearer token 不出现在 URL 中）；命令经 `/api/command` 走同一 Zod 请求 schema 与同一 dispatch，HTTP 不是第二条业务语义路径。
 

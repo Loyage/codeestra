@@ -1,6 +1,6 @@
 # SQLite Schema
 
-状态：逻辑 SQL 设计基线 + 已实现 migration 记录。第 2–6 节是逻辑关系设计（其中若干节已被后续 ADR 修订，见第 8 节各版本的说明）；第 8 节逐版本记录 `packages/storage/src/migration.ts` 中**实际存在**的 migration，当前 `phase1SchemaVersion = 28`（v22 未占用；v25 已由 FOUNDATION-065 占用、v28 已由 FOUNDATION-075 / ADR-0046 占用）。**schema version 16 永久未使用**，原因见第 8 节。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与第 2–6 节的约束等价，并以第 8 节的实现记录为准。
+状态：逻辑 SQL 设计基线 + 已实现 migration 记录。第 2–6 节是逻辑关系设计（其中若干节已被后续 ADR 修订，见第 8 节各版本的说明）；第 8 节逐版本记录 `packages/storage/src/migration.ts` 中**实际存在**的 migration，当前最新实现为 schema **v33**（ADR-0060；v16 永久未使用、v22 未占用）。ADR-0061 已接受但尚未实现的 Runtime 全局负载控制计划占用 **v34**，其小节是实施契约，不得据此声称 migration 已存在。**schema version 16 永久未使用**，原因见第 8 节。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与第 2–6 节的约束等价，并以第 8 节的实现记录为准。
 
 ## 1. 约定
 
@@ -1360,3 +1360,68 @@ ADR-0060 之前，一个 Task 的基线 ref 只有一个可能：项目行的 `p
 - 读取处一律 `COALESCE(workspace.base_ref, projects.dev_ref)`：`NULL` 表示「这一行写于 v33 之前」，那时 dev ref 就是基线，
   于是历史记录仍然如实；升级不发明数据、不改写任何已有行。
 - 有 dev clone 的项目行为不变（写入的仍是那个 clone 的 `refs/heads/dev`）；managed 项目写入项目文件夹当时检出的分支。
+
+### Runtime 唯一全局容量与 Provider 冻结（计划 schema version 34，ADR-0061；尚未实现）
+
+计划新增的持久事实：
+
+```sql
+CREATE TABLE runtime_capacity_settings (
+  singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+  global_limit INTEGER NOT NULL CHECK(global_limit BETWEEN 1 AND 16),
+  version INTEGER NOT NULL CHECK(version >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= 0),
+  updated_by TEXT NOT NULL CHECK(length(trim(updated_by)) > 0)
+) STRICT;
+
+CREATE TABLE runtime_pause_control (
+  singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+  state TEXT NOT NULL CHECK(state IN
+    ('RUNNING','PAUSING','PAUSED','RESUMING','RECOVERY_REQUIRED')),
+  pause_epoch INTEGER NOT NULL CHECK(pause_epoch >= 0),
+  version INTEGER NOT NULL CHECK(version >= 0),
+  requested_at INTEGER,
+  requested_by TEXT,
+  settled_at INTEGER,
+  detail_json TEXT CHECK(detail_json IS NULL OR json_valid(detail_json))
+) STRICT;
+
+CREATE TABLE runtime_pause_targets (
+  id TEXT PRIMARY KEY,
+  pause_epoch INTEGER NOT NULL CHECK(pause_epoch > 0),
+  -- 这些 ID 是冻结当时的身份快照，刻意不加 FK：task purge 可以删除业务聚合，
+  -- 但 Runtime 仍需保留 pause epoch 的进程恢复/审计事实。
+  project_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  execution_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  incarnation_id TEXT NOT NULL,
+  provider_pid INTEGER NOT NULL CHECK(provider_pid > 0),
+  provider_start_token TEXT NOT NULL CHECK(length(trim(provider_start_token)) > 0),
+  state TEXT NOT NULL CHECK(state IN
+    ('PENDING','STOPPED','RESUMED','EXITED','RECOVERY_REQUIRED')),
+  observation_json TEXT NOT NULL CHECK(json_valid(observation_json)),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+  UNIQUE(pause_epoch,incarnation_id)
+) STRICT;
+
+CREATE TABLE runtime_command_receipts (
+  command_id TEXT PRIMARY KEY,
+  payload_hash TEXT NOT NULL,
+  result_json TEXT NOT NULL CHECK(json_valid(result_json)),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0)
+) STRICT;
+```
+
+最终 migration 可在不改变约束语义的前提下调整列名，但必须保持：singleton、pause epoch、逐 incarnation process identity、目标状态、同命令幂等与同键异文拒绝。
+
+**旧容量迁移是确定性的**：读取 `project_capacity_limits.global_limit` 与 `project_adapter_slot_limits.slot_limit` 的全部显式值；有值则 `MIN(all values)` 写入 singleton，没有则写/派生默认 2；随后才退役两张旧配置表。reservation/Execution 一行不改。迁移必须比对新值、关键表行数并执行 `foreign_key_check`；失败整笔回滚。历史 `SchedulerCapacityChanged` 事件保留。
+
+**全局事件**：`domain_events.project_id` 计划由 `NOT NULL REFERENCES projects(id)` 重建为可空 FK；`NULL` 只表示 Runtime 全局事实。复制必须保留原 `sequence`、event_id、payload 与索引，且 `event_deliveries` 引用保持有效。Project 过滤读取改为 `(project_id = ? OR project_id IS NULL)`。
+
+**状态一致性**：
+
+- `RUNNING` 时不得有 `PENDING`/`STOPPED` 目标；`PAUSED` 时本 epoch 不得有 `PENDING`/`RECOVERY_REQUIRED`；这些跨表约束由同一 immediate transaction 的 storage service 强制并以故障注入测试覆盖。
+- `RECOVERY_REQUIRED` 仍保持全局启动屏障；target 行不因超时、心跳或 Runtime 重启自动删除/改成 `EXITED`。
+- `runtime_pause_targets` 不是 Session 状态来源，不得据它把 Session 写回 ACTIVE/PAUSED；Session/Execution 的重启收敛仍走既有表与 ADR-0028。它的五个业务 ID 刻意是无 FK 的身份快照：`task purge` 删除 Task 聚合后，本 pause epoch 的进程控制/审计事实仍必须保留；purge 前仍须按 ADR-0058 证明 provider 已停止，并把对应 target 如实收口。
