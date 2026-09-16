@@ -16,7 +16,7 @@
 - `$TASK` = `task create` 返回的 task id；
 - `<version>` = 该 Task 当前的 `version`（乐观版本号）。**它每次改状态都会变**——用 `task status` 或
   上一条命令的输出重新取，不要凭记忆复用。
-- 每条命令的完整参数与退出码见 [cli/README.md](./cli/README.md)（九篇索引）；
+- 每条命令的完整参数与退出码见 [cli/README.md](./cli/README.md)（八篇索引）；
   报错怎么办见 [troubleshooting.md](./troubleshooting.md)。
 
 ---

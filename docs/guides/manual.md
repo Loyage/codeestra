@@ -1092,7 +1092,7 @@ Task/Execution 的 `RECOVERY_REQUIRED` 用 **`task recover <project-id> <task-id
 
 **本文不复制错误码表。** 稳定码、每条的触发条件与处理方式都在
 [troubleshooting.md](./troubleshooting.md) 的 §1（按症状）与 §2（按领域速查表）里；
-每条命令的参数、退出码与码位在 [cli/README.md](./cli/README.md) 索引下的九篇里。
+每条命令的参数、退出码与码位在 [cli/README.md](./cli/README.md) 索引下的八篇里。
 
 ### 想深入看哪篇
 
@@ -1150,7 +1150,7 @@ Task/Execution 的 `RECOVERY_REQUIRED` 用 **`task recover <project-id> <task-id
 - [workflow.md](./workflow.md)：端到端流程走查（含可照抄命令）
 - [features.md](./features.md)：功能清单（一行一个能力）
 - [ui.md](./ui.md)：**逐屏 UI 走查**（7 个标签页，每个按钮做什么）
-- [cli/](./cli/README.md)：CLI 与 HTTP/SSE 命令参考（九篇）
+- [cli/](./cli/README.md)：CLI 与 HTTP/SSE 命令参考（八篇）
 - [recipes.md](./recipes.md)：常见任务的做法
 - [acceptance-checklist.md](./acceptance-checklist.md)：人工观感核对清单
 - [troubleshooting.md](./troubleshooting.md)：常见故障与稳定码表

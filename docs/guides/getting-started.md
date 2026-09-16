@@ -181,16 +181,19 @@ bun run codeestra project impact validate /path/to/repo --json
 
 ```sh
 # FULL（默认）：无确认
-bun run codeestra project trust /path/to/repo --dev-repo /path/to/dev-clone
+bun run codeestra project trust /path/to/repo
 
 # STRICT：需要确认，交互输入 TRUST，或脚本传 --yes
 bun run codeestra permission set strict
-bun run codeestra project trust /path/to/repo --dev-repo /path/to/dev-clone --yes
+bun run codeestra project trust /path/to/repo --yes
 ```
 
-**前提**：仓库是合法 Git 仓库；`main` ref 可读。`--dev-repo` **可选**（ADR-0060）：给出一个同 origin、检出了 `dev` 的
-独立 clone，项目就有长期 `dev` 基线与 `dev → main` 提升；不给（managed）则 Task 基线取**项目文件夹当前检出的分支**，
-成果留在 task 分支由你自己合，`task integrate` / `promotion prepare` 需要 dev 分支时会以 `DEV_REPO_REQUIRED` 拒绝。
+**前提**：仓库是合法 Git 仓库；`main` ref 可读；并且**不要停在 detached HEAD**（那没有分支可命名，建 Task 时
+会被 `TASK_BASE_REF_UNRESOLVED` 拒绝）。
+
+**Task 基线只有一种**（ADR-0064）：这个文件夹**建 workspace 时当前检出的分支**；ref 与 commit 会一起固定，
+之后切分支不会移动已建 Task 的基线。产品不再有 dev clone、长期 `dev` 集成分支或 `dev → main` 提升，
+所以 trust **没有 `--dev-repo`**、也不会返回 `DEV_REPO_*`。成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
 
 **影响**：一旦 trust，Agent 工具、验证命令与 Git hooks 会**以你的用户权限**运行。STRICT 下文本明确写着：
 这**不**授权 commit、更新 main、push 或使用未知工具。
@@ -277,10 +280,8 @@ bun run codeestra stop --wait 30      # 最多等 30 秒（0–600）
 
 1. **UI 打不开、报 `UI_ASSETS_MISSING`** → 先 `bun run build:ui`。
 2. **CLI 打到了别的 Runtime** → 检查 `CODEESTRA_HOME`；一个 home 只跑一个 Runtime。
-3. **`project trust` 报 `DEV_REPO_*`** → 你给了一个不能被核验的 dev clone 路径（不是另一个 clone、origin 不同、
-   没检出 `dev`）。修好它，或者干脆**不给** `--dev-repo`（ADR-0060：此时 Task 基线取项目文件夹当前检出的分支，
-   但 `task integrate` / `promotion prepare` 仍然需要 dev clone）。**`DEV_REPO_REQUIRED` 只会在这些需要 dev 分支的
-   操作上报**，不再由 `project trust` 返回。
+3. **`project trust` 报 `REPOSITORY_CHANGED` / `VERIFICATION_POLICY_CHANGED`** → 你查看身份/策略与确认之间，
+   它们变了。重新 `project inspect` 看一遍再信任。（`DEV_REPO_*` 系列稳定码已随 ADR-0064 删除。）
 
 更多报错见 [troubleshooting.md](./troubleshooting.md)。
 

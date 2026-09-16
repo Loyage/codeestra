@@ -42,9 +42,9 @@
 **执行任何提升、重启 main 稳定服务或运行 dev 实例之前，先读 `docs/agents/runbook.md`**：命令序列、本机检出布局（ADR-0048）、dev 实例与「重启 main 稳定服务」规程的全文都在那里（原先写在本文件同名小节的规程已移入该文件）。本节只写不变量。
 
 - 项目必须长期保留 `main` 与 `dev` 两个分支，不得删除、重命名或用临时 integration branch 取代；两者在 GitHub 上都必须存在（`origin/main`、`origin/dev`）。`main` 是用户日常运行的稳定实例，不得在其上开发新功能。
-- 该双分支模型**只属于 Codeestra 自身**（ADR-0060 / FOUNDATION-093，schema **v33**：`dev_repo_path` 可选，没有 dev clone 的 managed 项目 Task 基线取项目文件夹当前检出的分支，只有集成与提升仍需 dev clone）；本机两个 clone 的拆分只为 Codeestra 自身的自进化。仍未做完的部分列在 `docs/tasks/README.md` 的 FOUNDATION-093 与 NEXT 第 14 条。
-- `dev` 是新功能实验与集成分支：功能 Task/worktree 从固定 `dev` commit 建立基线；功能完成、Task verification 通过后，经 IntegrationBatch 与独立 Integration verification 进入 `dev`，不得直接进入 `main`。
-- `dev → main` 是唯一稳定提升路径，且**必须经 GitHub 中转**（ADR-0047）：只 push 固定 dev 候选这一个 ref 并读回核对，main clone 以 fast-forward-only 拉取，重启核对通过后才推回 `origin/main`。不 `--force`、不覆盖远端已有提交、不对已检出的 `main` 用 `update-ref`；断网、SSH 认证失败或远端不可达时不推进任何 ref，也不得把本地等价当作提升成功。
+- 该双分支模型**只属于 Codeestra 自身**，且从 ADR-0064（schema **v35**）起它**没有任何产品支撑**：产品不再建模 dev clone、长期 `dev` 集成分支、`task integrate`、`task integration *` 或 `promotion *`（那些命令与相关表已整体删除）。本文件描述的 `main`/`dev` 布局、人工四步与重启规程全部是**本仓库自身的人工约定**，产品不提供命令、不记账、不校验。
+- `dev` 是新功能实验与集成分支：功能 Task/worktree 的基线是**项目文件夹（本机即 dev clone）建 workspace 时当前检出的分支**（`workspaces.base_ref`），在本机就是 `dev`；功能完成、Task verification 通过后，由**人**把成果合回 `dev`（`git merge`），不得直接进入 `main`。产品不做合并、不自动推、不记账。
+- `dev → main` 是唯一稳定提升路径，且**必须经 GitHub 中转**（沿用 ADR-0047 的口径，现在是人工步骤而非产品命令）：只 push 固定 dev 候选这一个 ref 并读回核对，main clone 以 fast-forward-only 拉取，重启核对通过后才推回 `origin/main`。不 `--force`、不覆盖远端已有提交、不对已检出的 `main` 用 `update-ref`；断网、SSH 认证失败或远端不可达时不推进任何 ref，也不得把本地等价当作提升成功。
 - 每批固定 dev SHA、预期 main SHA 与验证证据；提升前必须在精确 `dev` 候选 SHA 上跑完全量测试（在 dev clone 发起），候选、测试配置或锁文件变化即证据失效并重跑。FULL 下不批准，STRICT 下保留用户批准且 ref/证据变化使批准失效。
 - **产品 `promotion prepare/approve/promote` 已实现 ADR-0047 的 GitHub 中转路径（FOUNDATION-077 / schema v29，细则见 ADR-0052），但本仓库自身的提升仍不得使用它**，一律走 runbook 的人工四步，并在交付记录里如实写明实际用了哪条路径、执行到哪一步。
 - `main` 成功更新后必须立即在 main clone `stop` 再 `status` 重启并检查 Runtime：该后置步骤不增加第二次确认，Runtime 恢复响应前不得报告提升完成；失败时立即报告，不擅自回滚。提升只有在「候选已到 `origin/dev`、main 已 ff 到该候选、Runtime 已恢复、已推回 `origin/main`」四件事实都核对后才算完成（推回放在最后，重启未成功就不推回）。
@@ -54,7 +54,7 @@
 
 - 未获授权不要 commit、push、强制更新 branch、reset --hard、clean、删除有改动的 worktree 或执行破坏性清理。
 - 不修改用户现有工作目录来为 Agent 腾出执行空间；稳定运行的 main clone 与开发用 task/dev clone 必须分离。
-- 合入 `dev` 必须经过 IntegrationBatch 与独立集成验证；`dev` 合入 `main` 遵守上节的权限模式与重启要求。
+- 合入 `dev` 是人工 Git 动作（ADR-0064 之后产品没有 IntegrationBatch 或 integrate 命令）：功能完成后由人把成果合回 `dev`；`dev` 合入 `main` 遵守上节的权限模式与重启要求。
 - Human-authored instructions/skills/policies 不得被机器静默覆盖；修改本规格与人工规范应明确出现在交付说明中。
 - 保留失败现场；资源回收必须有归属校验与可追溯记录。
 
@@ -66,7 +66,7 @@
 - 小步改动，围绕不变量测试。优先覆盖非法状态迁移、重复命令/事件、并发修订、崩溃恢复、Git 基线变化和验证失效。
 - **开发分支只跑定向测试（ADR-0038）**：创建 `task/*`、`lane/*`、feature 或 Self Task candidate branch/worktree 时，按开发方向写少量具体的测试文件或窄命令及其覆盖目标；范围扩大时同步更新。
 - **开发分支禁止全量测试**：不得在上述分支运行 `bun run check`、`just check`、`just verify` 或等价全仓测试/构建；`check:fast` 也是聚合检查，不是“挑几个测试”的默认替代品（仅当改动确实横跨其覆盖范围并在交付记录中说明理由时才可用）。
-- **全量测试只在 `dev` 执行**：所有候选集成完毕后、准备 `dev → main` 前对精确 `dev` SHA 跑一次；之后 dev SHA、测试配置或锁文件变化都必须重跑。普通 dev 文档修改不触发立即全量测试。交付时只报告实际执行结果。
+- **全量测试只在 `dev` 执行**：所有候选合入完毕、准备 `dev → main` 前对精确 `dev` SHA 跑一次；之后 dev SHA、测试配置或锁文件变化都必须重跑。普通 dev 文档修改不触发立即全量测试。交付时只报告实际执行结果。
 - Git 测试使用临时仓库；不要以真实用户仓库做破坏性测试。
 - Mock adapter 只能证明协议与编排行为，不可声称真实 Agent 集成已验收。
 - 记录实际运行的检查及结果；不能运行的检查标明原因，禁止声称未执行的测试通过。
@@ -76,5 +76,5 @@
 ## Self Evolution
 
 - Self Task 在独立开发 worktree 中操作，不覆盖运行 Stable。
-- Candidate 测试与 Stable 数据隔离；candidate 分支遵守 ADR-0038，只跑建分支时选定的定向测试。Git 变更先进入 `dev`，并在精确 dev 候选上完成提升前全量测试；用户显式批准 `dev → main` 且完成 Runtime 重启前不能切换 Stable。
+- Candidate 测试与 Stable 数据隔离；candidate 分支遵守 ADR-0038，只跑建分支时选定的定向测试。Git 变更先合入 `dev`（人工），并在精确 dev 候选上完成提升前全量测试；用户显式批准 `dev → main` 且完成 Runtime 重启前不能切换 Stable。
 - 不绕过 bootstrap 恢复边界。涉及不可逆 migration 或 bootstrap 自身更新，先获明确决策。

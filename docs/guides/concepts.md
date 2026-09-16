@@ -5,8 +5,8 @@
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > §「调度三态」由 FOUNDATION-091 按 ADR-0059 重写（声明同一功能才冲突）；
 > §「调度三态」末尾新增「全局暂停」一段、§「运行边界」补充控制状态的持久性（FOUNDATION-097 / ADR-0061 D04/D08）。
-> §「双分支与 Task 工作树基线」由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目可跑完整 Task，只有集成与提升需要 dev 分支）；其余内容沿用 FOUNDATION-091 的校对基线。
-> §「Reclaim」由 ADR-0062 补充集成后的自动回收一行。
+> **本次修订（ADR-0064 / schema v35）**：删除 IntegrationBatch / Integration verification / Promotion
+> 三节与 dev clone、dev 基线、自动回收的表述，Task 基线改为「项目文件夹建 workspace 时检出的分支」这一种。
 
 这份文档解释 Codeestra 里的名词到底指什么、哪些东西**不是**调度主实体、以及几条会影响你日常判断的硬边界。
 规格原文见 [PROJECT_SPEC.md](../../PROJECT_SPEC.md) §2「核心不变量」；这里是面向使用者的说明。
@@ -20,7 +20,7 @@ Codeestra 是 **Task-first** 的：**Task 是业务主实体**。
 - **Agent、Terminal、Conversation、Worktree 都不是调度的业务主实体。**
   它们是 Task 执行过程中用到的资源与观察面：Agent 是一次执行绑定的一方，Terminal 是某个 Session 的
   终端接管面，Conversation 属于 provider 自己的会话文件，Worktree 是 Task 独占的工作目录。
-  调度、冲突判定、依赖、验证、集成、提升都围绕 **Task** 组织，而不是围绕「哪个 Agent」或「哪个终端」。
+  调度、冲突判定、依赖、验证都围绕 **Task** 组织，而不是围绕「哪个 Agent」或「哪个终端」。
 - 你能在界面上看到「执行过程」「终端」「会话」这些视图，但它们**不参与**调度决策的排序与门禁。
 
 好处是：换 Agent 不会变成一个新产品语义（只是新 Execution），关掉界面不会停止任何 Task。
@@ -40,7 +40,7 @@ Project 记录包含：`main` ref、`dev` ref、对象格式（sha1/sha256）、
 
 一次有边界的开发工作。Task 持有：当前 specification、**不可覆盖**的 revision 历史、constraints、priority、
 dependencies、**声明的功能（`features`，见下）**、predicted impact、conflict state、execution 历史、
-branch/worktree、验证与集成状态、归档标记。
+branch/worktree、验证状态、归档标记。
 
 功能声明属于 **revision**：`task create --feature <module-id>` 在第一条 revision 上声明，
 `task revision create --feature …` 替换后续 revision 的声明（**省略即继承**）。id 必须是项目 `main` ref 上
@@ -133,7 +133,7 @@ Codeestra 诚实报告 Adapter 能力，不伪造 `resume` / `attach` / `interru
   两者都**不会**恢复对话，也**不是** TaskRevision。开关 `settings prose-question-attention`
   （`auto` 默认 / `record-only` / `off`）决定这类完成是否记成等待。
 
-### Verification（验证）与 Task verification ≠ Integration verification
+### Verification（验证）
 
 **这是最容易混淆、也最重要的一条边界。**
 
@@ -142,49 +142,42 @@ Codeestra 诚实报告 Adapter 能力，不伪造 `resume` / `attach` / `interru
   中运行，证据**不含原始命令输出**。或者，当该分支在 `.codeestra/tests.json` 声明了定向测试计划并用
   `task tests record` 记录后，验证运行的是**已记录的计划**（而不是文件本身）——所以范围变化是一次显式、
   可审计的追加。
-- **Integration verification** 判定**一个 IntegrationBatch 合并后的 dev 提交**。它是**独立实体、独立记录**。
-- 两者**不能互相替代**：Task verification 通过**不**释放依赖；进入 `dev` **不**等于已提升到 `main`。
-- 提升前还有第三份证据：**dev 全量测试证据**（对精确 dev 候选 SHA 在 detached 副本里运行项目固定策略），
-  由 Runtime 运行并观察，客户端**不能自报**结果。
+- **只有这一种验证了**（ADR-0064）：产品不再有 *Integration verification*、*IntegrationBatch* 或
+  **dev 全量测试证据**——它们随 `dev → main` 提升一起删除。
 
-验证证据绑定 `revision / commit / policy digest`。**已完成执行 ≠ 已验证**；**已验证 ≠ 已集成到 dev**；
-**已进入 dev ≠ 已获批提升到 main**；**main 已更新 ≠ Runtime 已重启完成**。
+验证证据绑定 `revision / commit / policy digest`。**已完成执行 ≠ 已验证**；**已验证 ≠ 已合并**——
+合并是你自己的 Git 动作（成果停在 `refs/heads/task/<task-id>`）。
 
-### IntegrationBatch（集成批次）
+### 成果与合并（原 IntegrationBatch）
 
-正式领域对象（ADR-0018）。它记录：包含哪些 Task 与 revision、对应的成果 commit、固定的 `dev` 基线、
-dev 集成结果与集成验证证据。
+ADR-0018/0053 的 `IntegrationBatch` 曾是「把成果合入 `dev`」的正式领域对象（成员、revision、成果 commit、
+固定的 `dev` 基线、集成验证证据）。**ADR-0064 把它整体删除**（schema v35）：没有 `task integrate`、
+没有批次状态机、没有 `dev` 集成分支。
 
-- 集成在 Runtime 数据目录下的 detached integration worktree 里合并：**能 ff 就 ff，否则 `--no-ff`**。
-- **先跑独立的集成验证，PASSED 之后才用 CAS 推进 `dev`**，并把 Task 推到 `SUCCEEDED`。
-- 任何失败**保留现场且不推进 `dev`**；`dev` 正被某个工作树检出时拒绝集成。
-- 批次状态：`CREATED / PREPARING / VERIFYING / INTEGRATING_DEV / INTEGRATED / CONFLICTED / FAILED / RECOVERY_REQUIRED / STALE / CANCELLED`
-  （`STALE` = 固定证据已过期，不推进；`CANCELLED` = 记录证明没有副作用时被用户结束）。
-- **一个批次可以含多个 Task**（ADR-0053）：`task integration create` 显式组成（不碰 Git），`task integration integrate` 按 task-id 顺序
-  逐个合并后由**一次**独立集成验证覆盖整批，`PASSED` 才推进 `dev` 并把**每个**成员推到 `SUCCEEDED`。
-  部分失败如实可读：失败的成员标 `CONFLICTED`/`FAILED`，已合并的保持 `MERGED`，未尝试的保持 `PREPARED`。
+现在只有一条规则：**成果 commit 停在 `refs/heads/task/<task-id>`，是否合并与何时合并由你自己决定**
+（在你自己检出的分支上 `git merge`）。Codeestra 不自动合、不自动推、不做提升记账，因此也没有
+「谁的成果已经进去了」这类记录需要维护。
 
-### Promotion（稳定提升）
+因此下面这些概念**不再存在**，历史记录里读到它们时按 ADR-0064 理解：`IntegrationBatch` 的十个状态、
+批级 `STALE`/`CANCELLED`、`INTEGRATED`/`MERGED`/`PREPARED` 成员状态、`dev` 基线、`DEV_REPO_*` /
+`DEV_REF_*` / `DEV_CHECKOUT_*` / `TASK_INTEGRATED_INTO_DEV` / `TASK_IN_STABLE_PROMOTION` /
+`DEV_FULL_SUITE_EVIDENCE_*` 稳定码，以及 `promotion` 命令面。
 
-`dev → main` 的正式记录（ADR-0009 / ADR-0022）。一次 promotion 固定三件事：
+### Promotion（稳定提升，已删除）
 
-1. 已验证的 **dev commit**；
-2. **预期旧 main commit**；
-3. 该 commit 的**集成验证证据** + 该 SHA 的 **dev 全量测试证据**（含策略 digest 与候选锁文件 digest）。
+ADR-0009/0022 的 `dev → main` 提升记录（三件事：已验证的 `dev` commit、预期旧 `main` commit、验证证据）
+已由 **ADR-0064 整体删除**（schema v35）：`promotion prepare/approve/promote/abandon/get/list`、
+`promotion full-suite run|list`、`stable_promotions(_members)` 与 `dev_full_suite_evidence` 都不存在。
 
-- 状态：`CREATED → AWAITING_APPROVAL → PROMOTING → RESTARTING → SUCCEEDED`（失败/过期另有 `STALE`、`FAILED`、`RECOVERY_REQUIRED`）。
-- **`prepare` 不写 Git**；真正移动 `main` 的动作在 `promote`，它必须在**检出 main 的那个工作树里**做
-  fast-forward，并在那里依次执行 `bun install --frozen-lockfile` → `bun run build:ui` → `bun run codeestra stop`
-  → `bun run codeestra status`。
-- **重启只有在每一步都退 0、且重启后的 Runtime 回答 `READY` 时才被记录**。
-- 策略在 main 上被编辑、候选里的锁文件变了、或出现更新的失败运行，都会让证据**过期**，以
-  `DEV_FULL_SUITE_EVIDENCE_STALE` 拒绝（退出码 1）。
+本仓库自身的 `dev → main` 仍走人工四步（push 固定候选到远端 `dev` 并读回 → main 检出 ff-only 拉取 →
+重启核对 → 推回远端 `main`），写在 `AGENTS.md` 与 `docs/agents/runbook.md`；那是**仓库约定**，
+没有命令、没有记录、没有任何东西替你保证它被执行过。
 
 ### Reclaim（资源回收）
 
-回收 Runtime 数据目录下属于**本 Runtime** 的工作树 / 验证副本 / 集成工作树（ADR-0021 / ADR-0037 / ADR-0042）。
+回收 Runtime 数据目录下属于**本 Runtime** 的工作树与验证副本（ADR-0021 / ADR-0037 / ADR-0042）。
 
-- 三类资源：`TASK_WORKTREE`、`VERIFICATION_COPY`、`INTEGRATION_WORKTREE`。
+- 两类资源：`TASK_WORKTREE`、`VERIFICATION_COPY`（账本词汇表里仍保留历史的 `INTEGRATION_WORKTREE` 取值，但 Runtime 不再产生该类候选）。
 - `reclaim plan` 是**只读试运行**，返回与 `apply` **完全相同**的决策形状，所以「预览」永远不会和「真跑」不一致。
 - 每个被考虑的资源都有明确动作：`RECLAIM / RETAIN / REFUSE / ALREADY_ABSENT / RECOVERY_REQUIRED`，
   并带上授权或拒绝它所依据的**归属证据**。
@@ -226,7 +219,7 @@ Runtime 数据目录（不进 Git，机器生成）
 | Agent 工具调用 | 自动允许 | gate 逐次审批（Attention） |
 | 成果 commit | `task result capture` 单步 | `prepare` → `commit … --confirm` 两步；保留敏感路径拒绝 |
 | 验证策略变化 | 不确认 | 需确认 |
-| 提升 `dev → main` | 无需批准 | 保留批准（`promotion approve`） |
+| 本仓库自身的 `dev → main` 人工四步 | 无需批准 | 保留人工确认（`AGENTS.md`；产品无此能力） |
 
 不变的是：revision/ref/归属/进程身份核对、静止证据、幂等与崩溃恢复**始终有效**——这些是正确性核对，
 **不是**权限审批，不会被 FULL 关掉，也不会被包装成审批。
@@ -247,16 +240,13 @@ Runtime 数据目录（不进 Git，机器生成）
 
 两种基线（**ADR-0060**：main/dev 双分支模型**只属于 Codeestra 自身**，被管理的其它项目不被要求这么搭）：
 
-- **记了 dev clone 的项目**（含 Codeestra 自身）：长期保留 `main` 与 `dev`；所有功能 Task 从该 clone 的
-  固定 `dev` commit 建立基线（`projects.dev_ref`）；成果经 `task integrate` 进入 `dev`，`dev → main` 只能经
-  `promotion` 走（ADR-0009）。
-- **没记 dev clone 的项目（managed）**：Task 从**项目文件夹当前检出的分支**建基线（建 workspace 时读 HEAD，
-  把 ref 与 commit 一起固定进 `workspaces.base_ref`）；成果留在 `refs/heads/task/<task-id>`，**由你自己合**。
-  这类项目**能完整跑 Task**：`task submit` / `task run` / `task depends list` / `task result *` / `task verify`
-  都按它自己的基线（项目文件夹当前检出的分支）与归属（项目文件夹）工作；只有真正需要长期 `dev` 分支的
-  集成与提升（`task integrate`、`promotion *`）会以 `DEV_REPO_REQUIRED` 拒绝。文件夹处于
-  detached HEAD 时以 `TASK_BASE_REF_UNRESOLVED` 拒绝（没有分支可名）；`task run --base-ref <refs/heads/…>`
-  可以显式指定一条本地分支作基线（只对新 workspace 生效）。
+- **只有一种模型**（ADR-0064）：Task 从**项目文件夹建 workspace 时当前检出的分支**建基线（读 HEAD，
+  把 ref 与 commit 一起固定进 `workspaces.base_ref`/`base_commit`）；成果留在 `refs/heads/task/<task-id>`，
+  **由你自己合**。`task submit` / `task run` / `task depends list` / `task result *` / `task verify`
+  都按这个基线与归属（项目文件夹本身）工作。文件夹处于 detached HEAD 时以 `TASK_BASE_REF_UNRESOLVED` 拒绝
+  （没有分支可名）；`task run --base-ref <refs/heads/…>` 可以显式指定一条本地分支作基线（只对新 workspace 生效）。
+- **Codeestra 自身**仍以 `main`/`dev` 两个 clone 开发并把 `dev` 提升到 `main`，但那是仓库约定
+  （`AGENTS.md`），产品不建模它。
 - owned worktree 位于 Runtime 数据目录 `worktrees/<project-id>/<task-id>/`，**不污染你的主工作区**。
 
 ### 调度三态：SAFE / UNKNOWN / CONFLICTING
@@ -273,8 +263,8 @@ Runtime 数据目录（不进 Git，机器生成）
   （历史的 assessment 行与客户端仍要能渲染），但日常不可达；`clear-unknown` 对 `CONFLICTING` 继续拒绝
   （`recorded:false`）。
 
-启动前门禁不再兜底残余风险：两个都没声明功能的 Task 可以并发改同一个文件，冲突在成果 commit /
-IntegrationBatch 阶段以 `CONFLICTED` 暴露（ADR-0059 D02 明确选择的权衡）。
+启动前门禁不再兜底残余风险：两个都没声明功能的 Task 可以并发改同一个文件，冲突要到**你自己合并时**
+才暴露（ADR-0059 D02 明确选择的权衡；ADR-0064 之前它在集成批次阶段以 `CONFLICTED` 暴露）。
 
 > 需要看「引擎看到的每一条事实」时：`project impact validate/show/explain` 与 `task schedule explain`
 > 仍然完整报告映射、快照、基线与占用者（含 `occupiers[].code`）；只是这些事实不再改变判定。

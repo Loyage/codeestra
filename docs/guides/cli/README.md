@@ -4,12 +4,12 @@
 > 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > **本次修订（ADR-0064 / schema v35）**：`promotion` 一篇（§15）与 `task integrate`/`task integration`（§11）
-> 已随集成与提升一起删除；九篇变八篇。
-> 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一，
+> 已随集成与提升一起删除，因此现在是八篇。
+> 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一（ADR-0064 之后为八篇），
 > **内容自 `cli-reference.md @ dev@de03448` 搬移，一句未改写；本次未重新核对源码**，最后校对日期因此不变。
 > 唯一未搬移的一行是原文件头部的第 17 行——它与第 6 行是同一句（只有句末标点不同），只保留了一份。
 > §14 新增 `scheduler control` 一节，并把 §0.2 的退出码与「等待码」表补上 `SCHEDULER_GLOBALLY_PAUSED`（FOUNDATION-097 / ADR-0061 D08/D09）；
-> 本文件既是**这套参考的入口**（九篇索引），也是原来那篇的 §0 通用约定（连接、自动启动、退出码、环境变量）。
+> 本文件既是**这套参考的入口**（八篇索引），也是原来那篇的 §0 通用约定（连接、自动启动、退出码、环境变量）。
 > 旧编号（§1–§21）到新文件的对照表在 [`../cli-reference.md`](../cli-reference.md)；各篇内部沿用拆分前的章节号。
 
 本文覆盖 `apps/cli/src/main.ts` 中 `usage()` 列出的**每一个命令组**，以及 Runtime 的 HTTP/SSE 面。
@@ -23,7 +23,7 @@ bun run codeestra <group> [<action>] [<argument>…] [--flag …]
 
 （`bun run codeestra` 对应 `package.json` 的 `"codeestra": "bun run apps/cli/src/main.ts"`。）
 
-## 九篇索引
+## 八篇索引
 
 | 文件 | 覆盖章节 |
 |---|---|

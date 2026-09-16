@@ -136,9 +136,7 @@ CODEESTRA_HOME="$CODEESTRA_HOME" bun run codeestra project list    # 记下 proj
 
 - 只从项目 **`main` ref** 读取：Task 分支改不动判定自己的命令。
 - 字段与上限见 `packages/contracts/src/verification-policy.ts`；策略缺失时 `task verify` 会拒绝。
-- **A8（真实提升）不能用这份最小策略**：`promotion full-suite run` 消费的是被验收项目 `main` ref 上
-  的真实策略，它必须真的能判定那个候选。对 Codeestra 自身来说就是
-  [`.codeestra/policies/verification.json`](../../.codeestra/policies/verification.json)（install + check）。
+- 策略只用于 `task verify`（`promotion full-suite run` 已随 ADR-0064 删除；A8 因此没有可执行的验收步骤）。
 
 ### 1.5 最小 `.codeestra/impact.json`（A1 并发验收专用）
 
@@ -707,89 +705,14 @@ ce task transcript "$PROJECT" "$TASK" --json                # 应包含刚键入
 
 ---
 
-### A8 真实 GitHub 上的产品路径提升（NEXT 第 11 条已完成 / ADR-0047 / ADR-0052）
+### A8 真实 GitHub 上的产品路径提升（**已删除**，ADR-0064）
 
-**这一项会真实改动远端 `refs/heads/dev` 与 `refs/heads/main`。必须先得到用户对「允许真实 push」的
-明确许可。** 没有许可时，改用本地裸远端仓库（`git init --bare`）验证同一条路径，并在记录里如实写明
-「这是本地裸远端，不是 GitHub」。
+这一项验收的是产品命令面 `promotion prepare/approve/promote` + `promotion full-suite run`。**ADR-0064
+（schema v35）把它连同 IntegrationBatch、独立集成验证与 dev clone 一起从产品中删除**，所以这里没有可执行的
+验收步骤。
 
-**前置**
-
-- 两个**互相独立**的 clone：main clone（检出 `main`）与 dev clone（检出 `dev`），各自 `.git` 是目录、
-  各有 `origin`、`git worktree list` 不出现对方（ADR-0048）。
-- `origin` 上 `refs/heads/main` 与 `refs/heads/dev` 都存在。
-- 项目已记录 dev clone：`project trust <main-clone> --dev-repo <dev-clone>`，核验通过
-  （`project inspect . --dev-repo <dev-clone>` 显示 `verified: true`）。
-- 一个 **`INTEGRATED`** 的 IntegrationBatch；候选就是它的集成 commit（`task integrate` 每个 Task
-  产生一个单成员批次）。
-- 候选 SHA 上已经跑过 `promotion full-suite run`，`state: PASSED`
-  （策略 = 该 `main` ref 上的真实 `verification.json`，不是 §1.4 的最小 noop）。
-
-**命令**
-
-```sh
-# --- 在 dev clone 侧准备候选 ---
-ce task integrate "$PROJECT" "$TASK" "$VERSION"; echo "exit=$?"
-#   → 记下 batchId；批次状态必须到 INTEGRATED，integratedCommit 就是候选
-git -C <dev-clone> rev-parse <candidate>                       # 记录候选 SHA（完整 40/64 位）
-git -C <main-clone> rev-parse main                             # 记录预期旧 main SHA
-
-ce project inspect "$MAIN_CLONE" --dev-repo "$DEV_CLONE"       # 确认 devRepoPath.verified: true
-
-# --- 固定证据 ---
-ce promotion full-suite run "$PROJECT" --dev-commit "$DEV_COMMIT" --json; echo "exit=$?"
-#   0 仅当 state=PASSED；证据绑定候选 SHA + 策略 digest + 该 commit 的 lockfile digest
-
-ce promotion prepare "$PROJECT" "$BATCH" "$DEV_COMMIT" "$MAIN_COMMIT"; echo "exit=$?"
-#   → 记下 promotionId；这一步不写任何 ref、不写远端
-
-# --- 第一次 promote：push + 读回 + 等待拉取 ---
-ce promotion promote "$PROJECT" "$PROMOTION" --json; echo "exit=$?"   # 期望 3
-git ls-remote origin refs/heads/dev                                    # 必须等于候选 SHA
-
-# --- 人工拉取（在 main clone 里；这是设计上的人工步骤） ---
-cd "$MAIN_CLONE" && git fetch origin && git merge --ff-only origin/dev
-
-# --- 第二次 promote：收口 + 重启 + 推回 origin/main ---
-ce promotion promote "$PROJECT" "$PROMOTION" --json; echo "exit=$?"   # 期望 0
-git ls-remote origin refs/heads/main                                   # 必须等于候选 SHA
-ce promotion get "$PROJECT" "$PROMOTION"
-```
-
-**预期观察**
-
-- `promotion promote` 第一次：**exit 3**，`phase: AWAITING_PULL`，`remoteDevCommit === 候选`，
-  `pushedAt` 非空；**没有任何重启记账**（`mainPushedAt` 为空）。
-- `git ls-remote origin refs/heads/dev` 读回值逐字符等于候选。
-- 第二次：exit 0，`phase: COMPLETE`，`remoteMainCommit === 候选`、`mainPushedAt` 非空；stderr 上能看到
-  四个后置步骤（`bun install --frozen-lockfile`、`bun run build:ui`、`stop`、`status`）的输出摘要。
-- `git ls-remote origin refs/heads/main` 读回值逐字符等于候选。
-- 人为制造的失败面（可选，但很有价值，用本地裸远端做）：远端 `dev` 被移到非候选 SHA →
-  `REMOTE_DEV_MOVED` 且 `prepare/approve/promote` 全拒、**不移动任何 ref**；`pre-receive` 拒绝 →
-  `DEV_PUSH_REFUSED`，记录保持可重试、**不标 `STALE`**；重启步失败 → 不推回 `origin/main`。
-
-**判定**
-
-- **可机器断言**：两次 promote 的退出码、`phase`、`remoteDevCommit`/`remoteMainCommit` 与
-  `git ls-remote` 读回值、`pushedAt`/`mainPushedAt` 的有无。
-- **必须人眼**：确认 main clone 的 Runtime 在重启后确实回答 `READY`（`promotion promote` 自己会核对
-  「应答 `runtime.ping` 的 boot 与发出计划的 boot 不同」），并确认这是**已批准的**提升，不是误触。
-  重启会更换 Web UI 的内存 token：旧链接失效是预期现象。
-
-**失败/中止**
-
-- `REMOTE_DEV_UNREACHABLE` / `DEV_PUSH_REFUSED` → 记录保持可重试、**不标 STALE**、**不移动 ref**；
-  这通常意味着断网或认证失败，**不要**重试第二次同样的 push 去「碰运气」，先修环境。
-- `REMOTE_DEV_MOVED` → 记录 `STALE`；必须重新 `prepare`（远端 `dev` 已经是别的东西了）。
-- `RESTART_STEP_FAILED` / `RUNTIME_NOT_READY` / `RESTART_UNPROVEN` → **不推回 `origin/main`**；
-  main 检出已在候选上且不回滚；重跑 `promotion promote` **只重跑已记录的步骤**，不会重复停 Runtime。
-- 断网/认证失败/远端不可达 → 一律不推进任何 ref，也**不得把本地等价当作提升成功**。
-
-**证据**：`a8-integrate.json`、候选与旧 main 的 SHA、`a8-full-suite.json`、`a8-prepare.json`、
-`a8-promote-push.json`、两次 `git ls-remote` 的原始输出、`a8-promote-complete.json`、
-`promotion get`、以及（若做了失败面）被钩子操纵的远端输出。
-
----
+仍然成立的只有本仓库自身的约定流程：`docs/agents/runbook.md` 的人工四步（push 固定候选到远端 `dev` 并读回
+→ main 检出 ff-only 拉取 → 重启核对 → 推回远端 `main`）。它是**人工操作**，不是产品能力，本文不把它列为验收项。
 
 ## 3. 证据包
 
@@ -806,7 +729,6 @@ ce promotion get "$PROJECT" "$PROMOTION"
 | 7 | 物化知识 | `$CODEESTRA_HOME/knowledge/**` 的文件 + `shasum -a 256` + 与记录的 digest 对照 |
 | 8 | 会话内容 | `task transcript … --json`（每个相关 Execution 一份） |
 | 9 | 终端投影 | `session handoff terminal read --since 0` 的原始输出 |
-| 10 | 提升事实 | `promotion get`、`git ls-remote` 读回值、`full-suite` 记录 |
 | 11 | Runtime 数据目录 | `$CODEESTRA_HOME` 的只读拷贝（`runtime.sqlite` + `-wal` + `-shm`、`worktrees/`、`knowledge/`、provider session 目录、`runtime-boots/`） |
 | 12 | 本次执行过的命令 | 脚手架真实模式把每条子命令与退出码追加到 `$EVIDENCE/commands.log`；手动执行时你自己维护同样一份 |
 
@@ -855,10 +777,10 @@ ce promotion get "$PROJECT" "$PROMOTION"
 
 - 命令参数、退出码、稳定码：[cli/README.md](../guides/cli/README.md)
 - 端到端流程（日常怎么用，不是怎么验收）：[workflow.md](../guides/workflow.md)
-- 领域概念（为什么 `UNKNOWN` 不是 `SAFE`、Task 验证 ≠ 集成验证）：[concepts.md](../guides/concepts.md)
+- 领域概念（为什么 `UNKNOWN` 不是 `SAFE`、成果停在 task 分支由你合并）：[concepts.md](../guides/concepts.md)
 - 出错了怎么办：[troubleshooting.md](../guides/troubleshooting.md)
 - 人工观感清单：[acceptance-checklist.md](../guides/acceptance-checklist.md)
 - 决策依据：ADR-0016（暂停/终止）、ADR-0026（原生终端）、ADR-0028（修订投递）、ADR-0043（散文提问）、
-  ADR-0044（插件与 gate）、ADR-0047/0052（GitHub 中转提升）、ADR-0051（知识交接与 ACK 评估）、
-  ADR-0008/0011（效率、CLI 完备、FULL 零确认）
+  ADR-0044（插件与 gate）、ADR-0051（知识交接与 ACK 评估）、ADR-0008/0011（效率、CLI 完备、FULL 零确认）、
+  ADR-0064（删除 dev clone / 集成 / 稳定提升）
 - 脚手架：`scripts/real-provider-acceptance.sh`（`--help` 列出全部步骤）

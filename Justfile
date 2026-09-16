@@ -38,10 +38,6 @@ ui-typecheck:
 ui-build:
     bun run --cwd apps/ui build
 
-# 构建带 dev 通道标记的 UI 资产（VITE_CODEESTRA_CHANNEL=dev，见 ADR-0049）
-ui-build-dev:
-    bun run build:ui:dev
-
 # 全量检查：仅在 dev 上、dev→main 前对精确候选 SHA 运行
 check:
     bun run check
@@ -104,9 +100,8 @@ restart-main:
     # 不要把它写进文件或提交。
     printf 'restart-main：main 稳定服务已恢复 READY\n'
 
-# dev 的 UI 必须用 dev 通道构建（ADR-0049）：不带 VITE_CODEESTRA_CHANNEL=dev 构建出来的
-# 界面没有 dev 标记，既不能当稳定版也不能当 dev 版汇报。构建后核对 index.html 真的带标记。
-# 重启 dev 服务：install → dev 通道构建 UI → stop → status
+# dev 实例与稳定实例的区别只有 CODEESTRA_HOME 与所在 clone（ADR-0064 删除了 ADR-0049 的 dev 通道标记）。
+# 重启 dev 服务：install → build UI → stop → status
 restart-dev:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -118,11 +113,7 @@ restart-dev:
     printf '== CODEESTRA_HOME=%s\n' "$home"
 
     bun install --frozen-lockfile
-    VITE_CODEESTRA_CHANNEL=dev bun run --cwd apps/ui build
-    if ! grep -q 'data-channel="dev"' apps/ui/dist/index.html; then
-        printf 'restart-dev：构建产物没有 dev 通道标记，停止（ADR-0049）\n' >&2
-        exit 1
-    fi
+    bun run --cwd apps/ui build
 
     CODEESTRA_HOME="$home" bun run codeestra stop
     CODEESTRA_HOME="$home" bun run codeestra status >/dev/null   # 拉起 Runtime；输出略

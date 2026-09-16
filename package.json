@@ -19,8 +19,7 @@
     "check:fast": "bun run typecheck && bun run typecheck:ui && bun run test && bun run test:unit",
     "check": "bun run typecheck && bun run typecheck:ui && bun run test && bun run test:storage && bun run build:ui",
     "typecheck:ui": "bun run --cwd apps/ui typecheck",
-    "build:ui": "bun run --cwd apps/ui build",
-    "build:ui:dev": "VITE_CODEESTRA_CHANNEL=dev bun run --cwd apps/ui build"
+    "build:ui": "bun run --cwd apps/ui build"
   },
   "devDependencies": {
     "@types/bun": "1.3.13",

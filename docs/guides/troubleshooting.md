@@ -5,7 +5,8 @@
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > 「全局暂停」一节的稳定码由 FOUNDATION-097 新增（ADR-0061 D08/D09）；`task purge` 的拒绝码一节由 FOUNDATION-090 新增（ADR-0058）；冲突判定与 `--feature` 的拒绝码由
 > FOUNDATION-091 新增/改写（ADR-0059）。
-> 「报 `DEV_REPO_REQUIRED`」一节由 FOUNDATION-093 第三轮重写（ADR-0060 修订）。
+> **本次修订（ADR-0064 / schema v35）**：删除「报 `DEV_REPO_REQUIRED`」与「集成报 `DEV_CHECKOUT_*`」
+> 两节、删除「稳定提升被拒」一节，并把删除过时的集成/提升码集中列在错误码一节。
 > 「任务集成后 worktree 还在？」一节由 ADR-0062 新增（集成成功后的自动回收与失败现场）。
 > 「任务一直不跑」与「调度 / 容量 / 槽位」两处的容量码由 **FOUNDATION-096** 同步（ADR-0061：只剩一个
 > Runtime 全局上限，容量命令不带 project 参数；`CAPACITY_ADAPTER_SLOT_LIMIT_REACHED` 成为历史码）。
@@ -82,28 +83,15 @@ CODEESTRA_HOME=/tmp/codeestra-dev bun run codeestra status
 
 同一个 home 上有两个 Runtime 应答过。这是事实，不是文案问题：先确认哪个是你想要的，再决定停谁。
 
-### 报 `DEV_REPO_REQUIRED`
+### 报 `DEV_REPO_REQUIRED` / `DEV_CHECKOUT_*`（已删除）
 
-这只属于**两条真正需要长期 `dev` 分支的命令面**：`task integrate` 与 `promotion *`
-（含 `promotion full-suite run`）。从 ADR-0056 起那个 `dev` 分支由项目的 **dev clone**
-（`projects.dev_repo_path`）提供，不是主检出自己的本地 ref；省略它（或写 `none`）时这两条命令会拒绝。
+这三个码都不再存在（ADR-0064）：产品不再有 dev clone、长期 `dev` 集成分支，也没有集成命令需要
+「另一个 clone 上的那条分支」。`task integrate` / `promotion *` 本身也已删除，执行它们只会得到用法错误。
 
-**它不再由 `project trust` 返回，也不出现在 Task 的常态路径上**（ADR-0060 第三轮修订，用户裁决
-「一般项目根本不需要 dev」）：`task submit`、`task run`、`task depends list`、`task result *`、`task verify`
-与 `reclaim *` 都按项目**自己记录的 Task 基线**（没有 dev clone 时 = 项目文件夹当前检出的分支）与归属
-（= 项目文件夹）工作。如果你在 2026-09 之前见过它们报这个码，那是当时的缺陷。
-
-补救（当你确实要集成或提升）：`git clone <origin> /path/to/dev-clone && git -C /path/to/dev-clone checkout dev`，
-然后 `project trust <repo> --dev-repo /path/to/dev-clone`。dev clone 上没有 `dev` 分支报 `DEV_REPO_DEV_REF_MISSING`；
-拒绝只影响需要 dev 分支的操作，不会改写已有行，`project inspect` 会只读地列出哪些已信任项目还没有 dev clone
-（`devRefRetirement.projectsWithoutDevRepo`）。
-
-### 集成报 `DEV_CHECKOUT_NOT_ON_DEV` / `DEV_CHECKOUT_DIRTY` / `DEV_CHECKOUT_MOVED`
-
-集成要把 dev clone 里的 `refs/heads/dev` **和它的工作树**一起快进，所以它先核验那个检出：必须在 `dev` 上、
-`git status --porcelain` 为空、且 HEAD 与 `refs/heads/dev` 都等于批次固定的基线。三查任一不成立即拒绝、
-不合并、不推进。最常⻅的原因是你在 dev clone 里留了未提交或未跟踪的文件 —— 提交或移走它们再集成
-（Runtime **不会**用 `reset --hard` / `checkout -f` 覆盖你的工作）。
+如果你在历史记录里读到这些码，它们描述的是 ADR-0064 之前的行为，现在没有对应的补救动作。
+当前 Task 基线的相关拒绝只有：`TASK_BASE_REF_UNRESOLVED`（项目文件夹处于 detached HEAD）、
+`TASK_BASE_REF_MISSING`（`--base-ref` 给的分支不存在）、`TASK_BASE_REF_NOT_A_BRANCH`、
+`TASK_BASE_REF_ALREADY_FIXED`（该 Task 的基线已固定）。
 
 ### `project trust` 报 `VERIFICATION_POLICY_CHANGED` / `IMPACT_POLICY_CHANGED` / `REPOSITORY_CHANGED`
 
@@ -320,29 +308,11 @@ bun run codeestra task operation list $PROJECT <task-id>
 | `STALE_REVISION` / `REPOSITORY_CHANGED` | 期间 revision 或仓库身份变了；重新申请 |
 | `CONFLICTED`（状态） | 合并冲突。**现场已保留**，由你处理 |
 
-### 稳定提升被拒
+### 稳定提升被拒（已删除）
 
-| 码 | 含义 / 怎么办 |
-|---|---|
-| `DEV_FULL_SUITE_EVIDENCE_MISSING` | 这个精确 dev SHA 没有全量测试证据 → `promotion full-suite run --dev-commit <full-sha>` |
-| `DEV_FULL_SUITE_EVIDENCE_NOT_PASSED` | 有证据但不是 PASSED。修好再跑一次 |
-| `DEV_FULL_SUITE_EVIDENCE_STALE` | **三处绑定之一变了**：main 上的策略被编辑、候选里的锁文件变了、或出现了更新的失败运行 |
-| `PROMOTION_EVIDENCE_MISMATCH` | 用于 `prepare` 的事实与记录不一致 |
-| `PROMOTION_NOT_APPROVED` | **仅 STRICT**：需要针对那一组精确三元组的 `promotion approve` |
-| `APPROVAL_NOT_REQUIRED` | FULL 下调了 `approve` |
-| `PROMOTION_NOT_FAST_FORWARD` | main 已经不是预期的那一个（不能快进） |
-| `PROMOTION_NOTHING_TO_PROMOTE` | dev 与 main 已经相同 |
-| `PROMOTION_STALE` | 提升记录已过期；重新 `prepare` |
-| `PROMOTION_IN_PROGRESS` | 该项目已有一个未结束的 promotion（数据库有唯一索引保证） |
-| `PROMOTION_FINISHED` / `PROMOTION_STATE_INVALID` | 该 promotion 已结束 / 状态不允许这一步 |
-| `MAIN_WORKTREE_MISSING` / `MAIN_WORKTREE_DIRTY` | 没有检出 main 的工作树 / 它不干净。**提升必须能推进 ref、index 与工作文件**，所以要求工作树可用且干净 |
-| `MAIN_REF_MOVED` / `DEV_REF_MOVED` / `REMOTE_DEV_MOVED` / `REMOTE_DEV_UNREACHABLE` / `DEV_PUSH_REFUSED` / `REMOTE_DEV_READBACK_MISMATCH` / `MAIN_PUSH_REFUSED` / `REMOTE_MAIN_READBACK_MISMATCH` | ref 事实与预期不符 / 远端读回与固定候选不符 / 远端不可达或被拒（ADR-0047 后本机 ff 路径与 `MAIN_NOT_UPDATED`/`MAIN_UPDATE_FAILED` 已删除） |
-| `RESTART_STEP_FAILED` / `RESTART_UNPROVEN` / `RUNTIME_NOT_OBSERVED` / `RUNTIME_NOT_RESTARTED` / `RUNTIME_NOT_READY` / `RESTART_PLAN_MISMATCH` | 后置步骤或重启无法核验。**重启只在每步退 0 且 Runtime 回答 READY 时被记录** |
-| `BATCH_NOT_INTEGRATED` | 引用的集成批次还没到 `INTEGRATED` |
-| `INVALID_COMMIT_ID` / `REPOSITORY_CHANGED` | commit 参数不合法 / 仓库身份变化 |
-
-**失败不会自动回滚**：若 main 已被 fast-forward 而重启序列失败，CLI 会明确打印「main 已被推进且未回滚；
-Runtime 恢复应答后重跑 `promotion promote` 会重跑已记录的后置步骤」。
+`promotion *` 与「提升被拒」的整套码（`PROMOTION_*`、`DEV_FULL_SUITE_EVIDENCE_*`、`MAIN_WORKTREE_*`、
+`DEV_REF_MOVED`、`REMOTE_DEV_*`、`RESTART_*` 等）随 ADR-0064 一起从产品中删除。本仓库自身的
+`dev → main` 人工四步失败时，按 `docs/agents/runbook.md` 的「停在哪一步就停在那一步并如实报告」处理。
 
 ### `RECOVERY_REQUIRED`（状态，不是错误码）
 
@@ -353,8 +323,6 @@ Runtime 恢复应答后重跑 `promotion promote` 会重跑已记录的后置步
 | Task / Execution 状态 | 执行的所有权或静止性无法证明 |
 | Agent Session 状态 | provider 进程身份无法确认 |
 | Workspace 状态 | worktree 归属无法核验 |
-| IntegrationBatch 状态 | 集成被中断，现场保留 |
-| Promotion 状态 | main 更新或重启无法核验 |
 | Attention kind `RECOVERY` | 需要人处理的一条恢复请求 |
 | `scheduler reservations reconcile` 的 `RECOVERY_REQUIRED` | 预留持有者活着或无法核验，**槽位保留**（不发信号、不删资源） |
 
@@ -368,8 +336,6 @@ Runtime 恢复应答后重跑 `promotion promote` 会重跑已记录的后置步
 | 码 | 含义 | 怎么办 |
 |---|---|---|
 | `PURGE_CONFIRMATION_REQUIRED` | 请求没带 `confirmed: true`（CLI 缺 `--yes` 时本地就会以退出码 2 拦住，根本不会发出请求） | 确认确实要永久删除，再加 `--yes` |
-| `TASK_INTEGRATED_INTO_DEV` | 这个任务的成果已经作为成员进入了某个 IntegrationBatch，即它的 commit 在 `dev` 里 | 改用 `task archive`（隐藏任务，但保留「谁把这个 commit 带进 dev」的记录）。`SUCCEEDED` 任务都属于这一类 |
-| `TASK_IN_STABLE_PROMOTION` | 这个任务的名字出现在某条稳定提升记录里 | 同上 |
 | `RECONCILE_REQUIRED` | 非终态任务无法被证明已停止，或 `RECOVERY_REQUIRED` 任务的 provider 仍存活/身份缺失/无法核验 | 确认该进程真的已退出（必要时先 `task recover` 按观察对账），再重试；确实要删就加 `--force`（见下） |
 | `PURGE_RESOURCE_NOT_OWNED` | 记录的 worktree / 验证副本 / 分支无法证明属于这个任务（例如分支被别的 worktree 检出、路径是 symlink 或注册不符） | **一行都没删**；看 `reclaim.records` 里的 `reasonCode`，先处理那个资源（如先释放它所在的 worktree） |
 | `CONCURRENT_MODIFICATION` | 版本已变（例如你看到后它又停了/改了） | 重新 `task status` 读当前版本再发一次 |
@@ -547,11 +513,15 @@ ADR-0061 删除了 Adapter 级容量上限，当前命令面不再产生它。�
 `VERIFICATION_FAILED`、`VERIFICATION_NOT_PASSED`、`VERIFICATION_JOB_FAILED`、`VERIFICATION_QUEUED`、
 `COMMAND_FAILED`、`COMMAND_TIMEOUT`、`CANCEL_UNCONFIRMED`、`NOT_CANCELLABLE`、
 所有 `TARGETED_TEST_PLAN_*`、
-`INTEGRATION_BATCH_INVALID`、`INTEGRATION_IN_PROGRESS`、`INTEGRATION_VERIFICATION_FAILED`、
-`MERGE_CONFLICT`、`MERGE_FAILED`、`MERGE_HEAD`、`REF_CONFLICT`、`UNRELATED`、`NOT_REACHABLE_FROM_DEV`、
-`HEAD_MISMATCH`、`UNEXPECTED_HEAD`、`BRANCH_DIVERGED`、`BRANCH_ABSENT`、`BRANCH_MISMATCH`、
-`BRANCH_CHECKED_OUT_ELSEWHERE`、`UNBORN_MAIN`、
-以及所有 `PROMOTION_*` 与 `DEV_FULL_SUITE_EVIDENCE_*`（见上文与 [cli/promotion.md](./cli/promotion.md)）。
+`REF_CONFLICT`、`UNRELATED`、`NOT_REACHABLE_FROM_BASE`、`UPSTREAM_RESULT_MISSING`、`BASE_REF_MISSING`、
+`BASE_REF_UNREADABLE`、`TASK_BASE_REF_UNRESOLVED`、`TASK_BASE_REF_MISSING`、`TASK_BASE_REF_NOT_A_BRANCH`、
+`TASK_BASE_REF_ALREADY_FIXED`、`HEAD_MISMATCH`、`UNEXPECTED_HEAD`、`BRANCH_DIVERGED`、`BRANCH_ABSENT`、
+`BRANCH_MISMATCH`、`BRANCH_CHECKED_OUT_ELSEWHERE`、`UNBORN_MAIN`。
+
+**已删除、不会再出现的码**（ADR-0064，历史记录里读到时按此理解）：所有 `DEV_REPO_*`、`DEV_REF_*`、
+`DEV_CHECKOUT_*`、`INTEGRATION_BATCH_*`、`INTEGRATION_IN_PROGRESS`、`INTEGRATION_VERIFICATION_FAILED`、
+`MERGE_CONFLICT`、`MERGE_FAILED`、`MERGE_HEAD`、`NOT_REACHABLE_FROM_DEV`、`PROMOTION_*`、
+`DEV_FULL_SUITE_EVIDENCE_*`、`TASK_INTEGRATED_INTO_DEV`、`TASK_IN_STABLE_PROMOTION`。
 
 ### 回收
 
@@ -669,11 +639,9 @@ K1 留下的两条待裁决已由 FOUNDATION-075 收口，因此这份清单**�
    `queue_update`），Codex 报 `REQUIRES_VALIDATION`、Claude Code 报 `UNSUPPORTED`。
    **仍未验证**：真实模型是否真的读了 guidance、真实 Pi 在忙碌轮次里是否接受 `steer`；**不要**把 `DELIVERED` 读成「模型已读」
    （命令面里的 `modelAcknowledgement` 恒为 `UNSUPPORTED`），UI 也没有投影（N3 领地）。
-7. ~~多成员 IntegrationBatch 与批级 `STALE`/`CANCELLED` 未实现~~ **已实现（FOUNDATION-081 / ADR-0053 / schema v30，`lane/m1-multi-member-integration` 分支）**：
-   `task integration create|integrate|get|cancel` 可显式组成多成员批次、按 task-id 顺序合并、由**一次**独立集成验证覆盖整批、`PASSED` 才推进 `dev`；
-   批级 `STALE`（成员证据或 `dev` 基线移动）与 `CANCELLED`（记录证明无副作用时）都是一等终态；产品 `promotion prepare` 已在一个**多成员 PASSED 批次**上实测成立。
-   **仍未做**：真实 Agent 的多成员验收（CLI e2e 用协议假 provider 驱动命令面）、UI 里没有组批/取消按钮（M2 领地）。
-   **仍未改变**：本仓库自身的提升继续走 `AGENTS.md` 的人工四步。
+7. ~~多成员 IntegrationBatch 与批级 `STALE`/`CANCELLED`~~ **已由 ADR-0064 从产品中删除**（连同 `task integrate`、
+   `task integration *`、`promotion *` 与全部集成/提升表）。成果停在 `refs/heads/task/<task-id>`，合并由用户自己完成；
+   本仓库自身的 `dev → main` 继续走 `AGENTS.md` 的人工四步。
 8. **Claude Code 的模型层全部未验证**（本机 `claude auth status` 为未登录）：该 Adapter 的 `structuredAttention`/`nativePermissionRouting`/`cooperativeStop`/`resumeAfterExit` 均报 `REQUIRES_VALIDATION`，不得当成 `SUPPORTED` 使用。
 9. **插件选择的真实效果未验证**（ADR-0044）：真实模型下「确实使用了所选 skill/theme」只有 argv 与命令面证据；themes 的显式路径加载未单独实测（ADR-0044 D06 标注为同构代码路径推断）；第三方 extension 是否能绕过 gate 未做对抗验证。
 10. **真实 provider 下的散文提问组合未验收**：`Task WAITING_FOR_USER` + `Execution RUNNING` + `Session EXITED` 只在存储/运行时单测与 stub e2e 下验证；Codex 侧的事实层未实现（只漏报、不谎报）。
@@ -694,6 +662,6 @@ K1 留下的两条待裁决已由 FOUNDATION-075 收口，因此这份清单**�
 
 ## 相关阅读
 
-- 每条命令的参数、退出码与码位：[cli/README.md](./cli/README.md)（九篇索引）
+- 每条命令的参数、退出码与码位：[cli/README.md](./cli/README.md)（八篇索引）
 - 领域概念（为什么 `UNKNOWN` 不代表“无冲突”、为什么 Task 验证 ≠ 集成验证）：[concepts.md](./concepts.md)
 - 完整流程：[workflow.md](./workflow.md)
