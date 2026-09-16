@@ -989,6 +989,21 @@ export interface TaskPurgeOutcomeView {
     readonly reasonCode: string;
     readonly branchRef: string | null;
   }[];
+  /**
+   * What `--force` stepped over (ADR-0058 D09); null when `--force` was not requested. Each entry names
+   * a refusal an ordinary purge would have ended with, so a forced deletion stays readable as one.
+   */
+  readonly forced: {
+    readonly bypassed: readonly { readonly code: string; readonly detail: string }[];
+    readonly termination: {
+      readonly attempted: boolean;
+      readonly signalsSent: number;
+      readonly terminated: boolean;
+      readonly survivors: readonly number[];
+      readonly unattributable: readonly number[];
+      readonly detail: string;
+    } | null;
+  } | null;
   readonly dependencyEdgesRemoved: number;
   readonly rowsDeleted: Readonly<Record<string, number>>;
   readonly detail: string;
@@ -1581,6 +1596,14 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     taskId: z.string().uuid(),
     expectedVersion: z.number().int().nonnegative(),
     confirmed: z.boolean(),
+    /**
+     * `--force` (ADR-0058 D09): step over the refusals that would otherwise stop the deletion — the
+     * Runtime tries to terminate a provider it could not prove gone, skips resources whose ownership it
+     * cannot prove (leaving those files on disk) and deletes a Task whose commit already reached
+     * `dev`/`main`. It is a wider statement by the same caller, not a second approval layer: the Runtime
+     * adds no step on top of it, and the outcome plus the audit record what was stepped over.
+     */
+    force: z.boolean().default(false),
     /** The user's own statement about the deletion; recorded verbatim in the audit, not judged. */
     reason: nonBlankString.optional(),
   }),

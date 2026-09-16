@@ -1686,6 +1686,27 @@ export interface TaskPurgeBranchFact {
   readonly detail: string;
 }
 
+/**
+ * What `--force` stepped over (ADR-0058 D09).
+ *
+ * An ordinary purge never carries this (`null` means "`--force` was not requested"); when it is not
+ * null the record says exactly which refusals would have stopped the deletion and what was done about
+ * a provider process that may still have been alive, so a forced deletion is never indistinguishable
+ * from an ordinary one in the audit.
+ */
+export interface TaskPurgeForcedFacts {
+  readonly bypassed: readonly { readonly code: string; readonly detail: string }[];
+  /** The termination attempt for a provider the reconcile could not prove gone; null when none ran. */
+  readonly termination: {
+    readonly attempted: boolean;
+    readonly signalsSent: number;
+    readonly terminated: boolean;
+    readonly survivors: readonly number[];
+    readonly unattributable: readonly number[];
+    readonly detail: string;
+  } | null;
+}
+
 export interface TaskPurgeInput {
   readonly projectId: string;
   readonly taskId: string;
@@ -1698,6 +1719,8 @@ export interface TaskPurgeInput {
   readonly purgedAt: number;
   readonly reclamation: readonly TaskPurgeReclaimedResource[];
   readonly branches: readonly TaskPurgeBranchFact[];
+  /** Null for an ordinary purge; the facts of a `--force` purge (ADR-0058 D09). */
+  readonly forced?: TaskPurgeForcedFacts | null | undefined;
 }
 
 export interface TaskPurgeResult {
@@ -1713,6 +1736,7 @@ export interface TaskPurgeResult {
   readonly currentRevisionId: string;
   readonly branchFacts: readonly TaskPurgeBranchFact[];
   readonly reclamation: readonly TaskPurgeReclaimedResource[];
+  readonly forced: TaskPurgeForcedFacts | null;
   readonly dependencyEdgesRemoved: number;
   readonly rowsDeleted: Readonly<Record<string, number>>;
   readonly detail: string;
@@ -5335,10 +5359,12 @@ export class Phase1Database {
       throw new StorageError('CONCURRENT_MODIFICATION', 'Task version did not match');
     }
     // Re-checked in the transaction: the caller's pre-flight answer is evidence, not the decision.
+    // `--force` is the one caller that may step over this refusal, and the bypass is recorded in the
+    // audit payload below instead of being silent (ADR-0058 D09).
     const blockers = this.inspectTaskPurgeBlockers({
       projectId: input.projectId, taskId: input.taskId,
     });
-    if (blockers.length > 0) {
+    if (blockers.length > 0 && (input.forced ?? null) === null) {
       const first = blockers[0] as TaskPurgeBlocker;
       throw new StorageError(first.code, `Task cannot be purged: ${first.detail}`);
     }
@@ -5347,7 +5373,7 @@ export class Phase1Database {
     database.exec('PRAGMA defer_foreign_keys=ON');
     const suspended = this.suspendAppendOnlyTriggers(database);
     const rowsDeleted: Record<string, number> = {};
-    for (const [table, statement] of taskPurgeDeletions()) {
+    for (const [table, statement] of taskPurgeDeletions((input.forced ?? null) !== null)) {
       const result = database.query(statement).run(input.taskId);
       if (result.changes > 0) rowsDeleted[table] = result.changes;
     }
@@ -5384,6 +5410,7 @@ export class Phase1Database {
         dependencyEdgesRemoved: rowsDeleted['task_dependencies'] ?? 0,
         branchFacts: input.branches,
         reclamation: input.reclamation,
+        forced: input.forced ?? null,
         appendOnlyTriggersSuspended: suspended.map((trigger) => trigger.name),
       },
     });
@@ -5401,9 +5428,13 @@ export class Phase1Database {
       currentRevisionId: row.current_revision_id,
       branchFacts: input.branches,
       reclamation: input.reclamation,
+      forced: input.forced ?? null,
       dependencyEdgesRemoved: rowsDeleted['task_dependencies'] ?? 0,
       rowsDeleted,
-      detail: `Task #${row.display_number} (${row.state}) and every row it owned were deleted`,
+      detail: `Task #${row.display_number} (${row.state}) and every row it owned were deleted`
+        + ((input.forced ?? null) === null
+          ? ''
+          : ` --force stepped over ${(input.forced ?? { bypassed: [] }).bypassed.length} refusal(s)`),
     };
   }
 
@@ -15832,10 +15863,16 @@ const appendOnlyTaskTables: readonly string[] = Object.freeze([
  * requirement: `PRAGMA defer_foreign_keys=ON` is what makes "the whole subgraph or none of it" hold.
  *
  * The three guarded tables (`integration_batch_items`, `integration_verification_runs`,
- * `stable_promotion_members`) are absent on purpose: a Task named by one of them is refused, because
- * the commit it put into `dev`/`main` outlives it.
+ * `stable_promotion_members`) are absent for an ordinary purge on purpose: a Task named by one of them
+ * is refused, because the commit it put into `dev`/`main` outlives it. `--force` is the one caller
+ * allowed to step over that refusal (ADR-0058 D09), and it deletes those rows for exactly the reason
+ * the refusal exists — the record of *who* brought the commit in is what the flag gives up. The stable
+ * promotion record itself has to go with them whenever its verification run is this Task's: the foreign
+ * keys leave no other consistent outcome.
  */
-function taskPurgeDeletions(): readonly (readonly [string, string])[] {
+function taskPurgeDeletions(
+  includeIntegratedMembership: boolean,
+): readonly (readonly [string, string])[] {
   const executions = 'SELECT e.id FROM executions e WHERE e.task_id=?1';
   const sessions = `SELECT s.id FROM agent_sessions s WHERE s.execution_id IN (${executions})`;
   return [
@@ -15883,6 +15920,30 @@ function taskPurgeDeletions(): readonly (readonly [string, string])[] {
     ['task_dependencies',
       'DELETE FROM task_dependencies WHERE prerequisite_task_id=?1 OR dependent_task_id=?1'],
     ['intent_targets', 'DELETE FROM intent_targets WHERE task_id=?1'],
+    // `--force`: the tables that record "this commit reached dev/main through this Task" are the reason
+    // an ordinary purge refuses, and they are the rows the flag gives up (ADR-0058 D09).
+    //
+    // The promotion half is a cascade, not a choice: `stable_promotions.verification_id` references the
+    // batch's integration verification run, and that run references this Task's execution/revision. A
+    // promotion record that names this Task's run therefore cannot outlive the Task, and because
+    // `stable_promotion_members.promotion_id` references the promotion, every member row of that
+    // promotion goes with it — including other Tasks' rows. The counts in `rowsDeleted` are the record
+    // of exactly how far the deletion reached.
+    ...(includeIntegratedMembership
+      ? ([
+        ['stable_promotion_members',
+          `DELETE FROM stable_promotion_members WHERE task_id=?1 OR promotion_id IN (
+            SELECT p.id FROM stable_promotions p
+            JOIN integration_verification_runs r ON r.id=p.verification_id
+            WHERE r.task_id=?1)`],
+        ['stable_promotions',
+          `DELETE FROM stable_promotions WHERE verification_id IN (
+            SELECT id FROM integration_verification_runs WHERE task_id=?1)`],
+        ['integration_verification_runs',
+          'DELETE FROM integration_verification_runs WHERE task_id=?1'],
+        ['integration_batch_items', 'DELETE FROM integration_batch_items WHERE task_id=?1'],
+      ] as readonly (readonly [string, string])[])
+      : []),
     ['executions', 'DELETE FROM executions WHERE task_id=?1'],
     ['task_revisions', 'DELETE FROM task_revisions WHERE task_id=?1'],
     ['workspaces', 'DELETE FROM workspaces WHERE task_id=?1'],

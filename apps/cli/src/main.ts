@@ -1277,7 +1277,7 @@ function usage(): never {
   bun run codeestra task cancel <project-id> <task-id> <expected-version>
   bun run codeestra task archive <project-id> <task-id> <expected-version>
   bun run codeestra task unarchive <project-id> <task-id> <expected-version>
-  bun run codeestra task purge <project-id> <task-id> <expected-version> --yes [--reason <text>] [--json]
+  bun run codeestra task purge <project-id> <task-id> <expected-version> --yes [--force] [--reason <text>] [--json]
     # DESTRUCTIVE and irreversible: deletes the Task, its revisions, executions, sessions, evidence,
     # owned worktrees, verification copies and branches. A non-terminal Task is cancelled first
     # through the ordinary cooperative stop, and a RECOVERY_REQUIRED Task is reconciled by
@@ -1286,7 +1286,14 @@ function usage(): never {
     # commit already reached dev/main is refused
     # (TASK_INTEGRATED_INTO_DEV / TASK_IN_STABLE_PROMOTION, exit 1) — archive it instead.
     # --yes is required and is the only guard; without it the command exits 2 without sending
-    # anything. Replaying the same command ID returns the receipt instead of a second deletion.
+    # anything. --force (ADR-0058 D09) is the same caller saying "delete it anyway": the Runtime
+    # first tries to terminate the provider processes the Task recorded (identity-verified pids
+    # only), then deletes what it otherwise would have refused — a provider it could not prove gone,
+    # resources whose ownership it cannot prove (those files are left on disk) and a Task whose
+    # commit is already in dev/main (the membership rows that record who brought it in are deleted).
+    # Everything stepped over is printed to stderr and recorded in the forced field of the view
+    # (stop.stop: "FORCED") and in the TaskPurged audit event. Replaying the same command ID returns
+    # the receipt instead of a second deletion.
     # stdout is the printed view (JSON shape regardless of --json), including rowsDeleted,
     # dependencyEdgesRemoved and the tip commit of every branch that was deleted.
   bun run codeestra task status <project-id> <task-id> [--json]
@@ -2755,7 +2762,7 @@ try {
     const expectedVersion = Number(versionText);
     if (firstArgument === undefined || taskId === undefined || versionText === undefined
       || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
-    const split = splitFlagTokens(flags, ['--reason'], ['--yes', '--json']);
+    const split = splitFlagTokens(flags, ['--reason'], ['--yes', '--json', '--force']);
     if (split.positionals.length !== 0) usage();
     // `--yes` is the whole guard, and it is the command's own statement rather than a permission
     // layer: nothing else in the product costs a step because of it, and a script that meant to
@@ -2765,6 +2772,9 @@ try {
         + ' and its own worktree/branch. Pass --yes to confirm.');
       process.exit(2);
     }
+    // ADR-0058 D09: `--force` is the same caller saying "delete it anyway". It is not a second gate
+    // and it adds no step: it only widens what this one command may step over.
+    const force = split.bare.has('--force');
     const reason = split.flags.get('--reason');
     const result = await call({
       command: 'task.purge',
@@ -2773,9 +2783,21 @@ try {
       taskId,
       expectedVersion,
       confirmed: true,
+      force,
       ...(reason === undefined ? {} : { reason }),
     }) as TaskPurgeOutcomeView;
     print(result);
+    if (result.forced !== null) {
+      // The facts a forced deletion stepped over go to stderr: stdout stays the one JSON document a
+      // script parses, while a human sees what was stepped over without reading the whole view.
+      console.error(`--force stepped over ${result.forced.bypassed.length} refusal(s):`);
+      for (const entry of result.forced.bypassed) {
+        console.error(`  ${entry.code} — ${entry.detail}`);
+      }
+      if (result.forced.termination !== null) {
+        console.error(`provider termination: ${result.forced.termination.detail}`);
+      }
+    }
   } else if (group === 'task' && (action === 'pause'
     || action === 'cancel' || action === 'archive' || action === 'unarchive')) {
     const [taskId, versionText, ...extra] = remainingArguments;

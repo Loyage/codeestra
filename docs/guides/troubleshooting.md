@@ -9,6 +9,7 @@
 > 「任务一直不跑」与「调度 / 容量 / 槽位」两处的容量码由 **FOUNDATION-096** 同步（ADR-0061：只剩一个
 > Runtime 全局上限，容量命令不带 project 参数；`CAPACITY_ADAPTER_SLOT_LIMIT_REACHED` 成为历史码）。
 > `RECONCILE_REQUIRED` 与 `task purge` 拒绝码一节里 `RECOVERY_REQUIRED` 的对账说明由用户任务 `task/930f5325` 同步（ADR-0058 D02 修订，2026-09-16）。
+> `task purge` 的 `--force` 与它跳过的四类拒绝由 `lane/purge-force` 同步（ADR-0058 D09，2026-09-16）：被拒绝又确实要删时加 `--force`，跳过了什么看 `forced` 与 stderr。
 > 其余内容沿用 FOUNDATION-091 的校对基线。
 
 本文只列**源码里实际存在**的错误码与状态。每条给出「什么时候出现 / 怎么办」。
@@ -354,10 +355,21 @@ Runtime 恢复应答后重跑 `promotion promote` 会重跑已记录的后置步
 | `PURGE_CONFIRMATION_REQUIRED` | 请求没带 `confirmed: true`（CLI 缺 `--yes` 时本地就会以退出码 2 拦住，根本不会发出请求） | 确认确实要永久删除，再加 `--yes` |
 | `TASK_INTEGRATED_INTO_DEV` | 这个任务的成果已经作为成员进入了某个 IntegrationBatch，即它的 commit 在 `dev` 里 | 改用 `task archive`（隐藏任务，但保留「谁把这个 commit 带进 dev」的记录）。`SUCCEEDED` 任务都属于这一类 |
 | `TASK_IN_STABLE_PROMOTION` | 这个任务的名字出现在某条稳定提升记录里 | 同上 |
-| `RECONCILE_REQUIRED` | 非终态任务无法被证明已停止，或 `RECOVERY_REQUIRED` 任务的 provider 仍存活/身份缺失/无法核验 | 确认该进程真的已退出（必要时先 `task recover` 按观察对账），再重试；这是有意拒绝，不是可绕过的开关 |
+| `RECONCILE_REQUIRED` | 非终态任务无法被证明已停止，或 `RECOVERY_REQUIRED` 任务的 provider 仍存活/身份缺失/无法核验 | 确认该进程真的已退出（必要时先 `task recover` 按观察对账），再重试；确实要删就加 `--force`（见下） |
 | `PURGE_RESOURCE_NOT_OWNED` | 记录的 worktree / 验证副本 / 分支无法证明属于这个任务（例如分支被别的 worktree 检出、路径是 symlink 或注册不符） | **一行都没删**；看 `reclaim.records` 里的 `reasonCode`，先处理那个资源（如先释放它所在的 worktree） |
 | `CONCURRENT_MODIFICATION` | 版本已变（例如你看到后它又停了/改了） | 重新 `task status` 读当前版本再发一次 |
 | `NOT_FOUND` | 任务不存在（已被别人删掉，或 ID 写错） | 核对 `task list --all`；如果只是想确认自己那条命令是否生效，**用同一个 commandId 重放**会读到收据而不是这个错 |
+
+### `task purge --yes --force`：我确实要删，别再拦我
+
+`--force` 是**同一条命令的更宽的声明**，不是第二道确认（`--yes` 仍是唯一一次确认，不加等待、不需要在场的人）。它按顺序做四件事：
+
+1. **先终止**：对任务**记录过的身份**（pid + start token）发 `SIGTERM`，有界等待，再对仍存活的发 `SIGKILL`，再有界等待。**记录里没有 start token 的 pid 一个信号都不发**（pid 会被复用，杀错进程比留下孤儿更糟；它们会列在 `termination.unattributable` 里），不按进程组杀、不扫描「看起来像 provider」的进程。两轮后仍存活就报 `termination.survivors`，**不声称静止**。
+2. **删掉本来会拒绝的行**：`TASK_INTEGRATED_INTO_DEV` / `TASK_IN_STABLE_PROMOTION` 不再拦——`dev`/`main` 里的来源记录（`integration_batch_items` / `integration_verification_runs` / `stable_promotion_members`）会一起删；**当该任务就是那条集成验证行记录的任务时，引用了它的 `stable_promotions` 记录本身、连同这条 promotion 的全部成员行（可能含其他任务）也必须一起删**（外键决定的），逐表条数在 `rowsDeleted` 里。
+3. **只越过「活占」**：`ACTIVE_EXECUTION` / `ACTIVE_RESERVATION` / `ACTIVE_VERIFICATION` / `TASK_NOT_TERMINAL` 不再拦。**归属校验从不越过**：证明不了归属的目录/分支**留在磁盘上**，逐项写在 `forced.bypassed` 里（它们随任务删除后变成「未注册目录」，需要时用 `reclaim --unregistered` 收拾）。
+4. **如实记账**：`forced`（`null` 表示没用 `--force`）= `bypassed[]`（每条被跳过的拒绝码与原文理由）+ `termination`（是否尝试、发了几个信号、是否终止、幸存与不可归属的 pid）；同一份事实写进 `TaskPurged`，CLI 另外打到 **stderr**。被强制删除的 `RECOVERY_REQUIRED` 任务，`stop.stop` 是 `"FORCED"`。
+
+**它管不到的**：集成工作树/集成验证副本（属于批次而不是任务）不由 purge 回收；`NOT_FOUND` / `CONCURRENT_MODIFICATION` / 缺 `--yes` 仍然失败。不传 `--force` 时所有旧行为一字未变。
 
 **不会做但很容易误传的两件事**：purge **不会**删 `domain_events`/`command_receipts`/`operations`/`intents`（事件流里仍能读到它的历史与最后那条 `TaskPurged`），
 且**不代表可恢复**——没有墓碑、没有备份，除了逐表行数与每个被删分支的 `tipCommit` 之外不可找回。

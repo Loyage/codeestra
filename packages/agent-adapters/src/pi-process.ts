@@ -448,6 +448,168 @@ export async function captureProviderProcessTree(input: {
   };
 }
 
+/**
+ * What a forced termination of a recorded provider tree actually did (ADR-0058 D09).
+ *
+ * Every field is an observation, never a claim of quiescence: `terminated: true` means "no process
+ * with a *recorded and verified* identity is still in the process table", which is the strongest
+ * fact a process table can give. `unattributable` names the recorded pids that were still occupied
+ * but whose start token was never captured — those are deliberately left alone, because a PID alone
+ * is reusable and signalling the wrong process is worse than leaving an orphan.
+ */
+export interface ProviderTerminationOutcome {
+  /** False when nothing could be attempted at all (for example the process table is unreadable). */
+  readonly attempted: boolean;
+  readonly signalsSent: number;
+  /** True when no recorded process with a verified identity is still running. */
+  readonly terminated: boolean;
+  /** The pids actually signalled, in the order the signals were sent (may repeat across phases). */
+  readonly signalled: readonly number[];
+  /** Recorded pids still running after both phases, with their identity verified. */
+  readonly survivors: readonly number[];
+  /** Recorded pids that are occupied but had no captured start token, so they were not signalled. */
+  readonly unattributable: readonly number[];
+  readonly detail: string;
+}
+
+/** The default grace a `SIGTERM` gets before `SIGKILL`, and the `SIGKILL` gets before reporting. */
+export const providerTerminationGraceMs = 2_000;
+
+/** How often the process table is re-read while waiting out one grace period. */
+const providerTerminationPollMs = 25;
+
+/**
+ * One phase of the verified-signal logic: which recorded processes are still ours right now.
+ *
+ * A pid is only "ours" when the start token read *now* equals the token recorded while the provider
+ * was alive. A pid that is occupied by a different token belongs to somebody else and is neither
+ * signalled nor counted as a survivor; a pid whose recorded token is null cannot be compared and is
+ * therefore reported as unattributable instead of being signalled.
+ */
+async function verifiedProviderProcesses(input: {
+  readonly tree: ProviderProcessTree;
+  readonly readTable: () => Promise<readonly ProcessTableRow[]>;
+  readonly readStartToken: (pid: number) => Promise<string | null>;
+}): Promise<{ readonly alive: readonly number[]; readonly unattributable: readonly number[] }> {
+  const rows = await input.readTable();
+  const byPid = new Map(rows.map((row) => [row.pid, row]));
+  const alive: number[] = [];
+  const unattributable: number[] = [];
+  const recorded: readonly { readonly pid: number; readonly startToken: string | null }[] = [
+    { pid: input.tree.pid, startToken: input.tree.startToken },
+    ...input.tree.descendants.map((descendant) => ({
+      pid: descendant.pid, startToken: descendant.startToken,
+    })),
+  ];
+  for (const entry of recorded) {
+    if (!byPid.has(entry.pid)) continue;
+    if (entry.startToken === null) {
+      unattributable.push(entry.pid);
+      continue;
+    }
+    const token = await input.readStartToken(entry.pid);
+    if (token === entry.startToken) alive.push(entry.pid);
+  }
+  return { alive, unattributable };
+}
+
+/**
+ * Terminates the provider process tree a Task recorded, using only identities it recorded, and
+ * reports what happened (ADR-0058 D09 — the `task purge --force` step).
+ *
+ * Scope and limits, deliberately:
+ *
+ * - Only the recorded pids are considered — never a process group and never a scan for "looks like a
+ *   provider". A pid is signalled only when its start token still matches the recorded one, so a
+ *   recycled pid is never hit. Recorded pids with no start token are reported as `unattributable`
+ *   and left alone.
+ * - `SIGTERM` first, one bounded grace period, then `SIGKILL` for the survivors, then one more bounded
+ *   grace period. A process that survives both is reported as a survivor; this function never claims
+ *   quiescence it did not observe.
+ * - Errors are facts, not exceptions: a signal that fails because the process is already gone is
+ *   simply a process that is gone. Nothing here throws, so the caller can record the attempt and go
+ *   on with whatever it was doing.
+ */
+export async function terminateProviderProcessTree(input: {
+  readonly tree: ProviderProcessTree;
+  readonly graceMs?: number;
+  readonly readTable?: () => Promise<readonly ProcessTableRow[]>;
+  readonly readStartToken?: (pid: number) => Promise<string | null>;
+  readonly signal?: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => void;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
+}): Promise<ProviderTerminationOutcome> {
+  const graceMs = input.graceMs ?? providerTerminationGraceMs;
+  const readTable = input.readTable ?? readProcessTable;
+  const readStartToken = input.readStartToken ?? readProcessStartToken;
+  const signal = input.signal ?? ((pid, kind) => { process.kill(pid, kind); });
+  const sleep = input.sleep ?? (async (milliseconds) => { await Bun.sleep(milliseconds); });
+  const signalled: number[] = [];
+  let first: { readonly alive: readonly number[]; readonly unattributable: readonly number[] };
+  try {
+    first = await verifiedProviderProcesses({ tree: input.tree, readTable, readStartToken });
+  } catch (error) {
+    return { attempted: false, signalsSent: 0, terminated: false, signalled: [], survivors: [],
+      unattributable: [],
+      detail: 'the process table could not be read: '
+        + `${error instanceof Error ? error.message : String(error)}` };
+  }
+  if (first.alive.length === 0) {
+    return { attempted: false, signalsSent: 0, terminated: true, signalled: [], survivors: [],
+      unattributable: first.unattributable,
+      detail: first.unattributable.length === 0
+        ? 'no recorded provider process was still running, so no signal was sent'
+        : `no recorded provider process was still running; ${first.unattributable.length} recorded`
+          + ` pid(s) are occupied without a captured start token and were not signalled: ${first.unattributable.join(', ')}` };
+  }
+  const sendAll = (kind: 'SIGTERM' | 'SIGKILL', pids: readonly number[]): void => {
+    for (const pid of pids) {
+      try {
+        signal(pid, kind);
+        signalled.push(pid);
+      } catch {
+        // ESRCH and friends: the process is already gone. The next verification pass decides.
+      }
+    }
+  };
+  const settle = async (): Promise<readonly number[]> => {
+    let waited = 0;
+    for (;;) {
+      const observed = await verifiedProviderProcesses({ tree: input.tree, readTable, readStartToken });
+      if (observed.alive.length === 0) return [];
+      if (waited >= graceMs) return observed.alive;
+      const step = Math.min(providerTerminationPollMs, graceMs - waited);
+      await sleep(step);
+      waited += step;
+    }
+  };
+  sendAll('SIGTERM', first.alive);
+  const afterTerm = await settle();
+  if (afterTerm.length > 0) sendAll('SIGKILL', afterTerm);
+  const survivors = afterTerm.length === 0 ? [] : await settle();
+  // The unattributable set is read once more so the record describes the state after the signals.
+  let unattributable = first.unattributable;
+  try {
+    unattributable = (await verifiedProviderProcesses({
+      tree: input.tree, readTable, readStartToken,
+    })).unattributable;
+  } catch {
+    // Keep the first reading: a table that cannot be read now does not invalidate what was seen.
+  }
+  return {
+    attempted: true,
+    signalsSent: signalled.length,
+    terminated: survivors.length === 0,
+    signalled,
+    survivors,
+    unattributable,
+    detail: survivors.length === 0
+      ? `sent ${signalled.length} signal(s) to the recorded provider tree; no recorded process with a`
+        + ' verified identity is still running'
+      : `sent ${signalled.length} signal(s) to the recorded provider tree but ${survivors.length}`
+        + ` recorded process(es) are still running: ${survivors.join(', ')}`,
+  };
+}
+
 /** What a later check can honestly say about a recorded provider process tree. */
 export type ProviderOwnershipObservation =
   /** Nothing in the recorded tree is still running. */

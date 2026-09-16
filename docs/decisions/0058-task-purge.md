@@ -1,7 +1,8 @@
 # ADR-0058：`task purge` — 任务可被永久删除（任何状态、append-only 的显式例外、已进 ref 即拒绝）
 
-Status：Accepted（用户 2026-09-16 就本格语义逐项明确选择；**无 schema 变更、不占迁移号**；**唯一新增一次显式确认 `--yes`，且它不在任何常态路径上**，见 D07）
-任务：本格（`lane/p1-task-purge`，格 1「先删除」）。基线：`dev = 17b4dd6`（schema v31）。
+Status：Accepted（用户 2026-09-16 就本格语义逐项明确选择；**无 schema 变更、不占迁移号**；**唯一新增一次显式确认 `--yes`，且它不在任何常态路径上**，见 D07。
+**修订 2026-09-16（`lane/purge-force`）**：用户要求「删除任务不该被各种因素阻拦」，并逐项选定 **`--force` 一次性放行 D02/D06/D05 的三类拒绝**（取舍见 D09）；D01 的确认仍只有 `--yes` 一次，`--force` 不是第二次确认。
+任务：本格（`lane/p1-task-purge`，格 1「先删除」）。基线：`dev = 17b4dd6`（schema v31）；D09 的基线 `dev = 2f578e9`。
 
 ## Context
 
@@ -47,10 +48,10 @@ Status：Accepted（用户 2026-09-16 就本格语义逐项明确选择；**无 
 ### D01：`task purge` 是全产品唯一要求显式确认的命令
 
 ```
-bun run codeestra task purge <project-id> <task-id> <expected-version> --yes [--reason <text>] [--json]
+bun run codeestra task purge <project-id> <task-id> <expected-version> --yes [--force] [--reason <text>] [--json]
 ```
 
-- 请求面新增 `task.purge`（`confirmed: boolean`、可选 `reason`）。**缺少 `--yes` → CLI 退出码 2 且不发送任何请求**；`confirmed: false` 的请求由 Runtime 在任何读取之前以 `PURGE_CONFIRMATION_REQUIRED` 拒绝。
+- 请求面新增 `task.purge`（`confirmed: boolean`、`force: boolean`（默认 `false`）、可选 `reason`）。**缺少 `--yes` → CLI 退出码 2 且不发送任何请求**；`confirmed: false` 的请求由 Runtime 在任何读取之前以 `PURGE_CONFIRMATION_REQUIRED` 拒绝。
 - 这是**唯一**一处「显式确认」，也不是审批层或权限门禁：Runtime 不再叠第二次询问，`confirmed` 是调用者自己的声明。**常态路径效率成本为 0**——项目接入、Agent 工具、成果 commit、验证策略、调度、提升、`cancel`/`archive` 全都不经过它；只有「永久删除一个任务」这一次动作需要它。
 - 退出码：`0` 成功；`1` 拒绝（`TASK_INTEGRATED_INTO_DEV` / `TASK_IN_STABLE_PROMOTION` / `RECONCILE_REQUIRED` / `PURGE_RESOURCE_NOT_OWNED` / `NOT_FOUND` / `CONCURRENT_MODIFICATION`）；`2` 缺 `--yes`（用法错误）；**不使用 3**（这里没有等待语义）。
 
@@ -96,6 +97,35 @@ bun run codeestra task purge <project-id> <task-id> <expected-version> --yes [--
 - **不做**「删除即遗忘」：事件没有外键，任务行消失后它仍在 `events.list`/SSE 里可读。
 - UI（`apps/ui/src/task-purge.tsx`）只是同一命令面的投影：危险区折叠块 + **输入该任务编号才启用**的按钮 + 可选原因输入；发送的就是 CLI 那一条请求（`confirmed: true`），**不自己判断可删性**，拒绝按 Runtime 返回的稳定码显示。它不碰 Git、不删文件。
 
+### D09：`--force` 是同一条命令的放宽，而不是第二道确认
+
+背景：用户在使用稳定实例时被 `RECONCILE_REQUIRED` 挡住（界面上也没有 recover 入口），明确要求「想删除某项任务时不该受各种因素阻拦」。
+
+**取舍（本轮问答的实际答复）**：
+
+| 选项 | 说明 | 结果 |
+|---|---|---|
+| **A. 新增 `--force` 一次性放行三类拒绝**（采用） | 默认行为不变；被拒绝时加一个 flag 就删，审计写明跳过了什么 | 用户选择 |
+| B. 全部放开：purge 默认就不拒绝 | 只保留 `NOT_FOUND`；可能留下孤儿进程、丢掉「谁带进来的」记录、磁盘残留 | 未采用 |
+| C. 只放开「无法核验 provider」 | 已进 ref 与归属不明仍拒绝 | 未采用 |
+| D. 保持现状，只补 UI 的 recover 入口 | 身份缺失的任务仍然永远删不掉 | 未采用 |
+
+补充：**provider 可能仍存活时**——用户选择「**先尝试终止再删**」（另一选项是不杀、只记录）；**UI**——用户选择「**CLI + UI 投影**」（拒绝后多一个「仍要强制删除」按钮，不要求重输编号）；**提升记录**——用户选择「**连提升记录一起删**」，而不是「这一类保持拒绝」。
+
+决定：
+
+- **`--force` 不是权限门禁、不是审批层、不新增常态路径步骤**：它是同一个调用者对同一条命令的**更宽的声明**。需要它的仍然只有「永久删除一个任务」这一次动作，`--yes` 依旧是唯一一次确认；Runtime 不会在 `--force` 之上再叠一次询问。
+- **D02 的放宽**：`RECOVERY_REQUIRED` 任务仍先走同一次观察对账（ADR-0055）。只有对账**拒绝**时 `--force` 才继续：先尝试**终止**该任务记录下来的 provider 进程树，然后照删，并把「被跳过的拒绝」与「终止结果」写进结果与 `TaskPurged` 事件（`stop.stop: "FORCED"`）。
+  - 终止只用**记录里的身份**：只有「pid 在进程表里**且**现在的 start token 等于当时记录的 token」的进程才收到信号；记录里 start token 为空的 pid 一律**不发信号**（pid 会被复用，杀错进程比留下孤儿更糟），并在结果里列为 `unattributable`。**不按进程组杀、不扫描「看起来像 provider」的进程**。先 `SIGTERM`，有界等待，再对仍存活的发 `SIGKILL`，再有界等待；两次之后仍存活就如实报为 `survivors`，**不声称静止**。没有记录身份时**一个信号都不发**（`termination: null`），删除照样继续——「无法归属」不等于「可以随便杀」。
+  - 越过的是「未证明静止」这条判据，不是事实本身：结果里 `state` 仍是删除时的状态，`stop.stop: "FORCED"` 说明它没有被证明静止。
+- **D06 的放宽**：`--force` 删除 `integration_batch_items` / `integration_verification_runs` / `stable_promotion_members` 里该任务的行——**这正是 D06 拒绝时要保住的那份「谁把这个 commit 带进来」的记录**，所以它是这次删除明确放弃的东西，逐表条数在 `rowsDeleted` 里可查。
+  - **级联是外键决定的，不是可选项**：`stable_promotions.verification_id` 引用该批次的集成验证行，而那行引用本任务的 execution/revision。因此当该任务就是那条验证行记录的任务时，**promotion 记录本身必须一起删**；又因 `stable_promotion_members.promotion_id` 引用它，这条 promotion 的**全部成员行**（可能含其他任务）也随之消失。这些计数同样在 `rowsDeleted` 里（`stable_promotions` / `stable_promotion_members`）。
+- **D05 的放宽分两半**：`--force` 越过的是**活占**那半（`ACTIVE_EXECUTION` / `ACTIVE_RESERVATION` / `ACTIVE_VERIFICATION` / `TASK_NOT_TERMINAL`）——这些门禁保护的那次运行正是本命令刚刚退役的；**归属那半从不越过**（symlink 逃逸、路径不在 owned root 内、注册/HEAD/分支与记录不符、未注册目录）。证明不了归属的目录/分支**留在磁盘上**，逐项写进结果（`bypassed`）与事件，**绝不 `rm -rf`**。
+  - 一个具体后果：`releaseWorkspaceForReclamation` 会因 Execution 仍持有 workspace 而拒绝，`--force` 下这是记录里的一条注记（`workspaceRelease: REFUSED_UNDER_LIVE_CLAIM`），不是失败的回收——那条 Execution 行本身就在同一条命令的删除清单里。
+- **审计**：结果与 `TaskPurged` payload 新增 `forced`（`null` 表示没有用 `--force`）：`bypassed[]`（每条被跳过的拒绝码与原文理由）+ `termination`（是否尝试、发了几个信号、是否终止、幸存与不可归属的 pid、原文说明）。CLI 把同一份事实打到 **stderr**（stdout 仍是那一个可解析的文档）。
+- **`--force` 管不到的东西**：集成工作树与集成验证副本（属于批次而不是任务）不由 purge 回收；`NOT_FOUND` / `CONCURRENT_MODIFICATION` / 缺 `--yes` 仍然失败。**退出码 3 仍不使用**。
+- **默认不变**：不传 `--force` 时 D01–D08 一字未变（包括 `--yes` 之外零确认、拒绝时一行不删）。
+
 ## Consequences
 
 - 已实现：`packages/contracts/src/index.ts`（`task.purge` 请求 + `TaskPurgeOutcomeView`）；`packages/storage/src/database.ts`（`inspectTaskPurge` / `inspectTaskPurgeBlockers` / `purgeTask` / `findTaskPurgeByCommand`、`taskPurgeDeletions`、append-only 触发器让路与复核、两个新的稳定拒绝码）；`packages/git/src/purge.ts`（新）；`apps/runtime/src/task-purge-service.ts`（新）与 `apps/runtime/src/main.ts` 接线；`apps/cli/src/main.ts`（`task purge` + `usage()`）；`apps/ui/src/task-purge.tsx`（新）+ `App.tsx` 接线 + `styles.css`；本 ADR、`docs/decisions/README.md`、`docs/architecture/event-model.md`、`docs/architecture/sqlite-schema.md`、`docs/architecture/domain-model.md`、`docs/architecture/state-machines.md`、`docs/guides/{cli-reference,ui,manual,troubleshooting}.md`、`docs/tasks/README.md`、`PROJECT_SPEC.md` 状态段。
@@ -106,6 +136,12 @@ bun run codeestra task purge <project-id> <task-id> <expected-version> --yes [--
   - 「删除了什么」在逐表行数层面是完整的，但**不保证可恢复**：没有墓碑、没有备份；分支 tip 与 revision id 只留在 `TaskPurged` 事件的 payload 里。
   - 非终态任务的 purge 会**先真实地终止它**（协作停止，可能中断正在运行的 Agent）。这是用户选择的语义，不是副作用。
 - 效率：FULL 下常态路径新增确认 **0 步**；`task purge` 自身需要一次 `--yes`（CLI 层面），UI 需要输入任务编号——两者都是**显式用户命令**的组成部分，不是审批层。
+- **`--force`（D09，2026-09-16 修订）新增的部分**：`packages/agent-adapters/src/pi-process.ts` 的 `terminateProviderProcessTree`（只对身份核验过的 pid 发信号；`SIGTERM` → 有界等待 → `SIGKILL` → 有界等待）与它的导出；`packages/contracts/src/index.ts`（请求 `force: boolean`（默认 `false`）、`TaskPurgeOutcomeView.forced`）；`packages/storage/src/database.ts`（`TaskPurgeForcedFacts`、`taskPurgeDeletions(includeIntegratedMembership)`、promotion 级联删除）；`apps/runtime/src/task-purge-service.ts`（`--force` 的停止/终止/回收/分支四条路径）、`apps/runtime/src/reclaim-service.ts`（`ignoreLiveClaims`）、`apps/runtime/src/task-recovery-service.ts`（导出 `recordedRecoveryTree`）、`apps/runtime/src/main.ts`；`apps/cli/src/main.ts`（`--force` + stderr 事实）；`apps/ui/src/task-purge.tsx` + `types.ts`（「仍要强制删除」）；仍**无 schema 变更**。
+- **`--force` 明确的代价（不掩盖）**：
+  - 可能留下**孤儿进程**。`--force` 发了信号但进程可能仍存活（`survivors`），且删除后没有任何任务行指向它；结果与事件里保留了 pid/身份，但 Runtime 不再拥有它。
+  - **`dev`/`main` 里 commit 的来源记录会消失**（D06 的反面），并且当该任务就是验证行记录的任务时，**该批次的稳定提升记录（含其全部成员行）也会消失**——包括其他任务的行。
+  - **归属不明的目录/分支留在磁盘上**，且它们的 `workspaces` / `reclamation_records` 行已被删除，于是变成「未注册目录」，只能靠 `reclaim --unregistered` 等显式路径收拾。
+- 效率（修订部分）：`--force` 本身是**同一个 flag 位置的一次选择**，不增加任何确认、等待或额外命令；最终承担者仍然只有「永久删除一个任务」这一步。
 
 ## Verification
 
@@ -117,8 +153,15 @@ bun run codeestra task purge <project-id> <task-id> <expected-version> --yes [--
 4. `apps/ui/test/task-purge.test.ts`（3 项，`vitest`，**通过**）：输入框只接受该任务的编号（`012`/空白通过，`#12`/别的编号/非数字/空/负数不通过）；`purgeCommand` 发送 `confirmed: true` 且空原因不带字段、原因被 trim；结果行如实说出被删行数、工作树/验证副本/分支数量、删除前的终止与依赖边数量，以及分支 tip。
 
 5. `apps/runtime/test/task-purge-recovery.test.ts`（3 项，`bun test`，**通过**，本次修订新增）：`RECOVERY_REQUIRED` 任务在观察为 `STOPPED` 时先写 `TaskRecoveryReconciled` 再写 `TaskPurged`、worktree 与分支真的消失、结果 `stop.stop='RECOVERED'`/最终状态 `FAILED`；观察为 `ALIVE` 或无 provider 身份时 `RECONCILE_REQUIRED` 且任务仍 `RECOVERY_REQUIRED`、worktree 仍在、无 `TaskPurged`。
+6. `--force` 的定向测试（**通过**）：
+   - `packages/agent-adapters/test/provider-termination.test.ts`（6 项）：先 `SIGTERM`、只对幸存者 `SIGKILL`；两轮后仍存活则报 `survivors` 而不声称静止；进程已不在时一个信号不发；**pid 被复用（token 不符）或记录里没有 token 时绝不发信号**（记为 `unattributable`）；进程表读不到是「什么都没做」的事实而不是静默成功；最后一项用真实 `sleep` 进程证明信号真的到达。
+   - `packages/storage/test/task-purge.test.ts` 新增 1 项：`forced` 非空时删掉 `integration_batch_items` / `integration_verification_runs` / `stable_promotion_members`，**并连带删掉引用了该验证行的 `stable_promotions` 及其成员行**；批次行与 operation 保留；`TaskPurged` payload 带 `forced`；`PRAGMA foreign_key_check` 为空。
+   - `apps/runtime/test/task-purge-recovery.test.ts` 新增 3 项：`--force` + 观察 `ALIVE` → 对记录的那棵树终止（只对 `providerPid` 发信号）后删除，`stop.stop='FORCED'`、`bypassed=[RECONCILE_REQUIRED]`、worktree 与分支真的消失、事件 payload 与视图一致；无记录身份时**不调用终止**且 `termination` 为 `null`；成员进过 IntegrationBatch 时**不带 `--force` 拒绝且不动**、带 `--force` 删掉并删掉那条 item 行。
+   - `apps/runtime/test/cli-task-purge.test.ts` 新增 1 项（真实 CLI + 真实 Runtime + 真实 git）：同一任务先 `--yes` 被拒（退出码 1 / `TASK_INTEGRATED_INTO_DEV`，worktree 与分支仍在），再 `--yes --force` 退出码 0、`rowsDeleted['integration_batch_items']=1`、stderr 打印 `--force stepped over 1 refusal(s)`、worktree 与分支真的消失、`task status` 为 `NOT_FOUND`。
+   - `apps/ui/test/task-purge.test.ts` 新增 2 项：`force: true` 才会出现在请求里；强制删除的结果行说「强制删除」并逐条列出被跳过的拒绝与终止结果（未强制时一行都不说）。
 
 未验证（不得声称）：`PURGE_RESOURCE_NOT_OWNED` 的真实 Git 竞态、reclaim 与分支删除之间崩溃的恢复全流程、UI 的实际点击（ADR-0008 边界）。
+**`--force` 未验证**：真实活着的 provider 进程被真实信号终止的端到端场景（只在服务层用注入的终止函数 + 适配器层用真实 `sleep` 进程分别验证过）；`--force` 下存储层每步与数据库之间崩溃的恢复；`--force` 删除 promotion 记录的后果在真实数据上的样子。
 
 ## 关联文档
 

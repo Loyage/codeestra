@@ -1226,6 +1226,9 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         taskId: request.taskId,
         expectedVersion: request.expectedVersion,
         commandId: request.commandId,
+        // `--force` (ADR-0058 D09) is the caller's own wider statement about this deletion; the
+        // Runtime adds no step on top of it and records in the outcome what it stepped over.
+        force: request.force,
         ...(request.reason === undefined ? {} : { reason: request.reason }),
         actor: 'local-user',
       });

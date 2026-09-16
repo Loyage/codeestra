@@ -43,7 +43,7 @@ type CommandEnvelope<T extends string, P> = {
 | `TaskCreated` | `Task` | taskId, revisionId, kind |
 | `TaskStateChanged` | `Task` | taskId, from, to, reason |
 | `TaskArchived` / `TaskUnarchived` | `Task` | taskId, from, to（同态，只改 `archived_at`）, reason, actor |
-| `TaskPurged` | `Task` | taskId, displayNumber, from, to=`PURGED`（**不是一个状态**：行已删除，见下）, archived, currentRevisionId, rowsDeleted（逐表行数）, dependencyEdgesRemoved, branchFacts（每个被删分支的 `branchRef`/`tipCommit`/`deleted`）, reclamation（每个被回收资源）, appendOnlyTriggersSuspended, reason, actor |
+| `TaskPurged` | `Task` | taskId, displayNumber, from, to=`PURGED`（**不是一个状态**：行已删除，见下）, archived, currentRevisionId, rowsDeleted（逐表行数）, dependencyEdgesRemoved, branchFacts（每个被删分支的 `branchRef`/`tipCommit`/`deleted`）, reclamation（每个被回收资源）, **forced（`--force` 时非 null：`bypassed[]` 被跳过的拒绝码与理由、`termination` 终止记录；ADR-0058 D09）**, appendOnlyTriggersSuspended, reason, actor |
 | `TaskRevisionCreated` | `Task` | taskId, revisionId, revisionNumber, previousRevisionId（首个修订为 null）, constraintCount, **features**（声明的功能，ADR-0059）, reason, actor（**设计名 `TaskRevisionAppended` 已废弃**） |
 | `TaskDependencyAdded` / `TaskDependencyRemoved` | `Task` | dependentId, prerequisiteId, requiredRevisionId（**设计名 `DependencyAdded`/`DependencyNeedsReview` 已废弃**） |
 | `ExecutionReserved` | `Execution` | executionId, taskId, revisionId, workspaceId |
