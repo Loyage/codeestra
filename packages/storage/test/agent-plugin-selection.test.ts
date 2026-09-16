@@ -10,9 +10,29 @@ import { Database } from 'bun:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Phase1Database, StorageError, agentPluginSelectionMigration, phase1SchemaVersion }
-  from '../src/index.js';
-import { restorePreV34Schema } from './support/restore-pre-v34.js';
+import {
+  Phase1Database, StorageError, agentAnswerMigration, agentConfigurationMigration,
+  agentDisconnectMigration, agentObservationMigration, agentPluginSelectionMigration,
+  agentStartMigration, capacitySlotReservationMigration, impactAnalysisMigration,
+  integrationPipelineMigration, knowledgeLayerMigration, operationProgressMigration,
+  phase1Migration, phase1SchemaVersion, reclamationMigration, revisionDeliveryMigration,
+  sessionHandoffMigration, sessionTerminalMigration, stablePromotionMigration,
+  taskControlMigration, taskDependenciesMigration, taskRetryMigration, taskVerificationMigration,
+  unregisteredReclamationMigration, verificationLayeringMigration, verificationProgressMigration,
+  workspaceRetryMigration,
+} from '../src/index.js';
+
+/** The exact v1…v26 chain, in `migrate()` order (v16 permanently unused, v22 unoccupied). */
+const throughV26 = [
+  phase1Migration, agentStartMigration, agentObservationMigration, agentAnswerMigration,
+  agentDisconnectMigration, taskVerificationMigration, workspaceRetryMigration,
+  agentConfigurationMigration, taskControlMigration, integrationPipelineMigration,
+  operationProgressMigration, reclamationMigration, stablePromotionMigration,
+  sessionHandoffMigration, taskDependenciesMigration, verificationProgressMigration,
+  sessionTerminalMigration, revisionDeliveryMigration, impactAnalysisMigration,
+  capacitySlotReservationMigration, taskRetryMigration, unregisteredReclamationMigration,
+  verificationLayeringMigration, knowledgeLayerMigration,
+];
 
 const selection = {
   extensions: ['/plugins/a.ts', '/plugins/b.ts'],
@@ -31,46 +51,22 @@ describe('agent plugin selection storage', () => {
   test('a version 26 database upgrades in place and keeps its existing rows', () => {
     const directory = mkdtempSync(join(tmpdir(), 'codeestra-plugin-v26-'));
     const filename = join(directory, 'runtime.sqlite');
+    const legacy = new Database(filename, { create: true, strict: true });
     try {
-      // Build the current schema, then remove exactly what version 27 added: the upgrade below is
-      // then the same statement a real version 26 database runs. The row inserted is a GLOBAL scope,
-      // so it references no project.
-      new Phase1Database(filename).close();
-    } catch {
-      // A failure here must not silently skip the migration assertions below.
-      throw new Error('could not build the current schema for the upgrade fixture');
-    }
-    try {
-      const legacy = new Database(filename, { create: true, strict: true });
+      // Build a genuine v26 database from the historical chain, then upgrade it. It cannot be done
+      // by building the current schema and stripping what later steps added any more: ADR-0064's v35
+      // step DROPs the `stable_promotions` aggregate and `projects.dev_repo_path`, so a current-schema
+      // database no longer has what a v26 database had.
       legacy.exec('PRAGMA foreign_keys=OFF;');
+      for (const migration of throughV26) legacy.exec(migration);
+      legacy.exec('PRAGMA foreign_keys=ON;');
+      legacy.query(`INSERT INTO projects(id,name,repo_root,git_common_dir,main_ref,dev_ref,
+        object_format,policy_version,created_at)
+        VALUES ('p1','demo','/tmp/demo','/tmp/demo/.git','refs/heads/main','refs/heads/dev','sha1',1,1)`)
+        .run();
       legacy.query(`INSERT INTO agent_configurations
-        (id,scope,project_id,adapter_id,provider,model,thinking_level,plugin_selection_json,
-         updated_at,updated_by)
-        VALUES ('cfg-global','GLOBAL',NULL,'pi','deepseek','deepseek-flash','high',
-          '{"extensions":[],"skills":[],"promptTemplates":[],"themes":[]}',5,'local-user')`).run();
-      legacy.exec('ALTER TABLE agent_configurations DROP COLUMN plugin_selection_json');
-      // A version 26 database also predates every later step, so the columns added by schema v29
-      // (the dev clone and the promotion remote readbacks) are removed as well: the upgrade below
-      // must then be exactly what a real v26 database runs.
-      for (const column of ['dev_repo_path', 'remote_dev_commit', 'remote_main_commit', 'pushed_at',
-        'main_pushed_at']) {
-        legacy.exec(`ALTER TABLE stable_promotions DROP COLUMN ${column}`);
-      }
-      legacy.exec('ALTER TABLE projects DROP COLUMN dev_repo_path');
-      // ...and the same for the tables added by schema v31 (Session Guidance, ADR-0057): a real v26
-      // database does not have them either.
-      for (const table of ['session_guidance_deliveries', 'execution_guidance_contexts',
-        'session_guidance']) {
-        legacy.exec(`DROP TABLE IF EXISTS ${table}`);
-      }
-      // ...and the column added by schema v32 (declared features, ADR-0059).
-      legacy.exec('ALTER TABLE task_revisions DROP COLUMN features_json');
-      // ...and the column added by schema v33 (the per-Task base ref, ADR-0060).
-      legacy.exec('ALTER TABLE workspaces DROP COLUMN base_ref');
-      // ...and everything schema v34 (ADR-0061) added, with the tables it retires restored: a real
-      // database of this age has the project-scoped capacity configuration and none of the Runtime
-      // global tables (capacity or pause).
-      restorePreV34Schema(legacy);
+        (id,scope,project_id,adapter_id,provider,model,thinking_level,updated_at,updated_by)
+        VALUES ('cfg-global','GLOBAL',NULL,'pi','deepseek','deepseek-flash','high',5,'local-user')`).run();
       legacy.exec('PRAGMA user_version=26');
       legacy.close();
 

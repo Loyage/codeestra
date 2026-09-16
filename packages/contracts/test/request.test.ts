@@ -94,28 +94,17 @@ describe('Runtime task request boundary', () => {
     expect(runtimeRequestSchema.safeParse({ ...verify, executionId: 'not-a-uuid' }).success).toBe(false);
   });
 
-  test('requires a Task version for integration and accepts a plain integration read', () => {
-    const integration = {
-      requestId: base.requestId,
-      schemaVersion: base.schemaVersion,
-      command: 'task.integrate' as const,
-      commandId: base.commandId,
-      projectId: base.projectId,
-      taskId: '66666666-6666-4666-8666-666666666666',
-      expectedVersion: 3,
-    };
-    expect(runtimeRequestSchema.safeParse(integration).success).toBe(true);
-    // Integration changes the Task state, so it must carry the optimistic-concurrency version.
-    const { expectedVersion: _dropped, ...withoutVersion } = integration;
-    expect(runtimeRequestSchema.safeParse(withoutVersion).success).toBe(false);
-    expect(runtimeRequestSchema.safeParse({ ...integration, expectedVersion: -1 }).success).toBe(false);
-    expect(runtimeRequestSchema.safeParse({
-      requestId: base.requestId,
-      schemaVersion: base.schemaVersion,
-      command: 'task.integration.list',
-      projectId: base.projectId,
-      taskId: '66666666-6666-4666-8666-666666666666',
-    }).success).toBe(true);
+  test('no longer represents the removed dev-clone, integration or promotion commands', () => {
+    // ADR-0064 deleted them from the command face; a request that names one is not representable at
+    // all, rather than being accepted and refused later by the Runtime.
+    const removed = ['task.integrate', 'task.integration.list', 'task.integration.create',
+      'task.integration.integrate', 'task.integration.get', 'task.integration.cancel',
+      'promotion.prepare', 'promotion.approve', 'promotion.promote', 'promotion.restart.record',
+      'promotion.abandon', 'promotion.get', 'promotion.list', 'promotion.fullSuite.run',
+      'promotion.fullSuite.list'];
+    for (const command of removed) {
+      expect(runtimeRequestSchema.safeParse({ ...base, command }).success).toBe(false);
+    }
   });
 
   test('requires a Task version for a dependency edit and allows an unpinned add', () => {
@@ -166,29 +155,19 @@ describe('Runtime task request boundary', () => {
   });
 
   test('requires an explicit verification policy confirmation when trusting a project', () => {
+    // ADR-0064: the identity a client echoes back is the repository identity itself — there is no dev
+    // baseline and no dev clone to pin alongside it.
     const trust = {
       requestId: base.requestId,
       schemaVersion: base.schemaVersion,
       command: 'project.trust' as const,
       path: '/repo',
-      // The identity a client echoes back is what `project.inspect` returned, so it also pins the
-      // development baseline every Task worktree would be created from (ADR-0018).
       expectedIdentity: {
         repoRoot: '/repo', gitCommonDir: '/repo/.git', mainRef: 'refs/heads/main',
         objectFormat: 'sha1', headCommit: 'a'.repeat(40),
-        devRef: 'refs/heads/dev', devCommit: 'a'.repeat(40), devRefPresent: true,
-        // The verified dev clone is part of the identity the user reviewed (ADR-0047 D05); a client
-        // that omits it sends an identity that cannot be confirmed.
-        devRepoPath: null,
-        // FOUNDATION-087 / ADR-0056: the read-only retirement evidence for a checkout's own local
-        // `dev` ref travels with the identity, so a client that echoes it back stays unambiguous.
-        devRefRetirement: {
-          localDevRefPresent: false, localDevRefCommit: null,
-          remoteRefsContainingLocalDevCommit: [], publishedOnRemote: false,
-          projectsWithoutDevRepo: [],
-        },
       },
     };
+    // The policy confirmation is required: a trust that names no policy cannot be confirmed.
     expect(runtimeRequestSchema.safeParse(trust).success).toBe(false);
     expect(runtimeRequestSchema.safeParse({
       ...trust,
@@ -198,34 +177,18 @@ describe('Runtime task request boundary', () => {
       ...trust,
       expectedVerificationPolicy: { state: 'PRESENT', mainCommit: 'a'.repeat(40), digest: 'b'.repeat(64) },
     }).success).toBe(true);
-    // A baseline that was never part of what the user reviewed cannot be confirmed silently.
-    const identityWithoutBaseline = {
-      repoRoot: '/repo', gitCommonDir: '/repo/.git', mainRef: 'refs/heads/main',
-      objectFormat: 'sha1', headCommit: 'a'.repeat(40),
-      devRepoPath: null,
-    };
+    // A dev-clone field is not part of the request any more, so sending one is refused instead of
+    // being silently ignored by a strict object.
     expect(runtimeRequestSchema.safeParse({
       ...trust,
-      expectedIdentity: identityWithoutBaseline,
+      devRepoPath: '/second-clone',
       expectedVerificationPolicy: { state: 'ABSENT', mainCommit: 'a'.repeat(40) },
     }).success).toBe(false);
-    // Dropping the dev clone path is refused: it is part of the identity the user reviewed
-    // (ADR-0047 D05), so a request that never names it cannot be confirmed.
     expect(runtimeRequestSchema.safeParse({
       ...trust,
-      expectedIdentity: {
-        repoRoot: '/repo', gitCommonDir: '/repo/.git', mainRef: 'refs/heads/main',
-        objectFormat: 'sha1', headCommit: 'a'.repeat(40),
-        devRef: 'refs/heads/dev', devCommit: 'a'.repeat(40), devRefPresent: true,
-      },
+      expectedIdentity: { ...trust.expectedIdentity, devRef: 'refs/heads/dev' },
       expectedVerificationPolicy: { state: 'ABSENT', mainCommit: 'a'.repeat(40) },
     }).success).toBe(false);
-    // A missing dev branch is representable (the Runtime then refuses trust with DEV_REF_MISSING).
-    expect(runtimeRequestSchema.safeParse({
-      ...trust,
-      expectedIdentity: { ...trust.expectedIdentity, devCommit: null, devRefPresent: false },
-      expectedVerificationPolicy: { state: 'ABSENT', mainCommit: 'a'.repeat(40) },
-    }).success).toBe(true);
     // A PRESENT confirmation without a digest cannot be represented.
     expect(runtimeRequestSchema.safeParse({
       ...trust,

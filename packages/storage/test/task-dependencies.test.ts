@@ -31,8 +31,8 @@ const merged = 'c'.repeat(40);
 function seed(storage: Phase1Database): void {
   const db = storage.sqlite;
   db.query(`INSERT INTO projects
-    (id,name,repo_root,git_common_dir,main_ref,dev_ref,object_format,created_at)
-    VALUES ('p1','Project','/repo','/repo/.git','refs/heads/main','refs/heads/dev','sha1',1)`).run();
+    (id,name,repo_root,git_common_dir,main_ref,object_format,created_at)
+    VALUES ('p1','Project','/repo','/repo/.git','refs/heads/main','sha1',1)`).run();
   db.query(`INSERT INTO project_trusts
     (id,project_id,repo_root,git_common_dir,object_format,policy_version,actor,status,accepted_at)
     VALUES ('trust1','p1','/repo','/repo/.git','sha1',1,'user','ACTIVE',1)`).run();
@@ -61,15 +61,21 @@ function seedIntegratedTask(
     readonly resultCommit: string;
     /** Attempt number of this Execution; a newer attempt supersedes an older capture. */
     readonly attemptNumber?: number;
+    /** Workspace the attempt runs in; a retry reuses the one its predecessor created. */
+    readonly workspaceId?: string;
   },
 ): void {
   const db = storage.sqlite;
-  const workspaceId = `w-${input.executionId}`;
-  db.query(`INSERT INTO workspaces
-    (id,task_id,branch_ref,path,ownership_token,base_commit,state,created_at)
-    VALUES (?1,?2,?3,?4,?5,?6,'RETAINED',3)`).run(
-    workspaceId, input.taskId, `refs/heads/task/${input.taskId}`,
-    `/work/${input.executionId}`, `owner-${input.executionId}`, oid);
+  const workspaceId = input.workspaceId ?? `w-${input.executionId}`;
+  // A retry runs in the workspace its predecessor created, so the row is only written by the attempt
+  // that owns it (`one_live_workspace` allows exactly one per Task).
+  if (input.workspaceId === undefined) {
+    db.query(`INSERT INTO workspaces
+      (id,task_id,branch_ref,path,ownership_token,base_commit,state,created_at)
+      VALUES (?1,?2,?3,?4,?5,?6,'RETAINED',3)`).run(
+      workspaceId, input.taskId, `refs/heads/task/${input.taskId}`,
+      `/work/${input.executionId}`, `owner-${input.executionId}`, oid);
+  }
   db.query(`INSERT INTO executions
     (id,task_id,attempt_number,initial_revision_id,applied_revision_id,workspace_id,adapter_id,
      adapter_version,state,resource_held,base_commit,result_commit,started_at,ended_at)
@@ -175,13 +181,14 @@ describe('task dependency persistence', () => {
       expect(upgraded.sqlite.query<{ name: string }, []>(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='task_dependencies'",
       ).get()?.name).toBe('task_dependencies');
-      // The pre-existing integration fact and Task row survived the additive step.
+      // The Task row survived every step. The integration aggregate this fixture wrote at v12 is
+      // gone, because ADR-0064 dropped it at v35 — asserted rather than merely not looked at.
       expect(upgraded.sqlite.query<{ count: number }, []>(
         'SELECT COUNT(*) AS count FROM tasks',
       ).get()?.count).toBe(1);
-      expect(upgraded.sqlite.query<{ count: number }, []>(
-        "SELECT COUNT(*) AS count FROM integration_batch_items WHERE state='INTEGRATED'",
-      ).get()?.count).toBe(1);
+      expect(upgraded.sqlite.query<{ name: string }, []>(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='integration_batch_items'",
+      ).get()).toBeNull();
       expect(upgraded.sqlite.query<Record<string, unknown>, []>('PRAGMA foreign_key_check').all())
         .toEqual([]);
       upgraded.close();
@@ -301,7 +308,7 @@ describe('task dependency persistence', () => {
     expect(storage.listTaskDependencyFacts('p1', { taskId: 't1' })[0]?.resultCommit).toBe(candidate);
     // A newer attempt of the same pinned revision supersedes the older capture.
     seedIntegratedTask(storage, { taskId: 't2', revisionId: 'r2', executionId: 'e3',
-      resultCommit: merged, attemptNumber: 2 });
+      resultCommit: merged, attemptNumber: 2, workspaceId: 'w-e2' });
     expect(storage.listTaskDependencyFacts('p1', { taskId: 't1' })[0]?.resultCommit).toBe(merged);
     storage.close();
   });
