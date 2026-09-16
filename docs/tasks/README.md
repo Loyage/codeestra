@@ -7447,6 +7447,86 @@ apps/runtime/test/task-recovery-service.test.ts packages/storage/test/task-purge
 
 剩余 / 未做：未 push `origin/dev`、未跑全量测试、未提升 `main`、未重启稳定 Runtime；UI 对 `RECOVERY_REQUIRED` 任务仍只显示
 「永久删除」，未单独加 `task recover` 按钮（本次按「让删除自己完成对账」实现，recover 入口仍缺）。
+## 回归修复（`lane/fix-impact-capacity-fixture`）— `cli-impact` 夹具显式设置 Runtime 全局并发上限（FOUNDATION-096 回归，无 schema 变更）
+
+状态：**已修复并定向验证，未合入 `dev`、未 push**。基线 `dev = 2f578e9`；worktree
+`/Users/loyage/Documents/codeestra-wt/fix-impact-capacity-fixture`，分支 `lane/fix-impact-capacity-fixture`。
+
+怎么发现的：为 `dev → main` 提升按 runbook 要求在**精确候选 `2f578e9`** 上跑全量 `bun run check`（日志
+`/tmp/check-2f578e9.log`，**退出码 1**），唯一失败是 `apps/runtime/test/cli-impact.test.ts` 的
+`derives SAFE and declared-feature verdicts from real change sets`：`Timed out waiting for the expected state`（26s）。
+单独重跑该文件**同样失败**（26.5s），所以不是负载抖动，是确定性失败。
+
+原因：FOUNDATION-096（`dev@8ea9f2f`，ADR-0061 D01）引入 **Runtime 全局唯一并发上限，默认 2**；而这个用例在同一个
+`CODEESTRA_HOME` 里同时持有 **3 个** Execution——映射项目的两个 Task（它们 stub provider 还活着、仍占槽）+ 无映射项目的
+第三个 Task——第三个 Task 一直排队，夹具等它写出的文件永远等不到。默认值 2 是用户在 ADR-0061 里明确选的
+（选项 A：取已有显式值的最小值，没有则 2），所以**错的是夹具的隐含假设，不是产品默认值**。
+
+改动（1 个文件，`apps/runtime/test/cli-impact.test.ts`）：`open` 之后显式
+`settings concurrency set --limit 3`，把该临时 Runtime 的上限与用例实际同时持有的 Execution 数对齐，并写明依据
+（ADR-0061）。断言与覆盖范围一字未改。
+
+定向验证：`bun test apps/runtime/test/cli-impact.test.ts` → **1 pass / 0 fail（7.8s）**（修复前 26.6s 超时）。
+**未跑** `bun run check` / `just check` / `just verify` / `check:fast`（ADR-0038：开发分支只跑定向测试）。
+
+对提升的影响（必须如实记账）：**`dev@2f578e9` 在全量测试上是红的，因此该候选不可提升**（runbook §3 要求候选上全量退出码 0）；
+本分支与 `lane/purge-force` 一起合入 `dev` 之后，才在**新的精确 `dev` 候选**上重跑全量并走人工四步。
+
+## 用户任务（`lane/purge-force`）— 删除任务不该被各种因素阻拦：`task purge --force`（ADR-0058 D09，无 schema 变更、不占迁移号）
+
+状态：**已实现并定向验证，未合入 `dev`、未 push、未提升 `main`**。基线 `dev = 2f578e9`；worktree
+`/Users/loyage/Documents/codeestra-wt/purge-force`，分支 `lane/purge-force`。
+
+用户原话：`现在的设计有问题，用户想删除某项任务的时候，应该不受各种因素阻拦，而现在会收到报错`
+（稳定实例上真实遇到的报错是 `删除被拒绝：RECONCILE_REQUIRED — The Task is RECOVERY_REQUIRED: run task recover …`，
+即 `bb1dd9a` 之前的那条旧文案——说明**当时的稳定 `main` 还没有把 purge 的自动对账带上去**）。
+
+用户逐项裁决（本轮问答的实际答复，未答复项不作批准）：
+1. 去掉哪些阻拦：**新增 `--force` 一次性放行 ②`RECONCILE_REQUIRED` / ③已进 `dev`/`main` / ④资源归属不明**（默认行为不变）。
+2. provider 可能仍存活时：**先尝试终止再删**（另一个选项是不杀、只记录）。
+3. UI：**CLI + UI 投影**（拒绝后多一个「仍要强制删除」）。
+4. 实现中发现的外键级硬事实（`stable_promotions.verification_id` → 集成验证行 → 该任务的 execution/revision）：
+   **连提升记录一起删**（连同该 promotion 的全部成员行），而不是「这一类保持拒绝」。
+
+改了什么：
+- `packages/agent-adapters/src/pi-process.ts`：新增 `terminateProviderProcessTree`（+ `providerTerminationGraceMs`）与导出。
+  只对**记录过身份**的 pid 发信号（pid 在表里且 start token 与记录相同）；记录里 token 为空的 pid 一律不发（记入
+  `unattributable`）；先 `SIGTERM`、有界轮询等待、再对幸存者 `SIGKILL`、再有界等待；两轮后仍存活如实报 `survivors`；
+  进程表读不到是「什么都没做」的事实。不按进程组杀、不扫描进程。
+- `packages/contracts/src/index.ts`：`task.purge` 请求新增 `force: boolean`（默认 `false`）；`TaskPurgeOutcomeView` 新增 `forced`。
+- `packages/storage/src/database.ts`：`TaskPurgeForcedFacts`、`TaskPurgeInput.forced`、`TaskPurgeResult.forced`；
+  `applyTaskPurge` 在 `forced` 非空时跳过 blocker 拒绝；`taskPurgeDeletions(includeIntegratedMembership)` 在强制时追加
+  `stable_promotion_members`（本任务的 + 被删 promotion 的全部）/`stable_promotions`（verification_id 指向本任务验证行的）/
+  `integration_verification_runs`/`integration_batch_items`；`TaskPurged` payload 带 `forced`；`detail` 说明跳过了几项。
+- `apps/runtime/src/task-purge-service.ts`：`force` 选项与 `terminate` 注入点；停止步骤新增 `FORCED` 结果
+  （对账拒绝后再终止、删完仍记 `RECOVERY_REQUIRED`）；`planPurgeResources`/`removeOwnedBranches` 在强制时把拒绝记为
+  `bypassed` 事实而不中止；`applyReclamation` 传 `ignoreLiveClaims: true`。
+- `apps/runtime/src/reclaim-service.ts`：`ReclaimPlanInput.ignoreLiveClaims`（只越过活占类门禁：`ACTIVE_EXECUTION`/
+  `ACTIVE_RESERVATION`/`ACTIVE_VERIFICATION`/`TASK_NOT_TERMINAL`；归属校验一律不越过）；强制时 workspace 释放被拒记成
+  `workspaceRelease: REFUSED_UNDER_LIVE_CLAIM` 注记而不是失败。
+- `apps/runtime/src/task-recovery-service.ts`：导出 `recordedRecoveryTree`（purge 的终止用同一棵树），`observeTaskRecovery` 复用它。
+- `apps/runtime/src/main.ts`、`apps/cli/src/main.ts`：接线 `force`；`--force` flag + 用法文本 + 把 `forced` 打到 stderr。
+- `apps/ui/src/task-purge.tsx`、`types.ts`：`purgeCommand` 的 `force`、拒绝后的「仍要强制删除」按钮、`purgeForcedLines`。
+- 文档：ADR-0058（Status + D01 + 新 D09）、`docs/decisions/README.md`、`docs/architecture/{domain-model,event-model,state-machines}.md`、
+  `docs/guides/{cli-reference,ui,features,manual,troubleshooting}.md`、本记录。
+
+定向验证（ADR-0038，开发分支只跑定向测试；全部通过）：
+- `bun test packages/agent-adapters/test/provider-termination.test.ts`（新增，6 项）
+- `bun test packages/storage/test/task-purge.test.ts`（4 项已有 + 1 项新增）
+- `bun test apps/runtime/test/task-purge-recovery.test.ts`（3 项已有 + 3 项新增）
+- `bun test apps/runtime/test/cli-task-purge.test.ts`（2 项已有 + 1 项新增，真实 CLI + 真实 Runtime + 真实 git）
+- 回归：`bun test packages/git/test/purge.test.ts packages/git/test/reclaim.test.ts apps/runtime/test/task-recovery-service.test.ts`（31 项通过）、
+  `bun test apps/runtime/test/cli-reclaim.test.ts`（8 项通过）
+- `bunx vitest run apps/ui/test/task-purge.test.ts`（4 项已有 + 2 项新增）
+- `bun run typecheck`、`bun run typecheck:ui` 通过
+- **未跑** `bun run check` / `just check` / `just verify` / `check:fast`（ADR-0038：全量只在 `dev` 候选上跑）
+
+仍未做 / 已知边界（不得当作已完成）：
+- 未跑全量、未合入 `dev`、未 push、未提升 `main`、未重启任何 Runtime。
+- **未验证**：真实活着的 provider 被真实信号终止的端到端链路（适配器层用真实 `sleep` 进程验证、服务层用注入的终止函数验证，
+  二者没有在同一次测试里同时为真）；`--force` 下各步骤之间崩溃的恢复；`--force` 删掉 promotion 记录在真实数据上的后果。
+- UI 的「仍要强制删除」没有人工点击验证（ADR-0008 边界），只有 `apps/ui/test/task-purge.test.ts` 的纯函数断言。
+
 ## FOUNDATION-096 — Runtime 全局容量：唯一跨项目上限 + schema v34 上半 + 全局事件（ADR-0061 D01/D02/D03/D10）
 
 状态：**代码、迁移、命令面与定向验证已完成**；**ADR-0061 的下半（全局暂停 / Provider 进程冻结 / `scheduler control *` / UI 全局 shell）仍未实现**，本格不得被读成「AI 请求不会再多发」——本格交付的是**容量事实**，不是对模型请求的刹车。

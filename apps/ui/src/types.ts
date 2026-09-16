@@ -1658,7 +1658,7 @@ export interface TaskPurgeOutcomeView {
   readonly replayed: boolean;
   readonly stop: {
     readonly state: string;
-    readonly stop: 'TERMINAL' | 'RELEASED' | 'RECOVERED' | 'UNCERTAIN';
+    readonly stop: 'TERMINAL' | 'RELEASED' | 'RECOVERED' | 'FORCED' | 'UNCERTAIN';
     readonly executionId: string | null;
     readonly sessionId: string | null;
     readonly detail: string;
@@ -1682,6 +1682,18 @@ export interface TaskPurgeOutcomeView {
     readonly reasonCode: string;
     readonly branchRef: string | null;
   }[];
+  /** What `--force` stepped over (ADR-0058 D09); null when the deletion was not forced. */
+  readonly forced: {
+    readonly bypassed: readonly { readonly code: string; readonly detail: string }[];
+    readonly termination: {
+      readonly attempted: boolean;
+      readonly signalsSent: number;
+      readonly terminated: boolean;
+      readonly survivors: readonly number[];
+      readonly unattributable: readonly number[];
+      readonly detail: string;
+    } | null;
+  } | null;
   readonly dependencyEdgesRemoved: number;
   readonly rowsDeleted: Readonly<Record<string, number>>;
   readonly detail: string;

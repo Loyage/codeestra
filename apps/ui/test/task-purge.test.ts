@@ -3,6 +3,7 @@ import {
   purgeBranchLines,
   purgeCommand,
   purgeConfirmationMatches,
+  purgeForcedLines,
   purgeOutcomeLine,
 } from '../src/task-purge.js';
 import type { TaskPurgeOutcomeView } from '../src/types.js';
@@ -38,6 +39,15 @@ describe('purge command', () => {
     expect(purgeCommand({ ...base, reason: '   ' })).not.toHaveProperty('reason');
     expect(purgeCommand({ ...base, reason: ' 不再需要 ' })).toMatchObject({ reason: '不再需要' });
   });
+
+  it('sends force: true only when the user asked to force the deletion', () => {
+    const base = { projectId: 'p', taskId: 't', expectedVersion: 3, commandId: 'c', reason: null };
+    expect(purgeCommand(base)).not.toHaveProperty('force');
+    expect(purgeCommand({ ...base, force: false })).not.toHaveProperty('force');
+    expect(purgeCommand({ ...base, force: true })).toMatchObject({
+      confirmed: true, force: true,
+    });
+  });
 });
 
 const outcome: TaskPurgeOutcomeView = {
@@ -59,6 +69,7 @@ const outcome: TaskPurgeOutcomeView = {
     { branchRef: 'refs/heads/task/t', tipCommit: 'a'.repeat(40), deleted: true, detail: 'deleted' },
   ],
   reclamation: [],
+  forced: null,
   dependencyEdgesRemoved: 2,
   rowsDeleted: { tasks: 1, task_revisions: 2 },
   detail: 'gone',
@@ -86,5 +97,37 @@ describe('purge outcome rendering', () => {
         detail: 'provider is gone; the run is closed as FAILED' },
     });
     expect(line).toContain('删除前已按观察对账（FAILED）');
+  });
+
+  it('reports a forced deletion as forced, and lists exactly what it stepped over', () => {
+    const forced: TaskPurgeOutcomeView = {
+      ...outcome,
+      state: 'RECOVERY_REQUIRED',
+      stop: { state: 'RECOVERY_REQUIRED', stop: 'FORCED', executionId: 'e1', sessionId: 's1',
+        detail: 'provider could not be proven gone; deleted anyway because --force was passed' },
+      forced: {
+        bypassed: [
+          { code: 'RECONCILE_REQUIRED', detail: 'provider process 7001 is still running' },
+          { code: 'PURGE_RESOURCE_NOT_OWNED',
+            detail: 'TASK_WORKTREE /tmp/w: ACTIVE_EXECUTION (left on disk)' },
+        ],
+        termination: { attempted: true, signalsSent: 2, terminated: false, survivors: [7001],
+          unattributable: [], detail: 'sent 2 signal(s) but 7001 is still running' },
+      },
+    };
+    const line = purgeOutcomeLine(forced);
+    expect(line).toContain('强制删除：进程未证明静止（RECOVERY_REQUIRED）');
+    expect(line).toContain('--force 跳过 2 项拒绝');
+    expect(purgeForcedLines(forced)).toEqual([
+      'RECONCILE_REQUIRED — provider process 7001 is still running',
+      'PURGE_RESOURCE_NOT_OWNED — TASK_WORKTREE /tmp/w: ACTIVE_EXECUTION (left on disk)',
+      'provider 进程可能仍在运行：sent 2 signal(s) but 7001 is still running',
+    ]);
+    // An ordinary deletion has nothing to report here, and nothing to claim either.
+    expect(purgeForcedLines(outcome)).toEqual([]);
+    const terminated = purgeForcedLines({ ...forced, forced: { ...forced.forced as NonNullable<
+      TaskPurgeOutcomeView['forced']>, termination: { attempted: true, signalsSent: 1,
+      terminated: true, survivors: [], unattributable: [], detail: 'no recorded process remains' } } });
+    expect(terminated.at(-1)).toContain('已尝试终止 provider 进程');
   });
 });

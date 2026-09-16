@@ -12,6 +12,9 @@
 `FAILED`（与 `task recover` 同一判定；provider 无法证明已退出即 `RECONCILE_REQUIRED` 且什么都不删），
 再在一次数据库事务里删掉它及其全部子行；`SUCCEEDED` 任务因成果已在 `dev` 中而被拒（ADR-0053）。
 
+**`--force`（ADR-0058 D09）不新增状态，也不新增「伪状态」**：它跳过的是判据而不是事实——`RECOVERY_REQUIRED` 任务被删除时
+最终状态仍然记作 `RECOVERY_REQUIRED`（结果里 `stop.stop: "FORCED"` 与 `forced.bypassed` 说明它没有被证明静止）。
+
 | 源 | 触发 | Guard / 目标 |
 |---|---|---|
 | DRAFT | submit | 规格有效；依赖未满足→BLOCKED，否则 READY |

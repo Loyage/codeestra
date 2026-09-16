@@ -24,10 +24,13 @@ export { readProcessStartToken } from './pi-identity.js';
 export {
   captureProviderProcessTree,
   inspectProviderProcessOwnership,
+  providerTerminationGraceMs,
   readProcessTable,
+  terminateProviderProcessTree,
 } from './pi-process.js';
 export type {
   ProcessTableRow, ProviderOwnershipObservation, ProviderProcessRef, ProviderProcessTree,
+  ProviderTerminationOutcome,
 } from './pi-process.js';
 import { piPluginSelectionSupport } from './pi-adapter.js';
 import { codexPluginSelectionSupport } from './codex-adapter.js';

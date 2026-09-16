@@ -155,6 +155,12 @@ interface PurgeView {
     readonly deleted: boolean }[];
   readonly rowsDeleted: Readonly<Record<string, number>>;
   readonly dependencyEdgesRemoved: number;
+  /** The `--force` facts (ADR-0058 D09); null for an ordinary deletion. */
+  readonly forced: {
+    readonly bypassed: readonly { readonly code: string; readonly detail: string }[];
+    readonly termination: { readonly attempted: boolean; readonly signalsSent: number;
+      readonly terminated: boolean; readonly detail: string } | null;
+  } | null;
 }
 
 describe('codeestra task purge command face', () => {
@@ -242,4 +248,63 @@ describe('codeestra task purge command face', () => {
       await cli(['stop'], fixture.environment);
     }
   }, 120_000);
+
+  test('--force deletes a Task whose commit reached an integration batch (ADR-0058 D09)', async () => {
+    const fixture = await openedProject();
+    try {
+      const task = await seededExecutedTask(fixture);
+      // The one refusal a CLI fixture can produce on purpose: the Task is a member of an integration
+      // batch, which is the record of *who* brought its commit into dev.
+      const storage = new Phase1Database(join(fixture.home, 'runtime.sqlite'));
+      const oid = 'a'.repeat(40);
+      try {
+        const revisionId = storage.getTask(fixture.projectId, task.taskId)
+          ?.currentRevision.id as string;
+        const executionId = storage.listTaskExecutions(fixture.projectId, task.taskId)[0]
+          ?.executionId as string;
+        // `INTEGRATED` (not CREATED) so the Runtime's startup integration reconcile, which needs a
+        // real batch operation, does not treat this scenery as an interrupted integration.
+        storage.sqlite.query(`INSERT INTO integration_batches
+          (id,project_id,dev_ref,dev_commit,state,integrated_commit,merged_commit,merge_strategy,
+            worktree_ownership_token,created_at,completed_at)
+          VALUES ('cli-force-b1',?1,'refs/heads/dev',?2,'INTEGRATED',?2,?2,'MERGE_COMMIT','token',12,13)`)
+          .run(fixture.projectId, oid);
+        storage.sqlite.query(`INSERT INTO integration_batch_items
+          (batch_id,project_id,task_id,revision_id,execution_id,candidate_commit,dev_commit,state,
+            integrated_commit,created_at)
+          VALUES ('cli-force-b1',?1,?2,?3,?4,?5,?5,'INTEGRATED',?5,12)`)
+          .run(fixture.projectId, task.taskId, revisionId, executionId, oid);
+      } finally {
+        storage.close();
+      }
+
+      // Without the flag the refusal names the record the deletion would erase, and nothing moves.
+      const refused = await cli(['task', 'purge', fixture.projectId, task.taskId,
+        String(task.taskVersion), '--yes'], fixture.environment);
+      expect(refused.exitCode).toBe(1);
+      expect(refused.stderr).toContain('TASK_INTEGRATED_INTO_DEV');
+      expect(existsSync(task.workspacePath)).toBe(true);
+      expect(await refExists(fixture.devRepo, task.branchRef)).toBe(true);
+
+      const forced = await cli(['task', 'purge', fixture.projectId, task.taskId,
+        String(task.taskVersion), '--yes', '--force', '--reason', 'forced by hand'],
+        fixture.environment);
+      expect(forced.exitCode).toBe(0);
+      const view = JSON.parse(forced.stdout) as PurgeView;
+      expect(view.forced?.bypassed.map((entry) => entry.code)).toEqual(['TASK_INTEGRATED_INTO_DEV']);
+      // The provenance row is what the flag gave up, and it is counted in the same view.
+      expect(view.rowsDeleted['integration_batch_items']).toBe(1);
+      expect(view.plan).toMatchObject({ worktrees: 1, branches: 1 });
+      // It goes to stderr as well: a human who ran the command sees what was stepped over without
+      // reading the JSON, while stdout stays one parseable document.
+      expect(forced.stderr).toContain('--force stepped over 1 refusal(s)');
+      expect(forced.stderr).toContain('TASK_INTEGRATED_INTO_DEV');
+      expect(existsSync(task.workspacePath)).toBe(false);
+      expect(await refExists(fixture.devRepo, task.branchRef)).toBe(false);
+      expect((await cli(['task', 'status', fixture.projectId, task.taskId], fixture.environment))
+        .stderr).toContain('NOT_FOUND');
+    } finally {
+      await cli(['stop'], fixture.environment);
+    }
+  }, 180_000);
 });

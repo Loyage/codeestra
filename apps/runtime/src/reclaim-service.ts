@@ -234,6 +234,17 @@ export interface ReclaimPlanInput {
   readonly unregisteredScan?: UnregisteredScanResult | undefined;
   /** Report unregistered candidates that belong to no trusted project (batch scope). */
   readonly reportUnattributed?: boolean;
+  /**
+   * ADR-0058 D09: treat the *live-claim* gates on this Task's resources as moot.
+   *
+   * Only `task purge --force` sets it, and only after it has decided the Task and its rows are going
+   * away: `ACTIVE_EXECUTION`, `ACTIVE_RESERVATION`, `ACTIVE_VERIFICATION` and `TASK_NOT_TERMINAL`
+   * protect a run this command has already retired (it terminated the provider first). The
+   * *ownership* gates — symlink escape, a path outside the owned root, a registration/HEAD/branch that
+   * does not match the record — are never bypassed here: a path the Runtime cannot prove is this
+   * Task's is still never deleted.
+   */
+  readonly ignoreLiveClaims?: boolean;
 }
 
 export interface ReclaimBatchInput extends Omit<ReclaimPlanInput, 'projectId'> {
@@ -1159,19 +1170,22 @@ async function buildPlan(input: ReclaimPlanInput): Promise<BuiltPlan> {
       };
       const refusal = (reasonCode: string, detail: string): ReclaimTarget =>
         ({ ...base, action: 'REFUSE', reasonCode, detail });
-      if (workspace.resourceHeld) {
+      // ADR-0058 D09: a forced purge has already retired this Task, so the gates that protect a live
+      // run no longer apply to it. Everything below them is an ownership check and still applies.
+      const liveClaimsApply = input.ignoreLiveClaims !== true;
+      if (liveClaimsApply && workspace.resourceHeld) {
         targets.push(refusal('ACTIVE_EXECUTION',
           'An Execution of this Task still holds its resources; cancel or wait for it first'));
-      } else if (workspace.activeReservation) {
+      } else if (liveClaimsApply && workspace.activeReservation) {
         // A slot reservation outlives the Execution it will start, so it is a live claim in its own
         // right; `--include-failure-scenes` must not be able to override it.
         targets.push(refusal('ACTIVE_RESERVATION',
           `Slot reservation ${workspace.reservationId ?? 'unknown'}`
           + ` (${workspace.reservationState ?? 'RESERVED'}) still claims this workspace`));
-      } else if (activeTaskStates.has(task.state)) {
+      } else if (liveClaimsApply && activeTaskStates.has(task.state)) {
         targets.push(refusal('TASK_NOT_TERMINAL',
           `Task is ${task.state} and still owns its workspace`));
-      } else if (!terminalTaskStates.has(task.state)) {
+      } else if (liveClaimsApply && !terminalTaskStates.has(task.state)) {
         targets.push(refusal('TASK_NOT_TERMINAL',
           `Task is ${task.state}; only a finished Task's workspace can be reclaimed`));
       } else if (owned.symlink) {
@@ -1255,7 +1269,7 @@ async function buildPlan(input: ReclaimPlanInput): Promise<BuiltPlan> {
       };
       const refusal = (reasonCode: string, detail: string): ReclaimTarget =>
         ({ ...base, action: 'REFUSE', reasonCode, detail });
-      if (copy.state === 'QUEUED' || copy.state === 'RUNNING') {
+      if (input.ignoreLiveClaims !== true && (copy.state === 'QUEUED' || copy.state === 'RUNNING')) {
         targets.push(refusal('ACTIVE_VERIFICATION',
           `Verification run is ${copy.state} and still owns its copy`));
       } else if (owned.symlink) {
@@ -1603,10 +1617,14 @@ export async function applyReclamation(input: ReclaimApplyInput): Promise<Reclai
     const ownedRoot = ownedRootFor(input.runtimeHome, target.kind);
     if (target.kind === 'TASK_WORKTREE') {
       // A reservation granted after the plan still claims this workspace: the directory must not be
-      // deleted under it, so the claim is read again here rather than assumed to be unchanged.
-      const reservation = input.storage.findActiveWorkspaceReservation({
-        projectId: input.projectId, workspaceId: target.resourceId,
-      });
+      // deleted under it, so the claim is read again here rather than assumed to be unchanged. A
+      // forced purge (ADR-0058 D09) has already retired the Task this reservation belongs to, so it
+      // is the one caller that does not re-check it.
+      const reservation = input.ignoreLiveClaims === true
+        ? null
+        : input.storage.findActiveWorkspaceReservation({
+          projectId: input.projectId, workspaceId: target.resourceId,
+        });
       if (reservation !== null) {
         records.push(recordInput(target, randomUUID(), 'REFUSED', 'ACTIVE_RESERVATION',
           `Slot reservation ${reservation.reservationId} (${reservation.state}) still claims this`
@@ -1630,6 +1648,9 @@ export async function applyReclamation(input: ReclaimApplyInput): Promise<Reclai
     const outcome = removeOutcome(removal.outcome);
     const evidence = { ...target.evidence, removal: removal.evidence,
       removalReasonCode: removal.reasonCode };
+    // Set when a forced purge (ADR-0058 D09) could not release the workspace row because a live claim
+    // still owns it. The removal itself stands: the purge deletes that row in its own transaction.
+    let releaseNote: Readonly<Record<string, unknown>> = {};
     if (target.kind === 'TASK_WORKTREE' && (outcome === 'RECLAIMED' || outcome === 'ALREADY_ABSENT')) {
       try {
         input.storage.releaseWorkspaceForReclamation({
@@ -1642,15 +1663,23 @@ export async function applyReclamation(input: ReclaimApplyInput): Promise<Reclai
           releasedAt: now(),
         });
       } catch (error) {
-        // The directory is gone but the workspace row still claims ownership. Saying so is the
-        // honest outcome; the next run reconciles the row without deleting anything again.
-        records.push(recordInput(target, randomUUID(), 'FAILED', 'WORKSPACE_RELEASE_FAILED',
-          error instanceof Error ? error.message : String(error), evidence));
-        continue;
+        const detail = error instanceof Error ? error.message : String(error);
+        if (input.ignoreLiveClaims === true) {
+          // A forced purge has already decided this Task is going away: the Execution holding the
+          // workspace is one of the rows it deletes in the same command, so a refused release is a
+          // note on the record instead of a failed removal that leaves the directory in place.
+          releaseNote = { workspaceRelease: { outcome: 'REFUSED_UNDER_LIVE_CLAIM', detail } };
+        } else {
+          // The directory is gone but the workspace row still claims ownership. Saying so is the
+          // honest outcome; the next run reconciles the row without deleting anything again.
+          records.push(recordInput(target, randomUUID(), 'FAILED', 'WORKSPACE_RELEASE_FAILED',
+            detail, evidence));
+          continue;
+        }
       }
     }
     records.push(recordInput(target, randomUUID(), outcome, removal.reasonCode,
-      removal.detail, evidence));
+      removal.detail, { ...evidence, ...releaseNote }));
   }
 
   // The unregistered half. Each candidate was already decided by the one scan this command

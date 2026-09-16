@@ -131,6 +131,28 @@ function recordedTree(value: unknown): ProviderProcessTree | null {
 }
 
 /**
+ * The provider process tree a recovery subject records, or `null` when it recorded no identity at all.
+ *
+ * Exported because `task purge --force` (ADR-0058 D09) needs the very same tree the reconcile reads:
+ * it may only signal processes this record names, and "no identity was recorded" has to mean "nothing
+ * can be attributed, so nothing may be signalled" in both places.
+ */
+export function recordedRecoveryTree(subject: TaskRecoverySubject): ProviderProcessTree | null {
+  const identity = recordedIdentity(subject.incarnationProcessIdentity)
+    ?? recordedIdentity(subject.sessionProcessIdentity);
+  if (identity === null) return null;
+  return recordedTree(subject.incarnationProcessTree)
+    ?? {
+      pid: identity.pid,
+      startToken: identity.startToken,
+      pgid: null,
+      descendants: [],
+      capturedAt: 0,
+      note: 'synthesized from the recorded provider identity; no descendant snapshot was kept',
+    };
+}
+
+/**
  * Observes one `RECOVERY_REQUIRED` Task from real facts only. Pure with respect to the database and
  * the filesystem: it reads the process table (through the Adapter's ownership inspector, so the
  * PID-reuse rule lives in one place) and checks whether the recorded workspace path still exists.
@@ -151,19 +173,12 @@ export async function observeTaskRecovery(input: {
 
   let processState: RecoveryProcessState;
   let providerPid: number | null = identity?.pid ?? null;
-  if (identity === null) {
+  const inspected = recordedRecoveryTree(subject);
+  if (identity === null || inspected === null) {
     processState = 'IDENTITY_MISSING';
   } else {
     // With no descendant snapshot the walk has nothing to check beyond the provider itself; the
     // observation still refuses to call that quiescence (see `descendantRecord`).
-    const inspected = tree ?? {
-      pid: identity.pid,
-      startToken: identity.startToken,
-      pgid: null,
-      descendants: [],
-      capturedAt: 0,
-      note: 'synthesized from the recorded provider identity; no descendant snapshot was kept',
-    };
     const inspector = input.inspectOwnership
       ?? ((value: ProviderProcessTree) => inspectProviderProcessOwnership({ tree: value }));
     const observation = await inspector(inspected);

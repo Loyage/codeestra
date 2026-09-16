@@ -4,6 +4,8 @@ import {
   captureProviderProcessTree,
   DeterministicFakeAdapter,
   type ProviderOwnershipObservation,
+  type ProviderProcessTree,
+  type ProviderTerminationOutcome,
 } from '@codeestra/agent-adapters';
 import type { AgentSessionRef, AgentStartRequest } from '@codeestra/contracts';
 import { AdapterRegistry } from '../src/adapter-registry.js';
@@ -222,4 +224,117 @@ describe('task purge on a RECOVERY_REQUIRED Task', () => {
       await closeHarness(harness);
     }
   }, 60_000);
+});
+
+/** The termination face `--force` uses: the real one signals pid+start-token matches only (ADR-0058 D09). */
+function terminationRecorder(): {
+  readonly calls: ProviderProcessTree[];
+  readonly terminate: (tree: ProviderProcessTree) => Promise<ProviderTerminationOutcome>;
+} {
+  const calls: ProviderProcessTree[] = [];
+  return {
+    calls,
+    terminate: async (tree) => {
+      calls.push(tree);
+      return { attempted: true, signalsSent: 2, terminated: true, signalled: [tree.pid], survivors: [],
+        unattributable: [], detail: 'sent 2 signal(s); no recorded process remains' };
+    },
+  };
+}
+
+describe('task purge --force on a RECOVERY_REQUIRED Task', () => {
+  test('terminates the recorded provider tree, then deletes, recording what it stepped over', async () => {
+    const harness = await recoveryHarness();
+    try {
+      const recorder = terminationRecorder();
+      const outcome = await purgeCommand(harness, {
+        force: true,
+        inspectOwnership: alive,
+        terminate: recorder.terminate,
+      });
+      // The refusal an ordinary purge would have ended with is recorded, not hidden — the state it was
+      // deleted from is still RECOVERY_REQUIRED, and the stop says the deletion was forced.
+      expect(outcome.state).toBe('RECOVERY_REQUIRED');
+      expect(outcome.stop).toMatchObject({ state: 'RECOVERY_REQUIRED', stop: 'FORCED' });
+      expect(outcome.forced?.bypassed.map((entry) => entry.code)).toEqual(['RECONCILE_REQUIRED']);
+      expect(outcome.forced?.termination).toMatchObject({ attempted: true, signalsSent: 2,
+        terminated: true });
+      // It signalled exactly the tree the reconcile read, and it did not invent one.
+      expect(recorder.calls.map((tree) => tree.pid)).toEqual([providerPid]);
+      // The live-claim gates no longer protect a Task this command retired: the worktree and the
+      // branch really go, which is what makes the Task genuinely deletable.
+      expect(outcome.plan).toMatchObject({ worktrees: 1, branches: 1 });
+      expect(outcome.branchFacts[0]?.deleted).toBe(true);
+      expect(existsSync(harness.workspacePath)).toBe(false);
+      expect(harness.fixture.storage
+        .getTask(harness.fixture.projectId, harness.fixture.taskId)).toBeNull();
+      // The audit carries the same facts as the view, in the same transaction as the deletion.
+      const event = harness.fixture.storage.sqlite.query<{ payload_json: string }, []>(
+        "SELECT payload_json FROM domain_events WHERE event_type='TaskPurged'").get();
+      expect(JSON.parse(event?.payload_json ?? '{}')).toMatchObject({
+        forced: { bypassed: [{ code: 'RECONCILE_REQUIRED' }], termination: { terminated: true } },
+      });
+    } finally {
+      await closeHarness(harness);
+    }
+  }, 60_000);
+
+  test('signals nothing when the record kept no identity, and still deletes', async () => {
+    const harness = await recoveryHarness();
+    try {
+      harness.fixture.storage.sqlite.query(
+        'UPDATE session_incarnations SET process_identity_json=NULL,process_tree_json=NULL WHERE session_id=?1')
+        .run(harness.sessionId);
+      harness.fixture.storage.sqlite.query(
+        'UPDATE agent_sessions SET process_identity_json=NULL WHERE id=?1').run(harness.sessionId);
+      const recorder = terminationRecorder();
+      const outcome = await purgeCommand(harness, { force: true, terminate: recorder.terminate });
+      // No identity means nothing can be attributed, so nothing may be signalled — and the outcome
+      // says that instead of claiming a termination that never happened.
+      expect(recorder.calls).toEqual([]);
+      expect(outcome.forced?.termination).toBeNull();
+      expect(outcome.stop?.stop).toBe('FORCED');
+      expect(harness.fixture.storage
+        .getTask(harness.fixture.projectId, harness.fixture.taskId)).toBeNull();
+    } finally {
+      await closeHarness(harness);
+    }
+  }, 60_000);
+
+  test('deletes a Task whose commit reached an integration batch, and refuses to without --force',
+    async () => {
+      const harness = await recoveryHarness();
+      try {
+        const { projectId, taskId } = harness.fixture;
+        const executionId = harness.executionId;
+        const revisionId = harness.fixture.storage.getTask(projectId, taskId)
+          ?.currentRevision.id as string;
+        const oid = 'a'.repeat(40);
+        harness.fixture.storage.sqlite.query(`INSERT INTO integration_batches
+          (id,project_id,dev_ref,dev_commit,state,integrated_commit,merged_commit,merge_strategy,
+            worktree_ownership_token,created_at,completed_at)
+          VALUES ('force-b1',?1,'refs/heads/dev',?2,'INTEGRATED',?2,?2,'MERGE_COMMIT','token',12,13)`)
+          .run(projectId, oid);
+        harness.fixture.storage.sqlite.query(`INSERT INTO integration_batch_items
+          (batch_id,project_id,task_id,revision_id,execution_id,candidate_commit,dev_commit,state,
+            integrated_commit,created_at)
+          VALUES ('force-b1',?1,?2,?3,?4,?5,?5,'INTEGRATED',?5,12)`)
+          .run(projectId, taskId, revisionId, executionId, oid);
+
+        await expect(purgeCommand(harness, { inspectOwnership: stopped }))
+          .rejects.toMatchObject({ code: 'TASK_INTEGRATED_INTO_DEV' });
+        expect(harness.fixture.storage.getTask(projectId, taskId)).not.toBeNull();
+
+        const outcome = await purgeCommand(harness, { force: true, inspectOwnership: stopped });
+        expect(outcome.forced?.bypassed.map((entry) => entry.code))
+          .toEqual(['TASK_INTEGRATED_INTO_DEV']);
+        // The provenance row is the thing the flag gives up, and `rowsDeleted` is where it shows.
+        expect(outcome.rowsDeleted['integration_batch_items']).toBe(1);
+        expect(harness.fixture.storage.getTask(projectId, taskId)).toBeNull();
+        expect(harness.fixture.storage.sqlite.query<{ count: number }, []>(
+          'SELECT COUNT(*) AS count FROM integration_batch_items').get()?.count).toBe(0);
+      } finally {
+        await closeHarness(harness);
+      }
+    }, 60_000);
 });
