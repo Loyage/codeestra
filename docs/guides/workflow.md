@@ -484,6 +484,6 @@ bun run codeestra task status $PROJECT <task-id>
 
 ## 下一步
 
-- 每条命令的完整参数与退出码：[cli-reference.md](./cli-reference.md)
+- 每条命令的完整参数与退出码：[cli/README.md](./cli/README.md)（九篇索引）
 - 界面上的每个面板：[ui.md](./ui.md)
 - 报错怎么办：[troubleshooting.md](./troubleshooting.md)

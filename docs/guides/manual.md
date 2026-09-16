@@ -218,7 +218,7 @@ bun run codeestra stop --wait 30      # 最多等 30 秒（0–600）
 ### 想深入看哪篇
 
 - 安装的每一步与输出形状：[getting-started.md](./getting-started.md)
-- 每条命令的参数与退出码：[cli-reference.md](./cli-reference.md) §1
+- 每条命令的参数与退出码：[cli/runtime.md](./cli/runtime.md)（§1、§2、§19）
 - 两个 clone 与 dev 实例的完整布置：[docs/tasks/README.md](../tasks/README.md) FOUNDATION-076
 
 ---
@@ -360,7 +360,7 @@ bun run codeestra project inspect /path/to/main-checkout --dev-repo /path/to/dev
 
 - 完整的接入步骤与预期输出：[getting-started.md](./getting-started.md) §4
 - Project 的概念与 common dir 识别：[concepts.md](./concepts.md)
-- `project *` 每条命令：[cli-reference.md](./cli-reference.md) §3
+- `project *` 每条命令：[cli/project.md](./cli/project.md)
 
 ---
 
@@ -482,7 +482,7 @@ bun run codeestra task purge  $PROJECT <task-id> <expected-version> --yes [--for
 
 - 完整端到端流程：[workflow.md](./workflow.md)
 - 状态机与不变量：[concepts.md](./concepts.md)、[../architecture/state-machines.md](../architecture/state-machines.md)
-- `task` 每条命令：[cli-reference.md](./cli-reference.md) §4–§5
+- `task` 每条命令：[cli/task-lifecycle.md](./cli/task-lifecycle.md)（§4）与 [cli/task-revision-session.md](./cli/task-revision-session.md)（§5）
 - 「我想做 X」的步骤化做法：[recipes.md](./recipes.md)
 
 ---
@@ -644,7 +644,7 @@ bun run codeestra events tail [--project $PROJECT] [--since <sequence>]
 
 - 逐屏 UI 走查（每个标签页、每个按钮）：[ui.md](./ui.md)
 - Attention、Session、handoff 的概念：[concepts.md](./concepts.md)
-- `attention` / `session handoff` / `events` 命令：[cli-reference.md](./cli-reference.md) §7、§17–§18
+- `attention` / `session handoff` / `events` 命令：[cli/task-revision-session.md](./cli/task-revision-session.md)（§7）与 [cli/interface.md](./cli/interface.md)（§17–§18）
 - 「Agent 停下来问我了」怎么处理：[recipes.md](./recipes.md)
 
 ---
@@ -693,7 +693,7 @@ Agent 一退出，任务详情顶部就出现**「Agent 运行结果」卡片**�
 ### 想深入看哪篇
 
 - 成果 commit 的安全策略与全部拒绝码：[workflow.md](./workflow.md) §5、[troubleshooting.md](./troubleshooting.md)
-- `task result` 命令：[cli-reference.md](./cli-reference.md) §8
+- `task result` 命令：[cli/task-result-verify.md](./cli/task-result-verify.md)（§8）
 
 ---
 
@@ -745,7 +745,7 @@ bun run codeestra task tests history $PROJECT <task-id> [--limit <n>]
 
 - 验证的完整语义与策略文件格式：[workflow.md](./workflow.md) §6、[concepts.md](./concepts.md)
 - 验证相关的全部拒绝码：[troubleshooting.md](./troubleshooting.md) §1
-- `task verify` / `task tests` / `task operation`：[cli-reference.md](./cli-reference.md) §9、§10
+- `task verify` / `task tests` / `task operation`：[cli/task-result-verify.md](./cli/task-result-verify.md)（§9–§10）
 
 ---
 
@@ -813,7 +813,7 @@ bun run codeestra task integration cancel $PROJECT <batch-id> --reason "<为什�
 
 - 集成的完整流程：[workflow.md](./workflow.md) §7
 - 集成相关拒绝码：[troubleshooting.md](./troubleshooting.md) §1
-- `task integrate` / `task integration`：[cli-reference.md](./cli-reference.md) §11
+- `task integrate` / `task integration`：[cli/integration-dag-scheduler.md](./cli/integration-dag-scheduler.md)（§11）
 - 界面上的批次视图与组批/集成/取消：[ui.md](./ui.md) §5.3
 
 ---
@@ -913,7 +913,7 @@ bun run codeestra promotion get|list|abandon …
 ### 想深入看哪篇
 
 - 提升的完整流程与全部拒绝码：[workflow.md](./workflow.md) §8、[troubleshooting.md](./troubleshooting.md) §1
-- `promotion` 每条命令：[cli-reference.md](./cli-reference.md) §15
+- `promotion` 每条命令：[cli/promotion.md](./cli/promotion.md)
 - 经 GitHub 中转的决策与理由：[ADR-0047](../decisions/0047-github-mediated-promotion.md)、
   本机两个 clone 的布置：[ADR-0048](../decisions/0048-dev-clone-and-separate-runtime-home.md)
 - 本仓库自身的四步操作与重启规程：[AGENTS.md](../../AGENTS.md)
@@ -1062,7 +1062,7 @@ bun run codeestra scheduler control reconcile [--json]
 
 - 完整流程中的依赖与调度：[workflow.md](./workflow.md) §3
 - `SAFE`/`UNKNOWN`/`CONFLICTING` 的准确含义：[concepts.md](./concepts.md)
-- `task depends` / `task schedule` / `scheduler`：[cli-reference.md](./cli-reference.md) §12–§14
+- `task depends` / `task schedule` / `scheduler`：[cli/integration-dag-scheduler.md](./cli/integration-dag-scheduler.md)（§12–§14）
 - 「两件事互相冲突怎么办」：[recipes.md](./recipes.md)
 
 ---
@@ -1171,7 +1171,7 @@ bun run codeestra agent plugins select [--project <project-id>] [--adapter <id>]
 
 - FULL/STRICT 的完整差异与理由：[concepts.md](./concepts.md)、[ADR-0011](../decisions/0011-default-full-permission-mode.md)
 - 设置键的详细语义：[ADR-0045](../decisions/0045-global-ui-settings.md)
-- `permission` / `settings` / `agent` 命令：[cli-reference.md](./cli-reference.md) §1–§2、§19
+- `permission` / `settings` / `agent` 命令：[cli/runtime.md](./cli/runtime.md)
 
 ---
 
@@ -1242,7 +1242,7 @@ bun run codeestra reclaim records --project $PROJECT [--task <task-id>] \
 ### 想深入看哪篇
 
 - 回收的完整语义与全部拒绝码：[workflow.md](./workflow.md) §9、[troubleshooting.md](./troubleshooting.md)
-- `reclaim` 每条命令：[cli-reference.md](./cli-reference.md) §16
+- `reclaim` 每条命令：[cli/integration-dag-scheduler.md](./cli/integration-dag-scheduler.md)（§16）
 - 「保住失败现场」「回收磁盘」：[recipes.md](./recipes.md)
 
 ---
@@ -1298,18 +1298,18 @@ Task/Execution 的 `RECOVERY_REQUIRED` 用 **`task recover <project-id> <task-id
 观察对账，只有能证明 provider 已退出才删除（否则 `RECONCILE_REQUIRED`）；确实要强行清掉就加 `--force`——
 它会先按记录的身份终止 provider，再删除（结果里 `stop.stop: "FORCED"`，`forced` 列出被跳过的拒绝与终止结果）。IntegrationBatch 与 Promotion 的
 `RECOVERY_REQUIRED` 各自有自己的收口命令，见
-[cli-reference.md](./cli-reference.md)。
+[cli/integration-dag-scheduler.md](./cli/integration-dag-scheduler.md) 与 [cli/promotion.md](./cli/promotion.md)。
 
 ### 13.6 完整的错误码表在哪
 
 **本文不复制错误码表。** 稳定码、每条的触发条件与处理方式都在
 [troubleshooting.md](./troubleshooting.md) 的 §1（按症状）与 §2（按领域速查表）里；
-每条命令的参数、退出码与码位在 [cli-reference.md](./cli-reference.md) 里。
+每条命令的参数、退出码与码位在 [cli/README.md](./cli/README.md) 索引下的九篇里。
 
 ### 想深入看哪篇
 
 - 常见故障与稳定码表：[troubleshooting.md](./troubleshooting.md)
-- 每条命令的退出码：[cli-reference.md](./cli-reference.md) §0
+- 每条命令的退出码：[cli/README.md](./cli/README.md)（§0.2）
 - 「我想做 X」：[recipes.md](./recipes.md)
 
 ---
@@ -1364,7 +1364,7 @@ Task/Execution 的 `RECOVERY_REQUIRED` 用 **`task recover <project-id> <task-id
 - [workflow.md](./workflow.md)：端到端流程走查（含可照抄命令）
 - [features.md](./features.md)：功能清单（一行一个能力）
 - [ui.md](./ui.md)：**逐屏 UI 走查**（7 个标签页，每个按钮做什么）
-- [cli-reference.md](./cli-reference.md)：CLI 与 HTTP/SSE 命令参考
+- [cli/](./cli/README.md)：CLI 与 HTTP/SSE 命令参考（九篇）
 - [recipes.md](./recipes.md)：常见任务的做法
 - [acceptance-checklist.md](./acceptance-checklist.md)：人工观感核对清单
 - [troubleshooting.md](./troubleshooting.md)：常见故障与稳定码表

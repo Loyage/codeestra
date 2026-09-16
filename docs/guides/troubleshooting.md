@@ -512,7 +512,7 @@ bun run codeestra events list --limit 1        # 或者从你保存的最后一�
 `SNAPSHOT_SCOPE_MISMATCH`、`STALE_ANALYZER`、
 `RECOVERY_PROVIDER_ALIVE`、`RECOVERY_DESCENDANTS_ALIVE`、`RECOVERY_OWNERSHIP_UNVERIFIABLE`、
 `RECOVERY_PROCESS_IDENTITY_MISSING`、`TASK_NOT_IN_RECOVERY`（`task recover` 的拒绝码，ADR-0055）、
-以及所有 `KNOWLEDGE_*`（在 [cli-reference.md](./cli-reference.md) 的 `project knowledge` 一节与
+以及所有 `KNOWLEDGE_*`（在 [cli/project.md](./cli/project.md) 的 `project knowledge` 一节与
 [features.md](./features.md) 列全）。
 
 ### 任务 / 执行 / 会话
@@ -551,7 +551,7 @@ ADR-0061 删除了 Adapter 级容量上限，当前命令面不再产生它。�
 `MERGE_CONFLICT`、`MERGE_FAILED`、`MERGE_HEAD`、`REF_CONFLICT`、`UNRELATED`、`NOT_REACHABLE_FROM_DEV`、
 `HEAD_MISMATCH`、`UNEXPECTED_HEAD`、`BRANCH_DIVERGED`、`BRANCH_ABSENT`、`BRANCH_MISMATCH`、
 `BRANCH_CHECKED_OUT_ELSEWHERE`、`UNBORN_MAIN`、
-以及所有 `PROMOTION_*` 与 `DEV_FULL_SUITE_EVIDENCE_*`（见上文与 [cli-reference.md](./cli-reference.md) 的 `promotion` 一节）。
+以及所有 `PROMOTION_*` 与 `DEV_FULL_SUITE_EVIDENCE_*`（见上文与 [cli/promotion.md](./cli/promotion.md)）。
 
 ### 回收
 
@@ -694,6 +694,6 @@ K1 留下的两条待裁决已由 FOUNDATION-075 收口，因此这份清单**�
 
 ## 相关阅读
 
-- 每条命令的参数、退出码与码位：[cli-reference.md](./cli-reference.md)
+- 每条命令的参数、退出码与码位：[cli/README.md](./cli/README.md)（九篇索引）
 - 领域概念（为什么 `UNKNOWN` 不代表“无冲突”、为什么 Task 验证 ≠ 集成验证）：[concepts.md](./concepts.md)
 - 完整流程：[workflow.md](./workflow.md)

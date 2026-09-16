@@ -24,7 +24,7 @@
 - 不是人工观感清单。那一份是 [`acceptance-checklist.md`](../guides/acceptance-checklist.md)，
   只覆盖布局、主题、字号、动效、焦点等**没有机器断言**的界面观感。
   两者互补：本文覆盖**功能**，那份覆盖**观感**（本文 §5 有指针）。
-- 不是命令参考。每条命令的参数与退出码见 [`cli-reference.md`](../guides/cli-reference.md)；
+- 不是命令参考。每条命令的参数与退出码见 [`cli/README.md`](../guides/cli/README.md)；
   本文只在验收语境里引用它们，并且每条都对照 `apps/cli/src/main.ts` 的 `usage()` 核对过（见交付记录）。
 
 **判定必须分两类**，下面每一项都拆开写：
@@ -90,7 +90,7 @@ CODEESTRA_HOME="$CODEESTRA_HOME" bun run codeestra agent config get
 ```
 
 这两条都是仓库已有能力（ADR-0012）；环境变量层的语义见
-[cli-reference.md §0.3](../guides/cli-reference.md)。
+[cli/README.md §0.3](../guides/cli/README.md)。
 
 ### 1.3 一次性临时仓库与 `CODEESTRA_HOME`
 
@@ -853,7 +853,7 @@ ce promotion get "$PROJECT" "$PROMOTION"
 
 ## 6. 相关阅读
 
-- 命令参数、退出码、稳定码：[cli-reference.md](../guides/cli-reference.md)
+- 命令参数、退出码、稳定码：[cli/README.md](../guides/cli/README.md)
 - 端到端流程（日常怎么用，不是怎么验收）：[workflow.md](../guides/workflow.md)
 - 领域概念（为什么 `UNKNOWN` 不是 `SAFE`、Task 验证 ≠ 集成验证）：[concepts.md](../guides/concepts.md)
 - 出错了怎么办：[troubleshooting.md](../guides/troubleshooting.md)

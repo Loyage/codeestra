@@ -7919,6 +7919,82 @@ Web UI HTTP 面读写同一条命令。
 - **集成成功但 Runtime 在自动回收前崩溃的窗口**：worktree 会留到下一次显式 `reclaim`（用户明确选择「不做后台周期扫描」，ADR-0062 D01 如实记录，不伪装成已自动收尾）。
 - UI 的「资源回收」卡只有纯投影核对与 HTTP 命令面断言，**未经真实点击**（ADR-0008 边界）。
 
+## 用户任务（`lane/cli-reference-split`）— CLI 命令参考按功能拆为九篇（ADR-0063，纯文档：无代码、无 schema、无命令面变化）
+
+状态：**已改完并定向验证通过，但按要求未提交、未 push、未合入 `dev`**。基线 `dev = 81dd3a8`；
+分支 `lane/cli-reference-split`（在 dev clone `/Users/loyage/Documents/codeestra-dev` 上，未建独立 worktree）。
+
+用户原话：「cli-reference.md太长了，我需要你按功能分别存放」。
+用户逐项裁决（本轮问答的实际答复，未答复项不作批准）：
+1. 拆分粒度：**按功能组拆 9 篇到 `docs/guides/cli/`**（否决「粗分 5 篇」与「每命令组一篇≈19 篇」）。
+2. 旧引用怎么处理：**保留 `cli-reference.md` 作索引 + 旧 §N 对照表，新文件内部沿用拆分前的章节号**。
+3. 记录方式：**新增 ADR-0063 修订 ADR-0050**（不重写 ADR-0050 正文）。
+4. 落地：**当前 dev clone 开 `lane/` 分支，改完先不提交**（本记录因此也是未提交状态的一部分）。
+
+改了什么：
+- **新增 9 篇**（`docs/guides/cli/`）：`README.md` 93 行（索引 + §0 + 相关阅读）、`runtime.md` 169（§1/§2/§19）、
+  `project.md` 136（§3）、`task-lifecycle.md` 195（§4）、`task-revision-session.md` 165（§5/§6/§6.1/§7）、
+  `task-result-verify.md` 100（§8/§9/§10）、`integration-dag-scheduler.md` 302（§11–§14/§16）、
+  `promotion.md` 106（§15）、`interface.md` 155（§17/§18/§20/§21）。
+- **`docs/guides/cli-reference.md`：1322 行 → 50 行**，改为索引：24 行「旧 §N → 现在在哪一篇」对照表 + 拆分理由。
+  它是**唯一保留的旧编号对照表**，所以 `docs/decisions/**` 与 `docs/tasks/README.md` 历史记录里的
+  「`cli-reference.md` §N」仍然可解析（查到文件后按号检索）。
+- **活文档链接同步**（只改指针，不改结论）：`docs/guides/README.md`（分流表）、`manual.md`（15 处）、`ui.md`（2 处）、
+  `troubleshooting.md`（3 处）、`recipes.md`（2 处）、`concepts.md`、`workflow.md`、`features.md`、`getting-started.md`、
+  `docs/architecture/agent-adapter-api.md`、`docs/notes/real-provider-acceptance-runbook.md`（3 处）。
+- **ADR**：新增 `docs/decisions/0063-split-cli-reference-by-command-group.md`（D01 文件集合与职责、D02 索引与对照表、
+  D03 沿用原章节号、D04 ADR-0050 D03 的映射目标改为 `docs/guides/cli/` 对应篇目、D05 搬移不等于校对、
+  D06 逐节校对注随节搬迁、D07 非目标）；`docs/decisions/README.md` 三处（ADR-0050 索引行加 `Amended by ADR-0063`、
+  新增 0063 索引行、「当前有效语义/用户文档纪律」一行）；本记录。
+- **一字未改**：`docs/decisions/NNNN-*.md` 既有正文、`docs/tasks/README.md` 既有记录（不重写历史）；
+  `PROJECT_SPEC.md`、`AGENTS.md`、`.codeestra/**`。
+
+文档同步（ADR-0050 D03 要求的交付说明）：
+- 这次**不是命令面变更**（无新命令、无 flag、无退出码、无稳定码、无 UI 行为、无设置键、无权限语义差异），
+  而是**命令参考本身的存放方式变更**；按 ADR-0063 D04，此后命令面变更的落点从 `cli-reference.md` 改为
+  **`docs/guides/cli/` 里覆盖该命令的那一篇**（§19 `settings` 在 `cli/runtime.md`）。
+- 改了哪一篇的哪一节：上列 11 个文件的**指针**（`docs/guides/README.md` 的分流表行、`manual.md` 每节末尾的
+  「想深入看哪篇」与 §13.5/§13.6/相关阅读、`ui.md` §2.2 提示行与相关阅读、`troubleshooting.md` 的
+  `KNOWLEDGE_*`/`PROMOTION_*` 行与末尾指针、`recipes.md` §0 与末尾、`concepts.md` 的退出码提示、
+  `workflow.md`/`features.md`/`getting-started.md` 的参考指针、`agent-adapter-api.md` §7 指针、
+  `real-provider-acceptance-runbook.md` 三处）。
+- 新增九篇的版本/校对头按 ADR-0050 D02 给出：`dev@de03448` / schema v34 / 2026-09-16，并写明
+  「内容自 `cli-reference.md @ dev@de03448` 搬移，一句未改写；**本次未重新核对源码**」——**搬运不是校对**，
+  所以日期不更新。
+- **确认无需修改并写明理由**：`PROJECT_SPEC.md`（无规格变化）；`AGENTS.md`（其规范写的是「按 ADR-0050 D01 的映射
+  同步 `docs/guides/` 对应段落」，未点名文件，D04 的目标变更不需要改它）；`acceptance-checklist.md`（人工观感项与
+  命令参考的存放位置无关）；`docs/decisions/**` 历史正文与 `docs/tasks/README.md` 历史记录（不重写历史，
+  旧 §N 引用由对照表解析）；`docs/guides/troubleshooting.md` 第 602 行的不一致清单（那是「某一格当时同步了什么」
+  的历史记录，与 ADR 同理不动）。
+
+定向验证（ADR-0038：开发分支只跑定向检查；**未跑** `bun run check` / `check:fast` / `just check` / `just verify`，
+本格无代码改动所以也没跑任何测试）：
+1. **搬移完整性（脚本逐行比对，可复现）**：按「原文件行号区间 → 目标文件」映射逐行比对，原文件第 35–1322 行
+   （§0–§21 与「相关阅读」，共 **1288 行**）**逐行、按原顺序**落在九篇里；每篇搬运行数与其正文行数相等，
+   无丢失、无重复、无插入。唯一被规范化处理的字节是相对链接的 `../` 前缀（新目录深一层）。
+   结果：`1288 行逐行落位：OK（无丢失/重复/顺序错）`。
+2. **头部校对注无丢失**：原第 6–20 行共 15 行注释逐行反查九篇，14 行至少出现一次；未出现的只有**原第 17 行**
+   ——它与第 6 行是同一句（只有句末标点 `；`/`。` 不同），只保留一份（已写入 ADR-0063 D05 与 `cli/README.md` 头部）。
+   跨篇的注释（涉及多篇的一条，如 FOUNDATION-093 那条涉及 §1/§3/§4）在**每篇都保留一份**（ADR-0063 D06）。
+3. **链接存在性**（沿用 ADR-0050 验证要求 1 的命令，覆盖 `docs/guides/**` 含新的 `cli/` 子目录与 `docs/decisions/*.md`）：
+   输出只有 2 行 `MISSING: docs/guides/features.md -> ../decisions/0047-github-mediated-stable-promotion.md`，
+   见下「已知问题」——**是本格之前就存在的断链，不是本次改动引入**。
+4. **命令面覆盖未缩小**：从九篇抽 `codeestra <group> <action>` 命令路径并集，与拆分前**完全相同**（各 93 条，
+   `diff` 无差异）。第一轮自检发现 `task purge` 的一条校对注（原第 9 行）漏搬，已补回到 `task-lifecycle.md`。
+5. **跨篇 § 引用盘点**：正文里共 **7 处**「见 §N」现在落在别的篇里（`integration-dag-scheduler.md` 的 §0/§1/§19、
+   `task-revision-session.md` 的 §17、`cli/README.md` 的 §14，以及本来就跨文档的 `project.md` → `manual.md` §3.4、
+   `task-lifecycle.md` → `ui.md` §2.2）。按 ADR-0063 D05 **未改写正文**，改由各篇头部的指引 + 索引表解析。
+6. **未验证（不得当作已成立）**：任何**渲染效果**——中文/全角标点标题的锚点是否可用、目录阅读体验、GitHub 与编辑器
+   的显示——本仓库没有渲染器，**不能断言**；对照表因此刻意不用锚点，只给「文件 + §N」。
+
+仍未做 / 已知问题：
+- **未提交**（用户要求先审阅）：本分支工作区有改动，未 commit、未 push、未合入 `dev`、未重启任何 Runtime。
+- **既有断链（不在本格范围，未修，等你裁决）**：`docs/guides/features.md` 第 35 与 37 行共 4 处链接写的是
+  `../decisions/0047-github-mediated-stable-promotion.md`，实际文件名是 `0047-github-mediated-promotion.md`；
+  HEAD 版本已有（`git show HEAD:docs/guides/features.md | grep -c` = 2 行）。修它属另一件事，本格没有静默改掉。
+- **未拆** `manual.md`（1374 行）与 `ui.md`（1148 行）：ADR-0063 D07 明确列为非目标，需另行裁决。
+- 索引与各篇头部的「覆盖哪些号」需要在**下一次**拆分/合并时同步维护（ADR-0063 的代价 2）。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），

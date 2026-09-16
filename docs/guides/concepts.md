@@ -280,7 +280,7 @@ IntegrationBatch 阶段以 `CONFLICTED` 暴露（ADR-0059 D02 明确选择的权
 > 仍然完整报告映射、快照、基线与占用者（含 `occupiers[].code`）；只是这些事实不再改变判定。
 
 > 因此「一个 Task 现在为什么不跑」有三种互不相同的答案：**依赖未满足（BLOCKED）**、**冲突等待**、**容量等待**。
-> CLI 用退出码 3 表示「等待」，退出码 1 表示「确实不会跑，需要处理」。详见 [cli-reference.md](./cli-reference.md)。
+> CLI 用退出码 3 表示「等待」，退出码 1 表示「确实不会跑，需要处理」。详见 [cli/README.md](./cli/README.md) 的 §0.2。
 
 ### 全局暂停：Runtime 控制状态，不是 Task 状态
 
