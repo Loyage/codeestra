@@ -80,6 +80,12 @@ import {
   writeProseQuestionAttentionMode,
 } from './prose-question-attention-settings.js';
 import {
+  autoReclaimPath,
+  defaultAutoReclaimEnabled,
+  readAutoReclaimEnabled,
+  writeAutoReclaimEnabled,
+} from './auto-reclaim-settings.js';
+import {
   abandonStablePromotion,
   approveStablePromotion,
   prepareStablePromotion,
@@ -220,6 +226,23 @@ const proseQuestionAttentionSettings = () => ({
   mode: proseQuestionAttentionMode,
   default: defaultProseQuestionAttentionMode,
   appliesTo: 'Agent completions observed after this change; an already recorded wait is unchanged',
+});
+// ADR-0062: automatic task-worktree reclamation after a successful integration is on by default.
+// An unreadable file must not stop the Runtime from starting: the failure is reported and the
+// product default (on) is used, matching the prose-question setting's treatment.
+let autoReclaimEnabled = defaultAutoReclaimEnabled;
+try {
+  autoReclaimEnabled = await readAutoReclaimEnabled(home);
+} catch (error) {
+  console.error('[runtime] the auto-reclaim setting could not be read',
+    error instanceof Error ? error.message : String(error));
+}
+const autoReclaimSettings = () => ({
+  enabled: autoReclaimEnabled,
+  default: defaultAutoReclaimEnabled,
+  file: autoReclaimPath(home),
+  appliesTo: 'Task worktrees of a batch are reclaimed right after its integration succeeds while'
+    + ' this is on; turning it off leaves every worktree for the explicit `reclaim` command',
 });
 const storage = new Phase1Database(join(home, 'runtime.sqlite'));
 const registry = createAdapterRegistry({ runtimeHome: home, environment: Bun.env });
@@ -794,6 +817,12 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       proseQuestionAttentionMode = request.mode;
       writeProseQuestionAttentionMode(home, proseQuestionAttentionMode);
       return success(request.requestId, proseQuestionAttentionSettings());
+    case 'settings.autoReclaim.get':
+      return success(request.requestId, autoReclaimSettings());
+    case 'settings.autoReclaim.set':
+      autoReclaimEnabled = request.enabled;
+      writeAutoReclaimEnabled(home, autoReclaimEnabled);
+      return success(request.requestId, autoReclaimSettings());
     // The interface-effect settings are read from and written to the Runtime home on every command
     // (never from a cached copy), so an edit made outside the Runtime — or a second look after a
     // restart — reports the file as it is. A broken file is refused with INVALID_UI_SETTING instead
@@ -1475,6 +1504,8 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         runner: verificationRunner,
         copiesRoot: verificationCopiesRoot,
         worktreesRoot: integrationWorktreesRoot,
+        runtimeHome: home,
+        autoReclaim: autoReclaimEnabled,
         projectId: request.projectId,
         taskId: request.taskId,
         expectedVersion: request.expectedVersion,
@@ -1519,6 +1550,8 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         runner: verificationRunner,
         copiesRoot: verificationCopiesRoot,
         worktreesRoot: integrationWorktreesRoot,
+        runtimeHome: home,
+        autoReclaim: autoReclaimEnabled,
         projectId: request.projectId,
         batchId: request.batchId,
         commandId: request.commandId,

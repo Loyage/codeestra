@@ -1386,6 +1386,7 @@ function usage(): never {
   bun run codeestra attention resolve <project-id> <attention-id> --dismiss [--note <text>] [--json]
   bun run codeestra attention resolve <project-id> <attention-id> --answer <text> [--note <text>] [--json]
   bun run codeestra settings prose-question-attention [auto|record-only|off] [--json]
+  bun run codeestra settings auto-reclaim [on|off] [--json]
   bun run codeestra settings ui list [--json]
   bun run codeestra settings ui get <key> [--json]
   bun run codeestra settings ui set <key> <value> [--json]
@@ -3665,6 +3666,20 @@ try {
     } else {
       if (mode !== 'auto' && mode !== 'record-only' && mode !== 'off') usage();
       print(await call({ command: 'settings.proseQuestionAttention.set', mode }));
+    }
+  } else if (group === 'settings' && action === 'auto-reclaim') {
+    // ADR-0062: the switch that decides whether a Task worktree is reclaimed automatically right
+    // after its integration succeeds. Reading and writing are one command because it has exactly two
+    // values and no confirmation; `on` is the product default.
+    const tokens = [firstArgument, ...remainingArguments]
+      .filter((token): token is string => token !== undefined && token !== '--json');
+    if (tokens.length > 1) usage();
+    const mode = tokens[0]?.toLowerCase();
+    if (mode === undefined) {
+      print(await call({ command: 'settings.autoReclaim.get' }));
+    } else {
+      if (mode !== 'on' && mode !== 'off') usage();
+      print(await call({ command: 'settings.autoReclaim.set', enabled: mode === 'on' }));
     }
   } else if (group === 'settings' && action === 'ui') {
     // The interface-effect settings (FOUNDATION-073 / ADR-0045). The key and the value are validated

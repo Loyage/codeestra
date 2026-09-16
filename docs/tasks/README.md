@@ -7775,6 +7775,60 @@ FOUNDATION-096 的容量上半，因此这次合并本身就是 ADR-0061 两半�
 - 容量半边的全局命令面（`scheduler capacity get|set|reset`）由 FOUNDATION-096 实现并已同在 `dev` 上；本格的容量卡 `scope` 已可切换到 `GLOBAL`（切点是一行 prop）。
 - 本次集成**只合并了两个分支，没有运行全量测试**：`dev → main` 提升前必须在精确 `dev` SHA 上跑一次全量（ADR-0038/runbook §3）。
 
+## 用户任务（`task/83d058f8`）— 优化资源管理回收：集成成功后自动删除 Task worktree（ADR-0062，无 schema 变更、不占迁移号）
+
+状态：**已实现并定向验证，未 commit、未 push、未提升 `main`、未重启任何 Runtime**。基线 `dev@7425556`；
+worktree `/Users/loyage/.local/state/codeestra/worktrees/8efee84e-33c7-4c9d-95ce-a3b29389829e/83d058f8-e32f-4da8-bbcd-bf807eaa8c96`，
+分支 `task/83d058f8-e32f-4da8-bbcd-bf807eaa8c96`。
+
+用户原话：`优化资源管理回收，任务跑完了，合并了，就应该可以删除worktree了`。
+
+用户逐项裁决（本轮 A/B/C 的实际答复，未答复项不作批准）：
+1. 触发时机：**集成成功后立即回收**（`dev` 前进后回收该批成员的 Task worktree；不做后台周期扫描）。
+2. 「已合并」判据：**Task 基线 ref（沿用现状）**。
+3. 开关：**默认开启 + 新增设置开关**（CLI + 设置页）。
+4. 终态但未合并的 clean worktree：**保留为失败现场（现状）**。
+
+改了什么：
+- `apps/runtime/src/auto-reclaim-settings.ts`（新）：`<CODEESTRA_HOME>/auto-reclaim.json`（`{version:1,enabled:true}`，0600/0700），
+  默认开启；缺文件=默认，文件不可读=Runtime 启动时记录并使用默认（与 prose 设置同处理），写入是原子替换。
+- `packages/contracts/src/index.ts`：新增 `settings.autoReclaim.get` / `settings.autoReclaim.set { enabled }`（union 追加）。
+- `apps/runtime/src/integration-service.ts`：`integrateComposedBatch` 在 `completeIntegrationBatch` 成功后，对该批每个成员调用
+  `applyReclamation({ kinds:['TASK_WORKTREE'], taskId, commandId:'auto-reclaim:<batchId>:<taskId>', automatic:{trigger:'INTEGRATION',batchId} })`；
+  逐成员 `try/catch`，失败不影响 `INTEGRATED`；`IntegrationReport` 新增 `reclamation` 汇总。`integrateIntegrationBatch` / `integrateTaskResult`
+  新增可选 `runtimeHome` / `autoReclaim`。
+- `apps/runtime/src/reclaim-service.ts`：`ReclaimApplyInput.automatic` 进入 payload hash 并写入每条记录 evidence（`automatic:true`/`trigger`/`batchId`）；
+  report 的 targets 带上该 evidence。**未新增 schema `source` 取值**（触发方式与「记录资源 vs 未注册目录」正交）。
+- `apps/runtime/src/main.ts`：启动读取该设置、分发两条新命令、把 `home`/开关传给两个集成入口。
+- `apps/cli/src/main.ts`：`settings auto-reclaim [on|off] [--json]` + usage。
+- `apps/ui/src/settings.tsx`、`types.ts`、`App.tsx`：设置页新增「资源回收」卡（复选框），读写同一条 Runtime 命令；`SettingsPage` 接收 `client`。
+- 文档：新 ADR-0062、`docs/decisions/README.md`、`docs/guides/{cli-reference,features,manual,ui,concepts,troubleshooting,recipes,workflow}.md`、
+  `docs/architecture/state-machines.md`、本记录。
+- `package.json`：把新测试文件 `cli-auto-reclaim` 加入 `test:e2e` 并从 `test:unit` 的 ignore 列表排除。
+
+定向验证（ADR-0038，开发分支只跑定向测试；全部通过）：
+
+| 命令 | 结果 |
+|---|---|
+| `bun run typecheck` | 退出码 0 |
+| `bun run typecheck:ui` | 退出码 0 |
+| `bun test apps/runtime/test/cli-auto-reclaim.test.ts`（新增） | 4 pass / 0 fail |
+| `bun test apps/runtime/test/cli-integrate.test.ts`（扩展 2 处） | 3 pass / 0 fail |
+| `bun test apps/runtime/test/cli-reclaim.test.ts apps/runtime/test/cli-reclaim-batch.test.ts`（回归） | 20 pass / 0 fail |
+| `bun test packages/contracts/test apps/runtime/test/integration-service.test.ts` | 63 pass / 0 fail |
+| `bunx vitest run apps/ui` | 14 文件 / 188 pass / 0 fail |
+
+覆盖的断言：集成成功后成员 worktree 目录消失、分支仍在（`task retry` 可重建）、报告 `reclamation` 计数正确；
+`settings auto-reclaim off` 后同一集成不删目录、显式 `reclaim apply --task --kind TASK_WORKTREE` 仍能删；设置默认/写读/0600/坏文件回退与修复；
+Web UI HTTP 面读写同一条命令。
+
+仍未做 / 已知边界（不得当作已完成）：
+- **未 commit、未 push、未合入 `dev`、未提升 `main`、未重启任何 Runtime**（未获用户授权）。
+- **未跑全量** `bun run check` / `just check` / `just verify`（ADR-0038：全量只在 `dev` 候选上跑）。
+- 真实 provider 长跑后的自动回收未验收（本格 e2e 用协议 stub provider）；多成员批次在同一次集成里的回收顺序与部分失败未单独端到端；Windows 未验证。
+- **集成成功但 Runtime 在自动回收前崩溃的窗口**：worktree 会留到下一次显式 `reclaim`（用户明确选择「不做后台周期扫描」，ADR-0062 D01 如实记录，不伪装成已自动收尾）。
+- UI 的「资源回收」卡只有纯投影核对与 HTTP 命令面断言，**未经真实点击**（ADR-0008 边界）。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），

@@ -6,6 +6,7 @@
 > 「全局暂停」一节的稳定码由 FOUNDATION-097 新增（ADR-0061 D08/D09）；`task purge` 的拒绝码一节由 FOUNDATION-090 新增（ADR-0058）；冲突判定与 `--feature` 的拒绝码由
 > FOUNDATION-091 新增/改写（ADR-0059）。
 > 「报 `DEV_REPO_REQUIRED`」一节由 FOUNDATION-093 第三轮重写（ADR-0060 修订）。
+> 「任务集成后 worktree 还在？」一节由 ADR-0062 新增（集成成功后的自动回收与失败现场）。
 > 「任务一直不跑」与「调度 / 容量 / 槽位」两处的容量码由 **FOUNDATION-096** 同步（ADR-0061：只剩一个
 > Runtime 全局上限，容量命令不带 project 参数；`CAPACITY_ADAPTER_SLOT_LIMIT_REACHED` 成为历史码）。
 > `RECONCILE_REQUIRED` 与 `task purge` 拒绝码一节里 `RECOVERY_REQUIRED` 的对账说明由用户任务 `task/930f5325` 同步（ADR-0058 D02 修订，2026-09-16）。
@@ -171,6 +172,20 @@ bun run codeestra task cancel   $PROJECT $OCCUPIER <expected-version>
 > 而 Codeestra 的账本不会因此改变：`workspaces` 行仍写 `RETAINED`/`RECOVERY_REQUIRED`，Task 分支可能被一并删除。
 > 本机 2026-09-14 就发生过一次（全部任务 worktree 被移走，`#7`/`#8` 因此变成不可观测的占用者）。
 > 要回收请用 `reclaim plan` / `reclaim apply`——那是唯一带归属校验与审计的路径。
+
+### 任务集成后 worktree 还在？
+
+先看集成报告的 `reclamation` 汇总（以及 `reclaim records` 的 `reasonCode`）：
+
+- `reclamation.enabled === false`：`settings auto-reclaim off` 开着，自动回收被关掉了；
+  `settings auto-reclaim on` 恢复，或直接跑 `reclaim apply`。
+- worktree 脏（有未提交/未跟踪改动）、成果未合入基线 ref、Task 是 `FAILED`/`CANCELLED`：属于**失败现场**，
+  自动回收**默认不删**（这是设计）。要么合入/清理后重跑 `reclaim apply`，要么显式 `--include-failure-scenes`
+  承担丢弃未提交改动的风险。
+- `reclamation.failed > 0`：自动回收本身失败（例如上一次回收中断需要 reconcile），worktree 留在磁盘上；
+  集成结果仍有效（ADR-0062），按 `reclamation.detail` 处理后重跑 `reclaim apply`。
+- managed 项目（无 dev clone）：用户把任务分支合到了**别的**分支上时不算「已合并」（判据是 Task 基线 ref，
+  ADR-0062 D02），worktree 因此保留；这是当前语义，需要删就显式 `reclaim apply --include-failure-scenes`。
 
 ### 全局暂停：`scheduler control` 的稳定码（ADR-0061）
 

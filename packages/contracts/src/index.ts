@@ -1847,6 +1847,17 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     mode: proseQuestionAttentionModeSchema,
   }),
   /**
+   * Reads and writes the one global switch that decides whether a Task worktree is reclaimed right
+   * after its integration succeeds (ADR-0062). It is a setting, not a gate: changing it needs no
+   * confirmation, and the explicit `reclaim` command keeps working while it is off.
+   */
+  z.strictObject({ ...requestBase, command: z.literal('settings.autoReclaim.get') }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('settings.autoReclaim.set'),
+    enabled: z.boolean(),
+  }),
+  /**
    * The interface-effect settings (FOUNDATION-073 / ADR-0045): one Runtime home, five keys, no
    * confirmation anywhere. `list` reports every key with its effective value, its product default
    * and whether it was explicitly chosen; `get`/`set` address one key; `reset` drops one explicit

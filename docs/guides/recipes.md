@@ -6,6 +6,7 @@
 > recipe 3 与 recipe 4 由 FOUNDATION-091 按 ADR-0059 改写（默认不冲突、声明同一功能才互斥）；
 > recipe 3 的容量命令由 **FOUNDATION-096** 同步（ADR-0061：上限是唯一的 Runtime 全局值，命令不带 project 参数；
 > 同一值另有设置面拼写 `settings concurrency`，也在本 recipe 里给出）。
+> recipe 12 补充「集成成功后自动回收」（ADR-0062）。
 
 本文是**步骤化**的：每条 recipe 回答一个「我想做 X」，给出可以照抄的命令与**做完之后看什么**。
 
@@ -560,6 +561,10 @@ bun run codeestra task recover $PROJECT $TASK <expected-version> [--reason "…"
 ## 12. 我想回收磁盘
 
 **目标**：把 Runtime 数据目录下不再需要的资源清掉，**并且知道每一样为什么被清或被留**。
+
+> 从 ADR-0062 起，**集成成功后会自动回收**该批成员里「clean + 已合并」的 Task worktree（默认开启）。
+> 这一步不再需要你记得跑；要关掉用 `settings auto-reclaim off`。下面仍然是那个**带审计的手动路径**，
+> 失败现场、未合并成果与任何手动选定都靠它。
 
 ```sh
 # 1) 先看（plan 是只读试运行，返回的结构与 apply 完全相同）

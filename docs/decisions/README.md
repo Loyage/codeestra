@@ -64,6 +64,7 @@
 - [ADR-0059](0059-feature-declaration-conflict-rule.md)：冲突判定只看「两侧声明同一功能且对方未完成」；文件/目录/模块/共享资源重叠与映射完整性都不再影响判定（schema v32）。**Supersedes ADR-0031 的判定语义**。
 - [ADR-0060](0060-managed-project-task-baseline.md)：被管理项目的 Task 基线取「项目文件夹当前检出的分支」，`dev clone` 变为可选（schema v33）。**Amends ADR-0056** 的必需性与 **ADR-0018** 的基线来源。**第三轮修订（2026-09-16，FOUNDATION-093）**：依赖判定从 dev-only 清单移出（它位于 `task submit`/`task run` 的常态路径），`DEV_REPO_REQUIRED` 只剩集成与提升。
 - [ADR-0061](0061-runtime-global-load-control.md)：Runtime 全局负载控制 —— 只保留一个跨全部项目/Adapter 的并行上限（默认 2、范围 1–16，旧显式值取最小值迁移）；全局暂停 = 持久启动屏障 + 按 `pid + start token + incarnation` 可核验的 Provider 主进程冻结（不改 Task 状态、不向工具子进程发停止信号、跨重启保持，只有显式继续才解除）。**Amends ADR-0030/0032/0033 的容量层级**。**两半都已实现**（schema v34）：容量上半是 FOUNDATION-096（`runtime_capacity_settings`、全局事件 `project_id = NULL`、命令面 `scheduler capacity get|set|reset`），暂停下半是 FOUNDATION-097（`runtime_pause_control`/`runtime_pause_targets`、持久屏障、`scheduler control status|pause|resume|reconcile`、UI 全局 shell）。Provider 冻结能力按 Adapter 如实声明：Pi `SUPPORTED`，Codex / Claude Code `REQUIRES_VALIDATION`。
+- [ADR-0062](0062-automatic-worktree-reclamation-after-integration.md)：集成成功后自动回收该批成员的 Task worktree（默认开启，`settings auto-reclaim on|off` 可关闭；复用 `reclaim` 的同一套归属校验与 append-only 账本，失败现场仍默认保留；无 schema 变更）。
 
 ## 当前有效语义（与旧 ADR 冲突时按此执行）
 
@@ -82,6 +83,7 @@
 - **任务永久删除**：ADR-0058 —— 唯一显式 `--yes`，不在常态路径；`cancel` 仍是终态、`archive` 仍是软删除；被拒绝时可用 `--force`（同一条命令的放宽，D09）删掉本来会被拒绝的任务，代价逐项写在 `forced` 与审计事件里。
 - **冲突判定**：ADR-0059 —— 默认 `SAFE_TO_PARALLELIZE`；`--allow-unknown` 保留且永不放宽 `CONFLICTING`。
 - **全局负载控制**：ADR-0061 —— 一个 Runtime 只有一个跨项目并行上限（**实现事实**：FOUNDATION-096，schema v34，命令面 `scheduler capacity get/set/reset`，项目级/Adapter 级覆写已退役）；全局暂停 = 持久启动屏障 + 可核验 Provider 主进程冻结（**实现事实**：FOUNDATION-097，同一 v34，命令面 `scheduler control status/pause/resume/reconcile`），不替 ADR-0016 的单 Task pause，也不自动跨重启恢复；`pauseState` 可能是五个控制状态之一。**能冻结哪些 Adapter** 按各自的 `providerProcessSuspension` 如实声明（当前只有 Pi 是 `SUPPORTED`）。
+- **资源回收**：ADR-0021/0037 —— 显式 `reclaim plan/apply/records`，只删归属校验通过的三类资源、默认保留失败现场、append-only 账本；**ADR-0062** —— 集成成功后对该批成员的 Task worktree 自动执行同一条决策（`settings auto-reclaim` 默认开启、可关闭），自动回收不越过活占门禁、不删 branch，失败不影响集成结果，并在报告 `reclamation` 汇总与账本 evidence 里标 `automatic: true`。
 
 以上各条都**不放宽**既有不变量：失败不动 `dev`、保留失败现场、不 `--force`、CAS 推进、命令幂等、崩溃按事实收敛；也都不新增权限门禁或审批层。
 

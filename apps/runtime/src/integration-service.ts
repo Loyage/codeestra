@@ -33,6 +33,7 @@ import {
   type VerificationTreeEvidence,
 } from './verification-service.js';
 import { requireProjectDevRepository, type ProjectDevRepository } from './dev-repo-service.js';
+import { applyReclamation } from './reclaim-service.js';
 
 export class IntegrationServiceError extends Error {
   constructor(readonly code: string, message: string) {
@@ -48,6 +49,22 @@ function sha256(value: string): string {
 /** Bounded failure diagnostics kept in the batch record; never captured command output. */
 function boundedDetail(detail: string): string {
   return detail.length <= 4_000 ? detail : detail.slice(0, 4_000);
+}
+
+/**
+ * ADR-0062: what the automatic reclamation that follows a successful integration did. It is a
+ * summary of `applyReclamation` runs (one per member), never a second deletion path. `enabled:false`
+ * means the setting was off and nothing was attempted.
+ */
+export interface IntegrationReclamationSummary {
+  readonly enabled: boolean;
+  readonly attempted: number;
+  readonly reclaimed: number;
+  readonly alreadyAbsent: number;
+  readonly retained: number;
+  readonly refused: number;
+  readonly failed: number;
+  readonly detail: string | null;
 }
 
 /** One member of a batch as the report exposes it, with its own outcome (ADR-0053). */
@@ -86,6 +103,11 @@ export interface IntegrationReport {
   readonly tree: VerificationTreeEvidence | null;
   /** Every member's fixed (revision, commit) binding and its own outcome. */
   readonly members: readonly IntegrationMemberReport[];
+  /**
+   * ADR-0062: the outcome of the automatic member-worktree reclamation, or `null` on a report that
+   * never reached the success path. `enabled:false` records that the setting was off.
+   */
+  readonly reclamation: IntegrationReclamationSummary | null;
   /** True for a replay: the recorded batch was returned instead of a second integration. */
   readonly alreadyCompleted: boolean;
   /** True when this call created the batch. */
@@ -270,6 +292,7 @@ function report(
     readonly verificationState: string | null;
     readonly alreadyCompleted: boolean;
     readonly created: boolean;
+    readonly reclamation?: IntegrationReclamationSummary | null;
   },
 ): IntegrationReport {
   const item = batch.items[0];
@@ -299,6 +322,7 @@ function report(
     commands: input.commands,
     tree: input.tree,
     members: memberReports(batch.items),
+    reclamation: input.reclamation ?? null,
     alreadyCompleted: input.alreadyCompleted,
     created: input.created,
   };
@@ -315,6 +339,77 @@ function replayReport(batch: IntegrationBatchSummary): IntegrationReport {
 function isFinished(state: IntegrationBatchState): boolean {
   return state === 'INTEGRATED' || state === 'CONFLICTED' || state === 'FAILED'
     || state === 'RECOVERY_REQUIRED' || state === 'STALE' || state === 'CANCELLED';
+}
+
+/**
+ * ADR-0062: after `dev` moved and every member Task reached SUCCEEDED, reclaim each member's own
+ * Task worktree through the ordinary `reclaim` decision (`kinds:['TASK_WORKTREE']`). It never
+ * invents a second deletion rule, and it is best effort by construction: the integration already
+ * succeeded, so a refusal or a failure is reported in the summary and left on disk for the explicit
+ * `reclaim` command. Each member is scoped by `taskId`, so no other Task is ever touched.
+ */
+async function reclaimIntegratedWorktrees(input: {
+  readonly storage: Phase1Database;
+  readonly runtimeHome: string | undefined;
+  readonly projectId: string;
+  readonly batchId: string;
+  readonly taskIds: readonly string[];
+  readonly enabled: boolean;
+  readonly now: () => number;
+  readonly randomUUID: () => string;
+}): Promise<IntegrationReclamationSummary> {
+  const zero = {
+    attempted: 0, reclaimed: 0, alreadyAbsent: 0, retained: 0, refused: 0, failed: 0,
+  } as const;
+  if (!input.enabled) {
+    return { enabled: false, ...zero,
+      detail: 'automatic reclamation is off; every worktree is left for the explicit `reclaim`' };
+  }
+  if (input.runtimeHome === undefined || input.runtimeHome.length === 0) {
+    return { enabled: true, ...zero,
+      detail: 'no Runtime home was available, so no worktree was reclaimed' };
+  }
+  const failureDetails: string[] = [];
+  let attempted = 0;
+  let reclaimed = 0;
+  let alreadyAbsent = 0;
+  let retained = 0;
+  let refused = 0;
+  let failed = 0;
+  for (const taskId of input.taskIds) {
+    attempted += 1;
+    try {
+      const reclamation = await applyReclamation({
+        storage: input.storage,
+        runtimeHome: input.runtimeHome,
+        projectId: input.projectId,
+        taskId,
+        kinds: ['TASK_WORKTREE'],
+        commandId: `auto-reclaim:${input.batchId}:${taskId}`,
+        automatic: { trigger: 'INTEGRATION', batchId: input.batchId },
+        now: input.now,
+        randomUUID: input.randomUUID,
+      });
+      reclaimed += reclamation.outcomeCounts.reclaimed;
+      alreadyAbsent += reclamation.outcomeCounts.alreadyAbsent;
+      retained += reclamation.outcomeCounts.retained;
+      refused += reclamation.outcomeCounts.refused;
+      if (reclamation.outcomeCounts.failed > 0) {
+        failed += reclamation.outcomeCounts.failed;
+        failureDetails.push(`task ${taskId}: ${reclamation.outcomeCounts.failed} removal(s) failed`);
+      }
+    } catch (error) {
+      // A refusal to even run the reclamation (a conflicting command ID, an interrupted operation
+      // that needs reconcile, a filesystem error) is a fact about the reclamation, not the
+      // integration: the worktree is left in place and the detail says why.
+      failed += 1;
+      failureDetails.push(`task ${taskId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return {
+    enabled: true, attempted, reclaimed, alreadyAbsent, retained, refused, failed,
+    detail: failureDetails.length === 0 ? null : failureDetails.join('; '),
+  };
 }
 
 /**
@@ -573,6 +668,8 @@ async function integrateComposedBatch(input: {
   readonly runner: VerificationRunner;
   readonly copiesRoot: string;
   readonly worktreesRoot: string;
+  readonly runtimeHome: string | undefined;
+  readonly autoReclaim: boolean;
   readonly projectId: string;
   readonly batch: IntegrationBatchPlan;
   readonly target: IntegrationPreflight;
@@ -836,6 +933,16 @@ async function integrateComposedBatch(input: {
   return report(completed, {
     commands: execution.outcomes, tree: execution.tree,
     verificationState: verification.state, alreadyCompleted: false, created: true,
+    reclamation: await reclaimIntegratedWorktrees({
+      storage,
+      runtimeHome: input.runtimeHome,
+      projectId: input.projectId,
+      batchId: batch.batchId,
+      taskIds: items.map((item) => item.taskId),
+      enabled: input.autoReclaim,
+      now,
+      randomUUID,
+    }),
   });
 }
 
@@ -955,6 +1062,10 @@ export async function integrateIntegrationBatch(input: {
   readonly runner: VerificationRunner;
   readonly copiesRoot: string;
   readonly worktreesRoot: string;
+  /** ADR-0062: the Runtime home, required for automatic member-worktree reclamation. */
+  readonly runtimeHome?: string;
+  /** ADR-0062: while true (the default at the command face), reclaim each member worktree on success. */
+  readonly autoReclaim?: boolean;
   readonly projectId: string;
   readonly batchId: string;
   readonly commandId: string;
@@ -1043,6 +1154,8 @@ export async function integrateIntegrationBatch(input: {
     runner: input.runner,
     copiesRoot: input.copiesRoot,
     worktreesRoot: input.worktreesRoot,
+    runtimeHome: input.runtimeHome,
+    autoReclaim: input.autoReclaim ?? false,
     projectId: input.projectId,
     batch: plan,
     target,
@@ -1128,6 +1241,10 @@ export async function integrateTaskResult(input: {
   readonly runner: VerificationRunner;
   readonly copiesRoot: string;
   readonly worktreesRoot: string;
+  /** ADR-0062: the Runtime home, required for automatic member-worktree reclamation. */
+  readonly runtimeHome?: string;
+  /** ADR-0062: while true (the default at the command face), reclaim the worktree on success. */
+  readonly autoReclaim?: boolean;
   readonly projectId: string;
   readonly taskId: string;
   readonly expectedVersion: number;
@@ -1192,6 +1309,8 @@ export async function integrateTaskResult(input: {
     runner: input.runner,
     copiesRoot: input.copiesRoot,
     worktreesRoot: input.worktreesRoot,
+    runtimeHome: input.runtimeHome,
+    autoReclaim: input.autoReclaim ?? false,
     projectId: input.projectId,
     batch: begun.plan,
     target,

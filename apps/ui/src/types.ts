@@ -1799,3 +1799,15 @@ export interface RuntimeGlobalControlView {
   readonly capacity: null;
   readonly capacityNote: string;
 }
+
+/**
+ * The automatic task-worktree reclamation switch (ADR-0062), projected from the Runtime's
+ * `settings.autoReclaim.get` / `set` command. The settings page is a front end to that command and
+ * stores nothing locally.
+ */
+export interface AutoReclaimView {
+  readonly enabled: boolean;
+  readonly default: boolean;
+  readonly file: string;
+  readonly appliesTo: string;
+}
