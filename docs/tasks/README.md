@@ -6670,9 +6670,9 @@ domain/ui 一行未动，且 ADR-0038 禁止在 lane 上跑全量（协调者在
 这是本格之前就存在的 UI/CLI 差异，本增量只对齐 `devRepoPath`，所以把它列在这里。
 ## FOUNDATION-090 — `task purge`：任务可被永久删除（`lane/p1-task-purge`，ADR-0058，**无 schema 变更**）
 
-状态：**已实现 + 已跑定向检查；未提交、未 push、未合并进 `dev`、未提升 `main`、未触碰稳定 clone 与其上的稳定 Runtime**（按仓库约定：先实现并跑该格的定向测试，等用户确认后才 commit）。
+状态：**已交付并提升**。提交 `ff4056c`（本格与格 2 一起）→ 合入 `dev` 的合并提交 `69d649f` → 经 ADR-0047 的 GitHub 中转提升到 `main`（`69d649f`，见下面的第六次提升记录）。全量 `just check` 在精确候选 `69d649f` 上退出码 0。
 
-固定基线：`dev@17b4dd6`（未 rebase、未合入新 dev、未 push）。工作分支：`lane/p1-task-purge`。
+固定基线：`dev@17b4dd6`。工作分支：`lane/p1-task-purge`（格 1、格 2 同一分支，分两个提交交付）。
 
 ### 背景（用户本机请求）
 
@@ -6761,7 +6761,7 @@ domain/ui 一行未动，且 ADR-0038 禁止在 lane 上跑全量（协调者在
 
 ## FOUNDATION-091 — 冲突判定改为「声明同一功能且对方未完成」（格 2，ADR-0059，schema **v32**）
 
-状态：**实现完成 + 收尾完成（旧默认断言已按新语义重写、文档已同步），全量 `bun test apps/runtime/test` 469 项全绿**；未提交、未 push、未合入 `dev`、未跑仓库全量 `check`（ADR-0038）。基线 `dev@17b4dd6`，工作分支 `lane/p1-task-purge`（与格 1 同分支）。
+状态：**实现完成 + 收尾完成 + 已交付并提升**。提交 `484f617`（含收尾）→ 合入 `dev` 的合并提交 `69d649f` → 经 ADR-0047 的 GitHub 中转提升到 `main`（`69d649f`，见下面的第六次提升记录）。`bun test apps/runtime/test` 469 项全绿；仓库全量 `just check` 在精确候选 `69d649f` 上退出码 0（Vitest 22 文件 / 490 项；Bun 871 pass / 0 fail）。基线 `dev@17b4dd6`，工作分支 `lane/p1-task-purge`（与格 1 同分支）。
 
 ### 交付了什么
 
@@ -6841,7 +6841,7 @@ domain/ui 一行未动，且 ADR-0038 禁止在 lane 上跑全量（协调者在
 - 未验证：真实 provider 下两个 `SAFE` 任务真的同时跑；UI 实际点击（ADR-0008 边界）。
 - `impact_assessments` 的配对行只覆盖「两侧都有快照」的配对，判定审计以 `TaskScheduleDecided`/`TaskWaitingForConflict` 事件为准（ADR-0059 D04）。
 - 未验证：真实 provider 下「调度启动的 Session」能被原生终端接管（本格的 incarnation 修复只在协议 stub 上验收过）。
-- 未提交、未 push、未合入 `dev`、未跑全量 `check`：需要用户授权并在 `dev` 上跑提升前全量测试（ADR-0038）。
+- 交付路径：本格与格 1 一起以两个提交（`ff4056c` = 格 1、`484f617` = 格 2）合入 `dev`（合并提交 `69d649f`），再经 ADR-0047 的 GitHub 中转提升到 `main`（`69d649f`，见第六次提升记录）；提升前在精确候选 SHA 上跑了全量 `just check`（退出码 0）。
 
 ## Wave N 开发分支集成（N3 → N1 → N2，3 格经 Orca 受监督编排）
 
@@ -6996,6 +6996,133 @@ stable clone 的 `lane/g1-event-model-alignment`（`975fd15`）、`lane/h1-sched
 - **`docs/guides/**` 按 ADR-0050 本次无需改动**：本次交付没有改命令面、设置键、UI 行为或权限语义，自动化只增了测试超时；N1/N2/N3 的文档同步已在各自 lane 内写明，未因提升而失效。逐篇校对头（ADR-0050 D02）仍未刷新。
 - **仍未做**（与 Wave N 记录的遗留相同）：`## NEXT` 与 `docs/roadmap/mvp.md` 的校准、`docs/guides/**` 的版本/校对头刷新。
 - **真实 provider 仍未验收**：`docs/notes/real-provider-acceptance-runbook.md` 的 A1–A8 一条都没跑。
+
+## 第六次真实 `dev → main` 提升（`main` `d2c4be7` → `69d649f`，同交付随后再提升一条记录提交；FOUNDATION-090 + FOUNDATION-091）
+
+状态：**已执行并成功**（用户在本会话显式指示「commit 后合并进 `dev`，再合并进 `main`」，随后指示「推送到远端，并合并到 main」）。
+本交付把 FOUNDATION-090（`task purge`，ADR-0058，**无 schema 变更**）与 FOUNDATION-091（冲突判定改为「声明同一功能」，
+ADR-0059，**schema v32**）带进稳定分支，按 ADR-0047 的 GitHub 中转人工四步完成（`just promote-main`，
+**未使用**产品 `codeestra promotion` 命令面）。它由**两次提升**组成：先把代码与修复提升到 `main`，
+再把本记录（连同一条测试卫生修复）推到 `origin/dev` 并提升——因为本记录提交不可能引用它自己的 SHA，
+精确读回值记在紧随其后的 `docs(tasks)` 补充提交里（那份补充提交按仓库惯例先留在本地 `dev`）。
+
+| 项 | 值 |
+|---|---|
+| 提升前 `main`（= `origin/dev` = `origin/main`） | `d2c4be7606cc38193c46430d89846ee780f7ee29` |
+| 提升后 `main`（= 被验证的精确 dev 候选） | `69d649f0fe450ffb7e133e6f5c6264a48bcd70b5` |
+| 交付提交 | `ff4056c`（格 1 / ADR-0058）、`484f617`（格 2 / ADR-0059）→ 合并提交 `69d649f`；`6aacaff`（测试卫生：给 `agent-observation-service.test.ts` 的 9 条补显式 `30_000`）与本记录提交（本记录的父提交） |
+| 方式 | ①push 固定候选到 `origin/dev` 并读回核对 ②main clone `git fetch` + `git merge --ff-only` ③重启并核对 ④推回 `origin/main` 并读回 |
+| `origin/dev` | `d2c4be7` → **`69d649f`**（读回值逐字符等于候选） |
+| `origin/main` | `d2c4be7` → **`69d649f`**（读回值逐字符等于候选） |
+| `phase1SchemaVersion` | 31 → **32**（`task_revisions.features_json`，纯 `ADD COLUMN`） |
+| 分支职责 | 合入前 `dev` 本地领先 `origin/dev` 一个提交（`17b4dd6` = 第五次提升的 docs 记录），它随本次候选一起进入稳定分支 |
+
+### 提交粒度与拆分方法（用户选择「按格拆」）
+
+两个 ADR 落在同一条分支（`lane/p1-task-purge`）上且共用若干文件，用户在权衡后选了**两个提交**而非一个，
+并要求两次中间态各自可验证。拆分按 hunk 级进行（组装一个只含格 1 hunk 的补丁后 `git apply --cached`，
+再用 `git add -A` 提交剩下的格 2），共享文件里属于格 2 的行留在工作区里等第二个提交：
+
+- 纯格 1：`packages/git/src/purge.ts` + `packages/git/src/index.ts` 的导出、`apps/runtime/src/task-purge-service.ts`、
+  `apps/ui/src/task-purge.tsx`、四个新测试文件、`docs/decisions/0058-task-purge.md`。
+- 共享文件（`PROJECT_SPEC.md`、`apps/{cli,runtime}/src/main.ts`、`apps/ui/src/{App,types,styles}.ts{,x}`、
+  `packages/contracts/src/index.ts`、`packages/storage/src/{database,index}.ts`、`docs/**`）：按 hunk 分配。
+  同一 hunk 内两格混用的有 5 处（`event-model.md` 相邻两行、`domain-model.md` 同一 hunk 的两段、
+  `decisions/README.md` 的优先级段、`tasks/README.md` 与 `cli-reference.md` 各有一段两节共用的 hunk），逐处按行切开；
+  被切掉的那半行在提交 1 里保持原样（作为 context 重新入补丁，否则 hunk 的上下文不再连续、补丁不成立）。
+- **提交 1 的树单独验证过**：`bun run typecheck` + `bun run typecheck:ui` 0 错误；`task purge` 的 9 项定向测试
+  （storage 4 / git 3 / CLI e2e 2）全绿；UI 套件 505 项全绿。
+
+**第一版合入 `dev` 的候选 `3212b9c` 在 `just check` 上是红的**（2 项失败）：`cli-task-purge.test.ts` 的 fixture
+是格 1 交付时的写法（`task submit` 后假定任务仍在 `READY`、版本 1，再直接跑 fake adapter），而收尾时为 ADR-0059
+的「提交即开始」把它改成了直接写 READY 的 helper——那次改动属于格 2，被拆分留在了格 2。也就是说：**拆出来的两半
+各自自洽，而合起来的树才完整**，这正是全量测试要拦的东西。修法：把收尾版的 fixture 放回格 2（`git commit --amend`
+一个**从未推送**的本地提交，`484f617`），丢弃那次本地合入（`git reset --hard 17b4dd6`）后重做合并（`69d649f`），
+再跑一次全量。第一次的失败、修正手法与重跑结果都在此如实记录；被改写的只有从未离开本机的两个提交（`3212b9c`、
+`ff1eabb`），**没有任何已被推送的历史被改写**（`origin/dev` 当时仍是 `d2c4be7`）。
+
+### 提升前全量证据（ADR-0038 D03）
+
+```sh
+cd /Users/loyage/Documents/codeestra-dev && just check   # 等价 bun run check
+```
+
+| 字段 | 值 |
+|---|---|
+| 候选 / 被检验 SHA | `69d649f0fe450ffb7e133e6f5c6264a48bcd70b5` |
+| 退出码 | **0** |
+| Vitest | 22 文件 / **490 项**通过 |
+| Bun（`test:storage` = contracts + storage + git + agent-adapters + `apps/runtime/test`） | **871 pass / 0 fail**、104 文件、5728 `expect()`、558.76s |
+| 同一命令链里的其它步骤 | `typecheck`、`typecheck:ui`、`build:ui`（均退出码 0） |
+
+同一候选上的分项记录（与收尾会话一致）：`bun test apps/runtime/test` **469 项全绿**（收尾前是 395/74）；
+`bun test packages/storage/test packages/domain/test` **474 项全绿**；格 2 的守门测试
+（`schedule-service` + `cli-schedule` + `cli-impact`）**17 项全绿**。
+
+### 提升前发现并修掉的测试卫生缺陷（集成期才暴露）
+
+第一次提升的候选 `69d649f` 在 `just check` 上 **871 pass / 0 fail**（退出码 0）。随后用户要求把本记录
+提交也推到远端，于是候选变成 `4b4f879`（= `69d649f` + 一条**纯文档**提交）——按 ADR-0038「候选变化即证据失效」，
+全量重跑，**这一次红了**：
+
+| 运行 | 候选 | 结果 | 失败项 |
+|---|---|---|---|
+| 第 1 次 | `69d649f` | exit 0、871 pass / 0 fail | — |
+| 第 2 次 | `4b4f879`（仅文档差异） | exit 1、870 pass / **1 fail** | `agent-observation-service.test.ts` › `never annotates the structured question channel a second time`，`timed out after 5000ms` |
+
+该测试单独跑只需 **0.45s**（实测 3 次：462ms / 444ms / 455ms），所以红的是 **Bun 默认的 5000ms 上限**，
+不是产品行为；`bun run check` 会并发跑 104 个文件，这台 8 核机器上同一夹具的耗时可以超出默认值一个量级。
+该文件 9 条测试都建真夹具并准备真 owned worktree（`createAgentFixture` + `startSession`），且**一条都没写显式超时**。
+
+修法（提交 `6aacaff`）：给这 9 条各追加 `30_000`，**不动测试体、断言或夹具**。与 `d2c4be7` 的先例同类
+（那次给 `promotion-service.test.ts` 的 24 条同类夹具补了 30s）。修后同一份代码重跑：**exit 0、871 pass / 0 fail**（528.84s）。
+
+### 第二次提升（`6aacaff` + 本记录）
+
+候选 = 本记录提交（其父提交是超时修复 `6aacaff`）。提升前在同一 SHA 上再跑了一次全量 `just check`（ADR-0038：候选变化即重跑），
+退出码 **0**：Vitest 22 文件 / 490 项，Bun **871 pass / 0 fail**、104 文件。
+然后按同样四步推进：`git push origin dev` → 读回 `origin/dev` == 候选 → main clone `git fetch` + `git merge --ff-only` →
+重启并核对 `status: READY` + `uiRunning: true` → `git push origin main` → 读回。
+**本记录能被 `main` 读到，本身就是这四步全部通过的证据**；精确 SHA、boot id/pid 与读回值见紧随其后的补充提交。
+数据库无需迁新版本（v32 已在第一次提升的重启里完成，本记录与 `6aacaff` 都不碰 schema）。
+
+### 重启序列与证据（`AGENTS.md` 规程，在 main clone 执行，由 `just promote-main` 串起）
+
+第一次提升（`69d649f`），每步退出码均 0：`bun install --frozen-lockfile` → `bun run build:ui` → `bun run codeestra stop` →
+`bun run codeestra status` → `bun run codeestra ui --no-open` → 核对 → `git push origin main` → 读回。
+
+| | boot id | pid |
+|---|---|---|
+| 提升前 | **无存活 Runtime**：`status: NOT_RUNNING`；最近一次 boot 的痕迹 `f7f2aa0c-41c7-461e-aba4-612219e26fd6` 记的是 `EXITED_WITHOUT_CLEAN_SHUTDOWN` | 60473 |
+| 提升后 | `8d7eb7b9-7607-4b6e-abc6-1da0c2a86072` | 98614 |
+
+提升后**独立读回**（不只信 recipe 自己的结论）：`status: READY`、`uiRunning: true`；main clone
+`HEAD = origin/main = origin/dev = 69d649f`、工作树 0 行改动；main clone 的 CLI 已能打印 `task purge`
+与 `--feature` 的用法、其 `packages/storage/src/migration.ts` 已有 v32 的 `features_json`（即稳定检出确实带上了新命令面与新 schema）。
+
+**稳定库迁移 31 → 32**（重启时由新代码完成）。核对方式：把 `runtime.sqlite` **连同 `-wal`/`-shm` 一起**复制到
+`/tmp` 后打开：`PRAGMA user_version = 32`、`task_revisions.features_json` 列存在、`PRAGMA foreign_key_check`
+**0 行违规**（10 个任务 / 1 个项目的行数不变）。**只复制主文件会读到 WAL 之前的旧视图**——第一次就是这么读到
+`user_version = 31`、`features_json` 不存在的，这条差异不是迁移失败，现如实记下以免后来者误判。
+
+### 收尾阶段修掉的两个真实缺陷（都在格 2 的提交里）
+
+1. **调度启动的 Session 没有 incarnation**：`recordAutomationIncarnation` 原先只在 `task.run`/`task.resume`/
+   `task.retry` 调用；ADR-0059 让自动 tick / submit 自动启动成为常态，这类 Execution 因此没有 incarnation、
+   没有单 writer lease，原生终端接管无 predecessor 可核（ADR-0023/0026）。修法：`ScheduleService` 的 `start`
+   回调包一层，启动出 Session 后记同一条 incarnation。
+2. **测试进程直连 Runtime HTTP 被开发者代理拦下**：环境里的 `http_proxy` 对 loopback 回 502 空 body。
+   `apps/runtime/test/cli-attention.test.ts` 在导入期设 `no_proxy`/`NO_PROXY`（子进程 CLI 早已各自设置）。
+
+### 本次未做（如实记录）
+
+- 这条记录**与代码一起被推送并提升**（用户在本会话后半显式要求「推送到远端，并合并到 main」）：
+  `origin/dev` 与 `origin/main` 都推进到了包含它的那次提交。这与第五次不同——第五次的记录提交是提升**之后**写的，
+  因而先只在本地 `dev`，直到本次交付才被带上远端。补充提交（精确读回值）同样先留在本地 `dev`，等下一次提升带上。
+- 未使用产品 `codeestra promotion prepare/approve/promote`：AGENTS.md 规定本仓库自身的提升一律走人工四步。
+- 未做任何资源回收，未删分支/worktree（`lane/p1-task-purge` 与格 1/格 2 的提交都保留）。
+- 未验证：真实 provider 下的并发运行（两个 `SAFE` 任务真的同时跑）、真实 provider 下「调度启动的 Session」
+  能否被原生终端接管（incarnation 修复只在协议 stub 上验收过）、UI 真实点击（ADR-0008 边界）。
 
 ## NEXT — 最小可用纵向切片
 
