@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 32;
+export const phase1SchemaVersion = 33;
 
 /** The kinds `intents.kind` accepts (ADR-0046) and the only kinds any command can write. */
 export const intentKinds = ['CREATE_TASK', 'AMEND_TASK', 'ADD_CONSTRAINT', 'CANCEL_TASK',
@@ -1883,6 +1883,20 @@ CREATE INDEX execution_guidance_contexts_by_task
 export const taskRevisionFeaturesMigration = `
 ALTER TABLE task_revisions ADD COLUMN features_json TEXT NOT NULL DEFAULT '[]'
   CHECK(json_valid(features_json) AND json_type(features_json)='array');
+`;
+
+/**
+ * Version 33 (FOUNDATION-093 / ADR-0060): the base ref a Task worktree was prepared from.
+ *
+ * A project without a recorded dev clone takes its Task baseline from the project folder's
+ * currently checked out branch, so the ref is decided per Task at preparation time and can no
+ * longer be re-read from the project row. `NULL` means "no per-Task base was recorded" — the
+ * readers fall back to `projects.dev_ref`, which is exactly what records written before this
+ * migration meant.
+ */
+export const taskBaselineRefMigration = `
+ALTER TABLE workspaces ADD COLUMN base_ref TEXT
+  CHECK(base_ref IS NULL OR length(trim(base_ref)) > 0);
 `;
 
 export const integrationBatchTerminalStatesMigration = `

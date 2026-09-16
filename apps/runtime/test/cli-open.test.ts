@@ -92,23 +92,27 @@ describe('codeestra open', () => {
     expect(stopped.exitCode).toBe(0);
   }, 60_000);
 
-  test('requires a dev clone for trust and refuses without one, writing nothing', async () => {
-    // ADR-0056 made the dev clone the single source of dev facts, so a trust that does not state one
-    // is refused with a stable code and the remedy — and no project is recorded.
+  test('trusts a project without a dev clone and records no dev facts for it (ADR-0060)', async () => {
+    // ADR-0060 made the dev clone optional: a project without one is managed — its Task baselines
+    // come from its own folder's checked out branch — so the trust succeeds and records no path.
     const { repository, home, assets } = await fixture();
     const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
-    const refused = await cli(['project', 'trust', repository], environment);
-    expect(refused.exitCode).toBe(1);
-    expect(refused.stderr).toContain('DEV_REPO_REQUIRED');
-    expect(refused.stderr).toContain('--dev-repo');
-    const listed = await cli(['project', 'list'], environment);
-    expect(JSON.parse(listed.stdout)).toEqual([]);
+    const trusted = await cli(['project', 'trust', repository], environment);
+    expect(trusted.exitCode).toBe(0);
+    const inspected = await cli(['project', 'inspect', repository], environment);
+    expect(inspected.exitCode).toBe(0);
+    expect(JSON.parse(inspected.stdout)).toMatchObject({ devRepoPath: null, devCommit: null });
+    // The report says which of the two baselines applies instead of warning about a broken project.
+    expect(inspected.stderr).toContain('未记录（managed');
 
-    // The old spelling that cleared the path is refused the same way: the clone is required, so
-    // `none` can never be a valid trust input again.
+    // `--dev-repo none` states the same fact explicitly and is not an error either; a trust that
+    // omits the flag re-reads what was recorded instead of silently clearing it.
     const cleared = await cli(['project', 'trust', repository, '--dev-repo', 'none'], environment);
-    expect(cleared.exitCode).toBe(1);
-    expect(cleared.stderr).toContain('DEV_REPO_REQUIRED');
+    expect(cleared.exitCode).toBe(0);
+    const listed = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
+      readonly { readonly devRepoPath: string | null }[];
+    expect(listed.length).toBe(1);
+    expect(listed[0]?.devRepoPath).toBeNull();
     await cli(['stop'], environment);
   }, 60_000);
 

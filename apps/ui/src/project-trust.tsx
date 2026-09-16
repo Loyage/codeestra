@@ -18,9 +18,10 @@ import type {
  *   `--dev-repo` argv — and it **never decides whether a path is usable**. Every refusal is the
  *   Runtime's own stable code, displayed verbatim next to a local glossary sentence that never
  *   replaces the code.
- * - It does not pretend an unfilled form can succeed: `project trust` needs a dev clone path, so the
- *   button is not usable while the field is blank, and the reason is stated instead of being shown as
- *   a silent no-op.
+ * - A dev clone is **optional** since ADR-0060: a project that records one keeps the long-lived `dev`
+ *   baseline and `dev → main` promotion; one that does not gets its Task baselines from **its own
+ *   folder's currently checked out branch**. The form therefore does not gate submission on the path;
+ *   the hint states what a blank field means instead.
  * - It reads the copy it shows out of the identity `project.inspect` returned, so the facts on screen
  *   are the facts the same request echoed back — never a client-side re-derivation of a path or a
  *   branch name.
@@ -86,16 +87,16 @@ export function projectTrustCommand(input: {
 }
 
 /**
- * Whether the form may send `project.trust`. Two independent reasons, neither of them a guess about
- * the repository: the dev clone path is a **required input** of this form, and in STRICT the user has
- * to type the confirmation. A blank path therefore cannot look like a successful trust.
+ * Whether the form may send `project.trust`. One reason only, and it is never a guess about the
+ * repository: in STRICT the user has to type the confirmation. A blank dev clone path is **not** a
+ * blocker (ADR-0060): it means "this project has no dev clone", and the Runtime decides what that
+ * makes usable.
  */
 export function canSubmitProjectTrust(input: {
   readonly permissionMode: 'FULL' | 'STRICT';
   readonly confirmation: string;
   readonly devRepoPath: string;
 }): boolean {
-  if (projectDevRepoPathMissing(input.devRepoPath)) return false;
   return input.permissionMode === 'FULL' || input.confirmation === 'TRUST';
 }
 
@@ -179,9 +180,10 @@ export function projectTrustRejectionNotice(code: string, message: string): stri
 }
 
 /**
- * The dev clone path input. Written so the required field states its own rule: the hint under it
- * names the CLI flag it corresponds to, says the value is sent as typed, and says the Runtime — not
- * this form — decides whether the path is usable.
+ * The dev clone path input. Written so the field states its own rule: the hint under it names the CLI
+ * flag it corresponds to, says the value is sent as typed, says the Runtime — not this form — decides
+ * whether the path is usable, and says what an empty field means now that a dev clone is optional
+ * (ADR-0060).
  */
 export function ProjectDevRepoInput({ value, busy, onChange }: {
   readonly value: string;
@@ -191,20 +193,21 @@ export function ProjectDevRepoInput({ value, busy, onChange }: {
   const missing = projectDevRepoPathMissing(value);
   return (
     <div className="project-dev-repo">
-      <label htmlFor="project-dev-repo-path">dev clone 路径（必填）</label>
+      <label htmlFor="project-dev-repo-path">dev clone 路径（可留空）</label>
       <input id="project-dev-repo-path" aria-label="dev clone 绝对路径"
         placeholder="/另一个检出 dev 的 clone" value={value} disabled={busy}
         onChange={(event) => { onChange(event.target.value); }} />
       <p className="muted hint">
         与 CLI 的 <span className="mono">--dev-repo</span> 同一个字段（
-        <span className="mono">project.trust</span> 的 <span className="mono">devRepoPath</span>）：稳定提升会用这个 clone 把固定候选推到远端 dev。
+        <span className="mono">project.trust</span> 的 <span className="mono">devRepoPath</span>）：记了它，稳定提升就用这个 clone 把固定候选推到远端 dev。
         值<strong>原样</strong>放进请求；能不能用由 Runtime 核验 —— 拒绝时这里显示它返回的
         {' '}<span className="mono">DEV_REPO_*</span> 稳定码与解释。
       </p>
       {missing ? (
         <p className="muted" role="status" data-project-trust="dev-repo-missing">
-          还没有填 dev clone 路径：<span className="mono">project.trust</span> 需要它，所以下面的
-          「添加项目 / 信任项目」按钮不会启用（不会假装成功）。
+          留空 = 这个项目没有 dev clone（ADR-0060）：Task 基线取该项目文件夹当前检出的分支，
+          <span className="mono">task integrate</span> 与 <span className="mono">promotion</span> 会在需要 dev 分支时以
+          {' '}<span className="mono">DEV_REPO_REQUIRED</span> 拒绝。
         </p>
       ) : null}
     </div>

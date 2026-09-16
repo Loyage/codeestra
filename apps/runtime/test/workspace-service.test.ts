@@ -127,6 +127,7 @@ async function reserveCrashedPreparation(value: Awaited<ReturnType<typeof fixtur
     branchRef: `refs/heads/task/${value.taskId}`,
     path: join(worktreesRoot, value.projectId, value.taskId),
     baseCommit: identity.headCommit,
+    baseRef: identity.mainRef,
     createdAt: 10,
   });
   value.storage.startWorkspacePreparation(operationId, workspaceId, 11);

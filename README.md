@@ -12,9 +12,9 @@ Task-first、local-first 的 AI Development Runtime。用户管理产品意图�
 
 ## 分支与运行规则
 
-项目长期保留两个分支：
+本项目（Codeestra 自己）长期保留两个分支：
 
-- `main`：用户日常实际运行 Codeestra、进行开发辅助工作的稳定分支。
+- `main`：可运行稳定实例的稳定分支（用户日常运行的就是它）。
 - `dev`：刚开发功能的实验与集成分支；所有功能任务从 `dev` 建基线，完成后先进入 `dev`，不得直接进入 `main`。
 
 `task/*`、`lane/*`、feature 与 Self Task candidate 分支在创建时按开发方向选定少量具体测试，只运行这些定向测试，不运行 `bun run check`、`just check`、`just verify` 或等价全仓检查。所有候选进入 `dev` 后，必须在准备 `dev → main` 前对精确 dev SHA 跑一次全量测试；候选变化后重跑。详见 ADR-0038。
@@ -23,10 +23,12 @@ Task-first、local-first 的 AI Development Runtime。用户管理产品意图�
 
 ### 本机工作树
 
+这两个目录的拆分**只为 Codeestra 自身的开发（自进化）**：稳定实例跑在 main clone，Codeestra 自己的开发、集成与定向验证在 dev clone；用 Codeestra 开发别的项目不涉及这种拆分。
+
 | 目录 | 分支 | 用途 |
 |---|---|---|
-| `~/Documents/codeestra` | `main` | 稳定工作树：日常运行 Runtime、用 Codeestra 辅助开发 |
-| `~/Documents/codeestra-dev` | `dev` | 开发工作树：新功能实验与集成 |
+| `~/Documents/codeestra` | `main` | 稳定工作树：只运行稳定实例、拉取已批准的提升 |
+| `~/Documents/codeestra-dev` | `dev` | 开发工作树：Codeestra 自身的新功能实验与集成 |
 
 两个工作树的 `node_modules`、`apps/ui/dist`、`.codeestra/` 是 gitignore 的本地状态，互不共享；在 dev 工作树里首次使用要执行 `bun install --frozen-lockfile`（`bun run check` 会顺带构建 UI 资产）。
 

@@ -185,7 +185,7 @@ describe('the dev clone fields are the command face\'s fields', () => {
     // `project.inspect`: the main path plus an optional candidate dev clone (ADR-0047 D05).
     const inspect = contractBlock('project.inspect');
     expect(inspect).toContain('path: z.string().min(1)');
-    expect(inspect).toContain('devRepoPath: z.string().min(1).optional()');
+    expect(inspect).toContain('devRepoPath: z.string().min(1).nullable().optional()');
     // `project.trust`: the reviewed identity, the policy confirmation, and the dev clone to record.
     const trust = contractBlock('project.trust');
     for (const field of ['path', 'expectedIdentity', 'devRepoPath', 'expectedVerificationPolicy',
@@ -212,22 +212,23 @@ describe('the dev clone fields are the command face\'s fields', () => {
 });
 
 // ---------------------------------------------------------------------------------------------
-// A blank path must not look like a successful trust
+// A blank path means "no dev clone" (ADR-0060), and the form says so
 // ---------------------------------------------------------------------------------------------
 
-describe('an unfilled dev clone path cannot pretend to succeed', () => {
-  it('refuses to offer the trust button until a path is there', () => {
+describe('a blank dev clone path means a managed project, not a failed trust', () => {
+  it('treats a blank path as "no dev clone" and lets the form be submitted', () => {
     expect(projectDevRepoPathMissing('')).toBe(true);
     expect(projectDevRepoPathMissing('   ')).toBe(true);
     expect(projectDevRepoPathMissing('/dev')).toBe(false);
     expect(projectDevRepoPathMissing('  /dev  ')).toBe(false);
+    // ADR-0060: the dev clone is optional, so only the STRICT declaration gates submission.
     const cases: readonly [('FULL' | 'STRICT'), string, string, boolean][] = [
       ['FULL', '', '/dev', true],
-      ['FULL', '', '', false],
-      ['FULL', '', '   ', false],
+      ['FULL', '', '', true],
+      ['FULL', '', '   ', true],
       ['STRICT', 'TRUST', '/dev', true],
-      ['STRICT', 'TRUST', '', false],
-      ['STRICT', 'TRUST', '   ', false],
+      ['STRICT', 'TRUST', '', true],
+      ['STRICT', 'TRUST', '   ', true],
       ['STRICT', '', '/dev', false],
       ['STRICT', 'trust', '/dev', false],
     ];
@@ -239,22 +240,23 @@ describe('an unfilled dev clone path cannot pretend to succeed', () => {
     expect(appSource).toContain('canSubmitProjectTrust({ permissionMode, confirmation, devRepoPath })');
   });
 
-  it('says why the button is not usable, in the form itself', () => {
+  it('states what a blank field means, in the form itself', () => {
     const blank = markup(createElement(ProjectDevRepoInput, {
       value: '', busy: false, onChange: () => {},
     }));
     expect(blank).toContain('data-project-trust="dev-repo-missing"');
-    expect(blank).toContain('还没有填 dev clone 路径');
-    expect(blank).toContain('不会假装成功');
+    expect(blank).toContain('留空 = 这个项目没有 dev clone');
+    expect(blank).toContain('DEV_REPO_REQUIRED');
     const filled = markup(createElement(ProjectDevRepoInput, {
       value: '/dev', busy: false, onChange: () => {},
     }));
     expect(filled).not.toContain('data-project-trust="dev-repo-missing"');
     for (const html of [blank, filled]) {
-      // The field names the CLI flag it corresponds to and where the value goes.
+      // The field names the CLI flag it corresponds to and where the value goes, and it no longer
+      // claims to be a required input (ADR-0060).
       expect(html).toContain('--dev-repo');
       expect(html).toContain('devRepoPath');
-      expect(html).toContain('必填');
+      expect(html).toContain('可留空');
       expect(html).not.toContain('**');
     }
   });

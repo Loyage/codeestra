@@ -35,6 +35,9 @@ function downgradeToV29(database: Database): void {
   }
   // ...and the column added by schema v32 (declared features, ADR-0059).
   database.exec('ALTER TABLE task_revisions DROP COLUMN features_json');
+  // ...and the column added by schema v33 (the per-Task base ref, ADR-0060): a v29 database
+  // recorded no base ref on a workspace, so the upgrade must replay that ADD COLUMN itself.
+  database.exec('ALTER TABLE workspaces DROP COLUMN base_ref');
   database.exec(`
     CREATE TABLE integration_batches_v29 (
       id TEXT PRIMARY KEY,

@@ -42,7 +42,8 @@
 ## 分支与发布工作流（ADR-0009/0047）
 
 - 项目必须长期保留 `main` 与 `dev` 两个分支；不得删除、重命名或用临时 integration branch 取代它们。两者在 GitHub 上都必须存在（`origin/main`、`origin/dev`）。
-- `main` 是用户日常实际运行 Codeestra、进行开发辅助工作的稳定分支；不得直接在 `main` 开发新功能。
+- `main` 是可运行稳定实例的稳定分支（用户日常运行的就是它）；不得直接在 `main` 开发新功能。
+- 本机的两个目录（main clone / dev clone，见下面「本机检出布局」）**只为 Codeestra 自身的开发（自进化）而拆分**：开发中的代码要能真的跑起来，同时稳定实例不被它干扰；用 Codeestra 开发别的项目不涉及这种目录拆分。产品层「被管理项目是否仍必须有 `dev` 基线」的口径也已由用户更正为「main/dev 双分支模型只属于 Codeestra 自身」，并已落进实现（ADR-0060 / FOUNDATION-093，schema **v33**：`dev_repo_path` 变为可选、没有 dev clone 的项目（managed）Task 基线取项目文件夹当前检出的分支；只有集成与提升仍需 dev clone）；仍未做完的部分逐条列在 `docs/tasks/README.md` 的 FOUNDATION-093 与 NEXT 第 14 条。
 - `dev` 是新功能实验与集成分支。所有功能 Task/worktree 从固定 `dev` commit 建立基线；功能完成、Task verification 通过后，经 IntegrationBatch 与独立 Integration verification 进入 `dev`，不得直接进入 `main`。
 - `dev → main` 是唯一稳定提升路径，且**必须经 GitHub 中转**（ADR-0047）：① 把固定 dev 候选 push 到 `origin/dev`，并读回核对 `origin/dev == 候选 SHA`；② 在 main clone 执行 `git fetch` + `git merge --ff-only origin/dev`；③ 在 main clone 按下面的规程重启稳定 Runtime 并核对 `status: READY`；④ 核对通过后才把 `main` 推回 `origin/main`（重启失败则不推回，保留现场并如实报告）。
 - `just promote-main <SHA>` 封装上面的 ②③④（候选 SHA 必须显式给出；要求候选已是 `origin/dev` 的尖端、main 检出干净且检出 `main`）。第 ① 步（把固定候选 push 到 `origin/dev`）与提升前的全量测试证据仍需人工完成。
@@ -54,7 +55,9 @@
 
 ### 本机检出布局（ADR-0048）
 
-- `~/Documents/codeestra` 检出 `main`：**稳定 clone**。只用于运行稳定服务、拉取已批准的提升、以及用 Codeestra 辅助开发；只接受 pull / `bun install --frozen-lockfile` / `bun run build:ui` / `stop` / `status`。不得在其中开发新功能、建 task/lane worktree，或把 dev 的未提交改动复制过去。
+这个拆分的**唯一理由是 Codeestra 自己要被开发（自进化）**：稳定实例跑在 main clone，开发、集成与定向验证在 dev clone，dev 代码用独立 `CODEESTRA_HOME` 起 dev 实例。用 Codeestra 开发别的项目时不需要（也不该）为那些项目建立这种 main/dev 目录拆分——那些项目的代码在自己的目录里，与这两个 clone 无关。
+
+- `~/Documents/codeestra` 检出 `main`：**稳定 clone**。只用于运行稳定服务与拉取已批准的提升；只接受 pull / `bun install --frozen-lockfile` / `bun run build:ui` / `stop` / `status`。不得在其中开发新功能、建 task/lane worktree，或把 dev 的未提交改动复制过去。
 - `~/Documents/codeestra-dev` 检出 `dev`：**开发 clone**。所有开发、集成与定向验证都在这里进行。
 - 两者是**独立仓库**，不是彼此的 worktree：各自 `.git` 是目录、各有 `origin`；`git worktree list` 不得出现对方。把两边用 worktree 或共享对象库连起来的做法已废弃。
 - 两个 clone 的 `node_modules`、`apps/ui/dist`、Runtime 数据目录都是各自的本地状态，不共享；各自需要 `bun install --frozen-lockfile`，UI 资产各自构建。

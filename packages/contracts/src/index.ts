@@ -84,8 +84,12 @@ export const projectIdentitySchema = repositoryIdentitySchema.extend({
   devRef: z.string().min(1),
   /**
    * Commit of the **dev clone's** local `dev` ref (ADR-0047 D05 / ADR-0056), or null when the project
-   * has no verifiable dev clone. It is the baseline a Task worktree would start from, which is why
-   * it is part of the identity a client echoes back.
+   * has no verifiable dev clone. It is part of the identity a client echoes back.
+   *
+   * ADR-0060: a project without a dev clone is not a broken project — its Task worktrees are based on
+   * the project folder's **currently checked out branch** instead, so this field being null changes
+   * what `task integrate` / `promotion *` can do (they need the long-lived `dev`), not whether the
+   * project works.
    */
   devCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/).nullable(),
   devRefPresent: z.boolean(),
@@ -1146,11 +1150,12 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     command: z.literal('project.inspect'),
     path: z.string().min(1),
     /**
-     * The dev clone to verify, as an explicit input (ADR-0047 D05). Omitted, the path recorded by a
-     * previous trust is inspected; supplied, that path is verified instead, so a user can see
-     * whether a candidate dev clone is usable before trusting it.
+     * The dev clone to verify, as an explicit input (ADR-0047 D05 / ADR-0060). Omitted, the path
+     * recorded by a previous trust is inspected; `null` states "this project has no dev clone"
+     * (managed mode); a path is verified instead, so a user can see whether a candidate dev clone
+     * is usable before trusting it.
      */
-    devRepoPath: z.string().min(1).optional(),
+    devRepoPath: z.string().min(1).nullable().optional(),
   }),
   z.strictObject({
     ...requestBase,
@@ -1164,15 +1169,14 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     /** The exact `project.inspect` result the user reviewed, including the dev baseline. */
     expectedIdentity: projectIdentitySchema,
     /**
-     * The dev clone to record (ADR-0047 D05). The Runtime verifies it (another clone, same origin,
-     * on the dev branch) and refuses with a stable code when it cannot; it never records an empty
-     * path in place of one it could not verify.
+     * The dev clone to record (ADR-0047 D05 / ADR-0060). The Runtime verifies it (another clone,
+     * same origin, on the dev branch) and refuses with a stable code when it cannot; it never
+     * records an empty path in place of one it could not verify.
      *
-     * FOUNDATION-087 / ADR-0056 made this clone the **single source of dev facts**, so the field is
-     * now required: an omitted or `null` value is refused with `DEV_REPO_REQUIRED` and the remedy
-     * command, *before* anything is written. The shape stays optional-but-nullable on purpose — a
-     * missing value must produce that stable code, not a generic boundary error, and a client that
-     * still sends the old `none` gets the same refusal instead of silently clearing the path.
+     * Since ADR-0060 a dev clone is **optional**: omitting the field keeps whatever the project
+     * recorded, and `null` states that this project has none — its Task baselines then come from the
+     * project folder's checked out branch and `task integrate` / `promotion *` refuse with
+     * `DEV_REPO_REQUIRED` because they need the long-lived `dev` branch.
      */
     devRepoPath: z.string().min(1).nullable().optional(),
     expectedVerificationPolicy: verificationPolicyConfirmationSchema,

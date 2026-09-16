@@ -1343,3 +1343,20 @@ SQLite 不能就地收窄 CHECK，所以重建表。`intents` 被三张表按名
 step-time 错误，不比对就可能让 `DROP TABLE` 在复制被拒后照跑）。`tasks.priority` 由 v1 保留、字段与 `tasks_schedule` 索引不变，
 但移除 `CHANGE_PRIORITY` 后**没有任何命令能让它非 0**，因此 ADR-0030 的「priority desc」在现状下是惰性的（这是如实记录的代价）。
 Phase 7 落地 `SELF_MODIFICATION` 时需要再做一次迁移把取值加回来。
+
+### `workspaces.base_ref`：Task 基线的 ref 逐 Task 记录（schema version 33，ADR-0060）
+
+```sql
+ALTER TABLE workspaces ADD COLUMN base_ref TEXT
+  CHECK(base_ref IS NULL OR length(trim(base_ref)) > 0);
+```
+
+ADR-0060 之前，一个 Task 的基线 ref 只有一个可能：项目行的 `projects.dev_ref`（`refs/heads/dev`），所以它不必逐行记录。
+被管理项目（没有 dev clone）的基线改为**项目文件夹当前检出的分支**之后，ref 是**建 workspace 那一刻**决定的，可能逐 Task
+不同（检出分支换了、或调用者显式给了 `--base-ref`），因此必须随 workspace 行一起记下来。`base_commit` 早已是 NOT NULL
+的列，这里只补它的来源 ref。
+
+- 纯 `ADD COLUMN`：不重建表、不动 `one_live_workspace` / `one_live_workspace_path` 两个部分唯一索引，v17–v32 的库直接升级。
+- 读取处一律 `COALESCE(workspace.base_ref, projects.dev_ref)`：`NULL` 表示「这一行写于 v33 之前」，那时 dev ref 就是基线，
+  于是历史记录仍然如实；升级不发明数据、不改写任何已有行。
+- 有 dev clone 的项目行为不变（写入的仍是那个 clone 的 `refs/heads/dev`）；managed 项目写入项目文件夹当时检出的分支。

@@ -1,4 +1,4 @@
-import { commitExists, inspectDevClone, inspectRepository, readRemoteUrl } from '@codeestra/git';
+import { commitExists, GitInspectionError, inspectBaseRef, inspectDevClone, inspectRepository, readRemoteUrl } from '@codeestra/git';
 
 /**
  * The dev clone (ADR-0047 D05 / ADR-0048 D01): a second, independent checkout of the same origin
@@ -166,6 +166,140 @@ export async function inspectDevRepo(input: {
     repoRoot: clone.path, gitCommonDir: clone.gitCommonDir, headCommit: clone.headCommit,
     branchRef: clone.branchRef, devRefCommit: clone.devRefCommit, originUrl,
     originMatchesProject: true, clean: clone.clean };
+}
+
+/**
+ * The code a Task baseline resolution refuses with (ADR-0060). Both are facts about the requested
+ * baseline, not about trust: a project stays trusted when its folder is on a detached HEAD.
+ */
+export type TaskBaselineCode = 'TASK_BASE_REF_UNRESOLVED' | 'TASK_BASE_REF_MISSING';
+
+export class TaskBaselineError extends Error {
+  constructor(readonly code: TaskBaselineCode, message: string) {
+    super(message);
+    this.name = 'TaskBaselineError';
+  }
+}
+
+/**
+ * The repository and the ref a Task worktree is based on (ADR-0060).
+ *
+ * There are exactly two ways a project can name a baseline, and which one applies is decided by a
+ * recorded path, never by a path or branch name:
+ *
+ * - a project with a recorded **dev clone** (ADR-0048/0056) takes the clone's long-lived `dev` as the
+ *   baseline. This is what Codeestra itself uses, and what any project that wants `dev → main`
+ *   promotion records;
+ * - a project **without** one takes its own folder (`projects.repo_root`) and the branch that folder
+ *   has **checked out right now** as the baseline. The ref and its commit are fixed with the
+ *   workspace, so switching branches in that folder later never moves an existing Task's baseline.
+ *
+ * A detached HEAD has no branch to name, so it is refused instead of being resolved to a commit
+ * nobody asked for. `baseRef` overrides the ref for one Task only (still a local branch of the
+ * baseline repository).
+ */
+export interface TaskBaselineRepository {
+  readonly mode: 'DEV_CLONE' | 'PROJECT_FOLDER';
+  /** The repository that owns the Task worktree and its branch. */
+  readonly repositoryRoot: string;
+  readonly gitCommonDir: string;
+  /** The trusted main checkout: identity and the ref the policies are read from. */
+  readonly mainRepositoryRoot: string;
+  readonly mainRef: string;
+  readonly baseRef: string;
+  readonly baseCommit: string;
+  readonly objectFormat: 'sha1' | 'sha256';
+  readonly devRepoPath: string | null;
+  /** Present only in `DEV_CLONE` mode: the verification behind the recorded path. */
+  readonly inspection: DevRepoInspection | null;
+}
+
+/**
+ * Resolves the Task baseline of one trusted project (ADR-0060). Cheap when a dev clone is recorded
+ * (the clone is re-verified), and read-only when it is not: the project folder is only inspected.
+ */
+export async function resolveTaskBaselineRepository(project: {
+  readonly id: string;
+  readonly repoRoot: string;
+  readonly gitCommonDir: string;
+  readonly mainRef: string;
+  readonly devRef: string;
+  readonly devRepoPath: string | null;
+  readonly objectFormat: 'sha1' | 'sha256';
+}, options: { readonly baseRef?: string | null } = {}): Promise<TaskBaselineRepository> {
+  const override = options.baseRef ?? null;
+  if (project.devRepoPath !== null) {
+    const dev = await requireProjectDevRepository(project);
+    const baseRef = override ?? dev.devRef;
+    const baseCommit = baseRef === dev.devRef
+      ? dev.devCommit
+      : await readBaselineRef(dev.devRepoPath, baseRef);
+    return {
+      mode: 'DEV_CLONE',
+      repositoryRoot: dev.devRepoPath,
+      gitCommonDir: dev.devGitCommonDir,
+      mainRepositoryRoot: dev.mainRepositoryRoot,
+      mainRef: dev.mainRef,
+      baseRef,
+      baseCommit,
+      objectFormat: dev.objectFormat,
+      devRepoPath: dev.devRepoPath,
+      inspection: dev.inspection,
+    };
+  }
+  // No dev clone is recorded: the project folder is its own baseline repository. A detached HEAD
+  // cannot name a ref, so it is refused with its own code (and only when no override was given).
+  if (override === null) {
+    let inspected;
+    try {
+      inspected = await inspectRepository(project.repoRoot);
+    } catch (error) {
+      if (await commitExists({ repositoryRoot: project.repoRoot, commit: 'HEAD' }).catch(() => false)) {
+        throw new TaskBaselineError('TASK_BASE_REF_UNRESOLVED',
+          `${project.repoRoot} has a detached HEAD, so there is no checked out branch to use as the`
+          + ' Task baseline; check out a branch there (or pass an explicit base ref) and try again');
+      }
+      throw error;
+    }
+    return {
+      mode: 'PROJECT_FOLDER',
+      repositoryRoot: inspected.repoRoot,
+      gitCommonDir: inspected.gitCommonDir,
+      mainRepositoryRoot: project.repoRoot,
+      mainRef: project.mainRef,
+      baseRef: inspected.mainRef,
+      baseCommit: inspected.headCommit,
+      objectFormat: inspected.objectFormat,
+      devRepoPath: null,
+      inspection: null,
+    };
+  }
+  return {
+    mode: 'PROJECT_FOLDER',
+    repositoryRoot: project.repoRoot,
+    gitCommonDir: project.gitCommonDir,
+    mainRepositoryRoot: project.repoRoot,
+    mainRef: project.mainRef,
+    baseRef: override,
+    baseCommit: await readBaselineRef(project.repoRoot, override),
+    objectFormat: project.objectFormat,
+    devRepoPath: null,
+    inspection: null,
+  };
+}
+
+/** Reads one local branch as the baseline commit, or refuses with the fact that is missing. */
+async function readBaselineRef(repositoryRoot: string, baseRef: string): Promise<string> {
+  try {
+    const inspected = await inspectBaseRef(repositoryRoot, baseRef);
+    return inspected.commit;
+  } catch (error) {
+    if (error instanceof GitInspectionError && error.code === 'MISSING_BASE_REF') {
+      throw new TaskBaselineError('TASK_BASE_REF_MISSING',
+        `${repositoryRoot} has no local branch ${baseRef}, so no Task baseline can be read from it`);
+    }
+    throw error;
+  }
 }
 
 /**

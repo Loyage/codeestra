@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
+  commitExists,
   GitInspectionError,
   inspectBaseRef,
   inspectRepository,
@@ -16,7 +17,7 @@ import {
   StorageError,
   type WorkspacePreparationPlan,
 } from '@codeestra/storage';
-import { requireProjectDevRepository, type ProjectDevRepository } from './dev-repo-service.js';
+import { resolveTaskBaselineRepository, type TaskBaselineRepository } from './dev-repo-service.js';
 
 export class WorkspaceServiceError extends Error {
   constructor(readonly code: string, message: string) {
@@ -64,6 +65,14 @@ async function assertTrustedMainCheckout(input: {
   try {
     repository = await inspectRepository(input.project.repoRoot);
   } catch (error) {
+    // ADR-0060: a project folder on a detached HEAD has no branch to name, but it is still the same
+    // checkout — that is not the identity change this guard exists for. The baseline resolution below
+    // refuses it with `TASK_BASE_REF_UNRESOLVED`, and the trust stays active. A checkout that cannot
+    // be read at all (moved, deleted, not a repository) still invalidates the trust.
+    if (await commitExists({ repositoryRoot: input.project.repoRoot, commit: 'HEAD' })
+      .catch(() => false)) {
+      return;
+    }
     input.storage.invalidateProjectTrust(input.project.id, input.now());
     const code = error instanceof GitInspectionError ? error.code : 'INVALID_REPOSITORY';
     throw new WorkspaceServiceError(code,
@@ -85,6 +94,12 @@ export async function prepareTaskWorkspace(input: {
   readonly projectId: string;
   readonly taskId: string;
   readonly expectedTaskVersion: number;
+  /**
+   * Explicit baseline override for this Task (ADR-0060): a local branch of whichever repository
+   * provides the baseline. Omitted means "the project's default" — the dev clone's `dev` when one is
+   * recorded, otherwise the project folder's currently checked out branch.
+   */
+  readonly baseRef?: string | null;
   readonly now?: () => number;
   readonly randomUUID?: () => string;
 }): Promise<WorkspacePreparationPlan> {
@@ -112,11 +127,12 @@ export async function prepareTaskWorkspace(input: {
   // worktree and keeps the paused Task's uncommitted work in place; the path/ownership token are
   // already recorded, so no Git side effect runs here.
   //
-  // ADR-0056: the project's dev clone is resolved (and `DEV_REPO_REQUIRED` refused) before any path
-  // is planned, because the worktree, its baseline and its branch all belong to that clone.
+  // ADR-0060: the Task baseline is resolved before any path is planned. A project with a recorded
+  // dev clone keeps ADR-0056's dev baseline; one without takes its own folder and the branch that
+  // folder has checked out right now.
   const project = input.storage.getTrustedProject(input.projectId);
   await assertTrustedMainCheckout({ storage: input.storage, project, now });
-  const dev = await requireProjectDevRepository(project);
+  const baseline = await resolveTaskBaselineRepository(project, { baseRef: input.baseRef ?? null });
   const reusable = input.storage.findReusableWorkspace(input.taskId);
   if (reusable !== null) {
     return {
@@ -126,10 +142,10 @@ export async function prepareTaskWorkspace(input: {
       taskId: input.taskId,
       workspaceId: reusable.workspaceId,
       workspaceState: 'READY' as const,
-      repoRoot: dev.devRepoPath,
+      repoRoot: baseline.repositoryRoot,
       gitCommonDir: project.gitCommonDir,
       mainRef: project.mainRef,
-      devRef: project.devRef,
+      devRef: baseline.baseRef,
       objectFormat: project.objectFormat,
       baseCommit: reusable.baseCommit,
       ownershipToken: reusable.ownershipToken,
@@ -146,7 +162,7 @@ export async function prepareTaskWorkspace(input: {
     runtimeHome: input.runtimeHome,
     projectId: input.projectId,
     taskId: input.taskId,
-    dev,
+    baseline,
     now,
     randomUUID,
   });
@@ -154,10 +170,10 @@ export async function prepareTaskWorkspace(input: {
   let repository;
   let baseCommit;
   try {
-    // Every new Task worktree is based on the project's fixed `dev` ref, never on `main` and
-    // never on whichever branch happens to be checked out where the project was trusted. The ref
-    // is the *dev clone's*, so the baseline commit and the worktree live in the same repository.
-    const inspected = await inspectBaseRef(dev.devRepoPath, dev.devRef);
+    // A project with a recorded dev clone is based on that clone's long-lived `dev`; a project
+    // without one is based on its own folder and the branch checked out there right now (ADR-0060).
+    // Either way the ref and the commit are fixed here, so a later checkout cannot move them.
+    const inspected = await inspectBaseRef(baseline.repositoryRoot, baseline.baseRef);
     repository = inspected.repository;
     baseCommit = inspected.commit;
   } catch (error) {
@@ -166,21 +182,26 @@ export async function prepareTaskWorkspace(input: {
     }
     throw error;
   }
-  // The dev clone was verified moments ago, so a mismatch here means the repository changed
-  // underneath this command. The recorded dev clone path is the user's statement about *which*
-  // second clone to use, not part of the main checkout's identity, so the trust is not invalidated;
-  // the refusal names the fact instead.
-  if (repository.repoRoot !== dev.devRepoPath
-    || repository.gitCommonDir !== dev.devGitCommonDir
-    || repository.objectFormat !== dev.objectFormat) {
+  // The baseline repository was verified moments ago (dev clone), or *is* the trusted checkout
+  // (project folder), so a mismatch here means the repository changed underneath this command.
+  if (baseline.mode === 'PROJECT_FOLDER') {
+    // The baseline repository is the trusted main checkout itself, so the same identity check that
+    // guards the trust applies: a moved folder invalidates the trust instead of being reported as a
+    // dev-clone mismatch.
+    if (repository.repoRoot !== project.repoRoot
+      || repository.gitCommonDir !== project.gitCommonDir
+      || repository.objectFormat !== project.objectFormat) {
+      input.storage.invalidateProjectTrust(input.projectId, now());
+      throw new WorkspaceServiceError('REPOSITORY_CHANGED',
+        'Project trust invalidated after identity changed');
+    }
+  } else if (repository.repoRoot !== baseline.repositoryRoot
+    || repository.gitCommonDir !== baseline.gitCommonDir
+    || repository.objectFormat !== baseline.objectFormat) {
+    // The recorded dev clone path is the user's statement about *which* second clone to use, not part
+    // of the main checkout's identity, so the trust is not invalidated; the refusal names the fact.
     throw new WorkspaceServiceError('REPOSITORY_CHANGED',
-      `The dev clone ${dev.devRepoPath} changed after it was verified`);
-  }
-  if (repository.repoRoot !== dev.devRepoPath
-    || repository.gitCommonDir !== dev.devGitCommonDir
-    || repository.objectFormat !== dev.objectFormat) {
-    input.storage.invalidateProjectTrust(input.projectId, now());
-    throw new WorkspaceServiceError('REPOSITORY_CHANGED', 'Project trust invalidated after identity changed');
+      `The dev clone ${baseline.repositoryRoot} changed after it was verified`);
   }
 
   const operationId = randomUUID();
@@ -201,6 +222,7 @@ export async function prepareTaskWorkspace(input: {
     branchRef,
     path,
     baseCommit,
+    baseRef: baseline.baseRef,
     createdAt: now(),
   });
   if (plan.operationState === 'SUCCEEDED' || plan.operationState === 'FAILED') return plan;
@@ -215,7 +237,7 @@ export async function prepareTaskWorkspace(input: {
   try {
     const prepared = await prepareWorkspace({
       operationId: plan.operationId,
-      repositoryRoot: dev.devRepoPath,
+      repositoryRoot: baseline.repositoryRoot,
       worktreesRoot,
       projectId: plan.projectId,
       baseRef: plan.devRef,
@@ -277,7 +299,7 @@ async function rebuildReclaimedTaskWorkspace(input: {
   readonly runtimeHome: string;
   readonly projectId: string;
   readonly taskId: string;
-  readonly dev: ProjectDevRepository;
+  readonly baseline: TaskBaselineRepository;
   readonly now: () => number;
   readonly randomUUID: () => string;
 }): Promise<WorkspacePreparationPlan | null> {
@@ -286,8 +308,9 @@ async function rebuildReclaimedTaskWorkspace(input: {
   const project = input.storage.getTrustedProject(input.projectId);
   const worktreesRoot = await canonicalWorktreesRoot(input.runtimeHome);
   const observed = await inspectOwnedWorktreeRebuild({
-    // The recorded worktree is a worktree of the dev clone (ADR-0056), so Git has to be asked there.
-    repositoryRoot: input.dev.devRepoPath,
+    // The recorded worktree belongs to the baseline repository (ADR-0060: the dev clone when one is
+    // recorded, otherwise the project folder), so Git has to be asked there.
+    repositoryRoot: input.baseline.repositoryRoot,
     ownedRoot: worktreesRoot,
     path: recorded.path,
     branchRef: recorded.branchRef,
@@ -324,7 +347,7 @@ async function rebuildReclaimedTaskWorkspace(input: {
       + ' under a live writer');
   }
   const rebuilt = await rebuildOwnedWorktree({
-    repositoryRoot: input.dev.devRepoPath,
+    repositoryRoot: input.baseline.repositoryRoot,
     ownedRoot: worktreesRoot,
     projectId: input.projectId,
     taskId: input.taskId,
@@ -357,10 +380,10 @@ async function rebuildReclaimedTaskWorkspace(input: {
     taskId: input.taskId,
     workspaceId: recorded.workspaceId,
     workspaceState: 'READY',
-    repoRoot: input.dev.devRepoPath,
+    repoRoot: input.baseline.repositoryRoot,
     gitCommonDir: project.gitCommonDir,
     mainRef: project.mainRef,
-    devRef: project.devRef,
+    devRef: input.baseline.baseRef,
     objectFormat: project.objectFormat,
     baseCommit: recorded.baseCommit,
     ownershipToken: recorded.ownershipToken,

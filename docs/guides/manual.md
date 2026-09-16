@@ -163,12 +163,12 @@ bun run codeestra ui --no-open  # 只打印地址
 
 ### 2.5 两个 clone 与 dev 通道标记（本机构造）
 
-本机把 `main` 与 `dev` 放在**两个分别 clone 的独立仓库**里，各自有 `.git` 目录与 `origin`，不是彼此的 worktree：
+本机把 `main` 与 `dev` 放在**两个分别 clone 的独立仓库**里，各自有 `.git` 目录与 `origin`，不是彼此的 worktree。这个拆分的**唯一理由是 Codeestra 自己要被开发（自进化）**：开发中的代码要能真的跑，而稳定实例不被它干扰。用 Codeestra 开发别的项目不涉及（也不该建立）这种 main/dev 目录拆分。
 
 | 目录 | 检出 | 用途 |
 |---|---|---|
-| `~/Documents/codeestra` | `main` | **稳定 clone**：只用于运行稳定服务、拉取已批准的提升、用 Codeestra 辅助开发 |
-| `~/Documents/codeestra-dev` | `dev` | **开发 clone**：所有开发、集成与定向验证都在这里 |
+| `~/Documents/codeestra` | `main` | **稳定 clone**：只用于运行稳定实例、拉取已批准的提升 |
+| `~/Documents/codeestra-dev` | `dev` | **开发 clone**：Codeestra 自身的所有开发、集成与定向验证都在这里 |
 
 两个 clone 的 `node_modules`、`apps/ui/dist`、Runtime 数据目录**都是各自的本地状态，不共享**：
 各自需要 `bun install --frozen-lockfile`，UI 资产各自构建。
@@ -276,7 +276,13 @@ bun run codeestra permission set strict
 bun run codeestra project trust /path/to/repo --dev-repo /path/to/dev-clone --yes
 ```
 
-`--dev-repo` 是**必需**的（ADR-0056）。省略它（或写 `--dev-repo none`）会以 `DEV_REPO_REQUIRED` 拒绝，
+`--dev-repo` 是**可选**的（ADR-0060）。给了它，项目就有长期 `dev` 基线（集成目标、提升候选、提升前全量证据）；
+省略它则 Task 基线取**项目文件夹当前检出的分支**，成果留在 task 分支由你自己合，而 `task integrate` / `promotion prepare`
+会在需要长期 `dev` 分支时以 `DEV_REPO_REQUIRED` 拒绝（拒绝的是那条分支，不是新的审批）。`--dev-repo none` 明确表示
+「这个项目没有 dev clone」。**Codeestra 自身自进化时仍用 dev clone**（见 ADR-0048 的本机布局）。
+
+若给了 dev clone，它会被逐项核验（另一个 clone、同 origin、HEAD 在 `dev` 上、该分支存在），不成立就以 `DEV_REPO_*` 拒绝，
+不写入任何东西。
 而且**什么都还没写**：项目不会被登记，补救命令就在错误消息里。
 
 **dev clone 会被推进**：集成成功时 Runtime 用 Git 自己的快进（`git merge --ff-only`）把 dev clone 里的 `refs/heads/dev`
@@ -305,7 +311,8 @@ bun run codeestra open /path/to/repo --dev-repo /path/to/dev-clone --no-open    
 bun run codeestra open /path/to/repo --dev-repo /path/to/dev-clone --yes        # STRICT 非交互确认
 ```
 
-因为这条命令会组合一次 `project trust`，它同样需要 `--dev-repo`（ADR-0056）。打开一个**已信任**仓库的另一个
+因为这条命令会组合一次 `project trust`，它的 `--dev-repo` 同样**可选**（ADR-0060：留空 = Task 基线取项目文件夹当前检出的分支；
+给了就给 dev 基线与提升）。打开一个**已信任**仓库的另一个
 工作树时 trust 会被跳过，那条路径不需要该 flag。
 
 `open` 会明确打印 `dev baseline`（**来自 dev clone**）、验证策略命令清单、影响映射状态、当前检出的

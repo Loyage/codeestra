@@ -90,7 +90,7 @@ async function capturedTask(): Promise<QuiescentFixture> {
   return { value, workspacePath: run.workspacePath, resultCommit: captured.resultCommit };
 }
 
-describe('a project without a dev clone is refused before any write (ADR-0056)', () => {
+describe('Task baselines and dev facts are two different things (ADR-0056 / ADR-0060)', () => {
   test('resolves the dev repository only from the recorded dev clone', async () => {
     const value = await createAgentFixture();
     try {
@@ -112,19 +112,46 @@ describe('a project without a dev clone is refused before any write (ADR-0056)',
     }
   });
 
-  test('refuses a workspace preparation without recording a workspace or an operation', async () => {
-    const value = await createAgentFixture();
-    withoutDevRepo(value);
-    await expect(prepareTaskWorkspace({
-      storage: value.storage, runtimeHome: value.home, commandId: crypto.randomUUID(),
-      projectId: value.projectId, taskId: value.taskId, expectedTaskVersion: 1,
-    })).rejects.toMatchObject({ code: 'DEV_REPO_REQUIRED' });
-    // The refusal happened before any side effect: no worktree, no operation, no workspace row.
-    expect(value.storage.listIncompleteWorkspacePreparations()).toEqual([]);
-    expect(value.storage.getLatestTaskWorkspace(value.taskId)).toBeNull();
-    expect(value.storage.listTasks(value.projectId)[0]?.state).toBe('READY');
-    value.storage.close();
-  });
+  test('prepares a managed workspace from the project folder and records that base ref (ADR-0060)',
+    async () => {
+      const value = await createAgentFixture();
+      withoutDevRepo(value);
+      // The project folder is on `main` here; that branch — not `dev`, not `mainRef` read elsewhere —
+      // is what a managed Task is based on, and both the ref and the commit are recorded with the
+      // workspace so a later checkout cannot move them.
+      const workspace = await prepareTaskWorkspace({
+        storage: value.storage, runtimeHome: value.home, commandId: crypto.randomUUID(),
+        projectId: value.projectId, taskId: value.taskId, expectedTaskVersion: 1,
+      });
+      expect(workspace.repoRoot).toBe(value.repo);
+      expect(workspace.devRef).toBe('refs/heads/main');
+      expect(workspace.baseCommit).toBe(value.mainCommit);
+      expect(await git(workspace.path, ['rev-parse', 'HEAD'])).toBe(workspace.baseCommit);
+      expect(value.storage.getLatestTaskWorkspace(value.taskId)?.baseCommit)
+        .toBe(workspace.baseCommit);
+      // Switching the folder's branch afterwards does not move the already prepared workspace.
+      await git(value.repo, ['checkout', '-q', 'dev']);
+      expect(await git(workspace.path, ['rev-parse', 'HEAD'])).toBe(workspace.baseCommit);
+      value.storage.close();
+    });
+
+  test('refuses a managed workspace when the project folder has a detached HEAD (ADR-0060)',
+    async () => {
+      const value = await createAgentFixture();
+      withoutDevRepo(value);
+      // A detached HEAD names no branch, so there is no baseline ref to record: the refusal is a
+      // fact about the requested baseline, and it still happens before any write.
+      await git(value.repo, ['checkout', '-q', '--detach', 'HEAD']);
+      await expect(prepareTaskWorkspace({
+        storage: value.storage, runtimeHome: value.home, commandId: crypto.randomUUID(),
+        projectId: value.projectId, taskId: value.taskId, expectedTaskVersion: 1,
+      })).rejects.toMatchObject({ code: 'TASK_BASE_REF_UNRESOLVED' });
+      expect(value.storage.listIncompleteWorkspacePreparations()).toEqual([]);
+      expect(value.storage.getLatestTaskWorkspace(value.taskId)).toBeNull();
+      // The project stays trusted: a detached HEAD is not an identity change.
+      expect(value.storage.getTrustedProject(value.projectId).repoRoot).toBe(value.repo);
+      value.storage.close();
+    });
 
   test('refuses the dependency projection, a reclamation plan and a full-suite run', async () => {
     const value = await createAgentFixture();

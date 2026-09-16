@@ -1126,8 +1126,10 @@ function printAgentPluginSelection(view: AgentConfigurationView): void {
 function usage(): never {
   console.error(`Usage:
   bun run codeestra status
-  bun run codeestra open [path] --dev-repo <dev-clone> [--yes] [--no-open]
-    # Composes inspect + trust + ui, so it needs the same dev clone ADR-0056 requires of a trust.
+  bun run codeestra open [path] [--dev-repo <dev-clone>] [--yes] [--no-open]
+    # Composes inspect + trust + ui. A dev clone is optional (ADR-0060): with one the project keeps
+    # the long-lived dev baseline and dev→main promotion, without one its Task baselines come from
+    # the folder's checked out branch and the dev-only commands refuse until one is recorded.
   bun run codeestra ui [--no-open]
   bun run codeestra stop [--wait <seconds>]
   bun run codeestra permission get
@@ -1148,20 +1150,24 @@ function usage(): never {
     # Every selected path is verified before anything is written and again before a Session starts;
     # a path that cannot be loaded is refused with a stable code and no Execution is created.
     # Exit codes: 0 applied, 1 refused (unusable path or adapter without plugin selection), 2 usage.
-  bun run codeestra project inspect [path] [--dev-repo <dev-clone>]
+  bun run codeestra project inspect [path] [--dev-repo <dev-clone|none>]
   bun run codeestra project policy [path]
-  bun run codeestra project trust [path] --dev-repo <dev-clone> [--yes]
+  bun run codeestra project trust [path] [--dev-repo <dev-clone|none>] [--yes]
   bun run codeestra project list
-    # ADR-0056: the dev clone is a second, independent clone of the same origin and the **single
-    # source of dev facts** (Task baselines, the integration target, promotion candidates). trust
-    # must state one; omitting --dev-repo (or the old \`--dev-repo none\`) is refused with
-    # DEV_REPO_REQUIRED before anything is written. The Runtime verifies the path (a Git work tree,
-    # another clone rather than the main checkout or one of its worktrees, the same origin, HEAD on
-    # the project dev branch) and refuses with a stable code (DEV_REPO_*) when it cannot, so trust
-    # never records a path it could not verify.
-    # project inspect reports the dev baseline from that clone and, read-only, whether this checkout
-    # still has its own transitional local dev ref and which trusted projects still have no dev clone
-    # (those are the ones that make deleting it destructive).
+    # ADR-0047 D05 / ADR-0060: a dev clone is a second, independent clone of the same origin, and it
+    # is what makes \`task integrate\` and \`promotion *\` usable (they need the long-lived dev branch).
+    # \`--dev-repo <path>\` records one — the Runtime verifies it (a Git work tree, another clone rather
+    # than the main checkout or one of its worktrees, the same origin, HEAD on the project dev branch)
+    # and refuses with a stable code (DEV_REPO_*) when it cannot, so trust never records a path it
+    # could not verify. \`--dev-repo none\` states that the project has none; omitting the flag
+    # re-reads what a previous trust recorded. No value is ever inferred from a path or branch name.
+    #
+    # Without a dev clone (ADR-0060 calls this the "managed" case) Task worktrees are based on the
+    # project folder's **currently checked out branch** instead, and \`task integrate\` / \`promotion
+    # prepare\` refuse with DEV_REPO_REQUIRED because that long-lived branch does not exist — a missing
+    # branch, not an approval step. A detached HEAD there is refused with TASK_BASE_REF_UNRESOLVED.
+    # project inspect reports which of the two baselines applies and, read-only, whether this checkout
+    # still has its own transitional local dev ref.
   bun run codeestra project impact validate [path] [--json]
   bun run codeestra project impact show <project-id> <task-id> [--json]
   bun run codeestra project impact explain <project-id> <task-id> [--json]
@@ -1685,13 +1691,16 @@ function describeDevRefRetirement(retirement: DevRefRetirement | undefined): voi
       + ' promotion and restart you may delete it by hand (git -C <checkout> branch -D dev)');
     return;
   }
-  console.error(`  ${retirement.projectsWithoutDevRepo.length} trusted project(s) have no dev clone,`
-    + ' so their dev facts cannot be read at all until one is recorded:');
+  console.error(`  ${retirement.projectsWithoutDevRepo.length} trusted project(s) have no dev clone:`);
   for (const project of retirement.projectsWithoutDevRepo) {
     console.error(`    ${project.projectId} ${project.name} ${project.repoRoot}`);
   }
-  console.error('  do not delete that ref while this list is non-empty:'
-    + ' run `project trust <checkout> --dev-repo <dev-clone>` for each project first');
+  // ADR-0060: a project without a dev clone is a normal state — its Task baselines come from its own
+  // folder — so this list alone no longer decides whether the transitional ref may be deleted. The
+  // retirement criterion (ADR-0056 D03) is a separate follow-up and is not invented here.
+  console.error('  a project without a dev clone is a normal state now (ADR-0060: its Task baselines'
+    + ' come from its own folder); whether the transitional ref is still needed is a separate'
+    + ' criterion, not decided by this list.');
 }
 
 function describeImpactPolicy(report: ImpactPolicyValidationView['policy']): void {
@@ -2112,9 +2121,10 @@ try {
     // commands only, so nothing here is reachable from the UI that is not reachable from the CLI.
     const tokens = [action, firstArgument, ...remainingArguments]
       .filter((token): token is string => token !== undefined);
-    // ADR-0056: `project trust` requires a dev clone, and this command composes that trust, so it
-    // takes the same explicit input (the path is never inferred from a branch or a directory name).
-    let openDevRepoPath: string | undefined;
+    // ADR-0060: a dev clone is optional, so this command no longer demands one. `--dev-repo <path>`
+    // records one; `--dev-repo none` states that the project has none; omitting the flag re-reads
+    // whatever a previous trust recorded (the path is never inferred from a branch or directory name).
+    let openDevRepoPath: string | null | undefined;
     const pathTokens: string[] = [];
     const flagTokens: string[] = [];
     for (let index = 0; index < tokens.length; index += 1) {
@@ -2122,7 +2132,7 @@ try {
       if (token === '--dev-repo') {
         const value = tokens[index + 1];
         if (value === undefined) usage();
-        openDevRepoPath = value === 'none' ? undefined : value;
+        openDevRepoPath = value === 'none' ? null : value;
         index += 1;
       } else if (token.startsWith('--')) flagTokens.push(token);
       else pathTokens.push(token);
@@ -2139,19 +2149,19 @@ try {
     console.error(`Repository: ${identity.repoRoot}`);
     console.error(`  main ref: ${identity.mainRef} · ${identity.objectFormat}`);
     console.error(`  HEAD: ${identity.headCommit}`);
-    // The baseline is part of what trust confirms, so it is never implicit. It is the dev clone's
-    // ref (ADR-0056); a missing dev clone or a missing dev branch is what has to be created first.
+    // The baseline is part of what trust confirms, so it is never implicit: it is the dev clone's
+    // `dev` when one is recorded, and this folder's checked out branch when none is (ADR-0060).
     // `devRefRetirement` is the marker of a Runtime that answers with the new contract (an older one
     // reports the checkout's own `dev` ref instead), so the wording follows what was actually sent.
     const reportsDevClone = identity.devRefRetirement !== undefined;
     console.error(`  dev baseline${reportsDevClone ? ' (from the dev clone)' : ''}:`
       + ` ${identity.devRefPresent && identity.devCommit !== null
         ? `${identity.devRef} · ${identity.devCommit}`
-        : `${identity.devRef} · 缺失（需要先有 dev clone 且其上有 dev 分支）`}`);
-    // ADR-0056: whether this project can read any dev fact at all is a reported fact, not a warning
-    // the user only discovers when the first Task is created.
+        : `${identity.devRef} · 该项目没有 dev clone：Task 基线改取此文件夹当前检出的分支`}`);
+    // ADR-0060: whether this project reads dev facts from a clone is a reported fact, not a warning
+    // the user only discovers when the first Task is created. Having none is a normal state.
     console.error(`  dev clone: ${identity.devRepoPath === null
-      ? '未记录（必需：trust 必须显式给出 --dev-repo <dev-clone>，否则 DEV_REPO_REQUIRED）'
+      ? '未记录（managed：Task 基线取该文件夹当前检出的分支；集成与提升需要 dev clone）'
       : identity.devRepoPath.verified
         ? `已核验 ${identity.devRepoPath.path}`
         : `不可用 (${identity.devRepoPath.code ?? 'unknown'}) ${identity.devRepoPath.detail ?? ''}`}`);
@@ -2443,24 +2453,27 @@ try {
     }) as ProjectIdentity;
     print(report);
     if (report.devRepoPath !== null) describeDevRepo(report.devRepoPath);
-    // ADR-0056: the development baseline comes from the dev clone; this checkout's own local `dev`
-    // ref is only a transitional pointer that nothing reads any more. A Runtime from before this
-    // contract answers with the old field (the checkout's own `dev` ref) and no retirement report, so
-    // the label only names the dev clone when the answer actually carries the new report — a message
-    // must not state a fact the Runtime did not send.
+    // ADR-0056 / ADR-0060: the development baseline comes from the dev clone when the project has
+    // one; without one it is the project folder's currently checked out branch. This checkout's own
+    // local `dev` ref is only a transitional pointer that nothing reads any more. A Runtime from
+    // before this contract answers with the old field (the checkout's own `dev` ref) and no
+    // retirement report, so the label only names the dev clone when the answer actually carries the
+    // new report — a message must not state a fact the Runtime did not send.
     const reportsDevClone = report.devRefRetirement !== undefined;
     console.error(`dev baseline${reportsDevClone ? ' (from the dev clone)' : ''}:`
       + ` ${report.devRefPresent && report.devCommit !== null
         ? `${report.devRef} · ${report.devCommit}`
-        : 'none — a dev clone with the dev branch is required before this project can be trusted'}`);
+        : '未记录（managed：该项目没有 dev clone——Task 基线取它自己文件夹当前检出的分支；task integrate / promotion 需要 dev 分支时以 DEV_REPO_REQUIRED 拒绝）'}`);
     describeDevRefRetirement(report.devRefRetirement);
   } else if (group === 'project' && action === 'list') {
     print(await call({ command: 'project.list' }));
   } else if (group === 'project' && action === 'policy') {
     print(await call({ command: 'project.verificationPolicy', path: firstArgument ?? process.cwd() }));
   } else if (group === 'project' && action === 'trust') {
-    // `--dev-repo <path>` is the explicit dev clone this trust records (ADR-0047 D05); `--dev-repo
-    // none` clears a recorded one. Both are stated by the user, never inferred.
+    // `--dev-repo <path>` records an explicit dev clone (ADR-0047 D05 / ADR-0060); `--dev-repo
+    // none` states that this project has none (Task baselines then come from this folder's checked
+    // out branch); omitting the flag re-reads what was recorded. All three are stated by the user,
+    // never inferred.
     const tokens = [firstArgument, ...remainingArguments]
       .filter((token): token is string => token !== undefined);
     let devRepoPath: string | null | undefined;
@@ -2482,11 +2495,11 @@ try {
     const identity = await call({
       command: 'project.inspect',
       path,
-      ...(devRepoPath === undefined || devRepoPath === null ? {} : { devRepoPath }),
+      ...(devRepoPath === undefined ? {} : { devRepoPath }),
     }) as ProjectIdentity;
     print(identity);
-    // ADR-0056: trust must state the dev clone, and this checkout's own local `dev` ref is only a
-    // transitional pointer; the report says whether it is still needed by any other project.
+    // ADR-0048 D04 / ADR-0060: this checkout's own local `dev` ref is only a transitional pointer;
+    // the report says whether it is still needed by any other project.
     describeDevRefRetirement(identity.devRefRetirement);
     // A dev clone that cannot be verified is refused here, before the confirmation is asked: trust
     // never records a path it could not establish, and never leaves it silently empty.
@@ -2517,8 +2530,9 @@ try {
       console.error('This project has no verification policy; task verify will refuse until one is added.');
     }
     if (identity.devRepoPath === null) {
-      console.error('No dev clone is recorded: `promotion prepare` will refuse until one is, because a'
-        + ' stable promotion pushes the candidate to the remote dev branch from that clone.');
+      console.error('No dev clone is recorded (ADR-0060): Task baselines come from this folder\'s'
+        + ' checked out branch, and `task integrate` / `promotion prepare` will refuse until a dev'
+        + ' clone is recorded, because they need the long-lived dev branch.');
     } else {
       describeDevRepo(identity.devRepoPath);
     }

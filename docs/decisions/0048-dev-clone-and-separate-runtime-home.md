@@ -1,6 +1,7 @@
 # ADR-0048：dev 是独立 clone、独立 Runtime 实例；main 检出只跑稳定服务
 
 Status：Accepted（用户 2026-09-15 决策）。无 schema 变更、不占迁移号、不改产品语义（仅本机布置与操作规程）。
+**口径澄清（FOUNDATION-092，用户 2026-09-16）**：本 ADR 只描述本机两个 clone 的**布置**；这个拆分**只服务 Codeestra 自身的开发（自进化）**，用 Codeestra 开发别的项目不涉及（也不该建立）这种 main/dev 目录拆分。D01/D02 里的「以 Codeestra 辅助开发」「用户日常使用」是当时的原话，范围以 `AGENTS.md`「本机检出布局」与 `PROJECT_SPEC.md` §2.12 为准；**D01–D05 正文一字未改**。
 与 ADR-0047（经 GitHub 中转的提升）配套：两个 clone 是那条信任路径的物理前提。
 
 ## Context

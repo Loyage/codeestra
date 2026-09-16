@@ -57,6 +57,7 @@ import {
   reclamationMigration,
   revisionDeliveryMigration,
   sessionGuidanceMigration,
+  taskBaselineRefMigration,
   taskRevisionFeaturesMigration,
   sessionHandoffMigration,
   sessionTerminalMigration,
@@ -1881,6 +1882,10 @@ export class Phase1Database {
         // Task revision. A pure `ADD COLUMN`, so it needs no foreign-key handling of its own; a
         // database stamped 17–31 still gets it, and no earlier number is ever inserted.
         if (version < 32) this.sqlite.exec(taskRevisionFeaturesMigration);
+        // Version 33 is this step's own number (FOUNDATION-093 / ADR-0060): the base ref a Task
+        // worktree was prepared from. A pure `ADD COLUMN` on `workspaces`; a database stamped
+        // 17–32 still gets it, and earlier numbers are never re-pointed.
+        if (version < 33) this.sqlite.exec(taskBaselineRefMigration);
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -2366,6 +2371,13 @@ export class Phase1Database {
     readonly branchRef: string;
     readonly path: string;
     readonly baseCommit: string;
+    /**
+     * The ref this Task's worktree is based on (ADR-0060). It is decided per Task by the caller —
+     * the dev clone's `dev` ref when one is recorded, otherwise the project folder's currently
+     * checked out branch — and recorded with the workspace so later readers report the ref that was
+     * actually used instead of re-deriving it from the project row.
+     */
+    readonly baseRef: string;
     readonly createdAt: number;
   }): WorkspacePreparationPlan {
     return this.sqlite.transaction(() => {
@@ -2393,6 +2405,9 @@ export class Phase1Database {
       if (subject.state !== 'READY') {
         throw new StorageError('INVALID_STATE', `Workspace cannot be reserved while Task is ${subject.state}`);
       }
+      if (input.baseRef.trim().length === 0) {
+        throw new StorageError('INVALID_STATE', 'Workspace preparation needs the base ref it was planned from');
+      }
       const requestJson = JSON.stringify({
         payloadHash: input.payloadHash,
         taskId: input.taskId,
@@ -2402,12 +2417,13 @@ export class Phase1Database {
         branchRef: input.branchRef,
         path: input.path,
         baseCommit: input.baseCommit,
+        baseRef: input.baseRef,
       });
       this.sqlite.query(`
-        INSERT INTO workspaces(id,task_id,branch_ref,path,ownership_token,base_commit,state,created_at)
-        VALUES (?1,?2,?3,?4,?5,?6,'RESERVED',?7)
+        INSERT INTO workspaces(id,task_id,branch_ref,path,ownership_token,base_commit,base_ref,state,created_at)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,'RESERVED',?8)
       `).run(input.workspaceId, input.taskId, input.branchRef, input.path,
-        input.ownershipToken, input.baseCommit, input.createdAt);
+        input.ownershipToken, input.baseCommit, input.baseRef, input.createdAt);
       this.sqlite.query(`
         INSERT INTO operations(id,project_id,kind,aggregate_id,idempotency_key,state,
           request_json,created_at,updated_at)
@@ -2424,7 +2440,7 @@ export class Phase1Database {
         repoRoot: subject.repo_root,
         gitCommonDir: subject.git_common_dir,
         mainRef: subject.main_ref,
-        devRef: subject.dev_ref,
+        devRef: input.baseRef,
         objectFormat: subject.object_format,
         baseCommit: input.baseCommit,
         ownershipToken: input.ownershipToken,
@@ -2559,7 +2575,7 @@ export class Phase1Database {
       SELECT operation.id AS operation_id,operation.state AS operation_state,
         operation.project_id,workspace.task_id,workspace.id AS workspace_id,
         workspace.state AS workspace_state,COALESCE(p.dev_repo_path,p.repo_root) AS repo_root,
-        p.git_common_dir,p.main_ref,p.dev_ref,
+        p.git_common_dir,p.main_ref,COALESCE(workspace.base_ref,p.dev_ref) AS dev_ref,
         p.object_format,workspace.base_commit,workspace.ownership_token,workspace.branch_ref,workspace.path
       FROM workspaces workspace JOIN tasks task ON task.id=workspace.task_id
       JOIN projects p ON p.id=task.project_id

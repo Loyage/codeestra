@@ -35,7 +35,6 @@ import type {
   ConfirmedImpactPolicy, ImpactPolicyConfirmationInput, ImpactSnapshotRecord, Phase1Database,
   TrustedProject,
 } from '@codeestra/storage';
-import { requireRecordedDevRepoPath } from './dev-repo-service.js';
 
 /**
  * The Runtime half of deterministic conflict analysis (ADR-0031). It does the impure work — reading
@@ -613,15 +612,18 @@ async function loadContext(input: {
 }
 
 /**
- * Reads the development baseline the impact facts are expressed against.
- *
- * ADR-0056: the long-lived `dev` branch lives in the project's dev clone, not in the stable main
- * checkout, and a project without a recorded clone is refused (`DEV_REPO_REQUIRED`) rather than having
- * its baseline guessed from another repository.
+ * Reads the development baseline the impact facts are expressed against (ADR-0056 / ADR-0060): the
+ * project's dev clone and its long-lived `dev` when one is recorded, otherwise the project folder's
+ * own HEAD — the same repository a managed project's Task worktrees come from. A folder on a detached
+ * HEAD (or an unreadable one) reports null instead of inventing a branch: the Task's own recorded
+ * workspace base is reported separately, and a missing project baseline stays visible as missing.
  */
 async function readProjectDevCommit(project: TrustedProject): Promise<string | null> {
-  const devRepoPath = requireRecordedDevRepoPath(project);
-  return await readLocalRefCommit({ repositoryRoot: devRepoPath, ref: devBranchRef });
+  if (project.devRepoPath === null) {
+    return await inspectRepository(project.repoRoot).then((repository) => repository.headCommit)
+      .catch(() => null);
+  }
+  return await readLocalRefCommit({ repositoryRoot: project.devRepoPath, ref: devBranchRef });
 }
 
 export interface ImpactSnapshotReport {

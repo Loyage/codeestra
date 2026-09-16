@@ -504,6 +504,7 @@ Git：目录开始时不是 Git 仓库；未初始化、未 commit、未 push，
 用户明确要求并补充确认：
 
 1. 项目长期保留 `main` 与 `dev`；`main` 用于日常实际运行和开发辅助，`dev` 用于新功能实验。
+   （**口径更正（FOUNDATION-092，2026-09-16）**：这一条按当时的原话保留不改。其中「开发辅助」曾被误读为「把本机分成两个目录是为了用 Codeestra 开发别的项目」；正确口径是两者只为 Codeestra **自身**的开发（自进化）而拆分，且产品层的双分支模型也只属于 Codeestra 自身 — 见 FOUNDATION-092 一节与 `PROJECT_SPEC.md` §2.12 的注。）
 2. 所有功能 Task/worktree 从 `dev` 建立基线，完成功能先经验证与 IntegrationBatch 进入 `dev`，不得直接进入 `main`。
 3. `dev → main` 必须由用户批准固定 dev/main SHA 与验证证据；沿用既有一次确认门禁。
 4. main 更新后立即在 main 工作树运行 `bun run codeestra stop`，再运行 `bun run codeestra status` 拉起并检查 Runtime；重启成功前不得报告提升完成。
@@ -7136,6 +7137,125 @@ cd /Users/loyage/Documents/codeestra-dev && just check   # 等价 bun run check
 - 未验证：真实 provider 下的并发运行（两个 `SAFE` 任务真的同时跑）、真实 provider 下「调度启动的 Session」
   能否被原生终端接管（incarnation 修复只在协议 stub 上验收过）、UI 真实点击（ADR-0008 边界）。
 
+## FOUNDATION-092 — 口径更正：两个 clone 的拆分只为 Codeestra 自进化；产品层「双分支模型」只属于 Codeestra 自身（纯文档，无代码、无 schema、无 ADR）
+
+状态：文档口径已更正；**产品语义变更未实现**（实现仍要求 `dev` 基线与 `dev_repo_path`）。
+
+### 背景（用户本轮更正）
+
+用户指出：把 `~/Documents/codeestra`（检出 `main`）与 `~/Documents/codeestra-dev`（检出 `dev`）分成两个目录，
+**不是**因为「要用 Codeestra 开发别的项目时需要这种拆分」，而是**单纯因为 Codeestra 自己要开发（自进化）**。
+
+本轮 A/B/C 选择题里用户进一步选定：**main/dev 双分支（双检出）模型只属于 Codeestra 自己**，被 Codeestra 管理的
+其它项目**不应被要求**保留 `dev` 分支或走 `dev → main` 提升路径；同时选定「本次只做文档口径更正 + 把产品语义变更记为待决项」，
+因此本格**不新增 ADR、不改任何实现、不改任何已 Accepted 的 ADR 正文**。
+
+### 修改（文档）
+
+| 文件 | 改动 |
+|---|---|
+| `AGENTS.md` | 分支职责处删去「进行开发辅助工作」；「本机检出布局」新增一段写明拆分的唯一理由是自进化，并如实注明「产品层口径已更正、实现未改」 |
+| `README.md` | 分支列表写清是「本项目（Codeestra 自己）」；本机工作树表按同一口径改写 |
+| `docs/guides/manual.md` §2.5 | 同一口径；表格里「稳定 clone」不再写「用 Codeestra 辅助开发」 |
+| `PROJECT_SPEC.md` §2.12 与 §5 | 「`main` 是日常实际运行和开发辅助的稳定分支」→「可运行稳定实例、不被开发中代码干扰的稳定分支」；并就地标注**范围口径待决**（未改实现语义） |
+| `docs/decisions/0048-*.md` 与 `docs/decisions/0009-*.md`（各只加 Status 行）、`docs/decisions/README.md`（ADR-0048 索引行 + 「优先级标注」处） | 追加口径澄清指针；**两份 ADR 的正文（ADR-0048 D01–D05、ADR-0009 D01–D03）一字未改**（按仓库惯例保留当时原话） |
+| `docs/tasks/README.md` | 本节；FOUNDATION-023 历史记录追加指向本节的更正指针（不重写历史）；NEXT 新增第 14 条与一项「需要用户裁决」 |
+
+### 验证（本格实际执行）
+
+- 只改文档：`git diff --stat` 只出现 `AGENTS.md`、`README.md`、`PROJECT_SPEC.md`、`docs/guides/manual.md`、
+  `docs/decisions/README.md`、`docs/decisions/0009-main-dev-promotion-and-restart.md`、
+  `docs/decisions/0048-dev-clone-and-separate-runtime-home.md`、`docs/tasks/README.md`；代码/schema 一个字节未动。
+- 口径回归检索：`grep -rn "辅助开发"` 的剩余命中只在**历史记录**里（ADR-0009 Context/D01、ADR-0048 D01/D02、
+  FOUNDATION-023），且这几处所在的文件顶部（或同一节）都有指向本节或 §2.12 的指针；其余文档不再出现该措辞。
+- 未跑任何测试/构建：按 ADR-0038，纯文档改动不跑 `check`/全量测试；本格也没有代码或 schema 变更。
+
+### 未做 / 剩余问题（产品语义，不得按已完成使用）
+
+- **实现未变**：`projects.dev_ref` 仍固定 `refs/heads/dev`、`projects.dev_repo_path` 仍必需（`DEV_REF_MISSING` /
+  `DEV_REPO_REQUIRED`）、`project trust --dev-repo`、`task integrate`、`promotion prepare/approve/promote` 与
+  `promotion full-suite run` 仍全部建立在「每个被信任项目都有 `dev` 基线」之上；两处 UI 投影（集成/「稳定提升记录」）同理。
+- 替代形态未定：见 NEXT 第 14 条与文末「需要用户裁决」。
+- 本格没有新增或改写任何 ADR；已 Accepted 的 ADR-0009/0018/0047/0052/0053/0056 与 ADR-0048 的适用范围
+  只在本节与 §2.12 的注里被标为待决，没有在正文里被静默重新解释。
+
+## FOUNDATION-093 — 被管理项目的 Task 基线改为「项目文件夹当前检出的分支」；`dev clone` 变为可选（ADR-0060，schema v33）
+
+状态：**主路径已实现并跑过定向测试**；剩余子项见文末（未做完的部分不当作已完成）。
+
+本格在独立分支与 worktree 上开发（ADR-0038）：
+
+- 分支 `lane/managed-task-baseline`（从 `dev@79c12c1` 建立），worktree `~/Documents/codeestra-wt/managed-task-baseline`；
+  `dev` 只用于最终集成，不在其中直接开发本格代码。
+- **定向命令与覆盖目标**（每次改动后在本分支 worktree 内执行；结果见下面「验证」表）：
+
+  | 命令 | 覆盖目标 |
+  |---|---|
+  | `bun test apps/runtime/test/dev-baseline.test.ts` | 两种基线的分派、managed 基线的 ref/commit 记录、切分支不移动基线、detached HEAD 拒绝且不落盘、trust 不被作废 |
+  | `bun test apps/runtime/test/workspace-service.test.ts` | workspace 生命周期与崩溃对账不回归；仓库不可读取时仍作废 trust |
+  | `bun test packages/storage/test` | v33 迁移（含历史版本夹具）与 `base_ref` 写读/回退 |
+  | `bun test apps/runtime/test/cli-open.test.ts` | CLI/命令面：不给 dev clone 也能 trust、如实记 null、`none` 的语义 |
+  | `bun test apps/ui/test/project-trust.test.ts` | 契约字符串与「留空=managed」的 UI 文案（UI 只投影同一命令面） |
+  | `bun test apps/runtime/test/{cli-impact,cli-integrate,integration-service,promotion-service}.test.ts` | 有 dev clone 的路径（含集成与提升）不回归 |
+  | `bun run typecheck` + `bun run typecheck:ui` | 跨包类型边界 |
+
+- **不跑全量**：按 ADR-0038，`bun run check` / `just verify` 只在提升前对精确 `dev` 候选 SHA 执行。
+
+### 背景（用户本轮决定）
+
+用户 2026-09-16 在 A/B/C 选择题里选定（均选推荐项）：被管理项目的 Task 基线用**项目文件夹当前检出的分支**
+（另给显式覆盖）；成果**留在 task 分支由用户自己合**；**不新增模式字段**，`dev_repo_path` 变回可选。
+设计与影响面见 ADR-0060（本格新增）。
+
+### 已实现
+
+| 层 | 改动 |
+|---|---|
+| schema | **v33**：`workspaces.base_ref TEXT`（纯 ADD COLUMN，带非空 CHECK）；读取处 `COALESCE(workspace.base_ref, projects.dev_ref)`，历史行仍如实 |
+| storage | `reserveWorkspacePreparation` 新增必填 `baseRef`（写入并返回该 ref），`workspacePreparationRow` 按 `COALESCE` 读回 |
+| runtime | `dev-repo-service.ts` 新增 `resolveTaskBaselineRepository`（dev-clone / PROJECT_FOLDER 两种模式）与新稳定码 `TASK_BASE_REF_UNRESOLVED` / `TASK_BASE_REF_MISSING`；`workspace-service.ts` 全部以解析结果为准（worktree、复用、回收重建、基线 ref 记录），并让 detached HEAD 不再作废 trust；`main.ts` 的 `project.inspect`/`project.trust` 接受「没有 dev clone」（省略=沿用已记录，`none`=没有）；`impact-analysis-service.ts` 的基线读取改为：无 dev clone 时取项目文件夹 HEAD commit（detached 则如实为 null） |
+| contracts | `project.inspect`/`project.trust` 的 `devRepoPath` 文档与可空形状；`projectIdentitySchema.devCommit` 的说明改为「null 不是坏项目」 |
+| CLI | `open`/`project trust`/`project inspect` 的 `--dev-repo` 变可选（`none` 为显式「没有」），usage 与两条报告文案按 ADR-0060 重写，退役证据不再声称空列表才能删 ref |
+| UI | `project-trust.tsx`：dev clone 输入改为「（可留空）」，`canSubmitProjectTrust` 不再因空路径禁用按钮，空路径的说明改为「留空 = managed」 |
+
+### 验证（本格实际执行；均为定向测试，未跑全量）
+
+| 检查 | 结果 |
+|---|---|
+| `bun run typecheck` / `bun run typecheck:ui` | 通过 |
+| `bun test apps/runtime/test/dev-baseline.test.ts` | 7 项通过（含新增：managed 从项目文件夹建基线并记录 `base_ref`；切分支后已建 workspace 不动；detached HEAD → `TASK_BASE_REF_UNRESOLVED` 且无 workspace 行、trust 仍在） |
+| `bun test apps/runtime/test/workspace-service.test.ts` | 21 项通过（含「仓库不可读取时仍作废 trust」） |
+| `bun test packages/storage/test` | 160 项通过（3 个旧夹具补了 `DROP COLUMN base_ref`，与既有 v29/v30/v31/v32 夹具同一写法的惯例） |
+| `bun test apps/runtime/test/cli-open.test.ts` | 8 项通过（原「trust 必须给 dev clone」一项改写为：「不给 dev clone 也能 trust、如实记录 null」） |
+| `bun test apps/ui/test/project-trust.test.ts` | 16 项通过（契约字符串与「留空=managed」的文案断言） |
+| `bun test apps/runtime/test/{cli-impact,cli-integrate,integration-service,promotion-service}.test.ts` | 52 项通过（dev clone 路径与提升语义未回归） |
+| `bun test apps/runtime/test/dev-repo-service.test.ts` | 6 项通过 |
+
+未执行：`bun run check`/`just check`/全量测试（ADR-0038：开发分支只跑定向测试，提升前才在精确 dev SHA 上跑全量）；
+真实 provider 下的端到端（本格没有 agent 行为变化）；稳定实例上的实测（未获授权，不碰）。
+
+**在 lane worktree 内重跑（把改动从 dev 工作区搬进分支后，另装依赖执行）**：`bun run typecheck` 与
+`bun run typecheck:ui` 通过；`dev-baseline` + `workspace-service` + `packages/storage/test` 共 **188 项通过**；
+`cli-open` + `project-trust` + `dev-repo-service` 共 **30 项通过**；`cli-impact` + `cli-integrate` +
+`integration-service` + `promotion-service` 共 **52 项通过**（总计 **270 项，0 失败**）。
+
+### 未做完 / 剩余（不得当作已完成）
+
+1. **`--base-ref` 显式覆盖未接线**：`prepareTaskWorkspace` 已接受 `baseRef` 参数且两条路径都能解析它，但 `task.run`
+   的命令面/契约/UI 未传该值，因此目前只能用默认（dev clone 的 `dev`，或项目文件夹当前检出分支）。detached HEAD
+   的项目文件夹目前只能靠「切到一条分支」恢复。
+2. **`reclaim` 的 managed 语义未改**：`planReclamation`/`reclaim-service` 仍以 `DEV_REPO_REQUIRED` 拒绝没有 dev clone
+   的项目（`dev-baseline.test.ts` 仍按现实现断言），所以 managed 项目的 Task worktree 目前不能经 `reclaim` 回收。
+3. **过渡 `dev` ref 的退役判据未重定义**：`projectsWithoutDevRepo` 现在会永久包含合法的 managed 项目，ADR-0056 D03 的
+   「没有任何项目仍缺 dev clone」判据不再可用；CLI 已改为如实报告、不再声称该列表决定删除，但真正的判据要另开一格。
+4. **`docs/guides/**` 未全部同步**（ADR-0050）：本格改了 `cli-reference.md`（`open`/`project trust`/`project inspect`/
+   基线说明）与 `features.md`（项目识别、项目接入、Task 基线、dev 事实来源四行），并新增 ADR-0060 索引与
+   `sqlite-schema.md` 的 v33 节；**`manual.md`、`getting-started.md`、`concepts.md`、`workflow.md`、`recipes.md`
+   里「trust 必须给 dev clone」的叙述未改**，这是已知文档债。
+5. **未做**：`project inspect` 输出里的 `devRef` 字段在 managed 模式下仍打印 `refs/heads/dev`（它不是基线，但读数容易误会）；
+   managed 项目的依赖判定/槽位/结果 commit 归属未逐条重验（它们走 `COALESCE(dev_repo_path, repo_root)`，代码上成立、
+   本格未逐一写测试）。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），
@@ -7151,6 +7271,10 @@ cd /Users/loyage/Documents/codeestra-dev && just check   # 等价 bun run check
 **2026-09-15 更新（FOUNDATION-081）**：多成员 IntegrationBatch 与批级 `STALE`/`CANCELLED` 已实现（ADR-0053，schema v30），
 因此第 5 条从剩余列表移出（依据见 FOUNDATION-081 一节；**该格在 `lane` 分支交付、尚未合入 `dev`**，见第 5 条里的括注）。
 剩余列表现在只有 1–4、6–10、12–13 号（第 11 条已于 FOUNDATION-077 完成）。
+
+**2026-09-16 更新（FOUNDATION-092）**：用户更正了本机两个 clone 的拆分口径（只为 Codeestra 自进化），并裁定
+产品层 main/dev 双分支模型**只属于 Codeestra 自身**；被管理项目的替代形态**未定**，因此新增下面第 14 条与文末
+「需要用户裁决」的一项（剩余列表此后为 1–4、6–10、12–14 号）。本次**没有**从剩余列表移出任何条目。
 
 ### 仍然剩余
 
@@ -7221,6 +7345,11 @@ cd /Users/loyage/Documents/codeestra-dev && just check   # 等价 bun run check
     但把该动作投影进 UI 仍是缺口。
 13. **`promotion` 的「已推送、等待拉取」UI 投影**（Wave L / L4 当时因契约未定而未做）：L1 已把该状态落进契约
     （派生 `phase: AWAITING_PULL` + 退出码 3），现在可以在项目页/任务详情投影「已推送 ≠ 已提升」。
+14. **被管理项目的分支/基线形态：方向已定、已实现主路径，剩余子项待做**（FOUNDATION-092 → FOUNDATION-093 / ADR-0060）：
+    用户 2026-09-16 已裁定 main/dev 双分支模型只属于 Codeestra 自身；被管理项目的 Task 基线取**项目文件夹当前检出的分支**、
+    成果留 task 分支由用户自己合、`dev_repo_path` 变回可选，schema v33 与 CLI/UI/命令面已按此实现（见 FOUNDATION-093）。
+    **仍未做**：`--base-ref` 命令面接线、`reclaim` 的 managed 语义、过渡 `dev` ref 退役判据重定义、
+    `docs/guides/**` 其余段落（manual / getting-started / concepts / workflow / recipes）。这些不再需要用户新裁决。
 
 ### 原 0–7 编号对照
 
@@ -7271,7 +7400,8 @@ cd /Users/loyage/Documents/codeestra-dev && just check   # 等价 bun run check
 
 ### 需要用户裁决（本格不得自行决定）
 
-本节原先列着两项。**用户已于 2026-09-15 就两项作出裁决，FOUNDATION-075 已按裁决完成**，因此本节当前**没有待用户裁决的事项**：
+本节原先列着两项。**用户已于 2026-09-15 就两项作出裁决，FOUNDATION-075 已按裁决完成**；**2026-09-16 的第三项
+（被管理项目的分支/基线形态）已由用户选定形态并由 FOUNDATION-093 / ADR-0060 实现主路径**，剩余子项不再需要新裁决：
 
 - `PROJECT_SPEC.md` §1 前状态段与 §3 的前后矛盾 → 用户裁决「开一格修规格」并授权修改规格文件；FOUNDATION-075 重写状态段
   （并追加授权修 §8 的现状陈述）。见 `docs/guides/troubleshooting.md` §3 第 7 条与 FOUNDATION-075 的「本次规格修订」。
@@ -7279,3 +7409,6 @@ cd /Users/loyage/Documents/codeestra-dev && just check   # 等价 bun run check
   见 `docs/guides/troubleshooting.md` §3 第 10 条。
 
 新增的待决项应重新列在这里，并写清「为何不能由执行者自行决定」。
+
+- **被管理项目的分支/基线形态**（FOUNDATION-092 → FOUNDATION-093）：**用户 2026-09-16 已选定形态**（基线=项目文件夹
+  当前检出分支、成果自己合、不加模式字段），ADR-0060 与本格主路径已落地，剩余子项见上面第 14 条，**不需要新的用户裁决**。

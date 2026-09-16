@@ -122,14 +122,16 @@ bun run codeestra ui [--no-open]
 ### `open`
 
 ```sh
-bun run codeestra open [path] --dev-repo <dev-clone> [--yes] [--no-open]
+bun run codeestra open [path] [--dev-repo <dev-clone>] [--yes] [--no-open]
 ```
 
 一条命令完成：`project.inspect` → 展示验证策略与影响映射 →（必要时）确认 → `project.trust` → `runtime.ui` 并预选该项目。
 `path` 默认当前目录；`--yes` 是 STRICT 下的非交互确认；`--no-open` 不打开浏览器。
 
-`--dev-repo <dev-clone>` 是**必需**的：这条命令会组合一次 `project trust`，而 trust 必须显式给出 dev clone
-（ADR-0056，见下面 `project trust`）。省略时 trust 以 `DEV_REPO_REQUIRED` 拒绝。
+`--dev-repo <dev-clone>` 是**可选**的（ADR-0060）：给了它，项目就有 `dev` 基线与 `dev → main` 提升；
+`--dev-repo none` 表示「这个项目没有 dev clone」；省略时沿用上次 trust 记录的值。留空（managed）时
+Task 基线取项目文件夹当前检出的分支，而 `task integrate` / `promotion prepare` 会在需要长期 `dev` 分支时
+以 `DEV_REPO_REQUIRED` 拒绝。
 （打开一个**已信任**仓库的另一个工作树时 trust 会被跳过，因此那条路径不需要该 flag。）
 
 已经确认过且策略 digest 未变时会跳过确认（正常路径**一次项目一次确认**；FULL 下没有这一步）。
@@ -169,9 +171,10 @@ Adapter 不支持的字段会被拒绝而不是静默忽略。稳定码：`INVAL
 `gitCommonDir`、`headCommit`、`branchRef`、`devRefCommit`、`originUrl`、`originMatchesProject`、`clean`。
 `path` 默认当前目录；`--dev-repo <path>` 改为核验**指定**的那个 clone（在 trust 之前先看它是否可用），省略时核验已记录的那个。
 
-**开发基线来自 dev clone（ADR-0056）**：`devRef` / `devCommit` / `devRefPresent` 描述的是**dev clone 的**本地 `dev`
-分支 —— 也就是 Task 基线、集成目标与提升候选的来源。没有可核验的 dev clone 时 `devCommit` 是 `null`、`devRefPresent`
-是 `false`：这不是「没有 dev 分支」，而是「没有可读 dev 事实的仓库」，此时**任何需要 dev 基线的操作**都以
+**开发基线有两种，按「有没有 dev clone」分派（ADR-0056 / ADR-0060）**：`devRef` / `devCommit` / `devRefPresent`
+描述的是**dev clone 的**本地 `dev` 分支；没有可核验的 dev clone 时它们是 `dev` / `null` / `false`，
+此时**Task 基线改取项目文件夹自己当前检出的分支**（managed），而**需要 dev 基线的操作**（集成、提升、依赖判定、
+回收、提升前全量证据）仍以 `DEV_REPO_REQUIRED` 拒绝：拒绝的是「没有那条长期分支」，不是新的审批。
 `DEV_REPO_REQUIRED` 拒绝并打印补救命令。
 
 `devRefRetirement` 是**只读的退役证据**（ADR-0048 D04 / ADR-0056），描述的是**被检查的那个检出自己**的本地 `dev` ref：
@@ -190,19 +193,14 @@ dev clone 的拒绝是 `DEV_REPO_*`（见下）。
 打印 `main` ref 上 `.codeestra/policies/verification.json` 的检查结果：`state`（`PRESENT` / `ABSENT` / `INVALID`）、
 `mainCommit`、`digest`、逐条 `commands`。缺失时提示「task verify 会拒绝直到该 ref 上存在此文件」。
 
-### `project trust [path] --dev-repo <dev-clone> [--yes]`
+### `project trust [path] [--dev-repo <dev-clone|none>] [--yes]`
 
-接入项目。**前提**：合法 Git 仓库；dev clone 上的 `dev` 分支存在。**影响**：Agent 工具、验证命令与 Git hooks
+接入项目。**前提**：合法 Git 仓库；给出 dev clone 时，该 clone 上的 `dev` 分支存在。**影响**：Agent 工具、验证命令与 Git hooks
 会以你的用户权限运行。FULL 无确认；STRICT 需要输入 `TRUST` 或 `--yes`。
 
-`--dev-repo <path>` 是**必需**的（ADR-0056）：dev clone 是**全部 dev 事实的唯一来源**（Task 基线、集成目标、提升候选、
-全量证据的副本根与锁文件），因此 trust 必须显式声明它。
-
-| 稳定码 | 含义 |
-|---|---|
-| `DEV_REPO_REQUIRED` | 省略 `--dev-repo`，或写了 `--dev-repo none`：dev clone 是必需的，拒绝发生在**任何写入之前**，项目不会被登记；补救命令就打印在消息里 |
-
-Runtime 对给出的路径逐条核验，任一条不成立即用稳定码拒绝，**不会**写入一个空路径而继续：
+`--dev-repo <path>` 是**可选**的（ADR-0060）：记了它，项目就拥有**长期 `dev` 基线**（集成目标、提升候选、
+全量证据的副本根与锁文件都从它读）；`--dev-repo none` 表示这个项目**没有** dev clone；省略时沿用上次记录的值
+（不会静默清除）。
 
 | 稳定码 | 含义 |
 |---|---|
@@ -212,8 +210,11 @@ Runtime 对给出的路径逐条核验，任一条不成立即用稳定码拒绝
 | `DEV_REPO_ORIGIN_MISMATCH` | 它的 `origin` 与 main 检出的 `origin` 不同 |
 | `DEV_REPO_BRANCH_MISMATCH` | 它的 HEAD 不在项目的 `dev` 分支上 |
 | `DEV_REPO_DEV_REF_MISSING` | 它没有本地 `dev` 分支 |
+| `TASK_BASE_REF_UNRESOLVED` | 没有 dev clone 且项目文件夹处于 detached HEAD：没有分支可作 Task 基线（切到一条分支再试） |
+| `TASK_BASE_REF_MISSING` | 显式给出的基线 ref 在该仓库里不存在 |
 
-重 trust 也必须给出 `--dev-repo`（`--dev-repo none` 不再有意义：清除它只会让项目读不到任何 dev 事实）。
+`DEV_REPO_REQUIRED` **不再**由 trust 返回：它是**需要 dev 事实的操作**的拒绝码（见下），因为没有长期
+`dev` 分支并不妨碍一个项目正常工作——那样的项目（managed）的 Task 基线是它自己文件夹当前检出的分支。
 失败时退 `1`；CLI 同时打印核验结果（`verified` / `code` / `detail`），因为 `project trust` 会先打印身份、策略与结果三份文档。
 
 防漂移：若在你查看与确认之间身份/策略/映射/dev clone 发生变化，返回 `REPOSITORY_CHANGED`、
@@ -225,7 +226,7 @@ Runtime 对给出的路径逐条核验，任一条不成立即用稳定码拒绝
 | 事实 | 仓库 | 谁读 |
 |---|---|---|
 | 仓库身份、`main` ref、`.codeestra/policies/verification.json`、`.codeestra/impact.json` | main 检出（`projects.repo_root`） | `project policy`、`project impact *`、Task 验证与集成的策略读取、提升的重启序列 |
-| 长期 `dev` 分支、Task 分支与 worktree、集成 worktree 与 ref 推进、提升候选对象、全量证据的副本与锁文件 | dev clone（`projects.dev_repo_path`） | Task 基线、依赖判定、验证副本、结果 commit、回收、`promotion full-suite run`、`promotion promote` 的 push |
+| 长期 `dev` 分支、Task 分支与 worktree、集成 worktree 与 ref 推进、提升候选对象、全量证据的副本与锁文件 | dev clone（`projects.dev_repo_path`）**或项目文件夹**（ADR-0060：没有 dev clone 时 Task 基线/worktree/验证副本/回收都落在项目文件夹；集成与提升仍需要 dev clone） | 需要 dev 基线的命令（`task integrate`、`promotion *` 等；`task *` 与 `reclaim *` 对两类项目都工作） |
 
 ### `project list`
 

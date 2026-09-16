@@ -1,6 +1,7 @@
 # ADR-0009：固定 main/dev 双分支、提升授权与服务重启
 
 Status：Accepted；**Amended by ADR-0011/0038**：FULL 下 dev→main 无需批准，STRICT 保留批准；提升前必须在精确 dev 候选 SHA 上通过全量测试。固定分支/SHA/证据与重启要求不变。
+**口径澄清（FOUNDATION-092，用户 2026-09-16）**：main/dev 双分支（双检出）模型**只属于 Codeestra 自身**（自进化）；D01 里「并用它辅助开发」是当时的原话（**正文一字未改**），范围与待决项以 `PROJECT_SPEC.md` §2.12 的注与 `AGENTS.md`「本机检出布局」为准。
 
 ## Context
 

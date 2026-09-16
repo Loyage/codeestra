@@ -64,6 +64,8 @@ describe('agent plugin selection storage', () => {
       }
       // ...and the column added by schema v32 (declared features, ADR-0059).
       legacy.exec('ALTER TABLE task_revisions DROP COLUMN features_json');
+      // ...and the column added by schema v33 (the per-Task base ref, ADR-0060).
+      legacy.exec('ALTER TABLE workspaces DROP COLUMN base_ref');
       legacy.exec('PRAGMA user_version=26');
       legacy.close();
 
