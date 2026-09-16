@@ -7449,7 +7449,7 @@ apps/runtime/test/task-recovery-service.test.ts packages/storage/test/task-purge
 「永久删除」，未单独加 `task recover` 按钮（本次按「让删除自己完成对账」实现，recover 入口仍缺）。
 ## 回归修复（`lane/fix-impact-capacity-fixture`）— `cli-impact` 夹具显式设置 Runtime 全局并发上限（FOUNDATION-096 回归，无 schema 变更）
 
-状态：**已修复并定向验证，未合入 `dev`、未 push**。基线 `dev = 2f578e9`；worktree
+状态：**已修复并定向验证，已合入 `dev`（merge `da5ffd7`）**；**未 push `origin/dev`、未提升 `main`**。基线 `dev = 2f578e9`；worktree
 `/Users/loyage/Documents/codeestra-wt/fix-impact-capacity-fixture`，分支 `lane/fix-impact-capacity-fixture`。
 
 怎么发现的：为 `dev → main` 提升按 runbook 要求在**精确候选 `2f578e9`** 上跑全量 `bun run check`（日志
@@ -7474,7 +7474,7 @@ apps/runtime/test/task-recovery-service.test.ts packages/storage/test/task-purge
 
 ## 用户任务（`lane/purge-force`）— 删除任务不该被各种因素阻拦：`task purge --force`（ADR-0058 D09，无 schema 变更、不占迁移号）
 
-状态：**已实现并定向验证，未合入 `dev`、未 push、未提升 `main`**。基线 `dev = 2f578e9`；worktree
+状态：**已实现并定向验证，已合入 `dev`（merge `5ace726`）**；**未 push `origin/dev`、未提升 `main`、未重启任何 Runtime**。基线 `dev = 2f578e9`；worktree
 `/Users/loyage/Documents/codeestra-wt/purge-force`，分支 `lane/purge-force`。
 
 用户原话：`现在的设计有问题，用户想删除某项任务的时候，应该不受各种因素阻拦，而现在会收到报错`
@@ -7522,7 +7522,7 @@ apps/runtime/test/task-recovery-service.test.ts packages/storage/test/task-purge
 - **未跑** `bun run check` / `just check` / `just verify` / `check:fast`（ADR-0038：全量只在 `dev` 候选上跑）
 
 仍未做 / 已知边界（不得当作已完成）：
-- 未跑全量、未合入 `dev`、未 push、未提升 `main`、未重启任何 Runtime。
+- 未跑全量（全量在合入后的 `dev` 候选上跑）、未 push、未提升 `main`、未重启任何 Runtime。
 - **未验证**：真实活着的 provider 被真实信号终止的端到端链路（适配器层用真实 `sleep` 进程验证、服务层用注入的终止函数验证，
   二者没有在同一次测试里同时为真）；`--force` 下各步骤之间崩溃的恢复；`--force` 删掉 promotion 记录在真实数据上的后果。
 - UI 的「仍要强制删除」没有人工点击验证（ADR-0008 边界），只有 `apps/ui/test/task-purge.test.ts` 的纯函数断言。
