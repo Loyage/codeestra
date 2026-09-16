@@ -15,7 +15,9 @@
 > 本文件既是**这套参考的入口**（八篇索引），也是原来那篇的 §0 通用约定（连接、自动启动、退出码、环境变量）。
 > 旧编号（§1–§21）到新文件的对照表在 [`../cli-reference.md`](../cli-reference.md)；各篇内部沿用拆分前的章节号。
 
-本文覆盖 `apps/cli/src/main.ts` 中 `usage()` 列出的**每一个命令组**。HTTP/SSE 面已按 ADR-0067 暂停。
+本文覆盖**命令树**（`apps/cli/src/command-tree.ts`）里的**每一个命令**。命令树是 CLI 的唯一命令清单：
+`help` 从它生成，argv 由它解析，`apps/runtime/test/cli-command-surface.test.ts` 再用它核对本目录的覆盖
+（ADR-0068），所以「本文列全了」不再是人工承诺。HTTP/SSE 面已按 ADR-0067 暂停。
 所有事实来自源码核对；核对方法见 `docs/tasks/README.md` 的 FOUNDATION-070 一节。
 
 调用形式统一是：
@@ -31,7 +33,7 @@ bun run codeestra <group> [<action>] [<argument>…] [--flag …]
 | 文件 | 覆盖章节 |
 |---|---|
 | **README.md**（本文件） | §0 通用约定（连接 / 自动启动 / 退出码 / 环境变量） |
-| [runtime.md](./runtime.md) | §1 Runtime 生命周期（`status`/`stop`；`ui`/`open` 已删除）、§2 `agent config`、§19 `settings`（含权限模式） |
+| [runtime.md](./runtime.md) | §1 Runtime 生命周期（`status`/`stop`；`ui`/`open` 已删除）、§2 `agent config` 与 `agent plugins`、§19 `settings`（含权限模式）、§22 `help` 与 `runtime commands` |
 | [project.md](./project.md) | §3 `project`（`inspect`/`policy`/`trust`/`list`、`project impact *`、`project knowledge *`） |
 | [task-lifecycle.md](./task-lifecycle.md) | §4 `task` 生命周期（`create` 到 `purge`/`status`）与 `--feature` |
 | [task-revision-session.md](./task-revision-session.md) | §5 `task revision` 与投递、§6 `task transcript`/`session transcript`、§6.1 `session guide`、§7 `session handoff` |
@@ -57,6 +59,8 @@ bun run codeestra <group> [<action>] [<argument>…] [--flag …]
   `session transcript`、`task operation list/get`、`settings list`。
 - 其余命令默认就是 JSON，`--json` 的作用是**让脚本声明意图**而不是改变输出。
 - 错误写到 stderr，形如 `CODE: message`；带事实的拒绝（例如 `SNAPSHOT_STALE`）会先打印一段 JSON 再退 1。
+- **想知道某一层有哪些命令，就问那一层**：`codeestra help`、`codeestra task help`、`codeestra task revision help`
+  （`--help`/`-h` 等价）。清单由命令树生成，不会与实际命令不一致，也不需要 Runtime（ADR-0068，见 §22）。
 
 ### 0.2 退出码
 
@@ -64,7 +68,7 @@ bun run codeestra <group> [<action>] [<argument>…] [--flag …]
 |---|---|
 | `0` | 成功。注意：某些命令的成功是「已受理」而不是「已完成」（见各命令说明） |
 | `1` | 拒绝或失败（含 `RECOVERY_REQUIRED` 这类需要人处理的状态） |
-| `2` | **用法错误**：参数个数/取值不合法、未知 flag、缺少必填 flag（`usage()` 与个别显式 `process.exit(2)`） |
+| `2` | **用法错误**：未知命令、缺少子命令、参数个数/取值不合法、未知 flag、缺少必填 flag。stderr **一行**，并指向对应层的 `help`（§22） |
 | `3` | **等待**（调度冲突/容量等待、Runtime 全局暂停 `SCHEDULER_GLOBALLY_PAUSED`、draining）或**没什么可做**（reclaim 计划/执行没有可回收项、`task schedule run` 这一趟没有可启动的候选） |
 
 `3` 从不表示 `BLOCKED`：`BLOCKED` 只表示**依赖未满足**，它属于「需要处理」而不是「等一等」。

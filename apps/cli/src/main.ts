@@ -23,7 +23,8 @@ import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOpt
   type AgentPluginDetection,
   type VerificationPolicyInspection,
   agentPluginKinds,
-  type SettingsListView } from '@codeestra/contracts';
+  type SettingsListView,
+  type TaskRecoveryView } from '@codeestra/contracts';
 /**
  * The Agent configuration view the Runtime returns for `agent.config.get|set|clear`. Only the fields
  * this client renders are named; anything else is ignored rather than invented.
@@ -41,6 +42,17 @@ import {
   readProcessState,
   type RuntimeHomeInspection,
 } from '../../runtime/src/lifecycle.js';
+import {
+  childIdOf,
+  commandPathOf,
+  helpViewOf,
+  maxTranscriptReverseReads,
+  renderHelp,
+  resolveCommand,
+  usageLineOf,
+  type ChainId,
+  type CommandId,
+} from './command-tree.js';
 
 type ClientRequest = RuntimeRequest extends infer Request
   ? Request extends RuntimeRequest ? Omit<Request, 'requestId' | 'schemaVersion'> : never
@@ -504,7 +516,6 @@ interface TranscriptRead {
  * newest entries are only reachable by reading everything before them; the cap keeps one command
  * from turning a long session into an unbounded loop, and `incomplete` says when it was hit.
  */
-const maxTranscriptReverseReads = 50;
 
 async function readTranscript(sessionId: string, flags: TranscriptFlags): Promise<TranscriptRead> {
   const limit = flags.limit ?? defaultTranscriptEntryReadLimit;
@@ -963,416 +974,64 @@ function printSettingsList(view: SettingsListView): void {
   console.log('  `settings list --json` prints the full record, including what each change applies to.');
 }
 
+/**
+ * The usage error: exactly one line (ADR-0068). The long text lives in the command tree and is
+ * printed by `help`, so an error message can never dump a command list that drifted from reality.
+ */
 function usage(): never {
-  console.error(`Usage:
-  bun run codeestra status
-  bun run codeestra stop [--wait <seconds>]
-  bun run codeestra agent config get [--project <project-id>] [--adapter <id>]
-  bun run codeestra agent config set [--project <project-id>] [--adapter <id>]
-    [--provider <name>] [--model <id>] [--thinking <off|minimal|low|medium|high|xhigh|max>]
-    [--unset provider|model|thinking]
-  bun run codeestra agent config clear [--project <project-id>] [--adapter <id>]
-  bun run codeestra agent plugins list [--project <project-id>] [--adapter <id>] [--json]
-  bun run codeestra agent plugins select [--project <project-id>] [--adapter <id>]
-    [--extension <path>]… [--skill <path>]… [--prompt-template <path>]… [--theme <path>]…
-    [--clear] [--json]
-    # The four kinds are the scope the user approved (ADR-0044): extensions, skills, prompt
-    # templates and themes. "select" replaces the whole selection with exactly the flags given
-    # (repeatable flags rather than a JSON file, so a path never needs a second escaping rule);
-    # "--clear" removes the selection.
-    # Every selected path is verified before anything is written and again before a Session starts;
-    # a path that cannot be loaded is refused with a stable code and no Execution is created.
-    # Exit codes: 0 applied, 1 refused (unusable path or adapter without plugin selection), 2 usage.
-  bun run codeestra project inspect [path]
-  bun run codeestra project policy [path]
-  bun run codeestra project trust [path] [--yes]
-  bun run codeestra project list
-    # ADR-0066: the product no longer models a dev clone, a long-lived dev branch, integration into
-    # it or dev→main promotion, so there is no \`--dev-repo\` flag and no DEV_REPO_* code. A Task
-    # worktree is based on the branch the project folder has checked out right now, fixed with the
-    # workspace; a detached HEAD there is refused with TASK_BASE_REF_UNRESOLVED (check out a branch,
-    # or pass --base-ref to task run). project inspect reports the repository identity and says the
-    # baseline in one line.
-  bun run codeestra project impact validate [path] [--json]
-  bun run codeestra project impact show <project-id> <task-id> [--json]
-  bun run codeestra project impact explain <project-id> <task-id> [--json]
-    # exit 0 for validate only when a mapping exists at the main ref and is the confirmed one;
-    # exit 0 for explain only for SAFE_TO_PARALLELIZE. UNKNOWN means "cannot be proven", not
-    # "no conflict", and exits 1 like CONFLICTING does (the code is in --json).
-  bun run codeestra project knowledge validate <project-id> [--json]
-  bun run codeestra project knowledge list <project-id> [--json]
-  bun run codeestra project knowledge show <project-id> [snapshot-id] [--json]
-  bun run codeestra project knowledge resolve <project-id> <task-id> [--json]
-    # The human-maintained layers (.codeestra/instructions, .codeestra/skills) are read from the
-    # project main ref only, so a Task branch can never rewrite the knowledge that judges its own
-    # execution. The machine-generated layer is Runtime data, not part of the project tree. validate
-    # and list exit 1 when any entry is refused (there is then no snapshot at all); show exits 1 when
-    # the project has no recorded snapshot; resolve reports what the next Execution would use and
-    # exits 1 only when no honest answer exists.
-  bun run codeestra task create <project-id> <任务详情…> --title <显示标题> --name <命名标题>
-    [--feature <module-id>]…
-    # 三个字段都必须给出（ADR-0065）：--title 是一句话摘要（任务列表显示它），
-    # --name 是小写英文短横线 slug（^[a-z][a-z0-9]*(-[a-z0-9]+)*$，≤ 50 字符），
-    # 用于分支 task/<编号>-<name> 与 worktree 目录；位置参数是任务详情。缺任一字段退出码 2。
-    # --feature declares the feature(s) this Task works on: module ids from the project's
-    # .codeestra/impact.json as read from its main ref. The Runtime refuses an id the mapping does
-    # not declare (UNKNOWN_FEATURE), and refuses any declaration when the mapping cannot be read.
-    # A Task that declares nothing is never in a feature conflict (ADR-0059).
-    # --constraint 与 --kind 已删除（ADR-0065），传入会被当作未知 flag。
-  bun run codeestra task list <project-id> [--all]
-  bun run codeestra task submit <project-id> <task-id> <expected-version>
-  bun run codeestra task run <project-id> <task-id> <expected-version> [--adapter <pi|codex|claude>]
-    [--base-ref <refs/heads/...>] [--allow-unknown] [--json]
-    Adapters: pi (default), codex, claude. Every run is bound to one Agent; changing --adapter starts a
-    new Execution rather than switching the Agent inside one. This is the explicit start request of
-    the same gate the automatic scheduler applies, so it exits 3 when the Task is *waiting* (the
-    conflict or capacity reason code is in --json and on stderr) and 1 when it is refused.
-    --base-ref fixes the baseline of a **new** workspace (ADR-0066): a local branch of the project
-    folder. Omitted, the baseline is the branch that folder has checked out right now. A Task that
-    already has a workspace keeps its recorded baseline and the flag
-    is refused with TASK_BASE_REF_ALREADY_FIXED instead of being ignored; a ref that is not a local
-    branch exits 1 with TASK_BASE_REF_NOT_A_BRANCH, and a missing one with TASK_BASE_REF_MISSING.
-  bun run codeestra task pause <project-id> <task-id> <expected-version>
-  bun run codeestra task resume <project-id> <task-id> <expected-version> [--adapter <pi|codex|claude>]
-    [--allow-unknown]
-    resume continues the *same* provider conversation of a PAUSED Task. A retry is a different
-    operation: it requeues a FAILED Task and a new Execution follows.
-  bun run codeestra task retry <project-id> <task-id> <expected-version> [--adapter <pi|codex|claude>]
-    [--json]
-    Retries a FAILED Task. Nothing is automatic: only this command requeues it. Without --adapter
-    the Adapter this Task last ran on is reused. The Task goes back to READY (or BLOCKED when an
-    upstream dependency is unmet) and the Runtime then asks the same scheduling gate that
-    "task run" uses for one start of *that* Task, so a retry queues behind conflicts and capacity
-    instead of jumping them. Exit 0 only when the new Execution started, 3 when the Task is
-    requeued and waiting (the reason code is in --json and on stderr), 1 when the retry or the start
-    was refused.
-  bun run codeestra task recover <project-id> <task-id> <expected-version> [--reason <text>] [--json]
-    The reconcile of a RECOVERY_REQUIRED Task (ADR-0055), the step the state machine promised and no
-    command face had. It reads real facts only — the recorded provider process identity (checked
-    against the real process table, start token and descendants), the recorded descendant snapshot,
-    and whether the recorded workspace is still on disk — and it changes something only when the
-    provider is provably gone: Execution and Task become FAILED (the resource is released), the
-    Session becomes EXITED, and the workspace becomes RETAINED. It never signals a process, never
-    removes or moves a worktree, never rewrites exit_json and never claims quiescence
-    (quiescenceProven: false, signalsSent: 0). A refusal changes nothing and exits 1 with
-    RECOVERY_PROVIDER_ALIVE / RECOVERY_DESCENDANTS_ALIVE / RECOVERY_OWNERSHIP_UNVERIFIABLE /
-    RECOVERY_PROCESS_IDENTITY_MISSING; TASK_NOT_IN_RECOVERY is exit 1 as well, ALREADY_RECONCILED is
-    exit 0 and read-only. After it, "task retry" can requeue the Task and "task cancel" can retire it
-    ("task purge" performs this same reconcile itself before deleting, so a manual recover is optional).
-  bun run codeestra task cancel <project-id> <task-id> <expected-version>
-  bun run codeestra task archive <project-id> <task-id> <expected-version>
-  bun run codeestra task unarchive <project-id> <task-id> <expected-version>
-  bun run codeestra task purge <project-id> <task-id> <expected-version> --yes [--force] [--reason <text>] [--json]
-    # DESTRUCTIVE and irreversible: deletes the Task, its revisions, executions, sessions, evidence,
-    # owned worktrees, verification copies and branches. A non-terminal Task is cancelled first
-    # through the ordinary cooperative stop, and a RECOVERY_REQUIRED Task is reconciled by
-    # observation first (the "task recover" rule; result stop.stop: "RECOVERED"); a stop or a
-    # provider that cannot be proven gone deletes nothing (RECONCILE_REQUIRED, exit 1).
-    # --yes is required and is the only guard; without it the command exits 2 without sending
-    # anything. --force (ADR-0058 D09) is the same caller saying "delete it anyway": the Runtime
-    # first tries to terminate the provider processes the Task recorded (identity-verified pids
-    # only), then deletes what it otherwise would have refused — a provider it could not prove gone
-    # and resources whose ownership it cannot prove (those files are left on disk).
-    # Everything stepped over is printed to stderr and recorded in the forced field of the view
-    # (stop.stop: "FORCED") and in the TaskPurged audit event. Replaying the same command ID returns
-    # the receipt instead of a second deletion.
-    # stdout is the printed view (JSON shape regardless of --json), including rowsDeleted,
-    # dependencyEdgesRemoved and the tip commit of every branch that was deleted.
-  bun run codeestra task status <project-id> <task-id> [--json]
-    # every Execution's Agent completion is printed with its note; a code such as
-    # PROSE_QUESTION_NO_TOOL_USE marks a completion the Runtime annotated instead of
-    # leaving an unexplained SUCCESS (heuristic: no tool call in the run and the last
-    # assistant text ends with a question mark). The note is printed to stderr.
-    # --json is accepted and is the default, so a script can state its intent.
-  bun run codeestra task revision create <project-id> <task-id> <expected-version>
-    [--specification <text>] [--feature <module-id>]… [--reason <text>] [--json]
-    # --feature sets the feature declaration of the new revision (validated against the project's
-    # mapping). Omitting it inherits the current revision's declaration; passing it at all replaces
-    # the declaration with the ids given (ADR-0059).
-    # 至少要有 --specification 或 --feature 之一：什么都不改的修订会被拒为 INVALID_REVISION。
-    # --constraint 已删除（ADR-0065），传入会被当作未知 flag。
-  bun run codeestra task revision list <project-id> <task-id> [--json]
-  bun run codeestra task revision delivery list <project-id> <task-id> [--json]
-  bun run codeestra task revision delivery get <project-id> <delivery-id> [--json]
-  bun run codeestra task revision delivery resolve <project-id> <task-id> <delivery-id>
-    <expected-version> --action <stop-and-restart|retry> [--adapter <id>] [--json]
-    # exit 0 only when the delivery ended satisfied; 1 when it stays unconfirmed
-  bun run codeestra task transcript <project-id> <task-id> [--execution <id>] [--after <entry-id>]
-    [--limit <n>] [--reverse] [--json]
-  bun run codeestra session transcript <session-id> [--after <entry-id>] [--limit <n>] [--reverse]
-    [--json]
-  bun run codeestra session transcript part <session-id> <entry-id> <part-index>
-  bun run codeestra session guide <project-id> <task-id> --message <text> [--json]
-    # Session Guidance, not a TaskRevision: it never changes the specification and never invalidates
-    # a verification. exit 0 = handed to the running conversation or recorded with nothing running;
-    # 1 = a provider was asked and did not take it (CHANNEL_UNSUPPORTED/TIMED_OUT/FAILED).
-    # "delivered" means the provider's channel accepted the message (enqueued), not that the model
-    # read it (ADR-0051/0057).
-  bun run codeestra session guidance list <project-id> <task-id> [--json]
-  bun run codeestra session guidance get <project-id> <guidance-id> [--json]
-  bun run codeestra session handoff status <project-id> <session-id> [--json]
-  bun run codeestra session handoff request <project-id> <session-id> <takeover|return>
-  bun run codeestra session handoff cancel <project-id> <session-id>
-  bun run codeestra session handoff writer acquire <project-id> <session-id> --holder <ref>
-    [--kind AUTOMATED_RPC|TERMINAL_ATTACHMENT]
-  bun run codeestra session handoff writer release <project-id> <session-id> --holder <ref>
-  bun run codeestra session handoff admit <project-id> <session-id>
-  bun run codeestra session handoff attach <project-id> <session-id> --holder <ref>
-    [--writer|--observer] [--since <cursor>]
-  bun run codeestra session handoff detach <project-id> <session-id> --holder <ref>
-  bun run codeestra session handoff release <project-id> <session-id> [--no-resume]
-  bun run codeestra session handoff terminal read <project-id> <session-id> [--since <cursor>]
-  bun run codeestra session handoff terminal write <project-id> <session-id> --text <text>
-  bun run codeestra session handoff terminal resize <project-id> <session-id> --cols <n> --rows <n>
-    [--holder <ref>] [--json]
-    # exit 0 only when the PTY really changed size (the transport's own answer), 1 when it refused
-    # (not held, writer seat taken) or did not take effect, 2 for an out-of-range size
-  bun run codeestra task result capture <project-id> <task-id> [execution-id]
-  bun run codeestra task result prepare <project-id> <task-id> [execution-id]   # strict mode
-  bun run codeestra task result commit <project-id> <task-id> <authorization-id> --confirm
-  bun run codeestra task verify <project-id> <task-id> [execution-id] [--background]
-    [--policy <auto|targeted|project>]
-  bun run codeestra task verification list <project-id> <task-id>
-  bun run codeestra task tests record <project-id> <task-id> [--commit <full-sha>]
-    [--expected-plan-digest <sha256>] [--json]
-  bun run codeestra task tests show <project-id> <task-id> [--json]
-  bun run codeestra task tests history <project-id> <task-id> [--limit <n>] [--json]
-  bun run codeestra task operation list <project-id> <task-id> [--json]
-  bun run codeestra task operation get <project-id> <operation-id> [--json]
-  bun run codeestra task operation cancel <project-id> <task-id> <operation-id> [--json]
-  bun run codeestra task depends add <project-id> <task-id> <expected-version>
-    <prerequisite-task-id> [--revision <revision-id>] [--json]
-  bun run codeestra task depends remove <project-id> <task-id> <expected-version>
-    <prerequisite-task-id> [--json]
-  bun run codeestra task depends list <project-id> [task-id] [--json]
-  bun run codeestra task schedule status <project-id> [--adapter <id>] [--json]
-  bun run codeestra task schedule plan <project-id> [--adapter <id>] [--json]
-  bun run codeestra task schedule explain <project-id> <task-id> [--adapter <id>] [--json]
-  bun run codeestra task schedule run <project-id> [--adapter <id>] [--json]
-  bun run codeestra task schedule clear-unknown <project-id> <task-id> [--json]
-  bun run codeestra events list [--project <project-id>] [--since <sequence>] [--limit <n>] [--json]
-  bun run codeestra events tail [--project <project-id>] [--since <sequence>]
-  bun run codeestra attention list <project-id>
-  bun run codeestra attention answer <project-id> <attention-id> confirm <yes|no>
-  bun run codeestra attention answer <project-id> <attention-id> value <text>
-  bun run codeestra attention answer <project-id> <attention-id> cancel
-  bun run codeestra attention answer <project-id> <attention-id> [--choose <question>:<options>]…
-    [--text <question>=<text>]… [--cancel]
-  bun run codeestra attention resolve <project-id> <attention-id> --dismiss [--note <text>] [--json]
-  bun run codeestra attention resolve <project-id> <attention-id> --answer <text> [--note <text>] [--json]
-  bun run codeestra settings list [--json]
-  bun run codeestra settings permission get [--json]
-  bun run codeestra settings permission set <full|strict> [--json]
-  bun run codeestra settings prose-question-attention [auto|record-only|off] [--json]
-  bun run codeestra settings concurrency get [--json]
-  bun run codeestra settings concurrency set --limit <n> [--json]
-  bun run codeestra settings concurrency reset [--json]
-  bun run codeestra reclaim plan [--project <project-id> | --all-projects] [--task <task-id>]
-    [--kind <TASK_WORKTREE|VERIFICATION_COPY|INTEGRATION_WORKTREE>]… [--include-failure-scenes]
-    [--unregistered] [--scan-root <path-inside-home>] [--remove-unregistered <path>]… [--json]
-  bun run codeestra reclaim apply [--project <project-id> | --all-projects] [--task <task-id>]
-    [--kind <kind>]… [--include-failure-scenes] [--unregistered] [--scan-root <path-inside-home>]
-    [--remove-unregistered <path>]… [--json]
-  bun run codeestra reclaim records [--project <project-id> | --all-projects] [--task <task-id>]
-    [--source <ALL|REGISTERED|UNREGISTERED_DIRECTORY>] [--since <epoch-ms|ISO>] [--until <epoch-ms|ISO>]
-    [--limit <n>] [--json]
-  bun run codeestra scheduler capacity get [--json]
-  bun run codeestra scheduler capacity set --limit <n> [--json]
-  bun run codeestra scheduler capacity reset [--json]
-  bun run codeestra scheduler reservations list <project-id> [--task <task-id>]
-    [--include-released] [--limit <n>] [--json]
-  bun run codeestra scheduler reservations get <project-id> <reservation-id> [--json]
-  bun run codeestra scheduler reservations acquire <project-id> <task-id> <expected-task-version>
-    --revision <revision-id> [--snapshot <impact-snapshot-id>] [--adapter <id>] [--json]
-  bun run codeestra scheduler reservations release <project-id> <reservation-id> --reason <text>
-    [--json]
-  bun run codeestra scheduler reservations prepare-workspace <project-id> <reservation-id>
-    <expected-task-version> [--json]
-  bun run codeestra scheduler reservations reconcile <project-id> [--json]
-  bun run codeestra scheduler control status [--json]
-  bun run codeestra scheduler control pause [--json]
-  bun run codeestra scheduler control resume [--json]
-  bun run codeestra scheduler control reconcile [--json]
-    The Runtime global load control (ADR-0061). It belongs to no Project: one CODEESTRA_HOME has one
-    host-wide barrier. pause freezes the admitted execution set at the process level — no new
-    Execution/Session starts and no new Provider delivery, while running tasks keep their Task,
-    Execution and Session state and their capacity slot. resume continues exactly the processes this
-    pause epoch verified and froze; a target whose pid changed or exited is reported instead of being
-    woken. Exit codes: 0 reached the complete target state (or it was already there); 1 a target could
-    not be verified, the platform cannot freeze a provider, or a resume is still in flight, with the
-    stable code (GLOBAL_PAUSE_UNSUPPORTED, GLOBAL_PAUSE_IDENTITY_UNVERIFIABLE,
-    GLOBAL_PAUSE_TARGET_NOT_STOPPED, GLOBAL_RESUME_TARGET_CHANGED, GLOBAL_PAUSE_RECOVERY_REQUIRED,
-    GLOBAL_CONTROL_IN_PROGRESS) in --json and on stderr; 3 is used only by a Task that *waits* for the
-    barrier (SCHEDULER_GLOBALLY_PAUSED), never for a partially frozen Runtime. reconcile only observes
-    and records: it sends no signal, and it never turns an unverifiable target into a stopped one.
-
-attention resolve ends a prose-question wait: an Agent that used no tool and ended its turn by
-asking its question in ordinary prose leaves a Task whose provider process already exited. The
-Runtime records that as its own Attention (a heuristic about the shape of the ending, never a claim
-about intent) and puts the Task in WAITING_FOR_USER; --dismiss records a false alarm, --answer
-records the user's own text. Neither resumes the conversation and neither is a TaskRevision: an
-answer is a statement about this wait, not an amendment of the specification. Delivering one through
-attention answer is refused with PROSE_QUESTION_RESOLUTION_REQUIRED, because there is no provider
-dialog to write to.
-
-settings list is the overview of every enabled Runtime-level setting (ADR-0064/0067): the
-permission mode, the prose-question switch and the one concurrency limit, each with its effective
-value, its product default, whether it is this Runtime home's own choice or the product default, the
-values it accepts and where it is stored. Every entry comes from the same read its own command uses,
-so the list cannot disagree with settings permission get, settings prose-question-attention or
-scheduler capacity get. Human-readable by default; --json prints the whole record.
-
-settings permission reads or writes the permission mode (ADR-0011). It is a setting like any other:
-get reports the mode in force with the product default, set accepts a case-insensitive full|strict,
-needs no confirmation, and writes $CODEESTRA_HOME/permission-mode.json (0600, atomic replacement).
-The mode applies to new operations and new Agent sessions; a Session already running keeps the mode
-it started with.
-
-settings prose-question-attention reads or writes the global switch that decides
-whether such a completion becomes a wait at all (auto, the default; record-only; off). Changing it
-needs no confirmation and never rewrites a wait that was already recorded.
-
-settings concurrency is the settings spelling of the one Runtime-wide concurrency limit (ADR-0061):
-get, set --limit <n> and reset send exactly the same Runtime commands as scheduler capacity, so the
-value, its audit event and its idempotency can never diverge between the two spellings. It is a
-setting, not a gate: zero confirmations, same behavior in FULL and STRICT, and a change takes effect
-on the next scheduling decision — raising it triggers a scheduling pass for every project (a Task
-waiting on capacity can therefore start immediately), while lowering it never pauses, releases or
-terminates a Task that already holds a slot. Invalid limits are refused with the same stable codes.
-
---reverse prints the newest transcript entry first. It is a rendering choice for the human view
-only (it is refused together with --json), and because the command face reads forward from a cursor
-it may read up to ${maxTranscriptReverseReads} pages to reach the newest entries.
-
-task verify --background returns a durable Operation handle instead of waiting for the policy to
-finish; follow it with task operation list and stop it with task operation cancel. Exit code 0 there
-means "the Operation was recorded and started", not "the verification passed".
-
-Long-command progress is published as domain events: every step and every observed output chunk of
-a running verification, and the Operation's settle, arrive on the same stream as everything else
-(events tail). A progress event never carries a verdict — a passed
-verification is only ever reported by VerificationCompleted and by the run's own state.
-
-ADR-0066 removed the whole integration and promotion face this text used to describe: there is no
-\`task integrate\`, no \`task integration *\`, no \`promotion *\`, no IntegrationBatch, no independent
-integration verification and no dev clone. A Task's result commit stays on \`refs/heads/task/<task-id>\`
-and merging it is the user's own Git step; the Runtime never merges, never pushes and keeps no
-promotion records. Likewise no command reports a dev baseline any more: the one Task baseline is the
-branch the project folder has checked out when the workspace is prepared.
-
-ADR-0038 splits verification cost by branch responsibility. A \`task/*\`, \`lane/*\` or feature branch
-commits its own small \`.codeestra/tests.json\` (a scope statement plus 1-16 argv commands, each with
-what it covers); \`task tests record\` snapshots that file into an append-only record bound to the
-exact task/revision/commit, and \`task verify\` runs that recorded plan -- never the file, so a scope
-change is an explicit audited append. A Task with no recorded plan keeps using the fixed project
-policy, and a recorded plan that belongs to another revision or commit is refused instead of being
-silently replaced by the project policy. (The \`dev → main\` full-suite evidence gate this paragraph
-used to describe went with the promotion face; this repository's own full-suite discipline is stated
-in AGENTS.md instead.)
-
-scheduler capacity get reports the **Runtime-wide** concurrency facts a scheduler uses: the single
-limit for this CODEESTRA_HOME and where it came from, how many slots are occupied across every
-project with the occupiers themselves (project, task, adapter, since, reservation or Execution), the
-stable reason code a new acquisition would get right now, the global control state, and whether the
-Runtime is draining. It takes no project and no adapter: a candidate's project and adapter no longer
-produce a second ceiling. scheduler capacity set --limit <n> writes that one limit and reset removes
-the explicit value so the documented default 2 applies again; both are zero-confirmation, both read
-the value back, and writing the value that is already effective is an idempotent no-op. An invalid
-limit (0, negative, above the ceiling) is refused with its own stable code instead of being clamped.
-Exit codes: 0 written or read, 1 refused (CAPACITY_LIMIT_INVALID / CAPACITY_LIMIT_OUT_OF_RANGE), 2
-usage. CAPACITY_ADAPTER_SLOT_LIMIT_REACHED is historical: no code path produces it any more, and it
-stays readable in old events and old command results.
-
-scheduler reservations acquire is the reservation primitive: it re-checks the Task version, the
-assessed revision, the dependency facts, the cached ImpactSnapshot generation and both capacity
-dimensions inside one immediate transaction, then records a reservation together with the evidence of
-who created it (Runtime boot, pid, OS start token). --snapshot names the ImpactSnapshot the caller
-assessed against: the mapping version, analyzer version and observed change set are read again, and
-the Task revision and worktree baseline are re-read inside the write transaction, so a generation that
-moved is refused with SNAPSHOT_STALE (or SNAPSHOT_UNAVAILABLE when it cannot be confirmed at all)
-and no reservation row is written — the recheck is freshness, not a second conflict analysis. Exit code
-0 means a slot is held, 3 means a *capacity wait* (the reason code says which limit), and 1 means a
-refusal (unmet dependencies, a stale revision, a stale snapshot generation, an already-held slot, ...).
-A refusal that carries facts prints them as JSON and then exits 1. Exit code 3 is never BLOCKED:
-BLOCKED means unmet dependencies only.
-
-scheduler reservations list shows the active reservations of a project with their holder evidence and
-their append-only history (--include-released keeps the audit rows), and get reads one reservation
-back by id together with that same history. release is explicit and requires
---reason; nothing releases a slot because a heartbeat expired, a client disappeared or a user waited.
-A release refused with SLOT_HOLDER_STILL_RUNNING means the recorded holder process is provably still
-alive and was not signalled. prepare-workspace prepares the Task worktree for one reservation and
-binds it, and reconcile re-checks every active reservation's recorded holder against the real process
-table: a holder proven gone is released and recorded, while a holder that is alive or unverifiable
-keeps the slot (RECOVERY_REQUIRED) — no process is signalled and no resource is deleted.
-
-task schedule is the scheduling engine's command face. The Runtime schedules on its own: a
-relevant event (submit, integration into dev, a stop, a revision delivery, a freed slot, a capacity
-change) triggers a pass, and a periodic recovery pass converges what a crash left behind. status
-reports the facts (the active set, occupancy, the last pass), plan is the ordered dry run of the
-candidate loop and starts nothing, and explain answers why one Task is not running now: its
-dependency verdict, its conflict verdict against every active/reserved Task with the intersecting
-paths/directories/modules/shared resources, and the capacity numbers. The order is priority
-descending, then creation time, then ID ascending, and raising a priority only changes the next
-order — it never interrupts a Task that already holds its resources. explain exits 0 when the Task
-is running or would start now, 3 when it is *waiting* (a conflict or capacity wait is never BLOCKED:
-BLOCKED means an unmet dependency only), and 1 when it is BLOCKED or not schedulable at all.
-
-task schedule clear-unknown records the explicit single-shot release of an UNKNOWN assessment
-(ADR-0030 D05): it is bound to the assessed revision, baseline and analyzer/policy versions, it is
-written to the audit ledger, it is consumed by exactly one start, and it does *not* change the
-recorded verdict, which stays UNKNOWN. It is a widening of the gate, never a new one: without it,
-nothing changes. A CONFLICTING assessment is a proven overlap and is never released (exit 1).
-
-stop asks the Runtime that owns this CODEESTRA_HOME to shut down and then checks the process it
-named until it is gone (default 10s, bounded by --wait). It reports STOPPED (exit 0), NOT_EXITED
-(exit 1) when the process is still there, NOT_RUNNING when no Runtime owns this home, and
-UNREACHABLE_PROCESS (exit 1) when a Runtime process is still there but nothing answers on its
-socket. It never starts a Runtime to stop it and never signals a process it cannot identify.
-
-status starts the Runtime when none is running and prints the runtime.ping result together with an
-ownership report read from this home's lifecycle records: the lock, the boot traces, and whether
-the endpoint answers. It is read-only, so an unreachable Runtime process is reported rather than
-replaced. Exit code 1 means the Runtime could not be reached or started.
-
-session handoff attach/detach/release are the native terminal face: attach returns the projected
-terminal stream from a cursor (at most one writer attachment; a second one exits 1 with
-ATTACHMENT_BUSY), detach leaves the terminal and the provider running, and release writes the
-terminal's own release byte, verifies the provider process exited and the provider session file still
-holds the conversation, then hands it back to automation on the same session file. Exit code 1 means
-the release or the successor start could not be confirmed — never "probably fine".
-
-session handoff projects the Runtime-side handoff contract: the provider incarnation history, the
-single writer lease, the handoff fence/safe point and the admission decision. A second writer lease
-acquisition exits 1 with ATTACHMENT_BUSY, and a refused admission exits 1. admit really starts the
-successor — a PTY-hosted native terminal for takeover, an RPC provider for the return — so it is the
-command that moves the lease; it refuses before recording anything rather than leaving a half-started
-successor, and an already admitted request replays the successor it recorded instead of starting a
-second one.
-
-project impact is deterministic conflict analysis: it maps the owned worktree's Git change set onto
-the .codeestra/impact.json mapping at the project main ref and compares it with every Task that
-currently holds a resource. It is read-only, it never starts or schedules a Task, and it uses no
-model: the verdict is SAFE_TO_PARALLELIZE, UNKNOWN, or CONFLICTING, each with stable reason codes and
-the exact intersecting paths, directories, modules, or shared resources. show prints one Task's
-ImpactSnapshot, explain explains a verdict against the active Tasks, and validate reports whether a
-mapping is present at the main ref and is the digest project trust confirmed. UNKNOWN is recorded
-for every Task whose mapping is missing, unconfirmed, invalid, or empty, and for any active Task
-whose change set cannot be observed — that is the point: nothing is called safe without proof.
-
-project knowledge is the layered knowledge of PROJECT_SPEC section 4: human-maintained instructions
-and skills, plus a machine-generated layer the Runtime owns. The human layers are read from the
-project main ref, never from a Task branch, and the machine layer lives under the Runtime data
-directory rather than inside the project tree, so it cannot be committed by accident. There is no
-override semantics: every human entry that parses is in the snapshot, a duplicate id or path is a
-refusal, and a layer with any refused entry produces no snapshot at all — which is what makes it
-impossible for a machine to silently replace human knowledge. validate and list report every
-refusal, show reads back one recorded snapshot with the Executions bound to it, and resolve reports
-what the next Execution of one Task would use without starting anything.`);
+  console.error(`USAGE: ${usageLineOf(helpContext)} — run \`${commandPathOf(helpContext)} help\``);
   process.exit(2);
 }
 
-const [group, action, firstArgument, ...remainingArguments] = Bun.argv.slice(2);
+/**
+ * A command the tree describes but the dispatch chain does not handle. This is a Codeestra defect,
+ * not a user error: it exits with a code no legitimate path uses so the targeted test that drives
+ * every node of the tree fails loudly instead of silently answering a usage error.
+ */
+function unhandledNode(id: string): never {
+  console.error(`UNHANDLED_COMMAND: ${id} is in the command tree but has no dispatch branch`
+    + ' — this is a Codeestra defect (ADR-0068).');
+  process.exit(70);
+}
+
+function assertNever(id: never): never {
+  unhandledNode(String(id));
+}
+
+/**
+ * Which node's usage line an error names. It is set from the resolved command before dispatch, so
+ * `usage()` needs no argument at its ~200 call sites.
+ */
+let helpContext: CommandId | null = null;
+
+const [, action, firstArgument, ...remainingArguments] = Bun.argv.slice(2);
+
+/**
+ * Resolve argv against the command tree before anything else happens (ADR-0068). The tree decides
+ * which node a command is; the chain below only decides what that node does. `help` is answered
+ * here, without a Runtime and without a single write.
+ */
+const resolved = resolveCommand(Bun.argv.slice(2));
+if (resolved.kind === 'HELP') {
+  if (Bun.argv.includes('--json')) print(helpViewOf(resolved.id));
+  else console.log(renderHelp(resolved.id));
+  process.exit(0);
+}
+if (resolved.kind === 'UNKNOWN') {
+  const parent = resolved.parent === null ? 'codeestra' : commandPathOf(resolved.parent);
+  console.error(`UNKNOWN_COMMAND: \`${resolved.token}\` is not a command under \`${parent}\``
+    + ` — run \`${parent} help\``);
+  process.exit(2);
+}
+if (resolved.kind === 'BARE') {
+  helpContext = resolved.parent;
+  if (resolved.parent === null) usage();
+  console.error(`USAGE: \`${commandPathOf(resolved.parent)}\` needs a subcommand`
+    + ` — run \`${commandPathOf(resolved.parent)} help\``);
+  process.exit(2);
+}
+const commandId: ChainId = resolved.id;
+helpContext = commandId;
 
 async function currentPermissionMode(): Promise<'FULL' | 'STRICT'> {
   const result = await call({ command: 'permission.get' }) as { mode: 'FULL' | 'STRICT' };
@@ -1856,7 +1515,10 @@ async function waitForRuntimeExit(input: {
 }
 
 try {
-  if (group === 'status' && action === undefined) {
+  if (commandId === 'status') {
+    // `status` takes nothing, so an extra token stays a usage error exactly as it was before the
+    // tree resolved argv (the guard used to be `action === undefined`).
+    if (action !== undefined) usage();
     // Ownership facts are read from this home's lifecycle records, read-only, so an unreachable
     // Runtime process is reported instead of being hidden behind a freshly started one.
     try {
@@ -1873,7 +1535,7 @@ try {
         ownership: ownershipSummary(ownership) });
       process.exit(1);
     }
-  } else if (group === 'stop' && (action === undefined || action.startsWith('--'))) {
+  } else if (commandId === 'stop') {
     // Stop is two-phase and factual: the Runtime only reports which process was asked to stop, and
     // this client waits (bounded) for that process to actually disappear before reporting success.
     // It never starts a Runtime to stop it, and never signals a process it cannot identify.
@@ -1938,11 +1600,13 @@ try {
       });
       if (!exit.exited) process.exit(1);
     }
-  } else if (group === 'agent' && action === 'config') {
+  } else if (commandId === 'agent.config') {
     // Agent configuration is per Adapter and per scope. Omitting --project means the global
     // default; supplying it means that project's override. Every field is optional, so `set`
     // merges and `--unset` clears one field without disturbing the others.
     const subcommand = firstArgument;
+    const child = childIdOf('agent.config', subcommand);
+    if (child === null) usage();
     const tokens = remainingArguments;
     let projectId: string | undefined;
     let adapterId = 'pi';
@@ -1962,21 +1626,21 @@ try {
       else usage();
     }
     const scope = projectId === undefined ? 'GLOBAL' as const : 'PROJECT' as const;
-    if (subcommand === 'get') {
+    if (child === 'agent.config.get') {
       if (unset.length > 0 || provider !== undefined || model !== undefined
         || thinkingLevel !== undefined) usage();
       print(await call({
         command: 'agent.config.get', adapterId,
         ...(projectId === undefined ? {} : { projectId }),
       }));
-    } else if (subcommand === 'clear') {
+    } else if (child === 'agent.config.clear') {
       if (unset.length > 0 || provider !== undefined || model !== undefined
         || thinkingLevel !== undefined) usage();
       print(await call({
         command: 'agent.config.clear', adapterId, scope,
         ...(projectId === undefined ? {} : { projectId }),
       }));
-    } else if (subcommand === 'set') {
+    } else if (child === 'agent.config.set') {
       const unsetFields = new Set(unset);
       for (const field of unsetFields) {
         if (field !== 'provider' && field !== 'model' && field !== 'thinking') usage();
@@ -1996,13 +1660,15 @@ try {
           : { thinkingLevel: thinkingLevel as 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' }),
       }));
     } else {
-      usage();
+      unhandledNode(child);
     }
-  } else if (group === 'agent' && action === 'plugins') {
+  } else if (commandId === 'agent.plugins') {
     // Plugin/resource selection and read-only detection (ADR-0044). Both halves stay one command
     // face with the Runtime: `list` projects the Runtime's detection, `select` writes the selection
     // through the same request the settings page uses.
     const subcommand = firstArgument;
+    const child = childIdOf('agent.plugins', subcommand);
+    if (child === null) usage();
     const tokens = remainingArguments;
     let projectId: string | undefined;
     let adapterId = 'pi';
@@ -2026,7 +1692,7 @@ try {
       else usage();
     }
     const scope = projectId === undefined ? 'GLOBAL' as const : 'PROJECT' as const;
-    if (subcommand === 'list') {
+    if (child === 'agent.plugins.list') {
       if (clear || Object.values(selection).some((paths) => paths.length > 0)) usage();
       const detection = await call({
         command: 'agent.plugins.list', adapterId,
@@ -2037,7 +1703,7 @@ try {
       // Exit 1 when the Adapter cannot apply a selection at all, so a script can tell "nothing
       // found" from "not supported here" without parsing prose.
       if (detection.pluginSelectionSupport !== 'SUPPORTED') process.exit(1);
-    } else if (subcommand === 'select') {
+    } else if (child === 'agent.plugins.select') {
       const chosen = agentPluginKinds.reduce(
         (total, kind) => total + selection[kind].length, 0);
       if (clear && chosen > 0) usage();
@@ -2050,9 +1716,9 @@ try {
       if (json) print(result);
       else printAgentPluginSelection(result);
     } else {
-      usage();
+      unhandledNode(child);
     }
-  } else if (group === 'project' && action === 'inspect') {
+  } else if (commandId === 'project.inspect') {
     const positional = [firstArgument, ...remainingArguments]
       .filter((token): token is string => token !== undefined);
     if (positional.some((token) => token.startsWith('--')) || positional.length > 1) usage();
@@ -2062,11 +1728,12 @@ try {
     }) as ProjectIdentity;
     print(report);
     console.error('Task 基线：该项目文件夹当前检出的分支（建 Task 时固定 ref 与 commit）。');
-  } else if (group === 'project' && action === 'list') {
+  } else if (commandId === 'project.list') {
+    if (firstArgument !== undefined) usage();
     print(await call({ command: 'project.list' }));
-  } else if (group === 'project' && action === 'policy') {
+  } else if (commandId === 'project.policy') {
     print(await call({ command: 'project.verificationPolicy', path: firstArgument ?? process.cwd() }));
-  } else if (group === 'project' && action === 'trust') {
+  } else if (commandId === 'project.trust') {
     const tokens = [firstArgument, ...remainingArguments]
       .filter((token): token is string => token !== undefined);
     const positional: string[] = [];
@@ -2117,11 +1784,13 @@ try {
       expectedImpactPolicy: expectedImpactPolicyConfirmation(impact),
     });
     print(trusted);
-  } else if (group === 'project' && action === 'impact') {
+  } else if (commandId === 'project.impact') {
     // Deterministic conflict analysis (ADR-0031). Read-only: it derives snapshots, records them
     // append-only, and explains a verdict. It never schedules, starts, or approves a Task.
     const subcommand = firstArgument;
-    if (subcommand === 'validate') {
+    const child = childIdOf('project.impact', subcommand);
+    if (child === null) usage();
+    if (child === 'project.impact.validate') {
       const positional = remainingArguments.filter((token) => !token.startsWith('--'));
       const flags = remainingArguments.filter((token) => token.startsWith('--'));
       if (positional.length > 1) usage();
@@ -2133,11 +1802,11 @@ try {
       // Exit 0 only when a mapping is present *and* in effect: an unconfirmed or broken mapping
       // makes every verdict UNKNOWN, which is a failure for a script that wants parallelism.
       if (report.code !== 'OK' && report.code !== 'OK_UNTRUSTED') process.exit(1);
-    } else if (subcommand === 'show' || subcommand === 'explain') {
+    } else if (child === 'project.impact.show' || child === 'project.impact.explain') {
       const [projectId, taskId, ...flags] = remainingArguments;
       if (projectId === undefined || taskId === undefined) usage();
       const json = jsonOnlyFlag(flags);
-      if (subcommand === 'show') {
+      if (child === 'project.impact.show') {
         const view = await call({ command: 'project.impact.show', projectId,
           taskId }) as ImpactSnapshotView;
         if (json) print(view);
@@ -2155,20 +1824,22 @@ try {
         if (view.assessment.verdict !== 'SAFE_TO_PARALLELIZE') process.exit(1);
       }
     } else {
-      usage();
+      unhandledNode(child);
     }
-  } else if (group === 'project' && action === 'knowledge') {
+  } else if (commandId === 'project.knowledge') {
     // Project Knowledge (FOUNDATION-067 / ADR-0041). Read-only: it reports the layered knowledge
     // (human layers from the project main ref, machine layer from the Runtime data directory) and
     // the snapshots already bound to Executions. Nothing here records a snapshot or starts a Task.
     const subcommand = firstArgument;
-    if (subcommand === 'validate' || subcommand === 'list') {
+    const child = childIdOf('project.knowledge', subcommand);
+    if (child === null) usage();
+    if (child === 'project.knowledge.validate' || child === 'project.knowledge.list') {
       const positional = remainingArguments.filter((token) => !token.startsWith('--'));
       const flags = remainingArguments.filter((token) => token.startsWith('--'));
       if (positional.length > 1) usage();
       const json = jsonOnlyFlag(flags);
       const projectId = positional[0] ?? process.cwd();
-      if (subcommand === 'validate') {
+      if (child === 'project.knowledge.validate') {
         const report = await call({ command: 'project.knowledge.validate', projectId }) as KnowledgeValidationView;
         if (json) print(report);
         else printKnowledgeValidation(report);
@@ -2181,7 +1852,7 @@ try {
         else printKnowledgeList(report);
         if (!report.valid) process.exit(1);
       }
-    } else if (subcommand === 'show') {
+    } else if (child === 'project.knowledge.show') {
       const positional = remainingArguments.filter((token) => !token.startsWith('--'));
       const flags = remainingArguments.filter((token) => token.startsWith('--'));
       if (positional[0] === undefined || positional.length > 2) usage();
@@ -2193,7 +1864,7 @@ try {
       }) as KnowledgeSnapshotView;
       if (json) print(view);
       else printKnowledgeSnapshot(view);
-    } else if (subcommand === 'resolve') {
+    } else if (child === 'project.knowledge.resolve') {
       const positional = remainingArguments.filter((token) => !token.startsWith('--'));
       const flags = remainingArguments.filter((token) => token.startsWith('--'));
       if (positional[0] === undefined || positional[1] === undefined || positional.length > 2) {
@@ -2208,9 +1879,9 @@ try {
       // is a successful answer that still exits 0.
       if (view.state !== 'VALID') process.exit(1);
     } else {
-      usage();
+      unhandledNode(child);
     }
-  } else if (group === 'task' && action === 'create') {
+  } else if (commandId === 'task.create') {
     if (firstArgument === undefined || remainingArguments.length === 0) usage();
     const input = parseTaskCreateFlags(remainingArguments);
     print(await call({
@@ -2222,12 +1893,12 @@ try {
       specification: input.specification,
       features: input.features,
     }));
-  } else if (group === 'task' && action === 'list') {
+  } else if (commandId === 'task.list') {
     const includeArchived = remainingArguments.length === 1 && remainingArguments[0] === '--all';
     if (firstArgument === undefined
       || (remainingArguments.length !== 0 && !includeArchived)) usage();
     print(await call({ command: 'task.list', projectId: firstArgument, includeArchived }));
-  } else if (group === 'task' && action === 'purge') {
+  } else if (commandId === 'task.purge') {
     const [taskId, versionText, ...flags] = remainingArguments;
     const expectedVersion = Number(versionText);
     if (firstArgument === undefined || taskId === undefined || versionText === undefined
@@ -2268,15 +1939,48 @@ try {
         console.error(`provider termination: ${result.forced.termination.detail}`);
       }
     }
-  } else if (group === 'task' && (action === 'pause'
-    || action === 'cancel' || action === 'archive' || action === 'unarchive')) {
+  } else if (commandId === 'task.recover') {
+    // The reconcile of a RECOVERY_REQUIRED Task (ADR-0055): the step the state machine promised and
+    // no command face had. Facts only — it changes something only when the provider is provably gone,
+    // and it never signals a process, moves a worktree, or claims quiescence.
+    const [taskId, versionText, ...flags] = remainingArguments;
+    const expectedVersion = Number(versionText);
+    if (firstArgument === undefined || taskId === undefined || versionText === undefined
+      || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
+    const split = splitFlagTokens(flags, ['--reason'], ['--json']);
+    if (split.positionals.length !== 0) usage();
+    const reason = split.flags.get('--reason');
+    const view = await call({
+      command: 'task.recover',
+      commandId: crypto.randomUUID(),
+      projectId: firstArgument,
+      taskId,
+      expectedVersion,
+      ...(reason === undefined ? {} : { reason }),
+    }) as TaskRecoveryView;
+    print(view);
+    // The observation is printed next to the verdict because "why it refused" is the whole point of
+    // this command, and because nothing here may be read as evidence of quiescence.
+    const observed = view.observation;
+    console.error(`[recovery] observed: provider ${observed.processState}`
+      + ` (pid ${observed.providerPid === null ? 'none' : String(observed.providerPid)})`
+      + ` · descendants ${observed.descendantRecord}(${String(observed.descendantCount)})`
+      + ` · workspace ${observed.workspacePresent ? 'present' : 'missing'}`
+      + ` · quiescenceProven=${String(observed.quiescenceProven)}`
+      + ` · signalsSent=${String(observed.signalsSent)}`);
+    if (view.outcome === 'REFUSED') {
+      console.error(`[recovery] refused: ${view.code ?? 'unknown'} — ${view.detail}`);
+      process.exit(1);
+    }
+  } else if (commandId === 'task.pause' || commandId === 'task.cancel'
+    || commandId === 'task.archive' || commandId === 'task.unarchive') {
     const [taskId, versionText, ...extra] = remainingArguments;
     const expectedVersion = Number(versionText);
     if (firstArgument === undefined || taskId === undefined || versionText === undefined
       || extra.length !== 0 || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
-    const command = action === 'pause' ? 'task.pause' as const
-      : action === 'cancel' ? 'task.cancel' as const
-      : action === 'archive' ? 'task.archive' as const
+    const command = commandId === 'task.pause' ? 'task.pause' as const
+      : commandId === 'task.cancel' ? 'task.cancel' as const
+      : commandId === 'task.archive' ? 'task.archive' as const
       : 'task.unarchive' as const;
     const result = await call({
       command,
@@ -2288,7 +1992,7 @@ try {
     print(result);
     // A stop the Runtime could not prove is a real failure for scripts, not a success.
     if (result.stop === 'UNCERTAIN') process.exit(1);
-  } else if (group === 'task' && action === 'resume') {
+  } else if (commandId === 'task.resume') {
     const [taskId, versionText, ...extra] = remainingArguments;
     const expectedVersion = Number(versionText);
     if (firstArgument === undefined || taskId === undefined || versionText === undefined
@@ -2321,7 +2025,7 @@ try {
       }
       throw error;
     }
-  } else if (group === 'task' && action === 'retry') {
+  } else if (commandId === 'task.retry') {
     const [taskId, versionText, ...flags] = remainingArguments;
     const expectedVersion = Number(versionText);
     if (firstArgument === undefined || taskId === undefined || versionText === undefined
@@ -2353,7 +2057,7 @@ try {
         + `${result.start.code ?? 'unknown'} — ${result.start.detail}`);
       process.exit(1);
     }
-  } else if (group === 'task' && action === 'status') {
+  } else if (commandId === 'task.status') {
     const [taskId, ...flags] = remainingArguments;
     if (firstArgument === undefined || taskId === undefined) usage();
     // The JSON view is this command's only output; `--json` is accepted so a script can say what it
@@ -2363,16 +2067,16 @@ try {
     printCompletionNotes(view);
     await printProseQuestionWaits({ projectId: firstArgument, view, call });
     print(view);
-  } else if (group === 'task' && action === 'transcript') {
+  } else if (commandId === 'task.transcript') {
     const [taskId, ...flags] = remainingArguments;
     if (firstArgument === undefined || taskId === undefined) usage();
     const parsed = parseTranscriptFlags(flags);
     if (parsed.reverse && parsed.json) usage();
     await transcriptForTask(firstArgument, taskId, parsed);
-  } else if (group === 'session' && action === 'transcript') {
-    // `session transcript part <session-id> <entry-id> <part-index>` is a three-level command, so
-    // the subcommand lands in firstArgument and the session ID is the first remaining argument.
-    if (firstArgument === 'part') {
+  } else if (commandId === 'session.transcript' || commandId === 'session.transcript.part') {
+    // `session transcript part <session-id> <entry-id> <part-index>` is a four-level path; the tree
+    // already told us which of the two forms this is, so `part` can never be read as a session id.
+    if (commandId === 'session.transcript.part') {
       const [sessionId, entryId, partIndexText, ...extra] = remainingArguments;
       const partIndex = Number(partIndexText);
       if (sessionId === undefined || entryId === undefined || partIndexText === undefined
@@ -2391,7 +2095,7 @@ try {
       if (flags.json) print(read.view);
       else printTranscript(read, sessionId, flags.reverse);
     }
-  } else if (group === 'session' && action === 'guide') {
+  } else if (commandId === 'session.guide') {
     // Session Guidance (ADR-0057): the other input channel of ADR-0010 D02. One command hands one
     // message to a running conversation and records the fact it produced; it never creates a
     // TaskRevision, never moves the Task's revision and never invalidates a verification. The exit
@@ -2421,30 +2125,34 @@ try {
     console.error(`[guidance] the guidance is recorded but was not handed over: `
       + `${recorded.code ?? recorded.outcome} — ${recorded.detail}`);
     process.exit(1);
-  } else if (group === 'session' && action === 'guidance') {
+  } else if (commandId === 'session.guidance') {
     // Read-only side of the same face: the durable record, its append-only attempt ledger and the
     // artifact each Execution was launched with. `--json` is the default projection, as everywhere on
     // this command surface.
     const subcommand = firstArgument;
-    if (subcommand === 'list') {
+    const child = childIdOf('session.guidance', subcommand);
+    if (child === null) usage();
+    if (child === 'session.guidance.list') {
       const [projectId, taskId, ...extra] = remainingArguments;
       if (projectId === undefined || taskId === undefined) usage();
       for (const flag of extra) if (flag !== '--json') usage();
       print(await call({ command: 'session.guidance.list', projectId, taskId }));
-    } else if (subcommand === 'get') {
+    } else if (child === 'session.guidance.get') {
       const [projectId, guidanceId, ...extra] = remainingArguments;
       if (projectId === undefined || guidanceId === undefined) usage();
       for (const flag of extra) if (flag !== '--json') usage();
       print(await call({ command: 'session.guidance.get', projectId, guidanceId }));
     } else {
-      usage();
+      unhandledNode(child);
     }
-  } else if (group === 'session' && action === 'handoff') {
+  } else if (commandId === 'session.handoff') {
     // `session handoff` is the control face of the Runtime-side handoff contract (ADR-0023): the
     // incarnation history, the single writer lease, the handoff fence and the admission decision.
     // Every subcommand prints the same JSON projection the Runtime returns; `--json` is accepted and
     // is also the default, so a script can state its intent without depending on that default.
     const subcommand = firstArgument;
+    const child = childIdOf('session.handoff', subcommand);
+    if (child === null) usage();
     const tokens = remainingArguments;
     // Flags are consumed with their value, so `--holder probe` is never mistaken for positionals;
     // anything else starting with `--` is a usage error rather than a silently ignored flag.
@@ -2484,11 +2192,11 @@ try {
       if (token.startsWith('--')) usage();
       positional.push(token);
     }
-    if (subcommand === 'status') {
+    if (child === 'session.handoff.status') {
       const [projectId, sessionId, ...extra] = positional;
       if (projectId === undefined || sessionId === undefined || extra.length !== 0) usage();
       print(await call({ command: 'session.handoff.status', projectId, sessionId }));
-    } else if (subcommand === 'request') {
+    } else if (child === 'session.handoff.request') {
       const [projectId, sessionId, kind, ...extra] = positional;
       if (projectId === undefined || sessionId === undefined
         || (kind !== 'takeover' && kind !== 'return') || extra.length !== 0) usage();
@@ -2499,11 +2207,11 @@ try {
         sessionId,
         kind: kind === 'takeover' ? 'TAKEOVER' : 'RETURN',
       }));
-    } else if (subcommand === 'cancel') {
+    } else if (child === 'session.handoff.cancel') {
       const [projectId, sessionId, ...extra] = positional;
       if (projectId === undefined || sessionId === undefined || extra.length !== 0) usage();
       print(await call({ command: 'session.handoff.cancel', projectId, sessionId }));
-    } else if (subcommand === 'writer') {
+    } else if (child === 'session.handoff.writer') {
       // The writer lease is the Runtime's answer to Pi having no session-file lock: competition is a
       // refusal (exit 1 with ATTACHMENT_BUSY), never a silent queue.
       const [writerAction, projectId, sessionId, ...extra] = positional;
@@ -2527,7 +2235,7 @@ try {
         // Not releasing the lease is a real failure for a script: the Session keeps its writer.
         if (!released.released) process.exit(1);
       }
-    } else if (subcommand === 'admit') {
+    } else if (child === 'session.handoff.admit') {
       const [projectId, sessionId, ...extra] = positional;
       if (projectId === undefined || sessionId === undefined || extra.length !== 0) usage();
       const admission = await call({
@@ -2539,7 +2247,7 @@ try {
       print(admission);
       // A refused admission keeps the predecessor as the writer; exit code 0 would claim otherwise.
       if (!admission.admitted) process.exit(1);
-    } else if (subcommand === 'attach') {
+    } else if (child === 'session.handoff.attach') {
       const [projectId, sessionId, ...extra] = positional;
       if (projectId === undefined || sessionId === undefined || extra.length !== 0) usage();
       if (holderRef === undefined) usage();
@@ -2555,7 +2263,7 @@ try {
       print(attached);
       // The attachment id and the cursor are what a script needs to detach / keep reading.
       process.exitCode = 0;
-    } else if (subcommand === 'detach') {
+    } else if (child === 'session.handoff.detach') {
       const [projectId, sessionId, ...extra] = positional;
       if (projectId === undefined || sessionId === undefined || extra.length !== 0) usage();
       if (holderRef === undefined) usage();
@@ -2570,7 +2278,7 @@ try {
       print(detached);
       // Detaching something this holder does not own is a refusal, not a silent success.
       if (!detached.detached) process.exit(1);
-    } else if (subcommand === 'release') {
+    } else if (child === 'session.handoff.release') {
       const [projectId, sessionId, ...extra] = positional;
       if (projectId === undefined || sessionId === undefined || extra.length !== 0) usage();
       const released = await call({
@@ -2586,7 +2294,7 @@ try {
       if (!released.released || (released.successor !== null && !released.successor.admitted)) {
         process.exit(1);
       }
-    } else if (subcommand === 'terminal') {
+    } else if (child === 'session.handoff.terminal') {
       // The projected terminal stream is the CLI-complete form of the native terminal: reading it is
       // a normal command with a stable cursor, writing to it is input, and resizing it is a fact about
       // the terminal device. None of the three is an approval channel.
@@ -2636,9 +2344,9 @@ try {
         if (resized.applied !== 'APPLIED') process.exit(1);
       }
     } else {
-      usage();
+      unhandledNode(child);
     }
-  } else if (group === 'task' && action === 'run') {
+  } else if (commandId === 'task.run') {
     const [taskId, versionText, ...flags] = remainingArguments;
     const expectedTaskVersion = Number(versionText);
     if (firstArgument === undefined || taskId === undefined || versionText === undefined
@@ -2672,7 +2380,7 @@ try {
       console.error(`[scheduler] refused: ${result.code ?? 'unknown'} — ${result.detail}`);
       process.exit(1);
     }
-  } else if (group === 'task' && action === 'verify') {
+  } else if (commandId === 'task.verify') {
     const [taskId, ...rest] = remainingArguments;
     if (firstArgument === undefined || taskId === undefined) usage();
     let background = false;
@@ -2717,12 +2425,14 @@ try {
     } else if (report.state !== 'PASSED') {
       process.exit(1);
     }
-  } else if (group === 'task' && action === 'tests') {
+  } else if (commandId === 'task.tests') {
     // `task tests <subcommand> …` lands the subcommand in firstArgument. The plan is a repository
     // file (`--json` is the machine format for every subcommand); recording it is what makes it the
     // command set verification runs, and each record is append-only (ADR-0038/0039).
     const subcommand = firstArgument;
-    if (subcommand === 'record') {
+    const child = childIdOf('task.tests', subcommand);
+    if (child === null) usage();
+    if (child === 'task.tests.record') {
       const split = splitFlagTokens(remainingArguments,
         ['--commit', '--expected-plan-digest'], ['--json']);
       const [projectId, taskId, ...extra] = split.positionals;
@@ -2746,7 +2456,7 @@ try {
       if (recorded.replacedExistingScope) {
         console.error('已追加新的定向测试计划记录；旧记录保留为审计，本次范围变化不是静默生效。');
       }
-    } else if (subcommand === 'show') {
+    } else if (child === 'task.tests.show') {
       const [projectId, taskId, ...flags] = remainingArguments;
       if (projectId === undefined || taskId === undefined) usage();
       jsonOnlyFlag(flags);
@@ -2755,7 +2465,7 @@ try {
       if (plan === null) {
         console.error(`该 Task 没有已记录的定向测试计划；\`task verify\` 会用固定项目策略。`);
       }
-    } else if (subcommand === 'history') {
+    } else if (child === 'task.tests.history') {
       const split = splitFlagTokens(remainingArguments, ['--limit'], ['--json']);
       const [projectId, taskId, ...extra] = split.positionals;
       if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
@@ -2766,30 +2476,32 @@ try {
         taskId,
         limit: limit === undefined ? 50 : Number(limit),
       }));
-    } else usage();
-  } else if (group === 'task' && action === 'verification') {
+    } else unhandledNode(child);
+  } else if (commandId === 'task.verification.list') {
     // `task verification <subcommand> …` lands the subcommand in firstArgument.
     const [projectId, taskId, ...extra] = remainingArguments;
     if (firstArgument !== 'list' || projectId === undefined || taskId === undefined
       || extra.length !== 0) usage();
     print(await call({ command: 'task.verification.list', projectId, taskId }));
-  } else if (group === 'task' && action === 'operation') {
+  } else if (commandId === 'task.operation') {
     // `task operation <subcommand> …` is a three-level command, so the subcommand lands in
     // firstArgument and the project ID is the first remaining argument.
     const subcommand = firstArgument;
-    if (subcommand === 'list') {
+    const child = childIdOf('task.operation', subcommand);
+    if (child === null) usage();
+    if (child === 'task.operation.list') {
       const [projectId, taskId, ...flags] = remainingArguments;
       if (projectId === undefined || taskId === undefined) usage();
       const json = jsonOnlyFlag(flags);
       const listed = await call({ command: 'task.operation.list', projectId, taskId });
       printOperations(listed as OperationView[], json);
-    } else if (subcommand === 'get') {
+    } else if (child === 'task.operation.get') {
       const [projectId, operationId, ...flags] = remainingArguments;
       if (projectId === undefined || operationId === undefined) usage();
       const json = jsonOnlyFlag(flags);
       const read = await call({ command: 'task.operation.get', projectId, operationId });
       if (json) print(read); else printOperation(read as OperationView);
-    } else if (subcommand === 'cancel') {
+    } else if (child === 'task.operation.cancel') {
       const [projectId, taskId, operationId, ...flags] = remainingArguments;
       if (projectId === undefined || taskId === undefined || operationId === undefined) usage();
       const json = jsonOnlyFlag(flags);
@@ -2810,21 +2522,23 @@ try {
       // Operation was left for a human, so the exit code must not report success.
       if (outcome.stop === 'UNCERTAIN') process.exit(1);
     } else {
-      usage();
+      unhandledNode(child);
     }
-  } else if (group === 'task' && action === 'depends') {
+  } else if (commandId === 'task.depends') {
     // `task depends add|remove|list` is a three-level command, so the subcommand lands in
     // firstArgument. `add`/`remove` are commands (JSON result); `list` is a read that prints a human
     // view by default and the Runtime projection with `--json`.
     const subcommand = firstArgument;
-    if (subcommand === 'add' || subcommand === 'remove') {
+    const child = childIdOf('task.depends', subcommand);
+    if (child === null) usage();
+    if (child === 'task.depends.add' || child === 'task.depends.remove') {
       // Flags may appear anywhere, so the arguments are walked in order instead of by position.
       const positionals: string[] = [];
       let requiredRevisionId: string | undefined;
       for (let index = 0; index < remainingArguments.length; index += 1) {
         const token = remainingArguments[index] as string;
         if (token === '--json') continue;
-        if (subcommand === 'add' && token === '--revision') {
+        if (child === 'task.depends.add' && token === '--revision') {
           const value = remainingArguments[index + 1];
           if (value === undefined) usage();
           requiredRevisionId = value;
@@ -2840,7 +2554,7 @@ try {
         || prerequisiteTaskId === undefined || extra.length !== 0
         || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
       const result = await call({
-        command: subcommand === 'add' ? 'task.depends.add' as const : 'task.depends.remove' as const,
+        command: child === 'task.depends.add' ? 'task.depends.add' as const : 'task.depends.remove' as const,
         commandId: crypto.randomUUID(),
         projectId,
         taskId,
@@ -2849,7 +2563,7 @@ try {
         ...(requiredRevisionId === undefined ? {} : { requiredRevisionId }),
       });
       print(result);
-    } else if (subcommand === 'list') {
+    } else if (child === 'task.depends.list') {
       const positionals: string[] = [];
       let json = false;
       for (const token of remainingArguments) {
@@ -2884,13 +2598,15 @@ try {
         }
       }
     } else {
-      usage();
+      unhandledNode(child);
     }
-  } else if (group === 'task' && action === 'result') {
+  } else if (commandId === 'task.result') {
     // `task result <subcommand> …` is a three-level command, so the subcommand lands in
     // firstArgument and the project ID is the first remaining argument.
     const subcommand = firstArgument;
-    if (subcommand === 'capture') {
+    const child = childIdOf('task.result', subcommand);
+    if (child === null) usage();
+    if (child === 'task.result.capture') {
       const [projectId, taskId, executionId, ...extra] = remainingArguments;
       if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
       print(await call({
@@ -2900,7 +2616,7 @@ try {
         taskId,
         ...(executionId === undefined ? {} : { executionId }),
       }));
-    } else if (subcommand === 'prepare') {
+    } else if (child === 'task.result.prepare') {
       const [projectId, taskId, executionId, ...extra] = remainingArguments;
       if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
       print(await call({
@@ -2910,7 +2626,7 @@ try {
         taskId,
         ...(executionId === undefined ? {} : { executionId }),
       }));
-    } else if (subcommand === 'commit') {
+    } else if (child === 'task.result.commit') {
       const [projectId, taskId, authorizationId, ...extra] = remainingArguments;
       if (projectId === undefined || taskId === undefined || authorizationId === undefined) usage();
       if (!extra.includes('--confirm') || extra.some((argument) => argument !== '--confirm')) usage();
@@ -2923,9 +2639,9 @@ try {
         confirm: true,
       }));
     } else {
-      usage();
+      unhandledNode(child);
     }
-  } else if (group === 'events' && (action === 'list' || action === 'tail')) {
+  } else if (commandId === 'events.list' || commandId === 'events.tail') {
     let projectId: string | undefined;
     let sinceSequence: number | undefined;
     let limit: number | undefined;
@@ -2968,10 +2684,10 @@ try {
         ...(sinceSequence === undefined ? {} : { sinceSequence }),
       });
     }
-  } else if (group === 'attention' && action === 'list') {
+  } else if (commandId === 'attention.list') {
     if (firstArgument === undefined || remainingArguments.length !== 0) usage();
     print(await call({ command: 'attention.list', projectId: firstArgument }));
-  } else if (group === 'attention' && action === 'answer') {
+  } else if (commandId === 'attention.answer') {
     const [attentionId, answerType, ...answerArguments] = remainingArguments;
     if (firstArgument === undefined || attentionId === undefined) usage();
     print(await call({
@@ -2981,7 +2697,7 @@ try {
       attentionId,
       answer: parseAttentionAnswer(answerType, answerArguments),
     }));
-  } else if (group === 'attention' && action === 'resolve') {
+  } else if (commandId === 'attention.resolve') {
     // A prose-question wait has no provider dialog behind it: the Agent's process already exited.
     // This command records how the wait ended instead of pretending an answer was delivered, so
     // exactly one of `--dismiss` (false alarm) and `--answer <text>` is required, and neither adds
@@ -3021,7 +2737,13 @@ try {
       ...(answer === undefined ? {} : { text: answer }),
       ...(note === undefined ? {} : { note }),
     }));
-  } else if (group === 'settings' && action === 'list') {
+  } else if (commandId === 'runtime.commands') {
+    // The discovery face of the Runtime (ADR-0068). It prints what the Runtime itself says it
+    // accepts, which is derived from the request union and so cannot list a command it lacks.
+    const extra = [firstArgument, ...remainingArguments].filter((token) => token !== undefined);
+    if (extra.length > 1 || (extra.length === 1 && extra[0] !== '--json')) usage();
+    print(await call({ command: 'runtime.commands' }));
+  } else if (commandId === 'settings.list') {
     // The settings overview (ADR-0064): one read that enumerates every Runtime-level setting, so
     // "which settings exist and what are they set to" is answered by the Runtime rather than by a
     // list this client maintains. Human-readable by default — a person asks this question — and
@@ -3033,7 +2755,7 @@ try {
     const view = await call({ command: 'settings.list' }) as SettingsListView;
     if (json) print(view);
     else printSettingsList(view);
-  } else if (group === 'settings' && action === 'permission') {
+  } else if (commandId === 'settings.permission') {
     // The permission mode is a setting (ADR-0011 / ADR-0064), so it is read and written where the
     // other Runtime-level switches are. Only the CLI spelling moved: the Runtime command, its file
     // (`permission-mode.json`) and its zero-confirmation semantics are unchanged.
@@ -3041,18 +2763,20 @@ try {
       .filter((token): token is string => token !== undefined && token !== '--json');
     if (tokens.some((token) => token.startsWith('--'))) usage();
     const [subcommand, mode, ...extra] = tokens;
+    const child = childIdOf('settings.permission', subcommand);
+    if (child === null) usage();
     if (extra.length !== 0) usage();
-    if (subcommand === 'get') {
+    if (child === 'settings.permission.get') {
       if (mode !== undefined) usage();
       print(await call({ command: 'permission.get' }));
-    } else if (subcommand === 'set') {
+    } else if (child === 'settings.permission.set') {
       if (mode === undefined || !['full', 'strict'].includes(mode.toLowerCase())) usage();
       print(await call({
         command: 'permission.set',
         mode: mode.toUpperCase() as 'FULL' | 'STRICT',
       }));
-    } else usage();
-  } else if (group === 'settings' && action === 'prose-question-attention') {
+    } else unhandledNode(child);
+  } else if (commandId === 'settings.prose-question-attention') {
     // The switch that decides whether a prose question becomes a wait. Reading and writing are one
     // command because the setting has exactly three values and no confirmation: `auto` (default),
     // `record-only` (annotate the completion but record no wait), `off` (record nothing).
@@ -3066,22 +2790,26 @@ try {
       if (mode !== 'auto' && mode !== 'record-only' && mode !== 'off') usage();
       print(await call({ command: 'settings.proseQuestionAttention.set', mode }));
     }
-  } else if (group === 'settings' && action === 'concurrency') {
+  } else if (commandId === 'settings.concurrency') {
     // The settings spelling of the one Runtime-wide concurrency limit (ADR-0061 D02). It is a thin
     // alias on purpose: the same story is told by `scheduler capacity`, and duplicating the rule here
     // (or worse, storing the value a second time) is how two readers end up disagreeing about the
     // same limit. The limit is discoverable where a user looks for settings, and it is adjusted in
     // real time — see `runConcurrencyCommand`.
+    const child = childIdOf('settings.concurrency', firstArgument);
+    if (child === null) usage();
     await runConcurrencyCommand([firstArgument, ...remainingArguments]
       .filter((token): token is string => token !== undefined));
-  } else if (group === 'task' && action === 'revision') {
+  } else if (commandId === 'task.revision') {
     // The revision face of PROJECT_SPEC §2.11: creating a revision is one command, and the delivery
     // of that revision into a running Execution is separately readable and separately resolvable. A
     // delivery is never reported as satisfied because the Runtime sent something — the state comes
     // from the recorded ledger, and for an Adapter without an acknowledgement channel it stays
     // visibly unconfirmed until the explicit stop-and-restart records a successor on that revision.
     const subcommand = firstArgument;
-    if (subcommand === 'create') {
+    const child = childIdOf('task.revision', subcommand);
+    if (child === null) usage();
+    if (child === 'task.revision.create') {
       const [projectId, taskId, versionText, ...flagTokens] = remainingArguments;
       const expectedVersion = Number(versionText);
       if (projectId === undefined || taskId === undefined || versionText === undefined
@@ -3097,11 +2825,11 @@ try {
         ...(input.features === undefined ? {} : { features: [...input.features] }),
         reason: input.reason,
       }));
-    } else if (subcommand === 'list') {
+    } else if (child === 'task.revision.list') {
       const [projectId, taskId, ...extra] = remainingArguments;
       if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
       print(await call({ command: 'task.revision.list', projectId, taskId }));
-    } else if (subcommand === 'delivery') {
+    } else if (child === 'task.revision.delivery') {
       const deliveryAction = remainingArguments[0];
       if (deliveryAction === 'list') {
         const [projectId, taskId, ...extra] = remainingArguments.slice(1);
@@ -3150,9 +2878,9 @@ try {
         usage();
       }
     } else {
-      usage();
+      unhandledNode(child);
     }
-  } else if (group === 'task' && action === 'submit') {
+  } else if (commandId === 'task.submit') {
     const [taskId, versionText, ...extra] = remainingArguments;
     const expectedVersion = Number(versionText);
     if (firstArgument === undefined || taskId === undefined || versionText === undefined
@@ -3164,7 +2892,7 @@ try {
       taskId,
       expectedVersion,
     }));
-  } else if (group === 'reclaim') {
+  } else if (commandId === 'reclaim') {
     // `reclaim` is the only destructive command face. `plan` is its read-only dry run and returns
     // exactly the decision shape `apply` records, so a preview can never disagree with the run.
     // Without `--project` (or with `--all-projects`) the command covers every trusted project and
@@ -3172,6 +2900,8 @@ try {
     // names that exact path with `--remove-unregistered` (ADR-0037).
     const [subcommand, ...flagTokens] = [action, firstArgument, ...remainingArguments]
       .filter((token): token is string => token !== undefined);
+    const child = childIdOf('reclaim', subcommand);
+    if (child === null) usage();
     if (subcommand !== 'plan' && subcommand !== 'apply' && subcommand !== 'records') usage();
     let projectId: string | undefined;
     let allProjects = false;
@@ -3219,22 +2949,22 @@ try {
         removeUnregistered.push(value);
         unregistered = true;
         index += 1;
-      } else if (flag === '--source' && value !== undefined && subcommand === 'records') {
+      } else if (flag === '--source' && value !== undefined && child === 'reclaim.records') {
         const normalized = value.toUpperCase();
         if (normalized !== 'ALL' && normalized !== 'REGISTERED'
           && normalized !== 'UNREGISTERED_DIRECTORY') usage();
         source = normalized;
         index += 1;
-      } else if (flag === '--since' && value !== undefined && subcommand === 'records') {
+      } else if (flag === '--since' && value !== undefined && child === 'reclaim.records') {
         since = timestamp(value);
         index += 1;
-      } else if (flag === '--until' && value !== undefined && subcommand === 'records') {
+      } else if (flag === '--until' && value !== undefined && child === 'reclaim.records') {
         until = timestamp(value);
         index += 1;
       } else if (flag === '--json') {
         // Every reclaim subcommand already prints the Runtime result verbatim; the flag is
         // accepted so a script can state its intent without depending on that default.
-      } else if (flag === '--limit' && value !== undefined && subcommand === 'records') {
+      } else if (flag === '--limit' && value !== undefined && child === 'reclaim.records') {
         const parsed = Number(value);
         if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maxReclaimRecordLimit) usage();
         limit = parsed;
@@ -3257,7 +2987,7 @@ try {
       unregistered,
       ...(scanRoot === undefined ? {} : { scanRoot }),
     };
-    if (subcommand === 'plan') {
+    if (child === 'reclaim.plan') {
       const plan = await call({ command: 'reclaim.plan', ...shared,
         ...(kinds.length === 0 ? {} : { kinds }),
         ...(removeUnregistered.length === 0 ? {} : { removeUnregistered }),
@@ -3269,7 +2999,7 @@ try {
       // stderr, so `--json` output stays the only thing a script has to read.
       if (plan.outcome === 'FAILED') process.exit(1);
       if (reclaimableCount(plan) === 0) process.exit(3);
-    } else if (subcommand === 'apply') {
+    } else if (child === 'reclaim.apply') {
       const report = await call({ command: 'reclaim.apply', commandId: crypto.randomUUID(),
         ...shared, ...(kinds.length === 0 ? {} : { kinds }),
         ...(removeUnregistered.length === 0 ? {} : { removeUnregistered }),
@@ -3280,33 +3010,37 @@ try {
       // reclaimed) while one that reclaimed something exits 0.
       if (report.outcome === 'FAILED') process.exit(1);
       if (reclaimedCount(report) === 0) process.exit(3);
-    } else {
+    } else if (child === 'reclaim.records') {
       print(await call({ command: 'reclaim.records', ...scope,
         ...(taskId === undefined ? {} : { taskId }),
         source: source ?? 'ALL',
         ...(since === undefined ? {} : { since }),
         ...(until === undefined ? {} : { until }),
         limit: limit ?? 100 }));
+    } else {
+      unhandledNode(child);
     }
-  } else if (group === 'task' && action === 'schedule') {
+  } else if (commandId === 'task.schedule') {
     // The scheduling engine's command face (FOUNDATION-055). `status` and `plan` observe (plan is the
     // ordered dry run: it reserves nothing and starts nothing), `explain` answers why one Task is not
     // running now, `run` requests a pass of the loop the Runtime also runs on events and on its
     // recovery period, and `clear-unknown` records an explicit single-shot release without starting
     // anything. None of them adds a confirmation step.
     const subcommand = firstArgument;
-    if (subcommand === 'status' || subcommand === 'plan' || subcommand === 'run') {
+    const child = childIdOf('task.schedule', subcommand);
+    if (child === null) usage();
+    if (child === 'task.schedule.status' || child === 'task.schedule.plan' || child === 'task.schedule.run') {
       const split = splitFlagTokens(remainingArguments, ['--adapter'], ['--json']);
       const [projectId, ...extra] = split.positionals;
       if (projectId === undefined || extra.length !== 0) usage();
       const adapterId = split.flags.get('--adapter');
       const adapter = adapterId === undefined ? {} : { adapterId };
-      if (subcommand === 'status') {
+      if (child === 'task.schedule.status') {
         const view = await call({ command: 'task.schedule.status', projectId, ...adapter }) as
           ScheduleOverviewView;
         print(view);
         printOccupierDiagnosticsForCandidates(projectId, view.candidates);
-      } else if (subcommand === 'plan') {
+      } else if (child === 'task.schedule.plan') {
         // `plan` is the dry run of `status`, so it answers with the same overview shape (dryRun: true).
         const overview = await call({ command: 'task.schedule.plan', projectId, ...adapter }) as
           ScheduleOverviewView;
@@ -3330,7 +3064,7 @@ try {
           printOccupierDiagnosticsForCandidates(projectId, project.candidates);
         }
       }
-    } else if (subcommand === 'explain') {
+    } else if (child === 'task.schedule.explain') {
       const split = splitFlagTokens(remainingArguments, ['--adapter'], ['--json']);
       const [projectId, taskId, ...extra] = split.positionals;
       if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
@@ -3349,7 +3083,7 @@ try {
       // state that is not schedulable at all).
       if (view.decision === 'WAIT_CONFLICT' || view.decision === 'WAIT_CAPACITY') process.exit(3);
       if (view.decision === 'BLOCKED' || view.decision === 'NOT_A_CANDIDATE') process.exit(1);
-    } else if (subcommand === 'clear-unknown') {
+    } else if (child === 'task.schedule.clear-unknown') {
       const split = splitFlagTokens(remainingArguments, [], ['--json']);
       const [projectId, taskId, ...extra] = split.positionals;
       if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
@@ -3364,9 +3098,9 @@ try {
       // only, so releasing it is refused with exit 1 instead of pretending it worked.
       if (released.state === 'CONFLICTING') process.exit(1);
     } else {
-      usage();
+      unhandledNode(child);
     }
-  } else if (group === 'scheduler') {
+  } else if (commandId === 'scheduler') {
     // Capacity and slot reservations (FOUNDATION-054 / ADR-0032). This is the only scheduler command
     // group in this lane: candidate ordering, ticks and `task schedule *` belong to the scheduling
     // engine, and `project impact *` to the analyzer. A capacity wait is reported as a wait (exit
@@ -3374,7 +3108,9 @@ try {
     // error with a stable code and exit code 1.
     const [subcommand, ...tokens] = [action, firstArgument, ...remainingArguments]
       .filter((token): token is string => token !== undefined);
-    if (subcommand === 'control') {
+    const child = childIdOf('scheduler', subcommand);
+    if (child === null) usage();
+    if (child === 'scheduler.control') {
       // The Runtime global load control (FOUNDATION-097 / ADR-0061 D09). These commands belong to no
       // Project: the barrier is host-wide. `status` and `reconcile` only observe; `pause`/`resume`
       // are the explicit user command themselves (zero confirmation, in FULL and STRICT alike), and
@@ -3407,11 +3143,11 @@ try {
       } else {
         usage();
       }
-    } else if (subcommand === 'capacity') {
+    } else if (child === 'scheduler.capacity') {
       // The Runtime-wide capacity face (ADR-0061 D02). `settings concurrency` is the same command
       // under its settings spelling — see `runConcurrencyCommand`.
       await runConcurrencyCommand(tokens);
-    } else if (subcommand === 'reservations') {
+    } else if (child === 'scheduler.reservations') {
       const split = splitFlagTokens(tokens,
         ['--task', '--revision', '--adapter', '--reason', '--limit', '--snapshot'],
         ['--include-released', '--json']);
@@ -3520,12 +3256,15 @@ try {
         usage();
       }
     } else {
-      usage();
+      unhandledNode(child);
     }
   } else {
-    usage();
+    // `tsc` proves this is unreachable: every node the resolver can return is compared above.
+    assertNever(commandId);
   }
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);
 }
+
+

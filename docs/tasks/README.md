@@ -8314,6 +8314,90 @@ ADR-0062 标 Superseded by ADR-0066。
 
 边界：没有运行、构建或验证保留的 Web UI 源码；这正是 ADR-0067 的范围，不能据此声称 UI 仍可运行。已有 `$CODEESTRA_HOME/ui-settings.json` 不删除、不迁移，当前 Runtime 忽略它。重新启用 Web UI 必须另立 ADR 并恢复契约、安全边界、文档与测试。
 
+## 用户任务 — CLI 每一层自描述，且清单与实际命令同源（ADR-0068，无 schema 变更）
+
+用户 2026-09-17 的要求：**CLI 的每一层都需要有总结这一层有哪些命令以及这些命令大致功能范围的命令，
+这个命令要内恰；这个准则是基本准则，可以写入宪法。**
+
+四轮 A/B/C 选择的结果：交付到「宪法 + ADR + 实现」；拼写用 `help` 动作 + `--help`/`-h` 别名；
+长文本全搬进 `help`、**错误路径只给一行**；原则覆盖 CLI + Runtime 命令面 + 文档同源校验；
+并**顺手修掉**勘察时发现的 `task recover` 缺陷。
+
+### 勘察发现（真实缺陷，不是推断）
+
+`codeestra task recover <project> <task> <version>` **从来不能执行**：CLI 没有分发分支，落到链尾的 `usage()`，
+退出码 2、stderr 405 行用法文本（实测）。但 `usage()` 第 1049 行把它当已实现命令列出，五篇用户文档在教用户敲它，
+ADR-0055 与 FOUNDATION-086 声称命令面已实现，Runtime 的 `case 'task.recover'`、契约、storage 与 8 项 service 测试都在。
+
+`git show 3d31533`（FOUNDATION-086 的代码提交）显示：那次只加了 `usage()` 文本与 Runtime 实现，**唯独漏了 CLI 分支**；
+该格的定向测试全部直接打 service/Runtime，没有一条走 CLI 路径，所以漂移没被发现。这是「清单靠人同步」的必然结果，
+也是 ADR-0068 的第一个证据。同类事故还有 `e0b2224`（模板字符串里列着已删除的集成/提升命令）。
+
+### 已实现
+
+| 位置 | 改动 |
+|---|---|
+| `PROJECT_SPEC.md` §1.1 | **新增第 4 条第一原则**（CLI 每一层自描述且与实际命令同源）；状态段与 §9 的「三条」改为「四条」（ADR-0008 → ADR-0008/0068） |
+| `AGENTS.md` 第一原则 | 同步这条准则（每一层清单同源；「只有源码里有、CLI 进不去」是缺陷） |
+| `docs/decisions/0068-*.md`（新） | ADR-0068：背景、三个方案、D01–D09（含强度边界 D07 与未覆盖处 D08） |
+| `docs/decisions/README.md` | 索引新增 ADR-0068 与「当前有效语义」的 CLI 自描述条目 |
+| `apps/cli/src/command-tree.ts`（新，约 1500 行） | **唯一命令清单**：134 个节点（103 条命令 + 31 个组，最深 4 层）、每节点一行 `summary`、`unit` 标记、`runtime` 映射、旧 `usage()` 原文 `detail`；解析器 `resolveCommand`、`childIdOf`、渲染器 `helpViewOf`/`renderHelp`、类型 `ChainId`/`DirectChildIds` |
+| `apps/cli/src/main.ts` | 405 行 `usage()` 模板整体删除，长文本搬进命令树；新 `usage()` 一行（用法行 + `run \`<路径> help\``）；`UNKNOWN_COMMAND`/缺子命令同样一行退 2；`unhandledNode` → `UNHANDLED_COMMAND` 退 70；39 个分发分支改为 `commandId === '<tree id>'` 且链尾 `assertNever`；16 个 unit 分支用 `childIdOf` 解析子命令（子命令名编译期校验、缺分支运行时大声失败——`agent config bogus` 以前静默退 0）；新增 `help` 与 `runtime commands` 两个命令；**补上 `task recover` 分支**（ADR-0055 的行为：只读事实、拒绝退 1、`[recovery] observed:` 观测行、绝不发信号/移动工作树/声称静止） |
+| `packages/contracts/src/index.ts` + `runtime-commands.ts`（新） | 新 Runtime 命令 `runtime.commands`：命令名列表从 `runtimeRequestSchema` 自身派生，描述是 `Record<RuntimeRequest['command'], RuntimeCommandInfo>`（98 条，缺一条就编译不过） |
+| `apps/runtime/src/main.ts` | `case 'runtime.commands'`（按 group + command 排序输出） |
+| `apps/runtime/test/cli-help.test.ts`（新，6 项） | 对**树里每个节点**跑 `<路径> help` 并与树逐项比对（子命令集合 + summary + 计数）；`help`/`<路径> help`/`--help`/`-h` 等价；`--json` 形状；**不启动 Runtime**（无 socket/lock）；未知命令/裸组/参数错误一行退 2；长文本与 notes 可达 |
+| `apps/runtime/test/cli-command-surface.test.ts`（新，5 项） | 节点形状与深度上界；解析器对每个路径成立；**每个 Runtime 命令都能追到 CLI 节点且其名字作为字面量出现在 CLI 代码里**（抓住 `task recover` 的那条）；`docs/guides/cli` 覆盖每条命令 |
+| `apps/runtime/test/cli-task-recover.test.ts`（新，2 项） | 从真实 CLI 到达 Runtime 的 reconcile（不是退 2），并且不写任何行；`task recover` 保留自己的用法错误与 help |
+| `docs/guides/cli/runtime.md` | §2 补 `agent plugins list\|select`（此前 `docs/guides/cli/` 完全没有这一节，是新校验暴露的真实缺口）；**新增 §22**：`help` 三种拼写、`--json`、不启动 Runtime、`runtime commands`、以及「用法错误一行」的新行为 |
+| `docs/guides/cli/README.md` | §0.1 增「问那一层」的指引；§0.2 的退出码 2 改为「一行 + 指向 help」；索引里 runtime.md 的覆盖范围补 §2 `agent plugins` 与 §22 |
+| `docs/guides/cli-reference.md` | 对照表新增 §22 一行、§2 改写为含 `agent plugins`；头部补本次修订说明 |
+| `docs/guides/manual.md` | §13.2 的退出码 2 行为 + 「不知道有哪些命令就问那一层」；§13.3 补一行「想知道 CLI 到底有哪些命令」 |
+| `docs/guides/features.md` | 能力表新增「CLI 自描述」一行 |
+| `docs/guides/troubleshooting.md` | §2 稳定码表新增 `UNKNOWN_COMMAND`/`USAGE`/`UNHANDLED_COMMAND`（含 70 的含义与「这是缺陷」的口径）；历史小节加「后记（ADR-0068）」说明 `usage()` 已被命令树取代 |
+| `docs/guides/cli/integration-dag-scheduler.md` | 两处「已列入 `usage()`」改为命令清单 + 命令树口径（历史事实不改写） |
+| `.codeestra/tests.json` | 本格定向范围（ADR-0038）：typecheck + 三个新测试 + CLI 命令面 e2e 全量（分发链被整体改写，故回归面取 CLI e2e 全体） |
+
+### 迁移无损核对
+
+旧 `usage()` 的模板字面量共 382 行非空文本。逐行核对：**每一行都能在 `apps/cli/src/command-tree.ts` 里找到**
+（0 行丢失）。三处细节按格式拆分：命令块首行 → `usage`；`[`/`<`/带 `<`/`[` 的 `--` 续行 → 并进 `usage`；
+`#` 注释与主题段落 → `detail`；两条不属于任何单条命令的段落（ADR-0066 的删除说明、ADR-0038 的验证成本说明）
+落在 `commandNotes`，由顶层 `help` 打印。
+
+### 实际验证（定向，ADR-0038）
+
+- `bun run typecheck`：通过（全仓 `tsc`；本格新增/改动了跨包公共类型——契约的 `runtime.commands` 与视图、
+  CLI 命令树的 `ChainId` 推导。**过程中它确实拦住了真实错误**：`ChainId` 的 `assertNever` 曾精确报出
+  「`task.recover` 未在分发链里比较」，`runtime.commands` 未加入契约 union 时也直接编译失败）。
+- `bun test apps/runtime/test/cli-help.test.ts apps/runtime/test/cli-command-surface.test.ts apps/runtime/test/cli-task-recover.test.ts`：
+  **13 pass / 0 fail**（其中 help 一致性一项对 134 个节点各起一个 CLI 进程）。
+- **CLI 命令面 e2e 全量回归**：`bun test apps/runtime/test/cli-*.test.ts` → **125 pass / 0 fail**（31 个文件，238.22s，2985 个断言）。
+  这一轮是在最后一次代码改动（`status` 分支补回「多余参数即用法错误」——旧守卫 `action === undefined` 在做这件事，
+  改成 tree id 守卫后必须由分支自己做，`status extra` 曾一度静默退 0）之后重跑的。
+- `bun test packages/contracts/test`：**43 pass / 0 fail**（契约 union 改了）。
+- 冒烟（人工，非自动化断言）：`help`、`task help`、`task revision help`、`task revision delivery help`、
+  `scheduler reservations help`、`help task run --json`、`session handoff --help` 均为退出码 0；
+  `task recoverr …` / `task` / 空参数 / `task list x y --bogus` / `status extra` / `project list x` 均为退出码 2 且 stderr 一行；
+  `runtime commands` 返回 98 条（`runtime.commands` 自己也列在内）。
+- **未跑**：`bun run check` / `just verify`（开发分支禁止全量，ADR-0038）；`apps/ui` 相关（ADR-0067 已移出默认检查）。
+- 文档没做 UI 验证（本次不涉及 UI），`docs/guides/**` 的**版本/校对头按 ADR-0050 D02 保留在最后一次 dev 基线**
+  （`dev@de03448`）：本格还在 feature 分支上，头记录的「本目录最后一次校对的 dev 基线」不应提前。
+
+### 剩余问题与如实说明
+
+1. **内层穷尽性只到「名字编译期 + 缺分支运行时大声失败」**（ADR-0068 D08）：顶层链由 `assertNever` 编译期穷尽；
+   unit 内部的子命令链用 `childIdOf` 校验名字与拒绝未知子命令，漏分支则由 `cli-help`/`cli-command-surface`
+   的「每个节点都必须能解析」与运行时 `UNHANDLED_COMMAND` 兜底。把它做成内层 `switch` + `assertNever` 是下一步；
+   `settings.concurrency`（转发给共享解析函数）留在同一兜底之下。
+2. **文档检查只证明「有落点」，不证明「没写错」**：`cli-command-surface` 的文档断言是覆盖断言；
+   某一节是否过时仍属 ADR-0050 的人工纪律。
+3. **`task recover` 对「没有 Execution 的 Task」回 `NOT_FOUND: Task was not found in this project`**
+   （查询 join 了 `executions`）：对一条存在的 Task 说「没找到」文案不准确。这是 ADR-0055 服务的既有行为，
+   不在本格改动范围；本格只保证命令面可达（并把这条写进 ADR-0068 的已知遗留）。
+4. **`help` 的一致性测试每个节点起一个进程**（134 次 spawn，约 6.5s）：够快但可以更省；没有优化。
+5. **未合入 `dev`、未提交、未提升**：本格只在 `Loyage/cli_list` 工作树上完成并验证。合入 `dev` 是人工 Git 动作；
+   合入后按 ADR-0038 在精确 dev 候选上跑全量，再按 `AGENTS.md` 的人工四步走 `dev → main`。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），

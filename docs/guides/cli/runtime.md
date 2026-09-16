@@ -87,6 +87,21 @@ bun run codeestra agent config clear [--project <project-id>] [--adapter <id>]
 **只影响此后新建的 Session**，并把当时生效的值记录在 Execution 上（用 `task status` 查看）。
 Adapter 不支持的字段会被拒绝而不是静默忽略。稳定码：`INVALID_AGENT_CONFIGURATION`、`UNKNOWN_ADAPTER`。
 
+### `agent plugins list|select`（ADR-0044）
+
+```sh
+bun run codeestra agent plugins list   [--project <project-id>] [--adapter <id>] [--json]
+bun run codeestra agent plugins select [--project <project-id>] [--adapter <id>]
+  [--extension <path>]… [--skill <path>]… [--prompt-template <path>]… [--theme <path>]…
+  [--clear] [--json]
+```
+
+- 四类资源就是用户批准的范围：extensions、skills、prompt templates、themes。
+- `select` **整份替换**选择（可重复 flag，而不是 JSON 文件，所以路径不需要第二套转义规则）；`--clear` 清空选择。
+- 每个被选路径在写入前与 Session 启动前都会被核验；不可加载的路径以稳定码拒绝，且**不创建 Execution**。
+- `adapters` 中对插件选择声明为不支持时，`select` 以稳定码拒绝而不是假装成功。
+- 退出码：`0` 已应用，`1` 被拒（路径不可用或 Adapter 不支持插件选择），`2` 用法错误。
+
 ---
 
 ## 19. `settings`
@@ -168,3 +183,37 @@ ADR-0067 起 `settings ui list|get|set|reset` 是未知命令（退出码 2）�
 
 ---
 
+## 22. `help` 与 `runtime commands`（自描述，ADR-0068）
+
+```sh
+bun run codeestra help [<命令路径…>] [--json]
+bun run codeestra <命令路径…> help      # 等价写法
+bun run codeestra <命令路径…> --help    # 与 -h 等价
+bun run codeestra runtime commands [--json]
+```
+
+命令树是 CLI 的**唯一**命令清单：`help` 从它生成，argv 也由它解析，测试再拿它核对
+`docs/guides/cli` 与 Runtime 的 versioned 命令面。因此清单**不可能**列出不存在的命令，也不可能漏掉存在的命令。
+每个节点都有一行「大致功能范围」；`<路径> help` 打印该层的子命令清单与它自己的长说明。
+
+- **三层写法等价**：`codeestra help task revision`、`codeestra task revision help`、`codeestra task revision --help`。
+  `help` 只在**紧跟命令路径的位置**被识别：`task create … --title -h` 是任务详情里恰好以 `-h` 开头，不是帮助请求。
+- **`help` 不连 Runtime、不启动 Runtime、不写任何东西**（退出码 0）。找不到它要帮助的东西时退 `2`。
+- `--json` 打印机器可读的那一份（`path`/`kind`/`summary`/`usage`/`variants`/`detail`/`children`/`notes`）。
+- **`runtime commands`** 是 Runtime 命令面自身的发现入口：列出这个 Runtime 接受的每一条 versioned 命令、它属于哪个
+  CLI 组、以及一行功能范围。它读的是契约里的 request union（与 Runtime 的 `switch` 同源），所以不会列出 Runtime
+  不接受的命令。**CLI 的每个命令都能追到这里的一条**：Runtime 有而 CLI 没有入口的能力是缺陷（ADR-0068）。
+
+### 用法错误：一行，不再打印整份清单
+
+`0`/`1`/`3` 之外，用法错误（未知命令、缺子命令、多余参数、未知 flag）一律退 **2**，且 stderr 只有**一行**：
+
+```text
+UNKNOWN_COMMAND: `task recoverr` is not a command under `codeestra task` — run `codeestra task help`
+USAGE: bun run codeestra task list <project-id> [--all] — run `codeestra task list help`
+```
+
+旧的 `usage()` 长文本（整份命令清单 + 各主题说明）**已完整搬进命令树**，仍可通过 `help` 读到；错误路径只留一行。
+`UNHANDLED_COMMAND`（退出码 `70`）表示命令树里有这个命令、但分发没有分支——那是 Codeestra 的缺陷，不是用法错误。
+
+---
