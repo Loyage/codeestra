@@ -8314,6 +8314,16 @@ ADR-0062 标 Superseded by ADR-0066。
 
 边界：没有运行、构建或验证保留的 Web UI 源码；这正是 ADR-0067 的范围，不能据此声称 UI 仍可运行。已有 `$CODEESTRA_HOME/ui-settings.json` 不删除、不迁移，当前 Runtime 忽略它。重新启用 Web UI 必须另立 ADR 并恢复契约、安全边界、文档与测试。
 
+提升记录（dev → main，人工四步，ADR-0047）：
+
+- 候选 SHA：`3f5c2b45f3970c8b10cc7f30a0444b9b723ad649`（`feat!: 暂停 Web UI…`），提升前在 dev clone 对该精确 SHA 跑完 `bun run check`（退出码 0，817 pass / 0 fail）。
+- ① 只 push 该候选：`7425556..3f5c2b4 → origin/dev`，读回核对 `origin/dev == 候选 SHA`。
+- ② main clone（`~/Documents/codeestra`）检出干净、在 `main`，`git merge --ff-only` 成功，`main HEAD = 3f5c2b4`。
+- ③ 重启稳定 Runtime：`bun install --frozen-lockfile` → `codeestra stop` → `codeestra status`，`status: READY` 核对通过。
+- ④ 推回 `origin/main`（`7425556..3f5c2b4`）并读回核对，`origin/main == 3f5c2b4`；提升完成。
+- 复核新代码确实在跑：`codeestra status` 不再返回 `uiRunning`；`codeestra ui` 退 2 并打印 usage。
+- 路径说明：本次走的是本仓库人工四步（`just promote-main <SHA>` 封装 ②③④）；未使用产品 `promotion *`（已由 ADR-0066 删除，且本仓库自身提升不得使用它）。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），
