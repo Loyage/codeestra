@@ -1,6 +1,10 @@
 # ADR-0060：被管理项目的 Task 基线是「指定的项目文件夹」；dev clone 变为可选
 
-Status：Accepted（用户 2026-09-16 决策）。**已实现**（FOUNDATION-093，schema **v33**），包括 D01 里的显式 `--base-ref` 覆盖（`task run --base-ref`，已有 workspace 的 Task 以 `TASK_BASE_REF_ALREADY_FIXED` 拒绝而非忽略）、D02（managed 的集成/提升仍以 `DEV_REPO_REQUIRED` 拒绝，`reclaim` 不再要求 dev clone）与 D04 的退役判据重定义（`publishedOnRemote`）。**未做的部分与已知边界**逐条列在 `docs/tasks/README.md` 的 FOUNDATION-093「仍未做」一节（UI 无 base-ref 输入、retry/resume 不接受该 flag、未跑全量），不得当作已完成。
+Status：Accepted（用户 2026-09-16 决策）。**已实现**（FOUNDATION-093，schema **v33**），包括 D01 里的显式 `--base-ref` 覆盖（`task run --base-ref`，已有 workspace 的 Task 以 `TASK_BASE_REF_ALREADY_FIXED` 拒绝而非忽略）、D02（managed 的集成/提升仍以 `DEV_REPO_REQUIRED` 拒绝，`reclaim` 不再要求 dev clone）与 D04 的退役判据重定义（`publishedOnRemote`）。
+
+**修订 2026-09-16（第三轮，用户报缺陷）**：D05 曾把「依赖判定」列入需要长期 `dev` 分支的操作，而依赖判定位于 `task submit` / `task run` / `task depends list` 的**常态路径**上——于是 managed 项目实际**无法 submit/run**，与 D01/D02「managed 的 trust → task → run → verify 常态路径不变」直接矛盾。用户裁决「一般项目根本不需要 dev，取消这个限制」。修订：Task 基线解析、依赖判定、槽位预留、调度启动前重检、影响分析基线、结果 commit 归属、任务级验证与回收一律按本 ADR 的基线/归属规则解析；`DEV_REPO_REQUIRED` 只剩 `task integrate`、`promotion *` 与 `promotion full-suite run`。
+
+**未做的部分与已知边界**逐条列在 `docs/tasks/README.md` 的 FOUNDATION-093「仍未做」一节（UI 无 base-ref 输入、retry/resume 不接受该 flag、未跑全量），不得当作已完成。
 **Amends ADR-0056 的必需性**（`dev_repo_path` 由必需改为可选）与 **ADR-0018/0056 的基线来源**（无 dev clone
 的项目从项目文件夹取基线）。**不放宽任何其它不变量**（不新增确认、不新增门禁、FULL 常态路径仍是 0 步）。
 
@@ -73,7 +77,13 @@ ref 建基线，集成与提升也都写回那个 clone。用户 2026-09-16 更�
 - `TASK_BASE_REF_MISSING`：显式给出的 ref 在该仓库里不存在。
 - `TASK_BASE_REF_NOT_A_BRANCH`：显式给出的 ref 不是本地分支（`refs/heads/…`）。
 - `TASK_BASE_REF_ALREADY_FIXED`：Task 已有记录的 workspace，基线已固定；该 flag 只对新 workspace 生效，**拒绝而不是忽略**。
-- `DEV_REPO_REQUIRED` 保留，但**不再是 trust 的拒绝码**：它只出现在需要长期 `dev` 分支的操作上（`task integrate`、`promotion *`、依赖判定、提升前全量证据）。
+- `DEV_REPO_REQUIRED` 保留，但**不再是 trust 的拒绝码**：它只出现在需要长期 `dev` 分支的操作上（`task integrate`、`promotion *`、提升前全量证据）。
+  **修订（见 Status）**：「依赖判定」已从这份清单里移除——它位于 `task submit`/`task run` 的常态路径上，
+  把它当作 dev-only 会让 managed 项目完全无法启动任何 Task。依赖判定改读「该项目记录的 Task 基线 ref」
+  （有 dev clone = 该 clone 的 `dev`；managed = 项目文件夹当前检出的分支），读不到就按未满足阻塞
+  （`DEV_BASELINE_MISSING`，ADR-0024 的 fail-closed），**不因此拒绝命令**；需要精确拒绝码的启动路径仍由
+  `slot-reservation`/workspace 准备以 `TASK_BASE_REF_*` 拒绝。原因码本身（`DEV_*`）未改名：它们是 ADR-0024
+  记录的有界枚举，改名需要另一次 ADR 修订。
 
 ## Consequences
 
@@ -99,9 +109,13 @@ ref 建基线，集成与提升也都写回那个 clone。用户 2026-09-16 更�
 3. `HEAD` detached：`TASK_BASE_REF_UNRESOLVED` 拒绝，且不留下 workspace 行、不建 worktree。
 4. `--base-ref <ref>` 覆盖成立：基线 ref/commit 等于给定 ref 的读回值；给了不存在的 ref 时以稳定码拒绝。
 5. 记了 dev clone 的项目（含 Codeestra 自身）行为与今天逐条相同：基线仍来自 dev clone 的 `dev`，
-   `task integrate`/`promotion *` 仍可用；managed 项目调用它们仍以 `DEV_REPO_REQUIRED` 拒绝，且拒绝发生在
+   `task integrate`/`promotion *` 仍可用；managed 项目调用**它们**仍以 `DEV_REPO_REQUIRED` 拒绝，且拒绝发生在
    任何写入之前。
 6. 既有全量证据/验证/回收/impact 的仓库根解析对两类项目都成立（managed 落到项目文件夹）。
+7. 第三轮修订（Status）：managed 项目的 `task submit` → 自动启动、`task run`、`task depends list`、
+   `task result capture`、`task verify` 全部成立（CLI 命令面驱动，`apps/runtime/test/cli-managed-project.test.ts`
+   在一个**连 `dev` 分支都没有**的仓库上跑通 trust → task → run → verify）；`--base-ref` 真正到达 Git
+   （workspace 的 HEAD 等于所给 ref 的 commit），detached HEAD 以 `TASK_BASE_REF_UNRESOLVED` 拒绝且不留槽位/workspace 行。
 
 ## Related
 

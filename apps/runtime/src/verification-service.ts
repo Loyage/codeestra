@@ -35,7 +35,6 @@ import {
   type VerificationPolicySource,
   type VerificationRunPlan,
 } from '@codeestra/storage';
-import { requireRecordedDevRepoPath } from './dev-repo-service.js';
 
 /** Bounded transient output kept for the caller's terminal; never persisted. */
 const maxOutputTailChars = 8_000;
@@ -925,10 +924,6 @@ export async function queueTaskVerification(input: {
   const now = input.now ?? Date.now;
   const randomUUID = input.randomUUID ?? (() => crypto.randomUUID());
   const candidates = input.storage.getVerificationCandidates(input.projectId, input.taskId);
-  // ADR-0056: the tested commit is an object of the project's dev clone, which is also the repository
-  // the detached copy is created from. A project without one is refused here, before anything is
-  // queued, instead of running the copy — and the commands — in the wrong repository.
-  requireRecordedDevRepoPath(input.storage.getTrustedProject(input.projectId));
   if (candidates.taskState !== 'EXECUTED') {
     throw new VerificationServiceError('TASK_NOT_EXECUTED',
       `Task is ${candidates.taskState}; verification needs an EXECUTED Task with a captured result commit`);

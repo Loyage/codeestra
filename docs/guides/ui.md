@@ -1,8 +1,9 @@
 # 界面说明（逐屏 UI 走查）
 
-> **适用版本** `dev@17b4dd6`（2026-09-16） · **schema** v32 · **最后校对** 2026-09-16
-> 版本会前进：`dev@17b4dd6` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@4667d32`（2026-09-16） · **schema** v33 · **最后校对** 2026-09-16
+> 版本会前进：`dev@4667d32` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> 项目接入的「dev 基线」一行小字、依赖原因码文案与影响投影的「项目基线」一行由 FOUNDATION-093 第三轮同步（ADR-0060 修订）；其余内容沿用 FOUNDATION-091 的校对基线。
 > 任务工作台的「永久删除」块由 FOUNDATION-090 新增（ADR-0058）；**声明的功能一行、`SAME_UNFINISHED_FEATURE`
 > 标签、冲突命中里的功能 id，以及影响投影中「快照/映射不再决定判定」的文案由 FOUNDATION-091 同步（ADR-0059）**；
 > 该块与这些文案只做了源码与纯函数核对，**未经真实点击**（ADR-0008 边界）。
@@ -529,7 +530,7 @@ FULL 下这个区块**不出现**。
     放行后失效条件包括任务修订、基线变化、映射/分析器/策略版本变化、实际 diff 超出预测。
 - **`影响与冲突判定`**（小字 `project impact show / explain · 只读`）：
   - 按钮 `刷新快照`（`project.impact.show`）与 `解释判定（explain）`（`project.impact.explain`）——**都只读**。
-  - `候选快照`：任务状态、处置（disposition）、revision、工作区基线与项目 dev 基线是否一致
+  - `候选快照`：任务状态、处置（disposition）、revision、工作区基线与**项目基线**是否一致（ADR-0060：有 dev clone 时是那个 clone 的 `dev`，managed 时是项目文件夹当前检出的分支；界面文案为「项目基线 … 与基线一致/不一致」，不再写「项目 dev」）
     （不一致时写 `只作为事实记录，判定不再因此变成 UNKNOWN`）、
     路径大小写实测，然后是快照详情：完整性（`完整` / `不完整（complete=false；它只是证据，不再决定判定）`）、
     变更指纹、changed 路径（可展开）、命中重要目录/模块/全局资源、映射未分类的路径、证据行。
@@ -707,7 +708,10 @@ dev clone 路径输入下面固定一行小字（原文）：`与 CLI 的 --dev-
 检查结果分两段：
 
 - **仓库身份**键值表：`仓库根目录` / `main 引用` / `对象格式` / `HEAD`，加两行开发基线相关的新行：
-  - `dev 基线`：`refs/heads/dev <commit 前 12 位>`（不存在时写 `DEV_REF_MISSING` 会被拒）。
+  - `dev 基线`：`refs/heads/dev <commit 前 12 位>`，下面一行小字有三种（FOUNDATION-093 第三轮按 ADR-0060 改）：
+    ref 存在 → `这个 ref 存在：Task 工作树与集成目标都从它建基线`；没有 dev clone（`devRepoPath: null`）→
+    `没有 dev clone（managed，ADR-0060）：Task 基线取这个项目文件夹当前检出的分支；task integrate / promotion * 需要在长期 dev 分支上工作时才以 DEV_REPO_REQUIRED 拒绝`；
+    给了 clone 但未通过核验 → `这个 dev clone 未通过核验（<稳定码>）：信任会被拒绝`。
   - `dev clone（这次会记录）`：键值表里的一项，内容**全部来自 `project.inspect` 返回的核验结果**，界面不自己判断路径：路径、徽标 `已核验（这个 clone 可以作为该项目的 dev clone）` 或 `未通过核验 · <稳定码>`、Runtime 的 `detail`、稳定码对应的本地解释，以及核验读到的事实（dev 分支 / HEAD 的 ref / dev ref commit / HEAD / 工作树干净 / origin 与主检出相同 / origin）。`clean` 与 `originMatchesProject` 为 `null` 时写 `未核验`（“没核实到”，不是“否”）。
   - 未给 dev clone 路径且项目也没记录过时，这一行写 `未指定：检查时没有给 dev clone 路径，也没有已记录的路径。` 与 `不要写 dev clone 就能用：Task 基线取项目文件夹当前检出的分支；task integrate / promotion 会在需要 dev 分支时以 DEV_REPO_REQUIRED 拒绝（ADR-0060）。`。
 - **验证策略**：`ABSENT` 时显示

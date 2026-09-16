@@ -14,7 +14,7 @@
 | 源 | 触发 | Guard / 目标 |
 |---|---|---|
 | DRAFT | submit | 规格有效；依赖未满足→BLOCKED，否则 READY |
-| BLOCKED | dependencies satisfied | 上游指定结果已入 dev 且当前 dev 基线可达→READY |
+| BLOCKED | dependencies satisfied | 上游指定结果已入 dev 且项目**当前 Task 基线 ref**（有 dev clone=该 clone 的 `dev`；managed=项目文件夹当前检出的分支）可达→READY |
 | READY | dependency invalidated | →BLOCKED |
 | READY | schedule | 当前 revision、依赖、冲突、容量、workspace 预留均通过→RUNNING（含 Execution 准备过程） |
 | RUNNING | agent needs input | 真实 AttentionRequest 已建立→WAITING_FOR_USER |

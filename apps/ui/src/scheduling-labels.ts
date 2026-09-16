@@ -117,9 +117,9 @@ export function decisionLabel(decision: string): string {
 export function dependencyBlockReasonLabel(code: string): string {
   return label({
     UPSTREAM_NOT_INTEGRATED: '上游还没有到达 INTEGRATED 的合入批次',
-    DEV_BASELINE_MISSING: '项目没有可读的 dev 基线，所有边保持未满足',
-    DEV_REF_UNREADABLE: 'dev 引用读取失败（不当作“无冲突”或“已满足”）',
-    NOT_REACHABLE_FROM_DEV: '上游已合入的 commit 已不在当前 dev 上',
+    DEV_BASELINE_MISSING: '项目没有可读的 Task 基线 ref（所有边保持未满足）',
+    DEV_REF_UNREADABLE: '基线 ref 读取失败（不当作“无冲突”或“已满足”）',
+    NOT_REACHABLE_FROM_DEV: '上游已合入的 commit 已不在当前基线上',
   }, code);
 }
 

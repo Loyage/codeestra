@@ -145,10 +145,13 @@ function ImpactSubject({ view }: { readonly view: ImpactTaskSnapshotView }) {
       {view.dispositionDetail === null ? null : <p className="muted hint">{view.dispositionDetail}</p>}
       <p className="muted hint">
         工作区基线 <span className="mono">{shortId(view.baseline.workspaceBaseCommit)}</span> ·
-        {' '}项目 dev <span className="mono">{shortId(view.baseline.projectDevCommit)}</span> ·
+        {/* ADR-0060: the project baseline is the dev clone's `dev` when one is recorded, otherwise the
+            project folder's checked out branch — the recorded field is `projectDevCommit` either way,
+            but the label must not claim a `dev` ref a managed project never had. */}
+        {' '}项目基线 <span className="mono">{shortId(view.baseline.projectDevCommit)}</span> ·
         {view.baseline.matchesProjectDev
-          ? ' 与 dev 一致'
-          : ' 与 dev 不一致：只作为事实记录，判定不再因此变成 UNKNOWN'}
+          ? ' 与基线一致'
+          : ' 与基线不一致：只作为事实记录，判定不再因此变成 UNKNOWN'}
       </p>
       <p className="muted hint">路径大小写实测 {view.caseMode}（{view.caseModeSource}）：{view.caseModeDetail}</p>
       {view.snapshot === null ? (

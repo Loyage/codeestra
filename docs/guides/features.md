@@ -1,10 +1,11 @@
 # 功能清单：「这软件能做什么」
 
-> **适用版本** `dev@17b4dd6`（2026-09-16） · **schema** v32 · **最后校对** 2026-09-16
-> 版本会前进：`dev@17b4dd6` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@4667d32`（2026-09-16） · **schema** v33 · **最后校对** 2026-09-16
+> 版本会前进：`dev@4667d32` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > 「任务」表的「永久删除」一行由 FOUNDATION-090 新增（ADR-0058）；「调度、容量与冲突」一节的声明功能与
 > 冲突判定两行由 FOUNDATION-091 改写（ADR-0059）。
+> 「接入与项目」表的 dev 事实来源一行由 FOUNDATION-093 第三轮同步（ADR-0060 修订）；其余行沿用 FOUNDATION-091 的校对基线。
 
 一行一个能力。列的含义：
 
@@ -25,7 +26,7 @@
 | 验证策略展示 | 打印 `main` ref 上 `.codeestra/policies/verification.json` 的状态、digest 与逐条命令 | `project policy [path]` | 项目 → 验证策略 | [0006](../decisions/0006-task-verification-policy.md) |
 | 项目接入（trust） | 注册项目；把「你刚看到的身份 + 验证策略 digest + 影响映射 digest + dev clone 核验结果」一起确认；**`--dev-repo` 可选**（ADR-0060：省略=沿用已记录的值，`none`=没有 dev clone；给了路径则逐项核验，不成立的以 `DEV_REPO_*` 拒绝）；FULL 零确认 / STRICT 输 `TRUST` | `project trust [path] [--dev-repo <dev-clone\|none>] [--yes]` | 项目 → 添加/信任此项目（dev clone 路径**可留空**，留空即 managed；被拒绝时显示稳定码 + 本地解释） | [0011](../decisions/0011-default-full-permission-mode.md)、[0031](../decisions/0031-impact-snapshot-and-deterministic-conflict-analyzer.md)、[0047](../decisions/0047-github-mediated-stable-promotion.md)、[0056](../decisions/0056-dev-repo-path-single-dev-fact-source.md)、[0060](../decisions/0060-managed-project-task-baseline.md) |
 | Task 基线 | 有 dev clone 的项目：从该 clone 的本地 `dev` 建基线。没有 dev clone 的项目（managed，ADR-0060）：从**项目文件夹当前检出的分支**建基线，建 workspace 时读 HEAD 并把 ref 与 commit 一起固定（`workspaces.base_ref`）；detached HEAD 以 `TASK_BASE_REF_UNRESOLVED` 拒绝，因为它没有分支可名 | `task run`（准备 workspace 时） | —（同一命令面） | [0009](../decisions/0009-main-dev-promotion-and-restart.md)、[0018](../decisions/0018-task-result-integration-into-dev.md)、[0060](../decisions/0060-managed-project-task-baseline.md) |
-| dev 事实的唯一来源 | 长期 `dev` 分支、集成 worktree 与 ref 推进、提升候选对象与全量证据的副本/锁文件都来自 `projects.dev_repo_path`；未记录时以 `DEV_REPO_REQUIRED` 拒绝，绝不回退到某个 clone 自己的本地 `dev` ref（ADR-0060 没有放宽这条：managed 项目本来就没声明 dev 基线） | `task integrate`、`promotion *`、依赖判定；`reclaim *` 对两类项目都工作（根取 `COALESCE(dev_repo_path, repo_root)`） | —（同一命令面） | [0056](../decisions/0056-dev-repo-path-single-dev-fact-source.md)、[0060](../decisions/0060-managed-project-task-baseline.md) |
+| dev 事实的唯一来源 | 长期 `dev` 分支、集成 worktree 与 ref 推进、提升候选对象与全量证据的副本/锁文件都来自 `projects.dev_repo_path`；未记录时以 `DEV_REPO_REQUIRED` 拒绝，绝不回退到某个 clone 自己的本地 `dev` ref（ADR-0060 没有放宽这条：managed 项目本来就没声明 dev 基线） | `task integrate`、`promotion *`、`promotion full-suite run`（ADR-0060 第三轮修订后**只剩这些**是真的 dev-only：依赖判定、槽位、调度启动前重检、结果 commit 归属、任务级验证与 `reclaim *` 对两类项目都工作，根/基线取 `COALESCE(dev_repo_path, repo_root)` 与该项目记录的 `base_ref`） | —（同一命令面） | [0056](../decisions/0056-dev-repo-path-single-dev-fact-source.md)、[0060](../decisions/0060-managed-project-task-baseline.md) |
 | 一条命令接入并打开 | inspect → 策略展示 → 必要时确认 → 打开界面并预选该项目（`--dev-repo` 必需，因为它组合一次 trust） | `open [path] --dev-repo <dev-clone> [--yes] [--no-open]` | —（它就是打开 UI 的那条路） | [0007](../decisions/0007-local-web-ui-entry.md)、[0008](../decisions/0008-efficiency-first-service-form.md) |
 | 项目列表 | 列出已信任项目及其确认策略 | `project list` | 顶部项目选择器 | — |
 | 影响映射校验 | 报告 `main` ref 上的 `.codeestra/impact.json` 是否存在且是已确认的那一份 | `project impact validate [path] [--json]` | **调度 → 影响映射 · impact.json** | [0031](../decisions/0031-impact-snapshot-and-deterministic-conflict-analyzer.md) |

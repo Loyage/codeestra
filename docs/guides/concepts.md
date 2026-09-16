@@ -1,9 +1,10 @@
 # 领域概念与边界
 
-> **适用版本** `dev@17b4dd6`（2026-09-16） · **schema** v32 · **最后校对** 2026-09-16
-> 版本会前进：`dev@17b4dd6` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@4667d32`（2026-09-16） · **schema** v33 · **最后校对** 2026-09-16
+> 版本会前进：`dev@4667d32` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > §「调度三态」由 FOUNDATION-091 按 ADR-0059 重写（声明同一功能才冲突）。
+> §「双分支与 Task 工作树基线」由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目可跑完整 Task，只有集成与提升需要 dev 分支）；其余内容沿用 FOUNDATION-091 的校对基线。
 
 这份文档解释 Codeestra 里的名词到底指什么、哪些东西**不是**调度主实体、以及几条会影响你日常判断的硬边界。
 规格原文见 [PROJECT_SPEC.md](../../PROJECT_SPEC.md) §2「核心不变量」；这里是面向使用者的说明。
@@ -245,8 +246,10 @@ Runtime 数据目录（不进 Git，机器生成）
   固定 `dev` commit 建立基线（`projects.dev_ref`）；成果经 `task integrate` 进入 `dev`，`dev → main` 只能经
   `promotion` 走（ADR-0009）。
 - **没记 dev clone 的项目（managed）**：Task 从**项目文件夹当前检出的分支**建基线（建 workspace 时读 HEAD，
-  把 ref 与 commit 一起固定进 `workspaces.base_ref`）；成果留在 `refs/heads/task/<task-id>`，**由你自己合**；
-  `task integrate` / `promotion` 需要长期 `dev` 分支，所以会以 `DEV_REPO_REQUIRED` 拒绝。文件夹处于
+  把 ref 与 commit 一起固定进 `workspaces.base_ref`）；成果留在 `refs/heads/task/<task-id>`，**由你自己合**。
+  这类项目**能完整跑 Task**：`task submit` / `task run` / `task depends list` / `task result *` / `task verify`
+  都按它自己的基线（项目文件夹当前检出的分支）与归属（项目文件夹）工作；只有真正需要长期 `dev` 分支的
+  集成与提升（`task integrate`、`promotion *`）会以 `DEV_REPO_REQUIRED` 拒绝。文件夹处于
   detached HEAD 时以 `TASK_BASE_REF_UNRESOLVED` 拒绝（没有分支可名）；`task run --base-ref <refs/heads/…>`
   可以显式指定一条本地分支作基线（只对新 workspace 生效）。
 - owned worktree 位于 Runtime 数据目录 `worktrees/<project-id>/<task-id>/`，**不污染你的主工作区**。

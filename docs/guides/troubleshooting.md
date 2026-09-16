@@ -1,10 +1,11 @@
 # 常见故障与稳定码表
 
-> **适用版本** `dev@17b4dd6`（2026-09-16） · **schema** v32 · **最后校对** 2026-09-16
-> 版本会前进：`dev@17b4dd6` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@4667d32`（2026-09-16） · **schema** v33 · **最后校对** 2026-09-16
+> 版本会前进：`dev@4667d32` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > `task purge` 的拒绝码一节由 FOUNDATION-090 新增（ADR-0058）；冲突判定与 `--feature` 的拒绝码由
 > FOUNDATION-091 新增/改写（ADR-0059）。
+> 「报 `DEV_REPO_REQUIRED`」一节由 FOUNDATION-093 第三轮重写（ADR-0060 修订）；其余内容沿用 FOUNDATION-091 的校对基线。
 
 本文只列**源码里实际存在**的错误码与状态。每条给出「什么时候出现 / 怎么办」。
 
@@ -75,19 +76,21 @@ CODEESTRA_HOME=/tmp/codeestra-dev bun run codeestra status
 
 同一个 home 上有两个 Runtime 应答过。这是事实，不是文案问题：先确认哪个是你想要的，再决定停谁。
 
-### `project trust` 报 `DEV_REPO_REQUIRED`
+### 报 `DEV_REPO_REQUIRED`
 
-Codeestra 要求项目长期保留 `main` 与 `dev`（ADR-0009），并且**所有功能 Task 从固定 `dev` commit 建基线**。
-从 ADR-0056 起，那个 `dev` 分支由项目的 **dev clone**（`projects.dev_repo_path`）提供，不是主检出自己的本地 ref。
-`--dev-repo` 因此是必需的；省略它（或写 `none`）会在**任何写入之前**以 `DEV_REPO_REQUIRED` 拒绝。
-补救：`git clone <origin> /path/to/dev-clone && git -C /path/to/dev-clone checkout dev`，然后
-`project trust <repo> --dev-repo /path/to/dev-clone`。dev clone 上没有 `dev` 分支报 `DEV_REPO_DEV_REF_MISSING`。
+这只属于**两条真正需要长期 `dev` 分支的命令面**：`task integrate` 与 `promotion *`
+（含 `promotion full-suite run`）。从 ADR-0056 起那个 `dev` 分支由项目的 **dev clone**
+（`projects.dev_repo_path`）提供，不是主检出自己的本地 ref；省略它（或写 `none`）时这两条命令会拒绝。
 
-### 已经正常跑过一段时间的项目突然报 `DEV_REPO_REQUIRED`
+**它不再由 `project trust` 返回，也不出现在 Task 的常态路径上**（ADR-0060 第三轮修订，用户裁决
+「一般项目根本不需要 dev」）：`task submit`、`task run`、`task depends list`、`task result *`、`task verify`
+与 `reclaim *` 都按项目**自己记录的 Task 基线**（没有 dev clone 时 = 项目文件夹当前检出的分支）与归属
+（= 项目文件夹）工作。如果你在 2026-09 之前见过它们报这个码，那是当时的缺陷。
 
-它的 `dev_repo_path` 仍是空的（在这条裁决之前 trust 的）。补救同样是补一次
-`project trust <repo> --dev-repo <dev-clone>`：拒绝只影响需要 dev 基线的操作，不会改写已有行。
-`project inspect` 会只读地告诉你哪些已信任项目还没有 dev clone（`devRefRetirement.projectsWithoutDevRepo`）。
+补救（当你确实要集成或提升）：`git clone <origin> /path/to/dev-clone && git -C /path/to/dev-clone checkout dev`，
+然后 `project trust <repo> --dev-repo /path/to/dev-clone`。dev clone 上没有 `dev` 分支报 `DEV_REPO_DEV_REF_MISSING`；
+拒绝只影响需要 dev 分支的操作，不会改写已有行，`project inspect` 会只读地列出哪些已信任项目还没有 dev clone
+（`devRefRetirement.projectsWithoutDevRepo`）。
 
 ### 集成报 `DEV_CHECKOUT_NOT_ON_DEV` / `DEV_CHECKOUT_DIRTY` / `DEV_CHECKOUT_MOVED`
 

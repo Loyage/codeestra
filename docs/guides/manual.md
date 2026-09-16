@@ -1,10 +1,11 @@
 # Codeestra 用户说明书
 
-> **适用版本** `dev@17b4dd6`（2026-09-16） · **schema** v32 · **最后校对** 2026-09-16
-> 版本会前进：`dev@17b4dd6` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@4667d32`（2026-09-16） · **schema** v33 · **最后校对** 2026-09-16
+> 版本会前进：`dev@4667d32` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > §「任务」的永久删除一条由 FOUNDATION-090 新增（ADR-0058）；§3.1、§4.2、§4.3、§4.5、§10.1、§10.3 与
 > 「名词表」的冲突判定由 FOUNDATION-091 按 ADR-0059 改写（声明同一功能才冲突，默认不冲突）。
+> §3.1、§3.2、§10.2 由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目的常态路径不变）；其余内容沿用 FOUNDATION-091 的校对基线。
 
 这是**写给使用者的说明书**：从头读到尾就能把 Codeestra 用起来，不需要先读架构文档或 ADR。
 需要细节时，每一节末尾都有「想深入看哪篇」。
@@ -243,9 +244,11 @@ git -C /path/to/dev-clone checkout dev
 要求（`project trust` 逐条核验，任一不成立就用稳定码拒绝）：是一个 Git work tree；**不是**主检出、也不是主检出的
 worktree（Git common dir 不同）；`origin` 与主检出一致；HEAD 在项目的 `dev` 分支上，且该分支在本地存在。
 
-它必须存在，因为从 ADR-0056 起它是**全部 dev 事实的唯一来源**：Task 基线、依赖判定、Task worktree、集成 worktree
-与 ref 推进、验证副本、回收归属、提升候选对象、全量证据的副本与锁文件。没有它，任何需要 dev 基线的操作都会以
-`DEV_REPO_REQUIRED` 拒绝（消息里直接给出补救命令）。
+它是**长期 `dev` 分支的全部事实来源**：集成 worktree 与 ref 推进、提升候选对象、全量证据的副本与锁文件。
+ADR-0060（第三轮修订）之后，需要它的**只剩**集成与提升两条命令面（`task integrate`、`promotion *`、
+`promotion full-suite run`），它们会以 `DEV_REPO_REQUIRED` 拒绝并直接给出补救命令；Task 基线、依赖判定、
+槽位、调度启动前重检、结果 commit 归属、任务级验证与回收对**没有 dev clone 的项目**同样成立
+（基线取项目文件夹当前检出的分支，归属取项目文件夹）。
 
 再看**谁将来判定你的成果**：
 
@@ -277,9 +280,11 @@ bun run codeestra project trust /path/to/repo --dev-repo /path/to/dev-clone --ye
 ```
 
 `--dev-repo` 是**可选**的（ADR-0060）。给了它，项目就有长期 `dev` 基线（集成目标、提升候选、提升前全量证据）；
-省略它则 Task 基线取**项目文件夹当前检出的分支**，成果留在 task 分支由你自己合，而 `task integrate` / `promotion prepare`
-会在需要长期 `dev` 分支时以 `DEV_REPO_REQUIRED` 拒绝（拒绝的是那条分支，不是新的审批）。`--dev-repo none` 明确表示
-「这个项目没有 dev clone」。**Codeestra 自身自进化时仍用 dev clone**（见 ADR-0048 的本机布局）。
+省略它则 Task 基线取**项目文件夹当前检出的分支**，成果留在 task 分支由你自己合。没有 dev clone 的项目照常
+`task submit` / `task run` / `task result capture` / `task verify`、`task depends list` 也按它自己的基线判定，
+只有 `task integrate` / `promotion prepare` 会在需要长期 `dev` 分支时以 `DEV_REPO_REQUIRED` 拒绝（拒绝的是那条分支，
+不是新的审批）。`--dev-repo none` 明确表示「这个项目没有 dev clone」。**Codeestra 自身自进化时仍用 dev clone**
+（见 ADR-0048 的本机布局）。
 
 若给了 dev clone，它会被逐项核验（另一个 clone、同 origin、HEAD 在 `dev` 上、该分支存在），不成立就以 `DEV_REPO_*` 拒绝，
 不写入任何东西。
@@ -939,8 +944,11 @@ bun run codeestra task depends list   $PROJECT [task-id] [--json]
 ```
 
 - 依赖图必须是 **DAG**；加环会以 `DEPENDENCY_CYCLE` / `DEPENDENCY_GRAPH_INVALID` 拒绝，**且不部分应用**。
-- **关键语义**：上游必须通过集成验证并进入 `dev`，下游的 dev 基线才包含它的结果。
+- **关键语义**：上游必须通过集成验证并进入 `dev`，下游的 **Task 基线 ref** 才包含它的结果。
   **仅 Task 验证成功不释放依赖。**
+- 基线来源（ADR-0060 第三轮修订）：有 dev clone 时是那个 clone 的 `dev`，managed 时是项目文件夹当前检出的分支；
+  读不到基线就按未满足阻塞（`DEV_BASELINE_MISSING`），**不会**因此拒绝整条命令。managed 项目不会产生
+  INTEGRATED 批次，所以带依赖边的 Task 会以 `UPSTREAM_NOT_INTEGRATED` 保持未满足。
 
 ### 10.3 调度：三种「不跑」互不相同
 

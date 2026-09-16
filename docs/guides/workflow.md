@@ -1,9 +1,10 @@
 # 端到端流程走查
 
-> **适用版本** `dev@17b4dd6`（2026-09-16） · **schema** v32 · **最后校对** 2026-09-16
-> 版本会前进：`dev@17b4dd6` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@4667d32`（2026-09-16） · **schema** v33 · **最后校对** 2026-09-16
+> 版本会前进：`dev@4667d32` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > §3.1 的 `task run` 门禁由 FOUNDATION-091 按 ADR-0059 改写。
+> §10 的依赖满足语义由 FOUNDATION-093 第三轮同步（ADR-0060 修订）；其余内容沿用 FOUNDATION-091 的校对基线。
 
 本文按真实顺序走一遍：**建任务 → 提交 → 运行 → 回答 Agent → 提交成果 → 验证 → 合入 dev → 稳定提升 → 资源回收**。
 每一步给出可以照抄的命令和**预期输出形状**。
@@ -144,7 +145,7 @@ bun run codeestra task depends list   $PROJECT [task-id] [--json]
 `task depends list` 的人读视图（不加 `--json`）逐条打印 `✓/✗ 依赖`、要求的 revision 编号，以及上游合入的
 dev commit 前 12 位。
 
-**关键语义**：**上游必须通过集成验证并进入 `dev`，下游的 dev 基线才包含它的结果**。仅 Task verification 成功
+**关键语义**：**上游必须通过集成验证并进入 `dev`，下游的 Task 基线 ref 才包含它的结果**（有 dev clone 时该基线是那个 clone 的 `dev`；managed 项目是项目文件夹当前检出的分支，读不到就按未满足阻塞而不是拒绝命令，ADR-0060 第三轮修订）。仅 Task verification 成功
 **不**释放依赖。
 
 ---

@@ -8,14 +8,14 @@ import type { TaskDependencyEdgeView, TaskDependencyView, TaskView } from './typ
  * Read-only: it never writes a Task state, and it is not a scheduler view. `BLOCKED` here means one
  * thing only — an unmet dependency — while conflict, capacity and revision waiting are different
  * facts and are never folded into it. The verdict (is each edge satisfied, and why not) comes from
- * the Runtime; this panel does not re-derive it from the dev baseline itself.
+ * the Runtime; this panel does not re-derive it from the Task baseline itself.
  */
 
 const reasonLabels: Record<string, string> = {
   UPSTREAM_NOT_INTEGRATED: '上游还没有到达 INTEGRATED 的合入批次',
-  DEV_BASELINE_MISSING: '项目没有可读的 dev 基线，所有边保持未满足',
-  DEV_REF_UNREADABLE: 'dev 引用读取失败（不当作“无冲突”或“已满足”）',
-  NOT_REACHABLE_FROM_DEV: '上游已合入的 commit 已不在当前 dev 上',
+  DEV_BASELINE_MISSING: '项目没有可读的 Task 基线 ref（所有边保持未满足）',
+  DEV_REF_UNREADABLE: '基线 ref 读取失败（不当作“无冲突”或“已满足”）',
+  NOT_REACHABLE_FROM_DEV: '上游已合入的 commit 已不在当前基线上',
 };
 
 function reasonLabel(code: string): string {
