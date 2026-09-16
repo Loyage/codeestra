@@ -3,11 +3,13 @@
 > **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v35 · **最后校对** 2026-09-17
 > 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
-> recipe 1/2/3 的创建命令与 §「我想改一个 bug」后的修订示例由本分支按 **ADR-0065** 改写
-> （必填 `--title`/`--name`；`--constraint` 已删除，限制写进详情）。
+> recipe 1/2/3 的创建命令与 §「我想改一个 bug」后的修订示例由 **ADR-0065** 改写
+> （必填 `--title`/`--name`；`--constraint`/`--kind` 已删除，限制写进详情）。
+> 权限模式的命令拼写由 FOUNDATION-098 同步为 `settings permission get|set`（ADR-0064：顶层 `permission` 已移除；§19 另新增 `settings list` 总览）。
 > recipe 3 与 recipe 4 由 FOUNDATION-091 按 ADR-0059 改写（默认不冲突、声明同一功能才互斥）；
 > recipe 3 的容量命令由 **FOUNDATION-096** 同步（ADR-0061：上限是唯一的 Runtime 全局值，命令不带 project 参数；
 > 同一值另有设置面拼写 `settings concurrency`，也在本 recipe 里给出）。
+> recipe 12 补充「集成成功后自动回收」（ADR-0062）。
 
 本文是**步骤化**的：每条 recipe 回答一个「我想做 X」，给出可以照抄的命令与**做完之后看什么**。
 
@@ -17,7 +19,7 @@
 - `$TASK` = `task create` 返回的 task id；
 - `<version>` = 该 Task 当前的 `version`（乐观版本号）。**它每次改状态都会变**——用 `task status` 或
   上一条命令的输出重新取，不要凭记忆复用。
-- 每条命令的完整参数与退出码见 [cli-reference.md](./cli-reference.md)；
+- 每条命令的完整参数与退出码见 [cli/README.md](./cli/README.md)（九篇索引）；
   报错怎么办见 [troubleshooting.md](./troubleshooting.md)。
 
 ---
@@ -565,6 +567,10 @@ bun run codeestra task recover $PROJECT $TASK <expected-version> [--reason "…"
 
 **目标**：把 Runtime 数据目录下不再需要的资源清掉，**并且知道每一样为什么被清或被留**。
 
+> 从 ADR-0062 起，**集成成功后会自动回收**该批成员里「clean + 已合并」的 Task worktree（默认开启）。
+> 这一步不再需要你记得跑；要关掉用 `settings auto-reclaim off`。下面仍然是那个**带审计的手动路径**，
+> 失败现场、未合并成果与任何手动选定都靠它。
+
 ```sh
 # 1) 先看（plan 是只读试运行，返回的结构与 apply 完全相同）
 bun run codeestra reclaim plan --project $PROJECT --json
@@ -611,7 +617,7 @@ bun run codeestra open /path/to/your-repo --dev-repo /path/to/dev-clone --no-ope
   # 接入项目（FULL 零确认）并拿到界面地址；--dev-repo 可选（ADR-0060）：
   # 给了它才有 dev 基线与 dev → main 提升；不给（managed）时 Task 基线取该项目文件夹当前检出的分支，
   # 成果留在 task 分支由你自己合。上面这一行是“我想要 dev → main 提升”时用的写法。
-bun run codeestra permission get                    # 确认权限模式
+bun run codeestra settings permission get                    # 确认权限模式
 
 bun run codeestra task create $PROJECT "一项具体的改动" \
   --title "一项具体的改动" --name "a-concrete-change"
@@ -703,6 +709,6 @@ bun run codeestra scheduler control resume --json
 - 从头读到尾的说明书：[manual.md](./manual.md)
 - 端到端流程与预期输出：[workflow.md](./workflow.md)
 - 逐屏 UI 走查（每个按钮做什么）：[ui.md](./ui.md)
-- 每条命令的参数与退出码：[cli-reference.md](./cli-reference.md)
+- 每条命令的参数与退出码：[cli/README.md](./cli/README.md)
 - 报错怎么办：[troubleshooting.md](./troubleshooting.md)
 - 人工观感核对清单：[acceptance-checklist.md](./acceptance-checklist.md)

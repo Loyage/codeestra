@@ -98,8 +98,8 @@ just verify
 ```sh
 export CODEESTRA_HOME=/tmp/codeestra-demo
 bun run codeestra status
-bun run codeestra permission get
-bun run codeestra permission set strict   # 可选；默认是 full，切换无需确认
+bun run codeestra settings permission get
+bun run codeestra settings permission set strict   # 可选；默认是 full，切换无需确认
 bun run codeestra agent config get                             # 当前生效的 provider/model/思考深度与来源
 bun run codeestra agent config set --model <id> --thinking <level>
 bun run codeestra agent config set --project <project-id> --model <id>

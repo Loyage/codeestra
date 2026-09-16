@@ -46,6 +46,24 @@ export interface TaskView {
   readonly updatedAt: number;
   /** Set when the Task is archived; the Runtime keeps every row and the owned worktree. */
   readonly archivedAt: number | null;
+  /**
+   * The newest Execution attempt and the ending its Agent Session recorded, as facts. It exists so
+   * a list row can tell "the Agent is still running" from "its Session already recorded an ending"
+   * without a second read per row.
+   *
+   * `null` means the Task never started an attempt. An absent `completionOutcome` means "not
+   * recorded" — never "failed" and never "succeeded".
+   */
+  readonly latestExecution: {
+    readonly executionId: string;
+    readonly attemptNumber: number;
+    readonly state: string;
+    /** True while this attempt still owns its reservation and workspace. */
+    readonly resourceHeld: boolean;
+    /** `null` when the attempt never recorded a Session (for example a failed start). */
+    readonly sessionState: string | null;
+    readonly completionOutcome: 'SUCCESS' | 'FAILURE' | null;
+  } | null;
 }
 
 export interface AgentConfigurationView {
@@ -1802,4 +1820,16 @@ export interface RuntimeGlobalControlView {
    */
   readonly capacity: null;
   readonly capacityNote: string;
+}
+
+/**
+ * The automatic task-worktree reclamation switch (ADR-0062), projected from the Runtime's
+ * `settings.autoReclaim.get` / `set` command. The settings page is a front end to that command and
+ * stores nothing locally.
+ */
+export interface AutoReclaimView {
+  readonly enabled: boolean;
+  readonly default: boolean;
+  readonly file: string;
+  readonly appliesTo: string;
 }

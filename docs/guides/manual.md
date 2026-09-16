@@ -9,9 +9,14 @@
 > §3.1、§3.2、§10.2 由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目的常态路径不变）。
 > §10.3 的 `WAIT_CAPACITY` 一行、§10.4、§11.2 与 §13.4 由 **FOUNDATION-096** 同步（ADR-0061：容量只剩一个
 > Runtime 全局上限，命令去掉 project/adapter 参数，并可从 `settings concurrency` 实时调整）；
+> §11 开头的「先看全」段与 §11.1 的命令拼写由 **FOUNDATION-098** 新增/改写（ADR-0064：`settings list` 总览，
+> 权限模式移入 `settings permission`，顶层 `permission` 已移除）。
+> §11.2.2 与 §12.3 由 ADR-0062 新增/补充（集成成功后自动回收 Task worktree，`settings auto-reclaim` 默认开启）。
 > §10.3 新增 `WAIT_CONTROL` 一行并由 **FOUNDATION-097** 新增 §10.5「全局暂停」。
 > §「任务」永久删除一条与 §13.5 `RECOVERY_REQUIRED` 的 purge 行为由用户任务 `task/930f5325` 同步（ADR-0058 D02 修订，2026-09-16）。
 > 其余内容沿用 FOUNDATION-091 的校对基线。
+> §6 末尾的「Agent 运行结果卡片与最后的输出」一段与 `04-task-detail.png` 的图说由用户任务 `Loyage/simplize_task_ui`
+> （2026-09-16）同步（无新命令；卡片是只读投影，截图未重拍）。
 
 这是**写给使用者的说明书**：从头读到尾就能把 Codeestra 用起来，不需要先读架构文档或 ADR。
 需要细节时，每一节末尾都有「想深入看哪篇」。
@@ -54,7 +59,7 @@ Codeestra 是 **Task-first、local-first 的 AI Development Runtime**：**你管
 
 1. **效率至上。** Runtime 默认运行在 `FULL` 主机级全权限模式。**项目接入、Agent 工具、成果 commit、
    验证策略变化，默认零确认、零等待。** 你随时可以用 CLI 无确认地切到 `STRICT`，恢复旧门禁
-   （`bun run codeestra permission set strict`）。
+   （`bun run codeestra settings permission set strict`）。
    正确性核对（revision/ref/归属/进程身份、静止证据、幂等与崩溃恢复）**一直有效**，但那些是核对，不是审批。
 2. **软件本体是服务，CLI 必须完备。** 独立本地 Runtime 是软件本体，Web UI 只是它的便利前端。
    每个能力都能只靠 CLI 完成并脚本化驱动（`--json`、稳定退出码）。「只有 UI 能做、CLI 不能做」视为缺陷。
@@ -216,7 +221,7 @@ bun run codeestra stop --wait 30      # 最多等 30 秒（0–600）
 ### 想深入看哪篇
 
 - 安装的每一步与输出形状：[getting-started.md](./getting-started.md)
-- 每条命令的参数与退出码：[cli-reference.md](./cli-reference.md) §1
+- 每条命令的参数与退出码：[cli/runtime.md](./cli/runtime.md)（§1、§2、§19）
 - 两个 clone 与 dev 实例的完整布置：[docs/tasks/README.md](../tasks/README.md) FOUNDATION-076
 
 ---
@@ -281,7 +286,7 @@ bun run codeestra project impact validate /path/to/repo --json
 bun run codeestra project trust /path/to/repo --dev-repo /path/to/dev-clone
 
 # STRICT：需要确认，交互输入 TRUST，或脚本传 --yes
-bun run codeestra permission set strict
+bun run codeestra settings permission set strict
 bun run codeestra project trust /path/to/repo --dev-repo /path/to/dev-clone --yes
 ```
 
@@ -358,7 +363,7 @@ bun run codeestra project inspect /path/to/main-checkout --dev-repo /path/to/dev
 
 - 完整的接入步骤与预期输出：[getting-started.md](./getting-started.md) §4
 - Project 的概念与 common dir 识别：[concepts.md](./concepts.md)
-- `project *` 每条命令：[cli-reference.md](./cli-reference.md) §3
+- `project *` 每条命令：[cli/project.md](./cli/project.md)
 
 ---
 
@@ -485,7 +490,7 @@ bun run codeestra task purge  $PROJECT <task-id> <expected-version> --yes [--for
 
 - 完整端到端流程：[workflow.md](./workflow.md)
 - 状态机与不变量：[concepts.md](./concepts.md)、[../architecture/state-machines.md](../architecture/state-machines.md)
-- `task` 每条命令：[cli-reference.md](./cli-reference.md) §4–§5
+- `task` 每条命令：[cli/task-lifecycle.md](./cli/task-lifecycle.md)（§4）与 [cli/task-revision-session.md](./cli/task-revision-session.md)（§5）
 - 「我想做 X」的步骤化做法：[recipes.md](./recipes.md)
 
 ---
@@ -647,7 +652,7 @@ bun run codeestra events tail [--project $PROJECT] [--since <sequence>]
 
 - 逐屏 UI 走查（每个标签页、每个按钮）：[ui.md](./ui.md)
 - Attention、Session、handoff 的概念：[concepts.md](./concepts.md)
-- `attention` / `session handoff` / `events` 命令：[cli-reference.md](./cli-reference.md) §7、§17–§18
+- `attention` / `session handoff` / `events` 命令：[cli/task-revision-session.md](./cli/task-revision-session.md)（§7）与 [cli/interface.md](./cli/interface.md)（§17–§18）
 - 「Agent 停下来问我了」怎么处理：[recipes.md](./recipes.md)
 
 ---
@@ -684,13 +689,20 @@ bun run codeestra task result commit  $PROJECT <task-id> <authorization-id> --co
 **且它的 Session 已 `EXITED`**）。STRICT 下按钮变成「准备成果提交」，随后出现「成果提交授权」区块，
 显示预期 HEAD、变更指纹、是否已静止、工作区路径，并由你按下「确认成果提交」。
 
-> 图：`04-task-detail.png` — 任务详情：「下一步」提示行、任务操作按钮组（提交为就绪 / 启动 Agent /
-> 暂停 / 提交成果 / 验证任务 / 合入 dev）、显示标题与命名标题、任务详情正文。
+Agent 一退出，任务详情顶部就出现**「Agent 运行结果」卡片**：结局（provider 记的成功/失败，或「没有记录到结局」）、
+停止原因、工具调用数，以及 **Agent 最后说的话**（provider 报告的最后一段文本，Runtime 最多保留 2000 字符，
+截断时写明只保留了尾部）。不必展开折叠块、也不必滚到底部去翻会话记录；卡片上的 `查看完整会话记录 ↓`
+跳到下方只读的完整过程。任务列表上，这一行的行尾提示也会从「执行中」改成「Agent 已退出 · 等待提交成果」。
+如果这次结束**什么都没记下来**，两边都会这么写，不会当成成功。
+
+> 图：`04-task-detail.png` — 任务详情：「Agent 运行结果」卡片（含最后的输出）、`下一步` 提示行、
+> 任务操作按钮组（提交为就绪 / 启动 Agent / 暂停 / 提交成果 / 验证任务 / 合入 dev）、
+> 显示标题与命名标题、任务详情正文（ADR-0065）。
 
 ### 想深入看哪篇
 
 - 成果 commit 的安全策略与全部拒绝码：[workflow.md](./workflow.md) §5、[troubleshooting.md](./troubleshooting.md)
-- `task result` 命令：[cli-reference.md](./cli-reference.md) §8
+- `task result` 命令：[cli/task-result-verify.md](./cli/task-result-verify.md)（§8）
 
 ---
 
@@ -742,7 +754,7 @@ bun run codeestra task tests history $PROJECT <task-id> [--limit <n>]
 
 - 验证的完整语义与策略文件格式：[workflow.md](./workflow.md) §6、[concepts.md](./concepts.md)
 - 验证相关的全部拒绝码：[troubleshooting.md](./troubleshooting.md) §1
-- `task verify` / `task tests` / `task operation`：[cli-reference.md](./cli-reference.md) §9、§10
+- `task verify` / `task tests` / `task operation`：[cli/task-result-verify.md](./cli/task-result-verify.md)（§9–§10）
 
 ---
 
@@ -810,7 +822,7 @@ bun run codeestra task integration cancel $PROJECT <batch-id> --reason "<为什�
 
 - 集成的完整流程：[workflow.md](./workflow.md) §7
 - 集成相关拒绝码：[troubleshooting.md](./troubleshooting.md) §1
-- `task integrate` / `task integration`：[cli-reference.md](./cli-reference.md) §11
+- `task integrate` / `task integration`：[cli/integration-dag-scheduler.md](./cli/integration-dag-scheduler.md)（§11）
 - 界面上的批次视图与组批/集成/取消：[ui.md](./ui.md) §5.3
 
 ---
@@ -910,7 +922,7 @@ bun run codeestra promotion get|list|abandon …
 ### 想深入看哪篇
 
 - 提升的完整流程与全部拒绝码：[workflow.md](./workflow.md) §8、[troubleshooting.md](./troubleshooting.md) §1
-- `promotion` 每条命令：[cli-reference.md](./cli-reference.md) §15
+- `promotion` 每条命令：[cli/promotion.md](./cli/promotion.md)
 - 经 GitHub 中转的决策与理由：[ADR-0047](../decisions/0047-github-mediated-promotion.md)、
   本机两个 clone 的布置：[ADR-0048](../decisions/0048-dev-clone-and-separate-runtime-home.md)
 - 本仓库自身的四步操作与重启规程：[AGENTS.md](../../AGENTS.md)
@@ -1059,19 +1071,31 @@ bun run codeestra scheduler control reconcile [--json]
 
 - 完整流程中的依赖与调度：[workflow.md](./workflow.md) §3
 - `SAFE`/`UNKNOWN`/`CONFLICTING` 的准确含义：[concepts.md](./concepts.md)
-- `task depends` / `task schedule` / `scheduler`：[cli-reference.md](./cli-reference.md) §12–§14
+- `task depends` / `task schedule` / `scheduler`：[cli/integration-dag-scheduler.md](./cli/integration-dag-scheduler.md)（§12–§14）
 - 「两件事互相冲突怎么办」：[recipes.md](./recipes.md)
 
 ---
 
 ## 11. 设置与权限：FULL 与 STRICT
 
+**先看全**：这条命令列出本 Runtime 的**全部九项设置**（下面每一项都在其中），逐项给出生效值、产品默认、
+取值、是「本 home 显式设置」还是「产品默认」，以及值存在哪个文件：
+
+```sh
+bun run codeestra settings list            # 人读列表
+bun run codeestra settings list --json     # 逐字段原文（每个条目还带「改它会影响什么」）
+```
+
+数据来自 Runtime 自己：每一项都由**它自己那条命令的同一次读取**填充，所以总览不会与
+`settings permission get`、`settings prose-question-attention`、`settings auto-reclaim`、
+`settings ui get <key>`、`scheduler capacity get` 读出的值不一致。它是**只读**的：不写文件、不改任何值、零确认。
+
 ### 11.1 权限模式
 
 ```sh
-bun run codeestra permission get
-bun run codeestra permission set strict
-bun run codeestra permission set full      # 切回默认
+bun run codeestra settings permission get
+bun run codeestra settings permission set strict
+bun run codeestra settings permission set full      # 切回默认
 ```
 
 | | `FULL`（默认） | `STRICT`（显式 opt-in） |
@@ -1129,6 +1153,23 @@ bun run codeestra settings concurrency reset [--json]
 降低上限**不会**暂停、释放或终止已经在跑的 Task（`get` 的 `used` 因此可能大于 `limit`）。
 它和 §11.2 的五个界面键一样是**设置、不是门禁**：零确认，FULL/STRICT 行为相同。
 
+### 11.2.2 集成成功后自动回收 worktree
+
+`settings auto-reclaim` 是 ADR-0062 的那个开关（默认 `on`）：
+
+```sh
+bun run codeestra settings auto-reclaim        # 读取 {enabled, default, file, appliesTo}
+bun run codeestra settings auto-reclaim on     # 默认
+bun run codeestra settings auto-reclaim off    # 回到手动 reclaim
+```
+
+- 开启时：`task integrate` / `task integration integrate` **成功后**（`dev` 已前进、成员 Task 已是 `SUCCEEDED`），
+  对该批每个成员执行与 `reclaim` **完全相同**的归属决策（只删 clean + 成果已是基线 ref 祖先 + 无 held Execution/活跃预留的
+  worktree）。**失败现场仍默认保留**，**绝不删 branch**（仍可 `task retry` 重建）。
+- 关闭时：集成照常，什么都不自动删；`reclaim plan/apply` 幂等且不受影响。
+- 设置存在 `<CODEESTRA_HOME>/auto-reclaim.json`；自动回收是集成成功后的**最佳努力**，它失败不影响集成结果，
+  失败细节在集成报告的 `reclamation` 汇总里。Web UI 的「设置 → 资源回收」卡写入同一条命令。
+
 ### 11.3 Agent 配置
 
 ```sh
@@ -1151,7 +1192,7 @@ bun run codeestra agent plugins select [--project <project-id>] [--adapter <id>]
 
 - FULL/STRICT 的完整差异与理由：[concepts.md](./concepts.md)、[ADR-0011](../decisions/0011-default-full-permission-mode.md)
 - 设置键的详细语义：[ADR-0045](../decisions/0045-global-ui-settings.md)
-- `permission` / `settings` / `agent` 命令：[cli-reference.md](./cli-reference.md) §1–§2、§19
+- `permission` / `settings` / `agent` 命令：[cli/runtime.md](./cli/runtime.md)
 
 ---
 
@@ -1216,11 +1257,13 @@ bun run codeestra reclaim records --project $PROJECT [--task <task-id>] \
 - 退出码：`FAILED` → `1`；可回收数量为 0（plan）或实际回收数量为 0（apply）→ `3`（「没什么可回收」不是错误）；
   否则 `0`。
 - 被回收的 Task 工作树之后可以用 `task retry` 从保留的 Task 分支**重建**。
+- **集成成功后会自动回收**（ADR-0062，默认开启）：不想要就 `settings auto-reclaim off`；失败现场依旧保留，
+  `reclaim plan/apply` 仍然可用。
 
 ### 想深入看哪篇
 
 - 回收的完整语义与全部拒绝码：[workflow.md](./workflow.md) §9、[troubleshooting.md](./troubleshooting.md)
-- `reclaim` 每条命令：[cli-reference.md](./cli-reference.md) §16
+- `reclaim` 每条命令：[cli/integration-dag-scheduler.md](./cli/integration-dag-scheduler.md)（§16）
 - 「保住失败现场」「回收磁盘」：[recipes.md](./recipes.md)
 
 ---
@@ -1276,18 +1319,18 @@ Task/Execution 的 `RECOVERY_REQUIRED` 用 **`task recover <project-id> <task-id
 观察对账，只有能证明 provider 已退出才删除（否则 `RECONCILE_REQUIRED`）；确实要强行清掉就加 `--force`——
 它会先按记录的身份终止 provider，再删除（结果里 `stop.stop: "FORCED"`，`forced` 列出被跳过的拒绝与终止结果）。IntegrationBatch 与 Promotion 的
 `RECOVERY_REQUIRED` 各自有自己的收口命令，见
-[cli-reference.md](./cli-reference.md)。
+[cli/integration-dag-scheduler.md](./cli/integration-dag-scheduler.md) 与 [cli/promotion.md](./cli/promotion.md)。
 
 ### 13.6 完整的错误码表在哪
 
 **本文不复制错误码表。** 稳定码、每条的触发条件与处理方式都在
 [troubleshooting.md](./troubleshooting.md) 的 §1（按症状）与 §2（按领域速查表）里；
-每条命令的参数、退出码与码位在 [cli-reference.md](./cli-reference.md) 里。
+每条命令的参数、退出码与码位在 [cli/README.md](./cli/README.md) 索引下的九篇里。
 
 ### 想深入看哪篇
 
 - 常见故障与稳定码表：[troubleshooting.md](./troubleshooting.md)
-- 每条命令的退出码：[cli-reference.md](./cli-reference.md) §0
+- 每条命令的退出码：[cli/README.md](./cli/README.md)（§0.2）
 - 「我想做 X」：[recipes.md](./recipes.md)
 
 ---
@@ -1342,7 +1385,7 @@ Task/Execution 的 `RECOVERY_REQUIRED` 用 **`task recover <project-id> <task-id
 - [workflow.md](./workflow.md)：端到端流程走查（含可照抄命令）
 - [features.md](./features.md)：功能清单（一行一个能力）
 - [ui.md](./ui.md)：**逐屏 UI 走查**（7 个标签页，每个按钮做什么）
-- [cli-reference.md](./cli-reference.md)：CLI 与 HTTP/SSE 命令参考
+- [cli/](./cli/README.md)：CLI 与 HTTP/SSE 命令参考（九篇）
 - [recipes.md](./recipes.md)：常见任务的做法
 - [acceptance-checklist.md](./acceptance-checklist.md)：人工观感核对清单
 - [troubleshooting.md](./troubleshooting.md)：常见故障与稳定码表

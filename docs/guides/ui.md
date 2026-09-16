@@ -1,10 +1,12 @@
 # 界面说明（逐屏 UI 走查）
 
-> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v35 · **最后校对** 2026-09-17
-> 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@06bcf97` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v35 · **最后校对** 2026-09-17
+> 版本会前进：`dev@06bcf97` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
-> §1.8（新建任务停靠条）、§2.2 的任务行与 §2.3（a）由本分支按 **ADR-0065** 改写：停靠条改为三个必填字段、无收起态；
-> 任务列表以显示标题为主行、命名标题作为次信息；任务详情展示两个标题与任务详情（无约束列表）。
+> §1.8（新建任务停靠条）、§2.2 的任务行与 §2.3（a）由 **ADR-0065** 改写：停靠条改为三个必填字段、无收起态；
+> 任务列表以显示标题为主行、命名标题作为次信息；任务详情展示两个标题与任务详情（无约束列表），
+> 且「任务自己的说明」（声明的功能 + 任务详情）位于 Agent 运行卡片与按钮组之下（ADR-0062/FOUNDATION-056 的版式）。
+> 权限模式的命令拼写由 FOUNDATION-098 同步为 `settings permission get|set`（ADR-0064：顶层 `permission` 已移除；§19 另新增 `settings list` 总览）。
 > 项目接入的「dev 基线」一行小字、依赖原因码文案与影响投影的「项目基线」一行由 FOUNDATION-093 第三轮同步（ADR-0060 修订）；其余内容沿用 FOUNDATION-091 的校对基线。
 > §1.2.1 的「全局负载控制条」与 §4.2 的容量卡改名由 FOUNDATION-097 新增/改写（ADR-0061 D09）。
 > 任务工作台的「永久删除」块由 FOUNDATION-090 新增（ADR-0058）；**声明的功能一行、`SAME_UNFINISHED_FEATURE`
@@ -12,6 +14,10 @@
 > 该块与这些文案只做了源码与纯函数核对，**未经真实点击**（ADR-0008 边界）。
 > 永久删除块里 `RECOVERY_REQUIRED` 任务「按观察对账」的文案由用户任务 `task/930f5325` 同步（ADR-0058 D02 修订，2026-09-16）。
 > 永久删除块里「仍要强制删除」按钮由 `lane/purge-force` 新增（ADR-0058 D09，2026-09-16）：拒绝后出现，发送同一请求加 `force: true`，并如实列出被跳过的拒绝与终止结果。
+> **§2.2 的行尾提示、§2.3 的「Agent 运行结果」卡片与重写后的「下一步」表由用户任务 `Loyage/simplize_task_ui`（2026-09-16）同步**：
+> 任务详情新增顶部卡片、规格正文下移到按钮组之后，任务列表行在最新尝试的 Session 已不在时改说那次尝试的结局。
+> 配套的命令面新增是 `task list` / `task status` 的 `latestExecution`（投影字段，无 schema 变更、无新命令）。
+> 本节的文案只做了源码与纯函数核对（`apps/ui/src/agent-run.ts`、`apps/ui/src/agent-run-card.tsx`），**未经真实点击**（ADR-0008 边界）。
 
 本文逐个标签页说明 Web UI 上**实际渲染**的东西：每个标签页能看到什么、每个按钮与输入做什么、
 哪些数字是**只读投影**、哪些操作会**真的改 Runtime 状态**。
@@ -111,7 +117,7 @@ Web UI 是**本地 Runtime 的便利前端**，不是另一个产品：
 | 元素 | 文案 | 说明 |
 |---|---|---|
 | 外观 | 标签 `外观` + 下拉框 `aria-label="界面主题"` | **改状态**：写入 Runtime 的 `theme` 设置（与「设置」标签页的同一项是同一个值） |
-| 权限模式 | `FULL · 全权限，零确认` 或 `STRICT · 严格模式` | **只读**：显示当前模式，**界面不提供切换**（切换用 CLI `permission set`） |
+| 权限模式 | `FULL · 全权限，零确认` 或 `STRICT · 严格模式` | **只读**：显示当前模式，**界面不提供切换**（切换用 CLI `settings permission set`） |
 | 事件流 | `● 事件流 · 实时` / `正在重连（第 N 次）` / `连接中` / `已停止` | **只读**：断线自动重连，用上次的**排他游标**续订，所以不会重复也不会漏 |
 
 > 图：`13-narrow-layout.png` — 窄屏（≤850px）下的外壳：标题栏保持不动、导航变成横向一条、
@@ -225,6 +231,24 @@ Web UI 是**本地 Runtime 的便利前端**，不是另一个产品：
 徽标的动效（`执行中` / `正在暂停` / `正在终止` 的状态点）描述的是**Runtime 记录的任务状态**，
 `title` 里明确写着「不代表进程心跳或完成比例」。
 
+**提示文字会被「最近一次尝试的结局」替换**（`apps/ui/src/agent-run.ts` 的 `agentRunRowHint`）。
+列表行不再只能看到任务状态：当**最新一次 Execution** 的 Session 已经不在时，行尾改说那次尝试做了什么。
+判据就是 `task list` / `task status` 返回的 `latestExecution`（见 [cli/task-lifecycle.md](./cli/task-lifecycle.md) §4），
+所以列表与详情用的是同一套事实，不需要逐行再读一次 `task status`。
+
+| 任务状态 | 最新尝试的事实 | 行尾提示（替换上表） |
+|---|---|---|
+| `RUNNING` | Session `ACTIVE` | `Agent 正在运行 · 可查看会话与步骤` |
+| `RUNNING` | 刚开始、Session 还没建立 | `Agent 正在启动` |
+| `RUNNING` | 有 `OPEN` 请求、Session 在等 | `Agent 正在等你回答 · 回答后继续` |
+| `RUNNING` | 尝试仍持资源、Session `EXITED`、记到 `SUCCESS` | `Agent 已退出 · 等待提交成果` |
+| `RUNNING` | 尝试仍持资源、Session `EXITED`、**没有结局** | `Agent 已退出 · 没有记录到结局` |
+| `RUNNING` | Session `EXITED` 但不再持资源／已 `SUCCEEDED` | `Agent 已结束（provider 记为成功）` |
+| `RECOVERY_REQUIRED` | Session `DISCONNECTED` | `会话连接已断开 · 不自动重试` |
+
+其余情况（含 `PAUSED`、`EXECUTED`、`SUCCEEDED` 与还没启动过的任务）**保持上表原文**，
+因为任务状态本身已经说得更准。行尾提示一定不会与徽标矛盾：徽标永远是**任务**状态，提示只说那次**尝试**。
+
 **（c）空列表时**
 
 `从一个任务开始`（完全没有任务，提示去底部创建草稿）或 `没有匹配的任务`（有任务但被筛掉，
@@ -233,9 +257,15 @@ Web UI 是**本地 Runtime 的便利前端**，不是另一个产品：
 ### 2.3 任务详情视图
 
 > 图：`04-task-detail.png` — 任务详情：「返回任务列表」、`任务 #N` 标题与状态徽标、
-> `下一步` 提示行、任务操作按钮组、显示标题与命名标题、任务详情正文。
+> 「Agent 运行结果」卡片（含最后的输出）、`下一步` 提示行、任务操作按钮组、
+> 显示标题、命名标题与任务详情正文。
 
-**（a）标题与详情**
+**（a）标题、运行结果与任务自己的说明**
+
+自上而下：返回按钮 → 标题行 → 显示标题与命名标题 → 版本小字 →（启动过 Agent 才有的）**运行结果卡片**
+→ `下一步` → 任务操作按钮组 → 声明的功能与任务详情。
+**任务详情从按钮组之后开始**：先读「Agent 干了什么、下一步做什么、能按什么」，再读当初要求的原文。
+（ADR-0065 之后约束列表不再存在；它曾表达的「必须遵守的限制」写在任务详情里。）
 
 | 元素 | 内容 |
 |---|---|
@@ -244,12 +274,33 @@ Web UI 是**本地 Runtime 的便利前端**，不是另一个产品：
 | 显示标题 | 一行摘要（与任务列表同一份事实） |
 | 小字 | `命名标题：<slug>`（旧任务显示 `命名标题：（创建于命名标题新增之前，分支与目录仍用内部 ID）`）+ ` 分支与 worktree 目录名（ADR-0065）` |
 | 小字 | `规格 r<revision 号> · 状态版本 v<version>` |
+| 运行结果卡片 | 见下；**只有启动过 Agent（`latestExecution !== null`）才出现** |
 | 小字（ADR-0059） | `声明的功能：<id、id>`，未声明时是 `声明的功能：（未声明，永不参与功能冲突）`；`title`：`声明的功能（ADR-0059）：两个未完成任务声明同一功能时才会被判为冲突` |
 | 任务详情 | 小标题 `任务详情` + 等宽块，就是当前 revision 的 specification |
 
+**（a2）「Agent 运行结果」卡片**（`apps/ui/src/agent-run-card.tsx`，只读）
+
+它把**最新一次 Execution 的结局与 Agent 最后说的话**放在标题下面，所以不必先展开任何折叠块，
+也不必滚到最下面。文案全部来自记录，没有任何一句是界面自己下的结论。
+
+| 元素 | 内容 |
+|---|---|
+| 标题 | 按结局分行：`Agent 正在运行` / `Agent 正在启动` / `Agent 正在等待你的回答` / `Agent 已暂停` / `Agent 运行已结束 · provider 记为成功` / `Agent 运行已结束 · provider 记为失败` / **`Agent 已结束 · 没有记录到结局`** |
+| 徽标 | `运行中` / `启动中` / `等待用户` / `已暂停` / `已结束 · provider 记为成功` / `已结束 · provider 记为失败` / `已结束 · 没有记录到结局`；卡片自带同一套色调（绿 = 成功、红 = 失败、黄 = **无结局记录**） |
+| 事实行 | `第 <n> 次尝试 · 停止原因 <reason> · 工具调用 <n> 次 · 最后文本 完整/只保留了尾部`；没有 provider 事实时改说 `这次结束没有记录 provider 事实（旧记录，或 Adapter 未报告）。`，未报告停止原因时写 `（provider 未报告）` |
+| 失败行 | 只有 provider 报告了失败才出现：`provider 报告的失败：<稳定码> <message>`（`role="alert"`） |
+| 最后的输出 | 小字 `最后的输出（全文）` 或 `最后的输出（尾部）` + 等宽块，内容就是 `execution.session.completion.facts.finalAssistantText`（provider 报告的**最后一段助手文本**，Runtime 最多保留 **2000** 字符） |
+| 截断说明 | 截断时额外一行：`Runtime 只保留了这段文本的最后 2000 个字符；更早的部分不在记录里。` |
+| 没有文本时 | `没有记录到助手文本。这不表示 Agent 什么都没说，只表示这次结束没有把文本记录下来。`（**不谎称成功也不谎称失败**） |
+| 跳转 | `查看完整会话记录 ↓`（`#agent-session-transcript`，跳到下方「Agent 会话与执行过程」里的会话记录块）+ 小字 `（下方「Agent 会话与执行过程」；只读，不改任务状态）`；**该任务还没有任何 Session 时整个跳转不出现** |
+
+> 这张卡片**不判断意图**：`SUCCESS`／`FAILURE` 是 provider 报的，`没有记录到结局` 也是记录的事实
+> （例如会话断开时 `exit_json` 里只有断开原因，没有 outcome）。它不与 `会话结束注记`（FOUNDATION-056）互相代替：
+> 注记说的是**结束形态**，这张卡片说的是**结束与最后的文本**。
+
 **（b）「下一步」提示行**
 
-一行灰字，按当前状态给出**下一步该做什么**。原文（源码核对）：
+一行灰字，按当前状态给出**下一步该做什么**。原文（源码核对，`apps/ui/src/agent-run.ts` 的 `taskNextStep`）：
 
 | 条件 | 文案 |
 |---|---|
@@ -260,16 +311,26 @@ Web UI 是**本地 Runtime 的便利前端**，不是另一个产品：
 | `BLOCKED` | 正在等待上游依赖满足。展开下方任务依赖，查看尚未满足的条件。 |
 | 有进行中集成 | 集成尚未完成，请查看下方独立集成验证与合入记录。 |
 | 验证进行中 | 任务验证进行中。下方显示实际步骤，可请求取消；完成前不能合入 dev。 |
-| 可捕获成果 | Agent 会话已退出。若有代码变更，可提交成果，然后独立验证。 |
+| 可捕获成果、结局 `SUCCESS` | Agent 运行已结束（provider 记为成功）。若有代码变更，可提交成果，然后独立验证。 |
+| 可捕获成果、**没有结局** | Agent 会话已退出，但没有记录到结局。提交成果前先在下方核对它实际做了什么。 |
 | `EXECUTED`、无集成 | 成果已提交。先在固定 commit 上运行任务验证；验证通过后才能合入 dev。 |
 | `EXECUTED`、验证通过 | 验证已通过，可以合入 dev。合入会产生独立集成验证，并只在通过后移动 dev 引用。 |
 | 已集成 | 已合入 dev。dev → main 的稳定提升是另一条流程，不在这一步内。 |
 | `SUCCEEDED` | 成果已合入 dev；这不等于已提升到稳定的 main。 |
-| `RUNNING` | 查看下方执行过程；可暂停（保留现场、稍后继续）或终止。 |
+| `RUNNING`、Session 在跑 | Agent 正在运行；可查看下方执行过程，或暂停（保留现场、稍后继续）、终止。 |
+| `RUNNING`、正在启动 | Agent 正在启动，尚未进入运行；可查看下方长命令步骤。 |
+| `RUNNING`、Session 在等用户 | Agent 正在等待你回答一个请求；在下方回答后它会继续。 |
+| `RUNNING`、正在/已经暂停 | 任务正在暂停或已暂停；「继续」会在同一工作树新建一次执行并复用该会话。 |
+| `RUNNING`、Session 已退出但不可捕获 | Agent 会话已退出，但这次尝试没有被记为可捕获成果；请在下方执行记录中核对。 |
+| `WAITING_FOR_USER` 但没有 `OPEN` 请求 | 任务在等待用户输入，但当前没有 OPEN 的待处理请求。刷新「待处理」或查看下方执行记录。 |
 | `PAUSED` | 任务已暂停，provider 进程已确认退出；「继续」会在同一工作树新建一次执行并复用该会话。 |
+| `PAUSING` | 正在协作停止 provider 进程：确认静止后才会进入「已暂停」，在此之前工作树不会释放。 |
+| `CANCELLING` | 正在协作停止 provider 进程：确认静止后才会记为「已终止」，在此之前占用不释放。 |
 | `CANCELLED` | 任务已终止，不会自动重开；需要重做请新建任务。 |
-| `RECOVERY_REQUIRED` | 执行状态需要人工检查，请展开执行与验证记录查看原因；不会自动重试。 |
-| `FAILED` | 本次执行失败，请查看执行记录中的错误原因。 |
+| `RECOVERY_REQUIRED`、Session `DISCONNECTED` | 会话与 Runtime 的连接已断开，状态需要人工核对；不会自动重试。 |
+| `RECOVERY_REQUIRED`、其他 | 执行状态需要人工检查，请展开执行与验证记录查看原因；不会自动重试。 |
+| `FAILED`，没记到错误码 | 本次执行失败，请查看执行记录中的错误原因。 |
+| `FAILED`，有错误码 | 本次执行失败（`<错误码>`），请查看执行记录中的错误原因。 |
 
 **（c）任务操作（`aria-label="任务操作"`）——每个按钮做什么**
 
@@ -964,6 +1025,21 @@ Runtime 后依然生效，命令行（codeestra settings ui …）读写的是�
 
 读写失败时显示错误横幅 `读取或写入 Runtime 设置失败：<CODE>: <message>`。
 
+### 8.1 「资源回收」卡（ADR-0062）
+
+「设置」标签页在「界面效果」下方还有一张「资源回收」卡，只有一个开关：
+
+| 位置 | 元素 | 命令 |
+|---|---|---|
+| 资源回收卡 | 标题 `资源回收` + `重新读取` | `settings.autoReclaim.get` |
+| 资源回收卡 | `集成后自动回收 worktree` 复选框（改动即写） | `settings.autoReclaim.set` |
+| 资源回收卡 | 当前/默认状态、设置文件真实路径与等价命令 | —（只读投影） |
+
+- 标题下说明原文：`集成成功后，Codeestra 按 reclaim 的同一套归属校验自动回收该批成员的 Task worktree；失败现场（脏 / 未合入 / 失败或取消）仍然保留。关闭后回到手动 reclaim。`
+- 复选框默认勾选（`enabled: true`）；取消后写入 `settings.autoReclaim.set {enabled:false}`，与 CLI
+  `codeestra settings auto-reclaim off` 是同一条命令、同一份文件（`<CODEESTRA_HOME>/auto-reclaim.json`）。
+- 和界面效果一样，它是**设置不是门禁**：零确认；`reclaim plan/apply` 行为不受影响。
+
 ---
 
 ## 9. 汇总：只读投影 vs 真的改状态
@@ -1022,7 +1098,7 @@ Runtime 后依然生效，命令行（codeestra settings ui …）读写的是�
 | 设置 | 五个下拉框（改动时）、`恢复默认`、`全部恢复默认` | `settings.ui.set` / `settings.ui.reset` |
 
 **注意 `刷新` 不是 `重启`**：界面**不提供**停止或重启 Runtime 的控件（那是 CLI `stop` / `status`），
-也**不提供**权限模式切换（那是 CLI `permission set`）。
+也**不提供**权限模式切换（那是 CLI `settings permission set`）。
 
 ---
 
@@ -1034,7 +1110,8 @@ Runtime 后依然生效，命令行（codeestra settings ui …）读写的是�
 | 能力 | 现状 |
 |---|---|
 | `attention resolve`（散文提问等待的回应） | 界面尚无该控件；等待会以 `WAITING_FOR_USER` + 会话结束注记显示，退出方式在 CLI |
-| `settings prose-question-attention` | 全局开关，界面未提供（「设置」标签页只有界面效果五项） |
+| `settings prose-question-attention` | 全局开关，界面未提供（设置页只有界面效果与资源回收卡） |
+| `settings auto-reclaim` | 全局开关（ADR-0062），**界面已提供**：设置页「资源回收」卡的复选框读写同一条命令 |
 | `reclaim plan/apply/records` | 破坏性命令面，界面未提供 |
 | `promotion prepare/approve/promote/abandon` | 界面上的稳定提升记录是**只读**的 |
 | `task tests record/show/history` | 界面只显示验证结果与策略摘要 |
@@ -1044,7 +1121,7 @@ Runtime 后依然生效，命令行（codeestra settings ui …）读写的是�
 | `session handoff writer acquire/release`、`terminal read` | 界面终端面板提供附加/输入/交接的主要动作，完整控制面在 CLI |
 | `scheduler reservations acquire/release/prepare-workspace` 的获取与准备 | 界面提供容量设置、预留查看、释放与 reconcile；预留的获取/准备控制面在 CLI |
 | `agent plugins select` 的 flag 形式（`--extension` / `--clear`） | 界面提供等价的勾选与「清除选择」 |
-| `stop` / `permission set` / `status` | 界面只显示权限模式与事件流状态；停止与切换用 CLI |
+| `stop` / `settings permission set` / `status` | 界面只显示权限模式与事件流状态；停止与切换用 CLI |
 | `events list` | 界面只做实时订阅 |
 
 `events.subscribe` 与 `runtime.ui` 这两个命令在 HTTP 上会被明确拒绝（`NOT_AVAILABLE_OVER_HTTP`）：
@@ -1056,7 +1133,7 @@ Runtime 后依然生效，命令行（codeestra settings ui …）读写的是�
 
 - 从头读到尾的说明书：[manual.md](./manual.md)
 - 功能清单：[features.md](./features.md)
-- CLI 完整命令参考（含 `/api/command`、`/api/events`）：[cli-reference.md](./cli-reference.md)
+- CLI 完整命令参考（含 `/api/command`、`/api/events`）：[cli/](./cli/README.md)（九篇索引；HTTP/SSE 面在 [cli/interface.md](./cli/interface.md) §20）
 - 常见任务的做法：[recipes.md](./recipes.md)
 - 人工观感核对清单：[acceptance-checklist.md](./acceptance-checklist.md)
 - 插图清单：[images/README.md](./images/README.md)

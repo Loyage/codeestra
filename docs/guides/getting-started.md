@@ -3,6 +3,7 @@
 > **适用版本** `dev@17b4dd6`（2026-09-16） · **schema** v32 · **最后校对** 2026-09-16
 > 版本会前进：`dev@17b4dd6` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> 权限模式的命令拼写由 FOUNDATION-098 同步为 `settings permission get|set`（ADR-0064：顶层 `permission` 已移除；§19 另新增 `settings list` 总览）。
 > §4.3 的影响映射含义提醒已按 ADR-0059 改写（FOUNDATION-091）；其余内容沿用原有校对基线。
 
 本文带你从零把 Codeestra 跑起来：安装依赖 → 启动 Runtime → 接入第一个 Git 项目 → 打开 Web UI。
@@ -116,15 +117,15 @@ CLI 会自动寻找 Runtime；**没有在跑就自动拉起它**，然后打印 
 看一眼当前权限模式：
 
 ```sh
-bun run codeestra permission get
+bun run codeestra settings permission get
 # {"mode":"FULL","default":"FULL"}
 ```
 
 `FULL` 是产品默认。切到 `STRICT` 无需确认，随时可切回：
 
 ```sh
-bun run codeestra permission set strict
-bun run codeestra permission set full
+bun run codeestra settings permission set strict
+bun run codeestra settings permission set full
 ```
 
 | 模式 | 行为差异（源码核对） |
@@ -184,7 +185,7 @@ bun run codeestra project impact validate /path/to/repo --json
 bun run codeestra project trust /path/to/repo --dev-repo /path/to/dev-clone
 
 # STRICT：需要确认，交互输入 TRUST，或脚本传 --yes
-bun run codeestra permission set strict
+bun run codeestra settings permission set strict
 bun run codeestra project trust /path/to/repo --dev-repo /path/to/dev-clone --yes
 ```
 
@@ -251,8 +252,8 @@ bun run codeestra ui --no-open  # 只打印地址
 如果只想从 `open` 拿到链接，用 `bun run codeestra open . --no-open`。
 
 UI 与 CLI 是**同一个命令面**：界面通过 `POST /api/command` 发送与 CLI 完全相同的请求结构，事件通过
-`GET /api/events` 的 SSE 流获取。详情见 [ui.md](./ui.md) 与 [cli-reference.md](./cli-reference.md) 的
-「HTTP / SSE 面」一节。
+`GET /api/events` 的 SSE 流获取。详情见 [ui.md](./ui.md) 与 [cli/interface.md](./cli/interface.md) 的
+「HTTP / SSE 面」一节（§20）。
 
 ---
 

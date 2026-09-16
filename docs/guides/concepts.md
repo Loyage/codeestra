@@ -7,6 +7,7 @@
 > §「调度三态」由 FOUNDATION-091 按 ADR-0059 重写（声明同一功能才冲突）；
 > §「调度三态」末尾新增「全局暂停」一段、§「运行边界」补充控制状态的持久性（FOUNDATION-097 / ADR-0061 D04/D08）。
 > §「双分支与 Task 工作树基线」由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目可跑完整 Task，只有集成与提升需要 dev 分支）；其余内容沿用 FOUNDATION-091 的校对基线。
+> §「Reclaim」由 ADR-0062 补充集成后的自动回收一行。
 
 这份文档解释 Codeestra 里的名词到底指什么、哪些东西**不是**调度主实体、以及几条会影响你日常判断的硬边界。
 规格原文见 [PROJECT_SPEC.md](../../PROJECT_SPEC.md) §2「核心不变量」；这里是面向使用者的说明。
@@ -196,6 +197,9 @@ dev 集成结果与集成验证证据。
 - **失败现场默认保留**：未提交改动、失败/取消的验证或集成，在没有 `--include-failure-scenes` 时是 `RETAIN`。
 - **未注册目录不会被删**，除非调用方用 `--remove-unregistered <精确路径>` 指明它（ADR-0037）。
 - 回收过的 Task worktree 之后可以由 `task retry` 从保留的 Task 分支**重建**（ADR-0042）。
+- **集成成功后会有一次自动回收**（ADR-0062，`settings auto-reclaim` 默认 `on`）：对该批成员的 Task worktree
+  执行与 `reclaim` 完全相同的决策（因此失败现场仍默认保留、branch 不动）；它失败不影响集成结果，
+  细节在集成报告的 `reclamation` 汇总与账本 evidence（`automatic: true`）里。
 
 ### Project Knowledge（项目知识）
 
@@ -282,7 +286,7 @@ IntegrationBatch 阶段以 `CONFLICTED` 暴露（ADR-0059 D02 明确选择的权
 > 仍然完整报告映射、快照、基线与占用者（含 `occupiers[].code`）；只是这些事实不再改变判定。
 
 > 因此「一个 Task 现在为什么不跑」有三种互不相同的答案：**依赖未满足（BLOCKED）**、**冲突等待**、**容量等待**。
-> CLI 用退出码 3 表示「等待」，退出码 1 表示「确实不会跑，需要处理」。详见 [cli-reference.md](./cli-reference.md)。
+> CLI 用退出码 3 表示「等待」，退出码 1 表示「确实不会跑，需要处理」。详见 [cli/README.md](./cli/README.md) 的 §0.2。
 
 ### 全局暂停：Runtime 控制状态，不是 Task 状态
 

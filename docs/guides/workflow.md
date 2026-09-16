@@ -6,6 +6,7 @@
 > §1 的创建任务与 §4.4 的修订示例由本分支按 **ADR-0065** 改写（必填 `--title`/`--name`；`--constraint`/`--kind` 已删除）。
 > §3.1 的 `task run` 门禁由 FOUNDATION-091 按 ADR-0059 改写。
 > §10 的依赖满足语义由 FOUNDATION-093 第三轮同步（ADR-0060 修订）；其余内容沿用 FOUNDATION-091 的校对基线。
+> §9 补充集成成功后的自动回收（ADR-0062）。
 
 本文按真实顺序走一遍：**建任务 → 提交 → 运行 → 回答 Agent → 提交成果 → 验证 → 合入 dev → 稳定提升 → 资源回收**。
 每一步给出可以照抄的命令和**预期输出形状**。
@@ -454,6 +455,10 @@ bun run codeestra reclaim records --project $PROJECT [--task <task-id>] \
 
 被回收的 Task worktree 之后可以用 `task retry` 从保留的 Task 分支重建（ADR-0042）。
 
+从 ADR-0062 起，**合入 `dev` 成功之后**会对该批成员的 Task worktree 自动执行同一条决策（默认开启）：
+clean + 已合入的会被回收，失败现场仍保留；`settings auto-reclaim off` 可关掉。自动回收是集成后的
+最佳努力，失败不影响集成结果，细节见集成报告的 `reclamation` 字段。
+
 ---
 
 ## 10. 观察与调试
@@ -483,6 +488,6 @@ bun run codeestra task status $PROJECT <task-id>
 
 ## 下一步
 
-- 每条命令的完整参数与退出码：[cli-reference.md](./cli-reference.md)
+- 每条命令的完整参数与退出码：[cli/README.md](./cli/README.md)（九篇索引）
 - 界面上的每个面板：[ui.md](./ui.md)
 - 报错怎么办：[troubleshooting.md](./troubleshooting.md)

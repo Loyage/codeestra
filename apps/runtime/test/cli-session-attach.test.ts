@@ -273,7 +273,7 @@ async function startTask(options: { readonly permissionMode?: 'FULL' | 'STRICT' 
   if (options.permissionMode === 'STRICT') {
     // The mode is a persisted Runtime setting that every launch reads, and the switch itself is
     // exactly one command with no confirmation.
-    expect((await cli(['permission', 'set', 'strict'], environment)).exitCode).toBe(0);
+    expect((await cli(['settings', 'permission', 'set', 'strict'], environment)).exitCode).toBe(0);
   }
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { id: string }[];

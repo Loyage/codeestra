@@ -258,6 +258,14 @@ export interface ReclaimApplyInput extends ReclaimPlanInput {
   readonly commandId: string;
   readonly now?: () => number;
   readonly randomUUID?: () => string;
+  /**
+   * ADR-0062: set only by the automatic reclamation that runs right after a successful integration.
+   * It is folded into the command's payload hash (a replay with a different trigger conflicts) and
+   * added to the evidence of every row, so an automatic run is distinguishable from a user's
+   * `reclaim apply` without widening the ledger's `source` column (which means "recorded resource vs
+   * unregistered directory", an orthogonal fact).
+   */
+  readonly automatic?: { readonly trigger: 'INTEGRATION'; readonly batchId: string };
 }
 
 export interface ReclaimBatchApplyInput extends ReclaimBatchInput {
@@ -1533,6 +1541,9 @@ export async function applyReclamation(input: ReclaimApplyInput): Promise<Reclai
     // A selection of paths to delete is part of the request identity: replaying the same command
     // ID with a different selection must be a conflict, not a second, wider run.
     removeUnregistered: [...(input.removeUnregistered ?? [])].map((path) => resolve(path)).sort(),
+    // ADR-0062: the trigger is part of the identity too, so the automatic reclamation can never be
+    // confused with a user command that happens to reuse its command ID.
+    automatic: input.automatic ?? null,
   }));
   const existing = input.storage.findReclamationOperation(input.projectId, input.commandId);
   if (existing !== null) {
@@ -1554,6 +1565,15 @@ export async function applyReclamation(input: ReclaimApplyInput): Promise<Reclai
   }
 
   const built = await buildPlan({ ...input, kinds, includeFailureScenes });
+  const automaticEvidence: Readonly<Record<string, unknown>> = input.automatic === undefined
+    ? {}
+    : { automatic: true, trigger: input.automatic.trigger, batchId: input.automatic.batchId };
+  const planTargets: readonly ReclaimTarget[] = Object.keys(automaticEvidence).length === 0
+    ? built.plan.targets
+    : built.plan.targets.map((target) => ({
+      ...target,
+      evidence: { ...target.evidence, ...automaticEvidence },
+    }));
   const repositoryRoot = built.candidates.project.repoRoot;
   const unregisteredTargets = built.plan.unregistered?.targets ?? [];
   const recordedTargets: RecordedTarget[] = [
@@ -1602,7 +1622,7 @@ export async function applyReclamation(input: ReclaimApplyInput): Promise<Reclai
   input.storage.startReclamationOperation(operation.operationId, now());
 
   const records: ReclamationRecordInput[] = [];
-  for (const target of built.plan.targets) {
+  for (const target of planTargets) {
     if (target.action === 'ALREADY_ABSENT') {
       records.push(recordInput(target, randomUUID(), 'ALREADY_ABSENT',
         target.reasonCode, target.detail, target.evidence));
@@ -1756,6 +1776,7 @@ export async function applyReclamation(input: ReclaimApplyInput): Promise<Reclai
   const completedAt = now();
   const report: ReclaimReport = {
     ...built.plan,
+    targets: planTargets,
     operationId: operation.operationId,
     outcome,
     records: records.map((record) => ({

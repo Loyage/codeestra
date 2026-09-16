@@ -9,6 +9,8 @@
 >
 > 基线 `dev@75fa7b87a4fbc515adf46a936b3666bf83a7ebaa` · 脚手架
 > [`scripts/real-provider-acceptance.sh`](../../scripts/real-provider-acceptance.sh) · 2026-09-15
+>
+> 权限模式的命令拼写由 FOUNDATION-098 同步为 `ce settings permission get|set`（ADR-0064：顶层 `permission` 已移除）。
 
 ---
 
@@ -24,7 +26,7 @@
 - 不是人工观感清单。那一份是 [`acceptance-checklist.md`](../guides/acceptance-checklist.md)，
   只覆盖布局、主题、字号、动效、焦点等**没有机器断言**的界面观感。
   两者互补：本文覆盖**功能**，那份覆盖**观感**（本文 §5 有指针）。
-- 不是命令参考。每条命令的参数与退出码见 [`cli-reference.md`](../guides/cli-reference.md)；
+- 不是命令参考。每条命令的参数与退出码见 [`cli/README.md`](../guides/cli/README.md)；
   本文只在验收语境里引用它们，并且每条都对照 `apps/cli/src/main.ts` 的 `usage()` 核对过（见交付记录）。
 
 **判定必须分两类**，下面每一项都拆开写：
@@ -90,7 +92,7 @@ CODEESTRA_HOME="$CODEESTRA_HOME" bun run codeestra agent config get
 ```
 
 这两条都是仓库已有能力（ADR-0012）；环境变量层的语义见
-[cli-reference.md §0.3](../guides/cli-reference.md)。
+[cli/README.md §0.3](../guides/cli/README.md)。
 
 ### 1.3 一次性临时仓库与 `CODEESTRA_HOME`
 
@@ -536,10 +538,10 @@ ce agent plugins list --project "$PROJECT" --adapter pi --json; echo "exit=$?"
 ce agent plugins select --project "$PROJECT" --adapter pi \
   --extension "$TMP/probe-extension.ts" --json; echo "exit=$?"
 ce agent plugins list --project "$PROJECT" --adapter pi --json   # 该条目 selected: true
-ce permission get                                                # 确认当前模式
+ce settings permission get                                                # 确认当前模式
 
 # ---- 观察 1：FULL 模式 ----
-ce permission set full
+ce settings permission set full
 ce task create "$PROJECT" "调用 probe_side_effect 工具一次，然后结束。"
 ce task submit "$PROJECT" "$TASK" 0
 ce task run "$PROJECT" "$TASK" 1 --adapter pi --json; echo "exit=$?"
@@ -548,7 +550,7 @@ ls "$CODEESTRA_HOME/plugin-side-effect.txt"     # 期望：存在（直接副作
 ls "$CODEESTRA_HOME/worktrees/$PROJECT/$TASK/probe-tool-out.txt"   # 期望：存在
 
 # ---- 观察 2：STRICT 模式 ----
-ce permission set strict
+ce settings permission set strict
 ce task create "$PROJECT" "调用 probe_side_effect 工具一次，然后结束。"
 ce task submit "$PROJECT" "$TASK2" 0
 ce task run "$PROJECT" "$TASK2" 1 --adapter pi --json; echo "exit=$?"
@@ -557,7 +559,7 @@ ce events list --project "$PROJECT" --since 0 --limit 500 --json
 
 # ---- 还原（必须做） ----
 ce agent plugins select --project "$PROJECT" --adapter pi --clear; echo "exit=$?"
-ce permission set full
+ce settings permission set full
 ```
 
 **预期观察**
@@ -580,7 +582,7 @@ ce permission set full
   解释）。同时确认这是**受控、可回滚**的：`--clear` 之后选择必须为空。
 
 **失败/中止**：probe 让 Runtime 崩溃、provider 异常退出或 ATTENTION 通道出错 → 立刻
-`agent plugins select --clear`、必要时 `permission set full`，然后按 §4 保留现场。
+`agent plugins select --clear`、必要时 `settings permission set full`，然后按 §4 保留现场。
 **不要**继续加载其它 extension 去「再试一次」。
 
 **证据**：`a5-plugins-list-before/after.json`、probe 源码原文（含 sha256）、两个 side-effect 文件的
@@ -853,7 +855,7 @@ ce promotion get "$PROJECT" "$PROMOTION"
 
 ## 6. 相关阅读
 
-- 命令参数、退出码、稳定码：[cli-reference.md](../guides/cli-reference.md)
+- 命令参数、退出码、稳定码：[cli/README.md](../guides/cli/README.md)
 - 端到端流程（日常怎么用，不是怎么验收）：[workflow.md](../guides/workflow.md)
 - 领域概念（为什么 `UNKNOWN` 不是 `SAFE`、Task 验证 ≠ 集成验证）：[concepts.md](../guides/concepts.md)
 - 出错了怎么办：[troubleshooting.md](../guides/troubleshooting.md)

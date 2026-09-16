@@ -292,7 +292,7 @@ Runtime 在 spawn plan 里带 `transport: 1`，helper 只接受它支持的那�
   provider 是否退出由 `waitpid` 判定（实测 master 在 provider 退出后不保证报 EOF）。
   `ioctl(TIOCSWINSZ)` 经 Bun FFI 在本机 darwin/arm64 会返回 0 却写入垃圾尺寸（AArch64 变参 ABI），理由写在代码注释里。
 - **取值域是合约的一部分**：`1..1000` 的整数行列，Runtime / helper / Zod 三处都拒绝越界。
-- **命令面**：`session handoff terminal resize`（`docs/guides/cli-reference.md` §7）。退出码 `0` 只有真的改了尺寸；
+- **命令面**：`session handoff terminal resize`（`docs/guides/cli/task-revision-session.md` §7）。退出码 `0` 只有真的改了尺寸；
   `1` 拒绝或未生效；`2` 越界。`session.handoff.status` 的 `terminal.currentSize` 只在**本 Runtime 仍持有该终端**时非 null：
   启动时的 `windowSize` 不是「现在的尺寸」。
 - **写入者座位拥有视口**：已有客户端持有该终端的 `WRITER` attachment 时，只有它能 resize；其他 holder 得到

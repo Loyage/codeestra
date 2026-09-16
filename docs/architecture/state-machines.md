@@ -52,6 +52,9 @@ Task Integration summary：`NOT_READY → ELIGIBLE → BATCHED → INTEGRATED`�
 
 Task worktree 基线（ADR-0009/ADR-0018）：新 Task 的 workspace 从 `projects.dev_ref`（默认 `refs/heads/dev`）的当前 OID 建立；仓库没有 `dev` 时 `project.trust` 以 `DEV_REF_MISSING` 拒绝，不静默回退到其他分支。已有 workspace 不回改基线。
 
+Task worktree 回收（ADR-0021/ADR-0062）：只有 `reclaim plan/apply` 与「集成成功后的自动回收」两条删除路径，共享同一条归属决策；
+自动回收在 `SUCCEEDED` 产生后对该批每个成员执行，`settings auto-reclaim off` 可关闭。两者都不删 branch，失败现场默认保留。
+
 ## 2. Execution
 
 状态：`CREATED, PREPARING, STARTING, RUNNING, WAITING_FOR_USER, PAUSING, PAUSED, STOPPING, RECOVERY_REQUIRED, SUCCEEDED, FAILED, CANCELLED, SUPERSEDED`。

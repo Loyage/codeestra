@@ -7630,6 +7630,23 @@ CREATE TABLE runtime_command_receipts (
 
 **超出任务书「你可改」清单的一处**：`apps/runtime/src/main.ts`（命令分发所在处）。不在「禁改」清单里，且不编辑它无法接入新命令面（验证 1/5/6 需要真实 CLI）。改动限于 `scheduler.capacity.*` 三个 case、`globalPauseState` provider 与 import/注释，未触碰暂停/进程冻结相关代码；集成时与 GLC-2 的 `scheduler control *` 分发会冲突，需手工合并。
 
+### 合入方式与集成复跑（已执行）
+
+- 合入方式：按用户本轮明确指示（「commit 后合并到 dev」）走**人工 `git merge --no-ff`**——在 dev clone
+  （`~/Documents/codeestra-dev`）的 `dev` 上合入 `Loyage/config_zone`（`26082d8`），得到 merge commit **`53f6f55`**。
+  **没有走产品 `task integration` 的 IntegrationBatch 路径**，如实记录：本格工作在 Orca 工作区分支上进行，不是一条
+  产品 Task，没有 TaskRevision / 成果 commit / 任务级验证可供集成批次消费；本仓库历次 `dev` 合入也一律是人工 merge。
+- 冲突：0 个（合入前 `dev = 28255d4` 与本格分支的基线相同；本格早期那次 `--ff-only` 后手工解开的 `package.json`
+  冲突在本提交里已经合成为并集）。
+- 集成复跑（在合并结果 `dev@53f6f55` 上，用 dev clone 自己的 `node_modules`）：
+
+| 命令 | 结果 |
+|---|---|
+| `bun run typecheck` | 退出码 0 |
+| `bun test apps/runtime/test/{cli-settings,cli-ui-settings,cli-auto-reclaim,permission-mode,ui-settings,cli-open}.test.ts` | **31 pass / 0 fail**（312 expect） |
+
+- 集成后仍未跑全量：`dev → main` 提升前必须在精确 dev SHA 上跑全量（ADR-0038 / runbook §3）。
+
 ### 剩余问题 / 集成注意（必须由协调者处理）
 
 1. **v34 是两块共用的版本号**：GLC-2 在自己分支上可能重复定义 `runtime_command_receipts` / 重建 `domain_events`。合并时以本格 DDL 为准并逐列核对（见上面两张表的最终形态）；合并后必须**重跑** v33→v34 真实文件库迁移、`foreign_key_check`、四张新表齐全与故障注入回滚——**本格分支上的回滚证据不能替合并后的证据背书**。
@@ -7775,11 +7792,334 @@ FOUNDATION-096 的容量上半，因此这次合并本身就是 ADR-0061 两半�
 - 容量半边的全局命令面（`scheduler capacity get|set|reset`）由 FOUNDATION-096 实现并已同在 `dev` 上；本格的容量卡 `scope` 已可切换到 `GLOBAL`（切点是一行 prop）。
 - 本次集成**只合并了两个分支，没有运行全量测试**：`dev → main` 提升前必须在精确 `dev` SHA 上跑一次全量（ADR-0038/runbook §3）。
 
-## 用户任务（`Loyage/task_auto`）— 任务输入字段重构：显示标题 / 命名标题 / 任务详情，删除约束与任务类型（ADR-0065，schema **v35**）
+## 用户任务（`Loyage/simplize_task_ui`）— 把 Agent 运行结局与最后的输出摆到任务详情最前面（无 ADR、**无 schema 变更**、不占迁移号、新命令面无）
 
-状态：**已实现并定向验证**；**未 commit、未 push、未合入 `dev`、未提升 `main`、未重启任何 Runtime**。基线 `dev = 7425556`；
-worktree `/Users/loyage/orca/workspaces/codeestra-dev/task_auto`，分支 `Loyage/task_auto`。定向测试计划见本分支的
-[`.codeestra/tests.json`](../../.codeestra/tests.json)（ADR-0038/0039；用 `targetedTestPlanSchema` 校验通过）。
+状态：**已实现并定向验证，已合入 `dev`（merge `2c5a0f4`）**；**未 push `origin/dev`、未提升 `main`、未重启任何 Runtime**（工作区分支 `Loyage/simplize_task_ui`，
+`865f79f` → merge `2c5a0f4` into `dev@7425556`；Orca worktree `/Users/loyage/orca/workspaces/codeestra-dev/simplize_task_ui`）。
+
+用户原话（两轮）：
+1. `简化任务详情页面的信息，目前这套太难关注到关键信息了，你先列出所有模块，我来选择哪些保留`；
+2. `细化状态提示吧，task内的agent运行完毕的时候，需要有提示，并且把agent最后的输出摆放到最前面来`。
+
+第一轮先给出了详情页 24 个模块的清单（含可见条件与所占体量），**未动手改版**；第二轮用户逐项裁决：
+1. 提示形态与位置：**标题下新增「Agent 运行结果」卡片**（而不是只改文字、也不是页面顶部整宽横幅）。
+2. 「最后的输出」来源：**用 Runtime 已记录的事实**（`executions[].session.completion.facts.finalAssistantText`），
+   不额外读会话文件。
+3. 提示范围：**详情页 + 任务列表行**（即需要给 Runtime 列表投影新增字段）。
+
+**第一轮的「精简模块」尚未执行**：模块清单里的取舍（第 3–24 项保留哪些）**未得到用户答复**，因此本次只做了第二轮明确要求的部分，
+并未删除或收起任何现有模块。不得把本次读成「详情页已精简」。
+
+改了什么：
+- `packages/storage/src/database.ts`：`TaskSummary` 新增 **`latestExecution`**（新 `TaskLatestExecutionSummary`）——最新一次 Execution 尝试
+  的 `executionId`/`attemptNumber`/`state`/`resourceHeld` 与它那个 Session 的 `sessionState`/`completionOutcome`；`listTasks`/`getTask`
+  各加两个 `LEFT JOIN`（`executions` 的最新一次 by `attempt_number DESC` + 它的 `agent_sessions`），共用新的 `TaskSummaryRow`；
+  `createTask` 的字面量显式给 `latestExecution: null`（从未启动过 ≠ 未知）。**纯读取投影**：不新增列、不新增表、不参与任何判定。
+- `packages/storage/src/index.ts`：导出 `TaskLatestExecutionSummary`。
+- `apps/ui/src/types.ts`：`TaskView` 同步 `latestExecution`。
+- `apps/ui/src/agent-run.ts`（新增，纯函数）：`agentRunPhase` 把事实分成
+  `NOT_STARTED/STARTING/RUNNING/WAITING_FOR_USER/PAUSED/ENDED_OK/ENDED_FAILED/ENDED_UNRECORDED` 七类，
+  `agentRunCapturable`（与 Runtime 的 `task.result.capture` 同一条判据，详情页按钮与列表行共用），`agentRunLabel`/`agentRunHeadline`/`agentRunTone`，
+  `agentRunFactLines`/`agentFinalOutput`，`taskNextStep`（把 `App.tsx` 里的 20 多分支 if 链搬出来并按结局细化），`agentRunRowHint`。
+  `taskNextStep` 顺带补上了原先会落到「当前状态：X。详情以 Runtime 记录为准。」的 `PAUSING` / `CANCELLING` 两档（只说
+  「确认静止后才进入下一态」，不断言已完成）。
+- `apps/ui/src/agent-run-card.tsx`（新增）：标题下的只读卡片；**规格正文/声明的功能被下移到操作按钮组之后**，让「Agent 说了什么 + 下一步该做什么」成为首先读到的两块。
+- `apps/ui/src/App.tsx`：`canCapture` 改用 `agentRunCapturable`；`nextStep` 改用 `taskNextStep`；卡片接到 `latestExecution` 的
+  `attemptNumber`/`session.completion`；给会话记录块加 `id="agent-session-transcript"` 作为卡片跳转锚点。
+- `apps/ui/src/task-list.tsx`：行尾提示改由 `agentRunRowHint` 优先给出（无更具体事实时回退到原表）。
+- `apps/ui/src/styles.css`：`.agent-run-card` 全套样式（**故意不用 `.card`**：`.task-detail > .card` 会把嵌套卡片染成警示色）。
+- 文档：`docs/guides/ui.md`（头部校对行 + §2.2 行尾提示替换表 + §2.3 「运行结果卡片」/重写的「下一步」表 + 顺序变更）、
+  `docs/guides/cli-reference.md` §4（`latestExecution` 字段）、`docs/guides/features.md`（任务表两行 + 新增一行）、
+  `docs/guides/manual.md` §6（图文说明），以及本记录。**未新增/修改 ADR**（无新的产品语义、无新门禁、无新命令）。
+
+定向验证（ADR-0038，开发分支只跑定向测试；全部通过）：
+- `bun test packages/storage/test/task-latest-execution.test.ts`（**新增，8 项**）：从未启动过 → `null`；Session `ACTIVE` → 无 outcome；
+  `SUCCESS` completion 下尝试仍 `RUNNING` + 持资源（这正是「已退出、待提交成果」）；`FAILURE` → 尝试 `FAILED`/不再持资源；
+  `exit_json` 里只有断开原因 → **不是** completion outcome；最新一次尝试胜过老的一次；`listTasks` 与 `getTask` 同一投影；归档不影响。
+- `bun test packages/storage/test`（**185 项**，含上面 8 项）：既有夹具全部通过（含 `one_held_execution` 单占用约束对新增 JOIN 无影响）。
+- `bunx vitest run apps/ui`（**16 文件 / 213 项**）：含新增的 `apps/ui/test/agent-run.test.ts`（分类、
+  `agentRunCapturable` 与 Runtime 判据一致、无 outcome 不渲染成成功、`taskNextStep` 各分支、列表行提示）与
+  `apps/ui/test/agent-run-card.test.ts`（静态渲染：输出在卡上、截断如实标注、无文本时不渲染空 `<pre>`、无 Session 时不给跳转）。
+- `bun test apps/runtime/test/cli-task-control.test.ts`（3 项）：`TaskPayload` 新增 `latestExecution` 断言，证明字段走通了**真实 CLI + 真实 Runtime + 真实 git** 的整条命令面。
+- `bun run typecheck`、`bun run typecheck:ui` 通过。
+- **未跑** `bun run check` / `just check` / `just verify` / `check:fast`（ADR-0038：全量只在 `dev` 候选上跑）。
+
+仍未做 / 已知边界（不得当作已完成）：
+- **第一轮的模块精简未执行**（用户尚未选保留哪些模块）；本次只新增与重排，未删除任何模块。
+- **未做 UI 的真实点击走查**（ADR-0008 边界）：卡片、跳转锚点、列表行提示的观感与窄屏排布只有源码/纯函数/静态渲染断言，
+  没有真实浏览器会话；`04-task-detail.png` 仍是**旧图**，截图未更新。
+- 卡片只显示最新一次尝试；用户在下拉框里选了另一次执行时，卡片**不会**跟着换（有意：它就是「最后一次说了什么」）。
+- `finalAssistantText` 依赖 Adapter 报告 facts；无 facts 时只能如实说「没有记录 provider 事实」，不回退去读会话文件（用户已选择该取舍）。
+- 未验证：超长输出在真实浏览器里的滚动高度、`#agent-session-transcript` 在非根滚动容器（`.workspace-shell`）里的实际落点。
+- **未跑全量**（全量在合入后的 `dev` 候选上、提升前跑）、**未 push `origin/dev`**、未提升 `main`、未重启任何 Runtime。
+- 合入方式是**人工 `--no-ff` merge**（与 `lane/purge-force`、`lane/fix-impact-capacity-fixture` 同一做法），
+  **没有**走产品 `task integration` 的 IntegrationBatch 路径，也**没有**在合入后单独跑一次独立集成验证——
+  本次 merge 前 `dev == 本分支基线`，merge 结果的树与 `865f79f` 完全一致（`git diff 865f79f dev` 为空），
+  因此「合并引入的风险」为零；但**这个 dev SHA 目前没有全量证据**，不得当成已验证的候选。
+
+## 用户任务（`task/83d058f8`）— 优化资源管理回收：集成成功后自动删除 Task worktree（ADR-0062，无 schema 变更、不占迁移号）
+
+状态：**已实现并定向验证，已合入本地 `dev`（merge `1bdddcf`）**；**未 push `origin/dev`、未提升 `main`、未重启任何 Runtime**。基线 `dev@7425556`（合入前 `dev` 已前进到 `4c28d8d`）；
+worktree `/Users/loyage/.local/state/codeestra/worktrees/8efee84e-33c7-4c9d-95ce-a3b29389829e/83d058f8-e32f-4da8-bbcd-bf807eaa8c96`，
+分支 `task/83d058f8-e32f-4da8-bbcd-bf807eaa8c96`。
+
+用户原话：`优化资源管理回收，任务跑完了，合并了，就应该可以删除worktree了`。
+
+用户逐项裁决（本轮 A/B/C 的实际答复，未答复项不作批准）：
+1. 触发时机：**集成成功后立即回收**（`dev` 前进后回收该批成员的 Task worktree；不做后台周期扫描）。
+2. 「已合并」判据：**Task 基线 ref（沿用现状）**。
+3. 开关：**默认开启 + 新增设置开关**（CLI + 设置页）。
+4. 终态但未合并的 clean worktree：**保留为失败现场（现状）**。
+
+改了什么：
+- `apps/runtime/src/auto-reclaim-settings.ts`（新）：`<CODEESTRA_HOME>/auto-reclaim.json`（`{version:1,enabled:true}`，0600/0700），
+  默认开启；缺文件=默认，文件不可读=Runtime 启动时记录并使用默认（与 prose 设置同处理），写入是原子替换。
+- `packages/contracts/src/index.ts`：新增 `settings.autoReclaim.get` / `settings.autoReclaim.set { enabled }`（union 追加）。
+- `apps/runtime/src/integration-service.ts`：`integrateComposedBatch` 在 `completeIntegrationBatch` 成功后，对该批每个成员调用
+  `applyReclamation({ kinds:['TASK_WORKTREE'], taskId, commandId:'auto-reclaim:<batchId>:<taskId>', automatic:{trigger:'INTEGRATION',batchId} })`；
+  逐成员 `try/catch`，失败不影响 `INTEGRATED`；`IntegrationReport` 新增 `reclamation` 汇总。`integrateIntegrationBatch` / `integrateTaskResult`
+  新增可选 `runtimeHome` / `autoReclaim`。
+- `apps/runtime/src/reclaim-service.ts`：`ReclaimApplyInput.automatic` 进入 payload hash 并写入每条记录 evidence（`automatic:true`/`trigger`/`batchId`）；
+  report 的 targets 带上该 evidence。**未新增 schema `source` 取值**（触发方式与「记录资源 vs 未注册目录」正交）。
+- `apps/runtime/src/main.ts`：启动读取该设置、分发两条新命令、把 `home`/开关传给两个集成入口。
+- `apps/cli/src/main.ts`：`settings auto-reclaim [on|off] [--json]` + usage。
+- `apps/ui/src/settings.tsx`、`types.ts`、`App.tsx`：设置页新增「资源回收」卡（复选框），读写同一条 Runtime 命令；`SettingsPage` 接收 `client`。
+- 文档：新 ADR-0062、`docs/decisions/README.md`、`docs/guides/{cli-reference,features,manual,ui,concepts,troubleshooting,recipes,workflow}.md`、
+  `docs/architecture/state-machines.md`、本记录。
+- `package.json`：把新测试文件 `cli-auto-reclaim` 加入 `test:e2e` 并从 `test:unit` 的 ignore 列表排除。
+
+定向验证（ADR-0038，开发分支只跑定向测试；全部通过）：
+
+| 命令 | 结果 |
+|---|---|
+| `bun run typecheck` | 退出码 0 |
+| `bun run typecheck:ui` | 退出码 0 |
+| `bun test apps/runtime/test/cli-auto-reclaim.test.ts`（新增） | 4 pass / 0 fail |
+| `bun test apps/runtime/test/cli-integrate.test.ts`（扩展 2 处） | 3 pass / 0 fail |
+| `bun test apps/runtime/test/cli-reclaim.test.ts apps/runtime/test/cli-reclaim-batch.test.ts`（回归） | 20 pass / 0 fail |
+| `bun test packages/contracts/test apps/runtime/test/integration-service.test.ts` | 63 pass / 0 fail |
+| `bunx vitest run apps/ui` | 14 文件 / 188 pass / 0 fail |
+
+覆盖的断言：集成成功后成员 worktree 目录消失、分支仍在（`task retry` 可重建）、报告 `reclamation` 计数正确；
+`settings auto-reclaim off` 后同一集成不删目录、显式 `reclaim apply --task --kind TASK_WORKTREE` 仍能删；设置默认/写读/0600/坏文件回退与修复；
+Web UI HTTP 面读写同一条命令。
+
+合入方式：按用户本轮裁决走**人工 `git merge --no-ff`**（与 `task/930f5325`、`lane/purge-force`、`Loyage/simplize_task_ui` 相同）——
+改动提交 `973a329` 以 merge commit **`1bdddcf`** 合入 dev clone（`~/Documents/codeestra-dev`）的 `dev`（合入前 `dev = 4c28d8d`）。
+**没有走产品 `task integration` 的 IntegrationBatch 路径**，如实记录：本 Task 停在 `RECOVERY_REQUIRED`（Pi 会话断开、无 capture 的成果 commit、
+无 PASSED 验证），产品路径在语义上无法消费本分支；本仓库历次 `dev` 合入也一律是人工 merge（缺口另见 `Loyage/simplize_task_ui` 一格与 NEXT 第 5 条）。
+
+冲突 2 个文件，都是「两侧各自追加」，逐处保留两侧原文：`docs/guides/cli-reference.md` 头部校对注（dev 的 `latestExecution` 一行 +
+本格的 `settings auto-reclaim` 一行）与 `docs/tasks/README.md` 末尾追加段（dev 的 `Loyage/simplize_task_ui` 段 + 本格这段）。
+被两侧都改过、由 Git 自动合并的 7 个文件（`apps/ui/src/App.tsx`、`apps/ui/src/types.ts`、`docs/guides/{ui,manual,features}.md` 等）
+逐文件与两个父提交做了 numstat 对账，双方改动一行未丢。
+
+独立集成验证（在合并结果 `dev@1bdddcf` 上重跑，用 dev clone 自己的 `node_modules`）：
+
+| 命令 | 结果 |
+|---|---|
+| `bun run typecheck` / `bun run typecheck:ui` | 退出码 0 / 0 |
+| `bunx vitest run apps/ui` | 16 文件 / **213 pass / 0 fail**（含 dev 侧新增的 agent-run 两文件） |
+| `bun test apps/runtime/test/{cli-auto-reclaim,cli-integrate,cli-reclaim,cli-reclaim-batch}.test.ts` | **27 pass / 0 fail** |
+| `bun test apps/runtime/test/cli-task-control.test.ts packages/storage/test` | **188 pass / 0 fail**（dev 侧 `latestExecution` 投影 + 并入无关回归） |
+| `bun test packages/contracts/test apps/runtime/test/integration-service.test.ts` | **63 pass / 0 fail** |
+
+合并本身仍未在 `dev@1bdddcf` 上跑全量；`dev → main` 提升前必须在精确 dev SHA 上跑全量（ADR-0038 / runbook §3）。
+
+顺带观察（**未修改，不属本格范围**）：`docs/tasks/README.md` 里 FOUNDATION-097 段末尾有一行既有的标题重复
+（`### 剩余问题 / 未做### 剩余问题 / 未做`）。它在合并的两个父提交里**都已存在**，不是本次合并引入，留给后续文档格处理。
+
+仍未做 / 已知边界（不得当作已完成）：
+- **未 push `origin/dev`、未提升 `main`、未重启任何 Runtime**（本轮用户明确选择「不 push」，与前几次合入一致）。
+- **未跑全量** `bun run check` / `just check` / `just verify`（ADR-0038：全量只在 `dev` 候选上跑）。
+- 真实 provider 长跑后的自动回收未验收（本格 e2e 用协议 stub provider）；多成员批次在同一次集成里的回收顺序与部分失败未单独端到端；Windows 未验证。
+- **集成成功但 Runtime 在自动回收前崩溃的窗口**：worktree 会留到下一次显式 `reclaim`（用户明确选择「不做后台周期扫描」，ADR-0062 D01 如实记录，不伪装成已自动收尾）。
+- UI 的「资源回收」卡只有纯投影核对与 HTTP 命令面断言，**未经真实点击**（ADR-0008 边界）。
+
+## 用户任务（`lane/cli-reference-split`）— CLI 命令参考按功能拆为九篇（ADR-0063，纯文档：无代码、无 schema、无命令面变化）
+
+状态：**已改完、定向验证通过、已合入 `dev`（merge `6119eef`，分支提交 `a6933a8`）**；
+**未 push `origin/dev`、未提升 `main`、未重启任何 Runtime**。基线 `dev = 81dd3a8`；
+分支 `lane/cli-reference-split`（在 dev clone `/Users/loyage/Documents/codeestra-dev` 上，未建独立 worktree）。
+
+合入路径（如实记录）：按仓库里既有 lane 分支的人工合并形态（与 `lane/purge-force`、`lane/fix-impact-capacity-fixture` 相同）
+在 dev clone 上 merge 进 `dev`；**没有走产品 `IntegrationBatch`，也没有跑“独立集成验证”** —— 本格是仓库自身的纯文档改动，
+不含任何代码路径，因此没有可被集成验证断言的命令面行为。
+
+用户原话：「cli-reference.md太长了，我需要你按功能分别存放」。
+用户逐项裁决（本轮问答的实际答复，未答复项不作批准）：
+1. 拆分粒度：**按功能组拆 9 篇到 `docs/guides/cli/`**（否决「粗分 5 篇」与「每命令组一篇≈19 篇」）。
+2. 旧引用怎么处理：**保留 `cli-reference.md` 作索引 + 旧 §N 对照表，新文件内部沿用拆分前的章节号**。
+3. 记录方式：**新增 ADR-0063 修订 ADR-0050**（不重写 ADR-0050 正文）。
+4. 落地：**当前 dev clone 开 `lane/` 分支，改完先不提交**（本记录因此也是未提交状态的一部分）。
+
+改了什么：
+- **新增 9 篇**（`docs/guides/cli/`）：`README.md` 93 行（索引 + §0 + 相关阅读）、`runtime.md` 169（§1/§2/§19）、
+  `project.md` 136（§3）、`task-lifecycle.md` 195（§4）、`task-revision-session.md` 165（§5/§6/§6.1/§7）、
+  `task-result-verify.md` 100（§8/§9/§10）、`integration-dag-scheduler.md` 302（§11–§14/§16）、
+  `promotion.md` 106（§15）、`interface.md` 155（§17/§18/§20/§21）。
+- **`docs/guides/cli-reference.md`：1322 行 → 50 行**，改为索引：24 行「旧 §N → 现在在哪一篇」对照表 + 拆分理由。
+  它是**唯一保留的旧编号对照表**，所以 `docs/decisions/**` 与 `docs/tasks/README.md` 历史记录里的
+  「`cli-reference.md` §N」仍然可解析（查到文件后按号检索）。
+- **活文档链接同步**（只改指针，不改结论）：`docs/guides/README.md`（分流表）、`manual.md`（15 处）、`ui.md`（2 处）、
+  `troubleshooting.md`（3 处）、`recipes.md`（2 处）、`concepts.md`、`workflow.md`、`features.md`、`getting-started.md`、
+  `docs/architecture/agent-adapter-api.md`、`docs/notes/real-provider-acceptance-runbook.md`（3 处）。
+- **ADR**：新增 `docs/decisions/0063-split-cli-reference-by-command-group.md`（D01 文件集合与职责、D02 索引与对照表、
+  D03 沿用原章节号、D04 ADR-0050 D03 的映射目标改为 `docs/guides/cli/` 对应篇目、D05 搬移不等于校对、
+  D06 逐节校对注随节搬迁、D07 非目标）；`docs/decisions/README.md` 三处（ADR-0050 索引行加 `Amended by ADR-0063`、
+  新增 0063 索引行、「当前有效语义/用户文档纪律」一行）；本记录。
+- **一字未改**：`docs/decisions/NNNN-*.md` 既有正文、`docs/tasks/README.md` 既有记录（不重写历史）；
+  `PROJECT_SPEC.md`、`AGENTS.md`、`.codeestra/**`。
+
+文档同步（ADR-0050 D03 要求的交付说明）：
+- 这次**不是命令面变更**（无新命令、无 flag、无退出码、无稳定码、无 UI 行为、无设置键、无权限语义差异），
+  而是**命令参考本身的存放方式变更**；按 ADR-0063 D04，此后命令面变更的落点从 `cli-reference.md` 改为
+  **`docs/guides/cli/` 里覆盖该命令的那一篇**（§19 `settings` 在 `cli/runtime.md`）。
+- 改了哪一篇的哪一节：上列 11 个文件的**指针**（`docs/guides/README.md` 的分流表行、`manual.md` 每节末尾的
+  「想深入看哪篇」与 §13.5/§13.6/相关阅读、`ui.md` §2.2 提示行与相关阅读、`troubleshooting.md` 的
+  `KNOWLEDGE_*`/`PROMOTION_*` 行与末尾指针、`recipes.md` §0 与末尾、`concepts.md` 的退出码提示、
+  `workflow.md`/`features.md`/`getting-started.md` 的参考指针、`agent-adapter-api.md` §7 指针、
+  `real-provider-acceptance-runbook.md` 三处）。
+- 新增九篇的版本/校对头按 ADR-0050 D02 给出：`dev@de03448` / schema v34 / 2026-09-16，并写明
+  「内容自 `cli-reference.md @ dev@de03448` 搬移，一句未改写；**本次未重新核对源码**」——**搬运不是校对**，
+  所以日期不更新。
+- **确认无需修改并写明理由**：`PROJECT_SPEC.md`（无规格变化）；`AGENTS.md`（其规范写的是「按 ADR-0050 D01 的映射
+  同步 `docs/guides/` 对应段落」，未点名文件，D04 的目标变更不需要改它）；`acceptance-checklist.md`（人工观感项与
+  命令参考的存放位置无关）；`docs/decisions/**` 历史正文与 `docs/tasks/README.md` 历史记录（不重写历史，
+  旧 §N 引用由对照表解析）；`docs/guides/troubleshooting.md` 第 602 行的不一致清单（那是「某一格当时同步了什么」
+  的历史记录，与 ADR 同理不动）。
+
+定向验证（ADR-0038：开发分支只跑定向检查；**未跑** `bun run check` / `check:fast` / `just check` / `just verify`，
+本格无代码改动所以也没跑任何测试）：
+1. **搬移完整性（脚本逐行比对，可复现）**：按「原文件行号区间 → 目标文件」映射逐行比对，原文件第 35–1322 行
+   （§0–§21 与「相关阅读」，共 **1288 行**）**逐行、按原顺序**落在九篇里；每篇搬运行数与其正文行数相等，
+   无丢失、无重复、无插入。唯一被规范化处理的字节是相对链接的 `../` 前缀（新目录深一层）。
+   结果：`1288 行逐行落位：OK（无丢失/重复/顺序错）`。
+2. **头部校对注无丢失**：原第 6–20 行共 15 行注释逐行反查九篇，14 行至少出现一次；未出现的只有**原第 17 行**
+   ——它与第 6 行是同一句（只有句末标点 `；`/`。` 不同），只保留一份（已写入 ADR-0063 D05 与 `cli/README.md` 头部）。
+   跨篇的注释（涉及多篇的一条，如 FOUNDATION-093 那条涉及 §1/§3/§4）在**每篇都保留一份**（ADR-0063 D06）。
+3. **链接存在性**（沿用 ADR-0050 验证要求 1 的命令，覆盖 `docs/guides/**` 含新的 `cli/` 子目录与 `docs/decisions/*.md`）：
+   输出只有 2 行 `MISSING: docs/guides/features.md -> ../decisions/0047-github-mediated-stable-promotion.md`，
+   见下「已知问题」——**是本格之前就存在的断链，不是本次改动引入**。
+4. **命令面覆盖未缩小**：从九篇抽 `codeestra <group> <action>` 命令路径并集，与拆分前**完全相同**（各 93 条，
+   `diff` 无差异）。第一轮自检发现 `task purge` 的一条校对注（原第 9 行）漏搬，已补回到 `task-lifecycle.md`。
+5. **跨篇 § 引用盘点**：正文里共 **7 处**「见 §N」现在落在别的篇里（`integration-dag-scheduler.md` 的 §0/§1/§19、
+   `task-revision-session.md` 的 §17、`cli/README.md` 的 §14，以及本来就跨文档的 `project.md` → `manual.md` §3.4、
+   `task-lifecycle.md` → `ui.md` §2.2）。按 ADR-0063 D05 **未改写正文**，改由各篇头部的指引 + 索引表解析。
+6. **未验证（不得当作已成立）**：任何**渲染效果**——中文/全角标点标题的锚点是否可用、目录阅读体验、GitHub 与编辑器
+   的显示——本仓库没有渲染器，**不能断言**；对照表因此刻意不用锚点，只给「文件 + §N」。
+
+仍未做 / 已知问题：
+- **已提交并合入 `dev`（`a6933a8` → merge `6119eef`）**；未 push `origin/dev`、未提升 `main`、未重启任何 Runtime
+  （纯文档，dev 实例的代码与 UI 资产未变，不需要 `just restart-dev`）。
+- **既有断链（不在本格范围，未修，等你裁决）**：`docs/guides/features.md` 第 35 与 37 行共 4 处链接写的是
+  `../decisions/0047-github-mediated-stable-promotion.md`，实际文件名是 `0047-github-mediated-promotion.md`；
+  HEAD 版本已有（`git show HEAD:docs/guides/features.md | grep -c` = 2 行）。修它属另一件事，本格没有静默改掉。
+- **未拆** `manual.md`（1374 行）与 `ui.md`（1148 行）：ADR-0063 D07 明确列为非目标，需另行裁决。
+- 索引与各篇头部的「覆盖哪些号」需要在**下一次**拆分/合并时同步维护（ADR-0063 的代价 2）。
+
+## FOUNDATION-098 — `settings` 成为设置的唯一入口：`settings list` 总览 + 权限模式移入 `settings permission`（ADR-0064，无 schema 变更）
+
+状态：**已实现并已合入 dev**（用户任务，无 schema 变更、不占迁移号；定向测试通过；
+改动提交 `26082d8` 以 merge commit **`53f6f55`** 合入 dev clone（`~/Documents/codeestra-dev`）的 `dev`，合入前 `dev = 28255d4`；**未跑全量**）。
+用户原话：「把 `bun run codeestra permission` 指令放入 `bun run codeestra settings` 里面，`bun run codeestra settings` 需要指令可以查看有哪些设置，以及这些设置处于什么状态。」
+基线变更：本格开头经用户授权把工作分支 fast-forward 到当时本地 `dev = 28255d41d3b4f54b01741ef02c1cc8a7856cf3f1`
+（因为 ADR-0062 的 `settings auto-reclaim` 与 ADR-0063 的 CLI 参考拆分都直接影响本任务），然后才写代码与文档。
+
+### 用户裁决（A/B/C，逐项）
+
+1. 顶层 `permission`：**删除**，只留 `settings permission`（不保留别名）。
+2. `settings` 下的形状：**`settings permission get` / `settings permission set <full|strict>`**。
+3. 总览的数据来源：**新增 Runtime 命令 `settings.list`**（而不是 CLI 侧拼装）。
+4. 总览列出哪些设置：**权限模式 + 散文开关 + 五个界面键 + 并发上限**；Agent 配置（三层作用域）排除。
+   本格补充：fast-forward 后同属「Runtime 级、一个 home 一份值、零确认」的 `settings auto-reclaim`（ADR-0062）按同一判据
+   一并纳入，共**九项**；这不是新增用户未答复的语义，已写进 ADR-0064 的 Options 4 备注。
+
+### 改了什么
+
+- `packages/contracts/src/settings.ts`（新增）：`settingKeys` 闭集（九项，即「有哪些设置」的契约事实）、
+  `settingEntrySchema`（`value`/`default`/`values`×`range` 恰有其一/`explicit`↔`source` 一致）、
+  `settingsListViewSchema`（强制每个键**恰好出现一次**）、`permissionModes`/`permissionModeSchema`/`defaultPermissionMode`。
+- `packages/contracts/src/index.ts`：新增 `settings.list` 请求；`permission.set` 改用共享的 `permissionModeSchema`；新增 `minConcurrencyLimit`。
+- `apps/runtime/src/settings-view.ts`（新增）：`inspectSettings` 把九项组装成载荷并在边界 `parse`。
+  每项来自它自己那条命令的同一次读取：内存值（permission / prose / auto-reclaim）+ `inspectUiSettings` + `storage.getRuntimeCapacity()`。
+- `apps/runtime/src/main.ts`：分发 `settings.list`；启动时记录三个文件型设置的「本 home 是否显式存过值」并在各自的 `set` 里置真
+  （值与「显式」必须同源）；`permission.get` 的 `default` 改用契约常量。
+- `apps/runtime/src/permission-mode.ts`：模式的枚举/默认/类型改为从契约单一声明处取得（不再本地重复）。
+- `apps/cli/src/main.ts`：**删除**顶层 `permission get|set`；新增 `settings list [--json]`（默认人读列表，`--json` 为 Runtime 载荷原文）
+  与 `settings permission get|set`（继续发 `permission.get|set`，零确认）；`usage()` 与 settings 段说明同步。
+- `apps/runtime/test/cli-settings.test.ts`（新增）：见下面定向验证。
+- 既有用例同步（顶层拼写变化）：`cli-open`、`cli-promotion`、`cli-session-attach`、`cli-codex-adapter`、`cli-claude-adapter` 的
+  `['permission', …]` 改为 `['settings', 'permission', …]`。
+- `package.json`：`cli-settings` 进 `test:e2e`、进 `test:unit` 的 ignore 列表（与 dev 侧 `cli-auto-reclaim` 合并，冲突手工解开后取并集）。
+- 文档：新 ADR-0064、`docs/decisions/README.md`（新增 0064 + 给 ADR-0011 加「CLI 拼写已移入 `settings permission`」+
+  「当前有效语义」新增「设置面」一条）；`docs/guides/cli/runtime.md`（§1 权限段改为指向 §19、§19 新增 `settings list`/
+  `settings permission`/`settings ui` 三节）；`docs/guides/cli/README.md`（索引表 §1 行、§0.1 人读视图清单、§0.3 `permission set` 措辞）；
+  `docs/guides/cli-reference.md`（旧 §N 对照表两行）；`docs/guides/{features,getting-started,manual,recipes,troubleshooting,ui,README}.md`；
+  `README.md`；`docs/notes/real-provider-acceptance-runbook.md`；本记录。
+- **未改**：任何 schema/迁移、任何 Runtime 命令名与存储文件、Web UI（`apps/ui/**` 一字未动：界面本来就只读 `permission.get` 显示模式，
+  且不提供切换；`settings list` 目前是 CLI-only）。
+
+### 实际跑了什么检查与结果（定向，ADR-0038；**未跑** `bun run check` / `just check` / `just verify` / `check:fast`）
+
+| 命令 | 结果 |
+|---|---|
+| `bun run typecheck` | 退出码 0 |
+| `bun test apps/runtime/test/cli-settings.test.ts`（新增） | **3 pass / 0 fail**（83 expect） |
+| `bun test apps/runtime/test/permission-mode.test.ts apps/runtime/test/ui-settings.test.ts` | **11 pass / 0 fail** |
+| `bun test apps/runtime/test/cli-ui-settings.test.ts` | 5 pass / 0 fail |
+| `bun test apps/runtime/test/cli-auto-reclaim.test.ts apps/runtime/test/cli-prose-question-attention.test.ts` | 8 pass / 0 fail |
+| `bun test apps/runtime/test/cli-open.test.ts` | 8 pass / 0 fail（改了拼写的用例） |
+| `bun test apps/runtime/test/cli-promotion.test.ts` | 6 pass / 0 fail（改了拼写的用例） |
+| `bun test apps/runtime/test/cli-session-attach.test.ts` | 2 pass / 0 fail（改了拼写的用例） |
+| `bun test apps/runtime/test/cli-codex-adapter.test.ts apps/runtime/test/cli-claude-adapter.test.ts` | 10 pass / 0 fail（改了拼写的用例） |
+
+覆盖的断言：全新 home 上九项全为产品默认、`explicit:false`、不创建任何设置文件；`values`×`range` 恰有其一；
+人读输出含键名、`--json` 为原文、多余参数退出码 2；`settings permission set` 写入 0600 版本化文件并零确认；
+顶层 `permission get|set` 现为用法错误（退出码 2、stdout 空）；总览与 `settings permission get`、`settings prose-question-attention`、
+`settings auto-reclaim`、`settings ui get <key>`、`scheduler capacity get` **逐项相等**；重启 Runtime 后「显式设置」仍如实
+（含「值等于默认但确实设置过」）。
+
+### 没跑什么及原因
+
+- **未跑全量**（`bun run check` / `just check` / `just verify`）：ADR-0038 —— 非 `dev` 分支不许跑全量，全量只在提升前的精确 dev 候选上跑。
+- **未跑 `typecheck:ui` / `bunx vitest run apps/ui`**：本格未改 `apps/ui/**` 一行（界面只读 `permission.get` 显示模式，不发现新命令）。
+- **未验收**：真实 provider 长跑下总览与专命令的一致性；Windows；`settings list` 的 UI 投影（本格有意不做，属 NEXT）。
+
+### 设计选择与依据
+
+- **总览由 Runtime 回答，而不是 CLI 拼装**：「有哪些设置」是一个产品事实；放在 CLI 就变成客户端再维护一份清单，
+  正是本 ADR 要消除的漂移。契约把键集闭合并要求「恰好一次」，所以新增设置忘了进总览会在边界报错，而不是悄悄少一行。
+- **不一并改 Runtime 命令名**（`permission.get|set` 保持原名）：与 ADR-0061 D02 的 `settings concurrency` 先例一致——
+  设置面拼写可以不同，但两边必须发同一条命令，不允许出现第二个状态源。改命令名会同时改 HTTP 面与 UI，超出用户要求的 CLI 范围。
+- **「是否显式设置」与「值」同源**：permission/prose/auto-reclaim 的值是内存里的生效值，所以「显式」也取启动时/写入时的文件事实；
+  若改成每次 `existsSync`，手改文件而 Runtime 还在跑时会出现「值=默认、却标着已显式设置」的自相矛盾行。
+- **布尔开关按 `on`/`off` 汇报**：列表是给敲这些命令的人看的，同一个设置不允许有两套词汇（`reclaim.auto` 的取值即 `settings auto-reclaim` 的同两个词）。
+- **人读默认 + `--json` 原文**：用户问的是「查看有哪些设置」，人读列表是直接答案；`--json` 保留完整契约（含每项的 `appliesTo`）供脚本使用。
+- **顶层 `permission` 直接删掉、不留别名**：用户明确选择；两者本就是同一条 Runtime 命令，留别名只会让「该用哪个」重新成为问题。
+
+### 与规格/ADR 的一致性和差异
+
+- 无规格修订（`PROJECT_SPEC.md` 未改）；不新增权限门禁、审批层、信任流程或沙箱（ADR-0008/0011 的第一原则不变）。
+- ADR-0011 的**语义**（默认 FULL、CLI 可无确认切 STRICT、存储文件、生效范围）一字未改，只改 CLI 拼写；已在 ADR-0011 索引行注明。
+- 历史记录（`docs/tasks/README.md` 的 FOUNDATION-070 等旧节、ADR-0011/0029/0040 正文）**保留原有 `permission get|set` 写法**：那是当时的事实记录，不重写历史；
+  当前有效拼写以 ADR-0064、`cli/runtime.md` §19 与本记录为准。
+
+### 剩余问题 / 集成注意（必须由协调者处理）
+
+- **未 push、未提升 main、未重启任何 Runtime**：本地 `dev` 现为 `53f6f55`（比 `origin/dev` 领先 11 个提交）。
+  按用户本轮裁决只做「commit 后合入本地 dev」，没有动任何远端 ref。
+- 合入 `dev` 时如需人工 merge，注意 `package.json` 的 `test:unit` ignore 列表与 `test:e2e` 列表需要双方取**并集**（本格已在本分支上手工解开一次同类冲突）。
+- 破坏性变更提醒：任何脚本/文档若仍写 `permission get|set`，升级后是用法错误（退出码 2）。
+- 已知不足（有意）：`settings list` 没有 UI 投影；`cli-reference.md` §19 原本从未记录 `settings ui`，本格补了一节**最小**说明（键名/取值/零确认/稳定码），
+  逐屏细节仍以 `manual.md` 与 `ui.md` 为准。
+
+## 用户任务（`Loyage/task_auto`）— 任务输入字段重构：显示标题 / 命名标题 / 任务详情，删除约束与任务类型（ADR-**0065**，schema **v35**）
+
+状态：**已实现并定向验证；已 commit `364e877`，并已把 `dev@06bcf97` 合入本分支完成集成**（ADR-0062/0063/0064 都已在 `dev` 上）。
+合入 `dev` 的合并提交、`dev` 上的全量检查结果与**未 push `origin/dev`** 的事实由本节末尾的「落地」小节记。
+worktree `/Users/loyage/orca/workspaces/codeestra-dev/task_auto`，分支 `Loyage/task_auto`；基线 `dev = 7425556`。
+定向测试计划见本分支的 [`.codeestra/tests.json`](../../.codeestra/tests.json)（ADR-0038/0039；用 `targetedTestPlanSchema` 校验通过）。
 
 用户原话（本轮任务）：`优化任务输入功能，首先任务字段添加：标题（分显示标题和命名标题）…然后就是任务详情，任务模板，
 删除现在的任务约束，任务类型及相关功能，这两个没用了，用户必须给出这些字段所有信息才能创建任务。`
@@ -7803,7 +8143,8 @@ worktree `/Users/loyage/orca/workspaces/codeestra-dev/task_auto`，分支 `Loyag
   重建 append-only 触发器与两个索引，派生 `display_title`、`naming_title` 留 NULL）；`intentKinds` 注释说明 `ADD_CONSTRAINT` 只作历史值。
 - `packages/storage/src/database.ts`：`migrateTaskInputFields()`（预检「正文没有任何非空白字符」+ 行数比对 + 结束态断言）；
   `createTask`/`createTaskRevision`/`TaskSummary`/`TaskRevisionSummary`/`AgentStartPlan` 去掉 `kind`/`constraints`、加上两个标题；
-  `TaskCreated`/`TaskRevisionCreated` 载荷相应更新；`createTaskRevision` 固定写 `AMEND_TASK`。
+  `TaskCreated`/`TaskRevisionCreated` 载荷相应更新；`createTaskRevision` 固定写 `AMEND_TASK`。集成时与 `dev` 的
+  `TaskSummaryRow`/`latestExecution`（FOUNDATION-056 那次落地）合并为同一个行类型与同一条 SELECT。
 - `packages/git/src/index.ts` + `rebuild.ts`：`prepareWorkspace` 与 `rebuildOwnedWorktree` 按 `workspaceName` 建立分支/目录
   （后者原本硬编码内部 ID，是一条被定向测试抓到的真实回归）。
 - `apps/runtime/src/`：`main.ts`（两个命令的接线）、`revision-delivery-service.ts`（去掉约束合并与 `ADD_CONSTRAINT`，
@@ -7811,38 +8152,45 @@ worktree `/Users/loyage/orca/workspaces/codeestra-dev/task_auto`，分支 `Loyag
   `agent-start-service.ts`/`agent-runtime-service.ts`（标题进提示词载荷）、`knowledge-service.ts`（Task 无 kind 后一律按 `DEVELOPMENT` 判定 scope）。
 - `packages/agent-adapters/src/{pi,codex,claude}-adapter.ts`：提示词改为「标题 + 详情」，删除 Constraints 段。
 - `apps/cli/src/main.ts`：`task create <详情…> --title --name`；`task revision create` 去掉 `--constraint`；usage 文本同步；
-  `TASK_KIND_UNSUPPORTED` 移除。
+  `TASK_KIND_UNSUPPORTED` 移除。集成时与 `dev` 的 `settings`/`auto-reclaim` 改动同文件共存（无冲突）。
 - `apps/ui/src/`：`new-task-dock.tsx` 重写（三个必填字段、无收起态）、`task-list.tsx`（主行改为显示标题、搜索含命名标题）、
-  `App.tsx`（两个标题 + 任务详情）、`revisions.tsx`（修订表单/表格去掉约束）、`types.ts`、`styles.css`。
-- 文档（ADR-0050 D01 映射）：新增 **ADR-0065** 与 `docs/decisions/README.md` 索引/当前有效语义；`PROJECT_SPEC.md`（§1 intent 取值、
-  §2.2、§2.7 分支命名、§2.11、§2.21、§3）；`docs/architecture/{domain-model,sqlite-schema,event-model,knowledge,agent-adapter-api}.md`；
-  `docs/guides/{cli-reference,features,concepts,workflow,manual,ui,acceptance-checklist,recipes,troubleshooting}.md`（逐篇在头部记录了改了哪一节）。
+  `App.tsx`（两个标题 + 任务详情；**保留 `dev` 的版式**——「任务自己的说明」仍在 Agent 运行卡片与按钮组之下，只是其中的约束列表被删掉）、
+  `revisions.tsx`（修订表单/表格去掉约束）、`types.ts`、`styles.css`。
+- 文档（ADR-0050 D01 映射）：新增 **ADR-0065**（原稿编号 0062 与 `dev` 上已落地的 ADR-0062 自动回收冲突，集成时改号）与
+  `docs/decisions/README.md` 索引/当前有效语义；`PROJECT_SPEC.md`（§1 intent 取值、§2.2、§2.7 分支命名、§2.11、§2.21、§3）；
+  `docs/architecture/{domain-model,sqlite-schema,event-model,knowledge,agent-adapter-api}.md`；
+  `docs/guides/{features,concepts,workflow,manual,ui,acceptance-checklist,recipes,troubleshooting}.md`（逐篇在头部记录了改了哪一节），
+  以及——按 ADR-0063 拆分后的位置——`docs/guides/cli/task-lifecycle.md`（`task create`）与 `docs/guides/cli/task-revision-session.md`
+  （`task revision create`）：命令面文档写进了拆分后的正文，`cli-reference.md` 保持为索引（本格不再改它）。
 
-实际跑了什么检查、结果如何（定向，ADR-0038；**未跑** `bun run check` / `just check` / `just verify` / `check:fast`）：
-- `bunx tsc --noEmit`、`bun run typecheck:ui`：通过（两个 TypeScript 项目全绿）。
-- `bun test packages/domain/test packages/contracts/test packages/git/test`：421 项通过。
-- `bun test packages/storage/test`：181 项通过，含新增 `task-input-fields-migration.test.ts`（4 项：升级派生/历史行保留/无法派生标题时拒绝/命名标题 CHECK）。
-- `bun test packages/agent-adapters/test`：146 项通过。
-- `bunx vitest run`（`packages/domain` + `apps/ui` 全部）：504 项通过。
-- `apps/runtime/test` 定向分批跑完全部 68 个文件（除下段列出的未验证项）：最后的合计为 0 fail；其中被本格改动直接影响的有
-  `cli-task-create`（重写为 3 项新断言）、`workspace-service`（新增「按命名标题建 workspace」一项）、`cli-impact`、`cli-managed-project`、
-  `cli-session-guidance`、`cli-knowledge`、`cli-schedule`、`cli-task-retry`、`cli-task-purge`、`cli-reclaim`、`cli-reclaim-batch`、
-  `packages/git/test/{inspect,rebuild}`（后者新增「按 `<编号>-<slug>` 重建布局」一项）。
-- 迁移冒烟（真实文件数据库，v33 建库 → 当前代码升级）：`display_title` 由首行派生、`naming_title` 为 NULL、`ADD_CONSTRAINT` 行保留、
-  `PRAGMA foreign_key_check` 为空、append-only 触发器仍在且 UPDATE 被拒。该冒烟已固化为上表的测试文件。
+实际跑了什么检查、结果如何（定向，ADR-0038；**未跑** `bun run check` / `just check` / `just verify` / `check:fast`；`dev` 上的全量在合入后单独跑）：
+- 集成前（分支基线 `7425556`）：`bunx tsc --noEmit`、`bun run typecheck:ui` 通过；`packages/domain+contracts+git` 421 项、
+  `packages/storage/test` 181 项（含新增 `task-input-fields-migration.test.ts` 4 项）、`packages/agent-adapters/test` 146 项、
+  `bunx vitest run`（domain + UI）504 项、`apps/runtime/test` 全部 68 个文件分批跑完 0 fail。
+- 迁移冒烟（真实文件数据库，v33 建库 → 当前代码升级）：`display_title` 由首行派生、`naming_title` 为 NULL、
+  `ADD_CONSTRAINT` 行保留、`PRAGMA foreign_key_check` 为空、append-only 触发器仍在且 UPDATE 被拒；已固化为测试文件。
+- 集成后（把 `dev@06bcf97` 合入本分支）：`bunx tsc --noEmit`、`bun run typecheck:ui` 通过；`bun test packages/storage/test`
+  181 项、`bunx vitest run` 504 项通过；受集成影响的运行时文件重跑通过（含 `cli-task-create`、`cli-reclaim-batch`、
+  `cli-knowledge`、`cli-schedule`、`cli-task-retry`、`workspace-service`、`packages/git/test/rebuild.test.ts`）。
 
 本格抓到并修掉的真实回归（不是测试问题）：
 - `rebuildOwnedWorktree` 把期望布局硬编码为 `join(ownedRoot, projectId, taskId)`，改名后重建会以 `PATH_NOT_OWNED_LAYOUT` 拒绝
   ——已改为按记录的 `workspaceName` 建立布局，并由 `cli-task-retry`（真实 CLI+git）与 `packages/git/test/rebuild.test.ts` 覆盖。
 - 迁移最初用 SQLite 的单参数 `trim()` 派生标题，而它**只去空格**：一个以换行开头的正文会产出「多行的一句话摘要」。
   已改为显式给出空白字符集，并对没有非空白字符的正文以 `INVALID_STATE` 在动表之前拒绝升级（两者都有测试）。
+- 集成复核：核对了 `dev` 上 ADR-0062 的自动回收与未注册目录扫描——两者都按 `workspaces` 行（记录路径）归属，**不**从目录名反推 Task，
+  因此与本格的命名改动相容；`cli-reclaim-batch` 里那条「命名 workspace 仍被 ledger 认领」的断言在集成后仍通过。
 
 仍未做 / 已知边界（不得当作已完成）：
-- 未 commit、未 push、未开 PR；未合入 `dev`，因此**没有 `dev` 候选上的全量证据**（ADR-0038/0039 要求合入后、提升前在精确 `dev` SHA 上跑一次全量）。
+- **未 push `origin/dev`**、未提升 `main`、未重启任何 Runtime（提升前的全量证据必须在精确 `dev` 候选 SHA 上重新产生）。
 - **未验证**：真实稳定 Runtime 上的 v34→v35 升级（禁止触碰稳定工作树与稳定 Runtime）；`task create` 三个字段在真实浏览器里的排版/焦点/窄屏换行
   （观感类，只能人工确认，见 `docs/guides/acceptance-checklist.md` J1–J5）。
 - **破坏性变更**：`task.create`/`task.revision.create` 的请求形状不向后兼容——旧客户端缺 `displayTitle`/`namingTitle` 会被拒。这是有意选择，已写入 ADR-0065。
 - 历史任务没有命名标题，因此它们的分支/目录仍是内部 ID（迁移**不改名**）；Phase 7 的 Self Task 需要新的迁移重新引入 kind（ADR-0065 D04 记录了这个代价）。
+
+### 落地（合入 `dev`）
+
+见紧随其后的收尾提交（`docs(tasks): record the landing of Loyage/task_auto …`）：其中记合并提交 SHA 与 `dev` 上的全量检查结果。
 
 ## NEXT — 最小可用纵向切片
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { chmodSync, mkdirSync, mkdtempSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -8,6 +8,7 @@ import {
   runCli,
 } from './support/runtime-reclamation.js';
 import { provisionDevClone } from './support/agent-fixture.js';
+import { recordedWorkspaceBranch, recordedWorkspacePath } from './support/workspace-naming.js';
 
 const repositoryRoot = join(import.meta.dir, '..', '..', '..');
 const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
@@ -203,9 +204,24 @@ describe('codeestra task integrate', () => {
     expect(integrated.exitCode).toBe(0);
     const report = JSON.parse(integrated.stdout) as { readonly state: string;
       readonly integratedCommit: string; readonly mergeStrategy: string;
-      readonly verificationState: string };
+      readonly verificationState: string;
+      readonly reclamation?: { readonly enabled: boolean; readonly attempted: number;
+        readonly reclaimed: number; readonly alreadyAbsent: number; readonly retained: number;
+        readonly refused: number; readonly failed: number; readonly detail: string | null } };
     expect(report).toMatchObject({ state: 'INTEGRATED', integratedCommit: resultCommit,
       mergeStrategy: 'FAST_FORWARD', verificationState: 'PASSED' });
+
+    // ADR-0062: a successful integration reclaims the member Task worktree by default, through the
+    // same ownership-checked decision `reclaim` uses. The branch is never touched, so `task retry`
+    // can still rebuild from it (ADR-0042). ADR-0065 D03: the workspace is named
+    // `<displayNumber>-<namingTitle>`, so the recorded row — not the Task id — is the fact.
+    const home = environment['CODEESTRA_HOME'] as string;
+    const worktreePath = recordedWorkspacePath(home, taskId);
+    expect(report.reclamation).toMatchObject({ enabled: true, attempted: 1, reclaimed: 1,
+      retained: 0, failed: 0 });
+    expect(existsSync(worktreePath)).toBe(false);
+    expect(await git(devRepo, ['rev-parse', '--verify', recordedWorkspaceBranch(home, taskId)]))
+      .toBe(resultCommit);
 
     // The ref moved, the stable branch did not, and the Task reached SUCCEEDED.
     expect(await git(devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(resultCommit);
@@ -223,6 +239,41 @@ describe('codeestra task integrate', () => {
     expect(listed).toEqual([expect.objectContaining({ state: 'INTEGRATED', devRef: 'refs/heads/dev' })]);
     await cli(['stop'], environment);
   }, 120_000);
+
+  test('leaves the worktree in place when auto-reclaim is off, and the explicit reclaim still takes it',
+    async () => {
+      const { environment, projectId, taskId, resultCommit } = await capturedTask();
+      const home = environment['CODEESTRA_HOME'] as string;
+      const worktreePath = recordedWorkspacePath(home, taskId);
+      expect(existsSync(worktreePath)).toBe(true);
+
+      const off = await cli(['settings', 'auto-reclaim', 'off'], environment);
+      expect(off.exitCode).toBe(0);
+      expect(JSON.parse(off.stdout)).toMatchObject({ enabled: false, default: true });
+
+      expect((await cli(['task', 'verify', projectId, taskId], environment)).exitCode).toBe(0);
+      const version = (await status(environment, projectId, taskId)).task.version;
+      const integrated = await cli(['task', 'integrate', projectId, taskId, String(version)],
+        environment);
+      expect(integrated.exitCode).toBe(0);
+      const report = JSON.parse(integrated.stdout) as { readonly state: string;
+        readonly integratedCommit: string;
+        readonly reclamation?: { readonly enabled: boolean; readonly attempted: number } };
+      expect(report).toMatchObject({ state: 'INTEGRATED', integratedCommit: resultCommit });
+      expect(report.reclamation).toMatchObject({ enabled: false, attempted: 0 });
+      // The setting turned the automatic path off; the directory is still there.
+      expect(existsSync(worktreePath)).toBe(true);
+
+      // The explicit command is unaffected by the setting and reclaims it now that it is merged.
+      const reclaimed = await cli(['reclaim', 'apply', '--project', projectId, '--task', taskId,
+        '--kind', 'TASK_WORKTREE', '--json'], environment);
+      expect(reclaimed.exitCode).toBe(0);
+      const reclamation = JSON.parse(reclaimed.stdout) as {
+        readonly outcomeCounts: { readonly reclaimed: number } };
+      expect(reclamation.outcomeCounts.reclaimed).toBe(1);
+      expect(existsSync(worktreePath)).toBe(false);
+      await cli(['stop'], environment);
+    }, 120_000);
 
   test('refuses to integrate without a PASSED verification and leaves dev untouched', async () => {
     const { environment, devRepo, projectId, taskId } = await capturedTask({ failingPolicy: true });

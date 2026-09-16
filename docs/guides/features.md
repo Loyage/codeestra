@@ -7,10 +7,15 @@
 > 「调度、容量与冲突」一节新增「全局暂停」一行，并由 FOUNDATION-097 标明容量行的目标语义（ADR-0061 D01–D03）；
 > 「任务」表的「永久删除」一行由 FOUNDATION-090 新增（ADR-0058）；「调度、容量与冲突」一节的声明功能与
 > 冲突判定两行由 FOUNDATION-091 改写（ADR-0059）。
+> 「任务」表的「列出任务」与「状态投影」两行，以及新增的「Agent 运行结局与最后输出」一行，
+> 由用户任务 `Loyage/simplize_task_ui`（2026-09-16）同步（无新命令：只用已有的 `task list` / `task status` 字段）。
 > 「接入与项目」表的 dev 事实来源一行由 FOUNDATION-093 第三轮同步（ADR-0060 修订）；
+> 「设置」表新增「设置总览」一行，「权限模式」一行的 CLI 入口改为 `settings permission …`
+> 并链接 0064（FOUNDATION-098 / ADR-0064：`settings list` 总览，权限模式移入 `settings`）。
 > 「调度、容量与冲突」的容量与上限、槽位预留两行由 **FOUNDATION-096** 改写（ADR-0061：唯一 Runtime 全局上限），
 > 同一表的「全局暂停」一行由 **FOUNDATION-097** 从「尚未实现」改为实现事实（ADR-0061 D04–D10：持久屏障与
 > Provider 主进程冻结，Pi 为 `SUPPORTED`、Codex/Claude 为 `REQUIRES_VALIDATION`）；
+> 「资源与知识」表新增「集成后自动回收 worktree」一行（ADR-0062 / 用户任务，无 schema 变更）。
 > 「设置」表的并发上限设置一行同轮新增（同一个值也可从设置面实时调整）；
 > 「永久删除」一行的 `RECOVERY_REQUIRED` 对账由用户任务 `task/930f5325` 同步（ADR-0058 D02 修订，2026-09-16）；
 > 其余行沿用 FOUNDATION-091 的校对基线。
@@ -18,7 +23,7 @@
 一行一个能力。列的含义：
 
 - **能做什么**：这个能力对用户交付什么。
-- **CLI 入口**：完整命令路径（命令参考见 [cli-reference.md](./cli-reference.md)）。
+- **CLI 入口**：完整命令路径（命令参考见 [cli/README.md](./cli/README.md)）。
 - **UI 位置**：在 Web UI 的哪里（面板名见 [ui.md](./ui.md)）。标「—」表示当前**只有 CLI** 入口。
 - **ADR**：相关的已接受决策记录。
 
@@ -44,7 +49,7 @@
 | 能力 | 能做什么 | CLI 入口 | UI 位置 | ADR |
 |---|---|---|---|---|
 | 创建任务 | 原子保存原始意图、首 revision、事实事件与幂等回执；三个必填字段：显示标题、命名标题、任务详情（ADR-0065） | `task create <project> <详情…> --title <显示标题> --name <命名标题>` | 新建任务停靠条 | [0065](../decisions/0065-task-input-fields.md) |
-| 列出任务 | 列出任务（默认隐藏归档，`--all` 含归档） | `task list <project> [--all]` | 任务工作台列表（含搜索/筛选/排序） | [0034](../decisions/0034-compact-task-workbench.md) |
+| 列出任务 | 列出任务（默认隐藏归档，`--all` 含归档）；每行附带最新一次尝试的 `latestExecution`（结局事实，见下行） | `task list <project> [--all]` | 任务工作台列表（含搜索/筛选/排序；行尾提示在 Agent 退出后改说那次尝试的结局） | [0034](../decisions/0034-compact-task-workbench.md) |
 | 提交任务 | 用 expected version 把 `DRAFT` 转 `READY`，并在同一命令里核对依赖 + 跑一次调度 pass | `task submit <project> <task> <expected-version>` | 任务详情 → 提交 | — |
 | 运行任务 | 显式请求启动；同自动调度同一门禁（依赖/冲突/容量） | `task run <project> <task> <expected-version> [--adapter <id>] [--allow-unknown] [--json]` | 任务详情 → 启动 Agent | [0030](../decisions/0030-phase2-parallel-scheduling.md) |
 | 暂停 / 恢复 | 暂停是协作停止（确认 provider 退出后才 `PAUSED`）；恢复以 provider conversation resume 继续 | `task pause`、`task resume <…> [--adapter <id>] [--allow-unknown]` | 任务详情 → 暂停 / 继续 | [0016](../decisions/0016-task-pause-cancel-archive.md) |
@@ -52,6 +57,7 @@
 | 取消 / 归档 | 取消是终态（不自动重开）；归档是软删除（只写 `archived_at`，不删行、不回收） | `task cancel`、`task archive`、`task unarchive` | 任务详情 →「更多操作」 | [0016](../decisions/0016-task-pause-cancel-archive.md) |
 | 永久删除 | **不可撤销**：删掉任务的全部记录（含 append-only 的修订/impact/定向测试计划/知识绑定）与它自己的 worktree、验证副本、`task/<id>` 分支，并写一条 `TaskPurged`；需 `--yes`；非终态先协作停止，`RECOVERY_REQUIRED` 先按观察对账（无法确认进程已退出则拒绝）；**成果已进 `dev`/`main` 的任务默认拒绝**（只能归档）。被拒绝时 `--force` 可删：先按记录的身份终止 provider，再删掉本来会拒绝的行（含 `dev`/`main` 的来源记录，必要时连同那条提升记录），归属不明的目录/分支留在磁盘上并逐项列出 | `task purge <project> <task> <expected-version> --yes [--force] [--reason <text>]` | 任务详情 →「更多操作」→「永久删除」（输入任务编号才启用）；被拒绝后多一个「仍要强制删除」 | [0058](../decisions/0058-task-purge.md) |
 | 状态投影 | 列出 Execution / Session / 验证 / 集成投影，附 Agent 完成注记与散文提问等待 | `task status <project> <task> [--json]` | 任务详情（执行 / 验证 / `集成批次 · dev` 记录，后者含每个批次的成员表） | [0013](../decisions/0013-read-only-agent-transcript-view.md) |
+| Agent 运行结局与最后输出 | 最新一次尝试的结局（provider 记的 `SUCCESS`/`FAILURE`，或**没有记录到结局**）、停止原因、工具调用数与**最后一段助手文本**（Runtime 最多保留 2000 字符，截断时如实标注只保留尾部）；`task list`/`task status` 的 `latestExecution` 让列表行不必逐行读详情 | `task status <project> <task> [--json]`（`executions[].session.completion.facts`、`latestExecution`） | 任务详情顶部「Agent 运行结果」卡片（含 `查看完整会话记录 ↓` 跳转）+ 任务列表行提示 | FOUNDATION-056（无 ADR；仅前端投影与只读字段） |
 | 规格修订 | 创建新 revision（改任务详情或功能声明，二者至少其一）并列出历史 | `task revision create`、`task revision list` | —（界面无入口） | [0028](../decisions/0028-revision-delivery-and-stale-session-startup-reconcile.md)、[0065](../decisions/0065-task-input-fields.md) |
 | Revision 投递台账 | 单独读取与解决「修订是否真的到达运行中的 Execution」 | `task revision delivery list/get/resolve` | —（界面无投影） | [0028](../decisions/0028-revision-delivery-and-stale-session-startup-reconcile.md) |
 | 优先级（**当前无命令面**） | 优先级是 Task 模型与调度排序的一部分（降序优先），但**没有任何 CLI 命令可以改它**：`task create` 不接受 priority 参数，新建 Task 的 priority 为 0 | —（无入口） | 任务工作台排序 | [0030](../decisions/0030-phase2-parallel-scheduling.md) |
@@ -64,7 +70,8 @@
 | 原生终端接管 | 单一 writer lease + 安全点 + 准入决策：attach 读投影终端流、detach 保持运行、release 写释放字节并验证 provider 已退出且会话文件仍在 | `session handoff status/request/cancel`、`writer acquire/release`、`admit/attach/detach/release`、`terminal read/write` | 任务详情 → 原生终端与会话交接 | [0010](../decisions/0010-live-agent-terminal-takeover.md)、[0023](../decisions/0023-strict-permission-attention-and-session-writer-lease.md)、[0026](../decisions/0026-native-terminal-pty-transport.md) |
 | 结构化提问 | Agent 用 `ask_user_question` 一次提 1–4 题（每题 2–4 个可选项、可多选、可用自己的话答）；一份问卷 = 一条 Attention = 一次 answer | `attention list`、`attention answer … --choose/--text/--cancel` | 待处理（单选/多选 + 自由文本） | [0014](../decisions/0014-agent-structured-question-channel.md) |
 | 散文提问等待 | 识别「没用工具、正文提问并结束轮次」，记成一条独立 Attention 与 `WAITING_FOR_USER`，并给出明确退出方式 | `attention resolve … --answer/--dismiss`、`settings prose-question-attention` | —（CLI-only） | [0043](../decisions/0043-prose-question-attention-escalation.md) |
-| 权限模式 | 默认 FULL 零确认；可无确认切 STRICT 恢复旧门禁（工具逐次审批、两步成果 commit、提升批准） | `permission get`、`permission set <full\|strict>` | 界面显示当前模式；STRICT 下出现 TRUST 输入与二次确认 | [0011](../decisions/0011-default-full-permission-mode.md)、[0023](../decisions/0023-strict-permission-attention-and-session-writer-lease.md) |
+| 设置总览 | 一条只读命令列出全部九项 Runtime 级设置（权限模式 / 散文开关 / 自动回收 / 五个界面键 / 并发上限），每项给出生效值、产品默认、取值、是否显式设置与存储位置；每项都由它自己那条命令的同一次读取填充，因此不会与专命令读出不一致 | `settings list [--json]` | —（CLI-only） | [0064](../decisions/0064-settings-list-and-permission-as-a-setting.md) |
+| 权限模式 | 默认 FULL 零确认；可无确认切 STRICT 恢复旧门禁（工具逐次审批、两步成果 commit、提升批准） | `settings permission get`、`settings permission set <full\|strict>` | 界面显示当前模式；STRICT 下出现 TRUST 输入与二次确认 | [0011](../decisions/0011-default-full-permission-mode.md)、[0023](../decisions/0023-strict-permission-attention-and-session-writer-lease.md)、[0064](../decisions/0064-settings-list-and-permission-as-a-setting.md) |
 | Agent 配置 | 持久化 provider/model/thinking，分全局默认与每项目覆盖；逐字段按 `环境变量 > 项目 > 全局 > Adapter 默认` 解析；只影响新 Session | `agent config get/set/clear [--project <id>] [--adapter <id>] [--provider/--model/--thinking/--unset]` | Agent 设置标签页（`当前生效值` 表与 `编辑并保存`） | [0012](../decisions/0012-agent-configuration-scopes.md) |
 | Agent 插件选择 | 选 Pi 的四类资源（extensions / skills / prompt templates / themes）；选择是**一个整体字段**（项目整份替换全局，不逐项合并）；生效值连同来源层与第三方扩展风险写进 Execution | `agent plugins list`、`agent plugins select [--extension/--skill/--prompt-template/--theme <path>]… [--clear]` | Agent 设置标签页（`插件候选` 与 `清除选择`） | [0044](../decisions/0044-agent-plugin-selection-and-detection.md) |
 | 多 Adapter | 注册 `pi`（默认）、`codex`、`claude`；每次运行绑定一个 Agent，换 Adapter 是新建 Execution | `task run/resume/retry --adapter <id>` | 任务详情 → 启动 Agent / 继续（`Agent` 下拉框，在 `READY` 与 `PAUSED` 时出现）；重试入口另有自己的 Adapter 下拉框，默认「沿用该任务上一次运行的 Adapter」，选项来自 `runtime.ping` 的已注册列表 | [0029](../decisions/0029-codex-adapter-transport-and-capabilities.md)、[0040](../decisions/0040-claude-code-adapter-transport-and-capabilities.md) |
@@ -114,6 +121,7 @@
 | 能力 | 能做什么 | CLI 入口 | UI 位置 | ADR |
 |---|---|---|---|---|
 | 资源回收 | 试运行与执行共用同一决策形状；未注册目录不被删（除非指名）；失败现场默认保留 | `reclaim plan/apply/records` | —（CLI-only） | [0021](../decisions/0021-resource-reclamation.md)、[0037](../decisions/0037-reclaim-batch-and-unregistered-directories.md) |
+| 集成后自动回收 worktree | 集成成功后对该批成员的 Task worktree 自动执行同一条 `reclaim` 决策（默认开启，`settings auto-reclaim off` 关闭）；只删 clean + 已合并的；不删 branch；失败不影响集成结果，写进集成报告与账本 | `settings auto-reclaim [on|off]`（自动回收本身由 `task integrate` / `task integration integrate` 触发） | 设置页「资源回收」卡 | [0062](../decisions/0062-automatic-worktree-reclamation-after-integration.md) |
 | worktree 重建 | 回收后从保留的 Task 分支重建 worktree，供 `task retry` 使用 | `task retry`（重建路径）；`reclaim plan/apply` 决定保留 | —（CLI-only） | [0042](../decisions/0042-rebuild-reclaimed-worktree.md) |
 | Project Knowledge | 分层知识（人工 `instructions`/`skills` 从 `main` ref 读 + Runtime 数据目录里的机器生成层）；无覆盖语义、重复 id/路径 fail-closed；逐条来源与 digest 进快照 | `project knowledge validate/list/show/resolve` | —（界面无投影） | [0041](../decisions/0041-project-knowledge-layers-and-execution-binding.md) |
 | Session Guidance 台账 | 一条指导的耐久记录（正文）+ append-only 尝试台账 + 每个 Execution 启动时带上它的产物事实（`launchedWith[]`）；artifact 在 `<CODEESTRA_HOME>/guidance/<project>/<task>/guidance-context.md`，**绝不写进 Task worktree**，也不与 Project Knowledge 共用文件 | `session guidance list/get` | —（CLI-only） | [0057](../decisions/0057-session-guidance-channel-and-fact-layering.md) |
@@ -127,7 +135,7 @@
 | 界面效果设置 | 五个键（`theme`/`density`/`fontSize`/`motion`/`timeDisplay`）存在 Runtime home 的 `ui-settings.json`，CLI 与界面读写同一份值；换浏览器、清缓存、重启 Runtime 后仍生效 | `settings ui list/get/set/reset` | 设置标签页（`界面效果`）+ 侧栏底部「外观」下拉框 | [0045](../decisions/0045-global-ui-settings.md) |
 | 并发上限设置 | 全局并发上限也可以从设置面读与改：`settings concurrency` 与 `scheduler capacity` 是**同一事实**（同一 `runtime_capacity_settings` 行、同一条事件），改完立刻生效且零确认 | `settings concurrency get/set --limit/reset` | —（CLI-only；界面容量卡仍显示调度面的同一数字） | [0061](../decisions/0061-runtime-global-load-control.md) D01/D02 |
 | Web UI | 本地 `127.0.0.1` HTTP + SSE，一次性内存 token，只走 `/api/command` 与 `/api/events` | `ui [--no-open]` | 全部界面 | [0007](../decisions/0007-local-web-ui-entry.md)、[0015](../decisions/0015-task-workbench-and-themes.md)、[0017](../decisions/0017-new-task-dock.md)、[0034](../decisions/0034-compact-task-workbench.md) |
-| Runtime 生命周期 | 单实例、自动拉起、两阶段 stop 与 ownership 报告 | `status`、`stop [--wait <s>]`、`permission get` | 侧栏底部的权限模式与事件流状态指示（**界面不提供停止/重启/切权限模式**） | [0025](../decisions/0025-runtime-lifecycle-stop-and-single-instance.md) |
+| Runtime 生命周期 | 单实例、自动拉起、两阶段 stop 与 ownership 报告 | `status`、`stop [--wait <s>]`、`settings permission get` | 侧栏底部的权限模式与事件流状态指示（**界面不提供停止/重启/切权限模式**） | [0025](../decisions/0025-runtime-lifecycle-stop-and-single-instance.md)、[0064](../decisions/0064-settings-list-and-permission-as-a-setting.md) |
 | 界面主题 | 亮/暗主题切换（不改任何业务语义；ADR-0045 后由 Runtime 持久化） | `settings ui set theme system\|light\|dark` | 侧栏底部「外观」下拉框（登录前的令牌表单里还有一个只预览、不写入的） | [0015](../decisions/0015-task-workbench-and-themes.md)、[0045](../decisions/0045-global-ui-settings.md) |
 | HTTP / SSE 面 | 与 socket 传输**同一 Zod 请求 schema**；`events.subscribe` 与 `runtime.ui` 在 HTTP 上被拒（`NOT_AVAILABLE_OVER_HTTP`） | `POST /api/command`、`GET /api/events` | 界面内部使用 | [0007](../decisions/0007-local-web-ui-entry.md)、[0008](../decisions/0008-efficiency-first-service-form.md) |
 
