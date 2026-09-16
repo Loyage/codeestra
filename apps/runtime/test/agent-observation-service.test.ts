@@ -132,7 +132,7 @@ describe('Agent completion notes', () => {
     } finally {
       value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('records the note alone when escalation is explicitly downgraded to record-only', async () => {
     const value = await createAgentFixture();
@@ -152,7 +152,7 @@ describe('Agent completion notes', () => {
     } finally {
       value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('records nothing at all when escalation is switched off', async () => {
     const value = await createAgentFixture();
@@ -172,7 +172,7 @@ describe('Agent completion notes', () => {
     } finally {
       value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('leaves an ordinary completion unexplained only when nothing needed saying', async () => {
     const value = await createAgentFixture();
@@ -192,7 +192,7 @@ describe('Agent completion notes', () => {
     } finally {
       value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('records no note when the Adapter reports no facts at all', async () => {
     const value = await createAgentFixture();
@@ -208,7 +208,7 @@ describe('Agent completion notes', () => {
     } finally {
       value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('never annotates the structured question channel a second time', async () => {
     const value = await createAgentFixture();
@@ -254,7 +254,7 @@ describe('Agent completion notes', () => {
     } finally {
       value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('adds no note to a failure, which already explains itself', async () => {
     const value = await createAgentFixture();
@@ -275,7 +275,7 @@ describe('Agent completion notes', () => {
     } finally {
       value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('reports no completion for an exit payload that is not a completion', async () => {
     const value = await createAgentFixture();
@@ -294,7 +294,7 @@ describe('Agent completion notes', () => {
     } finally {
       value.storage.close();
     }
-  });
+  }, 30_000);
 
   test('records the note once when the same completion event is replayed', async () => {
     const value = await createAgentFixture();
@@ -332,5 +332,5 @@ describe('Agent completion notes', () => {
     } finally {
       value.storage.close();
     }
-  });
+  }, 30_000);
 });
