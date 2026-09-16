@@ -939,7 +939,7 @@ export class ScheduleService {
     // 3. Capacity (ADR-0032). A wait here is a capacity wait with its own stable code, never
     //    `BLOCKED`, and it distinguishes the global limit from the Adapter's own limit.
     if (input.dryRun) {
-      const capacityWait = this.#capacityWait(project.id, input.adapterId, input.simulatedExtraSlots);
+      const capacityWait = this.#capacityWait(project.id, input.simulatedExtraSlots);
       if (capacityWait !== null) {
         return { ...withAssessment, disposition: 'WAITING', detail: capacityWait.detail,
           wait: capacityWait };
@@ -1488,40 +1488,36 @@ export class ScheduleService {
     return inspectProjectCapacity({
       storage: this.#storage,
       projectId,
-      knownAdapterIds: this.#adapters.ids(),
       draining: this.#draining(),
     });
   }
 
-  #capacityWait(projectId: string, adapterId: string, simulatedExtraSlots: number): ScheduleWaitView | null {
+  /**
+   * The capacity wait a candidate would hit right now, if any (ADR-0061 D01).
+   *
+   * There is one dimension left, so the former Adapter branch is gone: a candidate's Adapter can no
+   * longer be the reason it waits. `simulatedExtraSlots` lets the caller ask "what would happen if the
+   * candidates already accepted in this same pass also occupied a slot", which is how one pass stays
+   * honest about the Tasks it is about to start.
+   */
+  #capacityWait(projectId: string, simulatedExtraSlots: number): ScheduleWaitView | null {
     const capacity = this.#capacityView(projectId);
-    const adapter = capacity.adapters.find((entry) => entry.adapterId === adapterId);
+    const used = capacity.globalUsed + simulatedExtraSlots;
     const code: CapacityWaitReasonCode | null = capacityWaitReason({
       draining: capacity.draining,
-      globalLimit: capacity.globalLimit,
-      globalUsed: capacity.globalUsed + simulatedExtraSlots,
-      adapterLimit: adapter?.limit ?? capacity.globalLimit,
-      adapterUsed: (adapter?.used ?? 0) + simulatedExtraSlots,
+      limit: capacity.globalLimit,
+      used,
     });
     if (code === null) return null;
-    const occupants = capacity.occupants.map((occupant) => occupant.taskId);
     if (code === 'SCHEDULER_DRAINING') {
       return { kind: 'CAPACITY', code, detail: capacity.drainReason
         ?? 'the Runtime is draining and accepts no new reservations', reasonCodes: [code],
         hits: Object.freeze([]), blocking: Object.freeze([]), since: null };
     }
-    if (code === 'CAPACITY_GLOBAL_LIMIT_REACHED') {
-      return { kind: 'CAPACITY', code,
-        detail: `${capacity.globalUsed + simulatedExtraSlots} of ${capacity.globalLimit} project`
-          + ' slots are in use', reasonCodes: [code], hits: Object.freeze([]),
-        blocking: Object.freeze(occupants), since: null };
-    }
     return { kind: 'CAPACITY', code,
-      detail: `${(adapter?.used ?? 0) + simulatedExtraSlots} of ${adapter?.limit ?? 0} ${adapterId}`
-        + ' slots are in use', reasonCodes: [code], hits: Object.freeze([]),
-      blocking: Object.freeze(capacity.occupants
-        .filter((occupant) => occupant.adapterId === adapterId)
-        .map((occupant) => occupant.taskId)),
+      detail: `${used} of ${capacity.globalLimit} Runtime-wide slots are in use`, reasonCodes: [code],
+      hits: Object.freeze([]),
+      blocking: Object.freeze(capacity.occupants.map((occupant) => occupant.taskId)),
       since: null };
   }
 

@@ -228,7 +228,7 @@ ce() { ( cd "$CLONE" && CODEESTRA_HOME="$CODEESTRA_HOME" bun run codeestra "$@" 
 ```sh
 # `ce` 见 §1.7；下面每一步都请把退出码记进证据包
 
-ce scheduler capacity get "$PROJECT" --json          # 记下 globalLimit=2
+ce scheduler capacity get --json                     # 记下 limit=2（容量是整个 Runtime 的，不带 project）
 
 ce task create "$PROJECT" "在 lane-a/out.txt 写入文本 lane-a，完成后结束。"
 #   → 记下 id 与 version（task create 的返回里 version=0）
@@ -245,7 +245,7 @@ echo '--- 以下是真实模型请求 ---'
 ce task run "$PROJECT" "$TASK_A" 1 --adapter pi --json; echo "exit=$?"
 ce task run "$PROJECT" "$TASK_B" 1 --adapter pi --json; echo "exit=$?"
 
-ce scheduler capacity get "$PROJECT" --json
+ce scheduler capacity get --json
 ce task status "$PROJECT" "$TASK_A" --json
 ce task status "$PROJECT" "$TASK_B" --json
 ps -Ao pid=,command= | grep -i ' pi ' | grep -v grep     # 两个 provider 进程
@@ -255,7 +255,7 @@ ce events list --project "$PROJECT" --since 0 --limit 500 --json
 **预期观察**
 
 - 两次 `task run` 都 **exit 0**（`outcome: STARTED`）；第二次**不**返回 `3`。
-- `scheduler capacity get --json`：`globalUsed: 2`，`occupants` 有两个不同的 `taskId`。
+- `scheduler capacity get --json`：`used: 2`，`occupiers` 有两个不同的 `taskId`（带 `projectId`）。
 - 两次 `task status --json`：`task.state` 都是 `RUNNING`，`executions[0].state` 都是 `RUNNING`、
   `resourceHeld: true`，两个 `executions[0].session.sessionId` 不同。
 - `ps` 输出里有**两个** provider 进程，argv 指向**两份不同的** worktree / session file。

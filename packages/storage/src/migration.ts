@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 33;
+export const phase1SchemaVersion = 34;
 
 /** The kinds `intents.kind` accepts (ADR-0046) and the only kinds any command can write. */
 export const intentKinds = ['CREATE_TASK', 'AMEND_TASK', 'ADD_CONSTRAINT', 'CANCEL_TASK',
@@ -1897,6 +1897,101 @@ ALTER TABLE task_revisions ADD COLUMN features_json TEXT NOT NULL DEFAULT '[]'
 export const taskBaselineRefMigration = `
 ALTER TABLE workspaces ADD COLUMN base_ref TEXT
   CHECK(base_ref IS NULL OR length(trim(base_ref)) > 0);
+`;
+
+/**
+ * The minimum of every explicit legacy capacity value, or `null` when there was none (ADR-0061 D03).
+ *
+ * Pure and exported so the deterministic rule can be asserted directly instead of only through a
+ * migration run: the new global limit is the smallest value the user had explicitly set anywhere
+ * (project-wide or per Adapter), because that is the only choice that cannot *increase* the load an
+ * upgrade puts on the machine. No explicit value at all means the documented default 2.
+ */
+export function resolveMigratedGlobalLimit(
+  legacyLimits: readonly number[],
+): number | null {
+  if (legacyLimits.length === 0) return null;
+  return Math.min(...legacyLimits);
+}
+
+/**
+ * Runtime-wide capacity, global event facts and command receipts (FOUNDATION-096, schema v34).
+ *
+ * This is the *first half* of ADR-0061: one concurrency limit for the whole Runtime, the retirement
+ * of the two project-scoped configuration tables, and the ability to write an event that belongs to
+ * no Project. Global pause (`runtime_pause_control`, `runtime_pause_targets`) is the other half and
+ * adds its own tables in this same version number; this script owns the two tables below, the
+ * `domain_events` rebuild, and nothing else.
+ *
+ * - `runtime_capacity_settings` is a singleton. **No row means "never set explicitly"**, so the
+ *   reader returns the documented default 2 and reports `limitSource = 'DEFAULT'`; a row exists only
+ *   after an explicit `set` or after this migration adopted a legacy value. `BETWEEN 1 AND 16`
+ *   makes the legal range a schema fact rather than an application convention.
+ * - `runtime_command_receipts` gives a command that belongs to no Project the same idempotency a
+ *   project command gets from `command_receipts`: the same command id replays the recorded result,
+ *   and the same key with a different payload is refused. A global command cannot be stored in
+ *   `command_receipts` because that table carries a `NOT NULL project_id`.
+ * - `domain_events.project_id` becomes nullable, because a Runtime global fact (a global capacity
+ *   change, and later a global pause) must not be disguised as some Project's event. SQLite cannot
+ *   relax `NOT NULL` in place, so the table is rebuilt with the documented create → copy → drop →
+ *   rename procedure while foreign keys are off; `NULL` is the only change, every other column,
+ *   index and row is copied as it was. `event_deliveries` keeps resolving because the old table is
+ *   dropped *before* the new one takes the name over.
+ * - The two retired configuration tables are dropped **after** the migration runner has read every
+ *   explicit value out of them (the runner computes the minimum, refuses values outside 1–16, and
+ *   writes the singleton inside the same transaction). Dropping them first — or losing a value to a
+ *   swallowed `exec()` error — is exactly what the row-count guard in `migrate()` is there to catch.
+ *
+ * Bun's `Database.exec()` swallows a step-time error inside a multi-statement script and keeps
+ * going, so the runner compares `domain_events` and `event_deliveries` row counts around this step
+ * and `PRAGMA foreign_key_check` after it. Schema version 34 is this step's own number: 25 is
+ * FOUNDATION-065/ADR-0039, 26 is FOUNDATION-067/ADR-0041, 27 is FOUNDATION-071/ADR-0044, 28 is
+ * FOUNDATION-075/ADR-0046, 29 is FOUNDATION-077/ADR-0052, 30 is FOUNDATION-081/ADR-0053, 31 is
+ * FOUNDATION-088/ADR-0057, 32 is FOUNDATION-091/ADR-0059, 33 is FOUNDATION-093/ADR-0060, and 16
+ * stays permanently unused. A database may already be stamped 17–33 and would skip a later
+ * `version < 16` step, so the runner only appends `if (version < 34)` after the existing ascending
+ * steps and never inserts an earlier number.
+ */
+export const runtimeGlobalCapacityMigration = `
+CREATE TABLE runtime_capacity_settings (
+  singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+  global_limit INTEGER NOT NULL CHECK(global_limit BETWEEN 1 AND 16),
+  version INTEGER NOT NULL CHECK(version >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= 0),
+  updated_by TEXT NOT NULL CHECK(length(trim(updated_by)) > 0)
+) STRICT;
+
+CREATE TABLE runtime_command_receipts (
+  command_id TEXT PRIMARY KEY,
+  payload_hash TEXT NOT NULL,
+  result_json TEXT NOT NULL CHECK(json_valid(result_json)),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0)
+) STRICT;
+
+CREATE TABLE domain_events_v34 (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id TEXT NOT NULL UNIQUE,
+  project_id TEXT REFERENCES projects(id),
+  event_type TEXT NOT NULL,
+  schema_version INTEGER NOT NULL CHECK(schema_version > 0),
+  aggregate_type TEXT NOT NULL,
+  aggregate_id TEXT NOT NULL,
+  aggregate_version INTEGER NOT NULL CHECK(aggregate_version >= 0),
+  correlation_id TEXT NOT NULL,
+  causation_id TEXT,
+  occurred_at INTEGER NOT NULL CHECK(occurred_at >= 0),
+  payload_json TEXT NOT NULL CHECK(json_valid(payload_json))
+) STRICT;
+INSERT INTO domain_events_v34(sequence,event_id,project_id,event_type,schema_version,aggregate_type,
+  aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+  SELECT sequence,event_id,project_id,event_type,schema_version,aggregate_type,aggregate_id,
+    aggregate_version,correlation_id,causation_id,occurred_at,payload_json FROM domain_events;
+DROP TABLE domain_events;
+ALTER TABLE domain_events_v34 RENAME TO domain_events;
+CREATE INDEX event_aggregate ON domain_events(aggregate_type,aggregate_id,aggregate_version);
+
+DROP TABLE project_adapter_slot_limits;
+DROP TABLE project_capacity_limits;
 `;
 
 export const integrationBatchTerminalStatesMigration = `

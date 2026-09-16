@@ -12,6 +12,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Phase1Database, devClonePromotionMigration, phase1SchemaVersion } from '../src/index.js';
+import { restorePreV34CapacitySchema } from './support/restore-pre-v34.js';
 
 const projectId = '10000000-0000-4000-8000-000000000001';
 
@@ -68,6 +69,9 @@ describe('dev clone promotion storage', () => {
       legacy.exec('ALTER TABLE task_revisions DROP COLUMN features_json');
       // ...and the column added by schema v33 (the per-Task base ref, ADR-0060).
       legacy.exec('ALTER TABLE workspaces DROP COLUMN base_ref');
+      // ...and everything schema v34 (ADR-0061) added, with the two tables it retires restored:
+      // a real v28 database has the project-scoped capacity configuration and no Runtime singleton.
+      restorePreV34CapacitySchema(legacy);
       legacy.exec('PRAGMA user_version=28');
       legacy.close();
 

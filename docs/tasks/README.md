@@ -7409,6 +7409,129 @@ cd /Users/loyage/Documents/codeestra-dev && just check   # 等价 bun run check
 - 合入方式：本格在 Orca worktree `all_max`（分支 `Loyage/all_max`，基线 `dev@4667d32`）交付；提交后先把 `dev` 合进本分支对齐（dev 上的 `FOUNDATION-094` 已占用 094 编号，本格编号改为 **FOUNDATION-095**；`docs/decisions/README.md`、`docs/tasks/README.md`、`PROJECT_SPEC.md` 三处冲突按 FOUNDATION-094 压缩后的结构重写），再以 merge commit 合入本地 `dev`。**未 push `origin/dev`**（用户 2026-09-16 决定本格只合并本地 `dev`）、未提升 `main`、未重启任何 Runtime。
 - `docs/guides/**` 本格**确认不修改**：这些文件描述已交付用户行为，而 ADR-0061 尚未实现；实现分支必须按 ADR-0050 同步 `cli-reference.md`、`manual.md`、`features.md`、`recipes.md`、`ui.md`、`concepts.md` 与 `troubleshooting.md`，并更新统一版本/校对头。
 
+## FOUNDATION-096 — Runtime 全局容量：唯一跨项目上限 + schema v34 上半 + 全局事件（ADR-0061 D01/D02/D03/D10）
+
+状态：**代码、迁移、命令面与定向验证已完成**；**ADR-0061 的下半（全局暂停 / Provider 进程冻结 / `scheduler control *` / UI 全局 shell）仍未实现**，本格不得被读成「AI 请求不会再多发」——本格交付的是**容量事实**，不是对模型请求的刹车。
+
+- 分支 `Loyage/glc-capacity-foundation`，基线 `dev@de03448`，schema **v34**（容量与 `domain_events` 可空化这一半）。
+- 本格**未新增 ADR**（ADR-0061 已是该能力的决策），未改 `PROJECT_SPEC.md` / `AGENTS.md` / 既有 ADR 正文 / `.codeestra/**` / `apps/ui/**`。
+
+### 改了什么
+
+**schema v34（容量上半）**。新增 `runtime_capacity_settings`（singleton：`global_limit` 1–16、`version`、`updated_at/by`；**没有行 = 未显式设置**，读取返回默认 2 与 `limitSource='DEFAULT'`）与 `runtime_command_receipts`（给无 Project 的全局命令提供 commandId 幂等与同键异文拒绝）；`domain_events.project_id` 由 `NOT NULL` 重建为可空 FK（create → copy → drop → rename，复制保留 `sequence`/event_id/payload，`AUTOINCREMENT` 状态随表名一起保留）；同一脚本内 DROP `project_capacity_limits` 与 `project_adapter_slot_limits`。迁移在同一个事务里**先读旧显式值**（不在 1–16 内就以 `INVALID_STATE` 拒绝、原库一行不动），取 `MIN` 后写 singleton 并写一条 `source='MIGRATED_MINIMUM'` 的全局事件；没有显式值则不写行、默认 2 生效、不写事件。迁移后核对 `domain_events` / `event_deliveries` 行数并执行 `PRAGMA foreign_key_check`。`phase1SchemaVersion` 置 34。
+
+**两张新表的最终形态**（集成时逐列核对，GLC-2 分支若重复定义请删重）：
+
+```sql
+CREATE TABLE runtime_capacity_settings (
+  singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+  global_limit INTEGER NOT NULL CHECK(global_limit BETWEEN 1 AND 16),
+  version INTEGER NOT NULL CHECK(version >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= 0),
+  updated_by TEXT NOT NULL CHECK(length(trim(updated_by)) > 0)
+) STRICT;
+CREATE TABLE runtime_command_receipts (
+  command_id TEXT PRIMARY KEY,
+  payload_hash TEXT NOT NULL,
+  result_json TEXT NOT NULL CHECK(json_valid(result_json)),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0)
+) STRICT;
+```
+
+`domain_events` 与 v1 逐列相同，**只有** `project_id` 去掉 `NOT NULL`（保留 `REFERENCES projects(id)`、`CHECK(schema_version > 0)`、`CHECK(aggregate_version >= 0)`、`CHECK(occurred_at >= 0)` 与索引 `event_aggregate`）。除此之外本格**没有改动任何其它表或列**。
+
+**跨项目计数（D01）**：`countActiveSlotOccupants` 去掉 project 参数，union 所有项目的活跃预留（`state IN ('RESERVED','RECOVERY_REQUIRED')`）与所有 `resource_held=1` 的 Execution，按 Task 去重（Task id 全局唯一，`executions`/`reservations` join `tasks` 取 `project_id`）；`reserveExecutionSlot` 在同一 immediate 事务内改为只判唯一上限，Adapter 分支删除（不再产生 `CAPACITY_ADAPTER_SLOT_LIMIT_REACHED`）。`SlotOccupant` 新增 `projectId` 与 `source`（`RESERVATION`/`EXECUTION`）。降低上限不抢占：没有任何释放/暂停/终止路径。
+
+**命令面（D02，破坏性）**：`scheduler capacity get|set|reset`，无 project/adapter 参数；旧 `get|set|clear <project-id> [--adapter <id>]` 移除（多余 positional 与 `--adapter` 都是用法错误 exit 2）。
+**同一事实另有设置面拼写（用户 2026-09-16 追加要求「可以从设置中实时调整」）**：`settings concurrency get|set --limit <n>|reset`。
+它是**纯别名**：向 Runtime 发的是同一条 `scheduler.capacity.*` 命令，因此同一个 `runtime_capacity_settings` 行、同一条
+`SchedulerGlobalCapacityChanged` 事件、同一套 commandId 幂等——没有第二个状态源，也没有第二份规则（CLI 里两者共用
+`runConcurrencyCommand`）。「实时」的语义按用户选择：提高上限（或 `reset`）会为每个项目触发一次调度 pass，等容量的候选立即有机会启动；
+降低上限**不抢占**（仍是 ADR-0061 D01）。新增这一条公共命令面**未新增 ADR**：语义、存储、事件与门禁都没变，只是把同一个事实
+放到用户找设置的地方；若用户认为需要独立 ADR，下一个空号是 0062。`get` 返回 `{limit, limitSource, used, available, waitReason, occupiers[], pauseState, ...}`，每个占用者带 `projectId`/`taskId`/`adapterId`/`since`/`source`。`set`/`reset` 零确认、同值幂等（`changed:false`、不 bump 版本、不发事件）、越界以既有稳定码拒绝不夹取。`scheduler reservations *` 不变（release/reconcile/prepare-workspace 语义未动）。
+
+**全局事件（D10 末段）**：`SchedulerGlobalCapacityChanged` 以 `project_id = NULL`、`aggregate_type='RuntimeSchedulerControl'`、`aggregate_id='runtime'` 写入，payload `{from, to, source, actor}`；`listEventsAfter` 的 project 过滤改为 `(project_id = ? OR project_id IS NULL)`，游标仍在同一 sequence 上前进。`StoredEventEnvelope.projectId` 与 `eventEnvelopeSchema.projectId` 改为可空。历史 `SchedulerCapacityChanged` 事件不迁移、不改名、不删除。
+
+**改动文件**：`packages/storage/src/{migration,database,index}.ts`、`packages/contracts/src/index.ts`、`apps/runtime/src/{capacity-service,slot-reservation-service,schedule-service,main}.ts`、`apps/cli/src/main.ts`、`apps/runtime/test/{cli-capacity-slots,cli-schedule,cli-task-retry,event-subscription-ipc,event-subscription-service,schedule-service,slot-reservation-service}.test.ts`、`packages/storage/test/{slot-capacity,slot-capacity-migration,runtime-capacity-migration}.test.ts`、`packages/storage/test/support/restore-pre-v34.ts`（新）、以及文档（见下）。`package.json` **未改**：新增测试在既有的 `packages/storage/test` 目录（`test:unit`/`test:storage` 直接收整个目录）或已列名的既有 CLI/e2e 文件里，没有新增 `apps/runtime/test/cli-*.test.ts` 文件，因此两处列表无需追加。
+
+**文档同步（ADR-0050）**：`docs/guides/cli-reference.md` §14 `scheduler capacity`（**重写**：破坏性变更、退出码/稳定码、`reset`、历史码）、§19 `settings`（新增 `settings concurrency` 小节）、§5 相关稳定码行；`manual.md` §10.3 `WAIT_CAPACITY` 一行、§10.4（重写）、§11.2.1（新增：并发上限也是一项可实时调整的设置）、§13.4；`features.md` 「调度、容量与冲突」的容量与槽位预留两行（并新增一行标明全局暂停未实现）与「设置」表的并发上限设置一行；`recipes.md` recipe 3 的命令与容量说明（含设置面拼写）；`troubleshooting.md` 「任务一直不跑」与「调度 / 容量 / 槽位」；五篇的版本/校对头按 ADR-0050 D02 更新为 `dev@de03448` / schema v34 / 2026-09-16，并写明本次在候选分支上校对、v34 只含容量一半。架构文档：`sqlite-schema.md`（`domain_events` DDL、v21 容量节标注退役、v34 节拆为「上半已实现 / 下半待实现」）、`event-model.md`（`SchedulerGlobalCapacityChanged` 移入已实现，Project 过滤规则改述）、`scheduler.md`（§1.1 当前实现、§7 顶部标注容量部分被取代、§7.5/§8.1）、`state-machines.md`（§1 READY 等待原因一行）。`docs/decisions/README.md` 三处、`docs/roadmap/mvp.md` 两处、`docs/notes/real-provider-acceptance-runbook.md` 三行同步。
+
+**`docs/guides/ui.md` 未修改，但这不是「无需修改」**：容量卡与全局 shell 按任务分格属 GLC-2 领地，且本格被禁止改 `apps/ui/**`。必须如实报告：本格把 `scheduler.capacity.get`/`set` 的请求 schema 去掉了 `projectId`，因此**当前 UI 的容量卡在这条分支上会失败**，要等 GLC-2 改写（集成前不可用）。其余未提及的文档（`concepts.md`、`workflow.md`、`getting-started.md`、`acceptance-checklist.md`）确认无需修改：它们只写「容量等待不是 BLOCKED / 退出码 3」，没有写上限的层级、命令参数或稳定码表。
+
+### 实际跑了什么检查与结果
+
+全部在临时 `CODEESTRA_HOME=/tmp/ce-glc1`、临时 Git 仓库下运行；未碰 `/Users/loyage/Documents/codeestra` 与 `~/.local/state/codeestra`。
+
+| 命令 | 结果 |
+|---|---|
+| `bun run typecheck` | **退出码 0**（无输出） |
+| `git diff --check` | 干净 |
+| `bun test packages/storage/test` | **172 pass / 0 fail**（含新增 `runtime-capacity-migration.test.ts` 8 项与重写的 `slot-capacity.test.ts` 22 项） |
+| `bun test apps/runtime/test/{slot-reservation-service,schedule-service,scheduler,event-subscription-service}.test.ts`（与 storage 同一次运行） | 合计 **218 pass / 0 fail** |
+| `bun test apps/runtime/test/{cli-capacity-slots,cli-schedule,cli-task-retry,event-subscription-ipc,http-api}.test.ts` | **32 pass / 0 fail**（95.18s）；加入设置面别名用例后 `cli-capacity-slots.test.ts` 单文件 **10 pass / 0 fail**（32.45s） |
+
+覆盖的具体断言（对应任务书验证 1–6）：
+
+1. **跨项目全局上限**：`cli-capacity-slots.test.ts` 新增「the limit is shared by every Project…」——同一个 `CODEESTRA_HOME` 下两个项目各占一个槽（`used=2`，`occupiers` 的 `projectId` 各不同），第三个 Task（不论属于哪个项目）exit 3 + `CAPACITY_GLOBAL_LIMIT_REACHED`；`slot-capacity.test.ts` 另在 storage 层用两个 Project 断言同一事实，并断言同一 Adapter 不再被第二个上限拦住。
+2. **降低上限不抢占**：`slot-capacity.test.ts`「a lower limit never releases an occupant, so used may exceed limit」与 `cli-capacity-slots.test.ts`「lowering the limit below `used` never preempts…」——`limit=1`、`used=2` 时两条预留仍是 `RESERVED`，`available=0`，新获取 exit 3；释放一条后（`used=1=limit`）仍 exit 3，全部释放后才 exit 0。
+3. **并发 acquire 竞态**：`cli-capacity-slots.test.ts`「concurrent acquisitions at the limit never overbook…」——`limit=1` 下两个 CLI 进程同时 acquire，恰好一个 0、一个 3，`used=1`，`reservations list` 的行与 `occupiers` 一致（无超发、无丢记录）。
+4. **v33→v34 迁移**：`runtime-capacity-migration.test.ts`（真实文件库，历史由 v1…v33 迁移常量链构建）——多个旧显式值 `{4, 1(pi), 3(codex)}` → **1**（`MIN`）且写 `source='MIGRATED_MINIMUM'` 的全局事件；无显式值 → 默认 2、singleton 无行、不加事件；reservation/Execution/历史事件/`event_deliveries` 行与 sequence 不变，新事件 sequence 继续递增；`PRAGMA foreign_key_check` 为空；旧值 99 → `INVALID_STATE` 拒绝且旧表/旧值/事件行数一行未动；**故障注入**（占用 `event_aggregate` 索引名，使失败发生在两张旧表已被 DROP **之后**）→ 整笔回滚，user_version 仍 33，两张旧表及其值、事件与 reservation 行数全部完好。
+5. **幂等与零确认**：`slot-capacity.test.ts` + `cli-capacity-slots.test.ts`——同 commandId 重放返回同一结果且只写一条事件、同键异文 `COMMAND_CONFLICT`、`set` 同值 `changed:false` 且不发事件、`reset` 回到 2 且重复 `reset` 是 no-op；CLI 上没有出现任何确认步骤。
+   设置面别名另有一例（`cli-capacity-slots.test.ts`「settings concurrency is the same setting as scheduler capacity, and it applies live」）：
+   `settings concurrency get` 与 `scheduler capacity get` **逐字节同值**，经设置面写入后调度面立即读到同一数字，同值写入 `changed:false`，
+   越界/非整数/多余位置参数与调度面同码（1/1/2），`reset` 回到 2；同时验证降低上限后两条预留仍在。
+6. **全局事件与订阅**：`event-subscription-service.test.ts` 与 `event-subscription-ipc.test.ts` 各新增一例——project 过滤订阅收到 `project_id = NULL` 的 `SchedulerGlobalCapacityChanged`，从其 cursor 重连不重不漏，随后该项目自己的事件仍按 sequence 到达。
+
+### 没跑什么及原因
+
+- **未跑 `bun run check` / `just check` / `just verify` / `check:fast`**：ADR-0038 禁止在开发分支跑全量聚合检查；全量只在 `dev` 候选上跑（由集成/提升流程执行）。
+- **未跑 `bun run test`（vitest）/ `typecheck:ui` / `build:ui`**：vitest 只收 `packages/domain` 与 `apps/ui`，本次未改这两处；`apps/ui` 是 GLC-2 领地且本格禁止改，其容量卡需要 GLC-2 改写后才能在合并分支上通过。
+- **未做真实 Provider 并发运行验收**：本格不涉及真实模型；两个 SAFE Task 真的同时跑仍属未验收项（`docs/guides/troubleshooting.md` §4），mock/stub 通过不能替代它（ADR-0008）。
+- **未做全局暂停相关验证**（D04–D09、Verification 4–9、11）：属 GLC-2。
+
+### 与 ADR 措辞不一致但按实现事实处理的地方
+
+1. **活跃预留的状态集**：任务书把活跃 reservation 描述为「`RESERVED`/`RECOVERY_REQUIRED`，而取值集包含 `PREPARING`/`READY`/`IN_USE`/`RETAINED`」。核对 `migration.ts`：`execution_slot_reservations.state` 的 CHECK 只有 `RESERVED`/`RELEASED`/`RECOVERY_REQUIRED`，那些状态属于 **`workspaces.state`**。因此 ADR-0061 D01 写的两个状态与实现完全一致，无需改 ADR 措辞；本格复用的就是既有判定（`state IN ('RESERVED','RECOVERY_REQUIRED')`）。
+2. **`reset` 的落库方式**：ADR 只说「回默认 2」。实现选择**删行**而不是写一行 `2`，否则 `limitSource` 会变成 `EXPLICIT`，把用户没做过的决定记成显式配置。语义与 ADR 一致，细节按实现事实处理。
+3. **`pauseState` 的来源**：ADR D02 要求 `capacity get` 返回 `pauseState`，但全局暂停表属 GLC-2。实现把「当前没有屏障」作为注入的 provider（`main.ts` 里一个函数返回 `{state:'RUNNING', pauseEpoch:0, detail:null}`），GLC-2 换成对 `runtime_pause_control` 的读取即可；在此之前的 `RUNNING` 是「确实没有屏障」的事实，不是乐观默认值。
+4. **`CAPACITY_ADAPTER_SLOT_LIMIT_REACHED` 与 `UNKNOWN_ADAPTER`**：按 D01 保留在契约里作为**历史可读**取值（历史事件与历史命令结果），新代码路径不再产生前者；`UNKNOWN_ADAPTER` 仍由其它命令（如 `task run --adapter`）产生，指南里没有把它写成容量命令的码。
+
+### 设计选择与依据
+
+| 选择 | 依据 |
+|---|---|
+| 一个 `CODEESTRA_HOME` 一个上限、默认 2、范围 1–16、跨项目按 Task 去重 | ADR-0061 D01；`PROJECT_SPEC.md` §2 第 10 条 |
+| 命令面无 project/adapter，`get/set/reset` 零确认 | ADR-0061 D02、D09 末段；ADR-0011（FULL 零确认） |
+| 旧显式值取 `MIN`、无值则 2、同一迁移退役旧表 | ADR-0061 D03（「不让升级突然增载」） |
+| 全局事实 `project_id = NULL`，项目过滤同时收到它 | ADR-0061 D10 末段；`event-model.md` §3.1 |
+| 表/列形态（singleton、`runtime_command_receipts`、BETWEEN 1 AND 16） | `sqlite-schema.md` 的 v34 契约节（实现按文档对齐） |
+| `settings concurrency` 做成**纯别名**（同一命令/行/事件），而不是第二个设置文件或第二套规则 | 用户 2026-09-16 选择「沿用 `runtime_capacity_settings`」；ADR-0061 D01 的单一事实源；避免文件与 SQLite 两份状态需要同步 |
+| 「实时」= 提高即触发全项目调度 pass、降低不抢占 | 用户 2026-09-16 选择；ADR-0061 D01 明写降低上限不抢占、`used > limit` 如实 |
+| 测试边界只用 CLI/Runtime 命令面与临时 Git 仓库 | ADR-0008；`AGENTS.md`「实现与验证」 |
+| 新增/修改文件范围 | 任务书「领地」；例外见下 |
+
+**超出任务书「你可改」清单的一处**：`apps/runtime/src/main.ts`（命令分发所在处）。不在「禁改」清单里，且不编辑它无法接入新命令面（验证 1/5/6 需要真实 CLI）。改动限于 `scheduler.capacity.*` 三个 case、`globalPauseState` provider 与 import/注释，未触碰暂停/进程冻结相关代码；集成时与 GLC-2 的 `scheduler control *` 分发会冲突，需手工合并。
+
+### 剩余问题 / 集成注意（必须由协调者处理）
+
+1. **v34 是两块共用的版本号**：GLC-2 在自己分支上可能重复定义 `runtime_command_receipts` / 重建 `domain_events`。合并时以本格 DDL 为准并逐列核对（见上面两张表的最终形态）；合并后必须**重跑** v33→v34 真实文件库迁移、`foreign_key_check`、四张新表齐全与故障注入回滚——**本格分支上的回滚证据不能替合并后的证据背书**。
+2. **`apps/ui` 需要 GLC-2 适配**：`scheduler.capacity.get/set` 的请求 schema 已去掉 `projectId`，现有容量卡与 `ui.md` 对应段落在这条分支上失效（本格按分格不得改）。
+   `settings concurrency` 目前**只有 CLI**：Web UI「设置」标签页里没有这个控件（加它同样要改 `apps/ui/**`，属 GLC-2）。
+   如果用户希望界面上也能实时调，需要 GLC-2 在设置页接同一个 `settings.capacity`/`scheduler.capacity` 命令面——没有新的后端语义要加。
+3. **全量测试未跑**：本格只跑了上表的定向集合；`dev` 候选上的全量检查由集成/提升流程执行。
+4. **未验收项**：真实 Provider 并发运行、以及 ADR-0061 下半的全部验证项（Verification 4–9、11）。
+
+### 合入方式
+
+- 本格在 Orca worktree `glc-capacity-foundation`（分支 `Loyage/glc-capacity-foundation`，基线 `dev@de03448`）交付，
+  **未把新的 `dev` 合进本分支**（本格任务约束明确禁止 `rebase`/合入新 `dev`），而是由用户指令以 **merge commit** 把本分支并入
+  本地 `dev`（合并时 `dev` 已前进到 `367bd4d`，含 `task/930f5325` 的 purge 对账修订）。
+- **未 push `origin/dev`**、未提升 `main`、未重启任何 Runtime（稳定实例与 dev 实例都未触碰）；
+  因此本格的合入事实只存在于本机 `dev`，远端 `origin/dev` 仍落后。
+- v34 与 GLC-2（`Loyage/glc-pause-ui`）共用同一个版本号：本次只把**容量上半**并入 `dev`，
+  因此 `dev` 上此刻只有两张新表；GLC-2 合入时必须把两块合成同一个 `if (version < 34)` 步骤，
+  并在**合并后**重跑 v33→v34 真实文件库迁移、`foreign_key_check`、四张新表齐全与故障注入整笔回滚（见上文「剩余问题」第 1 条）。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），

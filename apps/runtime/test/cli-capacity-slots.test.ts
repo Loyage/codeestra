@@ -136,6 +136,35 @@ interface TaskRef {
   readonly displayNumber: number;
 }
 
+/**
+ * Opens a second project in the same `CODEESTRA_HOME`, because the whole point of ADR-0061's single
+ * limit is what happens across Projects: a one-project fixture cannot tell the new behaviour from the
+ * retired per-project ceilings.
+ */
+async function openSecondProject(environment: Record<string, string>): Promise<string> {
+  const before = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
+    readonly { readonly id: string }[];
+  const repository = temporaryDirectory('codeestra-slot-repo-two-');
+  mkdirSync(join(repository, '.codeestra', 'policies'), { recursive: true });
+  await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'), JSON.stringify({
+    version: 1, commands: [{ id: 'check', argv: ['true'], cwd: '.', timeoutSeconds: 60 }],
+  }));
+  await Bun.write(join(repository, 'README.md'), 'second fixture\n');
+  await git(repository, ['init', '-q', '-b', 'main']);
+  await git(repository, ['add', '.']);
+  await git(repository, ['commit', '-q', '-m', 'fixture']);
+  await git(repository, ['branch', 'dev']);
+  const devRepo = await provisionDevClone({ repository });
+  const opened = await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
+  expect(opened.exitCode).toBe(0);
+  const after = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
+    readonly { readonly id: string }[];
+  const created = after.find((project) =>
+    !before.some((previous) => previous.id === project.id));
+  expect(created).toBeDefined();
+  return created?.id as string;
+}
+
 async function createReadyTask(
   environment: Record<string, string>,
   projectId: string,
@@ -204,56 +233,114 @@ function payloadOf<T>(result: { readonly exitCode: number; readonly stderr: stri
 }
 
 describe('codeestra scheduler capacity and reservations', () => {
-  test('capacity is configurable, read back, and refuses invalid values instead of clamping', async () => {
+  test('the Runtime has one limit: set, read back, reset, and invalid values refused', async () => {
     const { environment, projectId } = await fixture();
-    const initial = await cli(['scheduler', 'capacity', 'get', projectId, '--json'], environment);
+    // No Project and no Adapter: one `CODEESTRA_HOME` is one resource domain, so the answer is
+    // Runtime-wide and lists every occupier rather than a per-Project breakdown.
+    const initial = await cli(['scheduler', 'capacity', 'get', '--json'], environment);
     expect(initial.exitCode).toBe(0);
     expect(JSON.parse(initial.stdout)).toMatchObject({
-      globalLimit: 2, globalLimitSource: 'DEFAULT', globalUsed: 0, globalAvailable: 2,
-      globalWaitReason: null, draining: false,
+      limit: 2, limitSource: 'DEFAULT', used: 0, available: 2, waitReason: null,
+      occupiers: [], pauseState: { state: 'RUNNING' },
+      configVersion: 0, updatedAt: null, updatedBy: null, draining: false,
     });
 
-    const set = await cli(['scheduler', 'capacity', 'set', projectId, '--limit', '3', '--json'],
-      environment);
+    // The old project-scoped form is removed, not hidden: an extra positional is a usage error.
+    expect((await cli(['scheduler', 'capacity', 'get', projectId, '--json'], environment)).exitCode)
+      .toBe(2);
+    expect((await cli(['scheduler', 'capacity', 'clear', projectId, '--adapter', 'pi'],
+      environment)).exitCode).toBe(2);
+    // ...and so is the removed `--adapter` flag.
+    expect((await cli(['scheduler', 'capacity', 'set', '--limit', '2', '--adapter', 'pi'],
+      environment)).exitCode).toBe(2);
+
+    const set = await cli(['scheduler', 'capacity', 'set', '--limit', '3', '--json'], environment);
     expect(set.exitCode).toBe(0);
     expect(JSON.parse(set.stdout)).toMatchObject({
-      changed: true, capacity: { globalLimit: 3, globalLimitSource: 'EXPLICIT' },
+      changed: true, capacity: { limit: 3, limitSource: 'EXPLICIT' },
     });
-    const readBack = await cli(['scheduler', 'capacity', 'get', projectId, '--json'], environment);
-    expect(JSON.parse(readBack.stdout)).toMatchObject({ globalLimit: 3, globalAvailable: 3 });
-
-    // A per-Adapter override is explicit, does not move the project limit, and is cleared back.
-    const override = await cli(['scheduler', 'capacity', 'set', projectId, '--limit', '1',
-      '--adapter', 'pi'], environment);
-    expect(override.exitCode).toBe(0);
-    const withOverride = JSON.parse((await cli(['scheduler', 'capacity', 'get', projectId, '--json'],
-      environment)).stdout) as { readonly adapters: readonly { readonly adapterId: string;
-        readonly limit: number; readonly limitSource: string }[] };
-    expect(withOverride.adapters.find((adapter) => adapter.adapterId === 'pi'))
-      .toMatchObject({ limit: 1, limitSource: 'EXPLICIT' });
-    const cleared = await cli(['scheduler', 'capacity', 'clear', projectId, '--adapter', 'pi'],
-      environment);
-    expect(cleared.exitCode).toBe(0);
-    const clearedView = JSON.parse(cleared.stdout) as { readonly capacity: { readonly adapters:
-      readonly { readonly adapterId: string; readonly limit: number; readonly limitSource: string }[] } };
-    expect(clearedView.capacity.adapters.find((adapter) => adapter.adapterId === 'pi'))
-      .toMatchObject({ limit: 3, limitSource: 'DEFAULT' });
+    // Setting the value that is already in effect changes nothing and reports that honestly.
+    const again = await cli(['scheduler', 'capacity', 'set', '--limit', '3', '--json'], environment);
+    expect(again.exitCode).toBe(0);
+    expect(JSON.parse(again.stdout)).toMatchObject({ changed: false,
+      capacity: { limit: 3, limitSource: 'EXPLICIT' } });
+    const readBack = await cli(['scheduler', 'capacity', 'get', '--json'], environment);
+    expect(JSON.parse(readBack.stdout)).toMatchObject({ limit: 3, available: 3 });
 
     // Invalid values are refused with their own stable code, and nothing is written.
     for (const [limit, code] of [['0', 'CAPACITY_LIMIT_INVALID'], ['-2', 'CAPACITY_LIMIT_INVALID'],
       ['99', 'CAPACITY_LIMIT_OUT_OF_RANGE']] as const) {
-      const refused = await cli(['scheduler', 'capacity', 'set', projectId, '--limit', limit],
-        environment);
+      const refused = await cli(['scheduler', 'capacity', 'set', '--limit', limit], environment);
       expect(refused.exitCode).toBe(1);
       expect(refused.stderr).toContain(code);
     }
-    const unknownAdapter = await cli(['scheduler', 'capacity', 'set', projectId, '--limit', '1',
-      '--adapter', 'claude-code'], environment);
-    expect(unknownAdapter.exitCode).toBe(1);
-    expect(unknownAdapter.stderr).toContain('UNKNOWN_ADAPTER');
-    expect(JSON.parse((await cli(['scheduler', 'capacity', 'get', projectId, '--json'], environment))
-      .stdout)).toMatchObject({ globalLimit: 3, globalUsed: 0 });
-  });
+    // A non-integer is a usage error, not a clamp.
+    expect((await cli(['scheduler', 'capacity', 'set', '--limit', '2.5'], environment)).exitCode)
+      .toBe(2);
+    expect((await cli(['scheduler', 'capacity', 'set'], environment)).exitCode).toBe(2);
+    expect(JSON.parse((await cli(['scheduler', 'capacity', 'get', '--json'], environment)).stdout))
+      .toMatchObject({ limit: 3, limitSource: 'EXPLICIT', used: 0 });
+
+    // `reset` removes the explicit value so the documented default applies again, and is idempotent.
+    const reset = await cli(['scheduler', 'capacity', 'reset', '--json'], environment);
+    expect(reset.exitCode).toBe(0);
+    expect(JSON.parse(reset.stdout)).toMatchObject({ changed: true,
+      capacity: { limit: 2, limitSource: 'DEFAULT' } });
+    const resetAgain = await cli(['scheduler', 'capacity', 'reset', '--json'], environment);
+    expect(JSON.parse(resetAgain.stdout)).toMatchObject({ changed: false,
+      capacity: { limit: 2, limitSource: 'DEFAULT' } });
+  }, 60_000);
+
+  test('settings concurrency is the same setting as scheduler capacity, and it applies live', async () => {
+    const { environment, projectId } = await fixture();
+    const viaSettings = await cli(['settings', 'concurrency', 'get', '--json'], environment);
+    expect(viaSettings.exitCode).toBe(0);
+    // The two spellings answer about one fact: the same singleton, the same payload shape.
+    const viaScheduler = await cli(['scheduler', 'capacity', 'get', '--json'], environment);
+    expect(JSON.parse(viaSettings.stdout)).toEqual(JSON.parse(viaScheduler.stdout));
+    expect(JSON.parse(viaSettings.stdout)).toMatchObject({
+      limit: 2, limitSource: 'DEFAULT', used: 0, occupiers: [],
+    });
+
+    expect((await cli(['settings', 'concurrency', 'set', '--limit', '5', '--json'], environment))
+      .exitCode).toBe(0);
+    // Written through the settings face, read back through the scheduler face: one row, one event.
+    expect(JSON.parse((await cli(['scheduler', 'capacity', 'get', '--json'], environment)).stdout))
+      .toMatchObject({ limit: 5, limitSource: 'EXPLICIT' });
+    expect(JSON.parse((await cli(['settings', 'concurrency', 'set', '--limit', '5', '--json'],
+      environment)).stdout)).toMatchObject({ changed: false });
+
+    // The limit applies to the very next acquisition, with no restart and no re-trust step.
+    const first = await createReadyTask(environment, projectId, 'Live limit A');
+    const second = await createReadyTask(environment, projectId, 'Live limit B');
+    expect((await acquire(environment, projectId, first)).exitCode).toBe(0);
+    expect((await acquire(environment, projectId, second)).exitCode).toBe(0);
+    // Lowering to 1 below `used=2` is honest and does not preempt either reservation...
+    expect((await cli(['settings', 'concurrency', 'set', '--limit', '1', '--json'], environment))
+      .exitCode).toBe(0);
+    const view = JSON.parse((await cli(['scheduler', 'capacity', 'get', '--json'], environment))
+      .stdout) as { readonly limit: number; readonly used: number };
+    expect(view).toMatchObject({ limit: 1, used: 2 });
+    expect(JSON.parse((await cli(['scheduler', 'reservations', 'list', projectId, '--json'],
+      environment)).stdout).reservations).toHaveLength(2);
+
+    // Invalid values behave exactly as on the scheduler face.
+    expect((await cli(['settings', 'concurrency', 'set', '--limit', '0'], environment)).exitCode)
+      .toBe(1);
+    expect((await cli(['settings', 'concurrency', 'set', '--limit', '0'], environment)).stderr)
+      .toContain('CAPACITY_LIMIT_INVALID');
+    expect((await cli(['settings', 'concurrency', 'set', '--limit', '99'], environment)).stderr)
+      .toContain('CAPACITY_LIMIT_OUT_OF_RANGE');
+    expect((await cli(['settings', 'concurrency', 'set', '--limit', '2.5'], environment)).exitCode)
+      .toBe(2);
+    expect((await cli(['settings', 'concurrency', 'set'], environment)).exitCode).toBe(2);
+    expect((await cli(['settings', 'concurrency', 'get', 'extra'], environment)).exitCode).toBe(2);
+
+    // `reset` returns the documented default, and the scheduler face reads the same row.
+    expect((await cli(['settings', 'concurrency', 'reset', '--json'], environment)).exitCode).toBe(0);
+    expect(JSON.parse((await cli(['scheduler', 'capacity', 'get', '--json'], environment)).stdout))
+      .toMatchObject({ limit: 2, limitSource: 'DEFAULT', used: 2 });
+  }, 60_000);
 
   test('two Tasks reserve at capacity two, the third waits, and a retry is refused', async () => {
     const { environment, projectId } = await fixture();
@@ -318,15 +405,15 @@ describe('codeestra scheduler capacity and reservations', () => {
     expect(JSON.parse(releasedDetail.stdout).events.map(
       (event: { readonly kind: string }) => event.kind)).toEqual(['RESERVED', 'RELEASED']);
     expect((await acquire(environment, projectId, first)).exitCode).toBe(0);
-    expect(JSON.parse((await cli(['scheduler', 'capacity', 'get', projectId, '--json'], environment))
-      .stdout)).toMatchObject({ globalUsed: 2 });
+    expect(JSON.parse((await cli(['scheduler', 'capacity', 'get', '--json'], environment))
+      .stdout)).toMatchObject({ used: 2 });
     // Releasing again is an honest no-op, not a second state change.
     const releaseAgain = await cli(['scheduler', 'reservations', 'release', projectId, reservationId,
       '--reason', 'again', '--json'], environment);
     expect(releaseAgain.exitCode).toBe(0);
     expect(JSON.parse(releaseAgain.stdout)).toMatchObject({ released: false,
       outcome: 'ALREADY_RELEASED' });
-  });
+  }, 60_000);
 
   test('two concurrent start requests never produce two reservations', async () => {
     const { environment, projectId } = await fixture();
@@ -356,7 +443,7 @@ describe('codeestra scheduler capacity and reservations', () => {
     const active = await cli(['scheduler', 'reservations', 'list', projectId, '--task', first.id,
       '--json'], environment);
     expect(JSON.parse(active.stdout).reservations).toHaveLength(1);
-  });
+  }, 60_000);
 
   test('a workspace is prepared for a reservation and bound to it', async () => {
     const { environment, projectId } = await fixture();
@@ -385,7 +472,7 @@ describe('codeestra scheduler capacity and reservations', () => {
     expect(JSON.parse(replay.stdout).workspace).toMatchObject({
       workspaceId: workspace.workspaceId, created: false,
     });
-  });
+  }, 60_000);
 
   test('a crash leaves a reservation whose holder is provably gone, and starting up releases it', async () => {
     const { environment, projectId, home } = await fixture();
@@ -429,7 +516,7 @@ describe('codeestra scheduler capacity and reservations', () => {
     expect(JSON.parse(explicit.stdout).outcomes).toEqual([]);
     expect((await acquire(environment, projectId, task)).exitCode).toBe(0);
     expect(home.length).toBeGreaterThan(0);
-  });
+  }, 60_000);
 
   test('a reservation whose holder cannot be verified keeps its slot instead of letting it through', async () => {
     const { environment, projectId, home } = await fixture();
@@ -475,9 +562,9 @@ describe('codeestra scheduler capacity and reservations', () => {
       // The foreign process was never signalled.
       expect(pidExists(sleeper.pid)).toBe(true);
       // And the unverifiable reservation still occupies its slot: the second Task waits for capacity.
-      const view = JSON.parse((await cli(['scheduler', 'capacity', 'get', projectId, '--json'],
-        environment)).stdout) as { readonly globalUsed: number };
-      expect(view.globalUsed).toBe(1);
+      const view = JSON.parse((await cli(['scheduler', 'capacity', 'get', '--json'],
+        environment)).stdout) as { readonly used: number };
+      expect(view.used).toBe(1);
       const waiting = await acquire(environment, projectId, second);
       expect(waiting.exitCode).toBe(0);
       // The Runtime must stay up here: stopping it would reconcile `second`'s own reservation and
@@ -496,5 +583,103 @@ describe('codeestra scheduler capacity and reservations', () => {
       sleeper.kill();
       await sleeper.exited;
     }
-  });
+  }, 60_000);
+
+  test('the limit is shared by every Project, so the third Task waits whichever Project it is in', async () => {
+    const { environment, projectId } = await fixture();
+    const secondProjectId = await openSecondProject(environment);
+    const first = await createReadyTask(environment, projectId, 'First project work');
+    const other = await createReadyTask(environment, secondProjectId, 'Second project work');
+    const third = await createReadyTask(environment, projectId, 'Third, still in project one');
+
+    // One slot from each Project fills the single Runtime-wide limit. Under the retired model each
+    // Project had two of its own, so this pair could never have been the reason a third Task waits.
+    expect((await acquire(environment, projectId, first)).exitCode).toBe(0);
+    expect((await acquire(environment, secondProjectId, other)).exitCode).toBe(0);
+    const view = JSON.parse((await cli(['scheduler', 'capacity', 'get', '--json'], environment))
+      .stdout) as { readonly used: number; readonly available: number;
+        readonly occupiers: readonly { readonly projectId: string; readonly taskId: string;
+          readonly source: string }[] };
+    expect(view).toMatchObject({ used: 2, available: 0 });
+    expect(view.occupiers.map((occupier) => occupier.projectId).sort())
+      .toEqual([projectId, secondProjectId].sort());
+    expect(view.occupiers.every((occupier) => occupier.source === 'RESERVATION')).toBe(true);
+
+    // The third Task waits no matter which Project it belongs to, with the global code.
+    const waiting = await acquire(environment, projectId, third);
+    expect(waiting.exitCode).toBe(3);
+    expect(waiting.payload).toMatchObject({
+      outcome: 'CAPACITY_WAIT',
+      wait: { code: 'CAPACITY_GLOBAL_LIMIT_REACHED', limit: 2, used: 2 },
+    });
+  }, 60_000);
+
+  test('lowering the limit below `used` never preempts, and a later start needs a free slot', async () => {
+    const { environment, projectId } = await fixture();
+    const first = await createReadyTask(environment, projectId, 'Held A');
+    const second = await createReadyTask(environment, projectId, 'Held B');
+    const third = await createReadyTask(environment, projectId, 'Waiting C');
+    expect((await acquire(environment, projectId, first)).exitCode).toBe(0);
+    expect((await acquire(environment, projectId, second)).exitCode).toBe(0);
+
+    // Lowering the limit below `used` is an honest fact, not a preemption: nothing is released,
+    // paused or terminated, and `available` reports 0 rather than a negative number.
+    expect((await cli(['scheduler', 'capacity', 'set', '--limit', '1', '--json'], environment))
+      .exitCode).toBe(0);
+    const lowered = JSON.parse((await cli(['scheduler', 'capacity', 'get', '--json'], environment))
+      .stdout) as { readonly limit: number; readonly used: number; readonly available: number };
+    expect(lowered).toMatchObject({ limit: 1, used: 2, available: 0 });
+    for (const task of [first, second]) {
+      const listed = await cli(['scheduler', 'reservations', 'list', projectId, '--task', task.id,
+        '--json'], environment);
+      expect(JSON.parse(listed.stdout).reservations).toHaveLength(1);
+      expect(JSON.parse(listed.stdout).reservations[0].state).toBe('RESERVED');
+    }
+    expect((await acquire(environment, projectId, third)).exitCode).toBe(3);
+
+    // Freeing one slot is not enough while `used` still equals `limit`; freeing the second is.
+    for (const task of [first, second]) {
+      const listed = JSON.parse((await cli(['scheduler', 'reservations', 'list', projectId, '--task',
+        task.id, '--json'], environment)).stdout) as {
+          readonly reservations: readonly { readonly reservationId: string }[] };
+      expect((await cli(['scheduler', 'reservations', 'release', projectId,
+        listed.reservations[0]?.reservationId as string, '--reason', 'test released', '--json'],
+      environment)).exitCode).toBe(0);
+      const used = (JSON.parse((await cli(['scheduler', 'capacity', 'get', '--json'], environment))
+        .stdout) as { readonly used: number }).used;
+      if (used >= 1) expect((await acquire(environment, projectId, third)).exitCode).toBe(3);
+    }
+    expect(JSON.parse((await cli(['scheduler', 'capacity', 'get', '--json'], environment)).stdout))
+      .toMatchObject({ used: 0, available: 1 });
+    expect((await acquire(environment, projectId, third)).exitCode).toBe(0);
+  }, 60_000);
+
+  test('concurrent acquisitions at the limit never overbook and never lose a reservation', async () => {
+    const { environment, projectId } = await fixture();
+    const first = await createReadyTask(environment, projectId, 'Race A');
+    const second = await createReadyTask(environment, projectId, 'Race B');
+    expect((await cli(['scheduler', 'capacity', 'set', '--limit', '1', '--json'], environment))
+      .exitCode).toBe(0);
+
+    // Two different CLI processes request the only slot at the same time. The immediate transaction
+    // serializes them, so exactly one is granted and the other reports a capacity wait; neither
+    // writes a second row for the same slot.
+    const [left, right] = await Promise.all([
+      acquire(environment, projectId, first),
+      acquire(environment, projectId, second),
+    ]);
+    expect([left.exitCode, right.exitCode].sort()).toEqual([0, 3]);
+    const granted = left.exitCode === 0 ? left : right;
+    expect(payloadOf(granted).outcome).toBe('RESERVED');
+    const view = JSON.parse((await cli(['scheduler', 'capacity', 'get', '--json'], environment))
+      .stdout) as { readonly used: number; readonly limit: number;
+        readonly occupiers: readonly { readonly taskId: string }[] };
+    expect(view).toMatchObject({ used: 1, limit: 1 });
+    expect(view.occupiers).toHaveLength(1);
+    // The reservation rows and the occupancy fact agree: no orphan row was left behind.
+    const rows = JSON.parse((await cli(['scheduler', 'reservations', 'list', projectId, '--json'],
+      environment)).stdout).reservations as readonly { readonly taskId: string }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.taskId).toBe(view.occupiers[0]?.taskId);
+  }, 60_000);
 });

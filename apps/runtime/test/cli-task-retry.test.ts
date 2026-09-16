@@ -512,7 +512,7 @@ describe('codeestra task retry', () => {
 
   test('a retry queues behind capacity instead of jumping the queue', async () => {
     const value = await fixture();
-    const capacity = await cli(['scheduler', 'capacity', 'set', value.projectId, '--limit', '1'],
+    const capacity = await cli(['scheduler', 'capacity', 'set', '--limit', '1'],
       value.environment);
     expect(capacity.exitCode).toBe(0);
 

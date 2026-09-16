@@ -1,11 +1,13 @@
 # 功能清单：「这软件能做什么」
 
-> **适用版本** `dev@4667d32`（2026-09-16） · **schema** v33 · **最后校对** 2026-09-16
-> 版本会前进：`dev@4667d32` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
+> 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > 「任务」表的「永久删除」一行由 FOUNDATION-090 新增（ADR-0058）；「调度、容量与冲突」一节的声明功能与
 > 冲突判定两行由 FOUNDATION-091 改写（ADR-0059）。
-> 「接入与项目」表的 dev 事实来源一行由 FOUNDATION-093 第三轮同步（ADR-0060 修订）；其余行沿用 FOUNDATION-091 的校对基线。
+> 「接入与项目」表的 dev 事实来源一行由 FOUNDATION-093 第三轮同步（ADR-0060 修订）；
+> 「调度、容量与冲突」的容量与上限、槽位预留两行由 **FOUNDATION-096** 改写（ADR-0061：唯一 Runtime 全局上限；
+> 全局暂停仍未实现，单独成行标明）；「设置」表的并发上限设置一行同轮新增（同一个值也可从设置面实时调整）。
 
 一行一个能力。列的含义：
 
@@ -77,8 +79,9 @@
 | 调度引擎 | 事件触发 + 周期恢复的 pass；`status` 报事实、`plan` 是有序 dry run、`explain` 回答「为什么它现在不跑」 | `task schedule status/plan/explain/run` | 调度 → 调度引擎 / 调度判定 | [0030](../decisions/0030-phase2-parallel-scheduling.md)、[0033](../decisions/0033-scheduling-engine.md) |
 | 声明功能 | 在 revision 上声明「这个 Task 在做哪个功能」（`modules[].id`）；写入时按项目 `main` ref 的映射校验；省略即继承上一条 revision 的声明 | `task create --feature <module-id>`（可重复）、`task revision create --feature <module-id>` | 新建任务 / 任务详情（声明的功能） | [0059](../decisions/0059-feature-declaration-conflict-rule.md) |
 | UNKNOWN 显式放行 | 对 `CONFLICTING` **永不放行**；对 `UNKNOWN` 做单次、绑定 revision/基线/分析器版本的放行（当前规则不产生 `UNKNOWN`，所以日常不可达） | `task run --allow-unknown`、`task schedule clear-unknown` | 调度 → UNKNOWN 的显式单次放行 | [0030](../decisions/0030-phase2-parallel-scheduling.md) D05、[0059](../decisions/0059-feature-declaration-conflict-rule.md) D02 |
-| 容量与上限 | 项目级并发上限（默认 2，上限 16）+ 每 Adapter 覆盖；读回存储值，非法值有自己的稳定码 | `scheduler capacity get/set/clear` | 调度 → 容量与槽位预留 | [0032](../decisions/0032-capacity-and-slot-reservations.md) |
-| 槽位预留 | 在**一个 immediate 事务**里复核 Task 版本、已评估 revision、依赖事实、ImpactSnapshot 代数与两个容量维度后记录预留 | `scheduler reservations list/acquire/release/prepare-workspace/reconcile` | 调度 → 槽位预留 | [0032](../decisions/0032-capacity-and-slot-reservations.md) |
+| 容量与上限 | **整个 Runtime 只有一个并发上限**（默认 2，上限 16），跨全部项目与 Adapter；占用按 Task 去重；改完**实时生效**（提高即启动等待中的候选，降低不抢占已运行 Task）；读回存储值，非法值有自己的稳定码 | `scheduler capacity get/set --limit/reset`（无 project/adapter 参数）与设置面拼写 `settings concurrency get/set --limit/reset`（同一行、同一事件） | 调度 → 容量与槽位预留 | [0061](../decisions/0061-runtime-global-load-control.md) D01/D02（修订 [0032](../decisions/0032-capacity-and-slot-reservations.md)） |
+| 全局暂停 | **尚未实现**（ADR-0061 另一半）：计划用 `scheduler control status/pause/resume/reconcile` 冻结 Provider 主进程，未实现前不得声称可用 | — | — | [0061](../decisions/0061-runtime-global-load-control.md) D04–D09 |
+| 槽位预留 | 在**一个 immediate 事务**里复核 Task 版本、已评估 revision、依赖事实、ImpactSnapshot 代数与**整个 Runtime 的唯一容量上限**后记录预留 | `scheduler reservations list/acquire/release/prepare-workspace/reconcile` | 调度 → 槽位预留 | [0032](../decisions/0032-capacity-and-slot-reservations.md)、[0061](../decisions/0061-runtime-global-load-control.md) D01 |
 | 预留对账 | 复核每个活跃预留的持有者进程是否真的还在：确认消失则释放并记录；活着的/无法核验的保留槽位 | `scheduler reservations reconcile` | 调度 → reconcile 观测 | [0032](../decisions/0032-capacity-and-slot-reservations.md) |
 | 冲突判定 | **只比较声明**：两侧声明了同一功能 id、且对方未完成（非 `SUCCEEDED`/`CANCELLED`、未归档）才 `CONFLICTING`；否则默认 `SAFE_TO_PARALLELIZE`。**同文件/同目录/同模块/共享资源不再拦人**（只作为事实进入解释输出） | `project impact validate/show/explain` | **调度 → 影响映射 · impact.json**；任务详情 → 影响与冲突判定 | [0059](../decisions/0059-feature-declaration-conflict-rule.md)（取代 [0031](../decisions/0031-impact-snapshot-and-deterministic-conflict-analyzer.md) 的判定语义；快照/映射/失效键/audit 表仍自 0031） |
 | 任务依赖 DAG | 增删查依赖；加环拒绝且不部分应用；上游必须进 `dev` 才满足 | `task depends add/remove/list` | 任务详情 → 依赖与 BLOCKED 原因 | [0024](../decisions/0024-task-dependency-dag-and-blocked.md) |
@@ -116,6 +119,7 @@
 | 事件订阅 | 只读订阅 append-only 事件日志，排他 sequence 游标、可重连、显式游标失效；含 heartbeat 帧 | `events list`、`events tail` | 运行事件（同一订阅） | [0035](../decisions/0035-event-name-and-handoff-faces.md)、[0027](../decisions/0027-verification-cancelled-and-progress-events.md) |
 | 设置（散文提问等待） | 散文提问等待的全局开关（`auto` / `record-only` / `off`）；读写同一命令，无需确认 | `settings prose-question-attention [mode]` | —（CLI-only；「设置」标签页只有界面效果五项） | [0043](../decisions/0043-prose-question-attention-escalation.md) |
 | 界面效果设置 | 五个键（`theme`/`density`/`fontSize`/`motion`/`timeDisplay`）存在 Runtime home 的 `ui-settings.json`，CLI 与界面读写同一份值；换浏览器、清缓存、重启 Runtime 后仍生效 | `settings ui list/get/set/reset` | 设置标签页（`界面效果`）+ 侧栏底部「外观」下拉框 | [0045](../decisions/0045-global-ui-settings.md) |
+| 并发上限设置 | 全局并发上限也可以从设置面读与改：`settings concurrency` 与 `scheduler capacity` 是**同一事实**（同一 `runtime_capacity_settings` 行、同一条事件），改完立刻生效且零确认 | `settings concurrency get/set --limit/reset` | —（CLI-only；界面容量卡仍显示调度面的同一数字） | [0061](../decisions/0061-runtime-global-load-control.md) D01/D02 |
 | Web UI | 本地 `127.0.0.1` HTTP + SSE，一次性内存 token，只走 `/api/command` 与 `/api/events` | `ui [--no-open]` | 全部界面 | [0007](../decisions/0007-local-web-ui-entry.md)、[0015](../decisions/0015-task-workbench-and-themes.md)、[0017](../decisions/0017-new-task-dock.md)、[0034](../decisions/0034-compact-task-workbench.md) |
 | Runtime 生命周期 | 单实例、自动拉起、两阶段 stop 与 ownership 报告 | `status`、`stop [--wait <s>]`、`permission get` | 侧栏底部的权限模式与事件流状态指示（**界面不提供停止/重启/切权限模式**） | [0025](../decisions/0025-runtime-lifecycle-stop-and-single-instance.md) |
 | 界面主题 | 亮/暗主题切换（不改任何业务语义；ADR-0045 后由 Runtime 持久化） | `settings ui set theme system\|light\|dark` | 侧栏底部「外观」下拉框（登录前的令牌表单里还有一个只预览、不写入的） | [0015](../decisions/0015-task-workbench-and-themes.md)、[0045](../decisions/0045-global-ui-settings.md) |

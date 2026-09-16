@@ -61,9 +61,9 @@ import {
 import { recoverTask } from './task-recovery-service.js';
 import {
   RuntimeDrainState,
-  clearAdapterCapacity,
-  inspectProjectCapacity,
-  setProjectCapacity,
+  inspectRuntimeCapacity,
+  resetRuntimeCapacity,
+  setRuntimeCapacity,
 } from './capacity-service.js';
 import { ScheduleService } from './schedule-service.js';
 import { SlotReservationService } from './slot-reservation-service.js';
@@ -325,6 +325,18 @@ const sessionGuidance = new SessionGuidanceService({
  * "draining" flag would survive a crash and silently refuse every future reservation.
  */
 const drain = new RuntimeDrainState();
+/**
+ * The persistent global control state a capacity query reports alongside its numbers (ADR-0061 D04).
+ *
+ * Only the **capacity** half of ADR-0061 lives here. This Runtime has no pause barrier table yet, so
+ * "there is no barrier" is the only fact it can honestly report, and `RUNNING` is exactly that: it is
+ * not an optimistic default standing in for a state nobody wrote down. The pause half owns
+ * `runtime_pause_control` and replaces this provider with a read of that row plus the launch barrier
+ * — the seam is one function so the two halves cannot drift into two different answers about the same
+ * fact.
+ */
+const globalPauseState = (): { readonly state: 'RUNNING'; readonly pauseEpoch: 0;
+  readonly detail: null } => ({ state: 'RUNNING', pauseEpoch: 0, detail: null });
 const slotReservations = new SlotReservationService({
   storage,
   bootId,
@@ -1615,46 +1627,44 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       }));
     }
     /**
-     * Capacity and slot reservations (FOUNDATION-054 / ADR-0032). The command face mirrors the
-     * primitive exactly: `capacity get` is the queryable capacity fact (limits, sources, occupancy,
-     * the stable wait reason and the Runtime's draining fact), `set`/`clear` change a limit and read
-     * it back, and the reservation commands acquire, release, prepare a workspace for and reconcile
-     * one reservation. An acquisition that finds no slot is a *wait*, returned as a value with its
-     * reason code — never as `BLOCKED`, which means unmet dependencies only.
+     * The Runtime-wide capacity face (ADR-0061 D01/D02, schema v34). `get` takes no Project and no
+     * Adapter: one `CODEESTRA_HOME` is one resource domain, so it reports the single limit, its
+     * source, the Runtime-wide occupancy with every occupier, and the stable wait reason a new
+     * acquisition would get. `set` writes that limit and `reset` removes the explicit value so the
+     * documented default applies again; both are zero-confirmation and idempotent, and neither
+     * releases, pauses or terminates a Task that already holds a slot. A changed limit triggers an
+     * event-driven scheduling pass for **every** Project, because a global limit can unblock a
+     * candidate anywhere. The reservation commands are unchanged: a reservation still belongs to a
+     * Task/Project, only the capacity judgement is Runtime-wide.
      */
     case 'scheduler.capacity.get':
-      return success(request.requestId, inspectProjectCapacity({
+      return success(request.requestId, inspectRuntimeCapacity({
         storage,
-        projectId: request.projectId,
-        knownAdapterIds: registry.ids(),
         draining: drain.state(),
+        pauseState: globalPauseState,
       }));
     case 'scheduler.capacity.set': {
-      const mutation = setProjectCapacity({
+      const mutation = setRuntimeCapacity({
         storage,
-        projectId: request.projectId,
-        adapterId: request.adapterId,
         limit: request.limit,
         actor: 'local-user',
         commandId: request.commandId,
-        knownAdapterIds: registry.ids(),
         draining: drain.state(),
+        pauseState: globalPauseState,
       });
       return success(request.requestId, { changed: mutation.changed, capacity: mutation.view,
-        schedule: await scheduleTick('CAPACITY_CHANGED', request.projectId) });
+        schedule: await scheduleTick('CAPACITY_CHANGED') });
     }
-    case 'scheduler.capacity.clear': {
-      const mutation = clearAdapterCapacity({
+    case 'scheduler.capacity.reset': {
+      const mutation = resetRuntimeCapacity({
         storage,
-        projectId: request.projectId,
-        adapterId: request.adapterId,
         actor: 'local-user',
         commandId: request.commandId,
-        knownAdapterIds: registry.ids(),
         draining: drain.state(),
+        pauseState: globalPauseState,
       });
       return success(request.requestId, { changed: mutation.changed, capacity: mutation.view,
-        schedule: await scheduleTick('CAPACITY_CHANGED', request.projectId) });
+        schedule: await scheduleTick('CAPACITY_CHANGED') });
     }
     case 'scheduler.reservations.list':
       return success(request.requestId, {

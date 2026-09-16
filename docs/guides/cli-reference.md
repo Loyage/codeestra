@@ -1,11 +1,15 @@
 # CLI 命令参考
 
-> **适用版本** `dev@4667d32`（2026-09-16） · **schema** v33 · **最后校对** 2026-09-16
-> 版本会前进：`dev@4667d32` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
+> 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > §7 的 `session handoff terminal resize` 一节由 FOUNDATION-083 校对（ADR-0054）；
 > §3 的 `project impact *` 与 §4 的 `task submit`/`task resume`/`--feature` 由 FOUNDATION-091 新增/改写（ADR-0059）；
-> §4 的 `task purge` 一节由 FOUNDATION-090 新增（ADR-0058，其余 §4 内容沿用 FOUNDATION-070 的校对基线）。
+> §4 的 `task purge` 一节由 FOUNDATION-090 新增（ADR-0058，其余 §4 内容沿用 FOUNDATION-070 的校对基线）；
+> §14 的 `scheduler capacity` 一节由 **FOUNDATION-096** 重写（ADR-0061 D02：破坏性变更——命令去掉 project/adapter 参数，
+> 旧 `get|set|clear <project-id>` 形态被移除）。本格交付在候选分支上完成，**schema v34 只含 Runtime 全局容量这一半**；
+> 同版本的全局暂停（`scheduler control *`）尚未实现，本节不描述它。
+> 同一事实还有一个设置面拼写：`settings concurrency get|set --limit|reset`（见 §19），它发的是同一条 Runtime 命令。
 > §7 的 `session handoff terminal resize` 一节由 FOUNDATION-083 校对（ADR-0054）。
 > §3 的 `project inspect`/`project trust` 段、§1 `open` 的失败码、§4 的 `task run` 与 `task depends` 两节由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目的常态路径不再出现 `DEV_REPO_REQUIRED`）；其余段落沿用 FOUNDATION-091 的校对基线。
 
@@ -329,10 +333,12 @@ managed 项目（没有 dev clone）同样可以 submit/run/depends 判定/resul
 基线（项目文件夹当前检出的分支）与归属（项目文件夹）工作，**不会**因缺少长期 `dev` 分支被拒绝（ADR-0060 第三轮修订）。
 
 相关稳定码：`TASK_NOT_STARTABLE`、`TASK_ARCHIVED`、`CONFLICT_WAIT`、`CAPACITY_WAIT`、
-`CAPACITY_GLOBAL_LIMIT_REACHED`、`CAPACITY_ADAPTER_SLOT_LIMIT_REACHED`、`SCHEDULER_DRAINING`、
+`CAPACITY_GLOBAL_LIMIT_REACHED`（唯一的 Runtime 全局上限已满）、`SCHEDULER_DRAINING`、
 `DEPENDENCIES_UNMET`、`CONCURRENT_MODIFICATION`、`UNKNOWN_ADAPTER`、`TASK_NOT_FOUND`；基线相关：
 `TASK_BASE_REF_ALREADY_FIXED`、`TASK_BASE_REF_NOT_A_BRANCH`（给的不是本地分支）、`TASK_BASE_REF_MISSING`
 （该分支不存在）、`TASK_BASE_REF_UNRESOLVED`（managed 项目文件夹处于 detached HEAD）。
+`CAPACITY_ADAPTER_SLOT_LIMIT_REACHED` 是**历史码**（ADR-0061 删除了 Adapter 级上限）：历史事件与历史命令结果
+仍按原名可读，但新实现不再产生它。
 
 ### `task recover <project-id> <task-id> <expected-version> [--reason <text>] [--json]`
 
@@ -813,17 +819,36 @@ bun run codeestra task schedule clear-unknown <project-id> <task-id> [--json]
 ### `scheduler capacity`
 
 ```sh
-bun run codeestra scheduler capacity get   <project-id> [--adapter <id>] [--json]
-bun run codeestra scheduler capacity set   <project-id> --limit <n> [--adapter <id>] [--json]
-bun run codeestra scheduler capacity clear <project-id> --adapter <id> [--json]
+bun run codeestra scheduler capacity get   [--json]
+bun run codeestra scheduler capacity set   --limit <n> [--json]
+bun run codeestra scheduler capacity reset [--json]
 ```
 
-- 两个维度：项目级并发上限（**默认 2，上限 16**）与每 Adapter 上限（无覆写时跟随项目上限）。
-- `get` 返回每个上限的**来源**（`DEFAULT` / `EXPLICIT`）、各 Adapter 的占用、**现在**新获取会拿到的稳定理由码，
-  以及 Runtime 是否在 draining。
-- `set` 会**读回存储值**；非法值（0、负数、超上限）或未知 Adapter 被以**自己的稳定码**拒绝，**不会被裁剪**。
-  `--limit` 必须是安全整数（用法错误否则）。`get` 不接受 `--limit`；`clear` 必须给 `--adapter`。
-- 稳定码：`CAPACITY_LIMIT_INVALID`、`CAPACITY_LIMIT_OUT_OF_RANGE`、`UNKNOWN_ADAPTER`。
+> **破坏性变更（FOUNDATION-096 / ADR-0061 D02）**：旧形态 `scheduler capacity get|set|clear <project-id>
+> [--adapter <id>]` 与 `capacity clear` **已被移除，不是隐藏的兼容层**。旧脚本必须迁移；`<project-id>` 或
+> `--adapter` 出现在命令行上就是用法错误（退出码 2）。
+
+- **只有一个上限，且属于整个 Runtime**：一个 `CODEESTRA_HOME` 就是一个资源域。默认 **2**，合法范围 **1–16**；
+  候选属于哪个项目、用哪个 Adapter 都不再产生第二个上限。占用按 **Task 去重**统计：所有项目的活跃预留
+  ∪ 所有 `resource_held=1` 的 Execution。
+- `get` 返回 `limit`、`limitSource`（`DEFAULT`/`EXPLICIT`）、`used`、`available`、每个占用者的
+  `projectId`/`taskId`/`adapterId`/`since`/`source`（`RESERVATION` 或 `EXECUTION`）、`waitReason`（**现在**新获取会拿到的
+  稳定理由码，或 `null`）、`pauseState` 与 Runtime 的 draining 事实。**`used` 可以大于 `limit`**：降低或重置上限
+  **不会**抢占、暂停或终止已经运行的任务，只阻止后续获取，所以 `available` 是 `max(limit - used, 0)`。
+- `set` 写那一个上限并**读回存储值**；重复设置同一个值是**幂等 no-op**（`changed: false`，不发事件、不 bump 版本）。
+  `reset` 删掉显式值，让文档默认 2 生效（`limitSource` 回到 `DEFAULT`）；已经是默认时重放 `reset` 也是 no-op。
+- `--limit` 必须是安全整数（否则用法错误，退出码 2）。越界值**被拒绝、不被裁剪**：`0`/负数/小数 → `CAPACITY_LIMIT_INVALID`，
+  大于 16 → `CAPACITY_LIMIT_OUT_OF_RANGE`（退出码 1，什么都不写）。
+- 退出码：`0` 读写成功；`1` 拒绝（`CAPACITY_LIMIT_INVALID` / `CAPACITY_LIMIT_OUT_OF_RANGE` / `COMMAND_CONFLICT`）；`2` 用法错误。
+- FULL 与 STRICT 行为相同：设置上限**零确认**，不是审批。
+- `CAPACITY_ADAPTER_SLOT_LIMIT_REACHED` 是**历史码**：新实现不再产生它，但历史事件与历史命令结果仍按原名可读。
+  `CAPACITY_GLOBAL_LIMIT_REACHED` 保留名字，含义是「整个 Runtime 的唯一上限已满」。
+- 全局容量事实写为事件 `SchedulerGlobalCapacityChanged`，其 `project_id` 为 `NULL`（不属于任何 Project）；
+  项目过滤的 `events subscribe` **同时**收到该项目事件与这类全局事件，游标仍按同一 sequence 前进。
+- 同一个上限也可以从**设置面**调整：`settings concurrency get|set --limit <n>|reset`（见 §19），
+  它发的是同一条命令——不存在第二个状态源。
+- 全局暂停（`SCHEDULER_GLOBALLY_PAUSED`、`scheduler control *`）属于 ADR-0061 的另一半，**尚未实现**；
+  `get` 的 `pauseState` 因此只可能是 `RUNNING`。
 
 ### `scheduler reservations`
 
@@ -837,7 +862,7 @@ bun run codeestra scheduler reservations reconcile <project-id> [--json]
 ```
 
 - `acquire` 在**一个 immediate 事务**内复核：Task 版本、已评估 revision、依赖事实、缓存的 ImpactSnapshot 代数、
-  两个容量维度，然后记录预留与创建者证据（Runtime boot、pid、OS start token）。
+  **整个 Runtime 的唯一容量上限**，然后记录预留与创建者证据（Runtime boot、pid、OS start token）。
   `--snapshot` 指定调用方据以评估的 ImpactSnapshot：映射版本、分析器版本、观察到的 change set 会被**重新读取**，
   过期则以 `SNAPSHOT_STALE` 拒绝（无法确认时 `SNAPSHOT_UNAVAILABLE`），**不写入任何预留行**——
   这是一次**新鲜度复核**，不是第二次冲突分析。
@@ -1106,12 +1131,36 @@ bun run codeestra settings prose-question-attention            # 读取
 bun run codeestra settings prose-question-attention auto       # 写入
 bun run codeestra settings prose-question-attention record-only
 bun run codeestra settings prose-question-attention off
+
+bun run codeestra settings concurrency get   [--json]
+bun run codeestra settings concurrency set   --limit <n> [--json]
+bun run codeestra settings concurrency reset [--json]
 ```
+
+### `settings prose-question-attention`
 
 - 读与写是**同一条命令**：不给值就是读，给值就是写。多给一个位置参数是用法错误。
 - 取值只有三个：`auto`（默认）/ `record-only` / `off`。其他取值是用法错误。
 - **不需要确认**，且**不会改写已经记录下来的等待**。
 - `--json` 被接受（输出本来就是 JSON）。
+
+### `settings concurrency`（全局并发上限）
+
+一个 Runtime 只有一个并发上限（ADR-0061 D01）。**设置面**的 `settings concurrency` 与**调度面**的
+`scheduler capacity` 是同一事实的两种拼写：它们向 Runtime 发**同一条命令**（同一个
+`runtime_capacity_settings` 行、同一条 `SchedulerGlobalCapacityChanged` 事件、同一套 commandId 幂等），
+所以两边不可能读出不一致的值，也不存在第二个状态源。
+
+- `get` 的输出与 `scheduler capacity get` 完全一致（`limit`/`limitSource`/`used`/`available`/`occupiers[]`/`waitReason`）。
+- `set --limit <n>`：默认 **2**，合法 **1–16**，零确认；重复设置同一个值是**幂等 no-op**（`changed: false`）。
+  非整数是用法错误（退出码 2）；整数但越界由 Runtime 拒绝：`CAPACITY_LIMIT_INVALID`（0/负数）、
+  `CAPACITY_LIMIT_OUT_OF_RANGE`（大于 16），退出码 1，**不夹取**。
+- `reset` 删掉显式值，让文档默认 2 生效（重复 `reset` 是 no-op）。
+- **实时生效，不需要重启 Runtime，也不需要重新 trust**：值在每一次获取的 immediate 事务里重读；提高（或 `reset`）
+  会为**每个项目**触发一次调度 pass，所以正等着容量的候选会立即有机会启动。
+- **降低上限不抢占**：已持有槽位的 Task 不被暂停、不被释放、不被终止，所以 `used` 可以大于 `limit`，
+  它只阻止后续获取（ADR-0061 D01）。
+- FULL 与 STRICT 行为相同（是设置，不是审批）。它不影响 `scheduler reservations *` 的按项目查询与操作。
 
 ---
 

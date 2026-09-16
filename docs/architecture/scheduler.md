@@ -1,6 +1,6 @@
 # Conservative Scheduler
 
-状态：§1–§6 是 Phase 2 设计（ADR-0030）；§7 记录**当前已实现的原语**（ADR-0032，schema v21）。**调度引擎本体已由 ADR-0033 / FOUNDATION-055 实现**（`apps/runtime/src/schedule-service.ts` + `CODEESTRA_SCHEDULE_TICK_MS`，默认 5000ms），因此 §1.2 的触发模型与 §7.6 不再是「未实现」：它们已经是实现事实（保留原文的措辞只在下面显式标注更正，不重写历史）。**ADR-0059 把冲突判定从「证明不相交」改为「两侧声明同一功能且对方未完成」（FOUNDATION-091），§1 的活跃集合与 §2 的判定流程下面各有一节显式更正。ADR-0061 又接受了容量与全局控制的下一版目标：删除项目级/Adapter 级额度，只保留一个跨项目 Runtime 上限，并新增持久全局 Provider 冻结；该设计尚未实现，§7 仍是当前代码事实，§8 是待开发契约。**
+状态：§1–§6 是 Phase 2 设计（ADR-0030）；§7 记录**当前已实现的原语**（ADR-0032，schema v21）。**调度引擎本体已由 ADR-0033 / FOUNDATION-055 实现**（`apps/runtime/src/schedule-service.ts` + `CODEESTRA_SCHEDULE_TICK_MS`，默认 5000ms），因此 §1.2 的触发模型与 §7.6 不再是「未实现」：它们已经是实现事实（保留原文的措辞只在下面显式标注更正，不重写历史）。**ADR-0059 把冲突判定从「证明不相交」改为「两侧声明同一功能且对方未完成」（FOUNDATION-091），§1 的活跃集合与 §2 的判定流程下面各有一节显式更正。ADR-0061 的容量上半（唯一跨项目 Runtime 上限，schema v34）已由 FOUNDATION-096 实现；同 ADR 的持久全局 Provider 冻结（§8.2/§8.3）仍未实现。**
 
 ## 1. 调度输入和顺序
 
@@ -21,17 +21,19 @@
 >
 > 两个集合仍然都被调度器使用（前者定容量，后者定冲突），但它们**不是同一个集合**。
 
-### 1.1 容量模型（当前实现：ADR-0030 D01/D02；目标修订：ADR-0061）
+### 1.1 容量模型（历史：ADR-0030 D01/D02；**当前实现：ADR-0061 D01，schema v34**）
 
-**当前实现**有两个带 Project 作用域的上限：项目级“全局”上限（默认 2）与每 Adapter 覆写；`GLOBAL_CAPACITY` / `ADAPTER_CAPACITY` 分别报告两者。因此它不能限制多个项目的总负载。
+**历史实现**有两个带 Project 作用域的上限：项目级“全局”上限（默认 2）与每 Adapter 覆写；`GLOBAL_CAPACITY` / `ADAPTER_CAPACITY` 分别报告两者。它们不能限制多个项目的总负载，已在 schema v34（FOUNDATION-096 / ADR-0061 D01/D03）退役，旧显式值迁移时取最小值。
 
-**ADR-0061 已接受、待实现的目标语义**只有一个上限：
+**当前实现**只有一个上限：
 
 - 一个 `CODEESTRA_HOME` / Runtime 只有一个跨全部 Project、全部 Adapter 的 `globalLimit`，默认 **2**，合法范围 1–16。
-- 占用是所有项目的活跃 reservation 与 `resource_held=1` Execution 按 Task 去重后的并集。
-- 项目级与 Adapter 级上限退役，不保留隐藏覆写；旧显式值在 v34 迁移时取最小值，没有显式值则为 2。
+- 占用是所有项目的活跃 reservation 与 `resource_held=1` Execution 按 Task 去重后的并集，且这个集合在同一个 immediate 事务内重读。
+- 项目级与 Adapter 级上限不存在（不是隐藏覆写）；旧显式值在 v34 迁移时取最小值，没有显式值则为 2。
 - 降低上限不抢占已运行 Task；`used > limit` 可以被如实观察，只阻止新获取。
-- `CAPACITY_GLOBAL_LIMIT_REACHED` 保留稳定名字但变为真正的 Runtime 全局容量等待；`CAPACITY_ADAPTER_SLOT_LIMIT_REACHED` 新实现不再产生，历史记录保留。
+- `CAPACITY_GLOBAL_LIMIT_REACHED` 保留稳定名字，含义是真正的 Runtime 全局容量等待；`CAPACITY_ADAPTER_SLOT_LIMIT_REACHED` 新实现不再产生，历史事件与历史命令结果保留可读。
+
+命令面：`scheduler capacity get|set|reset`（无 project/adapter 参数；`get` 列出跨项目占用者）。
 
 容量等待不是 `BLOCKED`（`PROJECT_SPEC.md` §2.10）：它不改写依赖理由，也不算故障。仍不按主机 CPU/内存自动推导容量（见 §6）。
 
@@ -154,6 +156,10 @@ on relevant committed event or periodic recovery tick:
 
 ## 7. 实现现状（Wave E / E2，ADR-0032，schema v21）
 
+> **容量部分已被 FOUNDATION-096（ADR-0061 D01/D02，schema v34）取代，见 §8.1**：§7.1 描述的两个带 Project
+> 作用域的上限、§7.4 的 Adapter 容量等待码与 §7.5 的 `scheduler capacity get|set|clear <project-id>` 已不是
+> 当前事实；reservation/reconcile 原语（§7.2–§7.3）与§7.6 的调度引擎描述仍然成立。下面保留原文作为 v21 的历史记录。
+
 本节记录**已经合入 `dev` 的实现**，与前面的设计意图分开。实现的是一组**原语 + 命令面**，不是会自己跑起来的调度器。
 
 ### 7.1 容量模型
@@ -184,6 +190,10 @@ on relevant committed event or periodic recovery tick:
 
 ### 7.5 命令面与退出码
 
+> **已由 FOUNDATION-096（ADR-0061 D02，schema v34）取代**：`scheduler capacity get|set|clear <project-id> [--adapter <id>]`
+> 被移除，改为无 project/adapter 参数的 `scheduler capacity get|set --limit <n>|reset`。`scheduler reservations *` 不变（预留仍属
+> Task/Project），只把 acquire 的容量计数改为全 Runtime。下面是 v21 的历史命令面。
+
 ```
 scheduler capacity get <project-id> [--adapter <id>] [--json]
 scheduler capacity set <project-id> --limit <n> [--adapter <id>] [--json]
@@ -212,11 +222,11 @@ scheduler reservations reconcile <project-id> [--json]
 
 因此在本格及其基线里：**不得写「自动 tick 已实现」或「两个 SAFE 任务真的会同时开始」。** Wave E 交付的是原语：E1 的 ImpactSnapshot/Conflict Analyzer 与 E2 的容量/槽位预留已经就位，但没有引擎驱动它们；本格的端到端证据只到「第三个任务得到容量等待」，没有两个 Task 真的同时跑。
 
-## 8. Runtime 全局负载控制（ADR-0061，已接受、待实现）
+## 8. Runtime 全局负载控制（ADR-0061；上半已实现，下半待实现）
 
-### 8.1 唯一全局容量
+### 8.1 唯一全局容量（**已实现**：FOUNDATION-096，schema v34 上半）
 
-目标命令面去掉 Project 与 Adapter 参数：
+命令面去掉 Project 与 Adapter 参数：
 
 ```text
 scheduler capacity get [--json]
@@ -224,9 +234,9 @@ scheduler capacity set --limit <1..16> [--json]
 scheduler capacity reset [--json]
 ```
 
-`get` 必须列出跨项目占用者（project/task/adapter/since/source）。`scheduler reservations *` 仍按 Project 操作，但 `acquire` 在同一个 immediate transaction 中统计**整个 Runtime**的占用，而不是只统计请求 Project。暂停状态不是容量的一部分；它在容量判断之前返回 `SCHEDULER_GLOBALLY_PAUSED`（exit 3）。
+`get` 列出跨项目占用者（project/task/adapter/since/source）与当前 `pauseState`；`set`/`reset` 零确认、同值幂等，`reset` 回到默认 2，越界按稳定码拒绝。`scheduler reservations *` 仍按 Project 操作，但 `acquire` 在同一个 immediate transaction 中统计**整个 Runtime**的占用，而不是只统计请求 Project。暂停状态不是容量的一部分；它在容量判断之前返回 `SCHEDULER_GLOBALLY_PAUSED`（exit 3，尚未实现）。
 
-### 8.2 全局控制状态
+### 8.2 全局控制状态（**尚未实现**）
 
 ```text
 RUNNING → PAUSING → PAUSED → RESUMING → RUNNING
@@ -250,7 +260,7 @@ scheduler control reconcile [--json]
 
 `reconcile` 只观察，不发暂停、继续或终止信号。`pause`/`resume` 只有在完整收口或幂等命中目标状态时 exit 0；部分结果 exit 1 并逐目标报告。普通 Task 因屏障等待仍 exit 3，且永远不是 `BLOCKED`。
 
-### 8.3 暂停期间
+### 8.3 暂停期间（**尚未实现**）
 
 已经运行的工具/验证命令不因全局暂停收到停止信号；已经发出的模型请求不被取消，可能在服务端完成。只读查询、事件订阅、记录用户输入、显式 task cancel/pause/recover/purge、Runtime stop 与不调用模型的 Git/验证/集成操作继续可用。answer/guidance 可耐久记录，但实际 Provider 投递延后到恢复并重验有效性之后。
 

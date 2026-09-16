@@ -296,9 +296,9 @@ describe('codeestra task schedule', () => {
       'src', 'agent', `${first}.ts`)).size > 0);
     await waitFor(() => Bun.file(join(realpathSync(value.home), 'worktrees', value.projectId, second,
       'src', 'agent', `${second}.ts`)).size > 0);
-    const capacity = JSON.parse((await cli(['scheduler', 'capacity', 'get', value.projectId, '--json'],
-      value.environment)).stdout) as { readonly globalUsed: number; readonly globalLimit: number };
-    expect(capacity).toMatchObject({ globalUsed: 2, globalLimit: 2 });
+    const capacity = JSON.parse((await cli(['scheduler', 'capacity', 'get', '--json'],
+      value.environment)).stdout) as { readonly used: number; readonly limit: number };
+    expect(capacity).toMatchObject({ used: 2, limit: 2 });
     const overview = JSON.parse((await cli(['task', 'schedule', 'status', value.projectId, '--json'],
       value.environment)).stdout) as {
       readonly dryRun: boolean;
@@ -517,7 +517,7 @@ describe('codeestra task schedule', () => {
   test('reports a grown diff without pausing anyone, because a change set is not a declaration', async () => {
     const value = await fixture({ withMapping: true, prefix: 'codeestra-schedule-growth' });
     // Capacity four, so nothing in this test can be a capacity wait.
-    expect((await cli(['scheduler', 'capacity', 'set', value.projectId, '--limit', '4'],
+    expect((await cli(['scheduler', 'capacity', 'set', '--limit', '4'],
       value.environment)).exitCode).toBe(0);
     const first = await createTask(value.environment, value.projectId, 'write:core/first.ts');
     const second = await createTask(value.environment, value.projectId, 'write:core/second.ts');

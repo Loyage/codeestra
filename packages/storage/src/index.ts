@@ -2,11 +2,11 @@ export { Phase1Database, SlotReservationError, StorageError, TaskDependencyError
   assertIntentKind,
   maxSlotReservationReadLimit, slotDependencyFingerprint, taskScheduleEventTypes } from './database.js';
 export type { TaskScheduleEventType } from './database.js';
+export type { ExecutionSlotAcquisition, ExecutionSlotReservationRecord } from './database.js';
 export type {
   AdapterEventResult, AgentAnswerPlan, AgentConfigurationRecord, AgentSessionLifecycleState,
   AgentStartPlan, AgentThinkingLevel, AttentionSummary,
-  AdapterSlotLimitRecord, ExecutionSlotAcquisition, ExecutionSlotReservationRecord,
-  ProjectCapacityChange, ProjectCapacityClearance, ProjectCapacityRecord,
+  RuntimeCapacityChange, RuntimeCapacityRecord,
   SlotHolderObservationKind, SlotOccupancy, SlotOccupant, SlotReservationAcquireInput,
   SlotSnapshotRecheckInput,
   SlotReservationDetail, SlotReservationEventKind, SlotReservationReconcileOutcome,
@@ -71,7 +71,9 @@ export {
   integrationPipelineMigration, knowledgeLayerMigration,
   intentKindShrinkMigration, intentKinds,
   operationProgressMigration,
-  phase1Migration, phase1SchemaVersion, reclamationMigration, sessionGuidanceMigration,
+  phase1Migration, phase1SchemaVersion, reclamationMigration,
+  resolveMigratedGlobalLimit, runtimeGlobalCapacityMigration,
+  sessionGuidanceMigration,
   sessionHandoffMigration,
   sessionTerminalMigration,
   revisionDeliveryMigration,

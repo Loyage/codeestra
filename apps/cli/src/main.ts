@@ -217,6 +217,49 @@ function print(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
 }
 
+/**
+ * The one Runtime-wide concurrency limit, under both of its spellings (ADR-0061 D01/D02).
+ *
+ * `scheduler capacity …` is the scheduler's face of the fact and `settings concurrency …` is the
+ * settings face; both send the *same* Runtime commands, so the stored value, its
+ * `SchedulerGlobalCapacityChanged` event and its commandId idempotency cannot diverge. The limit is
+ * the only place this number lives (`runtime_capacity_settings`): the settings spelling is discoverable
+ * where a user looks for settings, not a second copy of the rule.
+ *
+ * It is a setting, not a gate: zero confirmations, identical behavior in FULL and STRICT, and a change
+ * applies in real time — the value is re-read inside every acquisition transaction, `set`/`reset`
+ * trigger a scheduling pass for **every** project so a Task waiting on capacity can start immediately,
+ * and lowering the limit never pauses, releases or terminates a Task that already holds a slot.
+ */
+async function runConcurrencyCommand(tokens: readonly string[]): Promise<void> {
+  const split = splitFlagTokens(tokens, ['--limit'], ['--json']);
+  const [concurrencyAction, ...extra] = split.positionals;
+  if (concurrencyAction === undefined || extra.length !== 0) usage();
+  const limitText = split.flags.get('--limit');
+  if (concurrencyAction === 'get') {
+    if (limitText !== undefined) usage();
+    print(await call({ command: 'scheduler.capacity.get' }));
+  } else if (concurrencyAction === 'set') {
+    // A non-integer is a usage error here (exit 2); an integer outside 1-16 is passed on so the
+    // Runtime answers with its own stable code (exit 1) instead of the CLI inventing a rule.
+    const limit = Number(limitText);
+    if (limitText === undefined || !Number.isSafeInteger(limit)) usage();
+    print(await call({
+      command: 'scheduler.capacity.set',
+      commandId: crypto.randomUUID(),
+      limit,
+    }));
+  } else if (concurrencyAction === 'reset') {
+    if (limitText !== undefined) usage();
+    print(await call({
+      command: 'scheduler.capacity.reset',
+      commandId: crypto.randomUUID(),
+    }));
+  } else {
+    usage();
+  }
+}
+
 /** The part of an IntegrationBatch record the CLI reports on: members and the batch verdict. */
 interface IntegrationBatchLineView {
   readonly batchId: string;
@@ -1337,6 +1380,9 @@ function usage(): never {
   bun run codeestra settings ui get <key> [--json]
   bun run codeestra settings ui set <key> <value> [--json]
   bun run codeestra settings ui reset [<key>] [--json]
+  bun run codeestra settings concurrency get [--json]
+  bun run codeestra settings concurrency set --limit <n> [--json]
+  bun run codeestra settings concurrency reset [--json]
     # key = theme|density|fontSize|motion|timeDisplay; every write is one command, zero
     # confirmations. An unknown key or an unsupported value is a usage error (exit 2); an
     # unreadable settings file is a Runtime error (exit 1, INVALID_UI_SETTING) that reset,
@@ -1350,9 +1396,9 @@ function usage(): never {
   bun run codeestra reclaim records [--project <project-id> | --all-projects] [--task <task-id>]
     [--source <ALL|REGISTERED|UNREGISTERED_DIRECTORY>] [--since <epoch-ms|ISO>] [--until <epoch-ms|ISO>]
     [--limit <n>] [--json]
-  bun run codeestra scheduler capacity get <project-id> [--adapter <id>] [--json]
-  bun run codeestra scheduler capacity set <project-id> --limit <n> [--adapter <id>] [--json]
-  bun run codeestra scheduler capacity clear <project-id> --adapter <id> [--json]
+  bun run codeestra scheduler capacity get [--json]
+  bun run codeestra scheduler capacity set --limit <n> [--json]
+  bun run codeestra scheduler capacity reset [--json]
   bun run codeestra scheduler reservations list <project-id> [--task <task-id>]
     [--include-released] [--limit <n>] [--json]
   bun run codeestra scheduler reservations get <project-id> <reservation-id> [--json]
@@ -1392,6 +1438,14 @@ confirmations, and nothing here changes what a Task is allowed to do. The values
 an unknown key or an unsupported value is refused instead of clamped, and a file the Runtime cannot
 understand is reported as INVALID_UI_SETTING rather than being silently replaced by defaults
 (settings ui reset is the explicit way out).
+
+settings concurrency is the settings spelling of the one Runtime-wide concurrency limit (ADR-0061):
+get, set --limit <n> and reset send exactly the same Runtime commands as scheduler capacity, so the
+value, its audit event and its idempotency can never diverge between the two spellings. It is a
+setting, not a gate: zero confirmations, same behavior in FULL and STRICT, and a change takes effect
+on the next scheduling decision — raising it triggers a scheduling pass for every project (a Task
+waiting on capacity can therefore start immediately), while lowering it never pauses, releases or
+terminates a Task that already holds a slot. Invalid limits are refused with the same stable codes.
 
 --reverse prints the newest transcript entry first. It is a rendering choice for the human view
 only (it is refused together with --json), and because the command face reads forward from a cursor
@@ -1439,12 +1493,18 @@ require a PASSED run of exactly that SHA with all three bindings unchanged; a po
 lockfile change inside the candidate or a newer failing run makes the evidence stale and the
 promotion is refused with DEV_FULL_SUITE_EVIDENCE_STALE (exit 1).
 
-scheduler capacity get reports the concurrency facts a scheduler uses: the project-wide limit (and
-where it came from), each Adapter's limit and occupancy, the stable reason code a new acquisition
-would get right now, and whether the Runtime is draining. capacity set/clear writes one limit;
-get reads the stored value back, an invalid limit (0, negative, above the ceiling) or an unknown
-Adapter is refused with its own stable code instead of being clamped. The default is 2 concurrent
-Tasks; an Adapter with no override follows the project limit.
+scheduler capacity get reports the **Runtime-wide** concurrency facts a scheduler uses: the single
+limit for this CODEESTRA_HOME and where it came from, how many slots are occupied across every
+project with the occupiers themselves (project, task, adapter, since, reservation or Execution), the
+stable reason code a new acquisition would get right now, the global control state, and whether the
+Runtime is draining. It takes no project and no adapter: a candidate's project and adapter no longer
+produce a second ceiling. scheduler capacity set --limit <n> writes that one limit and reset removes
+the explicit value so the documented default 2 applies again; both are zero-confirmation, both read
+the value back, and writing the value that is already effective is an idempotent no-op. An invalid
+limit (0, negative, above the ceiling) is refused with its own stable code instead of being clamped.
+Exit codes: 0 written or read, 1 refused (CAPACITY_LIMIT_INVALID / CAPACITY_LIMIT_OUT_OF_RANGE), 2
+usage. CAPACITY_ADAPTER_SLOT_LIMIT_REACHED is historical: no code path produces it any more, and it
+stays readable in old events and old command results.
 
 scheduler reservations acquire is the reservation primitive: it re-checks the Task version, the
 assessed revision, the dependency facts, the cached ImpactSnapshot generation and both capacity
@@ -3596,6 +3656,14 @@ try {
     } else {
       usage();
     }
+  } else if (group === 'settings' && action === 'concurrency') {
+    // The settings spelling of the one Runtime-wide concurrency limit (ADR-0061 D02). It is a thin
+    // alias on purpose: the same story is told by `scheduler capacity`, and duplicating the rule here
+    // (or worse, storing the value a second time) is how two readers end up disagreeing about the
+    // same limit. The limit is discoverable where a user looks for settings, and it is adjusted in
+    // real time — see `runConcurrencyCommand`.
+    await runConcurrencyCommand([firstArgument, ...remainingArguments]
+      .filter((token): token is string => token !== undefined));
   } else if (group === 'task' && action === 'revision') {
     // The revision face of PROJECT_SPEC §2.11: creating a revision is one command, and the delivery
     // of that revision into a running Execution is separately readable and separately resolvable. A
@@ -4037,39 +4105,9 @@ try {
     const [subcommand, ...tokens] = [action, firstArgument, ...remainingArguments]
       .filter((token): token is string => token !== undefined);
     if (subcommand === 'capacity') {
-      const split = splitFlagTokens(tokens, ['--adapter', '--limit'], ['--json']);
-      const [capacityAction, projectId, ...extra] = split.positionals;
-      if (capacityAction === undefined || projectId === undefined || extra.length !== 0) usage();
-      const adapterId = split.flags.get('--adapter');
-      const limitText = split.flags.get('--limit');
-      if (capacityAction === 'get') {
-        if (limitText !== undefined) usage();
-        print(await call({
-          command: 'scheduler.capacity.get',
-          projectId,
-          ...(adapterId === undefined ? {} : { adapterId }),
-        }));
-      } else if (capacityAction === 'set') {
-        const limit = Number(limitText);
-        if (limitText === undefined || !Number.isSafeInteger(limit)) usage();
-        print(await call({
-          command: 'scheduler.capacity.set',
-          commandId: crypto.randomUUID(),
-          projectId,
-          limit,
-          ...(adapterId === undefined ? {} : { adapterId }),
-        }));
-      } else if (capacityAction === 'clear') {
-        if (limitText !== undefined || adapterId === undefined) usage();
-        print(await call({
-          command: 'scheduler.capacity.clear',
-          commandId: crypto.randomUUID(),
-          projectId,
-          adapterId,
-        }));
-      } else {
-        usage();
-      }
+      // The Runtime-wide capacity face (ADR-0061 D02). `settings concurrency` is the same command
+      // under its settings spelling — see `runConcurrencyCommand`.
+      await runConcurrencyCommand(tokens);
     } else if (subcommand === 'reservations') {
       const split = splitFlagTokens(tokens,
         ['--task', '--revision', '--adapter', '--reason', '--limit', '--snapshot'],

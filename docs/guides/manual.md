@@ -1,11 +1,14 @@
 # Codeestra 用户说明书
 
-> **适用版本** `dev@4667d32`（2026-09-16） · **schema** v33 · **最后校对** 2026-09-16
-> 版本会前进：`dev@4667d32` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
+> 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > §「任务」的永久删除一条由 FOUNDATION-090 新增（ADR-0058）；§3.1、§4.2、§4.3、§4.5、§10.1、§10.3 与
 > 「名词表」的冲突判定由 FOUNDATION-091 按 ADR-0059 改写（声明同一功能才冲突，默认不冲突）。
 > §3.1、§3.2、§10.2 由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目的常态路径不变）；其余内容沿用 FOUNDATION-091 的校对基线。
+> §10.3 的 `WAIT_CAPACITY` 一行、§10.4、§11.2 与 §13.4 由 **FOUNDATION-096** 同步（ADR-0061：容量只剩一个
+> Runtime 全局上限，命令去掉 project/adapter 参数，并可从 `settings concurrency` 实时调整；**全局暂停尚未实现**）。
+> 本次校对在候选分支上完成。
 
 这是**写给使用者的说明书**：从头读到尾就能把 Codeestra 用起来，不需要先读架构文档或 ADR。
 需要细节时，每一节末尾都有「想深入看哪篇」。
@@ -963,7 +966,7 @@ bun run codeestra task schedule clear-unknown $PROJECT <task-id> [--json]
 |---|---|---|
 | `BLOCKED` | **依赖未满足**（唯一含义） | 1 |
 | `WAIT_CONFLICT` | 与某个**未完成且声明了同一功能**的 Task 冲突 | 3 |
-| `WAIT_CAPACITY` | 项目级上限或 Adapter 上限已满 | 3 |
+| `WAIT_CAPACITY` | **整个 Runtime 的唯一并发上限**已满（默认 2，跨全部项目与 Adapter） | 3 |
 | `SCHEDULER_DRAINING` | Runtime 正在 draining，不接受新预留 | 3 |
 
 `UNKNOWN` 的**显式单次放行**（`task schedule clear-unknown` 或 `task run --allow-unknown`）绑定
@@ -973,23 +976,30 @@ ADR-0059 之后当前规则**不再产生 `UNKNOWN`**，所以这条路日常不
 ### 10.4 容量与槽位
 
 ```sh
-bun run codeestra scheduler capacity get   $PROJECT [--adapter <id>] [--json]
-bun run codeestra scheduler capacity set   $PROJECT --limit <n> [--adapter <id>] [--json]
-bun run codeestra scheduler capacity clear $PROJECT --adapter <id> [--json]
+bun run codeestra scheduler capacity get [--json]
+bun run codeestra scheduler capacity set --limit <n> [--json]
+bun run codeestra scheduler capacity reset [--json]
 bun run codeestra scheduler reservations list $PROJECT [--task <task-id>] [--include-released] [--limit <n>]
 bun run codeestra scheduler reservations release $PROJECT <reservation-id> --reason "…"
 bun run codeestra scheduler reservations reconcile $PROJECT [--json]
 ```
 
-- 两个上限同时生效：**项目全局**与**每 adapter**（adapter 没有覆写时跟随全局上限）。默认 2，上限 16。
-- 非法值有自己的稳定码（`CAPACITY_LIMIT_INVALID` / `CAPACITY_LIMIT_OUT_OF_RANGE` / `UNKNOWN_ADAPTER`），
-  **不会被静默夹取**。
+- **只有一个上限，而且是整个 Runtime 的**（ADR-0061）：同一个 `CODEESTRA_HOME` 下所有项目加起来的并发 Task 不超过它。默认 2，上限 16。
+  旧版本的项目级 / 每 adapter 上限已经**删除**（不是隐藏开关）；升级时如果你以前显式设置过多个值，取其中**最小值**，没有显式值则为 2。
+- 设置上限是**零确认**的：`set --limit 4` 就生效；重复设置同一个值是幂等 no-op。再敲 `reset` 就回到默认 2。
+- 也可以在**设置面**调整同一个值：`bun run codeestra settings concurrency get|set --limit <n>|reset`。
+  两种拼写发的是**同一条命令**（同一行、同一条审计事件），所以不存在两个值。
+- **改完立刻生效，不需要重启 Runtime**：提高上限会为每个项目触发一次调度，正等着容量的任务立即有机会启动；
+  **降低上限不会打断已经跑着的任务**（这是刻意的：不会因为你调小数字就杀掉谁）。
+- 非法值有自己的稳定码（`CAPACITY_LIMIT_INVALID` / `CAPACITY_LIMIT_OUT_OF_RANGE`），**不会被静默夹取**。
 - **释放必须显式且必须给原因**。**没有任何东西会因为心跳过期、客户端消失或用户等待而自动释放。**
   可证明仍存活的持有者会被拒绝释放（`SLOT_HOLDER_STILL_RUNNING`）。
 - `reconcile` 只**读真实进程表**：已死 → 释放并记录；仍存活 → 保持占用；无法核验 → `RECOVERY_REQUIRED`。
   它**不发信号、不杀进程、不删资源、不声称静止**。
 - 一个常见的误解：**Task 启动后，槽位由预留移交给该 Execution**，所以「没有活跃预留但任务在跑」是正常事实。
   用 `--include-released` 可以看到这次移交。
+- **暂停全部任务（全局冻结 Provider）属于 ADR-0061 的另一半，还没有实现**：目前没有 `scheduler control *` 命令，
+  `capacity get` 的 `pauseState` 只会是 `RUNNING`。单任务暂停仍用 `task pause`。
 
 > 图：`08-schedule.png` — 「调度」标签页：调度引擎面板（adapter / 调度循环 / draining / 最近一次 tick /
 > 容量一行）、活跃集合表、候选顺序卡片（含等待块与命中路径）、容量与槽位预留表。
@@ -1052,6 +1062,21 @@ bun run codeestra settings ui reset [<key>] [--json]
 
 > 图：`11-settings.png` — 「设置」标签页的「界面效果」：五个键各一行（中文名 + 键名 + 一句说明 +
 > 下拉框 + 当前/默认/是否显式设置 + 恢复默认），以及每行的等价 CLI 命令。
+
+### 11.2.1 并发上限也是一项可实时调整的设置
+
+`settings concurrency` 是**整个 Runtime 的并发上限**（默认 2，范围 1–16）在设置面上的拼写：
+
+```sh
+bun run codeestra settings concurrency get   [--json]
+bun run codeestra settings concurrency set   --limit <n> [--json]
+bun run codeestra settings concurrency reset [--json]
+```
+
+它与调度面的 `scheduler capacity get|set|reset` 是**同一事实**（同一行、同一条 `SchedulerGlobalCapacityChanged` 事件），
+因此两边读出的值不会不一致。改完**立刻生效**：提高上限会让正在等待容量的任务在下一次调度里就有机会启动；
+降低上限**不会**暂停、释放或终止已经在跑的 Task（`get` 的 `used` 因此可能大于 `limit`）。
+它和 §11.2 的五个界面键一样是**设置、不是门禁**：零确认，FULL/STRICT 行为相同。
 
 ### 11.3 Agent 配置
 
@@ -1182,8 +1207,9 @@ bun run codeestra task status $PROJECT <task-id>     # 执行 / 验证 / 会话�
 ### 13.4 任务一直不跑
 
 它可能是**等待**（退出码 3），不是失败。三种互不相同的答案见 §10.3。
-看谁占着：`scheduler capacity get`、`scheduler reservations list`。
-**没有任何东西会自动释放**，释放必须显式并给出原因。
+看谁占着：`scheduler capacity get`（**整个 Runtime** 的占用者，带 project/task/adapter）与 `scheduler reservations list $PROJECT`。
+**没有任何东西会自动释放**，释放必须显式并给出原因。并发上限是唯一的 Runtime 全局值：想让更多任务同时跑就 `scheduler capacity set --limit <n>`，
+而不是靠多开一个项目。
 
 ### 13.5 看到 `RECOVERY_REQUIRED`
 

@@ -1,11 +1,13 @@
 # 常见故障与稳定码表
 
-> **适用版本** `dev@4667d32`（2026-09-16） · **schema** v33 · **最后校对** 2026-09-16
-> 版本会前进：`dev@4667d32` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
+> 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > `task purge` 的拒绝码一节由 FOUNDATION-090 新增（ADR-0058）；冲突判定与 `--feature` 的拒绝码由
 > FOUNDATION-091 新增/改写（ADR-0059）。
-> 「报 `DEV_REPO_REQUIRED`」一节由 FOUNDATION-093 第三轮重写（ADR-0060 修订）；其余内容沿用 FOUNDATION-091 的校对基线。
+> 「报 `DEV_REPO_REQUIRED`」一节由 FOUNDATION-093 第三轮重写（ADR-0060 修订）；
+> 「任务一直不跑」与「调度 / 容量 / 槽位」两处的容量码由 **FOUNDATION-096** 同步（ADR-0061：只剩一个
+> Runtime 全局上限，容量命令不带 project 参数；`CAPACITY_ADAPTER_SLOT_LIMIT_REACHED` 成为历史码）。
 
 本文只列**源码里实际存在**的错误码与状态。每条给出「什么时候出现 / 怎么办」。
 
@@ -173,13 +175,13 @@ bun run codeestra task cancel   $PROJECT $OCCUPIER <expected-version>
 | 现象 | 含义 |
 |---|---|
 | `WAIT_CONFLICT` | 与某个**未完成且声明了同一功能**的 Task 冲突（唯一冲突） |
-| `WAIT_CAPACITY` | 项目级上限或 Adapter 上限已满（`CAPACITY_GLOBAL_LIMIT_REACHED` / `CAPACITY_ADAPTER_SLOT_LIMIT_REACHED`） |
+| `WAIT_CAPACITY` | **整个 Runtime 的唯一并发上限**已满（`CAPACITY_GLOBAL_LIMIT_REACHED`，默认 2，跨全部项目与 Adapter） |
 | `SCHEDULER_DRAINING` | Runtime 正在 draining，不接受新的 slot |
 
-看谁占着：
+看谁占着（容量是整个 Runtime 的，所以 `capacity get` 不带项目）：
 
 ```sh
-bun run codeestra scheduler capacity get $PROJECT --json
+bun run codeestra scheduler capacity get --json
 bun run codeestra scheduler reservations list $PROJECT
 ```
 
@@ -478,12 +480,15 @@ bun run codeestra events list --limit 1        # 或者从你保存的最后一�
 
 ### 调度 / 容量 / 槽位
 
-`CAPACITY_WAIT`、`CONFLICT_WAIT`、`CAPACITY_GLOBAL_LIMIT_REACHED`、`CAPACITY_ADAPTER_SLOT_LIMIT_REACHED`、
+`CAPACITY_WAIT`、`CONFLICT_WAIT`、`CAPACITY_GLOBAL_LIMIT_REACHED`、
 `CAPACITY_LIMIT_INVALID`、`CAPACITY_LIMIT_OUT_OF_RANGE`、`SCHEDULER_DRAINING`、`TASK_NOT_STARTABLE`、
 `SLOT_ALREADY_RESERVED`、`SLOT_ALREADY_BOUND`、`SLOT_NOT_ACTIVE`、`SLOT_HELD_BY_ANOTHER_RUNTIME`、
 `SLOT_HOLDER_STILL_RUNNING`、`HOLDER_STILL_RUNNING`、`HOLDER_STOPPED`、`HOLDER_PROCESS_ID_REUSED`、
 `HOLDER_OWNERSHIP_UNVERIFIABLE`、`PROCESS_IDENTITY_MISSING`、`NOT_HELD`、`REVISION_CHANGED`、
 `SNAPSHOT_STALE`、`SNAPSHOT_UNAVAILABLE`、`NOT_A_CANDIDATE`、`SCHEDULE_TICK_FAILED`、`NOT_UNKNOWN`。
+
+`CAPACITY_ADAPTER_SLOT_LIMIT_REACHED` 与 `UNKNOWN_ADAPTER`（当容量命令用它时）只出现在**历史**事件与历史命令结果里：
+ADR-0061 删除了 Adapter 级容量上限，当前命令面不再产生它。（`UNKNOWN_ADAPTER` 仍由其他命令如 `task run --adapter` 产生。）
 
 ### 验证 / 集成 / 提升
 

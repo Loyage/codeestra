@@ -95,10 +95,10 @@ function withTemporaryFile(run: (filename: string) => void): void {
 }
 
 const capacityTables = [
-  'project_capacity_limits',
-  'project_adapter_slot_limits',
   'execution_slot_reservations',
   'execution_slot_reservation_events',
+  'runtime_capacity_settings',
+  'runtime_command_receipts',
 ];
 
 function expectUpgradedToCapacitySchema(upgraded: Phase1Database): void {
@@ -109,11 +109,18 @@ function expectUpgradedToCapacitySchema(upgraded: Phase1Database): void {
   expect(phase1SchemaVersion).toBeGreaterThanOrEqual(21);
   const tables = upgraded.sqlite.query<{ name: string }, []>(`
     SELECT name FROM sqlite_master WHERE type='table'
-      AND name IN ('project_capacity_limits','project_adapter_slot_limits',
-        'execution_slot_reservations','execution_slot_reservation_events')
+      AND name IN ('execution_slot_reservations','execution_slot_reservation_events',
+        'runtime_capacity_settings','runtime_command_receipts')
     ORDER BY name
   `).all().map((row) => row.name);
   expect(tables).toEqual([...capacityTables].sort());
+  // The v21 configuration tables that v34 (ADR-0061 D03) retired are gone in the current schema:
+  // the project-scoped limits no longer exist, not even as a hidden override layer.
+  const retired = upgraded.sqlite.query<{ name: string }, []>(`
+    SELECT name FROM sqlite_master WHERE type='table'
+      AND name IN ('project_capacity_limits','project_adapter_slot_limits')
+  `).all();
+  expect(retired).toEqual([]);
   // Additive: the pre-existing row is still readable and the pre-existing tables are untouched.
   expect(upgraded.sqlite.query<{ id: string }, []>(
     "SELECT id FROM projects WHERE id='legacy'").get()?.id).toBe('legacy');
@@ -124,8 +131,8 @@ function expectUpgradedToCapacitySchema(upgraded: Phase1Database): void {
     "SELECT name FROM sqlite_master WHERE type='table' AND name='task_revision_deliveries'")
     .get()?.name).toBe('task_revision_deliveries');
   // The new tables are usable right away and start from the documented default capacity.
-  expect(upgraded.getProjectCapacity('legacy')).toMatchObject({
-    globalLimit: 2, globalLimitSource: 'DEFAULT',
+  expect(upgraded.getRuntimeCapacity()).toMatchObject({
+    limit: 2, limitSource: 'DEFAULT',
   });
 }
 
@@ -164,15 +171,15 @@ describe('capacity and slot reservation migration', () => {
       first.sqlite.query(`INSERT INTO project_trusts
         (id,project_id,repo_root,git_common_dir,object_format,policy_version,actor,status,accepted_at)
         VALUES ('kept-trust','kept','/kept','/kept/.git','sha1',1,'user','ACTIVE',1)`).run();
-      first.setProjectGlobalCapacity({
-        projectId: 'kept', limit: 5, commandId: crypto.randomUUID(), payloadHash: 'p',
+      first.setRuntimeCapacityLimit({
+        limit: 5, commandId: crypto.randomUUID(), payloadHash: 'p',
         eventId: crypto.randomUUID(), actor: 'user', updatedAt: 2,
       });
       first.close();
       const reopened = new Phase1Database(filename);
       try {
-        expect(reopened.getProjectCapacity('kept')).toMatchObject({
-          globalLimit: 5, globalLimitSource: 'EXPLICIT',
+        expect(reopened.getRuntimeCapacity()).toMatchObject({
+          limit: 5, limitSource: 'EXPLICIT',
         });
       } finally { reopened.close(); }
     });

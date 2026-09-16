@@ -1,6 +1,6 @@
 # SQLite Schema
 
-状态：逻辑 SQL 设计基线 + 已实现 migration 记录。第 2–6 节是逻辑关系设计（其中若干节已被后续 ADR 修订，见第 8 节各版本的说明）；第 8 节逐版本记录 `packages/storage/src/migration.ts` 中**实际存在**的 migration，当前最新实现为 schema **v33**（ADR-0060；v16 永久未使用、v22 未占用）。ADR-0061 已接受但尚未实现的 Runtime 全局负载控制计划占用 **v34**，其小节是实施契约，不得据此声称 migration 已存在。**schema version 16 永久未使用**，原因见第 8 节。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与第 2–6 节的约束等价，并以第 8 节的实现记录为准。
+状态：逻辑 SQL 设计基线 + 已实现 migration 记录。第 2–6 节是逻辑关系设计（其中若干节已被后续 ADR 修订，见第 8 节各版本的说明）；第 8 节逐版本记录 `packages/storage/src/migration.ts` 中**实际存在**的 migration，当前最新实现为 schema **v34**（ADR-0061 **上半：Runtime 唯一全局容量**，FOUNDATION-096；v16 永久未使用、v22 未占用）。**v34 下半（全局暂停：`runtime_pause_control` / `runtime_pause_targets`）仍属 ADR-0061 已接受、尚未实现的契约**，两块共用一个版本号、集成时合并为同一个 `if (version < 34)` 步骤；不得据下半的小节声称那两张表已存在。**schema version 16 永久未使用**，原因见第 8 节。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与第 2–6 节的约束等价，并以第 8 节的实现记录为准。
 
 ## 1. 约定
 
@@ -453,18 +453,19 @@ CREATE TABLE operations (
   updated_at INTEGER NOT NULL,
   UNIQUE(project_id,kind,idempotency_key)
 );
+```sql
 CREATE TABLE domain_events (
   sequence INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id TEXT NOT NULL UNIQUE,
-  project_id TEXT NOT NULL REFERENCES projects(id),
+  project_id TEXT REFERENCES projects(id),      -- v34 起可空；NULL = Runtime 全局事实
   event_type TEXT NOT NULL,
   schema_version INTEGER NOT NULL CHECK(schema_version > 0),
   aggregate_type TEXT NOT NULL,
   aggregate_id TEXT NOT NULL,
-  aggregate_version INTEGER NOT NULL,
+  aggregate_version INTEGER NOT NULL CHECK(aggregate_version >= 0),
   correlation_id TEXT NOT NULL,
   causation_id TEXT,
-  occurred_at INTEGER NOT NULL,
+  occurred_at INTEGER NOT NULL CHECK(occurred_at >= 0),
   payload_json TEXT NOT NULL CHECK(json_valid(payload_json))
 );
 CREATE TABLE event_deliveries (
@@ -1032,7 +1033,11 @@ END;
 
 快照的唯一键就是「能否复用」的判据：`(task, revision, base, analyzer, policy, change fingerprint)`。Task 修订、基线移动、映射编辑、分析器换代、观测到的 diff 变大，都产生**新行**，旧行保留做审计且永不被再次选中。配对判定按两个 snapshot 唯一，没有任何列能把已记录的 `SAFE` 改成别的值。
 
-### Phase 2 容量与槽位预留（schema version 21，ADR-0032）
+### Phase 2 容量与槽位预留（schema version 21，ADR-0032；**v34 起前两张配置表已退役**）
+
+> 下表是 v21 的历史实现记录：`project_capacity_limits` 与 `project_adapter_slot_limits` 已由 schema v34（ADR-0061 D03）
+> 迁移取最小值后退役，新的唯一上限在 `runtime_capacity_settings`（见下文「Runtime 唯一全局容量」）。
+> `execution_slot_reservations` / `execution_slot_reservation_events` 仍属当前实现，只是容量判定改为全 Runtime 计数。
 
 ```sql
 CREATE TABLE project_capacity_limits (
@@ -1361,9 +1366,10 @@ ADR-0060 之前，一个 Task 的基线 ref 只有一个可能：项目行的 `p
   于是历史记录仍然如实；升级不发明数据、不改写任何已有行。
 - 有 dev clone 的项目行为不变（写入的仍是那个 clone 的 `refs/heads/dev`）；managed 项目写入项目文件夹当时检出的分支。
 
-### Runtime 唯一全局容量与 Provider 冻结（计划 schema version 34，ADR-0061；尚未实现）
+### Runtime 唯一全局容量（**已实现**：schema version 34 上半，FOUNDATION-096 / ADR-0061）与 Provider 冻结（同版本下半，**尚未实现**）
 
-计划新增的持久事实：
+本版本号被两块共用：容量事实与 `domain_events` 可空化属于**上半（已实现）**；`runtime_pause_control` / `runtime_pause_targets`
+属于**下半（仍待实现）**，两块在集成时合并为同一个 `if (version < 34)` 步骤。已实现的持久事实：
 
 ```sql
 CREATE TABLE runtime_capacity_settings (
@@ -1374,6 +1380,35 @@ CREATE TABLE runtime_capacity_settings (
   updated_by TEXT NOT NULL CHECK(length(trim(updated_by)) > 0)
 ) STRICT;
 
+CREATE TABLE runtime_command_receipts (
+  command_id TEXT PRIMARY KEY,
+  payload_hash TEXT NOT NULL,
+  result_json TEXT NOT NULL CHECK(json_valid(result_json)),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0)
+) STRICT;
+```
+
+没有行 = 未显式设置：读取返回文档默认值 **2**，`limitSource = 'DEFAULT'`；`set` 写行，`reset` 删行（写行 2 会把用户
+没做过的决定记成 `EXPLICIT`）。`runtime_command_receipts` 给**不属于任何 Project** 的全局命令提供与
+`command_receipts` 相同的幂等语义（同 commandId 重放同结果、同键异文拒绝）；它不能复用 `command_receipts`，
+因为那张表的 `project_id` 是 NOT NULL。
+
+**旧容量迁移是确定性的，且整笔原子**（见 `runtimeGlobalCapacityMigration` 与 `Phase1Database.migrateRuntimeGlobalCapacity`）：
+读取 `project_capacity_limits.global_limit` 与 `project_adapter_slot_limits.slot_limit` 的**全部显式值**；
+有值则 `MIN(all values)` 写入 singleton（并写一条 `source='MIGRATED_MINIMUM'` 的全局事件），一个都没有则不写行、默认 2 生效；
+随后**同一脚本**重建 `domain_events` 并 DROP 两张旧配置表。值不在 1–16 内、或任一步骤失败，都在同一个
+事务里整笔回滚（先读值、后删表，所以旧值不会先被删掉）；迁移后核对新值、`domain_events` 与 `event_deliveries` 行数，
+并执行 `PRAGMA foreign_key_check`。reservation / Execution / 历史事件一行不改，`SchedulerCapacityChanged` 保留。
+
+**全局事件**：`domain_events.project_id` 由 `NOT NULL REFERENCES projects(id)` 重建为可空 FK（create → copy → drop → rename，
+复制保留原 `sequence`/event_id/payload，`AUTOINCREMENT` 状态也随之保留）；`NULL` 只表示 Runtime 全局事实，
+不是「未知 Project」。`event_deliveries.event_id` 引用在新表接管名字后继续有效。Project 过滤读取改为
+`(project_id = ? OR project_id IS NULL)`。
+
+下半（全局暂停）的持久事实与状态一致性约束（`PENDING`/`STOPPED`/`RECOVERY_REQUIRED` 跨表约束、无 FK 的身份快照、
+purge 前收口等）仍适用，但**尚未实现**：
+
+```sql
 CREATE TABLE runtime_pause_control (
   singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
   state TEXT NOT NULL CHECK(state IN
@@ -1405,22 +1440,11 @@ CREATE TABLE runtime_pause_targets (
   updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
   UNIQUE(pause_epoch,incarnation_id)
 ) STRICT;
-
-CREATE TABLE runtime_command_receipts (
-  command_id TEXT PRIMARY KEY,
-  payload_hash TEXT NOT NULL,
-  result_json TEXT NOT NULL CHECK(json_valid(result_json)),
-  created_at INTEGER NOT NULL CHECK(created_at >= 0)
-) STRICT;
 ```
 
 最终 migration 可在不改变约束语义的前提下调整列名，但必须保持：singleton、pause epoch、逐 incarnation process identity、目标状态、同命令幂等与同键异文拒绝。
 
-**旧容量迁移是确定性的**：读取 `project_capacity_limits.global_limit` 与 `project_adapter_slot_limits.slot_limit` 的全部显式值；有值则 `MIN(all values)` 写入 singleton，没有则写/派生默认 2；随后才退役两张旧配置表。reservation/Execution 一行不改。迁移必须比对新值、关键表行数并执行 `foreign_key_check`；失败整笔回滚。历史 `SchedulerCapacityChanged` 事件保留。
-
-**全局事件**：`domain_events.project_id` 计划由 `NOT NULL REFERENCES projects(id)` 重建为可空 FK；`NULL` 只表示 Runtime 全局事实。复制必须保留原 `sequence`、event_id、payload 与索引，且 `event_deliveries` 引用保持有效。Project 过滤读取改为 `(project_id = ? OR project_id IS NULL)`。
-
-**状态一致性**：
+**状态一致性（下半）**：
 
 - `RUNNING` 时不得有 `PENDING`/`STOPPED` 目标；`PAUSED` 时本 epoch 不得有 `PENDING`/`RECOVERY_REQUIRED`；这些跨表约束由同一 immediate transaction 的 storage service 强制并以故障注入测试覆盖。
 - `RECOVERY_REQUIRED` 仍保持全局启动屏障；target 行不因超时、心跳或 Runtime 重启自动删除/改成 `EXITED`。

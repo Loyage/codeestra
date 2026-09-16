@@ -288,7 +288,7 @@ export class SlotReservationService {
     // checked against the real process table, and a holder that is provably gone is *reported* here
     // — never released. Freeing it is the explicit release or the audited startup reconcile.
     const wait = result.wait as CapacityWaitReason;
-    const holderEvidence = await this.#observeBlockingHolders(input.projectId, wait.blocking);
+    const holderEvidence = await this.#observeBlockingHolders(wait.blocking);
     return {
       outcome: result.outcome === 'DRAINING' ? 'DRAINING' : 'CAPACITY_WAIT',
       capacity: result.capacity,
@@ -544,16 +544,23 @@ export class SlotReservationService {
   }
 
   /** Live observations of the recorded holders of the slots that caused a wait. Read-only. */
-  async #observeBlockingHolders(projectId: string, blocking: readonly string[]): Promise<
+  async #observeBlockingHolders(blocking: readonly string[]): Promise<
     readonly { readonly reservationId: string; readonly taskId: string;
       readonly observation: SlotHolderObservationState; readonly detail: string }[]
   > {
+    // The blocking Tasks may now belong to *any* Project (ADR-0061 D01 counts the whole Runtime), so
+    // the lookup is by Task across the active set instead of by Project: a Project-scoped read would
+    // silently drop the occupant that actually caused the wait.
+    const active = this.#storage.listActiveSlotReservations()
+      .filter((reservation) => blocking.includes(reservation.taskId));
     const evidence: { reservationId: string; taskId: string;
       observation: SlotHolderObservationState; detail: string }[] = [];
+    const byTask = new Map<string, ExecutionSlotReservationRecord>();
+    for (const reservation of active) {
+      if (!byTask.has(reservation.taskId)) byTask.set(reservation.taskId, reservation);
+    }
     for (const taskId of blocking) {
-      const active = this.#storage.listSlotReservations(projectId, { taskId })
-        .filter((reservation) => reservation.state !== 'RELEASED');
-      const reservation = active[0];
+      const reservation = byTask.get(taskId);
       if (reservation === undefined) continue;
       const observation = await this.#inspectHolder(reservation);
       evidence.push({
