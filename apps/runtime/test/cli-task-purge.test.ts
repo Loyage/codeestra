@@ -13,7 +13,6 @@ import {
   runCli,
   submitFixtureTaskWithoutScheduling,
 } from './support/runtime-reclamation.js';
-import { provisionDevClone } from './support/agent-fixture.js';
 
 /**
  * `task purge` (ADR-0058) driven only through the CLI and the Runtime command face (ADR-0008): one
@@ -57,7 +56,6 @@ async function refExists(cwd: string, ref: string): Promise<boolean> {
 interface PurgeFixture {
   readonly environment: Record<string, string>;
   readonly repo: string;
-  readonly devRepo: string;
   readonly home: string;
   readonly projectId: string;
 }
@@ -76,14 +74,13 @@ async function openedProject(): Promise<PurgeFixture> {
   await git(repo, ['add', '.']);
   await git(repo, ['commit', '-q', '-m', 'fixture']);
   await git(repo, ['branch', 'dev']);
-  const devRepo = await provisionDevClone({ repository: repo });
   const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets,
     CODEESTRA_SCHEDULE_TICK_MS: '600000' };
-  const opened = await cli(['open', repo, '--dev-repo', devRepo, '--no-open'], environment);
+  const opened = await cli(['open', repo, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { id: string }[];
-  return { environment, repo, devRepo, home, projectId: projects[0]?.id as string };
+  return { environment, repo, home, projectId: projects[0]?.id as string };
 }
 
 interface SeededTask {
@@ -169,7 +166,7 @@ describe('codeestra task purge command face', () => {
     try {
       const task = await seededExecutedTask(fixture);
       expect(existsSync(task.workspacePath)).toBe(true);
-      expect(await refExists(fixture.devRepo, task.branchRef)).toBe(true);
+      expect(await refExists(fixture.repo, task.branchRef)).toBe(true);
 
       const purged = await cli(['task', 'purge', fixture.projectId, task.taskId,
         String(task.taskVersion), '--yes', '--reason', 'no longer wanted'], fixture.environment);
@@ -192,7 +189,7 @@ describe('codeestra task purge command face', () => {
       // Both halves really happened: the directory and the branch are gone, and the Task is gone
       // from every read face rather than merely hidden.
       expect(existsSync(task.workspacePath)).toBe(false);
-      expect(await refExists(fixture.devRepo, task.branchRef)).toBe(false);
+      expect(await refExists(fixture.repo, task.branchRef)).toBe(false);
       const listed = JSON.parse((await cli(['task', 'list', fixture.projectId, '--all'],
         fixture.environment)).stdout) as readonly { id: string }[];
       expect(listed.map((entry) => entry.id)).not.toContain(task.taskId);
@@ -239,7 +236,7 @@ describe('codeestra task purge command face', () => {
       expect(refused.exitCode).toBe(2);
       expect(refused.stderr).toContain('--yes');
       expect(existsSync(task.workspacePath)).toBe(true);
-      expect(await refExists(fixture.devRepo, task.branchRef)).toBe(true);
+      expect(await refExists(fixture.repo, task.branchRef)).toBe(true);
 
       const status = JSON.parse((await cli(['task', 'status', fixture.projectId, task.taskId],
         fixture.environment)).stdout) as { readonly task: { readonly state: string } };
@@ -249,62 +246,4 @@ describe('codeestra task purge command face', () => {
     }
   }, 120_000);
 
-  test('--force deletes a Task whose commit reached an integration batch (ADR-0058 D09)', async () => {
-    const fixture = await openedProject();
-    try {
-      const task = await seededExecutedTask(fixture);
-      // The one refusal a CLI fixture can produce on purpose: the Task is a member of an integration
-      // batch, which is the record of *who* brought its commit into dev.
-      const storage = new Phase1Database(join(fixture.home, 'runtime.sqlite'));
-      const oid = 'a'.repeat(40);
-      try {
-        const revisionId = storage.getTask(fixture.projectId, task.taskId)
-          ?.currentRevision.id as string;
-        const executionId = storage.listTaskExecutions(fixture.projectId, task.taskId)[0]
-          ?.executionId as string;
-        // `INTEGRATED` (not CREATED) so the Runtime's startup integration reconcile, which needs a
-        // real batch operation, does not treat this scenery as an interrupted integration.
-        storage.sqlite.query(`INSERT INTO integration_batches
-          (id,project_id,dev_ref,dev_commit,state,integrated_commit,merged_commit,merge_strategy,
-            worktree_ownership_token,created_at,completed_at)
-          VALUES ('cli-force-b1',?1,'refs/heads/dev',?2,'INTEGRATED',?2,?2,'MERGE_COMMIT','token',12,13)`)
-          .run(fixture.projectId, oid);
-        storage.sqlite.query(`INSERT INTO integration_batch_items
-          (batch_id,project_id,task_id,revision_id,execution_id,candidate_commit,dev_commit,state,
-            integrated_commit,created_at)
-          VALUES ('cli-force-b1',?1,?2,?3,?4,?5,?5,'INTEGRATED',?5,12)`)
-          .run(fixture.projectId, task.taskId, revisionId, executionId, oid);
-      } finally {
-        storage.close();
-      }
-
-      // Without the flag the refusal names the record the deletion would erase, and nothing moves.
-      const refused = await cli(['task', 'purge', fixture.projectId, task.taskId,
-        String(task.taskVersion), '--yes'], fixture.environment);
-      expect(refused.exitCode).toBe(1);
-      expect(refused.stderr).toContain('TASK_INTEGRATED_INTO_DEV');
-      expect(existsSync(task.workspacePath)).toBe(true);
-      expect(await refExists(fixture.devRepo, task.branchRef)).toBe(true);
-
-      const forced = await cli(['task', 'purge', fixture.projectId, task.taskId,
-        String(task.taskVersion), '--yes', '--force', '--reason', 'forced by hand'],
-        fixture.environment);
-      expect(forced.exitCode).toBe(0);
-      const view = JSON.parse(forced.stdout) as PurgeView;
-      expect(view.forced?.bypassed.map((entry) => entry.code)).toEqual(['TASK_INTEGRATED_INTO_DEV']);
-      // The provenance row is what the flag gave up, and it is counted in the same view.
-      expect(view.rowsDeleted['integration_batch_items']).toBe(1);
-      expect(view.plan).toMatchObject({ worktrees: 1, branches: 1 });
-      // It goes to stderr as well: a human who ran the command sees what was stepped over without
-      // reading the JSON, while stdout stays one parseable document.
-      expect(forced.stderr).toContain('--force stepped over 1 refusal(s)');
-      expect(forced.stderr).toContain('TASK_INTEGRATED_INTO_DEV');
-      expect(existsSync(task.workspacePath)).toBe(false);
-      expect(await refExists(fixture.devRepo, task.branchRef)).toBe(false);
-      expect((await cli(['task', 'status', fixture.projectId, task.taskId], fixture.environment))
-        .stderr).toContain('NOT_FOUND');
-    } finally {
-      await cli(['stop'], fixture.environment);
-    }
-  }, 180_000);
 });

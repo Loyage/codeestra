@@ -7,7 +7,6 @@ import {
   registerTemporaryDirectory,
   runCli,
 } from './support/runtime-reclamation.js';
-import { provisionDevClone } from './support/agent-fixture.js';
 
 const repositoryRoot = join(import.meta.dir, '..', '..', '..');
 const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
@@ -73,10 +72,9 @@ async function trustedProject(): Promise<{ environment: Record<string, string>; 
   await git(repository, ['branch', 'dev']);
   // ADR-0056: every dev fact comes from a second clone of the same origin that sits on
   // `dev`; the project is trusted with it explicitly.
-  const devRepo = await provisionDevClone({ repository: repository });
 
   const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
-  const opened = await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
+  const opened = await cli(['open', repository, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { id: string }[];

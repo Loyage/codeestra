@@ -8,7 +8,6 @@ import {
   registerTemporaryDirectory,
   runCli,
 } from './support/runtime-reclamation.js';
-import { provisionDevClone } from './support/agent-fixture.js';
 
 /**
  * The cached-snapshot-generation recheck over the real command face (FOUNDATION-060).
@@ -111,8 +110,6 @@ const impactMapping = {
 interface Fixture {
   readonly environment: Record<string, string>;
   readonly repository: string;
-  /** The dev clone the project is trusted with (ADR-0056): where the `dev` ref lives. */
-  readonly devRepo: string;
   readonly projectId: string;
 }
 
@@ -138,7 +135,6 @@ async function fixture(withMapping: boolean): Promise<Fixture> {
   await git(repository, ['branch', 'dev']);
   // ADR-0056: every dev fact comes from a second clone of the same origin that sits on
   // `dev`; the project is trusted with it explicitly.
-  const devRepo = await provisionDevClone({ repository: repository });
 
   const stubPath = join(tools, 'stub-pi.ts');
   const shimPath = join(tools, 'pi');
@@ -154,11 +150,11 @@ async function fixture(withMapping: boolean): Promise<Fixture> {
     // often enough for a test to observe a start it did not ask for.
     CODEESTRA_SCHEDULE_TICK_MS: '600000',
   };
-  const opened = await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
+  const opened = await cli(['open', repository, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { readonly id: string }[];
-  return { environment, repository, devRepo, projectId: projects[0]?.id as string };
+  return { environment, repository, projectId: projects[0]?.id as string };
 }
 
 /**
@@ -299,13 +295,16 @@ async function activeReservations(fixtureState: Fixture) {
 }
 
 /** Moves `dev` forward without touching the checked-out `main` worktree. */
-async function advanceDev(fixtureState: Fixture): Promise<string> {
+/**
+ * Advances the Task baseline (ADR-0064): the project folder's checked out branch IS the baseline, so a
+ * real fast-forward of that checkout is what moves it.
+ */
+async function advanceBaseline(fixtureState: Fixture): Promise<string> {
   const tree = await git(fixtureState.repository, ['rev-parse', 'HEAD^{tree}']);
-  // ADR-0056: the long-lived `dev` ref lives in the project's dev clone, not in the main checkout.
-  const previous = await git(fixtureState.devRepo, ['rev-parse', 'refs/heads/dev']);
-  const moved = await git(fixtureState.devRepo,
-    ['commit-tree', tree, '-p', previous, '-m', 'dev moves']);
-  await git(fixtureState.devRepo, ['update-ref', 'refs/heads/dev', moved]);
+  const previous = await git(fixtureState.repository, ['rev-parse', 'HEAD']);
+  const moved = await git(fixtureState.repository,
+    ['commit-tree', tree, '-p', previous, '-m', 'baseline moves']);
+  await git(fixtureState.repository, ['merge', '--ff-only', '-q', moved]);
   return moved;
 }
 
@@ -335,9 +334,9 @@ describe('scheduler reservations acquire --snapshot', () => {
       expect(released.exitCode).toBe(0);
       expect((await activeReservations(fixtureState)).reservations).toHaveLength(0);
 
-      // `dev` advances: a Task without a worktree was predicted against that baseline, so the cached
+      // The baseline advances: a Task without a worktree was predicted against it, so the cached
       // generation no longer describes the Task and the reservation is refused with facts.
-      const moved = await advanceDev(fixtureState);
+      const moved = await advanceBaseline(fixtureState);
       const refused = await acquire(fixtureState, task, generation.snapshotId);
       expect(refused.exitCode).toBe(1);
       expect(refused.payload).toMatchObject({
@@ -370,8 +369,11 @@ describe('scheduler reservations acquire --snapshot', () => {
       await git(fixtureState.repository, ['commit', '-q', '-m', 'declare an impact mapping']);
       const refused = await acquire(fixtureState, task, generation.snapshotId);
       expect(refused.exitCode).toBe(1);
+      // The mapping lives on the branch that is also the Task baseline (ADR-0064), so this commit
+      // moves both facts and both reasons are reported.
       expect(refused.payload).toMatchObject({ outcome: 'REFUSED', code: 'SNAPSHOT_STALE',
-        detail: { differing: ['policyVersion'], reasonCodes: ['STALE_POLICY'] } });
+        detail: { differing: ['baseCommit', 'policyVersion'],
+          reasonCodes: ['STALE_BASE', 'STALE_POLICY'] } });
       expect(refused.payload?.detail?.assessed?.['policyVersion']).toBe('impact-policy-v1#absent');
       expect(String(refused.payload?.detail?.observed?.['policyVersion']))
         .toMatch(/^impact-policy-v1#[0-9a-f]{12}$/);

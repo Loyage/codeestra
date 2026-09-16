@@ -7,7 +7,6 @@ import {
   registerTemporaryDirectory,
   runCli,
 } from './support/runtime-reclamation.js';
-import { provisionDevClone } from './support/agent-fixture.js';
 
 const repositoryRoot = join(import.meta.dir, '..', '..', '..');
 const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
@@ -90,8 +89,6 @@ for await (const chunk of Bun.stdin.stream()) {
 interface Fixture {
   readonly environment: Record<string, string>;
   readonly repository: string;
-  /** The dev clone the project is trusted with: the long-lived `dev` ref lives there (ADR-0056). */
-  readonly devRepo: string;
   readonly home: string;
   readonly projectId: string;
 }
@@ -115,7 +112,6 @@ async function fixture(): Promise<Fixture> {
   await git(repository, ['branch', 'dev']);
   // ADR-0056: every dev fact comes from a second clone of the same origin that sits on
   // `dev`; the project is trusted with it explicitly.
-  const devRepo = await provisionDevClone({ repository: repository });
 
   const stubPath = join(tools, 'stub-pi.ts');
   const shimPath = join(tools, 'pi');
@@ -128,11 +124,11 @@ async function fixture(): Promise<Fixture> {
     CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: shimPath,
   };
-  const opened = await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
+  const opened = await cli(['open', repository, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { readonly id: string }[];
-  return { environment, repository, devRepo, home, projectId: projects[0]?.id as string };
+  return { environment, repository, home, projectId: projects[0]?.id as string };
 }
 
 interface DependencyEdgePayload {
@@ -267,7 +263,7 @@ describe('codeestra task depends', () => {
   }, 60_000);
 
   test('keeps a downstream Task BLOCKED until the upstream is integrated, then unblocks it', async () => {
-    const { environment, devRepo, home, projectId } = await fixture();
+    const { environment, repository, home, projectId } = await fixture();
     const upstream = await createTask(environment, projectId, 'Produce the upstream result');
     const downstream = await createTask(environment, projectId, 'Consume the upstream result');
 
@@ -300,7 +296,7 @@ describe('codeestra task depends', () => {
     expect((await status(environment, projectId, downstream)).executions).toEqual([]);
     expect(existsSync(join(realpathSync(home), 'worktrees', projectId, downstream))).toBe(false);
 
-    // Drive the upstream to a verified result commit and integrate it into dev.
+    // Drive the upstream to a verified result commit.
     // The undeclared upstream is SAFE under ADR-0059, so submission starts it immediately.
     expect((await cli(['task', 'submit', projectId, upstream, '0'], environment)).exitCode).toBe(0);
     const deadline = Date.now() + 30_000;
@@ -316,26 +312,20 @@ describe('codeestra task depends', () => {
     const resultCommit = (JSON.parse(captured.stdout) as { readonly resultCommit: string }).resultCommit;
     expect((await cli(['task', 'verify', projectId, upstream], environment)).exitCode).toBe(0);
 
-    const upstreamVersion = (await status(environment, projectId, upstream)).task.version;
-    const integrated = await cli(['task', 'integrate', projectId, upstream,
-      String(upstreamVersion)], environment);
-    expect(integrated.exitCode).toBe(0);
-    const integrateReport = JSON.parse(integrated.stdout) as {
-      readonly state: string;
-      readonly dependencyReconcile: { readonly readied: readonly string[] } | null;
-    };
-    expect(integrateReport.state).toBe('INTEGRATED');
-    // The integrated upstream satisfies the edge, so the downstream Task is moved in the same command.
-    expect(integrateReport.dependencyReconcile?.readied).toEqual([downstream]);
-    expect(await git(devRepo, ['rev-parse', 'refs/heads/dev'])).toBe(resultCommit);
+    // ADR-0064: there is no integration command any more. Merging the upstream result into the
+    // project's checked out branch is the user's own step, and it is the only thing that can satisfy
+    // the edge.
+    await git(repository, ['merge', '--ff-only', '-q', resultCommit]);
+    expect(await git(repository, ['rev-parse', 'HEAD'])).toBe(resultCommit);
 
+    // A scheduling pass re-evaluates BLOCKED Tasks. With the upstream result now reachable the
+    // downstream is READY, and — being SAFE under ADR-0059 — it starts immediately.
+    expect((await cli(['task', 'schedule', 'run', projectId], environment)).exitCode).toBe(0);
     const view = await dependsList(environment, projectId, downstream);
     expect(view.blocked).toBe(false);
     expect(view.edges[0]?.reason).toBeNull();
     expect(view.edges[0]).toMatchObject({ satisfied: true, resultCommit: resultCommit,
       reason: null });
-    // Dependency reconciliation triggers the scheduler. The undeclared downstream is SAFE under
-    // ADR-0059, so it starts immediately instead of lingering in READY.
     expect(view.taskState).toBe('RUNNING');
     expect((await status(environment, projectId, downstream)).task.state).toBe('RUNNING');
 

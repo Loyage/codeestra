@@ -15,7 +15,6 @@ import {
   reconcileWorkspacePreparations,
 } from '../src/recovery-service.js';
 import { prepareTaskWorkspace } from '../src/workspace-service.js';
-import { provisionDevClone } from './support/agent-fixture.js';
 
 const directories: string[] = [];
 afterEach(() => {
@@ -34,7 +33,6 @@ async function run(cwd: string, args: readonly string[]): Promise<string> {
 async function fixture(): Promise<{
   storage: Phase1Database;
   repo: string;
-  devRepo: string;
   home: string;
   projectId: string;
   taskId: string;
@@ -49,7 +47,6 @@ async function fixture(): Promise<{
   // The baseline for every workspace is the long-lived `dev` branch (ADR-0009), and ADR-0056 reads it
   // from the project's dev clone, so the fixture provisions one.
   await run(repo, ['branch', 'dev']);
-  const devRepo = await provisionDevClone({ repository: repo });
   const identity = await inspectRepository(repo);
   const storage = new Phase1Database();
   const projectId = '10000000-0000-4000-8000-000000000001';
@@ -61,8 +58,6 @@ async function fixture(): Promise<{
     repoRoot: identity.repoRoot,
     gitCommonDir: identity.gitCommonDir,
     mainRef: identity.mainRef,
-    devRepoPath: devRepo,
-    recordDevRepoPath: true,
     objectFormat: identity.objectFormat,
     policyVersion: 1,
     verificationPolicyConfirmationId: 'b0000000-0000-4000-8000-00000000000b',
@@ -100,7 +95,7 @@ async function fixture(): Promise<{
     actor: 'local-user',
     submittedAt: 3,
   });
-  return { storage, repo: identity.repoRoot, devRepo, home: realpathSync(home), projectId, taskId };
+  return { storage, repo: identity.repoRoot, home: realpathSync(home), projectId, taskId };
 }
 
 function uuidSequence(start = 10): () => string {
@@ -291,7 +286,7 @@ describe('workspace preparation service', () => {
     const value = await fixture();
     // ADR-0056: the Task worktree is created in the dev clone, so the conflicting branch has to exist
     // there for the preparation to refuse it before any side effect.
-    await run(value.devRepo, ['branch', `task/${value.taskId}`, 'HEAD']);
+    await run(value.repo, ['branch', `task/${value.taskId}`, 'HEAD']);
     try {
       await expect(prepareTaskWorkspace({
         storage: value.storage,
@@ -323,7 +318,7 @@ describe('workspace preparation service', () => {
         repositoryRoot: crashed.plan.repoRoot,
         worktreesRoot: crashed.worktreesRoot,
         projectId: crashed.plan.projectId,
-        baseRef: crashed.plan.devRef,
+        baseRef: crashed.plan.baseRef,
         taskId: crashed.plan.taskId,
         workspaceId: crashed.plan.workspaceId,
         ownershipToken: crashed.plan.ownershipToken,
@@ -354,7 +349,7 @@ describe('workspace preparation service', () => {
         repositoryRoot: crashed.plan.repoRoot,
         worktreesRoot: crashed.worktreesRoot,
         projectId: crashed.plan.projectId,
-        baseRef: crashed.plan.devRef,
+        baseRef: crashed.plan.baseRef,
         taskId: crashed.plan.taskId,
         workspaceId: crashed.plan.workspaceId,
         ownershipToken: crashed.plan.ownershipToken,

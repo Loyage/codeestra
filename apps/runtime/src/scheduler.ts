@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 import {
   createDependencyGraph,
   dependencyImpact,
-  transitiveDependents,
   type DependencyEdge,
   type DependencyGraph,
 } from '@codeestra/domain';
@@ -89,16 +88,6 @@ export interface DependencyReconcileResult {
   /** True only when this call moved the Task between READY and BLOCKED. */
   readonly changed: boolean;
   readonly blockedReasons: readonly TaskDependencyBlockReason[];
-}
-
-export interface DependentsReconcileResult {
-  readonly taskId: string;
-  readonly readied: readonly string[];
-  readonly blocked: readonly string[];
-  readonly unchanged: readonly string[];
-  /** Per-Task failures; the parent command is not failed by a dependent that could not be updated. */
-  readonly errors: readonly { readonly taskId: string; readonly code: string;
-    readonly message: string }[];
 }
 
 /** Command IDs derived from the parent command, so a replayed command is never applied twice. */
@@ -352,73 +341,6 @@ export async function reconcileTaskDependencyState(input: {
     changed: change.changed,
     blockedReasons: view.blockedReasons,
   };
-}
-
-/**
- * Recomputes every Task that transitively waits for `taskId`. This is what turns "the upstream
- * reached `dev`" into downstream progress without a background loop; a per-Task failure is reported
- * instead of failing the command that triggered it, so a successful integration is never reported
- * as failed because an unrelated Task could not be updated.
- */
-export async function reconcileDependentTasks(input: {
-  readonly storage: Phase1Database;
-  readonly projectId: string;
-  readonly taskId: string;
-  readonly commandId: string;
-  readonly actor: string;
-  readonly now?: () => number;
-  readonly randomUUID?: () => string;
-}): Promise<DependentsReconcileResult> {
-  const facts = input.storage.listTaskDependencyFacts(input.projectId);
-  let dependents: readonly string[];
-  try {
-    dependents = transitiveDependents(graphOf(facts), input.taskId);
-  } catch (error) {
-    // A corrupt stored graph must not turn an already-completed integration into a failure; it is
-    // reported as an unreconciled dependent set so a human sees it instead of silence.
-    return Object.freeze({
-      taskId: input.taskId,
-      readied: Object.freeze([]),
-      blocked: Object.freeze([]),
-      unchanged: Object.freeze([]),
-      errors: Object.freeze([{ taskId: input.taskId, code: 'DEPENDENCY_GRAPH_INVALID',
-        message: error instanceof Error ? error.message : String(error) }]),
-    });
-  }
-  const readied: string[] = [];
-  const blocked: string[] = [];
-  const unchanged: string[] = [];
-  const errors: { taskId: string; code: string; message: string }[] = [];
-  for (const dependent of dependents) {
-    try {
-      const result = await reconcileTaskDependencyState({
-        storage: input.storage,
-        projectId: input.projectId,
-        taskId: dependent,
-        commandId: derivedId('dependency-dependents', input.commandId, dependent),
-        actor: input.actor,
-        ...(input.now === undefined ? {} : { now: input.now }),
-        ...(input.randomUUID === undefined ? {} : { randomUUID: input.randomUUID }),
-      });
-      if (!result.changed) unchanged.push(dependent);
-      else if (result.state === 'READY') readied.push(dependent);
-      else blocked.push(dependent);
-    } catch (error) {
-      errors.push({
-        taskId: dependent,
-        code: typeof error === 'object' && error !== null && 'code' in error
-          ? String(error.code) : 'DEPENDENCY_RECONCILE_FAILED',
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-  return Object.freeze({
-    taskId: input.taskId,
-    readied: Object.freeze(readied),
-    blocked: Object.freeze(blocked),
-    unchanged: Object.freeze(unchanged),
-    errors: Object.freeze(errors),
-  });
 }
 
 /** Read-only guard for paths that must not start writing (for example resuming a paused Task). */

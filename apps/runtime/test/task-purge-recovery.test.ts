@@ -301,40 +301,4 @@ describe('task purge --force on a RECOVERY_REQUIRED Task', () => {
     }
   }, 60_000);
 
-  test('deletes a Task whose commit reached an integration batch, and refuses to without --force',
-    async () => {
-      const harness = await recoveryHarness();
-      try {
-        const { projectId, taskId } = harness.fixture;
-        const executionId = harness.executionId;
-        const revisionId = harness.fixture.storage.getTask(projectId, taskId)
-          ?.currentRevision.id as string;
-        const oid = 'a'.repeat(40);
-        harness.fixture.storage.sqlite.query(`INSERT INTO integration_batches
-          (id,project_id,dev_ref,dev_commit,state,integrated_commit,merged_commit,merge_strategy,
-            worktree_ownership_token,created_at,completed_at)
-          VALUES ('force-b1',?1,'refs/heads/dev',?2,'INTEGRATED',?2,?2,'MERGE_COMMIT','token',12,13)`)
-          .run(projectId, oid);
-        harness.fixture.storage.sqlite.query(`INSERT INTO integration_batch_items
-          (batch_id,project_id,task_id,revision_id,execution_id,candidate_commit,dev_commit,state,
-            integrated_commit,created_at)
-          VALUES ('force-b1',?1,?2,?3,?4,?5,?5,'INTEGRATED',?5,12)`)
-          .run(projectId, taskId, revisionId, executionId, oid);
-
-        await expect(purgeCommand(harness, { inspectOwnership: stopped }))
-          .rejects.toMatchObject({ code: 'TASK_INTEGRATED_INTO_DEV' });
-        expect(harness.fixture.storage.getTask(projectId, taskId)).not.toBeNull();
-
-        const outcome = await purgeCommand(harness, { force: true, inspectOwnership: stopped });
-        expect(outcome.forced?.bypassed.map((entry) => entry.code))
-          .toEqual(['TASK_INTEGRATED_INTO_DEV']);
-        // The provenance row is the thing the flag gives up, and `rowsDeleted` is where it shows.
-        expect(outcome.rowsDeleted['integration_batch_items']).toBe(1);
-        expect(harness.fixture.storage.getTask(projectId, taskId)).toBeNull();
-        expect(harness.fixture.storage.sqlite.query<{ count: number }, []>(
-          'SELECT COUNT(*) AS count FROM integration_batch_items').get()?.count).toBe(0);
-      } finally {
-        await closeHarness(harness);
-      }
-    }, 60_000);
 });

@@ -8,7 +8,6 @@ import {
   registerTemporaryDirectory,
   runCli,
 } from './support/runtime-reclamation.js';
-import { provisionDevClone } from './support/agent-fixture.js';
 
 /**
  * `scheduler control *` on the real command face (FOUNDATION-097 / ADR-0061 D09).
@@ -68,9 +67,8 @@ async function trustedProject(): Promise<{ environment: Record<string, string>; 
   await git(repository, ['add', '.']);
   await git(repository, ['commit', '-q', '-m', 'fixture']);
   await git(repository, ['branch', 'dev']);
-  const devRepo = await provisionDevClone({ repository });
   const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
-  expect((await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment)).exitCode)
+  expect((await cli(['open', repository, '--no-open'], environment)).exitCode)
     .toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { id: string }[];

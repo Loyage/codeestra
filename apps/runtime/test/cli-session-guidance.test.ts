@@ -149,42 +149,8 @@ interface RepositoryFixture {
   readonly repository: string;
   readonly tools: string;
   readonly assets: string;
-  /** The second, independent clone ADR-0056 requires; its path is what `--dev-repo` records. */
-  readonly devClone: string;
 }
 
-/**
- * Gives the fixture repository the dev clone ADR-0056 resolves every dev fact from.
- *
- * The shape is dictated by `inspectDevRepo`, not by what would make a test pass quickly, and each of
- * its four checks is satisfied by a real Git object rather than by a relaxed assertion:
- *
- * 1. **another clone** — a bare `origin` plus an actual `git clone` of it, so the worktree root and
- *    the Git common directory both differ from the main checkout's (a worktree of the main checkout
- *    would share the common directory and be refused as `DEV_REPO_NOT_SEPARATE`);
- * 2. **the same origin** — the main checkout pushes to the bare repository the clone fetches from, so
- *    both report the identical `origin` URL (`DEV_REPO_ORIGIN_MISMATCH` otherwise);
- * 3. **HEAD on the project's `dev` branch** — `git checkout dev` in the clone
- *    (`DEV_REPO_BRANCH_MISMATCH` otherwise);
- * 4. **that branch exists locally** — `git push origin main dev` gives the clone a local
- *    `refs/heads/dev` (`DEV_REPO_DEV_REF_MISSING` otherwise).
- *
- * The canonical path is returned, because that is the path the Runtime compares against its own
- * inspection of the main checkout. The clone gets the fixture's local identity too: a `git clone`
- * does not inherit it, and a test must never resolve the developer's global Git identity.
- */
-async function provisionDevClone(repository: string): Promise<string> {
-  const origin = temporaryDirectory('codeestra-guidance-origin-');
-  await git(origin, ['init', '--bare', '-q', '-b', 'main']);
-  await git(repository, ['remote', 'add', 'origin', origin]);
-  await git(repository, ['push', '-q', 'origin', 'main', 'dev']);
-  const clone = temporaryDirectory('codeestra-guidance-dev-');
-  await git(clone, ['clone', '-q', origin, '.']);
-  await git(clone, ['checkout', '-q', 'dev']);
-  await git(clone, ['config', 'user.name', 'Guidance Test']);
-  await git(clone, ['config', 'user.email', 'guidance@example.invalid']);
-  return realpathSync(clone);
-}
 
 async function createRepository(prefix: string): Promise<RepositoryFixture> {
   const repository = temporaryDirectory(`${prefix}-repo-`);
@@ -199,14 +165,12 @@ async function createRepository(prefix: string): Promise<RepositoryFixture> {
   await git(repository, ['init', '-q', '-b', 'main']);
   await git(repository, ['add', '.']);
   await git(repository, ['commit', '-q', '-m', 'fixture']);
-  await git(repository, ['branch', 'dev']);
   const stubPath = join(tools, 'stub-pi.ts');
   const shimPath = join(tools, 'pi');
   await Bun.write(stubPath, stubSource);
   await Bun.write(shimPath, `#!/bin/sh\nexec "${process.execPath}" "${stubPath}" "$@"\n`);
   chmodSync(shimPath, 0o755);
-  const devClone = await provisionDevClone(repository);
-  return { repository, tools: shimPath, assets, devClone };
+  return { repository, tools: shimPath, assets };
 }
 
 describe('session guidance command face', () => {
@@ -215,24 +179,13 @@ describe('session guidance command face', () => {
     const main = await createRepository('codeestra-guidance');
     const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: main.assets,
       CODEESTRA_PI_EXECUTABLE: main.tools };
-    // The dev clone is named explicitly, so this registration is accepted by the contract this lane's
-    // base has (`--dev-repo` optional, but verified when given) **and** by ADR-0056's
-    // (`DEV_REPO_REQUIRED` without one). A clone that failed any of the four checks is refused by
-    // trust itself, so a green exit here is evidence the fixture is genuinely usable.
-    const trusted = await cli(['project', 'trust', main.repository, '--dev-repo', main.devClone,
-      '--yes'], environment);
+    // ADR-0064: trust records the repository identity and the committed policies; there is no dev
+    // clone to name, and the Task baseline is this folder's checked out branch.
+    const trusted = await cli(['project', 'trust', main.repository, '--yes'], environment);
     expect(trusted.exitCode).toBe(0);
     const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
       readonly { readonly id: string }[];
     const projectId = projects[0]?.id as string;
-    // The recorded fact, not the fixture's intention: the project's dev clone path is the one this
-    // test provisioned (the Runtime resolved it to its canonical form).
-    const inspected = JSON.parse((await cli(['project', 'inspect', main.repository],
-      environment)).stdout) as {
-      readonly devRepoPath: { readonly path: string; readonly verified: boolean } | null;
-    };
-    expect(inspected.devRepoPath?.verified).toBe(true);
-    expect(realpathSync(inspected.devRepoPath?.path as string)).toBe(main.devClone);
     const created = JSON.parse((await cli(['task', 'create', projectId, 'Change the first area'],
       environment)).stdout) as TaskPayload;
 

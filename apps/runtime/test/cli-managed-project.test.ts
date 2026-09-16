@@ -131,21 +131,22 @@ async function managedFixture(): Promise<ManagedFixture> {
   return { repository, tools: shimPath, assets };
 }
 
-describe('codeestra runs Tasks in a project that has no dev branch (ADR-0060)', () => {
-  test('trusts, starts, commits and verifies a Task from the folder the project lives in',
+describe('codeestra runs Tasks in the project folder itself (ADR-0064)', () => {
+  test('trusts, starts, commits and verifies a Task whose baseline is the folder\'s checked out branch',
     async () => {
       const home = temporaryDirectory('codeestra-managed-home-');
       const main = await managedFixture();
       const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: main.assets,
         CODEESTRA_PI_EXECUTABLE: main.tools };
 
-      // `--dev-repo` omitted: a project with no second clone is a normal registration, and the fact
-      // is recorded as null instead of being reported as a broken project (ADR-0060 D03).
+      // ADR-0064: there is no dev clone to record, so a repository with no `dev` branch at all is the
+      // ordinary shape. Trust pins the repository identity and the committed policies.
       const trusted = await cli(['project', 'trust', main.repository, '--yes'], environment);
       expect(trusted.exitCode).toBe(0);
       const inspected = JSON.parse((await cli(['project', 'inspect', main.repository],
-        environment)).stdout) as { readonly devRepoPath: unknown };
-      expect(inspected.devRepoPath).toBeNull();
+        environment)).stdout) as { readonly repoRoot: string; readonly mainRef: string };
+      expect(inspected.repoRoot).toBe(realpathSync(main.repository));
+      expect(inspected.mainRef).toBe('refs/heads/main');
       const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
         readonly { readonly id: string }[];
       const projectId = projects[0]?.id as string;
@@ -166,13 +167,13 @@ describe('codeestra runs Tasks in a project that has no dev branch (ADR-0060)', 
       expect(await git(main.repository, ['rev-parse', `refs/heads/task/${created.id}`]))
         .toBe(mainCommit);
 
-      // The dependency projection reads that same branch: no `DEV_REPO_REQUIRED`, no `dev` ref.
+      // The dependency projection reads that same branch and names it plainly.
       const dependencies = JSON.parse((await cli(['task', 'depends', 'list', projectId, created.id,
         '--json'], environment)).stdout) as {
-        readonly devRef: string; readonly devCommit: string | null; readonly blocked: boolean;
+        readonly baseRef: string; readonly baseCommit: string | null; readonly blocked: boolean;
       };
-      expect(dependencies.devRef).toBe('refs/heads/main');
-      expect(dependencies.devCommit).toBe(mainCommit);
+      expect(dependencies.baseRef).toBe('refs/heads/main');
+      expect(dependencies.baseCommit).toBe(mainCommit);
       expect(dependencies.blocked).toBe(false);
 
       // FULL mode captures the result commit in one step. The Runtime proves quiescence from its own

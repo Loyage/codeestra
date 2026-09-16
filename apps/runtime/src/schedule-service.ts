@@ -789,7 +789,13 @@ export class ScheduleService {
     const project = this.#storage.getTrustedProject(input.projectId);
     const adapterId = input.adapterId;
     const activeRefs = this.#activeTaskRefs(project.id);
-    // §4 first: an active Task whose observed diff has moved past the snapshot its prediction was
+    // §1 first: a Task that is `BLOCKED` on a dependency may now be satisfied. Nothing else moves it
+    // out of `BLOCKED` (ADR-0064 deleted the integration command that used to trigger this), so the
+    // pass re-evaluates every blocked Task exactly once, before it picks candidates. Dependencies are
+    // the only reason a Task is ever `BLOCKED`, so a Task whose edges are all satisfied becomes
+    // `READY` here and can be considered by this very tick.
+    await this.#reconcileBlockedTasks(project.id, input.tickId);
+    // §4: an active Task whose observed diff has moved past the snapshot its prediction was
     // made from invalidates that prediction *before* any new decision is taken from it.
     const growth = await this.#detectImpactGrowth({
       project,
@@ -840,6 +846,39 @@ export class ScheduleService {
    * produce the same order, so "why did that one start" has one answer. Raising a priority only
    * changes this order; it never interrupts a Task that already holds its resource.
    */
+  /**
+   * Re-evaluates the dependency verdict of every `BLOCKED` Task in one project.
+   *
+   * A Task is `BLOCKED` for exactly one reason — an unmet dependency (ADR-0024) — and the fact that
+   * satisfies it (the upstream result commit becoming reachable from the project's checked out
+   * branch) is produced outside the Runtime, by the user merging. So a pass has to look again rather
+   * than wait for a command that no longer exists: ADR-0064 deleted `task integrate`, which was the
+   * only caller of the old dependent fan-out.
+   *
+   * A per-Task failure is logged and skipped: one unreadable Task must not stop the pass for the rest.
+   */
+  async #reconcileBlockedTasks(projectId: string, tickId: string): Promise<void> {
+    const blocked = this.#storage.listTasks(projectId)
+      .filter((task) => task.state === 'BLOCKED' && task.archivedAt === null);
+    for (const task of blocked) {
+      try {
+        await reconcileTaskDependencyState({
+          storage: this.#storage,
+          projectId,
+          taskId: task.id,
+          commandId: derivedScheduleId('schedule-dependency', tickId, task.id),
+          actor: 'scheduler',
+          expectedVersion: task.version,
+          now: this.#now,
+        });
+      } catch (error) {
+        this.#logger('a blocked Task could not be re-evaluated', {
+          taskId: task.id, reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
   #candidateOrder(projectId: string): readonly TaskSummary[] {
     return this.#storage.listTasks(projectId)
       .filter((task) => task.state === 'READY' && task.archivedAt === null)

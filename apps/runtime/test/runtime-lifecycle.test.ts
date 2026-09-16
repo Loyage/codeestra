@@ -18,7 +18,6 @@ import {
   releaseRuntimeOwnership,
   runtimeBootRecordPath,
 } from '../src/lifecycle.js';
-import { provisionDevClone } from './support/agent-fixture.js';
 
 /** `Bun.write` works for fixtures, but these writes must be atomic before the file is read back. */
 async function writeFile(path: string, content: string): Promise<void> {
@@ -516,7 +515,6 @@ describe('Runtime lifecycle: a stopping Runtime owns provider processes', () => 
     await git(repository, ['branch', 'dev']);
     // ADR-0056: every dev fact comes from a second clone of the same origin that sits on
     // `dev`; the project is trusted with it explicitly.
-    const devRepo = await provisionDevClone({ repository: repository });
 
     const stubPath = join(tools, 'stub-pi.ts');
     const shimPath = join(tools, 'pi');
@@ -529,7 +527,7 @@ describe('Runtime lifecycle: a stopping Runtime owns provider processes', () => 
       CODEESTRA_PI_EXECUTABLE: shimPath,
     };
 
-    expect((await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment)).exitCode).toBe(0);
+    expect((await cli(['open', repository, '--no-open'], environment)).exitCode).toBe(0);
     const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
       readonly { readonly id: string }[];
     const projectId = projects[0]?.id as string;
