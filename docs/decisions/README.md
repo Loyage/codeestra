@@ -26,7 +26,7 @@
 - [ADR-0021](0021-resource-reclamation.md)：`reclaim plan/apply/records` 只删注册过且归属校验通过的三类资源，默认保留失败现场，append-only 账本入 v12。**Amended by ADR-0037**（D03 退出码与跨项目批量、未注册目录）。
 - [ADR-0022](0022-stable-branch-promotion.md)：`dev → main` 成为产品能力（固定 dev/main/证据三元组、只允许 ff、ref 或证据移动即 `STALE`）。**Amended by ADR-0038/0039**（全量证据）与 **ADR-0047**（改经远端中转）。
 - [ADR-0023](0023-strict-permission-attention-and-session-writer-lease.md)：STRICT 工具审批转成既有 Attention（决议按 incarnation 原子拒绝过期/重放）；Session incarnation 历史 + 单 writer lease。**Amended by ADR-0026**：PTY 传输与 successor 启动已实现。
-- [ADR-0024](0024-task-dependency-dag-and-blocked.md)：任务依赖一等公民（schema v15）、纯领域 DAG 环校验且不部分应用、`BLOCKED` 只表示依赖未满足。
+- [ADR-0024](0024-task-dependency-dag-and-blocked.md)：任务依赖一等公民（schema v15）、纯领域 DAG 环校验且不部分应用、`BLOCKED` 只表示依赖未满足。**Amended 2026-09-16 / ADR-0060**：判定所读的 ref 是该项目的 Task 基线 ref（有 dev clone=其 `dev`；managed=项目文件夹当前检出的分支），读不到按未满足阻塞。
 - [ADR-0025](0025-runtime-lifecycle-stop-and-single-instance.md)：`stop` 为「请求 + 有界等待 + 事实报告」；`runtime.lock` 单实例归属 + 每次 boot 痕迹 + 只读诊断（不写不删不发信号）。
 - [ADR-0026](0026-native-terminal-pty-transport.md)：原生终端 PTY 传输与 attach/detach/release；incarnation 进程树按 pid 并集刷新，无法核验一律拒绝接手。**Amended by ADR-0054**（能力表三行）。
 - [ADR-0027](0027-verification-cancelled-and-progress-events.md)：verification run 的一等 `CANCELLED`（未确认静止仍写不成终态）与 `OperationProgressed`/`OperationSettled` 事件。
@@ -62,7 +62,7 @@
 - [ADR-0057](0057-session-guidance-channel-and-fact-layering.md)：Session Guidance 是会话级事实，不产生 TaskRevision、不使旧验证失效；「已投递」= provider 通道接收，「模型已读」不存在（schema v31）。
 - [ADR-0058](0058-task-purge.md)：`task purge` 永久删除任务：全产品唯一一次显式 `--yes` 且不在任何常态路径上；append-only 只在 purge 事务内让路、触发器缺失即拒绝；成果已进 `dev`/`main` 即拒绝。
 - [ADR-0059](0059-feature-declaration-conflict-rule.md)：冲突判定只看「两侧声明同一功能且对方未完成」；文件/目录/模块/共享资源重叠与映射完整性都不再影响判定（schema v32）。**Supersedes ADR-0031 的判定语义**。
-- [ADR-0060](0060-managed-project-task-baseline.md)：被管理项目的 Task 基线取「项目文件夹当前检出的分支」，`dev clone` 变为可选（schema v33）。**Amends ADR-0056** 的必需性与 **ADR-0018** 的基线来源。
+- [ADR-0060](0060-managed-project-task-baseline.md)：被管理项目的 Task 基线取「项目文件夹当前检出的分支」，`dev clone` 变为可选（schema v33）。**Amends ADR-0056** 的必需性与 **ADR-0018** 的基线来源。**第三轮修订（2026-09-16，FOUNDATION-093）**：依赖判定从 dev-only 清单移出（它位于 `task submit`/`task run` 的常态路径），`DEV_REPO_REQUIRED` 只剩集成与提升。
 
 ## 当前有效语义（与旧 ADR 冲突时按此执行）
 
@@ -76,7 +76,7 @@
 - **IntegrationBatch**：ADR-0053 —— 一次覆盖整批的集成验证、批级 `STALE`/`CANCELLED`、成员按 `task_id` 排序、部分失败如实。
 - **终端与交接**：ADR-0054 —— PTY resize 合约（POSIX 范围）；并行工具批次安全点规则与 ADR-0010 相同；跨交接权限矩阵仍 `PARTIAL`。
 - **`RECOVERY_REQUIRED` 对账**：ADR-0055 —— 只读事实、能证明 provider 已消失才收口、不声称静止、不发信号、不删资源。
-- **`dev` 事实来源**：ADR-0056/0060 —— 记了 dev clone 的项目取其本地 `refs/heads/dev`；没记（managed）的取项目文件夹当前检出的分支；`dev_repo_path` 可选。
+- **`dev` 事实来源与 Task 基线**：ADR-0056/0060 —— 记了 dev clone 的项目取其本地 `refs/heads/dev`；没记（managed）的取项目文件夹当前检出的分支；`dev_repo_path` 可选。**只有集成与提升需要长期 `dev` 分支**；依赖判定、槽位预留、调度启动前重检、结果 commit 归属、任务级验证与回收对两类项目都成立（第三轮修订）。
 - **Session Guidance**：ADR-0057 —— 会话级事实；命令面写明「已入队 ≠ 模型已读」，无通道即 `CHANNEL_UNSUPPORTED`。
 - **任务永久删除**：ADR-0058 —— 唯一显式 `--yes`，不在常态路径；`cancel` 仍是终态、`archive` 仍是软删除。
 - **冲突判定**：ADR-0059 —— 默认 `SAFE_TO_PARALLELIZE`；`--allow-unknown` 保留且永不放宽 `CONFLICTING`。

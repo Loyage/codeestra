@@ -10,7 +10,7 @@ import {
 } from '@codeestra/storage';
 import type { AgentRuntimeCoordinator } from './agent-runtime-service.js';
 import { deriveCommandId } from './agent-runtime-service.js';
-import { requireRecordedDevRepoPath } from './dev-repo-service.js';
+import { taskWorkspaceRepositoryRoot } from './dev-repo-service.js';
 import { applyReclamation, planReclamation, type ReclaimPlan } from './reclaim-service.js';
 import { pauseOrCancelTask } from './task-control-service.js';
 
@@ -314,9 +314,10 @@ async function removeOwnedBranches(
   plan: { readonly targets: ReclaimPlan['targets'] },
 ): Promise<readonly TaskPurgeBranchFact[]> {
   const project = input.storage.getTrustedProject(input.projectId);
-  // The Task worktree is a worktree of the project's dev clone (ADR-0056), so its branch lives in
-  // that clone rather than in the stable checkout.
-  const repositoryRoot = requireRecordedDevRepoPath(project);
+  // ADR-0060: the Task branch lives in the repository that owns this project's Task worktrees — the
+  // dev clone when one is recorded, otherwise the project folder — not necessarily in the stable
+  // checkout.
+  const repositoryRoot = taskWorkspaceRepositoryRoot(project);
   const branchRefs = [...new Set(plan.targets
     .filter((target) => target.kind === 'TASK_WORKTREE')
     .map((target) => target.externalRef)

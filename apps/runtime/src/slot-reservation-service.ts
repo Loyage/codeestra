@@ -7,7 +7,7 @@ import {
   type SlotReservationReconcileOutcomeView,
   type SlotReservationReconcileReport,
 } from '@codeestra/contracts';
-import { changeSetPaths, inspectChangeSet, readLocalRefCommit } from '@codeestra/git';
+import { changeSetPaths, inspectChangeSet } from '@codeestra/git';
 import { impactAnalyzerVersion } from '@codeestra/domain';
 import {
   Phase1Database,
@@ -22,7 +22,7 @@ import {
 import { impactPolicyVersionKey, inspectImpactPolicy } from './impact-analysis-service.js';
 import { isProcessRunning, readProcessStartToken } from './lifecycle.js';
 import { assertDependenciesSatisfied } from './scheduler.js';
-import { requireRecordedDevRepoPath } from './dev-repo-service.js';
+import { resolveTaskBaselineRepository, TaskBaselineError } from './dev-repo-service.js';
 
 /**
  * Slot reservations: the primitive a scheduler reserves with before it prepares a workspace or
@@ -201,6 +201,12 @@ export class SlotReservationService {
      * D05); it never means "the snapshot is valid".
      */
     readonly impactSnapshotId?: string | null;
+    /**
+     * Explicit baseline ref this reservation is made against, for a **new** workspace (ADR-0060).
+     * Absent or `null` means the project's default baseline: the dev clone's `dev` when one is
+     * recorded, otherwise the project folder's currently checked out branch.
+     */
+    readonly baseRef?: string | null;
   }): Promise<SlotReservationAcquisitionView> {
     // Dependencies first, and through the scheduler's own guard: the verdict and the "just became
     // READY inside this command" reconciliation stay in one place instead of being reimplemented.
@@ -220,16 +226,16 @@ export class SlotReservationService {
     const facts = this.#storage.listTaskDependencyFacts(input.projectId, { taskId: input.taskId });
     const dependencyFingerprint = slotDependencyFingerprint(facts);
     const project = this.#storage.getTrustedProject(input.projectId);
-    // ADR-0056: the development baseline is the dev clone's `dev` ref. A project without a dev
-    // clone is refused here, before this command writes a reservation.
-    const devRepoPath = requireRecordedDevRepoPath(project);
+    // ADR-0060: the baseline is the one this Task would start from — the dev clone's `dev` when one is
+    // recorded, otherwise the project folder's checked out branch (or the caller's explicit
+    // `--base-ref`) — and it is resolved **before** this command writes a reservation, so a project
+    // whose baseline cannot be named is refused without leaving a slot behind.
+    const baseline = await resolveTaskBaselineRepository(project, { baseRef: input.baseRef ?? null });
     // Recorded as the baseline this assessment was made against. The dependency verdict itself was
     // decided by the guard above from the same ref; a ref that moves between the two reads is
     // therefore recorded honestly as "assessed against this commit", and the engine re-checks the
     // external baseline before it starts an agent (scheduler.md §2).
-    const assessedDevCommit = await readLocalRefCommit({
-      repositoryRoot: devRepoPath, ref: project.devRef,
-    }).catch(() => null);
+    const assessedDevCommit = baseline.baseCommit;
     // Anything the caller assessed against a cached snapshot generation is rechecked against the
     // generation observed *now*: the mapping version, the analyzer version and the Task's change set
     // (or, before a worktree exists, its empty observation against the development baseline) are read
@@ -241,6 +247,7 @@ export class SlotReservationService {
         projectId: input.projectId,
         taskId: input.taskId,
         snapshotId: input.impactSnapshotId,
+        baseRef: input.baseRef ?? null,
       });
     const reservationId = this.#randomUUID();
     const acquisition: SlotReservationAcquireInput = {
@@ -296,7 +303,7 @@ export class SlotReservationService {
    *
    * This is the impure half of the recheck (`scheduler.md` §2 "recheck cached snapshot generations"):
    * the mapping version comes from the project `main` ref, the change set from the Task's own owned
-   * worktree (or the empty pre-start observation against the development ref), and the analyzer
+   * worktree (or the empty pre-start observation against the Task baseline ref), and the analyzer
    * version from this running binary. The judgment itself stays in the analyzer's pure
    * `recheckImpactSnapshotGeneration`, applied again inside the reservation transaction — so the
    * service never invents a rule the analyzer does not have.
@@ -310,6 +317,8 @@ export class SlotReservationService {
     readonly projectId: string;
     readonly taskId: string;
     readonly snapshotId: string;
+    /** The explicit baseline the reservation was made against, if any (ADR-0060). */
+    readonly baseRef: string | null;
   }): Promise<SlotSnapshotRecheckInput> {
     const refuse = (detail: string,
       extra: Readonly<Record<string, unknown>> = {}): SlotReservationError =>
@@ -350,23 +359,28 @@ export class SlotReservationService {
       };
     }
     // No worktree yet: the observation a pre-start prediction was made from is "this Task has not
-    // changed anything, against the current development baseline".
-    // ADR-0056: resolved first, so a missing dev clone is refused rather than read as "no baseline".
-    const devRepoPath = requireRecordedDevRepoPath(input.project);
-    const baseCommit = await readLocalRefCommit({
-      repositoryRoot: devRepoPath, ref: input.project.devRef,
-    }).catch(() => null);
-    if (baseCommit === null) {
-      throw refuse(`the ${input.project.devRef} baseline could not be read, so the empty observation`
-        + ' this Task was assessed from cannot be reproduced');
+    // changed anything, against the baseline it would start from".
+    // ADR-0060: resolved with the same baseline the prediction used, so a managed project is read from
+    // its own folder and a baseline that cannot be named is refused rather than read as "no baseline".
+    let baselineCommit: string;
+    try {
+      baselineCommit = (await resolveTaskBaselineRepository(input.project, {
+        baseRef: input.baseRef,
+      })).baseCommit;
+    } catch (error) {
+      if (error instanceof TaskBaselineError) {
+        throw refuse(`the baseline could not be resolved as this Task's empty observation needs`
+          + ` it (${error instanceof Error ? error.message : String(error)})`);
+      }
+      throw error;
     }
     return {
       snapshotId: input.snapshotId,
       files: Object.freeze([]),
       policyVersion,
       analyzerVersion: impactAnalyzerVersion,
-      baselineSource: 'DEV_REF',
-      baseCommit,
+      baselineSource: 'BASELINE_REF',
+      baseCommit: baselineCommit,
       changeFingerprint: null,
     };
   }

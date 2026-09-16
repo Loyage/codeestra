@@ -1967,7 +1967,11 @@ function ProjectTab({ client, permissionMode, projectId, tasks, refreshToken, ru
           <dd className="mono">{identity.devRef} {identity.devCommit?.slice(0, 12) ?? '—'}
             <div className="muted">{identity.devRefPresent
               ? '这个 ref 存在：Task 工作树与集成目标都从它建基线'
-              : '这个 ref 不存在：信任会被拒绝为 DEV_REF_MISSING'}</div></dd>
+              : identity.devRepoPath === null
+                ? '没有 dev clone（managed，ADR-0060）：Task 基线取这个项目文件夹当前检出的分支；'
+                  + 'task integrate / promotion * 需要在长期 dev 分支上工作时才以 DEV_REPO_REQUIRED 拒绝'
+                : `这个 dev clone 未通过核验（${identity.devRepoPath.code ?? 'DEV_REPO_*'}）：`
+                  + '信任会被拒绝'}</div></dd>
           <DevRepoInspectionRows inspection={identity.devRepoPath} />
         </dl>
       )}

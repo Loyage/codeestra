@@ -4,12 +4,16 @@ import { join } from 'node:path';
 import { DeterministicFakeAdapter } from '@codeestra/agent-adapters';
 import { AgentRuntimeCoordinator } from '../src/agent-runtime-service.js';
 import { AdapterRegistry } from '../src/adapter-registry.js';
+import { RuntimeDrainState } from '../src/capacity-service.js';
 import { requireProjectDevRepository, requireRecordedDevRepoPath } from '../src/dev-repo-service.js';
 import { integrateTaskResult } from '../src/integration-service.js';
 import { runDevFullSuite } from '../src/promotion-evidence-service.js';
 import { planReclamation } from '../src/reclaim-service.js';
 import { captureResultCommit, prepareResultCommit } from '../src/result-commit-service.js';
+import { ScheduleService } from '../src/schedule-service.js';
 import { inspectTaskDependencies } from '../src/scheduler.js';
+import { SlotReservationService } from '../src/slot-reservation-service.js';
+import { purgeTask } from '../src/task-purge-service.js';
 import { runTaskVerification, VerificationRunner } from '../src/verification-service.js';
 import { prepareTaskWorkspace } from '../src/workspace-service.js';
 import {
@@ -205,17 +209,25 @@ describe('Task baselines and dev facts are two different things (ADR-0056 / ADR-
   test('refuses dev-only operations, but reclaims a managed workspace (ADR-0060)', async () => {
     const value = await createAgentFixture();
     withoutDevRepo(value);
-    // These two need the long-lived `dev` baseline itself, so a project that never declared one is
-    // refused with the code that names the missing branch — not with a new approval.
-    await expect(inspectTaskDependencies({
-      storage: value.storage, projectId: value.projectId, taskId: value.taskId,
-    })).rejects.toMatchObject({ code: 'DEV_REPO_REQUIRED' });
+    // Promotion evidence needs the long-lived `dev` branch itself, so a project that never declared
+    // one is refused with the code that names the missing branch — not with a new approval.
     await expect(runDevFullSuite({
       storage: value.storage, runner: new VerificationRunner(),
       copiesRoot: join(value.home, 'verifications'), projectId: value.projectId,
       expectedDevCommit: value.mainCommit, commandId: crypto.randomUUID(),
     })).rejects.toMatchObject({ code: 'DEV_REPO_REQUIRED' });
     expect(value.storage.listDevFullSuiteEvidence(value.projectId)).toEqual([]);
+
+    // The dependency verdict is **not** dev-only (ADR-0060): it is read against the Task baseline this
+    // project actually has — the folder's checked out branch — so a managed Task is never refused for
+    // a branch it was never asked to have.
+    const view = await inspectTaskDependencies({
+      storage: value.storage, projectId: value.projectId, taskId: value.taskId,
+    });
+    expect(view.devRef).toBe('refs/heads/main');
+    expect(view.devCommit).toBe(value.mainCommit);
+    expect(view.blocked).toBe(false);
+    expect(view.blockedReasons).toEqual([]);
 
     // Reclamation is *not* dev-only: the worktree and the branch live in the project folder, so the
     // plan is built against that repository and measures "already merged" against the ref the
@@ -240,6 +252,198 @@ describe('Task baselines and dev facts are two different things (ADR-0056 / ADR-
     expect(target?.reasonCode).toBe('TASK_NOT_TERMINAL');
     value.storage.close();
   });
+});
+
+interface ManagedRuntime {
+  readonly value: AgentFixture;
+  readonly coordinator: AgentRuntimeCoordinator;
+  readonly schedule: ScheduleService;
+  readonly adapter: DeterministicFakeAdapter;
+}
+
+/**
+ * A managed project (no dev clone) driven through the *real* scheduling gate and the real Runtime:
+ * dependency verdict, conflict assessment, slot reservation, baseline re-check, workspace preparation
+ * and Execution all run. The fake Adapter is the only step a test may not take for a real provider.
+ */
+async function managedRuntime(
+  mode: 'SUCCEED' | 'FAIL_BEFORE_START' = 'SUCCEED',
+): Promise<ManagedRuntime> {
+  const value = await createAgentFixture();
+  withoutDevRepo(value);
+  const adapter = new DeterministicFakeAdapter(mode, mode === 'SUCCEED'
+    ? [{ type: 'completed', eventId: 'fake-completed-1', cursor: 'cursor-1',
+        outcome: 'SUCCESS', evidenceRef: 'fake-quiescence' }]
+    : []);
+  const registry = new AdapterRegistry();
+  registry.register(adapter);
+  const bootId = 'boot-managed-1';
+  const coordinator = new AgentRuntimeCoordinator({
+    storage: value.storage, registry, runtimeHome: value.home, bootId,
+  });
+  const drain = new RuntimeDrainState();
+  const slots = new SlotReservationService({
+    storage: value.storage, bootId, pid: process.pid, startToken: 'linux:test:1',
+    draining: () => drain.state(), now: () => Date.now(),
+  });
+  const schedule = new ScheduleService({
+    storage: value.storage,
+    adapters: { ids: () => [adapter.id] },
+    slots,
+    start: async (request) => {
+      const run = await coordinator.runScheduledExecution({
+        projectId: request.projectId,
+        taskId: request.taskId,
+        expectedTaskVersion: request.expectedTaskVersion,
+        revisionId: request.revisionId,
+        adapterId: request.adapterId,
+        reservationId: request.reservationId,
+        commandId: request.commandId,
+        actor: request.actor,
+        ...(request.baseRef === undefined || request.baseRef === null
+          ? {} : { baseRef: request.baseRef }),
+      });
+      return {
+        executionId: run.executionId, sessionId: run.sessionId, attemptNumber: run.attemptNumber,
+        taskVersion: run.taskVersion, workspaceId: run.workspaceId, workspacePath: run.workspacePath,
+        baseCommit: run.baseCommit, adapterId: run.adapterId, adapterVersion: run.adapterVersion,
+        sessionState: run.sessionState, permissionMode: run.permissionMode,
+        agentConfig: run.agentConfig,
+      };
+    },
+    draining: () => drain.state(),
+    defaultAdapterId: adapter.id,
+    now: () => Date.now(),
+  });
+  return { value, coordinator, schedule, adapter };
+}
+
+/** `task.run` for the fixture's Task, through the engine the command face uses. */
+async function runManaged(
+  managed: ManagedRuntime,
+  overrides: { readonly baseRef?: string } = {},
+): ReturnType<ScheduleService['runNow']> {
+  const { value } = managed;
+  const version = value.storage.getTask(value.projectId, value.taskId)?.version;
+  return managed.schedule.runNow({
+    projectId: value.projectId,
+    taskId: value.taskId,
+    expectedTaskVersion: version as number,
+    adapterId: managed.adapter.id,
+    commandId: crypto.randomUUID(),
+    allowUnknown: false,
+    actor: 'local-user',
+    ...(overrides.baseRef === undefined ? {} : { baseRef: overrides.baseRef }),
+  });
+}
+
+/** The recorded `base_ref` of one Task's workspace, as every later reader sees it. */
+function recordedBaseRef(value: AgentFixture, taskId: string): string | null {
+  const candidates = value.storage.getReclamationCandidates(value.projectId, { taskId });
+  return candidates.workspaces[0]?.baseRef ?? null;
+}
+
+describe('a managed project runs its Tasks from its own folder (ADR-0060)', () => {
+  test('starts a Task through the scheduling gate instead of refusing DEV_REPO_REQUIRED', async () => {
+    const managed = await managedRuntime();
+    const { value } = managed;
+    const outcome = await runManaged(managed);
+    expect(outcome.outcome).toBe('STARTED');
+    expect(outcome.wait).toBeNull();
+    // The baseline is the branch the project folder has checked out, and it is what the Task worktree
+    // was really created from.
+    expect(outcome.baseCommit).toBe(value.mainCommit);
+    expect(recordedBaseRef(value, value.taskId)).toBe('refs/heads/main');
+    const workspace = value.storage.getLatestTaskWorkspace(value.taskId);
+    expect(workspace?.baseCommit).toBe(value.mainCommit);
+    expect(workspace?.path.startsWith(join(value.home, 'worktrees'))).toBe(true);
+    // The worktree belongs to the project folder: the Task branch is registered there and nowhere else.
+    expect(await git(value.repo, ['rev-parse', `refs/heads/task/${value.taskId}`]))
+      .toBe(value.mainCommit);
+    await expect(git(value.devRepo, ['rev-parse', `refs/heads/task/${value.taskId}`]))
+      .rejects.toThrow();
+    await managed.coordinator.settle();
+    value.storage.close();
+  });
+
+  test('carries an explicit --base-ref all the way to the worktree Git is based on', async () => {
+    const managed = await managedRuntime();
+    const { value } = managed;
+    // A second branch with its own commit, so "the ref that was asked for" is distinguishable from
+    // "the branch the folder happens to have checked out".
+    await git(value.repo, ['checkout', '-q', '-b', 'feature']);
+    await Bun.write(join(value.repo, 'feature.txt'), 'feature\n');
+    await git(value.repo, ['add', 'feature.txt']);
+    await git(value.repo, ['commit', '-q', '-m', 'feature work']);
+    const featureCommit = await git(value.repo, ['rev-parse', 'refs/heads/feature']);
+    await git(value.repo, ['checkout', '-q', 'main']);
+    const outcome = await runManaged(managed, { baseRef: 'refs/heads/feature' });
+    expect(outcome.outcome).toBe('STARTED');
+    expect(outcome.baseCommit).toBe(featureCommit);
+    expect(recordedBaseRef(value, value.taskId)).toBe('refs/heads/feature');
+    const workspace = value.storage.getLatestTaskWorkspace(value.taskId);
+    expect(await git(workspace?.path as string, ['rev-parse', 'HEAD'])).toBe(featureCommit);
+    await managed.coordinator.settle();
+    value.storage.close();
+  });
+
+  test('refuses a detached-HEAD folder before any slot or workspace is written', async () => {
+    const managed = await managedRuntime();
+    const { value } = managed;
+    await git(value.repo, ['checkout', '-q', '--detach', 'HEAD']);
+    await expect(runManaged(managed)).rejects.toMatchObject({ code: 'TASK_BASE_REF_UNRESOLVED' });
+    // Nothing was reserved, prepared or started, and the trust survives: a detached HEAD is a fact
+    // about the requested baseline, not an identity change.
+    expect(value.storage.listSlotReservations(value.projectId, { includeReleased: true })).toEqual([]);
+    expect(value.storage.getLatestTaskWorkspace(value.taskId)).toBeNull();
+    expect(value.storage.getTrustedProject(value.projectId).repoRoot).toBe(value.repo);
+    value.storage.close();
+  });
+
+  test('captures, verifies and purges a Task whose branch lives in the project folder', async () => {
+    const managed = await managedRuntime();
+    const { value, coordinator } = managed;
+    const run = await coordinator.runTask({
+      projectId: value.projectId, taskId: value.taskId, expectedTaskVersion: 1,
+      commandId: crypto.randomUUID(), adapterId: managed.adapter.id,
+    });
+    await coordinator.settle();
+    await Bun.write(join(run.workspacePath, 'agent-output.txt'), 'work\n');
+    const prepared = await prepareResultCommit({
+      storage: value.storage, projectId: value.projectId, taskId: value.taskId,
+      commandId: crypto.randomUUID(), actor: 'local-user',
+    });
+    const captured = await captureResultCommit({
+      storage: value.storage, projectId: value.projectId, taskId: value.taskId,
+      authorizationId: prepared.authorizationId, commandId: crypto.randomUUID(),
+    });
+    // The result commit is an object of the project folder's repository — exactly where the worktree
+    // and its branch live for a managed project (ADR-0060).
+    expect(await git(value.repo, ['cat-file', '-e', captured.resultCommit])).toBe('');
+    const verified = await runTaskVerification({
+      storage: value.storage, runner: new VerificationRunner(),
+      copiesRoot: join(value.home, 'verifications'),
+      projectId: value.projectId, taskId: value.taskId,
+      commandId: crypto.randomUUID(), permissionMode: 'FULL',
+    });
+    expect(verified.state).toBe('PASSED');
+    expect(verified.testedCommit).toBe(captured.resultCommit);
+
+    const purged = await purgeTask({
+      storage: value.storage, runtimeHome: value.home, coordinator,
+      projectId: value.projectId, taskId: value.taskId,
+      expectedVersion: value.storage.getTask(value.projectId, value.taskId)?.version as number,
+      commandId: crypto.randomUUID(), actor: 'local-user', reason: 'managed lifecycle test',
+    });
+    expect(purged.state).toBe('CANCELLED');
+    expect(purged.plan).toMatchObject({ worktrees: 1, branches: 1 });
+    expect(purged.branchFacts[0]?.deleted).toBe(true);
+    // Both halves really happened: the worktree and the branch are gone from the project folder.
+    expect(existsSync(run.workspacePath)).toBe(false);
+    await expect(git(value.repo, ['rev-parse', `refs/heads/task/${value.taskId}`]))
+      .rejects.toThrow();
+    value.storage.close();
+  }, 60_000);
 });
 
 describe('dev facts come from the dev clone (ADR-0056)', () => {

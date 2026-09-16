@@ -393,7 +393,7 @@ describe('snapshot generation recheck', () => {
         files: Object.freeze([] as string[]),
         policyVersion: workspace.snapshot.policyVersion,
         analyzerVersion: impactAnalyzerVersion,
-        baselineSource: 'DEV_REF',
+        baselineSource: 'BASELINE_REF',
         baseCommit: workspace.snapshot.baseCommit,
         changeFingerprint: null,
       },

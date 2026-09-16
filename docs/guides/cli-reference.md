@@ -1,12 +1,13 @@
 # CLI 命令参考
 
-> **适用版本** `dev@17b4dd6`（2026-09-16） · **schema** v32 · **最后校对** 2026-09-16
-> 版本会前进：`dev@17b4dd6` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@4667d32`（2026-09-16） · **schema** v33 · **最后校对** 2026-09-16
+> 版本会前进：`dev@4667d32` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > §7 的 `session handoff terminal resize` 一节由 FOUNDATION-083 校对（ADR-0054）；
 > §3 的 `project impact *` 与 §4 的 `task submit`/`task resume`/`--feature` 由 FOUNDATION-091 新增/改写（ADR-0059）；
 > §4 的 `task purge` 一节由 FOUNDATION-090 新增（ADR-0058，其余 §4 内容沿用 FOUNDATION-070 的校对基线）。
 > §7 的 `session handoff terminal resize` 一节由 FOUNDATION-083 校对（ADR-0054）。
+> §3 的 `project inspect`/`project trust` 段、§1 `open` 的失败码、§4 的 `task run` 与 `task depends` 两节由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目的常态路径不再出现 `DEV_REPO_REQUIRED`）；其余段落沿用 FOUNDATION-091 的校对基线。
 
 本文覆盖 `apps/cli/src/main.ts` 中 `usage()` 列出的**每一个命令组**，以及 Runtime 的 HTTP/SSE 面。
 所有事实来自源码核对；核对方法见 `docs/tasks/README.md` 的 FOUNDATION-070 一节。
@@ -135,8 +136,7 @@ Task 基线取项目文件夹当前检出的分支，而 `task integrate` / `pro
 （打开一个**已信任**仓库的另一个工作树时 trust 会被跳过，因此那条路径不需要该 flag。）
 
 已经确认过且策略 digest 未变时会跳过确认（正常路径**一次项目一次确认**；FULL 下没有这一步）。
-失败：确认被拒（`Project trust was not confirmed`）、trust 后项目未出现在列表中、`DEV_REPO_REQUIRED`、
-`DEV_REPO_*`。
+失败：确认被拒（`Project trust was not confirmed`）、trust 后项目未出现在列表中、给出的 dev clone 无法核验（`DEV_REPO_*`）。
 
 ---
 
@@ -173,9 +173,10 @@ Adapter 不支持的字段会被拒绝而不是静默忽略。稳定码：`INVAL
 
 **开发基线有两种，按「有没有 dev clone」分派（ADR-0056 / ADR-0060）**：`devRef` / `devCommit` / `devRefPresent`
 描述的是**dev clone 的**本地 `dev` 分支；没有可核验的 dev clone 时它们是 `dev` / `null` / `false`，
-此时**Task 基线改取项目文件夹自己当前检出的分支**（managed），而**需要 dev 基线的操作**（集成、提升、依赖判定、
-回收、提升前全量证据）仍以 `DEV_REPO_REQUIRED` 拒绝：拒绝的是「没有那条长期分支」，不是新的审批。
-`DEV_REPO_REQUIRED` 拒绝并打印补救命令。
+此时**Task 基线改取项目文件夹自己当前检出的分支**（managed）。**需要长期 `dev` 分支的操作**只有集成与提升
+（`task integrate`、`promotion *`、`promotion full-suite run`）仍以 `DEV_REPO_REQUIRED` 拒绝并打印补救命令：
+拒绝的是「没有那条长期分支」，不是新的审批。Task 基线解析、依赖判定、槽位预留、调度启动前重检、影响分析基线、
+结果 commit 归属、任务级验证与回收对两类项目都成立（ADR-0060 第三轮修订，用户裁决「一般项目根本不需要 dev」）。
 
 `devRefRetirement` 是**只读的退役证据**（ADR-0048 D04 / ADR-0056），描述的是**被检查的那个检出自己**的本地 `dev` ref：
 
@@ -215,8 +216,10 @@ dev clone 的拒绝是 `DEV_REPO_*`（见下）。
 | `TASK_BASE_REF_UNRESOLVED` | 没有 dev clone 且项目文件夹处于 detached HEAD：没有分支可作 Task 基线（切到一条分支再试） |
 | `TASK_BASE_REF_MISSING` | 显式给出的基线 ref 在该仓库里不存在 |
 
-`DEV_REPO_REQUIRED` **不再**由 trust 返回：它是**需要 dev 事实的操作**的拒绝码（见下），因为没有长期
-`dev` 分支并不妨碍一个项目正常工作——那样的项目（managed）的 Task 基线是它自己文件夹当前检出的分支。
+`DEV_REPO_REQUIRED` **不再**由 trust 返回，也只属于**需要长期 `dev` 分支的操作**（`task integrate`、
+`promotion *`、`promotion full-suite run`，见下）：没有那条分支并不妨碍一个项目正常工作——那样的项目（managed）
+的 Task 基线是它自己文件夹当前检出的分支，`task submit`/`task run`/`task depends list`/`task result *`/`task verify`
+都照常工作（ADR-0060 第三轮修订）。
 失败时退 `1`；CLI 同时打印核验结果（`verified` / `code` / `detail`），因为 `project trust` 会先打印身份、策略与结果三份文档。
 
 防漂移：若在你查看与确认之间身份/策略/映射/dev clone 发生变化，返回 `REPOSITORY_CHANGED`、
@@ -321,6 +324,9 @@ ADR-0059 之后当前规则**不再产生 `UNKNOWN`**，所以这条路日常不
 | `0` | `outcome: STARTED` |
 | `3` | `outcome: WAIT`——冲突等待或容量等待；stderr 打印 `[scheduler] CONFLICT|CAPACITY wait: <code> — <detail>` |
 | `1` | `outcome: REFUSED`——依赖未满足、状态不可启动、revision 过期等 |
+
+managed 项目（没有 dev clone）同样可以 submit/run/depends 判定/result commit/verify：这些操作按它自己的
+基线（项目文件夹当前检出的分支）与归属（项目文件夹）工作，**不会**因缺少长期 `dev` 分支被拒绝（ADR-0060 第三轮修订）。
 
 相关稳定码：`TASK_NOT_STARTABLE`、`TASK_ARCHIVED`、`CONFLICT_WAIT`、`CAPACITY_WAIT`、
 `CAPACITY_GLOBAL_LIMIT_REACHED`、`CAPACITY_ADAPTER_SLOT_LIMIT_REACHED`、`SCHEDULER_DRAINING`、
@@ -758,10 +764,15 @@ bun run codeestra task depends list   <project-id> [task-id] [--json]
 
 - flag 可以出现在**任意位置**（解析器按顺序走 token），但 `--revision` 只对 `add` 有意义。
 - 依赖图必须是 **DAG**；加环以 `DEPENDENCY_CYCLE` 拒绝，且**不部分应用**。自依赖是 `SELF_DEPENDENCY`。
-- **满足条件**：上游必须**通过集成验证并进入 `dev`**；下游的 dev 基线必须包含上游结果。
+- **满足条件**：上游必须**通过集成验证并进入 `dev`**；下游的 **Task 基线 ref** 必须包含上游结果。
   **仅 Task verification 成功不释放依赖**，进入 `dev` 也不等于已提升到 `main`。
-- `list` 无 `--json` 时打印人读视图：项目与 dev commit、该 Task 的状态与版本、逐条 `✓/✗ 依赖`、
-  要求的 revision 编号、上游合入的 dev commit 前 12 位，以及上游闭包/下游影响数量。
+- 基线来源（ADR-0060 第三轮修订）：`devRef`/`devCommit` 是**该项目 Task 基线**的 ref 与 commit——
+  有 dev clone 时是那个 clone 的 `dev`，managed 时是项目文件夹**当前检出的分支**（managed 项目不会产生
+  INTEGRATED 批次，因此带依赖边的 Task 会以 `UPSTREAM_NOT_INTEGRATED` 保持未满足，而**不会**以
+  `DEV_REPO_REQUIRED` 拒绝整条命令）。基线 ref 读不到时所有边保持未满足（`DEV_BASELINE_MISSING`），
+  绝不当作已满足；原因码沿用 ADR-0024 的有界枚举（`DEV_*` 是历史命名）。
+- `list` 无 `--json` 时打印人读视图：项目与基线 commit、该 Task 的状态与版本、逐条 `✓/✗ 依赖`、
+  要求的 revision 编号、上游合入 commit 的前 12 位，以及上游闭包/下游影响数量。
 
 其他码：`DUPLICATE_EDGE`、`DEPENDENCY_GRAPH_INVALID`、`UPSTREAM_NOT_INTEGRATED`、`DEPENDENCY_RECONCILE_FAILED`。
 

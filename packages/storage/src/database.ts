@@ -239,8 +239,9 @@ export interface SlotSnapshotRecheckInput {
   readonly files: readonly string[];
   readonly policyVersion: string;
   readonly analyzerVersion: string;
-  /** Where the baseline came from: the Task's own worktree, or the development ref before one. */
-  readonly baselineSource: 'WORKSPACE' | 'DEV_REF';
+  /** Where the baseline came from: the Task's own worktree, or the project's Task baseline ref
+   * (the dev clone's `dev`, or the project folder's checked out branch) before one exists (ADR-0060). */
+  readonly baselineSource: 'WORKSPACE' | 'BASELINE_REF';
   /** The observed baseline; re-read from the worktree row when `baselineSource` is `WORKSPACE`. */
   readonly baseCommit: string;
   /** Evidence for the refusal facts only; the change-set decision is the exact path set. */
@@ -13743,8 +13744,8 @@ export class Phase1Database {
                 + ` ${expected.baseCommit.slice(0, 12)}, but this Task has no live worktree any more`,
             });
           }
-          if (expected.baselineSource === 'DEV_REF' && worktree !== null) {
-            // The caller observed "no worktree, predicted against the development baseline" and the
+          if (expected.baselineSource === 'BASELINE_REF' && worktree !== null) {
+            // The caller observed "no worktree, predicted against the Task baseline ref" and the
             // Task now has one: the facts the prediction described are not the facts of this write.
             throw slotSnapshotStaleRefusal({
               row,
