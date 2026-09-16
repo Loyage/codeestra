@@ -7574,7 +7574,7 @@ CREATE TABLE runtime_command_receipts (
 
 ## FOUNDATION-097 — 全局暂停：持久屏障 + Provider 主进程冻结 + 三 Adapter 进程归属 spike + UI 全局 shell（GLC-2，ADR-0061 下半，schema **v34**）
 
-状态：已在 `Loyage/glc-pause-ui`（基线 `dev@de03448`）实现并跑过定向检查，**并已与 FOUNDATION-096 的容量上半一起集成到本地 `dev`**（本记录随该次集成 merge commit 落地）。**未 push `origin/dev`、未提升 `main`、未重启任何 Runtime。** 本格只做 ADR-0061 的**暂停半边**（D04–D10）；容量半边（D01–D03）是 FOUNDATION-096。
+状态：已在 `Loyage/glc-pause-ui`（基线 `dev@de03448`）实现并跑过定向检查，**并已与 FOUNDATION-096 的容量上半一起集成到本地 `dev`**：分支提交 `6879154`，集成 merge commit **`5295efb`**（合入前 `dev@8ea9f2f`）。**未 push `origin/dev`、未提升 `main`、未重启任何 Runtime。** 本格只做 ADR-0061 的**暂停半边**（D04–D10）；容量半边（D01–D03）是 FOUNDATION-096。
 
 ### 改了什么
 
@@ -7602,7 +7602,7 @@ CREATE TABLE runtime_command_receipts (
 | `bun test apps/runtime/test/cli-global-control.test.ts` | **3 通过 / 0 失败**：真实 Runtime + socket 上的 `scheduler control *` exit 0/3 语义、`SCHEDULER_GLOBALLY_PAUSED` 稳定码、`task run` 与 `reservations acquire` 同时 exit 3、`stop` 后重启状态仍在 |
 | `bun test apps/runtime/test/schedule-service.test.ts` | 12 通过 / 0 失败（含新增两条 CONTROL 等待用例） |
 | `bun test apps/runtime/test/event-subscription-service.test.ts` / `event-subscription-ipc.test.ts` / `slot-reservation-service.test.ts` / `session-guidance.test.ts` / `http-api.test.ts` / `packages/contracts/test` | 全通过 |
-| **集成后在 `dev` 树上重跑**：`bun run typecheck`、`bun run typecheck:ui`、`bun test packages/storage/test`（含 096 的 `runtime-capacity-migration.test.ts` 与本格的 `runtime-pause-control-migration.test.ts`）、`bun test apps/runtime/test/runtime-global-pause.test.ts`、`cli-global-control.test.ts`、`slot-reservation-service.test.ts`、`schedule-service.test.ts`、`cli-capacity-slots.test.ts`、`event-subscription*.test.ts`、`bunx vitest run apps/ui` | 见本记录末尾的「集成复跑结果」 |
+| **集成后在 `dev` 树上重跑**（merge `5295efb`）：typecheck / storage 176 / contracts 41 / agent-adapters 140 / runtime-global-pause 11 / cli-global-control 3 / schedule-service 12 / slot-reservation / event-subscription×2 / cli-capacity-slots / cli-task-control / agent-runtime-service / session-guidance / vitest apps/ui 186 | 见「集成复跑结果」一节（全通过） |
 
 **没跑及原因**：`bun run check` / `just check` / `just verify` / `check:fast`（ADR-0038 禁止在开发分支跑全量）；`test:e2e` 全列表（本格只跑与之相关的 CLI 用例）；真实 Claude Code 的模型层验收（本机无凭据）；真实 Codex 的模型层验收（本机 ChatGPT 额度到 2026-09-19 才恢复，见下）。
 
@@ -7648,8 +7648,43 @@ CREATE TABLE runtime_command_receipts (
 - **测试夹具**：096 新增的 `packages/storage/test/support/restore-pre-v34.ts` 成为唯一入口，本格把
   「删掉 v34 四张表、恢复两张旧配置表」并进去，并把函数名 `restorePreV34CapacitySchema` 改为
   `restorePreV34Schema`（三处调用点同步）——原来的名字在集成后已不准确。
-- **合并后的证据（本格重跑，不沿用两格各自的结论）**：见下表的「集成后在 dev 树上重跑」一栏。
-  两格各自分支上的迁移证据**不能**替合并后的证据背书，因此这一栏是必须的。
+- **合并后的证据（本格重跑，不沿用两格各自的结论）**：见下面「集成复跑结果」一节，结果全通过。
+  两格各自分支上的迁移证据**不能**替合并后的证据背书，因此这一节是必须的。
+
+### 集成复跑结果（合并后在 `dev` 树上，本格自己跑的）
+
+集成 merge commit：**`5295efb`**（`Loyage/glc-pause-ui@6879154` 合入 `dev@8ea9f2f`）。合入前 `dev` 上已有
+FOUNDATION-096 的容量上半，因此这次合并本身就是 ADR-0061 两半的集成。
+
+| 检查 | 结果 |
+|---|---|
+| `bun run typecheck` / `bun run typecheck:ui` | 退出码 0 |
+| `bun test packages/storage/test` | **176 通过 / 0 失败**，含 `runtime-capacity-migration.test.ts`（096）与本格 `runtime-pause-control-migration.test.ts`：v33 **真实文件库**升级、**四张 v34 表齐全**且两张旧配置表消失、`domain_events` 行与投递行不变、`project_id` 变可空、`PRAGMA foreign_key_check` 为空、**故障注入整笔回滚** |
+| `bun test packages/contracts/test` | 41 通过 / 0 失败 |
+| `bun test packages/agent-adapters/test` | 140 通过 / 0 失败 |
+| `bun test apps/runtime/test/runtime-global-pause.test.ts` | 11 通过 / 0 失败（真实 POSIX 进程） |
+| `bun test apps/runtime/test/cli-global-control.test.ts` | 3 通过 / 0 失败（真实 Runtime + socket，exit 0/1/3） |
+| `bun test apps/runtime/test/schedule-service.test.ts` | 12 通过 / 0 失败（含本格新增 2 条 CONTROL 等待用例） |
+| `bun test apps/runtime/test/slot-reservation-service.test.ts` / `event-subscription-service.test.ts` / `event-subscription-ipc.test.ts` | 全通过（含 096 的「Project 过滤也收到 Runtime 全局容量事件」） |
+| `bun test apps/runtime/test/cli-capacity-slots.test.ts` / `cli-schedule.test.ts` / `cli-task-control.test.ts` | 全通过 |
+| `bun test apps/runtime/test/agent-runtime-service.test.ts` / `session-guidance.test.ts` | 全通过（协调器加了屏障检查后的回归） |
+| `bunx vitest run apps/ui` | **14 文件 / 186 用例全通过** |
+| `bun run build:ui:dev` + `grep -o 'data-channel="dev"' apps/ui/dist/index.html` | 成功、命中 |
+
+**未跑**：`bun run check` / `just check` / `just verify` / `check:fast`（ADR-0038 禁止开发分支全量）；
+`test:e2e` 全列表；真实 Codex / Claude Code 的模型层验收。
+
+**一处未解释的观测（如实记录）**：把 `packages/contracts/test` + `packages/storage/test` +
+`packages/agent-adapters/test` 放在**同一个 `bun test` 进程**里跑时，出现过 1 个失败；
+分开跑三个套件各为 41 / 176 / 140 全通过，未能复现。按用户指示未继续追查，
+**提升前的全量测试（在精确 dev SHA 上）必须确认它不是真实缺陷**。
+
+**集成时的新增改动（不在本格分支的提交里，随 merge commit 一起落地）**：把容量半边留下的
+`globalPauseState` stub 换成对 `runtime_pause_control` 那一行的读取（`detail` 收敛成一句话）；
+`RuntimeGlobalControlState` 改为 `GlobalControlState` 的别名；UI 容量卡改为真正调用
+`scheduler capacity get`（无参）并显示跨项目占用者与 `pauseState`，上限设置改为 `set --limit` / `reset`
+（`data-capacity-scope="GLOBAL"`）；`slot-reservation-service` 采用 096 的持有者观测签名；
+`restorePreV34CapacitySchema` 更名为 `restorePreV34Schema` 并同时清理两张旧表。
 
 ### 剩余问题 / 未做### 剩余问题 / 未做
 
