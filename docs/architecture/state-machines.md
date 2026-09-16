@@ -37,7 +37,7 @@
 | CANCELLING | confirmed stopped | →CANCELLED，保留 workspace |
 | RECOVERY_REQUIRED | reconcile | 依据真实事实回到已证实状态；必须审计，不能直接释放资源。命令面是 `task recover <project> <task> <expected-version>`（ADR-0055）：只读事实（记录的 provider 身份按真实进程表 + start token + 后代核对、记录的后代快照、workspace 路径是否仍在磁盘），**只有能证明 provider 已消失**才收口为 `FAILED`（同时 `Execution → FAILED`、`resource_held=0`、Session `→ EXITED`、workspace `→ RETAINED`）；存活 / 后代存活 / 无法核验 / 无身份一律**拒绝并保持占用**（退出码 1、零行变化）。收口**不主张工作树静止**（`quiescenceProven:false`、`signalsSent:0`），不发信号、不删工作树 |
 
-READY 的等待原因单独派生为 CONFLICT / CAPACITY / DRAINING / REVISION_REVIEW 等，不误用 BLOCKED。ADR-0061 实现后，全局负载屏障另以 `SCHEDULER_GLOBALLY_PAUSED` 表达（仍是等待、退出码 3，不是 Task 状态）。依赖未满足是 BLOCKED 唯一含义。SUCCEEDED/CANCELLED 不自动重开。
+READY 的等待原因单独派生为 CONFLICT / CAPACITY / DRAINING / REVISION_REVIEW 等，不误用 BLOCKED。**ADR-0061 的容量上半（FOUNDATION-096，schema v34）已实现：CAPACITY 现在是唯一的跨 Project Runtime 上限，不再是项目级/Adapter 级两个上限。** 全局负载屏障另以 `SCHEDULER_GLOBALLY_PAUSED` 表达（仍是等待、退出码 3，不是 Task 状态），属 ADR-0061 下半、**尚未实现**。依赖未满足是 BLOCKED 唯一含义。SUCCEEDED/CANCELLED 不自动重开。
 
 Task Verification：`NOT_RUN → QUEUED → RUNNING → PASSED | FAILED | ERROR | CANCELLED`；revision/commit/策略失效产生 `STALE`。重验创建新 VerificationRun，旧证据不改写。
 

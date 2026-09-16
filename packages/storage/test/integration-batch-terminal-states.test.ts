@@ -20,6 +20,7 @@ import {
   Phase1Database,
   phase1SchemaVersion,
 } from '../src/index.js';
+import { restorePreV34CapacitySchema } from './support/restore-pre-v34.js';
 
 /** The exact DDL schema v29 had, so the fixture below can be downgraded to it. */
 const stateCheckV29 = `CHECK(state IN ('CREATED','PREPARING','VERIFYING','INTEGRATING_DEV',
@@ -38,6 +39,9 @@ function downgradeToV29(database: Database): void {
   // ...and the column added by schema v33 (the per-Task base ref, ADR-0060): a v29 database
   // recorded no base ref on a workspace, so the upgrade must replay that ADD COLUMN itself.
   database.exec('ALTER TABLE workspaces DROP COLUMN base_ref');
+  // ...and everything schema v34 (ADR-0061) added, with the two tables it retires restored: a real
+  // v29 database has the project-scoped capacity configuration and no Runtime singleton.
+  restorePreV34CapacitySchema(database);
   database.exec(`
     CREATE TABLE integration_batches_v29 (
       id TEXT PRIMARY KEY,

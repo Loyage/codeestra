@@ -556,9 +556,7 @@ describe('scheduling loop', () => {
     // The pause releases the Execution row (E2's occupancy counts holders), so a paused Task occupies
     // no slot — but scheduler.md §1 keeps it in the active set, because it still owns a worktree with
     // changes and resuming it is a start. Leaving it out would let both be resumed at once.
-    expect(harnessed.fixture.storage.countActiveSlotOccupants({
-      projectId: harnessed.fixture.projectId,
-    }).globalUsed).toBe(0);
+    expect(harnessed.fixture.storage.countActiveSlotOccupants().globalUsed).toBe(0);
     // Both paused Tasks declare the same feature, which is the current reason a resume has to wait:
     // the peer is unfinished (`PAUSED`) and its declaration overlaps.
     for (const taskId of [first.taskId, second.taskId]) {
@@ -644,9 +642,7 @@ describe('scheduling loop', () => {
       taskOf(harnessed.fixture, task.taskId).currentRevision.id, task.version, nextId(), bootId,
       Date.now());
     // The residual reservation occupies a slot and blocks a second reservation for this Task.
-    const capacityBefore = harnessed.fixture.storage.countActiveSlotOccupants({
-      projectId: harnessed.fixture.projectId,
-    });
+    const capacityBefore = harnessed.fixture.storage.countActiveSlotOccupants();
     expect(capacityBefore.globalUsed).toBe(1);
     const refused = await harnessed.runNow({ taskId: task.taskId, version: task.version });
     expect(refused.outcome).toBe('REFUSED');

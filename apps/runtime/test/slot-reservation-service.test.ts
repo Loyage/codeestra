@@ -3,9 +3,10 @@ import { SlotReservationError, type ExecutionSlotReservationRecord } from '@code
 import { SchedulerError } from '../src/scheduler.js';
 import {
   RuntimeDrainState,
-  clearAdapterCapacity,
   inspectProjectCapacity,
-  setProjectCapacity,
+  inspectRuntimeCapacity,
+  resetRuntimeCapacity,
+  setRuntimeCapacity,
 } from '../src/capacity-service.js';
 import {
   SlotReservationService,
@@ -105,27 +106,37 @@ function capacityView(harnessed: Harness) {
   return inspectProjectCapacity({
     storage: harnessed.fixture.storage,
     projectId: harnessed.fixture.projectId,
-    knownAdapterIds: ['pi', 'codex'],
     draining: harnessed.drain.state(),
   });
 }
 
-describe('capacity configuration', () => {
+/** The Runtime-wide view `scheduler capacity get` answers with. */
+function runtimeCapacityView(harnessed: Harness) {
+  return inspectRuntimeCapacity({
+    storage: harnessed.fixture.storage,
+    draining: harnessed.drain.state(),
+    pauseState: () => ({ state: 'RUNNING' as const, pauseEpoch: 0, detail: null }),
+  });
+}
+
+function setLimit(harnessed: Harness, limit: number, commandId = nextId()) {
+  return setRuntimeCapacity({
+    storage: harnessed.fixture.storage,
+    limit,
+    actor: 'user',
+    commandId,
+    draining: harnessed.drain.state(),
+    pauseState: () => ({ state: 'RUNNING' as const, pauseEpoch: 0, detail: null }),
+    now: () => 5,
+    randomUUID: nextId,
+  });
+}
+
+describe('Runtime-wide capacity configuration', () => {
   test('a set value is read back and used by the acquisition decision', async () => {
     const harnessed = await harness();
     expect(capacityView(harnessed).globalLimit).toBe(2);
-    setProjectCapacity({
-      storage: harnessed.fixture.storage,
-      projectId: harnessed.fixture.projectId,
-      adapterId: undefined,
-      limit: 3,
-      actor: 'user',
-      commandId: nextId(),
-      knownAdapterIds: ['pi'],
-      draining: harnessed.drain.state(),
-      now: () => 5,
-      randomUUID: nextId,
-    });
+    expect(setLimit(harnessed, 3).changed).toBe(true);
     const view = capacityView(harnessed);
     expect(view.globalLimit).toBe(3);
     expect(view.globalLimitSource).toBe('EXPLICIT');
@@ -149,76 +160,67 @@ describe('capacity configuration', () => {
     expect(capacityView(harnessed).globalUsed).toBe(3);
   });
 
-  test('per-Adapters limits are explicit, and an override is cleared back to the project limit', async () => {
+  test('the Runtime-wide view lists every occupier with its Project, Adapter and source', async () => {
     const harnessed = await harness();
-    setProjectCapacity({
-      storage: harnessed.fixture.storage,
+    expect(runtimeCapacityView(harnessed)).toMatchObject({
+      limit: 2, limitSource: 'DEFAULT', used: 0, available: 2, waitReason: null,
+      pauseState: { state: 'RUNNING', pauseEpoch: 0, detail: null }, occupiers: [],
+    });
+    const taskRow = harnessed.fixture.storage.getTask(harnessed.fixture.projectId,
+      harnessed.fixture.taskId);
+    await harnessed.service.acquire({
       projectId: harnessed.fixture.projectId,
-      adapterId: 'pi',
-      limit: 1,
+      taskId: harnessed.fixture.taskId,
+      expectedTaskVersion: taskRow?.version as number,
+      revisionId: taskRow?.currentRevision.id as string,
+      adapterId: 'codex',
       actor: 'user',
       commandId: nextId(),
-      knownAdapterIds: ['pi'],
-      draining: harnessed.drain.state(),
-      randomUUID: nextId,
     });
-    let view = capacityView(harnessed);
-    expect(view.adapters.find((adapter) => adapter.adapterId === 'pi')).toMatchObject({
-      limit: 1, limitSource: 'EXPLICIT',
+    const view = runtimeCapacityView(harnessed);
+    expect(view.used).toBe(1);
+    expect(view.available).toBe(1);
+    expect(view.occupiers).toHaveLength(1);
+    expect(view.occupiers[0]).toMatchObject({
+      projectId: harnessed.fixture.projectId, taskId: harnessed.fixture.taskId,
+      adapterId: 'codex', source: 'RESERVATION', state: 'RESERVED',
     });
-    // An Adapter without an override follows the project limit and says so.
-    expect(view.adapters.find((adapter) => adapter.adapterId === 'codex')).toMatchObject({
-      limit: 2, limitSource: 'DEFAULT',
-    });
-    setProjectCapacity({
-      storage: harnessed.fixture.storage,
-      projectId: harnessed.fixture.projectId,
-      adapterId: undefined,
-      limit: 4,
-      actor: 'user',
-      commandId: nextId(),
-      knownAdapterIds: ['pi'],
-      draining: harnessed.drain.state(),
-      randomUUID: nextId,
-    });
-    view = capacityView(harnessed);
-    // The override stays, while the Adapter without one follows the new global limit.
-    expect(view.adapters.find((adapter) => adapter.adapterId === 'pi')?.limit).toBe(1);
-    expect(view.adapters.find((adapter) => adapter.adapterId === 'codex')?.limit).toBe(4);
-    clearAdapterCapacity({
-      storage: harnessed.fixture.storage,
-      projectId: harnessed.fixture.projectId,
-      adapterId: 'pi',
-      actor: 'user',
-      commandId: nextId(),
-      knownAdapterIds: ['pi'],
-      draining: harnessed.drain.state(),
-      randomUUID: nextId,
-    });
-    expect(capacityView(harnessed).adapters.find((adapter) => adapter.adapterId === 'pi'))
-      .toMatchObject({ limit: 4, limitSource: 'DEFAULT' });
+    // The Adapter a candidate uses is no longer a ceiling: a different Adapter changes nothing.
+    expect(view.occupiers[0]?.adapterIds).toEqual(['codex']);
   });
 
-  test('refuses an invalid limit and an unknown Adapter with their own stable codes', async () => {
+  test('reset returns to the documented default and setting the same value is an idempotent no-op', async () => {
     const harnessed = await harness();
-    const attempt = (limit: number, adapterId?: string) => () => setProjectCapacity({
+    expect(setLimit(harnessed, 4).changed).toBe(true);
+    expect(setLimit(harnessed, 4).changed).toBe(false);
+    expect(runtimeCapacityView(harnessed).limit).toBe(4);
+    const reset = resetRuntimeCapacity({
       storage: harnessed.fixture.storage,
-      projectId: harnessed.fixture.projectId,
-      adapterId,
-      limit,
       actor: 'user',
       commandId: nextId(),
-      knownAdapterIds: ['pi'],
       draining: harnessed.drain.state(),
+      pauseState: () => ({ state: 'RUNNING' as const, pauseEpoch: 0, detail: null }),
       randomUUID: nextId,
     });
+    expect(reset.changed).toBe(true);
+    expect(runtimeCapacityView(harnessed)).toMatchObject({ limit: 2, limitSource: 'DEFAULT' });
+    expect(resetRuntimeCapacity({
+      storage: harnessed.fixture.storage,
+      actor: 'user',
+      commandId: nextId(),
+      draining: harnessed.drain.state(),
+      pauseState: () => ({ state: 'RUNNING' as const, pauseEpoch: 0, detail: null }),
+      randomUUID: nextId,
+    }).changed).toBe(false);
+  });
+
+  test('refuses an invalid limit with its own stable code and writes nothing', async () => {
+    const harnessed = await harness();
+    const attempt = (limit: number) => () => setLimit(harnessed, limit);
     expect(attempt(0)).toThrow(SlotReservationError);
     expect(attempt(-3)).toThrow(SlotReservationError);
     expect(attempt(1.5)).toThrow(SlotReservationError);
     expect(attempt(100)).toThrow(SlotReservationError);
-    let unknownAdapter: unknown = null;
-    try { attempt(2, 'claude-code')(); } catch (error) { unknownAdapter = error; }
-    expect((unknownAdapter as SlotReservationError).code).toBe('UNKNOWN_ADAPTER');
     // Nothing was written by any refused attempt.
     expect(capacityView(harnessed).globalLimitSource).toBe('DEFAULT');
   });
@@ -253,6 +255,39 @@ describe('capacity configuration', () => {
     expect(waiting.reservation).toBeNull();
     // And the capacity view reports the same reason code, so a client can query it instead.
     expect(capacityView(harnessed).globalWaitReason).toBe('CAPACITY_GLOBAL_LIMIT_REACHED');
+  });
+
+  test('a lower limit does not release, pause or terminate an occupant', async () => {
+    const harnessed = await harness();
+    const second = addTask(harnessed.fixture, 'second');
+    for (const task of [harnessed.fixture.taskId, second]) {
+      const row = harnessed.fixture.storage.getTask(harnessed.fixture.projectId, task);
+      await harnessed.service.acquire({
+        projectId: harnessed.fixture.projectId, taskId: task,
+        expectedTaskVersion: row?.version as number,
+        revisionId: row?.currentRevision.id as string,
+        adapterId: 'pi', actor: 'user', commandId: nextId(),
+      });
+    }
+    expect(setLimit(harnessed, 1).changed).toBe(true);
+    // `used > limit` is an honest fact: both reservations are still there and still RESERVED, and
+    // nothing signalled or stopped either Task.
+    expect(harnessed.fixture.storage.listActiveSlotReservations()).toHaveLength(2);
+    expect(harnessed.fixture.storage.listActiveSlotReservations()
+      .every((reservation) => reservation.state === 'RESERVED')).toBe(true);
+    const view = runtimeCapacityView(harnessed);
+    expect(view).toMatchObject({ limit: 1, used: 2, available: 0 });
+    // A new acquisition is refused while `used >= limit`.
+    const third = addTask(harnessed.fixture, 'third');
+    const row = harnessed.fixture.storage.getTask(harnessed.fixture.projectId, third);
+    const waiting = await harnessed.service.acquire({
+      projectId: harnessed.fixture.projectId, taskId: third,
+      expectedTaskVersion: row?.version as number,
+      revisionId: row?.currentRevision.id as string,
+      adapterId: 'pi', actor: 'user', commandId: nextId(),
+    });
+    expect(waiting.outcome).toBe('CAPACITY_WAIT');
+    expect(waiting.wait).toMatchObject({ code: 'CAPACITY_GLOBAL_LIMIT_REACHED', limit: 1, used: 2 });
   });
 });
 

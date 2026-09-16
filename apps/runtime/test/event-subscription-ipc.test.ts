@@ -235,6 +235,42 @@ describe('Runtime event subscription over the IPC socket', () => {
     subscriber.close();
   }, 30_000);
 
+  test('a Project-filtered subscription also receives the Runtime global capacity fact', async () => {
+    const harness = await startRuntime();
+    const projectId = await trustedProject(harness);
+    // Filtered to one Project: global facts belong to no Project, so they would be dropped by a
+    // naive `project_id = ?` filter — and they are exactly the facts that affect every Project.
+    const subscriber = await Subscriber.connect(harness, {
+      command: 'events.subscribe', sinceSequence: 0, projectId,
+    });
+    await waitFor(() => subscriber.frames.some((frame) => frame.type === 'subscribed'));
+    expect(subscriber.frames[0]).toMatchObject({ type: 'subscribed', projectId });
+
+    await call(harness, {
+      command: 'scheduler.capacity.set', commandId: crypto.randomUUID(), limit: 3,
+    });
+    await waitFor(() => subscriber.events()
+      .some((event) => event.eventType === 'SchedulerGlobalCapacityChanged'));
+    const delivered = subscriber.frames.flatMap((frame) => frame.type === 'event' ? [frame] : []);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]?.event.projectId).toBeNull();
+    expect(delivered[0]?.event.payload).toMatchObject({ to: 3, source: 'EXPLICIT' });
+    const cursor = delivered[0]?.cursor as number;
+
+    // Resuming from the delivered cursor repeats nothing: the cursor advanced over the same single
+    // sequence even though the event carried no Project.
+    const resumed = await Subscriber.connect(harness, {
+      command: 'events.subscribe', sinceSequence: cursor, projectId,
+    });
+    await waitFor(() => resumed.frames.length > 0);
+    expect(resumed.events()).toEqual([]);
+
+    resumed.close();
+    await call(harness, { command: 'runtime.stop' });
+    await waitFor(() => subscriber.closed);
+    subscriber.close();
+  }, 30_000);
+
   test('rejects an unknown cursor and closes only that connection', async () => {
     const harness = await startRuntime();
     await trustedProject(harness);

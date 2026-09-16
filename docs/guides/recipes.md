@@ -1,9 +1,11 @@
 # 常见任务的做法（recipes）
 
-> **适用版本** `dev@17b4dd6`（2026-09-16） · **schema** v32 · **最后校对** 2026-09-16
-> 版本会前进：`dev@17b4dd6` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
+> 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
-> recipe 3 与 recipe 4 由 FOUNDATION-091 按 ADR-0059 改写（默认不冲突、声明同一功能才互斥）。
+> recipe 3 与 recipe 4 由 FOUNDATION-091 按 ADR-0059 改写（默认不冲突、声明同一功能才互斥）；
+> recipe 3 的容量命令由 **FOUNDATION-096** 同步（ADR-0061：上限是唯一的 Runtime 全局值，命令不带 project 参数；
+> 同一值另有设置面拼写 `settings concurrency`，也在本 recipe 里给出）。
 
 本文是**步骤化**的：每条 recipe 回答一个「我想做 X」，给出可以照抄的命令与**做完之后看什么**。
 
@@ -126,8 +128,8 @@ bun run codeestra project impact explain $PROJECT $TASK_B --json
 bun run codeestra task run $PROJECT $TASK_A <version-a>
 bun run codeestra task run $PROJECT $TASK_B <version-b>
 
-# 4) 看谁占着槽位、谁在跑
-bun run codeestra scheduler capacity get      $PROJECT --json
+# 4) 看谁占着槽位、谁在跑（容量是整个 Runtime 的，不按项目分）
+bun run codeestra scheduler capacity get      --json
 bun run codeestra scheduler reservations list $PROJECT
 bun run codeestra task schedule status        $PROJECT
 ```
@@ -137,13 +139,17 @@ bun run codeestra task schedule status        $PROJECT
 1. **冲突只看声明。** 判定比较两个 revision 是否声明了**同一个功能**（`--feature <module-id>`，取自
    `.codeestra/impact.json` 的 `modules[].id`），不用模型。**同文件/同目录/共享依赖都不再拦人**；
    两个都没声明功能的 Task 可以改同一个文件，冲突在合入 `dev` 时以 `CONFLICTED` 暴露。
-2. **容量上限默认是 2。** 想同时跑更多要显式提高上限：
+2. **容量上限默认是 2，而且是整个 Runtime 的。** 它跨你接入的**所有项目**与 Adapter：两个项目各自跑一个任务就已经占满了。想让更多任务同时跑就显式提高上限（零确认）：
    ```sh
-   bun run codeestra scheduler capacity set $PROJECT --limit 4
+   bun run codeestra scheduler capacity set --limit 4      # 调度面拼写
+   bun run codeestra settings concurrency set --limit 4    # 设置面拼写：同一条命令、同一个值
+   bun run codeestra settings concurrency reset            # 回到默认 2
    ```
+   改完**立刻生效**，不需要重启：提高上限后正等容量的任务会立即有机会启动。
+   降低上限**不会**停掉已经跑着的任务（`get` 的 `used` 可能大于 `limit`），只阻止之后的新任务。
 3. **想让两件事互斥，就给它们声明同一个功能**（见 recipe 4）。
 
-**做完看什么**：`task schedule status` 的「活跃集合」里有两条；`scheduler capacity get` 的全局已用为 2。
+**做完看什么**：`task schedule status` 的「活跃集合」里有两条；`scheduler capacity get` 的 `used` 为 2（这是**整个 Runtime** 的已用，不是你当前项目单独的）。
 
 ---
 

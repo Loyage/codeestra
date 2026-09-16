@@ -55,7 +55,9 @@ import {
   phase1Migration,
   phase1SchemaVersion,
   reclamationMigration,
+  resolveMigratedGlobalLimit,
   revisionDeliveryMigration,
+  runtimeGlobalCapacityMigration,
   sessionGuidanceMigration,
   taskBaselineRefMigration,
   taskRevisionFeaturesMigration,
@@ -134,6 +136,20 @@ function canonicalJson(value: unknown): string {
 }
 
 /**
+ * A UUID derived from stable parts instead of random bytes. A migration that writes a fixed fact
+ * (the adopted legacy capacity value) reuses one event identity if it ever has to re-derive it, so
+ * the ledger records "this is the v34 adoption" rather than a new random id per attempt.
+ */
+function deterministicUuid(seed: string): string {
+  const digest = createHash('sha256').update(seed).digest();
+  const bytes = Buffer.from(digest.subarray(0, 16));
+  bytes[6] = ((bytes[6] as number) & 0x0f) | 0x40;
+  bytes[8] = ((bytes[8] as number) & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
  * The Task a long-command Operation belongs to. A run owns its Task directly; a verification
  * Operation names it in the request payload it was created with. Kept in one place so the event
  * payload and the Operation projection can never disagree about which Task progress belongs to.
@@ -165,52 +181,59 @@ export type SlotHolderObservationKind = 'HOLDER_STOPPED' | 'HOLDER_PROCESS_ID_RE
   | 'HOLDER_STILL_RUNNING' | 'HOLDER_OWNERSHIP_UNVERIFIABLE' | 'PROCESS_IDENTITY_MISSING';
 export type SlotReservationEventKind = 'RESERVED' | 'RELEASED' | 'RECONCILE_OBSERVED';
 
-export interface AdapterSlotLimitRecord {
-  readonly adapterId: string;
+/**
+ * The Runtime-wide concurrency configuration (ADR-0061 D01/D02, schema v34).
+ *
+ * One `CODEESTRA_HOME` is one resource domain with exactly one limit, so the record carries no
+ * Project and no Adapter: `DEFAULT` means the singleton row does not exist and the documented
+ * default 2 applies. Project-scoped capacity no longer exists, which is why the two former
+ * configuration tables (`project_capacity_limits`, `project_adapter_slot_limits`) are retired by
+ * the v34 migration rather than kept as a hidden override layer.
+ */
+export interface RuntimeCapacityRecord {
   readonly limit: number;
-  readonly version: number;
-  readonly updatedAt: number;
-  readonly updatedBy: string;
-}
-
-export interface ProjectCapacityRecord {
-  readonly projectId: string;
-  readonly globalLimit: number;
-  /** `DEFAULT` means no row exists and the documented default applies. */
-  readonly globalLimitSource: 'DEFAULT' | 'EXPLICIT';
+  /** `DEFAULT` means no singleton row exists and the documented default applies. */
+  readonly limitSource: 'DEFAULT' | 'EXPLICIT';
   readonly version: number;
   readonly updatedAt: number | null;
   readonly updatedBy: string | null;
-  readonly adapterOverrides: readonly AdapterSlotLimitRecord[];
 }
 
-export interface ProjectCapacityChange {
+export interface RuntimeCapacityChange {
   readonly changed: boolean;
-  readonly capacity: ProjectCapacityRecord;
-}
-
-export interface ProjectCapacityClearance {
-  readonly removed: boolean;
-  readonly capacity: ProjectCapacityRecord;
+  readonly capacity: RuntimeCapacityRecord;
 }
 
 /** One Task occupying a slot right now, with the facts that made it an occupant. */
 export interface SlotOccupant {
   readonly taskId: string;
+  /** The Project the occupying Task belongs to; capacity itself is Runtime-wide (ADR-0061). */
+  readonly projectId: string;
   /** Every Adapter this Task occupies a slot for (normally exactly one). */
   readonly adapterIds: readonly string[];
   /** The active reservation, or null when the occupant is an Execution holding its workspace. */
   readonly reservationId: string | null;
   readonly state: SlotReservationState | null;
   readonly since: number;
+  /**
+   * Which of the two facts made this Task an occupant. A reservation is the stronger fact and wins
+   * when a Task has both, so the reported source is the one a client can act on (release it, or
+   * wait for the Execution to finish).
+   */
+  readonly source: 'RESERVATION' | 'EXECUTION';
 }
 
-/** Who occupies a slot right now: counted per Task, never per row. */
+/**
+ * Who occupies a slot right now: counted per Task across the whole Runtime, never per row.
+ *
+ * `ADAPTER_SLOT_LIMIT_REACHED` used to be a second dimension of this same read; ADR-0061 removed
+ * the Adapter limit, so `adapterUsed`/`adapterBlocking` are gone rather than always zero. The
+ * historical wait code and every historical event stay readable; they are simply never produced
+ * again.
+ */
 export interface SlotOccupancy {
   readonly globalUsed: number;
-  readonly adapterUsed: number;
   readonly globalBlocking: readonly string[];
-  readonly adapterBlocking: readonly string[];
   readonly occupants: readonly SlotOccupant[];
 }
 
@@ -487,7 +510,14 @@ export interface StoredEventEnvelope {
   readonly sequence: number;
   readonly eventType: string;
   readonly schemaVersion: number;
-  readonly projectId: string;
+  /**
+   * The Project this fact belongs to, or `null` for a Runtime global fact (ADR-0061 D10).
+   *
+   * `NULL` is not "unknown": it means the fact genuinely belongs to no Project — a global capacity
+   * change today, a global pause once that half lands — and a Project-filtered subscriber receives it
+   * *in addition to* that Project's own events, because global capacity affects every Project.
+   */
+  readonly projectId: string | null;
   readonly aggregateType: string;
   readonly aggregateId: string;
   readonly aggregateVersion: number;
@@ -1773,10 +1803,11 @@ export class Phase1Database {
       throw new StorageError('UNSUPPORTED_SCHEMA', `Database schema ${version} is newer than ${phase1SchemaVersion}`);
     }
     if (version === phase1SchemaVersion) return;
-    // `workspaces` (v7), `executions` (v9), `intents` (v28) and `integration_batches` (v30) are each
-    // referenced by name from other tables, so every upgrade below the newest such step runs with
-    // foreign keys off and verifies the whole schema before the connection is used.
-    const rebuildsTable = version < 30;
+    // `workspaces` (v7), `executions` (v9), `intents` (v28), `integration_batches` (v30) and
+    // `domain_events` (v34) are each referenced by name from other tables, so every upgrade below
+    // the newest such step runs with foreign keys off and verifies the whole schema before the
+    // connection is used.
+    const rebuildsTable = version < 34;
     if (rebuildsTable) this.sqlite.exec('PRAGMA foreign_keys=OFF;');
     try {
       this.sqlite.transaction(() => {
@@ -1887,6 +1918,12 @@ export class Phase1Database {
         // worktree was prepared from. A pure `ADD COLUMN` on `workspaces`; a database stamped
         // 17–32 still gets it, and earlier numbers are never re-pointed.
         if (version < 33) this.sqlite.exec(taskBaselineRefMigration);
+        // Version 34 is this half of ADR-0061 (FOUNDATION-096): the single Runtime-wide capacity
+        // limit, Runtime-scoped command receipts, and a `domain_events.project_id` that may be NULL
+        // for a global fact. The other half (global pause) adds its own tables under the same
+        // version number, so the two blocks are merged into one `if (version < 34)` step at
+        // integration; this block owns the two tables below and the `domain_events` rebuild.
+        if (version < 34) this.migrateRuntimeGlobalCapacity();
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -1899,6 +1936,75 @@ export class Phase1Database {
     } finally {
       if (rebuildsTable) this.sqlite.exec('PRAGMA foreign_keys=ON;');
     }
+  }
+
+  /**
+   * Schema v34, this half of ADR-0061 (FOUNDATION-096): one Runtime-wide capacity limit, the
+   * retirement of the two project-scoped configuration tables, and a `domain_events.project_id`
+   * that may be NULL for a global fact.
+   *
+   * The order is load-bearing. Every explicit legacy value is read **before** the DDL script that
+   * drops the tables holding them, the deterministic minimum is computed from that read, and a value
+   * outside the documented range stops the upgrade with a named reason while the original database is
+   * still untouched. Bun's `Database.exec()` swallows a step-time error inside a multi-statement
+   * script and keeps going, so `INSERT ... SELECT` copy failures are turned into a loud rollback by
+   * comparing the `domain_events` and `event_deliveries` row counts around the rebuild. The whole
+   * step runs in `migrate()`'s transaction: any failure rolls back the drops too, which is why the
+   * old rows can never be deleted before their values are safely carried over.
+   */
+  private migrateRuntimeGlobalCapacity(): void {
+    const legacyLimits = this.sqlite.query<{ legacy_limit: number }, []>(`
+      SELECT global_limit AS legacy_limit FROM project_capacity_limits
+      UNION ALL SELECT slot_limit AS legacy_limit FROM project_adapter_slot_limits
+    `).all().map((row) => row.legacy_limit);
+    const outOfRange = legacyLimits.filter((limit) => !Number.isSafeInteger(limit)
+      || limit < 1 || limit > maxConcurrencyLimit);
+    if (outOfRange.length > 0) {
+      throw new StorageError('INVALID_STATE',
+        'Schema v34 adopts the smallest explicit capacity value as the new Runtime-wide limit, and'
+        + ` this database records a value outside 1-${maxConcurrencyLimit}: ${outOfRange.join(', ')}.`
+        + ' Nothing was changed; resolve those rows deliberately before upgrading.');
+    }
+    const migratedLimit = resolveMigratedGlobalLimit(legacyLimits);
+    const eventsBefore = this.countTableRows('domain_events');
+    const deliveriesBefore = this.countTableRows('event_deliveries');
+    this.sqlite.exec(runtimeGlobalCapacityMigration);
+    if (migratedLimit !== null) {
+      const occurredAt = Date.now();
+      this.sqlite.query(`
+        INSERT INTO runtime_capacity_settings(singleton_id,global_limit,version,updated_at,updated_by)
+        VALUES (1,?1,0,?2,'schema-migration')
+      `).run(migratedLimit, occurredAt);
+      this.appendGlobalCapacityEvent({
+        eventId: deterministicUuid(`v34-runtime-capacity:${migratedLimit}`),
+        limit: migratedLimit,
+        previousLimit: null,
+        source: 'MIGRATED_MINIMUM',
+        actor: 'schema-migration',
+        occurredAt,
+      });
+    }
+    // The rebuild may legitimately add exactly one row: the `MIGRATED_MINIMUM` fact above. Anything
+    // else means the copy or the drop lost or duplicated history, and the transaction must roll back.
+    const expectedEvents = eventsBefore + (migratedLimit === null ? 0 : 1);
+    const eventsAfter = this.countTableRows('domain_events');
+    if (eventsAfter !== expectedEvents) {
+      throw new StorageError('INVALID_STATE',
+        `Schema v34 rebuild of domain_events changed the row count (${eventsBefore} before,`
+        + ` ${eventsAfter} after, ${expectedEvents} expected); the upgrade was rolled back and`
+        + ' nothing was changed');
+    }
+    const deliveriesAfter = this.countTableRows('event_deliveries');
+    if (deliveriesAfter !== deliveriesBefore) {
+      throw new StorageError('INVALID_STATE',
+        `Schema v34 rebuild of domain_events changed event_deliveries (${deliveriesBefore} before,`
+        + ` ${deliveriesAfter} after); the upgrade was rolled back and nothing was changed`);
+    }
+  }
+
+  private countTableRows(table: 'domain_events' | 'event_deliveries'): number {
+    return this.sqlite.query<{ rows: number }, []>(
+      `SELECT COUNT(*) AS rows FROM ${table}`).get()?.rows ?? 0;
   }
 
   /** Records the explicit confirmation that established project trust, including the
@@ -4403,6 +4509,11 @@ export class Phase1Database {
    * persists the last delivered cursor resumes with neither a gap nor a duplicate at the boundary.
    * This is a subscription read, not a durable consumer: `event_deliveries` remains the
    * at-least-once outbox.
+   *
+   * A Project-filtered read delivers that Project's events **and** the Runtime global events
+   * (`project_id IS NULL`), because a global capacity fact affects every Project (ADR-0061 D10). The
+   * cursor still advances over the same single sequence, so reconnecting never skips and never repeats
+   * an event at the boundary; an unfiltered read (`projectId` absent) remains the whole log.
    */
   listEventsAfter(input: {
     readonly sinceSequence: number;
@@ -4416,14 +4527,15 @@ export class Phase1Database {
       throw new StorageError('INVALID_STATE', 'Event read limit must be between 1 and 500');
     }
     return this.sqlite.query<{
-      event_id: string; sequence: number; event_type: string; schema_version: number; project_id: string;
+      event_id: string; sequence: number; event_type: string; schema_version: number;
+      project_id: string | null;
       aggregate_type: string; aggregate_id: string; aggregate_version: number; correlation_id: string;
       causation_id: string | null; occurred_at: number; payload_json: string;
     }, [number, string | null, number]>(`
       SELECT event_id,sequence,event_type,schema_version,project_id,aggregate_type,aggregate_id,
         aggregate_version,correlation_id,causation_id,occurred_at,payload_json
       FROM domain_events
-      WHERE sequence>?1 AND (?2 IS NULL OR project_id=?2)
+      WHERE sequence>?1 AND (?2 IS NULL OR project_id=?2 OR project_id IS NULL)
       ORDER BY sequence LIMIT ?3
     `).all(input.sinceSequence, input.projectId ?? null, input.limit).map((row) => ({
       eventId: row.event_id, sequence: row.sequence, eventType: row.event_type,
@@ -13343,38 +13455,25 @@ export class Phase1Database {
   // ---------------------------------------------------------------------------------------------
 
   /**
-   * The capacity configuration of one project: the project-wide limit plus every Adapter override
-   * that was actually set. An Adapter without a row *follows the project limit*; that is reported as
-   * `DEFAULT` rather than written down, so a later change to the project limit moves it too.
+   * The Runtime-wide capacity configuration (ADR-0061 D01/D02). One `CODEESTRA_HOME`, one limit.
+   *
+   * A missing singleton row is not an error and not a zero: it means the user never set the limit
+   * explicitly, so the documented default 2 applies and the source is reported as `DEFAULT`. Nothing
+   * in this read is derived from host resources — the limit is a configuration, not a measurement.
    */
-  getProjectCapacity(projectId: string): ProjectCapacityRecord {
-    this.assertTrustedProject(projectId);
-    const limits = this.sqlite.query<{
+  getRuntimeCapacity(): RuntimeCapacityRecord {
+    const row = this.sqlite.query<{
       global_limit: number; version: number; updated_at: number; updated_by: string;
-    }, [string]>(`
-      SELECT global_limit,version,updated_at,updated_by FROM project_capacity_limits
-      WHERE project_id=?1
-    `).get(projectId);
-    const overrides = this.sqlite.query<{
-      adapter_id: string; slot_limit: number; version: number; updated_at: number; updated_by: string;
-    }, [string]>(`
-      SELECT adapter_id,slot_limit,version,updated_at,updated_by FROM project_adapter_slot_limits
-      WHERE project_id=?1 ORDER BY adapter_id
-    `).all(projectId).map((row): AdapterSlotLimitRecord => ({
-      adapterId: row.adapter_id,
-      limit: row.slot_limit,
-      version: row.version,
-      updatedAt: row.updated_at,
-      updatedBy: row.updated_by,
-    }));
+    }, []>(`
+      SELECT global_limit,version,updated_at,updated_by FROM runtime_capacity_settings
+      WHERE singleton_id=1
+    `).get();
     return {
-      projectId,
-      globalLimit: limits?.global_limit ?? defaultConcurrencyLimit,
-      globalLimitSource: limits === null ? 'DEFAULT' : 'EXPLICIT',
-      version: limits?.version ?? 0,
-      updatedAt: limits?.updated_at ?? null,
-      updatedBy: limits?.updated_by ?? null,
-      adapterOverrides: overrides,
+      limit: row?.global_limit ?? defaultConcurrencyLimit,
+      limitSource: row === null ? 'DEFAULT' : 'EXPLICIT',
+      version: row?.version ?? 0,
+      updatedAt: row?.updated_at ?? null,
+      updatedBy: row?.updated_by ?? null,
     };
   }
 
@@ -13390,190 +13489,166 @@ export class Phase1Database {
   }
 
   /**
-   * Sets the project-wide concurrency limit. It applies to every Adapter that has no explicit
-   * override, and it changes the number the *next* acquisition is judged against — a lower limit
-   * never releases anything that is already reserved.
+   * Sets the one Runtime-wide limit. It changes the number the *next* acquisition is judged against
+   * and nothing else: a lower limit never releases, pauses or terminates a Task that already holds a
+   * slot, so `used` may honestly exceed `limit` until those Tasks finish.
+   *
+   * Setting the value that is already effective is an idempotent no-op: no version bump and no event,
+   * because nothing changed. The command identity is recorded in `runtime_command_receipts` rather
+   * than `command_receipts`, because this command belongs to no Project.
    */
-  setProjectGlobalCapacity(input: {
-    readonly projectId: string;
+  setRuntimeCapacityLimit(input: {
     readonly limit: number;
     readonly commandId: string;
     readonly payloadHash: string;
     readonly eventId: string;
     readonly actor: string;
     readonly updatedAt: number;
-  }): ProjectCapacityChange {
+  }): RuntimeCapacityChange {
     this.assertCapacityLimit(input.limit);
-    return this.executeCommand({
-      projectId: input.projectId,
+    return this.executeRuntimeCommand({
       commandId: input.commandId,
       payloadHash: input.payloadHash,
       createdAt: input.updatedAt,
       apply: (database) => {
-        this.assertTrustedProject(input.projectId);
-        const existing = database.query<{ global_limit: number; version: number }, [string]>(`
-          SELECT global_limit,version FROM project_capacity_limits WHERE project_id=?1
-        `).get(input.projectId);
+        const existing = database.query<{ global_limit: number; version: number }, []>(`
+          SELECT global_limit,version FROM runtime_capacity_settings WHERE singleton_id=1
+        `).get();
         if (existing === null) {
           database.query(`
-            INSERT INTO project_capacity_limits(project_id,global_limit,version,updated_at,updated_by)
-            VALUES (?1,?2,0,?3,?4)
-          `).run(input.projectId, input.limit, input.updatedAt, input.actor);
+            INSERT INTO runtime_capacity_settings(singleton_id,global_limit,version,updated_at,
+              updated_by) VALUES (1,?1,0,?2,?3)
+          `).run(input.limit, input.updatedAt, input.actor);
         } else if (existing.global_limit !== input.limit) {
           database.query(`
-            UPDATE project_capacity_limits SET global_limit=?1,version=?2,updated_at=?3,updated_by=?4
-            WHERE project_id=?5 AND global_limit=?6 AND version=?7
+            UPDATE runtime_capacity_settings SET global_limit=?1,version=?2,updated_at=?3,
+              updated_by=?4 WHERE singleton_id=1 AND global_limit=?5 AND version=?6
           `).run(input.limit, existing.version + 1, input.updatedAt, input.actor,
-            input.projectId, existing.global_limit, existing.version);
+            existing.global_limit, existing.version);
         }
         const changed = existing === null || existing.global_limit !== input.limit;
         if (changed) {
-          insertCapacityEvent(database, {
+          this.appendGlobalCapacityEvent({
             eventId: input.eventId,
-            projectId: input.projectId,
-            aggregateVersion: (existing?.version ?? 0) + 1,
+            limit: input.limit,
+            previousLimit: existing?.global_limit ?? defaultConcurrencyLimit,
+            source: 'EXPLICIT',
             actor: input.actor,
-            payload: {
-              projectId: input.projectId,
-              scope: 'GLOBAL',
-              adapterId: null,
-              from: existing?.global_limit ?? defaultConcurrencyLimit,
-              to: input.limit,
-              actor: input.actor,
-            },
             occurredAt: input.updatedAt,
           });
         }
-        return { changed, capacity: this.getProjectCapacity(input.projectId) };
-      },
-    });
-  }
-
-  /** Sets one Adapter's slot limit, which stops following the project limit from now on. */
-  setAdapterSlotLimit(input: {
-    readonly projectId: string;
-    readonly adapterId: string;
-    readonly limit: number;
-    readonly commandId: string;
-    readonly payloadHash: string;
-    readonly eventId: string;
-    readonly actor: string;
-    readonly updatedAt: number;
-  }): ProjectCapacityChange {
-    this.assertCapacityLimit(input.limit);
-    if (input.adapterId.trim().length === 0) {
-      throw new SlotReservationError('UNKNOWN_ADAPTER', 'An Adapter slot limit needs an Adapter ID');
-    }
-    return this.executeCommand({
-      projectId: input.projectId,
-      commandId: input.commandId,
-      payloadHash: input.payloadHash,
-      createdAt: input.updatedAt,
-      apply: (database) => {
-        this.assertTrustedProject(input.projectId);
-        const existing = database.query<{ slot_limit: number; version: number }, [string, string]>(`
-          SELECT slot_limit,version FROM project_adapter_slot_limits
-          WHERE project_id=?1 AND adapter_id=?2
-        `).get(input.projectId, input.adapterId);
-        if (existing === null) {
-          database.query(`
-            INSERT INTO project_adapter_slot_limits(project_id,adapter_id,slot_limit,version,
-              updated_at,updated_by) VALUES (?1,?2,?3,0,?4,?5)
-          `).run(input.projectId, input.adapterId, input.limit, input.updatedAt, input.actor);
-        } else if (existing.slot_limit !== input.limit) {
-          database.query(`
-            UPDATE project_adapter_slot_limits SET slot_limit=?1,version=?2,updated_at=?3,updated_by=?4
-            WHERE project_id=?5 AND adapter_id=?6 AND slot_limit=?7 AND version=?8
-          `).run(input.limit, existing.version + 1, input.updatedAt, input.actor,
-            input.projectId, input.adapterId, existing.slot_limit, existing.version);
-        }
-        const changed = existing === null || existing.slot_limit !== input.limit;
-        if (changed) {
-          const globalLimit = this.getProjectCapacity(input.projectId).globalLimit;
-          insertCapacityEvent(database, {
-            eventId: input.eventId,
-            projectId: input.projectId,
-            aggregateVersion: (existing?.version ?? 0) + 1,
-            actor: input.actor,
-            payload: {
-              projectId: input.projectId,
-              scope: 'ADAPTER',
-              adapterId: input.adapterId,
-              from: existing?.slot_limit ?? globalLimit,
-              to: input.limit,
-              actor: input.actor,
-            },
-            occurredAt: input.updatedAt,
-          });
-        }
-        return { changed, capacity: this.getProjectCapacity(input.projectId) };
-      },
-    });
-  }
-
-  /** Removes one Adapter override, so that Adapter follows the project limit again. */
-  clearAdapterSlotLimit(input: {
-    readonly projectId: string;
-    readonly adapterId: string;
-    readonly commandId: string;
-    readonly payloadHash: string;
-    readonly eventId: string;
-    readonly actor: string;
-    readonly updatedAt: number;
-  }): ProjectCapacityClearance {
-    return this.executeCommand({
-      projectId: input.projectId,
-      commandId: input.commandId,
-      payloadHash: input.payloadHash,
-      createdAt: input.updatedAt,
-      apply: (database) => {
-        this.assertTrustedProject(input.projectId);
-        const existing = database.query<{ slot_limit: number; version: number }, [string, string]>(`
-          SELECT slot_limit,version FROM project_adapter_slot_limits
-          WHERE project_id=?1 AND adapter_id=?2
-        `).get(input.projectId, input.adapterId);
-        if (existing !== null) {
-          database.query(
-            'DELETE FROM project_adapter_slot_limits WHERE project_id=?1 AND adapter_id=?2',
-          ).run(input.projectId, input.adapterId);
-          const globalLimit = this.getProjectCapacity(input.projectId).globalLimit;
-          insertCapacityEvent(database, {
-            eventId: input.eventId,
-            projectId: input.projectId,
-            aggregateVersion: existing.version + 1,
-            actor: input.actor,
-            payload: {
-              projectId: input.projectId,
-              scope: 'ADAPTER',
-              adapterId: input.adapterId,
-              from: existing.slot_limit,
-              to: globalLimit,
-              actor: input.actor,
-            },
-            occurredAt: input.updatedAt,
-          });
-        }
-        return {
-          removed: existing !== null,
-          capacity: this.getProjectCapacity(input.projectId),
-        };
+        return { changed, capacity: this.getRuntimeCapacity() };
       },
     });
   }
 
   /**
-   * Who currently occupies a slot in this project, read as facts.
+   * Removes the explicit limit so the documented default applies again (ADR-0061 D02 `reset`).
+   *
+   * Deleting the row is the only honest way to say "back to the default": writing `2` with an
+   * `EXPLICIT` source would record a user decision the user never made, and a later change of the
+   * documented default would silently not apply to this Runtime. Resetting an already-default
+   * configuration is an idempotent no-op with no event.
+   */
+  resetRuntimeCapacityLimit(input: {
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly eventId: string;
+    readonly actor: string;
+    readonly updatedAt: number;
+  }): RuntimeCapacityChange {
+    return this.executeRuntimeCommand({
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.updatedAt,
+      apply: (database) => {
+        const existing = database.query<{ global_limit: number }, []>(
+          'SELECT global_limit FROM runtime_capacity_settings WHERE singleton_id=1').get();
+        if (existing !== null) {
+          database.query('DELETE FROM runtime_capacity_settings WHERE singleton_id=1').run();
+          this.appendGlobalCapacityEvent({
+            eventId: input.eventId,
+            limit: defaultConcurrencyLimit,
+            previousLimit: existing.global_limit,
+            source: 'DEFAULT',
+            actor: input.actor,
+            occurredAt: input.updatedAt,
+          });
+        }
+        return { changed: existing !== null, capacity: this.getRuntimeCapacity() };
+      },
+    });
+  }
+
+  /**
+   * Appends one Runtime global capacity fact: `project_id = NULL`, because a global fact must not be
+   * disguised as some Project's event (ADR-0061 D10). `source` distinguishes a user's explicit write,
+   * a `reset` back to the default, and the value the v34 migration adopted from legacy config.
+   */
+  private appendGlobalCapacityEvent(input: {
+    readonly eventId: string;
+    readonly limit: number;
+    readonly previousLimit: number | null;
+    readonly source: 'DEFAULT' | 'EXPLICIT' | 'MIGRATED_MINIMUM';
+    readonly actor: string;
+    readonly occurredAt: number;
+  }): void {
+    this.sqlite.query(`
+      INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+        aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+      VALUES (?1,NULL,'SchedulerGlobalCapacityChanged',1,'RuntimeSchedulerControl','runtime',1,?2,
+        NULL,?3,?4)
+    `).run(input.eventId, input.eventId, input.occurredAt, JSON.stringify({
+      from: input.previousLimit, to: input.limit, source: input.source, actor: input.actor,
+    }));
+  }
+
+  /**
+   * The idempotency wrapper for a command that belongs to no Project (ADR-0061 D10): the same
+   * command id answers with the recorded result, and the same key with a different payload is
+   * refused. It is the `runtime_command_receipts` twin of `executeCommand`, and it exists because
+   * `command_receipts` carries a `NOT NULL project_id` that a global command has nothing to fill.
+   */
+  private executeRuntimeCommand<T extends object>(input: {
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly createdAt: number;
+    readonly apply: (database: Database) => T;
+  }): T {
+    return this.sqlite.transaction(() => {
+      const existing = this.sqlite.query<
+        { payload_hash: string; result_json: string },
+        [string]
+      >('SELECT payload_hash,result_json FROM runtime_command_receipts WHERE command_id=?1')
+        .get(input.commandId);
+      if (existing !== null) {
+        if (existing.payload_hash !== input.payloadHash) {
+          throw new StorageError('COMMAND_CONFLICT',
+            'Command ID was already used with a different payload');
+        }
+        return JSON.parse(existing.result_json) as T;
+      }
+      const result = input.apply(this.sqlite);
+      this.sqlite.query(`
+        INSERT INTO runtime_command_receipts(command_id,payload_hash,result_json,created_at)
+        VALUES (?1,?2,?3,?4)
+      `).run(input.commandId, input.payloadHash, JSON.stringify(result), input.createdAt);
+      return result;
+    })();
+  }
+
+  /**
+   * Who currently occupies a slot, read as facts across the whole Runtime (ADR-0061 D01).
    *
    * A slot is occupied by a Task that either holds an active reservation or is running with
    * `resource_held=1` (the pre-reservation `task.run` path). Counting per *Task* — never per row —
    * means a reserved Task that then starts an Execution consumes exactly one slot, and `excludeTaskId`
-   * keeps a Task from blocking itself when its reservation is re-checked.
+   * keeps a Task from blocking itself when its reservation is re-checked. The Project a candidate
+   * belongs to and the Adapter it would use no longer narrow this read: there is no second limit.
    */
   countActiveSlotOccupants(input: {
-    readonly projectId: string;
     readonly excludeTaskId?: string;
-  }): SlotOccupancy {
-    this.assertTrustedProject(input.projectId);
+  } = {}): SlotOccupancy {
     return countSlotOccupants(this.sqlite, input);
   }
 
@@ -13789,11 +13864,7 @@ export class Phase1Database {
           throw new SlotReservationError('SLOT_ALREADY_RESERVED',
             `Task already has an active slot reservation ${existing.id} (${existing.state})`);
         }
-        const capacity = this.slotCapacityFor(database, {
-          projectId: input.projectId,
-          adapterId: input.adapterId,
-          excludeTaskId: input.taskId,
-        });
+        const capacity = this.slotCapacityFor(database, { excludeTaskId: input.taskId });
         const drain = input.draining();
         if (drain.draining) {
           return {
@@ -13819,22 +13890,7 @@ export class Phase1Database {
               limit: capacity.globalLimit,
               used: capacity.globalUsed,
               blocking: capacity.globalBlocking,
-              detail: `${capacity.globalUsed} of ${capacity.globalLimit} project slots are in use`,
-            },
-            capacity,
-            reservation: null,
-          };
-        }
-        if (capacity.adapterUsed >= capacity.adapterLimit) {
-          return {
-            outcome: 'CAPACITY_WAIT' as const,
-            wait: {
-              code: 'CAPACITY_ADAPTER_SLOT_LIMIT_REACHED' as const,
-              adapterId: input.adapterId,
-              limit: capacity.adapterLimit,
-              used: capacity.adapterUsed,
-              blocking: capacity.adapterBlocking,
-              detail: `${capacity.adapterUsed} of ${capacity.adapterLimit} ${input.adapterId} slots are in use`,
+              detail: `${capacity.globalUsed} of ${capacity.globalLimit} Runtime-wide slots are in use`,
             },
             capacity,
             reservation: null,
@@ -13900,10 +13956,7 @@ export class Phase1Database {
         // it just acquired, otherwise a client would have to add one itself.
         return {
           outcome: 'RESERVED' as const,
-          capacity: this.slotCapacityFor(database, {
-            projectId: input.projectId,
-            adapterId: input.adapterId,
-          }),
+          capacity: this.slotCapacityFor(database, {}),
           wait: null,
           reservation: this.getSlotReservation(input.projectId, input.reservationId),
         };
@@ -14208,25 +14261,21 @@ export class Phase1Database {
     });
   }
 
-  /** The capacity both dimensions as the next acquisition would be judged against. */
+  /**
+   * The capacity facts as the next acquisition would be judged against (ADR-0061 D01): the single
+   * Runtime-wide limit and the Runtime-wide occupancy. There is no second dimension to report, so the
+   * old Adapter limit fields are gone rather than meaningless zeroes.
+   */
   private slotCapacityFor(database: Database, input: {
-    readonly projectId: string;
-    readonly adapterId: string;
     readonly excludeTaskId?: string;
   }): SlotCapacityCheck {
-    const capacity = this.getProjectCapacity(input.projectId);
-    const override = capacity.adapterOverrides.find((row) => row.adapterId === input.adapterId) ?? null;
+    const capacity = this.getRuntimeCapacity();
     const occupancy = countSlotOccupants(database, input);
     return {
-      globalLimit: capacity.globalLimit,
-      globalLimitSource: capacity.globalLimitSource,
+      globalLimit: capacity.limit,
+      globalLimitSource: capacity.limitSource,
       globalUsed: occupancy.globalUsed,
       globalBlocking: occupancy.globalBlocking,
-      adapterId: input.adapterId,
-      adapterLimit: override?.limit ?? capacity.globalLimit,
-      adapterLimitSource: override === null ? 'DEFAULT' : 'EXPLICIT',
-      adapterUsed: occupancy.adapterUsed,
-      adapterBlocking: occupancy.adapterBlocking,
     };
   }
 
@@ -14533,38 +14582,42 @@ export function slotDependencyFingerprint(facts: readonly TaskDependencyFact[]):
 }
 
 /**
- * The real occupants of one project's slots, per Task. Two sources are unioned: an active
- * reservation (this primitive) and an Execution that still holds its workspace (`resource_held=1`,
- * the pre-reservation `task.run` path). Union rather than sum keeps a reserved Task that then starts
- * exactly one slot, and it is what makes the reported capacity fact honest about work that is
- * actually running today.
+ * The real occupants of the Runtime's slots, per Task (ADR-0061 D01).
+ *
+ * Two sources are unioned across the whole Runtime — every Project's active reservation (this
+ * primitive) and every Execution that still holds its workspace (`resource_held=1`, the
+ * pre-reservation `task.run` path). Union rather than sum keeps a reserved Task that then starts
+ * exactly one slot, and counting across Projects is what makes the limit a real total: a candidate's
+ * Project and Adapter no longer narrow anything, and Task ids are globally unique, so the union key is
+ * unambiguous.
  */
 function countSlotOccupants(database: Database, input: {
-  readonly projectId: string;
-  readonly adapterId?: string;
   readonly excludeTaskId?: string;
 }): SlotOccupancy {
   const rows = database.query<{
-    task_id: string; adapter_id: string; reservation_id: string | null;
+    task_id: string; project_id: string; adapter_id: string; reservation_id: string | null;
     state: SlotReservationState | null; since_at: number; source: 'RESERVATION' | 'EXECUTION';
-  }, [string, string]>(`
-    SELECT task_id,adapter_id,reservation_id,state,since_at,source FROM (
-      SELECT task_id,adapter_id,id AS reservation_id,state,reserved_at AS since_at,
+  }, [string]>(`
+    SELECT task_id,project_id,adapter_id,reservation_id,state,since_at,source FROM (
+      SELECT task_id,project_id,adapter_id,id AS reservation_id,state,reserved_at AS since_at,
         'RESERVATION' AS source FROM execution_slot_reservations
-        WHERE project_id=?1 AND state IN ('RESERVED','RECOVERY_REQUIRED')
+        WHERE state IN ('RESERVED','RECOVERY_REQUIRED')
       UNION
-      SELECT execution.task_id AS task_id,execution.adapter_id AS adapter_id,NULL AS reservation_id,
-        NULL AS state,COALESCE(execution.started_at,0) AS since_at,'EXECUTION' AS source
+      SELECT execution.task_id AS task_id,task.project_id AS project_id,
+        execution.adapter_id AS adapter_id,NULL AS reservation_id,NULL AS state,
+        COALESCE(execution.started_at,0) AS since_at,'EXECUTION' AS source
         FROM executions execution JOIN tasks task ON task.id=execution.task_id
-        WHERE task.project_id=?1 AND execution.resource_held=1
-    ) WHERE task_id<>?2
-  `).all(input.projectId, input.excludeTaskId ?? '');
+        WHERE execution.resource_held=1
+    ) WHERE task_id<>?1
+  `).all(input.excludeTaskId ?? '');
   interface MutableOccupant {
     taskId: string;
+    projectId: string;
     adapterIds: Set<string>;
     reservationId: string | null;
     state: SlotReservationState | null;
     since: number;
+    source: 'RESERVATION' | 'EXECUTION';
   }
   const byTask = new Map<string, MutableOccupant>();
   for (const row of rows) {
@@ -14572,10 +14625,12 @@ function countSlotOccupants(database: Database, input: {
     if (existing === undefined) {
       byTask.set(row.task_id, {
         taskId: row.task_id,
+        projectId: row.project_id,
         adapterIds: new Set([row.adapter_id]),
         reservationId: row.reservation_id,
         state: row.state,
         since: row.since_at,
+        source: row.source,
       });
       continue;
     }
@@ -14586,43 +14641,24 @@ function countSlotOccupants(database: Database, input: {
       existing.reservationId = row.reservation_id;
       existing.state = row.state;
       existing.since = row.since_at;
+      existing.source = row.source;
     }
   }
   const occupants = [...byTask.values()].sort((left, right) => (left.taskId < right.taskId ? -1 : 1));
   const globalBlocking = occupants.map((occupant) => occupant.taskId);
-  const adapterBlocking = occupants
-    .filter((occupant) => input.adapterId !== undefined && occupant.adapterIds.has(input.adapterId))
-    .map((occupant) => occupant.taskId);
   return {
     globalUsed: globalBlocking.length,
-    adapterUsed: adapterBlocking.length,
     globalBlocking,
-    adapterBlocking,
     occupants: occupants.map((occupant) => ({
       taskId: occupant.taskId,
+      projectId: occupant.projectId,
       adapterIds: [...occupant.adapterIds].sort(),
       reservationId: occupant.reservationId,
       state: occupant.state,
       since: occupant.since,
+      source: occupant.source,
     })),
   };
-}
-
-/** One `SchedulerCapacityChanged` fact. The aggregate is the project's capacity configuration. */
-function insertCapacityEvent(database: Database, input: {
-  readonly eventId: string;
-  readonly projectId: string;
-  readonly aggregateVersion: number;
-  readonly actor: string;
-  readonly payload: Readonly<Record<string, unknown>>;
-  readonly occurredAt: number;
-}): void {
-  database.query(`
-    INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-      aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-    VALUES (?1,?2,'SchedulerCapacityChanged',1,'SchedulerCapacity',?2,?3,?4,NULL,?5,?6)
-  `).run(input.eventId, input.projectId, input.aggregateVersion, input.actor, input.occurredAt,
-    JSON.stringify(input.payload));
 }
 
 /** Appends one reservation history row; the sequence is allocated inside the caller's transaction. */

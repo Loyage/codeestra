@@ -58,14 +58,14 @@ Task verification（ADR-0006）、Task 暂停/取消/归档（ADR-0016/FOUNDATIO
 ### 当前状态（截至 FOUNDATION-074）
 
 **交付项已实现**：DAG 校验与 `BLOCKED` 语义（ADR-0024/FOUNDATION-044，含环校验）、影响分析与确定性 Conflict Analyzer
-（ADR-0031/FOUNDATION-053，`SAFE|UNKNOWN|CONFLICTING` + 稳定 reason code）、容量原语（ADR-0032/FOUNDATION-054，**当前实现为每项目**“全局”默认 2 +
-每 adapter 上限 + reservation/release/崩溃 reconcile）、调度引擎本体（ADR-0033/FOUNDATION-055，自动 tick、候选顺序、等待语义、
+（ADR-0031/FOUNDATION-053，`SAFE|UNKNOWN|CONFLICTING` + 稳定 reason code）、容量原语（ADR-0032/FOUNDATION-054，reservation/release/崩溃 reconcile；
+**上限自 FOUNDATION-096 起是每个 `CODEESTRA_HOME` 唯一的跨项目值**，见下）、调度引擎本体（ADR-0033/FOUNDATION-055，自动 tick、候选顺序、等待语义、
 `--allow-unknown`）与其 UI 投影（FOUNDATION-059）。
 
 **未验证（因此本 Phase 的验收矩阵尚未成立）**：验收第一项「两个 SAFE 任务真的同时跑」只在调度器/命令面与测试夹具下验证过，
 **真实 provider 的并发运行没有完成受控验收**（`docs/guides/troubleshooting.md` §4 第 1 条）。调度器本身有门禁这一事实不能替代该验收。
 
-**已接受但尚未实现的下一步（ADR-0061 / FOUNDATION-095）**：当前“全局上限”其实是每 Project 一份，并另有 Adapter 覆写；它将被替换为每个 `CODEESTRA_HOME` 唯一的跨项目上限（旧显式值取最小值迁移），并新增 `scheduler control status|pause|resume|reconcile`。全局 pause 是持久启动屏障 + 可核验 Provider 主进程冻结，不改 Task 状态、不向运行中工具子进程发停止信号、重启不自动继续。实现分支还必须完成三种 Adapter 的进程归属 spike；在此之前不能把该能力写成已交付。
+**ADR-0061 的进度（FOUNDATION-096）**：容量上半已交付——每个 `CODEESTRA_HOME` 只有一个跨项目上限（默认 2，旧显式值取最小值迁移，schema v34），命令面为 `scheduler capacity get|set|reset`，占用跨项目按 Task 统计。**尚未交付的是全局 Provider 冻结**：`scheduler control status|pause|resume|reconcile`、持久启动屏障与可核验的主进程冻结仍未实现，在此之前不能把该能力写成已交付。它还需要完成三种 Adapter 的进程归属 spike。
 
 ## Phase 3 — Interactive Agent Sessions
 

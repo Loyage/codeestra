@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Phase1Database, StorageError, agentPluginSelectionMigration, phase1SchemaVersion }
   from '../src/index.js';
+import { restorePreV34CapacitySchema } from './support/restore-pre-v34.js';
 
 const selection = {
   extensions: ['/plugins/a.ts', '/plugins/b.ts'],
@@ -66,6 +67,9 @@ describe('agent plugin selection storage', () => {
       legacy.exec('ALTER TABLE task_revisions DROP COLUMN features_json');
       // ...and the column added by schema v33 (the per-Task base ref, ADR-0060).
       legacy.exec('ALTER TABLE workspaces DROP COLUMN base_ref');
+      // ...and everything schema v34 (ADR-0061) added, with the two tables it retires restored:
+      // a real v26 database has the project-scoped capacity configuration and no Runtime singleton.
+      restorePreV34CapacitySchema(legacy);
       legacy.exec('PRAGMA user_version=26');
       legacy.close();
 

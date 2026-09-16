@@ -135,7 +135,12 @@ export const eventEnvelopeSchema = z.strictObject({
   sequence: z.number().int().positive(),
   eventType: z.string().min(1),
   schemaVersion: z.number().int().positive(),
-  projectId: z.string().min(1),
+  /**
+   * The Project this fact belongs to, or `null` for a Runtime global fact (ADR-0061 D10). A global
+   * capacity change is delivered to a Project-filtered subscriber *in addition to* that Project's own
+   * events, because it affects every Project; `null` means "belongs to no Project", never "unknown".
+   */
+  projectId: z.string().min(1).nullable(),
   aggregateType: z.string().min(1),
   aggregateId: z.string().min(1),
   aggregateVersion: z.number().int().nonnegative(),
@@ -430,11 +435,12 @@ export const runtimeStopResultSchema = z.strictObject({
 export type RuntimeStopResult = z.infer<typeof runtimeStopResultSchema>;
 
 /**
- * Concurrency capacity and slot reservations (Phase 2, FOUNDATION-054 / ADR-0032).
+ * Concurrency capacity and slot reservations (ADR-0061 D01/D02, schema v34).
  *
- * Two dimensions, both bounded by an explicit limit: the project-wide number of concurrent Tasks
- * (default 2, configurable) and the number of concurrent slots per Agent Adapter (an Adapter with
- * no explicit override follows the project limit). Nothing here is derived from host resources.
+ * There is **one** limit and it belongs to the whole Runtime: a `CODEESTRA_HOME` is one resource
+ * domain, and the number of Tasks occupying a slot is counted across every Project. The former
+ * project-wide and per-Adapter ceilings are retired, not hidden: a candidate's Project and Adapter
+ * cannot produce a second bound. Nothing here is derived from host resources.
  *
  * A Task that cannot get a slot because of capacity is **waiting**, not blocked: `BLOCKED` is
  * reserved for unmet dependencies (PROJECT_SPEC §2.10), so a capacity wait is expressed as its own
@@ -449,6 +455,11 @@ export const maxSlotReservationReadLimit = 200;
 /**
  * Why a Task did not get a slot. These are the codes a scheduler may surface as a *capacity wait*
  * (never as `BLOCKED`); the set is closed so a client can branch on it.
+ *
+ * `CAPACITY_ADAPTER_SLOT_LIMIT_REACHED` is **historical**: the Adapter-level ceiling it described no
+ * longer exists (ADR-0061 D01), so no new event, command result or wait reason carries it. It stays in
+ * this union because the ledger and `command_receipts` still hold results that do, and those must
+ * remain readable rather than being reinterpreted as a code that never existed.
  */
 export type CapacityWaitReasonCode =
   | 'CAPACITY_GLOBAL_LIMIT_REACHED'
@@ -457,6 +468,7 @@ export type CapacityWaitReasonCode =
 
 export interface CapacityWaitReason {
   readonly code: CapacityWaitReasonCode;
+  /** The Adapter the acquisition asked for; the Runtime-wide limit itself belongs to no Adapter. */
   readonly adapterId: string | null;
   readonly limit: number | null;
   readonly used: number | null;
@@ -465,30 +477,74 @@ export interface CapacityWaitReason {
   readonly detail: string;
 }
 
-/** The capacity both dimensions as one acquisition is judged against, with where each limit came from. */
+/**
+ * The capacity one acquisition is judged against, with where the limit came from.
+ *
+ * The field names stay `global*` because they *are* the global facts — and the occupancy is now
+ * counted across the whole Runtime rather than inside one Project, which is what makes the limit a
+ * real total. The former per-Adapter fields are gone: there is no second ceiling to report.
+ */
 export interface SlotCapacityCheck {
   readonly globalLimit: number;
   readonly globalLimitSource: 'DEFAULT' | 'EXPLICIT';
   readonly globalUsed: number;
   readonly globalBlocking: readonly string[];
-  readonly adapterId: string;
-  readonly adapterLimit: number;
-  readonly adapterLimitSource: 'DEFAULT' | 'EXPLICIT';
-  readonly adapterUsed: number;
-  readonly adapterBlocking: readonly string[];
 }
 
-/** One Adapter's capacity facts, as `scheduler capacity get` reports them. */
-export interface AdapterCapacityView {
+/**
+ * The persistent global control state a capacity query reports alongside the numbers (ADR-0061 D04).
+ *
+ * The state machine is declared here because it is part of the command-face contract; the persistent
+ * pause half of ADR-0061 is implemented by a later change, and until then a Runtime has no barrier to
+ * report, which is why `RUNNING` is the honest answer for it.
+ */
+export type GlobalControlState = 'RUNNING' | 'PAUSING' | 'PAUSED' | 'RESUMING' | 'RECOVERY_REQUIRED';
+
+export interface RuntimePauseStateView {
+  readonly state: GlobalControlState;
+  readonly pauseEpoch: number;
+  readonly detail: string | null;
+}
+
+/** One Task occupying a Runtime slot right now, with the facts that made it an occupant. */
+export interface CapacityOccupierView {
+  readonly projectId: string;
+  readonly taskId: string;
   readonly adapterId: string;
+  readonly adapterIds: readonly string[];
+  readonly reservationId: string | null;
+  readonly since: number;
+  /** Which fact occupies the slot: a live reservation, or an Execution holding its resource. */
+  readonly source: 'RESERVATION' | 'EXECUTION';
+  readonly state: 'RESERVED' | 'RECOVERY_REQUIRED' | null;
+}
+
+/**
+ * The Runtime-wide capacity facts `scheduler capacity get` reports (ADR-0061 D02). The command takes
+ * no Project and no Adapter, and the answer lists every occupier across every Project.
+ */
+export interface RuntimeCapacityView {
   readonly limit: number;
   readonly limitSource: 'DEFAULT' | 'EXPLICIT';
   readonly used: number;
+  /** `max(limit - used, 0)`: a lower limit never releases a slot, so `used` may exceed `limit`. */
   readonly available: number;
-  /** The code an acquisition for this Adapter would report right now, or null when a slot is free. */
+  /** The code a new acquisition would report right now, or null when a slot is free. */
   readonly waitReason: CapacityWaitReasonCode | null;
+  readonly occupiers: readonly CapacityOccupierView[];
+  readonly pauseState: RuntimePauseStateView;
+  readonly configVersion: number;
+  readonly updatedAt: number | null;
+  readonly updatedBy: string | null;
+  /** Runtime-owned draining fact: new reservations are refused while it is true. */
+  readonly draining: boolean;
+  readonly drainReason: string | null;
 }
 
+/**
+ * The per-Project report of the same Runtime-wide capacity, used by `task.schedule.*`. The numbers
+ * are global; `projectId` only says which Project asked. There is deliberately no Adapter list left.
+ */
 export interface ProjectCapacityView {
   readonly projectId: string;
   readonly globalLimit: number;
@@ -496,7 +552,6 @@ export interface ProjectCapacityView {
   readonly globalUsed: number;
   readonly globalAvailable: number;
   readonly globalWaitReason: CapacityWaitReasonCode | null;
-  readonly adapters: readonly AdapterCapacityView[];
   readonly configVersion: number;
   readonly updatedAt: number | null;
   readonly updatedBy: string | null;
@@ -504,8 +559,10 @@ export interface ProjectCapacityView {
   readonly draining: boolean;
   readonly drainReason: string | null;
   /** Tasks holding a slot right now, so a client can compute a waiting duration. */
-  readonly occupants: readonly { readonly taskId: string;
-    readonly reservationId: string | null; readonly adapterId: string; readonly since: number }[];
+  readonly occupants: readonly { readonly projectId: string; readonly taskId: string;
+    readonly reservationId: string | null; readonly adapterId: string;
+    readonly adapterIds: readonly string[]; readonly since: number;
+    readonly source: 'RESERVATION' | 'EXECUTION' }[];
 }
 
 /** Who created a reservation and what evidence was recorded for it (never a bare "it was me"). */
@@ -2150,32 +2207,27 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     taskId: z.string().uuid(),
   }),
   /**
-   * Capacity configuration (FOUNDATION-054 / ADR-0032). `get` reports the limits, where each one came
-   * from, how many slots are occupied, the stable wait reason a new acquisition would get, and the
-   * Runtime's draining fact. `set` writes one limit (project-wide, or one Adapter when `adapterId` is
-   * given) and `clear` removes an Adapter override so it follows the project limit again. An invalid
-   * value is refused with a stable code instead of being clamped to something plausible.
+   * The single Runtime-wide capacity limit (ADR-0061 D02). `get` takes no Project and no Adapter:
+   * one `CODEESTRA_HOME` is one resource domain, so the answer is the limit, its source, the
+   * Runtime-wide occupancy with every occupier, and the stable wait reason a new acquisition would
+   * get. `set` writes the only limit there is, and `reset` removes the explicit value so the
+   * documented default applies again. Both are zero-confirmation and idempotent: writing the value
+   * that is already effective changes nothing and emits no event.
    */
   z.strictObject({
     ...requestBase,
     command: z.literal('scheduler.capacity.get'),
-    projectId: z.string().uuid(),
-    adapterId: nonBlankString.optional(),
   }),
   z.strictObject({
     ...requestBase,
     command: z.literal('scheduler.capacity.set'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
     limit: z.number().int(),
-    adapterId: nonBlankString.optional(),
   }),
   z.strictObject({
     ...requestBase,
-    command: z.literal('scheduler.capacity.clear'),
+    command: z.literal('scheduler.capacity.reset'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
-    adapterId: nonBlankString,
   }),
   /**
    * Slot reservations: the primitive a scheduler reserves with before it prepares a workspace or

@@ -148,6 +148,45 @@ describe('event subscription hub', () => {
     value.storage.close();
   });
 
+  test('delivers a Runtime global event to a Project-filtered subscriber with no gap or repeat', async () => {
+    const value = await createAgentFixture();
+    const hub = new EventSubscriptionHub({ storage: value.storage });
+    const peer = recorder();
+    const handle = hub.subscribe({
+      requestId: crypto.randomUUID(), sinceSequence: value.storage.latestEventSequence(),
+      projectId: value.projectId, send: peer.send, onStop: peer.onStop,
+    });
+    const start = handle.cursor;
+    // A global capacity fact is written with `project_id = NULL`; a Project-filtered subscriber must
+    // still receive it, because a Runtime-wide limit affects every Project (ADR-0061 D10).
+    value.storage.setRuntimeCapacityLimit({
+      limit: 3, commandId: 'cmd-global', payloadHash: 'p', eventId: 'evt-global-capacity',
+      actor: 'local-user', updatedAt: 20,
+    });
+    hub.flush();
+    expect(eventFrames(peer.frames).map((frame) => frame.eventType))
+      .toEqual(['SchedulerGlobalCapacityChanged']);
+    expect(peer.frames.flatMap((frame) => frame.type === 'event' ? [frame.event.projectId] : []))
+      .toEqual([null]);
+    // The cursor advances over the same single sequence, so a reconnect repeats nothing.
+    expect(handle.cursor).toBe(start + 1);
+    const resumed = recorder();
+    hub.subscribe({
+      requestId: crypto.randomUUID(), sinceSequence: handle.cursor, projectId: value.projectId,
+      send: resumed.send, onStop: resumed.onStop,
+    });
+    hub.flush();
+    expect(eventFrames(resumed.frames)).toEqual([]);
+    // A Project's own events keep arriving after the global one, in sequence order.
+    createTask(value.storage, value.projectId, 'after-global');
+    hub.flush();
+    expect(eventFrames(peer.frames).slice(1).map((frame) => frame.eventType))
+      .toEqual(['IntentRecorded', 'TaskCreated']);
+    handle.close();
+    hub.close();
+    value.storage.close();
+  });
+
   test('rejects a cursor ahead of the log instead of silently clamping it', async () => {
     const value = await createAgentFixture();
     const hub = new EventSubscriptionHub({ storage: value.storage });
