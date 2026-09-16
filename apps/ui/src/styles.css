@@ -210,6 +210,18 @@ footer { padding: 0.4rem 1.1rem; font-size: 0.7rem; }
 .verification-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; padding: 0.7rem 0; font-size: 0.8rem; }
 .next-step { background: var(--accent-soft); border-left: 3px solid var(--accent); padding: 0.75rem 1rem; margin-top: 0.6rem; border-radius: 0 8px 8px 0; }
 .next-step .eyebrow { color: var(--accent); }
+/* The Agent run result card: how the newest attempt ended and the last text the provider recorded.
+   It is deliberately not a `.card` child — `.task-detail > .card` tones nested cards as warnings,
+   and this block carries the tone of the ending it reports. */
+.agent-run-card { border: 1px solid var(--tone); border-left-width: 4px; background: var(--tone-soft); border-radius: 10px; padding: 0.8rem 1rem; margin: 0.75rem 0; }
+.agent-run-heading { margin-bottom: 0.15rem; }
+.agent-run-heading h3 { margin: 0; font-size: 1rem; }
+.agent-run-card > .hint { margin: 0.2rem 0 0; }
+.agent-run-output-block { margin-top: 0.6rem; }
+.agent-run-output-block .eyebrow { display: block; color: var(--tone); }
+.agent-run-output { margin: 0.4rem 0 0; max-height: 18rem; background: var(--panel); }
+.agent-run-jump { margin: 0.7rem 0 0; font-size: 0.82rem; }
+.agent-run-jump a { color: var(--tone); font-weight: 600; }
 .task-actions { padding-bottom: 0.75rem; border-bottom: 1px solid var(--line); }
 .task-actions .inline { font-size: 0.8rem; }
 .task-detail > .card:not(.operation-panel) { background: var(--warn-soft); }
