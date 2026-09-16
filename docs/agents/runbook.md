@@ -15,7 +15,7 @@
 - `~/Documents/codeestra-dev` 检出 `dev`：**开发 clone**。所有开发、集成与定向验证都在这里进行。
 - 两者是**独立仓库**，不是彼此的 worktree：各自 `.git` 是目录、各有 `origin`；`git worktree list` 不得出现对方。
 - 两个 clone 的 `node_modules`、`apps/ui/dist`、Runtime 数据目录都是各自的本地状态，不共享；各自需要 `bun install --frozen-lockfile`，UI 资产各自构建。
-- **产品侧的 dev 建模已由 ADR-0064 删除**：没有 dev clone、长期 `dev` 集成分支、`task integrate` 或
+- **产品侧的 dev 建模已由 ADR-0066 删除**：没有 dev clone、长期 `dev` 集成分支、`task integrate` 或
   `promotion *`，也没有 dev 构建通道。本文件里的 `main`/`dev` 两个 clone、人工四步与重启规程是
   **本仓库自身的仓库约定**，不是产品能力：产品不提供命令、不记账、不校验它。
 - Task 基线就取项目文件夹**建 workspace 时当前检出的分支**（`workspaces.base_ref`）。本机开发时，
@@ -31,7 +31,7 @@ CODEESTRA_HOME=~/.local/state/codeestra-dev bun run codeestra ui --no-open
 ```
 
 - 等价入口：`just restart-dev`（`install --frozen-lockfile` → 构建 UI → `stop` → `status` → `ui --no-open`）。
-- **没有 dev 通道标记了**（ADR-0064 删除 ADR-0049）：`VITE_CODEESTRA_CHANNEL`、`data-channel`、橙色横幅与
+- **没有 dev 通道标记了**（ADR-0066 删除 ADR-0049）：`VITE_CODEESTRA_CHANNEL`、`data-channel`、橙色横幅与
   `Codeestra Dev` 品牌名都不存在，所以没有「构建后核对标记」这一步。区分 dev/稳定靠 `CODEESTRA_HOME` 与目录。
 - Web UI 端口由 Runtime 自己取空闲端口，两个实例不会撞端口；各自持有自己的内存 token，不要记录实际 token。
 - 不写 `CODEESTRA_HOME` 时，从 dev clone 运行 CLI 连的是**稳定 Runtime**、执行的是 `main` 代码：不能用来证明 dev 代码已运行。
@@ -46,7 +46,7 @@ CODEESTRA_HOME=~/.local/state/codeestra-dev bun run codeestra ui --no-open
 
 - `just promote-main <SHA>` 封装上面的 ②③④（候选 SHA 必须显式给出；要求候选已是 `origin/dev` 的尖端、main 检出干净且检出 `main`）。第 ① 步与提升前的全量测试证据仍需人工完成。
 - 第 1 步只 push 固定候选这一个 ref；不 `--force`、不覆盖远端已有提交。断网、SSH 认证失败或远端不可达时不推进任何 ref，也不得把本地等价当作提升成功。
-- **产品已经没有提升命令了**（ADR-0064 删除 `promotion *` 与 `task integrate`）：本仓库自身的提升
+- **产品已经没有提升命令了**（ADR-0066 删除 `promotion *` 与 `task integrate`）：本仓库自身的提升
   一律走上面的人工四步，并在交付记录里如实写明执行到哪一步。
 
 ## 4. 重启 main 稳定服务（给 dev Agent 的操作规程）

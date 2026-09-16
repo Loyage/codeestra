@@ -98,7 +98,8 @@ async function seededExecutedTask(
   fixture: PurgeFixture,
   specification = 'Produce one artifact',
 ): Promise<SeededTask> {
-  const created = JSON.parse((await cli(['task', 'create', fixture.projectId, specification],
+  const created = JSON.parse((await cli(['task', 'create', fixture.projectId, specification,
+    '--title', 'fixture task', '--name', 'fixture-task'],
     fixture.environment)).stdout) as { readonly id: string };
   await cli(['stop'], fixture.environment);
   submitFixtureTaskWithoutScheduling({
@@ -130,10 +131,14 @@ async function seededExecutedTask(
       authorizationId: prepared.authorizationId, commandId: crypto.randomUUID(),
     });
     const task = storage.getTask(fixture.projectId, created.id);
+    // The recorded branch is the fact of what this workspace is called (ADR-0065 D03); a named
+    // workspace is `task/<displayNumber>-<namingTitle>`, not `task/<task-id>`.
+    const workspace = storage.getLatestTaskWorkspace(created.id);
+    if (workspace === null) throw new Error('The fixture Task has no recorded workspace');
     return {
       taskId: created.id,
       workspacePath: run.workspacePath,
-      branchRef: `refs/heads/task/${created.id}`,
+      branchRef: workspace.branchRef,
       taskVersion: task?.version as number,
     };
   } finally {

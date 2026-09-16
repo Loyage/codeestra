@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { cleanupTemporaryDirectories, registerTemporaryDirectory } from './support/agent-fixture.js';
 import { reclaimTestResources, runCli } from './support/runtime-reclamation.js';
+import { recordedWorkspaceName, recordedWorkspacePath } from './support/workspace-naming.js';
 
 /**
  * The scheduling engine through the real CLI and the real Runtime (FOUNDATION-055 / ADR-0030).
@@ -196,7 +197,8 @@ async function createTask(
   /** Extra flags after the specification, e.g. `--feature <module-id>` (ADR-0059). */
   flags: readonly string[] = [],
 ): Promise<string> {
-  const created = JSON.parse((await cli(['task', 'create', projectId, specification, ...flags],
+  const created = JSON.parse((await cli(['task', 'create', projectId, specification, ...flags,
+    '--title', 'fixture task', '--name', 'fixture-task'],
     environment)).stdout) as { readonly id: string };
   return created.id;
 }
@@ -290,10 +292,14 @@ describe('codeestra task schedule', () => {
       expect(list).toHaveLength(1);
       expect(list[0]?.state).toBe('RUNNING');
     }
-    await waitFor(() => Bun.file(join(realpathSync(value.home), 'worktrees', value.projectId, first,
-      'src', 'agent', `${first}.ts`)).size > 0);
-    await waitFor(() => Bun.file(join(realpathSync(value.home), 'worktrees', value.projectId, second,
-      'src', 'agent', `${second}.ts`)).size > 0);
+    const firstWorkspace = recordedWorkspacePath(value.home, first);
+    const secondWorkspace = recordedWorkspacePath(value.home, second);
+    // ADR-0065 D03: the directory name is `<displayNumber>-<namingTitle>`, and the stub provider keys
+    // the file it writes on the directory it runs in.
+    await waitFor(() => Bun.file(join(firstWorkspace, 'src', 'agent',
+      `${recordedWorkspaceName(value.home, first)}.ts`)).size > 0);
+    await waitFor(() => Bun.file(join(secondWorkspace, 'src', 'agent',
+      `${recordedWorkspaceName(value.home, second)}.ts`)).size > 0);
     const capacity = JSON.parse((await cli(['scheduler', 'capacity', 'get', '--json'],
       value.environment)).stdout) as { readonly used: number; readonly limit: number };
     expect(capacity).toMatchObject({ used: 2, limit: 2 });
@@ -355,8 +361,8 @@ describe('codeestra task schedule', () => {
     expect((await submit(value.environment, value.projectId, first)).schedule.started).toHaveLength(1);
     expect((await submit(value.environment, value.projectId, second)).schedule.started).toHaveLength(1);
     for (const taskId of [first, second]) {
-      await waitFor(() => Bun.file(join(realpathSync(value.home), 'worktrees', value.projectId,
-        taskId, 'core', 'shared.ts')).size > 0);
+      await waitFor(() => Bun.file(join(recordedWorkspacePath(value.home, taskId),
+        'core', 'shared.ts')).size > 0);
     }
     const secondRef = await taskRef(value.environment, value.projectId, second);
     const paused = await cli(['task', 'pause', value.projectId, second, String(secondRef.version)],
@@ -507,9 +513,11 @@ describe('codeestra task schedule', () => {
     expect([left.exitCode, right.exitCode]).toEqual([1, 1]);
     for (const attempt of [left, right]) expect(attempt.stderr).toContain('TASK_NOT_STARTABLE');
     expect(await executions(value.environment, value.projectId, task)).toHaveLength(1);
-    // One Agent process in total: the stub logs one start line per Task and no more.
+    // One Agent process in total: the stub logs one start line per workspace (ADR-0065 D03), so the
+    // recorded workspace name is what identifies this Task's line.
     const log = await Bun.file(value.stubLog).text();
-    expect(log.trim().split('\n').filter((line) => line.includes(task))).toHaveLength(1);
+    const logged = recordedWorkspaceName(value.home, task);
+    expect(log.trim().split('\n').filter((line) => line.includes(logged))).toHaveLength(1);
   }, 120_000);
 
   test('reports a grown diff without pausing anyone, because a change set is not a declaration', async () => {
@@ -522,9 +530,9 @@ describe('codeestra task schedule', () => {
     // Both start on empty predictions, which is the residual risk §4 exists for.
     expect((await submit(value.environment, value.projectId, first)).schedule.started).toHaveLength(1);
     expect((await submit(value.environment, value.projectId, second)).schedule.started).toHaveLength(1);
-    await waitFor(() => Bun.file(join(realpathSync(value.home), 'worktrees', value.projectId, first,
+    await waitFor(() => Bun.file(join(recordedWorkspacePath(value.home, first),
       'core', 'first.ts')).size > 0);
-    await waitFor(() => Bun.file(join(realpathSync(value.home), 'worktrees', value.projectId, second,
+    await waitFor(() => Bun.file(join(recordedWorkspacePath(value.home, second),
       'core', 'second.ts')).size > 0);
 
     // The next pass sees both diffs, and neither scope is contained in the prediction any more.
@@ -601,9 +609,11 @@ describe('codeestra task schedule', () => {
     expect(schedule.active[0]).toMatchObject({ taskId: task, executionState: 'RECOVERY_REQUIRED' });
     expect(schedule.candidates).toEqual([]);
     expect(schedule.capacity.globalUsed).toBe(1);
-    // One Agent process was started in total, across both Runtime generations.
+    // One Agent process was started in total, across both Runtime generations; the stub names its
+    // line after the workspace it ran in (ADR-0065 D03).
     const log = await Bun.file(value.stubLog).text();
-    expect(log.trim().split('\n').filter((line) => line.includes(task))).toHaveLength(1);
-    expect(existsSync(join(realpathSync(value.home), 'worktrees', value.projectId, task))).toBe(true);
+    const logged = recordedWorkspaceName(value.home, task);
+    expect(log.trim().split('\n').filter((line) => line.includes(logged))).toHaveLength(1);
+    expect(existsSync(recordedWorkspacePath(value.home, task))).toBe(true);
   }, 120_000);
 });

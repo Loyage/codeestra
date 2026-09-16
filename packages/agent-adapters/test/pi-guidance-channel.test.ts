@@ -140,7 +140,7 @@ Fixture {
       sessionId: '20000000-0000-4000-8000-000000000002',
       executionId: '30000000-0000-4000-8000-000000000003',
       workspace: { id: 'w1', cwd: workspace, ownershipToken: 'token' },
-      revision: { id: 'r1', specification: 'Do the thing', constraints: [] },
+      revision: { id: 'r1', displayTitle: 'Do the thing', specification: 'Do the thing' },
       knowledgeSnapshotRefs: [],
       permissionMode: 'FULL',
       environment: {},

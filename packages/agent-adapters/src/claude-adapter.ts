@@ -145,15 +145,13 @@ interface LiveSession {
   readonly argv: readonly string[];
 }
 
+/**
+ * The prompt carries the Task's display title and its detail (ADR-0065 D02); the Task-level titles
+ * are the only metadata a provider sees.
+ */
 function composeRevisionPrompt(revision: AgentStartRequest['revision']): string {
-  const lines = [`Codeestra revision ${revision.id}`, '', revision.specification.trim()];
-  if (revision.constraints.length > 0) {
-    lines.push('', 'Constraints:');
-    for (const constraint of revision.constraints) {
-      lines.push(`- ${constraint.id}: ${constraint.text.trim()}`);
-    }
-  }
-  return lines.join('\n');
+  return [`Codeestra revision ${revision.id}`, `Task: ${revision.displayTitle.trim()}`, '',
+    revision.specification.trim()].join('\n');
 }
 
 /**

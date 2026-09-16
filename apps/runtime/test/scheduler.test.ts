@@ -45,8 +45,8 @@ function createSubmittedTask(
     intentEventId: `intent-event-${taskId}`,
     taskEventId: `task-event-${taskId}`,
     specification,
-    constraints: [],
-    kind: 'DEVELOPMENT',
+    displayTitle: 'fixture task',
+    namingTitle: null,
     actor: 'local-user',
     createdAt: 10,
   });

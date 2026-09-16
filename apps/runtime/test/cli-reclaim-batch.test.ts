@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { DeterministicFakeAdapter } from '@codeestra/agent-adapters';
 import {
   Phase1Database,
@@ -153,6 +153,8 @@ async function fixtureWithProjects(
 interface SeededTask {
   readonly taskId: string;
   readonly workspacePath: string;
+  /** The recorded Task branch (ADR-0065 D03): `task/<displayNumber>-<namingTitle>`. */
+  readonly branchRef: string;
   readonly resultCommit: string;
 }
 
@@ -166,7 +168,8 @@ async function seededExecutedTask(
   projectId: string,
   specification: string,
 ): Promise<SeededTask> {
-  const created = JSON.parse((await cli(['task', 'create', projectId, specification],
+  const created = JSON.parse((await cli(['task', 'create', projectId, specification,
+    '--title', 'fixture task', '--name', 'fixture-task'],
     fixture.environment)).stdout) as { readonly id: string };
   await cli(['stop'], fixture.environment);
   submitFixtureTaskWithoutScheduling({ home: fixture.home, projectId, taskId: created.id });
@@ -194,7 +197,11 @@ async function seededExecutedTask(
       storage, projectId, taskId: created.id,
       authorizationId: prepared.authorizationId, commandId: crypto.randomUUID(),
     });
-    return { taskId: created.id, workspacePath: run.workspacePath,
+    // The recorded workspace row is the fact of the branch and path this Task owns.
+    const candidates = storage.getReclamationCandidates(projectId, { taskId: created.id });
+    const workspace = candidates.workspaces[0];
+    if (workspace === undefined) throw new Error('The fixture Task has no recorded workspace');
+    return { taskId: created.id, workspacePath: workspace.path, branchRef: workspace.branchRef,
       resultCommit: captured.resultCommit };
   });
 }
@@ -323,9 +330,9 @@ describe('codeestra reclaim: cross-project batch', () => {
       // The finished project is reclaimed; the busy project is untouched and still owned.
       expect(existsSync(reclaimable.workspacePath)).toBe(false);
       expect(existsSync(reserved.workspacePath)).toBe(true);
-      // ADR-0064: the Task branch lives in the project folder that owns the worktree.
+      // ADR-0066: the Task branch lives in the project folder that owns the worktree.
       expect(await git(fixture.repositories[0] as string, ['rev-parse', '--verify',
-        `refs/heads/task/${reclaimable.taskId}`])).toBe(reclaimable.resultCommit);
+        reclaimable.branchRef])).toBe(reclaimable.resultCommit);
 
       // The ledger is per project and read back across projects, with the deciding evidence.
       const records = JSON.parse((await cli(['reclaim', 'records', '--all-projects', '--json'],
@@ -576,7 +583,8 @@ describe('codeestra reclaim: unregistered directories', () => {
       // A selection spelled the way a person would (through the symlinked home) still matches the
       // canonical record, so it stays the *registered* target instead of becoming an unregistered
       // one that could be removed by an unverified path.
-      const spelledThroughLink = join(fixture.home, 'worktrees', projectId, task.taskId);
+      const spelledThroughLink = join(fixture.home, 'worktrees', projectId,
+        basename(task.workspacePath));
       expect(realpathSync(spelledThroughLink)).toBe(realpathSync(task.workspacePath));
       const selected = await cli(['reclaim', 'apply', '--project', projectId, '--unregistered',
         '--remove-unregistered', spelledThroughLink, '--json'], fixture.environment);

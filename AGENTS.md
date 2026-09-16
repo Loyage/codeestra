@@ -42,7 +42,7 @@
 **执行任何提升、重启 main 稳定服务或运行 dev 实例之前，先读 `docs/agents/runbook.md`**：命令序列、本机检出布局（ADR-0048）、dev 实例与「重启 main 稳定服务」规程的全文都在那里（原先写在本文件同名小节的规程已移入该文件）。本节只写不变量。
 
 - 项目必须长期保留 `main` 与 `dev` 两个分支，不得删除、重命名或用临时 integration branch 取代；两者在 GitHub 上都必须存在（`origin/main`、`origin/dev`）。`main` 是用户日常运行的稳定实例，不得在其上开发新功能。
-- 该双分支模型**只属于 Codeestra 自身**，且从 ADR-0064（schema **v35**）起它**没有任何产品支撑**：产品不再建模 dev clone、长期 `dev` 集成分支、`task integrate`、`task integration *` 或 `promotion *`（那些命令与相关表已整体删除）。本文件描述的 `main`/`dev` 布局、人工四步与重启规程全部是**本仓库自身的人工约定**，产品不提供命令、不记账、不校验。
+- 该双分支模型**只属于 Codeestra 自身**，且从 ADR-0066（schema **v36**）起它**没有任何产品支撑**：产品不再建模 dev clone、长期 `dev` 集成分支、`task integrate`、`task integration *` 或 `promotion *`（那些命令与相关表已整体删除）。本文件描述的 `main`/`dev` 布局、人工四步与重启规程全部是**本仓库自身的人工约定**，产品不提供命令、不记账、不校验。
 - `dev` 是新功能实验与集成分支：功能 Task/worktree 的基线是**项目文件夹（本机即 dev clone）建 workspace 时当前检出的分支**（`workspaces.base_ref`），在本机就是 `dev`；功能完成、Task verification 通过后，由**人**把成果合回 `dev`（`git merge`），不得直接进入 `main`。产品不做合并、不自动推、不记账。
 - `dev → main` 是唯一稳定提升路径，且**必须经 GitHub 中转**（沿用 ADR-0047 的口径，现在是人工步骤而非产品命令）：只 push 固定 dev 候选这一个 ref 并读回核对，main clone 以 fast-forward-only 拉取，重启核对通过后才推回 `origin/main`。不 `--force`、不覆盖远端已有提交、不对已检出的 `main` 用 `update-ref`；断网、SSH 认证失败或远端不可达时不推进任何 ref，也不得把本地等价当作提升成功。
 - 每批固定 dev SHA、预期 main SHA 与验证证据；提升前必须在精确 `dev` 候选 SHA 上跑完全量测试（在 dev clone 发起），候选、测试配置或锁文件变化即证据失效并重跑。FULL 下不批准，STRICT 下保留用户批准且 ref/证据变化使批准失效。

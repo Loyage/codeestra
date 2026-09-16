@@ -18,7 +18,7 @@
 | 源 | 触发 | Guard / 目标 |
 |---|---|---|
 | DRAFT | submit | 规格有效；依赖未满足→BLOCKED，否则 READY |
-| BLOCKED | dependencies satisfied | 上游指定修订的结果 commit 对项目**当前 Task 基线 ref**（项目文件夹当前检出的分支）可达→READY；由 scheduling pass 重新评估（ADR-0064，见 §4） |
+| BLOCKED | dependencies satisfied | 上游指定修订的结果 commit 对项目**当前 Task 基线 ref**（项目文件夹当前检出的分支）可达→READY；由 scheduling pass 重新评估（ADR-0066，见 §4） |
 | READY | dependency invalidated | →BLOCKED |
 | READY | schedule | 当前 revision、依赖、冲突、容量、workspace 预留均通过→RUNNING（含 Execution 准备过程） |
 | RUNNING | agent needs input | 真实 AttentionRequest 已建立→WAITING_FOR_USER |
@@ -47,10 +47,10 @@ Task Verification：`NOT_RUN → QUEUED → RUNNING → PASSED | FAILED | ERROR 
 
 Phase 1 判定（ADR-0006）：全部命令 exit 0 且副本 tracked 内容未变→`PASSED`；命令非零退出或无法 spawn→`FAILED/COMMAND_FAILED`（不继续后续命令）；超时→`ERROR/COMMAND_TIMEOUT`；tracked 修改或 HEAD 移动→`ERROR/TREE_MUTATED`（不覆盖已判定的 `FAILED`）；副本无法创建→`ERROR/WORKTREE_FAILED`；Runtime 重启→`ERROR/RUNTIME_RESTARTED` 并保留副本路径。终态一旦写入，重放 completion 不改变结论。Task 自身状态不因验证而变成 SUCCEEDED：`PASSED` 只是当前 revision/commit 的 Task scope 证据。
 
-Task worktree 基线（ADR-0064）：新 Task 的 workspace 从**项目文件夹建 workspace 时当前检出的分支**的当前 OID 建立，ref 与 commit 一起固定进 `workspaces.base_ref`/`base_commit`；`HEAD` detached 时以 `TASK_BASE_REF_UNRESOLVED` 拒绝，不静默回退到其他分支。已有 workspace 不回改基线。
+Task worktree 基线（ADR-0066）：新 Task 的 workspace 从**项目文件夹建 workspace 时当前检出的分支**的当前 OID 建立，ref 与 commit 一起固定进 `workspaces.base_ref`/`base_commit`；`HEAD` detached 时以 `TASK_BASE_REF_UNRESOLVED` 拒绝，不静默回退到其他分支。已有 workspace 不回改基线。
 
 Task worktree 回收（ADR-0021）：只有显式 `reclaim plan/apply/records` 一条删除路径（`INTEGRATION_WORKTREE` 取值保留在 append-only 账本词汇表里，但 Runtime 不再产生该类候选）；
-它不删 branch，失败现场默认保留。ADR-0062 的「集成成功后自动回收」随 ADR-0064 删除集成而移除，没有自动路径。
+它不删 branch，失败现场默认保留。ADR-0062 的「集成成功后自动回收」随 ADR-0066 删除集成而移除，没有自动路径。
 
 ## 2. Execution
 
@@ -145,9 +145,9 @@ RECORDED ──(存在活会话且通道为 SUPPORTED)──→ DELIVERED       
 - 启动交付 fail-closed：Task 有 guidance 记录却拿不到 Runtime home 或 artifact 核验不过（绝对路径/普通文件/digest/字节数/UTF-8）
   时以 `GUIDANCE_CONTEXT_UNAVAILABLE` **拒绝启动**，不静默少注入；**零 guidance 时 argv/入参逐字节不变**。
 
-## 4. IntegrationBatch / StableBranchPromotion（已删除，ADR-0064）
+## 4. IntegrationBatch / StableBranchPromotion（已删除，ADR-0066）
 
-这一整段曾描述「Task 成果进入 `dev`」与「`dev` 提升 `main`」两层状态机。**ADR-0064 把它从产品中删除**：
+这一整段曾描述「Task 成果进入 `dev`」与「`dev` 提升 `main`」两层状态机。**ADR-0066 把它从产品中删除**：
 命令（`task integrate`、`task integration create|integrate|list|get|cancel`、
 `promotion prepare|approve|promote|restart.record|abandon|get|list`、
 `promotion full-suite run|list`）、服务（`integration-service`、`promotion-service`、

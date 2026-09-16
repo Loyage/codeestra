@@ -250,7 +250,7 @@ function fixture(mode: string, options: {
     sessionId: 'session-under-test',
     executionId: 'execution-1',
     workspace: { id: 'workspace-1', cwd: root, ownershipToken: 'token-1' },
-    revision: { id: 'revision-1', specification: 'Do the thing', constraints: [{ id: 'c1', text: 'Be safe' }] },
+    revision: { id: 'revision-1', displayTitle: 'Do the thing', specification: 'Do the thing' },
     knowledgeSnapshotRefs: [],
     permissionMode: options.permissionMode ?? 'STRICT',
     environment: {},
@@ -370,7 +370,9 @@ describe('Claude adapter start', () => {
     expect(report.cwd).toBe(fixtureUnderTest.root);
     expect(report.controlRequests.map((request) => request.subtype)).toEqual(['initialize']);
     expect(report.userMessages[0]).toContain('Codeestra revision revision-1');
-    expect(report.userMessages[0]).toContain('- c1: Be safe');
+    // ADR-0065 D02: the prompt is the title plus the detail; the removed constraint section is gone.
+    expect(report.userMessages[0]).toContain('Task: Do the thing');
+    expect(report.userMessages[0]).not.toContain('Constraints:');
   });
 
   test('records the conversation path the provider will actually write, resolved path included',

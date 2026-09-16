@@ -1,14 +1,19 @@
 # 功能清单：「这软件能做什么」
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v35 · **最后校对** 2026-09-16
-> 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
+> **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
+> 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> 「创建任务」与「规格修订」两行由本分支按 **ADR-0065** 改写（三个必填字段；约束与任务类型已删除）。
 > 「调度、容量与冲突」一节新增「全局暂停」一行，并由 FOUNDATION-097 标明容量行的目标语义（ADR-0061 D01–D03）；
 > 「任务」表的「永久删除」一行由 FOUNDATION-090 新增（ADR-0058）；「调度、容量与冲突」一节的声明功能与
 > 冲突判定两行由 FOUNDATION-091 改写（ADR-0059）。
 > 「任务」表的「列出任务」与「状态投影」两行，以及新增的「Agent 运行结局与最后输出」一行，
 > 由用户任务 `Loyage/simplize_task_ui`（2026-09-16）同步（无新命令：只用已有的 `task list` / `task status` 字段）。
 > 「接入与项目」表的 dev 事实来源一行由 FOUNDATION-093 第三轮同步（ADR-0060 修订）；
+> 「设置」表新增「设置总览」一行，「权限模式」一行的 CLI 入口改为 `settings permission …`
+> 并链接 0064（FOUNDATION-098 / ADR-0064：`settings list` 总览，权限模式移入 `settings`）。
 > 「调度、容量与冲突」的容量与上限、槽位预留两行由 **FOUNDATION-096** 改写（ADR-0061：唯一 Runtime 全局上限），
 > 同一表的「全局暂停」一行由 **FOUNDATION-097** 从「尚未实现」改为实现事实（ADR-0061 D04–D10：持久屏障与
 > Provider 主进程冻结，Pi 为 `SUPPORTED`、Codex/Claude 为 `REQUIRES_VALIDATION`）；
@@ -32,10 +37,10 @@
 
 | 能力 | 能做什么 | CLI 入口 | UI 位置 | ADR |
 |---|---|---|---|---|
-| 项目识别 | 读仓库身份：工作树根、`main` ref、对象格式、HEAD（ADR-0064 删除了 dev clone 与 `dev` 基线字段） | `project inspect [path]` | 项目 → 添加本地项目 | [0064](../decisions/0064-remove-dev-clone-and-dual-baseline.md) |
+| 项目识别 | 读仓库身份：工作树根、`main` ref、对象格式、HEAD（ADR-0066 删除了 dev clone 与 `dev` 基线字段） | `project inspect [path]` | 项目 → 添加本地项目 | [0064](../decisions/0066-remove-dev-clone-and-dual-baseline.md) |
 | 验证策略展示 | 打印 `main` ref 上 `.codeestra/policies/verification.json` 的状态、digest 与逐条命令 | `project policy [path]` | 项目 → 验证策略 | [0006](../decisions/0006-task-verification-policy.md) |
-| 项目接入（trust） | 注册项目；把「你刚看到的身份 + 验证策略 digest + 影响映射 digest」一起确认；FULL 零确认 / STRICT 输 `TRUST` | `project trust [path] [--yes]` | 项目 → 添加/信任此项目（被拒绝时显示稳定码 + 本地解释） | [0011](../decisions/0011-default-full-permission-mode.md)、[0031](../decisions/0031-impact-snapshot-and-deterministic-conflict-analyzer.md)、[0064](../decisions/0064-remove-dev-clone-and-dual-baseline.md) |
-| Task 基线 | **只有一种**（ADR-0064）：从**项目文件夹建 workspace 时当前检出的分支**建基线，把 ref 与 commit 一起固定（`workspaces.base_ref`/`base_commit`）；detached HEAD 以 `TASK_BASE_REF_UNRESOLVED` 拒绝，因为它没有分支可名。`task run --base-ref <refs/heads/…>` 可单次覆盖 | `task run`（准备 workspace 时） | —（同一命令面） | [0005](../decisions/0005-task-entry-and-worktree-location.md)、[0064](../decisions/0064-remove-dev-clone-and-dual-baseline.md) |
+| 项目接入（trust） | 注册项目；把「你刚看到的身份 + 验证策略 digest + 影响映射 digest」一起确认；FULL 零确认 / STRICT 输 `TRUST` | `project trust [path] [--yes]` | 项目 → 添加/信任此项目（被拒绝时显示稳定码 + 本地解释） | [0011](../decisions/0011-default-full-permission-mode.md)、[0031](../decisions/0031-impact-snapshot-and-deterministic-conflict-analyzer.md)、[0064](../decisions/0066-remove-dev-clone-and-dual-baseline.md) |
+| Task 基线 | **只有一种**（ADR-0066）：从**项目文件夹建 workspace 时当前检出的分支**建基线，把 ref 与 commit 一起固定（`workspaces.base_ref`/`base_commit`）；detached HEAD 以 `TASK_BASE_REF_UNRESOLVED` 拒绝，因为它没有分支可名。`task run --base-ref <refs/heads/…>` 可单次覆盖 | `task run`（准备 workspace 时） | —（同一命令面） | [0005](../decisions/0005-task-entry-and-worktree-location.md)、[0064](../decisions/0066-remove-dev-clone-and-dual-baseline.md) |
 | 一条命令接入并打开 | inspect → 策略展示 → 必要时确认 → 打开界面并预选该项目 | `open [path] [--yes] [--no-open]` | —（它就是打开 UI 的那条路） | [0007](../decisions/0007-local-web-ui-entry.md)、[0008](../decisions/0008-efficiency-first-service-form.md) |
 | 项目列表 | 列出已信任项目及其确认策略 | `project list` | 顶部项目选择器 | — |
 | 影响映射校验 | 报告 `main` ref 上的 `.codeestra/impact.json` 是否存在且是已确认的那一份 | `project impact validate [path] [--json]` | **调度 → 影响映射 · impact.json** | [0031](../decisions/0031-impact-snapshot-and-deterministic-conflict-analyzer.md) |
@@ -44,7 +49,7 @@
 
 | 能力 | 能做什么 | CLI 入口 | UI 位置 | ADR |
 |---|---|---|---|---|
-| 创建任务 | 原子保存原始意图、首 revision、事实事件与幂等回执 | `task create <project> <spec> [--constraint <t>]… [--kind DEVELOPMENT]` | 新建任务停靠条 | — |
+| 创建任务 | 原子保存原始意图、首 revision、事实事件与幂等回执；三个必填字段：显示标题、命名标题、任务详情（ADR-0065） | `task create <project> <详情…> --title <显示标题> --name <命名标题>` | 新建任务停靠条 | [0065](../decisions/0065-task-input-fields.md) |
 | 列出任务 | 列出任务（默认隐藏归档，`--all` 含归档）；每行附带最新一次尝试的 `latestExecution`（结局事实，见下行） | `task list <project> [--all]` | 任务工作台列表（含搜索/筛选/排序；行尾提示在 Agent 退出后改说那次尝试的结局） | [0034](../decisions/0034-compact-task-workbench.md) |
 | 提交任务 | 用 expected version 把 `DRAFT` 转 `READY`，并在同一命令里核对依赖 + 跑一次调度 pass | `task submit <project> <task> <expected-version>` | 任务详情 → 提交 | — |
 | 运行任务 | 显式请求启动；同自动调度同一门禁（依赖/冲突/容量） | `task run <project> <task> <expected-version> [--adapter <id>] [--allow-unknown] [--json]` | 任务详情 → 启动 Agent | [0030](../decisions/0030-phase2-parallel-scheduling.md) |
@@ -54,7 +59,7 @@
 | 永久删除 | **不可撤销**：删掉任务的全部记录（含 append-only 的修订/impact/定向测试计划/知识绑定）与它自己的 worktree、验证副本、`task/<id>` 分支，并写一条 `TaskPurged`；需 `--yes`；非终态先协作停止，`RECOVERY_REQUIRED` 先按观察对账（无法确认进程已退出则拒绝）；**成果已进 `dev`/`main` 的任务默认拒绝**（只能归档）。被拒绝时 `--force` 可删：先按记录的身份终止 provider，再删掉本来会拒绝的行（含 `dev`/`main` 的来源记录，必要时连同那条提升记录），归属不明的目录/分支留在磁盘上并逐项列出 | `task purge <project> <task> <expected-version> --yes [--force] [--reason <text>]` | 任务详情 →「更多操作」→「永久删除」（输入任务编号才启用）；被拒绝后多一个「仍要强制删除」 | [0058](../decisions/0058-task-purge.md) |
 | 状态投影 | 列出 Execution / Session / 验证 / 集成投影，附 Agent 完成注记与散文提问等待 | `task status <project> <task> [--json]` | 任务详情（执行 / 验证 / `集成批次 · dev` 记录，后者含每个批次的成员表） | [0013](../decisions/0013-read-only-agent-transcript-view.md) |
 | Agent 运行结局与最后输出 | 最新一次尝试的结局（provider 记的 `SUCCESS`/`FAILURE`，或**没有记录到结局**）、停止原因、工具调用数与**最后一段助手文本**（Runtime 最多保留 2000 字符，截断时如实标注只保留尾部）；`task list`/`task status` 的 `latestExecution` 让列表行不必逐行读详情 | `task status <project> <task> [--json]`（`executions[].session.completion.facts`、`latestExecution`） | 任务详情顶部「Agent 运行结果」卡片（含 `查看完整会话记录 ↓` 跳转）+ 任务列表行提示 | FOUNDATION-056（无 ADR；仅前端投影与只读字段） |
-| 规格修订 | 创建新 revision（可只改理由、只加约束）并列出历史 | `task revision create`、`task revision list` | —（界面无入口） | [0028](../decisions/0028-revision-delivery-and-stale-session-startup-reconcile.md) |
+| 规格修订 | 创建新 revision（改任务详情或功能声明，二者至少其一）并列出历史 | `task revision create`、`task revision list` | —（界面无入口） | [0028](../decisions/0028-revision-delivery-and-stale-session-startup-reconcile.md)、[0065](../decisions/0065-task-input-fields.md) |
 | Revision 投递台账 | 单独读取与解决「修订是否真的到达运行中的 Execution」 | `task revision delivery list/get/resolve` | —（界面无投影） | [0028](../decisions/0028-revision-delivery-and-stale-session-startup-reconcile.md) |
 | 优先级（**当前无命令面**） | 优先级是 Task 模型与调度排序的一部分（降序优先），但**没有任何 CLI 命令可以改它**：`task create` 不接受 priority 参数，新建 Task 的 priority 为 0 | —（无入口） | 任务工作台排序 | [0030](../decisions/0030-phase2-parallel-scheduling.md) |
 
@@ -66,7 +71,8 @@
 | 原生终端接管 | 单一 writer lease + 安全点 + 准入决策：attach 读投影终端流、detach 保持运行、release 写释放字节并验证 provider 已退出且会话文件仍在 | `session handoff status/request/cancel`、`writer acquire/release`、`admit/attach/detach/release`、`terminal read/write` | 任务详情 → 原生终端与会话交接 | [0010](../decisions/0010-live-agent-terminal-takeover.md)、[0023](../decisions/0023-strict-permission-attention-and-session-writer-lease.md)、[0026](../decisions/0026-native-terminal-pty-transport.md) |
 | 结构化提问 | Agent 用 `ask_user_question` 一次提 1–4 题（每题 2–4 个可选项、可多选、可用自己的话答）；一份问卷 = 一条 Attention = 一次 answer | `attention list`、`attention answer … --choose/--text/--cancel` | 待处理（单选/多选 + 自由文本） | [0014](../decisions/0014-agent-structured-question-channel.md) |
 | 散文提问等待 | 识别「没用工具、正文提问并结束轮次」，记成一条独立 Attention 与 `WAITING_FOR_USER`，并给出明确退出方式 | `attention resolve … --answer/--dismiss`、`settings prose-question-attention` | —（CLI-only） | [0043](../decisions/0043-prose-question-attention-escalation.md) |
-| 权限模式 | 默认 FULL 零确认；可无确认切 STRICT 恢复旧门禁（工具逐次审批、两步成果 commit、提升批准） | `permission get`、`permission set <full\|strict>` | 界面显示当前模式；STRICT 下出现 TRUST 输入与二次确认 | [0011](../decisions/0011-default-full-permission-mode.md)、[0023](../decisions/0023-strict-permission-attention-and-session-writer-lease.md) |
+| 设置总览 | 一条只读命令列出全部九项 Runtime 级设置（权限模式 / 散文开关 / 自动回收 / 五个界面键 / 并发上限），每项给出生效值、产品默认、取值、是否显式设置与存储位置；每项都由它自己那条命令的同一次读取填充，因此不会与专命令读出不一致 | `settings list [--json]` | —（CLI-only） | [0064](../decisions/0064-settings-list-and-permission-as-a-setting.md) |
+| 权限模式 | 默认 FULL 零确认；可无确认切 STRICT 恢复旧门禁（工具逐次审批、两步成果 commit、提升批准） | `settings permission get`、`settings permission set <full\|strict>` | 界面显示当前模式；STRICT 下出现 TRUST 输入与二次确认 | [0011](../decisions/0011-default-full-permission-mode.md)、[0023](../decisions/0023-strict-permission-attention-and-session-writer-lease.md)、[0064](../decisions/0064-settings-list-and-permission-as-a-setting.md) |
 | Agent 配置 | 持久化 provider/model/thinking，分全局默认与每项目覆盖；逐字段按 `环境变量 > 项目 > 全局 > Adapter 默认` 解析；只影响新 Session | `agent config get/set/clear [--project <id>] [--adapter <id>] [--provider/--model/--thinking/--unset]` | Agent 设置标签页（`当前生效值` 表与 `编辑并保存`） | [0012](../decisions/0012-agent-configuration-scopes.md) |
 | Agent 插件选择 | 选 Pi 的四类资源（extensions / skills / prompt templates / themes）；选择是**一个整体字段**（项目整份替换全局，不逐项合并）；生效值连同来源层与第三方扩展风险写进 Execution | `agent plugins list`、`agent plugins select [--extension/--skill/--prompt-template/--theme <path>]… [--clear]` | Agent 设置标签页（`插件候选` 与 `清除选择`） | [0044](../decisions/0044-agent-plugin-selection-and-detection.md) |
 | 多 Adapter | 注册 `pi`（默认）、`codex`、`claude`；每次运行绑定一个 Agent，换 Adapter 是新建 Execution | `task run/resume/retry --adapter <id>` | 任务详情 → 启动 Agent / 继续（`Agent` 下拉框，在 `READY` 与 `PAUSED` 时出现）；重试入口另有自己的 Adapter 下拉框，默认「沿用该任务上一次运行的 Adapter」，选项来自 `runtime.ping` 的已注册列表 | [0029](../decisions/0029-codex-adapter-transport-and-capabilities.md)、[0040](../decisions/0040-claude-code-adapter-transport-and-capabilities.md) |
@@ -104,7 +110,7 @@
 
 ## 稳定提升（已删除）
 
-**ADR-0064 把整条 `dev → main` 提升路径从产品中删除**（schema v35）：`promotion prepare/approve/promote/
+**ADR-0066 把整条 `dev → main` 提升路径从产品中删除**（schema v36）：`promotion prepare/approve/promote/
 abandon/get/list`、`promotion full-suite run|list`、IntegrationBatch 与独立集成验证都不存在，
 `dev_full_suite_evidence` 表也已 DROP。成果停在 `refs/heads/task/<task-id>`，是否合并由你自己决定。
 本仓库自身仍走 `AGENTS.md` / `docs/agents/runbook.md` 的人工四步（push 固定候选到远端 `dev` → main 检出
@@ -128,7 +134,7 @@ ff-only 拉取 → 重启核对 → 推回远端 `main`），但那是仓库约�
 | 界面效果设置 | 五个键（`theme`/`density`/`fontSize`/`motion`/`timeDisplay`）存在 Runtime home 的 `ui-settings.json`，CLI 与界面读写同一份值；换浏览器、清缓存、重启 Runtime 后仍生效 | `settings ui list/get/set/reset` | 设置标签页（`界面效果`）+ 侧栏底部「外观」下拉框 | [0045](../decisions/0045-global-ui-settings.md) |
 | 并发上限设置 | 全局并发上限也可以从设置面读与改：`settings concurrency` 与 `scheduler capacity` 是**同一事实**（同一 `runtime_capacity_settings` 行、同一条事件），改完立刻生效且零确认 | `settings concurrency get/set --limit/reset` | —（CLI-only；界面容量卡仍显示调度面的同一数字） | [0061](../decisions/0061-runtime-global-load-control.md) D01/D02 |
 | Web UI | 本地 `127.0.0.1` HTTP + SSE，一次性内存 token，只走 `/api/command` 与 `/api/events` | `ui [--no-open]` | 全部界面 | [0007](../decisions/0007-local-web-ui-entry.md)、[0015](../decisions/0015-task-workbench-and-themes.md)、[0017](../decisions/0017-new-task-dock.md)、[0034](../decisions/0034-compact-task-workbench.md) |
-| Runtime 生命周期 | 单实例、自动拉起、两阶段 stop 与 ownership 报告 | `status`、`stop [--wait <s>]`、`permission get` | 侧栏底部的权限模式与事件流状态指示（**界面不提供停止/重启/切权限模式**） | [0025](../decisions/0025-runtime-lifecycle-stop-and-single-instance.md) |
+| Runtime 生命周期 | 单实例、自动拉起、两阶段 stop 与 ownership 报告 | `status`、`stop [--wait <s>]`、`settings permission get` | 侧栏底部的权限模式与事件流状态指示（**界面不提供停止/重启/切权限模式**） | [0025](../decisions/0025-runtime-lifecycle-stop-and-single-instance.md)、[0064](../decisions/0064-settings-list-and-permission-as-a-setting.md) |
 | 界面主题 | 亮/暗主题切换（不改任何业务语义；ADR-0045 后由 Runtime 持久化） | `settings ui set theme system\|light\|dark` | 侧栏底部「外观」下拉框（登录前的令牌表单里还有一个只预览、不写入的） | [0015](../decisions/0015-task-workbench-and-themes.md)、[0045](../decisions/0045-global-ui-settings.md) |
 | HTTP / SSE 面 | 与 socket 传输**同一 Zod 请求 schema**；`events.subscribe` 与 `runtime.ui` 在 HTTP 上被拒（`NOT_AVAILABLE_OVER_HTTP`） | `POST /api/command`、`GET /api/events` | 界面内部使用 | [0007](../decisions/0007-local-web-ui-entry.md)、[0008](../decisions/0008-efficiency-first-service-form.md) |
 

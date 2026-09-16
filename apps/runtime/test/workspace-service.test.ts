@@ -80,8 +80,8 @@ async function fixture(): Promise<{
     intentEventId: '70000000-0000-4000-8000-000000000007',
     taskEventId: '80000000-0000-4000-8000-000000000008',
     specification: 'Prepare an owned worktree',
-    constraints: [],
-    kind: 'DEVELOPMENT',
+    displayTitle: 'fixture task',
+    namingTitle: null,
     actor: 'local-user',
     createdAt: 2,
   });
@@ -230,6 +230,55 @@ describe('workspace preparation service', () => {
     }
   });
 
+  test('names a new workspace after the display number and the naming title (ADR-0065 D03)', async () => {
+    const value = await fixture();
+    try {
+      // A Task created through the product's `task create` always carries a naming title; the fixture's
+      // first Task deliberately has none, so this covers the branch that has one.
+      const named = value.storage.createTask({
+        projectId: value.projectId,
+        commandId: 'c0000000-0000-4000-8000-00000000000c',
+        payloadHash: 'named-create',
+        intentId: 'c1000000-0000-4000-8000-00000000000c',
+        taskId: 'c2000000-0000-4000-8000-00000000000c',
+        revisionId: 'c3000000-0000-4000-8000-00000000000c',
+        intentEventId: 'c4000000-0000-4000-8000-00000000000c',
+        taskEventId: 'c5000000-0000-4000-8000-00000000000c',
+        displayTitle: 'Name the workspace after the Task',
+        namingTitle: 'named-worktree',
+        specification: 'Prepare a named worktree',
+        actor: 'local-user',
+        createdAt: 3,
+      });
+      expect(named.displayNumber).toBe(2);
+      value.storage.submitTask({
+        projectId: value.projectId, taskId: named.id, expectedVersion: 0,
+        commandId: 'c6000000-0000-4000-8000-00000000000c', payloadHash: 'named-submit',
+        eventId: 'c7000000-0000-4000-8000-00000000000c', actor: 'local-user', submittedAt: 4,
+      });
+      const prepared = await prepareTaskWorkspace({
+        storage: value.storage,
+        runtimeHome: value.home,
+        commandId: 'c8000000-0000-4000-8000-00000000000c',
+        projectId: value.projectId,
+        taskId: named.id,
+        expectedTaskVersion: 1,
+        now: () => 20,
+        randomUUID: uuidSequence(0x20),
+      });
+      expect(prepared.branchRef).toBe('refs/heads/task/2-named-worktree');
+      expect(prepared.path).toBe(join(value.home, 'worktrees', value.projectId, '2-named-worktree'));
+      expect(await run(prepared.path, ['symbolic-ref', 'HEAD']))
+        .toBe('refs/heads/task/2-named-worktree');
+      // The internal identity is still what the row records, so nothing downstream has to parse the
+      // name back into a Task.
+      expect(value.storage.getLatestTaskWorkspace(named.id)?.branchRef)
+        .toBe('refs/heads/task/2-named-worktree');
+    } finally {
+      value.storage.close();
+    }
+  });
+
   test('atomically reserves one Execution after the workspace is ready', async () => {
     const value = await fixture();
     try {
@@ -319,6 +368,7 @@ describe('workspace preparation service', () => {
         worktreesRoot: crashed.worktreesRoot,
         projectId: crashed.plan.projectId,
         baseRef: crashed.plan.baseRef,
+        workspaceName: crashed.plan.taskId,
         taskId: crashed.plan.taskId,
         workspaceId: crashed.plan.workspaceId,
         ownershipToken: crashed.plan.ownershipToken,
@@ -350,6 +400,7 @@ describe('workspace preparation service', () => {
         worktreesRoot: crashed.worktreesRoot,
         projectId: crashed.plan.projectId,
         baseRef: crashed.plan.baseRef,
+        workspaceName: crashed.plan.taskId,
         taskId: crashed.plan.taskId,
         workspaceId: crashed.plan.workspaceId,
         ownershipToken: crashed.plan.ownershipToken,

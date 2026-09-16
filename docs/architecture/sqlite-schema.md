@@ -1,6 +1,8 @@
 # SQLite Schema
 
-状态：逻辑 SQL 设计基线 + 已实现 migration 记录。第 2–6 节是逻辑关系设计（其中若干节已被后续 ADR 修订，见第 8 节各版本的说明）；第 8 节逐版本记录 `packages/storage/src/migration.ts` 中**实际存在**的 migration，当前最新实现为 schema **v35**（ADR-0064 删除 dev clone / 双基线 / 集成 / 稳定提升；v34 是 ADR-0061 的两半：容量上半 FOUNDATION-096，暂停下半 FOUNDATION-097；v16 永久未使用、v22 未占用）。**schema version 16 永久未使用**，原因见第 8 节。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与第 2–6 节的约束等价，并以第 8 节的实现记录为准。
+状态：逻辑 SQL 设计基线 + 已实现 migration 记录。第 2–6 节是逻辑关系设计（其中若干节已被后续 ADR 修订，见第 8 节各版本的说明）；第 8 节逐版本记录 `packages/storage/src/migration.ts` 中**实际存在**的 migration，当前最新实现为 schema **v36**（ADR-0066 删除 dev clone / 双基线 / 集成 / 稳定提升；v35 是 ADR-0065 的任务输入字段重建；v34 是 ADR-0061 的两半：容量上半 FOUNDATION-096，暂停下半 FOUNDATION-097；v16 永久未使用、v22 未占用）。**schema version 16 永久未使用**，原因见第 8 节。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与第 2–6 节的约束等价，并以第 8 节的实现记录为准。
+> **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` /
+> `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支）。
 
 ## 1. 约定
 
@@ -25,7 +27,7 @@ CREATE TABLE projects (
   repo_root TEXT NOT NULL UNIQUE,
   git_common_dir TEXT NOT NULL UNIQUE,
   main_ref TEXT NOT NULL,
-  -- v1/v29 曾有 dev_ref 与 dev_repo_path；ADR-0064（schema v35）把它们删除：
+  -- v1/v29 曾有 dev_ref 与 dev_repo_path；ADR-0066（schema v36）把它们删除：
   -- Task 基线改为「项目文件夹建 workspace 时检出的分支」，记在 workspaces.base_ref/base_commit 上。
   object_format TEXT NOT NULL CHECK (object_format IN ('sha1','sha256')),
   policy_version INTEGER NOT NULL DEFAULT 1,
@@ -51,6 +53,8 @@ CREATE TABLE intents (
   idempotency_key TEXT NOT NULL,
   raw_text TEXT NOT NULL,
   -- v1 的声明；v28（ADR-0046）把它收窄为前五个取值，见第 8 节。
+  -- `ADD_CONSTRAINT` 自 ADR-0065 D05 起不再产生（约束功能已删除），但**保留在 CHECK 里**：
+  -- 库里已有真实历史行，改写已记录的分类就是改写历史。
   kind TEXT CHECK (kind IN ('CREATE_TASK','AMEND_TASK','ADD_CONSTRAINT',
     'CANCEL_TASK','CHANGE_PRIORITY','ANSWER_AGENT','SELF_MODIFICATION')),
   status TEXT NOT NULL CHECK (status IN ('RECORDED','NEEDS_CLARIFICATION','APPLIED','REJECTED')),
@@ -62,7 +66,10 @@ CREATE TABLE tasks (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id),
   display_number INTEGER NOT NULL CHECK(display_number > 0),
-  kind TEXT NOT NULL CHECK(kind IN ('DEVELOPMENT','SELF')),
+  -- schema v35 (ADR-0065)：两个 Task 级标题。display_title 必填（历史行由 detail 首行派生），
+  -- naming_title 可空（历史行不编造名字），并删除 v1 的 kind 列。
+  display_title TEXT NOT NULL CHECK(length(trim(display_title)) > 0),
+  naming_title TEXT CHECK(naming_title IS NULL OR length(trim(naming_title)) > 0),
   current_revision_id TEXT NOT NULL,
   state TEXT NOT NULL CHECK(state IN ('DRAFT','BLOCKED','READY','RUNNING','PAUSING',
     'PAUSED','WAITING_FOR_USER','RECOVERY_REQUIRED','EXECUTED','FAILED',
@@ -82,7 +89,7 @@ CREATE TABLE task_revisions (
   number INTEGER NOT NULL CHECK(number > 0),
   previous_revision_id TEXT,
   specification TEXT NOT NULL CHECK(length(trim(specification)) > 0),
-  constraints_json TEXT NOT NULL CHECK(json_valid(constraints_json)),
+  -- v1 的 constraints_json；schema v35 (ADR-0065 D04) 删除了该列（约束功能不再存在）。
   -- schema v32 (FOUNDATION-091 / ADR-0059)：声明的功能（modules[].id），纯 ADD COLUMN，
   -- 历史行一律 '[]'（在引入该列之前没有任何声明，而「没声明」的安全读法就是不参与功能冲突）。
   features_json TEXT NOT NULL DEFAULT '[]'
@@ -437,7 +444,7 @@ CREATE INDEX verification_subject ON verification_runs(task_id,revision_id,teste
 
 Schema version 1 仅创建 TASK verification 所需列和复合外键，不创建 `integration_batches`、`integration_batch_items`、`stable_branch_promotions`、`stable_promotion_approvals` 或 INTEGRATION scope；Phase 4 migration 引入上述逻辑形态并补做 subject XOR 测试。version 6 已将 Phase 1 实际使用的 TASK scope 重建为带 evidence/policy/operation 列的形态，见第 8 节。
 
-**ADR-0064 起本节描述的集成与提升逻辑对象在实现中已全部删除**（schema v35）：`integration_batches`、`integration_batch_items`、`integration_verification_runs`、`stable_promotions`、`stable_promotion_members`、`dev_full_suite_evidence` 都不存在。下面第 8 节里 v10/v13/v25/v29/v30 各段是**历史记录**，描述当时确实创建过的结构，不代表当前 schema。
+**ADR-0066 起本节描述的集成与提升逻辑对象在实现中已全部删除**（schema v36）：`integration_batches`、`integration_batch_items`、`integration_verification_runs`、`stable_promotions`、`stable_promotion_members`、`dev_full_suite_evidence` 都不存在。下面第 8 节里 v10/v13/v25/v29/v30 各段是**历史记录**，描述当时确实创建过的结构，不代表当前 schema。
 
 ## 6. 操作日志、事件、幂等
 
@@ -1206,10 +1213,12 @@ ALTER TABLE stable_promotions ADD COLUMN approved_full_suite_evidence_id TEXT;
 已知后果（ADR-0032 记录）：单个 lane 合并后，**已经被标成更高版本号的库不会补跑后来出现的更低版本步骤**。跨格合并必须按既定顺序
 （E0 → E1 → E2；以及 Wave D 的 17 → 18 → 19）。这也是 v16 永久未使用的同一个根因。
 
-版本占用现状（以 `packages/storage/src/migration.ts` 为准，不提前创建未来表）：v22 未占用；v16 永久未使用；v23–v30 已实现
+版本占用现状（以 `packages/storage/src/migration.ts` 为准，不提前创建未来表）：v22 未占用；v16 永久未使用；v23–v35 已实现
 （v23 `task retry`/ADR-0036，v24 未注册目录回收/ADR-0037，v25 分层验证证据/ADR-0038+ADR-0039，v26 项目知识/ADR-0041，
 v27 Agent 插件选择/ADR-0044，v28 `intents.kind` 收窄/ADR-0046，v29 dev clone 与经 GitHub 中转的提升/ADR-0047，
-v30 多成员 IntegrationBatch 的两个终态/ADR-0053）。当前 `phase1SchemaVersion = 30`。
+v30 多成员 IntegrationBatch 的两个终态/ADR-0053，v31 Session Guidance/ADR-0057，v32 revision 功能声明/ADR-0059，
+v33 `workspaces.base_ref`/ADR-0060，v34 Runtime 全局容量与 Provider 冻结/ADR-0061，
+v35 Task 输入字段：两个标题 + 删除约束/任务类型/ADR-0065）。当前 `phase1SchemaVersion = 35`。
 
 ### 经 GitHub 中转的提升与 dev clone（schema version 29，ADR-0047）—— **v35 已删除**
 
@@ -1351,6 +1360,10 @@ step-time 错误，不比对就可能让 `DROP TABLE` 在复制被拒后照跑�
 但移除 `CHANGE_PRIORITY` 后**没有任何命令能让它非 0**，因此 ADR-0030 的「priority desc」在现状下是惰性的（这是如实记录的代价）。
 Phase 7 落地 `SELF_MODIFICATION` 时需要再做一次迁移把取值加回来。
 
+**v35（ADR-0065 D05）之后**：`ADD_CONSTRAINT` 不再由任何命令写（约束功能已删除），但**仍留在 CHECK 里**。库里已有真实历史行
+（「用户只追加了约束」），把它们改写成 `AMEND_TASK` 就是改写已记录的分类，而拒绝升级会把可升级的库挡在门外；因此 v35 不重建
+`intents`，只让产品停止写这个取值。
+
 ### `workspaces.base_ref`：Task 基线的 ref 逐 Task 记录（schema version 33，ADR-0060）
 
 ```sql
@@ -1461,7 +1474,41 @@ CREATE TABLE runtime_pause_targets (
 - `RECOVERY_REQUIRED` 仍保持全局启动屏障；target 行不因超时、心跳或 Runtime 重启自动删除/改成 `EXITED`。
 - `runtime_pause_targets` 不是 Session 状态来源，不得据它把 Session 写回 ACTIVE/PAUSED；Session/Execution 的重启收敛仍走既有表与 ADR-0028。它的五个业务 ID 刻意是无 FK 的身份快照：`task purge` 删除 Task 聚合后，本 pause epoch 的进程控制/审计事实仍必须保留；purge 前仍须按 ADR-0058 证明 provider 已停止，并把对应 target 如实收口。
 
-### 删除 dev clone / 双基线 / 集成 / 稳定提升（schema version 35，ADR-0064）
+### Task 输入字段：两个标题与约束/任务类型的删除（schema version 35，ADR-0065）
+
+一个 Task 多两个 Task 级标题，少两个字段：
+
+```sql
+-- tasks：新增两列并删除 v1 的 kind 列（整表重建）
+display_title TEXT NOT NULL
+  CHECK(length(trim(display_title)) > 0 AND length(display_title) <= 200
+    AND display_title NOT LIKE '%' || char(10) || '%'
+    AND display_title NOT LIKE '%' || char(13) || '%'),
+naming_title TEXT CHECK(naming_title IS NULL OR (
+  length(naming_title) BETWEEN 1 AND 50
+  AND naming_title GLOB '[a-z]*'
+  AND naming_title NOT GLOB '*[^a-z0-9-]*'
+  AND naming_title NOT LIKE '-%' AND naming_title NOT LIKE '%-'
+  AND naming_title NOT LIKE '%--%')),
+-- task_revisions：删除 v1 的 constraints_json（整表重建，append-only 触发器原样重建）
+```
+
+为什么必须重建两张表：`tasks` 有既有行，`NOT NULL` 的新列不能靠 `ADD COLUMN` 加上去；`task_revisions` 的
+`constraints_json` 出现在该表自己的 CHECK 里，SQLite 不能就地删一个有 CHECK 的列。`task_revisions` 的两个 append-only
+触发器（`task_revisions_no_update` / `task_revisions_no_delete`）在脚本里显式重建——漏掉它们就等于让 revision 变成可改写的。
+`tasks` 的 `tasks_schedule` 与 `tasks_project_archived` 两个索引同理重建。
+
+派生规则（历史行没有标题）：`display_title` 取当前 revision 正文的**首行**（首行为空则把整段折成一行）并截断到 200 字符。
+两处细节是承载语义的：SQLite 的**单参数 `trim()` 只去空格**，不过滤换行与制表符，因此脚本里每次 trim 都显式给出字符集，
+否则一个以换行开头的正文会产出一个「多行的一句话摘要」；以及正文里没有任何非空白字符时无法派生出标题——
+这种行只能是人手改过的库，`migrateTaskInputFields()` 在动任何表之前以具名 `INVALID_STATE` 拒绝升级，原库一行不动。
+`naming_title` 一律留 `NULL`：Runtime 不为用户早先创建的任务编造英文名字；`NULL` 在 Git 命名上退回内部身份
+（`refs/heads/task/<task-id>` 与 `<task-id>` 目录），也就是那些任务本来就有的名字，**迁移不改任何已有的 ref 或目录**。
+
+同一步还收紧了 `display_title` 的 CHECK（拒绝内嵌换行）、重命名过的 `intents.kind` **未**被触碰（见上一节），
+并沿用既有的「行数比对 + 结束态断言」防护：Bun 的 `exec()` 会吞掉多语句脚本里的 step 错误，所以复制失败必须变成一次响亮的回滚。
+
+### 删除 dev clone / 双基线 / 集成 / 稳定提升（schema version 36，ADR-0066）
 
 用户决策下的**不可逆删除**：把 dev clone（第二个 clone）、长期 `dev` 集成分支、`dev → main` 提升与
 dev 构建通道一起从产品中去掉。`migrate()` 里这一步带 `projects` 行数守卫（Bun 的 `exec()` 会吞掉脚本内的

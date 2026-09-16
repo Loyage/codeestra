@@ -1,17 +1,18 @@
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
+// The mode's spelling, its closed value set and its default are declared once, in the contract, so
+// the stored file, the `permission.get|set` commands and the aggregate `settings.list` entry cannot
+// drift apart (ADR-0064).
+import { defaultPermissionMode, permissionModeSchema, type PermissionMode } from '@codeestra/contracts';
 
-export const permissionModeSchema = z.enum(['FULL', 'STRICT']);
-export type PermissionMode = z.infer<typeof permissionModeSchema>;
+export { defaultPermissionMode, permissionModeSchema };
+export type { PermissionMode };
 
 const persistedPermissionModeSchema = z.strictObject({
   version: z.literal(1),
   mode: permissionModeSchema,
 });
-
-/** Full access is intentionally the product default; strict mode is an explicit opt-in. */
-export const defaultPermissionMode: PermissionMode = 'FULL';
 
 export function permissionModePath(runtimeHome: string): string {
   return join(runtimeHome, 'permission-mode.json');

@@ -56,12 +56,12 @@ interface ChangeSet {
 ## 2. Task Workspace
 
 - prepare 以**项目基线**的固定 SHA 为基线（ADR-0009 / ADR-0060），独立 `refs/heads/task/<task-id>` 与 Runtime 数据目录 `worktrees/<project-id>/<task-id>/`（ADR-0005）。ref/path 只使用校验后的内部 UUID，不把用户文本当 ref/path，也不在用户仓库根目录创建 worktree。
-- **基线只有一种来源**（ADR-0064）：在**项目文件夹**（`projects.repo_root`）里取**建 workspace 时当前检出的分支**，把 ref 与 commit 一起固定进 `workspaces.base_ref`/`base_commit`（此后切分支不会移动已建 Task 的基线）；`task run --base-ref <refs/heads/…>` 可以显式选一条本地分支。`HEAD` detached 时以 `TASK_BASE_REF_UNRESOLVED` 拒绝，不猜一条分支。同一目录同时拥有仓库身份与 `main` ref（判定策略、影响映射的读取来源）。**哪个根指向哪个仓库**见下表：
+- **基线只有一种来源**（ADR-0066）：在**项目文件夹**（`projects.repo_root`）里取**建 workspace 时当前检出的分支**，把 ref 与 commit 一起固定进 `workspaces.base_ref`/`base_commit`（此后切分支不会移动已建 Task 的基线）；`task run --base-ref <refs/heads/…>` 可以显式选一条本地分支。`HEAD` detached 时以 `TASK_BASE_REF_UNRESOLVED` 拒绝，不猜一条分支。同一目录同时拥有仓库身份与 `main` ref（判定策略、影响映射的读取来源）。**哪个根指向哪个仓库**见下表：
 
 | 根字段 / 事实 | 代表哪个仓库 | 谁消费它 |
 |---|---|---|
 | `TrustedProject.repoRoot` / `gitCommonDir` / `mainRef` | **项目文件夹**（唯一的仓库根） | 身份校验、Task 基线与 worktree、结果 commit 归属、回收、`inspectVerificationPolicy`、`inspectImpactPolicy`、knowledge |
-| `taskWorkspaceRepositoryRoot(project)`（Runtime 辅助） | 项目文件夹（ADR-0064 之前是 `devRepoPath ?? repoRoot`） | 结果 commit 的 worktree 归属校验（`assertOwnedWorkspace`）、`task retry` 的 worktree 观测、`task purge` 的 Task 分支删除 |
+| `taskWorkspaceRepositoryRoot(project)`（Runtime 辅助） | 项目文件夹（ADR-0066 之前是 `devRepoPath ?? repoRoot`） | 结果 commit 的 worktree 归属校验（`assertOwnedWorkspace`）、`task retry` 的 worktree 观测、`task purge` 的 Task 分支删除 |
 | `WorkspacePreparationPlan.repoRoot` | 项目文件夹 | `prepareTaskWorkspace`、重启时 `reconcileWorkspacePreparations` 的 `reconcileWorkspace` |
 | `WorkspacePreparationPlan.baseRef` | 该 Task 实际使用的基线 ref（`workspaces.base_ref`，v33 之前的历史行已由 v35 迁移回填） | worktree 创建、回收重建、报告、`task.depends.list` |
 | `VerificationCandidates.repositoryRoot` | 项目文件夹（被验证的 commit 是那个仓库里的对象） | 验证副本的创建、`testedCommit` 的 tree/计划文件读取 |
@@ -83,7 +83,7 @@ interface ChangeSet {
 - 副本删除用 `git worktree remove --force` + `git worktree prune`，并再次核对路径位于 copies root 内；Runtime 重启对未完成 run 保留副本路径而不是在可能有孤儿进程组时删除现场。
 - release 只处理确认归属且已静止、无未保存改动的 worktree；取消/失败不自动调用。保留 branch/证据，不自动 prune 用户资源。
 
-## 3. 成果去向：停在 task 分支（ADR-0064）
+## 3. 成果去向：停在 task 分支（ADR-0066）
 
 产品不再建模 dev clone、长期 `dev` 集成分支或 `dev → main` 提升：`task integrate`、
 `task integration *`、`promotion *`、`promotion full-suite run` 全部从命令面删除，schema **v35** 也
@@ -98,7 +98,7 @@ DROP 了 `integration_batches(_items)`、`integration_verification_runs`、`stab
   `base_ref`）就不按已合并处理，回收保留现场。
 - **依赖释放**不再读「集成事实」：一条依赖边的事实是**上游修订自己的 result commit**
   （`executions.applied_revision_id = required_revision_id` 的最新非空 `result_commit`），该 commit 对
-  项目当前 Task 基线 ref 可达才释放（ADR-0064 D03）。原因码是有界枚举：
+  项目当前 Task 基线 ref 可达才释放（ADR-0066 D03）。原因码是有界枚举：
   `UPSTREAM_RESULT_MISSING`、`BASE_REF_MISSING`、`BASE_REF_UNREADABLE`、`NOT_REACHABLE_FROM_BASE`。
 - **`BLOCKED → READY` 的触发点随之改变**：`task integrate` 已不存在（它是旧实现里唯一的触发者），
   所以 scheduling pass 在挑选候选之前先对每个 `BLOCKED` 任务调用 `reconcileTaskDependencyState`

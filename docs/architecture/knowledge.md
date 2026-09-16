@@ -25,7 +25,7 @@
 - 可选 front-matter 仅支持顶层标量键 `id`（`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`）与 `scope`（`ALL` | `DEVELOPMENT` | `SELF`，缺省 `ALL`）。未知键、嵌套、序列、多行标量、重复键一律拒绝——静默忽略未知键会把 `scpoe: SELF` 这样的一次手误变成「所有任务都读」。
 - 层序是固定常量 `instructions → skills → generated`，只决定列举与渲染顺序。
 - **没有覆盖语义**：所有可解析的人工条目整体进入快照，一条都不丢弃。重复 `id` 或重复路径是 fail-closed 拒绝（`KNOWLEDGE_DUPLICATE_ID` / `KNOWLEDGE_DUPLICATE_PATH`）。不做任务级覆盖，Task 无法改写判自己的知识。
-- `scope` 复用既有 `tasks.kind`：`DEVELOPMENT` 任务不读 `scope: SELF` 的条目，反之亦然。
+- `scope` 曾复用 `tasks.kind`；自 ADR-0065 起 Task 不再有 kind（v35 删了该列），而 `scope` 的解析**不变**（不让人工维护的现有文件变成非法）：`ALL` 与 `DEVELOPMENT` 条目适用，`scope: SELF` 条目当前无法适用于任何执行（SELF 尚不存在），这也是 `project knowledge resolve` 如实的 `appliesToTask: false`。Phase 7 落地 Self Task 时按 PROJECT_SPEC §5 重新迁移。
 
 ## 3. 失败语义
 
@@ -50,7 +50,7 @@
 建立 Execution（`task.run` 与调度引擎共同的唯一路径 `#startPreparedExecution`）时，Runtime 按固定顺序：
 
 1. 从 `main` ref + Runtime 生成层解析并校验（任一条目被拒即抛出，Execution 不建立）；
-2. 渲染该 Task kind 适用的条目为确定性 Markdown，写入 `<home>/knowledge/<project-id>/<task-id>/knowledge-context.md`；
+2. 渲染该 Task 适用的条目为确定性 Markdown（ADR-0065 之后一律按 `DEVELOPMENT` 判定），写入 `<home>/knowledge/<project-id>/<task-id>/knowledge-context.md`；
 3. `recordKnowledgeSnapshot`（按 `(project, mainCommit, snapshotDigest)` 幂等）得到 `snapshotId`；
 4. 在 `reserveExecution` 的**同一写事务**里插入 `execution_knowledge_snapshots`，记录 `snapshotId`、`context_path`、`context_digest`、`context_bytes`、`refs_json`；
 5. 把 `refs`（`knowledge-snapshot:<digest>` + 逐条 `knowledge-entry:<layer>:<path>#<digest12>`）填进 `AgentStartRequest.knowledgeSnapshotRefs`。

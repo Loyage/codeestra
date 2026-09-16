@@ -10,6 +10,7 @@ import {
   proseQuestionResolutionSchema,
 } from './prose-question.js';
 import { uiSettingKeySchema, uiSettingValueSchema } from './ui-settings.js';
+import { permissionModeSchema } from './settings.js';
 
 export * from './questionnaire.js';
 export * from './verification-policy.js';
@@ -17,6 +18,7 @@ export * from './impact-policy.js';
 export * from './targeted-test-plan.js';
 export * from './prose-question.js';
 export * from './ui-settings.js';
+export * from './settings.js';
 export * from './agent-plugins.js';
 
 export const repositoryIdentitySchema = z.strictObject({
@@ -208,9 +210,30 @@ const requestBase = {
   schemaVersion: z.literal(1),
 };
 
-const taskKindSchema = z.enum(['DEVELOPMENT', 'SELF']);
 const nonBlankString = z.string().min(1).refine((value) => value.trim().length > 0, 'Must not be blank');
-const constraintSchema = z.strictObject({ id: z.string().min(1), text: nonBlankString });
+
+/**
+ * The two Task-level titles (ADR-0065).
+ *
+ * `displayTitle` is the one line the task list and the task detail render, so it is bounded and
+ * explicitly single-line: a summary that wraps is not a summary. `namingTitle` becomes a Git ref
+ * component and a directory name, so the accepted shape is the one that is safe in both: lowercase
+ * ASCII letters and digits separated by single hyphens, starting with a letter. Both are required at
+ * creation and neither is a revision fact — there is no command that changes them afterwards.
+ */
+export const maxTaskDisplayTitleChars = 200;
+export const maxTaskNamingTitleChars = 50;
+export const taskNamingTitlePattern = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+const taskDisplayTitleSchema = z.string()
+  .min(1)
+  .max(maxTaskDisplayTitleChars)
+  .refine((value) => value.trim().length > 0, 'Must not be blank')
+  .refine((value) => !/\r|\n/.test(value), 'A display title must be a single line');
+const taskNamingTitleSchema = z.string()
+  .min(1)
+  .max(maxTaskNamingTitleChars)
+  .regex(taskNamingTitlePattern,
+    'A naming title is lowercase ASCII, hyphen-separated, and starts with a letter');
 /**
  * A declared feature is a module id from the project's `.codeestra/impact.json` (ADR-0059). The
  * schema only bounds the shape — the id is validated against the project's own mapping before it is
@@ -268,16 +291,6 @@ export const agentConfigurationEnvironmentVariables = Object.freeze({
     model: 'CODEESTRA_CLAUDE_MODEL',
     thinkingLevel: 'CODEESTRA_CLAUDE_THINKING',
   }),
-});
-
-const constraintsSchema = z.array(constraintSchema).superRefine((constraints, context) => {
-  const ids = new Set<string>();
-  for (const [index, constraint] of constraints.entries()) {
-    if (ids.has(constraint.id)) {
-      context.addIssue({ code: 'custom', message: 'Constraint IDs must be unique', path: [index, 'id'] });
-    }
-    ids.add(constraint.id);
-  }
 });
 
 /**
@@ -353,6 +366,8 @@ export type RuntimeStopResult = z.infer<typeof runtimeStopResultSchema>;
  * stable reason code on the acquisition result and on `scheduler capacity get`.
  */
 export const defaultConcurrencyLimit = 2;
+/** Lower bound for a configured limit: a limit below one slot is not a smaller number, it is a stop. */
+export const minConcurrencyLimit = 1;
 /** Upper bound for a configured limit: a typo must be refused, never silently clamped. */
 export const maxConcurrencyLimit = 16;
 /** Upper bound for one reservation read, so a client cannot ask the Runtime for unbounded rows. */
@@ -1206,7 +1221,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
   z.strictObject({
     ...requestBase,
     command: z.literal('permission.set'),
-    mode: z.enum(['FULL', 'STRICT']),
+    mode: permissionModeSchema,
   }),
   /**
    * Reads the Agent configuration for one Adapter together with the effective value per field and
@@ -1314,8 +1329,12 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     command: z.literal('task.create'),
     commandId: z.string().uuid(),
     projectId: z.string().uuid(),
+    /** The one-line summary the task list shows (ADR-0065). Required; there is no derived default. */
+    displayTitle: taskDisplayTitleSchema,
+    /** The Task's name as it appears in its branch and worktree directory (ADR-0065). Required. */
+    namingTitle: taskNamingTitleSchema,
+    /** The Task detail: the revision body the Agent works from (ADR-0065 D01). */
     specification: nonBlankString,
-    constraints: constraintsSchema.default([]),
     /**
      * The features this Task declares (ADR-0059): module ids from the project's
      * `.codeestra/impact.json`. They are validated against that mapping before anything is written,
@@ -1323,7 +1342,6 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
      * Task declares no feature, which is why it can never be in a feature conflict.
      */
     features: taskFeaturesSchema.default([]),
-    kind: taskKindSchema.default('DEVELOPMENT'),
   }),
   z.strictObject({
     ...requestBase,
@@ -1654,6 +1672,14 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     note: z.string().trim().min(1).max(maxProseQuestionResolutionNoteLength).optional(),
   }),
   /**
+   * Every Runtime-level setting in one read (ADR-0064): the permission mode, the prose-question
+   * switch, the automatic-reclamation switch, the five interface settings and the one concurrency
+   * limit. "Which settings exist" is then a fact a client reads instead of a list it maintains, and
+   * the CLI's `settings list` and a future UI page cannot disagree about the set or about any value:
+   * each entry is filled from the same read the setting's own command uses.
+   */
+  z.strictObject({ ...requestBase, command: z.literal('settings.list') }),
+  /**
    * Reads and writes the one global switch that decides whether a prose question becomes a wait.
    * It is a setting, not a gate: changing it needs no confirmation and rewriting it never touches
    * an already recorded wait.
@@ -1952,9 +1978,8 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     projectId: z.string().uuid(),
     taskId: z.string().uuid(),
     expectedVersion: z.number().int().nonnegative(),
-    /** Absent means "keep the current specification and only add constraints". */
+    /** Absent means "keep the current detail and only change the feature declaration" (ADR-0065). */
     specification: nonBlankString.optional(),
-    constraints: constraintsSchema.default([]),
     /**
      * The features of the *new* revision. Absent means "inherit the current revision's declaration"
      * (ADR-0059 D03) — amending a specification must not silently drop the Task out of the feature
@@ -2566,8 +2591,9 @@ export interface AgentStartRequest {
   readonly workspace: { readonly id: string; readonly cwd: string; readonly ownershipToken: string };
   readonly revision: {
     readonly id: string;
+    /** The Task-level one-line summary; part of every prompt (ADR-0065 D02). */
+    readonly displayTitle: string;
     readonly specification: string;
-    readonly constraints: readonly { readonly id: string; readonly text: string }[];
   };
   readonly knowledgeSnapshotRefs: readonly string[];
   /**

@@ -383,7 +383,11 @@ export class AgentRuntimeCoordinator {
         home: this.#runtimeHome,
         projectId: input.projectId,
         taskId: input.taskId,
-        taskKind: task.kind,
+        // ADR-0065 D05: Tasks no longer carry a kind, and every Task the Runtime can execute is a
+        // development Task until Phase 7 introduces Self Tasks with its own migration. Project
+        // Knowledge keeps its `scope: ALL|DEVELOPMENT|SELF` front-matter (human-authored files must
+        // not become invalid), so a `scope: SELF` entry simply applies to nothing yet.
+        taskKind: 'DEVELOPMENT',
         commandId: deriveCommandId(input.commandId, 'knowledge'),
         now: this.#now,
       });
@@ -932,10 +936,8 @@ export class AgentRuntimeCoordinator {
       },
       revision: {
         id: plan.revisionId,
+        displayTitle: plan.displayTitle,
         specification: plan.specification,
-        constraints: plan.constraints.map((constraint) => ({
-          id: constraint.id, text: constraint.text,
-        })),
       },
       knowledgeSnapshotRefs: executionKnowledgeRefs(
         this.#storage.getExecutionKnowledgeSnapshot(plan.executionId)),

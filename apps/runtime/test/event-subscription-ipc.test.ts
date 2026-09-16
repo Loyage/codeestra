@@ -188,7 +188,8 @@ describe('Runtime event subscription over the IPC socket', () => {
     const projectId = await trustedProject(harness);
     const first = (await call(harness, {
       command: 'task.create', commandId: crypto.randomUUID(), projectId,
-      specification: 'First task', constraints: [], features: [], kind: 'DEVELOPMENT',
+      displayTitle: 'First task', namingTitle: 'first-task',
+      specification: 'First task', features: [],
     })) as unknown as { id: string };
 
     const subscriber = await Subscriber.connect(harness, { command: 'events.subscribe', sinceSequence: 0 });
@@ -208,7 +209,8 @@ describe('Runtime event subscription over the IPC socket', () => {
     // A new event must arrive without reconnecting: this is live delivery, not a one-shot replay.
     const second = (await call(harness, {
       command: 'task.create', commandId: crypto.randomUUID(), projectId,
-      specification: 'Second task', constraints: [], features: [], kind: 'DEVELOPMENT',
+      displayTitle: 'Second task', namingTitle: 'second-task',
+      specification: 'Second task', features: [],
     })) as unknown as { id: string };
     await waitFor(() => subscriber.events().some((event) => event.taskId === second.id));
     expect(subscriber.events().slice(2).map((event) => event.eventType))

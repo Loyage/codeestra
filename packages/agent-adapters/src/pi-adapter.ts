@@ -134,15 +134,14 @@ interface LiveSession {
   readonly pluginSelection: AgentPluginSelection | null;
 }
 
+/**
+ * The prompt carries the Task's display title and its detail (ADR-0065 D02). The Task-level titles
+ * are the only metadata a provider sees: the naming title exists for Git naming, and putting it in
+ * the prompt would mix "what this directory is called" into "what has to be done".
+ */
 function composeRevisionPrompt(revision: AgentStartRequest['revision']): string {
-  const lines = [`Codeestra revision ${revision.id}`, '', revision.specification.trim()];
-  if (revision.constraints.length > 0) {
-    lines.push('', 'Constraints:');
-    for (const constraint of revision.constraints) {
-      lines.push(`- ${constraint.id}: ${constraint.text.trim()}`);
-    }
-  }
-  return lines.join('\n');
+  return [`Codeestra revision ${revision.id}`, `Task: ${revision.displayTitle.trim()}`, '',
+    revision.specification.trim()].join('\n');
 }
 
 /**

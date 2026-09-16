@@ -193,7 +193,8 @@ async function executedTask(
   value: { readonly environment: Record<string, string>; readonly projectId: string },
 ): Promise<string> {
   const { environment, projectId } = value;
-  const created = JSON.parse((await cli(['task', 'create', projectId, 'Ask the user something'],
+  const created = JSON.parse((await cli(['task', 'create', projectId, 'Ask the user something',
+    '--title', 'Ask the user something', '--name', 'ask-the-user'],
     environment)).stdout) as { readonly id: string };
   const taskId = created.id;
   // ADR-0059 makes an undeclared Task SAFE, so submit itself starts the Session.

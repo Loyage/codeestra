@@ -40,8 +40,8 @@ function createTask(storage: Phase1Database, projectId: string, suffix: string):
     intentEventId: `intent-event-${suffix}`,
     taskEventId: `task-event-${suffix}`,
     specification: `Task ${suffix}`,
-    constraints: [],
-    kind: 'DEVELOPMENT',
+    displayTitle: 'fixture task',
+    namingTitle: null,
     actor: 'local-user',
     createdAt: 10,
   });

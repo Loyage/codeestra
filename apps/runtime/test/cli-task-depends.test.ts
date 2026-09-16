@@ -172,7 +172,8 @@ async function createTask(
   projectId: string,
   specification: string,
 ): Promise<string> {
-  const created = await cli(['task', 'create', projectId, specification], environment);
+  const created = await cli(['task', 'create', projectId, specification,
+    '--title', 'fixture task', '--name', 'fixture-task'], environment);
   expect(created.exitCode).toBe(0);
   return (JSON.parse(created.stdout) as { readonly id: string }).id;
 }

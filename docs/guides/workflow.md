@@ -1,11 +1,12 @@
 # 端到端流程走查
 
-> **适用版本** `dev@4667d32`（2026-09-16） · **schema** v33 · **最后校对** 2026-09-16
-> 版本会前进：`dev@4667d32` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> §1 的创建任务与 §4.4 的修订示例由本分支按 **ADR-0065** 改写（必填 `--title`/`--name`；`--constraint`/`--kind` 已删除）。
 > §3.1 的 `task run` 门禁由 FOUNDATION-091 按 ADR-0059 改写。
 > §10 的依赖满足语义由 FOUNDATION-093 第三轮同步（ADR-0060 修订）；其余内容沿用 FOUNDATION-091 的校对基线。
-> **本次修订（ADR-0064 / schema v35）**：§7「合入 `dev`」与 §8「稳定提升」整节删除，改为成果去向与
+> **本次修订（ADR-0066 / schema v36）**：§7「合入 `dev`」与 §8「稳定提升」整节删除，改为成果去向与
 > 本仓库自身的人工四步；§9 去掉自动回收；§3.3 的依赖语义按「上游结果 commit 对当前基线可达」改写。
 
 本文按真实顺序走一遍：**建任务 → 提交 → 运行 → 回答 Agent → 提交成果 → 验证 → 把成果交给你 → 资源回收**。
@@ -39,11 +40,14 @@ bun run codeestra open . --no-open          # 注册项目并拿到带 token 的
 
 ```sh
 bun run codeestra task create $PROJECT "为 parser 增加一个 CRLF 输入用例" \
-  --constraint "不得改动公开 API"
+  --title "给 parser 补一个 CRLF 输入用例" --name "parser-crlf-case"
 ```
 
-- `--constraint <text>` 可以重复，用来说明约束。
-- `--kind DEVELOPMENT` 是当前允许的值（默认就是它）。
+- 位置参数是**任务详情**（Agent 实际依据的正文）：多词原样拼接。
+- `--title <显示标题>`：非空、单行、≤ 200 字符；任务列表显示的就是它。
+- `--name <命名标题>`：小写英文短横线 slug（`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`，≤ 50 字符）；
+  分支与 worktree 目录叫 `task/<编号>-<name>` 与 `<编号>-<name>`。
+- 三个字段都必填；`--constraint` 与 `--kind` 已删除（ADR-0065），传入即用法错误（退出码 2）。
 
 **预期形状**：打印 Task 的摘要 JSON，包含 `taskId`、`displayNumber`（人读编号，如 `#3`）、
 `state: "DRAFT"`、`revisionId`（第一条 revision）、`version`。原始意图、首 revision、事实事件与幂等回执
@@ -147,7 +151,7 @@ bun run codeestra task depends list   $PROJECT [task-id] [--json]
 `task depends list` 的人读视图（不加 `--json`）逐条打印 `✓/✗ 依赖`、要求的 revision 编号，以及上游合入的
 dev commit 前 12 位。
 
-**关键语义**（ADR-0064）：**上游指定修订自己的结果 commit 必须对下游的 Task 基线 ref 可达**（基线就是项目文件夹建 workspace 时检出的分支；读不到就按未满足阻塞而不是拒绝命令）。仅 Task verification 成功
+**关键语义**（ADR-0066）：**上游指定修订自己的结果 commit 必须对下游的 Task 基线 ref 可达**（基线就是项目文件夹建 workspace 时检出的分支；读不到就按未满足阻塞而不是拒绝命令）。仅 Task verification 成功
 **不**释放依赖。
 
 ---
@@ -214,7 +218,7 @@ bun run codeestra settings prose-question-attention off        # 什么都不记
 
 ```sh
 bun run codeestra task revision create $PROJECT <task-id> <expected-version> \
-  [--specification <text>] [--constraint <text>]… [--reason <text>] [--json]
+  [--specification <text>] [--feature <module-id>]… [--reason <text>] [--json]
 bun run codeestra task revision list $PROJECT <task-id> [--json]
 
 bun run codeestra task revision delivery list   $PROJECT <task-id> [--json]
@@ -320,7 +324,7 @@ bun run codeestra task tests history $PROJECT <task-id> [--limit <n>] [--json]
 
 ## 7. 把成果交给你（合并由你完成）
 
-**Codeestra 不合入任何东西**（ADR-0064）。任务跑完、验证通过之后，成果 commit 停在
+**Codeestra 不合入任何东西**（ADR-0066）。任务跑完、验证通过之后，成果 commit 停在
 `refs/heads/task/<task-id>`：
 
 ```sh
@@ -329,7 +333,7 @@ git -C <项目文件夹> merge --ff-only <result-commit>     # 你自己合并�
 ```
 
 - `task integrate`、`task integration create|integrate|list|get|cancel`、`promotion *`、`promotion full-suite *`
-  全部**已删除**（ADR-0064，schema v35）：IntegrationBatch、独立集成验证、`dev` 集成分支与 `dev → main` 提升
+  全部**已删除**（ADR-0066，schema v36）：IntegrationBatch、独立集成验证、`dev` 集成分支与 `dev → main` 提升
   都不存在。执行它们只会得到用法错误（退出码 2）。
 - 为什么：合并是把代码放进你日常使用分支的动作，冲突与取舍是你的产品判断。Codeestra 不替你做，也就不替你记账。
 - **依赖释放**跟着变：下游要等上游的 result commit 对它自己的基线 ref 可达。这个重判发生在每一趟调度
@@ -381,7 +385,7 @@ bun run codeestra reclaim records --project $PROJECT [--task <task-id>] \
 
 从 ADR-0062 起，**合入 `dev` 成功之后**会对该批成员的 Task worktree 自动执行同一条决策（默认开启）：
 clean + 成果已进入该 workspace 记录的 `base_ref` 的会被回收，失败现场仍保留。**没有自动回收路径**
-（ADR-0064 删掉了 ADR-0062 的「集成成功后自动回收」），只有显式 `reclaim plan/apply`。
+（ADR-0066 删掉了 ADR-0062 的「集成成功后自动回收」），只有显式 `reclaim plan/apply`。
 
 ---
 

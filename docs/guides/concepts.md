@@ -1,11 +1,14 @@
 # 领域概念与边界
 
-> **适用版本** `dev@de03448` + 本格分支 `Loyage/glc-pause-ui`（2026-09-16） · **schema** v35（本格暂停半边） · **最后校对** 2026-09-16
-> 版本会前进：`dev@4667d32` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
+> **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
+> 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> §「Task」与 §「Revision」由本分支按 **ADR-0065** 改写（两个 Task 级标题；约束已删除）。
 > §「调度三态」由 FOUNDATION-091 按 ADR-0059 重写（声明同一功能才冲突）；
 > §「调度三态」末尾新增「全局暂停」一段、§「运行边界」补充控制状态的持久性（FOUNDATION-097 / ADR-0061 D04/D08）。
-> **本次修订（ADR-0064 / schema v35）**：删除 IntegrationBatch / Integration verification / Promotion
+> **本次修订（ADR-0066 / schema v36）**：删除 IntegrationBatch / Integration verification / Promotion
 > 三节与 dev clone、dev 基线、自动回收的表述，Task 基线改为「项目文件夹建 workspace 时检出的分支」这一种。
 
 这份文档解释 Codeestra 里的名词到底指什么、哪些东西**不是**调度主实体、以及几条会影响你日常判断的硬边界。
@@ -38,9 +41,14 @@ Project 记录包含：`main` ref、`dev` ref、对象格式（sha1/sha256）、
 
 ### Task（任务）
 
-一次有边界的开发工作。Task 持有：当前 specification、**不可覆盖**的 revision 历史、constraints、priority、
+一次有边界的开发工作。Task 持有：**两个 Task 级标题**（显示标题 `displayTitle`：任务列表与详情渲染的
+一句话摘要；命名标题 `namingTitle`：分支与 worktree 目录名，`task/<编号>-<name>`；两者创建时必填、创建后不可改，
+ADR-0065）、当前 specification（任务详情）、**不可覆盖**的 revision 历史、priority、
 dependencies、**声明的功能（`features`，见下）**、predicted impact、conflict state、execution 历史、
 branch/worktree、验证状态、归档标记。
+
+约束（`constraints`）自 ADR-0065 起**不再是 Task 或 revision 的字段**：它过去表达的「Agent 必须遵守的具体限制」
+写进任务详情即可，产品不再有单独的约束列表、`--constraint` flag 或约束界面。任务类型（`kind`）同样已删除。
 
 功能声明属于 **revision**：`task create --feature <module-id>` 在第一条 revision 上声明，
 `task revision create --feature …` 替换后续 revision 的声明（**省略即继承**）。id 必须是项目 `main` ref 上
@@ -67,14 +75,14 @@ DRAFT → BLOCKED → READY → RUNNING ⇄ (PAUSING → PAUSED → RUNNING)
 
 Task 的规格快照，append-only。第一次创建 Task 就产生第一条 revision。之后
 
-- `task revision create`：显式修订（可只改理由、只加约束）；
+- `task revision create`：显式修订（改任务详情，或改功能声明，二者至少其一）；
 - 修订进入**正在运行的** Execution 是一个独立可观察的过程：**Revision Delivery**。
   一个 delivery 只有在台账里被确认后才算满足；对没有确认通道的 Adapter，它会**如实保持未确认**，直到
   显式的 stop-and-restart 在**那条 revision** 上记录出后继 Execution（见 [features.md](./features.md)）。
 
 旧 revision 的验证**不能**作为新 revision 的交付证据。
 
-**两条输入通道，不要混。** 改规格/约束/验收目标 = Revision（`task revision create`，产生不可变 revision，
+**两条输入通道，不要混。** 改任务详情/功能声明/验收目标 = Revision（`task revision create`，产生不可变 revision，
 并使旧验证失效）；对**正在运行的会话**说一句「怎么做」而不改验收标准 = **Session Guidance**
 （`session guide`，不产生 revision、不动 `appliedRevisionId`、不使验证失效，见 §Session 与 features.md）。
 CLI/UI 不会根据自然语言猜测意图：想改验收标准就必须显式提交修订。
@@ -142,7 +150,7 @@ Codeestra 诚实报告 Adapter 能力，不伪造 `resume` / `attach` / `interru
   中运行，证据**不含原始命令输出**。或者，当该分支在 `.codeestra/tests.json` 声明了定向测试计划并用
   `task tests record` 记录后，验证运行的是**已记录的计划**（而不是文件本身）——所以范围变化是一次显式、
   可审计的追加。
-- **只有这一种验证了**（ADR-0064）：产品不再有 *Integration verification*、*IntegrationBatch* 或
+- **只有这一种验证了**（ADR-0066）：产品不再有 *Integration verification*、*IntegrationBatch* 或
   **dev 全量测试证据**——它们随 `dev → main` 提升一起删除。
 
 验证证据绑定 `revision / commit / policy digest`。**已完成执行 ≠ 已验证**；**已验证 ≠ 已合并**——
@@ -151,14 +159,14 @@ Codeestra 诚实报告 Adapter 能力，不伪造 `resume` / `attach` / `interru
 ### 成果与合并（原 IntegrationBatch）
 
 ADR-0018/0053 的 `IntegrationBatch` 曾是「把成果合入 `dev`」的正式领域对象（成员、revision、成果 commit、
-固定的 `dev` 基线、集成验证证据）。**ADR-0064 把它整体删除**（schema v35）：没有 `task integrate`、
+固定的 `dev` 基线、集成验证证据）。**ADR-0066 把它整体删除**（schema v36）：没有 `task integrate`、
 没有批次状态机、没有 `dev` 集成分支。
 
 现在只有一条规则：**成果 commit 停在 `refs/heads/task/<task-id>`，是否合并与何时合并由你自己决定**
 （在你自己检出的分支上 `git merge`）。Codeestra 不自动合、不自动推、不做提升记账，因此也没有
 「谁的成果已经进去了」这类记录需要维护。
 
-因此下面这些概念**不再存在**，历史记录里读到它们时按 ADR-0064 理解：`IntegrationBatch` 的十个状态、
+因此下面这些概念**不再存在**，历史记录里读到它们时按 ADR-0066 理解：`IntegrationBatch` 的十个状态、
 批级 `STALE`/`CANCELLED`、`INTEGRATED`/`MERGED`/`PREPARED` 成员状态、`dev` 基线、`DEV_REPO_*` /
 `DEV_REF_*` / `DEV_CHECKOUT_*` / `TASK_INTEGRATED_INTO_DEV` / `TASK_IN_STABLE_PROMOTION` /
 `DEV_FULL_SUITE_EVIDENCE_*` 稳定码，以及 `promotion` 命令面。
@@ -166,7 +174,7 @@ ADR-0018/0053 的 `IntegrationBatch` 曾是「把成果合入 `dev`」的正式�
 ### Promotion（稳定提升，已删除）
 
 ADR-0009/0022 的 `dev → main` 提升记录（三件事：已验证的 `dev` commit、预期旧 `main` commit、验证证据）
-已由 **ADR-0064 整体删除**（schema v35）：`promotion prepare/approve/promote/abandon/get/list`、
+已由 **ADR-0066 整体删除**（schema v36）：`promotion prepare/approve/promote/abandon/get/list`、
 `promotion full-suite run|list`、`stable_promotions(_members)` 与 `dev_full_suite_evidence` 都不存在。
 
 本仓库自身的 `dev → main` 仍走人工四步（push 固定候选到远端 `dev` 并读回 → main 检出 ff-only 拉取 →
@@ -184,7 +192,7 @@ ADR-0009/0022 的 `dev → main` 提升记录（三件事：已验证的 `dev` c
 - **失败现场默认保留**：未提交改动、失败/取消的验证，在没有 `--include-failure-scenes` 时是 `RETAIN`。
 - **未注册目录不会被删**，除非调用方用 `--remove-unregistered <精确路径>` 指明它（ADR-0037）。
 - 回收过的 Task worktree 之后可以由 `task retry` 从保留的 Task 分支**重建**（ADR-0042）。
-- **没有自动回收路径**（ADR-0064）：ADR-0062 的「集成成功后自动回收」随集成一起删除。回收只有显式
+- **没有自动回收路径**（ADR-0066）：ADR-0062 的「集成成功后自动回收」随集成一起删除。回收只有显式
   `reclaim plan/apply/records` 一条路径；「已合并」按该 workspace 记录的 `base_ref`（项目文件夹建 workspace
   时检出的分支）判定。
 
@@ -240,7 +248,7 @@ Runtime 数据目录（不进 Git，机器生成）
 
 两种基线（**ADR-0060**：main/dev 双分支模型**只属于 Codeestra 自身**，被管理的其它项目不被要求这么搭）：
 
-- **只有一种模型**（ADR-0064）：Task 从**项目文件夹建 workspace 时当前检出的分支**建基线（读 HEAD，
+- **只有一种模型**（ADR-0066）：Task 从**项目文件夹建 workspace 时当前检出的分支**建基线（读 HEAD，
   把 ref 与 commit 一起固定进 `workspaces.base_ref`/`base_commit`）；成果留在 `refs/heads/task/<task-id>`，
   **由你自己合**。`task submit` / `task run` / `task depends list` / `task result *` / `task verify`
   都按这个基线与归属（项目文件夹本身）工作。文件夹处于 detached HEAD 时以 `TASK_BASE_REF_UNRESOLVED` 拒绝
@@ -264,7 +272,7 @@ Runtime 数据目录（不进 Git，机器生成）
   （`recorded:false`）。
 
 启动前门禁不再兜底残余风险：两个都没声明功能的 Task 可以并发改同一个文件，冲突要到**你自己合并时**
-才暴露（ADR-0059 D02 明确选择的权衡；ADR-0064 之前它在集成批次阶段以 `CONFLICTED` 暴露）。
+才暴露（ADR-0059 D02 明确选择的权衡；ADR-0066 之前它在集成批次阶段以 `CONFLICTED` 暴露）。
 
 > 需要看「引擎看到的每一条事实」时：`project impact validate/show/explain` 与 `task schedule explain`
 > 仍然完整报告映射、快照、基线与占用者（含 `occupiers[].code`）；只是这些事实不再改变判定。

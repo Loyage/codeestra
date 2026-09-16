@@ -36,12 +36,14 @@ function openDatabase(): { readonly database: Phase1Database; readonly filename:
     VALUES ('trust1','p1','/repo','/repo/.git','sha1',1,'user','ACTIVE',1)`).run();
   database.sqlite.transaction(() => {
     for (const [task, revision, number] of [['t1', 'r1', 1], ['t2', 'r2', 2]] as const) {
+      // Schema v35 (ADR-0065): the titles replace `kind`, and the revision has no constraint column.
       database.sqlite.query(`INSERT INTO tasks
-        (id,project_id,display_number,kind,current_revision_id,state,created_at,updated_at)
-        VALUES (?1,'p1',?2,'DEVELOPMENT',?3,'CANCELLED',2,2)`).run(task, number, revision);
+        (id,project_id,display_number,display_title,naming_title,current_revision_id,state,
+          created_at,updated_at)
+        VALUES (?1,'p1',?2,?1,?1,?3,'CANCELLED',2,2)`).run(task, number, revision);
       database.sqlite.query(`INSERT INTO task_revisions
-        (id,task_id,number,previous_revision_id,specification,constraints_json,actor,reason,created_at)
-        VALUES (?1,?2,1,NULL,'Do work','[]','user','initial',2)`).run(revision, task);
+        (id,task_id,number,previous_revision_id,specification,actor,reason,created_at)
+        VALUES (?1,?2,1,NULL,'Do work','user','initial',2)`).run(revision, task);
     }
   })();
   return { database, filename };

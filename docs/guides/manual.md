@@ -1,13 +1,21 @@
 # Codeestra 用户说明书
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v35 · **最后校对** 2026-09-16
-> 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
+> **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
+> 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> §4.1（创建任务）、§4.6 的任务详情描述与末尾术语表的 Task 一行由本分支按 **ADR-0065** 改写（三个必填字段；约束与任务类型已删除）。
 > §10.5 的「全局暂停」由 FOUNDATION-097 新增（ADR-0061 D04–D10）；§「任务」的永久删除一条由 FOUNDATION-090 新增（ADR-0058）；§3.1、§4.2、§4.3、§4.5、§10.1、§10.3 与
 > 「名词表」的冲突判定由 FOUNDATION-091 按 ADR-0059 改写（声明同一功能才冲突，默认不冲突）。
 > §3.1、§3.2、§10.2 由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目的常态路径不变）。
 > §10.3 的 `WAIT_CAPACITY` 一行、§10.4、§11.2 与 §13.4 由 **FOUNDATION-096** 同步（ADR-0061：容量只剩一个
 > Runtime 全局上限，命令去掉 project/adapter 参数，并可从 `settings concurrency` 实时调整）；
+> §11 开头的「先看全」段与 §11.1 的命令拼写由 **FOUNDATION-098** 新增/改写（ADR-0064：`settings list` 总览，
+> 权限模式移入 `settings permission`，顶层 `permission` 已移除）。
+> §11.2.2 与 §12.3 由 ADR-0062 新增/补充（集成成功后自动回收 Task worktree，`settings auto-reclaim` 默认开启）。
+> **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
+> 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
 > §10.3 新增 `WAIT_CONTROL` 一行并由 **FOUNDATION-097** 新增 §10.5「全局暂停」。
 > §「任务」永久删除一条与 §13.5 `RECOVERY_REQUIRED` 的 purge 行为由用户任务 `task/930f5325` 同步（ADR-0058 D02 修订，2026-09-16）。
 > 其余内容沿用 FOUNDATION-091 的校对基线。
@@ -55,7 +63,7 @@ Codeestra 是 **Task-first、local-first 的 AI Development Runtime**：**你管
 
 1. **效率至上。** Runtime 默认运行在 `FULL` 主机级全权限模式。**项目接入、Agent 工具、成果 commit、
    验证策略变化，默认零确认、零等待。** 你随时可以用 CLI 无确认地切到 `STRICT`，恢复旧门禁
-   （`bun run codeestra permission set strict`）。
+   （`bun run codeestra settings permission set strict`）。
    正确性核对（revision/ref/归属/进程身份、静止证据、幂等与崩溃恢复）**一直有效**，但那些是核对，不是审批。
 2. **软件本体是服务，CLI 必须完备。** 独立本地 Runtime 是软件本体，Web UI 只是它的便利前端。
    每个能力都能只靠 CLI 完成并脚本化驱动（`--json`、稳定退出码）。「只有 UI 能做、CLI 不能做」视为缺陷。
@@ -76,7 +84,7 @@ Codeestra 的每一步都**只报事实，不报乐观猜测**。所以你会反
   想让两个 Task 互斥，就给它们声明**同一个功能**（`task create --feature <module-id>`）。
 
 > 图：`00-overview.png` — Codeestra 的总流水线：用户意图 → Task → 依赖/冲突判定 → 调度 → 独立工作树 →
-> Coding Agent → Task 验证 → 成果停在 task 分支（**合并由用户自己完成**，ADR-0064）。
+> Coding Agent → Task 验证 → 成果停在 task 分支（**合并由用户自己完成**，ADR-0066）。
 
 ### 想深入看哪篇
 
@@ -193,7 +201,7 @@ CODEESTRA_HOME=~/.local/state/codeestra-dev bun run codeestra ui --no-open
 
 等价入口是 `just restart-dev`（在 dev clone 里跑）：install → 构建 UI → `stop` → `status` → `ui --no-open`。
 
-**界面不再有「dev 版」标记**（ADR-0064 删除 ADR-0049 的构建期通道）：`VITE_CODEESTRA_CHANNEL=dev`、
+**界面不再有「dev 版」标记**（ADR-0066 删除 ADR-0049 的构建期通道）：`VITE_CODEESTRA_CHANNEL=dev`、
 `data-channel`、橙色横幅与 `Codeestra DEV` 品牌名都不存在，UI 只有一种构建产物、一个品牌名 `Codeestra`。
 区分「这是 dev 代码」靠的是 `CODEESTRA_HOME` 与目录，不是界面上的标记。
 
@@ -230,7 +238,7 @@ bun run codeestra project inspect /path/to/repo
 
 关键是这几项：`repoRoot`（工作树根）、`mainRef` / `objectFormat`（主分支 ref 与对象格式）、`headCommit`。
 
-**Task 基线只有一种**（ADR-0064）：**这个文件夹建 workspace 时当前检出的分支**。ref 与 commit 会一起
+**Task 基线只有一种**（ADR-0066）：**这个文件夹建 workspace 时当前检出的分支**。ref 与 commit 会一起
 固定进这条 Task 的记录，所以你之后切分支**不会**移动已建 Task 的基线。产品不再有 dev clone、长期 `dev`
 集成分支或 `dev → main` 提升——因此 `project inspect` 也不再返回 `devRef` / `devCommit` / `devRepoPath` /
 `devRefRetirement`。
@@ -246,11 +254,13 @@ bun run codeestra project inspect /path/to/repo
 bun run codeestra project trust /path/to/repo --yes
 
 # STRICT：需要确认，交互输入 TRUST，或脚本传 --yes
-bun run codeestra permission set strict
-bun run codeestra project trust /path/to/repo --yes
+bun run codeestra settings permission set strict
+bun run codeestra project trust /path/to/repo --dev-repo /path/to/dev-clone --yes
+> **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
+> 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
 ```
 
-**没有 `--dev-repo`**：ADR-0064 之后产品不再有 dev clone，trust 记录的是仓库身份与两份已提交策略的确认。
+**没有 `--dev-repo`**：ADR-0066 之后产品不再有 dev clone，trust 记录的是仓库身份与两份已提交策略的确认。
 Task 基线就是**项目文件夹建 workspace 时当前检出的分支**，成果停在 task 分支由你自己合（§8）。
 如果这个文件夹处于 detached HEAD，建 Task 时会被 `TASK_BASE_REF_UNRESOLVED` 拒绝——切到一条分支即可。
 
@@ -276,7 +286,7 @@ bun run codeestra open /path/to/repo --no-open    # 只打印带 token 的地址
 bun run codeestra open /path/to/repo --yes        # STRICT 非交互确认
 ```
 
-`open` 只有这两个 flag（ADR-0064 删掉了 `--dev-repo`）。它会打印仓库身份、验证策略命令清单、影响映射状态，
+`open` 只有这两个 flag（ADR-0066 删掉了 `--dev-repo`）。它会打印仓库身份、验证策略命令清单、影响映射状态，
 以及**是否需要再次确认**；打开一个**已信任**仓库的另一个工作树时 trust 会被跳过。
 
 ### 想深入看哪篇
@@ -293,21 +303,26 @@ bun run codeestra open /path/to/repo --yes        # STRICT 非交互确认
 
 ```sh
 bun run codeestra task create $PROJECT "为 parser 增加一个 CRLF 输入用例" \
-  --constraint "不得改动公开 API"
+  --title "给 parser 补一个 CRLF 输入用例" --name "parser-crlf-case"
 ```
 
 - `$PROJECT` 是 `project list` 返回的 Project ID。
-- `--constraint <text>` 可以重复；每条约束都是 Agent 必须遵守的具体限制，会作为规格的一部分保存。
-- `--kind DEVELOPMENT` 是当前允许的值（默认就是它）。`SELF` 会被拒绝：Runtime 还没有 Self-Evolution 行为。
+- 三个字段**都必填**（ADR-0065）：位置参数是**任务详情**（Agent 实际依据的正文）；
+  `--title <显示标题>` 是一句话摘要，任务列表显示的就是它；`--name <命名标题>` 是小写英文短横线 slug
+  （`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`，≤ 50 字符），分支与 worktree 目录叫 `task/<编号>-<name>` 与 `<编号>-<name>`。
+- 两个标题是 **Task 级**字段：创建后没有任何命令可以修改它们（要改就新建任务）。
+- `--constraint` 与 `--kind` **已删除**：约束列表与任务类型都不再存在，把它们当 flag 传会以用法错误（退出码 2）结束。
+  过去写成约束的限制现在写进任务详情即可。
 
 **创建出来的 Task 是 `DRAFT`**：它**不会**自动启动 Agent。结果里要记住两个值：`taskId` 与 `version`
 （乐观版本号，后面每条改状态的命令都要传它）。
 
-界面上对应底部常驻的**新建任务停靠条**：收起时是一行输入（回车即创建），展开后可以写多行规格、加约束。
+界面上对应底部常驻的**新建任务停靠条**：它**没有收起态**（三个字段都必填，单行收起形态凑不出合法命令），
+直接就是三个字段——显示标题、命名标题、任务详情——加「＋ 创建草稿」。
 从任何标签页都能创建；创建成功后界面自动切回任务工作台，让新草稿立刻可见。
 
-> 图：`12-new-task-dock.png` — 停靠条展开状态：多行规格正文、约束列表（＋ 添加约束）、任务类型下拉框、
-> 「＋ 创建草稿」与「收起」按钮。
+> 图：`12-new-task-dock.png` — 停靠条：显示标题、命名标题（下方写着 slug 规则与分支命名）、任务详情、
+> 「＋ 创建草稿」。
 
 ### 4.2 提交为就绪
 
@@ -392,7 +407,7 @@ bun run codeestra task purge  $PROJECT <task-id> <expected-version> --yes [--for
   同时在事件流里留下一条 `TaskPurged`（含每个被删分支的 tip）。三点必须知道：
   1. **成果已进 `dev` 的任务删不掉**（`TASK_INTEGRATED_INTO_DEV`）——否则那个 commit 会失去「谁把它带进来」的记录；这类任务只能归档，`SUCCEEDED` 任务都属于这一类。
   2. **正在跑的任务会先被真地终止**（能确认 provider 退出才继续）；`RECOVERY_REQUIRED` 任务会先按观察对账（与 `task recover` 同一判定）：能证明 provider 已退出就继续删除（最终状态 `FAILED`、结果里 `stop.stop: "RECOVERED"`），否则什么都不删并报 `RECONCILE_REQUIRED`。
-  3. **被拒绝时可以加 `--force`**（ADR-0058 D09）：它是同一条命令的更宽的声明，不是第二道确认（`--yes` 仍是唯一一次确认）。它先对任务**记录过的身份**发 `SIGTERM`→`SIGKILL` 终止 provider（记录里没有 start token 的 pid 一律不发信号），再删掉本来只由「活占用」保护的资源（ADR-0064 之后没有「成果已进入 dev/main」这一类拒绝了）。**归属不明**的目录与分支留在磁盘上并逐项列出；`forced`（以及 CLI 的 stderr）会告诉你跳过了什么、进程是否真的终止。
+  3. **被拒绝时可以加 `--force`**（ADR-0058 D09）：它是同一条命令的更宽的声明，不是第二道确认（`--yes` 仍是唯一一次确认）。它先对任务**记录过的身份**发 `SIGTERM`→`SIGKILL` 终止 provider（记录里没有 start token 的 pid 一律不发信号），再删掉本来只由「活占用」保护的资源（ADR-0066 之后没有「成果已进入 dev/main」这一类拒绝了）。**归属不明**的目录与分支留在磁盘上并逐项列出；`forced`（以及 CLI 的 stderr）会告诉你跳过了什么、进程是否真的终止。
   3. 它会连带删掉**指向该任务的依赖边**（下游会因此重新判定）。
 
 日常清理不再需要的任务：先 `task cancel`（如果需要），再 `task purge --yes`；被拒绝又确实不再需要它时加 `--force`。只想让列表安静下来就用 `task archive`。
@@ -533,7 +548,7 @@ bun run codeestra session guidance get  $PROJECT <guidance-id>
 必须知道的边界：
 
 - **它不改变任务**：不产生 revision、不动 Task 的 revision 与 version、**不使任何验证失效**。
-  改规格、改约束、改验收目标**必须**走 `task amend`（`task revision create`），旧验证仍然因此失效。这两条通道不能互相代替。
+  改任务详情、改功能声明或改验收目标**必须**走 `task amend`（`task revision create`），旧验证仍然因此失效。这两条通道不能互相代替。
 - **记录之后它不会随进程消失**：该 Task 的每条 guidance 会在**新建 Execution**（`task resume` 的 successor、`task retry`
   的新 Execution）启动时随启动参数一并交给 provider。用户不需要为了让它生效而重发一遍。
 - **`0` 与 `1` 的意思不一样**：退出码 `0` = 已经交给运行中的 provider 通道（`DELIVERED`），**或**当时没有会话可交付而消息
@@ -610,7 +625,10 @@ Agent 一退出，任务详情顶部就出现**「Agent 运行结果」卡片**�
 如果这次结束**什么都没记下来**，两边都会这么写，不会当成成功。
 
 > 图：`04-task-detail.png` — 任务详情：「Agent 运行结果」卡片（含最后的输出）、`下一步` 提示行、
-> 任务操作按钮组（提交为就绪 / 启动 Agent / 暂停 / 提交成果 / 验证任务）、规格正文与约束列表。
+> 任务操作按钮组（提交为就绪 / 启动 Agent / 暂停 / 提交成果 / 验证任务 / 合入 dev）、
+> 显示标题与命名标题、任务详情正文（ADR-0065）。
+> **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
+> 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
 
 ### 想深入看哪篇
 
@@ -673,7 +691,7 @@ bun run codeestra task tests history $PROJECT <task-id> [--limit <n>]
 
 ## 8. 成果怎么交给你
 
-**Codeestra 不合入任何东西**（ADR-0064）。任务跑完、验证通过之后，成果 commit 停在
+**Codeestra 不合入任何东西**（ADR-0066）。任务跑完、验证通过之后，成果 commit 停在
 `refs/heads/task/<task-id>`，**合并是你自己的事**：
 
 ```sh
@@ -684,7 +702,7 @@ bun run codeestra task status $PROJECT $TASK --json
 git -C <项目文件夹> merge --ff-only <result-commit>
 ```
 
-- 产品**没有** `task integrate`、`task integration *`、`promotion *` 这些命令：它们随 ADR-0064 一起删除，
+- 产品**没有** `task integrate`、`task integration *`、`promotion *` 这些命令：它们随 ADR-0066 一起删除，
   连同 IntegrationBatch、独立集成验证与 `dev → main` 提升。执行它们只会得到用法错误。
 - 为什么不自动合：合并是把代码放进你日常使用分支的动作，冲突与取舍属于你的产品判断；Codeestra 不替你做，
   也就不会替你记账。
@@ -698,11 +716,11 @@ git -C <项目文件夹> merge --ff-only <result-commit>
 
 - [`cli/integration-dag-scheduler.md`](./cli/integration-dag-scheduler.md) §11（删除说明）、§12、§16
 - [`architecture/git-workspace-api.md`](../architecture/git-workspace-api.md) §3
-- [`decisions/0064-remove-dev-clone-and-dual-baseline.md`](../decisions/0064-remove-dev-clone-and-dual-baseline.md)
+- [`decisions/0066-remove-dev-clone-and-dual-baseline.md`](../decisions/0066-remove-dev-clone-and-dual-baseline.md)
 
 ## 9. 本仓库自身的 `dev → main`（仓库约定，不是产品能力）
 
-**产品没有发布到 main 的命令**（ADR-0064）。如果你是在用 Codeestra 开发**别的**项目，这一节与你无关：
+**产品没有发布到 main 的命令**（ADR-0066）。如果你是在用 Codeestra 开发**别的**项目，这一节与你无关：
 成果停在 task 分支，合并由你自己在自己的分支上完成（§8）。
 
 Codeestra **自身的开发**仍按仓库约定走两个 clone：`~/Documents/codeestra` 检出 `main`（稳定实例）、
@@ -760,7 +778,7 @@ bun run codeestra task depends list   $PROJECT [task-id] [--json]
 ```
 
 - 依赖图必须是 **DAG**；加环会以 `DEPENDENCY_CYCLE` / `DEPENDENCY_GRAPH_INVALID` 拒绝，**且不部分应用**。
-- **关键语义**（ADR-0064）：上游**指定修订自己的结果 commit** 必须对下游的 **Task 基线 ref** 可达。
+- **关键语义**（ADR-0066）：上游**指定修订自己的结果 commit** 必须对下游的 **Task 基线 ref** 可达。
   **仅 Task 验证成功不释放依赖**——你要把上游的成果合并进自己的分支，下游才会解锁。
 - 基线来源：项目文件夹**建 workspace 时当前检出的分支**（只有这一种）；读不到基线就按未满足阻塞
   （`BASE_REF_MISSING`），**不会**因此拒绝整条命令。上游没有结果 commit 是 `UPSTREAM_RESULT_MISSING`，
@@ -872,12 +890,24 @@ bun run codeestra scheduler control reconcile [--json]
 
 ## 11. 设置与权限：FULL 与 STRICT
 
+**先看全**：这条命令列出本 Runtime 的**全部九项设置**（下面每一项都在其中），逐项给出生效值、产品默认、
+取值、是「本 home 显式设置」还是「产品默认」，以及值存在哪个文件：
+
+```sh
+bun run codeestra settings list            # 人读列表
+bun run codeestra settings list --json     # 逐字段原文（每个条目还带「改它会影响什么」）
+```
+
+数据来自 Runtime 自己：每一项都由**它自己那条命令的同一次读取**填充，所以总览不会与
+`settings permission get`、`settings prose-question-attention`、`settings auto-reclaim`、
+`settings ui get <key>`、`scheduler capacity get` 读出的值不一致。它是**只读**的：不写文件、不改任何值、零确认。
+
 ### 11.1 权限模式
 
 ```sh
-bun run codeestra permission get
-bun run codeestra permission set strict
-bun run codeestra permission set full      # 切回默认
+bun run codeestra settings permission get
+bun run codeestra settings permission set strict
+bun run codeestra settings permission set full      # 切回默认
 ```
 
 | | `FULL`（默认） | `STRICT`（显式 opt-in） |
@@ -1026,7 +1056,7 @@ bun run codeestra reclaim records --project $PROJECT [--task <task-id>] \
 - 退出码：`FAILED` → `1`；可回收数量为 0（plan）或实际回收数量为 0（apply）→ `3`（「没什么可回收」不是错误）；
   否则 `0`。
 - 被回收的 Task 工作树之后可以用 `task retry` 从保留的 Task 分支**重建**。
-- **没有自动回收路径**（ADR-0064）：ADR-0062 的「集成成功后自动回收」随集成一起删除；要么显式
+- **没有自动回收路径**（ADR-0066）：ADR-0062 的「集成成功后自动回收」随集成一起删除；要么显式
   `reclaim apply`，要么让 worktree 留着。
 
 ### 想深入看哪篇
@@ -1112,7 +1142,9 @@ Task/Execution 的 `RECOVERY_REQUIRED` 用 **`task recover <project-id> <task-id
 | **CLI** | 完备命令面。每个能力都能只靠它完成并脚本化驱动（`--json`、稳定退出码） |
 | **Web UI** | Runtime 的便利前端，与 CLI 走**同一个命令面**，不新增业务语义、不绕过门禁、不直接访问 SQLite |
 | **Project** | 一个已接入（trust）的 Git 仓库。按 **Git common dir** 识别，所以同一仓库的多份工作树是同一个 Project |
-| **Task** | **业务主实体**：一次有边界的开发工作。持有当前规格、不可覆盖的 revision 历史、约束、依赖、执行历史与验证状态 |
+| **Task** | **业务主实体**：一次有边界的开发工作。持有两个 Task 级标题（显示标题、命名标题）、任务详情（不可覆盖的 revision 历史）、依赖、执行历史、验证与集成状态 |
+> **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
+> 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
 | **TaskRevision** | Task 规格的快照，append-only。第一次创建 Task 就产生第一条 |
 | **Revision Delivery** | 「修订是否真的到达了运行中的 Execution」的独立可观察过程。`revisionAcknowledgement` 不支持的 Adapter 会**如实保持未确认** |
 | **Execution** | **一次执行尝试**，恰好绑定**一个**主 Agent。换 Agent 要新建 Execution |

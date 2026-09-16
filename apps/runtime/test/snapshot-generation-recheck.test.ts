@@ -216,8 +216,6 @@ describe('snapshot generation recheck', () => {
       revisionEventId: nextId(),
       deliveryEventId: nextId(),
       specification: 'Amended specification',
-      constraints: [],
-      kind: 'AMEND_TASK',
       reason: 'the user revised the Task',
       actor: 'user',
       createdAt: 900,

@@ -199,7 +199,6 @@ const createRevision = (value: Harness, specification: string) => value.service.
     .getTask(value.fixture.projectId, value.fixture.taskId)?.version ?? 0,
   commandId: crypto.randomUUID(),
   specification,
-  constraints: [],
   reason: 'test revision',
   actor: 'local-user',
 });
@@ -613,7 +612,7 @@ describe('revision delivery at the Runtime boundary', () => {
     }
   }, 30_000);
 
-  test('records no requirement when nothing is running, and merges constraint-only revisions', async () => {
+  test('records no requirement when nothing is running, and refuses a revision that changes nothing', async () => {
     // No Execution at all: a revision is a specification change, and there is nothing to deliver it to.
     const fixture = await createAgentFixture();
     const adapter = new StoppableSessionAdapter();
@@ -628,8 +627,8 @@ describe('revision delivery at the Runtime boundary', () => {
         taskId: fixture.taskId,
         expectedVersion: 1,
         commandId: crypto.randomUUID(),
-        constraints: [{ id: 'constraint-1', text: 'must be fast' }],
-        reason: 'add a constraint',
+        specification: 'A revised detail',
+        reason: 'amend the detail',
         actor: 'local-user',
       });
       expect(first.delivery).toBeNull();
@@ -637,41 +636,30 @@ describe('revision delivery at the Runtime boundary', () => {
       expect(service.listDeliveries(fixture.projectId, fixture.taskId)).toHaveLength(0);
       const revisions = service.listRevisions(fixture.projectId, fixture.taskId);
       expect(revisions.map((revision) => revision.number)).toEqual([1, 2]);
-      // The specification is carried over unchanged and the constraint is appended.
-      expect(revisions[1]?.specification).toBe(revisions[0]?.specification);
-      expect(revisions[1]?.constraints).toEqual([{ id: 'constraint-1', text: 'must be fast' }]);
-      // A second constraint-only revision keeps the earlier constraint instead of replacing it.
-      const second = await service.createRevision({
+      expect(revisions[1]?.specification).toBe('A revised detail');
+      expect(revisions[1]?.current).toBe(true);
+      // A feature declaration on its own is still a real revision (ADR-0059 D03), and since ADR-0065
+      // it is the *only* other thing a revision can change besides the detail.
+      const declared = await service.createRevision({
         projectId: fixture.projectId,
         taskId: fixture.taskId,
         expectedVersion: first.revision.taskVersion,
         commandId: crypto.randomUUID(),
-        constraints: [{ id: 'constraint-2', text: 'and observable' }],
-        reason: 'add another constraint',
+        features: ['fixture-feature'],
+        reason: 'declare a feature',
         actor: 'local-user',
       });
-      expect(second.revision.revisionNumber).toBe(3);
-      expect(service.listRevisions(fixture.projectId, fixture.taskId)[2]?.constraints)
-        .toEqual([{ id: 'constraint-1', text: 'must be fast' },
-          { id: 'constraint-2', text: 'and observable' }]);
-      // A revision with nothing to change is refused rather than recorded as an empty amendment.
+      expect(declared.revision.revisionNumber).toBe(3);
+      expect(fixture.storage.getTask(fixture.projectId, fixture.taskId)?.currentRevision.features)
+        .toEqual(['fixture-feature']);
+      // A revision with nothing to change (no detail, no feature declaration) is refused rather than
+      // recorded as an empty amendment.
       await expect(service.createRevision({
         projectId: fixture.projectId,
         taskId: fixture.taskId,
-        expectedVersion: second.revision.taskVersion,
+        expectedVersion: declared.revision.taskVersion,
         commandId: crypto.randomUUID(),
-        constraints: [],
         reason: 'nothing',
-        actor: 'local-user',
-      })).rejects.toMatchObject({ code: 'INVALID_REVISION' });
-      // A duplicate constraint ID is refused too.
-      await expect(service.createRevision({
-        projectId: fixture.projectId,
-        taskId: fixture.taskId,
-        expectedVersion: second.revision.taskVersion,
-        commandId: crypto.randomUUID(),
-        constraints: [{ id: 'constraint-1', text: 'again' }],
-        reason: 'duplicate',
         actor: 'local-user',
       })).rejects.toMatchObject({ code: 'INVALID_REVISION' });
     } finally {

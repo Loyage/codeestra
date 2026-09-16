@@ -1,7 +1,8 @@
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOptions,
   maxQuestionnaireQuestions,
+  taskNamingTitlePattern,
   maxSlotReservationReadLimit,
   maxTranscriptEntryReadLimit,
   runtimePingResultSchema,
@@ -26,6 +27,7 @@ import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOpt
   isValidUiSettingValue,
   uiSettingKeysAsText,
   uiSettingValuesAsText,
+  type SettingsListView,
   type UiSettingKey } from '@codeestra/contracts';
 /**
  * The Agent configuration view the Runtime returns for `agent.config.get|set|clear`. Only the fields
@@ -593,28 +595,25 @@ function parseTranscriptFlags(flags: readonly string[]): TranscriptFlags {
 }
 
 interface TaskCreateInput {
+  readonly displayTitle: string;
+  readonly namingTitle: string;
   readonly specification: string;
-  /** Mutable array: the IPC request type is not readonly. */
-  readonly constraints: { readonly id: string; readonly text: string }[];
   /** Declared feature ids (`--feature <id>`, repeatable); validated by the Runtime. */
   readonly features: string[];
-  readonly kind: 'DEVELOPMENT';
 }
 
 /**
- * `task create` keeps its free-form specification, so only `--constraint` and `--kind` are read as
- * flags. Constraint IDs are generated here because the Runtime treats them as the stable identity
- * of a constraint inside one revision and requires them to be unique and non-blank.
- *
- * `SELF` is refused instead of silently becoming a development task: the Runtime has no
- * Self-Evolution behaviour (no isolated self worktree, no candidate/stable separation), so accepting
- * the kind would claim a capability that does not exist.
+ * `task create` takes the Task detail as its positional text, so only the two titles and the
+ * declared features are read as flags. Both titles are required (ADR-0065 D01): the display title is
+ * what the task list shows, the naming title is what the branch and worktree directory are called,
+ * and neither is derived from the other. The naming shape is checked here too, so a script gets the
+ * usage error (exit 2) instead of a contract refusal.
  */
 function parseTaskCreateFlags(tokens: readonly string[]): TaskCreateInput {
   const specification: string[] = [];
-  const constraints: { id: string; text: string }[] = [];
   const features: string[] = [];
-  let kind: 'DEVELOPMENT' = 'DEVELOPMENT';
+  let displayTitle: string | undefined;
+  let namingTitle: string | undefined;
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index] as string;
     const value = tokens[index + 1];
@@ -624,44 +623,38 @@ function parseTaskCreateFlags(tokens: readonly string[]): TaskCreateInput {
       if (value === undefined || value.trim().length === 0) usage();
       features.push(value.trim());
       index += 1;
-    } else if (token === '--constraint') {
+    } else if (token === '--title') {
       if (value === undefined || value.trim().length === 0) usage();
-      constraints.push({ id: crypto.randomUUID(), text: value.trim() });
+      displayTitle = value.trim();
       index += 1;
-    } else if (token === '--kind') {
-      if (value === undefined) usage();
-      if (value === 'SELF') {
-        throw new Error('TASK_KIND_UNSUPPORTED: SELF（自演进）尚未实现：Runtime 没有隔离的 self'
-          + ' worktree，也没有 Candidate/Stable 隔离；请使用 DEVELOPMENT');
-      }
-      if (value !== 'DEVELOPMENT') usage();
-      kind = value;
+    } else if (token === '--name') {
+      if (value === undefined || !taskNamingTitlePattern.test(value)) usage();
+      namingTitle = value;
       index += 1;
     } else if (token.startsWith('--')) {
-      // An unknown flag is a mistake, not part of the specification; the specification itself can
-      // always be passed first or quoted.
+      // An unknown flag is a mistake, not part of the detail; the detail itself can always be passed
+      // first or quoted. `--constraint` and `--kind` land here on purpose (ADR-0065 D04).
       usage();
     } else {
       specification.push(token);
     }
   }
-  if (specification.length === 0) usage();
-  return { specification: specification.join(' '), constraints, features, kind };
+  if (specification.length === 0 || displayTitle === undefined || namingTitle === undefined) usage();
+  return { displayTitle, namingTitle, specification: specification.join(' '), features };
 }
 
 /**
- * Flags for `task revision create`. A specification is optional: omitting it keeps the current one
- * and records an `ADD_CONSTRAINT` revision, which is exactly how "追加约束" is expressed.
+ * Flags for `task revision create`. The detail is optional: omitting it keeps the current one and
+ * changes only the feature declaration, which since ADR-0065 is the only other revision-level fact
+ * (constraints were deleted, so there is no "only add a constraint" revision any more).
  */
 function parseRevisionFlags(tokens: readonly string[]): {
   readonly specification: string | undefined;
-  readonly constraints: readonly { readonly id: string; readonly text: string }[];
   /** Absent means "inherit the current revision's declaration" (ADR-0059 D03). */
   readonly features: readonly string[] | undefined;
   readonly reason: string;
 } {
   const specification: string[] = [];
-  const constraints: { id: string; text: string }[] = [];
   const features: string[] = [];
   let featuresGiven = false;
   let reason = 'user revision request';
@@ -671,10 +664,6 @@ function parseRevisionFlags(tokens: readonly string[]): {
     if (token === '--specification') {
       if (value === undefined || value.trim().length === 0) usage();
       specification.push(value.trim());
-      index += 1;
-    } else if (token === '--constraint') {
-      if (value === undefined || value.trim().length === 0) usage();
-      constraints.push({ id: crypto.randomUUID(), text: value.trim() });
       index += 1;
     } else if (token === '--feature') {
       // An explicit `--feature` is how a Task begins (or stops) declaring a feature: repeated flags
@@ -698,7 +687,6 @@ function parseRevisionFlags(tokens: readonly string[]): {
   }
   return {
     specification: specification.length === 0 ? undefined : specification.join(' '),
-    constraints,
     features: featuresGiven ? features : undefined,
     reason,
   };
@@ -988,6 +976,30 @@ function printAgentPluginSelection(view: AgentConfigurationView): void {
   console.log('Applies to the next Agent Session; the effective list is recorded with the Execution.');
 }
 
+/**
+ * The settings overview as a person reads it: one line per setting with its effective value, whether
+ * that value is this Runtime home's own choice or the product default, the values it accepts, and
+ * where it is stored. `--json` prints the Runtime's payload verbatim instead — that payload is the
+ * complete record, including what a change to each setting applies to.
+ */
+function printSettingsList(view: SettingsListView): void {
+  console.log(`Runtime settings (${view.home})`);
+  const keyWidth = Math.max(...view.settings.map((entry) => entry.key.length));
+  const valueWidth = Math.max(...view.settings.map((entry) => String(entry.value).length));
+  for (const entry of view.settings) {
+    const accepted = entry.values === null
+      ? `${String(entry.range?.min)}-${String(entry.range?.max)}`
+      : entry.values.join('|');
+    const stored = entry.store === 'RUNTIME_FILE' && entry.file !== null
+      ? basename(entry.file) : 'Runtime database';
+    console.log(`  ${entry.key.padEnd(keyWidth)}  ${String(entry.value).padEnd(valueWidth)}`
+      + `  ${entry.source === 'RUNTIME' ? 'set    ' : 'default'}`
+      + `  accepted ${accepted} · default ${String(entry.default)} · ${stored}`);
+  }
+  console.log(`  ${view.appliesTo}`);
+  console.log('  `settings list --json` prints the full record, including what each change applies to.');
+}
+
 function usage(): never {
   console.error(`Usage:
   bun run codeestra status
@@ -997,8 +1009,6 @@ function usage(): never {
     # the folder's checked out branch and the dev-only commands refuse until one is recorded.
   bun run codeestra ui [--no-open]
   bun run codeestra stop [--wait <seconds>]
-  bun run codeestra permission get
-  bun run codeestra permission set <full|strict>
   bun run codeestra agent config get [--project <project-id>] [--adapter <id>]
   bun run codeestra agent config set [--project <project-id>] [--adapter <id>]
     [--provider <name>] [--model <id>] [--thinking <off|minimal|low|medium|high|xhigh|max>]
@@ -1049,12 +1059,16 @@ function usage(): never {
     # and list exit 1 when any entry is refused (there is then no snapshot at all); show exits 1 when
     # the project has no recorded snapshot; resolve reports what the next Execution would use and
     # exits 1 only when no honest answer exists.
-  bun run codeestra task create <project-id> <specification> [--constraint <text>]…
-    [--feature <module-id>]… [--kind DEVELOPMENT]
+  bun run codeestra task create <project-id> <任务详情…> --title <显示标题> --name <命名标题>
+    [--feature <module-id>]…
+    # 三个字段都必须给出（ADR-0065）：--title 是一句话摘要（任务列表显示它），
+    # --name 是小写英文短横线 slug（^[a-z][a-z0-9]*(-[a-z0-9]+)*$，≤ 50 字符），
+    # 用于分支 task/<编号>-<name> 与 worktree 目录；位置参数是任务详情。缺任一字段退出码 2。
     # --feature declares the feature(s) this Task works on: module ids from the project's
     # .codeestra/impact.json as read from its main ref. The Runtime refuses an id the mapping does
     # not declare (UNKNOWN_FEATURE), and refuses any declaration when the mapping cannot be read.
     # A Task that declares nothing is never in a feature conflict (ADR-0059).
+    # --constraint 与 --kind 已删除（ADR-0065），传入会被当作未知 flag。
   bun run codeestra task list <project-id> [--all]
   bun run codeestra task submit <project-id> <task-id> <expected-version>
   bun run codeestra task run <project-id> <task-id> <expected-version> [--adapter <pi|codex|claude>]
@@ -1125,10 +1139,12 @@ function usage(): never {
     # assistant text ends with a question mark). The note is printed to stderr.
     # --json is accepted and is the default, so a script can state its intent.
   bun run codeestra task revision create <project-id> <task-id> <expected-version>
-    [--specification <text>] [--constraint <text>]… [--feature <module-id>]… [--reason <text>] [--json]
+    [--specification <text>] [--feature <module-id>]… [--reason <text>] [--json]
     # --feature sets the feature declaration of the new revision (validated against the project's
     # mapping). Omitting it inherits the current revision's declaration; passing it at all replaces
     # the declaration with the ids given (ADR-0059).
+    # 至少要有 --specification 或 --feature 之一：什么都不改的修订会被拒为 INVALID_REVISION。
+    # --constraint 已删除（ADR-0065），传入会被当作未知 flag。
   bun run codeestra task revision list <project-id> <task-id> [--json]
   bun run codeestra task revision delivery list <project-id> <task-id> [--json]
   bun run codeestra task revision delivery get <project-id> <delivery-id> [--json]
@@ -1207,6 +1223,9 @@ function usage(): never {
     [--text <question>=<text>]… [--cancel]
   bun run codeestra attention resolve <project-id> <attention-id> --dismiss [--note <text>] [--json]
   bun run codeestra attention resolve <project-id> <attention-id> --answer <text> [--note <text>] [--json]
+  bun run codeestra settings list [--json]
+  bun run codeestra settings permission get [--json]
+  bun run codeestra settings permission set <full|strict> [--json]
   bun run codeestra settings prose-question-attention [auto|record-only|off] [--json]
   bun run codeestra settings ui list [--json]
   bun run codeestra settings ui get <key> [--json]
@@ -1273,7 +1292,24 @@ about intent) and puts the Task in WAITING_FOR_USER; --dismiss records a false a
 records the user's own text. Neither resumes the conversation and neither is a TaskRevision: an
 answer is a statement about this wait, not an amendment of the specification. Delivering one through
 attention answer is refused with PROSE_QUESTION_RESOLUTION_REQUIRED, because there is no provider
-dialog to write to. settings prose-question-attention reads or writes the global switch that decides
+dialog to write to.
+
+settings list is the overview of every Runtime-level setting (ADR-0064): the permission mode, the
+prose-question switch, the five interface-effect preferences and the one concurrency limit, each
+with its effective value, its product default, whether it is this Runtime home's own choice or the
+product default, the values it accepts and where it is stored. It answers "what settings exist and
+what are they set to" from the Runtime itself, and every entry comes from the same read its own
+command uses, so the list cannot disagree with settings permission get, settings
+prose-question-attention, settings ui get or scheduler capacity get. Human-readable by default;
+--json prints the whole record, including what a change to each setting applies to.
+
+settings permission reads or writes the permission mode (ADR-0011). It is a setting like any other:
+get reports the mode in force with the product default, set accepts a case-insensitive full|strict,
+needs no confirmation, and writes $CODEESTRA_HOME/permission-mode.json (0600, atomic replacement).
+The mode applies to new operations and new Agent sessions; a Session already running keeps the mode
+it started with.
+
+settings prose-question-attention reads or writes the global switch that decides
 whether such a completion becomes a wait at all (auto, the default; record-only; off). Changing it
 needs no confirmation and never rewrites a wait that was already recorded.
 
@@ -2150,13 +2186,6 @@ try {
       });
       if (!exit.exited) process.exit(1);
     }
-  } else if (group === 'permission' && action === 'get'
-    && firstArgument === undefined && remainingArguments.length === 0) {
-    print(await call({ command: 'permission.get' }));
-  } else if (group === 'permission' && action === 'set') {
-    if (firstArgument === undefined || remainingArguments.length !== 0
-      || !['full', 'strict'].includes(firstArgument.toLowerCase())) usage();
-    print(await call({ command: 'permission.set', mode: firstArgument.toUpperCase() as 'FULL' | 'STRICT' }));
   } else if (group === 'agent' && action === 'config') {
     // Agent configuration is per Adapter and per scope. Omitting --project means the global
     // default; supplying it means that project's override. Every field is optional, so `set`
@@ -2436,10 +2465,10 @@ try {
       command: 'task.create',
       commandId: crypto.randomUUID(),
       projectId: firstArgument,
+      displayTitle: input.displayTitle,
+      namingTitle: input.namingTitle,
       specification: input.specification,
-      constraints: input.constraints,
       features: input.features,
-      kind: input.kind,
     }));
   } else if (group === 'task' && action === 'list') {
     const includeArchived = remainingArguments.length === 1 && remainingArguments[0] === '--all';
@@ -3240,6 +3269,37 @@ try {
       ...(answer === undefined ? {} : { text: answer }),
       ...(note === undefined ? {} : { note }),
     }));
+  } else if (group === 'settings' && action === 'list') {
+    // The settings overview (ADR-0064): one read that enumerates every Runtime-level setting, so
+    // "which settings exist and what are they set to" is answered by the Runtime rather than by a
+    // list this client maintains. Human-readable by default — a person asks this question — and
+    // `--json` prints the Runtime's payload verbatim for a script.
+    const tokens = [firstArgument, ...remainingArguments]
+      .filter((token): token is string => token !== undefined);
+    const json = tokens.includes('--json');
+    if (tokens.length > 1 || tokens.some((token) => token !== '--json')) usage();
+    const view = await call({ command: 'settings.list' }) as SettingsListView;
+    if (json) print(view);
+    else printSettingsList(view);
+  } else if (group === 'settings' && action === 'permission') {
+    // The permission mode is a setting (ADR-0011 / ADR-0064), so it is read and written where the
+    // other Runtime-level switches are. Only the CLI spelling moved: the Runtime command, its file
+    // (`permission-mode.json`) and its zero-confirmation semantics are unchanged.
+    const tokens = [firstArgument, ...remainingArguments]
+      .filter((token): token is string => token !== undefined && token !== '--json');
+    if (tokens.some((token) => token.startsWith('--'))) usage();
+    const [subcommand, mode, ...extra] = tokens;
+    if (extra.length !== 0) usage();
+    if (subcommand === 'get') {
+      if (mode !== undefined) usage();
+      print(await call({ command: 'permission.get' }));
+    } else if (subcommand === 'set') {
+      if (mode === undefined || !['full', 'strict'].includes(mode.toLowerCase())) usage();
+      print(await call({
+        command: 'permission.set',
+        mode: mode.toUpperCase() as 'FULL' | 'STRICT',
+      }));
+    } else usage();
   } else if (group === 'settings' && action === 'prose-question-attention') {
     // The switch that decides whether a prose question becomes a wait. Reading and writing are one
     // command because the setting has exactly three values and no confirmation: `auto` (default),
@@ -3316,7 +3376,6 @@ try {
         taskId,
         expectedVersion,
         ...(input.specification === undefined ? {} : { specification: input.specification }),
-        constraints: [...input.constraints],
         ...(input.features === undefined ? {} : { features: [...input.features] }),
         reason: input.reason,
       }));

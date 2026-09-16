@@ -1,11 +1,15 @@
 # 常见故障与稳定码表
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v35 · **最后校对** 2026-09-16
-> 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
+> **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
+> 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> 第 15 条（ADR-0065 的未验证项）由**本分支**新增；`task create` 的 `--constraint`/`--kind` 已删除，不再是稳定码来源。
+> 权限模式的命令拼写由 FOUNDATION-098 同步为 `settings permission get|set`（ADR-0064：顶层 `permission` 已移除；§19 另新增 `settings list` 总览）。
 > 「全局暂停」一节的稳定码由 FOUNDATION-097 新增（ADR-0061 D08/D09）；`task purge` 的拒绝码一节由 FOUNDATION-090 新增（ADR-0058）；冲突判定与 `--feature` 的拒绝码由
 > FOUNDATION-091 新增/改写（ADR-0059）。
-> **本次修订（ADR-0064 / schema v35）**：删除「报 `DEV_REPO_REQUIRED`」与「集成报 `DEV_CHECKOUT_*`」
+> **本次修订（ADR-0066 / schema v36）**：删除「报 `DEV_REPO_REQUIRED`」与「集成报 `DEV_CHECKOUT_*`」
 > 两节、删除「稳定提升被拒」一节，并把删除过时的集成/提升码集中列在错误码一节。
 > 「任务集成后 worktree 还在？」一节由 ADR-0062 新增（集成成功后的自动回收与失败现场）。
 > 「任务一直不跑」与「调度 / 容量 / 槽位」两处的容量码由 **FOUNDATION-096** 同步（ADR-0061：只剩一个
@@ -85,10 +89,10 @@ CODEESTRA_HOME=/tmp/codeestra-dev bun run codeestra status
 
 ### 报 `DEV_REPO_REQUIRED` / `DEV_CHECKOUT_*`（已删除）
 
-这三个码都不再存在（ADR-0064）：产品不再有 dev clone、长期 `dev` 集成分支，也没有集成命令需要
+这三个码都不再存在（ADR-0066）：产品不再有 dev clone、长期 `dev` 集成分支，也没有集成命令需要
 「另一个 clone 上的那条分支」。`task integrate` / `promotion *` 本身也已删除，执行它们只会得到用法错误。
 
-如果你在历史记录里读到这些码，它们描述的是 ADR-0064 之前的行为，现在没有对应的补救动作。
+如果你在历史记录里读到这些码，它们描述的是 ADR-0066 之前的行为，现在没有对应的补救动作。
 当前 Task 基线的相关拒绝只有：`TASK_BASE_REF_UNRESOLVED`（项目文件夹处于 detached HEAD）、
 `TASK_BASE_REF_MISSING`（`--base-ref` 给的分支不存在）、`TASK_BASE_REF_NOT_A_BRANCH`、
 `TASK_BASE_REF_ALREADY_FIXED`（该 Task 的基线已固定）。
@@ -163,7 +167,7 @@ bun run codeestra task cancel   $PROJECT $OCCUPIER <expected-version>
 
 ### 任务跑完/合并后 worktree 还在？
 
-**这是预期行为**（ADR-0064）：产品没有任何自动回收路径——ADR-0062 的「集成成功后自动回收」随集成一起删除。
+**这是预期行为**（ADR-0066）：产品没有任何自动回收路径——ADR-0062 的「集成成功后自动回收」随集成一起删除。
 要回收就显式跑：
 
 ```sh
@@ -311,7 +315,7 @@ bun run codeestra task operation list $PROJECT <task-id>
 ### 稳定提升被拒（已删除）
 
 `promotion *` 与「提升被拒」的整套码（`PROMOTION_*`、`DEV_FULL_SUITE_EVIDENCE_*`、`MAIN_WORKTREE_*`、
-`DEV_REF_MOVED`、`REMOTE_DEV_*`、`RESTART_*` 等）随 ADR-0064 一起从产品中删除。本仓库自身的
+`DEV_REF_MOVED`、`REMOTE_DEV_*`、`RESTART_*` 等）随 ADR-0066 一起从产品中删除。本仓库自身的
 `dev → main` 人工四步失败时，按 `docs/agents/runbook.md` 的「停在哪一步就停在那一步并如实报告」处理。
 
 ### `RECOVERY_REQUIRED`（状态，不是错误码）
@@ -412,7 +416,7 @@ recorded path is occupied by something Git does not register
 切到 STRICT 就恢复确认：
 
 ```sh
-bun run codeestra permission set strict
+bun run codeestra settings permission set strict
 bun run codeestra project trust /path/to/repo    # 重新确认当前策略 digest
 ```
 
@@ -518,7 +522,7 @@ ADR-0061 删除了 Adapter 级容量上限，当前命令面不再产生它。�
 `TASK_BASE_REF_ALREADY_FIXED`、`HEAD_MISMATCH`、`UNEXPECTED_HEAD`、`BRANCH_DIVERGED`、`BRANCH_ABSENT`、
 `BRANCH_MISMATCH`、`BRANCH_CHECKED_OUT_ELSEWHERE`、`UNBORN_MAIN`。
 
-**已删除、不会再出现的码**（ADR-0064，历史记录里读到时按此理解）：所有 `DEV_REPO_*`、`DEV_REF_*`、
+**已删除、不会再出现的码**（ADR-0066，历史记录里读到时按此理解）：所有 `DEV_REPO_*`、`DEV_REF_*`、
 `DEV_CHECKOUT_*`、`INTEGRATION_BATCH_*`、`INTEGRATION_IN_PROGRESS`、`INTEGRATION_VERIFICATION_FAILED`、
 `MERGE_CONFLICT`、`MERGE_FAILED`、`MERGE_HEAD`、`NOT_REACHABLE_FROM_DEV`、`PROMOTION_*`、
 `DEV_FULL_SUITE_EVIDENCE_*`、`TASK_INTEGRATED_INTO_DEV`、`TASK_IN_STABLE_PROMOTION`。
@@ -639,7 +643,7 @@ K1 留下的两条待裁决已由 FOUNDATION-075 收口，因此这份清单**�
    `queue_update`），Codex 报 `REQUIRES_VALIDATION`、Claude Code 报 `UNSUPPORTED`。
    **仍未验证**：真实模型是否真的读了 guidance、真实 Pi 在忙碌轮次里是否接受 `steer`；**不要**把 `DELIVERED` 读成「模型已读」
    （命令面里的 `modelAcknowledgement` 恒为 `UNSUPPORTED`），UI 也没有投影（N3 领地）。
-7. ~~多成员 IntegrationBatch 与批级 `STALE`/`CANCELLED`~~ **已由 ADR-0064 从产品中删除**（连同 `task integrate`、
+7. ~~多成员 IntegrationBatch 与批级 `STALE`/`CANCELLED`~~ **已由 ADR-0066 从产品中删除**（连同 `task integrate`、
    `task integration *`、`promotion *` 与全部集成/提升表）。成果停在 `refs/heads/task/<task-id>`，合并由用户自己完成；
    本仓库自身的 `dev → main` 继续走 `AGENTS.md` 的人工四步。
 8. **Claude Code 的模型层全部未验证**（本机 `claude auth status` 为未登录）：该 Adapter 的 `structuredAttention`/`nativePermissionRouting`/`cooperativeStop`/`resumeAfterExit` 均报 `REQUIRES_VALIDATION`，不得当成 `SUPPORTED` 使用。
@@ -657,6 +661,10 @@ K1 留下的两条待裁决已由 FOUNDATION-075 收口，因此这份清单**�
    实际跑的只有两类可复现断言：文档内链接存在性，以及命令/标签页/按钮文案对源码的核对；命令与结果见
    `docs/tasks/README.md` 的 FOUNDATION-078 一节。**未验证**：全部观感类结论（见 [acceptance-checklist.md](./acceptance-checklist.md)）、
    插图的真实效果（图尚未提供）、以及浏览器里的真实点击路径。
+15. **ADR-0065（任务输入字段：两个必填标题 + 删除约束与任务类型，schema v35）**：**未验证**的是真实稳定 Runtime 上的 v34→v35 升级
+   （禁止触碰稳定工作树与稳定 Runtime）与停靠条三字段的排版/焦点/窄屏换行（观感类，只能人工确认，见 [acceptance-checklist.md](./acceptance-checklist.md) J1–J5）。
+   **已补的不是缺口**：v35 重建两张表，其复制失败防护（行数比对 + 结束态断言）与「正文没有任何非空白字符、无法派生标题」的拒绝路径都有直接测试
+   `packages/storage/test/task-input-fields-migration.test.ts`——这正是上面第 13 条记的 v28「第二道网没有直接测试」在本步被补上的部分。
 
 ---
 

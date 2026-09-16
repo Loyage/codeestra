@@ -256,6 +256,13 @@ export async function prepareWorkspace(input: {
   readonly projectId: string;
   /** The fixed baseline ref the worktree is created from (ADR-0009: the project's `dev` ref). */
   readonly baseRef: string;
+  /**
+   * The Task's namespace inside `refs/heads/task/` and inside the Runtime worktrees root. It is
+   * `<displayNumber>-<namingTitle>` for a Task created after ADR-0065 and the Task id for one created
+   * before it; the caller derives it with the domain rule, and this layer checks it is a safe single
+   * path segment and ref component instead of trusting that it was assembled correctly.
+   */
+  readonly workspaceName: string;
   readonly taskId: string;
   readonly workspaceId: string;
   readonly ownershipToken: string;
@@ -267,6 +274,10 @@ export async function prepareWorkspace(input: {
     ['taskId', input.taskId], ['workspaceId', input.workspaceId],
     ['ownershipToken', input.ownershipToken]] as const) {
     if (!stableId.test(value)) throw new GitInspectionError('FOREIGN_RESOURCE', `${name} must be a UUID`);
+  }
+  if (!/^[0-9a-z][0-9a-z-]{0,63}$/.test(input.workspaceName)) {
+    throw new GitInspectionError('FOREIGN_RESOURCE',
+      'workspaceName must be a lowercase path segment of letters, digits and hyphens');
   }
   const repository = await inspectRepository(input.repositoryRoot);
   if (!input.baseRef.startsWith('refs/heads/')) {
@@ -282,7 +293,7 @@ export async function prepareWorkspace(input: {
     throw new GitInspectionError('STALE_BASE', 'Base ref or requested base changed before workspace preparation');
   }
 
-  const branchRef = `refs/heads/task/${input.taskId}`;
+  const branchRef = `refs/heads/task/${input.workspaceName}`;
   if (await refExists(repository.repoRoot, branchRef)) {
     throw new GitInspectionError('REF_CONFLICT', `Task branch already exists: ${branchRef}`);
   }
@@ -312,7 +323,7 @@ export async function prepareWorkspace(input: {
     || !canonicalParent.startsWith(`${worktreesRoot}/`)) {
     throw new GitInspectionError('UNSAFE_CHECKOUT', 'Workspace parent escaped the Runtime worktrees root');
   }
-  const path = join(worktreesRoot, input.projectId, input.taskId);
+  const path = join(worktreesRoot, input.projectId, input.workspaceName);
 
   const shortBranch = branchRef.slice('refs/heads/'.length);
   const process = Bun.spawn([

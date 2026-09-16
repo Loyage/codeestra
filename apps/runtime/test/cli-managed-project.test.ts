@@ -151,7 +151,8 @@ describe('codeestra runs Tasks in the project folder itself (ADR-0064)', () => {
         readonly { readonly id: string }[];
       const projectId = projects[0]?.id as string;
 
-      const created = JSON.parse((await cli(['task', 'create', projectId, 'Write one file'],
+      const created = JSON.parse((await cli(['task', 'create', projectId, 'Write one file',
+        '--title', 'Write one file', '--name', 'write-one-file'],
         environment)).stdout) as { readonly id: string; readonly version: number };
       // Submitting is where the defect reported itself: the dependency verdict refused the command
       // with `DEV_REPO_REQUIRED` before the Task could ever be scheduled.
@@ -161,10 +162,13 @@ describe('codeestra runs Tasks in the project folder itself (ADR-0064)', () => {
 
       // The stub provider wrote its file, so the Execution really started — in a worktree based on the
       // branch the project folder has checked out, whose Task branch is registered in that folder.
-      const worktree = join(realpathSync(home), 'worktrees', projectId, created.id);
-      await waitFor(() => existsSync(join(worktree, `${created.id}.txt`)));
+      // ADR-0065 D03: the workspace namespace is the display number plus the naming title, and this is
+      // the project's first Task.
+      const workspaceName = '1-write-one-file';
+      const worktree = join(realpathSync(home), 'worktrees', projectId, workspaceName);
+      await waitFor(() => existsSync(join(worktree, `${workspaceName}.txt`)));
       const mainCommit = await git(main.repository, ['rev-parse', 'refs/heads/main']);
-      expect(await git(main.repository, ['rev-parse', `refs/heads/task/${created.id}`]))
+      expect(await git(main.repository, ['rev-parse', `refs/heads/task/${workspaceName}`]))
         .toBe(mainCommit);
 
       // The dependency projection reads that same branch and names it plainly.

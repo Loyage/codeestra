@@ -1,23 +1,23 @@
 # CLI 参考 · 依赖 DAG、调度与回收
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v35 · **最后校对** 2026-09-16
+> **适用版本** `dev@de03448`（2026-09-16） · **schema** v36 · **最后校对** 2026-09-16
 > 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../../tasks/README.md) 的最新 FOUNDATION 记录为准。
-> 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一（ADR-0064 之后为八篇），
+> 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一（ADR-0066 之后为八篇），
 > **内容自 `cli-reference.md @ dev@de03448` 搬移，一句未改写；本次未重新核对源码**，最后校对日期因此不变。
 > 本文件覆盖 §11–§14 与 §16（§15 在 [promotion.md](./promotion.md)）；章节号沿用拆分前的编号，因此可能不连续。正文里提到本文件没有的号（例如 §14、§17）时，到 [README.md](./README.md) 的索引表查它在哪一篇。
 > §14 新增 `scheduler control` 一节，并把 §0.2 的退出码与「等待码」表补上 `SCHEDULER_GLOBALLY_PAUSED`（FOUNDATION-097 / ADR-0061 D08/D09）；
 > §14 的 `scheduler capacity` 一节由 **FOUNDATION-096** 重写（ADR-0061 D02：破坏性变更——命令去掉 project/adapter 参数，
 > 旧 `get|set|clear <project-id>` 形态被移除）；§14 的 `scheduler control` 一节由 **FOUNDATION-097** 新增
 > （同一个 schema v34 的暂停半边，两半已合并在同一次集成里）。
-> **本次修订（ADR-0064 / schema v35）**：从产品中删除了 dev clone、长期 `dev` 集成分支与
+> **本次修订（ADR-0066 / schema v36）**：从产品中删除了 dev clone、长期 `dev` 集成分支与
 > `dev → main` 提升，因此 §11 的 `task integrate` / `task integration` 整节、`promotion` 一篇（§15）
 > 与 §19 的 `settings auto-reclaim` 全部作废；§12 的依赖原因码与 §16 的「已合并」判定按新语义改写。
 > 其余段落沿用 FOUNDATION-091/093 的校对基线。
 
-## 11. `task integrate` / `task integration`（ADR-0064 已删除）
+## 11. `task integrate` / `task integration`（ADR-0066 已删除）
 
-这两个命令连同 IntegrationBatch、独立集成验证与 `dev` 集成分支一起从产品中删除（ADR-0064，schema v35）：
+这两个命令连同 IntegrationBatch、独立集成验证与 `dev` 集成分支一起从产品中删除（ADR-0066，schema v36）：
 
 ```sh
 # 这些命令不再存在；执行会得到用法错误（退出码 2）。
@@ -28,7 +28,7 @@ bun run codeestra task integration create|integrate|list|get|cancel …
 成果 commit 停在 `refs/heads/task/<task-id>`，是否合并由你自己决定（`git merge --ff-only <result-commit>`
 在你的分支上），Codeestra 不自动合、不自动推、不记账。完整语义见
 [git-workspace-api.md §3](../../architecture/git-workspace-api.md) 与
-[ADR-0064](../../decisions/0064-remove-dev-clone-and-dual-baseline.md)。
+[ADR-0066](../../decisions/0066-remove-dev-clone-and-dual-baseline.md)。
 
 ## 12. `task depends`（DAG）
 
@@ -41,9 +41,9 @@ bun run codeestra task depends list   <project-id> [task-id] [--json]
 - flag 可以出现在**任意位置**（解析器按顺序走 token），但 `--revision` 只对 `add` 有意义。
 - 依赖图必须是 **DAG**；加环以 `DEPENDENCY_CYCLE` 拒绝，且**不部分应用**。自依赖是 `SELF_DEPENDENCY`。
 - **满足条件**：上游**指定修订自己的结果 commit** 必须对下游的 **Task 基线 ref** 可达
-  （ADR-0064）。**仅 Task verification 成功不释放依赖**：验证通过不等于那个 commit 已经进了基线。
+  （ADR-0066）。**仅 Task verification 成功不释放依赖**：验证通过不等于那个 commit 已经进了基线。
 - 基线来源（ADR-0060 第三轮修订）：`devRef`/`devCommit` 是**该项目 Task 基线**的 ref 与 commit——
-  就是项目文件夹**建 workspace 时检出的分支**（ADR-0064 之后只有这一种；不会产生
+  就是项目文件夹**建 workspace 时检出的分支**（ADR-0066 之后只有这一种；不会产生
   INTEGRATED 批次，因此带依赖边的 Task 会以 `UPSTREAM_NOT_INTEGRATED` 保持未满足，而**不会**以
   任何「缺 dev clone」类拒绝）。基线 ref 读不到时所有边保持未满足（`BASE_REF_MISSING`），
   绝不当作已满足；原因码是有界枚举 `UPSTREAM_RESULT_MISSING` / `BASE_REF_MISSING` /
@@ -69,7 +69,7 @@ bun run codeestra task schedule clear-unknown <project-id> <task-id> [--json]
 
 - Runtime **自己会调度**：相关事件（submit、停止、revision 投递、槽位释放、容量变化）触发一次 pass，
   另有周期恢复 pass（`CODEESTRA_SCHEDULE_TICK_MS`，默认 5000ms）收敛崩溃遗留状态。
-- **每一趟 pass 先重新评估 `BLOCKED` 任务**（ADR-0064）：旧实现里唯一的触发者是已删除的
+- **每一趟 pass 先重新评估 `BLOCKED` 任务**（ADR-0066）：旧实现里唯一的触发者是已删除的
   `task integrate`，所以现在由 pass 在挑选候选之前对每个 `BLOCKED` 任务重判依赖。上游结果 commit
   进入项目当前分支后，下游会在下一次 pass（或你显式跑一次 `task schedule run`）转为 `READY` 并可能立即启动。
   `task depends list` / `task schedule status` 是只读的，因此它们可能显示「边已满足、任务仍是 `BLOCKED`」，
@@ -236,9 +236,9 @@ bun run codeestra reclaim records [--project <project-id> | --all-projects] [--t
 - **未注册目录不会被删**：只有用 `--remove-unregistered <精确路径>` 指名才会（`UNREGISTERED_EXPLICIT_SELECTION`）；
   最多 200 个选择。`--scan-root` 必须是 home 内的绝对路径（`SCAN_ROOT_NOT_ABSOLUTE` / `SCAN_ROOT_OUTSIDE_HOME`），
   并且它隐含 `--unregistered`。
-- **`--kind INTEGRATION_WORKTREE` 仍然可以写，但不再匹配任何东西**（ADR-0064）：Runtime 不再创建集成
+- **`--kind INTEGRATION_WORKTREE` 仍然可以写，但不再匹配任何东西**（ADR-0066）：Runtime 不再创建集成
   工作树，所以它只作为 append-only 账本里的历史取值保留；旧目录会落进「未注册目录」处置通道。
-- **「已合并」按该 workspace 记录的 `base_ref` 判定**（ADR-0064）：`resultCommit` 对项目文件夹建这个
+- **「已合并」按该 workspace 记录的 `base_ref` 判定**（ADR-0066）：`resultCommit` 对项目文件夹建这个
   workspace 时检出分支的 commit 做 ancestor 检查。读不到该 ref 时不按已合并处理，资源 `RETAIN`。
 - `--project` 与 `--all-projects` 互斥；`--task` 需要 `--project`。
 - `records` 专用 flag：`--source`、`--since`/`--until`（epoch 毫秒或任何 ISO-8601；`since >= until` 是用法错误）、

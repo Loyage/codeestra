@@ -184,7 +184,8 @@ async function runOneTask(): Promise<{
   const projectId = projects[0]?.id as string;
 
   const created = JSON.parse((await cli(['task', 'create', projectId,
-    'Create greeting.txt and stop'], environment)).stdout) as { readonly id: string };
+    'Create greeting.txt and stop', '--title', 'Create greeting.txt and stop',
+    '--name', 'create-greeting'], environment)).stdout) as { readonly id: string };
   const taskId = created.id;
   // Submission starts this undeclared Task immediately under ADR-0059.
   const submitted = await cli(['task', 'submit', projectId, taskId, '0'], environment);

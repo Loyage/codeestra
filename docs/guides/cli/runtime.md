@@ -1,16 +1,20 @@
 # CLI 参考 · Runtime 生命周期、Agent 配置与设置
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v35 · **最后校对** 2026-09-16
+> **适用版本** `dev@de03448`（2026-09-16） · **schema** v36 · **最后校对** 2026-09-16
 > 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../../tasks/README.md) 的最新 FOUNDATION 记录为准。
-> 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一（ADR-0064 之后为八篇），
+> 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一（ADR-0066 之后为八篇），
 > **内容自 `cli-reference.md @ dev@de03448` 搬移，一句未改写；本次未重新核对源码**，最后校对日期因此不变。
 > 本文件覆盖 §1–§2、§19；章节号沿用拆分前的编号，因此可能不连续。正文里提到本文件没有的号（例如 §14、§17）时，到 [README.md](./README.md) 的索引表查它在哪一篇。
-> **本次修订（ADR-0064 / schema v35）**：删除 `settings auto-reclaim` 一节（该开关随集成一起移除）、
+> §19 新增 `settings list` 总览，并把权限模式从 §1 移入 §19（`settings permission get|set`，顶层 `permission` 已移除；ADR-0064 / 用户任务，无 schema 变更）。
+> **本次修订（ADR-0066 / schema v36）**：删除 `settings auto-reclaim` 一节（该开关随集成一起移除）、
 > 删除 `open` 的 `--dev-repo` 参数，并删除所有 dev clone / 提升相关的失败码。
 > 同一事实还有一个设置面拼写：`settings concurrency get|set --limit|reset`（见 §19），它发的是同一条 Runtime 命令。
 
-## 1. Runtime 生命周期与权限
+## 1. Runtime 生命周期
+
+> §1 原来还有「权限」：权限模式现在是下方 §19 `settings` 的一项设置（`settings permission get|set`，
+> 顶层 `permission` 命令已移除，ADR-0064）。本节只讲生命周期。
 
 ### `status`
 
@@ -43,15 +47,11 @@ bun run codeestra stop [--wait <seconds>]
 `pidMismatch` 字段表示「stop 应答点名的进程」与「ping 应答的进程」不同——那是两个 Runtime 争同一个 home 的事实，必须被看到。
 `--wait` 之外的参数是用法错误（退出码 2）。
 
-### `permission get` / `permission set`
+### 权限模式
 
-```sh
-bun run codeestra permission get
-bun run codeestra permission set <full|strict>
-```
-
-`get` 返回 `{ mode, default: "FULL" }`。`set` 接受大小写不敏感的 `full` / `strict`，**无需确认**，写入
-`<CODEESTRA_HOME>/permission-mode.json`（0600，原子替换）。其他取值是用法错误。
+权限模式自 ADR-0064 起与其他 Runtime 级设置放在一起，读写命令是下方 §19 的 `settings permission get` /
+`settings permission set <full|strict>`：发的是同一条 Runtime 命令，写的是同一份 `<CODEESTRA_HOME>/permission-mode.json`，
+「无需确认」「只影响后续操作与新 Session」的语义一字未改。顶层 `permission` 命令已**移除**。
 
 ### `ui`
 
@@ -73,7 +73,7 @@ bun run codeestra open [path] [--yes] [--no-open]
 一条命令完成：`project.inspect` → 展示验证策略与影响映射 →（必要时）确认 → `project.trust` → `runtime.ui` 并预选该项目。
 `path` 默认当前目录；`--yes` 是 STRICT 下的非交互确认；`--no-open` 不打开浏览器。
 
-ADR-0064 之后 `open` 只有 `--yes` 与 `--no-open` 两个 flag：产品不再有 dev clone 可记，所以也没有
+ADR-0066 之后 `open` 只有 `--yes` 与 `--no-open` 两个 flag：产品不再有 dev clone 可记，所以也没有
 `--dev-repo`；Task 基线就是项目文件夹当前检出的分支（建 Task 时固定 ref 与 commit）。
 （打开一个**已信任**仓库的另一个工作树时 trust 会被跳过。）
 
@@ -107,16 +107,56 @@ Adapter 不支持的字段会被拒绝而不是静默忽略。稳定码：`INVAL
 
 ## 19. `settings`
 
+一个 Runtime home 的**全部设置**就是这一节的命令：**九项**（`settings list` 逐项列出）。
+
 ```sh
+bun run codeestra settings list [--json]                        # 全部设置总览（人读；--json 是完整记录）
+
+bun run codeestra settings permission get [--json]              # 权限模式（§1 的 permission 已并入这里）
+bun run codeestra settings permission set <full|strict> [--json]
+
 bun run codeestra settings prose-question-attention            # 读取
 bun run codeestra settings prose-question-attention auto       # 写入
 bun run codeestra settings prose-question-attention record-only
 bun run codeestra settings prose-question-attention off
 
+bun run codeestra settings ui list [--json]             # 五个界面效果键
+bun run codeestra settings ui get <key> [--json]
+bun run codeestra settings ui set <key> <value> [--json]
+bun run codeestra settings ui reset [<key>] [--json]
+
 bun run codeestra settings concurrency get   [--json]
 bun run codeestra settings concurrency set   --limit <n> [--json]
 bun run codeestra settings concurrency reset [--json]
 ```
+
+### `settings list`（全部设置总览）
+
+一条**只读**命令回答「有哪些设置、现在是什么状态」：列出上述八项，逐项给出**生效值**、**产品默认**、
+**取值**（闭集用 `values`，数值上限用 `range`）、是「本 home 显式设置」还是「产品默认」，以及**值存在哪里**
+（文件的绝对路径，或 Runtime 数据库）。
+
+- 数据来自 Runtime（`settings.list`），每项都由**它自己那条命令的同一次读取**填充，所以总览不可能与
+  `settings permission get`、`settings prose-question-attention`、`settings ui get <key>`、
+  `scheduler capacity get` 读出的值不一致；也不存在第二个状态源。
+- 默认输出是**人读列表**；`--json` 打印逐字段原文，每个条目还带 `appliesTo`——「改这一项会影响什么」。
+- 键名就是命令路径加一个点：`permission.mode`、`attention.proseQuestion`、`ui.theme`（及另外四个 ui 键）、
+  `capacity.globalLimit`。每项按**它自己命令的词**汇报取值（`settings auto-reclaim` 已随 ADR-0066 删除，
+  因此没有 `reclaim.auto` 这一项）。
+- 零确认、不写任何文件、不改变任何值。多余参数、未知 flag 是用法错误（退出码 2）。
+
+### `settings permission`（权限模式）
+
+```sh
+bun run codeestra settings permission get
+bun run codeestra settings permission set <full|strict>
+```
+
+- `get` 返回 `{ mode, default: "FULL" }`。`set` 接受大小写不敏感的 `full` / `strict`，**无需确认**，写入
+  `<CODEESTRA_HOME>/permission-mode.json`（0600，原子替换）；其他取值是用法错误。
+- 只影响**后续操作与新 Agent Session**：已经在跑的 Session 沿用启动时的模式，不会在工具执行中途改变 gate 语义。
+- 自 ADR-0064 起**顶层 `permission get|set` 已移除**（现在是用法错误，退出码 2），只保留这一个拼写。
+- `--json` 被接受（输出本来就是 JSON）。
 
 ### `settings prose-question-attention`
 
@@ -124,6 +164,16 @@ bun run codeestra settings concurrency reset [--json]
 - 取值只有三个：`auto`（默认）/ `record-only` / `off`。其他取值是用法错误。
 - **不需要确认**，且**不会改写已经记录下来的等待**。
 - `--json` 被接受（输出本来就是 JSON）。
+
+### `settings ui`（界面效果）
+
+五个键：`theme` / `density` / `fontSize` / `motion` / `timeDisplay`（`list` 报每个键的生效值、产品默认、可取值
+与是否显式设置；`get <key>` / `set <key> <value>` / `reset [<key>]` 读写一个键，`reset` 不带键就是全部恢复默认）。
+
+- 它们存在 `<CODEESTRA_HOME>/ui-settings.json`，属于 Runtime 而不是浏览器：清缓存、换浏览器、重启后仍生效。
+- 零确认；未知键或非法取值是用法错误（退出码 2）；文件不可读时 Runtime 以 `INVALID_UI_SETTING` 拒绝（退出码 1，
+  `reset` 是显式出路）。
+- 逐项含义与界面位置见 [manual.md 的「设置与权限」](../manual.md) 与 [ui.md](../ui.md)。
 
 ### `settings concurrency`（全局并发上限）
 

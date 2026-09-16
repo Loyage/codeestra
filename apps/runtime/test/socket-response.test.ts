@@ -171,7 +171,8 @@ describe('Runtime socket responses', () => {
     for (let index = 0; index < 8; index += 1) {
       await request(harness, {
         command: 'task.create', commandId: crypto.randomUUID(), projectId,
-        specification, constraints: [], features: [], kind: 'DEVELOPMENT',
+        displayTitle: 'buffer task', namingTitle: `buffer-${index}`,
+        specification, features: [],
       });
     }
 

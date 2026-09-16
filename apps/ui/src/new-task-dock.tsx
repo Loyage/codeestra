@@ -3,23 +3,31 @@ import type { RuntimeClient } from './api.js';
 import { usePendingAction } from './use-pending-action.js';
 import type { TaskView } from './types.js';
 
-/** One row of the constraint editor; `id` is only a React key until the Task is created. */
-interface ConstraintDraft {
-  readonly id: string;
-  readonly text: string;
-}
+/**
+ * The Task input bounds, mirrored from `@codeestra/contracts` (ADR-0065 D01).
+ *
+ * Like the other wire literals in this app, they are copied rather than imported: this client owns no
+ * dependency on the server packages, and the Runtime remains the authority — these values only drive
+ * `maxLength` and the button's disabled state so a user is not asked to submit something the Runtime
+ * will refuse. `packages/contracts/test/request.test.ts` owns the authoritative shape.
+ */
+const maxDisplayTitleChars = 200;
+const maxNamingTitleChars = 50;
+const namingTitlePattern = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 
 /**
  * The bottom-docked new-task composer.
  *
  * It is `position: sticky; bottom: 0` in normal flow rather than a fixed overlay, so it stays
  * reachable while the page scrolls without covering the content above it — which also means the
- * page needs no compensating bottom padding, and a long expansion can still be scrolled past.
+ * page needs no compensating bottom padding.
  *
- * The collapsed bar and every field in the expanded panel map to what `codeestra task create`
- * accepts from a script (`--constraint`, `--kind`), so nothing here is reachable only from the UI
- * (PROJECT_SPEC §1.1, ADR-0008). `SELF` stays visible but disabled: the Runtime has no
- * Self-Evolution behaviour yet, so offering it would claim a capability that does not exist.
+ * Three fields are required (ADR-0065): the display title the task list shows, the naming title the
+ * branch and worktree directory are named after, and the Task detail the Agent works from. Because
+ * none of them can be derived from the others, the dock no longer has a collapsed single-line form:
+ * a one-line composer could not produce a valid `task create` command. Every field maps to a
+ * `codeestra task create` flag (`--title`, `--name`, positional detail), so nothing here is
+ * reachable only from the UI (PROJECT_SPEC §1.1, ADR-0008).
  */
 export function NewTaskDock(props: {
   readonly client: RuntimeClient;
@@ -27,31 +35,32 @@ export function NewTaskDock(props: {
   readonly run: (label: string, action: () => Promise<void>) => Promise<void>;
   readonly onCreated: (task: TaskView) => Promise<void>;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [displayTitle, setDisplayTitle] = useState('');
+  const [namingTitle, setNamingTitle] = useState('');
   const [specification, setSpecification] = useState('');
-  const [constraints, setConstraints] = useState<readonly ConstraintDraft[]>([]);
   const actions = usePendingAction(props.run);
   const pending = actions.pending.has('create');
   const panelId = useId();
-  const kindHintId = useId();
-  const inputRef = useRef<HTMLInputElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  /** Set by an explicit toggle so the first render does not steal focus from the page. */
-  const focusAfterToggle = useRef(false);
+  const namingHintId = useId();
+  const titleRef = useRef<HTMLInputElement>(null);
 
+  // Focus the first field once when the dock appears, so a user who just switched projects can start
+  // typing. It is not refocused on every render: that would fight the caret while editing.
+  const focusedOnMount = useRef(false);
   useEffect(() => {
-    if (!focusAfterToggle.current) return;
-    focusAfterToggle.current = false;
-    (expanded ? textareaRef.current : inputRef.current)?.focus();
-  }, [expanded]);
+    if (focusedOnMount.current) return;
+    focusedOnMount.current = true;
+    titleRef.current?.focus();
+  }, []);
 
-  const toggle = (next: boolean): void => {
-    focusAfterToggle.current = true;
-    setExpanded(next);
-  };
-
-  const text = specification.trim();
-  const canCreate = !pending && text.length > 0;
+  const title = displayTitle.trim();
+  const name = namingTitle.trim();
+  // The same shape the Runtime accepts, checked here so the button's disabled state and the refusal
+  // agree. The Runtime stays authoritative; this only avoids a pointless round trip.
+  const nameValid = name.length > 0 && name.length <= maxNamingTitleChars
+    && namingTitlePattern.test(name);
+  const detail = specification.trim();
+  const canCreate = !pending && title.length > 0 && nameValid && detail.length > 0;
   const create = (): void => {
     if (!canCreate) return;
     void actions.run('create', '正在创建任务', async () => {
@@ -59,51 +68,17 @@ export function NewTaskDock(props: {
         command: 'task.create',
         commandId: crypto.randomUUID(),
         projectId: props.projectId,
-        specification: text,
-        // Blank rows are dropped rather than sent: the Runtime rejects a blank constraint text.
-        constraints: constraints
-          .filter((row) => row.text.trim().length > 0)
-          .map((row) => ({ id: row.id, text: row.text.trim() })),
-        kind: 'DEVELOPMENT',
+        displayTitle: title,
+        namingTitle: name,
+        specification: detail,
       });
-      // Clearing and collapsing makes the dock ready for the next task and keeps the newly
-      // selected draft visible instead of behind expanded inputs.
+      // Clearing keeps the dock ready for the next task.
+      setDisplayTitle('');
+      setNamingTitle('');
       setSpecification('');
-      setConstraints([]);
-      setExpanded(false);
       await props.onCreated(created);
     });
   };
-
-  if (!expanded) {
-    return (
-      <section className="new-task-dock" aria-label="新建任务">
-        <form
-          className="new-task-bar"
-          onSubmit={(event) => { event.preventDefault(); create(); }}
-        >
-          <input
-            ref={inputRef}
-            type="text"
-            aria-label="新任务内容"
-            value={specification}
-            placeholder="描述一项具体的改动，回车即创建草稿"
-            onChange={(event) => setSpecification(event.target.value)}
-          />
-          <button type="submit" className="primary" disabled={!canCreate}>
-            {pending ? '正在创建…' : '＋ 创建草稿'}
-          </button>
-          <button
-            type="button"
-            aria-expanded={false}
-            onClick={() => toggle(true)}
-          >
-            展开 ⌃
-          </button>
-        </form>
-      </section>
-    );
-  }
 
   return (
     <section className="new-task-dock" aria-label="新建任务">
@@ -112,91 +87,65 @@ export function NewTaskDock(props: {
         onSubmit={(event) => { event.preventDefault(); create(); }}
       >
         <div className="section-heading">
-          <h3><label htmlFor={panelId}>新建任务 · 详细设定</label></h3>
+          <h3>新建任务</h3>
           <div className="actions">
             <button type="submit" className="primary" disabled={!canCreate}>
               {pending ? '正在创建…' : '＋ 创建草稿'}
             </button>
-            <button type="button" aria-expanded onClick={() => toggle(false)}>收起 ⌄</button>
           </div>
         </div>
+
+        <label htmlFor={`${panelId}-title`}>
+          显示标题<span className="muted hint">（任务列表显示的一句话摘要，必填）</span>
+        </label>
+        <input
+          id={`${panelId}-title`}
+          ref={titleRef}
+          type="text"
+          aria-label="显示标题"
+          maxLength={maxDisplayTitleChars}
+          value={displayTitle}
+          placeholder="例如：给 parser 补一个 CRLF 输入用例"
+          onChange={(event) => setDisplayTitle(event.target.value)}
+        />
+
+        <label htmlFor={`${panelId}-name`}>
+          命名标题<span className="muted hint">（分支与 worktree 目录名，必填）</span>
+        </label>
+        <input
+          id={`${panelId}-name`}
+          type="text"
+          aria-label="命名标题"
+          aria-describedby={namingHintId}
+          maxLength={maxNamingTitleChars}
+          value={namingTitle}
+          placeholder="例如：parser-crlf-case"
+          onChange={(event) => setNamingTitle(event.target.value)}
+        />
+        <p className="muted hint" id={namingHintId}>
+          小写英文短横线 slug（<code>^[a-z][a-z0-9]*(-[a-z0-9]+)*$</code>），不能有空格；
+          分支为 <code>task/&lt;编号&gt;-&lt;命名标题&gt;</code>，worktree 目录同此名。
+        </p>
+
+        <label htmlFor={`${panelId}-detail`}>
+          任务详情<span className="muted hint">（Agent 实际依据的正文，必填）</span>
+        </label>
         <textarea
-          id={panelId}
-          ref={textareaRef}
+          id={`${panelId}-detail`}
           rows={6}
           value={specification}
           placeholder="描述要完成的改动：目标、范围与验收方式"
           onChange={(event) => setSpecification(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === 'Escape') {
-              event.preventDefault();
-              toggle(false);
-            } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
               event.preventDefault();
               create();
             }
           }}
         />
         <p className="muted hint">
-          ⌘/Ctrl + Enter 创建 · Esc 收起。草稿不会自动启动 Agent，仍需先提交为就绪。
+          ⌘/Ctrl + Enter 创建。草稿不会自动启动 Agent，仍需先提交为就绪。
         </p>
-
-        <fieldset className="dock-constraints">
-          <legend className="eyebrow">约束</legend>
-          {constraints.length === 0 ? (
-            <p className="muted hint">
-              还没有约束。每一项都是 Agent 必须遵守的具体限制，会作为规格的一部分保存。
-            </p>
-          ) : null}
-          <ul className="dock-constraint-list">
-            {constraints.map((row, index) => (
-              <li key={row.id}>
-                <input
-                  type="text"
-                  aria-label={`约束 ${index + 1}`}
-                  value={row.text}
-                  placeholder="例如：不要改动 apps/ui 之外的文件"
-                  onChange={(event) => {
-                    const next = event.target.value;
-                    setConstraints((previous) => previous.map((candidate) => (
-                      candidate.id === row.id ? { ...candidate, text: next } : candidate)));
-                  }}
-                />
-                <button
-                  type="button"
-                  onClick={() => setConstraints((previous) => previous.filter(
-                    (candidate) => candidate.id !== row.id))}
-                >
-                  删除
-                </button>
-              </li>
-            ))}
-          </ul>
-          <button
-            type="button"
-            onClick={() => setConstraints((previous) => [...previous,
-              { id: crypto.randomUUID(), text: '' }])}
-          >
-            ＋ 添加约束
-          </button>
-        </fieldset>
-
-        <div className="dock-kind">
-          <label className="inline">
-            任务类型
-            <select value="DEVELOPMENT" aria-describedby={kindHintId}
-              onChange={() => {}}>
-              <option value="DEVELOPMENT">DEVELOPMENT · 开发任务</option>
-              {/* Visible but unselectable: the kind exists in the contract and the database, but
-                  nothing in the Runtime treats it differently yet. */}
-              <option value="SELF" disabled>SELF · 自演进（未实现）</option>
-            </select>
-          </label>
-          <span className="muted hint" id={kindHintId}>
-            SELF 尚未实现：Runtime 没有隔离的 self worktree，也没有 Candidate/Stable 隔离；
-            命令行 <code>task create --kind SELF</code> 同样会被拒绝。
-          </span>
-        </div>
       </form>
     </section>
   );

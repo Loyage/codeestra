@@ -1,13 +1,13 @@
 # CLI 参考 · project（接入、影响分析与知识）
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v35 · **最后校对** 2026-09-16
+> **适用版本** `dev@de03448`（2026-09-16） · **schema** v36 · **最后校对** 2026-09-16
 > 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../../tasks/README.md) 的最新 FOUNDATION 记录为准。
-> 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一（ADR-0064 之后为八篇），
+> 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一（ADR-0066 之后为八篇），
 > **内容自 `cli-reference.md @ dev@de03448` 搬移，一句未改写；本次未重新核对源码**，最后校对日期因此不变。
 > 本文件覆盖 §3；章节号沿用拆分前的编号，因此可能不连续。正文里提到本文件没有的号（例如 §14、§17）时，到 [README.md](./README.md) 的索引表查它在哪一篇。
 > §3 的 `project impact *` 与 §4 的 `task submit`/`task resume`/`--feature` 由 FOUNDATION-091 新增/改写（ADR-0059）；
-> **本次修订（ADR-0064 / schema v35）**：`project inspect`/`project trust` 的 `--dev-repo` 参数、
+> **本次修订（ADR-0066 / schema v36）**：`project inspect`/`project trust` 的 `--dev-repo` 参数、
 > `devRepoPath` 字段与 `devRefRetirement` 报告全部删除；Task 基线只有一种（项目文件夹建 workspace 时检出的
 > 分支）。`DEV_REPO_*` / `DEV_REF_MISSING` 稳定码不再产生。
 
@@ -17,7 +17,7 @@
 
 读仓库身份：`repoRoot`、`mainRef`、`objectFormat`、`headCommit`、`gitCommonDir`。`path` 默认当前目录。
 
-**Task 基线只有一种**（ADR-0064）：项目文件夹**建 workspace 时当前检出的分支**，ref 与 commit 一起固定进
+**Task 基线只有一种**（ADR-0066）：项目文件夹**建 workspace 时当前检出的分支**，ref 与 commit 一起固定进
 `workspaces.base_ref`/`base_commit`。因此 inspect **不再**返回 `devRef` / `devCommit` / `devRefPresent` /
 `devRepoPath` / `devRefRetirement`，也**没有** `--dev-repo` 参数：dev clone、长期 `dev` 集成分支、
 `dev → main` 提升与 dev 构建通道都已从产品中删除。
@@ -36,7 +36,7 @@ stderr 会打印一行 `Task 基线：该项目文件夹当前检出的分支（
 FULL 无确认；STRICT 需要输入 `TRUST` 或 `--yes`。
 
 trust 记录的正是**你审阅过的那份身份**（仓库身份）与两份已提交策略的确认；没有 dev clone 路径要记，
-因为产品不再有它（ADR-0064）。
+因为产品不再有它（ADR-0066）。
 
 | 稳定码 | 含义 |
 |---|---|
@@ -48,7 +48,7 @@ trust 记录的正是**你审阅过的那份身份**（仓库身份）与两份�
 `REPOSITORY_CHANGED`、`VERIFICATION_POLICY_CHANGED` 或 `IMPACT_POLICY_CHANGED`：重新检查再信任。
 同一仓库的其他工作树（同一 Git common dir）重复 trust 是幂等的。
 
-**一个文件夹拥有全部事实**（ADR-0064）：仓库身份、`main` ref、`.codeestra/policies/verification.json`、
+**一个文件夹拥有全部事实**（ADR-0066）：仓库身份、`main` ref、`.codeestra/policies/verification.json`、
 `.codeestra/impact.json`、Task 分支与 worktree、验证副本与回收，都在 `projects.repo_root` 这一个根上；
 没有第二个 clone 需要核对，也没有跨 clone 的候选对象要核验。
 

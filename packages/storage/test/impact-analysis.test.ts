@@ -45,13 +45,28 @@ function seedProject(database: Database): void {
   database.query(`INSERT INTO project_trusts
     (id,project_id,repo_root,git_common_dir,object_format,policy_version,actor,status,accepted_at)
     VALUES ('trust1','p1','/repo','/repo/.git','sha1',1,'user','ACTIVE',1)`).run();
+  // This helper seeds two kinds of database: a legacy one stamped 16/19 that is then upgraded, and a
+  // current `Phase1Database`. Schema v35 (ADR-0065) deleted `tasks.kind` and
+  // `task_revisions.constraints_json` and added the two titles, so the stamped version decides which
+  // shape is legal here.
+  const current = (database.query<{ user_version: number }, []>('PRAGMA user_version')
+    .get()?.user_version ?? 0) >= 35;
   database.transaction(() => {
-    database.query(`INSERT INTO tasks
-      (id,project_id,display_number,kind,current_revision_id,state,created_at,updated_at)
-      VALUES ('t1','p1',1,'DEVELOPMENT','r1','READY',2,2)`).run();
-    database.query(`INSERT INTO task_revisions
-      (id,task_id,number,previous_revision_id,specification,constraints_json,actor,reason,created_at)
-      VALUES ('r1','t1',1,NULL,'Do work','[]','user','initial',2)`).run();
+    database.query(current
+      ? `INSERT INTO tasks
+          (id,project_id,display_number,display_title,naming_title,current_revision_id,state,
+            created_at,updated_at)
+          VALUES ('t1','p1',1,'Do work','do-work','r1','READY',2,2)`
+      : `INSERT INTO tasks
+          (id,project_id,display_number,kind,current_revision_id,state,created_at,updated_at)
+          VALUES ('t1','p1',1,'DEVELOPMENT','r1','READY',2,2)`).run();
+    database.query(current
+      ? `INSERT INTO task_revisions
+          (id,task_id,number,previous_revision_id,specification,actor,reason,created_at)
+          VALUES ('r1','t1',1,NULL,'Do work','user','initial',2)`
+      : `INSERT INTO task_revisions
+          (id,task_id,number,previous_revision_id,specification,constraints_json,actor,reason,created_at)
+          VALUES ('r1','t1',1,NULL,'Do work','[]','user','initial',2)`).run();
   })();
 }
 
@@ -190,11 +205,12 @@ describe('impact snapshot persistence', () => {
       VALUES ('trust1','p1','/repo','/repo/.git','sha1',1,'user','ACTIVE',1)`).run();
     created.sqlite.transaction(() => {
       created.sqlite.query(`INSERT INTO tasks
-        (id,project_id,display_number,kind,current_revision_id,state,created_at,updated_at)
-        VALUES ('t1','p1',1,'DEVELOPMENT','r1','READY',2,2)`).run();
+        (id,project_id,display_number,display_title,naming_title,current_revision_id,state,
+          created_at,updated_at)
+        VALUES ('t1','p1',1,'Do work','do-work','r1','READY',2,2)`).run();
       created.sqlite.query(`INSERT INTO task_revisions
-        (id,task_id,number,previous_revision_id,specification,constraints_json,actor,reason,created_at)
-        VALUES ('r1','t1',1,NULL,'Do work','[]','user','initial',2)`).run();
+        (id,task_id,number,previous_revision_id,specification,actor,reason,created_at)
+        VALUES ('r1','t1',1,NULL,'Do work','user','initial',2)`).run();
     })();
     return created;
   }
@@ -263,11 +279,12 @@ describe('impact snapshot persistence', () => {
     database = fresh();
     database.sqlite.transaction(() => {
       database.sqlite.query(`INSERT INTO tasks
-        (id,project_id,display_number,kind,current_revision_id,state,created_at,updated_at)
-        VALUES ('t2','p1',2,'DEVELOPMENT','r2','READY',2,2)`).run();
+        (id,project_id,display_number,display_title,naming_title,current_revision_id,state,
+          created_at,updated_at)
+        VALUES ('t2','p1',2,'Other work','other-work','r2','READY',2,2)`).run();
       database.sqlite.query(`INSERT INTO task_revisions
-        (id,task_id,number,previous_revision_id,specification,constraints_json,actor,reason,created_at)
-        VALUES ('r2','t2',1,NULL,'Other work','[]','user','initial',2)`).run();
+        (id,task_id,number,previous_revision_id,specification,actor,reason,created_at)
+        VALUES ('r2','t2',1,NULL,'Other work','user','initial',2)`).run();
     })();
     const candidate = database.recordImpactSnapshot(snapshotInput());
     const other = database.recordImpactSnapshot(snapshotInput({

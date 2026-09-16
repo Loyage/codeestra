@@ -1,6 +1,16 @@
-export const phase1SchemaVersion = 35;
+export const phase1SchemaVersion = 36;
 
-/** The kinds `intents.kind` accepts (ADR-0046) and the only kinds any command can write. */
+/**
+ * The kinds `intents.kind` accepts.
+ *
+ * Five values, four of which any command can still produce: Task creation (`CREATE_TASK`),
+ * revision creation (`AMEND_TASK`), cancellation (`CANCEL_TASK`) and Attention answering
+ * (`ANSWER_AGENT`). `ADD_CONSTRAINT` is **historical only** since ADR-0065 D05: the constraint
+ * feature was deleted, but databases hold real rows that recorded "the user only added a
+ * constraint", and rewriting a recorded classification to fit a narrower CHECK would be a history
+ * rewrite. No writer emits it any more, and the schema keeps accepting it so those rows survive an
+ * upgrade. The projection removal of the three never-producible kinds stays as ADR-0046 decided.
+ */
 export const intentKinds = ['CREATE_TASK', 'AMEND_TASK', 'ADD_CONSTRAINT', 'CANCEL_TASK',
   'ANSWER_AGENT'] as const;
 export type IntentKind = (typeof intentKinds)[number];
@@ -2058,7 +2068,7 @@ INSERT INTO runtime_pause_control(singleton_id,state,pause_epoch,version,request
 `;
 
 /**
- * Schema v35 (ADR-0062): the product no longer models a dev clone, a long-lived `dev` branch,
+ * Schema v36 (ADR-0066): the product no longer models a dev clone, a long-lived `dev` branch,
  * integration into it, or `dev → main` promotion.
  *
  * A Task worktree is based on **the project folder's currently checked out branch** for every
@@ -2078,8 +2088,9 @@ INSERT INTO runtime_pause_control(singleton_id,state,pause_epoch,version,request
  * rebuild is guarded by a row-count comparison in `migrate()` because Bun's `exec()` would otherwise
  * swallow a copy failure and run the following `DROP TABLE` anyway.
  *
- * Schema version 35 is this step's own number: 16 stays permanently unused and no earlier number is
- * ever inserted. A database may already be stamped 17–34 and would skip a later `version < 16` step.
+ * Schema version 36 is this step's own number (35 is the Task input fields step, ADR-0065): 16 stays
+ * permanently unused and no earlier number is ever inserted. A database may already be stamped
+ * 17–35 and would skip a later `version < 16` step.
  */
 export const removeDevCloneMigration = `
 UPDATE workspaces SET base_ref = (
@@ -2142,4 +2153,131 @@ INSERT INTO integration_batches_v30(id,project_id,dev_ref,dev_commit,state,integ
 DROP TABLE integration_batches;
 ALTER TABLE integration_batches_v30 RENAME TO integration_batches;
 CREATE INDEX integration_batches_by_project ON integration_batches(project_id,created_at,id);
+`;
+
+/**
+ * Version 35 (ADR-0065): the Task input fields.
+ *
+ * A Task gains two Task-level titles and loses two fields that no longer exist in the product:
+ *
+ * - `tasks.display_title` is what the task list and the task detail render. It is the *stored*
+ *   summary rather than a client-side truncation of the body, so every reader shows the same thing.
+ *   A historical row has no such field, so it is derived from the first line of the Task's current
+ *   revision and truncated to the contract's bound. That is a derived display value from
+ *   authoritative data, not an invented one.
+ *
+ *   Two details of that derivation are load-bearing. SQLite's one-argument `trim()` removes **spaces
+ *   only**, not newlines or tabs, so every trim in the script names its whitespace set explicitly —
+ *   otherwise a detail that starts with a line break would produce a multi-line "one-line summary".
+ *   And a detail whose first line is blank has no first line to use, so the whole detail is folded
+ *   onto one line. A detail with no non-whitespace character at all cannot become a title, so
+ *   `migrateTaskInputFields()` refuses such a database up front with a named reason instead of
+ *   writing a blank title.
+ * - `tasks.naming_title` is the Task's name inside its branch and worktree directory. Historical
+ *   rows stay NULL on purpose: the Runtime does not fabricate an English name for a Task the user
+ *   created before the field existed. A NULL falls back to the internal identity in Git naming
+ *   (`task/<task-id>`), which is exactly the name those tasks already have.
+ * - `tasks.kind` and `task_revisions.constraints_json` are deleted outright (ADR-0065 D04).
+ *
+ * Both tables are rebuilt. `tasks` must be, because a `NOT NULL` column cannot be added to a table
+ * that already has rows, and `task_revisions` must be, because its `constraints_json` CHECK
+ * mentions the dropped column. `task_revisions` carries the append-only triggers, so they are
+ * recreated verbatim: losing them would silently make revisions mutable. The old `tasks` indexes
+ * are recreated for the same reason.
+ *
+ * `intents.kind` is **not** touched. Historical rows may hold `ADD_CONSTRAINT` and rewriting a
+ * recorded classification to fit a narrower CHECK is exactly the history rewrite the audit rules
+ * forbid (ADR-0065 D05); the product simply stops writing that value.
+ *
+ * No row is dropped or rewritten beyond the two derived/NULL title columns. Bun's `exec()` swallows
+ * a step-time error inside a multi-statement script, so `migrate()` compares the row counts of both
+ * tables around this script and turns a silently-swallowed copy failure into a loud rollback.
+ */
+export const taskInputFieldsMigration = `
+CREATE TABLE task_revisions_v35 (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id) DEFERRABLE INITIALLY DEFERRED,
+  number INTEGER NOT NULL CHECK(number > 0),
+  previous_revision_id TEXT,
+  specification TEXT NOT NULL CHECK(length(trim(specification)) > 0),
+  features_json TEXT NOT NULL DEFAULT '[]'
+    CHECK(json_valid(features_json) AND json_type(features_json)='array'),
+  source_intent_id TEXT REFERENCES intents(id),
+  actor TEXT NOT NULL CHECK(length(trim(actor)) > 0),
+  reason TEXT NOT NULL CHECK(length(trim(reason)) > 0),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  UNIQUE(task_id,number),
+  UNIQUE(task_id,id),
+  FOREIGN KEY(task_id,previous_revision_id) REFERENCES task_revisions(task_id,id),
+  CHECK((number=1 AND previous_revision_id IS NULL) OR (number>1 AND previous_revision_id IS NOT NULL)),
+  CHECK(previous_revision_id IS NULL OR previous_revision_id <> id)
+) STRICT;
+INSERT INTO task_revisions_v35(id,task_id,number,previous_revision_id,specification,features_json,
+  source_intent_id,actor,reason,created_at)
+  SELECT id,task_id,number,previous_revision_id,specification,features_json,source_intent_id,actor,
+    reason,created_at FROM task_revisions;
+DROP TABLE task_revisions;
+ALTER TABLE task_revisions_v35 RENAME TO task_revisions;
+CREATE TRIGGER task_revisions_no_update
+BEFORE UPDATE ON task_revisions BEGIN
+  SELECT RAISE(ABORT,'task revisions are append-only');
+END;
+CREATE TRIGGER task_revisions_no_delete
+BEFORE DELETE ON task_revisions BEGIN
+  SELECT RAISE(ABORT,'task revisions are append-only');
+END;
+
+CREATE TABLE tasks_v35 (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  display_number INTEGER NOT NULL CHECK(display_number > 0),
+  display_title TEXT NOT NULL
+    CHECK(length(trim(display_title)) > 0 AND length(display_title) <= 200
+      AND display_title NOT LIKE '%' || char(10) || '%'
+      AND display_title NOT LIKE '%' || char(13) || '%'),
+  naming_title TEXT CHECK(naming_title IS NULL OR (
+    length(naming_title) BETWEEN 1 AND 50
+    AND naming_title GLOB '[a-z]*'
+    AND naming_title NOT GLOB '*[^a-z0-9-]*'
+    AND naming_title NOT LIKE '-%'
+    AND naming_title NOT LIKE '%-'
+    AND naming_title NOT LIKE '%--%')),
+  current_revision_id TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('DRAFT','BLOCKED','READY','RUNNING','PAUSING','PAUSED',
+    'WAITING_FOR_USER','RECOVERY_REQUIRED','EXECUTED','FAILED','CANCELLING','CANCELLED','SUCCEEDED')),
+  priority INTEGER NOT NULL DEFAULT 0,
+  version INTEGER NOT NULL DEFAULT 0 CHECK(version >= 0),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+  archived_at INTEGER CHECK(archived_at IS NULL OR archived_at >= 0),
+  pending_retry_from_execution_id TEXT REFERENCES executions(id),
+  UNIQUE(project_id,display_number),
+  UNIQUE(project_id,id),
+  UNIQUE(id,current_revision_id),
+  FOREIGN KEY(id,current_revision_id) REFERENCES task_revisions(task_id,id)
+    DEFERRABLE INITIALLY DEFERRED
+) STRICT;
+INSERT INTO tasks_v35(id,project_id,display_number,display_title,naming_title,current_revision_id,
+  state,priority,version,created_at,updated_at,archived_at,pending_retry_from_execution_id)
+  SELECT task.id,task.project_id,task.display_number,
+    CASE
+      -- The first line, when it has content ...
+      WHEN trim(CASE WHEN instr(revision.specification,char(10)) = 0 THEN revision.specification
+        ELSE substr(revision.specification,1,instr(revision.specification,char(10))-1) END,
+        ' ' || char(9) || char(10) || char(13)) <> ''
+      THEN substr(trim(CASE WHEN instr(revision.specification,char(10)) = 0
+        THEN revision.specification
+        ELSE substr(revision.specification,1,instr(revision.specification,char(10))-1) END,
+        ' ' || char(9) || char(10) || char(13)),1,200)
+      -- ... otherwise the whole detail folded onto one line (the pre-check guarantees content).
+      ELSE substr(trim(replace(replace(revision.specification,char(13),' '),char(10),' '),
+        ' ' || char(9)),1,200)
+    END,
+    NULL,task.current_revision_id,task.state,task.priority,task.version,task.created_at,
+    task.updated_at,task.archived_at,task.pending_retry_from_execution_id
+  FROM tasks task JOIN task_revisions revision ON revision.id=task.current_revision_id;
+DROP TABLE tasks;
+ALTER TABLE tasks_v35 RENAME TO tasks;
+CREATE INDEX tasks_schedule ON tasks(project_id,state,priority DESC,created_at,id);
+CREATE INDEX tasks_project_archived ON tasks(project_id,archived_at);
 `;

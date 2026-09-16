@@ -50,7 +50,7 @@ interface StartRequest {
     expectedLastEntryId?: string;
   };
   workspace: { id: string; cwd: string; ownershipToken: string };
-  revision: { id: string; specification: string; constraints: readonly Constraint[] };
+  revision: { id: string; displayTitle: string; specification: string };
   knowledgeSnapshotRefs: readonly string[];
   // ADR-0051：该 Execution 绑定的**物化知识产物**（Runtime 数据目录内的绝对路径 + digest + 字节数）。
   // 缺失 = 该 Execution 没有可交出的知识（无绑定或 entryCount 为 0），Adapter 的受控启动必须逐字节不变；
@@ -103,8 +103,8 @@ interface ProviderSuspensionPlan {
 interface RevisionInput {
   deliveryKey: string;
   revisionId: string;
+  displayTitle: string;
   specification: string;
-  constraints: readonly Constraint[];
 }
 interface GuidanceInput {
   commandId: string;

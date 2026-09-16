@@ -909,6 +909,13 @@ function TasksTab(props: CommonProps & {
               <TaskStateBadge state={task.state} live={props.live && !canCapture} />
               {canCapture ? <span className="muted hint">会话已退出 · 等待提交成果</span> : null}
               {task.archivedAt === null ? null : <span className="muted">已归档</span>}</div>
+            <p className="task-display-title">{task.displayTitle}</p>
+            <p className="muted hint">
+              命名标题：{task.namingTitle === null
+                ? '（创建于命名标题新增之前，分支与目录仍用内部 ID）'
+                : <code>{task.namingTitle}</code>}
+              {' · '}分支与 worktree 目录名（ADR-0065）
+            </p>
             <p className="muted hint">规格 r{task.currentRevision.number} · 状态版本 v{task.version}</p>
 
             {latestRun === null ? null : (
@@ -1140,14 +1147,8 @@ function TasksTab(props: CommonProps & {
               声明的功能：{task.currentRevision.features.length === 0 ? '（未声明，永不参与功能冲突）'
                 : task.currentRevision.features.join('、')}
             </p>
+            <p className="eyebrow">任务详情</p>
             <pre className="spec">{task.currentRevision.specification}</pre>
-            {task.currentRevision.constraints.length === 0 ? null : (
-              <ul>
-                {task.currentRevision.constraints.map((constraint) => (
-                  <li key={constraint.id}>{constraint.text}</li>
-                ))}
-              </ul>
-            )}
 
             {waiting === 0 ? null : (
               <AttentionTab key={task.id} client={client} projectId={projectId}

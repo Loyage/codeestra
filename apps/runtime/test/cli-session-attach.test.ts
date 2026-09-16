@@ -271,13 +271,14 @@ async function startTask(options: { readonly permissionMode?: 'FULL' | 'STRICT' 
   if (options.permissionMode === 'STRICT') {
     // The mode is a persisted Runtime setting that every launch reads, and the switch itself is
     // exactly one command with no confirmation.
-    expect((await cli(['permission', 'set', 'strict'], environment)).exitCode).toBe(0);
+    expect((await cli(['settings', 'permission', 'set', 'strict'], environment)).exitCode).toBe(0);
   }
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { id: string }[];
   const projectId = projects[0]?.id as string;
   const created = JSON.parse((await cli(['task', 'create', projectId,
-    'Attach one native terminal'], environment)).stdout) as { readonly id: string };
+    'Attach one native terminal', '--title', 'Attach one native terminal',
+    '--name', 'attach-native-terminal'], environment)).stdout) as { readonly id: string };
   // ADR-0059: submitting an undeclared Task starts it in the same command (the automatic pass judges
   // it SAFE), so the Session this file drives exists without a second `task run`.
   expect((await cli(['task', 'submit', projectId, created.id, '0'], environment)).exitCode).toBe(0);

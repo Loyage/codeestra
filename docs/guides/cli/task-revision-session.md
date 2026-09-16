@@ -1,10 +1,14 @@
 # CLI 参考 · 修订投递、会话记录与终端接管
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v35 · **最后校对** 2026-09-16
-> 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@06bcf97` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> 版本会前进：`dev@06bcf97` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../../tasks/README.md) 的最新 FOUNDATION 记录为准。
-> 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一（ADR-0064 之后为八篇），
-> **内容自 `cli-reference.md @ dev@de03448` 搬移，一句未改写；本次未重新核对源码**，最后校对日期因此不变。
+> 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一，
+> **内容自 `cli-reference.md` 搬移，除下面列出的几节外一句未改写**。
+> §5 的 `task revision create` 由本分支按 **ADR-0065** 更新：`--constraint` 已删除，
+> 「必须改点什么」现在是「改任务详情或改功能声明，至少其一」。
+> **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
+> 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
 > 本文件覆盖 §5、§6、§6.1、§7；章节号沿用拆分前的编号，因此可能不连续。正文里提到本文件没有的号（例如 §14、§17）时，到 [README.md](./README.md) 的索引表查它在哪一篇。
 > §7 的 `session handoff terminal resize` 一节由 FOUNDATION-083 校对（ADR-0054）；
 
@@ -12,7 +16,7 @@
 
 ```sh
 bun run codeestra task revision create <project-id> <task-id> <expected-version>
-  [--specification <text>] [--constraint <text>]… [--feature <module-id>]… [--reason <text>] [--json]
+  [--specification <text>] [--feature <module-id>]… [--reason <text>] [--json]
 bun run codeestra task revision list <project-id> <task-id> [--json]
 
 bun run codeestra task revision delivery list <project-id> <task-id> [--json]
@@ -21,13 +25,13 @@ bun run codeestra task revision delivery resolve <project-id> <task-id> <deliver
   --action <stop-and-restart|retry> [--adapter <id>] [--json]
 ```
 
-- `create` 至少需要 `--specification` 或 `--constraint` 之一（及其非空文本）。
+- `create` 至少需要 `--specification` 或 `--feature` 之一：什么都没改的修订会被拒为 `INVALID_REVISION`（ADR-0065 之后约束不再是可改的第三样东西）。`--constraint` 已删除，传入即错误用法。
 - `--reason` 用于说明修订原因；缺省是 `initial task creation` 之外的自定义原因。
 - `--action` 必填，且只接受那两个值。
 - delivery 状态：`PENDING / IN_FLIGHT / ACKNOWLEDGED / UNACKNOWLEDGED / CHANNEL_UNSUPPORTED / TIMED_OUT / FAILED / SUPERSEDED_BY_RESTART`。
 - `resolve` **退出码 `0` 仅当投递最终被满足**（`SUPERSEDED_BY_RESTART` / `RESOLVED` / `ALREADY_SATISFIED`）；
   否则 `1`——例如在**没有确认通道**的 Adapter 上 `retry`，它会诚实地留在未确认状态。
-- **与 Session Guidance 的分界**（ADR-0010 D02 / ADR-0057）：本组命令改变的是**验收规格/约束**，因此产生不可变 revision
+- **与 Session Guidance 的分界**（ADR-0010 D02 / ADR-0057）：本组命令改变的是**验收规格**，因此产生不可变 revision
   并使旧验证失效；只是想对**运行中的会话**说一句「怎么做」而不改验收标准，走 `session guide`（见 §6.1，它不产生 revision、
   不动 `appliedRevisionId`、不使验证失效）。两者不能互相代替。
 

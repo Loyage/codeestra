@@ -177,7 +177,7 @@ describe('codeestra open', () => {
   test('asks again once the policy at the main ref changes', async () => {
     const { repository, home, assets } = await fixture();
     const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
-    expect((await cli(['permission', 'set', 'strict'], environment)).exitCode).toBe(0);
+    expect((await cli(['settings', 'permission', 'set', 'strict'], environment)).exitCode).toBe(0);
     expect((await cli(['open', repository, '--yes', '--no-open'], environment)).exitCode).toBe(0);
 
     await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'), JSON.stringify({
@@ -197,7 +197,7 @@ describe('codeestra open', () => {
   test('refuses to trust without the confirmation gate', async () => {
     const { repository, home, assets } = await fixture();
     const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
-    expect((await cli(['permission', 'set', 'strict'], environment)).exitCode).toBe(0);
+    expect((await cli(['settings', 'permission', 'set', 'strict'], environment)).exitCode).toBe(0);
     // Strict mode preserves the opt-in confirmation path; stdin is /dev/null so it must fail.
     const refused = await runCli(['open', repository, '--no-open'], environment,
       { entry: cliEntry });

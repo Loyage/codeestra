@@ -9,6 +9,8 @@
 >
 > 基线 `dev@75fa7b87a4fbc515adf46a936b3666bf83a7ebaa` · 脚手架
 > [`scripts/real-provider-acceptance.sh`](../../scripts/real-provider-acceptance.sh) · 2026-09-15
+>
+> 权限模式的命令拼写由 FOUNDATION-098 同步为 `ce settings permission get|set`（ADR-0064：顶层 `permission` 已移除）。
 
 ---
 
@@ -136,7 +138,7 @@ CODEESTRA_HOME="$CODEESTRA_HOME" bun run codeestra project list    # 记下 proj
 
 - 只从项目 **`main` ref** 读取：Task 分支改不动判定自己的命令。
 - 字段与上限见 `packages/contracts/src/verification-policy.ts`；策略缺失时 `task verify` 会拒绝。
-- 策略只用于 `task verify`（`promotion full-suite run` 已随 ADR-0064 删除；A8 因此没有可执行的验收步骤）。
+- 策略只用于 `task verify`（`promotion full-suite run` 已随 ADR-0066 删除；A8 因此没有可执行的验收步骤）。
 
 ### 1.5 最小 `.codeestra/impact.json`（A1 并发验收专用）
 
@@ -534,10 +536,10 @@ ce agent plugins list --project "$PROJECT" --adapter pi --json; echo "exit=$?"
 ce agent plugins select --project "$PROJECT" --adapter pi \
   --extension "$TMP/probe-extension.ts" --json; echo "exit=$?"
 ce agent plugins list --project "$PROJECT" --adapter pi --json   # 该条目 selected: true
-ce permission get                                                # 确认当前模式
+ce settings permission get                                                # 确认当前模式
 
 # ---- 观察 1：FULL 模式 ----
-ce permission set full
+ce settings permission set full
 ce task create "$PROJECT" "调用 probe_side_effect 工具一次，然后结束。"
 ce task submit "$PROJECT" "$TASK" 0
 ce task run "$PROJECT" "$TASK" 1 --adapter pi --json; echo "exit=$?"
@@ -546,7 +548,7 @@ ls "$CODEESTRA_HOME/plugin-side-effect.txt"     # 期望：存在（直接副作
 ls "$CODEESTRA_HOME/worktrees/$PROJECT/$TASK/probe-tool-out.txt"   # 期望：存在
 
 # ---- 观察 2：STRICT 模式 ----
-ce permission set strict
+ce settings permission set strict
 ce task create "$PROJECT" "调用 probe_side_effect 工具一次，然后结束。"
 ce task submit "$PROJECT" "$TASK2" 0
 ce task run "$PROJECT" "$TASK2" 1 --adapter pi --json; echo "exit=$?"
@@ -555,7 +557,7 @@ ce events list --project "$PROJECT" --since 0 --limit 500 --json
 
 # ---- 还原（必须做） ----
 ce agent plugins select --project "$PROJECT" --adapter pi --clear; echo "exit=$?"
-ce permission set full
+ce settings permission set full
 ```
 
 **预期观察**
@@ -578,7 +580,7 @@ ce permission set full
   解释）。同时确认这是**受控、可回滚**的：`--clear` 之后选择必须为空。
 
 **失败/中止**：probe 让 Runtime 崩溃、provider 异常退出或 ATTENTION 通道出错 → 立刻
-`agent plugins select --clear`、必要时 `permission set full`，然后按 §4 保留现场。
+`agent plugins select --clear`、必要时 `settings permission set full`，然后按 §4 保留现场。
 **不要**继续加载其它 extension 去「再试一次」。
 
 **证据**：`a5-plugins-list-before/after.json`、probe 源码原文（含 sha256）、两个 side-effect 文件的
@@ -705,9 +707,9 @@ ce task transcript "$PROJECT" "$TASK" --json                # 应包含刚键入
 
 ---
 
-### A8 真实 GitHub 上的产品路径提升（**已删除**，ADR-0064）
+### A8 真实 GitHub 上的产品路径提升（**已删除**，ADR-0066）
 
-这一项验收的是产品命令面 `promotion prepare/approve/promote` + `promotion full-suite run`。**ADR-0064
+这一项验收的是产品命令面 `promotion prepare/approve/promote` + `promotion full-suite run`。**ADR-0066
 （schema v35）把它连同 IntegrationBatch、独立集成验证与 dev clone 一起从产品中删除**，所以这里没有可执行的
 验收步骤。
 
@@ -782,5 +784,5 @@ ce task transcript "$PROJECT" "$TASK" --json                # 应包含刚键入
 - 人工观感清单：[acceptance-checklist.md](../guides/acceptance-checklist.md)
 - 决策依据：ADR-0016（暂停/终止）、ADR-0026（原生终端）、ADR-0028（修订投递）、ADR-0043（散文提问）、
   ADR-0044（插件与 gate）、ADR-0051（知识交接与 ACK 评估）、ADR-0008/0011（效率、CLI 完备、FULL 零确认）、
-  ADR-0064（删除 dev clone / 集成 / 稳定提升）
+  ADR-0066（删除 dev clone / 集成 / 稳定提升）
 - 脚手架：`scripts/real-provider-acceptance.sh`（`--help` 列出全部步骤）

@@ -34,11 +34,12 @@ function seedProject(): void {
 function seedTask(): void {
   db.transaction(() => {
     db.query(`INSERT INTO tasks
-      (id,project_id,display_number,kind,current_revision_id,state,created_at,updated_at)
-      VALUES ('t1','p1',1,'DEVELOPMENT','r1','READY',2,2)`).run();
+      (id,project_id,display_number,display_title,naming_title,current_revision_id,state,
+        created_at,updated_at)
+      VALUES ('t1','p1',1,'Do work','do-work','r1','READY',2,2)`).run();
     db.query(`INSERT INTO task_revisions
-      (id,task_id,number,previous_revision_id,specification,constraints_json,actor,reason,created_at)
-      VALUES ('r1','t1',1,NULL,'Do work','[]','user','initial',2)`).run();
+      (id,task_id,number,previous_revision_id,specification,actor,reason,created_at)
+      VALUES ('r1','t1',1,NULL,'Do work','user','initial',2)`).run();
   })();
 }
 
@@ -196,8 +197,9 @@ describe('Phase 1 migration', () => {
   test('rejects a task without its referenced revision at transaction commit', () => {
     expect(() => db.transaction(() => {
       db.query(`INSERT INTO tasks
-        (id,project_id,display_number,kind,current_revision_id,state,created_at,updated_at)
-        VALUES ('bad','p1',2,'DEVELOPMENT','missing','DRAFT',2,2)`).run();
+        (id,project_id,display_number,display_title,naming_title,current_revision_id,state,
+          created_at,updated_at)
+        VALUES ('bad','p1',2,'bad','bad','missing','DRAFT',2,2)`).run();
     })()).toThrow();
     expect(db.query('SELECT id FROM tasks WHERE id=?1').get('bad')).toBeNull();
   });
@@ -624,7 +626,7 @@ describe('event log read cursor', () => {
       projectId, commandId: `command-${suffix}`, payloadHash: `hash-${suffix}`,
       intentId: `intent-${suffix}`, taskId: `task-${suffix}`, revisionId: `revision-${suffix}`,
       intentEventId: `intent-event-${suffix}`, taskEventId: `task-event-${suffix}`,
-      specification: `Task ${suffix}`, constraints: [], kind: 'DEVELOPMENT',
+      specification: `Task ${suffix}`, displayTitle: `Task ${suffix}`, namingTitle: null,
       actor: 'local-user', createdAt: 10,
     });
   }
@@ -685,12 +687,14 @@ describe('transaction and idempotency primitives', () => {
       intentId: 'intent-create', taskId: 'task-create', revisionId: 'revision-create',
       intentEventId: 'intent-event-create', taskEventId: 'task-event-create',
       specification: 'Preserve the exact user request',
-      constraints: [{ id: 'constraint-1', text: 'Do not change main' }],
-      kind: 'DEVELOPMENT' as const, actor: 'local-user', createdAt: 10,
+      displayTitle: 'Preserve the exact user request',
+      namingTitle: 'preserve-the-request',
+      actor: 'local-user', createdAt: 10,
     };
     const created = storage.createTask(input);
     expect(created).toMatchObject({
       id: 'task-create', displayNumber: 1, state: 'DRAFT', version: 0,
+      displayTitle: 'Preserve the exact user request', namingTitle: 'preserve-the-request',
       currentRevision: { id: 'revision-create', number: 1, specification: input.specification },
     });
     expect(storage.createTask({
@@ -708,7 +712,7 @@ describe('transaction and idempotency primitives', () => {
       projectId: 'p1', commandId: 'create-submit', payloadHash: 'create-hash',
       intentId: 'submit-intent', taskId: 'submit-task', revisionId: 'submit-revision',
       intentEventId: 'submit-intent-event', taskEventId: 'submit-task-event',
-      specification: 'Submit this task', constraints: [], kind: 'DEVELOPMENT',
+      specification: 'Submit this task', displayTitle: 'Submit this task', namingTitle: null,
       actor: 'local-user', createdAt: 10,
     });
     const input = {
@@ -741,8 +745,8 @@ describe('transaction and idempotency primitives', () => {
       projectId: 'p1', commandId: `command-${suffix}`, payloadHash: `hash-${suffix}`,
       intentId: `intent-${suffix}`, taskId: `task-${suffix}`, revisionId: `revision-${suffix}`,
       intentEventId: `intent-event-${suffix}`, taskEventId: `task-event-${suffix}`,
-      specification: `Task ${suffix}`, constraints: [],
-      kind: 'DEVELOPMENT', actor: 'local-user', createdAt: 10,
+      specification: `Task ${suffix}`, displayTitle: `Task ${suffix}`, namingTitle: null,
+      actor: 'local-user', createdAt: 10,
     });
     expect(create('one').displayNumber).toBe(1);
     expect(create('two').displayNumber).toBe(2);

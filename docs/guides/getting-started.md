@@ -3,6 +3,7 @@
 > **适用版本** `dev@17b4dd6`（2026-09-16） · **schema** v32 · **最后校对** 2026-09-16
 > 版本会前进：`dev@17b4dd6` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> 权限模式的命令拼写由 FOUNDATION-098 同步为 `settings permission get|set`（ADR-0064：顶层 `permission` 已移除；§19 另新增 `settings list` 总览）。
 > §4.3 的影响映射含义提醒已按 ADR-0059 改写（FOUNDATION-091）；其余内容沿用原有校对基线。
 
 本文带你从零把 Codeestra 跑起来：安装依赖 → 启动 Runtime → 接入第一个 Git 项目 → 打开 Web UI。
@@ -116,15 +117,15 @@ CLI 会自动寻找 Runtime；**没有在跑就自动拉起它**，然后打印 
 看一眼当前权限模式：
 
 ```sh
-bun run codeestra permission get
+bun run codeestra settings permission get
 # {"mode":"FULL","default":"FULL"}
 ```
 
 `FULL` 是产品默认。切到 `STRICT` 无需确认，随时可切回：
 
 ```sh
-bun run codeestra permission set strict
-bun run codeestra permission set full
+bun run codeestra settings permission set strict
+bun run codeestra settings permission set full
 ```
 
 | 模式 | 行为差异（源码核对） |
@@ -184,14 +185,14 @@ bun run codeestra project impact validate /path/to/repo --json
 bun run codeestra project trust /path/to/repo
 
 # STRICT：需要确认，交互输入 TRUST，或脚本传 --yes
-bun run codeestra permission set strict
+bun run codeestra settings permission set strict
 bun run codeestra project trust /path/to/repo --yes
 ```
 
 **前提**：仓库是合法 Git 仓库；`main` ref 可读；并且**不要停在 detached HEAD**（那没有分支可命名，建 Task 时
 会被 `TASK_BASE_REF_UNRESOLVED` 拒绝）。
 
-**Task 基线只有一种**（ADR-0064）：这个文件夹**建 workspace 时当前检出的分支**；ref 与 commit 会一起固定，
+**Task 基线只有一种**（ADR-0066）：这个文件夹**建 workspace 时当前检出的分支**；ref 与 commit 会一起固定，
 之后切分支不会移动已建 Task 的基线。产品不再有 dev clone、长期 `dev` 集成分支或 `dev → main` 提升，
 所以 trust **没有 `--dev-repo`**、也不会返回 `DEV_REPO_*`。成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
 
@@ -281,7 +282,7 @@ bun run codeestra stop --wait 30      # 最多等 30 秒（0–600）
 1. **UI 打不开、报 `UI_ASSETS_MISSING`** → 先 `bun run build:ui`。
 2. **CLI 打到了别的 Runtime** → 检查 `CODEESTRA_HOME`；一个 home 只跑一个 Runtime。
 3. **`project trust` 报 `REPOSITORY_CHANGED` / `VERIFICATION_POLICY_CHANGED`** → 你查看身份/策略与确认之间，
-   它们变了。重新 `project inspect` 看一遍再信任。（`DEV_REPO_*` 系列稳定码已随 ADR-0064 删除。）
+   它们变了。重新 `project inspect` 看一遍再信任。（`DEV_REPO_*` 系列稳定码已随 ADR-0066 删除。）
 
 更多报错见 [troubleshooting.md](./troubleshooting.md)。
 

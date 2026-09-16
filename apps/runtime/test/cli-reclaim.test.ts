@@ -88,6 +88,8 @@ interface SeededTask {
   readonly taskId: string;
   readonly workspaceId: string;
   readonly workspacePath: string;
+  /** The branch the workspace row recorded (ADR-0065 D03: `task/<displayNumber>-<namingTitle>`). */
+  readonly branchRef: string;
   readonly revisionId: string;
   readonly resultCommit: string;
   readonly taskVersion: number;
@@ -128,7 +130,8 @@ async function seededExecutedTask(
   fixture: ReclaimFixture,
   specification = 'Produce one artifact',
 ): Promise<SeededTask> {
-  const created = JSON.parse((await cli(['task', 'create', fixture.projectId, specification],
+  const created = JSON.parse((await cli(['task', 'create', fixture.projectId, specification,
+    '--title', 'fixture task', '--name', 'fixture-task'],
     fixture.environment)).stdout) as { readonly id: string };
   await cli(['stop'], fixture.environment);
   submitFixtureTaskWithoutScheduling({
@@ -163,7 +166,8 @@ async function seededExecutedTask(
     return {
       taskId: created.id,
       workspaceId: candidates.workspaces[0]?.workspaceId as string,
-      workspacePath: run.workspacePath,
+      workspacePath: candidates.workspaces[0]?.path as string,
+      branchRef: candidates.workspaces[0]?.branchRef as string,
       revisionId: task?.currentRevision.id as string,
       resultCommit: captured.resultCommit,
       taskVersion: task?.version as number,
@@ -195,7 +199,7 @@ describe('codeestra reclaim command face', () => {
     try {
       const task = await seededExecutedTask(fixture);
       await mergeResultIntoBaseline(fixture, task.resultCommit);
-      const branchRef = `refs/heads/task/${task.taskId}`;
+      const branchRef = task.branchRef;
 
       // The dry run is the same decision surface: it removes nothing and writes nothing.
       const planned = await cli(['reclaim', 'plan', '--project', fixture.projectId],
@@ -271,7 +275,7 @@ describe('codeestra reclaim command face', () => {
         '--include-failure-scenes'], fixture.environment);
       expect(applied.exitCode).toBe(0);
       expect(existsSync(task.workspacePath)).toBe(false);
-      expect(await git(fixture.repo, ['rev-parse', '--verify', `refs/heads/task/${task.taskId}`]))
+      expect(await git(fixture.repo, ['rev-parse', '--verify', task.branchRef]))
         .toBe(task.resultCommit);
     } finally {
       await cli(['stop'], fixture.environment);
@@ -315,17 +319,20 @@ describe('codeestra reclaim command face', () => {
   test('refuses to reclaim a workspace whose Execution still holds it', async () => {
     const fixture = await openedProject();
     try {
-      const created = JSON.parse((await cli(['task', 'create', fixture.projectId, 'Active work'],
+      const created = JSON.parse((await cli(['task', 'create', fixture.projectId, 'Active work',
+        '--title', 'Active work', '--name', 'active-work'],
         fixture.environment)).stdout) as { readonly id: string };
       await cli(['stop'], fixture.environment);
       submitFixtureTaskWithoutScheduling({
         home: fixture.home, projectId: fixture.projectId, taskId: created.id,
       });
+      let workspacePath = '';
       await withStorage(fixture.home, async (storage) => {
         const workspace = await prepareTaskWorkspace({
           storage, runtimeHome: fixture.home, commandId: crypto.randomUUID(),
           projectId: fixture.projectId, taskId: created.id, expectedTaskVersion: 1,
         });
+        workspacePath = workspace.path;
         storage.reserveExecution({
           projectId: fixture.projectId, taskId: created.id, expectedTaskVersion: 1,
           workspaceId: workspace.workspaceId, executionId: crypto.randomUUID(),
@@ -338,8 +345,10 @@ describe('codeestra reclaim command face', () => {
       const plan = JSON.parse((await cli(['reclaim', 'plan', '--project', fixture.projectId,
         '--include-failure-scenes'], fixture.environment)).stdout) as ReclaimReportShape;
       expect(plan.counts).toMatchObject({ refuse: 1, reclaim: 0 });
-      expect(plan.targets[0]).toMatchObject({ action: 'REFUSE', reasonCode: 'ACTIVE_EXECUTION' });      expect(existsSync(join(fixture.home, 'worktrees', fixture.projectId, created.id)))
-        .toBe(true);
+      expect(plan.targets[0]).toMatchObject({ action: 'REFUSE', reasonCode: 'ACTIVE_EXECUTION' });
+      // ADR-0065 D03: the directory is `<displayNumber>-<namingTitle>`, which is what the preparation
+      // recorded; the assertion is that the live workspace is still on disk, not its exact name.
+      expect(existsSync(workspacePath)).toBe(true);
     } finally {
       await cli(['stop'], fixture.environment);
     }
