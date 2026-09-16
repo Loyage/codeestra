@@ -8255,6 +8255,22 @@ ADR-0062 标 Superseded by ADR-0066。
 | `bunx vitest run --root apps/ui` | 13 文件 **155 pass / 0 fail** |
 | `bun run build:ui` | 退出码 0；`apps/ui/dist/index.html` 不含 `data-channel`（标记已删除） |
 
+### 落地（合入 `dev`）
+
+- **合并提交**：`1c7727d Merge branch 'Loyage/delete_dev' into dev`，以及补丁合并
+  `d52b475 Merge branch 'Loyage/delete_dev' into dev（补：CLI 用法文本不再列出已删除的集成/提升命令）`
+  （在 dev clone `/Users/loyage/Documents/codeestra-dev` 用 `git merge --no-ff` 执行）。
+  `dev` 从 `f1bee1c` 前进到 `d52b475`；合并前本格分支已两次把 `dev` 合入自己（解决 ADR-0062/0063/0064/0065 带来的冲突），
+  因此这两次合入本身无冲突。
+- **`dev` 上的全量检查**（在精确 `d52b475` 上；等同 `just verify`）：`bun run check` 退出码 0 ——
+  `tsc --noEmit`、UI `tsc --noEmit`、`vitest run`（23 个文件 463 项）、`bun test`（103 个文件 **845 项，0 fail**）、
+  UI Vite 构建均通过。执行方式就是 `bun run check`，没有额外手段。
+- **合入后发现并修掉的一处**（因此有第二个合并提交）：`apps/cli/src/main.ts` 的 `usage()` 文本仍把
+  `task integrate`/`task integration *`/`promotion *` 列成可用命令 —— 那段是模板字符串，`typecheck` 不会报错，
+  是靠人工核对 `codeestra <未知命令>` 的输出发现的。修法见 `e0b2224`。
+- **未做**：未 push `origin/dev`（`origin/dev` 仍在 `7425556`，本地 `dev` 领先 30 个提交）、未提升 `main`、
+  未重启任何 Runtime（稳定 Runtime 与 dev 实例都没有被触碰）。
+
 **未做 / 不在本格**：
 
 - 未 push `origin/dev`、未提升 `main`、未重启任何 Runtime。
