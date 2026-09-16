@@ -7292,7 +7292,9 @@ cd /Users/loyage/Documents/codeestra-dev && just check   # 等价 bun run check
 | `bun run check` / 全量 | **未跑**（ADR-0038：开发分支只跑定向测试；提升前在精确 `dev` SHA 上跑全量） |
 | 稳定实例实测 | 未做（本轮在 Orca 工作区 `Loyage/fix` 内改；未动稳定 clone、未提升） |
 
-合入方式：本格在 `Loyage/fix` worktree（基线 `dev@4667d32`）交付；期间 `dev` 已前进到 FOUNDATION-094 的三个文档提交，因此先把 `dev` 合进本分支对齐（并据 094 压缩后的 ADR 索引改写本格的索引条目），再以 merge commit 合入 `dev`。**未 push `origin/dev`、未提升 `main`、未重启稳定 Runtime。**
+合入方式：本格在 `Loyage/fix` worktree（基线 `dev@4667d32`）交付；期间 `dev` 已前进到 FOUNDATION-094 的三个文档提交，因此先把 `dev` 合进本分支对齐（并据 094 压缩后的 ADR 索引改写本格的索引条目），再以 merge commit 合入本地 `dev`。
+实际落地：代码提交 `6a5ddbb`（fix: managed 项目的 Task 生命周期不再要求 dev clone）→ 对齐 `dev@36c8720` 的合并 `da157fa`（树内容与随后被测的代码树逐字节相同）→ 合入 `dev` 的 merge commit `0b001e8`（`dev` 的检入 `dev@0b001e8`）。
+**未 push `origin/dev`、未提升 `main`、未重启稳定 Runtime**（因此正在运行的稳定实例仍带此缺陷）。
 
 ### 仍未做 / 已知边界（不得当作已完成）
 
