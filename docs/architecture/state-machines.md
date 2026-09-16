@@ -6,6 +6,11 @@
 
 状态：`DRAFT, BLOCKED, READY, RUNNING, PAUSING, PAUSED, WAITING_FOR_USER, RECOVERY_REQUIRED, EXECUTED, FAILED, CANCELLING, CANCELLED, SUCCEEDED`。
 
+**本表不包含「已删除」：`task purge`（ADR-0058）不产生新状态，它让聚合根行消失**。`TaskPurged` 的 payload 里
+`to: 'PURGED'` 描述的是「这个任务在这里结束」，不是一个可迁移到的状态（没有 `task list`/`task status` 能再读到它）。
+因此本表的迁移规则对它不适用：purge 先按既有规则把非终态任务停到 `CANCELLED`（无法确认静止即 `RECONCILE_REQUIRED` 且什么都不删），
+再在一次数据库事务里删掉它及其全部子行；`SUCCEEDED` 任务因成果已在 `dev` 中而被拒（ADR-0053）。
+
 | 源 | 触发 | Guard / 目标 |
 |---|---|---|
 | DRAFT | submit | 规格有效；依赖未满足→BLOCKED，否则 READY |

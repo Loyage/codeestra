@@ -21,6 +21,7 @@ import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOpt
   type DevRepoInspection,
   type DevRefRetirement,
   type TaskRetryOutcomeView,
+  type TaskPurgeOutcomeView,
   type AgentPluginDetection,
   type VerificationPolicyInspection,
   agentPluginKinds,
@@ -1195,6 +1196,16 @@ function usage(): never {
   bun run codeestra task cancel <project-id> <task-id> <expected-version>
   bun run codeestra task archive <project-id> <task-id> <expected-version>
   bun run codeestra task unarchive <project-id> <task-id> <expected-version>
+  bun run codeestra task purge <project-id> <task-id> <expected-version> --yes [--reason <text>] [--json]
+    # DESTRUCTIVE and irreversible: deletes the Task, its revisions, executions, sessions, evidence,
+    # owned worktrees, verification copies and branches. A non-terminal Task is cancelled first
+    # through the ordinary cooperative stop, and a stop that cannot be confirmed deletes nothing
+    # (RECONCILE_REQUIRED, exit 1). A Task whose commit already reached dev/main is refused
+    # (TASK_INTEGRATED_INTO_DEV / TASK_IN_STABLE_PROMOTION, exit 1) — archive it instead.
+    # --yes is required and is the only guard; without it the command exits 2 without sending
+    # anything. Replaying the same command ID returns the receipt instead of a second deletion.
+    # stdout is the printed view (JSON shape regardless of --json), including rowsDeleted,
+    # dependencyEdgesRemoved and the tip commit of every branch that was deleted.
   bun run codeestra task status <project-id> <task-id> [--json]
     # every Execution's Agent completion is printed with its note; a code such as
     # PROSE_QUESTION_NO_TOOL_USE marks a completion the Runtime annotated instead of
@@ -2607,6 +2618,32 @@ try {
     if (firstArgument === undefined
       || (remainingArguments.length !== 0 && !includeArchived)) usage();
     print(await call({ command: 'task.list', projectId: firstArgument, includeArchived }));
+  } else if (group === 'task' && action === 'purge') {
+    const [taskId, versionText, ...flags] = remainingArguments;
+    const expectedVersion = Number(versionText);
+    if (firstArgument === undefined || taskId === undefined || versionText === undefined
+      || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
+    const split = splitFlagTokens(flags, ['--reason'], ['--yes', '--json']);
+    if (split.positionals.length !== 0) usage();
+    // `--yes` is the whole guard, and it is the command's own statement rather than a permission
+    // layer: nothing else in the product costs a step because of it, and a script that meant to
+    // archive cannot reach permanent deletion by accident.
+    if (!split.bare.has('--yes')) {
+      console.error('task purge permanently deletes the Task, its revisions, executions, evidence'
+        + ' and its own worktree/branch. Pass --yes to confirm.');
+      process.exit(2);
+    }
+    const reason = split.flags.get('--reason');
+    const result = await call({
+      command: 'task.purge',
+      commandId: crypto.randomUUID(),
+      projectId: firstArgument,
+      taskId,
+      expectedVersion,
+      confirmed: true,
+      ...(reason === undefined ? {} : { reason }),
+    }) as TaskPurgeOutcomeView;
+    print(result);
   } else if (group === 'task' && (action === 'pause'
     || action === 'cancel' || action === 'archive' || action === 'unarchive')) {
     const [taskId, versionText, ...extra] = remainingArguments;

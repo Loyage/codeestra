@@ -9,6 +9,11 @@
 - JSON TEXT 附加 `json_valid` 并由 Zod 检验结构；不将结构化关系全部塞进 JSON。
 - aggregate version 通过 `UPDATE ... WHERE version = expectedVersion` CAS；更新行数非 1 为并发冲突。
 - 默认不级联删除审计与成果记录。归档、日志期限、数据库压缩后续设计；未获授权不自动回收证据。
+  **唯一的显式例外是 `task purge`（ADR-0058）**：用户在命令面显式要求永久删除一个任务时，该任务拥有的行——包括五张
+  append-only 任务子表（`task_revisions`/`impact_snapshots`/`impact_assessments`/`targeted_test_plans`/`execution_knowledge_snapshots`）
+  的 `_no_delete` 触发器会在**同一个事务内**被读出原文 → DROP → DELETE → 原文重建 → 复核数量（任一触发器缺失即拒绝，失败即整笔回滚）——
+  连同它自己的 worktree/验证副本/分支一起销毁。代价是可见的：`domain_events`、`command_receipts`、`operations`、`intents` 与项目级
+  `knowledge_snapshots` **不被删除**，所以「这个任务存在过、被谁在什么时候删除了什么」仍可读（最后一条 `TaskPurged`），而**逐表行数之外不可恢复**（无墓碑、无备份）。
 - 下列 state 的合法值由对应 `state-machines.md` 的同名状态集合生成 CHECK；示例中对长枚举以应用校验说明，不把省略的 CHECK 当作已完整 migration。正式 migration 必须补齐并测试。
 
 ## 2. 身份、意图、任务与 DAG

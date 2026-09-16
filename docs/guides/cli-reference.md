@@ -378,6 +378,29 @@ workspace 变成 `RETAINED` 后 `reclaim` 才能考虑它。`--reason <text>` �
 
 三者都需要 expected version，多余参数是用法错误。
 
+### `task purge <project-id> <task-id> <expected-version> --yes [--reason <text>] [--json]`
+**本命令不可撤销。** 它删掉这个任务**拥有的一切**：全部 revision、Execution、AgentSession、终端/guidance/Attention 记录、验证运行、
+impact 快照与它的配对判定、槽位预留、回收记录、依赖边、`intents` 的 target，以及**它自己的 worktree、验证副本与 `task/<id>` 分支**，
+最后删除任务行本身，并在同一个事务里写一条 `TaskPurged` 事件。
+| 情形 | 行为 / 退出码 |
+|---|---|
+| 成功 | `0`；stdout 是结果 JSON（`--json` 只用于声明意图），含逐表 `rowsDeleted`、`dependencyEdgesRemoved`、`plan`、`branchFacts`（每个被删分支的 `tipCommit`） |
+| 缺 `--yes` | `2`，**不发送任何请求**，什么都不变 |
+| 任务成果已进 `dev` | `1`，`TASK_INTEGRATED_INTO_DEV`（见下） |
+| 任务参与过稳定提升 | `1`，`TASK_IN_STABLE_PROMOTION` |
+| 非终态任务 | 先走一次协作停止：能确认 provider 退出才继续删除；无法确认则 `1` / `RECONCILE_REQUIRED`，**什么都不删** |
+| `RECOVERY_REQUIRED` 任务 | `1` / `RECONCILE_REQUIRED`，先用 `task recover` 对账 |
+| 记录的 worktree/验证副本/分支无法证明属于它 | `1` / `PURGE_RESOURCE_NOT_OWNED`，**一行都不删** |
+固定事实（不只是约定）：
+- **`--yes` 是整个产品唯一一次显式确认，且不在任何常态路径上**：接入、工具、成果 commit、验证策略、调度、提升、`cancel`/`archive`
+  都不需要它。它不是审批层：Runtime 不再叠第二次询问，`confirmed` 是调用者自己的声明。
+- **`SUCCEEDED` 任务实际上不可 purge**：按定义它的成果已进 `dev`（ADR-0053），因此会被 `TASK_INTEGRATED_INTO_DEV` 拒绝，
+  请改用 `task archive`（它隐藏任务但不销毁那个 commit 的来源记录）。
+- **删除是幂等的**：同一 `commandId` 重放会读到收据（`replayed: true`），不会发生第二次删除；同一 ID 换 payload 报 `COMMAND_CONFLICT`。
+- **`domain_events`、`command_receipts`、`operations`、`intents` 与项目级知识快照不删**：所以任务被删后，事件流里仍能读到它的历史
+  以及最后那条 `TaskPurged`。**除逐表行数与分支 tip 之外不可恢复**（无墓碑、无备份）。
+- **会连带删掉指向它的依赖边**（条数在 `dependencyEdgesRemoved` 里），下游任务会因此重新判定；也会删掉**另一方**与它配对的那条 impact 判定。
+- 本命令**不使用退出码 3**。
 ### `task status <project-id> <task-id> [--json]`
 
 - 输出是 JSON（`--json` 是**默认**，可用脚本声明意图）；任何其他 flag 是用法错误。

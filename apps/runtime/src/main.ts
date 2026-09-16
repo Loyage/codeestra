@@ -102,6 +102,7 @@ import {
   reconcileTaskDependencyState,
 } from './scheduler.js';
 import { pauseOrCancelTask, resumePausedTask, retryFailedTask } from './task-control-service.js';
+import { purgeTask } from './task-purge-service.js';
 import {
   readSessionTranscript,
   readSessionTranscriptPart,
@@ -1090,6 +1091,32 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         dependencyReasons: retried.retry.dependencyReasons,
         start: outcome,
       });
+    }
+    case 'task.purge': {
+      // Permanent deletion (ADR-0058). The only command face that asks for an explicit confirmation
+      // bit, and the bit is the caller's own statement, not a permission gate: the Runtime adds no
+      // approval step on top of it, and a request without it is refused before anything is read or
+      // stopped, so "no" costs nothing.
+      if (!request.confirmed) {
+        throw new RuntimeCommandError('PURGE_CONFIRMATION_REQUIRED',
+          'Permanent deletion requires --yes: it destroys the Task, its revisions, executions,'
+          + ' evidence and its worktree/branch. Nothing was read or changed.');
+      }
+      const purged = await purgeTask({
+        storage,
+        runtimeHome: home,
+        coordinator,
+        projectId: request.projectId,
+        taskId: request.taskId,
+        expectedVersion: request.expectedVersion,
+        commandId: request.commandId,
+        ...(request.reason === undefined ? {} : { reason: request.reason }),
+        actor: 'local-user',
+      });
+      // The Task is gone, so there is nothing for the scheduler to reconsider; a purge releases no
+      // slot through the engine (the rows that held one are deleted) and inventing a tick here would
+      // only report an unrelated Task's wait.
+      return success(request.requestId, purged);
     }
     case 'task.archive': {
       const payloadHash = createHash('sha256').update(JSON.stringify({

@@ -455,3 +455,13 @@ body { font-size: 0.875rem; }
 .settings-row-head { display: flex; align-items: baseline; gap: 0.5rem; }
 .settings-row-control { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; margin: 0.4rem 0; }
 .settings-row-control select { min-width: 8rem; }
+
+/* Permanent deletion (ADR-0058): the same danger colour as the other destructive actions, plus a
+   separator so the irreversible control is never mistaken for "more operations". */
+.purge-control { margin-top: 0.6rem; }
+.purge-control .danger-zone { border-top: 1px solid var(--line); padding-top: 0.6rem; }
+.purge-control .danger-zone > summary { color: var(--danger); cursor: pointer; }
+.purge-control label { display: block; margin: 0.45rem 0; }
+.purge-control input { margin-left: 0.4rem; }
+.purge-outcome { margin-top: 0.5rem; }
+.purge-outcome p { margin: 0.2rem 0; }

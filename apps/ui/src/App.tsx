@@ -20,6 +20,7 @@ import {
   projectTrustRejectionNotice,
 } from './project-trust.js';
 import { TaskRetryControls } from './task-retry.js';
+import { TaskPurgeControls } from './task-purge.js';
 import { RevisionDeliveryPanel } from './revisions.js';
 import { ProseQuestionWaitCard, isProseQuestionWait, readProseQuestionWait, proseQuestionResolveCommand } from './prose-wait.js';
 import { SchedulePanel, ScheduleExplainPanel, CapacityPanel } from './schedule.js';
@@ -1161,6 +1162,16 @@ function TasksTab(props: CommonProps & {
                   run={run}
                 />
                 <p className="muted hint">终止后不能重开；归档只隐藏任务，不删除记录或回收工作树。</p>
+                <TaskPurgeControls
+                  client={client}
+                  projectId={projectId}
+                  task={task}
+                  onChanged={async () => {
+                    await props.reloadTasks(projectId);
+                    await props.loadDetail(projectId, task.id);
+                  }}
+                  run={run}
+                />
               </details>
             </div>
             {waiting === 0 ? null : (

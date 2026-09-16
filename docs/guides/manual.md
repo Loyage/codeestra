@@ -435,12 +435,20 @@ bun run codeestra task resume $PROJECT <task-id> <expected-version> [--adapter <
 bun run codeestra task retry  $PROJECT <task-id> <expected-version> [--adapter <id>]
 bun run codeestra task cancel $PROJECT <task-id> <expected-version>
 bun run codeestra task archive|unarchive $PROJECT <task-id> <expected-version>
+bun run codeestra task purge  $PROJECT <task-id> <expected-version> --yes [--reason <text>]
 ```
 
 - **暂停**是协作停止：确认 provider 进程退出后才进 `PAUSED`，工作树与会话保留。
 - **继续**在同一工作树新建一次执行，并**复用已暂停会话的 provider conversation**。
 - **重试**只对 `FAILED` 生效，只由这条显式命令触发；重试后仍走同一道调度门禁（会排队，不会插队）。
 - **终止**是终态；**归档**只隐藏任务，不删记录、不回收工作树，可随时取消归档。
+- **永久删除**（`task purge --yes`）是唯一不可撤销的操作：它删掉任务的全部记录与它自己的 worktree、验证副本、`task/<id>` 分支，
+  同时在事件流里留下一条 `TaskPurged`（含每个被删分支的 tip）。三点必须知道：
+  1. **成果已进 `dev` 的任务删不掉**（`TASK_INTEGRATED_INTO_DEV`）——否则那个 commit 会失去「谁把它带进来」的记录；这类任务只能归档，`SUCCEEDED` 任务都属于这一类。
+  2. **正在跑的任务会先被真地终止**（能确认 provider 退出才继续）；无法确认时什么都不删，先用 `task recover` 对账。
+  3. 它会连带删掉**指向该任务的依赖边**（下游会因此重新判定）。
+
+日常清理不再需要的任务：先 `task cancel`（如果需要），再 `task purge --yes`。只想让列表安静下来就用 `task archive`。
 
 > 图：`03-task-workbench.png` — 任务工作台：顶部「项目任务概况」四个计数卡（全部任务 / 执行中 /
 > 需要你处理 / 成果已提交）、搜索与筛选行、任务行（状态徽标 + 提示文字 + 「查看详情 →」）。

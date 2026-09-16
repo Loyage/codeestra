@@ -47,6 +47,8 @@ export type {
   TaskDependencyBlockReason, TaskDependencyFact, TaskDependencyMutation, TaskDependencyRecord,
   TaskDependencyRemoval, TaskDependencyStateChange,
   TaskLifecycleState, TaskResumeRequest, TaskStopRequest, TaskSummary,
+  TaskPurgeBlocker, TaskPurgeBranchFact, TaskPurgeInput, TaskPurgeReclaimedResource,
+  TaskPurgeResult, TaskPurgeSubject,
   TaskRetryRequest, TaskRetryWorkspaceMode, TaskWorkspaceRecord,
   AgentSessionStartupReconciliationRecord, RevisionDeliveryAttemptState,
   StaleAgentSessionConvergence, StaleAgentSessionRecord, StaleSessionObservation,

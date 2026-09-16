@@ -262,6 +262,7 @@ Web UI 是**本地 Runtime 的便利前端**，不是另一个产品：
 | `更多操作` → `终止` | 多数状态 | `task.cancel` | 终止是**终态**；协作停止 Agent，保留工作树与全部记录 |
 | `更多操作` → `归档` / `取消归档` | 见下 | `task.archive` / `task.unarchive` | 归档**只隐藏任务**，不删除记录或回收工作树；可随时取消归档 |
 | `更多操作` → `重试（task retry）` | **总是可见**（不做本地状态判断） | `task.retry` | 重新入队这个任务并请调度门禁尝试启动一次；被拒绝时显示 Runtime 返回的稳定码 |
+| `更多操作` → `永久删除（不可撤销）` | 折叠块，见下 | `task.purge` | 删掉任务及其全部记录、它自己的工作树/验证副本/分支；**输入任务编号才启用**；已进 `dev` 的任务会被拒绝 |
 
 **（c2）`更多操作` 里的重试块（`task retry`）**
 
@@ -300,6 +301,23 @@ Web UI 是**本地 Runtime 的便利前端**，不是另一个产品：
 - **可以归档**：非归档状态，且状态不是 `RUNNING` / `WAITING_FOR_USER` / `PAUSING` / `PAUSED` /
   `CANCELLING` / `RECOVERY_REQUIRED`。「更多操作」底部的说明原文：
   `终止后不能重开；归档只隐藏任务，不删除记录或回收工作树。`
+
+**（c3）`更多操作` 里的永久删除块（`task purge`）**
+
+源码位置：`apps/ui/src/task-purge.tsx`。它同样是**同一命令面的投影**：界面不碰 Git、不删文件，也不自己判断可删性；
+被拒绝时原样显示 Runtime 返回的稳定码（`TASK_INTEGRATED_INTO_DEV` / `TASK_IN_STABLE_PROMOTION` /
+`RECONCILE_REQUIRED` / `PURGE_RESOURCE_NOT_OWNED` / `CONCURRENT_MODIFICATION`）。
+
+| 元素 | 内容（固定文案） |
+|---|---|
+| 折叠块标题 | `永久删除（不可撤销）`（危险色，与其他破坏性操作同一颜色） |
+| 说明 | 连同全部修订、执行、会话、证据，以及它自己的 worktree、验证副本与分支一起销毁；非终态会先走一次协作停止，**无法确认进程静止时不删除任何东西**；成果已进 `dev`/`main` 的任务会被拒绝，请改用归档 |
+| 确认输入 | `输入任务编号 #<n> 以确认`——只有输入就等于该任务编号（纯数字，允许前后空白）时按钮才启用；输入 `#<n>`、别的编号或文字都不启用 |
+| 原因输入 | `原因（可选，记入审计）`——空则不发送 `reason` 字段 |
+| 按钮 | `永久删除`；发送 `task.purge`（带 `confirmed: true` 与原任务的 `expectedVersion`） |
+
+发送后显示的事实：被删任务编号与最终状态、逐表删除行数合计、工作树/验证副本/分支数量、删除前的终止事实、被移除的依赖边数量，
+以及**每个被删分支的 `branchRef → tipCommit`**（分支没了，它指向的 commit 仍然可读）。同一命令被重放时额外显示 `这是同一命令的重放，没有发生第二次删除。`
 
 **（d）待处理请求（就地嵌入）**
 
@@ -939,6 +957,7 @@ Runtime 后依然生效，命令行（codeestra settings ui …）读写的是�
 | 任务详情 | `合入 dev` | `task.integrate` |
 | 任务详情 | `取消`（长命令行） | `task.operation.cancel` |
 | 任务详情 | `终止` / `归档` / `取消归档` | `task.cancel` / `task.archive` / `task.unarchive` |
+| 任务详情 | `永久删除`（需输入任务编号） | `task.purge` |
 | 任务详情 | `更多操作` → `重试（task retry）` | `task.retry`（重新入队 + 一次启动请求；事件记录后仍可能只是等待或启动被拒） |
 | 任务详情 | 原生终端：`请求接管` / `接管` / `取消接管请求` / `附加` / `分离` / `写入` / `交还自动化` | `session.handoff.request` / `admit` / `cancel` / `attach` / `detach` / `terminal.write` / `release` |
 | 任务详情 | 调度判定：`记录单次放行` | `task.schedule.clearUnknown` |

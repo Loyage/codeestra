@@ -6668,6 +6668,97 @@ domain/ui 一行未动，且 ADR-0038 禁止在 lane 上跑全量（协调者在
 **本增量如实报告的缺口（不属本格范围，未改）**：界面发送 `project.trust` 时仍**不发送** `expectedImpactPolicy`
 （契约里它是可选字段，CLI 总是发）：从界面信任的项目会记不到影响映射，于是影响判定恒为 `UNKNOWN`。
 这是本格之前就存在的 UI/CLI 差异，本增量只对齐 `devRepoPath`，所以把它列在这里。
+## FOUNDATION-090 — `task purge`：任务可被永久删除（`lane/p1-task-purge`，ADR-0058，**无 schema 变更**）
+
+状态：**已实现 + 已跑定向检查；未提交、未 push、未合并进 `dev`、未提升 `main`、未触碰稳定 clone 与其上的稳定 Runtime**（按仓库约定：先实现并跑该格的定向测试，等用户确认后才 commit）。
+
+固定基线：`dev@17b4dd6`（未 rebase、未合入新 dev、未 push）。工作分支：`lane/p1-task-purge`。
+
+### 背景（用户本机请求）
+
+用户提出两件事：①「任务需要可以被删除，避免影响冲突判断」；②「冲突判断太保守了，需要快，默认不认为冲突，
+只有在用户想改进某个功能而该功能还没开发完的时候才视作冲突」。本格只做①（②是下一格，会改 `PROJECT_SPEC.md` §2.6 与 ADR-0031）。
+① 对应的缺口是真实的：ADR-0016 只有 `task archive`（软删除、不删除任何行、不回收 worktree/branch），
+而**归档不影响冲突判定**，所以卡住或不再需要的任务永久留在库里与磁盘上，没有任何命令面可清理。
+
+动手前用**迁移后的真实 schema**（`PRAGMA foreign_key_list` 的传递闭包，不是 `migration.ts` 的文本——多张表被 v7/v9/v24/v28/v30 重建过）
+实测出三条硬事实：`tasks` 的 FK 闭包有 **35 张表**且**没有任何 `ON DELETE CASCADE`**；**五张任务子表带 append-only `no_delete` 触发器**；
+**三张表记录「成果已进入某个 ref」**（`integration_batch_items`/`integration_verification_runs`/`stable_promotion_members`）。
+
+### 交付了什么（ADR-0058 D01–D08）
+
+1. **命令面**：`task purge <project-id> <task-id> <expected-version> --yes [--reason <text>] [--json]`。
+   缺 `--yes` → **退出码 2 且不发送任何请求**；`confirmed:false` 的请求由 Runtime 在任何读取之前以 `PURGE_CONFIRMATION_REQUIRED` 拒绝。
+   这是全产品唯一一次显式确认，也不是审批层：**常态路径（接入/工具/成果 commit/验证策略/调度/提升/`cancel`/`archive`）新增步数 0**。
+   退出码 `0` 成功、`1` 拒绝、`2` 用法，**不使用 3**（没有等待语义）。
+2. **任何状态都可 purge，但非终态必须先被证明已停止**：走既有协作停止（派生 command ID），
+   `RUNNING` 系先 `CANCELLING` 并等 Adapter 确认 provider 退出才落 `CANCELLED`；`UNCERTAIN` 或本来就是 `RECOVERY_REQUIRED`
+   → `RECONCILE_REQUIRED` 且**什么都不删**（先用 `task recover`，ADR-0055）。删除用的版本是**停止之后**读到的版本（调用者的 `expectedVersion` 描述的是他看到的状态）。
+3. **append-only 是显式例外，且只在 purge 事务内让路**：五张表的 `_no_delete` 触发器从 `sqlite_master` 读出原文 → DROP → DELETE → 原文重建 → 复核数量，
+   失败即整笔回滚；**任一期望触发器缺失即 `INVALID_STATE` 拒绝**（这条路径永远不会变成「可以悄悄绕过 append-only」）。项目级 `knowledge_snapshots` 不删。
+4. **外键仍然被检查**：一次 `PRAGMA defer_foreign_keys=ON` 把 35 张表的删除顺序降级为**文档**而不是正确性前提
+   （`tasks.current_revision_id`↔`task_revisions`、`agent_sessions.current_incarnation_id`↔`session_incarnations`、
+   `tasks.pending_retry_from_execution_id`→`executions` 都是环），**不关闭外键**：留下悬空引用仍会使整笔事务失败。
+   `domain_events`/`command_receipts`/`operations`/`intents` **保留**（删运行时拥有的行，不删「发生过什么」）；
+   `intent_targets` 与 `task_dependencies` 的两端点边删除，后者条数在返回值与审计里明示（`dependencyEdgesRemoved`）。
+5. **资源回收复用 ADR-0021 的 plan/apply**（`TASK_WORKTREE`+`VERIFICATION_COPY`、`includeFailureScenes:true`）：
+   plan 里有任何一个 target 不是 `RECLAIM`/`ALREADY_ABSENT` → `PURGE_RESOURCE_NOT_OWNED` 且**一行不删**。
+   分支删除由新增的 `packages/git/src/purge.ts` 承担（`reclaim.ts` 明确声明「不删分支」，purge 恰好相反，所以是独立的一小片表面）：
+   只接受本地分支、**被任何 worktree 检出即拒绝**、`git update-ref -d <ref> <expected-tip>` 比较交换、**删除前读出 tip 并记入审计**。
+   顺序为 plan（只读）→ apply → 分支 → 数据库事务；任一步失败即中止且不删数据库行（`reclaim.records` 仍如实，ADR-0042 的 REBUILD 可恢复）。
+6. **成果已进 ref 即拒绝**：`TASK_INTEGRATED_INTO_DEV` / `TASK_IN_STABLE_PROMOTION`（事务内重检）。
+   必须写明的后果：`SUCCEEDED` 按定义在成果进入 `dev` 之后才写（ADR-0053），所以**每个 `SUCCEEDED` 任务都会被拒绝**，
+   purge 的常规对象是 `CANCELLED`（及取消过的 `FAILED`）——这正是要的不变量：`dev`/`main` 里的 commit 永远保留「谁把它带进来的」。
+7. **幂等由 `command_receipts` 承担**（常规前置在重放时必然 `NOT_FOUND`）：同 ID 同 hash 返回上次结果（`replayed:true`），
+   hash 不同或收据不是 purge 形状 → `COMMAND_CONFLICT`；**不新增墓碑表**。
+8. **新事件 `TaskPurged`**（同事务写入，payload 含最终状态、逐表删除行数、依赖边数、每个被删分支的 tip、每个被回收资源、
+   被让路的触发器名单、操作者与 reason），任务行消失后仍在 `events.list`/SSE 可读。
+9. **UI 同批**（`apps/ui/src/task-purge.tsx`）：危险区折叠块 + **输入该任务编号才启用**的按钮 + 可选原因；
+   发送的就是 CLI 那一条请求（`confirmed: true`），**不自己判断可删性**，拒绝按 Runtime 的稳定码显示，且不碰 Git/文件系统。
+
+### 改了哪些文件
+
+- 新增：`packages/git/src/purge.ts`、`apps/runtime/src/task-purge-service.ts`、`apps/ui/src/task-purge.tsx`、
+  `docs/decisions/0058-task-purge.md`。
+- 修改：`packages/contracts/src/index.ts`（`task.purge` 请求 + `TaskPurgeOutcomeView`，纯追加）、
+  `packages/storage/src/{database,index}.ts`（`inspectTaskPurge`/`inspectTaskPurgeBlockers`/`purgeTask`/`findTaskPurgeByCommand`、
+  `taskPurgeDeletions`、触发器让路与复核、两个新的稳定拒绝码，纯追加）、`packages/git/src/index.ts`（导出）、
+  `apps/runtime/src/main.ts`（`case 'task.purge'`）、`apps/cli/src/main.ts`（`task purge` + `usage()`）、
+  `apps/ui/src/{App.tsx,types.ts,styles.css}`。
+- 文档：本文件、`docs/decisions/README.md`、`docs/architecture/{event-model,sqlite-schema,domain-model,state-machines}.md`、
+  `docs/guides/{cli-reference,ui,manual,troubleshooting}.md`、`PROJECT_SPEC.md`（状态段）。
+- 新增测试（ADR-0038 的定向测试，**本格在 lane 分支上未运行全量 `bun run check` / `just check`**）：
+  `packages/storage/test/task-purge.test.ts`（4）、`packages/git/test/purge.test.ts`（3）、
+  `apps/runtime/test/cli-task-purge.test.ts`（2）、`apps/ui/test/task-purge.test.ts`（3）。
+
+### 实际运行的定向验证与结果
+
+| 命令 | 结果 |
+|---|---|
+| `bun test packages/storage/test/task-purge.test.ts` | **4 pass / 0 fail**（20 断言） |
+| `bun test packages/git/test/purge.test.ts` | **3 pass / 0 fail**（8 断言） |
+| `bun test apps/runtime/test/cli-task-purge.test.ts` | **2 pass / 0 fail**（30 断言，真实 CLI + 真实 Runtime + 真实 worktree/branch） |
+| `bun x vitest run apps/ui/test/task-purge.test.ts` | **3 pass / 0 fail** |
+| `bun x tsc --noEmit -p tsconfig.json` | **无输出（0 错误）** |
+
+未运行的检查：全量 `bun run check` / `just check` / `just verify`（ADR-0038 禁止在功能分支运行），
+以及任何浏览器/桌面自动化（ADR-0008 禁止）。UI 只验证了纯函数投影，**没有**真实点击验证。
+
+### 如实报告的已知边界
+
+- `SUCCEEDED` 任务实际不可 purge（只能 `task archive`），这是 D06 的有意后果。
+- 删除会**连带删除跨任务事实**：指向它的依赖边（会改变下游依赖判定）与被删方的配对 `impact_assessments` 行。
+- 「删了什么」逐表完整但**不保证可恢复**：无墓碑、无备份，分支 tip 只留在 `TaskPurged` 事件的 payload 里。
+- 非终态 purge 会**先真实终止**该任务（协作停止，可能中断正在运行的 Agent）——这是用户选择的语义。
+- 未验证：`RECOVERY_REQUIRED` 的 purge 路径（只走到拒绝分支）、`PURGE_RESOURCE_NOT_OWNED` 的真实 Git 竞态、
+  reclaim 与分支删除之间崩溃的恢复全流程、UI 实际点击。
+- 本格**未**触碰 `PROJECT_SPEC.md` §2.6 的冲突判定语义（那是下一格），也未实现「功能声明」相关字段。
+
+### 与下一格的关系
+
+②「冲突判定放宽」尚未开始：按用户答复，下一格会改为「默认 SAFE，只有两侧声明同一 feature（复用 `.codeestra/impact.json` 的 `modules[].id`）
+且对方为**任何非终态**时才 `CONFLICTING`」，保留三值判定但默认路径不再产出 `UNKNOWN`，并写新 ADR supersede ADR-0031、修订 `PROJECT_SPEC.md` §2.6。
+
 ## Wave N 开发分支集成（N3 → N1 → N2，3 格经 Orca 受监督编排）
 
 状态：**三格已合入 `dev`，合并后的完整 `bun run check` 退出码 0**（Vitest 21 文件 / 502 项；Bun 862 pass / 0 fail）。未 push、未提升 `main`、未触碰稳定 clone 与其上的稳定 Runtime。

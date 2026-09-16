@@ -298,7 +298,23 @@ Runtime 恢复应答后重跑 `promotion promote` 会重跑已记录的后置步
 | `scheduler reservations reconcile` 的 `RECOVERY_REQUIRED` | 预留持有者活着或无法核验，**槽位保留**（不发信号、不删资源） |
 
 相关码：`RECONCILE_REQUIRED`（操作被拒绝并要求对账，例如 `TASK_PAUSED` 的 retry、
-`task operation cancel` 的某些路径）。
+`task operation cancel` 的某些路径、**以及 `task purge` 遇到非终态任务却无法证明 provider 已停止**（含
+任务本来就是 `RECOVERY_REQUIRED`）。purge 遇到它时**什么都不删**：先 `task recover` 对账。
+
+### `task purge` 被拒绝
+
+| 码 | 含义 | 怎么办 |
+|---|---|---|
+| `PURGE_CONFIRMATION_REQUIRED` | 请求没带 `confirmed: true`（CLI 缺 `--yes` 时本地就会以退出码 2 拦住，根本不会发出请求） | 确认确实要永久删除，再加 `--yes` |
+| `TASK_INTEGRATED_INTO_DEV` | 这个任务的成果已经作为成员进入了某个 IntegrationBatch，即它的 commit 在 `dev` 里 | 改用 `task archive`（隐藏任务，但保留「谁把这个 commit 带进 dev」的记录）。`SUCCEEDED` 任务都属于这一类 |
+| `TASK_IN_STABLE_PROMOTION` | 这个任务的名字出现在某条稳定提升记录里 | 同上 |
+| `RECONCILE_REQUIRED` | 非终态任务无法被证明已停止，或它本来就是 `RECOVERY_REQUIRED` | 先 `task recover` 按观察对账，再重试 |
+| `PURGE_RESOURCE_NOT_OWNED` | 记录的 worktree / 验证副本 / 分支无法证明属于这个任务（例如分支被别的 worktree 检出、路径是 symlink 或注册不符） | **一行都没删**；看 `reclaim.records` 里的 `reasonCode`，先处理那个资源（如先释放它所在的 worktree） |
+| `CONCURRENT_MODIFICATION` | 版本已变（例如你看到后它又停了/改了） | 重新 `task status` 读当前版本再发一次 |
+| `NOT_FOUND` | 任务不存在（已被别人删掉，或 ID 写错） | 核对 `task list --all`；如果只是想确认自己那条命令是否生效，**用同一个 commandId 重放**会读到收据而不是这个错 |
+
+**不会做但很容易误传的两件事**：purge **不会**删 `domain_events`/`command_receipts`/`operations`/`intents`（事件流里仍能读到它的历史与最后那条 `TaskPurged`），
+且**不代表可恢复**——没有墓碑、没有备份，除了逐表行数与每个被删分支的 `tipCommit` 之外不可找回。
 
 ### Agent 起不来：`PROVIDER_VERSION_UNAVAILABLE`
 
