@@ -14,7 +14,7 @@
 - [ADR-0008](0008-efficiency-first-service-form.md)：效率至上、CLI 是完备命令面、测试仅限命令面。**Amended by ADR-0011**（默认 FULL 零确认）。
 - [ADR-0009](0009-main-dev-promotion-and-restart.md)：固定 `main`/`dev` 双分支与提升后立即重启。**Amended by ADR-0011**（FULL 不批准）、**ADR-0038/0039**（提升前必须有精确 dev SHA 的全量证据）、**ADR-0047**（提升改经 GitHub 中转；重启序列不变）。
 - [ADR-0010](0010-live-agent-terminal-takeover.md)：运行中 Agent 支持原生终端完全接管；Pi 在结构化安全点做 RPC↔TUI/PTY 交接，单 writer lease，不新增确认。**Amended by ADR-0011**（FULL 下工具不确认）与 **ADR-0023**（接管与 lease 的实现契约；PTY 落地见 ADR-0026）。
-- [ADR-0011](0011-default-full-permission-mode.md)：默认 `FULL` 主机级全权限，现有与未来常态确认归零；可无确认切到显式 opt-in 的 `STRICT`。
+- [ADR-0011](0011-default-full-permission-mode.md)：默认 `FULL` 主机级全权限，现有与未来常态确认归零；可无确认切到显式 opt-in 的 `STRICT`。**CLI 拼写由 ADR-0064 移入 `settings permission get|set`（顶层 `permission` 已移除）；语义、Runtime 命令与存储文件未变**。
 - [ADR-0012](0012-agent-configuration-scopes.md)：Agent 配置分全局默认与每项目覆盖，逐字段按 环境变量 > 项目 > 全局 > 适配器默认；仅新 Session 生效并写入 Execution。
 - [ADR-0013](0013-read-only-agent-transcript-view.md)：Agent 执行过程只读视图（`session.transcript`）读 provider 自己的会话文件；不入库、不是事件、不是 attach。
 - [ADR-0014](0014-agent-structured-question-channel.md)：结构化提问通道：一份问卷 = 一个 provider dialog = 一条 `QUESTION` Attention = 一次 answer Operation；非法答案报错而不降级为拒绝。
@@ -66,10 +66,12 @@
 - [ADR-0061](0061-runtime-global-load-control.md)：Runtime 全局负载控制 —— 只保留一个跨全部项目/Adapter 的并行上限（默认 2、范围 1–16，旧显式值取最小值迁移）；全局暂停 = 持久启动屏障 + 按 `pid + start token + incarnation` 可核验的 Provider 主进程冻结（不改 Task 状态、不向工具子进程发停止信号、跨重启保持，只有显式继续才解除）。**Amends ADR-0030/0032/0033 的容量层级**。**两半都已实现**（schema v34）：容量上半是 FOUNDATION-096（`runtime_capacity_settings`、全局事件 `project_id = NULL`、命令面 `scheduler capacity get|set|reset`），暂停下半是 FOUNDATION-097（`runtime_pause_control`/`runtime_pause_targets`、持久屏障、`scheduler control status|pause|resume|reconcile`、UI 全局 shell）。Provider 冻结能力按 Adapter 如实声明：Pi `SUPPORTED`，Codex / Claude Code `REQUIRES_VALIDATION`。
 - [ADR-0062](0062-automatic-worktree-reclamation-after-integration.md)：集成成功后自动回收该批成员的 Task worktree（默认开启，`settings auto-reclaim on|off` 可关闭；复用 `reclaim` 的同一套归属校验与 append-only 账本，失败现场仍默认保留；无 schema 变更）。
 - [ADR-0063](0063-split-cli-reference-by-command-group.md)：CLI 命令参考按功能拆为 [`docs/guides/cli/`](../guides/cli/README.md) 九篇；各篇**沿用拆分前的章节号**，`cli-reference.md` 保留为索引 + 旧 §N 对照表（历史记录里的 §N 引用仍可解析）；正文逐行搬移、不重新核对、逐节校对注随节搬迁。**Amends ADR-0050** 的文件集合（D02）与 D03 的映射目标。**无代码、无 schema、无命令面变化**。
+- [ADR-0064](0064-settings-list-and-permission-as-a-setting.md)：`settings` 成为设置的唯一入口 —— 新增 Runtime 命令 `settings.list` 与 CLI `settings list [--json]`（一条只读命令枚举**九项** Runtime 级设置：生效值/产品默认/取值或区间/是否显式设置/存储位置，每项由它自己那条命令的同一次读取填充，契约强制键集完备）；权限模式的 CLI 拼写移入 `settings permission get|set` 并**移除顶层 `permission`**（破坏性；Runtime 命令、`permission-mode.json` 与语义一字未改）。**无 schema 变更、不占迁移号**。
 
 ## 当前有效语义（与旧 ADR 冲突时按此执行）
 
-- **权限**：ADR-0011 —— 默认 `FULL` 零确认；`STRICT` 是显式 opt-in，只恢复旧门禁；FULL 下不得新增任何确认步骤。
+- **权限**：ADR-0011 —— 默认 `FULL` 零确认；`STRICT` 是显式 opt-in，只恢复旧门禁；FULL 下不得新增任何确认步骤。CLI 读写拼写是 `settings permission get|set`（ADR-0064；顶层 `permission` 已移除），Runtime 命令与存储不变。
+- **设置面**：ADR-0064 —— 一个 Runtime home 的全部设置由 `settings list` 枚举（九项，只读、零确认）；每项的值与「是否显式设置」来自它自己那条命令的同一次读取，不得引入第二状态源；新增设置必须同时进 `settingKeys`。
 - **测试范围与时机**：ADR-0038/0039 —— task/lane/feature/Self candidate 分支只跑建分支时选定的定向测试；全量只在精确 `dev` 候选上、作为提升前必备证据。
 - **稳定提升路径**：ADR-0047/0052 —— push 固定候选到远端 `dev` → 读回核对 → main clone `ff-only` 拉取 → 重启并核对 → 推回远端 `main`。产品命令面已实现（schema v29）；本仓库自身的提升仍走 `AGENTS.md` 的人工四步，不使用产品命令面。
 - **分支职责与重启**：ADR-0009 —— `main`/`dev` 长期并存（只属 Codeestra 自身），Task 先集成进 `dev`；`main` 更新后立即 `stop` + `status`。

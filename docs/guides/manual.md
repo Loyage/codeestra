@@ -8,6 +8,8 @@
 > §3.1、§3.2、§10.2 由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目的常态路径不变）。
 > §10.3 的 `WAIT_CAPACITY` 一行、§10.4、§11.2 与 §13.4 由 **FOUNDATION-096** 同步（ADR-0061：容量只剩一个
 > Runtime 全局上限，命令去掉 project/adapter 参数，并可从 `settings concurrency` 实时调整）；
+> §11 开头的「先看全」段与 §11.1 的命令拼写由 **FOUNDATION-098** 新增/改写（ADR-0064：`settings list` 总览，
+> 权限模式移入 `settings permission`，顶层 `permission` 已移除）。
 > §11.2.2 与 §12.3 由 ADR-0062 新增/补充（集成成功后自动回收 Task worktree，`settings auto-reclaim` 默认开启）。
 > §10.3 新增 `WAIT_CONTROL` 一行并由 **FOUNDATION-097** 新增 §10.5「全局暂停」。
 > §「任务」永久删除一条与 §13.5 `RECOVERY_REQUIRED` 的 purge 行为由用户任务 `task/930f5325` 同步（ADR-0058 D02 修订，2026-09-16）。
@@ -56,7 +58,7 @@ Codeestra 是 **Task-first、local-first 的 AI Development Runtime**：**你管
 
 1. **效率至上。** Runtime 默认运行在 `FULL` 主机级全权限模式。**项目接入、Agent 工具、成果 commit、
    验证策略变化，默认零确认、零等待。** 你随时可以用 CLI 无确认地切到 `STRICT`，恢复旧门禁
-   （`bun run codeestra permission set strict`）。
+   （`bun run codeestra settings permission set strict`）。
    正确性核对（revision/ref/归属/进程身份、静止证据、幂等与崩溃恢复）**一直有效**，但那些是核对，不是审批。
 2. **软件本体是服务，CLI 必须完备。** 独立本地 Runtime 是软件本体，Web UI 只是它的便利前端。
    每个能力都能只靠 CLI 完成并脚本化驱动（`--json`、稳定退出码）。「只有 UI 能做、CLI 不能做」视为缺陷。
@@ -283,7 +285,7 @@ bun run codeestra project impact validate /path/to/repo --json
 bun run codeestra project trust /path/to/repo --dev-repo /path/to/dev-clone
 
 # STRICT：需要确认，交互输入 TRUST，或脚本传 --yes
-bun run codeestra permission set strict
+bun run codeestra settings permission set strict
 bun run codeestra project trust /path/to/repo --dev-repo /path/to/dev-clone --yes
 ```
 
@@ -1069,12 +1071,24 @@ bun run codeestra scheduler control reconcile [--json]
 
 ## 11. 设置与权限：FULL 与 STRICT
 
+**先看全**：这条命令列出本 Runtime 的**全部九项设置**（下面每一项都在其中），逐项给出生效值、产品默认、
+取值、是「本 home 显式设置」还是「产品默认」，以及值存在哪个文件：
+
+```sh
+bun run codeestra settings list            # 人读列表
+bun run codeestra settings list --json     # 逐字段原文（每个条目还带「改它会影响什么」）
+```
+
+数据来自 Runtime 自己：每一项都由**它自己那条命令的同一次读取**填充，所以总览不会与
+`settings permission get`、`settings prose-question-attention`、`settings auto-reclaim`、
+`settings ui get <key>`、`scheduler capacity get` 读出的值不一致。它是**只读**的：不写文件、不改任何值、零确认。
+
 ### 11.1 权限模式
 
 ```sh
-bun run codeestra permission get
-bun run codeestra permission set strict
-bun run codeestra permission set full      # 切回默认
+bun run codeestra settings permission get
+bun run codeestra settings permission set strict
+bun run codeestra settings permission set full      # 切回默认
 ```
 
 | | `FULL`（默认） | `STRICT`（显式 opt-in） |

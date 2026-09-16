@@ -10,6 +10,7 @@ import {
   proseQuestionResolutionSchema,
 } from './prose-question.js';
 import { uiSettingKeySchema, uiSettingValueSchema } from './ui-settings.js';
+import { permissionModeSchema } from './settings.js';
 
 export * from './questionnaire.js';
 export * from './verification-policy.js';
@@ -17,6 +18,7 @@ export * from './impact-policy.js';
 export * from './targeted-test-plan.js';
 export * from './prose-question.js';
 export * from './ui-settings.js';
+export * from './settings.js';
 export * from './agent-plugins.js';
 
 export const repositoryIdentitySchema = z.strictObject({
@@ -449,6 +451,8 @@ export type RuntimeStopResult = z.infer<typeof runtimeStopResultSchema>;
  * stable reason code on the acquisition result and on `scheduler capacity get`.
  */
 export const defaultConcurrencyLimit = 2;
+/** Lower bound for a configured limit: a limit below one slot is not a smaller number, it is a stop. */
+export const minConcurrencyLimit = 1;
 /** Upper bound for a configured limit: a typo must be refused, never silently clamped. */
 export const maxConcurrencyLimit = 16;
 /** Upper bound for one reservation read, so a client cannot ask the Runtime for unbounded rows. */
@@ -1302,7 +1306,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
   z.strictObject({
     ...requestBase,
     command: z.literal('permission.set'),
-    mode: z.enum(['FULL', 'STRICT']),
+    mode: permissionModeSchema,
   }),
   /**
    * Reads the Agent configuration for one Adapter together with the effective value per field and
@@ -1835,6 +1839,14 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     text: z.string().trim().min(1).max(maxProseQuestionAnswerLength).optional(),
     note: z.string().trim().min(1).max(maxProseQuestionResolutionNoteLength).optional(),
   }),
+  /**
+   * Every Runtime-level setting in one read (ADR-0064): the permission mode, the prose-question
+   * switch, the automatic-reclamation switch, the five interface settings and the one concurrency
+   * limit. "Which settings exist" is then a fact a client reads instead of a list it maintains, and
+   * the CLI's `settings list` and a future UI page cannot disagree about the set or about any value:
+   * each entry is filled from the same read the setting's own command uses.
+   */
+  z.strictObject({ ...requestBase, command: z.literal('settings.list') }),
   /**
    * Reads and writes the one global switch that decides whether a prose question becomes a wait.
    * It is a setting, not a gate: changing it needs no confirmation and rewriting it never touches

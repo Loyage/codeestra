@@ -8001,6 +8001,100 @@ Web UI HTTP 面读写同一条命令。
 - **未拆** `manual.md`（1374 行）与 `ui.md`（1148 行）：ADR-0063 D07 明确列为非目标，需另行裁决。
 - 索引与各篇头部的「覆盖哪些号」需要在**下一次**拆分/合并时同步维护（ADR-0063 的代价 2）。
 
+## FOUNDATION-098 — `settings` 成为设置的唯一入口：`settings list` 总览 + 权限模式移入 `settings permission`（ADR-0064，无 schema 变更）
+
+状态：**已实现**（用户任务，无 schema 变更、不占迁移号；定向测试通过；**未合入 dev、未跑全量**）。
+用户原话：「把 `bun run codeestra permission` 指令放入 `bun run codeestra settings` 里面，`bun run codeestra settings` 需要指令可以查看有哪些设置，以及这些设置处于什么状态。」
+基线变更：本格开头经用户授权把工作分支 fast-forward 到当时本地 `dev = 28255d41d3b4f54b01741ef02c1cc8a7856cf3f1`
+（因为 ADR-0062 的 `settings auto-reclaim` 与 ADR-0063 的 CLI 参考拆分都直接影响本任务），然后才写代码与文档。
+
+### 用户裁决（A/B/C，逐项）
+
+1. 顶层 `permission`：**删除**，只留 `settings permission`（不保留别名）。
+2. `settings` 下的形状：**`settings permission get` / `settings permission set <full|strict>`**。
+3. 总览的数据来源：**新增 Runtime 命令 `settings.list`**（而不是 CLI 侧拼装）。
+4. 总览列出哪些设置：**权限模式 + 散文开关 + 五个界面键 + 并发上限**；Agent 配置（三层作用域）排除。
+   本格补充：fast-forward 后同属「Runtime 级、一个 home 一份值、零确认」的 `settings auto-reclaim`（ADR-0062）按同一判据
+   一并纳入，共**九项**；这不是新增用户未答复的语义，已写进 ADR-0064 的 Options 4 备注。
+
+### 改了什么
+
+- `packages/contracts/src/settings.ts`（新增）：`settingKeys` 闭集（九项，即「有哪些设置」的契约事实）、
+  `settingEntrySchema`（`value`/`default`/`values`×`range` 恰有其一/`explicit`↔`source` 一致）、
+  `settingsListViewSchema`（强制每个键**恰好出现一次**）、`permissionModes`/`permissionModeSchema`/`defaultPermissionMode`。
+- `packages/contracts/src/index.ts`：新增 `settings.list` 请求；`permission.set` 改用共享的 `permissionModeSchema`；新增 `minConcurrencyLimit`。
+- `apps/runtime/src/settings-view.ts`（新增）：`inspectSettings` 把九项组装成载荷并在边界 `parse`。
+  每项来自它自己那条命令的同一次读取：内存值（permission / prose / auto-reclaim）+ `inspectUiSettings` + `storage.getRuntimeCapacity()`。
+- `apps/runtime/src/main.ts`：分发 `settings.list`；启动时记录三个文件型设置的「本 home 是否显式存过值」并在各自的 `set` 里置真
+  （值与「显式」必须同源）；`permission.get` 的 `default` 改用契约常量。
+- `apps/runtime/src/permission-mode.ts`：模式的枚举/默认/类型改为从契约单一声明处取得（不再本地重复）。
+- `apps/cli/src/main.ts`：**删除**顶层 `permission get|set`；新增 `settings list [--json]`（默认人读列表，`--json` 为 Runtime 载荷原文）
+  与 `settings permission get|set`（继续发 `permission.get|set`，零确认）；`usage()` 与 settings 段说明同步。
+- `apps/runtime/test/cli-settings.test.ts`（新增）：见下面定向验证。
+- 既有用例同步（顶层拼写变化）：`cli-open`、`cli-promotion`、`cli-session-attach`、`cli-codex-adapter`、`cli-claude-adapter` 的
+  `['permission', …]` 改为 `['settings', 'permission', …]`。
+- `package.json`：`cli-settings` 进 `test:e2e`、进 `test:unit` 的 ignore 列表（与 dev 侧 `cli-auto-reclaim` 合并，冲突手工解开后取并集）。
+- 文档：新 ADR-0064、`docs/decisions/README.md`（新增 0064 + 给 ADR-0011 加「CLI 拼写已移入 `settings permission`」+
+  「当前有效语义」新增「设置面」一条）；`docs/guides/cli/runtime.md`（§1 权限段改为指向 §19、§19 新增 `settings list`/
+  `settings permission`/`settings ui` 三节）；`docs/guides/cli/README.md`（索引表 §1 行、§0.1 人读视图清单、§0.3 `permission set` 措辞）；
+  `docs/guides/cli-reference.md`（旧 §N 对照表两行）；`docs/guides/{features,getting-started,manual,recipes,troubleshooting,ui,README}.md`；
+  `README.md`；`docs/notes/real-provider-acceptance-runbook.md`；本记录。
+- **未改**：任何 schema/迁移、任何 Runtime 命令名与存储文件、Web UI（`apps/ui/**` 一字未动：界面本来就只读 `permission.get` 显示模式，
+  且不提供切换；`settings list` 目前是 CLI-only）。
+
+### 实际跑了什么检查与结果（定向，ADR-0038；**未跑** `bun run check` / `just check` / `just verify` / `check:fast`）
+
+| 命令 | 结果 |
+|---|---|
+| `bun run typecheck` | 退出码 0 |
+| `bun test apps/runtime/test/cli-settings.test.ts`（新增） | **3 pass / 0 fail**（83 expect） |
+| `bun test apps/runtime/test/permission-mode.test.ts apps/runtime/test/ui-settings.test.ts` | **11 pass / 0 fail** |
+| `bun test apps/runtime/test/cli-ui-settings.test.ts` | 5 pass / 0 fail |
+| `bun test apps/runtime/test/cli-auto-reclaim.test.ts apps/runtime/test/cli-prose-question-attention.test.ts` | 8 pass / 0 fail |
+| `bun test apps/runtime/test/cli-open.test.ts` | 8 pass / 0 fail（改了拼写的用例） |
+| `bun test apps/runtime/test/cli-promotion.test.ts` | 6 pass / 0 fail（改了拼写的用例） |
+| `bun test apps/runtime/test/cli-session-attach.test.ts` | 2 pass / 0 fail（改了拼写的用例） |
+| `bun test apps/runtime/test/cli-codex-adapter.test.ts apps/runtime/test/cli-claude-adapter.test.ts` | 10 pass / 0 fail（改了拼写的用例） |
+
+覆盖的断言：全新 home 上九项全为产品默认、`explicit:false`、不创建任何设置文件；`values`×`range` 恰有其一；
+人读输出含键名、`--json` 为原文、多余参数退出码 2；`settings permission set` 写入 0600 版本化文件并零确认；
+顶层 `permission get|set` 现为用法错误（退出码 2、stdout 空）；总览与 `settings permission get`、`settings prose-question-attention`、
+`settings auto-reclaim`、`settings ui get <key>`、`scheduler capacity get` **逐项相等**；重启 Runtime 后「显式设置」仍如实
+（含「值等于默认但确实设置过」）。
+
+### 没跑什么及原因
+
+- **未跑全量**（`bun run check` / `just check` / `just verify`）：ADR-0038 —— 非 `dev` 分支不许跑全量，全量只在提升前的精确 dev 候选上跑。
+- **未跑 `typecheck:ui` / `bunx vitest run apps/ui`**：本格未改 `apps/ui/**` 一行（界面只读 `permission.get` 显示模式，不发现新命令）。
+- **未验收**：真实 provider 长跑下总览与专命令的一致性；Windows；`settings list` 的 UI 投影（本格有意不做，属 NEXT）。
+
+### 设计选择与依据
+
+- **总览由 Runtime 回答，而不是 CLI 拼装**：「有哪些设置」是一个产品事实；放在 CLI 就变成客户端再维护一份清单，
+  正是本 ADR 要消除的漂移。契约把键集闭合并要求「恰好一次」，所以新增设置忘了进总览会在边界报错，而不是悄悄少一行。
+- **不一并改 Runtime 命令名**（`permission.get|set` 保持原名）：与 ADR-0061 D02 的 `settings concurrency` 先例一致——
+  设置面拼写可以不同，但两边必须发同一条命令，不允许出现第二个状态源。改命令名会同时改 HTTP 面与 UI，超出用户要求的 CLI 范围。
+- **「是否显式设置」与「值」同源**：permission/prose/auto-reclaim 的值是内存里的生效值，所以「显式」也取启动时/写入时的文件事实；
+  若改成每次 `existsSync`，手改文件而 Runtime 还在跑时会出现「值=默认、却标着已显式设置」的自相矛盾行。
+- **布尔开关按 `on`/`off` 汇报**：列表是给敲这些命令的人看的，同一个设置不允许有两套词汇（`reclaim.auto` 的取值即 `settings auto-reclaim` 的同两个词）。
+- **人读默认 + `--json` 原文**：用户问的是「查看有哪些设置」，人读列表是直接答案；`--json` 保留完整契约（含每项的 `appliesTo`）供脚本使用。
+- **顶层 `permission` 直接删掉、不留别名**：用户明确选择；两者本就是同一条 Runtime 命令，留别名只会让「该用哪个」重新成为问题。
+
+### 与规格/ADR 的一致性和差异
+
+- 无规格修订（`PROJECT_SPEC.md` 未改）；不新增权限门禁、审批层、信任流程或沙箱（ADR-0008/0011 的第一原则不变）。
+- ADR-0011 的**语义**（默认 FULL、CLI 可无确认切 STRICT、存储文件、生效范围）一字未改，只改 CLI 拼写；已在 ADR-0011 索引行注明。
+- 历史记录（`docs/tasks/README.md` 的 FOUNDATION-070 等旧节、ADR-0011/0029/0040 正文）**保留原有 `permission get|set` 写法**：那是当时的事实记录，不重写历史；
+  当前有效拼写以 ADR-0064、`cli/runtime.md` §19 与本记录为准。
+
+### 剩余问题 / 集成注意（必须由协调者处理）
+
+- **未 commit、未合入 dev、未 push、未提升 main、未重启任何 Runtime**：本文只报告已执行的事实。
+- 合入 `dev` 时如需人工 merge，注意 `package.json` 的 `test:unit` ignore 列表与 `test:e2e` 列表需要双方取**并集**（本格已在本分支上手工解开一次同类冲突）。
+- 破坏性变更提醒：任何脚本/文档若仍写 `permission get|set`，升级后是用法错误（退出码 2）。
+- 已知不足（有意）：`settings list` 没有 UI 投影；`cli-reference.md` §19 原本从未记录 `settings ui`，本格补了一节**最小**说明（键名/取值/零确认/稳定码），
+  逐屏细节仍以 `manual.md` 与 `ui.md` 为准。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），

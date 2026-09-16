@@ -3,6 +3,7 @@
 > **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
 > 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> 权限模式的命令拼写由 FOUNDATION-098 同步为 `settings permission get|set`（ADR-0064：顶层 `permission` 已移除；§19 另新增 `settings list` 总览）。
 > recipe 3 与 recipe 4 由 FOUNDATION-091 按 ADR-0059 改写（默认不冲突、声明同一功能才互斥）；
 > recipe 3 的容量命令由 **FOUNDATION-096** 同步（ADR-0061：上限是唯一的 Runtime 全局值，命令不带 project 参数；
 > 同一值另有设置面拼写 `settings concurrency`，也在本 recipe 里给出）。
@@ -612,7 +613,7 @@ bun run codeestra open /path/to/your-repo --dev-repo /path/to/dev-clone --no-ope
   # 接入项目（FULL 零确认）并拿到界面地址；--dev-repo 可选（ADR-0060）：
   # 给了它才有 dev 基线与 dev → main 提升；不给（managed）时 Task 基线取该项目文件夹当前检出的分支，
   # 成果留在 task 分支由你自己合。上面这一行是“我想要 dev → main 提升”时用的写法。
-bun run codeestra permission get                    # 确认权限模式
+bun run codeestra settings permission get                    # 确认权限模式
 
 bun run codeestra task create $PROJECT "一项具体的改动" --constraint "一条具体约束"
 bun run codeestra task submit $PROJECT $TASK <version>

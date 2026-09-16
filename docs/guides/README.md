@@ -3,6 +3,7 @@
 > **适用版本** `dev@de03448` + 本格分支 `Loyage/glc-pause-ui`（2026-09-16） · **schema** v34（本格暂停半边） · **最后校对** 2026-09-16
 > 版本会前进：`dev@036cf68` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> 权限模式的命令拼写由 FOUNDATION-098 同步为 `settings permission get|set`（ADR-0064：顶层 `permission` 已移除；§19 另新增 `settings list` 总览）。
 
 本目录是**面向使用者**的中文指南：怎么装、怎么用、软件具备哪些能力、每条命令怎么敲、出错了怎么办。
 
@@ -33,7 +34,7 @@ Codeestra 是 Task-first、local-first 的 AI Development Runtime：你管理产
 ## 三条必须先知道的第一原则
 
 1. **效率至上**：Runtime 默认运行在 `FULL` 主机级全权限模式。项目接入、Agent 工具、成果 commit、验证策略
-   变化默认**零确认**。你随时可以用 CLI 无确认切到 `STRICT` 恢复旧门禁（`bun run codeestra permission set strict`）。
+   变化默认**零确认**。你随时可以用 CLI 无确认切到 `STRICT` 恢复旧门禁（`bun run codeestra settings permission set strict`）。
 2. **软件本体是服务，CLI 必须完备**：每个能力都必须能只靠 CLI 完成并可脚本化驱动。只有 UI 能做的事视为缺陷。
 3. **测试只驱动 CLI / 命令面**：自动化验收不依赖桌面或键鼠自动化。
 

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdirSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { devBranchRef, impactPolicyPath, runtimeRequestSchema, uiSettingKeys,
   validateQuestionnaireAnswer,
@@ -74,8 +74,11 @@ import { runtimeHome, runtimeSocketPath } from './paths.js';
 import { SessionHandoffService } from './session-handoff-service.js';
 import { TerminalService } from './terminal-service.js';
 import { inspectUiSettings, resetUiSettings, setUiSetting } from './ui-settings.js';
-import { readPermissionMode, writePermissionMode, type PermissionMode } from './permission-mode.js';
+import { inspectSettings } from './settings-view.js';
+import { defaultPermissionMode, permissionModePath, readPermissionMode, writePermissionMode,
+  type PermissionMode } from './permission-mode.js';
 import {
+  proseQuestionAttentionPath,
   readProseQuestionAttentionMode,
   writeProseQuestionAttentionMode,
 } from './prose-question-attention-settings.js';
@@ -211,10 +214,17 @@ if (await probeRuntimeEndpoint(socketPath)) {
 // Only now is the socket file known to be a leftover of a Runtime that is not answering.
 rmSync(socketPath, { force: true });
 
+// The recorded-vs-default question is answered from the boot read, next to the value it produced:
+// `settings.list` must never report a value from one moment and an "explicitly set" flag from
+// another. A Runtime that writes the file itself is answering that question with "yes" from here on,
+// which is why these two are reassigned by `permission.set` and
+// `settings.proseQuestionAttention.set`.
+let permissionModeExplicit = existsSync(permissionModePath(home));
 let permissionMode: PermissionMode = await readPermissionMode(home);
 // The prose-question escalation setting is a downgrade-only switch, so an unreadable file must not
 // stop the Runtime from starting: the failure is reported and the product default is used.
 let proseQuestionAttentionMode: ProseQuestionAttentionMode = defaultProseQuestionAttentionMode;
+let proseQuestionAttentionExplicit = existsSync(proseQuestionAttentionPath(home));
 try {
   proseQuestionAttentionMode = await readProseQuestionAttentionMode(home);
 } catch (error) {
@@ -229,8 +239,10 @@ const proseQuestionAttentionSettings = () => ({
 });
 // ADR-0062: automatic task-worktree reclamation after a successful integration is on by default.
 // An unreadable file must not stop the Runtime from starting: the failure is reported and the
-// product default (on) is used, matching the prose-question setting's treatment.
+// product default (on) is used, matching the prose-question setting's treatment. Whether this home
+// stores a value at all is a boot-time fact `settings.list` reports next to the value (ADR-0064).
 let autoReclaimEnabled = defaultAutoReclaimEnabled;
+let autoReclaimExplicit = existsSync(autoReclaimPath(home));
 try {
   autoReclaimEnabled = await readAutoReclaimEnabled(home);
 } catch (error) {
@@ -803,25 +815,44 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       setTimeout(() => { void shutdown(); }, 10);
       return success(request.requestId, { stopping: true, pid: process.pid, bootId, startedAt });
     case 'permission.get':
-      return success(request.requestId, { mode: permissionMode, default: 'FULL' });
+      return success(request.requestId, { mode: permissionMode, default: defaultPermissionMode });
     case 'permission.set':
       permissionMode = request.mode;
       writePermissionMode(home, permissionMode);
+      permissionModeExplicit = true;
       return success(request.requestId, {
         mode: permissionMode,
         appliesTo: 'new operations and new Agent sessions',
       });
+    // The settings face (ADR-0064): one read that enumerates every Runtime-level setting with its
+    // effective value, its product default and where the value is stored. Each entry is filled from
+    // the same read its own command uses, so the list cannot disagree with `permission.get`,
+    // `settings prose-question-attention`, `settings auto-reclaim`, `settings ui get` or
+    // `scheduler capacity get`.
+    case 'settings.list':
+      return success(request.requestId, inspectSettings({
+        runtimeHome: home,
+        permissionMode,
+        permissionModeExplicit,
+        proseQuestionAttention: proseQuestionAttentionSettings(),
+        proseQuestionAttentionExplicit,
+        autoReclaim: autoReclaimSettings(),
+        autoReclaimExplicit,
+        storage,
+      }));
     case 'settings.proseQuestionAttention.get':
       return success(request.requestId, proseQuestionAttentionSettings());
     case 'settings.proseQuestionAttention.set':
       proseQuestionAttentionMode = request.mode;
       writeProseQuestionAttentionMode(home, proseQuestionAttentionMode);
+      proseQuestionAttentionExplicit = true;
       return success(request.requestId, proseQuestionAttentionSettings());
     case 'settings.autoReclaim.get':
       return success(request.requestId, autoReclaimSettings());
     case 'settings.autoReclaim.set':
       autoReclaimEnabled = request.enabled;
       writeAutoReclaimEnabled(home, autoReclaimEnabled);
+      autoReclaimExplicit = true;
       return success(request.requestId, autoReclaimSettings());
     // The interface-effect settings are read from and written to the Runtime home on every command
     // (never from a cached copy), so an edit made outside the Runtime — or a second look after a
