@@ -3,24 +3,20 @@ import type { Database } from 'bun:sqlite';
 import { Phase1Database, StorageError, phase1SchemaVersion } from '../src/index.js';
 
 /**
- * Layered verification records (ADR-0038 implemented by ADR-0039, schema v25).
+ * Targeted test plans (ADR-0038 implemented by ADR-0039, schema v25).
  *
- * Two facts are being protected here, both at the storage boundary rather than in a service:
+ * One fact is being protected here, at the storage boundary rather than in a service: **a targeted
+ * test plan is append-only**. A scope change appends a record; the triggers refuse UPDATE and DELETE
+ * outright, so the plan a verification's evidence points at can never be rewritten after the fact.
  *
- * 1. **A targeted test plan is append-only.** A scope change appends a record; the triggers refuse
- *    UPDATE and DELETE outright, so the plan a verification's evidence points at can never be
- *    rewritten after the fact.
- * 2. **An unfinished dev full-suite run is never readable as a pass.** Terminal states must carry
- *    `ended_at`/`outcome_code`, and a run a previous Runtime left RUNNING is closed as an ERROR with
- *    the reason, not silently treated as complete.
+ * ADR-0064 deleted the dev full-suite evidence half of this step (it existed only to gate a
+ * `dev → main` promotion), so nothing here asserts that table any more.
  *
  * The schema assertions use the migration constant (and `>= 25`), never `=== 25`: a later lane may
  * legitimately raise the version, and a hard-coded number turned into a false red twice before.
  */
 
 const planDigest = 'a'.repeat(64);
-const policyDigest = 'b'.repeat(64);
-const lockfileDigest = 'c'.repeat(64);
 const commit = 'd'.repeat(40);
 
 let storage: Phase1Database;
@@ -31,8 +27,8 @@ function seedProjectAndTask(target: Database): void {
   // exist by the time the transaction commits.
   target.transaction(() => {
     target.query(`INSERT INTO projects
-      (id,name,repo_root,git_common_dir,main_ref,dev_ref,object_format,created_at)
-      VALUES ('p1','Project','/repo','/repo/.git','refs/heads/main','refs/heads/dev','sha1',1)`).run();
+      (id,name,repo_root,git_common_dir,main_ref,object_format,created_at)
+      VALUES ('p1','Project','/repo','/repo/.git','refs/heads/main','sha1',1)`).run();
     target.query(`INSERT INTO project_trusts
       (id,project_id,repo_root,git_common_dir,object_format,policy_version,actor,status,accepted_at)
       VALUES ('trust1','p1','/repo','/repo/.git','sha1',1,'user','ACTIVE',1)`).run();
@@ -64,26 +60,6 @@ function planInput(overrides: Partial<Parameters<Phase1Database['recordTargetedT
   };
 }
 
-function fullSuiteInput(overrides: Partial<Parameters<Phase1Database['beginDevFullSuiteRun']>[0]> = {}) {
-  return {
-    evidenceId: 'evidence-1',
-    projectId: 'p1',
-    devRef: 'refs/heads/dev',
-    devCommit: commit,
-    policyVersion: 'verification-policy-v1',
-    policyDigest,
-    lockfilePath: 'bun.lock',
-    lockfilePresent: true,
-    lockfileDigest,
-    commands: [{ id: 'check', argv: ['bun', 'run', 'check'], cwd: '.', timeoutSeconds: 1_800 }],
-    copyPath: '/home/verifications/p1/evidence-1',
-    commandId: 'cmd-full-suite-1',
-    payloadHash: 'payload-1',
-    observedBy: 'runtime-full-suite',
-    startedAt: 20,
-    ...overrides,
-  };
-}
 
 beforeEach(() => {
   storage = new Phase1Database();
@@ -97,16 +73,14 @@ describe('layered verification schema', () => {
     const tables = db.query<{ name: string }, []>(
       "SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name);
     expect(tables).toContain('targeted_test_plans');
-    expect(tables).toContain('dev_full_suite_evidence');
     const verificationColumns = db.query<{ name: string }, []>(
       'PRAGMA table_info(verification_runs)').all().map((row) => row.name);
     expect(verificationColumns).toEqual(expect.arrayContaining(['policy_source', 'plan_id',
       'plan_version', 'plan_digest']));
-    const promotionColumns = db.query<{ name: string }, []>(
-      'PRAGMA table_info(stable_promotions)').all().map((row) => row.name);
-    expect(promotionColumns).toEqual(expect.arrayContaining(['full_suite_evidence_id',
-      'full_suite_dev_commit', 'full_suite_policy_version', 'full_suite_policy_digest',
-      'full_suite_lockfile_digest', 'approved_full_suite_evidence_id']));
+    // ADR-0064 dropped the integration/promotion aggregates, so the columns they used are gone and
+    // the test asserts their absence rather than merely stopping to look at them.
+    expect(tables).not.toContain('stable_promotions');
+    expect(tables).not.toContain('dev_full_suite_evidence');
     // v16 stays permanently unused: a database stamped 17–24 must still get this step.
     expect(tables).not.toContain('verification_runs_v16');
   });
@@ -168,69 +142,5 @@ describe('targeted test plans are append-only', () => {
     storage.recordTargetedTestPlan(planInput());
     expect(storage.getLatestTargetedTestPlan({ projectId: 'p1', taskId: 't1', revisionId: 'r1',
       testedCommit: 'a'.repeat(40) })).toBeNull();
-  });
-});
-
-describe('dev full-suite evidence', () => {
-  test('records a run, completes it with evidence, and replays the same command ID', () => {
-    const begun = storage.beginDevFullSuiteRun(fullSuiteInput());
-    expect(begun.created).toBe(true);
-    expect(begun.evidence.state).toBe('RUNNING');
-    expect(begun.evidence.lockfilePresent).toBe(true);
-    expect(begun.evidence.endedAt).toBeNull();
-    const completed = storage.completeDevFullSuiteRun({
-      evidenceId: 'evidence-1', state: 'PASSED', outcomeCode: 'PASSED',
-      evidence: { testedCommit: commit, commands: [] }, endedAt: 30,
-    });
-    expect(completed).toMatchObject({ state: 'PASSED', outcomeCode: 'PASSED', endedAt: 30 });
-    // Replaying the command ID returns the recorded run instead of starting a second one.
-    const replay = storage.beginDevFullSuiteRun(fullSuiteInput({ evidenceId: 'evidence-2' }));
-    expect(replay.created).toBe(false);
-    expect(replay.evidence.evidenceId).toBe('evidence-1');
-    expect(storage.listDevFullSuiteEvidence('p1')).toHaveLength(1);
-  });
-
-  test('a re-run after invalidation appends a new row instead of rewriting the old one', () => {
-    storage.beginDevFullSuiteRun(fullSuiteInput());
-    storage.completeDevFullSuiteRun({ evidenceId: 'evidence-1', state: 'PASSED',
-      outcomeCode: 'PASSED', evidence: {}, endedAt: 30 });
-    storage.beginDevFullSuiteRun(fullSuiteInput({ evidenceId: 'evidence-2',
-      commandId: 'cmd-full-suite-2', payloadHash: 'payload-1', startedAt: 40 }));
-    storage.completeDevFullSuiteRun({ evidenceId: 'evidence-2', state: 'FAILED',
-      outcomeCode: 'COMMAND_FAILED', evidence: {}, endedAt: 50 });
-    const rows = storage.listDevFullSuiteEvidenceForCommit('p1', commit);
-    expect(rows.map((row) => [row.evidenceId, row.state]))
-      .toEqual([['evidence-2', 'FAILED'], ['evidence-1', 'PASSED']]);
-  });
-
-  test('the same command ID with a different payload is refused', () => {
-    storage.beginDevFullSuiteRun(fullSuiteInput());
-    expect(() => storage.beginDevFullSuiteRun(fullSuiteInput({
-      evidenceId: 'evidence-2', payloadHash: 'payload-2',
-    }))).toThrow(StorageError);
-  });
-
-  test('a run left RUNNING by a previous Runtime is closed as an ERROR, not a pass', () => {
-    storage.beginDevFullSuiteRun(fullSuiteInput());
-    const reconciled = storage.reconcileDevFullSuiteEvidence(60);
-    expect(reconciled).toEqual(['evidence-1']);
-    expect(storage.getDevFullSuiteEvidence('p1', 'evidence-1')).toMatchObject({
-      state: 'ERROR', outcomeCode: 'RUNTIME_RESTARTED', endedAt: 60,
-    });
-    // Idempotent: the fact was already recorded.
-    expect(storage.reconcileDevFullSuiteEvidence(70)).toEqual([]);
-  });
-
-  test('a terminal run must carry both its end time and its outcome code', () => {
-    storage.beginDevFullSuiteRun(fullSuiteInput());
-    expect(() => db.query(`
-      UPDATE dev_full_suite_evidence SET state='PASSED' WHERE id='evidence-1'
-    `).run()).toThrow();
-  });
-
-  test('evidence of one project is not readable through another project', () => {
-    storage.beginDevFullSuiteRun(fullSuiteInput());
-    expect(() => storage.getDevFullSuiteEvidence('other-project', 'evidence-1'))
-      .toThrow(StorageError);
   });
 });

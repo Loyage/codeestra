@@ -286,8 +286,8 @@ describe('Phase 1 migration', () => {
   });
 });
 
-describe('integration pipeline schema (ADR-0018)', () => {
-  test('upgrades a version 9 database and keeps existing projects on the dev baseline', () => {
+describe('dev/integration schema removal (ADR-0064)', () => {
+  test('a legacy database still keeps its projects, but the integration and promotion tables are gone', () => {
     const directory = mkdtempSync(join(tmpdir(), 'codeestra-storage-v9-'));
     const filename = join(directory, 'runtime.sqlite');
     try {
@@ -322,22 +322,23 @@ describe('integration pipeline schema (ADR-0018)', () => {
       const upgraded = new Phase1Database(filename);
       expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version)
         .toBe(phase1SchemaVersion);
-      // An existing project keeps working and gains the documented dev baseline.
-      expect(upgraded.getTrustedProject('p1').devRef).toBe('refs/heads/dev');
+      // An existing project keeps working; it no longer carries a per-project baseline ref, because
+      // the Task baseline is read from the folder's checked out branch at preparation time.
+      expect(upgraded.getTrustedProject('p1').mainRef).toBe('refs/heads/main');
+      const projectColumns = upgraded.sqlite.query<{ name: string }, []>(
+        "SELECT name FROM pragma_table_info('projects')").all().map((row) => row.name);
+      expect(projectColumns).not.toContain('dev_ref');
+      expect(projectColumns).not.toContain('dev_repo_path');
+      // Every aggregate the dev-clone / integration / promotion model needed is dropped, not merely
+      // left unread: v35 is an irreversible DROP by decision (ADR-0064).
       const tables = upgraded.sqlite.query<{ name: string }, []>(`
         SELECT name FROM sqlite_master WHERE type='table' AND name IN
-          ('integration_batches','integration_batch_items','integration_verification_runs') ORDER BY name
+          ('integration_batches','integration_batch_items','integration_verification_runs',
+           'stable_promotions','stable_promotion_members','dev_full_suite_evidence') ORDER BY name
       `).all().map((row) => row.name);
-      expect(tables).toEqual([
-        'integration_batch_items', 'integration_batches', 'integration_verification_runs']);
-      upgraded.sqlite.query(`INSERT INTO integration_batches
-        (id,project_id,dev_ref,dev_commit,state,merged_commit,worktree_ownership_token,created_at)
-        VALUES ('b1','p1','refs/heads/dev',?1,'CREATED',NULL,'owner',5)`).run(oid);
-      // The batch states are the documented ones; an invented state is rejected by the schema.
-      expect(() => upgraded.sqlite.query(
-        "UPDATE integration_batches SET state='PREPARED' WHERE id='b1'",
-      ).run()).toThrow();
-      upgraded.sqlite.query("UPDATE integration_batches SET state='PREPARING' WHERE id='b1'").run();
+      expect(tables).toEqual([]);
+      expect(upgraded.sqlite.query<{ count: number }, []>('PRAGMA foreign_key_check').all().length)
+        .toBe(0);
       upgraded.close();
     } finally {
       rmSync(directory, { recursive: true, force: true });

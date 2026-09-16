@@ -59,6 +59,8 @@ function seedIntegratedTask(
     readonly revisionId: string;
     readonly executionId: string;
     readonly resultCommit: string;
+    /** Attempt number of this Execution; a newer attempt supersedes an older capture. */
+    readonly attemptNumber?: number;
   },
 ): void {
   const db = storage.sqlite;
@@ -71,34 +73,11 @@ function seedIntegratedTask(
   db.query(`INSERT INTO executions
     (id,task_id,attempt_number,initial_revision_id,applied_revision_id,workspace_id,adapter_id,
      adapter_version,state,resource_held,base_commit,result_commit,started_at,ended_at)
-    VALUES (?1,?2,1,?3,?3,?4,'pi','1','SUCCEEDED',0,?5,?6,4,5)`).run(
-    input.executionId, input.taskId, input.revisionId, workspaceId, oid, input.resultCommit);
+    VALUES (?1,?2,?7,?3,?3,?4,'pi','1','SUCCEEDED',0,?5,?6,4,5)`).run(
+    input.executionId, input.taskId, input.revisionId, workspaceId, oid, input.resultCommit,
+    input.attemptNumber ?? 1);
 }
 
-function seedIntegrationBatch(
-  storage: Phase1Database,
-  input: {
-    readonly taskId: string;
-    readonly revisionId: string;
-    readonly executionId: string;
-    readonly batchId: string;
-    readonly resultCommit: string;
-    /** A batch that never reached INTEGRATED, so the item row must not count as a fact. */
-    readonly batchState?: 'INTEGRATED' | 'FAILED';
-  },
-): void {
-  const db = storage.sqlite;
-  db.query(`INSERT INTO integration_batches
-    (id,project_id,dev_ref,dev_commit,state,worktree_ownership_token,created_at)
-    VALUES (?1,'p1','refs/heads/dev',?2,?3,?4,20)`).run(
-    input.batchId, oid, input.batchState ?? 'INTEGRATED', `owner-${input.batchId}`);
-  db.query(`INSERT INTO integration_batch_items
-    (batch_id,project_id,task_id,revision_id,execution_id,candidate_commit,dev_commit,state,
-     integrated_commit,created_at)
-    VALUES (?1,'p1',?2,?3,?4,?5,?6,'INTEGRATED',?5,20)`).run(
-    input.batchId, input.taskId, input.revisionId, input.executionId,
-    input.resultCommit, oid);
-}
 
 /** Asserts the stable error code, not the human-readable message. */
 async function expectCode(action: Promise<unknown> | (() => unknown), code: string): Promise<void> {
@@ -301,7 +280,7 @@ describe('task dependency persistence', () => {
     expect(facts).toHaveLength(1);
     expect(facts[0]).toMatchObject({ prerequisiteTaskId: 't2', requiredRevisionId: 'r2',
       requiredRevisionNumber: 1, dependentDisplayNumber: 1, prerequisiteDisplayNumber: 2,
-      resultCommit: null, integrationBatchId: null });
+      resultCommit: null });
 
     // Re-pinning an existing edge is refused instead of silently retargeting it.
     expect(() => addDependency(storage, { taskId: 't1', prerequisiteTaskId: 't2',
@@ -309,21 +288,21 @@ describe('task dependency persistence', () => {
     storage.close();
   });
 
-  test('reports the recorded integration fact for the pinned revision', () => {
+  test('reports the pinned revision own captured result commit', () => {
     const storage = new Phase1Database();
     seed(storage);
     addDependency(storage, { taskId: 't1', prerequisiteTaskId: 't2', commandId: 'c1' });
+    // ADR-0064: an edge is judged by the upstream revision's *own* captured result commit; nothing
+    // has to have been "integrated", and reaching the project baseline is the scheduler's Git
+    // question. Before any capture the fact is null.
+    expect(storage.listTaskDependencyFacts('p1', { taskId: 't1' })[0]?.resultCommit).toBeNull();
     seedIntegratedTask(storage, { taskId: 't2', revisionId: 'r2', executionId: 'e2',
       resultCommit: candidate });
-    // A batch that never reached INTEGRATED is not a fact, even with an item row.
-    seedIntegrationBatch(storage, { taskId: 't2', revisionId: 'r2', executionId: 'e2',
-      batchId: 'batch2', resultCommit: candidate, batchState: 'FAILED' });
-    expect(storage.listTaskDependencyFacts('p1', { taskId: 't1' })[0]?.resultCommit).toBeNull();
-    seedIntegrationBatch(storage, { taskId: 't2', revisionId: 'r2', executionId: 'e2',
-      batchId: 'batch1', resultCommit: merged });
-    const fact = storage.listTaskDependencyFacts('p1', { taskId: 't1' })[0];
-    expect(fact?.resultCommit).toBe(merged);
-    expect(fact?.integrationBatchId).toBe('batch1');
+    expect(storage.listTaskDependencyFacts('p1', { taskId: 't1' })[0]?.resultCommit).toBe(candidate);
+    // A newer attempt of the same pinned revision supersedes the older capture.
+    seedIntegratedTask(storage, { taskId: 't2', revisionId: 'r2', executionId: 'e3',
+      resultCommit: merged, attemptNumber: 2 });
+    expect(storage.listTaskDependencyFacts('p1', { taskId: 't1' })[0]?.resultCommit).toBe(merged);
     storage.close();
   });
 

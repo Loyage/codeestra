@@ -1,4 +1,3 @@
-import { Database } from 'bun:sqlite';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -90,45 +89,8 @@ function purgeInput(overrides: Partial<TaskPurgeInput> = {}): TaskPurgeInput {
   };
 }
 
-/** Makes the Task a member of an integration batch, which is what `dev` actually keeps. */
-function seedIntegrationMembership(database: Database): void {
-  database.transaction(() => {
-    database.query(`INSERT INTO integration_batches
-      (id,project_id,dev_ref,dev_commit,state,worktree_ownership_token,created_at)
-      VALUES ('b1','p1','refs/heads/dev',?1,'CREATED','token',3)`).run(oid);
-    database.query(`INSERT INTO integration_batch_items
-      (batch_id,project_id,task_id,revision_id,execution_id,candidate_commit,dev_commit,state,created_at)
-      VALUES ('b1','p1','t1','r1','e1',?1,?1,'PREPARED',3)`).run(oid);
-  })();
-}
 
 describe('task purge storage boundary', () => {
-  test('refuses a Task whose commit already reached an integration batch, deleting nothing', () => {
-    const { database } = openDatabase();
-    try {
-      database.sqlite.query(`INSERT INTO workspaces
-        (id,task_id,branch_ref,path,ownership_token,base_commit,state,created_at)
-        VALUES ('w1','t1','refs/heads/task/t1','/tmp/w1','token',?1,'RETAINED',3)`).run(oid);
-      database.sqlite.query(`INSERT INTO executions
-        (id,task_id,attempt_number,initial_revision_id,applied_revision_id,workspace_id,adapter_id,
-          adapter_version,state,resource_held,base_commit,result_commit,version)
-        VALUES ('e1','t1',1,'r1','r1','w1','pi','1.0.0','SUCCEEDED',0,?1,?1,0)`).run(oid);
-      seedIntegrationMembership(database.sqlite);
-
-      const blockers = database.inspectTaskPurgeBlockers({ projectId: 'p1', taskId: 't1' });
-      expect(blockers.map((blocker) => blocker.code)).toEqual(['TASK_INTEGRATED_INTO_DEV']);
-      expect(() => database.purgeTask(purgeInput())).toThrow(StorageError);
-      // A refusal writes nothing at all: the Task, its revision and the batch item are all intact.
-      expect(database.getTask('p1', 't1')).not.toBeNull();
-      expect(database.sqlite.query<{ count: number }, []>(
-        'SELECT COUNT(*) AS count FROM integration_batch_items').get()?.count).toBe(1);
-      expect(database.sqlite.query<{ count: number }, []>(
-        "SELECT COUNT(*) AS count FROM domain_events WHERE event_type='TaskPurged'").get()?.count)
-        .toBe(0);
-    } finally {
-      database.close();
-    }
-  });
 
   test('deletes the paired impact rows of both roles and keeps project-scoped audit', () => {
     const { database } = openDatabase();
@@ -223,78 +185,4 @@ describe('task purge storage boundary', () => {
     }
   });
 
-  test('--force deletes a Task whose commit reached dev, membership rows included (ADR-0058 D09)', () => {
-    const { database } = openDatabase();
-    try {
-      database.sqlite.query(`INSERT INTO workspaces
-        (id,task_id,branch_ref,path,ownership_token,base_commit,state,created_at)
-        VALUES ('w1','t1','refs/heads/task/t1','/tmp/w1','token',?1,'RETAINED',3)`).run(oid);
-      database.sqlite.query(`INSERT INTO executions
-        (id,task_id,attempt_number,initial_revision_id,applied_revision_id,workspace_id,adapter_id,
-          adapter_version,state,resource_held,base_commit,result_commit,version)
-        VALUES ('e1','t1',1,'r1','r1','w1','pi','1.0.0','SUCCEEDED',0,?1,?1,0)`).run(oid);
-      seedIntegrationMembership(database.sqlite);
-      // The same guard also holds an integration verification run and a stable promotion record, the
-      // other two places where a commit's provenance outlives the Task. Both must go for the same
-      // reason, and both are named in `rowsDeleted`.
-      database.sqlite.query(`INSERT INTO operations
-        (id,project_id,kind,aggregate_id,idempotency_key,state,request_json,created_at,updated_at)
-        VALUES ('op1','p1','INTEGRATION_VERIFICATION','b1','key1','SUCCEEDED','{}',4,4)`).run();
-      database.sqlite.query(`INSERT INTO integration_verification_runs
-        (id,batch_id,project_id,task_id,execution_id,revision_id,operation_id,command_id,
-          tested_commit,tested_tree,dev_commit,policy_version,policy_digest,main_commit,
-          commands_json,copy_path,state,outcome_code,queued_at,ended_at)
-        VALUES ('ivr1','b1','p1','t1','e1','r1','op1','cmd1',?1,?1,?1,'policy-v1',?2,?1,
-          '[]','/tmp/copy','PASSED','PASSED',4,5)`).run(oid, digest);
-      database.sqlite.query(`INSERT INTO stable_promotions
-        (id,project_id,dev_ref,main_ref,candidate_commit,expected_main_commit,integration_batch_id,
-          verification_id,verification_tested_commit,permission_mode,state,created_at)
-        VALUES ('sp1','p1','refs/heads/dev','refs/heads/main',?1,?1,'b1','ivr1',?1,'FULL','CREATED',4)`)
-        .run(oid);
-      database.sqlite.query(`INSERT INTO stable_promotion_members
-        (promotion_id,batch_id,project_id,task_id,revision_id,execution_id,candidate_commit,created_at)
-        VALUES ('sp1','b1','p1','t1','r1','e1',?1,4)`).run(oid);
-
-      const blockers = database.inspectTaskPurgeBlockers({ projectId: 'p1', taskId: 't1' });
-      expect(blockers.map((blocker) => blocker.code)).toEqual([
-        'TASK_INTEGRATED_INTO_DEV', 'TASK_IN_STABLE_PROMOTION',
-      ]);
-      const forced = { bypassed: [
-        { code: 'TASK_INTEGRATED_INTO_DEV', detail: 'member of 1 batch item(s)' },
-        { code: 'TASK_IN_STABLE_PROMOTION', detail: 'member of 1 stable promotion record(s)' },
-      ], termination: null };
-      const result = database.purgeTask(purgeInput({ forced }));
-
-      expect(database.getTask('p1', 't1')).toBeNull();
-      expect(result.forced).toEqual(forced);
-      // The provenance rows the ordinary refusal protects are exactly what the flag gave up, and the
-      // audit says so in the same transaction.
-      expect(result.rowsDeleted['integration_batch_items']).toBe(1);
-      expect(result.rowsDeleted['integration_verification_runs']).toBe(1);
-      expect(result.rowsDeleted['stable_promotion_members']).toBe(1);
-      expect(database.sqlite.query<{ count: number }, []>(
-        'SELECT COUNT(*) AS count FROM integration_batch_items').get()?.count).toBe(0);
-      expect(database.sqlite.query<{ count: number }, []>(
-        'SELECT COUNT(*) AS count FROM integration_verification_runs').get()?.count).toBe(0);
-      expect(database.sqlite.query<{ count: number }, []>(
-        'SELECT COUNT(*) AS count FROM stable_promotion_members').get()?.count).toBe(0);
-      // The batch row and the operation are not the Task's rows: they stay. The promotion record does
-      // not — its verification run was this Task's, and `stable_promotions.verification_id` leaves no
-      // other consistent outcome (ADR-0058 D09). `rowsDeleted` is the audit of how far that reached.
-      expect(database.sqlite.query<{ count: number }, []>(
-        'SELECT COUNT(*) AS count FROM integration_batches').get()?.count).toBe(1);
-      expect(database.sqlite.query<{ count: number }, []>(
-        'SELECT COUNT(*) AS count FROM stable_promotions').get()?.count).toBe(0);
-      expect(result.rowsDeleted['stable_promotion_members']).toBe(1);
-      expect(result.rowsDeleted['stable_promotions']).toBe(1);
-      const event = database.sqlite.query<{ payload_json: string }, []>(
-        "SELECT payload_json FROM domain_events WHERE event_type='TaskPurged'").get();
-      expect(JSON.parse(event?.payload_json ?? '{}')).toMatchObject({ forced });
-      // And the deletion is still a whole-subgraph one: no dangling reference to the Task is left.
-      expect(database.sqlite.query<{ count: number }, []>('PRAGMA foreign_key_check').all().length)
-        .toBe(0);
-    } finally {
-      database.close();
-    }
-  });
 });
