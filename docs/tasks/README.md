@@ -7630,6 +7630,23 @@ CREATE TABLE runtime_command_receipts (
 
 **超出任务书「你可改」清单的一处**：`apps/runtime/src/main.ts`（命令分发所在处）。不在「禁改」清单里，且不编辑它无法接入新命令面（验证 1/5/6 需要真实 CLI）。改动限于 `scheduler.capacity.*` 三个 case、`globalPauseState` provider 与 import/注释，未触碰暂停/进程冻结相关代码；集成时与 GLC-2 的 `scheduler control *` 分发会冲突，需手工合并。
 
+### 合入方式与集成复跑（已执行）
+
+- 合入方式：按用户本轮明确指示（「commit 后合并到 dev」）走**人工 `git merge --no-ff`**——在 dev clone
+  （`~/Documents/codeestra-dev`）的 `dev` 上合入 `Loyage/config_zone`（`26082d8`），得到 merge commit **`53f6f55`**。
+  **没有走产品 `task integration` 的 IntegrationBatch 路径**，如实记录：本格工作在 Orca 工作区分支上进行，不是一条
+  产品 Task，没有 TaskRevision / 成果 commit / 任务级验证可供集成批次消费；本仓库历次 `dev` 合入也一律是人工 merge。
+- 冲突：0 个（合入前 `dev = 28255d4` 与本格分支的基线相同；本格早期那次 `--ff-only` 后手工解开的 `package.json`
+  冲突在本提交里已经合成为并集）。
+- 集成复跑（在合并结果 `dev@53f6f55` 上，用 dev clone 自己的 `node_modules`）：
+
+| 命令 | 结果 |
+|---|---|
+| `bun run typecheck` | 退出码 0 |
+| `bun test apps/runtime/test/{cli-settings,cli-ui-settings,cli-auto-reclaim,permission-mode,ui-settings,cli-open}.test.ts` | **31 pass / 0 fail**（312 expect） |
+
+- 集成后仍未跑全量：`dev → main` 提升前必须在精确 dev SHA 上跑全量（ADR-0038 / runbook §3）。
+
 ### 剩余问题 / 集成注意（必须由协调者处理）
 
 1. **v34 是两块共用的版本号**：GLC-2 在自己分支上可能重复定义 `runtime_command_receipts` / 重建 `domain_events`。合并时以本格 DDL 为准并逐列核对（见上面两张表的最终形态）；合并后必须**重跑** v33→v34 真实文件库迁移、`foreign_key_check`、四张新表齐全与故障注入回滚——**本格分支上的回滚证据不能替合并后的证据背书**。
@@ -8003,7 +8020,8 @@ Web UI HTTP 面读写同一条命令。
 
 ## FOUNDATION-098 — `settings` 成为设置的唯一入口：`settings list` 总览 + 权限模式移入 `settings permission`（ADR-0064，无 schema 变更）
 
-状态：**已实现**（用户任务，无 schema 变更、不占迁移号；定向测试通过；**未合入 dev、未跑全量**）。
+状态：**已实现并已合入 dev**（用户任务，无 schema 变更、不占迁移号；定向测试通过；
+改动提交 `26082d8` 以 merge commit **`53f6f55`** 合入 dev clone（`~/Documents/codeestra-dev`）的 `dev`，合入前 `dev = 28255d4`；**未跑全量**）。
 用户原话：「把 `bun run codeestra permission` 指令放入 `bun run codeestra settings` 里面，`bun run codeestra settings` 需要指令可以查看有哪些设置，以及这些设置处于什么状态。」
 基线变更：本格开头经用户授权把工作分支 fast-forward 到当时本地 `dev = 28255d41d3b4f54b01741ef02c1cc8a7856cf3f1`
 （因为 ADR-0062 的 `settings auto-reclaim` 与 ADR-0063 的 CLI 参考拆分都直接影响本任务），然后才写代码与文档。
@@ -8089,7 +8107,8 @@ Web UI HTTP 面读写同一条命令。
 
 ### 剩余问题 / 集成注意（必须由协调者处理）
 
-- **未 commit、未合入 dev、未 push、未提升 main、未重启任何 Runtime**：本文只报告已执行的事实。
+- **未 push、未提升 main、未重启任何 Runtime**：本地 `dev` 现为 `53f6f55`（比 `origin/dev` 领先 11 个提交）。
+  按用户本轮裁决只做「commit 后合入本地 dev」，没有动任何远端 ref。
 - 合入 `dev` 时如需人工 merge，注意 `package.json` 的 `test:unit` ignore 列表与 `test:e2e` 列表需要双方取**并集**（本格已在本分支上手工解开一次同类冲突）。
 - 破坏性变更提醒：任何脚本/文档若仍写 `permission get|set`，升级后是用法错误（退出码 2）。
 - 已知不足（有意）：`settings list` 没有 UI 投影；`cli-reference.md` §19 原本从未记录 `settings ui`，本格补了一节**最小**说明（键名/取值/零确认/稳定码），
