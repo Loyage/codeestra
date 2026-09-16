@@ -174,137 +174,10 @@ export interface VerificationRunView {
   readonly endedAt: number | null;
 }
 
-/**
- * One fixed member of an IntegrationBatch, as `task.integration.list` (and every batch inside
- * `task.status`) reports it. `state` is the member's own item state; a batch is multi-member since
- * ADR-0053, so this is never "the one Task" the way it was before that.
- */
-export interface IntegrationBatchItemView {
-  readonly taskId: string;
-  readonly taskVersion: number;
-  readonly revisionId: string;
-  readonly executionId: string;
-  readonly candidateCommit: string;
-  readonly devCommit: string;
-  readonly state: string;
-  readonly integratedCommit: string | null;
-  readonly detail: string | null;
-  readonly createdAt: number;
-  readonly completedAt: number | null;
-}
-
-/**
- * One member of an IntegrationBatch as the single-batch reads report it (`task.integration.get`,
- * `create`, `cancel`, and every member of the `integrate` report). This is the same record as
- * `IntegrationBatchItemView`, projected without the per-member `taskVersion` / `devCommit` /
- * `createdAt` / `completedAt` columns.
- */
-export interface IntegrationBatchMemberView {
-  readonly taskId: string;
-  readonly executionId: string;
-  readonly revisionId: string;
-  readonly candidateCommit: string;
-  readonly state: string;
-  readonly integratedCommit: string | null;
-  readonly detail: string | null;
-}
-
-/**
- * A batch of one or more Task results entering the long-lived `dev` branch (ADR-0018 / ADR-0053).
- * `integratedCommit` is only set once the ref actually moved; every other state means `dev` was left
- * untouched. This is the shape `task.integration.list` and `task.status` return, with every member
- * in `items`.
- */
-export interface IntegrationBatchView {
-  readonly batchId: string;
-  readonly projectId: string;
-  readonly devRef: string;
-  readonly devCommit: string;
-  readonly state: string;
-  readonly integratedCommit: string | null;
-  readonly mergeStrategy: 'FAST_FORWARD' | 'MERGE_COMMIT' | null;
-  /** The merge Git produced, recorded before the ref moves; null until a merge was recorded. */
-  readonly mergedCommit: string | null;
-  readonly worktreePath: string | null;
-  readonly verificationId: string | null;
-  readonly outcomeCode: string | null;
-  readonly detail: string | null;
-  readonly createdAt: number;
-  readonly completedAt: number | null;
-  readonly items: readonly IntegrationBatchItemView[];
-}
-
-/**
- * The recorded batch one single-batch command returns (`create` / `get` / `cancel`): the same facts
- * as `IntegrationBatchView`, keyed by `members` instead of `items`, plus whether this call created
- * the batch (`created: false` means the command was a replay of an already recorded batch).
- */
-export interface IntegrationBatchRecordView {
-  readonly batchId: string;
-  readonly projectId: string;
-  readonly devRef: string;
-  readonly devCommit: string;
-  readonly state: string;
-  readonly integratedCommit: string | null;
-  readonly mergeStrategy: 'FAST_FORWARD' | 'MERGE_COMMIT' | null;
-  readonly mergedCommit: string | null;
-  readonly worktreePath: string | null;
-  readonly verificationId: string | null;
-  readonly outcomeCode: string | null;
-  readonly detail: string | null;
-  readonly createdAt: number;
-  readonly completedAt: number | null;
-  readonly members: readonly IntegrationBatchMemberView[];
-  /** True when this call created the batch. */
-  readonly created: boolean;
-}
-
-/** One policy command of the batch's independent integration verification, as it was observed. */
-export interface IntegrationCommandOutcomeView {
-  readonly id: string;
-  readonly argv: readonly string[];
-  readonly cwd: string;
-  readonly timeoutSeconds: number;
-  readonly exitCode: number | null;
-  readonly timedOut: boolean;
-  readonly durationMs: number;
-  readonly stdoutBytes: number;
-  readonly stderrBytes: number;
-  readonly stdoutDigest: string;
-  readonly stderrDigest: string;
-  /** Transient tail for the caller's terminal; empty when the run was replayed. */
-  readonly stdoutTail: string;
-  readonly stderrTail: string;
-  readonly failureDetail?: string;
-}
-
-/** The tree the integration verification ran against (facts, never a pass/fail prediction). */
-export interface IntegrationTreeEvidenceView {
-  readonly headCommit: string;
-  readonly trackedModifications: readonly string[];
-  readonly untrackedFiles: readonly string[];
-  readonly clean: boolean;
-}
-
-/**
- * What `task.integration.integrate` reports: the merge it produced, the one verification that
- * covered the whole batch, and every member's fixed binding. `alreadyCompleted` means the recorded
- * verdict of a finished batch was returned instead of a second integration.
- */
-export interface IntegrationReportView extends IntegrationBatchRecordView {
-  readonly mergedCommit: string | null;
-  readonly worktreeDetail: string | null;
-  readonly verificationState: string | null;
-  readonly commands: readonly IntegrationCommandOutcomeView[];
-  readonly tree: IntegrationTreeEvidenceView | null;
-  readonly alreadyCompleted: boolean;
-}
-
 export interface TaskStatusView {
   readonly task: TaskView;
   readonly executions: readonly ExecutionView[];
   readonly verifications: readonly VerificationRunView[];
-  readonly integrations: readonly IntegrationBatchView[];
   /**
    * Long-command Operations (ADR-0019): the Agent run and every verification run, with the steps
    * the Runtime actually recorded. Progress is a fact list, not a predicted percentage.
@@ -563,39 +436,11 @@ export interface RepositoryIdentityView {
 }
 
 /**
- * The Runtime's verification of a project's dev clone (ADR-0047 D05 / ADR-0048): a second, separate
- * clone of the same origin sitting on the project's `dev` branch. `verified: false` always carries
- * the stable code that names the fact which could not be established; every other field is what the
- * check could still read.
+ * What `project.inspect` returns: the repository identity (ADR-0064 removed the dev baseline and the
+ * dev clone). It is also the value a trust echoes back as `expectedIdentity`, so the client must
+ * return it unchanged.
  */
-export interface DevRepoInspectionView {
-  readonly path: string;
-  /** The project's dev branch this clone is expected to have checked out. */
-  readonly devRef: string;
-  readonly verified: boolean;
-  readonly code: string | null;
-  readonly detail: string | null;
-  readonly repoRoot: string | null;
-  readonly gitCommonDir: string | null;
-  readonly headCommit: string | null;
-  readonly branchRef: string | null;
-  readonly devRefCommit: string | null;
-  readonly originUrl: string | null;
-  readonly originMatchesProject: boolean | null;
-  readonly clean: boolean | null;
-}
-
-/**
- * What `project.inspect` returns: the repository identity plus the development baseline and the
- * verified dev clone. It is also the value a trust echoes back as `expectedIdentity`, so the client
- * must return it unchanged.
- */
-export interface ProjectIdentityView extends RepositoryIdentityView {
-  readonly devRef: string;
-  readonly devCommit: string | null;
-  readonly devRefPresent: boolean;
-  readonly devRepoPath: DevRepoInspectionView | null;
-}
+export type ProjectIdentityView = RepositoryIdentityView;
 
 export interface VerificationPolicyView {
   readonly state: 'PRESENT' | 'ABSENT';
@@ -880,110 +725,6 @@ export interface TerminalReleaseResultView {
     };
   };
   readonly successor: SuccessorAdmissionView | null;
-}
-
-/* ------------------------------------------------------------------------------------------------
- * Stable promotion (ADR-0022) and the dependency graph (ADR-0024), read-only projections.
- */
-
-export type StablePromotionStateView = 'CREATED' | 'AWAITING_APPROVAL' | 'PROMOTING' | 'RESTARTING'
-  | 'SUCCEEDED' | 'STALE' | 'FAILED' | 'RECOVERY_REQUIRED';
-
-/**
- * Which pair of distinguishable facts a record states (ADR-0047 D03 / ADR-0052). The Runtime
- * **derives** it from the stored state and the recorded restart result; it is never an input the
- * client may send. `AWAITING_PULL` is the one that must never read as a finished promotion: the
- * candidate is on the remote `dev` and the main checkout has not pulled it yet.
- */
-export type PromotionPhaseView = 'READY_TO_PUSH' | 'AWAITING_PULL' | 'RESTART_PENDING'
-  | 'MAIN_PUSH_PENDING' | 'COMPLETE' | 'REFUSED';
-
-export interface PromotionMemberView {
-  readonly batchId: string;
-  readonly taskId: string;
-  readonly revisionId: string;
-  readonly executionId: string;
-  readonly candidateCommit: string;
-}
-
-/** One restart step the client executed and observed; the exit code is a fact, not a verdict. */
-export interface PromotionRestartStepView {
-  readonly id: string;
-  readonly argv: readonly string[];
-  readonly cwd: string;
-  readonly exitCode: number | null;
-  readonly durationMs: number;
-  readonly stdoutBytes: number;
-  readonly stderrBytes: number;
-  readonly stdoutDigest: string;
-  readonly stderrDigest: string;
-  readonly failureDetail?: string;
-}
-
-export interface PromotionRestartView {
-  readonly observedBootId: string;
-  readonly runtimeStatus: string | null;
-  readonly uiRunning: boolean | null;
-  readonly steps: readonly PromotionRestartStepView[];
-}
-
-/**
- * `dev → main` as the Runtime recorded it. `promotedCommit` is only set once `main` really moved,
- * and `restart` only says what the promoting client observed — a moved ref is not a live Runtime.
- */
-export interface StablePromotionView {
-  readonly promotionId: string;
-  readonly projectId: string;
-  readonly devRef: string;
-  readonly mainRef: string;
-  readonly candidateCommit: string;
-  readonly expectedMainCommit: string;
-  readonly integrationBatchId: string;
-  readonly verificationId: string;
-  readonly verificationTestedCommit: string;
-  readonly permissionMode: 'FULL' | 'STRICT';
-  readonly state: StablePromotionStateView;
-  readonly approval: {
-    readonly devCommit: string;
-    readonly mainCommit: string;
-    readonly verificationId: string;
-    /** The exact dev full-suite evidence the approval also covered (ADR-0039); null when unrecorded. */
-    readonly fullSuiteEvidenceId: string | null;
-    readonly approvedAt: number;
-  } | null;
-  /** The dev full-suite evidence `promote` re-reads before it touches any ref (ADR-0038 D03). */
-  readonly fullSuite: {
-    readonly evidenceId: string;
-    readonly devCommit: string;
-    readonly policyVersion: string;
-    readonly policyDigest: string;
-    readonly lockfileDigest: string;
-  } | null;
-  readonly promotedCommit: string | null;
-  readonly mainWorktreePath: string | null;
-  readonly promotingBootId: string | null;
-  /** The dev clone this promotion pushes its candidate from (ADR-0047 D05); null when none. */
-  readonly devRepoPath: string | null;
-  /**
-   * Commit **read back** from the remote dev ref after the push. This is an observation, never an
-   * input: it is only recorded once `git ls-remote` reported the fixed candidate, which is what makes
-   * "the push exited 0" unable to stand in for "the candidate is on the remote".
-   */
-  readonly remoteDevCommit: string | null;
-  /** Commit read back from the remote main ref after the stable commit was published there. */
-  readonly remoteMainCommit: string | null;
-  readonly pushedAt: number | null;
-  readonly mainPushedAt: number | null;
-  /** Which pair of facts (pushed / pulled-and-restarted) this record currently states. */
-  readonly phase: PromotionPhaseView;
-  readonly restartSteps: readonly { readonly id: string; readonly argv: readonly string[];
-    readonly cwd: string }[];
-  readonly restart: PromotionRestartView | null;
-  readonly outcomeCode: string | null;
-  readonly detail: string | null;
-  readonly createdAt: number;
-  readonly completedAt: number | null;
-  readonly members: readonly PromotionMemberView[];
 }
 
 /** Why one dependency edge is not satisfied; `satisfied` is true exactly when this is null. */
