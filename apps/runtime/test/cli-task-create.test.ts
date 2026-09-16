@@ -57,8 +57,6 @@ interface TaskCreateView {
 async function trustedProject(): Promise<{ environment: Record<string, string>; projectId: string }> {
   const repository = temporaryDirectory('codeestra-task-create-repo-');
   const home = temporaryDirectory('codeestra-task-create-home-');
-  const assets = temporaryDirectory('codeestra-task-create-assets-');
-  await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
   mkdirSync(join(repository, '.codeestra', 'policies'), { recursive: true });
   await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'), JSON.stringify({
     version: 1, commands: [{ id: 'check', argv: ['true'], cwd: '.', timeoutSeconds: 60 }],
@@ -72,8 +70,8 @@ async function trustedProject(): Promise<{ environment: Record<string, string>; 
   // ADR-0056: every dev fact comes from a second clone of the same origin that sits on
   // `dev`; the project is trusted with it explicitly.
 
-  const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
-  const opened = await cli(['open', repository, '--no-open'], environment);
+  const environment = { CODEESTRA_HOME: home };
+  const opened = await cli(['project', 'trust', repository], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { id: string }[];

@@ -78,7 +78,6 @@ function providerConfigDirectory(): { directory: string; skillPath: string; prom
 function environmentFor(providerDirectory: string): Record<string, string> {
   return {
     CODEESTRA_HOME: temporaryDirectory('codeestra-plugin-home-'),
-    CODEESTRA_UI_DIST: temporaryDirectory('codeestra-plugin-ui-'),
     // The controlled launch is irrelevant here (no Agent is started), but an absent Pi must never
     // make this test depend on the developer's installation for detection.
     CODEESTRA_PI_EXECUTABLE: 'pi-not-installed',

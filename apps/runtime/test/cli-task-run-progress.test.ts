@@ -128,8 +128,6 @@ async function fixture(verificationCommands: readonly unknown[]): Promise<{
   const repository = temporaryDirectory('codeestra-progress-repo-');
   const home = temporaryDirectory('codeestra-progress-home-');
   const tools = temporaryDirectory('codeestra-progress-tools-');
-  const assets = temporaryDirectory('codeestra-progress-assets-');
-  await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
   mkdirSync(join(repository, '.codeestra', 'policies'), { recursive: true });
   await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'),
     JSON.stringify({ version: 1, commands: verificationCommands }));
@@ -150,11 +148,10 @@ async function fixture(verificationCommands: readonly unknown[]): Promise<{
 
   const environment = {
     CODEESTRA_HOME: home,
-    CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: shimPath,
     CODEESTRA_SCHEDULE_TICK_MS: '600000',
   };
-  const opened = await cli(['open', repository, '--no-open'], environment);
+  const opened = await cli(['project', 'trust', repository], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { readonly id: string }[];

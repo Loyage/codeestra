@@ -1,6 +1,6 @@
 # ADR-0064：`settings` 成为设置的唯一入口 —— `settings list` 总览 + 权限模式移入 `settings permission`
 
-Status：Accepted（用户 2026-09-16 逐项裁决）。**已实现**（用户任务 FOUNDATION-098；无 schema 变更、不占迁移号）。
+Status：Accepted（用户 2026-09-16 逐项裁决）。**已实现**（用户任务 FOUNDATION-098；无 schema 变更、不占迁移号）。**ADR-0067 已修订其闭合集合**：UI settings 命令面暂停，当前 `settings list` 只枚举三项启用设置；下文九项是本 ADR 落地时的历史事实。
 基线：`dev = 28255d41d3b4f54b01741ef02c1cc8a7856cf3f1`（本格开头先 fast-forward 到当时本地 `dev`，因为 `settings auto-reclaim`（ADR-0062）与 CLI 参考拆分（ADR-0063）都直接影响本任务）。
 
 ## Context

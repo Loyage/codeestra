@@ -1,76 +1,34 @@
 {
   "version": 1,
-  "scope": "任务输入字段重构（ADR-0065）：新任务必填的显示标题与命名标题、任务详情；命名标题驱动分支与 worktree 目录；删除任务约束与任务类型（含 --constraint/--kind、ADD_CONSTRAINT 写入路径、三个 Adapter 的 Constraints 提示词段）；schema v35 重建 tasks/task_revisions。",
+  "scope": "暂停 Web UI 开发并默认禁用全部 Web UI 入口：删除 ui/open、runtime.ui 与 UI 设置命令面；保留实现源码但移出默认检查、构建、重启和提升流程；删除 UI 与专用 HTTP/SSE 测试，现有 CLI 测试改用 project trust。",
   "commands": [
     {
-      "id": "storage-v35-migration",
-      "argv": ["bun", "test", "packages/storage/test/task-input-fields-migration.test.ts"],
+      "id": "typecheck-cli-runtime",
+      "argv": ["bun", "run", "typecheck"],
       "cwd": ".",
-      "timeoutSeconds": 120,
-      "covers": "v34→v35 升级：标题派生（首行/空首行/CRLF）、命名标题留 NULL、append-only 触发器重建、历史 ADD_CONSTRAINT 行不被改写、行数与结束态断言、无法派生标题时拒绝"
-    },
-    {
-      "id": "storage-suite",
-      "argv": ["bun", "test", "packages/storage/test"],
-      "cwd": ".",
-      "timeoutSeconds": 500,
-      "covers": "schema v35 之后全部存储层行为：任务/修订读写、依赖、回收、purge、知识绑定与既有各版本迁移测试都不回退"
+      "timeoutSeconds": 180,
+      "covers": "CLI/Runtime/contracts 在移除 Web UI 命令与 Runtime 启动路径后仍保持严格类型一致；apps/ui 按 ADR-0067 不进入默认检查"
     },
     {
       "id": "contracts-boundary",
       "argv": ["bun", "test", "packages/contracts/test/request.test.ts"],
       "cwd": ".",
       "timeoutSeconds": 120,
-      "covers": "task.create 三个必填字段与非法值拒绝、被删除的 constraints/kind 被拒、task.revision.create 不再带约束"
+      "covers": "移除 Web UI request variants 后，剩余 versioned Runtime 请求 union 仍通过其现有边界用例"
     },
     {
-      "id": "domain-and-ui",
-      "argv": ["bunx", "vitest", "run", "packages/domain", "apps/ui"],
+      "id": "runtime-settings-cli",
+      "argv": ["bun", "test", "apps/runtime/test/cli-settings.test.ts"],
       "cwd": ".",
-      "timeoutSeconds": 200,
-      "covers": "领域规则（revision 快照、taskWorkspaceName 派生）与 UI 投影（revision 表、任务列表/详情渲染不含约束）"
+      "timeoutSeconds": 180,
+      "covers": "settings list 只枚举仍启用的 CLI/Runtime 设置，权限、散文提问和全局容量命令保持可用"
     },
     {
-      "id": "git-workspace-naming",
-      "argv": ["bun", "test", "packages/git/test/inspect.test.ts", "packages/git/test/rebuild.test.ts"],
-      "cwd": ".",
-      "timeoutSeconds": 240,
-      "covers": "分支/目录按 <编号>-<命名标题> 创建、非法 workspaceName 拒绝、reclaim 后按记录名重建布局（ADR-0042 + ADR-0065 D03）"
-    },
-    {
-      "id": "adapters-prompt",
-      "argv": ["bun", "test", "packages/agent-adapters/test"],
-      "cwd": ".",
-      "timeoutSeconds": 300,
-      "covers": "三个 Adapter 的提示词改为「标题 + 详情」且不再出现 Constraints 段"
-    },
-    {
-      "id": "runtime-workspace-and-scheduler",
-      "argv": ["bun", "test", "apps/runtime/test/workspace-service.test.ts", "apps/runtime/test/scheduler.test.ts", "apps/runtime/test/schedule-service.test.ts", "apps/runtime/test/slot-reservation-service.test.ts"],
-      "cwd": ".",
-      "timeoutSeconds": 500,
-      "covers": "workspace 命名与记录、调度/容量/槽位在 schema v35 之后行为不变"
-    },
-    {
-      "id": "runtime-revision-and-sessions",
-      "argv": ["bun", "test", "apps/runtime/test/revision-delivery.test.ts", "apps/runtime/test/session-guidance.test.ts", "apps/runtime/test/integration-service.test.ts", "apps/runtime/test/promotion-service.test.ts"],
-      "cwd": ".",
-      "timeoutSeconds": 500,
-      "covers": "修订「必须改详情或功能声明」的新规则、投递台账、会话指导与集成/提升证据链"
-    },
-    {
-      "id": "cli-task-create",
-      "argv": ["bun", "test", "apps/runtime/test/cli-task-create.test.ts"],
-      "cwd": ".",
-      "timeoutSeconds": 240,
-      "covers": "task create 的三个必填字段、旧 flag 被拒为用法错误、非法命名标题、缺字段都不创建任务"
-    },
-    {
-      "id": "cli-task-flows",
-      "argv": ["bun", "test", "apps/runtime/test/cli-task-retry.test.ts", "apps/runtime/test/cli-task-purge.test.ts", "apps/runtime/test/cli-reclaim.test.ts", "apps/runtime/test/cli-reclaim-batch.test.ts"],
+      "id": "runtime-cli-smoke",
+      "argv": ["bun", "test", "apps/runtime/test/cli-task-create.test.ts", "apps/runtime/test/cli-attention.test.ts", "apps/runtime/test/operation-progress-events.test.ts"],
       "cwd": ".",
       "timeoutSeconds": 360,
-      "covers": "重试/永久删除/回收按记录的命名与路径工作，且旧任务的内部 ID 命名仍被正确重建"
+      "covers": "共享测试改用 project trust 后，Task 创建、结构化回答与 Operation 进度仍只经 CLI/socket 命令面工作"
     }
   ]
 }

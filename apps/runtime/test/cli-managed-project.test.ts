@@ -106,15 +106,12 @@ for await (const chunk of Bun.stdin.stream()) {
 interface ManagedFixture {
   readonly repository: string;
   readonly tools: string;
-  readonly assets: string;
 }
 
 /** A repository with a verification policy and **no** `dev` branch and **no** second clone. */
 async function managedFixture(): Promise<ManagedFixture> {
   const repository = temporaryDirectory('codeestra-managed-repo-');
   const tools = temporaryDirectory('codeestra-managed-tools-');
-  const assets = temporaryDirectory('codeestra-managed-assets-');
-  await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
   mkdirSync(join(repository, '.codeestra', 'policies'), { recursive: true });
   await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'), JSON.stringify({
     version: 1, commands: [{ id: 'check', argv: ['true'], cwd: '.', timeoutSeconds: 60 }],
@@ -128,7 +125,7 @@ async function managedFixture(): Promise<ManagedFixture> {
   await Bun.write(stubPath, stubSource);
   await Bun.write(shimPath, `#!/bin/sh\nexec "${process.execPath}" "${stubPath}" "$@"\n`);
   chmodSync(shimPath, 0o755);
-  return { repository, tools: shimPath, assets };
+  return { repository, tools: shimPath };
 }
 
 describe('codeestra runs Tasks in the project folder itself (ADR-0064)', () => {
@@ -136,7 +133,7 @@ describe('codeestra runs Tasks in the project folder itself (ADR-0064)', () => {
     async () => {
       const home = temporaryDirectory('codeestra-managed-home-');
       const main = await managedFixture();
-      const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: main.assets,
+      const environment = { CODEESTRA_HOME: home,
         CODEESTRA_PI_EXECUTABLE: main.tools };
 
       // ADR-0064: there is no dev clone to record, so a repository with no `dev` branch at all is the

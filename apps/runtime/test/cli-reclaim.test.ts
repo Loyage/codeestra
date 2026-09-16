@@ -99,8 +99,6 @@ interface SeededTask {
 async function openedProject(): Promise<ReclaimFixture> {
   const repo = temporaryDirectory('codeestra-reclaim-repo-');
   const home = realpathSync(temporaryDirectory('codeestra-reclaim-home-'));
-  const assets = temporaryDirectory('codeestra-reclaim-assets-');
-  await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
   mkdirSync(join(repo, '.codeestra', 'policies'), { recursive: true });
   await Bun.write(join(repo, '.codeestra', 'policies', 'verification.json'), JSON.stringify({
     version: 1, commands: [{ id: 'check', argv: ['true'], cwd: '.', timeoutSeconds: 60 }],
@@ -112,9 +110,9 @@ async function openedProject(): Promise<ReclaimFixture> {
   await git(repo, ['branch', 'dev']);
   // ADR-0056: every dev fact comes from a second clone of the same origin that sits on
   // `dev`; the project is trusted with it explicitly.
-  const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets,
+  const environment = { CODEESTRA_HOME: home,
     CODEESTRA_SCHEDULE_TICK_MS: '600000' };
-  const opened = await cli(['open', repo, '--no-open'], environment);
+  const opened = await cli(['project', 'trust', repo], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { id: string }[];

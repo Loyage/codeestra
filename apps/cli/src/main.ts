@@ -23,12 +23,7 @@ import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOpt
   type AgentPluginDetection,
   type VerificationPolicyInspection,
   agentPluginKinds,
-  isUiSettingKey,
-  isValidUiSettingValue,
-  uiSettingKeysAsText,
-  uiSettingValuesAsText,
-  type SettingsListView,
-  type UiSettingKey } from '@codeestra/contracts';
+  type SettingsListView } from '@codeestra/contracts';
 /**
  * The Agent configuration view the Runtime returns for `agent.config.get|set|clear`. Only the fields
  * this client renders are named; anything else is ignored rather than invented.
@@ -47,41 +42,9 @@ import {
   type RuntimeHomeInspection,
 } from '../../runtime/src/lifecycle.js';
 
-/** The subset of `project.list` this client reads. */
-interface TrustedProjectListing {
-  readonly id: string;
-  readonly name: string;
-  readonly repoRoot: string;
-  readonly gitCommonDir: string;
-  /** The active verification policy confirmation, or null when trust never confirmed one. */
-  readonly confirmedPolicy:
-    { readonly state: 'ABSENT' | 'PRESENT'; readonly digest: string | null;
-      readonly mainRef: string; readonly mainCommit: string } | null;
-  /** The active impact-mapping confirmation, or null when trust never declared one. */
-  readonly confirmedImpactPolicy:
-    { readonly state: 'ABSENT' | 'PRESENT' | 'INVALID'; readonly digest: string | null;
-      readonly contentDigest: string | null; readonly code: string | null;
-      readonly mainRef: string; readonly mainCommit: string } | null;
-}
-
 type ClientRequest = RuntimeRequest extends infer Request
   ? Request extends RuntimeRequest ? Omit<Request, 'requestId' | 'schemaVersion'> : never
   : never;
-
-/**
- * A CLI-side UI-setting key check. The value is turned into a `never` return so a mistyped key can
- * only reach `usage()` (exit 2): the command line is wrong, and no Runtime needs to be asked.
- */
-function parseUiSettingKey(token: string | undefined): UiSettingKey {
-  if (token === undefined || !isUiSettingKey(token)) {
-    if (token !== undefined) {
-      console.error(`Unknown UI setting "${token}"; the keys are:`
-        + ` ${uiSettingKeysAsText()}`);
-    }
-    usage();
-  }
-  return token;
-}
 
 /** Resource kinds `reclaim` accepts; the Runtime boundary validates the same set again. */
 const reclaimKindNames = ['TASK_WORKTREE', 'VERIFICATION_COPY', 'INTEGRATION_WORKTREE'] as const;
@@ -1003,10 +966,6 @@ function printSettingsList(view: SettingsListView): void {
 function usage(): never {
   console.error(`Usage:
   bun run codeestra status
-  bun run codeestra open [path] [--yes] [--no-open]
-    # Composes inspect + trust + ui. There is exactly one Task baseline (ADR-0066): the branch the
-    # project folder has checked out right now, fixed with the workspace when a Task starts.
-  bun run codeestra ui [--no-open]
   bun run codeestra stop [--wait <seconds>]
   bun run codeestra agent config get [--project <project-id>] [--adapter <id>]
   bun run codeestra agent config set [--project <project-id>] [--adapter <id>]
@@ -1205,17 +1164,9 @@ function usage(): never {
   bun run codeestra settings permission get [--json]
   bun run codeestra settings permission set <full|strict> [--json]
   bun run codeestra settings prose-question-attention [auto|record-only|off] [--json]
-  bun run codeestra settings ui list [--json]
-  bun run codeestra settings ui get <key> [--json]
-  bun run codeestra settings ui set <key> <value> [--json]
-  bun run codeestra settings ui reset [<key>] [--json]
   bun run codeestra settings concurrency get [--json]
   bun run codeestra settings concurrency set --limit <n> [--json]
   bun run codeestra settings concurrency reset [--json]
-    # key = theme|density|fontSize|motion|timeDisplay; every write is one command, zero
-    # confirmations. An unknown key or an unsupported value is a usage error (exit 2); an
-    # unreadable settings file is a Runtime error (exit 1, INVALID_UI_SETTING) that reset,
-    # with no key, repairs by rewriting the file from scratch.
   bun run codeestra reclaim plan [--project <project-id> | --all-projects] [--task <task-id>]
     [--kind <TASK_WORKTREE|VERIFICATION_COPY|INTEGRATION_WORKTREE>]… [--include-failure-scenes]
     [--unregistered] [--scan-root <path-inside-home>] [--remove-unregistered <path>]… [--json]
@@ -1264,14 +1215,12 @@ answer is a statement about this wait, not an amendment of the specification. De
 attention answer is refused with PROSE_QUESTION_RESOLUTION_REQUIRED, because there is no provider
 dialog to write to.
 
-settings list is the overview of every Runtime-level setting (ADR-0064): the permission mode, the
-prose-question switch, the five interface-effect preferences and the one concurrency limit, each
-with its effective value, its product default, whether it is this Runtime home's own choice or the
-product default, the values it accepts and where it is stored. It answers "what settings exist and
-what are they set to" from the Runtime itself, and every entry comes from the same read its own
-command uses, so the list cannot disagree with settings permission get, settings
-prose-question-attention, settings ui get or scheduler capacity get. Human-readable by default;
---json prints the whole record, including what a change to each setting applies to.
+settings list is the overview of every enabled Runtime-level setting (ADR-0064/0067): the
+permission mode, the prose-question switch and the one concurrency limit, each with its effective
+value, its product default, whether it is this Runtime home's own choice or the product default, the
+values it accepts and where it is stored. Every entry comes from the same read its own command uses,
+so the list cannot disagree with settings permission get, settings prose-question-attention or
+scheduler capacity get. Human-readable by default; --json prints the whole record.
 
 settings permission reads or writes the permission mode (ADR-0011). It is a setting like any other:
 get reports the mode in force with the product default, set accepts a case-insensitive full|strict,
@@ -1282,16 +1231,6 @@ it started with.
 settings prose-question-attention reads or writes the global switch that decides
 whether such a completion becomes a wait at all (auto, the default; record-only; off). Changing it
 needs no confirmation and never rewrites a wait that was already recorded.
-
-settings ui reads and writes the five interface-effect preferences (theme, density, fontSize, motion,
-timeDisplay) that the Web UI renders with. They belong to the Runtime, not to a browser: the file is
-$CODEESTRA_HOME/ui-settings.json, list reports each key's effective value, its product default and
-whether it was explicitly chosen, and a value survives clearing a browser's storage, a different
-browser and a Runtime restart. They are settings, not gates: each write is one command and zero
-confirmations, and nothing here changes what a Task is allowed to do. The values are closed sets, so
-an unknown key or an unsupported value is refused instead of clamped, and a file the Runtime cannot
-understand is reported as INVALID_UI_SETTING rather than being silently replaced by defaults
-(settings ui reset is the explicit way out).
 
 settings concurrency is the settings spelling of the one Runtime-wide concurrency limit (ADR-0061):
 get, set --limit <n> and reset send exactly the same Runtime commands as scheduler capacity, so the
@@ -1311,7 +1250,7 @@ means "the Operation was recorded and started", not "the verification passed".
 
 Long-command progress is published as domain events: every step and every observed output chunk of
 a running verification, and the Operation's settle, arrive on the same stream as everything else
-(events tail; the Web UI shows them live). A progress event never carries a verdict — a passed
+(events tail). A progress event never carries a verdict — a passed
 verification is only ever reported by VerificationCompleted and by the run's own state.
 
 ADR-0066 removed the whole integration and promotion face this text used to describe: there is no
@@ -1435,39 +1374,9 @@ what the next Execution of one Task would use without starting anything.`);
 
 const [group, action, firstArgument, ...remainingArguments] = Bun.argv.slice(2);
 
-/**
- * The address the UI is opened at carries the token and the preselected project in its fragment:
- * fragments are never sent to the server, so neither value reaches a log or a history entry.
- */
-function preselectProject(url: string, projectId: string): string {
-  const separator = url.includes('#') ? '&' : '#';
-  return `${url}${separator}project=${encodeURIComponent(projectId)}`;
-}
-
-function launchBrowser(url: string): void {
-  const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
-  Bun.spawn([opener, url], { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' }).unref();
-}
-
 async function currentPermissionMode(): Promise<'FULL' | 'STRICT'> {
   const result = await call({ command: 'permission.get' }) as { mode: 'FULL' | 'STRICT' };
   return result.mode;
-}
-
-function describeVerificationPolicy(policy: VerificationPolicyInspection): void {
-  if (policy.state !== 'PRESENT') {
-    console.error('No verification policy at the main ref: task verify will refuse until'
-      + ` ${'.codeestra/policies/verification.json'} exists at that ref.`);
-    return;
-  }
-  console.error(`Verification policy (main ${policy.mainCommit.slice(0, 12)}`
-    + `, digest ${String(policy.digest).slice(0, 12)}):`);
-  for (const command of policy.policy?.commands ?? []) {
-    console.error(`  ${command.id}: ${command.argv.join(' ')}`
-      + ` (cwd ${command.cwd}, timeout ${command.timeoutSeconds}s)`);
-  }
-  console.error('task verify runs these in an isolated copy of the tested commit, never in your'
-    + ' working tree.');
 }
 
 /**
@@ -1964,117 +1873,6 @@ try {
         ownership: ownershipSummary(ownership) });
       process.exit(1);
     }
-  } else if (group === 'ui') {
-    // `ui` takes no positional arguments; every remaining token must be the --no-open flag.
-    const flags = [action, firstArgument, ...remainingArguments]
-      .filter((flag): flag is string => flag !== undefined);
-    if (flags.some((flag) => flag !== '--no-open')) usage();
-    const endpoint = await call({ command: 'runtime.ui' }) as { url: string };
-    console.log(endpoint.url);
-    console.error('The token is in the URL fragment: it stays in this terminal and in your browser session.');
-    console.error('Closing the browser does not stop the Runtime or any Task.');
-    if (!flags.includes('--no-open')) launchBrowser(endpoint.url);
-  } else if (group === 'open') {
-    // "Work on this repository": one complete, scriptable CLI path that inspects the repository,
-    // shows the verification policy that will judge results, takes the same trust confirmation the
-    // UI takes, then starts the Web UI with this project preselected. It composes existing
-    // commands only, so nothing here is reachable from the UI that is not reachable from the CLI.
-    const tokens = [action, firstArgument, ...remainingArguments]
-      .filter((token): token is string => token !== undefined);
-    const pathTokens: string[] = [];
-    const flagTokens: string[] = [];
-    for (const token of tokens) {
-      if (token.startsWith('--')) flagTokens.push(token);
-      else pathTokens.push(token);
-    }
-    if (pathTokens.length > 1
-      || flagTokens.some((flag) => flag !== '--yes' && flag !== '--no-open')) usage();
-    const path = pathTokens[0] ?? process.cwd();
-
-    // ADR-0062: what a Task is based on is this folder's currently checked out branch, so the
-    // identity this shows and confirms is the repository identity itself.
-    const identity = await call({
-      command: 'project.inspect',
-      path,
-    }) as ProjectIdentity;
-    console.error(`Repository: ${identity.repoRoot}`);
-    console.error(`  main ref: ${identity.mainRef} · ${identity.objectFormat}`);
-    console.error(`  HEAD: ${identity.headCommit}`);
-    const policy = await call({ command: 'project.verificationPolicy',
-      path }) as VerificationPolicyInspection;
-    describeVerificationPolicy(policy);
-    // The same trust event confirms the impact mapping (ADR-0031). Showing it here keeps the
-    // STRICT confirmation a single decision that covers both policies — it adds no extra step.
-    const impact = await call({ command: 'project.impact.validate',
-      path }) as ImpactPolicyValidationView;
-    describeImpactPolicy(impact.policy);
-
-    const mode = await currentPermissionMode();
-    const known = (await call({ command: 'project.list' }) as TrustedProjectListing[])
-      // A repository can have several worktrees (for example the stable main tree and this dev
-      // tree). The Runtime identifies one Project by the Git common directory, not by a worktree
-      // checkout path, so opening another owned worktree must remain idempotent.
-      .find((candidate) => candidate.repoRoot === identity.repoRoot
-        || candidate.gitCommonDir === identity.gitCommonDir);
-    const confirmation = known?.confirmedPolicy ?? null;
-    // One confirmation per project on the normal path. The rule mirrors the gate task verify
-    // applies: the confirmed *policy digest* is what must still match, so committing to the main
-    // ref without touching the policy file never asks for a new confirmation. The impact mapping is
-    // confirmed by the same event, so it is checked the same way.
-    const alreadyConfirmed = confirmation !== null
-      && confirmation.state === policy.state
-      && (policy.state !== 'PRESENT' || confirmation.digest === policy.digest);
-    const impactConfirmation = known?.confirmedImpactPolicy ?? null;
-    const impactAlreadyConfirmed = impactConfirmation !== null
-      && impactConfirmation.state === impact.policy.state
-      && (impact.policy.state !== 'PRESENT'
-        || impactConfirmation.digest === impact.policy.digest);
-    if (alreadyConfirmed && impactAlreadyConfirmed) {
-      console.error(`\nAlready trusted as ${String(known?.name)}; the policy at the main ref is the`
-        + ' confirmed one, so nothing needs confirming again.');
-    } else {
-      if (known !== undefined) {
-        console.error('\nThe confirmation on file no longer matches this repository: a policy at'
-          + ' the main ref changed (or was never confirmed), so it needs confirming again.');
-      }
-      if (mode === 'FULL') {
-        console.error('\nFULL permission mode: registering this project without confirmation.');
-      } else {
-        console.error('\nSTRICT permission mode: trusting allows an Agent, commands, and Git hooks'
-          + ' to run with your user permissions.');
-        console.error('It does not authorize commits, main updates, pushes, or unknown tools.');
-        const confirmed = flagTokens.includes('--yes')
-          || prompt('Type TRUST to confirm:') === 'TRUST';
-        if (!confirmed) throw new Error('Project trust was not confirmed');
-      }
-      await call({
-        command: 'project.trust',
-        path,
-        expectedIdentity: identity,
-        expectedVerificationPolicy: policy.state === 'PRESENT'
-          ? { state: 'PRESENT', mainCommit: policy.mainCommit, digest: policy.digest as string }
-          : { state: 'ABSENT', mainCommit: policy.mainCommit },
-        expectedImpactPolicy: expectedImpactPolicyConfirmation(impact),
-      });
-    }
-
-    const projects = await call({ command: 'project.list' }) as TrustedProjectListing[];
-    const project = projects.find((candidate) => candidate.repoRoot === identity.repoRoot
-      || candidate.gitCommonDir === identity.gitCommonDir);
-    if (project === undefined) throw new Error('The trusted project was not listed');
-    console.error(`\nTrusted project ${project.id} (${project.name}).`);
-
-    const endpoint = await call({ command: 'runtime.ui' }) as { url: string };
-    const url = preselectProject(endpoint.url, project.id);
-    console.log(url);
-    console.error('The Web UI opens on this project. The token stays in the URL fragment and in'
-      + ' your browser session.');
-    console.error(mode === 'FULL'
-      ? 'Next: create a draft task, submit it, then Run task…; tools run without permission prompts.'
-      : 'Next: create a draft task, submit it, then Run task… and answer the gate prompts.');
-    console.error('Results land on refs/heads/task/<task-id>; merge them yourself,'
-      + ' for example: git merge task/<task-id>');
-    if (!flagTokens.includes('--no-open')) launchBrowser(url);
   } else if (group === 'stop' && (action === undefined || action.startsWith('--'))) {
     // Stop is two-phase and factual: the Runtime only reports which process was asked to stop, and
     // this client waits (bounded) for that process to actually disappear before reporting success.
@@ -3267,40 +3065,6 @@ try {
     } else {
       if (mode !== 'auto' && mode !== 'record-only' && mode !== 'off') usage();
       print(await call({ command: 'settings.proseQuestionAttention.set', mode }));
-    }
-  } else if (group === 'settings' && action === 'ui') {
-    // The interface-effect settings (FOUNDATION-073 / ADR-0045). The key and the value are validated
-    // here *and* at the Runtime boundary, deliberately twice for two different readers: a script
-    // asking the CLI gets a usage error it can fix without a Runtime, while the Web UI — which sends
-    // the same request — gets a stable code instead. Nothing is clamped, and no write asks for
-    // confirmation.
-    const positionals = [firstArgument, ...remainingArguments]
-      .filter((token): token is string => token !== undefined && token !== '--json');
-    if (positionals.some((token) => token.startsWith('--'))) usage();
-    const [subcommand, keyToken, valueToken, ...extra] = positionals;
-    if (extra.length !== 0) usage();
-    if (subcommand === 'list') {
-      if (positionals.length !== 1) usage();
-      print(await call({ command: 'settings.ui.list' }));
-    } else if (subcommand === 'get') {
-      if (positionals.length !== 2) usage();
-      print(await call({ command: 'settings.ui.get', key: parseUiSettingKey(keyToken) }));
-    } else if (subcommand === 'set') {
-      if (positionals.length !== 3) usage();
-      const key = parseUiSettingKey(keyToken);
-      const value = valueToken as string;
-      if (!isValidUiSettingValue(key, value)) {
-        console.error(`Invalid value "${value}" for ${key}; expected one of:`
-          + ` ${uiSettingValuesAsText(key)}`);
-        usage();
-      }
-      print(await call({ command: 'settings.ui.set', key, value }));
-    } else if (subcommand === 'reset') {
-      if (positionals.length > 2) usage();
-      print(await call({ command: 'settings.ui.reset',
-        ...(keyToken === undefined ? {} : { key: parseUiSettingKey(keyToken) }) }));
-    } else {
-      usage();
     }
   } else if (group === 'settings' && action === 'concurrency') {
     // The settings spelling of the one Runtime-wide concurrency limit (ADR-0061 D02). It is a thin

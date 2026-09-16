@@ -204,8 +204,6 @@ async function fixture(options: { readonly strict?: boolean; readonly mode?: str
   const home = temporaryDirectory('codeestra-claude-cli-home-');
   const configDir = temporaryDirectory('codeestra-claude-cli-provider-');
   const tools = temporaryDirectory('codeestra-claude-cli-tools-');
-  const assets = temporaryDirectory('codeestra-claude-cli-assets-');
-  await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
   mkdirSync(join(repository, '.codeestra', 'policies'), { recursive: true });
   await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'), JSON.stringify({
     version: 1, commands: [{ id: 'check', argv: ['true'], cwd: '.', timeoutSeconds: 60 }],
@@ -232,7 +230,6 @@ async function fixture(options: { readonly strict?: boolean; readonly mode?: str
   const claudeReportPath = join(tools, 'claude-report.json');
   const environment = {
     CODEESTRA_HOME: home,
-    CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: piShim,
     CODEESTRA_CLAUDE_EXECUTABLE: options.claudeExecutable === 'missing'
       ? join(tools, 'definitely-missing-claude')
@@ -249,7 +246,7 @@ async function fixture(options: { readonly strict?: boolean; readonly mode?: str
     // STRICT is a live Runtime switch; the project trust then needs the explicit confirmation flag.
     expect((await cli(['settings', 'permission', 'set', 'strict'], environment)).exitCode).toBe(0);
   }
-  const opened = await cli(['open', repository, '--no-open',
+  const opened = await cli(['project', 'trust', repository,
     ...(options.strict === true ? ['--yes'] : [])], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as

@@ -30,14 +30,6 @@ check-fast:
 test-e2e:
     bun run test:e2e
 
-# UI 类型检查
-ui-typecheck:
-    bun run --cwd apps/ui typecheck
-
-# 构建 UI 静态资产（Runtime 从 apps/ui/dist 托管）
-ui-build:
-    bun run --cwd apps/ui build
-
 # 全量检查：仅在 dev 上、dev→main 前对精确候选 SHA 运行
 check:
     bun run check
@@ -61,7 +53,7 @@ verify:
 # restart-main 只让 main 检出里现成的代码生效。提升（git fetch / merge --ff-only /
 # push origin main）刻意不在这里 —— 把授权推送绑进日常重启，会让随手一条命令就推进
 # origin/main；那条路径是 promote-main，且候选 SHA 必须显式给出。
-# 重启 main 稳定服务：install → build:ui → stop → status（不移动任何 ref、不推送）
+# 重启 main 稳定服务：install → stop → status（不移动任何 ref、不推送）
 restart-main:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -76,32 +68,20 @@ restart-main:
     fi
 
     bun install --frozen-lockfile
-    bun run build:ui
     bun run codeestra stop
     bun run codeestra status >/dev/null   # 按固定序列拉起 Runtime；输出略，末尾统一核对
-    # stop/status 不会把 Web UI 服务器带回来（ADR-0007：UI 是按需客户端），而已实测
-    # 重启后 uiRunning 默认为 false。稳定服务要保持「随时可用」，所以这里显式拉起；
-    # --no-open 只起服务、不自动开浏览器，并把带 token 的链接打在这里。
-    bun run codeestra ui --no-open
     status_out="$(bun run codeestra status)"
     printf '%s\n' "$status_out"
 
-    # 只有 Runtime 自己报告 READY 且 uiRunning 为真，才算稳定服务已恢复。
+    # 只有 Runtime 自己报告 READY，才算稳定服务已恢复。
     printf '%s\n' "$status_out" | grep -q '"status": "READY"' || {
         printf 'restart-main：status 不是 READY，稳定服务未确认恢复\n' >&2
         exit 1
     }
-    printf '%s\n' "$status_out" | grep -q '"uiRunning": true' || {
-        printf 'restart-main：uiRunning 不是 true，稳定服务未确认恢复\n' >&2
-        exit 1
-    }
-
-    # Runtime 重启会更换 Web UI 内存 token；上面那一步已经把带 token 的链接打在终端里，
-    # 不要把它写进文件或提交。
     printf 'restart-main：main 稳定服务已恢复 READY\n'
 
 # dev 实例与稳定实例的区别只有 CODEESTRA_HOME 与所在 clone（ADR-0064 删除了 ADR-0049 的 dev 通道标记）。
-# 重启 dev 服务：install → build UI → stop → status
+# 重启 dev 服务：install → stop → status
 restart-dev:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -113,23 +93,16 @@ restart-dev:
     printf '== CODEESTRA_HOME=%s\n' "$home"
 
     bun install --frozen-lockfile
-    bun run --cwd apps/ui build
 
     CODEESTRA_HOME="$home" bun run codeestra stop
     CODEESTRA_HOME="$home" bun run codeestra status >/dev/null   # 拉起 Runtime；输出略
-    # UI 服务器同样不会被 stop/status 带回来，这里显式拉起并打印带 token 的链接。
-    CODEESTRA_HOME="$home" bun run codeestra ui --no-open
     status_out="$(CODEESTRA_HOME="$home" bun run codeestra status)"
     printf '%s\n' "$status_out"
     printf '%s\n' "$status_out" | grep -q '"status": "READY"' || {
         printf 'restart-dev：status 不是 READY，dev 服务未确认恢复\n' >&2
         exit 1
     }
-    printf '%s\n' "$status_out" | grep -q '"uiRunning": true' || {
-        printf 'restart-dev：uiRunning 不是 true，dev 界面未确认拉起\n' >&2
-        exit 1
-    }
-    printf 'restart-dev：dev 服务已恢复 READY（含 Web UI）\n'
+    printf 'restart-dev：dev 服务已恢复 READY\n'
 
 # 这是唯一会写远端 ref 的动作：只 push 这一个固定候选，不 --force、不覆盖远端已有提交、
 # 不对已检出的 main 用 update-ref。任一步失败即停止，不推进任何 ref 并保留现场。
@@ -180,23 +153,14 @@ promote-main SHA:
 
     # 3) 在 main 检出按固定序列重启并核对
     bun install --frozen-lockfile
-    bun run build:ui
     bun run codeestra stop
     bun run codeestra status >/dev/null   # 按固定序列拉起 Runtime；输出略
-    # 同 restart-main：req 5 的恢复判据含 uiRunning: true，而 stop/status 不会带回 UI，
-    # 所以推回 origin/main 之前必须先把 UI 显式拉起，否则这一步永远无法通过。
-    bun run codeestra ui --no-open
     status_out="$(bun run codeestra status)"
     printf '%s\n' "$status_out"
     printf '%s\n' "$status_out" | grep -q '"status": "READY"' || {
         printf 'promote-main：status 不是 READY，不推回 origin/main，保留现场\n' >&2
         exit 1
     }
-    printf '%s\n' "$status_out" | grep -q '"uiRunning": true' || {
-        printf 'promote-main：uiRunning 不是 true，不推回 origin/main，保留现场\n' >&2
-        exit 1
-    }
-
     # 4) 只有上面全部通过才推回 origin/main，并读回核对（推回也必须是 fast-forward）
     git push origin main
     git fetch origin

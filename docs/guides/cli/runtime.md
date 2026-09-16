@@ -1,7 +1,7 @@
 # CLI 参考 · Runtime 生命周期、Agent 配置与设置
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v36 · **最后校对** 2026-09-16
-> 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@6c7de03`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> 版本会前进：`dev@6c7de03` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一（ADR-0066 之后为八篇），
 > **内容自 `cli-reference.md @ dev@de03448` 搬移，一句未改写；本次未重新核对源码**，最后校对日期因此不变。
@@ -10,6 +10,7 @@
 > **本次修订（ADR-0066 / schema v36）**：删除 `settings auto-reclaim` 一节（该开关随集成一起移除）、
 > 删除 `open` 的 `--dev-repo` 参数，并删除所有 dev clone / 提升相关的失败码。
 > 同一事实还有一个设置面拼写：`settings concurrency get|set --limit|reset`（见 §19），它发的是同一条 Runtime 命令。
+> **ADR-0067**：Web UI 已暂停；`ui`、`open`、`settings ui *`、`runtime.ui` 与 `uiRunning` 已删除。
 
 ## 1. Runtime 生命周期
 
@@ -53,33 +54,16 @@ bun run codeestra stop [--wait <seconds>]
 `settings permission set <full|strict>`：发的是同一条 Runtime 命令，写的是同一份 `<CODEESTRA_HOME>/permission-mode.json`，
 「无需确认」「只影响后续操作与新 Session」的语义一字未改。顶层 `permission` 命令已**移除**。
 
-### `ui`
+### 已删除的 Web UI 入口
+
+ADR-0067 起 `ui` 与 `open` 都是未知命令（退出码 2）。项目接入请显式使用：
 
 ```sh
-bun run codeestra ui [--no-open]
+bun run codeestra project inspect [path]
+bun run codeestra project policy [path]
+bun run codeestra project trust [path] [--yes]
+bun run codeestra project list
 ```
-
-在 `127.0.0.1` 上按需启动 HTTP + SSE 并打印地址（token 在 fragment）。`--no-open` 只打印不打开浏览器。
-除 `--no-open` 外不接受任何参数。
-
-常见失败：`UI_ASSETS_MISSING`（界面资产目录下没有 `index.html`；提示信息给出 `bun run --cwd apps/ui build`）。
-
-### `open`
-
-```sh
-bun run codeestra open [path] [--yes] [--no-open]
-```
-
-一条命令完成：`project.inspect` → 展示验证策略与影响映射 →（必要时）确认 → `project.trust` → `runtime.ui` 并预选该项目。
-`path` 默认当前目录；`--yes` 是 STRICT 下的非交互确认；`--no-open` 不打开浏览器。
-
-ADR-0066 之后 `open` 只有 `--yes` 与 `--no-open` 两个 flag：产品不再有 dev clone 可记，所以也没有
-`--dev-repo`；Task 基线就是项目文件夹当前检出的分支（建 Task 时固定 ref 与 commit）。
-（打开一个**已信任**仓库的另一个工作树时 trust 会被跳过。）
-
-已经确认过且策略 digest 未变时会跳过确认（正常路径**一次项目一次确认**；FULL 下没有这一步）。
-失败：确认被拒（`Project trust was not confirmed`）、trust 后项目未出现在列表中、
-`REPOSITORY_CHANGED` / `VERIFICATION_POLICY_CHANGED` / `IMPACT_POLICY_CHANGED`（你审阅过的身份或策略在这期间变了）。
 
 ---
 
@@ -100,14 +84,14 @@ bun run codeestra agent config clear [--project <project-id>] [--adapter <id>]
 - `get` / `clear` 不接受 `--provider` / `--model` / `--thinking` / `--unset`（用法错误）。
 
 解析优先级**逐字段**：`环境变量 > 项目覆盖 > 全局默认 > Adapter 默认`。
-**只影响此后新建的 Session**，并把当时生效的值记录在 Execution 上（`task status` 与 UI 都能看到）。
+**只影响此后新建的 Session**，并把当时生效的值记录在 Execution 上（用 `task status` 查看）。
 Adapter 不支持的字段会被拒绝而不是静默忽略。稳定码：`INVALID_AGENT_CONFIGURATION`、`UNKNOWN_ADAPTER`。
 
 ---
 
 ## 19. `settings`
 
-一个 Runtime home 的**全部设置**就是这一节的命令：**九项**（`settings list` 逐项列出）。
+一个 Runtime home 的**全部启用设置**就是这一节的命令：**三项**（`settings list` 逐项列出）。
 
 ```sh
 bun run codeestra settings list [--json]                        # 全部设置总览（人读；--json 是完整记录）
@@ -120,11 +104,6 @@ bun run codeestra settings prose-question-attention auto       # 写入
 bun run codeestra settings prose-question-attention record-only
 bun run codeestra settings prose-question-attention off
 
-bun run codeestra settings ui list [--json]             # 五个界面效果键
-bun run codeestra settings ui get <key> [--json]
-bun run codeestra settings ui set <key> <value> [--json]
-bun run codeestra settings ui reset [<key>] [--json]
-
 bun run codeestra settings concurrency get   [--json]
 bun run codeestra settings concurrency set   --limit <n> [--json]
 bun run codeestra settings concurrency reset [--json]
@@ -132,16 +111,15 @@ bun run codeestra settings concurrency reset [--json]
 
 ### `settings list`（全部设置总览）
 
-一条**只读**命令回答「有哪些设置、现在是什么状态」：列出上述八项，逐项给出**生效值**、**产品默认**、
+一条**只读**命令回答「有哪些设置、现在是什么状态」：列出上述三项，逐项给出**生效值**、**产品默认**、
 **取值**（闭集用 `values`，数值上限用 `range`）、是「本 home 显式设置」还是「产品默认」，以及**值存在哪里**
 （文件的绝对路径，或 Runtime 数据库）。
 
 - 数据来自 Runtime（`settings.list`），每项都由**它自己那条命令的同一次读取**填充，所以总览不可能与
-  `settings permission get`、`settings prose-question-attention`、`settings ui get <key>`、
-  `scheduler capacity get` 读出的值不一致；也不存在第二个状态源。
+  `settings permission get`、`settings prose-question-attention`、`scheduler capacity get` 读出的值不一致；也不存在第二个状态源。
 - 默认输出是**人读列表**；`--json` 打印逐字段原文，每个条目还带 `appliesTo`——「改这一项会影响什么」。
-- 键名就是命令路径加一个点：`permission.mode`、`attention.proseQuestion`、`ui.theme`（及另外四个 ui 键）、
-  `capacity.globalLimit`。每项按**它自己命令的词**汇报取值（`settings auto-reclaim` 已随 ADR-0066 删除，
+- 键名就是命令路径加一个点：`permission.mode`、`attention.proseQuestion`、`capacity.globalLimit`。
+  每项按**它自己命令的词**汇报取值（`settings auto-reclaim` 已随 ADR-0066 删除，
   因此没有 `reclaim.auto` 这一项）。
 - 零确认、不写任何文件、不改变任何值。多余参数、未知 flag 是用法错误（退出码 2）。
 
@@ -165,15 +143,10 @@ bun run codeestra settings permission set <full|strict>
 - **不需要确认**，且**不会改写已经记录下来的等待**。
 - `--json` 被接受（输出本来就是 JSON）。
 
-### `settings ui`（界面效果）
+### 已删除的 `settings ui`
 
-五个键：`theme` / `density` / `fontSize` / `motion` / `timeDisplay`（`list` 报每个键的生效值、产品默认、可取值
-与是否显式设置；`get <key>` / `set <key> <value>` / `reset [<key>]` 读写一个键，`reset` 不带键就是全部恢复默认）。
-
-- 它们存在 `<CODEESTRA_HOME>/ui-settings.json`，属于 Runtime 而不是浏览器：清缓存、换浏览器、重启后仍生效。
-- 零确认；未知键或非法取值是用法错误（退出码 2）；文件不可读时 Runtime 以 `INVALID_UI_SETTING` 拒绝（退出码 1，
-  `reset` 是显式出路）。
-- 逐项含义与界面位置见 [manual.md 的「设置与权限」](../manual.md) 与 [ui.md](../ui.md)。
+ADR-0067 起 `settings ui list|get|set|reset` 是未知命令（退出码 2），也不再出现在 `settings list`。
+已有 `<CODEESTRA_HOME>/ui-settings.json` 不删除、不迁移；当前 Runtime 忽略它。
 
 ### `settings concurrency`（全局并发上限）
 

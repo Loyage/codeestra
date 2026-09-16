@@ -5,8 +5,8 @@
 ```text
 apps/
   runtime/             # 独立本地进程、IPC、启动/关闭/恢复
-  cli/                 # 首个用户入口；也可启动本地 Web UI
-  ui/                  # React/Vite 本地 Web UI，资产由 Runtime 托管（ADR-0007）
+  cli/                 # 当前唯一用户入口；自动连接/启动 Runtime
+  ui/                  # 暂停的 React/Vite 源码；默认不构建、不测试、不发布（ADR-0067）
   desktop/             # Tauri 客户端（尚未创建）；关闭不影响 Runtime
 packages/
   domain/              # 纯 TypeScript：值对象、revision、状态迁移、不变量

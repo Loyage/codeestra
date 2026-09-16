@@ -1,12 +1,12 @@
 # 安装与第一次运行
 
-> **适用版本** `dev@17b4dd6`（2026-09-16） · **schema** v32 · **最后校对** 2026-09-16
-> 版本会前进：`dev@17b4dd6` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@6c7de03`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> 版本会前进：`dev@6c7de03` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > 权限模式的命令拼写由 FOUNDATION-098 同步为 `settings permission get|set`（ADR-0064：顶层 `permission` 已移除；§19 另新增 `settings list` 总览）。
 > §4.3 的影响映射含义提醒已按 ADR-0059 改写（FOUNDATION-091）；其余内容沿用原有校对基线。
 
-本文带你从零把 Codeestra 跑起来：安装依赖 → 启动 Runtime → 接入第一个 Git 项目 → 打开 Web UI。
+本文带你从零把 Codeestra 跑起来：安装依赖 → 启动 Runtime → 用 CLI 接入第一个 Git 项目。
 
 所有示例都可以照抄执行。涉及会改状态的命令（`trust` 等）都标注了**前提**与**影响**。
 
@@ -35,13 +35,7 @@ nix shell nixpkgs#bun nixpkgs#nodejs_24 nixpkgs#just
 bun install --frozen-lockfile
 ```
 
-如果要使用 Web UI，还需要**构建前端资产**（`apps/ui/dist` 是 gitignore 的本地状态，每个工作树各自构建）：
-
-```sh
-bun run build:ui
-```
-
-> 没构建 UI 资产就请求界面时，Runtime 会以稳定码 `UI_ASSETS_MISSING` 拒绝，提示信息里给出上面这条构建命令。
+> ADR-0067 起 Web UI 已暂停。默认安装、检查和运行流程不构建 `apps/ui`。
 
 ---
 
@@ -60,8 +54,6 @@ Runtime 是**每用户单实例**的本地服务：一个 `CODEESTRA_HOME` 对�
 
 - `CODEESTRA_HOME` 目录会被 `chmod 0700`。
 - `runtime.sock` 会被 `chmod 0600`。
-- HTTP 界面只绑定 `127.0.0.1`，并且每个 Runtime 进程启动时生成一次性内存 bearer token；token 只放在
-  打开地址的 URL **fragment**（`#token=…`）里，fragment 不会发给服务器。
 
 想试跑而不污染日常数据，换一个数据目录即可：
 
@@ -94,7 +86,6 @@ CLI 会自动寻找 Runtime；**没有在跑就自动拉起它**，然后打印 
   "adapters": ["pi", "codex", "claude"],
   "activeSessions": [],
   "eventSubscribers": 0,
-  "uiRunning": false,
   "ownership": {
     "home": "/tmp/codeestra-demo",
     "socketPath": "/tmp/codeestra-demo/runtime.sock",
@@ -133,7 +124,7 @@ bun run codeestra settings permission set full
 | `FULL`（默认） | 项目接入不确认；工具调用自动允许；成果 commit 可单步 `task result capture`；验证策略变化不确认 |
 | `STRICT` | 项目接入需输入 `TRUST`（脚本用 `--yes`）；工具调用经 gate 逐次审批；成果 commit 分两步（先 `prepare` 拿授权，再 `commit … --confirm`）；验证策略变化需确认 |
 
-> 注意：Runtime 内部对「未显式传模式」的调用默认按 `STRICT` 处理；CLI 与 UI 都会显式传入当前模式。
+> 注意：Runtime 内部对「未显式传模式」的调用默认按 `STRICT` 处理；CLI 会显式传入当前模式。
 
 ---
 
@@ -225,38 +216,19 @@ bun run codeestra project trust /path/to/repo --yes
 bun run codeestra project list
 ```
 
-### 4.5 一条命令搞定：`open`
+### 4.5 Web UI 入口已删除
 
-日常最快路径是 `open`：它把 inspect → 策略展示 →（必要时）确认 →（UI 实例）打开界面串起来。
-
-```sh
-bun run codeestra open /path/to/repo            # 接入并打开 Web UI，pre-select 该项目
-bun run codeestra open /path/to/repo --no-open  # 同上，只打印带 token 的地址
-bun run codeestra open /path/to/repo --yes      # STRICT 下的非交互确认
-```
-
-`open` 会明确打印：`dev baseline`、验证策略命令清单、影响映射状态，以及**是否需要再次确认**。已经确认过且
-策略 digest 未变时会直接跳过确认（正常路径**一次项目一次确认**；FULL 下连这一次都没有）。
-
----
-
-## 5. 打开 Web UI
+ADR-0067 起 `open` 与 `ui` 都是未知命令。日常接入流程就是上面的显式 CLI 命令：
 
 ```sh
-bun run codeestra ui            # 启动 HTTP/SSE 并按需打开浏览器
-bun run codeestra ui --no-open  # 只打印地址
+bun run codeestra project inspect /path/to/repo
+bun run codeestra project policy /path/to/repo
+bun run codeestra project impact validate /path/to/repo --json
+bun run codeestra project trust /path/to/repo       # STRICT 脚本可加 --yes
+bun run codeestra project list
 ```
 
-输出的是界面 URL，token 在 fragment 里。两点提示（CLI 自己会打印）：
-
-- token 只留在你的终端与浏览器会话中；
-- 关掉浏览器**不会**停止 Runtime 或任何 Task。
-
-如果只想从 `open` 拿到链接，用 `bun run codeestra open . --no-open`。
-
-UI 与 CLI 是**同一个命令面**：界面通过 `POST /api/command` 发送与 CLI 完全相同的请求结构，事件通过
-`GET /api/events` 的 SSE 流获取。详情见 [ui.md](./ui.md) 与 [cli/interface.md](./cli/interface.md) 的
-「HTTP / SSE 面」一节（§20）。
+保留的 `apps/ui` 与 HTTP 源码不代表可用入口。详情见 [ADR-0067](../decisions/0067-pause-web-ui-and-cli-focus.md)。
 
 ---
 
@@ -279,7 +251,7 @@ bun run codeestra stop --wait 30      # 最多等 30 秒（0–600）
 
 ## 7. 这个环境下最常踩的三件事
 
-1. **UI 打不开、报 `UI_ASSETS_MISSING`** → 先 `bun run build:ui`。
+1. **`ui` / `open` 报用法错误** → Web UI 已按 ADR-0067 暂停；使用 `project trust` 与其它 CLI 命令。
 2. **CLI 打到了别的 Runtime** → 检查 `CODEESTRA_HOME`；一个 home 只跑一个 Runtime。
 3. **`project trust` 报 `REPOSITORY_CHANGED` / `VERIFICATION_POLICY_CHANGED`** → 你查看身份/策略与确认之间，
    它们变了。重新 `project inspect` 看一遍再信任。（`DEV_REPO_*` 系列稳定码已随 ADR-0066 删除。）

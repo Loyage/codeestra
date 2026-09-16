@@ -130,8 +130,6 @@ async function createRepository(input: {
 }): Promise<RepositoryFixture> {
   const repository = temporaryDirectory(`${input.prefix}-repo-`);
   const tools = temporaryDirectory(`${input.prefix}-tools-`);
-  const assets = temporaryDirectory(`${input.prefix}-assets-`);
-  await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
   mkdirSync(join(repository, '.codeestra', 'policies'), { recursive: true });
   await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'), JSON.stringify({
     version: 1, commands: [{ id: 'check', argv: ['true'], cwd: '.', timeoutSeconds: 60 }],
@@ -261,13 +259,11 @@ async function cancelWithCurrentVersion(
 describe('project impact', () => {
   test('derives SAFE and declared-feature verdicts from real change sets', async () => {
     const home = temporaryDirectory('codeestra-impact-home-');
-    const assets = temporaryDirectory('codeestra-impact-assets-');
-    await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
     const main = await createRepository({ prefix: 'codeestra-impact', withImpactMapping: true });
-    const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets,
+    const environment = { CODEESTRA_HOME: home,
       CODEESTRA_PI_EXECUTABLE: main.tools };
 
-    const opened = await cli(['open', main.repository, '--no-open'], environment);
+    const opened = await cli(['project', 'trust', main.repository], environment);
     expect(opened.exitCode).toBe(0);
     expect(opened.stderr).toContain('Impact mapping');
     // The Runtime-wide concurrency limit is one fact for the whole `CODEESTRA_HOME` and defaults to
@@ -402,7 +398,7 @@ describe('project impact', () => {
     // verdict being UNKNOWN.
     const bare = await createRepository({ prefix: 'codeestra-impact-bare', withImpactMapping: false });
     const bareEnvironment = { ...environment, CODEESTRA_PI_EXECUTABLE: bare.tools };
-    expect((await cli(['open', bare.repository, '--no-open'], bareEnvironment)).exitCode).toBe(0);
+    expect((await cli(['project', 'trust', bare.repository], bareEnvironment)).exitCode).toBe(0);
     const bareProjects = JSON.parse((await cli(['project', 'list'], bareEnvironment)).stdout) as
       readonly { readonly id: string; readonly name: string }[];
     const bareProjectId = bareProjects.find((entry) => entry.id !== projectId)?.id as string;
@@ -436,7 +432,7 @@ describe('project impact', () => {
     await Bun.write(join(main.repository, '.codeestra', 'impact.json'), '{ not json }\n');
     await git(main.repository, ['add', '.codeestra/impact.json']);
     await git(main.repository, ['commit', '-q', '-m', 'break the mapping']);
-    expect((await cli(['open', main.repository, '--no-open'], environment)).exitCode).toBe(0);
+    expect((await cli(['project', 'trust', main.repository], environment)).exitCode).toBe(0);
     const invalid = await cli(['project', 'impact', 'validate', main.repository, '--json'], environment);
     expect(invalid.exitCode).toBe(1);
     expect(JSON.parse(invalid.stdout)).toMatchObject({

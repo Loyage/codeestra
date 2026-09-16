@@ -24,8 +24,8 @@ User Intent → Task / Task DAG → Dependency Analysis → Conflict Analysis
 以下三条是用户确认的最高原则（ADR-0008），本文件其余条款、ADR 与实现选择都在其下解释：
 
 1. **效率至上。** 用户从意图到可用结果的等待时间与操作步数优先于其他考虑。Runtime 默认使用 `FULL` 全权限模式：Agent、验证命令与 Git hooks 以当前系统用户的主机级权限运行，已注册工具（包括未知名称）不确认、不做路径或网络限制；项目接入、成果 commit、验证策略变化以及未来 dev→main / Self Promotion 的常态确认成本均为 **0 步、0 等待**。用户可通过 CLI 无确认切换到 `STRICT` 兼容模式以恢复旧门禁。revision/ref/ownership/process identity、静止证据、幂等与崩溃恢复等正确性核对继续有效，但不得伪装成权限审批（ADR-0011）。
-2. **软件本体是服务，CLI 是完备命令面。** 独立本地 Runtime 是软件本体，拥有完备的 CLI 交互能力：每个能力都必须能只靠 CLI 完成，并可脚本化驱动（机器可读输出、稳定退出码）。Web UI 与未来桌面只是方便交互的前端，走同一 versioned command/query/event 面与同一确认门禁，不新增业务语义、不绕过门禁、不直接访问 SQLite。出现“只有 UI 能做、CLI 不能做”的能力视为缺陷而非设计选择。
-3. **自动化测试仅限 CLI/命令面，不获取电脑控制权。** 项目内测试与验收的驱动方式仅限 CLI 命令与 Runtime 命令面（含承载它的 HTTP/SSE 传输）；禁止 computer-use、OS 级键鼠/窗口自动化、桌面应用操作与真实桌面会话，开发 Agent 不得为验证而取得用户电脑控制权。产品内 Agent 同样不新增屏幕读取、桌面操作或键鼠控制类工具。
+2. **软件本体是服务，CLI 是完备命令面。** 独立本地 Runtime 是软件本体，拥有完备的 CLI 交互能力：每个能力都必须能只靠 CLI 完成，并可脚本化驱动（机器可读输出、稳定退出码）。**当前按 ADR-0067 只启用 CLI/Unix socket 命令面，Web UI 开发已暂停**：实现源码可静态保留，但不提供入口、不进入默认构建/测试/发布。未来若恢复 Web UI 或桌面，它们只能走同一 versioned command/query/event 面与同一确认门禁，不新增业务语义、不绕过门禁、不直接访问 SQLite。出现“只有 UI 能做、CLI 不能做”的能力视为缺陷而非设计选择。
+3. **自动化测试仅限 CLI/命令面，不获取电脑控制权。** 项目内测试与验收的驱动方式仅限 CLI 命令与 Runtime 命令面；ADR-0067 起当前传输仅为 Unix socket，暂停的 HTTP/SSE 不在测试范围。禁止 computer-use、OS 级键鼠/窗口自动化、桌面应用操作与真实桌面会话，开发 Agent 不得为验证而取得用户电脑控制权。产品内 Agent 同样不新增屏幕读取、桌面操作或键鼠控制类工具。
 
 ## 2. 核心不变量
 
@@ -48,7 +48,7 @@ User Intent → Task / Task DAG → Dependency Analysis → Conflict Analysis
 15. Human-authored knowledge 和 machine-generated knowledge 分离；Agent 不能静默覆盖人工维护的知识文件。
 16. Self Task 原则上可修改全部 Codeestra 源码，但只能在隔离开发环境形成 Candidate。运行中的 Stable 不被直接覆盖；Promotion 必须由用户发起。
 17. 独立且极小的 `codeestra-bootstrap` 提供 list versions、launch version、switch version、health check、rollback，作为恢复入口。
-18. 能力完备性以 CLI 为准：任何领域能力都必须有对应的 CLI 命令路径；UI/桌面只是同一命令面的前端。不得存在仅 UI 可用的能力。
+18. 能力完备性以 CLI 为准：任何领域能力都必须有对应的 CLI 命令路径。ADR-0067 起 Web UI 暂停且无可用入口；未来恢复的 UI/桌面也只能是同一命令面的前端。不得存在仅 UI 可用的能力。
 19. 自动化测试与验收只通过 CLI/命令面驱动；不引入桌面或键鼠控制自动化。FULL 模式不得新增任何确认步骤。
 20. Runtime 保持本机单用户模型，不提供 RBAC、多用户/租户、路径沙箱、网络策略或密钥托管。权限模式只分为默认 `FULL` 与显式 opt-in 的 `STRICT`；FULL 使用当前用户可获得的全部主机权限。
 21. 人工介入采用双通道：Session Guidance 进入真实 provider conversation、立即影响当前执行但不修改验收规格；改变任务详情或功能声明必须显式生成 TaskRevision。Pi 接管等待当前工具完成后的结构化安全点，不为接管强杀工具；接管、detach、交还与 writer lease 全部经 CLI/Runtime 命令面表达，不新增确认门禁。
@@ -111,11 +111,11 @@ Self-hosting test 不应污染 Stable 的数据库、工作树、真实运行任
 
 ## 6. 技术方向
 
-优先 TypeScript、Bun、Bun workspaces、React、Vite、Tailwind、shadcn/ui、Tauri 2、SQLite、Drizzle ORM、Zod、Git CLI、Bun.spawn、Vitest。PTY 按真实交互需求单独选型；普通 stdout pipe 不能冒充 PTY。
+优先 TypeScript、Bun、Bun workspaces、SQLite、Drizzle ORM、Zod、Git CLI、Bun.spawn、Vitest。React/Vite 等 Web UI 技术实现按 ADR-0067 暂停，源码保留但不进入当前默认工具链；未来恢复时再重新确认前端技术方向。PTY 按真实交互需求单独选型；普通 stdout pipe 不能冒充 PTY。
 
 目标是本机单用户开发编排。不引入 Kubernetes、Kafka、RabbitMQ、微服务拆分或分布式基础设施。采用独立本地 Runtime，首个可用入口为自动启动该后台 Runtime 的 CLI，后续桌面作为可重连客户端；关闭客户端不终止任务和 Session。Phase 3 的原生终端接管由 Runtime 持有 PTY：在当前工具结束后的安全点从 RPC 交接到同一持久 conversation 的原生 TUI，detach 不终止 TUI，显式 release 后再交接回 RPC；两边不得同时写同一 session/worktree。
 
-**CLI 是完备、可脚本化的权威接口面（§1.1 第 2 条）；Web UI 与桌面是同一命令面的便利前端，功能是 CLI 能力的子集投影。** Runtime 默认 `FULL`：项目注册不确认，Pi 对所有已注册工具自动放行且不加工具 allowlist，验证策略变化自动执行，成果 commit 使用单步 capture；CLI 可无确认切换 `STRICT` 恢复旧门禁。
+**CLI 是完备、可脚本化的权威接口面（§1.1 第 2 条）；ADR-0067 起 Web UI 暂停，当前没有 UI/HTTP 入口。** 保留的前端源码不是启用能力；未来恢复的 Web UI 或桌面只能是 CLI 命令面的子集投影。Runtime 默认 `FULL`：项目注册不确认，Pi 对所有已注册工具自动放行且不加工具 allowlist，验证策略变化自动执行，成果 commit 使用单步 capture；CLI 可无确认切换 `STRICT` 恢复旧门禁。
 
 Agent 配置（provider/model/thinking level）按 ADR-0012 分全局默认与每项目覆盖持久化，逐字段按 环境变量 > 项目 > 全局 > 适配器默认 解析，仅影响新 Session，生效值随 Execution 记录。Agent 执行过程按 ADR-0013 只读展示，不入库、不是事件、不是 attach，文件路径不离开 Runtime。
 

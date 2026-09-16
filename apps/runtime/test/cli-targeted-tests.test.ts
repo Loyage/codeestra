@@ -118,8 +118,6 @@ async function fixture(): Promise<{
   const repository = temporaryDirectory('codeestra-layering-repo-');
   const home = temporaryDirectory('codeestra-layering-home-');
   const tools = temporaryDirectory('codeestra-layering-tools-');
-  const assets = temporaryDirectory('codeestra-layering-assets-');
-  await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
   mkdirSync(join(repository, '.codeestra', 'policies'), { recursive: true });
   // A project policy that FAILS: a PASSED Task verification can therefore only have run the
   // branch's recorded targeted plan, never the fixed project policy.
@@ -144,11 +142,10 @@ async function fixture(): Promise<{
 
   const environment = {
     CODEESTRA_HOME: home,
-    CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: shimPath,
     CODEESTRA_SCHEDULE_TICK_MS: '600000',
   };
-  const opened = await cli(['open', repository, '--no-open'], environment);
+  const opened = await cli(['project', 'trust', repository], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { readonly id: string }[];

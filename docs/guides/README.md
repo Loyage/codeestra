@@ -8,8 +8,7 @@
 本目录是**面向使用者**的中文指南：怎么装、怎么用、软件具备哪些能力、每条命令怎么敲、出错了怎么办。
 
 Codeestra 是 Task-first、local-first 的 AI Development Runtime：你管理产品意图，Codeestra 管理软件工程
-（分支、工作树、执行、验证、集成、提升）。软件本体是一个**独立本地 Runtime**；CLI 与本地 Web UI 是
-**同一个命令面**的前端，UI 不新增业务语义、不绕过门禁。
+（分支、工作树、执行、验证）。软件本体是一个**独立本地 Runtime**；ADR-0067 起当前只启用 CLI/Unix socket 命令面，Web UI 已暂停。
 
 > 本文档只描述**当前实现真实具备**的能力。每条命令、参数、退出码与错误码都从仓库源码核对得到
 > （核对方法与结果见 `docs/tasks/README.md` 的 FOUNDATION-070 一节）。文档与实现不一致的地方在本目录
@@ -25,9 +24,9 @@ Codeestra 是 Task-first、local-first 的 AI Development Runtime：你管理产
 | 走一遍「从建任务到合入 dev 再到稳定提升」的完整流程 | [workflow.md](./workflow.md) |
 | 查「这软件到底有哪些功能」 | [features.md](./features.md) |
 | 查「这条命令怎么用、参数是什么、退出码是什么」 | [cli/README.md](./cli/README.md)（八篇索引 + §0 通用约定） |
-| 认一下界面上的每个面板、每个按钮做什么 | [ui.md](./ui.md)（逐屏走查） |
+| 查看 Web UI 为什么不可用、未来怎样恢复 | [ui.md](./ui.md)（暂停说明） |
 | 想做某件具体的事（改 bug / 并行 / 换 Agent / **暂停全部** / 发布…） | [recipes.md](./recipes.md) |
-| 想人工核对界面观感（窄屏、主题、字号、焦点…） | [acceptance-checklist.md](./acceptance-checklist.md) |
+| 查看 UI 人工验收状态 | [acceptance-checklist.md](./acceptance-checklist.md)（当前暂停） |
 | 图放哪、缺哪张图 | [images/README.md](./images/README.md) |
 | 遇到了报错 / 想查稳定错误码 | [troubleshooting.md](./troubleshooting.md) |
 
@@ -35,7 +34,7 @@ Codeestra 是 Task-first、local-first 的 AI Development Runtime：你管理产
 
 1. **效率至上**：Runtime 默认运行在 `FULL` 主机级全权限模式。项目接入、Agent 工具、成果 commit、验证策略
    变化默认**零确认**。你随时可以用 CLI 无确认切到 `STRICT` 恢复旧门禁（`bun run codeestra settings permission set strict`）。
-2. **软件本体是服务，CLI 必须完备**：每个能力都必须能只靠 CLI 完成并可脚本化驱动。只有 UI 能做的事视为缺陷。
+2. **软件本体是服务，CLI 必须完备**：每个能力都必须能只靠 CLI 完成并可脚本化驱动；当前 Web UI 已暂停。
 3. **测试只驱动 CLI / 命令面**：自动化验收不依赖桌面或键鼠自动化。
 
 完整表述见 [PROJECT_SPEC.md §1.1](../../PROJECT_SPEC.md)、

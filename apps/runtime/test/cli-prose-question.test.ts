@@ -136,8 +136,6 @@ async function fixture(mode: 'PROSE_QUESTION' | 'TOOL_THEN_QUESTION'): Promise<{
   const repository = temporaryDirectory('codeestra-note-repo-');
   const home = temporaryDirectory('codeestra-note-home-');
   const tools = temporaryDirectory('codeestra-note-tools-');
-  const assets = temporaryDirectory('codeestra-note-assets-');
-  await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
   mkdirSync(join(repository, '.codeestra', 'policies'), { recursive: true });
   await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'),
     JSON.stringify({ version: 1, commands: [{ id: 'check', argv: ['true'], cwd: '.',
@@ -158,11 +156,10 @@ async function fixture(mode: 'PROSE_QUESTION' | 'TOOL_THEN_QUESTION'): Promise<{
 
   const environment = {
     CODEESTRA_HOME: home,
-    CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: shimPath,
     CODEESTRA_STUB_MODE: mode,
   };
-  const opened = await cli(['open', repository, '--no-open'], environment);
+  const opened = await cli(['project', 'trust', repository], environment);
   expect(opened.exitCode).toBe(0);
   // FOUNDATION-069 made the product default `auto`, which records the note *and* the wait it stands
   // for. The contract this file pins is FOUNDATION-056's: annotate the completion and change no

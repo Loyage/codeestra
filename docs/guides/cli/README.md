@@ -15,7 +15,7 @@
 > 本文件既是**这套参考的入口**（八篇索引），也是原来那篇的 §0 通用约定（连接、自动启动、退出码、环境变量）。
 > 旧编号（§1–§21）到新文件的对照表在 [`../cli-reference.md`](../cli-reference.md)；各篇内部沿用拆分前的章节号。
 
-本文覆盖 `apps/cli/src/main.ts` 中 `usage()` 列出的**每一个命令组**，以及 Runtime 的 HTTP/SSE 面。
+本文覆盖 `apps/cli/src/main.ts` 中 `usage()` 列出的**每一个命令组**。HTTP/SSE 面已按 ADR-0067 暂停。
 所有事实来自源码核对；核对方法见 `docs/tasks/README.md` 的 FOUNDATION-070 一节。
 
 调用形式统一是：
@@ -31,13 +31,13 @@ bun run codeestra <group> [<action>] [<argument>…] [--flag …]
 | 文件 | 覆盖章节 |
 |---|---|
 | **README.md**（本文件） | §0 通用约定（连接 / 自动启动 / 退出码 / 环境变量） |
-| [runtime.md](./runtime.md) | §1 Runtime 生命周期（`status`/`stop`/`ui`/`open`）、§2 `agent config`、§19 `settings`（含权限模式） |
+| [runtime.md](./runtime.md) | §1 Runtime 生命周期（`status`/`stop`；`ui`/`open` 已删除）、§2 `agent config`、§19 `settings`（含权限模式） |
 | [project.md](./project.md) | §3 `project`（`inspect`/`policy`/`trust`/`list`、`project impact *`、`project knowledge *`） |
 | [task-lifecycle.md](./task-lifecycle.md) | §4 `task` 生命周期（`create` 到 `purge`/`status`）与 `--feature` |
 | [task-revision-session.md](./task-revision-session.md) | §5 `task revision` 与投递、§6 `task transcript`/`session transcript`、§6.1 `session guide`、§7 `session handoff` |
 | [task-result-verify.md](./task-result-verify.md) | §8 `task result`、§9 `task verify`/`task verification`/`task tests`、§10 `task operation` |
 | [integration-dag-scheduler.md](./integration-dag-scheduler.md) | §12 `task depends`、§13 `task schedule`、§14 `scheduler`、§16 `reclaim`（§11 `task integrate`/§15 `promotion` 已由 ADR-0066 删除） |
-| [interface.md](./interface.md) | §17 `events`、§18 `attention`、§20 HTTP/SSE 面、§21 其他只在源码里出现的东西 |
+| [interface.md](./interface.md) | §17 `events`、§18 `attention`、§20 已暂停的 HTTP/SSE 面、§21 其他只在源码里出现的东西 |
 
 旧引用（例如其他地方写的「`cli-reference.md` §14」）在 [`../cli-reference.md`](../cli-reference.md)
 的对照表里查到落点文件后，按 `§14` 在该文件内检索即可。
@@ -77,7 +77,6 @@ bun run codeestra <group> [<action>] [<argument>…] [--flag …]
 | 变量 | 作用 |
 |---|---|
 | `CODEESTRA_HOME` | Runtime 数据目录（决定单实例身份与 socket 位置） |
-| `CODEESTRA_UI_DIST` | 覆盖 Web UI 资产目录（默认 `apps/ui/dist`） |
 | `CODEESTRA_SCHEDULE_TICK_MS` | 周期调度 pass 间隔，默认 `5000` |
 | `CODEESTRA_PI_EXECUTABLE` / `CODEESTRA_PI_GATE_EXTENSION` / `CODEESTRA_PI_QUESTION_EXTENSION` / `CODEESTRA_PI_SESSION_DIR` / `CODEESTRA_PI_PLATFORM` | Pi Adapter 的可执行文件、gate/question 扩展、会话目录、平台 |
 | `CODEESTRA_CODEX_EXECUTABLE` / `CODEESTRA_CODEX_HOME` / `CODEESTRA_CODEX_REQUEST_USER_INPUT` | Codex Adapter |
@@ -93,5 +92,5 @@ bun run codeestra <group> [<action>] [<argument>…] [--flag …]
 ## 相关阅读
 
 - 端到端流程与预期输出形状：[workflow.md](../workflow.md)
-- 界面：[ui.md](../ui.md)
+- Web UI 暂停状态：[ui.md](../ui.md)
 - 稳定错误码与排障：[troubleshooting.md](../troubleshooting.md)

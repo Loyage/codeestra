@@ -1,7 +1,7 @@
 # 功能清单：「这软件能做什么」
 
-> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
-> 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@6c7de03`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> 版本会前进：`dev@6c7de03` 只是本目录最后一次校对的基线；当前适用版本以
 > **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
 > 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
@@ -26,7 +26,7 @@
 
 - **能做什么**：这个能力对用户交付什么。
 - **CLI 入口**：完整命令路径（命令参考见 [cli/README.md](./cli/README.md)）。
-- **UI 位置**：在 Web UI 的哪里（面板名见 [ui.md](./ui.md)）。标「—」表示当前**只有 CLI** 入口。
+- **UI 位置**：保留暂停前的历史定位，**当前全部不可用**；ADR-0067 起 Web UI 没有入口。实际入口以 CLI 列为准。
 - **ADR**：相关的已接受决策记录。
 
 > 这份清单只写**当前实现真实具备**的能力。未实现 / 未验证的部分见文末「明确的未实现与未验证」。
@@ -41,7 +41,7 @@
 | 验证策略展示 | 打印 `main` ref 上 `.codeestra/policies/verification.json` 的状态、digest 与逐条命令 | `project policy [path]` | 项目 → 验证策略 | [0006](../decisions/0006-task-verification-policy.md) |
 | 项目接入（trust） | 注册项目；把「你刚看到的身份 + 验证策略 digest + 影响映射 digest」一起确认；FULL 零确认 / STRICT 输 `TRUST` | `project trust [path] [--yes]` | 项目 → 添加/信任此项目（被拒绝时显示稳定码 + 本地解释） | [0011](../decisions/0011-default-full-permission-mode.md)、[0031](../decisions/0031-impact-snapshot-and-deterministic-conflict-analyzer.md)、[0064](../decisions/0066-remove-dev-clone-and-dual-baseline.md) |
 | Task 基线 | **只有一种**（ADR-0066）：从**项目文件夹建 workspace 时当前检出的分支**建基线，把 ref 与 commit 一起固定（`workspaces.base_ref`/`base_commit`）；detached HEAD 以 `TASK_BASE_REF_UNRESOLVED` 拒绝，因为它没有分支可名。`task run --base-ref <refs/heads/…>` 可单次覆盖 | `task run`（准备 workspace 时） | —（同一命令面） | [0005](../decisions/0005-task-entry-and-worktree-location.md)、[0064](../decisions/0066-remove-dev-clone-and-dual-baseline.md) |
-| 一条命令接入并打开 | inspect → 策略展示 → 必要时确认 → 打开界面并预选该项目 | `open [path] [--yes] [--no-open]` | —（它就是打开 UI 的那条路） | [0007](../decisions/0007-local-web-ui-entry.md)、[0008](../decisions/0008-efficiency-first-service-form.md) |
+| Web UI 接入快捷命令（已删除） | ADR-0067 起不再提供接入并打开界面的复合命令；使用 `project inspect|policy|trust|list` | — | —（UI 已暂停） | [0067](../decisions/0067-pause-web-ui-and-cli-focus.md) |
 | 项目列表 | 列出已信任项目及其确认策略 | `project list` | 顶部项目选择器 | — |
 | 影响映射校验 | 报告 `main` ref 上的 `.codeestra/impact.json` 是否存在且是已确认的那一份 | `project impact validate [path] [--json]` | **调度 → 影响映射 · impact.json** | [0031](../decisions/0031-impact-snapshot-and-deterministic-conflict-analyzer.md) |
 
@@ -71,7 +71,7 @@
 | 原生终端接管 | 单一 writer lease + 安全点 + 准入决策：attach 读投影终端流、detach 保持运行、release 写释放字节并验证 provider 已退出且会话文件仍在 | `session handoff status/request/cancel`、`writer acquire/release`、`admit/attach/detach/release`、`terminal read/write` | 任务详情 → 原生终端与会话交接 | [0010](../decisions/0010-live-agent-terminal-takeover.md)、[0023](../decisions/0023-strict-permission-attention-and-session-writer-lease.md)、[0026](../decisions/0026-native-terminal-pty-transport.md) |
 | 结构化提问 | Agent 用 `ask_user_question` 一次提 1–4 题（每题 2–4 个可选项、可多选、可用自己的话答）；一份问卷 = 一条 Attention = 一次 answer | `attention list`、`attention answer … --choose/--text/--cancel` | 待处理（单选/多选 + 自由文本） | [0014](../decisions/0014-agent-structured-question-channel.md) |
 | 散文提问等待 | 识别「没用工具、正文提问并结束轮次」，记成一条独立 Attention 与 `WAITING_FOR_USER`，并给出明确退出方式 | `attention resolve … --answer/--dismiss`、`settings prose-question-attention` | —（CLI-only） | [0043](../decisions/0043-prose-question-attention-escalation.md) |
-| 设置总览 | 一条只读命令列出全部九项 Runtime 级设置（权限模式 / 散文开关 / 自动回收 / 五个界面键 / 并发上限），每项给出生效值、产品默认、取值、是否显式设置与存储位置；每项都由它自己那条命令的同一次读取填充，因此不会与专命令读出不一致 | `settings list [--json]` | —（CLI-only） | [0064](../decisions/0064-settings-list-and-permission-as-a-setting.md) |
+| 设置总览 | 一条只读命令列出全部三项启用的 Runtime 级设置（权限模式 / 散文开关 / 并发上限），每项给出生效值、产品默认、取值、是否显式设置与存储位置 | `settings list [--json]` | —（CLI-only） | [0064](../decisions/0064-settings-list-and-permission-as-a-setting.md)、[0067](../decisions/0067-pause-web-ui-and-cli-focus.md) |
 | 权限模式 | 默认 FULL 零确认；可无确认切 STRICT 恢复旧门禁（工具逐次审批、两步成果 commit、提升批准） | `settings permission get`、`settings permission set <full\|strict>` | 界面显示当前模式；STRICT 下出现 TRUST 输入与二次确认 | [0011](../decisions/0011-default-full-permission-mode.md)、[0023](../decisions/0023-strict-permission-attention-and-session-writer-lease.md)、[0064](../decisions/0064-settings-list-and-permission-as-a-setting.md) |
 | Agent 配置 | 持久化 provider/model/thinking，分全局默认与每项目覆盖；逐字段按 `环境变量 > 项目 > 全局 > Adapter 默认` 解析；只影响新 Session | `agent config get/set/clear [--project <id>] [--adapter <id>] [--provider/--model/--thinking/--unset]` | Agent 设置标签页（`当前生效值` 表与 `编辑并保存`） | [0012](../decisions/0012-agent-configuration-scopes.md) |
 | Agent 插件选择 | 选 Pi 的四类资源（extensions / skills / prompt templates / themes）；选择是**一个整体字段**（项目整份替换全局，不逐项合并）；生效值连同来源层与第三方扩展风险写进 Execution | `agent plugins list`、`agent plugins select [--extension/--skill/--prompt-template/--theme <path>]… [--clear]` | Agent 设置标签页（`插件候选` 与 `清除选择`） | [0044](../decisions/0044-agent-plugin-selection-and-detection.md) |
@@ -131,12 +131,12 @@ ff-only 拉取 → 重启核对 → 推回远端 `main`），但那是仓库约�
 |---|---|---|---|---|
 | 事件订阅 | 只读订阅 append-only 事件日志，排他 sequence 游标、可重连、显式游标失效；含 heartbeat 帧 | `events list`、`events tail` | 运行事件（同一订阅） | [0035](../decisions/0035-event-name-and-handoff-faces.md)、[0027](../decisions/0027-verification-cancelled-and-progress-events.md) |
 | 设置（散文提问等待） | 散文提问等待的全局开关（`auto` / `record-only` / `off`）；读写同一命令，无需确认 | `settings prose-question-attention [mode]` | —（CLI-only；「设置」标签页只有界面效果五项） | [0043](../decisions/0043-prose-question-attention-escalation.md) |
-| 界面效果设置 | 五个键（`theme`/`density`/`fontSize`/`motion`/`timeDisplay`）存在 Runtime home 的 `ui-settings.json`，CLI 与界面读写同一份值；换浏览器、清缓存、重启 Runtime 后仍生效 | `settings ui list/get/set/reset` | 设置标签页（`界面效果`）+ 侧栏底部「外观」下拉框 | [0045](../decisions/0045-global-ui-settings.md) |
+| 界面效果设置（已暂停） | 实现源码与已有 `ui-settings.json` 保留，但当前 Runtime 不读取、不暴露 | —（`settings ui *` 已删除） | —（UI 已暂停） | [0045](../decisions/0045-global-ui-settings.md)、[0067](../decisions/0067-pause-web-ui-and-cli-focus.md) |
 | 并发上限设置 | 全局并发上限也可以从设置面读与改：`settings concurrency` 与 `scheduler capacity` 是**同一事实**（同一 `runtime_capacity_settings` 行、同一条事件），改完立刻生效且零确认 | `settings concurrency get/set --limit/reset` | —（CLI-only；界面容量卡仍显示调度面的同一数字） | [0061](../decisions/0061-runtime-global-load-control.md) D01/D02 |
-| Web UI | 本地 `127.0.0.1` HTTP + SSE，一次性内存 token，只走 `/api/command` 与 `/api/events` | `ui [--no-open]` | 全部界面 | [0007](../decisions/0007-local-web-ui-entry.md)、[0015](../decisions/0015-task-workbench-and-themes.md)、[0017](../decisions/0017-new-task-dock.md)、[0034](../decisions/0034-compact-task-workbench.md) |
+| Web UI（已暂停） | 实现源码静态保留；没有 HTTP/SSE 服务、公开入口、默认构建或测试 | —（`ui` / `open` 已删除） | — | [0067](../decisions/0067-pause-web-ui-and-cli-focus.md) |
 | Runtime 生命周期 | 单实例、自动拉起、两阶段 stop 与 ownership 报告 | `status`、`stop [--wait <s>]`、`settings permission get` | 侧栏底部的权限模式与事件流状态指示（**界面不提供停止/重启/切权限模式**） | [0025](../decisions/0025-runtime-lifecycle-stop-and-single-instance.md)、[0064](../decisions/0064-settings-list-and-permission-as-a-setting.md) |
-| 界面主题 | 亮/暗主题切换（不改任何业务语义；ADR-0045 后由 Runtime 持久化） | `settings ui set theme system\|light\|dark` | 侧栏底部「外观」下拉框（登录前的令牌表单里还有一个只预览、不写入的） | [0015](../decisions/0015-task-workbench-and-themes.md)、[0045](../decisions/0045-global-ui-settings.md) |
-| HTTP / SSE 面 | 与 socket 传输**同一 Zod 请求 schema**；`events.subscribe` 与 `runtime.ui` 在 HTTP 上被拒（`NOT_AVAILABLE_OVER_HTTP`） | `POST /api/command`、`GET /api/events` | 界面内部使用 | [0007](../decisions/0007-local-web-ui-entry.md)、[0008](../decisions/0008-efficiency-first-service-form.md) |
+| 界面主题（已暂停） | 保留源码，不属于当前启用能力 | — | — | [0067](../decisions/0067-pause-web-ui-and-cli-focus.md) |
+| HTTP / SSE 面（已暂停） | `http-api.ts` 源码保留但 Runtime 不实例化；不属于当前产品面 | — | — | [0067](../decisions/0067-pause-web-ui-and-cli-focus.md) |
 
 ---
 

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, rmSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
-import { impactPolicyPath, runtimeRequestSchema, uiSettingKeys,
+import { basename, join } from 'node:path';
+import { impactPolicyPath, runtimeRequestSchema,
   validateQuestionnaireAnswer,
   questionnairePromptSchema,
   type RuntimePauseStateView, type RuntimeRequest, type RuntimeResponse,
@@ -32,7 +32,6 @@ import { agentPluginKinds, agentPluginSelectionSchema,
   type AgentPluginSelection } from '@codeestra/contracts';
 import { AgentRuntimeCoordinator, deriveCommandId } from './agent-runtime-service.js';
 import { EventSubscriptionHub, type EventSubscriptionHandle } from './event-subscription-service.js';
-import { RuntimeHttpApi } from './http-api.js';
 import {
   acquireRuntimeOwnership,
   probeRuntimeEndpoint,
@@ -68,7 +67,6 @@ import { LongOperationService } from './operation-service.js';
 import { runtimeHome, runtimeSocketPath } from './paths.js';
 import { SessionHandoffService } from './session-handoff-service.js';
 import { TerminalService } from './terminal-service.js';
-import { inspectUiSettings, resetUiSettings, setUiSetting } from './ui-settings.js';
 import { inspectSettings } from './settings-view.js';
 import { defaultPermissionMode, permissionModePath, readPermissionMode, writePermissionMode,
   type PermissionMode } from './permission-mode.js';
@@ -448,15 +446,6 @@ const schedule = new ScheduleService({
   defaultAdapterId: 'pi',
   logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
 });
-/** Built UI assets. The HTTP service is only started when a client asks for it. */
-const uiAssetsRoot = Bun.env.CODEESTRA_UI_DIST === undefined
-  ? resolve(import.meta.dir, '../../../apps/ui/dist')
-  : resolve(Bun.env.CODEESTRA_UI_DIST);
-const httpApi = new RuntimeHttpApi({
-  assetsRoot: uiAssetsRoot,
-  subscriptions,
-  dispatch: (request) => dispatch(request),
-});
 await reconcileWorkspacePreparations({ storage });
 reconcileInterruptedAgentStarts({ storage });
 reconcileInterruptedAgentAnswers({ storage });
@@ -725,10 +714,6 @@ function firstUnusablePluginPath(
 
 async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
   switch (request.command) {
-    case 'runtime.ui': {
-      const endpoint = httpApi.start();
-      return success(request.requestId, { url: endpoint.url, running: true });
-    }
     case 'runtime.ping':
       return success(request.requestId, {
         pid: process.pid,
@@ -739,7 +724,6 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         adapters: registry.ids(),
         activeSessions: coordinator.activeSessionIds(),
         eventSubscribers: subscriptions.subscriberCount(),
-        uiRunning: httpApi.running,
       });
     case 'runtime.stop':
       // The response reports which process was asked to stop, never that it stopped: only the
@@ -759,7 +743,7 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
     // The settings face (ADR-0064): one read that enumerates every Runtime-level setting with its
     // effective value, its product default and where the value is stored. Each entry is filled from
     // the same read its own command uses, so the list cannot disagree with `permission.get`,
-    // `settings prose-question-attention`, `settings ui get` or
+    // `settings prose-question-attention` or
     // `scheduler capacity get`.
     case 'settings.list':
       return success(request.requestId, inspectSettings({
@@ -777,26 +761,6 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       writeProseQuestionAttentionMode(home, proseQuestionAttentionMode);
       proseQuestionAttentionExplicit = true;
       return success(request.requestId, proseQuestionAttentionSettings());
-    // The interface-effect settings are read from and written to the Runtime home on every command
-    // (never from a cached copy), so an edit made outside the Runtime — or a second look after a
-    // restart — reports the file as it is. A broken file is refused with INVALID_UI_SETTING instead
-    // of being reported as defaults; `settings ui reset` is the explicit way out of that state.
-    case 'settings.ui.list':
-      return success(request.requestId, inspectUiSettings(home));
-    case 'settings.ui.get': {
-      const view = inspectUiSettings(home);
-      const entry = view.settings.find((candidate) => candidate.key === request.key);
-      if (entry === undefined) {
-        throw new RuntimeCommandError('UNKNOWN_UI_SETTING',
-          `${request.key} is not a UI setting; the keys are: ${uiSettingKeys.join(', ')}`);
-      }
-      return success(request.requestId, entry);
-    }
-    case 'settings.ui.set':
-      return success(request.requestId,
-        setUiSetting(home, request.key, request.value));
-    case 'settings.ui.reset':
-      return success(request.requestId, resetUiSettings(home, request.key));
     case 'agent.config.get':
       return success(request.requestId, agentConfigurationPayload(resolveAgentConfiguration({
         storage,
@@ -992,7 +956,7 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         task,
         executions: storage.listTaskExecutions(request.projectId, request.taskId),
         verifications: storage.listVerificationRuns(request.projectId, request.taskId),
-        // Long-command progress travels with the Task detail so the UI gets it in the same read
+        // Long-command progress travels with the Task detail so every client gets it in one read
         // the CLI gets from task.operation.list; both are the same projection.
         operations: storage.listTaskOperations(request.projectId, request.taskId),
       });
@@ -2154,7 +2118,6 @@ async function shutdown(): Promise<void> {
   // control pipe means "no writer owns this terminal".
   await terminals.close();
   handoff.close();
-  httpApi.stop();
   // Signal first: an in-flight long command stops at its next step boundary without writing a
   // verdict, so a restart cannot turn a killed command into a judged failure.
   longOperations.beginShutdown();

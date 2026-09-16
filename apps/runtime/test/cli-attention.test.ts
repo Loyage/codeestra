@@ -3,8 +3,6 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { encodeQuestionnaireDialogTitle, type Questionnaire } from '@codeestra/contracts';
-import { RuntimeClient } from '../../ui/src/api.js';
-import type { AttentionView, TaskStatusView, TaskView } from '../../ui/src/types.js';
 import {
   reclaimTestResources,
   registerTemporaryDirectory,
@@ -13,12 +11,6 @@ import {
 
 const repositoryRoot = join(import.meta.dir, '..', '..', '..');
 const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
-
-// The Web UI's own client (`RuntimeClient`) talks to the Runtime's loopback HTTP surface from this
-// process, and a developer proxy in the environment would answer for it (a 502 with an empty body).
-// Child CLI invocations already set this for themselves; the in-process fetch needs the same floor.
-process.env.no_proxy = '127.0.0.1,localhost';
-process.env.NO_PROXY = '127.0.0.1,localhost';
 
 afterEach(async () => { await reclaimTestResources(); });
 
@@ -128,8 +120,6 @@ async function startQuestionnaireTask(title: string): Promise<{
   const repository = temporaryDirectory('codeestra-question-repo-');
   const home = temporaryDirectory('codeestra-question-home-');
   const tools = temporaryDirectory('codeestra-question-tools-');
-  const assets = temporaryDirectory('codeestra-question-assets-');
-  await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
   mkdirSync(join(repository, '.codeestra', 'policies'), { recursive: true });
   await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'), JSON.stringify({
     version: 1, commands: [{ id: 'check', argv: ['true'], cwd: '.', timeoutSeconds: 60 }],
@@ -152,12 +142,11 @@ async function startQuestionnaireTask(title: string): Promise<{
 
   const environment = {
     CODEESTRA_HOME: home,
-    CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: shimPath,
     CODEESTRA_QUESTION_REPORT: reportPath,
     CODEESTRA_QUESTION_TITLE: title,
   };
-  const opened = await cli(['open', repository, '--no-open'], environment);
+  const opened = await cli(['project', 'trust', repository], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { id: string }[];
@@ -243,94 +232,6 @@ describe('codeestra attention answer', () => {
       await cli(['stop'], environment);
     }
   });
-
-  test('workbench HTTP client reads tasks and answers while a task awaits user input', async () => {
-    const { environment, projectId, taskId } =
-      await startQuestionnaireTask(encodeQuestionnaireDialogTitle(questionnaire));
-    try {
-      await waitForAttention(environment, projectId);
-      const opened = await cli(['ui', '--no-open'], environment);
-      expect(opened.exitCode).toBe(0);
-      const endpoint = new URL(opened.stdout.trim());
-      const token = new URLSearchParams(endpoint.hash.slice(1)).get('token');
-      expect(token).not.toBeNull();
-      const client = new RuntimeClient(endpoint.origin, token!);
-      const [status, attentions] = await Promise.all([
-        client.command<TaskStatusView>({ command: 'task.status', projectId, taskId }),
-        client.command<AttentionView[]>({ command: 'attention.list', projectId }),
-      ]);
-      expect(status.task.state).toBe('WAITING_FOR_USER');
-      const attention = attentions.find((item) => item.taskId === taskId && item.status === 'OPEN')!;
-      expect(attention).toBeDefined();
-
-      // The UI's actual transport can still create/read another draft while the run is blocked.
-      const draft = await client.command<TaskView>({ command: 'task.create', projectId,
-        commandId: crypto.randomUUID(), displayTitle: '另一个任务 · 不自动运行',
-        namingTitle: 'another-task', specification: '另一个任务 · 不自动运行' });
-      expect(draft.state).toBe('DRAFT');
-      expect(draft.currentRevision.number).toBe(1);
-      // Compact task rows use these existing command projections, not per-row task.status reads
-      // or a client-invented running duration / verification percentage.
-      const list = await client.command<TaskView[]>({ command: 'task.list', projectId,
-        includeArchived: true });
-      const listedDraft = list.find((item) => item.id === draft.id)!;
-      expect(listedDraft).toBeDefined();
-      expect(listedDraft).toMatchObject({ displayNumber: draft.displayNumber, priority: draft.priority,
-        createdAt: draft.createdAt, updatedAt: draft.updatedAt, archivedAt: null });
-      expect(Number.isFinite(listedDraft.updatedAt)).toBe(true);
-      expect(list.find((item) => item.id === taskId)?.state).toBe('WAITING_FOR_USER');
-      expect(attentions.filter((item) => item.taskId === taskId && item.status === 'OPEN')).toHaveLength(1);
-      const detail = await client.command<TaskStatusView>({ command: 'task.status', projectId,
-        taskId: draft.id });
-      expect(detail.task.id).not.toBe(taskId);
-      expect(detail.executions).toHaveLength(0);
-      await expect(client.command({ command: 'task.verify', projectId, taskId: draft.id,
-        commandId: crypto.randomUUID() })).rejects.toThrow('captured result');
-
-      await expect(client.command({ command: 'attention.answer', projectId, attentionId: attention.id,
-        commandId: crypto.randomUUID(), answer: { type: 'QUESTIONNAIRE', answer: { version: 1,
-          answers: [{ type: 'CHOICES', questionIndex: 0, choiceIndexes: [2] }] } },
-      })).rejects.toThrow('Question 1 has no option 3');
-      expect((await client.command<AttentionView[]>({ command: 'attention.list', projectId }))
-        .find((item) => item.id === attention.id)?.status).toBe('OPEN');
-      await client.command({ command: 'attention.answer', projectId, attentionId: attention.id,
-        commandId: crypto.randomUUID(), answer: { type: 'QUESTIONNAIRE', answer: { version: 1,
-          answers: [{ type: 'CHOICES', questionIndex: 0, choiceIndexes: [1] },
-            { type: 'TEXT', questionIndex: 1, text: '只验证命令面' }] } },
-      });
-      // Answer delivery is not completion. Wait for the independently projected provider exit
-      // through the command face, not a delay.
-      let ended = await client.command<TaskStatusView>({ command: 'task.status', projectId, taskId });
-      const deadline = Date.now() + 5_000;
-      while (ended.executions[0]?.session?.state !== 'EXITED' && Date.now() < deadline) {
-        await Bun.sleep(50);
-        ended = await client.command<TaskStatusView>({ command: 'task.status', projectId, taskId });
-      }
-      expect(ended.executions[0]?.session?.state).toBe('EXITED');
-      // Session exit isn't a captured result, a verification pass, or a release.
-      expect(ended.task.state).toBe('RUNNING');
-      expect(ended.verifications).toHaveLength(0);
-      expect((await client.command<TaskView[]>({ command: 'task.list', projectId }))
-        .find((item) => item.id === draft.id)?.state).toBe('DRAFT');
-      // The default overview excludes archived Tasks; the explicit archive filter can recover
-      // them without losing the state or revision used in the row.
-      await client.command({ command: 'task.archive', commandId: crypto.randomUUID(), projectId,
-        taskId: draft.id, expectedVersion: draft.version });
-      expect((await client.command<TaskView[]>({ command: 'task.list', projectId }))
-        .some((item) => item.id === draft.id)).toBe(false);
-      const archived = (await client.command<TaskView[]>({ command: 'task.list', projectId,
-        includeArchived: true })).find((item) => item.id === draft.id)!;
-      expect(archived.archivedAt).not.toBeNull();
-      expect(archived.state).toBe('DRAFT');
-      expect(archived.currentRevision).toEqual(draft.currentRevision);
-      await client.command({ command: 'task.unarchive', commandId: crypto.randomUUID(), projectId,
-        taskId: draft.id, expectedVersion: archived.version });
-      expect((await client.command<TaskView[]>({ command: 'task.list', projectId }))
-        .find((item) => item.id === draft.id)?.archivedAt).toBeNull();
-    } finally {
-      await cli(['stop'], environment);
-    }
-  }, 30_000);
 
   test('refuses a structured answer for an Attention that is not a questionnaire', async () => {
     // The same stub, but its dialog carries an ordinary title: the Attention is a plain provider

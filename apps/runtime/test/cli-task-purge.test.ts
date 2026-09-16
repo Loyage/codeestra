@@ -63,8 +63,6 @@ interface PurgeFixture {
 async function openedProject(): Promise<PurgeFixture> {
   const repo = temporaryDirectory('codeestra-purge-repo-');
   const home = realpathSync(temporaryDirectory('codeestra-purge-home-'));
-  const assets = temporaryDirectory('codeestra-purge-assets-');
-  await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
   mkdirSync(join(repo, '.codeestra', 'policies'), { recursive: true });
   await Bun.write(join(repo, '.codeestra', 'policies', 'verification.json'), JSON.stringify({
     version: 1, commands: [{ id: 'check', argv: ['true'], cwd: '.', timeoutSeconds: 60 }],
@@ -74,9 +72,9 @@ async function openedProject(): Promise<PurgeFixture> {
   await git(repo, ['add', '.']);
   await git(repo, ['commit', '-q', '-m', 'fixture']);
   await git(repo, ['branch', 'dev']);
-  const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets,
+  const environment = { CODEESTRA_HOME: home,
     CODEESTRA_SCHEDULE_TICK_MS: '600000' };
-  const opened = await cli(['open', repo, '--no-open'], environment);
+  const opened = await cli(['project', 'trust', repo], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { id: string }[];

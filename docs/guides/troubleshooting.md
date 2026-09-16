@@ -1,6 +1,7 @@
 # 常见故障与稳定码表
 
-> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> **适用版本** ADR-0067（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> **本次修订**：删除已暂停 HTTP/UI 的现行排障步骤与稳定码，只保留 CLI/Unix socket 路径。
 > 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
 > **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
 > 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
@@ -46,27 +47,9 @@ Runtime 连不上也起不来。CLI 仍然会读本 home 的 ownership 记录并
 - `lock` 里没有记录 / `socketPresent: false`：Runtime 没起来（例如启动即崩）。看 `traces`。
 - `unreadableRecords` 非空：生命周期记录损坏，属于需要保留现场的事故。
 
-### 界面打不开：`UI_ASSETS_MISSING`
+### `ui` / `open` 报用法错误（退出码 2）
 
-```text
-The UI assets were not found at <dir>. Build them with: bun run --cwd apps/ui build
-```
-
-`apps/ui/dist` 是 gitignore 的本地状态，每个工作树各自构建：
-
-```sh
-bun run build:ui
-```
-
-### 界面说令牌无效 / 旧链接突然失效：`UNAUTHORIZED`
-
-Runtime **每次启动都会换内存 token**。重新执行：
-
-```sh
-bun run codeestra ui            # 或 bun run codeestra open . 
-```
-
-把旧标签页丢掉即可。token 只在 URL fragment 与浏览器 sessionStorage 里，不会进入服务端日志。
+这是当前预期行为。ADR-0067 已暂停 Web UI，删除 `codeestra ui` / `codeestra open` 与 Runtime HTTP/SSE 入口；请改用 CLI。保留的前端与 HTTP 源码不代表可运行功能，也不进入默认构建与测试。
 
 ### 命令打到了「另一个」Runtime
 
@@ -430,7 +413,7 @@ bun run codeestra project trust /path/to/repo    # 重新确认当前策略 dige
 bun run codeestra events list --limit 1        # 或者从你保存的最后一个游标开始
 ```
 
-其他订阅结束原因：`EVENT_READ_FAILED`（读取事件出错）、`SUBSCRIPTION_FAILED`（HTTP 侧订阅失败）。
+其他订阅结束原因：`EVENT_READ_FAILED`（读取事件出错）。
 
 ### 别的地方也出现 `CONCURRENT_MODIFICATION`
 
@@ -445,18 +428,10 @@ bun run codeestra events list --limit 1        # 或者从你保存的最后一�
 
 | 码 | 来源 | 含义 |
 |---|---|---|
-| `INVALID_REQUEST` | HTTP `/api/command` | 请求体不符合 Zod schema（400） |
-| `INVALID_JSON` | HTTP `/api/command` | 请求体不是 JSON（400） |
-| `UNAUTHORIZED` | HTTP | 缺少/错误的 Bearer token（401） |
-| `FOREIGN_ORIGIN` | HTTP | `Origin` 主机或端口不匹配（403） |
-| `UNSUPPORTED_MEDIA_TYPE` | HTTP | `Content-Type` 不是 `application/json`（415） |
-| `METHOD_NOT_ALLOWED` | HTTP | 方法不对（405） |
-| `NOT_AVAILABLE_OVER_HTTP` | HTTP | `events.subscribe` / `runtime.ui` 不走 HTTP（400） |
-| `NOT_FOUND` | HTTP / 各服务 | 资源不存在 |
-| `INTERNAL_ERROR` | HTTP | 服务端未归类异常（500） |
-| `INVALID_CURSOR` | 事件订阅 / HTTP `/api/events` | 游标超前于日志；订阅结束 |
+| `NOT_FOUND` | 各服务 | 资源不存在 |
+| `INTERNAL_ERROR` | Runtime | 未归类异常 |
+| `INVALID_CURSOR` | 事件订阅 | 游标超前于日志；订阅结束 |
 | `EVENT_READ_FAILED` | 事件订阅 | 读取事件失败 |
-| `SUBSCRIPTION_FAILED` | 事件订阅 | 订阅建立失败 |
 | `CONCURRENT_MODIFICATION` | 多处 | 乐观版本冲突 |
 | `VERSION_CONFLICT` | Task 提交等 | 同上 |
 | `INVALID_STATE` / `INVALID_TRANSITION` / `INVALID_VALUE` | 领域 / storage | 状态或取值不允许 |

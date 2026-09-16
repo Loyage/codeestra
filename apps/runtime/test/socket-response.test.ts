@@ -17,7 +17,7 @@ import {
  * `socket.end(payload)` accepts only the bytes that fit in the buffer (8192 here) and then never
  * flushes the rest nor closes, so a client waits forever for a response that cannot arrive. This
  * caught a real `task verify` report: the Runtime had already finished and stored the evidence, but
- * the CLI and the Web UI both hung on a report that was silently cut in half.
+ * the CLI hung on a report that was silently cut in half.
  */
 const runtimeEntry = resolve(import.meta.dir, '../src/main.ts');
 /** The buffer boundary that truncated the payload; the test must exceed it to be meaningful. */

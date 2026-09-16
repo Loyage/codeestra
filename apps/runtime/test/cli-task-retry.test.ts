@@ -207,11 +207,9 @@ async function fixture(options: { readonly tickMs?: string } = {}): Promise<Fixt
   const repository = temporaryDirectory('codeestra-retry-repo-');
   const home = temporaryDirectory('codeestra-retry-home-');
   const tools = temporaryDirectory('codeestra-retry-tools-');
-  const assets = temporaryDirectory('codeestra-retry-assets-');
   const stubLog = join(tools, 'starts.log');
   const codexReportPath = join(tools, 'codex-report.json');
   writeFileSync(stubLog, '');
-  await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
   mkdirSync(join(repository, '.codeestra', 'policies'), { recursive: true });
   await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'), JSON.stringify({
     version: 1, commands: [{ id: 'check', argv: ['true'], cwd: '.', timeoutSeconds: 60 }],
@@ -238,7 +236,6 @@ async function fixture(options: { readonly tickMs?: string } = {}): Promise<Fixt
 
   const environment = {
     CODEESTRA_HOME: home,
-    CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: shimPath,
     CODEESTRA_CODEX_EXECUTABLE: codexShim,
     CODEESTRA_CODEX_CLI_STUB_REPORT: codexReportPath,
@@ -248,7 +245,7 @@ async function fixture(options: { readonly tickMs?: string } = {}): Promise<Fixt
     // The recovery period is a convergence safety net; the tests that want a pass ask for one.
     CODEESTRA_SCHEDULE_TICK_MS: options.tickMs ?? '60000',
   };
-  const opened = await cli(['open', repository, '--no-open'], environment);
+  const opened = await cli(['project', 'trust', repository], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { readonly id: string }[];

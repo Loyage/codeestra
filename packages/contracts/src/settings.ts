@@ -4,7 +4,7 @@ import { z } from 'zod';
  * The settings face of one Runtime home (ADR-0064).
  *
  * Before this file the product had several settings that each knew only their own command
- * (`permission get|set`, `settings prose-question-attention`, `settings ui …`, and the concurrency
+ * (`permission get|set`, `settings prose-question-attention`, and the concurrency
  * limit reachable as `scheduler capacity` / `settings concurrency`).
  * Nothing said *which* settings exist, so "show me my settings" had no answer and a newly added
  * setting was invisible unless a user already knew its name. `settings.list` is that answer: one
@@ -18,7 +18,7 @@ import { z } from 'zod';
  *    listed is not reported, and a setting that is reported twice is a contract violation — either
  *    way the aggregate cannot silently drift from what the product actually has.
  * 2. **The aggregate never re-invents a value.** Each entry is filled from the same read its own
- *    dedicated command uses, so `settings.list` cannot disagree with `settings ui get theme` or
+ *    dedicated command uses, so `settings.list` cannot disagree with `settings permission get` or
  *    `scheduler capacity get`. There is one stored value per setting and no second state source.
  *
  * This is not a new permission surface: every setting in this list is zero-confirmation in FULL and
@@ -39,7 +39,7 @@ export const defaultPermissionMode: PermissionMode = 'FULL';
  * Every setting this Runtime home has, in the order a person should read them.
  *
  * The spelling is the command path with dots: `permission.mode` is what `settings permission get`
- * reports, `ui.theme` is what `settings ui get theme` reports, and `capacity.globalLimit` is the
+ * reports, and `capacity.globalLimit` is the
  * one limit under both of its spellings. A client that wants to point at one setting prints the
  * key; there is no second name for it.
  *
@@ -50,11 +50,6 @@ export const defaultPermissionMode: PermissionMode = 'FULL';
 export const settingKeys = [
   'permission.mode',
   'attention.proseQuestion',
-  'ui.theme',
-  'ui.density',
-  'ui.fontSize',
-  'ui.motion',
-  'ui.timeDisplay',
   'capacity.globalLimit',
 ] as const;
 export const settingKeySchema = z.enum(settingKeys);
@@ -62,9 +57,7 @@ export type SettingKey = (typeof settingKeys)[number];
 
 /**
  * Where a setting's value came from. `PRODUCT_DEFAULT` means this Runtime home records nothing for
- * it and the documented default is in force; `RUNTIME` means an explicit value is stored. The same
- * distinction the UI-settings face reports, kept here because "it is dark" and "you chose dark" are
- * different facts.
+ * it and the documented default is in force; `RUNTIME` means an explicit value is stored.
  */
 export const settingSources = ['PRODUCT_DEFAULT', 'RUNTIME'] as const;
 export const settingSourceSchema = z.enum(settingSources);

@@ -1,9 +1,9 @@
 # CLI 命令参考（索引）
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v36 · **最后校对** 2026-09-16
-> 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
-> [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
-""> 权限模式的命令拼写由 FOUNDATION-098 同步为 `settings permission get|set`（ADR-0064：顶层 `permission` 已移除；§19 另新增 `settings list` 总览）。
+> **适用版本** ADR-0067（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> 当前适用版本以 [docs/tasks/README.md](../tasks/README.md) 的最新记录为准。
+> 权限模式的命令拼写由 FOUNDATION-098 同步为 `settings permission get|set`（ADR-0064：顶层 `permission` 已移除；§19 另新增 `settings list` 总览）。
+> **本次修订（ADR-0067）**：索引标明 `ui` / `open` 已删除；正文以 [`cli/runtime.md`](./cli/runtime.md) 为准。
 > **本次修订（ADR-0066 / schema v36）**：`promotion` 一篇（§15）与 `task integrate`/`task integration`（§11）随集成与
 > 提升一起删除，因此拆分后的篇数由九篇变为**八篇**。
 > 拆分说明（ADR-0063）：原来这一篇 1322 行的参考已**按功能拆成 [`cli/`](./cli/README.md) 下的八篇**。
@@ -20,7 +20,7 @@
 | 旧章节 | 现在在 |
 |---|---|
 | §0 通用约定（连接 / 自动启动 / 退出码 / 环境变量） | [cli/README.md](./cli/README.md) |
-| §1 Runtime 生命周期（`status`/`stop`/`ui`/`open`；权限模式已移入 §19） | [cli/runtime.md](./cli/runtime.md) |
+| §1 Runtime 生命周期（`status`/`stop`；`ui`/`open` 已由 ADR-0067 删除；权限模式已移入 §19） | [cli/runtime.md](./cli/runtime.md) |
 | §2 `agent config` | [cli/runtime.md](./cli/runtime.md) |
 | §3 `project`（含 `project impact *`、`project knowledge *`） | [cli/project.md](./cli/project.md) |
 | §4 `task`：生命周期（`create` 到 `purge`/`status`）与 `--feature` | [cli/task-lifecycle.md](./cli/task-lifecycle.md) |

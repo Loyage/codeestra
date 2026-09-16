@@ -1,7 +1,7 @@
 # Codeestra 用户说明书
 
-> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
-> 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@6c7de03`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> 版本会前进：`dev@6c7de03` 只是本目录最后一次校对的基线；当前适用版本以
 > **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
 > 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
@@ -65,10 +65,9 @@ Codeestra 是 **Task-first、local-first 的 AI Development Runtime**：**你管
    验证策略变化，默认零确认、零等待。** 你随时可以用 CLI 无确认地切到 `STRICT`，恢复旧门禁
    （`bun run codeestra settings permission set strict`）。
    正确性核对（revision/ref/归属/进程身份、静止证据、幂等与崩溃恢复）**一直有效**，但那些是核对，不是审批。
-2. **软件本体是服务，CLI 必须完备。** 独立本地 Runtime 是软件本体，Web UI 只是它的便利前端。
-   每个能力都能只靠 CLI 完成并脚本化驱动（`--json`、稳定退出码）。「只有 UI 能做、CLI 不能做」视为缺陷。
-3. **测试只走 CLI / 命令面。** 自动化验收不依赖桌面、键鼠或浏览器自动化；UI 观感由你在场目视确认
-   （见 [acceptance-checklist.md](./acceptance-checklist.md)）。
+2. **软件本体是服务，CLI 必须完备。** 独立本地 Runtime 是软件本体。ADR-0067 起 Web UI 暂停，当前只启用 CLI/Unix socket 命令面。
+   每个能力都能只靠 CLI 完成并脚本化驱动（`--json`、稳定退出码）。
+3. **测试只走 CLI / 命令面。** 自动化验收不依赖桌面、键鼠或浏览器自动化。
 
 ### 一条贯穿全书的边界
 
@@ -110,13 +109,7 @@ nix shell nixpkgs#bun nixpkgs#nodejs_24 nixpkgs#just
 bun install --frozen-lockfile
 ```
 
-要用 Web UI 还要**构建前端资产**（`apps/ui/dist` 是 gitignore 的本地状态，**每个工作树各自构建**）：
-
-```sh
-bun run build:ui
-```
-
-> 没构建就去请求界面，Runtime 会以稳定码 `UI_ASSETS_MISSING` 拒绝，并告诉你跑上面这条命令。
+> Web UI 已按 ADR-0067 暂停。默认安装、检查与运行流程不构建 `apps/ui`。
 
 ### 2.2 第一次运行：`status` 会自己把 Runtime 拉起来
 
@@ -134,7 +127,6 @@ ownership 报告。关键字段：
 | `permissionMode` | 当前是 `FULL` 还是 `STRICT` |
 | `adapters` | 已注册的 Adapter，当前是 `pi`、`codex`、`claude` |
 | `activeSessions` | 正在跑的会话 |
-| `uiRunning` | 是否已经在提供 Web UI |
 | `ownership` | 本 home 的锁记录、启动轨迹、socket 是否应答、`verdict` |
 
 `status` 是**只读**的：它会启动 Runtime（若不在跑），但**不会**替换或杀掉一个「进程在、socket 不应答」的
@@ -158,25 +150,15 @@ Runtime 是**每用户单实例**的本地服务：**一个 `CODEESTRA_HOME` 对
 export CODEESTRA_HOME=/tmp/codeestra-demo
 ```
 
-安全属性：`CODEESTRA_HOME` 目录 `0700`、socket `0600`；HTTP 界面只绑定 `127.0.0.1`，并且每个 Runtime 进程
-启动时生成一次性**内存 token**。
+安全属性：`CODEESTRA_HOME` 目录 `0700`、socket `0600`。当前 Runtime 不启动 Web UI HTTP 服务。
 
 > **最容易踩的一条**：CLI 只按 `CODEESTRA_HOME` 找 socket。若某个 Runtime 已经在跑，你在别的工作树执行
 > `bun run codeestra …` 会打到**那个** Runtime（即那份代码），**不会**启动你当前工作树的构建。
 > 要验证另一份代码，就换 `CODEESTRA_HOME`。
 
-### 2.4 打开 Web UI
+### 2.4 Web UI 已暂停
 
-```sh
-bun run codeestra ui            # 启动 HTTP/SSE 并按需打开浏览器
-bun run codeestra ui --no-open  # 只打印地址
-```
-
-地址形如 `http://127.0.0.1:<port>/#token=<32字节hex>`。token 放在 **fragment** 里——fragment 不会发给服务器，
-所以它不会进入任何服务端日志；浏览器把它存进 sessionStorage。
-
-- **Runtime 重启会更换内存 token**：旧的带 token 链接会立刻失效，重新执行 `codeestra ui` 即可。
-- **关掉页面不会停止 Runtime 或任何 Task。** 页面顶部会写明这一点。
+`codeestra ui`、`codeestra open` 与 Runtime HTTP/SSE 入口已由 ADR-0067 删除。保留的前端源码不代表可用功能；请使用 CLI。
 
 ### 2.5 两个 clone（本机构造，仓库约定）
 
@@ -187,23 +169,17 @@ bun run codeestra ui --no-open  # 只打印地址
 | `~/Documents/codeestra` | `main` | **稳定 clone**：只用于运行稳定实例、拉取已批准的提升 |
 | `~/Documents/codeestra-dev` | `dev` | **开发 clone**：Codeestra 自身的所有开发、集成与定向验证都在这里 |
 
-两个 clone 的 `node_modules`、`apps/ui/dist`、Runtime 数据目录**都是各自的本地状态，不共享**：
-各自需要 `bun install --frozen-lockfile`，UI 资产各自构建。
+两个 clone 的 `node_modules` 与 Runtime 数据目录**都是各自的本地状态，不共享**：各自需要 `bun install --frozen-lockfile`。
 
 在 dev clone 里用**独立 home** 运行 dev 代码，稳定 Runtime 不受影响：
 
 ```sh
 cd ~/Documents/codeestra-dev
-bun run build:ui
 CODEESTRA_HOME=~/.local/state/codeestra-dev bun run codeestra status
-CODEESTRA_HOME=~/.local/state/codeestra-dev bun run codeestra ui --no-open
 ```
 
-等价入口是 `just restart-dev`（在 dev clone 里跑）：install → 构建 UI → `stop` → `status` → `ui --no-open`。
-
-**界面不再有「dev 版」标记**（ADR-0066 删除 ADR-0049 的构建期通道）：`VITE_CODEESTRA_CHANNEL=dev`、
-`data-channel`、橙色横幅与 `Codeestra DEV` 品牌名都不存在，UI 只有一种构建产物、一个品牌名 `Codeestra`。
-区分「这是 dev 代码」靠的是 `CODEESTRA_HOME` 与目录，不是界面上的标记。
+等价入口是 `just restart-dev`（在 dev clone 里跑）：install → `stop` → `status`。
+区分「这是 dev 代码」靠的是 `CODEESTRA_HOME` 与目录。
 
 ### 2.6 停止
 
@@ -267,7 +243,7 @@ Task 基线就是**项目文件夹建 workspace 时当前检出的分支**，成
 而如果 trust 被拒，**什么都还没写**：项目不会被登记，补救命令就在错误消息里。
 
 **影响**：一旦 trust，Agent 工具、验证命令与 Git hooks 会**以你的用户权限**运行。
-STRICT 下界面会明确写着：这**不**授权 commit、更新 main、push 或使用未知工具。
+STRICT 下 CLI 会明确写着：这**不**授权 commit、更新 main、push 或使用未知工具。
 
 **防漂移**（重要）：`trust` 会把「你刚看过的身份 + 验证策略 digest + 影响映射 digest」一起提交。
 若在你查看与确认之间这些文件动了，Runtime 以 `VERIFICATION_POLICY_CHANGED` 或 `IMPACT_POLICY_CHANGED` 拒绝，
@@ -276,18 +252,17 @@ STRICT 下界面会明确写着：这**不**授权 commit、更新 main、push �
 同一个仓库可以有多份工作树（稳定 `main` 树与开发树）：Runtime 按 **Git common dir** 识别一个 Project，
 所以再打开另一个工作树是幂等的。
 
-### 3.3 一条命令搞定：`open`
+### 3.3 显式 CLI 接入
 
-日常最快的路径是 `open`，它把 inspect → 策略展示 →（必要时）确认 → 打开界面串起来：
+`open` 已由 ADR-0067 删除。使用可脚本化的显式命令：
 
 ```sh
-bun run codeestra open /path/to/repo              # 接入并打开 Web UI
-bun run codeestra open /path/to/repo --no-open    # 只打印带 token 的地址
-bun run codeestra open /path/to/repo --yes        # STRICT 非交互确认
+bun run codeestra project inspect /path/to/repo
+bun run codeestra project policy /path/to/repo
+bun run codeestra project impact validate /path/to/repo --json
+bun run codeestra project trust /path/to/repo       # STRICT 脚本可加 --yes
+bun run codeestra project list
 ```
-
-`open` 只有这两个 flag（ADR-0066 删掉了 `--dev-repo`）。它会打印仓库身份、验证策略命令清单、影响映射状态，
-以及**是否需要再次确认**；打开一个**已信任**仓库的另一个工作树时 trust 会被跳过。
 
 ### 想深入看哪篇
 
@@ -316,13 +291,6 @@ bun run codeestra task create $PROJECT "为 parser 增加一个 CRLF 输入用�
 
 **创建出来的 Task 是 `DRAFT`**：它**不会**自动启动 Agent。结果里要记住两个值：`taskId` 与 `version`
 （乐观版本号，后面每条改状态的命令都要传它）。
-
-界面上对应底部常驻的**新建任务停靠条**：它**没有收起态**（三个字段都必填，单行收起形态凑不出合法命令），
-直接就是三个字段——显示标题、命名标题、任务详情——加「＋ 创建草稿」。
-从任何标签页都能创建；创建成功后界面自动切回任务工作台，让新草稿立刻可见。
-
-> 图：`12-new-task-dock.png` — 停靠条：显示标题、命名标题（下方写着 slug 规则与分支命名）、任务详情、
-> 「＋ 创建草稿」。
 
 ### 4.2 提交为就绪
 
@@ -429,7 +397,7 @@ bun run codeestra task purge  $PROJECT <task-id> <expected-version> --yes [--for
 ### 5.1 Agent 会停下来问你
 
 Agent 需要你决定时会留下一条 **Attention**（需要人回答的请求）。你**不需要盯着终端**：请求会出现在
-CLI 的 `attention list` 与界面的「待处理」标签页里，并且**只暂停对应的那个 Task**，其他合格任务继续跑。
+它会出现在 CLI 的 `attention list` 里，并且**只暂停对应的那个 Task**，其他合格任务继续跑。
 
 ```sh
 bun run codeestra attention list $PROJECT
@@ -451,7 +419,7 @@ bun run codeestra attention answer $PROJECT <attention-id> --choose 1:2 --text 2
 bun run codeestra attention answer $PROJECT <attention-id> --cancel
 ```
 
-- `--choose <题>:<选项>` **可以重复**；题号与选项号都是 **1-based**，与界面显示一致。
+- `--choose <题>:<选项>` **可以重复**；题号与选项号都是 **1-based**。
 - 一道题只能答一次，重复会报错。
 - 越界/重复/单选多选不符由 Runtime 拒绝并返回 `INVALID_QUESTIONNAIRE_ANSWER:*`，**请求保持 OPEN**，
   你已答的内容不会被吞掉——改对再提交即可。
@@ -499,9 +467,6 @@ bun run codeestra session transcript part <session-id> <entry-id> <part-index>
 
 **它的边界要记清**：这是**只读**展示——不写数据库、不改任务状态、**不是 attach、也不是终端接管**。
 长内容默认截断，`part` 命令取回整块；`--reverse` 是给人看的渲染选择（与 `--json` 互斥）。
-
-界面上对应「Agent 会话与执行过程」面板：默认折叠为单行时间线，可以展开、可以切换正序/倒序，
-运行中的会话由界面自动增量轮询。
 
 > 图：`06-transcript.png` — 「Agent 执行过程」面板：排列下拉框（正序/倒序）、单行时间线条目
 > （类型标签 + 摘要 + 时间）、展开后的分段正文与「展开全文」按钮。
@@ -579,7 +544,7 @@ bun run codeestra events tail [--project $PROJECT] [--since <sequence>]
 
 ### 想深入看哪篇
 
-- 逐屏 UI 走查（每个标签页、每个按钮）：[ui.md](./ui.md)
+- Web UI 暂停状态：[ui.md](./ui.md)
 - Attention、Session、handoff 的概念：[concepts.md](./concepts.md)
 - `attention` / `session handoff` / `events` 命令：[cli/task-revision-session.md](./cli/task-revision-session.md)（§7）与 [cli/interface.md](./cli/interface.md)（§17–§18）
 - 「Agent 停下来问我了」怎么处理：[recipes.md](./recipes.md)
@@ -614,7 +579,7 @@ bun run codeestra task result commit  $PROJECT <task-id> <authorization-id> --co
 - STRICT 下还会拒绝**敏感路径**（`SENSITIVE_PATH_BLOCKED`）；**FULL 下不做敏感路径拒绝**。
 - 成果落在内部 `refs/heads/task/<task-id>`。
 
-界面上，「提交成果」按钮只在**可捕获**的状态出现（任务 `RUNNING`、该 Execution 仍在运行、持有资源、
+CLI 只在**可捕获**的状态接受提交（任务 `RUNNING`、该 Execution 仍在运行、持有资源、
 **且它的 Session 已 `EXITED`**）。STRICT 下按钮变成「准备成果提交」，随后出现「成果提交授权」区块，
 显示预期 HEAD、变更指纹、是否已静止、工作区路径，并由你按下「确认成果提交」。
 
@@ -663,7 +628,7 @@ bun run codeestra task operation get    $PROJECT <operation-id> [--json]
 bun run codeestra task operation cancel $PROJECT <task-id> <operation-id> [--json]
 ```
 
-界面上的「长命令进度」面板只显示**Runtime 记录的事实步骤**，不预估百分比。取消是**协作停止**：
+CLI 读取的长命令进度只包含**Runtime 记录的事实步骤**，不预估百分比。取消是**协作停止**：
 只有在确认进程组静止后才记录终态；无法确认时保留占用并需要人工处理（退出码 1，**不要当成已取消**）。
 
 ### 按分支职责分层的测试证据
@@ -848,7 +813,7 @@ bun run codeestra scheduler control reconcile [--json]
 ```
 
 这四个命令**不属于任何项目**（控制的屏障是整台机器的），FULL 与 STRICT **都不需要二次确认**。
-界面上对应外壳里的「全局负载控制」条（暂停全部 / 继续全部），与选中的项目无关。
+这些命令控制整个 Runtime，与任何单个项目无关。
 
 **它做什么**：先立屏障（新的 Execution/Session/successor 与向 Provider 的投递都停下），
 再按 `pid + OS start token + 这次 incarnation` 核验，然后只对**模型请求发起进程**发 `SIGSTOP`；
@@ -890,7 +855,7 @@ bun run codeestra scheduler control reconcile [--json]
 
 ## 11. 设置与权限：FULL 与 STRICT
 
-**先看全**：这条命令列出本 Runtime 的**全部九项设置**（下面每一项都在其中），逐项给出生效值、产品默认、
+**先看全**：这条命令列出本 Runtime 的**全部三项启用设置**，逐项给出生效值、产品默认、
 取值、是「本 home 显式设置」还是「产品默认」，以及值存在哪个文件：
 
 ```sh
@@ -899,8 +864,7 @@ bun run codeestra settings list --json     # 逐字段原文（每个条目还�
 ```
 
 数据来自 Runtime 自己：每一项都由**它自己那条命令的同一次读取**填充，所以总览不会与
-`settings permission get`、`settings prose-question-attention`、`settings auto-reclaim`、
-`settings ui get <key>`、`scheduler capacity get` 读出的值不一致。它是**只读**的：不写文件、不改任何值、零确认。
+`settings permission get`、`settings prose-question-attention`、`scheduler capacity get` 读出的值不一致。它是**只读**的：不写文件、不改任何值、零确认。
 
 ### 11.1 权限模式
 
@@ -921,34 +885,11 @@ bun run codeestra settings permission set full      # 切回默认
 **不变的**：revision/ref/归属/进程身份核对、静止证据、幂等与崩溃恢复**始终有效**。那些是正确性核对，
 不是权限审批，不会被 FULL 关掉，也不会被包装成审批。
 
-界面上左侧栏底部会显示当前模式：`FULL · 全权限，零确认` 或 `STRICT · 严格模式`。
-STRICT 下界面才出现 TRUST 输入框和（旧流程的）二次确认；FULL 下它们**不出现**。
+当前模式只通过 CLI/Runtime 命令面查看与切换。
 
-### 11.2 界面效果设置
+### 11.2 Web UI 设置已暂停
 
-五个键都在 Runtime 里持久化（不是浏览器本地存储），CLI 与界面读写的是**同一份值**：
-
-```sh
-bun run codeestra settings ui list [--json]              # 全部键：当前值、默认值、是否显式设置、可取值
-bun run codeestra settings ui get <key> [--json]
-bun run codeestra settings ui set <key> <value> [--json]
-bun run codeestra settings ui reset [<key>] [--json]
-```
-
-| 键 | 取值 | 默认 |
-|---|---|---|
-| `theme` | `system` / `light` / `dark` | `system` |
-| `density` | `comfortable` / `compact` | `comfortable` |
-| `fontSize` | `medium` / `small` / `large` | `medium` |
-| `motion` | `full` / `reduced` | `full` |
-| `timeDisplay` | `relative` / `absolute` | `relative` |
-
-- 未知键或非法值是**用法错误（退出码 2）**，不会被夹取。
-- 文件读不了时报 `INVALID_UI_SETTING`（退出码 1）；不带 key 的 `reset` 会重写文件，是损坏时的恢复路径。
-- **设置不是门禁**：每次写入都是一个命令、零确认，不改变任何 Task 被允许做什么。
-
-> 图：`11-settings.png` — 「设置」标签页的「界面效果」：五个键各一行（中文名 + 键名 + 一句说明 +
-> 下拉框 + 当前/默认/是否显式设置 + 恢复默认），以及每行的等价 CLI 命令。
+ADR-0067 起 `settings ui list|get|set|reset` 已删除，也不再出现在 `settings list`。已有 `ui-settings.json` 保留但当前 Runtime 忽略。
 
 ### 11.2.1 并发上限也是一项可实时调整的设置
 
@@ -963,7 +904,7 @@ bun run codeestra settings concurrency reset [--json]
 它与调度面的 `scheduler capacity get|set|reset` 是**同一事实**（同一行、同一条 `SchedulerGlobalCapacityChanged` 事件），
 因此两边读出的值不会不一致。改完**立刻生效**：提高上限会让正在等待容量的任务在下一次调度里就有机会启动；
 降低上限**不会**暂停、释放或终止已经在跑的 Task（`get` 的 `used` 因此可能大于 `limit`）。
-它和 §11.2 的五个界面键一样是**设置、不是门禁**：零确认，FULL/STRICT 行为相同。
+它是**设置、不是门禁**：零确认，FULL/STRICT 行为相同。
 
 ### 11.2.2 自动回收 worktree（已删除）
 
@@ -1089,12 +1030,11 @@ bun run codeestra task status $PROJECT <task-id>     # 执行 / 验证 / 会话�
 **`3` 从不表示 `BLOCKED`**——`BLOCKED` 只表示依赖未满足，属于「需要处理」而不是「等一等」。
 看到一个 `1` 时，**先读错误码，不要读文案**：文案可能会变，码不会。
 
-### 13.3 界面打不开 / 令牌失效
+### 13.3 Web UI 命令不可用
 
 | 症状 | 处理 |
 |---|---|
-| `UI_ASSETS_MISSING` | 先 `bun run build:ui` |
-| 界面说令牌无效，或旧链接突然失效 | Runtime 每次启动都换内存 token：重新执行 `bun run codeestra ui` |
+| `ui` / `open` 返回用法错误 | Web UI 已按 ADR-0067 暂停；改用 `project trust` 与其它 CLI 命令 |
 | 命令打到了「另一个」Runtime | 检查 `CODEESTRA_HOME`；一个 home 只跑一个 Runtime |
 
 ### 13.4 任务一直不跑
@@ -1140,7 +1080,7 @@ Task/Execution 的 `RECOVERY_REQUIRED` 用 **`task recover <project-id> <task-id
 |---|---|
 | **Runtime** | 独立本地服务，Codeestra 的软件本体。每用户单实例，一个 `CODEESTRA_HOME` 一个 Runtime，通过 Unix socket 通信 |
 | **CLI** | 完备命令面。每个能力都能只靠它完成并脚本化驱动（`--json`、稳定退出码） |
-| **Web UI** | Runtime 的便利前端，与 CLI 走**同一个命令面**，不新增业务语义、不绕过门禁、不直接访问 SQLite |
+| **Web UI（暂停）** | ADR-0067 起没有可用入口；实现源码静态保留，不属于当前产品面 |
 | **Project** | 一个已接入（trust）的 Git 仓库。按 **Git common dir** 识别，所以同一仓库的多份工作树是同一个 Project |
 | **Task** | **业务主实体**：一次有边界的开发工作。持有两个 Task 级标题（显示标题、命名标题）、任务详情（不可覆盖的 revision 历史）、依赖、执行历史、验证与集成状态 |
 > **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
@@ -1181,8 +1121,8 @@ Task/Execution 的 `RECOVERY_REQUIRED` 用 **`task recover <project-id> <task-id
 - [concepts.md](./concepts.md)：领域概念与硬边界
 - [workflow.md](./workflow.md)：端到端流程走查（含可照抄命令）
 - [features.md](./features.md)：功能清单（一行一个能力）
-- [ui.md](./ui.md)：**逐屏 UI 走查**（7 个标签页，每个按钮做什么）
-- [cli/](./cli/README.md)：CLI 与 HTTP/SSE 命令参考（八篇）
+- [ui.md](./ui.md)：Web UI 暂停状态与未来恢复条件
+- [cli/](./cli/README.md)：CLI 命令参考（八篇）
 - [recipes.md](./recipes.md)：常见任务的做法
 - [acceptance-checklist.md](./acceptance-checklist.md)：人工观感核对清单
 - [troubleshooting.md](./troubleshooting.md)：常见故障与稳定码表

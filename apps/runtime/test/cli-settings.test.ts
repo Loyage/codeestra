@@ -13,19 +13,14 @@ import { reclaimTestResources, runCli } from './support/runtime-reclamation.js';
  * `settings list` answers "which settings exist and what are they set to" from the Runtime itself.
  *
  * The point of the list is that it cannot disagree with the dedicated commands, so every test here
- * compares the aggregate against `settings permission get`, `settings ui get`, `settings
- * prose-question-attention` and `scheduler capacity get` rather than against a second expectation
+ * compares the aggregate against `settings permission get`, `settings prose-question-attention`
+ * and `scheduler capacity get` rather than against a second expectation
  * written by hand. Everything is driven through a real CLI process against a real Runtime in a
  * temporary `CODEESTRA_HOME` — no browser, no desktop automation (ADR-0008).
  */
 
 const repositoryRoot = join(import.meta.dir, '..', '..', '..');
 const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
-
-// A developer machine may have an HTTP proxy configured (this repository's own AGENTS.md documents
-// one). Loopback must bypass it, exactly as the reclamation helper does for the CLI children it
-// spawns — otherwise the Runtime's HTTP surface is reached through the proxy and answers 502.
-process.env['no_proxy'] = '127.0.0.1,localhost';
 
 afterEach(async () => {
   await reclaimTestResources();
@@ -64,11 +59,7 @@ interface SettingsListView {
 async function fixture(): Promise<{ readonly environment: Record<string, string>;
   readonly home: string }> {
   const home = temporaryDirectory('ce-settings-home-');
-  // `codeestra ui` refuses to start the HTTP surface without built assets; the fixture stays usable
-  // for a UI-transport assertion without building the interface.
-  const assets = temporaryDirectory('ce-settings-assets-');
-  await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
-  return { environment: { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets }, home };
+  return { environment: { CODEESTRA_HOME: home }, home };
 }
 
 /** The settings file a value must be in for the Runtime to read it after a restart. */
@@ -105,11 +96,6 @@ describe('codeestra settings', () => {
         setting.source, setting.explicit])).toEqual([
         ['permission.mode', 'FULL', 'FULL', 'PRODUCT_DEFAULT', false],
         ['attention.proseQuestion', 'auto', 'auto', 'PRODUCT_DEFAULT', false],
-        ['ui.theme', 'system', 'system', 'PRODUCT_DEFAULT', false],
-        ['ui.density', 'comfortable', 'comfortable', 'PRODUCT_DEFAULT', false],
-        ['ui.fontSize', 'medium', 'medium', 'PRODUCT_DEFAULT', false],
-        ['ui.motion', 'full', 'full', 'PRODUCT_DEFAULT', false],
-        ['ui.timeDisplay', 'relative', 'relative', 'PRODUCT_DEFAULT', false],
         ['capacity.globalLimit', 2, 2, 'PRODUCT_DEFAULT', false],
       ]);
       // A closed word set carries its values; a number carries its range. Exactly one, never both.
@@ -122,8 +108,7 @@ describe('codeestra settings', () => {
       for (const setting of view.settings) expect(setting.appliesTo.length).toBeGreaterThan(0);
 
       // A read invents no settings file: "no explicit choice" stays visible as such.
-      for (const name of ['permission-mode.json', 'prose-question-attention.json',
-        'ui-settings.json']) {
+      for (const name of ['permission-mode.json', 'prose-question-attention.json']) {
         expect(existsSync(join(home, name))).toBe(false);
       }
 
@@ -190,14 +175,11 @@ describe('codeestra settings', () => {
       expect((await cli(['settings', 'permission', 'set', 'strict'], environment)).exitCode).toBe(0);
       expect((await cli(['settings', 'prose-question-attention', 'record-only'], environment))
         .exitCode).toBe(0);
-      expect((await cli(['settings', 'ui', 'set', 'theme', 'dark'], environment)).exitCode).toBe(0);
       expect((await cli(['settings', 'concurrency', 'set', '--limit', '3'], environment)).exitCode)
         .toBe(0);
 
       const view = await list(environment);
       expect(entry(view, 'attention.proseQuestion')).toMatchObject({ value: 'record-only',
-        explicit: true, source: 'RUNTIME' });
-      expect(entry(view, 'ui.theme')).toMatchObject({ value: 'dark', default: 'system',
         explicit: true, source: 'RUNTIME' });
       expect(entry(view, 'capacity.globalLimit')).toMatchObject({ value: 3, default: 2,
         explicit: true, source: 'RUNTIME' });
@@ -208,11 +190,9 @@ describe('codeestra settings', () => {
         .stdout) as { readonly mode: string };
       const attention = JSON.parse((await cli(['settings', 'prose-question-attention'], environment))
         .stdout) as { readonly mode: string };
-      const theme = JSON.parse((await cli(['settings', 'ui', 'get', 'theme'], environment)).stdout) as { readonly value: string };
       const capacity = JSON.parse((await cli(['scheduler', 'capacity', 'get'], environment)).stdout) as { readonly limit: number };
       expect(entry(view, 'permission.mode').value).toBe(permission.mode);
       expect(entry(view, 'attention.proseQuestion').value).toBe(attention.mode);
-      expect(entry(view, 'ui.theme').value).toBe(theme.value);
       expect(entry(view, 'capacity.globalLimit').value).toBe(capacity.limit);
 
       // A restart reads the recorded choices again: the values cannot be coming from an in-memory
@@ -225,7 +205,6 @@ describe('codeestra settings', () => {
         explicit: true, source: 'RUNTIME' });
       expect(entry(afterRestart, 'attention.proseQuestion')).toMatchObject({ value: 'record-only',
         explicit: true, source: 'RUNTIME' });
-      expect(entry(afterRestart, 'ui.theme')).toMatchObject({ value: 'dark', explicit: true });
       expect(entry(afterRestart, 'capacity.globalLimit')).toMatchObject({ value: 3, explicit: true });
 
       // A value equal to the default that this home explicitly recorded is still reported as set:

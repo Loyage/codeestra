@@ -1,7 +1,7 @@
-# CLI 参考 · 事件、Attention 与 HTTP/SSE 面
+# CLI 参考 · 事件与 Attention
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v36 · **最后校对** 2026-09-16
-> 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@6c7de03`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> 版本会前进：`dev@6c7de03` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一（ADR-0066 之后为八篇），
 > **内容自 `cli-reference.md @ dev@de03448` 搬移，一句未改写；本次未重新核对源码**，最后校对日期因此不变。
@@ -103,37 +103,13 @@ bun run codeestra attention resolve <project-id> <attention-id> --answer <text> 
 
 ---
 
-## 20. HTTP / SSE 面（Web UI 用）
+## 20. HTTP / SSE 面（已暂停）
 
-Runtime 的本地 HTTP 面只绑定 `127.0.0.1`，端口在 `codeestra ui` 时选定，**每进程一次性内存 token**。
+ADR-0067 起 Runtime 不再实例化 HTTP 服务，`runtime.ui`、`codeestra ui` 与 `codeestra open` 已删除；
+`POST /api/command`、`GET /api/events` 和静态资产托管都不属于当前启用的产品面。
 
-### `POST /api/command`
-
-- `Authorization: Bearer <token>` 必填，否则 `401 {"error":"UNAUTHORIZED"}`。
-- `Content-Type` 必须是 `application/json`，否则 `415 UNSUPPORTED_MEDIA_TYPE`。
-- `Origin` 存在但主机/端口不匹配 → `403 FOREIGN_ORIGIN`（缺 `Origin` 的非浏览器客户端仍然受 token 保护）。
-- 请求体必须是 `runtimeRequestSchema` 能接受的请求（与 socket 传输**同一 schema**），否则
-  `400 {"error":"INVALID_REQUEST"}`；JSON 解析失败 → `400 INVALID_JSON`。
-- **`events.subscribe` 与 `runtime.ui` 在 HTTP 上被明确拒绝**：`400 {"error":"NOT_AVAILABLE_OVER_HTTP"}`。
-- 命令仍在运行时，服务器会每 `keepAliveMs`（默认 10s）写一个空白字符保活——空白对 JSON 解析器无意义，
-  所以快命令仍然只返回紧凑的 JSON 体。空白只在第一个间隔过去之后才开始写。
-- 其他 `/api/*` 路径 → `404 {"error":"NOT_FOUND"}`；非 API 路径按静态资源处理，未知路径回退到
-  `index.html`（单页应用）。路径穿越（`..`、绝对路径、`\0`）直接被拒。
-
-成功应答是 `runtimeResponseSchema`：`{ requestId, schemaVersion, ok: true, result }`；
-失败是 `{ requestId, schemaVersion, ok: false, error: { code, message, detail? } }`。
-**命令的稳定错误码与退出码语义都在这个 envelope 里**——UI 用 `code` 而不是解析文案。
-
-### `GET /api/events`
-
-- 同样需要 Bearer token（401），只接受 `GET`（否则 405）。
-- 查询参数：`projectId`（可选）、`sinceSequence`（可选，非负安全整数；不合法 → `400 {"error":"INVALID_CURSOR"}`）。
-- 成功时返回 `text/event-stream`，先发一行注释 `: connected` 让客户端知道流是活的，然后按 SSE 帧发送
-  `subscribed` / `event` / `heartbeat` / `error`。
-- 订阅失败时先发一帧 `{"type":"error","code":"SUBSCRIPTION_FAILED",…}` 再关闭。
-
-**游标语义与 CLI 完全一致**（排他、未知游标报错而不静默裁剪），所以用 UI 显示的游标重连，
-既不会重复也不会漏事件。
+`apps/runtime/src/http-api.ts` 仅作为暂停前实现源码保留，不受当前默认测试保障。需要恢复时必须另立 ADR，
+重新开放契约、安全边界、文档与测试，不能因为源码存在就宣称 HTTP/SSE 可用。
 
 ---
 

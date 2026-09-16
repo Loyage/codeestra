@@ -92,8 +92,6 @@ async function fixture(): Promise<Fixture> {
   const repository = temporaryDirectory('codeestra-slot-repo-');
   const home = temporaryDirectory('codeestra-slot-home-');
   const tools = temporaryDirectory('codeestra-slot-tools-');
-  const assets = temporaryDirectory('codeestra-slot-assets-');
-  await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
   mkdirSync(join(repository, '.codeestra', 'policies'), { recursive: true });
   await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'), JSON.stringify({
     version: 1, commands: [{ id: 'check', argv: ['true'], cwd: '.', timeoutSeconds: 60 }],
@@ -114,13 +112,12 @@ async function fixture(): Promise<Fixture> {
 
   const environment = {
     CODEESTRA_HOME: home,
-    CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: shimPath,
     // These tests exercise the reservation primitive on a READY Task, so the recovery pass must not
     // start it on its own default adapter while they are setting up.
     CODEESTRA_SCHEDULE_TICK_MS: '600000',
   };
-  const opened = await cli(['open', repository, '--no-open'], environment);
+  const opened = await cli(['project', 'trust', repository], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { readonly id: string }[];
@@ -152,7 +149,7 @@ async function openSecondProject(environment: Record<string, string>): Promise<s
   await git(repository, ['add', '.']);
   await git(repository, ['commit', '-q', '-m', 'fixture']);
   await git(repository, ['branch', 'dev']);
-  const opened = await cli(['open', repository, '--no-open'], environment);
+  const opened = await cli(['project', 'trust', repository], environment);
   expect(opened.exitCode).toBe(0);
   const after = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { readonly id: string }[];

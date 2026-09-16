@@ -128,15 +128,13 @@ async function fixtureWithProjects(
     symlinkSync(real, link);
     home = link;
   }
-  const assets = temporaryDirectory('codeestra-reclaim-batch-assets-');
-  await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
-  const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets,
+  const environment = { CODEESTRA_HOME: home,
     CODEESTRA_SCHEDULE_TICK_MS: '600000' };
   const repositories: string[] = [];
   for (let index = 0; index < count; index += 1) {
     const { repository } = await createRepository(`codeestra-reclaim-batch-repo-${index}-`);
     repositories.push(repository);
-    const opened = await cli(['open', repository, '--no-open'], environment);
+    const opened = await cli(['project', 'trust', repository], environment);
     expect(opened.exitCode).toBe(0);
   }
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as

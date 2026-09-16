@@ -117,8 +117,6 @@ async function fixture(withMapping: boolean): Promise<Fixture> {
   const repository = temporaryDirectory('codeestra-recheck-repo-');
   const home = temporaryDirectory('codeestra-recheck-home-');
   const tools = temporaryDirectory('codeestra-recheck-tools-');
-  const assets = temporaryDirectory('codeestra-recheck-assets-');
-  await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
   mkdirSync(join(repository, '.codeestra', 'policies'), { recursive: true });
   await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'), JSON.stringify({
     version: 1, commands: [{ id: 'check', argv: ['true'], cwd: '.', timeoutSeconds: 60 }],
@@ -144,13 +142,12 @@ async function fixture(withMapping: boolean): Promise<Fixture> {
 
   const environment = {
     CODEESTRA_HOME: home,
-    CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: shimPath,
     // The fixtures below deliberately leave a READY Task in place; the recovery pass must not run
     // often enough for a test to observe a start it did not ask for.
     CODEESTRA_SCHEDULE_TICK_MS: '600000',
   };
-  const opened = await cli(['open', repository, '--no-open'], environment);
+  const opened = await cli(['project', 'trust', repository], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { readonly id: string }[];

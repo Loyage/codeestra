@@ -8,13 +8,11 @@ import {
   settingsListViewSchema,
   type PermissionMode,
   type ProseQuestionAttentionSettings,
-  type SettingEntry,
   type SettingsListView,
 } from '@codeestra/contracts';
 import type { Phase1Database } from '@codeestra/storage';
 import { permissionModePath } from './permission-mode.js';
 import { proseQuestionAttentionPath } from './prose-question-attention-settings.js';
-import { inspectUiSettings, uiSettingsPath } from './ui-settings.js';
 
 /**
  * The settings face of one Runtime home (ADR-0064).
@@ -25,9 +23,8 @@ import { inspectUiSettings, uiSettingsPath } from './ui-settings.js';
  *
  * 1. **Each entry is filled from the same read its own command uses.** The permission mode, the
  *    prose-question switch come from the values this Runtime booted with and writes on change (the
- *    in-memory facts `permission.get` and `settings prose-question-attention` report); the five
- *    interface keys come from `inspectUiSettings`,
- *    which reads the file on every call; the concurrency limit comes from the same
+ *    in-memory facts `permission.get` and `settings prose-question-attention` report); the
+ *    concurrency limit comes from the same
  *    `runtime_capacity_settings` read `scheduler capacity get` uses. The aggregate therefore cannot
  *    disagree with the dedicated command — a second reader of the same fact is exactly how two
  *    answers start to differ.
@@ -48,11 +45,9 @@ export function inspectSettings(input: {
   readonly proseQuestionAttentionExplicit: boolean;
   readonly storage: Phase1Database;
 }): SettingsListView {
-  const ui = inspectUiSettings(input.runtimeHome);
   const capacity = input.storage.getRuntimeCapacity();
   const permissionFile = permissionModePath(input.runtimeHome);
   const attentionFile = proseQuestionAttentionPath(input.runtimeHome);
-  const uiFile = uiSettingsPath(input.runtimeHome);
   // The stored and effective values have to be two readings of one moment, so both come from the
   // value the Runtime is actually using plus the boot-time question "did this home store one?".
   const permissionExplicit = input.permissionModeExplicit;
@@ -88,18 +83,6 @@ export function inspectSettings(input: {
         file: attentionFile,
         appliesTo: input.proseQuestionAttention.appliesTo,
       },
-      ...ui.settings.map((entry): SettingEntry => ({
-        key: `ui.${entry.key}` as SettingEntry['key'],
-        value: entry.value,
-        default: entry.default,
-        values: [...entry.values],
-        range: null,
-        explicit: entry.explicit,
-        source: entry.source,
-        store: 'RUNTIME_FILE',
-        file: uiFile,
-        appliesTo: ui.appliesTo,
-      })),
       {
         key: 'capacity.globalLimit',
         value: capacity.limit,

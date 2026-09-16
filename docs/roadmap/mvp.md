@@ -9,7 +9,7 @@
 - 效率至上是最高优化目标：阶段内任务优先选择能直接减少用户等待时间与操作步数的项（例如已完成的 Task cancel、长命令后台化与进度事件、revision 投递确认，以及仍剩余的调度/提升类能力）——这份清单不是承诺，只说明排序依据。
 - 安全/隔离类工作不单独占阶段排期，也不再新增门禁；已实现门禁维持在既有条款。
 - 权限管理（多用户、租户、密钥托管、路径沙箱、网络策略，以及相应的沙箱/联邦）不属于当前 roadmap，不预留专项阶段。
-- 每个阶段的新能力以 CLI 完备为前提：CLI 能完成并脚本化驱动后，才由 UI/桌面做便利前端（检查方式：能力是否有 versioned command 与稳定退出码）。
+- 每个阶段的新能力以 CLI 完备为前提。ADR-0067 起暂停 Web UI 开发，当前 roadmap 不安排 UI 投影；检查方式是 CLI 是否有 versioned command、`--json` 与稳定退出码。
 - 验收与自动化测试只用 CLI/命令面断言，不获取电脑控制权（不引入桌面/键鼠自动化）。
 
 ## Phase 0 — Architecture Foundation
@@ -69,7 +69,7 @@ Task verification（ADR-0006）、Task 暂停/取消/归档（ADR-0016/FOUNDATIO
 
 ## Phase 3 — Interactive Agent Sessions
 
-交付：真实 session 接入、Attention Inbox、WAITING_FOR_USER、回答路由、断连与恢复、运行中修订的通知与确认；增加 Session Guidance 与原生终端接管。Pi 按 ADR-0010 在当前工具结束后的结构化安全点执行 RPC→原生 TUI/PTY 交接，detach 后保持 TUI 运行，显式 release 再交接回 RPC；CLI 提供 request/attach/status/release 与可脚本化 guidance，UI 只投影同一命令面。
+交付：真实 session 接入、Attention Inbox、WAITING_FOR_USER、回答路由、断连与恢复、运行中修订的通知与确认；增加 Session Guidance 与原生终端接管。Pi 按 ADR-0010 在当前工具结束后的结构化安全点执行 RPC→原生 TUI/PTY 交接，detach 后保持 TUI 运行，显式 release 再交接回 RPC；CLI 提供 request/attach/status/release 与可脚本化 guidance。Web UI 投影已按 ADR-0067 暂停。
 
 实现顺序：先以真实 Pi spike 验证 session-file 双向恢复、权限模式 side channel（FULL 零确认 / STRICT gate）和 PTY 生命周期；再实现 handoff Operation / Session incarnation / 单 writer lease；最后接 CLI attach 与 UI 终端。任一步都不得让两个 Provider 进程同时写同一 conversation/worktree。
 
@@ -92,7 +92,7 @@ artifact 在 Runtime 数据目录且**不写 Task worktree**。它**不产生 Ta
 
 **未验证**：跨交接权限模式完整矩阵、并行工具批次的安全点、PTY resize（如实声明 `UNSUPPORTED`）、真实模型在 TUI 中键入后
 交还自动化的复验；Session Guidance 的**模型侧**（真实模型是否读了 guidance、真实 Pi 在忙碌轮次里是否接受 `steer`）
-与 UI 投影仍未验证。
+；Web UI 投影已从当前方向移除（ADR-0067）。
 
 ## Phase 4 — Integration Pipeline
 

@@ -29,7 +29,7 @@ Self Task → Candidate → 自托管测试 → 用户 Promotion → 排空 → 
 
 这是模块分层，不是微服务。Domain 不依赖具体运行时、数据库、UI 或 Agent。Git worktree 隔离工作目录，不提供 OS 权限沙箱。
 
-服务形态：独立本地 Runtime 是软件本体；**CLI 是完备、权威、可脚本化的命令面**，Web UI 与未来桌面只是同一 versioned command/query/event 面的便利前端（不新增业务语义、不绕过门禁、不直接访问 SQLite）。“只有 UI 能做、CLI 不能做”的能力视为缺陷。
+服务形态：独立本地 Runtime 是软件本体；**CLI 是完备、权威、可脚本化的命令面**。ADR-0067 起 Web UI 暂停，当前只启用 CLI/Unix socket；保留的 UI/HTTP 源码不属于可用产品面。未来恢复的 UI/桌面仍只能是同一 versioned command/query/event 面的便利前端。
 
 ## 设计导航
 

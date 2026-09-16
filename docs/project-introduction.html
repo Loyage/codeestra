@@ -331,8 +331,8 @@
       <div class="section-head"><span class="section-number">03 /</span><div><h2 id="principles-title">三条第一原则</h2><p>这是产品与工程取舍的最高依据，而不是可选的风格偏好。</p></div></div>
       <div class="grid three">
         <article class="card"><span class="label">01 — EFFICIENCY</span><h3>效率至上</h3><p>默认 <code>FULL</code> 主机级全权限，常态权限确认预算为 <strong>0 步、0 等待</strong>。可用 CLI 无确认切换 <code>STRICT</code>，恢复旧门禁。</p><p>减少用户等待，不用层层审批代替正确性核对。</p></article>
-        <article class="card"><span class="label">02 — SERVICE + CLI</span><h3>软件本体是服务</h3><p>独立 Runtime 拥有业务语义；CLI 必须完备、可脚本化，提供机器可读输出与稳定退出码。</p><p>Web UI 与未来桌面只是同一命令面的便利前端。“只有 UI 能做”是缺陷。</p></article>
-        <article class="card"><span class="label">03 — COMMAND-SURFACE TESTING</span><h3>只从命令面验证</h3><p>自动化测试与验收通过 CLI / Runtime 命令面及其 HTTP/SSE 传输驱动；不获取用户电脑控制权。</p><p>不使用桌面、键鼠或真实窗口自动化。视觉观感留给用户在场时人工确认。</p></article>
+        <article class="card"><span class="label">02 — SERVICE + CLI</span><h3>软件本体是服务</h3><p>独立 Runtime 拥有业务语义；CLI 必须完备、可脚本化，提供机器可读输出与稳定退出码。</p><p>ADR-0067 起 Web UI 暂停，当前只启用 CLI/Unix socket。“只有 UI 能做”始终是缺陷。</p></article>
+        <article class="card"><span class="label">03 — COMMAND-SURFACE TESTING</span><h3>只从命令面验证</h3><p>自动化测试与验收通过 CLI / Runtime Unix socket 命令面驱动；不获取用户电脑控制权。</p><p>不使用桌面、键鼠或真实窗口自动化；暂停的 Web UI/HTTP 不在当前测试范围。</p></article>
       </div>
       <div class="callout warn"><strong>零确认 ≠ 零校验，也不等于沙箱。</strong>FULL 下 Agent、验证命令和 Git hooks 使用当前系统用户的主机权限。Worktree 只隔离工作目录；revision、ref、归属、进程身份、幂等与恢复核对仍然有效。需要澄清产品意图时仍应提问，提问不是权限审批。</div>
     </section>
@@ -378,9 +378,9 @@
 
     <section id="architecture" aria-labelledby="architecture-title">
       <div class="section-head"><span class="section-number">06 /</span><div><h2 id="architecture-title">一个 Runtime，多种入口，清晰分层</h2><p>这是本地模块化服务，不是微服务系统；关闭客户端不等于终止后台任务。</p></div></div>
-      <div class="architecture" role="group" aria-label="架构：CLI、Web UI 与未来桌面通过同一命令面连接 Runtime；Runtime 编排调度、Git、Agent、验证与知识，底层保存证据和恢复状态。">
-        <div class="arch-clients"><div class="arch-client">CLI · 完备命令面</div><div class="arch-client">Web UI · React / Vite</div><div class="arch-client future">Tauri 桌面 · 未实现</div></div>
-        <p class="arch-connector">↓ 同一 versioned commands / queries / events · CLI：Unix socket · Web：本机 HTTP / SSE ↓</p>
+      <div class="architecture" role="group" aria-label="架构：当前由 CLI 通过 Unix socket 连接 Runtime；Web UI 已暂停；Runtime 编排调度、Git、Agent、验证与知识，底层保存证据和恢复状态。">
+        <div class="arch-clients"><div class="arch-client">CLI · 当前唯一入口</div><div class="arch-client future">Web UI · 已暂停</div><div class="arch-client future">Tauri 桌面 · 未实现</div></div>
+        <p class="arch-connector">↓ versioned commands / queries / events · 当前传输：CLI / Unix socket ↓</p>
         <div class="arch-runtime"><h3>Local Runtime <span class="pill">Bun / TypeScript</span></h3><p>拥有状态、编排与外部操作生命周期；一个 CODEESTRA_HOME 对应一个实例。</p><div class="arch-modules"><span>Task / Revision / DAG</span><span>Scheduler / Conflict</span><span>Execution / Session</span><span>Git Workspace / Integration</span><span>Verification / Operations</span><span>Knowledge / Adapter Registry</span></div></div>
         <div class="arch-foundation">SQLite · 事务 / 唯一性约束 / 审计 &nbsp; | &nbsp; Outbox · 事件投递 &nbsp; | &nbsp; Recovery · 真实资源核对</div>
         <p class="arch-connector">↓ Adapter ports 隔离供应商协议 ↓</p>
@@ -394,26 +394,26 @@
       <div class="table-wrap spaced"><table><caption>从问题找到代码：当前真实目录</caption><thead><tr><th scope="col">路径</th><th scope="col">职责 / 阅读切入点</th></tr></thead><tbody>
         <tr><td><code>apps/cli</code></td><td>参数、机器可读输出、退出码、自动连接 / 启动 Runtime。</td></tr>
         <tr><td><code>apps/runtime</code></td><td>命令分发、调度、执行、验证、知识、生命周期与恢复编排。</td></tr>
-        <tr><td><code>apps/ui</code></td><td>同一命令面的 React / Vite 投影；不直接读写数据库或定义业务语义。</td></tr>
+        <tr><td><code>apps/ui</code></td><td>暂停的 React / Vite 源码；默认不构建、不测试、不发布，当前不可用。</td></tr>
         <tr><td><code>packages/domain</code></td><td>纯 TypeScript 规则与状态机；不导入 Bun、数据库驱动、UI 或 Agent SDK。</td></tr>
         <tr><td><code>packages/contracts</code></td><td>Zod 运行时边界、命令 / 事件 schema、Adapter ports。</td></tr>
         <tr><td><code>packages/storage</code></td><td>Bun 原生 SQLite、迁移、事务、约束、审计、命令回执与投影。</td></tr>
         <tr><td><code>packages/git</code> / <code>packages/agent-adapters</code></td><td>Git 归属与 worktree 操作 / 各 provider 的真实协议与能力声明。</td></tr>
       </tbody></table></div>
-      <p class="hero-foot">技术选择：TypeScript、Bun workspaces、React、Vite、SQLite、Zod、Git CLI、Vitest / Bun test。Tauri 与独立 bootstrap 是规划，不是已有组件；不能把架构目标目录当作当前实现。</p>
+      <p class="hero-foot">当前默认工具链：TypeScript、Bun workspaces、SQLite、Zod、Git CLI、Vitest / Bun test。React / Vite 源码按 ADR-0067 暂停，Tauri 与独立 bootstrap 是规划；不能把保留源码或目标目录当作当前可用组件。</p>
     </section>
 
     <section id="progress" aria-labelledby="progress-title">
       <div class="section-head"><span class="section-number">07 /</span><div><h2 id="progress-title">已经超出概念验证，但尚未完整验收</h2><p>内容基线：dev @ Wave L（FOUNDATION-077～080 合入后，2026-09-15）。下面是仓库进展快照，不是 main 部署证明。</p></div></div>
       <div class="grid three">
-        <article class="card dark"><span class="label">FOUNDATION</span><h3>可运行的纵向基础</h3><p>Task、成果 commit 与 Task verification 已实现，CLI 与本地 Web UI 已可用；集成与稳定提升已按 ADR-0066 从产品中删除。</p></article>
+        <article class="card dark"><span class="label">FOUNDATION</span><h3>可运行的纵向基础</h3><p>Task、成果 commit 与 Task verification 已实现，CLI 可用；Web UI 已按 ADR-0067 暂停，集成与稳定提升已按 ADR-0066 从产品中删除。</p></article>
         <article class="card"><span class="label">PROVIDER INTEGRATION</span><h3>3 个真实 Adapter</h3><p>Pi、Codex、Claude Code 已接入。接入不等于能力一致，更不等于三个 provider 的全部模型行为已验收。</p></article>
         <article class="card"><span class="label">LATEST MILESTONE</span><h3>稳定 / 开发实例分离</h3><p>main 与 dev 已改为两个独立 clone；dev 使用独立 home 与构建期 DEV 标记。ADR-0047 的提升已落到产品命令面，用户说明书（ADR-0050）与知识注入（ADR-0051）同批落地。</p></article>
       </div>
       <ol class="timeline spaced" aria-label="各阶段当前状态">
         <li><span class="phase">PHASE 0</span><div><h3>Architecture Foundation <span class="badge">基础已建立</span></h3><p>规格、ADR、领域状态机、仓库结构、工具链与测试入口已建立；文档与实现持续校准。</p></div></li>
         <li><span class="phase">PHASE 1</span><div><h3>Single Task Runtime <span class="badge">交付项已实现</span></h3><p>Task 生命周期、独占工作目录、成果捕获、验证、暂停 / 取消 / 归档、显式重试与恢复核对。真实模型暂停 / 恢复和取消超时仍待复验。</p></div></li>
-        <li><span class="phase">PHASE 2</span><div><h3>DAG + Scheduler + Parallel Worktrees <span class="badge partial">实现已有 · 真实并发待验收</span></h3><p>DAG、冲突分析、容量预留、自动 tick 与 UI 投影已实现；两个 SAFE 任务由真实 provider 同时运行的验收尚未完成。</p></div></li>
+        <li><span class="phase">PHASE 2</span><div><h3>DAG + Scheduler + Parallel Worktrees <span class="badge partial">实现已有 · 真实并发待验收</span></h3><p>DAG、冲突分析、容量预留与自动 tick 已实现；Web UI 投影已暂停，两个 SAFE 任务由真实 provider 同时运行的验收尚未完成。</p></div></li>
         <li><span class="phase">PHASE 3</span><div><h3>Interactive Agent Sessions <span class="badge partial">部分实现</span></h3><p>Attention、修订投递台账、Pi 安全点原生终端交接、只读 transcript 已实现。Session Guidance 未实现；真实 revision ACK 无 Adapter 支持。</p></div></li>
         <li><span class="phase">PHASE 4</span><div><h3>Integration Pipeline <span class="badge partial">部分实现 · 提升已走产品命令面</span></h3><p>单成员 IntegrationBatch、独立集成验证、精确 dev SHA 全量证据，以及 ADR-0047 的「push → 等待拉取 → 收口 → 重启 → 推回」命令面已实现。多成员批次、批级 STALE / CANCELLED 与「等待拉取」的 UI 投影仍未实现。</p></div></li>
         <li><span class="phase">PHASE 5</span><div><h3>Multiple Agent Adapters <span class="badge partial">已接入 · 按能力验收</span></h3><p>Pi / Codex / Claude Code 和失败后换 Agent 的新 Execution 路径已有。Claude 模型层待验证；插件选择目前仅 Pi 支持。</p></div></li>
@@ -444,14 +444,14 @@
         <tr><td>Task → dev</td><td>Task verification 通过后，经 IntegrationBatch 和独立 Integration verification 集成。</td><td>任务自身通过不能代替合并后的验证；也不能代替提升前全量证据。</td></tr>
         <tr><td>dev → main 前</td><td>在 dev 发起，对精确候选 SHA 完成全量测试；Runtime 的证据命令在该 SHA 的隔离副本运行。</td><td>候选、策略或锁文件变化后必须重跑。普通 dev 文档修改不触发立即全量测试。</td></tr>
       </tbody></table></div>
-      <div class="card dark spaced"><span class="label">本仓库自身的发布约定 / 不是产品能力</span><h3>dev → origin/dev → main → 重启核对 → origin/main</h3><p>这一节只适用于 Codeestra 自己这个仓库（ADR-0066 之后产品没有任何提升命令）。固定候选与预期 main SHA 后：</p><ol><li>只 push 固定候选到远端 dev，并读回核对 SHA 相等。</li><li>在 main clone 执行 fetch + merge --ff-only origin/dev，核对拉到的就是候选。</li><li>在 main clone 按顺序 install → build:ui → stop → status；只有 <strong>READY 且 uiRunning: true</strong> 才报告稳定服务恢复。</li><li>重启核对成功后，才 fast-forward push main 回 origin/main。任一步失败就停下，保留现场，不擅自回滚或强推。</li></ol><p class="spaced">完整命令序列见 <code>docs/agents/runbook.md</code>。产品不提供命令、不记账、不校验它。</p></div>
+      <div class="card dark spaced"><span class="label">本仓库自身的发布约定 / 不是产品能力</span><h3>dev → origin/dev → main → 重启核对 → origin/main</h3><p>这一节只适用于 Codeestra 自己这个仓库（ADR-0066 之后产品没有任何提升命令）。固定候选与预期 main SHA 后：</p><ol><li>只 push 固定候选到远端 dev，并读回核对 SHA 相等。</li><li>在 main clone 执行 fetch + merge --ff-only origin/dev，核对拉到的就是候选。</li><li>在 main clone 按顺序 install → stop → status；只有 <strong>status: READY</strong> 才报告 Runtime 恢复。</li><li>重启核对成功后，才 fast-forward push main 回 origin/main。任一步失败就停下，保留现场，不擅自回滚或强推。</li></ol><p class="spaced">ADR-0067 起这里没有 UI 构建或启动步骤。完整命令序列见 <code>docs/agents/runbook.md</code>。</p></div>
     </section>
 
     <section id="start" aria-labelledby="start-title">
       <div class="section-head"><span class="section-number">10 /</span><div><h2 id="start-title">第一天：先确认你在运行哪一份代码</h2><p>本机双 clone 布局是当前开发环境约定；其他开发者请替换为自己的对应路径。</p></div></div>
       <div class="grid two">
-        <article class="card"><span class="label">MAIN / 稳定实例</span><h3><code>~/Documents/codeestra</code></h3><p>检出 main，用于稳定服务与日常使用。只按既定规程拉取、安装、构建和重启；不在这里开发新功能，不复制 dev 未提交改动。</p><p>与 dev 不是彼此的 worktree，也不共享对象库、node_modules、UI 产物或运行数据。</p></article>
-        <article class="card"><span class="label">DEV / 开发实例</span><h3><code>~/Documents/codeestra-dev</code></h3><p>检出 dev，使用独立 <code>CODEESTRA_HOME</code>。Web UI 端口由 Runtime 自取空闲端口，不需要手动与稳定实例错开。</p><p>DEV 标记来自构建变量，不来自运行期猜测；没有标记的页面不能证明它是稳定版。</p></article>
+        <article class="card"><span class="label">MAIN / 稳定实例</span><h3><code>~/Documents/codeestra</code></h3><p>检出 main，用于稳定服务与日常使用。只按既定规程拉取、安装和重启；不在这里开发新功能，不复制 dev 未提交改动。</p><p>与 dev 不是彼此的 worktree，也不共享对象库、node_modules 或运行数据。</p></article>
+        <article class="card"><span class="label">DEV / 开发实例</span><h3><code>~/Documents/codeestra-dev</code></h3><p>检出 dev，使用独立 <code>CODEESTRA_HOME</code>。当前只运行 CLI/Runtime；Web UI 已暂停。</p><p>区分开发与稳定实例依靠检出目录和 <code>CODEESTRA_HOME</code>。</p></article>
       </div>
       <pre aria-label="开发实例准备命令"><code># 使用 Nix 提供工具；以下示例在开发 clone 执行
 nix shell nixpkgs#bun nixpkgs#nodejs_24 nixpkgs#just
@@ -460,16 +460,14 @@ pwd
 git branch --show-current
 git status --short
 
-# 每个 clone 都需要自己的依赖与 UI 产物
+# 每个 clone 都需要自己的依赖；Web UI 已暂停，无 UI 构建步骤
 bun install --frozen-lockfile
-bun run build:ui:dev
 
 # 仅为当前 shell 设置独立实例目录
 export CODEESTRA_HOME="$HOME/.local/state/codeestra-dev"
 bun run codeestra status
-bun run codeestra permission get
-bun run codeestra ui --no-open</code></pre>
-      <p class="hero-foot">这段命令会启动 dev Runtime，但不会创建任务或启动 provider 执行开发工作。本次 HTML 文档交付没有代你运行这些命令。生成的 UI 地址含临时 token，不要写入文档、日志或提交。</p>
+bun run codeestra settings permission get</code></pre>
+      <p class="hero-foot">这段命令会启动 dev Runtime，但不会创建任务或启动 provider 执行开发工作。当前没有 Web UI 地址、端口或 token。</p>
       <div class="callout warn"><strong>最常见的误判：</strong>在 dev clone 执行不带独立 <code>CODEESTRA_HOME</code> 的 CLI，可能连接的是已经运行的稳定 Runtime，不能证明 dev 代码已生效。区分两个实例靠 <code>CODEESTRA_HOME</code> 与所在目录，界面上没有 dev 标记（ADR-0066 删除了它）。</div>
       <div class="card spaced"><h3>讲解结束后，确认大家能回答这四个问题</h3>
         <details open><summary>为什么不是“一个 Agent = 一个任务”？</summary><p>Task 表达目标与交付，Execution 表达一次尝试，Agent 是执行资源。换 Agent 不该丢掉任务身份、规格历史与失败证据。</p></details>

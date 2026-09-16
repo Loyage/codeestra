@@ -220,8 +220,6 @@ async function startHandoffTask(mode: 'permission' | 'fence'): Promise<{
   const repository = temporaryDirectory('codeestra-handoff-repo-');
   const home = temporaryDirectory('codeestra-handoff-home-');
   const tools = temporaryDirectory('codeestra-handoff-tools-');
-  const assets = temporaryDirectory('codeestra-handoff-assets-');
-  await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
   mkdirSync(join(repository, '.codeestra', 'policies'), { recursive: true });
   await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'), JSON.stringify({
     version: 1, commands: [{ id: 'check', argv: ['true'], cwd: '.', timeoutSeconds: 60 }],
@@ -243,12 +241,11 @@ async function startHandoffTask(mode: 'permission' | 'fence'): Promise<{
 
   const environment = {
     CODEESTRA_HOME: home,
-    CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: shimPath,
     CODEESTRA_HANDOFF_REPORT: reportPath,
     CODEESTRA_HANDOFF_MODE: mode,
   };
-  const opened = await cli(['open', repository, '--no-open'], environment);
+  const opened = await cli(['project', 'trust', repository], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { id: string }[];

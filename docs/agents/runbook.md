@@ -11,10 +11,10 @@
 
 ## 1. 本机检出布局（ADR-0048）
 
-- `~/Documents/codeestra` 检出 `main`：**稳定 clone**。只用于运行稳定服务与拉取已批准的提升；只接受 pull / `bun install --frozen-lockfile` / `bun run build:ui` / `stop` / `status`。不得在其中开发新功能、建 task/lane worktree，或把 dev 的未提交改动复制过去。
+- `~/Documents/codeestra` 检出 `main`：**稳定 clone**。只用于运行稳定服务与拉取已批准的提升；只接受 pull / `bun install --frozen-lockfile` / `stop` / `status`。不得在其中开发新功能、建 task/lane worktree，或把 dev 的未提交改动复制过去。
 - `~/Documents/codeestra-dev` 检出 `dev`：**开发 clone**。所有开发、集成与定向验证都在这里进行。
 - 两者是**独立仓库**，不是彼此的 worktree：各自 `.git` 是目录、各有 `origin`；`git worktree list` 不得出现对方。
-- 两个 clone 的 `node_modules`、`apps/ui/dist`、Runtime 数据目录都是各自的本地状态，不共享；各自需要 `bun install --frozen-lockfile`，UI 资产各自构建。
+- 两个 clone 的 `node_modules` 与 Runtime 数据目录都是各自的本地状态，不共享；各自需要 `bun install --frozen-lockfile`。ADR-0067 起默认流程不构建 UI。
 - **产品侧的 dev 建模已由 ADR-0066 删除**：没有 dev clone、长期 `dev` 集成分支、`task integrate` 或
   `promotion *`，也没有 dev 构建通道。本文件里的 `main`/`dev` 两个 clone、人工四步与重启规程是
   **本仓库自身的仓库约定**，不是产品能力：产品不提供命令、不记账、不校验它。
@@ -25,15 +25,11 @@
 
 ```bash
 cd /Users/loyage/Documents/codeestra-dev
-bun run build:ui
 CODEESTRA_HOME=~/.local/state/codeestra-dev bun run codeestra status
-CODEESTRA_HOME=~/.local/state/codeestra-dev bun run codeestra ui --no-open
 ```
 
-- 等价入口：`just restart-dev`（`install --frozen-lockfile` → 构建 UI → `stop` → `status` → `ui --no-open`）。
-- **没有 dev 通道标记了**（ADR-0066 删除 ADR-0049）：`VITE_CODEESTRA_CHANNEL`、`data-channel`、橙色横幅与
-  `Codeestra Dev` 品牌名都不存在，所以没有「构建后核对标记」这一步。区分 dev/稳定靠 `CODEESTRA_HOME` 与目录。
-- Web UI 端口由 Runtime 自己取空闲端口，两个实例不会撞端口；各自持有自己的内存 token，不要记录实际 token。
+- 等价入口：`just restart-dev`（`install --frozen-lockfile` → `stop` → `status`）。
+- ADR-0067 起 Web UI 暂停：没有 UI 构建、端口、token 或启动步骤。区分 dev/稳定靠 `CODEESTRA_HOME` 与目录。
 - 不写 `CODEESTRA_HOME` 时，从 dev clone 运行 CLI 连的是**稳定 Runtime**、执行的是 `main` 代码：不能用来证明 dev 代码已运行。
 - dev 实例的数据库、任务与会话是独立的临时数据，不得据它声称稳定数据迁移或稳定服务已更新。
 
@@ -51,16 +47,15 @@ CODEESTRA_HOME=~/.local/state/codeestra-dev bun run codeestra ui --no-open
 
 ## 4. 重启 main 稳定服务（给 dev Agent 的操作规程）
 
-等价入口：`just restart-main`（只重启，不移动任何 ref、不推送），它在下面序列末尾补一步 `bun run codeestra ui --no-open`（ADR-0007：UI 是按需客户端，`stop`/`status` 不会把它带回来，而第 5 条要求 `uiRunning: true`）。
+等价入口：`just restart-main`（只重启，不移动任何 ref、不推送）。
 
-用户说“重启 main 的服务”“让 main 更新生效”或同义指令时，必须操作 **main clone**。除非用户明确要求跳过，使用完整流程；即使看不出依赖或 UI 变化，也允许重复执行 install/build，以免漏更各自被 gitignore 的本地资产：
+用户说“重启 main 的服务”“让 main 更新生效”或同义指令时，必须操作 **main clone**。除非用户明确要求跳过，使用完整流程；允许重复执行 install 以确保锁文件依赖一致：
 
 ```bash
 cd /Users/loyage/Documents/codeestra
 git fetch origin
 git merge --ff-only origin/dev        # 只在本次是已批准的提升时执行；拉不到候选就停下并报告
 bun install --frozen-lockfile
-bun run build:ui
 bun run codeestra stop
 bun run codeestra status
 git push origin main                  # 提升收尾：把已拉取并验证过的 main 推回 origin/main
@@ -72,8 +67,8 @@ git push origin main                  # 提升收尾：把已拉取并验证过�
 2. `fetch` / `merge --ff-only` 只用于把已批准的 `origin/dev` 候选快进到 `main`，ff 不成立（`main` 与候选分叉）即停止并报告，不得改用 merge commit、reset 或强推；`push origin main` 也只允许 fast-forward，被拒即停下报告。
 3. 命令按顺序执行并检查退出码；前一步失败即停止并报告，不声称已重启成功。
 4. `stop` 中断运行中的 Runtime/Session，这是既定后置步骤，不额外确认；不要手工 kill 未核验归属的进程。
-5. 只有 `status: "READY"` 且 `uiRunning: true` 才可报告恢复；提升在「候选已到 `origin/dev`、main 已 ff 到该候选、Runtime 已恢复、已推回 `origin/main`」四件事实都核对后才算完成（推回最后，重启未成功不推回）。
-6. 重启更换 Web UI 内存 token，旧 URL 失效；用户需要 UI 时在 main clone 执行 `bun run codeestra ui`（只要链接加 `--no-open`），不得记录实际 token。从 dev clone 不带独立 `CODEESTRA_HOME` 运行 CLI 只是连稳定 Runtime，不能证明 dev 代码已运行，也不能把未提升的 dev 改动说成已部署。
+5. 只有 `status: "READY"` 才可报告恢复；提升在「候选已到 `origin/dev`、main 已 ff 到该候选、Runtime 已恢复、已推回 `origin/main`」四件事实都核对后才算完成（推回最后，重启未成功不推回）。
+6. 从 dev clone 不带独立 `CODEESTRA_HOME` 运行 CLI 只是连稳定 Runtime，不能证明 dev 代码已运行，也不能把未提升的 dev 改动说成已部署。
 
 ## 5. 不要做的事
 

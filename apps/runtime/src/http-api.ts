@@ -141,7 +141,7 @@ export class RuntimeHttpApi {
       // Same schema as the socket transport: the HTTP surface adds no new command semantics.
       const parsed = runtimeRequestSchema.safeParse(body);
       if (!parsed.success) return json({ error: 'INVALID_REQUEST' }, 400);
-      if (parsed.data.command === 'events.subscribe' || parsed.data.command === 'runtime.ui') {
+      if (parsed.data.command === 'events.subscribe') {
         return json({ error: 'NOT_AVAILABLE_OVER_HTTP' }, 400);
       }
       return this.#dispatchStreaming(parsed.data);

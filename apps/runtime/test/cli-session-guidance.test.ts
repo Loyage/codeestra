@@ -151,15 +151,12 @@ const message = 'Prefer the repository conventions file over ad-hoc styling.';
 interface RepositoryFixture {
   readonly repository: string;
   readonly tools: string;
-  readonly assets: string;
 }
 
 
 async function createRepository(prefix: string): Promise<RepositoryFixture> {
   const repository = temporaryDirectory(`${prefix}-repo-`);
   const tools = temporaryDirectory(`${prefix}-tools-`);
-  const assets = temporaryDirectory(`${prefix}-assets-`);
-  await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
   mkdirSync(join(repository, '.codeestra', 'policies'), { recursive: true });
   await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'), JSON.stringify({
     version: 1, commands: [{ id: 'check', argv: ['true'], cwd: '.', timeoutSeconds: 60 }],
@@ -173,14 +170,14 @@ async function createRepository(prefix: string): Promise<RepositoryFixture> {
   await Bun.write(stubPath, stubSource);
   await Bun.write(shimPath, `#!/bin/sh\nexec "${process.execPath}" "${stubPath}" "$@"\n`);
   chmodSync(shimPath, 0o755);
-  return { repository, tools: shimPath, assets };
+  return { repository, tools: shimPath };
 }
 
 describe('session guidance command face', () => {
   test('records guidance, hands it to the next Execution and never becomes a TaskRevision', async () => {
     const home = temporaryDirectory('codeestra-guidance-home-');
     const main = await createRepository('codeestra-guidance');
-    const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: main.assets,
+    const environment = { CODEESTRA_HOME: home,
       CODEESTRA_PI_EXECUTABLE: main.tools };
     // ADR-0064: trust records the repository identity and the committed policies; there is no dev
     // clone to name, and the Task baseline is this folder's checked out branch.

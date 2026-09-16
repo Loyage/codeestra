@@ -56,8 +56,6 @@ async function trustedProject(): Promise<{ environment: Record<string, string>; 
   projectId: string }> {
   const repository = temporaryDirectory('codeestra-glc2-repo-');
   const home = temporaryDirectory('codeestra-glc2-home-');
-  const assets = temporaryDirectory('codeestra-glc2-assets-');
-  await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
   mkdirSync(join(repository, '.codeestra', 'policies'), { recursive: true });
   await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'), JSON.stringify({
     version: 1, commands: [{ id: 'check', argv: ['true'], cwd: '.', timeoutSeconds: 60 }],
@@ -67,8 +65,8 @@ async function trustedProject(): Promise<{ environment: Record<string, string>; 
   await git(repository, ['add', '.']);
   await git(repository, ['commit', '-q', '-m', 'fixture']);
   await git(repository, ['branch', 'dev']);
-  const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
-  expect((await cli(['open', repository, '--no-open'], environment)).exitCode)
+  const environment = { CODEESTRA_HOME: home };
+  expect((await cli(['project', 'trust', repository], environment)).exitCode)
     .toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { id: string }[];

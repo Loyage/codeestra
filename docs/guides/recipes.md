@@ -1,7 +1,7 @@
 # 常见任务的做法（recipes）
 
-> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
-> 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@6c7de03`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> 版本会前进：`dev@6c7de03` 只是本目录最后一次校对的基线；当前适用版本以
 > **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
 > 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
@@ -14,6 +14,8 @@
 > recipe 12 补充「集成成功后自动回收」（ADR-0062）。
 
 本文是**步骤化**的：每条 recipe 回答一个「我想做 X」，给出可以照抄的命令与**做完之后看什么**。
+
+> **ADR-0067**：Web UI 已暂停。本篇遗留的“界面上也可以”描述只记录暂停前的历史投影，当前不可操作；请执行每节的 CLI 命令。
 
 约定：
 
@@ -466,21 +468,14 @@ cd ~/Documents/codeestra
 git fetch origin
 git merge --ff-only origin/dev
 
-# ③ 在 main clone：重启稳定 Runtime（并拉起 Web UI）后核对
+# ③ 在 main clone：重启稳定 Runtime 后核对
 bun install --frozen-lockfile
-bun run build:ui
 bun run codeestra stop
-bun run codeestra status                 # 拉起 Runtime
-bun run codeestra ui --no-open           # 再拉起 Web UI 服务器，并打印带 token 的链接
-bun run codeestra status                 # 必须看到 status: "READY" 且 uiRunning: true
+bun run codeestra status                 # 必须看到 status: "READY"
 
 # ④ 核对通过后，才把 main 推回远端
 git push origin main
 ```
-
-**为什么第 ③ 步要多一条 `codeestra ui --no-open`**：`stop` / `status` 不会把 Web UI 服务器带回来
-（ADR-0007：UI 是按需客户端），实测重启后 `uiRunning` 为 `false`；而恢复判据要求 `uiRunning: true`，
-不显式拉起就永远无法通过。
 
 第 ②–④ 步的等价入口是 `just promote-main <候选SHA>`（在 dev clone 里跑，候选 SHA 必须显式给出）；
 只重启、不提升的等价入口是 `just restart-main`。第 ① 步与提升前的全量测试证据仍需人工完成。
@@ -611,14 +606,12 @@ bun run codeestra reclaim records --project $PROJECT --limit 50
 ```sh
 cd /path/to/codeestra
 bun install --frozen-lockfile
-bun run build:ui                                   # 需要 Web UI 时
 bun run codeestra status                           # 拉起 Runtime，看 READY
 
-bun run codeestra open /path/to/your-repo --dev-repo /path/to/dev-clone --no-open \
-  # 接入项目（FULL 零确认）并拿到界面地址；--dev-repo 可选（ADR-0060）：
-  # 给了它才有 dev 基线与 dev → main 提升；不给（managed）时 Task 基线取该项目文件夹当前检出的分支，
-  # 成果留在 task 分支由你自己合。上面这一行是“我想要 dev → main 提升”时用的写法。
-bun run codeestra settings permission get                    # 确认权限模式
+bun run codeestra project inspect /path/to/your-repo
+bun run codeestra project trust /path/to/your-repo # FULL 零确认；STRICT 可加 --yes
+bun run codeestra project list                     # 取得 PROJECT id
+bun run codeestra settings permission get          # 确认权限模式
 
 bun run codeestra task create $PROJECT "一项具体的改动" \
   --title "一项具体的改动" --name "a-concrete-change"
@@ -709,7 +702,7 @@ bun run codeestra scheduler control resume --json
 
 - 从头读到尾的说明书：[manual.md](./manual.md)
 - 端到端流程与预期输出：[workflow.md](./workflow.md)
-- 逐屏 UI 走查（每个按钮做什么）：[ui.md](./ui.md)
+- Web UI 暂停状态：[ui.md](./ui.md)
 - 每条命令的参数与退出码：[cli/README.md](./cli/README.md)
 - 报错怎么办：[troubleshooting.md](./troubleshooting.md)
 - 人工观感核对清单：[acceptance-checklist.md](./acceptance-checklist.md)

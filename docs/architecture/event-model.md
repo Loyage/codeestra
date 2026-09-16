@@ -264,7 +264,7 @@ Runtime 的本地 socket 同时承载一次性命令与长连接订阅；两者�
 - 订阅连接是一条命令一条连接：客户端在订阅建立后继续发送 command 属于协议违约，Runtime 直接关闭该连接。
 - 可选 `projectId` 过滤只影响交付；游标仍会前进，因此过滤订阅的 resume 语义与全量订阅一致。**ADR-0061/v34（FOUNDATION-096）起，Project 过滤交付“该 Project 的事件 + `project_id IS NULL` 的 Runtime 全局事件”**，因为全局容量会影响每个 Project；cursor 仍按同一 sequence 前进，重连在边界上不漏不重。全局暂停事件（FOUNDATION-097）使用同一规则，且已落地。Phase 1 未实现按 project 的权限隔离——本地单用户 socket 权限（0600）是这一层的边界。
 - 投影由 Runtime 的事件写入路径负责；订阅不引入第二个事件源，也不允许客户端写入事件。
-- 本地 Web UI 经 `RuntimeHttpApi` 的 `/api/events` 消费同一组帧（SSE 编码，`fetch` 流式读取而非 `EventSource`，因此 bearer token 不出现在 URL 中）；命令经 `/api/command` 走同一 Zod 请求 schema 与同一 dispatch，HTTP 不是第二条业务语义路径。
+- ADR-0067 起本地 Web UI / HTTP/SSE 入口暂停，Runtime 不实例化 `RuntimeHttpApi`；该实现源码静态保留，但不属于当前启用或测试的传输面。当前客户端通过 Unix socket 消费同一组 versioned frame。
 
 ## 4. 终端接管传输与安全
 

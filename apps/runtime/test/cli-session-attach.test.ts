@@ -233,8 +233,6 @@ async function startTask(options: { readonly permissionMode?: 'FULL' | 'STRICT' 
   const repository = temporaryDirectory('codeestra-attach-repo-');
   const home = temporaryDirectory('codeestra-attach-home-');
   const tools = temporaryDirectory('codeestra-attach-tools-');
-  const assets = temporaryDirectory('codeestra-attach-assets-');
-  await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
   mkdirSync(join(repository, '.codeestra', 'policies'), { recursive: true });
   await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'), JSON.stringify({
     version: 1, commands: [{ id: 'check', argv: ['true'], cwd: '.', timeoutSeconds: 60 }],
@@ -257,7 +255,6 @@ async function startTask(options: { readonly permissionMode?: 'FULL' | 'STRICT' 
 
   const environment = {
     CODEESTRA_HOME: home,
-    CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: shimPath,
     CODEESTRA_HANDOFF_REPORT: reportPath,
     CODEESTRA_HANDOFF_MODES: modesPath,
@@ -265,7 +262,7 @@ async function startTask(options: { readonly permissionMode?: 'FULL' | 'STRICT' 
     CODEESTRA_STUB_TUI_EXIT: '7',
     CODEESTRA_HANDOFF_CONNECT_MS: '2000',
   };
-  const opened = await cli(['open', repository, '--no-open',
+  const opened = await cli(['project', 'trust', repository,
     ...(options.permissionMode === 'STRICT' ? ['--yes'] : [])], environment);
   expect(opened.exitCode).toBe(0);
   if (options.permissionMode === 'STRICT') {

@@ -26,10 +26,10 @@ User Intent → Task / Task DAG → Dependency Analysis → Conflict Analysis
 ```sh
 cd /path/to/codeestra            # 或你自己的仓库
 bun install --frozen-lockfile
-bun run build:ui                 # 需要 Web UI 时
 export CODEESTRA_HOME=/tmp/codeestra-demo   # 想隔离就换数据目录
 bun run codeestra status
-bun run codeestra open . --no-open          # 注册项目并拿到带 token 的 UI 地址
+bun run codeestra project trust .           # FULL 零确认；STRICT 可加 --yes
+bun run codeestra project list              # 取得 project id
 ```
 
 下面用 `$PROJECT` 表示 `project list` 返回的 Project ID。
@@ -350,8 +350,7 @@ Codeestra **自身**的开发仍按仓库约定走两个 clone（`~/Documents/co
 
 1. push 固定 dev 候选到 `origin/dev` 并读回核对；
 2. 在 main clone `git fetch` + `git merge --ff-only origin/dev`；
-3. 在 main clone `bun install --frozen-lockfile` → `bun run build:ui` → `bun run codeestra stop` → `status`，
-   核对 `status: "READY"` 且 `uiRunning: true`；
+3. 在 main clone `bun install --frozen-lockfile` → `bun run codeestra stop` → `status`，核对 `status: "READY"`；
 4. 核对通过后才把 `main` 推回 `origin/main`（重启失败则不推回，保留现场并如实报告）。
 
 实现细节与失败处置见 [`docs/agents/runbook.md`](../agents/runbook.md)。这不是产品能力：没有记录、没有命令、
@@ -417,5 +416,5 @@ bun run codeestra task status $PROJECT <task-id>
 ## 下一步
 
 - 每条命令的完整参数与退出码：[cli/README.md](./cli/README.md)（八篇索引）
-- 界面上的每个面板：[ui.md](./ui.md)
+- Web UI 暂停状态：[ui.md](./ui.md)
 - 报错怎么办：[troubleshooting.md](./troubleshooting.md)

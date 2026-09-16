@@ -1,10 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 
-// The ambient shell proxy would route loopback requests through it and break the SSE fetch below.
-process.env.no_proxy = '127.0.0.1,localhost';
-process.env.NO_PROXY = '127.0.0.1,localhost';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DeterministicFakeAdapter } from '@codeestra/agent-adapters';
 import type { RuntimeStreamFrame } from '@codeestra/contracts';
@@ -12,14 +7,12 @@ import { Phase1Database } from '@codeestra/storage';
 import { AdapterRegistry } from '../src/adapter-registry.js';
 import { AgentRuntimeCoordinator } from '../src/agent-runtime-service.js';
 import { EventSubscriptionHub } from '../src/event-subscription-service.js';
-import { RuntimeHttpApi } from '../src/http-api.js';
 import { LongOperationService, operationSteps } from '../src/operation-service.js';
 import { captureResultCommit, prepareResultCommit } from '../src/result-commit-service.js';
 import { VerificationRunner } from '../src/verification-service.js';
 import {
   cleanupTemporaryDirectories,
   createAgentFixture,
-  registerTemporaryDirectory,
   waitFor,
   type AgentFixture,
   type AgentFixtureOptions,
@@ -240,7 +233,7 @@ describe('progress events are durable, ordered and idempotent (ADR-0027)', () =>
     }
   });
 
-  test('reaches an event subscription through the same frames the UI reads', async () => {
+  test('reaches a command-face event subscription through versioned frames', async () => {
     const value = await createAgentFixture();
     const hub = new EventSubscriptionHub({ storage: value.storage, intervalMs: 10 });
     try {
@@ -492,95 +485,3 @@ describe('task.run progress events', () => {
     }
   });
 });
-
-describe('HTTP/SSE carrier for progress events', () => {
-  test('an OperationProgressed fact arrives over the SSE event stream', async () => {
-    const value = await createAgentFixture();
-    const assetsRoot = mkdtempSync(join(tmpdir(), 'codeestra-ui-assets-'));
-    registerTemporaryDirectory(assetsRoot);
-    // The SPA shell is fetched without a token; the API paths below still require the bearer token.
-    await Bun.write(join(assetsRoot, 'index.html'), '<!doctype html><title>Codeestra</title>');
-    const hub = new EventSubscriptionHub({ storage: value.storage, intervalMs: 10 });
-    const api = new RuntimeHttpApi({
-      assetsRoot,
-      subscriptions: hub,
-      dispatch: async (request) => ({
-        requestId: request.requestId, schemaVersion: 1, ok: true, result: { ok: true },
-      }),
-    });
-    const endpoint = api.start();
-    const origin = endpoint.url.slice(0, endpoint.url.indexOf('/#'));
-    try {
-      const begun = value.storage.beginRunOperation({
-        operationId: crypto.randomUUID(),
-        projectId: value.projectId,
-        kind: 'RUN_TASK',
-        aggregateId: value.taskId,
-        idempotencyKey: crypto.randomUUID(),
-        request: { taskId: value.taskId },
-        createdAt: 10,
-      });
-      const response = await fetch(`${origin}/api/events?sinceSequence=0`, {
-        headers: { authorization: `Bearer ${endpoint.token}` },
-      });
-      expect(response.status).toBe(200);
-      expect(response.headers.get('content-type')).toContain('text/event-stream');
-      value.storage.recordOperationProgressEvent({
-        operationId: begun.operation.operationId,
-        eventId: crypto.randomUUID(),
-        phase: 'OUTPUT',
-        dedupKey: 'OUTPUT:chatty:0',
-        detail: { commandId: 'chatty', stream: 'STDOUT', stdoutBytes: 12, elapsedMs: 3 },
-        recordedAt: 11,
-      });
-      const frames = await readFramesUntil(response, (frame) => frame.type === 'event'
-        && frame.event.eventType === 'OperationProgressed', 5_000);
-      const event = frames.find((frame) => frame.type === 'event'
-        && frame.event.eventType === 'OperationProgressed');
-      if (event === undefined || event.type !== 'event') throw new Error('no SSE event frame');
-      expect(event.event.payload).toMatchObject({
-        operationId: begun.operation.operationId,
-        phase: 'OUTPUT',
-        verdict: false,
-        detail: { commandId: 'chatty', stdoutBytes: 12 },
-      });
-    } finally {
-      api.stop();
-      hub.close();
-      value.storage.close();
-    }
-  });
-});
-
-/** Reads SSE frames until `done` accepts one or the deadline passes. */
-async function readFramesUntil(
-  response: Response,
-  done: (frame: RuntimeStreamFrame) => boolean,
-  timeoutMs = 3_000,
-): Promise<readonly RuntimeStreamFrame[]> {
-  const reader = response.body?.getReader();
-  if (reader === undefined) throw new Error('The event stream had no body');
-  const decoder = new TextDecoder();
-  const frames: RuntimeStreamFrame[] = [];
-  const deadline = Date.now() + timeoutMs;
-  let buffer = '';
-  while (Date.now() < deadline) {
-    const read = await reader.read();
-    if (read.done === true) break;
-    buffer += decoder.decode(read.value, { stream: true });
-    for (let end = buffer.indexOf('\n\n'); end !== -1; end = buffer.indexOf('\n\n')) {
-      const chunk = buffer.slice(0, end);
-      buffer = buffer.slice(end + 2);
-      const data = chunk.split('\n').find((line) => line.startsWith('data: '));
-      if (data === undefined) continue;
-      const frame = JSON.parse(data.slice(6)) as RuntimeStreamFrame;
-      frames.push(frame);
-      if (done(frame)) {
-        void reader.cancel().catch(() => {});
-        return frames;
-      }
-    }
-  }
-  void reader.cancel().catch(() => {});
-  return frames;
-}

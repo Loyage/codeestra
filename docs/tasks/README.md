@@ -8279,6 +8279,41 @@ ADR-0062 标 Superseded by ADR-0066。
   `scripts/real-provider-acceptance.sh` 的 `promotion` 步骤改为只打印说明（不再调用已删除的命令）。
 - 集成前的「多成员批次」相关历史记录（FOUNDATION-081 等）按原样保留，未改写历史。
 
+## 用户任务 — 暂停 Web UI、集中开发 CLI（ADR-0067）
+
+状态：**已实现；定向验证与提升前全量 `bun run check` 均通过；本次已 commit 并 push 到 `origin/dev`，并作为候选提升 `main`（提升四步见本文件后续记录）。**
+
+用户决定「先放弃 WebUI 开发，专攻 CLI 接口开发，删除与 WebUI 有关的测试代码，功能代码可以先保留，但是不启用」，并确认：
+
+1. 从 CLI usage/dispatch 移除 `ui` / `open`，Runtime 不再可启动 UI；
+2. 删除 `apps/ui` 全部测试及 Web UI 专用 HTTP/`runtime.ui`/`open` 测试，保留共享 CLI/Runtime 测试；
+3. 默认开发与发布流程完全不再 typecheck/build/start UI。
+
+实现：
+
+- 新增 [ADR-0067](../decisions/0067-pause-web-ui-and-cli-focus.md)，同步 `PROJECT_SPEC.md` 与决策索引。
+- 删除 CLI `ui` / `open` / `settings ui *`，删除 Runtime 请求 `runtime.ui` / `settings.ui.*` 与 `runtime.ping.uiRunning`；Runtime 不再实例化 `RuntimeHttpApi`。
+- `settings list` 从 UI 暂停前的八项缩为当前启用的三项：`permission.mode`、`attention.proseQuestion`、`capacity.globalLimit`。
+- 保留 `apps/ui/**`、`apps/runtime/src/http-api.ts`、UI settings 的实现/contracts 源码；它们不可达、不进入默认质量门，不声明兼容或可用。
+- 删除 `apps/ui` 13 个测试文件，以及 Runtime 的 `cli-open`、`cli-ui-settings`、`http-api`、`ui-settings` 四个专用测试文件；删除共享测试里的 Web UI HTTP client 与 HTTP/SSE 专用段落。
+- 原来借 `open` 注册项目的共享 CLI 测试改用 `project trust`，并删除 `CODEESTRA_UI_DIST` / 假静态资产夹具。
+- `package.json`、Vitest 与 `Justfile` 的默认 check/restart/promote 流程不再 typecheck/build/test/start UI；Runtime 恢复判据只要求 `status: READY`。
+- 文档同步（ADR-0050 D01）：`docs/guides/cli/runtime.md` 的 §1/§19、`docs/guides/cli/interface.md` 的 §20、`docs/guides/cli-reference.md` 的 §1 索引、`manual.md` 的 §1/§2/§3/§11/§13/术语表、`getting-started.md` 的安装/状态/项目接入、`features.md` 的接入/设置/命令面行、`workflow.md` 的准备与发布步骤、`recipes.md` 的发布/从零开工、`troubleshooting.md` 的 UI/HTTP 排障、`ui.md`、`acceptance-checklist.md` 与 `images/README.md` 的暂停说明、`docs/guides/README.md` 导航；另同步仓库 runbook、架构索引、项目介绍与根 README。
+
+定向验证（按本格 `.codeestra/tests.json`；未运行开发分支禁跑的全量 `bun run check` / `just check` / `just verify` / `check:fast`）：
+
+- `bun run typecheck`：通过。
+- `bun test packages/contracts/test/request.test.ts`：22 pass / 0 fail。
+- `bun test apps/runtime/test/cli-settings.test.ts`：3 pass / 0 fail。
+- `bun test apps/runtime/test/cli-task-create.test.ts apps/runtime/test/cli-attention.test.ts apps/runtime/test/operation-progress-events.test.ts`：12 pass / 0 fail。
+- CLI 负向冒烟：`bun run codeestra ui` 与 `bun run codeestra settings ui list` 均退 2 并显示 usage；`just --list` 不含 UI recipe。
+
+提升前全量证据（ADR-0038：只在 `dev`、`dev → main` 前对精确候选 SHA 运行一次）：
+
+- `bun run check`（`typecheck` → `vitest run` → `test:storage`）：退出码 0，817 pass / 0 fail，5297 expect()，99 个文件，379.72s。
+
+边界：没有运行、构建或验证保留的 Web UI 源码；这正是 ADR-0067 的范围，不能据此声称 UI 仍可运行。已有 `$CODEESTRA_HOME/ui-settings.json` 不删除、不迁移，当前 Runtime 忽略它。重新启用 Web UI 必须另立 ADR 并恢复契约、安全边界、文档与测试。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），

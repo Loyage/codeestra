@@ -52,8 +52,6 @@ interface AgentConfigPayload {
 async function trustedProject(): Promise<{ home: string; projectId: string }> {
   const repository = temporaryDirectory('codeestra-config-repo-');
   const home = temporaryDirectory('codeestra-config-home-');
-  const assets = temporaryDirectory('codeestra-config-assets-');
-  await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
   mkdirSync(join(repository, '.codeestra', 'policies'), { recursive: true });
   await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'), JSON.stringify({
     version: 1, commands: [{ id: 'check', argv: ['true'], cwd: '.', timeoutSeconds: 60 }],
@@ -66,9 +64,9 @@ async function trustedProject(): Promise<{ home: string; projectId: string }> {
   await git(repository, ['branch', 'dev']);
   // ADR-0056: every dev fact comes from a second clone of the same origin that sits on
   // `dev`; the project is trusted with it explicitly.
-  const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets,
+  const environment = { CODEESTRA_HOME: home,
     CODEESTRA_PI_EXECUTABLE: 'pi-not-installed' };
-  expect((await cli(['open', repository, '--no-open'], environment)).exitCode).toBe(0);
+  expect((await cli(['project', 'trust', repository], environment)).exitCode).toBe(0);
   const listed = await cli(['project', 'list'], environment);
   const projects = JSON.parse(listed.stdout) as readonly { id: string }[];
   return { home, projectId: projects[0]?.id as string };

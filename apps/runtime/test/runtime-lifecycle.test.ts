@@ -502,8 +502,6 @@ describe('Runtime lifecycle: a stopping Runtime owns provider processes', () => 
     const repository = temporaryDirectory('codeestra-lifecycle-provider-repo-');
     const home = unstartedHome('codeestra-lifecycle-provider-');
     const tools = realpathSync(temporaryDirectory('codeestra-lifecycle-provider-tools-'));
-    const assets = temporaryDirectory('codeestra-lifecycle-provider-assets-');
-    await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
     mkdirSync(join(repository, '.codeestra', 'policies'), { recursive: true });
     await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'), JSON.stringify({
       version: 1, commands: [{ id: 'check', argv: ['true'], cwd: '.', timeoutSeconds: 60 }],
@@ -523,11 +521,10 @@ describe('Runtime lifecycle: a stopping Runtime owns provider processes', () => 
     chmodSync(shimPath, 0o755);
     const environment = {
       CODEESTRA_HOME: home,
-      CODEESTRA_UI_DIST: assets,
       CODEESTRA_PI_EXECUTABLE: shimPath,
     };
 
-    expect((await cli(['open', repository, '--no-open'], environment)).exitCode).toBe(0);
+    expect((await cli(['project', 'trust', repository], environment)).exitCode).toBe(0);
     const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
       readonly { readonly id: string }[];
     const projectId = projects[0]?.id as string;

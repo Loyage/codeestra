@@ -129,7 +129,6 @@ Only self tasks read this.
 interface RepositoryFixture {
   readonly repository: string;
   readonly tools: string;
-  readonly assets: string;
 }
 
 async function createRepository(input: {
@@ -139,8 +138,6 @@ async function createRepository(input: {
 }): Promise<RepositoryFixture> {
   const repository = temporaryDirectory(`${input.prefix}-repo-`);
   const tools = temporaryDirectory(`${input.prefix}-tools-`);
-  const assets = temporaryDirectory(`${input.prefix}-assets-`);
-  await Bun.write(join(assets, 'index.html'), '<!doctype html><title>Codeestra</title>');
   mkdirSync(join(repository, '.codeestra', 'policies'), { recursive: true });
   await Bun.write(join(repository, '.codeestra', 'policies', 'verification.json'), JSON.stringify({
     version: 1, commands: [{ id: 'check', argv: ['true'], cwd: '.', timeoutSeconds: 60 }],
@@ -170,7 +167,7 @@ async function createRepository(input: {
   await Bun.write(stubPath, stubSource);
   await Bun.write(shimPath, `#!/bin/sh\nexec "${process.execPath}" "${stubPath}" "$@"\n`);
   chmodSync(shimPath, 0o755);
-  return { repository, tools: shimPath, assets };
+  return { repository, tools: shimPath };
 }
 
 interface TaskPayload {
@@ -247,7 +244,7 @@ async function openAndIdentify(
   environment: Record<string, string>,
   repository: string,
 ): Promise<string> {
-  const opened = await cli(['open', repository, '--no-open'], environment);
+  const opened = await cli(['project', 'trust', repository], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { readonly id: string }[];
@@ -277,7 +274,7 @@ describe('project knowledge', () => {
       instructions: conventions,
       skills: releaseSkill,
     });
-    const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: main.assets,
+    const environment = { CODEESTRA_HOME: home,
       CODEESTRA_PI_EXECUTABLE: main.tools };
     const projectId = await openAndIdentify(environment, main.repository);
 
@@ -410,7 +407,7 @@ describe('project knowledge', () => {
       prefix: 'codeestra-knowledge-branch',
       instructions: conventions,
     });
-    const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: main.assets,
+    const environment = { CODEESTRA_HOME: home,
       CODEESTRA_PI_EXECUTABLE: main.tools };
     const projectId = await openAndIdentify(environment, main.repository);
 
@@ -499,7 +496,7 @@ describe('project knowledge', () => {
       prefix: 'codeestra-knowledge-concurrent',
       instructions: conventions,
     });
-    const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: main.assets,
+    const environment = { CODEESTRA_HOME: home,
       CODEESTRA_PI_EXECUTABLE: main.tools };
     const projectId = await openAndIdentify(environment, main.repository);
 
@@ -551,7 +548,7 @@ describe('project knowledge', () => {
       // `scpoe` is a typo for `scope`: it must fail loudly rather than silently mean "everywhere".
       instructions: '---\nscpoe: SELF\n---\nBody\n',
     });
-    const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: main.assets,
+    const environment = { CODEESTRA_HOME: home,
       CODEESTRA_PI_EXECUTABLE: main.tools };
     const projectId = await openAndIdentify(environment, main.repository);
 
@@ -593,7 +590,7 @@ describe('project knowledge', () => {
       prefix: 'codeestra-knowledge-generated',
       instructions: conventions,
     });
-    const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: main.assets,
+    const environment = { CODEESTRA_HOME: home,
       CODEESTRA_PI_EXECUTABLE: main.tools };
     const projectId = await openAndIdentify(environment, main.repository);
     const generated = join(home, 'knowledge', projectId, 'generated');
