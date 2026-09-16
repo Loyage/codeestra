@@ -249,6 +249,12 @@ describe('project impact', () => {
     const opened = await cli(['open', main.repository, '--dev-repo', main.devRepo, '--no-open'], environment);
     expect(opened.exitCode).toBe(0);
     expect(opened.stderr).toContain('Impact mapping');
+    // The Runtime-wide concurrency limit is one fact for the whole `CODEESTRA_HOME` and defaults to
+    // 2 (ADR-0061), so this fixture must raise it to the number of Executions it holds at once: the
+    // two mapped Tasks keep their stub provider alive while the bare project's Task starts below.
+    // Without this the third Task simply waits for a slot and the file it should write never appears.
+    expect((await cli(['settings', 'concurrency', 'set', '--limit', '3', '--json'], environment))
+      .exitCode).toBe(0);
     const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
       readonly { readonly id: string }[];
     const projectId = projects[0]?.id as string;
