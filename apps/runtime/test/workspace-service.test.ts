@@ -61,7 +61,6 @@ async function fixture(): Promise<{
     repoRoot: identity.repoRoot,
     gitCommonDir: identity.gitCommonDir,
     mainRef: identity.mainRef,
-    devRef: 'refs/heads/dev',
     devRepoPath: devRepo,
     recordDevRepoPath: true,
     objectFormat: identity.objectFormat,

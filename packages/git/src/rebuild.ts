@@ -1,7 +1,7 @@
 import { lstat, mkdir, realpath } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { GitInspectionError } from './errors.js';
-import { isAncestor, listCheckedOutRefs, readLocalRefCommit } from './integration.js';
+import { isAncestor, listCheckedOutRefs, readLocalRefCommit } from './refs.js';
 import { inspectOwnedPath, inspectOwnedWorktreeRegistration } from './reclaim.js';
 
 /**

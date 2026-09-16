@@ -80,7 +80,7 @@ describe('waits', () => {
     expect(decisionLabel('BLOCKED')).toContain('依赖未满足');
     expect(decisionLabel('WAIT_CAPACITY')).not.toContain('BLOCKED');
     expect(decisionLabel('WAIT_CONFLICT')).not.toContain('BLOCKED');
-    expect(dependencyBlockReasonLabel('UPSTREAM_NOT_INTEGRATED')).toContain('上游');
+    expect(dependencyBlockReasonLabel('UPSTREAM_RESULT_MISSING')).toContain('上游');
   });
 
   it('does not present a dry run as a start', () => {

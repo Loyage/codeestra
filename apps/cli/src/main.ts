@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOptions,
@@ -18,15 +17,12 @@ import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOpt
   type SlotReservationAcquisitionView,
   type SlotReservationReconcileReport, type SlotReservationReleaseView,
   type SlotSnapshotRefusalDetail,
-  type DevRepoInspection,
-  type DevRefRetirement,
   type TaskRetryOutcomeView,
   type TaskPurgeOutcomeView,
   type AgentPluginDetection,
   type VerificationPolicyInspection,
   agentPluginKinds,
   isUiSettingKey,
-  devBranchRef,
   isValidUiSettingValue,
   uiSettingKeysAsText,
   uiSettingValuesAsText,
@@ -258,26 +254,6 @@ async function runConcurrencyCommand(tokens: readonly string[]): Promise<void> {
   } else {
     usage();
   }
-}
-
-/** The part of an IntegrationBatch record the CLI reports on: members and the batch verdict. */
-interface IntegrationBatchLineView {
-  readonly batchId: string;
-  readonly state: string;
-  readonly devCommit: string;
-  readonly members: readonly { readonly taskId: string; readonly state: string }[];
-}
-
-/**
- * Integration exit codes (ADR-0053). The three outcomes a script has to tell apart without parsing
- * JSON are: `0` the `dev` ref moved (INTEGRATED), `1` a refusal or a recorded terminal verdict that
- * did not integrate (FAILED/CONFLICTED/STALE/CANCELLED), and `3` a batch that is not finished and
- * needs a human before anything else can proceed (RECOVERY_REQUIRED, i.e. an in-flight batch left by
- * an earlier attempt). A usage error stays `2`.
- */
-function exitForIntegrationVerdict(state: string): void {
-  if (state === 'INTEGRATED') return;
-  process.exit(state === 'RECOVERY_REQUIRED' ? 3 : 1);
 }
 
 /**
@@ -909,173 +885,19 @@ interface TaskDependencyView {
   readonly taskId: string | null;
   readonly taskState: string | null;
   readonly taskVersion: number | null;
-  readonly devRef: string;
-  readonly devCommit: string | null;
+  readonly baseRef: string;
+  readonly baseCommit: string | null;
   readonly edges: readonly {
     readonly dependentDisplayNumber: number;
     readonly prerequisiteDisplayNumber: number;
     readonly requiredRevisionNumber: number;
-    readonly integratedCommit: string | null;
+    readonly resultCommit: string | null;
     readonly satisfied: boolean;
     readonly reason: { readonly code: string } | null;
   }[];
   readonly blocked: boolean;
   readonly prerequisites: readonly string[];
   readonly dependents: readonly string[];
-}
-
-/** The promotion record as the Runtime projects it, plus what this client needs to run the restart. */
-interface PromotionRestartStepView {
-  readonly id: string;
-  readonly argv: readonly string[];
-  readonly cwd: string;
-}
-
-interface PromotionReportView {
-  readonly promotionId: string;
-  readonly projectId: string;
-  readonly state: string;
-  /** Which pair of facts this record states (ADR-0047 D03); `COMPLETE` is the only finished one. */
-  readonly phase: 'READY_TO_PUSH' | 'AWAITING_PULL' | 'RESTART_PENDING' | 'MAIN_PUSH_PENDING'
-    | 'COMPLETE' | 'REFUSED';
-  readonly devRef: string;
-  readonly mainRef: string;
-  readonly candidateCommit: string;
-  readonly expectedMainCommit: string;
-  readonly promotedCommit: string | null;
-  readonly mainWorktreePath: string | null;
-  readonly promotingBootId: string | null;
-  /** The dev clone this promotion pushes from, and what the remote `dev` was read back as. */
-  readonly devRepoPath: string | null;
-  readonly remoteDevCommit: string | null;
-  readonly remoteMainCommit: string | null;
-  readonly pushedAt: number | null;
-  readonly mainPushedAt: number | null;
-  readonly restartSteps: readonly PromotionRestartStepView[];
-  readonly permissionMode: 'FULL' | 'STRICT';
-  readonly outcomeCode: string | null;
-  readonly detail: string | null;
-  readonly members: readonly { readonly taskId: string; readonly revisionId: string }[];
-  readonly restart: { readonly observedBootId: string; readonly runtimeStatus: string | null;
-    readonly uiRunning: boolean | null;
-    readonly steps: readonly PromotionStepOutcomeView[] } | null;
-}
-
-interface PromotionStepOutcomeView {
-  readonly id: string;
-  /** Mutable array: the IPC request type is not readonly. */
-  readonly argv: string[];
-  readonly cwd: string;
-  readonly exitCode: number | null;
-  readonly durationMs: number;
-  readonly stdoutBytes: number;
-  readonly stderrBytes: number;
-  readonly stdoutDigest: string;
-  readonly stderrDigest: string;
-  readonly failureDetail?: string;
-}
-
-function sha256Hex(value: string): string {
-  return createHash('sha256').update(value).digest('hex');
-}
-
-/**
- * Runs the recorded post-promotion sequence in the main worktree, in order, stopping at the first
- * failure (ADR-0009 D03). This is the client's job because the Runtime stops itself in the middle
- * of the sequence; steps that were not reached are reported as not run rather than omitted, so the
- * submitted list still matches the recorded plan exactly.
- */
-async function runPromotionRestartSteps(
-  plan: PromotionReportView,
-): Promise<PromotionStepOutcomeView[]> {
-  const outcomes: PromotionStepOutcomeView[] = [];
-  let halted = false;
-  for (const step of plan.restartSteps) {
-    if (halted) {
-      outcomes.push({ id: step.id, argv: [...step.argv], cwd: step.cwd, exitCode: null,
-        durationMs: 0,
-        stdoutBytes: 0, stderrBytes: 0, stdoutDigest: sha256Hex(''), stderrDigest: sha256Hex(''),
-        failureDetail: 'not run: an earlier post-step failed' });
-      continue;
-    }
-    console.error(`[promotion] ${step.id}: ${step.argv.join(' ')}  (cwd ${step.cwd})`);
-    const started = Date.now();
-    const child = Bun.spawn({ cmd: [...step.argv], cwd: step.cwd, stdin: 'ignore',
-      stdout: 'pipe', stderr: 'pipe' });
-    const [exitCode, stdout, stderr] = await Promise.all([
-      child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
-    ]);
-    // Step output goes to stderr so stdout stays the machine-readable record. It is the user's own
-    // command output; the recorded evidence is a digest, not the text.
-    if (stdout.length > 0) console.error(stdout.trimEnd());
-    if (stderr.length > 0) console.error(stderr.trimEnd());
-    outcomes.push({
-      id: step.id, argv: [...step.argv], cwd: step.cwd, exitCode,
-      durationMs: Date.now() - started,
-      stdoutBytes: new TextEncoder().encode(stdout).length,
-      stderrBytes: new TextEncoder().encode(stderr).length,
-      stdoutDigest: sha256Hex(stdout), stderrDigest: sha256Hex(stderr),
-      ...(exitCode === 0 ? {} : { failureDetail: stderr.trim().slice(0, 500)
-        || `exited with ${exitCode}` }),
-    });
-    if (exitCode !== 0) {
-      console.error(`[promotion] ${step.id} exited ${exitCode}; later post-steps are not run`);
-      halted = true;
-    }
-  }
-  return outcomes;
-}
-
-/**
- * Reads the Runtime the restart produced and records it. The boot identity sent here is the one
- * that answered `runtime.ping` just now, and the Runtime checks it is the boot answering the record
- * call as well — so a Runtime that was never stopped cannot be reported as restarted.
- */
-async function recordPromotionRestart(
-  plan: PromotionReportView,
-  steps: PromotionStepOutcomeView[],
-): Promise<PromotionReportView> {
-  let observed: { readonly bootId: string; readonly status: string; readonly uiRunning: boolean };
-  try {
-    observed = await call({ command: 'runtime.ping' }) as
-      { readonly bootId: string; readonly status: string; readonly uiRunning: boolean };
-  } catch (error) {
-    console.error(`[promotion] the Runtime did not answer after the restart sequence: ${
-      error instanceof Error ? error.message : String(error)}`);
-    console.error('[promotion] main was already fast-forwarded and is not rolled back. Once the'
-      + ' Runtime answers, re-run `promotion promote` to run the recorded post-steps again.');
-    process.exit(1);
-  }
-  return await call({
-    command: 'promotion.restart.record',
-    commandId: crypto.randomUUID(),
-    projectId: plan.projectId,
-    promotionId: plan.promotionId,
-    observedBootId: observed.bootId,
-    runtimeStatus: observed.status,
-    uiRunning: observed.uiRunning,
-    steps,
-  }) as PromotionReportView;
-}
-
-function printPromotion(promotion: PromotionReportView): void {
-  console.log(`promotion ${promotion.promotionId} ${promotion.state}/${promotion.phase}`
-    + (promotion.outcomeCode === null ? '' : ` (${promotion.outcomeCode})`));
-  console.log(`  dev  ${promotion.devRef} ${promotion.candidateCommit}`
-    + (promotion.remoteDevCommit === null
-      ? ' · not pushed yet'
-      : ` · pushed to ${promotion.devRepoPath ?? 'origin'} as ${promotion.remoteDevCommit}`));
-  console.log(`  main ${promotion.mainRef}${promotion.promotedCommit === null
-    ? ` was ${promotion.expectedMainCommit}` : ` now ${promotion.promotedCommit}`}`
-    + (promotion.remoteMainCommit === null
-      ? '' : ` · published as ${promotion.remoteMainCommit}`));
-  console.log(`  ${promotion.permissionMode} mode · ${promotion.members.length} member revision(s)`
-    + ` · worktree ${promotion.mainWorktreePath ?? 'not recorded'}`);
-  for (const step of promotion.restart?.steps ?? []) {
-    console.log(`  ${step.id.padEnd(9, ' ')} exit ${step.exitCode === null
-      ? 'not run' : String(step.exitCode)} · ${step.durationMs}ms · ${step.argv.join(' ')}`);
-  }
-  if (promotion.detail !== null) console.log(`  ${promotion.detail}`);
 }
 
 /**
@@ -1751,54 +1573,6 @@ function expectedImpactPolicyConfirmation(report: ImpactPolicyValidationView): I
   return { state: 'ABSENT', mainCommit: report.mainCommit };
 }
 
-/** One line per declared mapping, so `project trust` shows what a confirmation actually accepts. */
-function describeDevRepo(inspection: DevRepoInspection): void {
-  if (!inspection.verified) {
-    console.error(`dev clone ${inspection.path}: unusable (${inspection.code ?? 'unknown'})`);
-    if (inspection.detail !== null) console.error(`  ${inspection.detail}`);
-    return;
-  }
-  console.error(`dev clone ${inspection.path}: verified (${inspection.devRef}`
-    + ` ${inspection.devRefCommit ?? 'unknown'}, origin ${inspection.originUrl ?? 'unknown'})`);
-}
-
-/**
- * The read-only retirement evidence for a checkout's own local `dev` ref (ADR-0048 D04 / ADR-0056).
- *
- * It deliberately does not present that ref as a development baseline — the Runtime never reads it any
- * more. What it does is say whether the inspected clone still has one, and which trusted projects have
- * no dev clone yet, because for those the ref is still the only copy of `dev` there is.
- */
-function describeDevRefRetirement(retirement: DevRefRetirement | undefined): void {
-  // A Runtime from before this contract does not answer with `devRefRetirement` at all. That is a
-  // *missing report*, not a crash: the CLI prints what it got and never invents the field (the same
-  // rule the newer `runtime.ping` fields follow).
-  if (retirement === undefined) return;
-  console.error(`transitional local ${devBranchRef} in this checkout:`
-    + (retirement.localDevRefPresent
-      ? ` present at ${retirement.localDevRefCommit ?? 'an unreadable commit'}`
-      : ' absent'));
-  if (retirement.localDevRefPresent) {
-    // ADR-0060: nothing reads this ref any more (ADR-0056), so the only question that decides whether
-    // deleting it by hand can lose history is whether its commit already exists on a remote.
-    console.error(retirement.publishedOnRemote
-      ? `  that commit is contained by ${retirement.remoteRefsContainingLocalDevCommit.join(', ')},`
-        + ' so deleting this local ref loses no history: git -C <checkout> branch -D dev'
-      : '  no remote-tracking ref contains that commit: it exists only in this clone, so deleting the'
-        + ' ref by hand can lose commits (push it first, or keep the ref)');
-  }
-  if (retirement.projectsWithoutDevRepo.length > 0) {
-    // ADR-0060: a project without a dev clone is a normal state — its Task baselines come from its own
-    // folder — so this list is a read-only report and no longer decides whether the ref can go.
-    console.error(`  ${retirement.projectsWithoutDevRepo.length} trusted project(s) have no dev clone`
-      + ' (their Task baselines come from their own folder; their dev-only commands refuse until one is'
-      + ' recorded):');
-    for (const project of retirement.projectsWithoutDevRepo) {
-      console.error(`    ${project.projectId} ${project.name} ${project.repoRoot}`);
-    }
-  }
-}
-
 function describeImpactPolicy(report: ImpactPolicyValidationView['policy']): void {
   if (report.state === 'ABSENT') {
     console.error('Impact mapping (.codeestra/impact.json at the main ref): absent.');
@@ -2217,51 +1991,25 @@ try {
     // commands only, so nothing here is reachable from the UI that is not reachable from the CLI.
     const tokens = [action, firstArgument, ...remainingArguments]
       .filter((token): token is string => token !== undefined);
-    // ADR-0060: a dev clone is optional, so this command no longer demands one. `--dev-repo <path>`
-    // records one; `--dev-repo none` states that the project has none; omitting the flag re-reads
-    // whatever a previous trust recorded (the path is never inferred from a branch or directory name).
-    let openDevRepoPath: string | null | undefined;
     const pathTokens: string[] = [];
     const flagTokens: string[] = [];
-    for (let index = 0; index < tokens.length; index += 1) {
-      const token = tokens[index] as string;
-      if (token === '--dev-repo') {
-        const value = tokens[index + 1];
-        if (value === undefined) usage();
-        openDevRepoPath = value === 'none' ? null : value;
-        index += 1;
-      } else if (token.startsWith('--')) flagTokens.push(token);
+    for (const token of tokens) {
+      if (token.startsWith('--')) flagTokens.push(token);
       else pathTokens.push(token);
     }
     if (pathTokens.length > 1
       || flagTokens.some((flag) => flag !== '--yes' && flag !== '--no-open')) usage();
     const path = pathTokens[0] ?? process.cwd();
 
+    // ADR-0062: what a Task is based on is this folder's currently checked out branch, so the
+    // identity this shows and confirms is the repository identity itself.
     const identity = await call({
       command: 'project.inspect',
       path,
-      ...(openDevRepoPath === undefined ? {} : { devRepoPath: openDevRepoPath }),
     }) as ProjectIdentity;
     console.error(`Repository: ${identity.repoRoot}`);
     console.error(`  main ref: ${identity.mainRef} · ${identity.objectFormat}`);
     console.error(`  HEAD: ${identity.headCommit}`);
-    // The baseline is part of what trust confirms, so it is never implicit: it is the dev clone's
-    // `dev` when one is recorded, and this folder's checked out branch when none is (ADR-0060).
-    // `devRefRetirement` is the marker of a Runtime that answers with the new contract (an older one
-    // reports the checkout's own `dev` ref instead), so the wording follows what was actually sent.
-    const reportsDevClone = identity.devRefRetirement !== undefined;
-    console.error(`  dev baseline${reportsDevClone ? ' (from the dev clone)' : ''}:`
-      + ` ${identity.devRefPresent && identity.devCommit !== null
-        ? `${identity.devRef} · ${identity.devCommit}`
-        : `${identity.devRef} · 该项目没有 dev clone：Task 基线改取此文件夹当前检出的分支`}`);
-    // ADR-0060: whether this project reads dev facts from a clone is a reported fact, not a warning
-    // the user only discovers when the first Task is created. Having none is a normal state.
-    console.error(`  dev clone: ${identity.devRepoPath === null
-      ? '未记录（managed：Task 基线取该文件夹当前检出的分支；集成与提升需要 dev clone）'
-      : identity.devRepoPath.verified
-        ? `已核验 ${identity.devRepoPath.path}`
-        : `不可用 (${identity.devRepoPath.code ?? 'unknown'}) ${identity.devRepoPath.detail ?? ''}`}`);
-    describeDevRefRetirement(identity.devRefRetirement);
     const policy = await call({ command: 'project.verificationPolicy',
       path }) as VerificationPolicyInspection;
     describeVerificationPolicy(policy);
@@ -2313,7 +2061,6 @@ try {
         command: 'project.trust',
         path,
         expectedIdentity: identity,
-        ...(openDevRepoPath === undefined ? {} : { devRepoPath: openDevRepoPath }),
         expectedVerificationPolicy: policy.state === 'PRESENT'
           ? { state: 'PRESENT', mainCommit: policy.mainCommit, digest: policy.digest as string }
           : { state: 'ABSENT', mainCommit: policy.mainCommit },
@@ -2525,63 +2272,25 @@ try {
       usage();
     }
   } else if (group === 'project' && action === 'inspect') {
-    // `--dev-repo <path>` inspects a *candidate* dev clone instead of the recorded one (ADR-0047
-    // D05), so a user can see whether a clone is usable before trusting it.
-    const tokens = [firstArgument, ...remainingArguments]
+    const positional = [firstArgument, ...remainingArguments]
       .filter((token): token is string => token !== undefined);
-    let devRepoPath: string | undefined;
-    const positional: string[] = [];
-    for (let index = 0; index < tokens.length; index += 1) {
-      const token = tokens[index] as string;
-      if (token === '--dev-repo') {
-        const value = tokens[index + 1];
-        if (value === undefined) usage();
-        devRepoPath = value;
-        index += 1;
-      } else if (token.startsWith('--')) usage();
-      else positional.push(token);
-    }
-    if (positional.length > 1) usage();
+    if (positional.some((token) => token.startsWith('--')) || positional.length > 1) usage();
     const report = await call({
       command: 'project.inspect',
       path: positional[0] ?? process.cwd(),
-      ...(devRepoPath === undefined ? {} : { devRepoPath }),
     }) as ProjectIdentity;
     print(report);
-    if (report.devRepoPath !== null) describeDevRepo(report.devRepoPath);
-    // ADR-0056 / ADR-0060: the development baseline comes from the dev clone when the project has
-    // one; without one it is the project folder's currently checked out branch. This checkout's own
-    // local `dev` ref is only a transitional pointer that nothing reads any more. A Runtime from
-    // before this contract answers with the old field (the checkout's own `dev` ref) and no
-    // retirement report, so the label only names the dev clone when the answer actually carries the
-    // new report — a message must not state a fact the Runtime did not send.
-    const reportsDevClone = report.devRefRetirement !== undefined;
-    console.error(`dev baseline${reportsDevClone ? ' (from the dev clone)' : ''}:`
-      + ` ${report.devRefPresent && report.devCommit !== null
-        ? `${report.devRef} · ${report.devCommit}`
-        : '未记录（managed：该项目没有 dev clone——Task 基线取它自己文件夹当前检出的分支；task integrate / promotion 需要 dev 分支时以 DEV_REPO_REQUIRED 拒绝）'}`);
-    describeDevRefRetirement(report.devRefRetirement);
+    console.error('Task 基线：该项目文件夹当前检出的分支（建 Task 时固定 ref 与 commit）。');
   } else if (group === 'project' && action === 'list') {
     print(await call({ command: 'project.list' }));
   } else if (group === 'project' && action === 'policy') {
     print(await call({ command: 'project.verificationPolicy', path: firstArgument ?? process.cwd() }));
   } else if (group === 'project' && action === 'trust') {
-    // `--dev-repo <path>` records an explicit dev clone (ADR-0047 D05 / ADR-0060); `--dev-repo
-    // none` states that this project has none (Task baselines then come from this folder's checked
-    // out branch); omitting the flag re-reads what was recorded. All three are stated by the user,
-    // never inferred.
     const tokens = [firstArgument, ...remainingArguments]
       .filter((token): token is string => token !== undefined);
-    let devRepoPath: string | null | undefined;
     const positional: string[] = [];
-    for (let index = 0; index < tokens.length; index += 1) {
-      const token = tokens[index] as string;
-      if (token === '--dev-repo') {
-        const value = tokens[index + 1];
-        if (value === undefined) usage();
-        devRepoPath = value === 'none' ? null : value;
-        index += 1;
-      } else if (token === '--yes') {
+    for (const token of tokens) {
+      if (token === '--yes') {
         // The confirmation flag is read from the raw argv below; it never becomes a positional.
       } else if (token.startsWith('--')) usage();
       else positional.push(token);
@@ -2591,19 +2300,8 @@ try {
     const identity = await call({
       command: 'project.inspect',
       path,
-      ...(devRepoPath === undefined ? {} : { devRepoPath }),
     }) as ProjectIdentity;
     print(identity);
-    // ADR-0048 D04 / ADR-0060: this checkout's own local `dev` ref is only a transitional pointer;
-    // the report says whether it is still needed by any other project.
-    describeDevRefRetirement(identity.devRefRetirement);
-    // A dev clone that cannot be verified is refused here, before the confirmation is asked: trust
-    // never records a path it could not establish, and never leaves it silently empty.
-    if (identity.devRepoPath !== null && !identity.devRepoPath.verified) {
-      describeDevRepo(identity.devRepoPath);
-      throw new Error(`${identity.devRepoPath.code ?? 'DEV_REPO_NOT_A_REPOSITORY'}:`
-        + ` ${identity.devRepoPath.detail ?? 'the dev clone could not be verified'}`);
-    }
     const policy = await call({ command: 'project.verificationPolicy',
       path }) as VerificationPolicyInspection;
     print(policy);
@@ -2625,13 +2323,6 @@ try {
     } else {
       console.error('This project has no verification policy; task verify will refuse until one is added.');
     }
-    if (identity.devRepoPath === null) {
-      console.error('No dev clone is recorded (ADR-0060): Task baselines come from this folder\'s'
-        + ' checked out branch, and `task integrate` / `promotion prepare` will refuse until a dev'
-        + ' clone is recorded, because they need the long-lived dev branch.');
-    } else {
-      describeDevRepo(identity.devRepoPath);
-    }
     const confirmed = mode === 'FULL' || Bun.argv.includes('--yes')
       || prompt('Type TRUST to confirm:') === 'TRUST';
     if (!confirmed) throw new Error('Project trust was not confirmed');
@@ -2639,14 +2330,12 @@ try {
       command: 'project.trust',
       path,
       expectedIdentity: identity,
-      ...(devRepoPath === undefined ? {} : { devRepoPath }),
       expectedVerificationPolicy: policy.state === 'PRESENT'
         ? { state: 'PRESENT', mainCommit: policy.mainCommit, digest: policy.digest as string }
         : { state: 'ABSENT', mainCommit: policy.mainCommit },
       expectedImpactPolicy: expectedImpactPolicyConfirmation(impact),
-    }) as { readonly devRepoPath: DevRepoInspection | null };
+    });
     print(trusted);
-    if (trusted.devRepoPath !== null) describeDevRepo(trusted.devRepoPath);
   } else if (group === 'project' && action === 'impact') {
     // Deterministic conflict analysis (ADR-0031). Read-only: it derives snapshots, records them
     // append-only, and explains a verdict. It never schedules, starts, or approves a Task.
@@ -3394,7 +3083,7 @@ try {
       if (json) {
         print(view);
       } else {
-        console.log(`project ${view.projectId} · ${view.devRef} ${view.devCommit ?? '缺失'}`
+        console.log(`project ${view.projectId} · ${view.baseRef} ${view.baseCommit ?? '缺失'}`
           + `${view.taskId === null ? '' : ` · 任务 ${view.taskId}`}`
           + ` · ${view.edges.length} 条依赖`);
         if (view.taskId !== null) {
@@ -3405,7 +3094,7 @@ try {
           console.log(`${edge.satisfied ? '✓' : '✗'} #${edge.dependentDisplayNumber}`
             + ` 依赖 #${edge.prerequisiteDisplayNumber}`
             + ` (revision #${edge.requiredRevisionNumber})`
-            + `${edge.integratedCommit === null ? '' : ` → dev ${edge.integratedCommit.slice(0, 12)}`}`
+            + `${edge.resultCommit === null ? '' : ` → ${edge.resultCommit.slice(0, 12)}`}`
             + `${edge.reason === null ? '' : ` · ${edge.reason.code}`}`);
         }
         if (view.taskId !== null
@@ -3413,107 +3102,6 @@ try {
           console.log(`上游闭包 ${view.prerequisites.length} 个 · 下游影响 ${view.dependents.length} 个`);
         }
       }
-    } else {
-      usage();
-    }
-  } else if (group === 'task' && action === 'integrate') {
-    const [taskId, versionText, ...extra] = remainingArguments;
-    const expectedVersion = Number(versionText);
-    if (firstArgument === undefined || taskId === undefined || versionText === undefined
-      || extra.length !== 0 || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
-    const report = await call({
-      command: 'task.integrate',
-      commandId: crypto.randomUUID(),
-      projectId: firstArgument,
-      taskId,
-      expectedVersion,
-    }) as { state: string };
-    print(report);
-    exitForIntegrationVerdict(report.state);
-  } else if (group === 'task' && action === 'integration') {
-    const subcommand = firstArgument;
-    if (subcommand === 'create') {
-      // `--member <task-id>:<expected-version>` may be repeated; the member order in the request is
-      // not part of the batch, because the Runtime fixes and merges members in `task-id` order.
-      const members: { taskId: string; expectedVersion: number }[] = [];
-      const positionals: string[] = [];
-      for (let index = 0; index < remainingArguments.length; index += 1) {
-        const token = remainingArguments[index] as string;
-        // The output is the recorded batch as JSON; `--json` is accepted as the explicit spelling so
-        // a script does not have to know that this one command has no other rendering.
-        if (token === '--json') continue;
-        if (token === '--member') {
-          const value = remainingArguments[index + 1];
-          if (value === undefined) usage();
-          const separator = value.lastIndexOf(':');
-          const memberTaskId = separator === -1 ? '' : value.slice(0, separator);
-          const memberVersion = Number(separator === -1 ? '' : value.slice(separator + 1));
-          if (separator === -1 || !Number.isSafeInteger(memberVersion) || memberVersion < 0) usage();
-          members.push({ taskId: memberTaskId, expectedVersion: memberVersion });
-          index += 1;
-          continue;
-        }
-        if (token.startsWith('--')) usage();
-        positionals.push(token);
-      }
-      if (positionals.length !== 1 || members.length === 0) usage();
-      const view = await call({
-        command: 'task.integration.create',
-        commandId: crypto.randomUUID(),
-        projectId: positionals[0] as string,
-        members,
-      }) as IntegrationBatchLineView;
-      print(view);
-      console.error(`[integration] batch ${view.batchId} 已组成：${view.members.length} 个成员，`
-        + `dev 基线 ${view.devCommit.slice(0, 12)}；用 \`task integration integrate ${view.batchId}\` 执行`);
-    } else if (subcommand === 'integrate') {
-      const [projectId, batchId, ...extra] = remainingArguments;
-      if (projectId === undefined || batchId === undefined || extra.length !== 0) usage();
-      const report = await call({
-        command: 'task.integration.integrate',
-        commandId: crypto.randomUUID(),
-        projectId,
-        batchId,
-      }) as IntegrationBatchLineView;
-      print(report);
-      exitForIntegrationVerdict(report.state);
-    } else if (subcommand === 'get') {
-      const [projectId, batchId, ...extra] = remainingArguments;
-      if (projectId === undefined || batchId === undefined || extra.length !== 0) usage();
-      print(await call({ command: 'task.integration.get', projectId, batchId }));
-    } else if (subcommand === 'cancel') {
-      const positionals: string[] = [];
-      let reason: string | undefined;
-      for (let index = 0; index < remainingArguments.length; index += 1) {
-        const token = remainingArguments[index] as string;
-        if (token === '--reason') {
-          reason = remainingArguments[index + 1];
-          if (reason === undefined) usage();
-          index += 1;
-          continue;
-        }
-        if (token.startsWith('--')) usage();
-        positionals.push(token);
-      }
-      const [projectId, batchId, ...extra] = positionals;
-      if (projectId === undefined || batchId === undefined || extra.length !== 0) usage();
-      const view = await call({
-        command: 'task.integration.cancel',
-        commandId: crypto.randomUUID(),
-        projectId,
-        batchId,
-        ...(reason === undefined ? {} : { reason }),
-      }) as IntegrationBatchLineView;
-      print(view);
-      // A batch that could not be confirmed side-effect-free is not cancelled: it keeps its slot as
-      // RECOVERY_REQUIRED and needs a human, which is exit 3 rather than "done".
-      if (view.state === 'RECOVERY_REQUIRED') process.exit(3);
-      if (view.state !== 'CANCELLED') process.exit(1);
-    } else if (subcommand === 'list') {
-      const [projectId, taskId, ...extra] = remainingArguments;
-      if (projectId === undefined || extra.length !== 0) usage();
-      print(await call({ command: 'task.integration.list', projectId,
-        ...(taskId === undefined ? {} : { taskId }) }));
     } else {
       usage();
     }
@@ -3922,145 +3510,6 @@ try {
         ...(since === undefined ? {} : { since }),
         ...(until === undefined ? {} : { until }),
         limit: limit ?? 100 }));
-    }
-  } else if (group === 'promotion' && action === 'full-suite') {
-    // The dev full-suite evidence face (ADR-0038 D03, ADR-0039). `run` executes the fixed project
-    // policy against the exact `dev` candidate commit in a detached copy and records what the
-    // Runtime observed; `list` reads the recorded evidence back. A client cannot submit a result.
-    const [subcommand, projectId, ...flags] = [firstArgument, ...remainingArguments];
-    if (subcommand === undefined || projectId === undefined) usage();
-    if (subcommand === 'run') {
-      const split = splitFlagTokens(flags, ['--dev-commit'], ['--json']);
-      if (split.positionals.length !== 0) usage();
-      const expectedDevCommit = split.flags.get('--dev-commit');
-      if (expectedDevCommit === undefined) {
-        console.error('--dev-commit <full-sha> is required: the evidence must name one exact dev SHA');
-        process.exit(2);
-      }
-      const report = await call({
-        command: 'promotion.fullSuite.run',
-        commandId: crypto.randomUUID(),
-        projectId,
-        expectedDevCommit,
-      }) as { state: string; evidenceId: string; policyDigest: string; lockfileDigest: string;
-        outcomeCode: string | null; alreadyRecorded: boolean };
-      print(report);
-      // Only a PASSED full-suite run of that exact SHA may carry a promotion, so a failed or
-      // unfinished run is exit code 1 for scripts.
-      if (report.state !== 'PASSED') process.exit(1);
-    } else if (subcommand === 'list') {
-      const split = splitFlagTokens(flags, ['--limit'], ['--json']);
-      if (split.positionals.length !== 0) usage();
-      const limit = split.flags.get('--limit');
-      print(await call({
-        command: 'promotion.fullSuite.list',
-        projectId,
-        limit: limit === undefined ? 20 : Number(limit),
-      }));
-    } else usage();
-  } else if (group === 'promotion') {
-    // The stable promotion face. `prepare` fixes the three facts and writes nothing to Git;
-    // `promote` moves main inside its own worktree and then runs the recorded restart sequence in
-    // this (surviving) client process, because the Runtime stops itself in the middle of it.
-    const subcommand = action;
-    const tokens = [firstArgument, ...remainingArguments]
-      .filter((token): token is string => token !== undefined);
-    let json = false;
-    let limit: number | undefined;
-    let reason: string | undefined;
-    const positionals: string[] = [];
-    for (let index = 0; index < tokens.length; index += 1) {
-      const flag = tokens[index] as string;
-      const value = tokens[index + 1];
-      if (flag === '--json') json = true;
-      else if (flag === '--reason' && value !== undefined) { reason = value; index += 1; }
-      else if (flag === '--limit' && value !== undefined) {
-        const parsed = Number(value);
-        if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 200) usage();
-        limit = parsed;
-        index += 1;
-      } else if (flag.startsWith('--')) usage();
-      else positionals.push(flag);
-    }
-    const [projectId, ...argumentsAfterProject] = positionals;
-    if (projectId === undefined) usage();
-    const promotionId = argumentsAfterProject[0];
-    const trailing = argumentsAfterProject.slice(1);
-    if (subcommand === 'prepare') {
-      const [batchId, expectedDevCommit, expectedMainCommit, ...extra] = argumentsAfterProject;
-      if (batchId === undefined || expectedDevCommit === undefined
-        || expectedMainCommit === undefined || extra.length !== 0) usage();
-      print(await call({
-        command: 'promotion.prepare',
-        commandId: crypto.randomUUID(),
-        projectId,
-        batchId,
-        expectedDevCommit,
-        expectedMainCommit,
-      }));
-    } else if (subcommand === 'approve') {
-      if (trailing.length !== 0 || promotionId === undefined) usage();
-      print(await call({
-        command: 'promotion.approve',
-        commandId: crypto.randomUUID(),
-        projectId,
-        promotionId,
-      }));
-    } else if (subcommand === 'promote') {
-      if (trailing.length !== 0 || promotionId === undefined) usage();
-      const result = await call({
-        command: 'promotion.promote',
-        commandId: crypto.randomUUID(),
-        projectId,
-        promotionId,
-      }) as PromotionReportView;
-      if (result.phase === 'AWAITING_PULL') {
-        // ADR-0047 D03: the candidate is on the remote dev branch and the main checkout has not
-        // pulled it. That is a distinct outcome, not a failure and not a success: exit code 3, and
-        // no restart step was run or recorded.
-        if (json) print(result);
-        else printPromotion(result);
-        console.error('The fixed candidate is pushed to the remote dev branch and read back; the main'
-          + ' checkout has not pulled it yet. In the main checkout run:');
-        console.error('  git fetch origin && git merge --ff-only origin/dev');
-        console.error('Then run `promotion promote` again with the same promotion ID to record the pull'
-          + ' and run the restart sequence.');
-        process.exit(3);
-      }
-      if (result.state !== 'RESTARTING' && result.state !== 'RECOVERY_REQUIRED') {
-        // Nothing left to run: report the facts verbatim, and only a real SUCCEEDED promotion is
-        // exit code 0.
-        if (json) print(result);
-        else printPromotion(result);
-        if (result.state !== 'SUCCEEDED') process.exit(1);
-      } else {
-        const outcomes = await runPromotionRestartSteps(result);
-        const recorded = await recordPromotionRestart(result, outcomes);
-        if (json) print(recorded);
-        else printPromotion(recorded);
-        if (recorded.state !== 'SUCCEEDED') process.exit(1);
-      }
-    } else if (subcommand === 'abandon') {
-      if (trailing.length !== 0 || promotionId === undefined) usage();
-      if (reason === undefined) {
-        throw new Error('--reason <text> is required: an abandoned promotion keeps the record and'
-          + ' the observed ref state for audit');
-      }
-      print(await call({
-        command: 'promotion.abandon',
-        commandId: crypto.randomUUID(),
-        projectId,
-        promotionId,
-        reason,
-      }));
-    } else if (subcommand === 'get') {
-      if (trailing.length !== 0 || promotionId === undefined) usage();
-      print(await call({ command: 'promotion.get', projectId, promotionId }));
-    } else if (subcommand === 'list') {
-      if (trailing.length !== 0) usage();
-      print(await call({ command: 'promotion.list', projectId, limit: limit ?? 20 }));
-    } else {
-      usage();
     }
   } else if (group === 'task' && action === 'schedule') {
     // The scheduling engine's command face (FOUNDATION-055). `status` and `plan` observe (plan is the

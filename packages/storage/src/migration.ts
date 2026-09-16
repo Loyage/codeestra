@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 34;
+export const phase1SchemaVersion = 35;
 
 /** The kinds `intents.kind` accepts (ADR-0046) and the only kinds any command can write. */
 export const intentKinds = ['CREATE_TASK', 'AMEND_TASK', 'ADD_CONSTRAINT', 'CANCEL_TASK',
@@ -2055,6 +2055,61 @@ CREATE INDEX runtime_pause_targets_by_epoch
 INSERT INTO runtime_pause_control(singleton_id,state,pause_epoch,version,requested_at,
   requested_by,settled_at,detail_json)
   VALUES (1,'RUNNING',0,0,NULL,NULL,NULL,NULL);
+`;
+
+/**
+ * Schema v35 (ADR-0062): the product no longer models a dev clone, a long-lived `dev` branch,
+ * integration into it, or `dev → main` promotion.
+ *
+ * A Task worktree is based on **the project folder's currently checked out branch** for every
+ * project — the one rule ADR-0060 introduced for projects without a dev clone, now the only rule.
+ * `project_trusts.dev_repo_path`, `projects.dev_ref` and the integration/promotion aggregates are
+ * removed rather than left unread: leaving a column that no command can write but a reader could
+ * still select is exactly the "two models" this step deletes.
+ *
+ * **Irreversible by decision (user, 2026-09-16).** The integration batches, their independent
+ * verification runs and every stable promotion record are dropped. They were records of a model
+ * that no longer exists; the tasks, revisions, executions and task-level `verification_runs` they
+ * pointed at are untouched, and worktrees/reclaim records keep their own audit.
+ *
+ * The column carry-over is load-bearing: `workspaces.base_ref` (v33) is only written by the
+ * preparation path, so rows prepared before v33 recorded their baseline ref solely on the project
+ * row (`projects.dev_ref`). They are backfilled **before** that column is dropped, and the `projects`
+ * rebuild is guarded by a row-count comparison in `migrate()` because Bun's `exec()` would otherwise
+ * swallow a copy failure and run the following `DROP TABLE` anyway.
+ *
+ * Schema version 35 is this step's own number: 16 stays permanently unused and no earlier number is
+ * ever inserted. A database may already be stamped 17–34 and would skip a later `version < 16` step.
+ */
+export const removeDevCloneMigration = `
+UPDATE workspaces SET base_ref = (
+  SELECT p.dev_ref FROM projects p JOIN tasks t ON t.project_id = p.id
+  WHERE t.id = workspaces.task_id
+) WHERE base_ref IS NULL;
+
+CREATE TABLE projects_v35 (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+  repo_root TEXT NOT NULL UNIQUE,
+  git_common_dir TEXT NOT NULL UNIQUE,
+  main_ref TEXT NOT NULL CHECK(length(trim(main_ref)) > 0),
+  object_format TEXT NOT NULL CHECK(object_format IN ('sha1','sha256')),
+  policy_version INTEGER NOT NULL DEFAULT 1 CHECK(policy_version > 0),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0)
+) STRICT;
+INSERT INTO projects_v35(id,name,repo_root,git_common_dir,main_ref,object_format,policy_version,
+  created_at)
+  SELECT id,name,repo_root,git_common_dir,main_ref,object_format,policy_version,created_at
+  FROM projects;
+DROP TABLE projects;
+ALTER TABLE projects_v35 RENAME TO projects;
+
+DROP TABLE integration_batch_items;
+DROP TABLE integration_verification_runs;
+DROP TABLE integration_batches;
+DROP TABLE stable_promotion_members;
+DROP TABLE stable_promotions;
+DROP TABLE dev_full_suite_evidence;
 `;
 
 export const integrationBatchTerminalStatesMigration = `

@@ -57,7 +57,7 @@ import {
 } from './impact-analysis-service.js';
 import { inspectTaskDependencies, reconcileTaskDependencyState } from './scheduler.js';
 import { resolveTaskBaselineRepository, TaskBaselineError,
-  type TaskBaselineRepository } from './dev-repo-service.js';
+  type TaskBaselineRepository } from './task-baseline-service.js';
 import type { SlotReservationService } from './slot-reservation-service.js';
 
 /**

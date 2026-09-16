@@ -312,7 +312,6 @@ describe('impact policy confirmation', () => {
       repoRoot: '/repo',
       gitCommonDir: '/repo/.git',
       mainRef: 'refs/heads/main',
-      devRef: 'refs/heads/dev',
       objectFormat: 'sha1' as const,
       policyVersion: 1,
       verificationPolicyConfirmationId: crypto.randomUUID(),

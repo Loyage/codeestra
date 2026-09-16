@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { ThemeSelector } from './theme.js';
-import { ChannelBanner, channelBrandName, uiChannel } from './channel.js';
 import { AgentSettingsPanel } from './agent-settings.js';
 import { SettingsPage, UiSettingsProvider } from './settings.js';
 import { usePendingAction } from './use-pending-action.js';
@@ -9,11 +8,7 @@ import { GlobalControlBar } from './global-control-bar.js';
 import { TranscriptPanel } from './transcript.js';
 import { TerminalPanel } from './terminal.js';
 import { DependencyPanel } from './dependencies.js';
-import { PromotionPanel } from './promotion.js';
-import { IntegrationBatchPanel, IntegrationBatchTable } from './integration-batches.js';
 import {
-  DevRepoInspectionRows,
-  ProjectDevRepoInput,
   canSubmitProjectTrust,
   projectInspectCommand,
   projectTrustCommand,
@@ -109,13 +104,6 @@ const valueLabels: Record<string, string> = {
   CONFIRM: '确认',
   VALUE: '文本',
   PREPARED: '已准备',
-  VERIFYING: '正在集成验证',
-  INTEGRATING_DEV: '正在更新 dev',
-  INTEGRATED: '已合入 dev',
-  CONFLICTED: '合并冲突',
-  MERGED: '已合并',
-  FAST_FORWARD: '快进',
-  MERGE_COMMIT: '合并提交',
   PLANNED: '已计划',
   IN_PROGRESS: '进行中',
   INFO: '信息',
@@ -246,7 +234,6 @@ export function App({ initialToken, initialProjectId, tokenKey }: {
   if (token === null) {
     return (
       <>
-        <ChannelBanner channel={uiChannel} />
         <div className="centered">
           <div className="theme-corner"><ThemeSelector /></div>
           <TokenForm onSubmit={(value) => {
@@ -439,10 +426,7 @@ function Console({ token, initialProjectId }: {
       || frame.event.eventType.startsWith('Task')
       || frame.event.eventType.startsWith('AgentSession')
       || frame.event.eventType.startsWith('Verification')
-      || frame.event.eventType.startsWith('ResultCommit')
-      // A batch is composed, merged, invalidated or cancelled as its own aggregate, so its events
-      // refresh the project's batch view and the selected Task's integration record.
-      || frame.event.eventType.startsWith('Integration');
+      || frame.event.eventType.startsWith('ResultCommit');
     // Long-command progress arrives as an event, so the Task detail is updated from the stream
     // instead of being polled. An Operation this client does not know yet (another client queued
     // it) triggers exactly one detail reload, after which its events merge in place.
@@ -591,11 +575,10 @@ function Console({ token, initialProjectId }: {
     <UiSettingsProvider client={client}>
     <div className="app">
       <a className="skip-link" href="#workspace">跳转到工作区</a>
-      <ChannelBanner channel={uiChannel} />
       <header className="app-header">
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">C</span>
-          <div><strong>{channelBrandName(uiChannel)}</strong><span className="brand-caption">让意图成为成果</span></div>
+          <div><strong>Codeestra</strong><span className="brand-caption">让意图成为成果</span></div>
         </div>
         <div className="header-controls">
           <select
@@ -749,7 +732,7 @@ function Console({ token, initialProjectId }: {
       </main>
 
       <footer className="muted">
-        关闭页面不会停止任务 · 暂停与终止请在任务详情操作 · 合入 dev 不等于发布到 main。
+        关闭页面不会停止任务 · 暂停与终止请在任务详情操作。
         {selectedTask === null ? null : ` 当前选择：任务 #${selectedTask.displayNumber}。`}
       </footer>
       {projectId === null ? null : (
@@ -844,20 +827,13 @@ function TasksTab(props: CommonProps & {
     setVerifyReport(null);
   }, [taskId]);
   const latestExecution = status?.executions[0] ?? null;
-  const integrationBatches = status?.integrations ?? [];
   const operations = status?.operations ?? [];
-  const integratedBatch = integrationBatches.find((batch) => batch.state === 'INTEGRATED') ?? null;
-  const inFlightIntegration = integrationBatches.find((batch) =>
-    ['CREATED', 'PREPARING', 'VERIFYING', 'INTEGRATING_DEV', 'RECOVERY_REQUIRED']
-      .includes(batch.state)) ?? null;
-  // Integration needs a PASSED Task verification of exactly this revision and result commit, and
-  // needs `dev` to be advanceable: the Runtime still refuses if the ref moved or is checked out.
+  // ADR-0062: a Task's result stays on its own branch; the user merges it. The console therefore
+  // reports the verification of exactly this revision and result commit, and nothing beyond it.
   const passedVerification = status?.verifications.find((verification) =>
     verification.state === 'PASSED'
     && verification.revisionId === task?.currentRevision.id
     && verification.testedCommit === latestExecution?.resultCommit) ?? null;
-  const canIntegrate = task?.state === 'EXECUTED' && passedVerification !== null
-    && integratedBatch === null && inFlightIntegration === null;
   const canCapture = task?.state === 'RUNNING'
     && latestExecution?.state === 'RUNNING' && latestExecution.resourceHeld
     && latestExecution.session?.state === 'EXITED';
@@ -870,15 +846,11 @@ function TasksTab(props: CommonProps & {
     : task.state === 'DRAFT' ? '提交后进入自动调度，满足依赖、冲突与容量条件才会启动。创建草稿不会自动运行。'
     : task.state === 'READY' ? '任务等待调度；可手动尝试启动，Runtime 会核对依赖、冲突与容量，不保证立即运行。'
     : task.state === 'BLOCKED' ? '正在等待上游依赖满足。展开下方任务依赖，查看尚未满足的条件。'
-    : inFlightIntegration !== null ? '集成尚未完成，请查看下方独立集成验证与合入记录。'
-    : verifying ? '任务验证进行中。下方显示实际步骤，可请求取消；完成前不能合入 dev。'
+    : verifying ? '任务验证进行中。下方显示实际步骤，可请求取消。'
     : canCapture ? 'Agent 会话已退出。若有代码变更，可提交成果，然后独立验证。'
-    : task.state === 'EXECUTED' ? (integratedBatch === null
-      ? (passedVerification === null
-        ? '成果已提交。先在固定 commit 上运行任务验证；验证通过后才能合入 dev。'
-        : '验证已通过，可以合入 dev。合入会产生独立集成验证，并只在通过后移动 dev 引用。')
-      : '已合入 dev。dev → main 的稳定提升是另一条流程，不在这一步内。')
-    : task.state === 'SUCCEEDED' ? '成果已合入 dev；这不等于已提升到稳定的 main。'
+    : task.state === 'EXECUTED' ? (passedVerification === null
+      ? '成果已提交。先在固定 commit 上运行任务验证。'
+      : '验证已通过。成果停在 task 分支上，由你自己合并。')
     : task.state === 'RUNNING' ? '查看下方执行过程；可暂停（保留现场、稍后继续）或终止。'
     : task.state === 'PAUSED' ? '任务已暂停，provider 进程已确认退出；「继续」会在同一工作树新建一次执行并复用该会话。'
     : task.state === 'CANCELLED' ? '任务已终止，不会自动重开；需要重做请新建任务。'
@@ -1085,7 +1057,7 @@ function TasksTab(props: CommonProps & {
                 type="button"
                 className={passedVerification === null ? 'primary' : ''}
                 hidden={task.state !== 'EXECUTED' || archived}
-                disabled={busy || verifying || inFlightIntegration !== null}
+                disabled={busy || verifying}
                 title="提交成果后，在固定 commit 上独立运行验证；后台运行，可在此查看进度并取消"
                 onClick={() => {
                   void run('正在排队验证', async () => {
@@ -1105,35 +1077,6 @@ function TasksTab(props: CommonProps & {
                 }}
               >
                 {verifying ? '验证进行中…' : passedVerification !== null ? '重新验证' : '验证任务'}
-              </button>
-              <button
-                type="button"
-                className="primary"
-                hidden={!canIntegrate || archived}
-                disabled={busy || verifying}
-                title={canIntegrate
-                  ? '把这次任务的成果 commit 合入 dev：先在独立工作树里合并，再跑独立集成验证，通过后才移动 dev 引用'
-                  : '需要 EXECUTED 任务、该成果 commit 的验证已通过、且没有进行中或已完成的合入'}
-                onClick={() => {
-                  void run('正在合入 dev（独立集成验证可能需要一段时间）', async () => {
-                    const report = await client.command<{ state: string }>({
-                      command: 'task.integrate',
-                      commandId: crypto.randomUUID(),
-                      projectId,
-                      taskId: task.id,
-                      expectedVersion: task.version,
-                    });
-                    if (selectedRef.current === task.id) setVerifyReport(null);
-                    await props.reloadTasks(projectId);
-                    await props.loadDetail(projectId, task.id);
-                    if (report.state !== 'INTEGRATED') {
-                      throw new Error(`合入未完成：${labelValue(report.state)}`
-                        + '（dev 未被改动，请看下方集成记录）');
-                    }
-                  });
-                }}
-              >
-                合入 dev
               </button>
               <details key={task.id} className="secondary-actions">
                 <summary>更多操作</summary>
@@ -1335,7 +1278,7 @@ function TasksTab(props: CommonProps & {
                 </div>}
                 <CompletionNotes executions={status.executions} />
                 <details className="execution-evidence">
-                <summary>执行、验证与集成记录 · {status.executions.length} 次执行 / {status.verifications.length} 次验证 / {integrationBatches.length} 次合入</summary>
+                <summary>执行与验证记录 · {status.executions.length} 次执行 / {status.verifications.length} 次验证</summary>
                 <h3>执行记录</h3>
                 <div className="table-scroll"><table>
                   <thead>
@@ -1396,13 +1339,6 @@ function TasksTab(props: CommonProps & {
                     ) : null}
                   </tbody>
                 </table></div>
-                <h3>集成批次 · dev
-                  <span className="muted hint">只读 · 一个批次可以跨多个任务（ADR-0053）</span></h3>
-                <IntegrationBatchTable batches={integrationBatches}
-                  emptyNote="本任务还没有集成批次；成果不会自动进入 dev。" />
-                <p className="muted hint">
-                  成员按 task_id 顺序列出；批级 INTEGRATED 只说明已合入 dev，不等于已进 main。
-                </p>
                 </details>
 
                 <section className="process-panel">
@@ -1465,13 +1401,6 @@ function TasksTab(props: CommonProps & {
                     projectId={projectId}
                     taskId={task.id}
                     tasks={tasks}
-                    refreshToken={props.detailToken}
-                    run={props.run}
-                  />
-                  <PromotionPanel
-                    client={client}
-                    projectId={projectId}
-                    taskId={task.id}
                     refreshToken={props.detailToken}
                     run={props.run}
                   />
@@ -1919,7 +1848,6 @@ function ProjectTab({ client, permissionMode, projectId, tasks, refreshToken, ru
   const actions = usePendingAction(run);
   const busy = actions.pending.size > 0;
   const [path, setPath] = useState('');
-  const [devRepoPath, setDevRepoPath] = useState('');
   const [identity, setIdentity] = useState<ProjectIdentityView | null>(null);
   const [policy, setPolicy] = useState<VerificationPolicyView | null>(null);
   const [confirmation, setConfirmation] = useState('');
@@ -1944,10 +1872,8 @@ function ProjectTab({ client, permissionMode, projectId, tasks, refreshToken, ru
         <button className="primary" type="button" disabled={path.trim().length === 0} onClick={() => {
           void actions.run('project', '正在检查项目与策略', async () => {
             setIdentity(null); setPolicy(null); setConfirmation(''); setTrustError(null);
-            // The dev clone is inspected when one was typed, so the identity this form echoes back
-            // below already carries the verification the user reviewed (ADR-0047 D05).
             const [identity, policy] = await Promise.all([
-              client.command<ProjectIdentityView>(projectInspectCommand({ path, devRepoPath })),
+              client.command<ProjectIdentityView>(projectInspectCommand({ path })),
               client.command<VerificationPolicyView>({ command: 'project.verificationPolicy', path }),
             ]);
             setIdentity(identity); setPolicy(policy);
@@ -1955,30 +1881,14 @@ function ProjectTab({ client, permissionMode, projectId, tasks, refreshToken, ru
         }}>检查项目</button>
       </div>
 
-      <ProjectDevRepoInput value={devRepoPath} busy={busy}
-        onChange={(value) => {
-          // Changing the path invalidates the inspected identity, exactly like the main path does:
-          // the trust request echoes the identity the user actually reviewed.
-          setDevRepoPath(value); setIdentity(null); setPolicy(null); setConfirmation('');
-          setTrustError(null);
-        }} />
-
       {identity === null ? null : (
         <dl className="kv">
           <dt>仓库根目录</dt><dd className="mono">{identity.repoRoot}</dd>
           <dt>main 引用</dt><dd className="mono">{identity.mainRef}</dd>
           <dt>对象格式</dt><dd>{identity.objectFormat}</dd>
           <dt>HEAD</dt><dd className="mono">{identity.headCommit}</dd>
-          <dt>dev 基线</dt>
-          <dd className="mono">{identity.devRef} {identity.devCommit?.slice(0, 12) ?? '—'}
-            <div className="muted">{identity.devRefPresent
-              ? '这个 ref 存在：Task 工作树与集成目标都从它建基线'
-              : identity.devRepoPath === null
-                ? '没有 dev clone（managed，ADR-0060）：Task 基线取这个项目文件夹当前检出的分支；'
-                  + 'task integrate / promotion * 需要在长期 dev 分支上工作时才以 DEV_REPO_REQUIRED 拒绝'
-                : `这个 dev clone 未通过核验（${identity.devRepoPath.code ?? 'DEV_REPO_*'}）：`
-                  + '信任会被拒绝'}</div></dd>
-          <DevRepoInspectionRows inspection={identity.devRepoPath} />
+          <dt>Task 基线</dt>
+          <dd className="muted">这个项目文件夹当前检出的分支；建 Task 时固定 ref 与 commit。</dd>
         </dl>
       )}
 
@@ -2025,9 +1935,8 @@ function ProjectTab({ client, permissionMode, projectId, tasks, refreshToken, ru
             />
           )}
           <p className="muted hint">
-            这个按钮会发出 <span className="mono">project.trust</span>：把你审阅的身份（含上面的 dev clone
-            核验结果）、验证策略 digest 与 dev clone 路径一起提交。dev clone 路径为空时按钮不可点
-            —— 信任需要它，界面不假装成功；路径能不能用由 Runtime 核验。
+            这个按钮会发出 <span className="mono">project.trust</span>：把你审阅的身份与验证策略 digest
+            一起提交。
           </p>
           {trustError === null ? null : (
             <p className="error" role="alert">信任被拒绝：{trustError}</p>
@@ -2035,7 +1944,7 @@ function ProjectTab({ client, permissionMode, projectId, tasks, refreshToken, ru
           <button
             type="button"
             className="primary"
-            disabled={!canSubmitProjectTrust({ permissionMode, confirmation, devRepoPath })}
+            disabled={!canSubmitProjectTrust({ permissionMode, confirmation })}
             onClick={() => {
               void actions.run('project', '正在添加项目', async () => {
                 setTrustError(null);
@@ -2043,7 +1952,6 @@ function ProjectTab({ client, permissionMode, projectId, tasks, refreshToken, ru
                   await client.command(projectTrustCommand({
                     path,
                     expectedIdentity: identity,
-                    devRepoPath,
                     expectedVerificationPolicy: projectTrustPolicyConfirmation(policy),
                   }));
                 } catch (caught) {
@@ -2068,10 +1976,6 @@ function ProjectTab({ client, permissionMode, projectId, tasks, refreshToken, ru
     {projectId === null ? null : (
       <section className="card">
         <DependencyPanel client={client} projectId={projectId} taskId={null} tasks={tasks}
-          refreshToken={refreshToken} run={run} />
-        <IntegrationBatchPanel client={client} projectId={projectId} tasks={tasks}
-          refreshToken={refreshToken} run={run} />
-        <PromotionPanel client={client} projectId={projectId} taskId={null}
           refreshToken={refreshToken} run={run} />
       </section>
     )}

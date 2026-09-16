@@ -89,7 +89,6 @@ async function harness(options: {
       repoRoot: fixture.repo,
       gitCommonDir: fixture.storage.getTrustedProject(fixture.projectId).gitCommonDir,
       mainRef: 'refs/heads/main',
-      devRef: 'refs/heads/dev',
       objectFormat: fixture.storage.getTrustedProject(fixture.projectId).objectFormat,
       policyVersion: 1,
       verificationPolicyConfirmationId: nextId(),
@@ -619,7 +618,7 @@ describe('scheduling loop', () => {
     const candidates = tick.projects[0]?.candidates ?? [];
     const blocked = candidates.find((candidate) => candidate.taskId === downstream.taskId);
     expect(blocked?.disposition).toBe('BLOCKED');
-    expect(blocked?.blockedReasons[0]?.code).toBe('UPSTREAM_NOT_INTEGRATED');
+    expect(blocked?.blockedReasons[0]?.code).toBe('UPSTREAM_RESULT_MISSING');
     expect(blocked?.wait).toBeNull();
     expect(taskOf(harnessed.fixture, downstream.taskId).state).toBe('BLOCKED');
     expect(executionsOf(harnessed.fixture, downstream.taskId)).toHaveLength(0);

@@ -59,6 +59,7 @@ import {
   reclamationMigration,
   resolveMigratedGlobalLimit,
   revisionDeliveryMigration,
+  removeDevCloneMigration,
   runtimeGlobalCapacityMigration,
   runtimePauseControlMigration,
   sessionGuidanceMigration,
@@ -113,12 +114,7 @@ export class StorageError extends Error {
       // `task.recover` only means something for a Task the Runtime is waiting to reconcile
       // (ADR-0055), so "there is nothing to reconcile here" is its own refusal instead of a generic
       // state error a caller would have to read a sentence to understand.
-      | 'TASK_NOT_IN_RECOVERY'
-      // `task.purge` (ADR-0058) permanently deletes a Task, so a Task that already put a commit into
-      // `dev` or into a stable promotion is refused with its own code instead of one generic
-      // "cannot delete": deleting it would erase the record of which commit entered which ref.
-      | 'TASK_INTEGRATED_INTO_DEV'
-      | 'TASK_IN_STABLE_PROMOTION',
+      | 'TASK_NOT_IN_RECOVERY',
     message: string,
   ) {
     super(message);
@@ -349,14 +345,6 @@ export interface TrustedProject {
   readonly gitCommonDir: string;
   /** Ref whose committed verification policy governs this project (ADR-0006). */
   readonly mainRef: string;
-  /** Ref every Task worktree is based on and every result is integrated into (ADR-0009). */
-  readonly devRef: string;
-  /**
-   * The second clone of the same origin a promotion pushes its fixed candidate from (ADR-0047
-   * D05), or null when the project has none. Recorded only after it was verified as a separate
-   * clone of this origin sitting on `dev`; a path that cannot be verified is refused, never stored.
-   */
-  readonly devRepoPath: string | null;
   readonly objectFormat: 'sha1' | 'sha256';
   readonly policyVersion: number;
   readonly trustedAt: number;
@@ -875,16 +863,16 @@ export interface WorkspacePreparationPlan {
   readonly workspaceId: string;
   readonly workspaceState: 'RESERVED' | 'PREPARING' | 'READY' | 'RECOVERY_REQUIRED' | 'RELEASED';
   /**
-   * The repository that owns this worktree: the project's dev clone (ADR-0056). It is what a
+   * The repository that owns this worktree: the project folder itself (ADR-0062). It is what a
    * restart re-reads when it reconciles an interrupted preparation (`git worktree list` has to be
-   * asked in the clone the worktree was created in). The record's `gitCommonDir` and `mainRef`
-   * stay the trusted main checkout's facts.
+   * asked in the repository the worktree was created in). The record's `gitCommonDir` and `mainRef`
+   * stay the trusted checkout's facts.
    */
   readonly repoRoot: string;
   readonly gitCommonDir: string;
   readonly mainRef: string;
   /** Fixed base ref for the worktree this plan prepares; the base commit is read from it. */
-  readonly devRef: string;
+  readonly baseRef: string;
   readonly objectFormat: 'sha1' | 'sha256';
   readonly baseCommit: string;
   readonly ownershipToken: string;
@@ -1248,373 +1236,6 @@ export interface TargetedTestPlanRecord {
   readonly recordedAt: number;
 }
 
-/** One dev full-suite run. Only `PASSED` can carry a `dev → main` promotion. */
-export type DevFullSuiteState = 'QUEUED' | 'RUNNING' | 'PASSED' | 'FAILED' | 'ERROR';
-
-/**
- * Independent "full suite passed on this exact dev SHA" evidence (ADR-0038 D03, ADR-0039). Every
- * run is one row bound to the candidate commit, the fixed project policy read from `main`, and the
- * lockfile at that commit; a re-run inserts a new row instead of rewriting the old one.
- */
-export interface DevFullSuiteEvidenceRecord {
-  readonly evidenceId: string;
-  readonly projectId: string;
-  readonly devRef: string;
-  readonly devCommit: string;
-  readonly policyVersion: string;
-  readonly policyDigest: string;
-  readonly lockfilePath: string;
-  /** False when the project has no lockfile at the candidate commit; the absence is the binding. */
-  readonly lockfilePresent: boolean;
-  readonly lockfileDigest: string;
-  readonly commands: readonly StoredVerificationCommand[];
-  readonly copyPath: string;
-  readonly state: DevFullSuiteState;
-  readonly outcomeCode: string | null;
-  readonly evidence: VerificationEvidence | null;
-  readonly commandId: string;
-  readonly observedBy: string;
-  readonly queuedAt: number;
-  readonly startedAt: number | null;
-  readonly endedAt: number | null;
-}
-
-/** Repository facts a dev full-suite run needs; no Task is involved in this evidence. */
-export interface DevFullSuiteCandidates {
-  readonly projectId: string;
-  /** The dev clone: the fixed candidate commit is an object of this clone (ADR-0056). */
-  readonly repositoryRoot: string;
-  /** The stable main checkout, whose `main` ref carries the fixed full-suite policy. */
-  readonly mainRepositoryRoot: string;
-  readonly gitCommonDir: string;
-  readonly mainRef: string;
-  readonly devRef: string;
-  readonly objectFormat: 'sha1' | 'sha256';
-}
-
-export type PromotionPermissionMode = 'FULL' | 'STRICT';
-
-/**
- * Stable branch promotion projections (ADR-0009 D02/D03, ADR-0022, ADR-0047). One promotion fixes
- * the facts it is allowed to act on — the verified `dev` commit, the expected old `main` commit, and
- * the independent integration verification of the promoted commit — together with the permission
- * mode, the dev clone it pushes from, the remote readbacks, and the Runtime restart result.
- *
- * `CREATED` holds the fixed evidence. `AWAITING_APPROVAL` exists only in STRICT and records the
- * exact approved triple, so a later `dev`/`main`/evidence movement is detectable as `STALE`.
- * `PROMOTING` means the fixed candidate was pushed to the remote `dev` and the remote was read back
- * and matched: it is "pushed, awaiting the manual pull in the main checkout" (ADR-0047 D03), **not**
- * "main moved". `RESTARTING` means the main checkout was observed at the candidate (the user pulled)
- * and the restart sequence was recorded; its result has to be recorded by a later Runtime.
- * `RECOVERY_REQUIRED` is a resumable, blocking state: reconciliation found the promotion mid-flight
- * and states what the refs actually say.
- */
-export type StablePromotionState = 'CREATED' | 'AWAITING_APPROVAL' | 'PROMOTING' | 'RESTARTING'
-  | 'SUCCEEDED' | 'STALE' | 'FAILED' | 'RECOVERY_REQUIRED';
-
-/**
- * Which of the two distinguishable promotion facts a record currently states (ADR-0047 D03).
- * `AWAITING_PULL` and `MAIN_PUSH_PENDING` are the two that must never be reported as a finished
- * promotion: the first has pushed to the remote `dev` only, the second has a restarted main
- * checkout whose new commit is not published on the remote `main` yet.
- */
-export type PromotionPhase = 'READY_TO_PUSH' | 'AWAITING_PULL' | 'RESTART_PENDING'
-  | 'MAIN_PUSH_PENDING' | 'COMPLETE' | 'REFUSED';
-
-/** One Task revision whose result the promoted `dev` commit contains. */
-export interface PromotionMember {
-  readonly batchId: string;
-  readonly taskId: string;
-  readonly revisionId: string;
-  readonly executionId: string;
-  readonly candidateCommit: string;
-}
-
-/** The fixed restart sequence: absolute cwd plus argv. Recorded before the Runtime stops. */
-export interface PromotionRestartPlanStep {
-  readonly id: string;
-  readonly argv: readonly string[];
-  readonly cwd: string;
-}
-
-export interface PromotionRestartStepOutcome {
-  readonly id: string;
-  readonly argv: readonly string[];
-  readonly cwd: string;
-  readonly exitCode: number | null;
-  readonly durationMs: number;
-  readonly stdoutBytes: number;
-  readonly stderrBytes: number;
-  readonly stdoutDigest: string;
-  readonly stderrDigest: string;
-  readonly failureDetail?: string;
-}
-
-/** What the client observed when it checked the restarted Runtime. */
-export interface PromotionRestartResult {
-  readonly observedBootId: string;
-  readonly runtimeStatus: string | null;
-  readonly uiRunning: boolean | null;
-  readonly steps: readonly PromotionRestartStepOutcome[];
-}
-
-/** Everything the promoting client needs to run the post-steps without asking again. */
-export interface StablePromotionSummary {
-  readonly promotionId: string;
-  readonly projectId: string;
-  readonly devRef: string;
-  readonly mainRef: string;
-  readonly candidateCommit: string;
-  readonly expectedMainCommit: string;
-  readonly integrationBatchId: string;
-  readonly verificationId: string;
-  readonly verificationTestedCommit: string;
-  readonly permissionMode: PromotionPermissionMode;
-  readonly state: StablePromotionState;
-  readonly approval: {
-    readonly devCommit: string; readonly mainCommit: string;
-    readonly verificationId: string;
-    /** The exact dev full-suite evidence the approval also covered (ADR-0039). */
-    readonly fullSuiteEvidenceId: string | null;
-    readonly approvedAt: number;
-  } | null;
-  /**
-   * The exact dev full-suite evidence this promotion was prepared against (ADR-0038 D03).
-   * `promote` re-reads all three bindings and refuses if any of them moved.
-   */
-  readonly fullSuite: {
-    readonly evidenceId: string;
-    readonly devCommit: string;
-    readonly policyVersion: string;
-    readonly policyDigest: string;
-    readonly lockfileDigest: string;
-  } | null;
-  /** Commit the main checkout was observed at; NULL until the pull was observed (ADR-0047 D03). */
-  readonly promotedCommit: string | null;
-  /** The worktree that has `main` checked out; NULL until the pull was observed there. */
-  readonly mainWorktreePath: string | null;
-  /** Boot identity of the Runtime that issued the restart plan after the pull was observed. */
-  readonly promotingBootId: string | null;
-  /** The dev clone this promotion pushes its candidate from (ADR-0047 D05). */
-  readonly devRepoPath: string | null;
-  /**
-   * Commit read back from the remote dev ref after the push. This is a *readback*, never an input:
-   * the promotion only records it after `git ls-remote` reported the fixed candidate, which is what
-   * makes "the push exited 0" unable to stand in for "the candidate is on the remote".
-   */
-  readonly remoteDevCommit: string | null;
-  /** Commit read back from the remote main ref after the stable commit was published there. */
-  readonly remoteMainCommit: string | null;
-  readonly pushedAt: number | null;
-  readonly mainPushedAt: number | null;
-  /** Which pair of facts (pushed / pulled-and-restarted) this record currently states. */
-  readonly phase: PromotionPhase;
-  readonly restartSteps: readonly PromotionRestartPlanStep[];
-  readonly restart: PromotionRestartResult | null;
-  readonly outcomeCode: string | null;
-  readonly detail: string | null;
-  readonly createdAt: number;
-  readonly completedAt: number | null;
-  /** Task revisions the promoted commit contains, fixed at preparation time. */
-  readonly members: readonly PromotionMember[];
-}
-
-export interface StablePromotionPlan extends StablePromotionSummary {
-  readonly operationId: string;
-  readonly operationState: 'PLANNED' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'RECONCILE_REQUIRED';
-  readonly repositoryRoot: string;
-  readonly gitCommonDir: string;
-  readonly objectFormat: 'sha1' | 'sha256';
-}
-
-/** Read-only facts the promotion service needs before it may touch any ref. */
-export interface PromotionCandidates {
-  readonly projectId: string;
-  readonly batchId: string;
-  readonly repositoryRoot: string;
-  readonly gitCommonDir: string;
-  readonly mainRef: string;
-  readonly devRef: string;
-  /** The project's recorded dev clone, or null when it has none (ADR-0047 D05). */
-  readonly devRepoPath: string | null;
-  readonly objectFormat: 'sha1' | 'sha256';
-  readonly batchState: IntegrationBatchState;
-  readonly batchDevRef: string;
-  readonly batchDevCommit: string;
-  readonly batchMergedCommit: string | null;
-  readonly batchIntegratedCommit: string | null;
-  readonly verificationState: VerificationState | null;
-  readonly verificationId: string | null;
-  readonly verificationTestedCommit: string | null;
-  readonly verificationDevCommit: string | null;
-  readonly verificationOutcomeCode: string | null;
-  readonly members: readonly PromotionMember[];
-  /** The open promotion of this project, if any; a second attempt must not race it. */
-  readonly openPromotion: StablePromotionSummary | null;
-}
-
-/**
- * Integration pipeline projections (ADR-0018, ADR-0053). A batch fixes the `dev` baseline, carries
- * one or more member candidates, and records the merges and the single independent integration
- * verification that allowed the `dev` ref to advance. `integratedCommit` is null until the ref
- * actually moved.
- *
- * The states follow `docs/architecture/state-machines.md` §4: `CREATED → PREPARING → VERIFYING →
- * INTEGRATING_DEV → INTEGRATED`, with `CONFLICTED`/`FAILED`/`RECOVERY_REQUIRED` as the other ends.
- * `INTEGRATING_DEV` exists because a crash between the ref write and the record is only resolvable
- * by comparing the recorded `mergedCommit` against the ref that was actually written.
- *
- * Two further terminal verdicts belong to the multi-member contract (ADR-0053) and are never mixed
- * with a failure:
- *
- * - `STALE`: the fixed evidence (a member's revision/result commit, or the recorded `dev` baseline)
- *   stopped being the current fact before anything was integrated. `dev` is untouched and no merge
- *   ran; the batch has to be composed again from the current facts.
- * - `CANCELLED`: the user ended a batch that had no Git side effect yet. A batch that already has a
- *   recorded worktree, merge or verification is never cancelled from here — it needs reconciliation
- *   first, so it becomes `RECOVERY_REQUIRED/RECONCILE_REQUIRED` instead.
- */
-export type IntegrationBatchState = 'CREATED' | 'PREPARING' | 'VERIFYING' | 'INTEGRATING_DEV'
-  | 'INTEGRATED' | 'CONFLICTED' | 'FAILED' | 'RECOVERY_REQUIRED' | 'STALE' | 'CANCELLED';
-export type IntegrationItemState = 'PREPARED' | 'MERGED' | 'INTEGRATED' | 'FAILED' | 'CONFLICTED';
-export type MergeStrategy = 'FAST_FORWARD' | 'MERGE_COMMIT';
-
-export interface IntegrationBatchItemSummary {
-  readonly batchId: string;
-  readonly projectId: string;
-  readonly taskId: string;
-  readonly taskVersion: number;
-  readonly revisionId: string;
-  readonly executionId: string;
-  readonly candidateCommit: string;
-  readonly devCommit: string;
-  readonly state: IntegrationItemState;
-  readonly integratedCommit: string | null;
-  readonly detail: string | null;
-  readonly createdAt: number;
-  readonly completedAt: number | null;
-}
-
-export interface IntegrationBatchSummary {
-  readonly batchId: string;
-  readonly projectId: string;
-  readonly devRef: string;
-  readonly devCommit: string;
-  readonly state: IntegrationBatchState;
-  readonly integratedCommit: string | null;
-  readonly mergeStrategy: MergeStrategy | null;
-  /** The merge Git produced, recorded before the ref moves; null until a merge was recorded. */
-  readonly mergedCommit: string | null;
-  readonly worktreePath: string | null;
-  readonly verificationId: string | null;
-  readonly outcomeCode: string | null;
-  readonly detail: string | null;
-  readonly createdAt: number;
-  readonly completedAt: number | null;
-  readonly items: readonly IntegrationBatchItemSummary[];
-}
-
-/** One member of a batch, with the facts its fixed record has to be compared against. */
-export interface IntegrationBatchMemberFacts {
-  readonly taskId: string;
-  readonly taskDisplayNumber: number;
-  readonly taskState: TaskLifecycleState;
-  readonly taskVersion: number;
-  readonly currentRevisionId: string;
-  /** The revision the batch fixed for this member. */
-  readonly revisionId: string;
-  readonly executionId: string;
-  readonly executionState: ExecutionLifecycleState;
-  readonly resultCommit: string | null;
-  /** The result commit the batch fixed for this member. */
-  readonly candidateCommit: string;
-  /** The PASSED Task verification of exactly this revision and result commit, when one exists. */
-  readonly taskVerificationId: string | null;
-  readonly taskVerificationTestedCommit: string | null;
-}
-
-/** Reads for one composed batch: its record, its project, and every member's current facts. */
-export interface IntegrationBatchCandidates {
-  readonly projectId: string;
-  readonly batchId: string;
-  /** The dev clone: the batch's `dev` ref, merge and compare-and-swap all happen there (ADR-0056). */
-  readonly repositoryRoot: string;
-  /** The stable main checkout; the verification policy is read from its `main` ref. */
-  readonly mainRepositoryRoot: string;
-  readonly gitCommonDir: string;
-  readonly mainRef: string;
-  readonly devRef: string;
-  readonly objectFormat: 'sha1' | 'sha256';
-  readonly batch: IntegrationBatchSummary;
-  readonly members: readonly IntegrationBatchMemberFacts[];
-}
-
-/** Read-only facts the integration service needs before it may touch any ref. */
-export interface IntegrationCandidates {
-  readonly projectId: string;
-  readonly taskId: string;
-  readonly taskDisplayNumber: number;
-  readonly taskState: TaskLifecycleState;
-  readonly taskVersion: number;
-  readonly currentRevisionId: string;
-  /** The dev clone: the project's `dev` ref and every Task branch commit live there (ADR-0056). */
-  readonly repositoryRoot: string;
-  /** The stable main checkout; the verification policy is read from its `main` ref. */
-  readonly mainRepositoryRoot: string;
-  readonly gitCommonDir: string;
-  readonly mainRef: string;
-  readonly devRef: string;
-  readonly objectFormat: 'sha1' | 'sha256';
-  readonly executions: readonly VerificationCandidateExecution[];
-  /** Task verification runs for this Task, newest first. */
-  readonly verificationRuns: readonly VerificationRunSummary[];
-  readonly batches: readonly IntegrationBatchSummary[];
-}
-
-/** Plan for the merge side effect: reserved before anything is written to Git. */
-export interface IntegrationBatchPlan extends IntegrationBatchSummary {
-  readonly operationId: string;
-  readonly operationState: 'PLANNED' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'RECONCILE_REQUIRED';
-  readonly worktreeOwnershipToken: string;
-  /**
-   * The dev clone: a restart reconciles an interrupted batch by reading the `dev` ref *there*
-   * (ADR-0056). The plan's `mainRef` stays the stable main ref the policy came from.
-   */
-  readonly repositoryRoot: string;
-  readonly mainRef: string;
-  readonly objectFormat: 'sha1' | 'sha256';
-  /** The batch's first member; `items` carries every member (ADR-0053). */
-  readonly item: IntegrationBatchItemSummary;
-}
-
-export interface IntegrationVerificationSummary {
-  readonly verificationId: string;
-  readonly batchId: string;
-  readonly projectId: string;
-  readonly taskId: string;
-  readonly executionId: string;
-  readonly revisionId: string;
-  readonly testedCommit: string;
-  readonly testedTree: string;
-  readonly devCommit: string;
-  readonly policyVersion: string;
-  readonly policyDigest: string;
-  readonly mainCommit: string;
-  readonly commands: readonly StoredVerificationCommand[];
-  readonly copyPath: string;
-  readonly state: VerificationState;
-  readonly outcomeCode: string | null;
-  readonly evidence: VerificationEvidence | null;
-  readonly queuedAt: number;
-  readonly startedAt: number | null;
-  readonly endedAt: number | null;
-}
-
-export interface IntegrationVerificationPlan extends IntegrationVerificationSummary {
-  readonly operationId: string;
-  readonly operationState: 'PLANNED' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'RECONCILE_REQUIRED';
-}
-
 export interface TaskSummary {
   readonly id: string;
   readonly projectId: string;
@@ -1652,16 +1273,6 @@ export interface TaskPurgeSubject {
   readonly currentRevisionId: string;
   readonly revisionCount: number;
   readonly executionCount: number;
-}
-
-/**
- * History outside the Task that a purge would outlive. `dev` (or a stable promotion) would keep a
- * commit whose origin record the deletion erased, so the refusal names which relation holds it.
- */
-export interface TaskPurgeBlocker {
-  readonly code: 'TASK_INTEGRATED_INTO_DEV' | 'TASK_IN_STABLE_PROMOTION';
-  readonly detail: string;
-  readonly count: number;
 }
 
 /** One owned resource the purge removed, recorded in the audit event before the rows disappear. */
@@ -1743,25 +1354,6 @@ export interface TaskPurgeResult {
 }
 
 /**
- * Which pair of distinguishable promotion facts a record states (ADR-0047 D03).
- *
- * It is derived from the stored state and the recorded restart result, never stored on its own: a
- * second source of truth for the same fact could disagree with the state machine, and the record a
- * client reads would then be the wrong one. `READY_TO_PUSH`/`AWAITING_PULL`/`RESTART_PENDING`/
- * `MAIN_PUSH_PENDING` are **not** a finished promotion; only `COMPLETE` is.
- */
-function promotionPhase(input: {
-  readonly state: StablePromotionState;
-  readonly restart: PromotionRestartResult | null;
-}): PromotionPhase {
-  if (input.state === 'SUCCEEDED') return 'COMPLETE';
-  if (input.state === 'STALE' || input.state === 'FAILED') return 'REFUSED';
-  if (input.state === 'CREATED' || input.state === 'AWAITING_APPROVAL') return 'READY_TO_PUSH';
-  if (input.state === 'PROMOTING') return 'AWAITING_PULL';
-  return input.restart === null ? 'RESTART_PENDING' : 'MAIN_PUSH_PENDING';
-}
-
-/**
  * A stored feature list is re-validated on read (ADR-0059). The column only guarantees that the JSON
  * parses as an array; a row edited outside this path must not become a judged fact, and a non-string
  * element would otherwise reach the comparison as `undefined`.
@@ -1830,11 +1422,11 @@ export class Phase1Database {
       throw new StorageError('UNSUPPORTED_SCHEMA', `Database schema ${version} is newer than ${phase1SchemaVersion}`);
     }
     if (version === phase1SchemaVersion) return;
-    // `workspaces` (v7), `executions` (v9), `intents` (v28), `integration_batches` (v30) and
-    // `domain_events` (v34) are each referenced by name from other tables, so every upgrade below
-    // the newest such step runs with foreign keys off and verifies the whole schema before the
-    // connection is used.
-    const rebuildsTable = version < 34;
+    // `workspaces` (v7), `executions` (v9), `intents` (v28), `integration_batches` (v30),
+    // `domain_events` (v34) and `projects` (v35) are each referenced by name from other tables, so
+    // every upgrade below the newest such step runs with foreign keys off and verifies the whole
+    // schema before the connection is used.
+    const rebuildsTable = version < 35;
     if (rebuildsTable) this.sqlite.exec('PRAGMA foreign_keys=OFF;');
     try {
       this.sqlite.transaction(() => {
@@ -1959,6 +1551,23 @@ export class Phase1Database {
           this.migrateRuntimeGlobalCapacity();
           this.migrateRuntimePauseControl();
         }
+        // Version 35 is this step's own number (ADR-0062): the product stops modelling a dev clone,
+        // a long-lived `dev` branch, integration into it and `dev → main` promotion. `projects` is
+        // rebuilt without `dev_ref`/`dev_repo_path` (copy guarded below, because Bun's `exec()`
+        // swallows a step-time error inside the script and would run the following `DROP TABLE`
+        // anyway) and the integration/promotion aggregates are dropped. What those records could
+        // still prove about a worktree lives in `workspaces`, `reclamation_records` and the Task
+        // rows, which this step does not touch. No earlier number is ever inserted.
+        if (version < 35) {
+          const projectsBefore = this.countTableRows('projects');
+          this.sqlite.exec(removeDevCloneMigration);
+          const projectsAfter = this.countTableRows('projects');
+          if (projectsAfter !== projectsBefore) {
+            throw new StorageError('INVALID_STATE',
+              `Schema v35 rebuild of projects lost rows (${projectsBefore} before, ${projectsAfter}`
+              + ' after); the upgrade was rolled back and nothing was changed');
+          }
+        }
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -2037,7 +1646,7 @@ export class Phase1Database {
     }
   }
 
-  private countTableRows(table: 'domain_events' | 'event_deliveries'): number {
+  private countTableRows(table: string): number {
     return this.sqlite.query<{ rows: number }, []>(
       `SELECT COUNT(*) AS rows FROM ${table}`).get()?.rows ?? 0;
   }
@@ -2080,17 +1689,10 @@ export class Phase1Database {
   /** Records the explicit confirmation that established project trust, including the
    * verification policy the user saw. Re-trusting an identical repository supersedes the
    * previous trust and policy confirmation instead of rewriting them. */
-  trustProject(input: Omit<TrustedProject, 'devRepoPath'> & {
+  trustProject(input: TrustedProject & {
     readonly trustId: string;
     readonly actor: string;
     readonly verificationPolicyConfirmationId: string;
-    /**
-     * The dev clone this trust records (ADR-0047 D05), or null to clear a previously recorded one.
-     * Omit the property to leave whatever the project recorded untouched: trust never silently
-     * clears a path it was not asked about, and never stores a path it has not verified.
-     */
-    readonly devRepoPath?: string | null;
-    readonly recordDevRepoPath?: boolean;
     readonly verificationPolicy: VerificationPolicyConfirmationInput;
     /**
      * The impact mapping confirmed by this trust (ADR-0031). When a caller omits it, no active
@@ -2109,36 +1711,21 @@ export class Phase1Database {
         SELECT id,repo_root,git_common_dir,main_ref,object_format FROM projects WHERE repo_root=?1
       `).get(input.repoRoot);
       let projectId = input.id;
-      const devRepoPath = input.devRepoPath ?? null;
-      // A path is written when this trust declared one (including an explicit null, which clears
-      // it); otherwise the project keeps what it already had.
-      const writeDevRepoPath = input.recordDevRepoPath === true || input.devRepoPath !== undefined;
       if (existing === null) {
         this.sqlite.query(`
-          INSERT INTO projects(id,name,repo_root,git_common_dir,main_ref,dev_ref,dev_repo_path,
+          INSERT INTO projects(id,name,repo_root,git_common_dir,main_ref,
             object_format,policy_version,created_at)
-          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
-        `).run(input.id, input.name, input.repoRoot, input.gitCommonDir, input.mainRef, input.devRef,
-          devRepoPath, input.objectFormat, input.policyVersion, input.trustedAt);
+          VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+        `).run(input.id, input.name, input.repoRoot, input.gitCommonDir, input.mainRef,
+          input.objectFormat, input.policyVersion, input.trustedAt);
       } else {
         if (existing.repo_root !== input.repoRoot || existing.git_common_dir !== input.gitCommonDir
           || existing.object_format !== input.objectFormat) {
           throw new StorageError('INVALID_STATE', 'Repository identity does not match the trusted project');
         }
         projectId = existing.id;
-        // Re-trusting refreshes the baseline ref name as well: it is part of what the user
-        // confirmed, and a later integration record must not point at a stale ref name.
-        this.sqlite.query(`
-          UPDATE projects SET dev_ref=?1 WHERE id=?2
-        `).run(input.devRef, projectId);
-        // The dev clone path is only written when this trust actually declared one: a re-trust that
-        // says nothing about it keeps the recorded path instead of clearing it behind the user's
-        // back. Clearing is explicit (`recordDevRepoPath` with a null path).
-        if (writeDevRepoPath) {
-          this.sqlite.query(`
-            UPDATE projects SET dev_repo_path=?1 WHERE id=?2
-          `).run(devRepoPath, projectId);
-        }
+        // The project row carries no per-project branch: every Task baseline is read from the
+        // project folder's checked out branch at preparation time (ADR-0062).
         this.sqlite.query(`
           UPDATE project_trusts SET status='INVALIDATED',invalidated_at=?1
           WHERE project_id=?2 AND status='ACTIVE'
@@ -2253,10 +1840,9 @@ export class Phase1Database {
   listTrustedProjects(): readonly TrustedProject[] {
     return this.sqlite.query<{
       id: string; name: string; repo_root: string; git_common_dir: string; main_ref: string;
-      dev_ref: string; dev_repo_path: string | null;
       object_format: 'sha1' | 'sha256'; policy_version: number; accepted_at: number;
     }, []>(`
-      SELECT p.id,p.name,p.repo_root,p.git_common_dir,p.main_ref,p.dev_ref,p.dev_repo_path,
+      SELECT p.id,p.name,p.repo_root,p.git_common_dir,p.main_ref,
              p.object_format,p.policy_version,t.accepted_at
       FROM projects p JOIN project_trusts t ON t.project_id=p.id AND t.status='ACTIVE'
       ORDER BY t.accepted_at,p.id
@@ -2266,8 +1852,6 @@ export class Phase1Database {
       repoRoot: row.repo_root,
       gitCommonDir: row.git_common_dir,
       mainRef: row.main_ref,
-      devRef: row.dev_ref,
-      devRepoPath: row.dev_repo_path,
       objectFormat: row.object_format,
       policyVersion: row.policy_version,
       trustedAt: row.accepted_at,
@@ -2567,10 +2151,10 @@ export class Phase1Database {
 
       const subject = this.sqlite.query<{
         state: TaskLifecycleState; version: number; repo_root: string; git_common_dir: string;
-        main_ref: string; dev_ref: string; object_format: 'sha1' | 'sha256';
+        main_ref: string; object_format: 'sha1' | 'sha256';
       }, [string, string]>(`
-        SELECT task.state,task.version,COALESCE(p.dev_repo_path,p.repo_root) AS repo_root,
-               p.git_common_dir,p.main_ref,p.dev_ref,p.object_format
+        SELECT task.state,task.version,p.repo_root AS repo_root,
+               p.git_common_dir,p.main_ref,p.object_format
         FROM tasks task JOIN projects p ON p.id=task.project_id
         JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
         WHERE task.project_id=?1 AND task.id=?2
@@ -2617,7 +2201,7 @@ export class Phase1Database {
         repoRoot: subject.repo_root,
         gitCommonDir: subject.git_common_dir,
         mainRef: subject.main_ref,
-        devRef: input.baseRef,
+        baseRef: input.baseRef,
         objectFormat: subject.object_format,
         baseCommit: input.baseCommit,
         ownershipToken: input.ownershipToken,
@@ -2745,14 +2329,14 @@ export class Phase1Database {
     const row = this.sqlite.query<{
       operation_id: string; operation_state: WorkspacePreparationPlan['operationState']; project_id: string;
       task_id: string; workspace_id: string; workspace_state: WorkspacePreparationPlan['workspaceState'];
-      repo_root: string; git_common_dir: string; main_ref: string; dev_ref: string;
+      repo_root: string; git_common_dir: string; main_ref: string; base_ref: string | null;
       object_format: 'sha1' | 'sha256';
       base_commit: string; ownership_token: string; branch_ref: string; path: string;
     }, [string]>(`
       SELECT operation.id AS operation_id,operation.state AS operation_state,
         operation.project_id,workspace.task_id,workspace.id AS workspace_id,
-        workspace.state AS workspace_state,COALESCE(p.dev_repo_path,p.repo_root) AS repo_root,
-        p.git_common_dir,p.main_ref,COALESCE(workspace.base_ref,p.dev_ref) AS dev_ref,
+        workspace.state AS workspace_state,p.repo_root AS repo_root,
+        p.git_common_dir,p.main_ref,workspace.base_ref AS base_ref,
         p.object_format,workspace.base_commit,workspace.ownership_token,workspace.branch_ref,workspace.path
       FROM workspaces workspace JOIN tasks task ON task.id=workspace.task_id
       JOIN projects p ON p.id=task.project_id
@@ -2771,7 +2355,7 @@ export class Phase1Database {
       repoRoot: row.repo_root,
       gitCommonDir: row.git_common_dir,
       mainRef: row.main_ref,
-      devRef: row.dev_ref,
+      baseRef: row.base_ref ?? 'HEAD',
       objectFormat: row.object_format,
       baseCommit: row.base_commit,
       ownershipToken: row.ownership_token,
@@ -5242,45 +4826,6 @@ export class Phase1Database {
   }
 
   /**
-   * Why this Task may not be purged, as facts rather than a guess. Both reasons are about history
-   * that lives outside the Task: a commit this Task put into `dev` (or into a stable promotion)
-   * outlives it, and deleting the Task would leave that commit in the ref with nothing naming where
-   * it came from. Archiving keeps every row and is the answer for those Tasks.
-   */
-  inspectTaskPurgeBlockers(input: {
-    readonly projectId: string;
-    readonly taskId: string;
-  }): readonly TaskPurgeBlocker[] {
-    const blockers: TaskPurgeBlocker[] = [];
-    const batchItems = this.countTaskRows('integration_batch_items', input.taskId);
-    const batchVerifications = this.countTaskRows('integration_verification_runs', input.taskId);
-    if (batchItems > 0 || batchVerifications > 0) {
-      blockers.push({
-        code: 'TASK_INTEGRATED_INTO_DEV',
-        detail: `the Task is a member of ${batchItems} integration batch item(s) and`
-          + ` ${batchVerifications} integration verification run(s)`,
-        count: batchItems + batchVerifications,
-      });
-    }
-    const promotionMembers = this.countTaskRows('stable_promotion_members', input.taskId);
-    if (promotionMembers > 0) {
-      blockers.push({
-        code: 'TASK_IN_STABLE_PROMOTION',
-        detail: `the Task is a member of ${promotionMembers} stable promotion record(s)`,
-        count: promotionMembers,
-      });
-    }
-    return blockers;
-  }
-
-  private countTaskRows(table: string, taskId: string): number {
-    // The table name is never user text: the only callers pass string literals from this file.
-    const row = this.sqlite.query<{ count: number }, [string]>(
-      `SELECT COUNT(*) AS count FROM ${table} WHERE task_id=?1`).get(taskId);
-    return row?.count ?? 0;
-  }
-
-  /**
    * Permanent deletion of one Task (ADR-0058).
    *
    * Everything this Task owns is deleted in one transaction — revisions, Executions, Sessions,
@@ -5358,22 +4903,11 @@ export class Phase1Database {
     if (row.version !== input.expectedVersion) {
       throw new StorageError('CONCURRENT_MODIFICATION', 'Task version did not match');
     }
-    // Re-checked in the transaction: the caller's pre-flight answer is evidence, not the decision.
-    // `--force` is the one caller that may step over this refusal, and the bypass is recorded in the
-    // audit payload below instead of being silent (ADR-0058 D09).
-    const blockers = this.inspectTaskPurgeBlockers({
-      projectId: input.projectId, taskId: input.taskId,
-    });
-    if (blockers.length > 0 && (input.forced ?? null) === null) {
-      const first = blockers[0] as TaskPurgeBlocker;
-      throw new StorageError(first.code, `Task cannot be purged: ${first.detail}`);
-    }
-
     // Every check that follows happens with the checks deferred to commit; nothing is written yet.
     database.exec('PRAGMA defer_foreign_keys=ON');
     const suspended = this.suspendAppendOnlyTriggers(database);
     const rowsDeleted: Record<string, number> = {};
-    for (const [table, statement] of taskPurgeDeletions((input.forced ?? null) !== null)) {
+    for (const [table, statement] of taskPurgeDeletions()) {
       const result = database.query(statement).run(input.taskId);
       if (result.changes > 0) rowsDeleted[table] = result.changes;
     }
@@ -6106,7 +5640,7 @@ export class Phase1Database {
       object_format: 'sha1' | 'sha256';
     }, [string, string]>(`
       SELECT task.id,task.project_id,task.display_number,task.state,task.current_revision_id,
-             COALESCE(p.dev_repo_path,p.repo_root) AS repo_root,p.repo_root AS main_repo_root,
+             p.repo_root AS repo_root,p.repo_root AS main_repo_root,
              p.git_common_dir,p.main_ref,p.object_format
       FROM tasks task
       JOIN projects p ON p.id=task.project_id
@@ -6445,924 +5979,6 @@ export class Phase1Database {
   }
 
   // ---------------------------------------------------------------------------------------------
-  // Integration pipeline (ADR-0018). These methods only record what happened; every Git side
-  // effect is executed by the integration service between calls, so a crash always leaves a
-  // batch in a state that can be reconciled without guessing what `dev` points at.
-  // ---------------------------------------------------------------------------------------------
-
-  /** Task, revision, refs and existing integration history for one Task's integration decision. */
-  getIntegrationCandidates(projectId: string, taskId: string): IntegrationCandidates {
-    const task = this.sqlite.query<{
-      id: string; project_id: string; display_number: number; state: TaskLifecycleState;
-      version: number; current_revision_id: string; repo_root: string; main_repo_root: string;
-      git_common_dir: string;
-      main_ref: string; dev_ref: string; object_format: 'sha1' | 'sha256';
-    }, [string, string]>(`
-      SELECT task.id,task.project_id,task.display_number,task.state,task.version,
-             task.current_revision_id,COALESCE(p.dev_repo_path,p.repo_root) AS repo_root,
-             p.repo_root AS main_repo_root,p.git_common_dir,p.main_ref,p.dev_ref,p.object_format
-      FROM tasks task
-      JOIN projects p ON p.id=task.project_id
-      JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
-      WHERE task.project_id=?1 AND task.id=?2
-    `).get(projectId, taskId);
-    if (task === null) {
-      throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
-    }
-    const executions = this.sqlite.query<{
-      id: string; attempt_number: number; state: ExecutionLifecycleState;
-      applied_revision_id: string; result_commit: string | null; base_commit: string;
-    }, [string]>(`
-      SELECT id,attempt_number,state,applied_revision_id,result_commit,base_commit
-      FROM executions WHERE task_id=?1 ORDER BY attempt_number DESC
-    `).all(taskId).map((row) => ({
-      executionId: row.id,
-      attemptNumber: row.attempt_number,
-      state: row.state,
-      appliedRevisionId: row.applied_revision_id,
-      resultCommit: row.result_commit,
-      baseCommit: row.base_commit,
-    }));
-    return {
-      projectId: task.project_id,
-      taskId: task.id,
-      taskDisplayNumber: task.display_number,
-      taskState: task.state,
-      taskVersion: task.version,
-      currentRevisionId: task.current_revision_id,
-      repositoryRoot: task.repo_root,
-      mainRepositoryRoot: task.main_repo_root,
-      gitCommonDir: task.git_common_dir,
-      mainRef: task.main_ref,
-      devRef: task.dev_ref,
-      objectFormat: task.object_format,
-      executions,
-      verificationRuns: this.listVerificationRuns(projectId, taskId),
-      batches: this.listIntegrationBatches(projectId, taskId),
-    };
-  }
-
-  /**
-   * Reads for one composed batch: its record, the project it belongs to, and every member's current
-   * facts. Nothing here decides anything; the integration service compares the fixed record against
-   * these facts before touching a ref.
-   */
-  getIntegrationBatchCandidates(projectId: string, batchId: string): IntegrationBatchCandidates {
-    const project = this.sqlite.query<{
-      repo_root: string; main_repo_root: string; git_common_dir: string; main_ref: string;
-      dev_ref: string;
-      object_format: 'sha1' | 'sha256';
-    }, [string, string]>(`
-      SELECT COALESCE(p.dev_repo_path,p.repo_root) AS repo_root,p.repo_root AS main_repo_root,
-             p.git_common_dir,p.main_ref,p.dev_ref,p.object_format
-      FROM projects p
-      JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
-      WHERE p.id=?1 AND EXISTS(SELECT 1 FROM integration_batches b WHERE b.id=?2 AND b.project_id=p.id)
-    `).get(projectId, batchId);
-    if (project === null) {
-      throw new StorageError('NOT_FOUND', 'Integration batch or active project trust was not found');
-    }
-    const batch = this.integrationBatchSummary(batchId);
-    if (batch.projectId !== projectId) {
-      throw new StorageError('NOT_FOUND', 'Integration batch was not found for this project');
-    }
-    const members = this.sqlite.query<{
-      task_id: string; display_number: number; task_state: TaskLifecycleState;
-      task_version: number; current_revision_id: string; revision_id: string; execution_id: string;
-      execution_state: ExecutionLifecycleState; result_commit: string | null;
-      candidate_commit: string; task_verification_id: string | null;
-      task_verification_tested_commit: string | null;
-    }, [string, string]>(`
-      SELECT item.task_id,task.display_number,task.state AS task_state,task.version AS task_version,
-             task.current_revision_id,item.revision_id,item.execution_id,
-             execution.state AS execution_state,execution.result_commit,item.candidate_commit,
-             (SELECT run.id FROM verification_runs run
-               WHERE run.task_id=item.task_id AND run.revision_id=item.revision_id
-                 AND run.tested_commit=item.candidate_commit AND run.state='PASSED'
-               ORDER BY run.queued_at DESC,run.id LIMIT 1) AS task_verification_id,
-             (SELECT run.tested_commit FROM verification_runs run
-               WHERE run.task_id=item.task_id AND run.revision_id=item.revision_id
-                 AND run.tested_commit=item.candidate_commit AND run.state='PASSED'
-               ORDER BY run.queued_at DESC,run.id LIMIT 1) AS task_verification_tested_commit
-      FROM integration_batch_items item
-      JOIN tasks task ON task.id=item.task_id
-      JOIN executions execution ON execution.task_id=item.task_id AND execution.id=item.execution_id
-      WHERE item.project_id=?1 AND item.batch_id=?2
-      ORDER BY item.task_id
-    `).all(projectId, batchId).map((row) => ({
-      taskId: row.task_id,
-      taskDisplayNumber: row.display_number,
-      taskState: row.task_state,
-      taskVersion: row.task_version,
-      currentRevisionId: row.current_revision_id,
-      revisionId: row.revision_id,
-      executionId: row.execution_id,
-      executionState: row.execution_state,
-      resultCommit: row.result_commit,
-      candidateCommit: row.candidate_commit,
-      taskVerificationId: row.task_verification_id,
-      taskVerificationTestedCommit: row.task_verification_tested_commit,
-    }));
-    return {
-      projectId,
-      batchId,
-      repositoryRoot: project.repo_root,
-      mainRepositoryRoot: project.main_repo_root,
-      gitCommonDir: project.git_common_dir,
-      mainRef: project.main_ref,
-      devRef: project.dev_ref,
-      objectFormat: project.object_format,
-      batch,
-      members,
-    };
-  }
-
-  /**
-   * Marks a batch unusable because its fixed evidence stopped being the current fact (ADR-0053).
-   * `STALE` is terminal and never touches `dev`: the merge/verification evidence that already exists
-   * stays readable, and the remedy is to compose a new batch from the current facts. A batch whose
-   * ref already moved (`INTEGRATED`) cannot become stale.
-   */
-  markIntegrationBatchStale(input: {
-    readonly batchId: string;
-    readonly outcomeCode: string;
-    readonly reason: string;
-    readonly eventId: string;
-    readonly at: number;
-  }): IntegrationBatchPlan {
-    return this.sqlite.transaction(() => {
-      const batch = this.integrationBatchPlan(input.batchId);
-      if (batch.state === 'STALE') return batch;
-      if (batch.state !== 'CREATED' && batch.state !== 'PREPARING'
-        && batch.state !== 'VERIFYING' && batch.state !== 'INTEGRATING_DEV') {
-        throw new StorageError('INVALID_STATE',
-          `Integration batch is ${batch.state}; only a batch that did not integrate can be stale`);
-      }
-      const updated = this.sqlite.query(`
-        UPDATE integration_batches SET state='STALE',outcome_code=?1,detail=?2,completed_at=?3
-        WHERE id=?4 AND state IN ('CREATED','PREPARING','VERIFYING','INTEGRATING_DEV')
-      `).run(input.outcomeCode, input.reason, input.at, input.batchId);
-      const operation = this.sqlite.query(`
-        UPDATE operations SET state='FAILED',result_json=?1,updated_at=?2
-        WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS')
-      `).run(JSON.stringify({ batchId: input.batchId, state: 'STALE',
-        outcomeCode: input.outcomeCode }), input.at, batch.operationId);
-      if (updated.changes !== 1 || operation.changes !== 1) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Integration batch changed while marking it stale');
-      }
-      this.sqlite.query(`
-        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-        VALUES (?1,?2,'IntegrationBatchStale',1,'IntegrationBatch',?3,0,?1,?1,?4,?5)
-      `).run(input.eventId, batch.projectId, input.batchId, input.at,
-        JSON.stringify({ batchId: input.batchId, devRef: batch.devRef, devCommit: batch.devCommit,
-          integratedCommit: null, outcomeCode: input.outcomeCode, reason: input.reason,
-          previousState: batch.state,
-          members: batch.items.map((member) => ({ taskId: member.taskId,
-            revisionId: member.revisionId, candidateCommit: member.candidateCommit,
-            state: member.state })) }));
-      return this.integrationBatchPlan(input.batchId);
-    })();
-  }
-
-  /**
-   * Ends a composed batch before it integrated (ADR-0053). A cancellation is only recorded as
-   * `CANCELLED` when the record itself proves that no member side effect exists yet: the batch is
-   * still `CREATED` and it recorded no worktree, no merge and no verification. Anything else is left
-   * for reconciliation instead of being called cancelled — a merge may exist, a verification process
-   * may still be writing its copy, or the ref write may have happened — so the batch keeps its slot
-   * as `RECOVERY_REQUIRED/RECONCILE_REQUIRED` and a human resolves it from the recorded evidence.
-   *
-   * Cancelling is idempotent: a batch that is already terminal is reported as it stands.
-   */
-  cancelIntegrationBatch(input: {
-    readonly batchId: string;
-    readonly reason: string;
-    readonly eventId: string;
-    readonly at: number;
-  }): IntegrationBatchPlan {
-    const observed = this.integrationBatchPlan(input.batchId);
-    if (observed.state === 'INTEGRATED' || observed.state === 'FAILED'
-      || observed.state === 'CONFLICTED' || observed.state === 'CANCELLED'
-      || observed.state === 'STALE' || observed.state === 'RECOVERY_REQUIRED') {
-      return observed;
-    }
-    // `markIntegrationRecoveryRequired` owns its own transaction, so the unconfirmed path is decided
-    // before the cancel transaction starts rather than nested inside it. A batch that already left
-    // `CREATED`, or that recorded a worktree/merge/verification while it was `CREATED`, cannot be
-    // confirmed side-effect-free from the records alone.
-    if (observed.state !== 'CREATED' || !this.memberSideEffectsSettled(observed)) {
-      return this.markIntegrationRecoveryRequired({
-        batchId: input.batchId,
-        outcomeCode: 'RECONCILE_REQUIRED',
-        reason: `cancellation was requested but batch ${input.batchId} recorded a worktree, a merge`
-          + ' or a verification, so its member side effects cannot be confirmed settled:'
-          + ` ${input.reason}`,
-        eventId: input.eventId,
-        at: input.at,
-      });
-    }
-    return this.sqlite.transaction(() => {
-      const batch = this.integrationBatchPlan(input.batchId);
-      if (batch.state !== 'CREATED') return batch;
-      if (!this.memberSideEffectsSettled(batch)) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Integration batch recorded a side effect while it was being cancelled');
-      }
-      const updated = this.sqlite.query(`
-        UPDATE integration_batches SET state='CANCELLED',outcome_code='CANCELLED_BY_USER',
-          detail=?1,completed_at=?2
-        WHERE id=?3 AND state='CREATED'
-      `).run(input.reason, input.at, input.batchId);
-      const operation = this.sqlite.query(`
-        UPDATE operations SET state='FAILED',result_json=?1,updated_at=?2
-        WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS')
-      `).run(JSON.stringify({ batchId: input.batchId, state: 'CANCELLED',
-        outcomeCode: 'CANCELLED_BY_USER' }), input.at, batch.operationId);
-      if (updated.changes !== 1 || operation.changes !== 1) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Integration batch changed while cancelling it');
-      }
-      this.sqlite.query(`
-        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-        VALUES (?1,?2,'IntegrationBatchCancelled',1,'IntegrationBatch',?3,0,?1,?1,?4,?5)
-      `).run(input.eventId, batch.projectId, input.batchId, input.at,
-        JSON.stringify({ batchId: input.batchId, devRef: batch.devRef, devCommit: batch.devCommit,
-          integratedCommit: null, outcomeCode: 'CANCELLED_BY_USER', reason: input.reason,
-          members: batch.items.map((member) => ({ taskId: member.taskId,
-            revisionId: member.revisionId, candidateCommit: member.candidateCommit,
-            state: member.state })) }));
-      return this.integrationBatchPlan(input.batchId);
-    })();
-  }
-
-  /**
-   * Reserves one IntegrationBatch for one or more Task members and fixes the `dev` baseline it was
-   * prepared against (ADR-0018, ADR-0053). Every member must still be an EXECUTED Task at the exact
-   * revision and result commit the batch will carry, so a batch is always a statement about facts
-   * that existed when it was composed. Validation is all-or-nothing: one unusable member refuses the
-   * whole batch and no row is written.
-   *
-   * Members are stored (and therefore merged) in `task_id` order, so the same member set always
-   * produces the same integration no matter which order the request listed it in.
-   */
-  beginIntegrationBatch(input: {
-    readonly projectId: string;
-    readonly batchId: string;
-    readonly operationId: string;
-    readonly worktreeOwnershipToken: string;
-    readonly devRef: string;
-    readonly devCommit: string;
-    readonly members: readonly {
-      readonly taskId: string;
-      readonly executionId: string;
-      readonly expectedVersion: number;
-    }[];
-    readonly commandId: string;
-    readonly payloadHash: string;
-    readonly createdEventId: string;
-    readonly actor: string;
-    readonly createdAt: number;
-  }): Readonly<{ plan: IntegrationBatchPlan; created: boolean }> {
-    if (input.members.length === 0) {
-      throw new StorageError('INVALID_STATE', 'An IntegrationBatch needs at least one member');
-    }
-    if (new Set(input.members.map((member) => member.taskId)).size !== input.members.length) {
-      throw new StorageError('INVALID_STATE', 'An IntegrationBatch cannot name the same Task twice');
-    }
-    return this.sqlite.transaction(() => {
-      const existing = this.sqlite.query<{ payload_hash: string; result_json: string }, [string, string]>(
-        'SELECT payload_hash,result_json FROM command_receipts WHERE project_id=?1 AND command_id=?2',
-      ).get(input.projectId, input.commandId);
-      if (existing !== null) {
-        if (existing.payload_hash !== input.payloadHash) {
-          throw new StorageError('COMMAND_CONFLICT',
-            'Command ID was already used with a different payload');
-        }
-        const recorded = JSON.parse(existing.result_json) as { batchId: string };
-        return { plan: this.integrationBatchPlan(recorded.batchId), created: false };
-      }
-      const project = this.sqlite.query<{ dev_ref: string }, [string]>(`
-        SELECT p.dev_ref FROM projects p
-        JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
-        WHERE p.id=?1
-      `).get(input.projectId);
-      if (project === null) {
-        throw new StorageError('NOT_FOUND', 'Project or active project trust was not found');
-      }
-      if (project.dev_ref !== input.devRef) {
-        throw new StorageError('CONCURRENT_MODIFICATION', 'Project baseline ref changed before integration');
-      }
-      // The request order is not authoritative: a batch is merged in `task_id` order so the same
-      // member set cannot produce two different integrations.
-      const ordered = [...input.members].sort((left, right) =>
-        left.taskId < right.taskId ? -1 : left.taskId > right.taskId ? 1 : 0);
-      const fixed: { taskId: string; revisionId: string; executionId: string;
-        candidateCommit: string }[] = [];
-      for (const member of ordered) {
-        const task = this.sqlite.query<{
-          state: TaskLifecycleState; version: number; current_revision_id: string;
-        }, [string, string]>(`
-          SELECT t.state,t.version,t.current_revision_id FROM tasks t
-          JOIN project_trusts trust ON trust.project_id=t.project_id AND trust.status='ACTIVE'
-          WHERE t.project_id=?1 AND t.id=?2
-        `).get(input.projectId, member.taskId);
-        if (task === null) {
-          throw new StorageError('NOT_FOUND', `Task ${member.taskId} or active project trust was not found`);
-        }
-        if (task.version !== member.expectedVersion) {
-          throw new StorageError('CONCURRENT_MODIFICATION',
-            `Task ${member.taskId} version did not match`);
-        }
-        if (task.state !== 'EXECUTED') {
-          throw new StorageError('INVALID_STATE',
-            `Task ${member.taskId} is ${task.state}; integration needs an EXECUTED Task with a`
-            + ' captured result commit');
-        }
-        const execution = this.sqlite.query<{
-          state: ExecutionLifecycleState; applied_revision_id: string; result_commit: string | null;
-        }, [string, string]>(`
-          SELECT state,applied_revision_id,result_commit FROM executions WHERE task_id=?1 AND id=?2
-        `).get(member.taskId, member.executionId);
-        if (execution === null) {
-          throw new StorageError('NOT_FOUND', `Execution was not found for Task ${member.taskId}`);
-        }
-        if (execution.state !== 'SUCCEEDED' || execution.result_commit === null
-          || execution.applied_revision_id !== task.current_revision_id) {
-          throw new StorageError('CONCURRENT_MODIFICATION',
-            `Execution evidence of Task ${member.taskId} changed before integration was prepared`);
-        }
-        fixed.push({
-          taskId: member.taskId,
-          revisionId: task.current_revision_id,
-          executionId: member.executionId,
-          candidateCommit: execution.result_commit,
-        });
-      }
-      this.sqlite.query(`
-        INSERT INTO operations(id,project_id,kind,aggregate_id,idempotency_key,state,request_json,
-          created_at,updated_at)
-        VALUES (?1,?2,'INTEGRATE_TASK_RESULT',?3,?4,'PLANNED',?5,?6,?6)
-      `).run(input.operationId, input.projectId, input.batchId, input.commandId,
-        JSON.stringify({ batchId: input.batchId, devRef: input.devRef, devCommit: input.devCommit,
-          members: fixed.map((member) => ({ taskId: member.taskId, revisionId: member.revisionId,
-            executionId: member.executionId, candidateCommit: member.candidateCommit })) }),
-        input.createdAt);
-      this.sqlite.query(`
-        INSERT INTO integration_batches(id,project_id,dev_ref,dev_commit,state,
-          worktree_ownership_token,created_at)
-        VALUES (?1,?2,?3,?4,'CREATED',?5,?6)
-      `).run(input.batchId, input.projectId, input.devRef, input.devCommit,
-        input.worktreeOwnershipToken, input.createdAt);
-      for (const member of fixed) {
-        this.sqlite.query(`
-          INSERT INTO integration_batch_items(batch_id,project_id,task_id,revision_id,execution_id,
-            candidate_commit,dev_commit,state,created_at)
-          VALUES (?1,?2,?3,?4,?5,?6,?7,'PREPARED',?8)
-        `).run(input.batchId, input.projectId, member.taskId, member.revisionId,
-          member.executionId, member.candidateCommit, input.devCommit, input.createdAt);
-      }
-      this.sqlite.query(`
-        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-        VALUES (?1,?2,'IntegrationBatchCreated',1,'IntegrationBatch',?3,0,?4,?4,?5,?6)
-      `).run(input.createdEventId, input.projectId, input.batchId, input.commandId, input.createdAt,
-        JSON.stringify({ batchId: input.batchId, devRef: input.devRef, devCommit: input.devCommit,
-          actor: input.actor,
-          members: fixed.map((member) => ({ taskId: member.taskId, revisionId: member.revisionId,
-            executionId: member.executionId, candidateCommit: member.candidateCommit })) }));
-      this.sqlite.query(`
-        INSERT INTO command_receipts(project_id,command_id,payload_hash,result_json,created_at)
-        VALUES (?1,?2,?3,?4,?5)
-      `).run(input.projectId, input.commandId, input.payloadHash,
-        JSON.stringify({ batchId: input.batchId }), input.createdAt);
-      return { plan: this.integrationBatchPlan(input.batchId), created: true };
-    })();
-  }
-
-  /** CREATED → PREPARING, with the retained integration worktree recorded before Git is touched. */
-  startIntegrationMerge(input: {
-    readonly batchId: string;
-    readonly worktreePath: string;
-    readonly startedAt: number;
-  }): IntegrationBatchPlan {
-    return this.sqlite.transaction(() => {
-      const batch = this.integrationBatchPlan(input.batchId);
-      if (batch.state !== 'CREATED') return batch;
-      const updated = this.sqlite.query(`
-        UPDATE integration_batches SET state='PREPARING',worktree_path=?1
-        WHERE id=?2 AND state='CREATED'
-      `).run(input.worktreePath, input.batchId);
-      const operation = this.sqlite.query(`
-        UPDATE operations SET state='IN_PROGRESS',updated_at=?1
-        WHERE id=?2 AND state='PLANNED'
-      `).run(input.startedAt, batch.operationId);
-      if (updated.changes !== 1 || operation.changes !== 1) {
-        throw new StorageError('CONCURRENT_MODIFICATION', 'Integration batch changed while starting its merge');
-      }
-      return this.integrationBatchPlan(input.batchId);
-    })();
-  }
-
-  /**
-   * Records one member's merge. The `dev` ref is still untouched at this point, and the batch keeps
-   * the merge of its last member as its own `mergeStrategy`/`mergedCommit`: the final integration
-   * tree either is that member's candidate commit (every step fast-forwarded) or the merge commit
-   * that member produced.
-   */
-  recordIntegrationMerge(input: {
-    readonly batchId: string;
-    readonly taskId: string;
-    readonly mergeStrategy: MergeStrategy;
-    readonly mergedCommit: string;
-    readonly eventId: string;
-    readonly mergedAt: number;
-  }): IntegrationBatchPlan {
-    return this.sqlite.transaction(() => {
-      const batch = this.integrationBatchPlan(input.batchId);
-      if (batch.state !== 'PREPARING') return batch;
-      const item = batch.items.find((entry) => entry.taskId === input.taskId);
-      if (item === undefined) {
-        throw new StorageError('NOT_FOUND', `Task ${input.taskId} is not a member of batch ${input.batchId}`);
-      }
-      if (item.state !== 'PREPARED') return batch;
-      const updated = this.sqlite.query(`
-        UPDATE integration_batches SET merge_strategy=?1,merged_commit=?2
-        WHERE id=?3 AND state='PREPARING'
-      `).run(input.mergeStrategy, input.mergedCommit, input.batchId);
-      const member = this.sqlite.query(`
-        UPDATE integration_batch_items SET state='MERGED'
-        WHERE batch_id=?1 AND task_id=?2 AND state='PREPARED'
-      `).run(input.batchId, input.taskId);
-      if (updated.changes !== 1 || member.changes !== 1) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Integration batch changed while recording a member merge');
-      }
-      this.sqlite.query(`
-        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-        VALUES (?1,?2,'IntegrationMemberMerged',1,'IntegrationBatch',?3,0,?1,?1,?4,?5)
-      `).run(input.eventId, batch.projectId, input.batchId, input.mergedAt,
-        JSON.stringify({ batchId: input.batchId, taskId: input.taskId,
-          revisionId: item.revisionId, candidateCommit: item.candidateCommit,
-          mergeStrategy: input.mergeStrategy, mergedCommit: input.mergedCommit }));
-      return this.integrationBatchPlan(input.batchId);
-    })();
-  }
-
-  /**
-   * Queues one independent integration verification on the merged commit together with its
-   * Operation. It is a separate record from Task verification: the tested commit is the
-   * integration result, and the fixed `dev` baseline is part of its evidence.
-   */
-  beginIntegrationVerification(input: {
-    readonly batchId: string;
-    readonly verificationId: string;
-    readonly operationId: string;
-    readonly commandId: string;
-    readonly testedCommit: string;
-    readonly testedTree: string;
-    readonly policyVersion: string;
-    readonly policyDigest: string;
-    readonly mainCommit: string;
-    readonly commands: readonly StoredVerificationCommand[];
-    readonly copyPath: string;
-    readonly queuedAt: number;
-  }): Readonly<{ plan: IntegrationVerificationPlan; created: boolean }> {
-    return this.sqlite.transaction(() => {
-      const existing = this.sqlite.query<{ id: string }, [string]>(`
-        SELECT id FROM integration_verification_runs WHERE batch_id=?1
-      `).get(input.batchId);
-      if (existing !== null) {
-        return { plan: this.integrationVerificationPlan(existing.id), created: false };
-      }
-      const batch = this.integrationBatchPlan(input.batchId);
-      if (batch.state !== 'PREPARING' || batch.mergeStrategy === null) {
-        throw new StorageError('INVALID_STATE',
-          `Integration batch is ${batch.state}; verification needs a recorded merge`);
-      }
-      if (batch.items.some((item) => item.state !== 'MERGED')) {
-        throw new StorageError('INVALID_STATE',
-          'Integration verification needs every member of the batch to be merged');
-      }
-      this.sqlite.query(`
-        INSERT INTO operations(id,project_id,kind,aggregate_id,idempotency_key,state,request_json,
-          created_at,updated_at)
-        VALUES (?1,?2,'RUN_INTEGRATION_VERIFICATION',?3,?4,'PLANNED',?5,?6,?6)
-      `).run(input.operationId, batch.projectId, input.verificationId, input.commandId,
-        JSON.stringify({ verificationId: input.verificationId, batchId: input.batchId,
-          testedCommit: input.testedCommit, devCommit: batch.devCommit,
-          policyDigest: input.policyDigest,
-          members: batch.items.map((item) => ({ taskId: item.taskId, revisionId: item.revisionId,
-            executionId: item.executionId, candidateCommit: item.candidateCommit })) }),
-        input.queuedAt);
-      // The verification row names the batch's first member for the per-Task columns the table has
-      // always carried; the batch itself is the subject (`batch_id` is unique here), and the full
-      // member list lives in the evidence and in `integration_batch_items`.
-      this.sqlite.query(`
-        INSERT INTO integration_verification_runs(id,batch_id,project_id,task_id,execution_id,
-          revision_id,operation_id,command_id,tested_commit,tested_tree,dev_commit,policy_version,
-          policy_digest,main_commit,commands_json,copy_path,state,queued_at)
-        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,'QUEUED',?17)
-      `).run(input.verificationId, input.batchId, batch.projectId, batch.items[0]?.taskId as string,
-        batch.items[0]?.executionId as string, batch.items[0]?.revisionId as string,
-        input.operationId, input.commandId,
-        input.testedCommit, input.testedTree, batch.devCommit, input.policyVersion,
-        input.policyDigest, input.mainCommit, JSON.stringify(input.commands), input.copyPath,
-        input.queuedAt);
-      const updated = this.sqlite.query(`
-        UPDATE integration_batches SET state='VERIFYING',verification_id=?1
-        WHERE id=?2 AND state='PREPARING'
-      `).run(input.verificationId, input.batchId);
-      if (updated.changes !== 1) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Integration batch changed while queuing its verification');
-      }
-      return { plan: this.integrationVerificationPlan(input.verificationId), created: true };
-    })();
-  }
-
-  /** QUEUED → RUNNING with its Operation IN_PROGRESS, before any command is spawned. */
-  startIntegrationVerification(input: {
-    readonly verificationId: string;
-    readonly startedAt: number;
-  }): IntegrationVerificationPlan {
-    return this.sqlite.transaction(() => {
-      const run = this.integrationVerificationPlan(input.verificationId);
-      if (run.state !== 'QUEUED') return run;
-      const updated = this.sqlite.query(`
-        UPDATE integration_verification_runs SET state='RUNNING',started_at=?1
-        WHERE id=?2 AND state='QUEUED'
-      `).run(input.startedAt, input.verificationId);
-      const operation = this.sqlite.query(`
-        UPDATE operations SET state='IN_PROGRESS',updated_at=?1 WHERE id=?2 AND state='PLANNED'
-      `).run(input.startedAt, run.operationId);
-      if (updated.changes !== 1 || operation.changes !== 1) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Integration verification changed while starting');
-      }
-      return this.integrationVerificationPlan(input.verificationId);
-    })();
-  }
-
-  completeIntegrationVerification(input: {
-    readonly verificationId: string;
-    readonly state: 'PASSED' | 'FAILED' | 'ERROR';
-    readonly outcomeCode: string;
-    readonly evidence: VerificationEvidence;
-    readonly eventId: string;
-    readonly completedAt: number;
-  }): IntegrationVerificationPlan {
-    return this.sqlite.transaction(() => {
-      const run = this.integrationVerificationPlan(input.verificationId);
-      if (run.state !== 'QUEUED' && run.state !== 'RUNNING') return run;
-      const updated = this.sqlite.query(`
-        UPDATE integration_verification_runs
-        SET state=?1,outcome_code=?2,evidence_json=?3,ended_at=?4
-        WHERE id=?5 AND state IN ('QUEUED','RUNNING')
-      `).run(input.state, input.outcomeCode, JSON.stringify(input.evidence), input.completedAt,
-        input.verificationId);
-      const operation = this.sqlite.query(`
-        UPDATE operations SET state=?1,result_json=?2,updated_at=?3
-        WHERE id=?4 AND state IN ('PLANNED','IN_PROGRESS')
-      `).run(input.state === 'PASSED' ? 'SUCCEEDED' : 'FAILED',
-        JSON.stringify({ verificationId: input.verificationId, state: input.state,
-          outcomeCode: input.outcomeCode }), input.completedAt, run.operationId);
-      if (updated.changes !== 1 || operation.changes !== 1) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Integration verification changed while completing');
-      }
-      this.sqlite.query(`
-        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-        VALUES (?1,?2,'IntegrationVerificationCompleted',1,'IntegrationBatch',?3,0,?4,?4,?5,?6)
-      `).run(input.eventId, run.projectId, run.batchId, input.eventId, input.completedAt,
-        JSON.stringify({ batchId: run.batchId, verificationId: input.verificationId,
-          taskId: run.taskId, executionId: run.executionId, revisionId: run.revisionId,
-          testedCommit: run.testedCommit, testedTree: run.testedTree, devCommit: run.devCommit,
-          policyVersion: run.policyVersion, policyDigest: run.policyDigest,
-          mainCommit: run.mainCommit, state: input.state, outcomeCode: input.outcomeCode,
-          evidence: input.evidence }));
-      return this.integrationVerificationPlan(input.verificationId);
-    })();
-  }
-
-  /**
-   * Records that `dev` now contains every member of the batch. Each Task only reaches SUCCEEDED here:
-   * a captured result commit is not an integration, and verification does not move a ref. Every member
-   * is guarded by the exact revision the batch fixed, so a Task that moved on since the batch was
-   * composed cannot be reported as integrated.
-   */
-  completeIntegrationBatch(input: {
-    readonly batchId: string;
-    readonly integratedCommit: string;
-    readonly worktreeDetail: string;
-    readonly completedEventId: string;
-    /** One event ID per member, in `items` order. */
-    readonly taskEventIds: readonly string[];
-    readonly completedAt: number;
-  }): IntegrationBatchPlan {
-    return this.sqlite.transaction(() => {
-      const batch = this.integrationBatchPlan(input.batchId);
-      if (batch.state === 'INTEGRATED') return batch;
-      if (batch.state !== 'VERIFYING' && batch.state !== 'INTEGRATING_DEV') {
-        throw new StorageError('INVALID_STATE',
-          `Integration batch is ${batch.state}; only a verified batch can be completed`);
-      }
-      if (input.taskEventIds.length !== batch.items.length) {
-        throw new StorageError('INVALID_STATE',
-          'Completing an integration needs one Task event ID per member');
-      }
-      const verification = this.integrationVerificationPlan(batch.verificationId as string);
-      if (verification.state !== 'PASSED') {
-        throw new StorageError('INVALID_STATE',
-          `Integration verification is ${verification.state}; the dev ref cannot advance`);
-      }
-      const item = this.sqlite.query(`
-        UPDATE integration_batch_items SET state='INTEGRATED',integrated_commit=?1,completed_at=?2
-        WHERE batch_id=?3 AND state='MERGED'
-      `).run(input.integratedCommit, input.completedAt, input.batchId);
-      const updated = this.sqlite.query(`
-        UPDATE integration_batches SET state='INTEGRATED',integrated_commit=?1,detail=?2,completed_at=?3
-        WHERE id=?4 AND state IN ('VERIFYING','INTEGRATING_DEV')
-      `).run(input.integratedCommit, input.worktreeDetail, input.completedAt, input.batchId);
-      if (item.changes !== batch.items.length || updated.changes !== 1) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Integration batch or its members changed while completing the integration');
-      }
-      for (const [index, member] of batch.items.entries()) {
-        const taskEventId = input.taskEventIds[index];
-        if (taskEventId === undefined) {
-          throw new StorageError('INVALID_STATE',
-            'Completing an integration needs one Task event ID per member');
-        }
-        const task = this.sqlite.query(`
-          UPDATE tasks SET state='SUCCEEDED',version=version+1,updated_at=?1
-          WHERE id=?2 AND project_id=?3 AND state='EXECUTED' AND current_revision_id=?4
-        `).run(input.completedAt, member.taskId, batch.projectId, member.revisionId);
-        if (task.changes !== 1) {
-          throw new StorageError('CONCURRENT_MODIFICATION',
-            `Task ${member.taskId} changed while completing the integration`);
-        }
-        this.sqlite.query(`
-          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-          VALUES (?1,?2,'TaskStateChanged',1,'Task',?3,?4,?5,?6,?7,?8)
-        `).run(taskEventId, batch.projectId, member.taskId, member.taskVersion + 1,
-          input.completedEventId, input.completedEventId, input.completedAt,
-          JSON.stringify({ taskId: member.taskId, from: 'EXECUTED', to: 'SUCCEEDED',
-            reason: 'result integrated into dev', actor: 'runtime-integration' }));
-      }
-      const operation = this.sqlite.query(`
-        UPDATE operations SET state='SUCCEEDED',result_json=?1,updated_at=?2
-        WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS')
-      `).run(JSON.stringify({ batchId: input.batchId, state: 'INTEGRATED',
-        integratedCommit: input.integratedCommit,
-        members: batch.items.map((member) => ({ taskId: member.taskId,
-          revisionId: member.revisionId, candidateCommit: member.candidateCommit })) }),
-        input.completedAt, batch.operationId);
-      if (operation.changes !== 1) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Integration batch operation changed while completing the integration');
-      }
-      this.sqlite.query(`
-        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-        VALUES (?1,?2,'IntegrationCompleted',1,'IntegrationBatch',?3,0,?4,?4,?5,?6)
-      `).run(input.completedEventId, batch.projectId, input.batchId, input.completedEventId,
-        input.completedAt, JSON.stringify({ batchId: input.batchId, devRef: batch.devRef,
-          devCommit: batch.devCommit, integratedCommit: input.integratedCommit,
-          mergeStrategy: batch.mergeStrategy, verificationId: batch.verificationId,
-          worktree: input.worktreeDetail,
-          members: batch.items.map((member) => ({ taskId: member.taskId,
-            executionId: member.executionId, revisionId: member.revisionId,
-            candidateCommit: member.candidateCommit })) }));
-      return this.integrationBatchPlan(input.batchId);
-    })();
-  }
-
-  /**
-   * Terminal failure of a batch. `dev` is untouched by definition: the service only calls this
-   * when the ref was not advanced, and the failed merge/verification evidence stays attached.
-   */
-  failIntegrationBatch(input: {
-    readonly batchId: string;
-    readonly state: 'FAILED' | 'CONFLICTED';
-    readonly outcomeCode: string;
-    readonly detail: string;
-    /** The member whose merge or evidence failed; omitted when the batch itself failed (verification). */
-    readonly failedTaskId?: string;
-    readonly mergeStrategy?: MergeStrategy;
-    readonly mergedCommit?: string;
-    readonly eventId: string;
-    readonly failedAt: number;
-  }): IntegrationBatchPlan {
-    return this.sqlite.transaction(() => {
-      const batch = this.integrationBatchPlan(input.batchId);
-      if (batch.state === 'INTEGRATED' || batch.state === 'FAILED'
-        || batch.state === 'CONFLICTED' || batch.state === 'RECOVERY_REQUIRED'
-        || batch.state === 'STALE' || batch.state === 'CANCELLED') {
-        return batch;
-      }
-      if (input.mergeStrategy !== undefined && batch.mergeStrategy === null) {
-        this.sqlite.query(`UPDATE integration_batches SET merge_strategy=?1 WHERE id=?2`)
-          .run(input.mergeStrategy, input.batchId);
-      }
-      // Only the member whose merge actually failed is marked. Members that were already merged keep
-      // `MERGED` and members that were never attempted keep `PREPARED`, so a partial integration is
-      // never reported as a whole-batch success *or* as a whole-batch failure.
-      const failingState = input.state === 'CONFLICTED' ? 'CONFLICTED' : 'FAILED';
-      const candidates = batch.items.filter((item) => item.state === 'PREPARED' || item.state === 'MERGED');
-      if (input.failedTaskId !== undefined
-        && !candidates.some((item) => item.taskId === input.failedTaskId)) {
-        throw new StorageError('INVALID_STATE',
-          `Task ${input.failedTaskId} has no unsettled member record in batch ${input.batchId}`);
-      }
-      const failedTaskId = input.failedTaskId;
-      const item = failedTaskId === undefined ? null : this.sqlite.query(`
-        UPDATE integration_batch_items SET state=?1,detail=?2,completed_at=?3
-        WHERE batch_id=?4 AND task_id=?5 AND state IN ('PREPARED','MERGED')
-      `).run(failingState, input.detail, input.failedAt, input.batchId, failedTaskId);
-      const updated = this.sqlite.query(`
-        UPDATE integration_batches
-        SET state=?1,outcome_code=?2,detail=?3,completed_at=?4
-        WHERE id=?5 AND state IN ('CREATED','PREPARING','VERIFYING','INTEGRATING_DEV')
-      `).run(input.state, input.outcomeCode, input.detail, input.failedAt, input.batchId);
-      const operation = this.sqlite.query(`
-        UPDATE operations SET state='FAILED',result_json=?1,updated_at=?2
-        WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS','RECONCILE_REQUIRED')
-      `).run(JSON.stringify({ batchId: input.batchId, state: input.state,
-        outcomeCode: input.outcomeCode, mergedCommit: input.mergedCommit ?? null,
-        failedTaskId: input.failedTaskId ?? null }),
-        input.failedAt, batch.operationId);
-      if (updated.changes !== 1 || operation.changes !== 1
-        || (item !== null && item.changes !== 1)) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Integration batch changed while recording its failure');
-      }
-      this.sqlite.query(`
-        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-        VALUES (?1,?2,'IntegrationFailed',1,'IntegrationBatch',?3,0,?4,?4,?5,?6)
-      `).run(input.eventId, batch.projectId, input.batchId, input.eventId, input.failedAt,
-        JSON.stringify({ batchId: input.batchId, devRef: batch.devRef,
-          devCommit: batch.devCommit, state: input.state, outcomeCode: input.outcomeCode,
-          detail: input.detail, mergeStrategy: input.mergeStrategy ?? batch.mergeStrategy,
-          mergedCommit: input.mergedCommit ?? null,
-          failedTaskId: input.failedTaskId ?? null,
-          members: batch.items.map((member) => ({ taskId: member.taskId,
-            executionId: member.executionId, revisionId: member.revisionId,
-            candidateCommit: member.candidateCommit })) }));
-      return this.integrationBatchPlan(input.batchId);
-    })();
-  }
-
-  /**
-   * Reconciliation entry for a batch a restart found in flight. The caller has already read the
-   * `dev` ref, so the record states what was observed instead of assuming the ref did not move.
-   * `RECOVERY_REQUIRED` is terminal and blocks a new attempt until a human resolves it.
-   */
-  markIntegrationRecoveryRequired(input: {
-    readonly batchId: string;
-    readonly outcomeCode: 'RECONCILE_REQUIRED' | 'DEV_REF_OBSERVED';
-    readonly reason: string;
-    readonly eventId: string;
-    readonly at: number;
-  }): IntegrationBatchPlan {
-    return this.sqlite.transaction(() => {
-      const batch = this.integrationBatchPlan(input.batchId);
-      if (!['CREATED', 'PREPARING', 'VERIFYING', 'INTEGRATING_DEV'].includes(batch.state)) return batch;
-      const item = this.sqlite.query(`
-        UPDATE integration_batch_items SET detail=?1
-        WHERE batch_id=?2 AND state IN ('PREPARED','MERGED')
-      `).run(input.reason, input.batchId);
-      const unsettled = batch.items.filter((member) =>
-        member.state === 'PREPARED' || member.state === 'MERGED').length;
-      const updated = this.sqlite.query(`
-        UPDATE integration_batches SET state='RECOVERY_REQUIRED',outcome_code=?1,detail=?2,completed_at=?3
-        WHERE id=?4 AND state IN ('CREATED','PREPARING','VERIFYING','INTEGRATING_DEV')
-      `).run(input.outcomeCode, input.reason, input.at, input.batchId);
-      const operation = this.sqlite.query(`
-        UPDATE operations SET state='RECONCILE_REQUIRED',result_json=?1,updated_at=?2
-        WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS')
-      `).run(JSON.stringify({ batchId: input.batchId, state: 'RECOVERY_REQUIRED',
-        outcomeCode: input.outcomeCode }), input.at, batch.operationId);
-      if (item.changes !== unsettled || updated.changes !== 1 || operation.changes !== 1) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Integration batch changed while recording its recovery');
-      }
-      this.sqlite.query(`
-        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-        VALUES (?1,?2,'IntegrationReconcileRequired',1,'IntegrationBatch',?3,0,?1,?1,?4,?5)
-      `).run(input.eventId, batch.projectId, input.batchId, input.at,
-        JSON.stringify({ batchId: input.batchId, devRef: batch.devRef,
-          devCommit: batch.devCommit, mergedCommit: batch.mergedCommit,
-          previousState: batch.state, outcomeCode: input.outcomeCode, reason: input.reason,
-          members: batch.items.map((member) => ({ taskId: member.taskId,
-            executionId: member.executionId, revisionId: member.revisionId,
-            candidateCommit: member.candidateCommit, state: member.state })) }));
-      return this.integrationBatchPlan(input.batchId);
-    })();
-  }
-
-  /**
-   * VERIFYING/INTEGRATING_DEV → INTEGRATING_DEV: recorded immediately before the ref write, so an
-   * interrupted update is identifiable and resolvable by comparing `merged_commit` with `dev`.
-   */
-  startIntegrationDevUpdate(input: {
-    readonly batchId: string;
-    readonly updatedAt: number;
-  }): IntegrationBatchPlan {
-    return this.sqlite.transaction(() => {
-      const batch = this.integrationBatchPlan(input.batchId);
-      if (batch.state !== 'VERIFYING') return batch;
-      const verification = batch.verificationId === null
-        ? null
-        : this.integrationVerificationPlan(batch.verificationId);
-      if (verification === null || verification.state !== 'PASSED') {
-        throw new StorageError('INVALID_STATE',
-          `Integration verification is ${verification?.state ?? 'missing'}; the dev ref cannot advance`);
-      }
-      if (batch.mergedCommit === null) {
-        throw new StorageError('INVALID_STATE', 'Integration batch has no recorded merge to apply');
-      }
-      const updated = this.sqlite.query(`
-        UPDATE integration_batches SET state='INTEGRATING_DEV'
-        WHERE id=?1 AND state='VERIFYING'
-      `).run(input.batchId);
-      const operation = this.sqlite.query(`
-        UPDATE operations SET updated_at=?1 WHERE id=?2 AND state='IN_PROGRESS'
-      `).run(input.updatedAt, batch.operationId);
-      if (updated.changes !== 1 || operation.changes !== 1) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Integration batch changed while starting its dev update');
-      }
-      return this.integrationBatchPlan(input.batchId);
-    })();
-  }
-
-  listIntegrationBatches(projectId: string, taskId?: string): readonly IntegrationBatchSummary[] {
-    const rows = taskId === undefined
-      ? this.sqlite.query<{ id: string }, [string]>(`
-          SELECT batch.id FROM integration_batches batch
-          WHERE batch.project_id=?1 ORDER BY batch.created_at DESC,batch.id
-        `).all(projectId)
-      : this.sqlite.query<{ id: string }, [string, string]>(`
-          SELECT batch.id FROM integration_batches batch
-          JOIN integration_batch_items item ON item.batch_id=batch.id
-          WHERE batch.project_id=?1 AND item.task_id=?2 ORDER BY batch.created_at DESC,batch.id
-        `).all(projectId, taskId);
-    return rows.map((row) => this.integrationBatchSummary(row.id));
-  }
-
-  /** Reads one recorded batch with its Operation and project refs, for an integration attempt. */
-  getIntegrationBatchPlan(projectId: string, batchId: string): IntegrationBatchPlan {
-    const plan = this.integrationBatchPlan(batchId);
-    if (plan.projectId !== projectId) {
-      throw new StorageError('NOT_FOUND', 'Integration batch was not found for this project');
-    }
-    return plan;
-  }
-
-  getIntegrationBatch(projectId: string, batchId: string): IntegrationBatchSummary {
-    const summary = this.integrationBatchSummary(batchId);
-    if (summary.projectId !== projectId) {
-      throw new StorageError('NOT_FOUND', 'Integration batch was not found for this project');
-    }
-    return summary;
-  }
-
-  /** Batches a previous Runtime left in flight; a restart reconciles them explicitly. */
-  listIncompleteIntegrationBatches(): readonly IntegrationBatchPlan[] {
-    return this.sqlite.query<{ id: string }, []>(`
-      SELECT id FROM integration_batches
-      WHERE state IN ('CREATED','PREPARING','VERIFYING','INTEGRATING_DEV') ORDER BY created_at,id
-    `).all().map((row) => this.integrationBatchPlan(row.id));
-  }
-
-  /**
-   * Batches that still block a new integration attempt for their members: the in-flight states plus
-   * `RECOVERY_REQUIRED`, which is terminal but unresolved and therefore keeps its slot (ADR-0053).
-   */
-  listBlockingIntegrationBatches(): readonly IntegrationBatchPlan[] {
-    return this.sqlite.query<{ id: string }, []>(`
-      SELECT id FROM integration_batches
-      WHERE state IN ('CREATED','PREPARING','VERIFYING','INTEGRATING_DEV','RECOVERY_REQUIRED')
-      ORDER BY created_at,id
-    `).all().map((row) => this.integrationBatchPlan(row.id));
-  }
-
-  listIncompleteIntegrationVerifications(): readonly IntegrationVerificationPlan[] {
-    return this.sqlite.query<{ id: string }, []>(`
-      SELECT id FROM integration_verification_runs
-      WHERE state IN ('QUEUED','RUNNING') ORDER BY queued_at,id
-    `).all().map((row) => this.integrationVerificationPlan(row.id));
-  }
-
-  // ---------------------------------------------------------------------------------------------
   // Layered verification records (ADR-0038, ADR-0039). Targeted test plans are append-only: a
   // scope change is a new row, never an edit, and the triggers in the migration refuse UPDATE and
   // DELETE outright. Dev full-suite evidence is one row per observed run.
@@ -7470,1268 +6086,6 @@ export class Phase1Database {
     };
   }
 
-  /** Repository refs a dev full-suite run binds its evidence to; no Task is involved. */
-  getDevFullSuiteCandidates(projectId: string): DevFullSuiteCandidates {
-    const row = this.sqlite.query<{
-      id: string; repo_root: string; main_repo_root: string; git_common_dir: string;
-      main_ref: string; dev_ref: string;
-      object_format: 'sha1' | 'sha256';
-    }, [string]>(`
-      SELECT p.id,COALESCE(p.dev_repo_path,p.repo_root) AS repo_root,
-             p.repo_root AS main_repo_root,p.git_common_dir,p.main_ref,p.dev_ref,p.object_format
-      FROM projects p
-      JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
-      WHERE p.id=?1
-    `).get(projectId);
-    if (row === null) throw new StorageError('NOT_FOUND', 'Active project trust was not found');
-    return {
-      projectId: row.id,
-      repositoryRoot: row.repo_root,
-      mainRepositoryRoot: row.main_repo_root,
-      gitCommonDir: row.git_common_dir,
-      mainRef: row.main_ref,
-      devRef: row.dev_ref,
-      objectFormat: row.object_format,
-    };
-  }
-
-  /**
-   * Records the start of one dev full-suite run. Replaying the same command ID returns the recorded
-   * run instead of starting a second one; a different payload under it is refused.
-   */
-  beginDevFullSuiteRun(input: {
-    readonly evidenceId: string;
-    readonly projectId: string;
-    readonly devRef: string;
-    readonly devCommit: string;
-    readonly policyVersion: string;
-    readonly policyDigest: string;
-    readonly lockfilePath: string;
-    readonly lockfilePresent: boolean;
-    readonly lockfileDigest: string;
-    readonly commands: readonly StoredVerificationCommand[];
-    readonly copyPath: string;
-    readonly commandId: string;
-    readonly payloadHash: string;
-    readonly observedBy: string;
-    readonly startedAt: number;
-  }): Readonly<{ evidence: DevFullSuiteEvidenceRecord; created: boolean }> {
-    return this.sqlite.transaction(() => {
-      const existing = this.sqlite.query<{ payload_hash: string; result_json: string }, [string, string]>(
-        'SELECT payload_hash,result_json FROM command_receipts WHERE project_id=?1 AND command_id=?2',
-      ).get(input.projectId, input.commandId);
-      if (existing !== null) {
-        if (existing.payload_hash !== input.payloadHash) {
-          throw new StorageError('COMMAND_CONFLICT',
-            'Command ID was already used with a different payload');
-        }
-        const recorded = JSON.parse(existing.result_json) as { evidenceId: string };
-        return { evidence: this.devFullSuiteEvidenceRecord(recorded.evidenceId), created: false };
-      }
-      const project = this.sqlite.query<{ id: string }, [string]>(`
-        SELECT p.id FROM projects p
-        JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
-        WHERE p.id=?1
-      `).get(input.projectId);
-      if (project === null) {
-        throw new StorageError('NOT_FOUND', 'Active project trust was not found');
-      }
-      this.sqlite.query(`
-        INSERT INTO dev_full_suite_evidence(id,project_id,dev_ref,dev_commit,policy_version,
-          policy_digest,lockfile_path,lockfile_present,lockfile_digest,commands_json,copy_path,state,
-          command_id,observed_by,queued_at,started_at)
-        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'RUNNING',?12,?13,?14,?14)
-      `).run(input.evidenceId, input.projectId, input.devRef, input.devCommit, input.policyVersion,
-        input.policyDigest, input.lockfilePath, input.lockfilePresent ? 1 : 0, input.lockfileDigest,
-        JSON.stringify(input.commands), input.copyPath, input.commandId, input.observedBy,
-        input.startedAt);
-      this.sqlite.query(`
-        INSERT INTO command_receipts(project_id,command_id,payload_hash,result_json,created_at)
-        VALUES (?1,?2,?3,?4,?5)
-      `).run(input.projectId, input.commandId, input.payloadHash,
-        JSON.stringify({ evidenceId: input.evidenceId }), input.startedAt);
-      return { evidence: this.devFullSuiteEvidenceRecord(input.evidenceId), created: true };
-    })();
-  }
-
-  /** RUNNING → a terminal state with the observed evidence; the bindings are never rewritten. */
-  completeDevFullSuiteRun(input: {
-    readonly evidenceId: string;
-    readonly state: 'PASSED' | 'FAILED' | 'ERROR';
-    readonly outcomeCode: string;
-    readonly evidence: VerificationEvidence;
-    readonly endedAt: number;
-  }): DevFullSuiteEvidenceRecord {
-    return this.sqlite.transaction(() => {
-      const current = this.devFullSuiteEvidenceRecord(input.evidenceId);
-      if (current.state === 'PASSED' || current.state === 'FAILED' || current.state === 'ERROR') {
-        return current;
-      }
-      const updated = this.sqlite.query(`
-        UPDATE dev_full_suite_evidence
-        SET state=?1,outcome_code=?2,evidence_json=?3,ended_at=?4
-        WHERE id=?5 AND state IN ('QUEUED','RUNNING')
-      `).run(input.state, input.outcomeCode, JSON.stringify(input.evidence), input.endedAt,
-        input.evidenceId);
-      if (updated.changes !== 1) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Dev full-suite evidence changed while recording its outcome');
-      }
-      return this.devFullSuiteEvidenceRecord(input.evidenceId);
-    })();
-  }
-
-  /**
-   * Closes runs a previous Runtime left QUEUED or RUNNING. A run nobody is driving is a failure,
-   * not a pass: it is recorded as `ERROR` with the fact that the Runtime restarted, and its copy
-   * stays on disk for the ordinary reclamation path.
-   */
-  reconcileDevFullSuiteEvidence(now: number): readonly string[] {
-    return this.sqlite.transaction(() => {
-      const rows = this.sqlite.query<{ id: string }, []>(`
-        SELECT id FROM dev_full_suite_evidence WHERE state IN ('QUEUED','RUNNING') ORDER BY queued_at,id
-      `).all().map((row) => row.id);
-      for (const id of rows) {
-        this.sqlite.query(`
-          UPDATE dev_full_suite_evidence
-          SET state='ERROR',outcome_code='RUNTIME_RESTARTED',ended_at=?1,
-              evidence_json=?2
-          WHERE id=?3 AND state IN ('QUEUED','RUNNING')
-        `).run(now, JSON.stringify({
-          reason: 'the Runtime that started this full-suite run restarted before it finished;'
-            + ' the observed state is not a verdict',
-        }), id);
-      }
-      return rows;
-    })();
-  }
-
-  getDevFullSuiteEvidence(projectId: string, evidenceId: string): DevFullSuiteEvidenceRecord {
-    const evidence = this.devFullSuiteEvidenceRecord(evidenceId);
-    if (evidence.projectId !== projectId) {
-      throw new StorageError('NOT_FOUND', 'Dev full-suite evidence was not found for this project');
-    }
-    return evidence;
-  }
-
-  listDevFullSuiteEvidence(projectId: string,
-    limit = 20): readonly DevFullSuiteEvidenceRecord[] {
-    return this.sqlite.query<{ id: string }, [string, number]>(`
-      SELECT id FROM dev_full_suite_evidence WHERE project_id=?1
-      ORDER BY queued_at DESC,id DESC LIMIT ?2
-    `).all(projectId, limit).map((row) => this.devFullSuiteEvidenceRecord(row.id));
-  }
-
-  /** Records of one exact candidate commit, newest first: what a promotion is checked against. */
-  listDevFullSuiteEvidenceForCommit(projectId: string, devCommit: string,
-    limit = 20): readonly DevFullSuiteEvidenceRecord[] {
-    return this.sqlite.query<{ id: string }, [string, string, number]>(`
-      SELECT id FROM dev_full_suite_evidence WHERE project_id=?1 AND dev_commit=?2
-      ORDER BY queued_at DESC,id DESC LIMIT ?3
-    `).all(projectId, devCommit, limit).map((row) => this.devFullSuiteEvidenceRecord(row.id));
-  }
-
-  private devFullSuiteEvidenceRecord(evidenceId: string): DevFullSuiteEvidenceRecord {
-    const row = this.sqlite.query<{
-      id: string; project_id: string; dev_ref: string; dev_commit: string; policy_version: string;
-      policy_digest: string; lockfile_path: string; lockfile_present: number;
-      lockfile_digest: string; commands_json: string;
-      copy_path: string; state: DevFullSuiteState; outcome_code: string | null;
-      evidence_json: string | null; command_id: string; observed_by: string; queued_at: number;
-      started_at: number | null; ended_at: number | null;
-    }, [string]>(`
-      SELECT id,project_id,dev_ref,dev_commit,policy_version,policy_digest,lockfile_path,
-             lockfile_present,lockfile_digest,commands_json,copy_path,state,outcome_code,
-             evidence_json,command_id,observed_by,queued_at,started_at,ended_at
-      FROM dev_full_suite_evidence WHERE id=?1
-    `).get(evidenceId);
-    if (row === null) throw new StorageError('NOT_FOUND', 'Dev full-suite evidence was not found');
-    return {
-      evidenceId: row.id,
-      projectId: row.project_id,
-      devRef: row.dev_ref,
-      devCommit: row.dev_commit,
-      policyVersion: row.policy_version,
-      policyDigest: row.policy_digest,
-      lockfilePath: row.lockfile_path,
-      lockfilePresent: row.lockfile_present === 1,
-      lockfileDigest: row.lockfile_digest,
-      commands: JSON.parse(row.commands_json) as readonly StoredVerificationCommand[],
-      copyPath: row.copy_path,
-      state: row.state,
-      outcomeCode: row.outcome_code,
-      evidence: row.evidence_json === null
-        ? null
-        : JSON.parse(row.evidence_json) as VerificationEvidence,
-      commandId: row.command_id,
-      observedBy: row.observed_by,
-      queuedAt: row.queued_at,
-      startedAt: row.started_at,
-      endedAt: row.ended_at,
-    };
-  }
-
-  // ---------------------------------------------------------------------------------------------
-  // Stable branch promotion (ADR-0009 D02/D03, ADR-0022). These methods only record facts and
-  // enforce state transitions; the Git side effect (fast-forwarding the checked-out `main`
-  // worktree) and the Runtime restart sequence are executed by the promotion service and its
-  // client between calls, so a crash always leaves a state that can be reconciled from refs.
-  // ---------------------------------------------------------------------------------------------
-
-  /**
-   * The integration evidence a promotion would fix, plus any promotion this project already has
-   * open. A promotion is only ever built from records that already exist: nothing here re-runs
-   * the integration verification, because the independent verification is what made `dev` move.
-   */
-  getPromotionCandidates(projectId: string, batchId: string): PromotionCandidates {
-    const row = this.sqlite.query<{
-      project_id: string; repo_root: string; git_common_dir: string; main_ref: string;
-      dev_ref: string; dev_repo_path: string | null;
-      object_format: 'sha1' | 'sha256';
-      batch_state: IntegrationBatchState; batch_dev_ref: string; batch_dev_commit: string;
-      merged_commit: string | null;
-      integrated_commit: string | null;
-      verification_state: VerificationState | null;
-      verification_id: string | null;
-      verification_tested_commit: string | null;
-      verification_dev_commit: string | null;
-      verification_outcome_code: string | null;
-    }, [string, string]>(`
-      SELECT p.id AS project_id,p.repo_root,p.git_common_dir,p.main_ref,p.dev_ref,p.dev_repo_path,
-             p.object_format,
-             batch.state AS batch_state,batch.dev_ref AS batch_dev_ref,
-             batch.dev_commit AS batch_dev_commit,batch.merged_commit,batch.integrated_commit,
-             run.state AS verification_state,run.id AS verification_id,
-             run.tested_commit AS verification_tested_commit,
-             run.dev_commit AS verification_dev_commit,run.outcome_code AS verification_outcome_code
-      FROM integration_batches batch
-      JOIN projects p ON p.id=batch.project_id
-      JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
-      LEFT JOIN integration_verification_runs run ON run.batch_id=batch.id
-      WHERE batch.project_id=?1 AND batch.id=?2
-    `).get(projectId, batchId);
-    if (row === null) {
-      throw new StorageError('NOT_FOUND', 'Integration batch or active project trust was not found');
-    }
-    const open = this.sqlite.query<{ id: string }, [string]>(`
-      SELECT id FROM stable_promotions
-      WHERE project_id=?1 AND state IN ('CREATED','AWAITING_APPROVAL','PROMOTING','RESTARTING',
-        'RECOVERY_REQUIRED')
-    `).get(projectId);
-    return {
-      projectId: row.project_id,
-      batchId,
-      repositoryRoot: row.repo_root,
-      gitCommonDir: row.git_common_dir,
-      mainRef: row.main_ref,
-      devRef: row.dev_ref,
-      devRepoPath: row.dev_repo_path,
-      objectFormat: row.object_format,
-      batchState: row.batch_state,
-      batchDevRef: row.batch_dev_ref,
-      batchDevCommit: row.batch_dev_commit,
-      batchMergedCommit: row.merged_commit,
-      batchIntegratedCommit: row.integrated_commit,
-      verificationState: row.verification_state,
-      verificationId: row.verification_id,
-      verificationTestedCommit: row.verification_tested_commit,
-      verificationDevCommit: row.verification_dev_commit,
-      verificationOutcomeCode: row.verification_outcome_code,
-      members: this.stablePromotionBatchMembers(projectId, batchId),
-      openPromotion: open === null ? null : this.stablePromotionSummary(open.id),
-    };
-  }
-
-  /**
-   * Fixes the promotion's three facts and its member revisions. Every value is copied from a
-   * record that already exists, so the promotion can be re-checked later against the same claim.
-   */
-  beginStablePromotion(input: {
-    readonly projectId: string;
-    readonly batchId: string;
-    readonly promotionId: string;
-    readonly operationId: string;
-    readonly commandId: string;
-    readonly payloadHash: string;
-    readonly createdEventId: string;
-    readonly devRef: string;
-    readonly mainRef: string;
-    readonly candidateCommit: string;
-    readonly expectedMainCommit: string;
-    readonly verificationId: string;
-    readonly verificationTestedCommit: string;
-    /** The verified dev clone this promotion will push from; re-checked on every side-effecting call. */
-    readonly devRepoPath: string | null;
-    /** The dev full-suite evidence triple this promotion is fixed to (ADR-0039). */
-    readonly fullSuiteEvidenceId: string;
-    readonly fullSuiteDevCommit: string;
-    readonly fullSuitePolicyVersion: string;
-    readonly fullSuitePolicyDigest: string;
-    readonly fullSuiteLockfileDigest: string;
-    readonly permissionMode: PromotionPermissionMode;
-    readonly actor: string;
-    readonly createdAt: number;
-  }): Readonly<{ plan: StablePromotionPlan; created: boolean }> {
-    return this.sqlite.transaction(() => {
-      const existing = this.sqlite.query<{ payload_hash: string; result_json: string }, [string, string]>(
-        'SELECT payload_hash,result_json FROM command_receipts WHERE project_id=?1 AND command_id=?2',
-      ).get(input.projectId, input.commandId);
-      if (existing !== null) {
-        if (existing.payload_hash !== input.payloadHash) {
-          throw new StorageError('COMMAND_CONFLICT',
-            'Command ID was already used with a different payload');
-        }
-        const recorded = JSON.parse(existing.result_json) as { promotionId: string };
-        return { plan: this.stablePromotionPlan(recorded.promotionId), created: false };
-      }
-      const open = this.sqlite.query<{ id: string; state: StablePromotionState }, [string]>(`
-        SELECT id,state FROM stable_promotions
-        WHERE project_id=?1 AND state IN ('CREATED','AWAITING_APPROVAL','PROMOTING','RESTARTING',
-          'RECOVERY_REQUIRED')
-      `).get(input.projectId);
-      if (open !== null) {
-        throw new StorageError('INVALID_STATE',
-          `Promotion ${open.id} is ${open.state}; it must be resumed or abandoned first`);
-      }
-      const project = this.sqlite.query<{
-        repo_root: string; main_ref: string; dev_ref: string; dev_repo_path: string | null;
-        object_format: 'sha1' | 'sha256';
-      }, [string]>(`
-        SELECT p.repo_root,p.main_ref,p.dev_ref,p.dev_repo_path,p.object_format FROM projects p
-        JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
-        WHERE p.id=?1
-      `).get(input.projectId);
-      if (project === null) {
-        throw new StorageError('NOT_FOUND', 'Active project trust was not found');
-      }
-      if (project.dev_ref !== input.devRef || project.main_ref !== input.mainRef) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Project baseline refs changed before the promotion was prepared');
-      }
-      if (project.dev_repo_path !== input.devRepoPath) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'The project dev clone changed before the promotion was prepared');
-      }
-      this.sqlite.query(`
-        INSERT INTO operations(id,project_id,kind,aggregate_id,idempotency_key,state,request_json,
-          created_at,updated_at)
-        VALUES (?1,?2,'PROMOTE_STABLE_BRANCH',?3,?4,'PLANNED',?5,?6,?6)
-      `).run(input.operationId, input.projectId, input.promotionId, input.commandId,
-        JSON.stringify({ promotionId: input.promotionId, batchId: input.batchId,
-          devRef: input.devRef, mainRef: input.mainRef, candidateCommit: input.candidateCommit,
-          expectedMainCommit: input.expectedMainCommit, verificationId: input.verificationId,
-          devRepoPath: input.devRepoPath }),
-        input.createdAt);
-      this.sqlite.query(`
-        INSERT INTO stable_promotions(id,project_id,dev_ref,main_ref,candidate_commit,
-          expected_main_commit,integration_batch_id,verification_id,verification_tested_commit,
-          permission_mode,state,created_at,full_suite_evidence_id,full_suite_dev_commit,
-          full_suite_policy_version,full_suite_policy_digest,full_suite_lockfile_digest,dev_repo_path)
-        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'CREATED',?11,?12,?13,?14,?15,?16,?17)
-      `).run(input.promotionId, input.projectId, input.devRef, input.mainRef,
-        input.candidateCommit, input.expectedMainCommit, input.batchId, input.verificationId,
-        input.verificationTestedCommit, input.permissionMode, input.createdAt,
-        input.fullSuiteEvidenceId, input.fullSuiteDevCommit, input.fullSuitePolicyVersion,
-        input.fullSuitePolicyDigest, input.fullSuiteLockfileDigest, input.devRepoPath);
-      for (const member of this.stablePromotionBatchMembers(input.projectId, input.batchId)) {
-        this.sqlite.query(`
-          INSERT INTO stable_promotion_members(promotion_id,batch_id,project_id,task_id,revision_id,
-            execution_id,candidate_commit,created_at)
-          VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
-        `).run(input.promotionId, input.batchId, input.projectId, member.taskId,
-          member.revisionId, member.executionId, member.candidateCommit, input.createdAt);
-      }
-      this.sqlite.query(`
-        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-        VALUES (?1,?2,'PromotionCreated',1,'Promotion',?3,0,?4,?4,?5,?6)
-      `).run(input.createdEventId, input.projectId, input.promotionId, input.commandId,
-        input.createdAt, JSON.stringify({ promotionId: input.promotionId, batchId: input.batchId,
-          devRef: input.devRef, mainRef: input.mainRef, candidateCommit: input.candidateCommit,
-          expectedMainCommit: input.expectedMainCommit, verificationId: input.verificationId,
-          fullSuiteEvidenceId: input.fullSuiteEvidenceId,
-          fullSuiteDevCommit: input.fullSuiteDevCommit,
-          fullSuitePolicyDigest: input.fullSuitePolicyDigest,
-          fullSuiteLockfileDigest: input.fullSuiteLockfileDigest,
-          permissionMode: input.permissionMode, actor: input.actor }));
-      this.sqlite.query(`
-        INSERT INTO command_receipts(project_id,command_id,payload_hash,result_json,created_at)
-        VALUES (?1,?2,?3,?4,?5)
-      `).run(input.projectId, input.commandId, input.payloadHash,
-        JSON.stringify({ promotionId: input.promotionId }), input.createdAt);
-      return { plan: this.stablePromotionPlan(input.promotionId), created: true };
-    })();
-  }
-
-  /**
-   * Records the STRICT approval of exactly the fixed triple. The approved values are copied from
-   * the promotion's own fixed evidence, so an approval can only ever mean those three facts — and
-   * `promote` re-reads both refs so a movement after this point invalidates it.
-   */
-  approveStablePromotion(input: {
-    readonly promotionId: string;
-    readonly actor: string;
-    readonly approvedAt: number;
-    readonly eventId: string;
-  }): StablePromotionPlan {
-    return this.sqlite.transaction(() => {
-      const promotion = this.stablePromotionPlan(input.promotionId);
-      if (promotion.state === 'AWAITING_APPROVAL') return promotion;
-      if (promotion.state !== 'CREATED') {
-        throw new StorageError('INVALID_STATE',
-          `Promotion is ${promotion.state}; only a CREATED promotion can be approved`);
-      }
-      const updated = this.sqlite.query(`
-        UPDATE stable_promotions
-        SET state='AWAITING_APPROVAL',approved_dev_commit=candidate_commit,
-            approved_main_commit=expected_main_commit,approved_verification_id=verification_id,
-            approved_full_suite_evidence_id=full_suite_evidence_id,approved_at=?1
-        WHERE id=?2 AND state='CREATED'
-      `).run(input.approvedAt, input.promotionId);
-      if (updated.changes !== 1) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Promotion changed while recording its approval');
-      }
-      this.sqlite.query(`
-        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-        VALUES (?1,?2,'PromotionApproved',1,'Promotion',?3,0,?1,?1,?4,?5)
-      `).run(input.eventId, promotion.projectId, input.promotionId, input.approvedAt,
-        JSON.stringify({ promotionId: input.promotionId, devRef: promotion.devRef,
-          mainRef: promotion.mainRef, candidateCommit: promotion.candidateCommit,
-          expectedMainCommit: promotion.expectedMainCommit,
-          verificationId: promotion.verificationId,
-          fullSuiteEvidenceId: promotion.fullSuite?.evidenceId ?? null,
-          actor: input.actor }));
-      return this.stablePromotionPlan(input.promotionId);
-    })();
-  }
-
-  /**
-   * Records the readback of the remote `dev` ref after the fixed candidate was pushed, and moves
-   * CREATED/AWAITING_APPROVAL → PROMOTING (ADR-0047 D02/D03).
-   *
-   * The value stored here is the commit Git reported for the remote ref, not the commit that was
-   * pushed: entering PROMOTING means "the candidate is on the remote and the main checkout has not
-   * pulled it yet", which is exactly the distinction "push exited 0" cannot make. STRICT requires a
-   * recorded approval that still matches the fixed triple; that is the only gate.
-   */
-  startStablePromotion(input: {
-    readonly promotionId: string;
-    readonly devRepoPath: string;
-    /** Read back from the remote dev ref by `git ls-remote` after the push. */
-    readonly remoteDevCommit: string;
-    readonly permissionMode: PromotionPermissionMode;
-    readonly pushedAt: number;
-    readonly eventId: string;
-  }): StablePromotionPlan {
-    return this.sqlite.transaction(() => {
-      const promotion = this.stablePromotionPlan(input.promotionId);
-      if (promotion.state !== 'CREATED' && promotion.state !== 'AWAITING_APPROVAL') {
-        return promotion;
-      }
-      if (input.permissionMode === 'STRICT') {
-        const approval = promotion.approval;
-        if (promotion.state !== 'AWAITING_APPROVAL' || approval === null
-          || approval.devCommit !== promotion.candidateCommit
-          || approval.mainCommit !== promotion.expectedMainCommit
-          || approval.verificationId !== promotion.verificationId
-          || approval.fullSuiteEvidenceId !== (promotion.fullSuite?.evidenceId ?? null)) {
-          throw new StorageError('INVALID_STATE',
-            'STRICT mode needs a recorded approval of this dev/main/verification/full-suite-evidence'
-            + ' triple before promoting');
-        }
-      }
-      if (input.remoteDevCommit !== promotion.candidateCommit) {
-        throw new StorageError('INVALID_STATE',
-          'The remote dev readback must be the fixed candidate commit; a promotion is never recorded'
-          + ' as pushed when the remote holds something else');
-      }
-      const updated = this.sqlite.query(`
-        UPDATE stable_promotions
-        SET state='PROMOTING',dev_repo_path=?1,remote_dev_commit=?2,pushed_at=?3,
-            permission_mode=?4,outcome_code=NULL,detail=NULL
-        WHERE id=?5 AND state IN ('CREATED','AWAITING_APPROVAL')
-      `).run(input.devRepoPath, input.remoteDevCommit, input.pushedAt, input.permissionMode,
-        input.promotionId);
-      const operation = this.sqlite.query(`
-        UPDATE operations SET state='IN_PROGRESS',updated_at=?1
-        WHERE id=?2 AND state IN ('PLANNED','RECONCILE_REQUIRED')
-      `).run(input.pushedAt, promotion.operationId);
-      if (updated.changes !== 1 || operation.changes !== 1) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Promotion changed while recording its dev push');
-      }
-      this.sqlite.query(`
-        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-        VALUES (?1,?2,'PromotionDevPushed',1,'Promotion',?3,0,?1,?1,?4,?5)
-      `).run(input.eventId, promotion.projectId, input.promotionId, input.pushedAt,
-        JSON.stringify({ promotionId: input.promotionId, devRef: promotion.devRef,
-          mainRef: promotion.mainRef, candidateCommit: promotion.candidateCommit,
-          expectedMainCommit: promotion.expectedMainCommit, devRepoPath: input.devRepoPath,
-          remoteDevCommit: input.remoteDevCommit, remote: 'origin',
-          awaitingPullFrom: promotion.mainRef }));
-      return this.stablePromotionPlan(input.promotionId);
-    })();
-  }
-
-  /**
-   * Records a refused push attempt on an open record **without changing its state**: the promotion
-   * stays prepared so the same command can be retried once the remote is reachable again. Nothing
-   * about the remote or the local refs is claimed by this row — it exists so the failure is
-   * auditable and readable in `promotion get` instead of only in one client's stderr.
-   */
-  recordStablePromotionPushFailure(input: {
-    readonly promotionId: string;
-    readonly outcomeCode: string;
-    readonly detail: string;
-    readonly eventId: string;
-    readonly at: number;
-  }): StablePromotionPlan {
-    return this.sqlite.transaction(() => {
-      const promotion = this.stablePromotionPlan(input.promotionId);
-      if (promotion.state === 'STALE' || promotion.state === 'FAILED'
-        || promotion.state === 'SUCCEEDED') {
-        return promotion;
-      }
-      const updated = this.sqlite.query(`
-        UPDATE stable_promotions SET outcome_code=?1,detail=?2
-        WHERE id=?3 AND state IN ('CREATED','AWAITING_APPROVAL','PROMOTING','RESTARTING',
-          'RECOVERY_REQUIRED')
-      `).run(input.outcomeCode, input.detail, input.promotionId);
-      if (updated.changes !== 1) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Promotion changed while recording its refused push');
-      }
-      this.sqlite.query(`
-        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-        VALUES (?1,?2,'PromotionPushRefused',1,'Promotion',?3,0,?1,?1,?4,?5)
-      `).run(input.eventId, promotion.projectId, input.promotionId, input.at,
-        JSON.stringify({ promotionId: input.promotionId, devRef: promotion.devRef,
-          mainRef: promotion.mainRef, candidateCommit: promotion.candidateCommit,
-          state: promotion.state, outcomeCode: input.outcomeCode, detail: input.detail }));
-      return this.stablePromotionPlan(input.promotionId);
-    })();
-  }
-
-  /**
-   * PROMOTING → RESTARTING once the main checkout was observed at the fixed candidate, i.e. the
-   * user pulled the pushed dev candidate (ADR-0047 D03).
-   *
-   * The restart plan is recorded here rather than before the push, because the plan has to name the
-   * worktree the pull landed in; recording it before that would describe a worktree state that did
-   * not exist yet. `promotingBootId` is the boot that read the pull, so a restart can only be
-   * recorded from a Runtime that is not this one.
-   */
-  recordStablePromotionMainUpdate(input: {
-    readonly promotionId: string;
-    readonly promotedCommit: string;
-    readonly mainWorktreePath: string;
-    readonly restartSteps: readonly PromotionRestartPlanStep[];
-    readonly promotingBootId: string;
-    readonly observedAt: number;
-    readonly eventId: string;
-  }): StablePromotionPlan {
-    return this.sqlite.transaction(() => {
-      const promotion = this.stablePromotionPlan(input.promotionId);
-      if (promotion.state !== 'PROMOTING') return promotion;
-      const updated = this.sqlite.query(`
-        UPDATE stable_promotions SET state='RESTARTING',promoted_commit=?1,main_worktree_path=?2,
-            restart_steps_json=?3,promoting_boot_id=?4,outcome_code=NULL,detail=NULL
-        WHERE id=?5 AND state='PROMOTING'
-      `).run(input.promotedCommit, input.mainWorktreePath, JSON.stringify(input.restartSteps),
-        input.promotingBootId, input.promotionId);
-      if (updated.changes !== 1) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Promotion changed while recording its main update');
-      }
-      this.sqlite.query(`
-        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-        VALUES (?1,?2,'PromotionMainUpdated',1,'Promotion',?3,0,?1,?1,?4,?5)
-      `).run(input.eventId, promotion.projectId, input.promotionId, input.observedAt,
-        JSON.stringify({ promotionId: input.promotionId, mainRef: promotion.mainRef,
-          expectedMainCommit: promotion.expectedMainCommit,
-          promotedCommit: input.promotedCommit, candidateCommit: promotion.candidateCommit,
-          remoteDevCommit: promotion.remoteDevCommit,
-          mainWorktreePath: input.mainWorktreePath, restartSteps: input.restartSteps }));
-      return this.stablePromotionPlan(input.promotionId);
-    })();
-  }
-
-  /**
-   * Records the observed restart result (ADR-0009 D03) on a promotion whose main checkout was
-   * observed at the candidate.
-   *
-   * A failing restart ends the promotion as FAILED with the evidence that caused it. A successful
-   * one **does not** end it: `main` is at the candidate and the Runtime is back, but the stable
-   * commit is not published on the remote yet, and ADR-0047 D01 puts that push after the restart.
-   * The record therefore stays RESTARTING with `MAIN_PUSH_PENDING` until `recordStablePromotionMainPush`
-   * read back the remote. "Main is updated and restarted" is never reported as a promotion by itself.
-   */
-  recordStablePromotionRestart(input: {
-    readonly promotionId: string;
-    readonly state: 'RESTARTED' | 'FAILED';
-    readonly outcomeCode: string;
-    readonly restart: PromotionRestartResult;
-    readonly detail: string;
-    readonly eventId: string;
-    readonly completedEventId: string;
-    readonly completedAt: number;
-  }): StablePromotionPlan {
-    return this.sqlite.transaction(() => {
-      const promotion = this.stablePromotionPlan(input.promotionId);
-      if (promotion.state === 'SUCCEEDED' || promotion.state === 'FAILED') return promotion;
-      if (promotion.state !== 'RESTARTING' && promotion.state !== 'RECOVERY_REQUIRED') {
-        throw new StorageError('INVALID_STATE',
-          `Promotion is ${promotion.state}; only a promotion whose main update was observed can record a restart`);
-      }
-      const updated = input.state === 'RESTARTED'
-        ? this.sqlite.query(`
-            UPDATE stable_promotions
-            SET state='RESTARTING',restart_result_json=?1,outcome_code=?2,detail=?3
-            WHERE id=?4 AND state IN ('RESTARTING','RECOVERY_REQUIRED')
-          `).run(JSON.stringify(input.restart), input.outcomeCode, input.detail, input.promotionId)
-        : this.sqlite.query(`
-            UPDATE stable_promotions
-            SET state='FAILED',restart_result_json=?1,outcome_code=?2,detail=?3,completed_at=?4
-            WHERE id=?5 AND state IN ('RESTARTING','RECOVERY_REQUIRED')
-          `).run(JSON.stringify(input.restart), input.outcomeCode, input.detail,
-            input.completedAt, input.promotionId);
-      const operation = input.state === 'RESTARTED'
-        ? this.sqlite.query(`
-            UPDATE operations SET state='IN_PROGRESS',updated_at=?1
-            WHERE id=?2 AND state IN ('PLANNED','IN_PROGRESS','RECONCILE_REQUIRED')
-          `).run(input.completedAt, promotion.operationId)
-        : this.sqlite.query(`
-            UPDATE operations SET state='FAILED',result_json=?1,updated_at=?2
-            WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS','RECONCILE_REQUIRED')
-          `).run(JSON.stringify({ promotionId: input.promotionId, state: 'FAILED',
-            outcomeCode: input.outcomeCode, promotedCommit: promotion.promotedCommit }),
-            input.completedAt, promotion.operationId);
-      if (updated.changes !== 1 || operation.changes !== 1) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Promotion changed while recording its restart result');
-      }
-      const recordedState = input.state === 'RESTARTED' ? 'RESTARTING' : 'FAILED';
-      this.sqlite.query(`
-        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-        VALUES (?1,?2,'PromotionRestartRecorded',1,'Promotion',?3,0,?1,?1,?4,?5)
-      `).run(input.completedEventId, promotion.projectId, input.promotionId, input.completedAt,
-        JSON.stringify({ promotionId: input.promotionId, mainRef: promotion.mainRef,
-          promotedCommit: promotion.promotedCommit, state: recordedState,
-          outcomeCode: input.outcomeCode, observedBootId: input.restart.observedBootId,
-          runtimeStatus: input.restart.runtimeStatus, uiRunning: input.restart.uiRunning,
-          steps: input.restart.steps }));
-      if (input.state === 'FAILED') {
-        this.sqlite.query(`
-          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-          VALUES (?1,?2,'PromotionFailed',1,'Promotion',?3,0,?4,?4,?5,?6)
-        `).run(input.eventId, promotion.projectId, input.promotionId, input.completedEventId,
-          input.completedAt,
-          JSON.stringify({ promotionId: input.promotionId, devRef: promotion.devRef,
-            mainRef: promotion.mainRef, candidateCommit: promotion.candidateCommit,
-            expectedMainCommit: promotion.expectedMainCommit,
-            promotedCommit: promotion.promotedCommit, state: 'FAILED',
-            outcomeCode: input.outcomeCode, detail: input.detail }));
-      }
-      return this.stablePromotionPlan(input.promotionId);
-    })();
-  }
-
-  /**
-   * Publishes (or fails to publish) the stable commit on the remote `main`, and with it decides the
-   * promotion's outcome (ADR-0047 D01/D02).
-   *
-   * `remoteMainCommit` is the value read back from the remote, or null when the push was refused or
-   * the readback did not match. Only a non-null readback equal to the candidate completes the
-   * promotion as SUCCEEDED; a failed publish keeps the record open in RESTARTING/MAIN_PUSH_PENDING
-   * with the failure recorded, so the same command can retry the publish without stopping the
-   * Runtime again — nothing is rolled back and nothing is claimed.
-   */
-  recordStablePromotionMainPush(input: {
-    readonly promotionId: string;
-    readonly remoteMainCommit: string | null;
-    readonly outcomeCode: string;
-    readonly detail: string;
-    readonly eventId: string;
-    readonly at: number;
-  }): StablePromotionPlan {
-    return this.sqlite.transaction(() => {
-      const promotion = this.stablePromotionPlan(input.promotionId);
-      if (promotion.state === 'SUCCEEDED' || promotion.state === 'FAILED') return promotion;
-      if (promotion.state !== 'RESTARTING') {
-        throw new StorageError('INVALID_STATE',
-          `Promotion is ${promotion.state}; only a promotion whose restart was recorded can publish main`);
-      }
-      if (promotion.restart === null) {
-        throw new StorageError('INVALID_STATE',
-          'The promotion has no recorded restart result; main is never published before the restart');
-      }
-      if (input.remoteMainCommit === null) {
-        const updated = this.sqlite.query(`
-          UPDATE stable_promotions SET outcome_code=?1,detail=?2
-          WHERE id=?3 AND state='RESTARTING'
-        `).run(input.outcomeCode, input.detail, input.promotionId);
-        if (updated.changes !== 1) {
-          throw new StorageError('CONCURRENT_MODIFICATION',
-            'Promotion changed while recording its refused main publish');
-        }
-        this.sqlite.query(`
-          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-          VALUES (?1,?2,'PromotionMainPushRefused',1,'Promotion',?3,0,?1,?1,?4,?5)
-        `).run(input.eventId, promotion.projectId, input.promotionId, input.at,
-          JSON.stringify({ promotionId: input.promotionId, mainRef: promotion.mainRef,
-            candidateCommit: promotion.candidateCommit, promotedCommit: promotion.promotedCommit,
-            outcomeCode: input.outcomeCode, detail: input.detail }));
-        return this.stablePromotionPlan(input.promotionId);
-      }
-      if (input.remoteMainCommit !== promotion.candidateCommit) {
-        throw new StorageError('INVALID_STATE',
-          'The remote main readback must be the promoted commit; the remote holds something else');
-      }
-      const updated = this.sqlite.query(`
-        UPDATE stable_promotions
-        SET state='SUCCEEDED',remote_main_commit=?1,main_pushed_at=?2,outcome_code=?3,detail=?4,
-            completed_at=?2
-        WHERE id=?5 AND state='RESTARTING'
-      `).run(input.remoteMainCommit, input.at, input.outcomeCode, input.detail, input.promotionId);
-      const operation = this.sqlite.query(`
-        UPDATE operations SET state='SUCCEEDED',result_json=?1,updated_at=?2
-        WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS','RECONCILE_REQUIRED')
-      `).run(JSON.stringify({ promotionId: input.promotionId, state: 'SUCCEEDED',
-        outcomeCode: input.outcomeCode, promotedCommit: promotion.promotedCommit,
-        remoteMainCommit: input.remoteMainCommit }), input.at, promotion.operationId);
-      if (updated.changes !== 1 || operation.changes !== 1) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Promotion changed while publishing its main commit');
-      }
-      this.sqlite.query(`
-        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-        VALUES (?1,?2,'PromotionCompleted',1,'Promotion',?3,0,?1,?1,?4,?5)
-      `).run(input.eventId, promotion.projectId, input.promotionId, input.at,
-        JSON.stringify({ promotionId: input.promotionId, devRef: promotion.devRef,
-          mainRef: promotion.mainRef, candidateCommit: promotion.candidateCommit,
-          expectedMainCommit: promotion.expectedMainCommit,
-          remoteDevCommit: promotion.remoteDevCommit,
-          promotedCommit: promotion.promotedCommit, remoteMainCommit: input.remoteMainCommit,
-          state: 'SUCCEEDED', outcomeCode: input.outcomeCode, detail: input.detail }));
-      return this.stablePromotionPlan(input.promotionId);
-    })();
-  }
-
-  /**
-   * Marks a recorded promotion unusable because a ref or the evidence moved. STALE is terminal:
-   * the candidate has to be prepared and approved again. It is refused once the pull has been
-   * observed (RESTARTING and beyond), because there `main` really is on the candidate and STALE
-   * would read as "nothing happened".
-   */
-  markStablePromotionStale(input: {
-    readonly promotionId: string;
-    readonly outcomeCode: string;
-    readonly reason: string;
-    readonly eventId: string;
-    readonly at: number;
-  }): StablePromotionPlan {
-    return this.sqlite.transaction(() => {
-      const promotion = this.stablePromotionPlan(input.promotionId);
-      if (promotion.state === 'STALE') return promotion;
-      if (promotion.state !== 'CREATED' && promotion.state !== 'AWAITING_APPROVAL'
-        && promotion.state !== 'PROMOTING') {
-        throw new StorageError('INVALID_STATE',
-          `Promotion is ${promotion.state}; only a promotion whose pull was not observed yet can be stale`);
-      }
-      const updated = this.sqlite.query(`
-        UPDATE stable_promotions SET state='STALE',outcome_code=?1,detail=?2,completed_at=?3
-        WHERE id=?4 AND state IN ('CREATED','AWAITING_APPROVAL','PROMOTING')
-      `).run(input.outcomeCode, input.reason, input.at, input.promotionId);
-      const operation = this.sqlite.query(`
-        UPDATE operations SET state='FAILED',result_json=?1,updated_at=?2
-        WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS','RECONCILE_REQUIRED')
-      `).run(JSON.stringify({ promotionId: input.promotionId, state: 'STALE',
-        outcomeCode: input.outcomeCode }), input.at, promotion.operationId);
-      if (updated.changes !== 1 || operation.changes !== 1) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Promotion changed while marking it stale');
-      }
-      this.sqlite.query(`
-        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-        VALUES (?1,?2,'PromotionStale',1,'Promotion',?3,0,?1,?1,?4,?5)
-      `).run(input.eventId, promotion.projectId, input.promotionId, input.at,
-        JSON.stringify({ promotionId: input.promotionId, devRef: promotion.devRef,
-          mainRef: promotion.mainRef, candidateCommit: promotion.candidateCommit,
-          expectedMainCommit: promotion.expectedMainCommit,
-          verificationId: promotion.verificationId, outcomeCode: input.outcomeCode,
-          reason: input.reason }));
-      return this.stablePromotionPlan(input.promotionId);
-    })();
-  }
-
-  /**
-   * Terminal failure without touching a ref: the caller only uses this when `main` was not
-   * advanced, or when the restart result is known to have failed.
-   */
-  failStablePromotion(input: {
-    readonly promotionId: string;
-    readonly outcomeCode: string;
-    readonly detail: string;
-    readonly eventId: string;
-    readonly failedAt: number;
-  }): StablePromotionPlan {
-    return this.sqlite.transaction(() => {
-      const promotion = this.stablePromotionPlan(input.promotionId);
-      if (promotion.state === 'FAILED') return promotion;
-      if (promotion.state === 'SUCCEEDED' || promotion.state === 'STALE') {
-        throw new StorageError('INVALID_STATE',
-          `Promotion is ${promotion.state}; it cannot be failed after that outcome`);
-      }
-      const promoted = promotion.promotedCommit;
-      const updated = this.sqlite.query(`
-        UPDATE stable_promotions SET state='FAILED',outcome_code=?1,detail=?2,completed_at=?3,
-            promoted_commit=?4
-        WHERE id=?5 AND state IN ('CREATED','AWAITING_APPROVAL','PROMOTING','RESTARTING',
-          'RECOVERY_REQUIRED')
-      `).run(input.outcomeCode, input.detail, input.failedAt, promoted, input.promotionId);
-      const operation = this.sqlite.query(`
-        UPDATE operations SET state='FAILED',result_json=?1,updated_at=?2
-        WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS','RECONCILE_REQUIRED')
-      `).run(JSON.stringify({ promotionId: input.promotionId, state: 'FAILED',
-        outcomeCode: input.outcomeCode, promotedCommit: promoted }), input.failedAt,
-        promotion.operationId);
-      if (updated.changes !== 1 || operation.changes !== 1) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Promotion changed while recording its failure');
-      }
-      this.sqlite.query(`
-        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-        VALUES (?1,?2,'PromotionFailed',1,'Promotion',?3,0,?1,?1,?4,?5)
-      `).run(input.eventId, promotion.projectId, input.promotionId, input.failedAt,
-        JSON.stringify({ promotionId: input.promotionId, devRef: promotion.devRef,
-          mainRef: promotion.mainRef, candidateCommit: promotion.candidateCommit,
-          expectedMainCommit: promotion.expectedMainCommit,
-          promotedCommit: promoted, state: 'FAILED', outcomeCode: input.outcomeCode,
-          detail: input.detail }));
-      return this.stablePromotionPlan(input.promotionId);
-    })();
-  }
-
-  /**
-   * Reconciliation entry for a promotion a restart found in flight. The caller has already read
-   * `main`, so the record states what was observed instead of assuming the ref did not move. It is
-   * resumable (the restart sequence can be re-run without a second ref write) and until then it
-   * blocks a new promotion for the project.
-   */
-  markStablePromotionRecoveryRequired(input: {
-    readonly promotionId: string;
-    readonly outcomeCode: string;
-    readonly reason: string;
-    readonly promotedCommit: string | null;
-    readonly eventId: string;
-    readonly at: number;
-  }): StablePromotionPlan {
-    return this.sqlite.transaction(() => {
-      const promotion = this.stablePromotionPlan(input.promotionId);
-      if (promotion.state === 'RECOVERY_REQUIRED') return promotion;
-      if (promotion.state !== 'PROMOTING' && promotion.state !== 'RESTARTING') {
-        throw new StorageError('INVALID_STATE',
-          `Promotion is ${promotion.state}; only an in-flight promotion needs reconciliation`);
-      }
-      const updated = this.sqlite.query(`
-        UPDATE stable_promotions
-        SET state='RECOVERY_REQUIRED',outcome_code=?1,detail=?2,promoted_commit=?3
-        WHERE id=?4 AND state IN ('PROMOTING','RESTARTING')
-      `).run(input.outcomeCode, input.reason,
-        input.promotedCommit ?? promotion.promotedCommit, input.promotionId);
-      const operation = this.sqlite.query(`
-        UPDATE operations SET state='RECONCILE_REQUIRED',result_json=?1,updated_at=?2
-        WHERE id=?3 AND state IN ('PLANNED','IN_PROGRESS')
-      `).run(JSON.stringify({ promotionId: input.promotionId, state: 'RECOVERY_REQUIRED',
-        outcomeCode: input.outcomeCode }), input.at, promotion.operationId);
-      if (updated.changes !== 1 || operation.changes !== 1) {
-        throw new StorageError('CONCURRENT_MODIFICATION',
-          'Promotion changed while recording its recovery');
-      }
-      this.sqlite.query(`
-        INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-          aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-        VALUES (?1,?2,'PromotionReconcileRequired',1,'Promotion',?3,0,?1,?1,?4,?5)
-      `).run(input.eventId, promotion.projectId, input.promotionId, input.at,
-        JSON.stringify({ promotionId: input.promotionId, devRef: promotion.devRef,
-          mainRef: promotion.mainRef, candidateCommit: promotion.candidateCommit,
-          expectedMainCommit: promotion.expectedMainCommit,
-          promotedCommit: input.promotedCommit ?? promotion.promotedCommit,
-          previousState: promotion.state, outcomeCode: input.outcomeCode,
-          reason: input.reason }));
-      return this.stablePromotionPlan(input.promotionId);
-    })();
-  }
-
-  /**
-   * The promotion one command already produced, so a replayed `promotion.prepare` reaches its own
-   * record instead of being refused as a second attempt.
-   */
-  findStablePromotionByCommand(projectId: string, commandId: string): StablePromotionPlan | null {
-    const receipt = this.sqlite.query<{ result_json: string }, [string, string]>(`
-      SELECT receipt.result_json FROM command_receipts receipt
-      JOIN stable_promotions promotion ON promotion.id=json_extract(receipt.result_json,'$.promotionId')
-      WHERE receipt.project_id=?1 AND receipt.command_id=?2
-    `).get(projectId, commandId);
-    if (receipt === null) return null;
-    const recorded = JSON.parse(receipt.result_json) as { promotionId?: string };
-    if (recorded.promotionId === undefined) return null;
-    return this.stablePromotionPlan(recorded.promotionId);
-  }
-
-  /**
-   * The project's open promotion, or null. A second attempt must not race an open record, and the
-   * remote-movement checks need to know which record a refusal invalidates (ADR-0047 D02).
-   */
-  getOpenStablePromotion(projectId: string): StablePromotionSummary | null {
-    const row = this.sqlite.query<{ id: string }, [string]>(`
-      SELECT id FROM stable_promotions
-      WHERE project_id=?1 AND state IN ('CREATED','AWAITING_APPROVAL','PROMOTING','RESTARTING',
-        'RECOVERY_REQUIRED')
-      ORDER BY created_at DESC,id LIMIT 1
-    `).get(projectId);
-    return row === null ? null : this.stablePromotionSummary(row.id);
-  }
-
-  listStablePromotions(projectId: string, limit = 20): readonly StablePromotionSummary[] {
-    return this.sqlite.query<{ id: string }, [string, number]>(`
-      SELECT id FROM stable_promotions WHERE project_id=?1 ORDER BY created_at DESC,id LIMIT ?2
-    `).all(projectId, limit).map((row) => this.stablePromotionSummary(row.id));
-  }
-
-  getStablePromotion(projectId: string, promotionId: string): StablePromotionSummary {
-    const summary = this.stablePromotionSummary(promotionId);
-    if (summary.projectId !== projectId) {
-      throw new StorageError('NOT_FOUND', 'Promotion was not found for this project');
-    }
-    return summary;
-  }
-
-  /** The plan form: project refs, object format and Operation state, for a state-changing call. */
-  getStablePromotionPlan(projectId: string, promotionId: string): StablePromotionPlan {
-    const plan = this.stablePromotionPlan(promotionId);
-    if (plan.projectId !== projectId) {
-      throw new StorageError('NOT_FOUND', 'Promotion was not found for this project');
-    }
-    return plan;
-  }
-
-  /** Promotions a previous Runtime left in flight; a restart reconciles them explicitly. */
-  listIncompleteStablePromotions(): readonly StablePromotionPlan[] {
-    return this.sqlite.query<{ id: string }, []>(`
-      SELECT id FROM stable_promotions WHERE state IN ('PROMOTING','RESTARTING')
-      ORDER BY created_at,id
-    `).all().map((row) => this.stablePromotionPlan(row.id));
-  }
-
-  private stablePromotionBatchMembers(projectId: string, batchId: string): readonly PromotionMember[] {
-    return this.sqlite.query<{
-      batch_id: string; task_id: string; revision_id: string; execution_id: string;
-      candidate_commit: string;
-    }, [string, string]>(`
-      SELECT batch_id,task_id,revision_id,execution_id,candidate_commit
-      FROM integration_batch_items WHERE project_id=?1 AND batch_id=?2 ORDER BY task_id
-    `).all(projectId, batchId).map((row) => ({
-      batchId: row.batch_id,
-      taskId: row.task_id,
-      revisionId: row.revision_id,
-      executionId: row.execution_id,
-      candidateCommit: row.candidate_commit,
-    }));
-  }
-
-  private stablePromotionSummary(promotionId: string): StablePromotionSummary {
-    const row = this.sqlite.query<{
-      id: string; project_id: string; dev_ref: string; main_ref: string; candidate_commit: string;
-      expected_main_commit: string; integration_batch_id: string; verification_id: string;
-      verification_tested_commit: string; permission_mode: PromotionPermissionMode;
-      state: StablePromotionState; approved_dev_commit: string | null;
-      approved_main_commit: string | null; approved_verification_id: string | null;
-      approved_full_suite_evidence_id: string | null;
-      approved_at: number | null; promoted_commit: string | null; main_worktree_path: string | null;
-      promoting_boot_id: string | null;
-      full_suite_evidence_id: string | null; full_suite_dev_commit: string | null;
-      full_suite_policy_version: string | null; full_suite_policy_digest: string | null;
-      full_suite_lockfile_digest: string | null;
-      restart_steps_json: string | null; restart_result_json: string | null;
-      dev_repo_path: string | null; remote_dev_commit: string | null;
-      remote_main_commit: string | null; pushed_at: number | null; main_pushed_at: number | null;
-      outcome_code: string | null; detail: string | null; created_at: number;
-      completed_at: number | null;
-    }, [string]>(`
-      SELECT id,project_id,dev_ref,main_ref,candidate_commit,expected_main_commit,
-             integration_batch_id,verification_id,verification_tested_commit,permission_mode,state,
-             approved_dev_commit,approved_main_commit,approved_verification_id,
-             approved_full_suite_evidence_id,approved_at,
-             promoted_commit,main_worktree_path,promoting_boot_id,full_suite_evidence_id,
-             full_suite_dev_commit,full_suite_policy_version,full_suite_policy_digest,
-             full_suite_lockfile_digest,restart_steps_json,
-             restart_result_json,dev_repo_path,remote_dev_commit,remote_main_commit,pushed_at,
-             main_pushed_at,outcome_code,detail,created_at,completed_at
-      FROM stable_promotions WHERE id=?1
-    `).get(promotionId);
-    if (row === null) throw new StorageError('NOT_FOUND', 'Promotion was not found');
-    const restart = row.restart_result_json === null
-      ? null
-      : JSON.parse(row.restart_result_json) as PromotionRestartResult;
-    return {
-      promotionId: row.id,
-      projectId: row.project_id,
-      devRef: row.dev_ref,
-      mainRef: row.main_ref,
-      candidateCommit: row.candidate_commit,
-      expectedMainCommit: row.expected_main_commit,
-      integrationBatchId: row.integration_batch_id,
-      verificationId: row.verification_id,
-      verificationTestedCommit: row.verification_tested_commit,
-      permissionMode: row.permission_mode,
-      state: row.state,
-      approval: row.approved_at === null || row.approved_dev_commit === null
-        || row.approved_main_commit === null || row.approved_verification_id === null
-        ? null
-        : {
-            devCommit: row.approved_dev_commit,
-            mainCommit: row.approved_main_commit,
-            verificationId: row.approved_verification_id,
-            fullSuiteEvidenceId: row.approved_full_suite_evidence_id,
-            approvedAt: row.approved_at,
-          },
-      fullSuite: row.full_suite_evidence_id === null || row.full_suite_dev_commit === null
-        || row.full_suite_policy_version === null || row.full_suite_policy_digest === null
-        || row.full_suite_lockfile_digest === null
-        ? null
-        : {
-            evidenceId: row.full_suite_evidence_id,
-            devCommit: row.full_suite_dev_commit,
-            policyVersion: row.full_suite_policy_version,
-            policyDigest: row.full_suite_policy_digest,
-            lockfileDigest: row.full_suite_lockfile_digest,
-          },
-      promotedCommit: row.promoted_commit,
-      mainWorktreePath: row.main_worktree_path,
-      promotingBootId: row.promoting_boot_id,
-      devRepoPath: row.dev_repo_path,
-      remoteDevCommit: row.remote_dev_commit,
-      remoteMainCommit: row.remote_main_commit,
-      pushedAt: row.pushed_at,
-      mainPushedAt: row.main_pushed_at,
-      phase: promotionPhase({ state: row.state, restart }),
-      restartSteps: row.restart_steps_json === null
-        ? []
-        : JSON.parse(row.restart_steps_json) as readonly PromotionRestartPlanStep[],
-      restart,
-      outcomeCode: row.outcome_code,
-      detail: row.detail,
-      createdAt: row.created_at,
-      completedAt: row.completed_at,
-      members: this.sqlite.query<{
-        batch_id: string; task_id: string; revision_id: string; execution_id: string;
-        candidate_commit: string;
-      }, [string]>(`
-        SELECT batch_id,task_id,revision_id,execution_id,candidate_commit
-        FROM stable_promotion_members WHERE promotion_id=?1 ORDER BY task_id
-      `).all(promotionId).map((member) => ({
-        batchId: member.batch_id,
-        taskId: member.task_id,
-        revisionId: member.revision_id,
-        executionId: member.execution_id,
-        candidateCommit: member.candidate_commit,
-      })),
-    };
-  }
-
-  private stablePromotionPlan(promotionId: string): StablePromotionPlan {
-    const summary = this.stablePromotionSummary(promotionId);
-    const row = this.sqlite.query<{
-      repo_root: string; git_common_dir: string; object_format: 'sha1' | 'sha256';
-      operation_id: string; operation_state: StablePromotionPlan['operationState'];
-    }, [string]>(`
-      SELECT p.repo_root,p.git_common_dir,p.object_format,o.id AS operation_id,
-             o.state AS operation_state
-      FROM stable_promotions promotion
-      JOIN projects p ON p.id=promotion.project_id
-      JOIN operations o ON o.kind='PROMOTE_STABLE_BRANCH'
-        AND o.aggregate_id=promotion.id
-      WHERE promotion.id=?1
-    `).get(promotionId);
-    if (row === null) {
-      throw new StorageError('NOT_FOUND', 'Promotion is missing its project or Operation');
-    }
-    return {
-      ...summary,
-      operationId: row.operation_id,
-      operationState: row.operation_state,
-      repositoryRoot: row.repo_root,
-      gitCommonDir: row.git_common_dir,
-      objectFormat: row.object_format,
-    };
-  }
-
-  /**
-   * Whether the batch record proves that no member side effect exists: nothing was merged and no
-   * verification was queued. Only such a batch may be cancelled; anything else needs reconciliation.
-   */
-  private memberSideEffectsSettled(batch: {
-    readonly worktreePath: string | null;
-    readonly mergeStrategy: MergeStrategy | null;
-    readonly mergedCommit: string | null;
-    readonly verificationId: string | null;
-  }): boolean {
-    return batch.worktreePath === null && batch.mergeStrategy === null
-      && batch.mergedCommit === null && batch.verificationId === null;
-  }
-
-  private integrationBatchSummary(batchId: string): IntegrationBatchSummary {
-    const row = this.sqlite.query<{
-      id: string; project_id: string; dev_ref: string; dev_commit: string;
-      state: IntegrationBatchState; integrated_commit: string | null;
-      merge_strategy: MergeStrategy | null; merged_commit: string | null;
-      worktree_path: string | null;
-      verification_id: string | null; outcome_code: string | null; detail: string | null;
-      created_at: number; completed_at: number | null;
-    }, [string]>(`
-      SELECT id,project_id,dev_ref,dev_commit,state,integrated_commit,merge_strategy,merged_commit,
-             worktree_path,verification_id,outcome_code,detail,created_at,completed_at
-      FROM integration_batches WHERE id=?1
-    `).get(batchId);
-    if (row === null) throw new StorageError('NOT_FOUND', 'Integration batch was not found');
-    return {
-      batchId: row.id,
-      projectId: row.project_id,
-      devRef: row.dev_ref,
-      devCommit: row.dev_commit,
-      state: row.state,
-      integratedCommit: row.integrated_commit,
-      mergeStrategy: row.merge_strategy,
-      mergedCommit: row.merged_commit,
-      worktreePath: row.worktree_path,
-      verificationId: row.verification_id,
-      outcomeCode: row.outcome_code,
-      detail: row.detail,
-      createdAt: row.created_at,
-      completedAt: row.completed_at,
-      items: this.integrationBatchItemSummaries(batchId),
-    };
-  }
-
-  private integrationBatchItemSummaries(batchId: string): readonly IntegrationBatchItemSummary[] {
-    return this.sqlite.query<{
-      batch_id: string; project_id: string; task_id: string; task_version: number;
-      revision_id: string; execution_id: string;
-      candidate_commit: string; dev_commit: string; state: IntegrationItemState;
-      integrated_commit: string | null; detail: string | null;
-      created_at: number; completed_at: number | null;
-    }, [string]>(`
-      SELECT item.batch_id,item.project_id,item.task_id,task.version AS task_version,
-             item.revision_id,item.execution_id,item.candidate_commit,item.dev_commit,item.state,
-             item.integrated_commit,item.detail,item.created_at,item.completed_at
-      FROM integration_batch_items item JOIN tasks task ON task.id=item.task_id
-      WHERE item.batch_id=?1 ORDER BY item.task_id
-    `).all(batchId).map((row) => ({
-      batchId: row.batch_id,
-      projectId: row.project_id,
-      taskId: row.task_id,
-      taskVersion: row.task_version,
-      revisionId: row.revision_id,
-      executionId: row.execution_id,
-      candidateCommit: row.candidate_commit,
-      devCommit: row.dev_commit,
-      state: row.state,
-      integratedCommit: row.integrated_commit,
-      detail: row.detail,
-      createdAt: row.created_at,
-      completedAt: row.completed_at,
-    }));
-  }
-
-  private integrationBatchPlan(batchId: string): IntegrationBatchPlan {
-    const summary = this.integrationBatchSummary(batchId);
-    const item = summary.items[0];
-    const operation = this.sqlite.query<{
-      id: string; state: IntegrationBatchPlan['operationState'];
-    }, [string]>(`
-      SELECT id,state FROM operations WHERE kind='INTEGRATE_TASK_RESULT' AND aggregate_id=?1
-    `).get(batchId);
-    const project = this.sqlite.query<{
-      repo_root: string; main_ref: string; object_format: 'sha1' | 'sha256';
-      ownership_token: string;
-    }, [string]>(`
-      SELECT COALESCE(p.dev_repo_path,p.repo_root) AS repo_root,p.main_ref,p.object_format,
-             batch.worktree_ownership_token
-      FROM integration_batches batch
-      JOIN projects p ON p.id=batch.project_id
-      WHERE batch.id=?1
-    `).get(batchId);
-    if (item === undefined || operation === null || project === null) {
-      throw new StorageError('NOT_FOUND', 'Integration batch is missing its item, operation, or project');
-    }
-    return {
-      ...summary,
-      operationId: operation.id,
-      operationState: operation.state,
-      worktreeOwnershipToken: project.ownership_token,
-      repositoryRoot: project.repo_root,
-      mainRef: project.main_ref,
-      objectFormat: project.object_format,
-      item,
-    };
-  }
-
-  private integrationVerificationPlan(verificationId: string): IntegrationVerificationPlan {
-    const row = this.sqlite.query<{
-      id: string; batch_id: string; project_id: string; task_id: string; execution_id: string;
-      revision_id: string; operation_id: string; operation_state: IntegrationVerificationPlan['operationState'];
-      tested_commit: string; tested_tree: string; dev_commit: string; policy_version: string;
-      policy_digest: string; main_commit: string; commands_json: string; copy_path: string;
-      state: VerificationState; outcome_code: string | null; evidence_json: string | null;
-      queued_at: number; started_at: number | null; ended_at: number | null;
-    }, [string]>(`
-      SELECT r.id,r.batch_id,r.project_id,r.task_id,r.execution_id,r.revision_id,r.operation_id,
-        o.state AS operation_state,r.tested_commit,r.tested_tree,r.dev_commit,r.policy_version,
-        r.policy_digest,r.main_commit,r.commands_json,r.copy_path,r.state,r.outcome_code,
-        r.evidence_json,r.queued_at,r.started_at,r.ended_at
-      FROM integration_verification_runs r JOIN operations o ON o.id=r.operation_id
-      WHERE r.id=?1
-    `).get(verificationId);
-    if (row === null) throw new StorageError('NOT_FOUND', 'Integration verification was not found');
-    return {
-      verificationId: row.id,
-      batchId: row.batch_id,
-      projectId: row.project_id,
-      taskId: row.task_id,
-      executionId: row.execution_id,
-      revisionId: row.revision_id,
-      operationId: row.operation_id,
-      operationState: row.operation_state,
-      testedCommit: row.tested_commit,
-      testedTree: row.tested_tree,
-      devCommit: row.dev_commit,
-      policyVersion: row.policy_version,
-      policyDigest: row.policy_digest,
-      mainCommit: row.main_commit,
-      commands: JSON.parse(row.commands_json) as readonly StoredVerificationCommand[],
-      copyPath: row.copy_path,
-      state: row.state,
-      outcomeCode: row.outcome_code,
-      evidence: row.evidence_json === null
-        ? null
-        : JSON.parse(row.evidence_json) as VerificationEvidence,
-      queuedAt: row.queued_at,
-      startedAt: row.started_at,
-      endedAt: row.ended_at,
-    };
-  }
 
   /**
    * Creates one long-command Operation, or returns the one the same command already created.
@@ -9233,13 +6587,13 @@ export class Phase1Database {
     options: { readonly taskId?: string } = {},
   ): ReclamationCandidates {
     const project = this.sqlite.query<{
-      id: string; name: string; repo_root: string; dev_repo_path: string | null;
+      id: string; name: string; repo_root: string;
       git_common_dir: string; main_ref: string;
-      dev_ref: string; object_format: 'sha1' | 'sha256';
+      object_format: 'sha1' | 'sha256';
     }, [string]>(`
-      SELECT p.id,p.name,COALESCE(p.dev_repo_path,p.repo_root) AS repo_root,p.dev_repo_path,
+      SELECT p.id,p.name,p.repo_root AS repo_root,
              p.git_common_dir,
-             p.main_ref,p.dev_ref,p.object_format
+             p.main_ref,p.object_format
       FROM projects p
       JOIN project_trusts trust ON trust.project_id=p.id AND trust.status='ACTIVE'
       WHERE p.id=?1
@@ -9293,23 +6647,6 @@ export class Phase1Database {
       WHERE project_id=?1 ${verificationFilter}
       ORDER BY queued_at DESC,id
     `).all(...taskParameters);
-    const integrationFilter = options.taskId === undefined ? ''
-      : 'AND EXISTS(SELECT 1 FROM integration_batch_items i'
-        + ' WHERE i.batch_id=b.id AND i.task_id=?2)';
-    const integrationWorktrees = this.sqlite.query<{
-      id: string; task_id: string | null; state: IntegrationBatchState; dev_commit: string;
-      merged_commit: string | null; integrated_commit: string | null; worktree_path: string;
-      worktree_ownership_token: string; detail: string | null;
-    }, [string] | [string, string]>(`
-      SELECT b.id,
-        (SELECT i.task_id FROM integration_batch_items i WHERE i.batch_id=b.id
-          ORDER BY i.created_at,i.task_id LIMIT 1) AS task_id,
-        b.state,b.dev_commit,b.merged_commit,b.integrated_commit,b.worktree_path,
-        b.worktree_ownership_token,b.detail
-      FROM integration_batches b
-      WHERE b.project_id=?1 AND b.worktree_path IS NOT NULL ${integrationFilter}
-      ORDER BY b.created_at DESC,b.id
-    `).all(...taskParameters);
     return {
       project: {
         projectId: project.id,
@@ -9317,8 +6654,6 @@ export class Phase1Database {
         repoRoot: project.repo_root,
         gitCommonDir: project.git_common_dir,
         mainRef: project.main_ref,
-        devRepoPath: project.dev_repo_path,
-        devRef: project.dev_ref,
         objectFormat: project.object_format,
       },
       tasks: tasks.map((row) => ({
@@ -9352,19 +6687,6 @@ export class Phase1Database {
         state: row.state,
         outcomeCode: row.outcome_code,
       })),
-      integrationWorktrees: integrationWorktrees
-        .filter((row): row is typeof row & { task_id: string } => row.task_id !== null)
-        .map((row) => ({
-          batchId: row.id,
-          taskId: row.task_id,
-          state: row.state,
-          devCommit: row.dev_commit,
-          mergedCommit: row.merged_commit,
-          integratedCommit: row.integrated_commit,
-          worktreePath: row.worktree_path,
-          ownershipToken: row.worktree_ownership_token,
-          detail: row.detail,
-        })),
     };
   }
 
@@ -9724,18 +7046,9 @@ export class Phase1Database {
         taskId: verification.task_id, resourceId: verification.id,
         resourceState: verification.state };
     }
-    const integration = this.sqlite.query<{
-      id: string; project_id: string; state: string;
-    }, [string]>(
-      'SELECT id,project_id,state FROM integration_batches WHERE worktree_path=?1 LIMIT 1',
-    ).get(path);
-    if (integration === null) return null;
-    const member = this.sqlite.query<{ task_id: string }, [string]>(
-      'SELECT task_id FROM integration_batch_items WHERE batch_id=?1 ORDER BY created_at LIMIT 1',
-    ).get(integration.id);
-    return { kind: 'INTEGRATION_WORKTREE', projectId: integration.project_id,
-      taskId: member?.task_id ?? null, resourceId: integration.id,
-      resourceState: integration.state };
+    // ADR-0062: the Runtime no longer creates integration worktrees, so a path that is not a Task
+    // worktree or a verification copy belongs to no Runtime-owned resource it can name.
+    return null;
   }
 
   /**
@@ -9787,9 +7100,9 @@ export class Phase1Database {
   // transaction, so two edges that are each legal cannot be committed together into a cycle.
   //
   // Whether an edge is satisfied is deliberately not decided here: these methods expose the
-  // recorded integration fact (`integratedCommit`), while the Git question — is that commit still
-  // reachable from the project's current `dev` ref — belongs to the scheduler, which has the
-  // repository.
+  // upstream revision's captured result commit, while the Git question — is that commit reachable
+  // from the project's current Task baseline ref — belongs to the scheduler, which has the
+  // repository (ADR-0062).
   // ---------------------------------------------------------------------------------------------
 
   /**
@@ -9819,7 +7132,7 @@ export class Phase1Database {
       dependent_state: TaskLifecycleState; prerequisite_task_id: string;
       prerequisite_display_number: number; prerequisite_state: TaskLifecycleState;
       required_revision_id: string; required_revision_number: number; created_by: string;
-      created_at: number; integrated_commit: string | null; integration_batch_id: string | null;
+      created_at: number; result_commit: string | null;
     }, [string, ...string[]]>(`
       SELECT dependency.project_id,dependency.dependent_task_id,
         dependent.display_number AS dependent_display_number,
@@ -9829,20 +7142,14 @@ export class Phase1Database {
         prerequisite.state AS prerequisite_state,
         dependency.required_revision_id,revision.number AS required_revision_number,
         dependency.created_by,dependency.created_at,
-        (SELECT item.integrated_commit FROM integration_batch_items item
-          JOIN integration_batches batch ON batch.id=item.batch_id
-          WHERE item.task_id=dependency.prerequisite_task_id
-            AND item.revision_id=dependency.required_revision_id
-            AND item.state='INTEGRATED' AND item.integrated_commit IS NOT NULL
-            AND batch.state='INTEGRATED'
-          ORDER BY item.created_at DESC,item.batch_id DESC LIMIT 1) AS integrated_commit,
-        (SELECT item.batch_id FROM integration_batch_items item
-          JOIN integration_batches batch ON batch.id=item.batch_id
-          WHERE item.task_id=dependency.prerequisite_task_id
-            AND item.revision_id=dependency.required_revision_id
-            AND item.state='INTEGRATED' AND item.integrated_commit IS NOT NULL
-            AND batch.state='INTEGRATED'
-          ORDER BY item.created_at DESC,item.batch_id DESC LIMIT 1) AS integration_batch_id
+        -- ADR-0062: an edge is judged by the upstream revision's *own* captured result commit.
+        -- Whether the project's current Task baseline ref contains it is the Git question the
+        -- scheduler answers; there is no integration record to read any more.
+        (SELECT e.result_commit FROM executions e
+          WHERE e.task_id=dependency.prerequisite_task_id
+            AND e.applied_revision_id=dependency.required_revision_id
+            AND e.result_commit IS NOT NULL
+          ORDER BY e.attempt_number DESC LIMIT 1) AS result_commit
       FROM task_dependencies dependency
       JOIN tasks dependent ON dependent.id=dependency.dependent_task_id
       JOIN tasks prerequisite ON prerequisite.id=dependency.prerequisite_task_id
@@ -9862,8 +7169,7 @@ export class Phase1Database {
       requiredRevisionNumber: row.required_revision_number,
       createdBy: row.created_by,
       createdAt: row.created_at,
-      integratedCommit: row.integrated_commit,
-      integrationBatchId: row.integration_batch_id,
+      resultCommit: row.result_commit,
     }));
   }
 
@@ -15184,17 +12490,16 @@ function slotSnapshotGenerationRecheck(input: {
 
 /**
  * A fingerprint of the dependency facts of one Task, recomputed inside the reservation transaction
- * and compared with the value the caller assessed. It covers the whole edge, including the recorded
- * integration fact the satisfaction verdict was derived from, so an upstream integration that lands
- * between the Git check and this write is refused instead of being reserved against a stale read.
+ * and compared with the value the caller assessed. It covers the whole edge, including the upstream
+ * result commit the satisfaction verdict was derived from, so an upstream result that lands between
+ * the Git check and this write is refused instead of being reserved against a stale read.
  */
 export function slotDependencyFingerprint(facts: readonly TaskDependencyFact[]): string {
   const canonical = [...facts]
     .map((fact) => ({
       prerequisiteTaskId: fact.prerequisiteTaskId,
       requiredRevisionId: fact.requiredRevisionId,
-      integratedCommit: fact.integratedCommit,
-      integrationBatchId: fact.integrationBatchId,
+      resultCommit: fact.resultCommit,
     }))
     .sort((left, right) => (left.prerequisiteTaskId < right.prerequisiteTaskId ? -1
       : left.prerequisiteTaskId > right.prerequisiteTaskId ? 1 : 0));
@@ -15861,18 +13166,8 @@ const appendOnlyTaskTables: readonly string[] = Object.freeze([
  * Everything one purge deletes, in an order that reads children-before-parents even though the
  * command defers foreign-key checking to commit. The order is documentation, not a correctness
  * requirement: `PRAGMA defer_foreign_keys=ON` is what makes "the whole subgraph or none of it" hold.
- *
- * The three guarded tables (`integration_batch_items`, `integration_verification_runs`,
- * `stable_promotion_members`) are absent for an ordinary purge on purpose: a Task named by one of them
- * is refused, because the commit it put into `dev`/`main` outlives it. `--force` is the one caller
- * allowed to step over that refusal (ADR-0058 D09), and it deletes those rows for exactly the reason
- * the refusal exists — the record of *who* brought the commit in is what the flag gives up. The stable
- * promotion record itself has to go with them whenever its verification run is this Task's: the foreign
- * keys leave no other consistent outcome.
  */
-function taskPurgeDeletions(
-  includeIntegratedMembership: boolean,
-): readonly (readonly [string, string])[] {
+function taskPurgeDeletions(): readonly (readonly [string, string])[] {
   const executions = 'SELECT e.id FROM executions e WHERE e.task_id=?1';
   const sessions = `SELECT s.id FROM agent_sessions s WHERE s.execution_id IN (${executions})`;
   return [
@@ -15920,30 +13215,6 @@ function taskPurgeDeletions(
     ['task_dependencies',
       'DELETE FROM task_dependencies WHERE prerequisite_task_id=?1 OR dependent_task_id=?1'],
     ['intent_targets', 'DELETE FROM intent_targets WHERE task_id=?1'],
-    // `--force`: the tables that record "this commit reached dev/main through this Task" are the reason
-    // an ordinary purge refuses, and they are the rows the flag gives up (ADR-0058 D09).
-    //
-    // The promotion half is a cascade, not a choice: `stable_promotions.verification_id` references the
-    // batch's integration verification run, and that run references this Task's execution/revision. A
-    // promotion record that names this Task's run therefore cannot outlive the Task, and because
-    // `stable_promotion_members.promotion_id` references the promotion, every member row of that
-    // promotion goes with it — including other Tasks' rows. The counts in `rowsDeleted` are the record
-    // of exactly how far the deletion reached.
-    ...(includeIntegratedMembership
-      ? ([
-        ['stable_promotion_members',
-          `DELETE FROM stable_promotion_members WHERE task_id=?1 OR promotion_id IN (
-            SELECT p.id FROM stable_promotions p
-            JOIN integration_verification_runs r ON r.id=p.verification_id
-            WHERE r.task_id=?1)`],
-        ['stable_promotions',
-          `DELETE FROM stable_promotions WHERE verification_id IN (
-            SELECT id FROM integration_verification_runs WHERE task_id=?1)`],
-        ['integration_verification_runs',
-          'DELETE FROM integration_verification_runs WHERE task_id=?1'],
-        ['integration_batch_items', 'DELETE FROM integration_batch_items WHERE task_id=?1'],
-      ] as readonly (readonly [string, string])[])
-      : []),
     ['executions', 'DELETE FROM executions WHERE task_id=?1'],
     ['task_revisions', 'DELETE FROM task_revisions WHERE task_id=?1'],
     ['workspaces', 'DELETE FROM workspaces WHERE task_id=?1'],
@@ -16044,20 +13315,12 @@ export interface ReclamationProjectRef {
   readonly projectId: string;
   readonly name: string;
   /**
-   * The repository that owns this project's Task worktrees: the dev clone when one is recorded
-   * (ADR-0056), otherwise the project folder itself (ADR-0060) — `COALESCE(dev_repo_path, repo_root)`.
-   * Ownership is proven by asking this repository, so it is never guessed from a path.
+   * The project folder that owns this project's Task worktrees (ADR-0062). Ownership is proven by
+   * asking this repository, so it is never guessed from a path.
    */
   readonly repoRoot: string;
-  /**
-   * The recorded dev clone path, or null. A reclamation proves ownership by asking the repository
-   * that owns the worktree, so a project without one is refused (`DEV_REPO_REQUIRED`) instead of
-   * having its `repoRoot` silently read as the stable checkout's.
-   */
-  readonly devRepoPath: string | null;
   readonly gitCommonDir: string;
   readonly mainRef: string;
-  readonly devRef: string;
   readonly objectFormat: 'sha1' | 'sha256';
 }
 
@@ -16078,10 +13341,9 @@ export interface ReclamationWorkspaceRef {
   readonly ownershipToken: string;
   readonly baseCommit: string;
   /**
-   * The ref this workspace was based on (ADR-0060), or null for rows written before schema v33. This
-   * is the ref a Task's result would be merged into, so it is what "already merged" is measured
-   * against: the dev clone's `dev` for a promoting project, the project folder's branch for a managed
-   * one.
+   * The ref this workspace was based on (ADR-0062), or null for rows written before schema v33.
+   * This is the ref a Task's result would be merged into by the user, so it is what "already merged"
+   * is measured against: the project folder's branch at preparation time (ADR-0060, v33).
    */
   readonly baseRef: string | null;
   readonly state: WorkspaceLifecycleState;
@@ -16107,25 +13369,12 @@ export interface ReclamationVerificationRef {
   readonly outcomeCode: string | null;
 }
 
-export interface ReclamationIntegrationRef {
-  readonly batchId: string;
-  readonly taskId: string;
-  readonly state: IntegrationBatchState;
-  readonly devCommit: string;
-  readonly mergedCommit: string | null;
-  readonly integratedCommit: string | null;
-  readonly worktreePath: string;
-  readonly ownershipToken: string;
-  readonly detail: string | null;
-}
-
 /** Everything a reclamation plan needs, in one read, including each resource's ownership token. */
 export interface ReclamationCandidates {
   readonly project: ReclamationProjectRef;
   readonly tasks: readonly ReclamationTaskRef[];
   readonly workspaces: readonly ReclamationWorkspaceRef[];
   readonly verificationCopies: readonly ReclamationVerificationRef[];
-  readonly integrationWorktrees: readonly ReclamationIntegrationRef[];
 }
 
 export type ReclamationOutcome = 'RECLAIMED' | 'ALREADY_ABSENT' | 'RETAINED' | 'REFUSED' | 'FAILED'
@@ -16264,9 +13513,9 @@ export interface OperationSummary {
 
 /**
  * One persisted dependency edge projected for clients: the pinned upstream revision and the display
- * identity of both endpoints. `integratedCommit` is the recorded fact that the pinned revision has
- * been merged into `dev`; it is not yet a satisfied dependency, because reachability from the
- * project's current `dev` ref is a Git question the scheduler answers.
+ * identity of both endpoints. `resultCommit` is the upstream revision's own captured result commit;
+ * it is not yet a satisfied dependency, because reachability from the project's current Task
+ * baseline ref is a Git question the scheduler answers (ADR-0062).
  */
 export interface TaskDependencyRecord {
   readonly projectId: string;
@@ -16283,9 +13532,8 @@ export interface TaskDependencyRecord {
 }
 
 export interface TaskDependencyFact extends TaskDependencyRecord {
-  /** Merged commit of an INTEGRATED batch for the pinned revision, or null when none exists. */
-  readonly integratedCommit: string | null;
-  readonly integrationBatchId: string | null;
+  /** Captured result commit of the pinned revision, or null when that revision captured none. */
+  readonly resultCommit: string | null;
 }
 
 export interface TaskDependencyMutation {
@@ -16310,8 +13558,8 @@ export interface TaskDependencyRemoval {
 
 /** Why one edge is not satisfied. Bounded codes, never a paraphrase of an upstream message. */
 export interface TaskDependencyBlockReason {
-  readonly code: 'UPSTREAM_NOT_INTEGRATED' | 'DEV_BASELINE_MISSING' | 'DEV_REF_UNREADABLE'
-    | 'NOT_REACHABLE_FROM_DEV';
+  readonly code: 'UPSTREAM_RESULT_MISSING' | 'BASE_REF_MISSING' | 'BASE_REF_UNREADABLE'
+    | 'NOT_REACHABLE_FROM_BASE';
   readonly prerequisiteTaskId: string;
   readonly requiredRevisionId: string;
   readonly detail: string | null;

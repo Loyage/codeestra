@@ -1,15 +1,12 @@
 import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, rmSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
-import { devBranchRef, impactPolicyPath, runtimeRequestSchema, uiSettingKeys,
+import { impactPolicyPath, runtimeRequestSchema, uiSettingKeys,
   validateQuestionnaireAnswer,
   questionnairePromptSchema,
   type RuntimePauseStateView, type RuntimeRequest, type RuntimeResponse,
   type RuntimeStreamFrame } from '@codeestra/contracts';
-import { inspectRepository, listRemoteRefsContainingCommit, readLocalRefCommit } from '@codeestra/git';
-import {
-  inspectDevRepo,
-} from './dev-repo-service.js';
+import { inspectRepository } from '@codeestra/git';
 import {
   defaultProseQuestionAttentionMode,
   type ProseQuestionAttentionMode,
@@ -35,8 +32,6 @@ import { agentPluginKinds, agentPluginSelectionSchema,
   type AgentPluginSelection } from '@codeestra/contracts';
 import { AgentRuntimeCoordinator, deriveCommandId } from './agent-runtime-service.js';
 import { EventSubscriptionHub, type EventSubscriptionHandle } from './event-subscription-service.js';
-import { cancelIntegrationBatch, createIntegrationBatch, integrateIntegrationBatch,
-  integrateTaskResult, readIntegrationBatch } from './integration-service.js';
 import { RuntimeHttpApi } from './http-api.js';
 import {
   acquireRuntimeOwnership,
@@ -80,13 +75,6 @@ import {
   writeProseQuestionAttentionMode,
 } from './prose-question-attention-settings.js';
 import {
-  abandonStablePromotion,
-  approveStablePromotion,
-  prepareStablePromotion,
-  promoteStableBranch,
-  recordPromotionRestart,
-} from './promotion-service.js';
-import {
   applyReclamation,
   applyReclamationBatch,
   listReclamationRecords,
@@ -99,7 +87,6 @@ import { captureResultCommit, prepareResultCommit } from './result-commit-servic
 import {
   assertDependenciesSatisfied,
   inspectTaskDependencies,
-  reconcileDependentTasks,
   reconcileTaskDependencyState,
 } from './scheduler.js';
 import { pauseOrCancelTask, resumePausedTask, retryFailedTask } from './task-control-service.js';
@@ -112,8 +99,6 @@ import {
 import {
   reconcileInterruptedAgentAnswers,
   reconcileInterruptedAgentStarts,
-  reconcileInterruptedIntegrations,
-  reconcileInterruptedPromotions,
   reconcileInterruptedResultCommits,
   reconcileInterruptedRunOperations,
   reconcileInterruptedVerifications,
@@ -131,10 +116,6 @@ import {
   listTargetedTestPlanViews,
   recordTargetedTestPlan,
 } from './verification-service.js';
-import {
-  listFullSuiteEvidence,
-  runDevFullSuite,
-} from './promotion-evidence-service.js';
 
 interface SocketState {
   buffer: string;
@@ -471,31 +452,9 @@ reconcileInterruptedAgentStarts({ storage });
 reconcileInterruptedAgentAnswers({ storage });
 await reconcileInterruptedResultCommits({ storage });
 reconcileInterruptedVerifications({ storage });
-// A dev full-suite run this Runtime did not finish (a crash, a kill) is closed as an ERROR with the
-// fact that the Runtime restarted: an unfinished run is not a pass, and `reconcileInterruptedRunOperations`
-// above does not know about this evidence table. Its copy stays on disk for the reclamation path.
-for (const evidenceId of storage.reconcileDevFullSuiteEvidence(Date.now())) {
-  console.error('[runtime] dev full-suite evidence closed as RUNTIME_RESTARTED', evidenceId);
-}
-await reconcileInterruptedIntegrations({
-  storage,
-  // Proving an interrupted ref write needs the ref itself: a batch whose recorded merge is already
-  // at `dev` is completed from that fact instead of being retried or reported as failed.
-  readRefCommit: async ({ devRef, repositoryRoot }) => readLocalRefCommit({
-    repositoryRoot, ref: devRef,
-  }),
-});
 // A reclamation the Runtime was killed in the middle of is reconciled from the actual filesystem
 // state; it never deletes anything, and it leaves what is still there for the next explicit run.
 await reconcileInterruptedReclamations({ storage, runtimeHome: home });
-// A stable promotion interrupts the Runtime on purpose (it restarts it), so a promotion found in
-// flight is reconciled from the `main` ref only: no ref is ever written twice from here.
-await reconcileInterruptedPromotions({
-  storage,
-  readRefCommit: async ({ ref, repositoryRoot }) => readLocalRefCommit({
-    repositoryRoot, ref,
-  }),
-});
 // A Session/Execution projection that still says ACTIVE/RUNNING after a restart describes a provider
 // process this generation cannot observe, attach to, or claim. It is converged from the recorded
 // process-ownership evidence — never into a running state, never by claiming quiescence, and never by
@@ -537,8 +496,6 @@ for (const terminal of terminalReconcile.maybeStillRunning) {
 const verificationRunner = new VerificationRunner();
 /** Verification copies live inside the Runtime data directory, never in the user's repo. */
 const verificationCopiesRoot = join(home, 'verifications');
-/** Detached worktrees an integration merge happens in; never a user's checkout. */
-const integrationWorktreesRoot = join(home, 'integrations');
 // Long commands (task.run / task.verify) are durable Operations: their progress is recorded as
 // facts, a cancel stops the owned process group and confirms it, and a restart reconciles them.
 const longOperations = new LongOperationService({
@@ -911,50 +868,10 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       }));
     }
     case 'project.inspect': {
+      // ADR-0062: what a Task would be based on is this folder's currently checked out branch, so
+      // the identity a client reviews and echoes back is the repository identity itself.
       const identity = await inspectRepository(request.path);
-      // ADR-0056/0060: with a dev clone recorded, the development baseline is the **dev clone's**
-      // `dev` ref, never this checkout's own local `dev` branch. An explicitly supplied path is
-      // inspected (that is how a user checks a candidate clone before trusting it); an explicit
-      // `null` states that this project has none; omitting the field re-reads what was recorded.
-      const recordedDevRepoPath = storage.listTrustedProjects()
-        .find((project) => project.repoRoot === identity.repoRoot
-          || project.gitCommonDir === identity.gitCommonDir)?.devRepoPath ?? null;
-      const requestedDevRepoPath = request.devRepoPath === undefined
-        ? recordedDevRepoPath
-        : request.devRepoPath;
-      const devRepoPath = requestedDevRepoPath === null ? null : await inspectDevRepo({
-        repositoryRoot: identity.repoRoot, devRef: devBranchRef, devRepoPath: requestedDevRepoPath,
-      });
-      // Read-only retirement evidence for the *inspected* checkout's own local `dev` ref — the
-      // transitional pointer of ADR-0048 D04 that ADR-0056 stopped reading. ADR-0060 replaced the old
-      // "which projects still lack a dev clone" proxy with the question that actually decides whether
-      // deleting it can lose history: does any remote-tracking ref already contain that commit?
-      const localDevRefCommit = await readLocalRefCommit({
-        repositoryRoot: identity.repoRoot, ref: devBranchRef,
-      }).catch(() => null);
-      const remoteRefsContainingLocalDevCommit = localDevRefCommit === null ? []
-        : await listRemoteRefsContainingCommit({
-          repositoryRoot: identity.repoRoot, commit: localDevRefCommit,
-        }).catch(() => []);
-      return success(request.requestId, {
-        ...identity,
-        devRef: devBranchRef,
-        devCommit: devRepoPath?.verified === true ? devRepoPath.devRefCommit : null,
-        devRefPresent: devRepoPath?.verified === true && devRepoPath.devRefCommit !== null,
-        devRepoPath,
-        devRefRetirement: {
-          localDevRefPresent: localDevRefCommit !== null,
-          localDevRefCommit,
-          remoteRefsContainingLocalDevCommit,
-          publishedOnRemote: remoteRefsContainingLocalDevCommit.length > 0,
-          // Read-only report: a project without a dev clone is a normal state (ADR-0060), so this list
-          // no longer decides anything; it never was a fall back to that ref either.
-          projectsWithoutDevRepo: storage.listTrustedProjects()
-            .filter((project) => project.devRepoPath === null)
-            .map((project) => ({ projectId: project.id, name: project.name,
-              repoRoot: project.repoRoot })),
-        },
-      });
+      return success(request.requestId, { ...identity });
     }
     case 'project.verificationPolicy': {
       const identity = await inspectRepository(request.path);
@@ -1049,7 +966,6 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         task,
         executions: storage.listTaskExecutions(request.projectId, request.taskId),
         verifications: storage.listVerificationRuns(request.projectId, request.taskId),
-        integrations: storage.listIntegrationBatches(request.projectId, request.taskId),
         // Long-command progress travels with the Task detail so the UI gets it in the same read
         // the CLI gets from task.operation.list; both are the same projection.
         operations: storage.listTaskOperations(request.projectId, request.taskId),
@@ -1469,91 +1385,6 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         commandId: request.commandId,
         permissionMode,
       }));
-    case 'task.integrate': {
-      const report = await integrateTaskResult({
-        storage,
-        runner: verificationRunner,
-        copiesRoot: verificationCopiesRoot,
-        worktreesRoot: integrationWorktreesRoot,
-        projectId: request.projectId,
-        taskId: request.taskId,
-        expectedVersion: request.expectedVersion,
-        commandId: request.commandId,
-        permissionMode,
-      });
-      // `dev` just moved, so a downstream Task that was BLOCKED may now be satisfied. The verdict is
-      // recomputed here instead of in a background loop, and a dependent that could not be updated is
-      // reported in the response rather than swallowed — the integration itself already succeeded.
-      return success(request.requestId, {
-        ...report,
-        dependencyReconcile: report.state === 'INTEGRATED'
-          ? await reconcileDependentTasks({
-            storage,
-            projectId: request.projectId,
-            taskId: request.taskId,
-            commandId: request.commandId,
-            actor: 'local-user',
-          })
-          : null,
-        // `dev` moving is an eligibility change: dependents that were BLOCKED may now be READY, so
-        // the engine looks again instead of waiting for the next period.
-        schedule: report.state === 'INTEGRATED'
-          ? await scheduleTick('INTEGRATION', request.projectId)
-          : null,
-      });
-    }
-    case 'task.integration.list':
-      return success(request.requestId,
-        storage.listIntegrationBatches(request.projectId, request.taskId));
-    case 'task.integration.create':
-      return success(request.requestId, await createIntegrationBatch({
-        storage,
-        projectId: request.projectId,
-        members: request.members,
-        commandId: request.commandId,
-        permissionMode,
-      }));
-    case 'task.integration.integrate': {
-      const report = await integrateIntegrationBatch({
-        storage,
-        runner: verificationRunner,
-        copiesRoot: verificationCopiesRoot,
-        worktreesRoot: integrationWorktreesRoot,
-        projectId: request.projectId,
-        batchId: request.batchId,
-        commandId: request.commandId,
-        permissionMode,
-      });
-      // `dev` just moved, so every member's dependents that were BLOCKED may now be satisfied. The
-      // same command face as `task.integrate` recomputes the verdict per member instead of in a
-      // background loop, and a dependent that could not be updated is reported rather than swallowed.
-      if (report.state !== 'INTEGRATED') return success(request.requestId, { ...report,
-        dependencyReconcile: null, schedule: null });
-      const dependencyReconcile = [];
-      for (const member of report.members) {
-        dependencyReconcile.push(await reconcileDependentTasks({
-          storage,
-          projectId: request.projectId,
-          taskId: member.taskId,
-          commandId: request.commandId,
-          actor: 'local-user',
-        }));
-      }
-      return success(request.requestId, { ...report, dependencyReconcile,
-        schedule: await scheduleTick('INTEGRATION', request.projectId) });
-    }
-    case 'task.integration.get':
-      return success(request.requestId, readIntegrationBatch({
-        storage, projectId: request.projectId, batchId: request.batchId,
-      }));
-    case 'task.integration.cancel':
-      return success(request.requestId, await cancelIntegrationBatch({
-        storage,
-        projectId: request.projectId,
-        batchId: request.batchId,
-        ...(request.reason === undefined ? {} : { reason: request.reason }),
-        commandId: request.commandId,
-      }));
     case 'task.depends.add': {
       const payloadHash = createHash('sha256').update(JSON.stringify({
         command: 'task.depends.add',
@@ -1875,79 +1706,6 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
     }
     case 'scheduler.control.reconcile':
       return success(request.requestId, (await globalControl.reconcile({ actor: 'local-user' })).view);
-    case 'promotion.prepare':
-      return success(request.requestId, await prepareStablePromotion({
-        storage,
-        projectId: request.projectId,
-        batchId: request.batchId,
-        expectedDevCommit: request.expectedDevCommit,
-        expectedMainCommit: request.expectedMainCommit,
-        commandId: request.commandId,
-        permissionMode,
-      }));
-    case 'promotion.approve':
-      return success(request.requestId, await approveStablePromotion({
-        storage,
-        projectId: request.projectId,
-        promotionId: request.promotionId,
-        permissionMode,
-      }));
-    case 'promotion.promote':
-      return success(request.requestId, await promoteStableBranch({
-        storage,
-        projectId: request.projectId,
-        promotionId: request.promotionId,
-        bootId,
-        permissionMode,
-      }));
-    case 'promotion.restart.record':
-      return success(request.requestId, await recordPromotionRestart({
-        storage,
-        projectId: request.projectId,
-        promotionId: request.promotionId,
-        bootId,
-        observedBootId: request.observedBootId,
-        runtimeStatus: request.runtimeStatus,
-        uiRunning: request.uiRunning,
-        steps: request.steps.map((step) => ({
-          id: step.id,
-          argv: step.argv,
-          cwd: step.cwd,
-          exitCode: step.exitCode,
-          durationMs: step.durationMs,
-          stdoutBytes: step.stdoutBytes,
-          stderrBytes: step.stderrBytes,
-          stdoutDigest: step.stdoutDigest,
-          stderrDigest: step.stderrDigest,
-          ...(step.failureDetail === undefined ? {} : { failureDetail: step.failureDetail }),
-        })),
-      }));
-    case 'promotion.abandon':
-      return success(request.requestId, abandonStablePromotion({
-        storage,
-        projectId: request.projectId,
-        promotionId: request.promotionId,
-        reason: request.reason,
-      }));
-    case 'promotion.get':
-      return success(request.requestId,
-        storage.getStablePromotion(request.projectId, request.promotionId));
-    case 'promotion.list':
-      return success(request.requestId,
-        storage.listStablePromotions(request.projectId, request.limit));
-    case 'promotion.fullSuite.run':
-      return success(request.requestId, await runDevFullSuite({
-        storage,
-        runner: verificationRunner,
-        copiesRoot: verificationCopiesRoot,
-        projectId: request.projectId,
-        expectedDevCommit: request.expectedDevCommit,
-        commandId: request.commandId,
-      }));
-    case 'promotion.fullSuite.list':
-      return success(request.requestId, listFullSuiteEvidence({
-        storage, projectId: request.projectId, limit: request.limit,
-      }));
     case 'attention.list':
       return success(request.requestId, storage.listAttentionRequests(request.projectId));
     case 'attention.answer': {
@@ -2167,68 +1925,11 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
     }
     case 'project.trust': {
       const identity = await inspectRepository(request.path);
-      // ADR-0060: a dev clone is optional. With one, the project keeps the long-lived `dev` baseline
-      // and `dev → main` promotion (ADR-0047/0056); without one, its Task baselines come from this
-      // folder's checked out branch, and the dev-only commands refuse with `DEV_REPO_REQUIRED`
-      // because they need that branch — never because of a new approval step.
-      //
-      // `undefined` re-reads what a previous trust recorded (never silently clearing a path the
-      // user did not ask about), `null` states "no dev clone", a path is verified below.
-      const recordedDevRepoPath = storage.listTrustedProjects()
-        .find((project) => project.repoRoot === identity.repoRoot
-          || project.gitCommonDir === identity.gitCommonDir)?.devRepoPath ?? null;
-      const requestedDevRepoPath = request.devRepoPath === undefined
-        ? recordedDevRepoPath
-        : request.devRepoPath;
-      // The dev clone (ADR-0047 D05) is verified *before* anything is compared or written: a path
-      // that is not a separate clone of this origin sitting on `dev` is refused with a stable code,
-      // so trust never records a path it could not establish and never silently leaves it empty.
-      const devRepoPath = requestedDevRepoPath === null ? null : await inspectDevRepo({
-        repositoryRoot: identity.repoRoot, devRef: devBranchRef, devRepoPath: requestedDevRepoPath,
-      });
-      if (devRepoPath !== null && !devRepoPath.verified) {
-        return failure(request.requestId, devRepoPath.code ?? 'DEV_REPO_NOT_A_REPOSITORY',
-          devRepoPath.detail ?? 'The dev clone could not be verified');
-      }
-      // The client echoes exactly what `project.inspect` reported, so this comparison also pins the
-      // development baseline and the dev clone the user saw, not only the repository identity.
-      const localDevRefCommit = await readLocalRefCommit({
-        repositoryRoot: identity.repoRoot, ref: devBranchRef,
-      }).catch(() => null);
-      // The identity a client echoes back pins which commit the transitional ref holds and whether it
-      // is already on a remote, because both are part of what the user reviewed (ADR-0060).
-      const remoteRefsContainingLocalDevCommit = localDevRefCommit === null ? []
-        : await listRemoteRefsContainingCommit({
-          repositoryRoot: identity.repoRoot, commit: localDevRefCommit,
-        }).catch(() => []);
-      const actual = {
-        ...identity,
-        devRef: devBranchRef,
-        devCommit: devRepoPath === null ? null : devRepoPath.devRefCommit,
-        devRefPresent: devRepoPath !== null && devRepoPath.devRefCommit !== null,
-        devRepoPath,
-        devRefRetirement: {
-          localDevRefPresent: localDevRefCommit !== null,
-          localDevRefCommit,
-          remoteRefsContainingLocalDevCommit,
-          publishedOnRemote: remoteRefsContainingLocalDevCommit.length > 0,
-          // The cross-project list is a read-only *report* about the transitional ref, not part of
-          // the identity this command pins: another project's trust must not make this one look as
-          // if the reviewed repository changed.
-          projectsWithoutDevRepo: request.expectedIdentity.devRefRetirement.projectsWithoutDevRepo,
-        },
-      };
+      // ADR-0062: every Task baseline is read from this folder's checked out branch at preparation
+      // time, so trust pins the repository identity and the two committed policies — nothing else.
+      const actual = { ...identity };
       if (JSON.stringify(actual) !== JSON.stringify(request.expectedIdentity)) {
         return failure(request.requestId, 'REPOSITORY_CHANGED', 'Repository identity changed after confirmation');
-      }
-      // `dev` is the development baseline every Task worktree of a *promoting* project and every
-      // integration target uses. When the user states a dev clone, it has to carry that ref:
-      // falling back to another branch would make "integrated into dev" mean something different per
-      // project. Without a dev clone there is no such claim to make (ADR-0060).
-      if (devRepoPath !== null && devRepoPath.devRefCommit === null) {
-        return failure(request.requestId, 'DEV_REF_MISSING',
-          `The dev clone ${devRepoPath.path} has no ${devBranchRef}; create the long-lived dev`
-          + ' branch there before trusting this project');
       }
       const policy = await inspectVerificationPolicy({
         repositoryRoot: actual.repoRoot,
@@ -2270,12 +1971,6 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         repoRoot: actual.repoRoot,
         gitCommonDir: actual.gitCommonDir,
         mainRef: actual.mainRef,
-        devRef: devBranchRef,
-        // ADR-0060: the dev clone is optional; what is recorded is exactly what was verified above
-        // (or null when the user stated that this project has none). A value the user did not state
-        // is left untouched instead of being cleared.
-        devRepoPath: requestedDevRepoPath,
-        recordDevRepoPath: request.devRepoPath !== undefined,
         objectFormat: actual.objectFormat,
         policyVersion: 1,
         verificationPolicyConfirmationId: crypto.randomUUID(),
@@ -2293,9 +1988,6 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         trusted: true,
         permissionMode,
         repository: identity,
-        devRef: devBranchRef,
-        devCommit: devRepoPath === null ? null : devRepoPath.devRefCommit,
-        devRepoPath,
         verificationPolicy: policy,
         impactPolicy: impactPolicyReport({ inspection: impactPolicy, confirmation: null }),
       });

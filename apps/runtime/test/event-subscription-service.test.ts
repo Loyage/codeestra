@@ -112,7 +112,6 @@ describe('event subscription hub', () => {
       repoRoot: `${value.repo}-other`,
       gitCommonDir: `${value.repo}-other/.git`,
       mainRef: 'refs/heads/main',
-      devRef: 'refs/heads/dev',
       objectFormat: 'sha1',
       policyVersion: 1,
       verificationPolicyConfirmationId: 'b0000000-0000-4000-8000-000000000009',

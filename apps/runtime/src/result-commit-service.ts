@@ -19,7 +19,7 @@ import {
   type ResultCommitAuthorization,
   type ResultCommitCapturePlan,
 } from '@codeestra/storage';
-import { taskWorkspaceRepositoryRoot } from './dev-repo-service.js';
+import { taskWorkspaceRepositoryRoot } from './task-baseline-service.js';
 
 export class ResultCommitServiceError extends Error {
   constructor(readonly code: string, message: string) {

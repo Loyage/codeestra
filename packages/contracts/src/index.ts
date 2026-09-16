@@ -30,100 +30,11 @@ export type RepositoryIdentity = z.infer<typeof repositoryIdentitySchema>;
 
 /**
  * What `project.inspect` reports and what `project.trust` must echo back: the repository identity
- * plus the development baseline a Task worktree would start from. Confirming trust therefore also
- * confirms the exact `dev` commit, and a baseline that moved between inspect and trust is refused.
+ * (ADR-0062). A Task worktree is based on this folder's currently checked out branch, so there is
+ * no per-project baseline ref to confirm alongside it.
  */
-/**
- * What `project inspect` reports about one dev clone, and what `project trust` verifies before it
- * records one. Every field is an observation: `verified` is false with a stable `code` when the
- * path is not a separate clone of this origin sitting on the project's dev branch, and the partial
- * facts that could be read are reported next to it so a client can say *why* it is unusable.
- */
-export const devRepoInspectionSchema = z.strictObject({
-  path: z.string().min(1),
-  /** The project's dev branch this clone is expected to have checked out. */
-  devRef: z.string().min(1),
-  verified: z.boolean(),
-  /** Stable refusal code when `verified` is false; null otherwise. */
-  code: z.string().min(1).nullable(),
-  detail: z.string().nullable(),
-  repoRoot: z.string().nullable(),
-  gitCommonDir: z.string().nullable(),
-  headCommit: z.string().nullable(),
-  branchRef: z.string().nullable(),
-  devRefCommit: z.string().nullable(),
-  originUrl: z.string().nullable(),
-  originMatchesProject: z.boolean().nullable(),
-  clean: z.boolean().nullable(),
-});
-export type DevRepoInspection = z.infer<typeof devRepoInspectionSchema>;
-
-/**
- * What `project inspect` reports about the *inspected checkout's own* local `dev` branch, and whether
- * that ref still carries anything nobody else has.
- *
- * ADR-0048 D04 kept that branch in the stable checkout as a transitional Task baseline and said it
- * must not be treated as promotion evidence; ADR-0056 stopped reading it (every dev fact now comes
- * from `projects.dev_repo_path`). This report is the read-only evidence for retiring it by hand:
- * `localDevRef*` is a fact about the clone that was inspected, and `remoteRefsContainingLocalDevCommit`
- * (with the derived `publishedOnRemote`) says whether that commit already exists on a remote — the
- * only question that decides whether deleting the local ref can lose history.
- *
- * ADR-0060 removed the old proxy criterion: `projectsWithoutDevRepo` used to mean "these projects'
- * last copy of `dev` is that ref". A project without a dev clone is now a normal, supported state
- * (its Task baselines come from its own folder), so that list is a read-only report and no longer
- * decides anything. It never was — and still is not — a fall back to that ref.
- */
-export const devRefRetirementSchema = z.strictObject({
-  localDevRefPresent: z.boolean(),
-  localDevRefCommit: z.string().nullable(),
-  /** Remote-tracking refs (`refs/remotes/...`) whose history contains the local `dev` tip. */
-  remoteRefsContainingLocalDevCommit: z.array(z.string()),
-  /**
-   * True when at least one remote-tracking ref contains the local `dev` tip: the commit is already
-   * elsewhere, so deleting this clone's ref removes a local convenience, not history. False for a ref
-   * that is absent (nothing to publish) and for a local-only commit (deleting it can lose commits).
-   */
-  publishedOnRemote: z.boolean(),
-  projectsWithoutDevRepo: z.array(z.strictObject({
-    projectId: z.string().min(1),
-    name: z.string(),
-    repoRoot: z.string().min(1),
-  })),
-});
-export type DevRefRetirement = z.infer<typeof devRefRetirementSchema>;
-
-export const projectIdentitySchema = repositoryIdentitySchema.extend({
-  devRef: z.string().min(1),
-  /**
-   * Commit of the **dev clone's** local `dev` ref (ADR-0047 D05 / ADR-0056), or null when the project
-   * has no verifiable dev clone. It is part of the identity a client echoes back.
-   *
-   * ADR-0060: a project without a dev clone is not a broken project — its Task worktrees are based on
-   * the project folder's **currently checked out branch** instead, so this field being null changes
-   * what `task integrate` / `promotion *` can do (they need the long-lived `dev`), not whether the
-   * project works.
-   */
-  devCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/).nullable(),
-  devRefPresent: z.boolean(),
-  /**
-   * The verified dev clone of this project (ADR-0047 D05), or null when none is recorded.
-   *
-   * It is part of the identity a client echoes back: trust confirms *which* second clone pushes
-   * this project's promotion candidate, and a path that changed between inspect and trust is a
-   * different fact than the one the user reviewed.
-   */
-  devRepoPath: devRepoInspectionSchema.nullable(),
-  /** Read-only retirement evidence for the stable checkout's transitional local `dev` ref. */
-  devRefRetirement: devRefRetirementSchema,
-});
+export const projectIdentitySchema = repositoryIdentitySchema;
 export type ProjectIdentity = z.infer<typeof projectIdentitySchema>;
-
-/**
- * The long-lived branch every Task worktree is based on and every finished Task is integrated
- * into (ADR-0009). The name is fixed: `main` is never a development baseline.
- */
-export const devBranchRef = 'refs/heads/dev';
 
 /**
  * Read cursor over the append-only event log. `sequence` is the only ordering guarantee;
@@ -190,13 +101,6 @@ export type RuntimeStreamFrame = z.infer<typeof runtimeStreamFrameSchema>;
 
 /** Upper bound for one event read, so a client cannot ask the Runtime to buffer unbounded rows. */
 export const maxEventReadLimit = 500;
-
-/**
- * Upper bound for one IntegrationBatch's members (ADR-0053). A batch is one merge plus one
- * verification, so the bound keeps a single command from turning into an unbounded amount of Git
- * work; it is a request-shape limit, not a policy on how many Tasks may be integrated.
- */
-export const maxIntegrationBatchMembers = 32;
 
 /**
  * Bounds for the read-only Agent session transcript view. A transcript read is a view over the
@@ -1361,13 +1265,6 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('project.inspect'),
     path: z.string().min(1),
-    /**
-     * The dev clone to verify, as an explicit input (ADR-0047 D05 / ADR-0060). Omitted, the path
-     * recorded by a previous trust is inspected; `null` states "this project has no dev clone"
-     * (managed mode); a path is verified instead, so a user can see whether a candidate dev clone
-     * is usable before trusting it.
-     */
-    devRepoPath: z.string().min(1).nullable().optional(),
   }),
   z.strictObject({
     ...requestBase,
@@ -1378,19 +1275,8 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('project.trust'),
     path: z.string().min(1),
-    /** The exact `project.inspect` result the user reviewed, including the dev baseline. */
+    /** The exact `project.inspect` result the user reviewed. */
     expectedIdentity: projectIdentitySchema,
-    /**
-     * The dev clone to record (ADR-0047 D05 / ADR-0060). The Runtime verifies it (another clone,
-     * same origin, on the dev branch) and refuses with a stable code when it cannot; it never
-     * records an empty path in place of one it could not verify.
-     *
-     * Since ADR-0060 a dev clone is **optional**: omitting the field keeps whatever the project
-     * recorded, and `null` states that this project has none — its Task baselines then come from the
-     * project folder's checked out branch and `task integrate` / `promotion *` refuse with
-     * `DEV_REPO_REQUIRED` because they need the long-lived `dev` branch.
-     */
-    devRepoPath: z.string().min(1).nullable().optional(),
     expectedVerificationPolicy: verificationPolicyConfirmationSchema,
     /**
      * The impact mapping the user reviewed (ADR-0031). Optional so a client that predates it still
@@ -1718,74 +1604,6 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     operationId: z.string().uuid(),
   }),
   /**
-   * Integrates one Task's captured result commit into the project's long-lived `dev` branch.
-   * Independent integration verification must PASS on the merged commit before the `dev` ref is
-   * advanced; a failure never changes `dev`.
-   */
-  z.strictObject({
-    ...requestBase,
-    command: z.literal('task.integrate'),
-    commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
-    taskId: z.string().uuid(),
-    expectedVersion: z.number().int().nonnegative(),
-  }),
-  z.strictObject({
-    ...requestBase,
-    command: z.literal('task.integration.list'),
-    projectId: z.string().uuid(),
-    /** Omitted lists every batch of the project; a multi-member batch spans several Tasks. */
-    taskId: z.string().uuid().optional(),
-  }),
-  /**
-   * Composes an IntegrationBatch of one or more members without touching Git (ADR-0053). Every
-   * member's current revision and captured result commit are fixed together with the `dev` baseline
-   * the batch will be integrated into, so the batch is a statement about the facts that existed when
-   * it was composed. `task.integration.integrate` is what merges and verifies it.
-   */
-  z.strictObject({
-    ...requestBase,
-    command: z.literal('task.integration.create'),
-    commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
-    members: z.array(z.strictObject({
-      taskId: z.string().uuid(),
-      expectedVersion: z.number().int().nonnegative(),
-    })).min(1).max(maxIntegrationBatchMembers),
-  }),
-  /**
-   * Merges every member of a composed batch, runs one independent integration verification over the
-   * whole result, and advances `dev` by compare-and-swap only after it PASSes. A member whose
-   * revision or result commit moved, or a `dev` that is no longer the recorded baseline, makes the
-   * batch `STALE` instead: nothing is merged and the ref keeps its value.
-   */
-  z.strictObject({
-    ...requestBase,
-    command: z.literal('task.integration.integrate'),
-    commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
-    batchId: z.string().uuid(),
-  }),
-  z.strictObject({
-    ...requestBase,
-    command: z.literal('task.integration.get'),
-    projectId: z.string().uuid(),
-    batchId: z.string().uuid(),
-  }),
-  /**
-   * Ends a composed batch. It reaches `CANCELLED` only when the record proves no member side effect
-   * exists yet; otherwise it becomes `RECOVERY_REQUIRED/RECONCILE_REQUIRED` and keeps its slot,
-   * because a merge, a verification or the ref write cannot be confirmed settled from here.
-   */
-  z.strictObject({
-    ...requestBase,
-    command: z.literal('task.integration.cancel'),
-    commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
-    batchId: z.string().uuid(),
-    reason: z.string().trim().min(1).max(1_000).optional(),
-  }),
-  /**
    * Reads a window of the provider's own session file for one Agent Session. This is a read-only
    * observation of what the Agent did; it is not an event log and carries no delivery guarantees.
    */
@@ -1961,127 +1779,15 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
   /**
    * Read-only projection of the dependency graph. With `taskId` it reports that Task's edges, the
    * transitive prerequisite/impact closures, and the exact reason each edge is (un)satisfied;
-   * without it, every edge of the project. `satisfied` is decided by the recorded integration fact
-   * plus the current `dev` ref, so a rewritten `dev` shows up as blocked again.
+   * without it, every edge of the project. `satisfied` is decided by the upstream revision's own
+   * captured result commit plus the project's current Task baseline ref (ADR-0062), so a baseline
+   * that no longer contains it shows up as blocked again.
    */
   z.strictObject({
     ...requestBase,
     command: z.literal('task.depends.list'),
     projectId: z.string().uuid(),
     taskId: z.string().uuid().optional(),
-  }),
-  /**
-   * Fixes the three facts a `dev → main` promotion may act on: the verified `dev` commit, the
-   * expected old `main` commit, and the independent integration verification of the promoted
-   * commit. The caller states all three; the Runtime refuses any promotion whose claim does not
-   * match Git, so a promotion can never be built from "whatever dev happens to be".
-   */
-  z.strictObject({
-    ...requestBase,
-    command: z.literal('promotion.prepare'),
-    commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
-    batchId: z.string().uuid(),
-    expectedDevCommit: z.string().min(7).max(64),
-    expectedMainCommit: z.string().min(7).max(64),
-  }),
-  /**
-   * Records one STRICT approval of exactly the prepared triple. FULL never needs it, so it is
-   * refused there instead of being accepted as a no-op confirmation.
-   */
-  z.strictObject({
-    ...requestBase,
-    command: z.literal('promotion.approve'),
-    commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
-    promotionId: z.string().uuid(),
-  }),
-  /**
-   * Advances the promotion by exactly one step of ADR-0047 D01/D03: push the fixed candidate to the
-   * remote `dev` and read the remote ref back (reporting `phase: AWAITING_PULL` while the main
-   * checkout has not pulled it), then — once the pull is observed — record the restart plan and, when
-   * the restart was recorded and checked, push the candidate to the remote `main`. The Runtime never
-   * advances a checked-out branch through its ref: `main` moves only when the user pulls it.
-   */
-  z.strictObject({
-    ...requestBase,
-    command: z.literal('promotion.promote'),
-    commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
-    promotionId: z.string().uuid(),
-  }),
-  /**
-   * Records the observed Runtime restart after the client ran the recorded post-steps in the main
-   * worktree, and then publishes the stable commit to the remote `main`. The submitted boot identity
-   * must be the Runtime answering this request and must not be the boot that read the pull and issued
-   * the plan, and the step list must match the recorded plan exactly.
-   */
-  z.strictObject({
-    ...requestBase,
-    command: z.literal('promotion.restart.record'),
-    commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
-    promotionId: z.string().uuid(),
-    observedBootId: z.string().uuid(),
-    runtimeStatus: z.string().min(1).max(40).nullable(),
-    uiRunning: z.boolean().nullable(),
-    steps: z.array(z.strictObject({
-      id: z.string().min(1).max(40),
-      argv: z.array(z.string()).min(1),
-      cwd: z.string().min(1),
-      exitCode: z.number().int().nullable(),
-      durationMs: z.number().int().nonnegative(),
-      stdoutBytes: z.number().int().nonnegative(),
-      stderrBytes: z.number().int().nonnegative(),
-      stdoutDigest: z.string().min(16).max(128),
-      stderrDigest: z.string().min(16).max(128),
-      failureDetail: z.string().optional(),
-    })).max(16),
-  }),
-  /**
-   * Closes a promotion whose outcome is still open, without touching a ref. Used when the observed
-   * state cannot be resumed (for example a `main` checkout moved by hand); the record keeps what was
-   * observed rather than claiming nothing happened.
-   */
-  z.strictObject({
-    ...requestBase,
-    command: z.literal('promotion.abandon'),
-    commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
-    promotionId: z.string().uuid(),
-    reason: z.string().min(1).max(500),
-  }),
-  z.strictObject({
-    ...requestBase,
-    command: z.literal('promotion.get'),
-    projectId: z.string().uuid(),
-    promotionId: z.string().uuid(),
-  }),
-  z.strictObject({
-    ...requestBase,
-    command: z.literal('promotion.list'),
-    projectId: z.string().uuid(),
-    limit: z.number().int().min(1).max(200).default(20),
-  }),
-  /**
-   * Runs the fixed project policy — the full suite — against the exact `dev` candidate commit in a
-   * detached copy and records the observed result as append-only evidence (ADR-0038 D03). The
-   * Runtime runs and observes it; a client cannot submit a result.
-   */
-  z.strictObject({
-    ...requestBase,
-    command: z.literal('promotion.fullSuite.run'),
-    commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
-    /** Full object ID of the current `dev` ref; the evidence names exactly this SHA. */
-    expectedDevCommit: z.string().min(7).max(64),
-  }),
-  /** Recorded dev full-suite evidence of one project, newest first (read-only). */
-  z.strictObject({
-    ...requestBase,
-    command: z.literal('promotion.fullSuite.list'),
-    projectId: z.string().uuid(),
-    limit: z.number().int().min(1).max(200).default(20),
   }),
   /**
    * Session handoff control face (ADR-0010 Phase 3 / ADR-0023). These commands operate on the

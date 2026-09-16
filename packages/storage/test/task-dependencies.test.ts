@@ -82,7 +82,7 @@ function seedIntegrationBatch(
     readonly revisionId: string;
     readonly executionId: string;
     readonly batchId: string;
-    readonly integratedCommit: string;
+    readonly resultCommit: string;
     /** A batch that never reached INTEGRATED, so the item row must not count as a fact. */
     readonly batchState?: 'INTEGRATED' | 'FAILED';
   },
@@ -97,7 +97,7 @@ function seedIntegrationBatch(
      integrated_commit,created_at)
     VALUES (?1,'p1',?2,?3,?4,?5,?6,'INTEGRATED',?5,20)`).run(
     input.batchId, input.taskId, input.revisionId, input.executionId,
-    input.integratedCommit, oid);
+    input.resultCommit, oid);
 }
 
 /** Asserts the stable error code, not the human-readable message. */
@@ -301,7 +301,7 @@ describe('task dependency persistence', () => {
     expect(facts).toHaveLength(1);
     expect(facts[0]).toMatchObject({ prerequisiteTaskId: 't2', requiredRevisionId: 'r2',
       requiredRevisionNumber: 1, dependentDisplayNumber: 1, prerequisiteDisplayNumber: 2,
-      integratedCommit: null, integrationBatchId: null });
+      resultCommit: null, integrationBatchId: null });
 
     // Re-pinning an existing edge is refused instead of silently retargeting it.
     expect(() => addDependency(storage, { taskId: 't1', prerequisiteTaskId: 't2',
@@ -317,12 +317,12 @@ describe('task dependency persistence', () => {
       resultCommit: candidate });
     // A batch that never reached INTEGRATED is not a fact, even with an item row.
     seedIntegrationBatch(storage, { taskId: 't2', revisionId: 'r2', executionId: 'e2',
-      batchId: 'batch2', integratedCommit: candidate, batchState: 'FAILED' });
-    expect(storage.listTaskDependencyFacts('p1', { taskId: 't1' })[0]?.integratedCommit).toBeNull();
+      batchId: 'batch2', resultCommit: candidate, batchState: 'FAILED' });
+    expect(storage.listTaskDependencyFacts('p1', { taskId: 't1' })[0]?.resultCommit).toBeNull();
     seedIntegrationBatch(storage, { taskId: 't2', revisionId: 'r2', executionId: 'e2',
-      batchId: 'batch1', integratedCommit: merged });
+      batchId: 'batch1', resultCommit: merged });
     const fact = storage.listTaskDependencyFacts('p1', { taskId: 't1' })[0];
-    expect(fact?.integratedCommit).toBe(merged);
+    expect(fact?.resultCommit).toBe(merged);
     expect(fact?.integrationBatchId).toBe('batch1');
     storage.close();
   });
@@ -401,7 +401,7 @@ describe('task dependency persistence', () => {
     const storage = new Phase1Database();
     seed(storage);
     addDependency(storage, { taskId: 't1', prerequisiteTaskId: 't2', commandId: 'c1' });
-    const reason = { code: 'UPSTREAM_NOT_INTEGRATED' as const, prerequisiteTaskId: 't2',
+    const reason = { code: 'UPSTREAM_RESULT_MISSING' as const, prerequisiteTaskId: 't2',
       requiredRevisionId: 'r2', detail: null };
     const blocked = storage.applyTaskDependencyState({
       projectId: 'p1', taskId: 't1', expectedVersion: 1, target: 'BLOCKED',

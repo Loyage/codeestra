@@ -140,7 +140,7 @@ interface DependencyEdgePayload {
   readonly prerequisiteTaskId: string;
   readonly requiredRevisionId: string;
   readonly satisfied: boolean;
-  readonly integratedCommit: string | null;
+  readonly resultCommit: string | null;
   readonly reason: { readonly code: string } | null;
 }
 
@@ -223,7 +223,7 @@ describe('codeestra task depends', () => {
     expect(addedPayload.dependencies.edges).toHaveLength(1);
     expect(addedPayload.dependencies.edges[0]).toMatchObject({
       dependentTaskId: downstream, prerequisiteTaskId: upstream, satisfied: false,
-      reason: { code: 'UPSTREAM_NOT_INTEGRATED' },
+      reason: { code: 'UPSTREAM_RESULT_MISSING' },
     });
 
     // The same edge again is reported as already present instead of a duplicate row or a version bump.
@@ -288,7 +288,7 @@ describe('codeestra task depends', () => {
     expect(submittedPayload.state).toBe('BLOCKED');
     expect(submittedPayload.dependencyState.changed).toBe(true);
     expect(submittedPayload.dependencyState.blockedReasons.map((reason) => reason.code))
-      .toEqual(['UPSTREAM_NOT_INTEGRATED']);
+      .toEqual(['UPSTREAM_RESULT_MISSING']);
     const blockedVersion = (await status(environment, projectId, downstream)).task.version;
     expect(submittedPayload.version).toBe(blockedVersion);
 
@@ -332,7 +332,7 @@ describe('codeestra task depends', () => {
     const view = await dependsList(environment, projectId, downstream);
     expect(view.blocked).toBe(false);
     expect(view.edges[0]?.reason).toBeNull();
-    expect(view.edges[0]).toMatchObject({ satisfied: true, integratedCommit: resultCommit,
+    expect(view.edges[0]).toMatchObject({ satisfied: true, resultCommit: resultCommit,
       reason: null });
     // Dependency reconciliation triggers the scheduler. The undeclared downstream is SAFE under
     // ADR-0059, so it starts immediately instead of lingering in READY.

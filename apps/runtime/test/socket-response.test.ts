@@ -149,16 +149,12 @@ async function request(harness: RuntimeHarness, command: ClientRequest): Promise
 }
 
 async function trustedProject(harness: RuntimeHarness): Promise<string> {
-  // The identity a trust echoes back pins the dev clone too (ADR-0056), so it is inspected with the
-  // same explicit path the trust will state.
   const identity = (await request(harness, { command: 'project.inspect', path: harness.repo,
-    devRepoPath: harness.devRepo,
   })) as ProjectIdentity;
   await request(harness, {
     command: 'project.trust',
     path: harness.repo,
     expectedIdentity: identity,
-    devRepoPath: harness.devRepo,
     expectedVerificationPolicy: { state: 'ABSENT', mainCommit: identity.headCommit },
   });
   const projects = (await request(harness, { command: 'project.list' })) as readonly

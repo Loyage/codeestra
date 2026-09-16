@@ -155,7 +155,7 @@ const waitingForCapacity = retry({
 
 const refusedByDependencies = retry({
   state: 'BLOCKED', version: 9,
-  dependencyReasons: [{ code: 'UPSTREAM_NOT_INTEGRATED', prerequisiteTaskId: 'task-9',
+  dependencyReasons: [{ code: 'UPSTREAM_RESULT_MISSING', prerequisiteTaskId: 'task-9',
     requiredRevisionId: 'revision-9', detail: 'the upstream result is not on dev yet' }],
   start: start({
     outcome: 'REFUSED', executionId: null, sessionId: null, attemptNumber: null,
@@ -206,7 +206,7 @@ describe('a started Execution is told apart from a wait and from a refused start
     expect(retryStartedExecution(refusedByDependencies)).toBe(false);
     expect(retryOutcomeNotice(refusedByDependencies)).toContain('DEPENDENCIES_UNMET');
     expect(retryOutcomeNotice(refusedByDependencies)).not.toContain('已启动');
-    expect(retryDependencySummary(refusedByDependencies)).toContain('UPSTREAM_NOT_INTEGRATED');
+    expect(retryDependencySummary(refusedByDependencies)).toContain('UPSTREAM_RESULT_MISSING');
     expect(retryWaitSummary(refusedByDependencies)).toBeNull();
     expect(retryDependencySummary(retry({}))).toBeNull();
   });
@@ -347,7 +347,7 @@ describe('rendered retry projection', () => {
     const html = markup(createElement(RetryOutcomeCard, { result: refusedByDependencies }));
     expect(html).toContain('已入队 · 启动被拒绝');
     expect(html).toContain('DEPENDENCIES_UNMET');
-    expect(html).toContain('UPSTREAM_NOT_INTEGRATED');
+    expect(html).toContain('UPSTREAM_RESULT_MISSING');
     expect(html).toContain('state-failed');
     expect(html).not.toContain('新执行已启动');
     // The requeue did happen, and the card says so without claiming a start.

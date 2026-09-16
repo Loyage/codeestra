@@ -241,7 +241,7 @@ describe('task retry', () => {
     expect(() => storage.retryTask(retryInput({
       target: 'READY',
       dependencyReasons: [{ prerequisiteTaskId: 't2', requiredRevisionId: 'r2',
-        code: 'UPSTREAM_NOT_INTEGRATED', detail: null }],
+        code: 'UPSTREAM_RESULT_MISSING', detail: null }],
     }))).toThrow(/while an unmet dependency is still named/);
     expect(storage.getTask('p1', 't1')?.version).toBe(4);
 
@@ -250,7 +250,7 @@ describe('task retry', () => {
     const blocked = storage.retryTask(retryInput({
       target: 'BLOCKED',
       dependencyReasons: [{ prerequisiteTaskId: 't2', requiredRevisionId: 'r2',
-        code: 'UPSTREAM_NOT_INTEGRATED', detail: null }],
+        code: 'UPSTREAM_RESULT_MISSING', detail: null }],
       taskEventId: 'evt-task-blocked', retryEventId: 'evt-retry-blocked',
     }));
     expect(blocked.state).toBe('BLOCKED');

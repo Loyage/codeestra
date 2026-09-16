@@ -169,16 +169,13 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<voi
 }
 
 async function trustedProject(harness: RuntimeHarness): Promise<string> {
-  // The identity a trust echoes back pins the dev clone too (ADR-0056), so it is inspected with the
-  // same explicit path the trust will state.
   const identity = (await call(harness, {
-    command: 'project.inspect', path: harness.repo, devRepoPath: harness.devRepo,
+    command: 'project.inspect', path: harness.repo,
   })) as unknown as ProjectIdentity;
   await call(harness, {
     command: 'project.trust',
     path: harness.repo,
     expectedIdentity: identity,
-    devRepoPath: harness.devRepo,
     expectedVerificationPolicy: { state: 'ABSENT', mainCommit: identity.headCommit },
   });
   const projects = (await call(harness, { command: 'project.list' })) as unknown as

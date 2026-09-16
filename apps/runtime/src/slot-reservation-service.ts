@@ -22,7 +22,7 @@ import {
 import { impactPolicyVersionKey, inspectImpactPolicy } from './impact-analysis-service.js';
 import { isProcessRunning, readProcessStartToken } from './lifecycle.js';
 import { assertDependenciesSatisfied } from './scheduler.js';
-import { resolveTaskBaselineRepository, TaskBaselineError } from './dev-repo-service.js';
+import { resolveTaskBaselineRepository, TaskBaselineError } from './task-baseline-service.js';
 
 /**
  * Slot reservations: the primitive a scheduler reserves with before it prepares a workspace or

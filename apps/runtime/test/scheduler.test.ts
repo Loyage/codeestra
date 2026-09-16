@@ -75,7 +75,7 @@ function recordIntegrationFact(
     readonly revisionId: string;
     readonly executionId: string;
     readonly batchId: string;
-    readonly integratedCommit: string;
+    readonly resultCommit: string;
     readonly devCommit: string;
   },
 ): void {
@@ -84,23 +84,23 @@ function recordIntegrationFact(
     (id,task_id,branch_ref,path,ownership_token,base_commit,state,created_at)
     VALUES (?1,?2,?3,?4,?5,?6,'RETAINED',3)`).run(
     `workspace-${input.executionId}`, input.taskId, `refs/heads/task/${input.taskId}`,
-    `/work/${input.executionId}`, `owner-${input.executionId}`, input.integratedCommit);
+    `/work/${input.executionId}`, `owner-${input.executionId}`, input.resultCommit);
   db.query(`INSERT INTO executions
     (id,task_id,attempt_number,initial_revision_id,applied_revision_id,workspace_id,adapter_id,
      adapter_version,state,resource_held,base_commit,result_commit,started_at,ended_at)
     VALUES (?1,?2,1,?3,?3,?4,'pi','1','SUCCEEDED',0,?5,?6,4,5)`).run(
     input.executionId, input.taskId, input.revisionId, `workspace-${input.executionId}`,
-    input.integratedCommit, input.integratedCommit);
+    input.resultCommit, input.resultCommit);
   db.query(`INSERT INTO integration_batches
     (id,project_id,dev_ref,dev_commit,state,worktree_ownership_token,integrated_commit,created_at)
     VALUES (?1,?2,'refs/heads/dev',?3,'INTEGRATED',?4,?5,20)`).run(
-    input.batchId, input.projectId, input.devCommit, `owner-${input.batchId}`, input.integratedCommit);
+    input.batchId, input.projectId, input.devCommit, `owner-${input.batchId}`, input.resultCommit);
   db.query(`INSERT INTO integration_batch_items
     (batch_id,project_id,task_id,revision_id,execution_id,candidate_commit,dev_commit,state,
      integrated_commit,created_at)
     VALUES (?1,?2,?3,?4,?5,?6,?7,'INTEGRATED',?6,20)`).run(
     input.batchId, input.projectId, input.taskId, input.revisionId, input.executionId,
-    input.integratedCommit, input.devCommit);
+    input.resultCommit, input.devCommit);
 }
 
 /** A real commit object on top of `parent`, so `dev` can be moved with real reachability. */
@@ -142,7 +142,7 @@ describe('dependency scheduler', () => {
     });
     expect(blocked.changed).toBe(true);
     expect(blocked.state).toBe('BLOCKED');
-    expect(blocked.blockedReasons.map((reason) => reason.code)).toEqual(['UPSTREAM_NOT_INTEGRATED']);
+    expect(blocked.blockedReasons.map((reason) => reason.code)).toEqual(['UPSTREAM_RESULT_MISSING']);
     expect(storage.getTask(projectId, 'downstream')?.state).toBe('BLOCKED');
 
     // A blocked Task cannot be started, and nothing is reserved for it.
@@ -167,7 +167,7 @@ describe('dependency scheduler', () => {
     await git(fixture.devRepo, ['update-ref', 'refs/heads/dev', integrated]);
     recordIntegrationFact(storage, { projectId, taskId: upstreamTaskId,
       revisionId: upstreamRevisionId, executionId: 'execution-upstream', batchId: 'batch-1',
-      integratedCommit: integrated, devCommit: devBefore });
+      resultCommit: integrated, devCommit: devBefore });
 
     const readied = await reconcileTaskDependencyState({
       storage, projectId, taskId: 'downstream', commandId: 'reconcile-2', actor: 'local-user',
@@ -200,7 +200,7 @@ describe('dependency scheduler', () => {
     const advanced = await commitTree(fixture.devRepo, integrated, 'later dev work');
     await git(fixture.devRepo, ['update-ref', 'refs/heads/dev', advanced]);
     recordIntegrationFact(storage, { projectId, taskId: upstreamTaskId, revisionId: upstreamRevisionId,
-      executionId: 'execution-upstream', batchId: 'batch-1', integratedCommit: integrated,
+      executionId: 'execution-upstream', batchId: 'batch-1', resultCommit: integrated,
       devCommit: devStart });
     // A strict ancestor counts: `isAncestor` is what makes an advanced dev satisfy the edge.
     expect((await reconcileTaskDependencyState({
@@ -214,7 +214,7 @@ describe('dependency scheduler', () => {
       storage, projectId, taskId: 'downstream', commandId: 'reconcile-2', actor: 'local-user',
     });
     expect(reblocked.state).toBe('BLOCKED');
-    expect(reblocked.blockedReasons.map((reason) => reason.code)).toEqual(['NOT_REACHABLE_FROM_DEV']);
+    expect(reblocked.blockedReasons.map((reason) => reason.code)).toEqual(['NOT_REACHABLE_FROM_BASE']);
     storage.close();
   });
 
@@ -237,7 +237,7 @@ describe('dependency scheduler', () => {
     const integrated = await commitTree(fixture.devRepo, devStart, 'upstream result');
     await git(fixture.devRepo, ['update-ref', 'refs/heads/dev', integrated]);
     recordIntegrationFact(storage, { projectId, taskId: upstreamTaskId, revisionId: upstreamRevisionId,
-      executionId: 'execution-upstream', batchId: 'batch-1', integratedCommit: integrated,
+      executionId: 'execution-upstream', batchId: 'batch-1', resultCommit: integrated,
       devCommit: devStart });
 
     // `middle` is now satisfied; `leaf` still waits for `middle`, which has not been integrated.
@@ -268,7 +268,7 @@ describe('dependency scheduler', () => {
     expect(view.devCommit).not.toBeNull();
     expect(view.edges).toHaveLength(1);
     expect(view.edges[0]).toMatchObject({ prerequisiteTaskId: 'middle', satisfied: false,
-      reason: { code: 'UPSTREAM_NOT_INTEGRATED' } });
+      reason: { code: 'UPSTREAM_RESULT_MISSING' } });
     expect([...view.prerequisites].sort()).toEqual([fixture.taskId, 'middle'].sort());
     expect(view.dependents).toEqual([]);
     expect(view.blocked).toBe(true);
@@ -319,14 +319,14 @@ describe('dependency scheduler', () => {
     createSubmittedTask(storage, projectId, 'downstream', 'downstream-revision', 'Consume the upstream');
     await addDependency(storage, fixture, 'downstream', upstreamTaskId, 'dep-add-1');
     recordIntegrationFact(storage, { projectId, taskId: upstreamTaskId, revisionId: upstreamRevisionId,
-      executionId: 'execution-upstream', batchId: 'batch-1', integratedCommit: 'd'.repeat(40),
+      executionId: 'execution-upstream', batchId: 'batch-1', resultCommit: 'd'.repeat(40),
       devCommit: 'd'.repeat(40) });
     // Deleting the branch removes the only baseline that could make the fact true.
     await git(fixture.devRepo, ['update-ref', '-d', 'refs/heads/dev']);
     const view = await inspectTaskDependencies({ storage, projectId, taskId: 'downstream' });
     expect(view.devCommit).toBeNull();
     expect(view.edges[0]?.satisfied).toBe(false);
-    expect(view.edges[0]?.reason?.code).toBe('DEV_BASELINE_MISSING');
+    expect(view.edges[0]?.reason?.code).toBe('BASE_REF_MISSING');
     storage.close();
   });
 });
