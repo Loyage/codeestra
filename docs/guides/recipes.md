@@ -16,7 +16,7 @@
 - `$TASK` = `task create` 返回的 task id；
 - `<version>` = 该 Task 当前的 `version`（乐观版本号）。**它每次改状态都会变**——用 `task status` 或
   上一条命令的输出重新取，不要凭记忆复用。
-- 每条命令的完整参数与退出码见 [cli-reference.md](./cli-reference.md)；
+- 每条命令的完整参数与退出码见 [cli/README.md](./cli/README.md)（九篇索引）；
   报错怎么办见 [troubleshooting.md](./troubleshooting.md)。
 
 ---
@@ -703,6 +703,6 @@ bun run codeestra scheduler control resume --json
 - 从头读到尾的说明书：[manual.md](./manual.md)
 - 端到端流程与预期输出：[workflow.md](./workflow.md)
 - 逐屏 UI 走查（每个按钮做什么）：[ui.md](./ui.md)
-- 每条命令的参数与退出码：[cli-reference.md](./cli-reference.md)
+- 每条命令的参数与退出码：[cli/README.md](./cli/README.md)
 - 报错怎么办：[troubleshooting.md](./troubleshooting.md)
 - 人工观感核对清单：[acceptance-checklist.md](./acceptance-checklist.md)

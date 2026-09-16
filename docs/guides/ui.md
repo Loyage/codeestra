@@ -237,7 +237,7 @@ Web UI 是**本地 Runtime 的便利前端**，不是另一个产品：
 
 **提示文字会被「最近一次尝试的结局」替换**（`apps/ui/src/agent-run.ts` 的 `agentRunRowHint`）。
 列表行不再只能看到任务状态：当**最新一次 Execution** 的 Session 已经不在时，行尾改说那次尝试做了什么。
-判据就是 `task list` / `task status` 返回的 `latestExecution`（见 [cli-reference.md](./cli-reference.md) §4），
+判据就是 `task list` / `task status` 返回的 `latestExecution`（见 [cli/task-lifecycle.md](./cli/task-lifecycle.md) §4），
 所以列表与详情用的是同一套事实，不需要逐行再读一次 `task status`。
 
 | 任务状态 | 最新尝试的事实 | 行尾提示（替换上表） |
@@ -1134,7 +1134,7 @@ Runtime 后依然生效，命令行（codeestra settings ui …）读写的是�
 
 - 从头读到尾的说明书：[manual.md](./manual.md)
 - 功能清单：[features.md](./features.md)
-- CLI 完整命令参考（含 `/api/command`、`/api/events`）：[cli-reference.md](./cli-reference.md)
+- CLI 完整命令参考（含 `/api/command`、`/api/events`）：[cli/](./cli/README.md)（九篇索引；HTTP/SSE 面在 [cli/interface.md](./cli/interface.md) §20）
 - 常见任务的做法：[recipes.md](./recipes.md)
 - 人工观感核对清单：[acceptance-checklist.md](./acceptance-checklist.md)
 - 插图清单：[images/README.md](./images/README.md)

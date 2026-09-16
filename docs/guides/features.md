@@ -20,7 +20,7 @@
 一行一个能力。列的含义：
 
 - **能做什么**：这个能力对用户交付什么。
-- **CLI 入口**：完整命令路径（命令参考见 [cli-reference.md](./cli-reference.md)）。
+- **CLI 入口**：完整命令路径（命令参考见 [cli/README.md](./cli/README.md)）。
 - **UI 位置**：在 Web UI 的哪里（面板名见 [ui.md](./ui.md)）。标「—」表示当前**只有 CLI** 入口。
 - **ADR**：相关的已接受决策记录。
 

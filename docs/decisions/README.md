@@ -52,7 +52,7 @@
 - [ADR-0047](0047-github-mediated-promotion.md)：`dev → main` 必须经 GitHub 中转，**拉取是用户显式的人工步骤**；只 push 固定候选、不 `--force`、不对已检出的 `main` 用 `update-ref`。**落地细则见 ADR-0052**。
 - [ADR-0048](0048-dev-clone-and-separate-runtime-home.md)：`~/Documents/codeestra`（main）与 `codeestra-dev`（dev）是两个独立 clone（非 worktree）；dev 用独立 `CODEESTRA_HOME`。**范围口径见 ADR-0060**。
 - [ADR-0049](0049-dev-ui-channel-marker.md)：dev 通道是构建期事实（`VITE_CODEESTRA_CHANNEL=dev`），产物带 `data-channel="dev"` + 横幅 + 橙色强调；未设置即无标记。
-- [ADR-0050](0050-user-manual-and-doc-sync-discipline.md)：单份主线说明书（`docs/guides/manual.md`）+ 八篇参考；功能变更必须同步 `docs/guides/` 对应段落，人工规范、不加机器门禁。
+- [ADR-0050](0050-user-manual-and-doc-sync-discipline.md)：单份主线说明书（`docs/guides/manual.md`）+ 八篇参考；功能变更必须同步 `docs/guides/` 对应段落，人工规范、不加机器门禁。**Amended by ADR-0063**：命令面参考由单篇 `cli-reference.md` 拆为 [`docs/guides/cli/`](../guides/cli/README.md) 九篇（章节号沿用拆分前编号、`cli-reference.md` 保留为索引与旧 §N 对照表），D03 的映射目标改为该目录下覆盖该命令的那一篇；D02 的版本/校对头规则不变。
 - [ADR-0051](0051-knowledge-handoff-codex-facts-and-revision-channel-evaluation.md)：知识按 Execution 绑定交给 provider，每个 provider 用自己的通道；`applyRevision` 经实测不可行，三个 provider 一律 `UNSUPPORTED`。
 - [ADR-0052](0052-promotion-fact-layering.md)：经 GitHub 中转提升的命令面事实分层：可重试拒绝 vs 记录 `STALE`、`AWAITING_PULL` 退 3 且不执行重启、推回失败可续、`DEV_REPO_*` 核验口径（schema v29）。
 - [ADR-0053](0053-multi-member-integration-batch.md)：多成员 IntegrationBatch（schema v30）：组成与集成分离、成员按 `task_id` 排序、批级 `STALE`/`CANCELLED`、成员级部分失败如实。
@@ -65,6 +65,7 @@
 - [ADR-0060](0060-managed-project-task-baseline.md)：被管理项目的 Task 基线取「项目文件夹当前检出的分支」，`dev clone` 变为可选（schema v33）。**Amends ADR-0056** 的必需性与 **ADR-0018** 的基线来源。**第三轮修订（2026-09-16，FOUNDATION-093）**：依赖判定从 dev-only 清单移出（它位于 `task submit`/`task run` 的常态路径），`DEV_REPO_REQUIRED` 只剩集成与提升。
 - [ADR-0061](0061-runtime-global-load-control.md)：Runtime 全局负载控制 —— 只保留一个跨全部项目/Adapter 的并行上限（默认 2、范围 1–16，旧显式值取最小值迁移）；全局暂停 = 持久启动屏障 + 按 `pid + start token + incarnation` 可核验的 Provider 主进程冻结（不改 Task 状态、不向工具子进程发停止信号、跨重启保持，只有显式继续才解除）。**Amends ADR-0030/0032/0033 的容量层级**。**两半都已实现**（schema v34）：容量上半是 FOUNDATION-096（`runtime_capacity_settings`、全局事件 `project_id = NULL`、命令面 `scheduler capacity get|set|reset`），暂停下半是 FOUNDATION-097（`runtime_pause_control`/`runtime_pause_targets`、持久屏障、`scheduler control status|pause|resume|reconcile`、UI 全局 shell）。Provider 冻结能力按 Adapter 如实声明：Pi `SUPPORTED`，Codex / Claude Code `REQUIRES_VALIDATION`。
 - [ADR-0062](0062-automatic-worktree-reclamation-after-integration.md)：集成成功后自动回收该批成员的 Task worktree（默认开启，`settings auto-reclaim on|off` 可关闭；复用 `reclaim` 的同一套归属校验与 append-only 账本，失败现场仍默认保留；无 schema 变更）。
+- [ADR-0063](0063-split-cli-reference-by-command-group.md)：CLI 命令参考按功能拆为 [`docs/guides/cli/`](../guides/cli/README.md) 九篇；各篇**沿用拆分前的章节号**，`cli-reference.md` 保留为索引 + 旧 §N 对照表（历史记录里的 §N 引用仍可解析）；正文逐行搬移、不重新核对、逐节校对注随节搬迁。**Amends ADR-0050** 的文件集合（D02）与 D03 的映射目标。**无代码、无 schema、无命令面变化**。
 
 ## 当前有效语义（与旧 ADR 冲突时按此执行）
 
@@ -73,7 +74,7 @@
 - **稳定提升路径**：ADR-0047/0052 —— push 固定候选到远端 `dev` → 读回核对 → main clone `ff-only` 拉取 → 重启并核对 → 推回远端 `main`。产品命令面已实现（schema v29）；本仓库自身的提升仍走 `AGENTS.md` 的人工四步，不使用产品命令面。
 - **分支职责与重启**：ADR-0009 —— `main`/`dev` 长期并存（只属 Codeestra 自身），Task 先集成进 `dev`；`main` 更新后立即 `stop` + `status`。
 - **本机布局与 dev 通道**：ADR-0048/0049/0060 —— 两个独立 clone 的拆分只服务 Codeestra 自身的开发；dev 界面是否带标记由构建期变量决定。
-- **用户文档纪律**：ADR-0050 —— 功能变更同步 `docs/guides/` 对应段落，交付说明写明改了哪一篇的哪一节。
+- **用户文档纪律**：ADR-0050 —— 功能变更同步 `docs/guides/` 对应段落，交付说明写明改了哪一篇的哪一节；**ADR-0063** —— 命令面变更的落点具体是 [`docs/guides/cli/`](../guides/cli/README.md) 里覆盖该命令的那一篇，旧 §N 对照表在 `docs/guides/cli-reference.md`。
 - **Project Knowledge**：ADR-0041/0051 —— 每个 provider 用自己的通道注入；`applyRevision` 三者 `UNSUPPORTED`。
 - **IntegrationBatch**：ADR-0053 —— 一次覆盖整批的集成验证、批级 `STALE`/`CANCELLED`、成员按 `task_id` 排序、部分失败如实。
 - **终端与交接**：ADR-0054 —— PTY resize 合约（POSIX 范围）；并行工具批次安全点规则与 ADR-0010 相同；跨交接权限矩阵仍 `PARTIAL`。

@@ -251,8 +251,8 @@ bun run codeestra ui --no-open  # 只打印地址
 如果只想从 `open` 拿到链接，用 `bun run codeestra open . --no-open`。
 
 UI 与 CLI 是**同一个命令面**：界面通过 `POST /api/command` 发送与 CLI 完全相同的请求结构，事件通过
-`GET /api/events` 的 SSE 流获取。详情见 [ui.md](./ui.md) 与 [cli-reference.md](./cli-reference.md) 的
-「HTTP / SSE 面」一节。
+`GET /api/events` 的 SSE 流获取。详情见 [ui.md](./ui.md) 与 [cli/interface.md](./cli/interface.md) 的
+「HTTP / SSE 面」一节（§20）。
 
 ---
 
