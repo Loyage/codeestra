@@ -226,7 +226,10 @@ Runtime 是每个 `CODEESTRA_HOME` 的单实例，归属是**持久事实**而�
 - `runtime.stop` 只报告「被要求停止的进程是谁」（`{stopping, pid, bootId, startedAt}`），**不隐含已停止**。CLI `codeestra stop [--wait <seconds>]`（默认 10s）先只读读取归属记录，再请求、有界轮询、按事实报告：`STOPPED` / `NOT_EXITED`（exit 0/1）、`NOT_RUNNING`（exit 0，且**不启动** Runtime）、`UNREACHABLE_PROCESS`（exit 1，**不杀**进程）。
 - shutdown 顺序完成后：只有 `coordinator.activeSessionIds()` 与 `verificationRunner.unconfirmedStops` **都为空**时才 `process.exit(0)`——即没有未确认停止的 provider 或验证进程；任一非空则不退出并保持可观察，让 `stop` 如实报 `NOT_EXITED`。
 
-### 6.1 Runtime 全局负载控制（ADR-0061，已接受、待实现）
+### 6.1 Runtime 全局负载控制（ADR-0061，**已实现**：FOUNDATION-097，schema v34 暂停半边）
+
+实现：`apps/runtime/src/runtime-control-service.ts`，命令面 `scheduler control status|pause|resume|reconcile`，
+持久事实 `runtime_pause_control` / `runtime_pause_targets`。容量半边（D01–D03）属并行的另一格，本节的 FSM 部分不依赖它。
 
 这是一层**控制状态机**，不加入 Task / Execution / AgentSession 的枚举：
 
@@ -246,6 +249,19 @@ RUNNING → PAUSING → PAUSED → RESUMING → RUNNING
 | 任一非 `RUNNING` → 同态 | `status` / `reconcile` 只观察；同 commandId 重放不产生第二次状态变化 |
 
 全局控制状态跨 Runtime 重启保留；启动先恢复屏障。Task/Execution/Session 维持冻结前状态，slot/workspace/writer lease 不释放。单 Task `task pause` 仍按 §1/§2 与 ADR-0016 执行协作停止并结束旧 Execution；不能用全局 `PAUSED` 冒充它。
+
+**已实现的确定行为**（与上表对应）：
+
+- 屏障提交（`RUNNING → PAUSING`）写 `runtime_pause_control` 与逐目标身份快照，并且与 Provider 启动路径共用
+  `RuntimeControlMutex`；调度候选、`task resume` 门禁、`scheduler reservations acquire`（在同一个写事务内）、
+  三种 Provider 启动（主启动 / scheduler 启动 / successor）与 answer/guidance 投递都读这一个事实。
+- `STOPPED` 只从「复读：身份仍匹配 **且** 进程状态为 stopped」写出；`SIGSTOP` 只发向该主进程。
+- 任一目标不可核验（身份读不出、`providerProcessSuspension` 不是 `SUPPORTED`、非 POSIX 平台、复读未证实停止）
+  → `RECOVERY_REQUIRED`，已冻结的目标保持冻结；`PAUSED` 只在全部目标 STOPPED/已证明退出时写出。
+- `resume` 只从 `PAUSED` 或可处置的 `RECOVERY_REQUIRED` 进入，只恢复同 epoch 中 `pid + start token + incarnation`
+  完全一致且处于 stopped 的主进程；已退出不复活，PID 复用不发信号；`PAUSING`/`RESUMING` 中再次变更状态得到
+  `GLOBAL_CONTROL_IN_PROGRESS`。
+- 启动读取屏障在任何 tick / Adapter start / 投递之前；不自动 `SIGCONT`、不自动 kill。
 
 ## 7. Revision 投递 FSM（ADR-0028，schema v19）
 

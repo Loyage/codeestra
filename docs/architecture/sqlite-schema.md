@@ -1,6 +1,6 @@
 # SQLite Schema
 
-状态：逻辑 SQL 设计基线 + 已实现 migration 记录。第 2–6 节是逻辑关系设计（其中若干节已被后续 ADR 修订，见第 8 节各版本的说明）；第 8 节逐版本记录 `packages/storage/src/migration.ts` 中**实际存在**的 migration，当前最新实现为 schema **v34**（ADR-0061 **上半：Runtime 唯一全局容量**，FOUNDATION-096；v16 永久未使用、v22 未占用）。**v34 下半（全局暂停：`runtime_pause_control` / `runtime_pause_targets`）仍属 ADR-0061 已接受、尚未实现的契约**，两块共用一个版本号、集成时合并为同一个 `if (version < 34)` 步骤；不得据下半的小节声称那两张表已存在。**schema version 16 永久未使用**，原因见第 8 节。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与第 2–6 节的约束等价，并以第 8 节的实现记录为准。
+状态：逻辑 SQL 设计基线 + 已实现 migration 记录。第 2–6 节是逻辑关系设计（其中若干节已被后续 ADR 修订，见第 8 节各版本的说明）；第 8 节逐版本记录 `packages/storage/src/migration.ts` 中**实际存在**的 migration，当前最新实现为 schema **v34**（ADR-0061 的两半：容量上半 FOUNDATION-096，暂停下半 FOUNDATION-097；v16 永久未使用、v22 未占用）。**schema version 16 永久未使用**，原因见第 8 节。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与第 2–6 节的约束等价，并以第 8 节的实现记录为准。
 
 ## 1. 约定
 
@@ -1366,10 +1366,17 @@ ADR-0060 之前，一个 Task 的基线 ref 只有一个可能：项目行的 `p
   于是历史记录仍然如实；升级不发明数据、不改写任何已有行。
 - 有 dev clone 的项目行为不变（写入的仍是那个 clone 的 `refs/heads/dev`）；managed 项目写入项目文件夹当时检出的分支。
 
-### Runtime 唯一全局容量（**已实现**：schema version 34 上半，FOUNDATION-096 / ADR-0061）与 Provider 冻结（同版本下半，**尚未实现**）
+### Runtime 唯一全局容量与 Provider 冻结（**已实现**：schema version 34，FOUNDATION-096 + FOUNDATION-097 / ADR-0061）
 
-本版本号被两块共用：容量事实与 `domain_events` 可空化属于**上半（已实现）**；`runtime_pause_control` / `runtime_pause_targets`
-属于**下半（仍待实现）**，两块在集成时合并为同一个 `if (version < 34)` 步骤。已实现的持久事实：
+> **两半合成一个版本号。** 两条并行分支各自在 v34 追加了自己的块，集成时合并为**一个** `if (version < 34)` 步骤：
+> 容量半边（`runtime_capacity_settings`、退役两张旧配置表、`runtime_command_receipts`、`domain_events.project_id` 可空）
+> 与暂停半边（`runtime_pause_control`、`runtime_pause_targets`）。`runtime_command_receipts` 与 `domain_events` 重建在
+> `migration.ts` 里**各只有一份**（容量半边拥有），暂停半边不重复它们。
+> `runtime_capacity_settings` 仍遵循「没有行 = 从未显式设置」→ 默认 2；`runtime_pause_control` 相反，迁移**总是**写入
+> singleton 行（`RUNNING`, epoch 0），因为「没有行」不能被读成「继续」。
+
+
+本版本号的持久事实（两半都已实现，见上面的说明）：
 
 ```sql
 CREATE TABLE runtime_capacity_settings (
@@ -1405,8 +1412,8 @@ CREATE TABLE runtime_command_receipts (
 不是「未知 Project」。`event_deliveries.event_id` 引用在新表接管名字后继续有效。Project 过滤读取改为
 `(project_id = ? OR project_id IS NULL)`。
 
-下半（全局暂停）的持久事实与状态一致性约束（`PENDING`/`STOPPED`/`RECOVERY_REQUIRED` 跨表约束、无 FK 的身份快照、
-purge 前收口等）仍适用，但**尚未实现**：
+全局暂停（下半）的持久事实与状态一致性约束（`PENDING`/`STOPPED`/`RECOVERY_REQUIRED` 跨表约束、无 FK 的身份快照、
+purge 前收口等）**已实现**：
 
 ```sql
 CREATE TABLE runtime_pause_control (
@@ -1442,10 +1449,12 @@ CREATE TABLE runtime_pause_targets (
 ) STRICT;
 ```
 
-最终 migration 可在不改变约束语义的前提下调整列名，但必须保持：singleton、pause epoch、逐 incarnation process identity、目标状态、同命令幂等与同键异文拒绝。
+实现与本节语义一致；列名与约束以 `runtimePauseControlMigration` 为准，必须保持：singleton、pause epoch、逐 incarnation process identity、目标状态、同命令幂等与同键异文拒绝。
 
 **状态一致性（下半）**：
 
 - `RUNNING` 时不得有 `PENDING`/`STOPPED` 目标；`PAUSED` 时本 epoch 不得有 `PENDING`/`RECOVERY_REQUIRED`；这些跨表约束由同一 immediate transaction 的 storage service 强制并以故障注入测试覆盖。
+- 已实现的迁移在提交前除行数核对外，还断言**结束态**（`domain_events.project_id` 确实可空、singleton 控制行确实存在）：
+  Bun 的 `exec()` 会吞掉多语句脚本里的 step 错误，只比行数会漏掉「复制之后才失败」的情形。
 - `RECOVERY_REQUIRED` 仍保持全局启动屏障；target 行不因超时、心跳或 Runtime 重启自动删除/改成 `EXITED`。
 - `runtime_pause_targets` 不是 Session 状态来源，不得据它把 Session 写回 ACTIVE/PAUSED；Session/Execution 的重启收敛仍走既有表与 ADR-0028。它的五个业务 ID 刻意是无 FK 的身份快照：`task purge` 删除 Task 聚合后，本 pause epoch 的进程控制/审计事实仍必须保留；purge 前仍须按 ADR-0058 证明 provider 已停止，并把对应 target 如实收口。

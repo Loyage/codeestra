@@ -76,7 +76,7 @@ p { margin: 0.45rem 0; }
 /* The banner is the first grid row of the shell and the header the second; both span the width, so
    a banner never lands inside the scrolling workspace column (ADR-0049). Row 1 is zero-height in
    the stable build, where no banner element is rendered at all. */
-.app { display: grid; grid-template-columns: 146px minmax(0, 1fr); grid-template-rows: auto 56px minmax(0, 1fr); height: 100vh; height: 100dvh; overflow: hidden; }
+.app { display: grid; grid-template-columns: 146px minmax(0, 1fr); grid-template-rows: auto 56px auto minmax(0, 1fr); height: 100vh; height: 100dvh; overflow: hidden; }
 .dev-banner { grid-column: 1 / -1; grid-row: 1; display: flex; gap: 0.6rem; align-items: baseline; margin: 0; padding: 0.4rem 1rem; background: #f59e0b; color: #26170a; border-bottom: 1px solid #b45309; font-size: 0.78rem; }
 .dev-banner strong { letter-spacing: 0.04em; font-size: 0.78rem; }
 .app-header { grid-column: 1 / -1; grid-row: 2; display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.45rem 1rem; border-bottom: 1px solid var(--line); background: var(--panel); }
@@ -88,7 +88,7 @@ p { margin: 0.45rem 0; }
 .header-controls select { width: min(28vw, 260px); }
 /* The sidebar keeps its own place in the shell: it never scrolls as a whole, and a navigation list
    that is taller than the viewport scrolls inside the sidebar instead of moving the header. */
-.sidebar { grid-column: 1; grid-row: 3; display: flex; flex-direction: column; border-right: 1px solid var(--line); background: var(--panel); padding: 0.85rem 0.5rem; min-width: 0; min-height: 0; overflow: hidden; }
+.sidebar { grid-column: 1; grid-row: 4; display: flex; flex-direction: column; border-right: 1px solid var(--line); background: var(--panel); padding: 0.85rem 0.5rem; min-width: 0; min-height: 0; overflow: hidden; }
 nav { display: flex; flex-direction: column; gap: 0.4rem; }
 .sidebar > nav { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 .nav-caption { padding: 0 0.8rem 0.7rem; }
@@ -101,7 +101,17 @@ nav { display: flex; flex-direction: column; gap: 0.4rem; }
 .connection.live span { color: var(--ok); }
 /* The single scroll container of the console: long task lists, task details and banners move here,
    never the page. `min-height: 0` lets the column shrink instead of pushing the grid row open. */
-.workspace-shell { grid-column: 2; grid-row: 3; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: auto; padding-bottom: 0.75rem; }
+.workspace-shell { grid-column: 2; grid-row: 4; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: auto; padding-bottom: 0.75rem; }
+/* The Runtime global load control (FOUNDATION-097 / ADR-0061 D09) is a shell row of its own, spanning
+   both columns and belonging to no Project. Its detail block is collapsed while the Runtime is RUNNING
+   and open otherwise, so a partial freeze is visible without pushing the workspace off screen. */
+.global-control-bar { grid-column: 1 / -1; grid-row: 3; border-bottom: 1px solid var(--line); background: var(--panel); min-width: 0; }
+.global-control { display: flex; flex-direction: column; gap: 0.35rem; padding: 0.4rem 1rem; font-size: 0.8rem; }
+.global-control-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.55rem; }
+.global-control-title { font-weight: 650; letter-spacing: -0.01em; }
+.global-control-head button { padding: 0.3rem 0.6rem; font-size: 0.78rem; }
+.global-control-details > summary { cursor: pointer; color: var(--muted); font-size: 0.76rem; }
+.global-control-details .table-scroll { max-height: 34vh; }
 .page-heading { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: 0.85rem 1.1rem 0.65rem; }
 .page-heading h1 { font-size: 1.25rem; }
 .page-heading .eyebrow { font-size: 0.7rem; }

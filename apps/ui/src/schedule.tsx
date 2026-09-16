@@ -24,6 +24,7 @@ import {
 import type {
   ConflictHitView,
   ProjectCapacityView,
+  RuntimeCapacityView,
   ScheduleAssessmentView,
   ScheduleCandidateView,
   ScheduleExplanationView,
@@ -211,14 +212,22 @@ export function AssessmentBlock({ assessment, tasks }: {
   );
 }
 
-/** The two capacity dimensions and who holds each slot; `limitSource` explains where a limit came from. */
+/**
+ * The capacity facts and who holds each slot; `limitSource` explains where a limit came from.
+ *
+ * `scope` is not decoration. ADR-0061 D01 makes the limit a **Runtime-global** one and the card is
+ * titled accordingly, but this build's capacity command面 is still project-scoped (schema v34's other
+ * half owns the global command). Rather than printing project numbers under a global heading, the
+ * table says which scope it is showing and the panel explains why — a card that silently relabelled
+ * project numbers as host-wide would be a false statement about what the machine is doing.
+ */
 export function CapacityTable({ capacity, tasks, now }: {
-  readonly capacity: ProjectCapacityView;
+  readonly capacity: RuntimeCapacityView;
   readonly tasks: readonly TaskView[];
   readonly now: number;
 }) {
   return (
-    <>
+    <div data-capacity-scope="GLOBAL">
       {capacity.draining ? (
         <div className="banner error" role="status">
           <div>
@@ -227,72 +236,67 @@ export function CapacityTable({ capacity, tasks, now }: {
           </div>
         </div>
       ) : null}
+      {capacity.pauseState.state === 'RUNNING' ? null : (
+        <div className="banner" role="status" data-capacity-pause-state={capacity.pauseState.state}>
+          <div>
+            <strong>Runtime 全局负载控制：{capacity.pauseState.state}</strong>
+            <div className="hint">
+              {capacity.pauseState.detail ?? '按 pid + start token 核验后冻结受控 Provider 主进程'}
+              {' · '}逐目标事实见外壳的「全局负载控制」条
+            </div>
+          </div>
+        </div>
+      )}
       <div className="table-scroll"><table>
         <thead>
           <tr><th>范围</th><th>上限</th><th>来源</th><th>已用</th><th>可用</th><th>现在获取会得到</th></tr>
         </thead>
         <tbody>
-          <tr>
-            <td>全局</td>
-            <td>{capacity.globalLimit}</td>
-            <td>{capacityLimitSourceLabel(capacity.globalLimitSource)}</td>
-            <td>{capacity.globalUsed}</td>
-            <td>{capacity.globalAvailable}</td>
-            <td>{capacity.globalWaitReason === null ? <span className="state state-ready">可以获取</span>
+          <tr data-capacity-row="runtime-global">
+            <td>Runtime 全局（跨全部项目与 Adapter）</td>
+            <td>{capacity.limit}</td>
+            <td>{capacityLimitSourceLabel(capacity.limitSource)}</td>
+            <td>{capacity.used}</td>
+            <td>{capacity.available}</td>
+            <td>{capacity.waitReason === null ? <span className="state state-ready">可以获取</span>
               : <span className="state state-waiting">
-                  {capacityWaitReasonLabel(capacity.globalWaitReason)}</span>}</td>
+                  {capacityWaitReasonLabel(capacity.waitReason)}</span>}</td>
           </tr>
-          {capacity.adapters.map((adapter) => (
-            <tr key={adapter.adapterId}>
-              <td>adapter <span className="mono">{adapter.adapterId}</span></td>
-              <td>{adapter.limit}</td>
-              <td>{capacityLimitSourceLabel(adapter.limitSource)}
-                {adapter.limitSource === 'DEFAULT' ? <div className="muted hint">跟随全局上限</div> : null}</td>
-              <td>{adapter.used}</td>
-              <td>{adapter.available}</td>
-              <td>{adapter.waitReason === null ? <span className="state state-ready">可以获取</span>
-                : <span className="state state-waiting">
-                    {capacityWaitReasonLabel(adapter.waitReason)}</span>}</td>
-            </tr>
-          ))}
-          {capacity.adapters.length === 0 ? (
-            <tr><td colSpan={6} className="muted">没有已注册的 adapter。</td></tr>
-          ) : null}
         </tbody>
       </table></div>
       <p className="muted hint">
         配置版本 v{capacity.configVersion}
-        {capacity.updatedAt === null ? ' · 从未显式设置'
+        {capacity.updatedAt === null ? ' · 从未显式设置（默认 2）'
           : ` · 最后修改 ${new Date(capacity.updatedAt).toLocaleString('zh-CN')}（${capacity.updatedBy ?? '—'}）`}
-        {capacity.globalUsed > capacity.globalLimit
+        {capacity.used > capacity.limit
           ? ' · 已用大于上限：降低上限不会释放已持有的槽位，事实如实显示' : ''}
       </p>
-      <h4>当前占用者</h4>
-      {capacity.occupants.length === 0 ? <p className="muted">没有任何任务占用槽位。</p> : (
+      <h4>当前占用者（跨项目）</h4>
+      {capacity.occupiers.length === 0 ? <p className="muted">没有任何任务占用槽位。</p> : (
         <ul className="list">
-          {capacity.occupants.map((occupant) => (
-            <li key={occupant.taskId} className="muted">
-              {taskTag(occupant.taskId, tasks)} · adapter <span className="mono">{occupant.adapterId}</span>
-              {' · 自 '}{formatSince(occupant.since, now)}
-              {occupant.reservationId === null ? null
-                : <> · 预留 <span className="mono">{shortId(occupant.reservationId)}</span></>}
+          {capacity.occupiers.map((occupier) => (
+            <li key={occupier.taskId} className="muted" data-capacity-occupier={occupier.taskId}
+              data-capacity-occupier-project={occupier.projectId}>
+              <span className="mono">{occupier.projectId.slice(0, 8)}</span>
+              {' · '}{taskTag(occupier.taskId, tasks)}
+              {' · adapter '}<span className="mono">{occupier.adapterId}</span>
+              {' · 自 '}{formatSince(occupier.since, now)}
+              {' · '}{occupier.source === 'EXECUTION' ? '执行中持有' : '预留持有'}
+              {occupier.reservationId === null ? null
+                : <> · 预留 <span className="mono">{shortId(occupier.reservationId)}</span></>}
             </li>
           ))}
         </ul>
       )}
-    </>
+    </div>
   );
 }
 
 /** A compact one-line capacity summary, so a panel can avoid repeating the whole table. */
 export function capacityLine(capacity: ProjectCapacityView): string {
-  const parts = [`全局 ${capacity.globalUsed}/${capacity.globalLimit}`
-    + `（${capacityLimitSourceLabel(capacity.globalLimitSource)}）`];
-  for (const adapter of capacity.adapters) {
-    parts.push(`${adapter.adapterId} ${adapter.used}/${adapter.limit}`
-      + `（${capacityLimitSourceLabel(adapter.limitSource)}）`);
-  }
-  return parts.join(' · ');
+  return `Runtime 全局 ${capacity.globalUsed}/${capacity.globalLimit}`
+    + `（${capacityLimitSourceLabel(capacity.globalLimitSource)}）`
+    + ` · 跨项目占用 ${capacity.occupants.length}`;
 }
 
 /* ------------------------------------------------------------------------------------------------
@@ -737,7 +741,7 @@ export function CapacityPanel({ client, projectId, tasks, refreshToken, run }: {
   readonly refreshToken: number;
   readonly run: (label: string, action: () => Promise<void>) => Promise<void>;
 }) {
-  const [capacity, setCapacity] = useState<ProjectCapacityView | null>(null);
+  const [capacity, setCapacity] = useState<RuntimeCapacityView | null>(null);
   const [reservations, setReservations] = useState<readonly SlotReservationView[] | null>(null);
   const [includeReleased, setIncludeReleased] = useState(false);
   const [detail, setDetail] = useState<SlotReservationDetailView | null>(null);
@@ -745,14 +749,15 @@ export function CapacityPanel({ client, projectId, tasks, refreshToken, run }: {
   const [releaseResult, setReleaseResult] = useState<SlotReservationReleaseView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [limitInput, setLimitInput] = useState('2');
-  const [limitScope, setLimitScope] = useState('');
   const [releaseReasons, setReleaseReasons] = useState<Record<string, string>>({});
   const now = useNow(30_000);
 
   const load = useCallback(async (): Promise<void> => {
     try {
       const [nextCapacity, listed] = await Promise.all([
-        client.command<ProjectCapacityView>({ command: 'scheduler.capacity.get', projectId }),
+        // `scheduler capacity get` takes no Project and no Adapter (ADR-0061 D02): the answer is the
+        // whole Runtime's occupancy, which is exactly what this card is about.
+        client.command<RuntimeCapacityView>({ command: 'scheduler.capacity.get' }),
         client.command<SlotReservationListView>({
           command: 'scheduler.reservations.list', projectId, includeReleased,
         }),
@@ -769,9 +774,16 @@ export function CapacityPanel({ client, projectId, tasks, refreshToken, run }: {
 
   return (
     <section className="capacity-panel">
-      <h4>容量与槽位预留 <span className="muted hint">scheduler capacity / reservations · ADR-0032</span></h4>
+      <h4>
+        Runtime 全局容量
+        <span className="muted hint">scheduler capacity / reservations · ADR-0061 D01–D03</span>
+      </h4>
+      <p className="muted hint" data-capacity-scope-note="GLOBAL">
+        整个 Runtime 只有**一个**并发上限，跨全部项目与 Adapter；下面的数字与占用者都是跨项目的。
+        设置面拼写 `settings concurrency` 与这里的按钮是同一条命令、同一个状态源。
+      </p>
       <p className="muted hint">
-        两个上限同时生效：项目全局与每 adapter。容量等待不是 BLOCKED；降低上限不会释放已持有的槽位。
+        容量等待不是 BLOCKED；降低上限不会释放已持有的槽位。
         释放必须给出原因，且不会因心跳过期或客户端消失自动发生。
       </p>
       {error === null ? null : <p className="error" role="alert">容量读取失败：{error}</p>}
@@ -781,19 +793,10 @@ export function CapacityPanel({ client, projectId, tasks, refreshToken, run }: {
 
           <h4>显式设置上限</h4>
           <p className="muted hint">
-            非法值会被拒绝并给出稳定错误码（CAPACITY_LIMIT_INVALID / CAPACITY_LIMIT_OUT_OF_RANGE /
-            UNKNOWN_ADAPTER），不会被静默夹取；上限范围 1–16。
+            非法值会被拒绝并给出稳定错误码（CAPACITY_LIMIT_INVALID / CAPACITY_LIMIT_OUT_OF_RANGE），
+            不会被静默夹取；上限范围 1–16。没有项目级或 Adapter 级覆写可设——ADR-0061 D01 之后只有这一个值。
           </p>
           <div className="actions">
-            <label className="inline">
-              范围
-              <select value={limitScope} onChange={(event) => setLimitScope(event.target.value)}>
-                <option value="">项目全局</option>
-                {(capacity?.adapters ?? []).map((adapter) => (
-                  <option key={adapter.adapterId} value={adapter.adapterId}>adapter {adapter.adapterId}</option>
-                ))}
-              </select>
-            </label>
             <input
               aria-label="并发上限"
               inputMode="numeric"
@@ -809,9 +812,7 @@ export function CapacityPanel({ client, projectId, tasks, refreshToken, run }: {
                   await client.command({
                     command: 'scheduler.capacity.set',
                     commandId: crypto.randomUUID(),
-                    projectId,
                     limit,
-                    ...(limitScope === '' ? {} : { adapterId: limitScope }),
                   });
                   await load();
                 } catch (caught) {
@@ -819,21 +820,19 @@ export function CapacityPanel({ client, projectId, tasks, refreshToken, run }: {
                 }
               });
             }}>设置上限（scheduler capacity set）</button>
-            <button type="button" disabled={limitScope === ''} title="只有显式设置过的 adapter 覆写才能清除" onClick={() => {
-              void run('正在清除 adapter 覆写', async () => {
+            <button type="button" title="删除显式值，回到文档默认值 2" onClick={() => {
+              void run('正在重置容量上限', async () => {
                 try {
                   await client.command({
-                    command: 'scheduler.capacity.clear',
+                    command: 'scheduler.capacity.reset',
                     commandId: crypto.randomUUID(),
-                    projectId,
-                    adapterId: limitScope,
                   });
                   await load();
                 } catch (caught) {
                   setError(describeError(caught));
                 }
               });
-            }}>清除该 adapter 覆写（capacity clear）</button>
+            }}>重置为默认 2（scheduler capacity reset）</button>
           </div>
 
           <h4>槽位预留</h4>

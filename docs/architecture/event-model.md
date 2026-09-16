@@ -109,7 +109,7 @@ Phase 1（ADR-0006）的 `VerificationCompleted` 不写入命令原始输出；`
 
 `SchedulerCapacityChanged` 只在值真正变化时发布（重复设置同一值不 bump 版本、不发事件）。`ExecutionSlotReconciled` 也会为「决定保持占用、状态未变」的观测发布——那是审计事实，不是状态迁移。`TaskSchedule*` 的重放保护是 `(event_type, correlation_id, aggregate_id)`，不是 event id。
 
-`SchedulerCapacityChanged` 与 `CAPACITY_ADAPTER_SLOT_LIMIT_REACHED` **不再产生新事实**（历史行原样保留）：ADR-0061 之后只有一个 Runtime 全局上限，写它的事实是 `SchedulerGlobalCapacityChanged`（FOUNDATION-096 已实现，schema v34）。
+`SchedulerCapacityChanged` 与 `CAPACITY_ADAPTER_SLOT_LIMIT_REACHED` **不再产生新事实**（历史行原样保留）：ADR-0061 之后只有一个 Runtime 全局上限，写它的事实是 `SchedulerGlobalCapacityChanged`（FOUNDATION-096，schema v34）。同一版本里实现的暂停半边写另外五个事件（FOUNDATION-097）。它们均以 `project_id = NULL`、`aggregate_type='RuntimeSchedulerControl'` 写入；`domain_events.project_id` 已可空，Project 过滤订阅同时收到全局事件。
 
 全局事实以 `project_id = NULL`、`aggregate_type='RuntimeSchedulerControl'` 写入；这是为“不属于任何 Project”保留的表达，而不是“未知 Project”。Project 过滤读取改为 `(project_id = ? OR project_id IS NULL)`，游标仍按同一 sequence 前进。
 
@@ -233,7 +233,7 @@ FOUNDATION-074 的 doc-sync 把它们补齐（名字都是实现先行的，按 
 | `ExecutionPauseRequested` / `ExecutionPaused` / `ExecutionCancelled` / `ExecutionSuperseded` | 未找到同名事件；暂停/取消的投影通过 `TaskStateChanged` / `ExecutionStateChanged` 与 Operation 状态表达 | **未验证**是否存在等价专名，本格不改动 |
 | `ResultCommitAuthorizationRequested` | 未实现同名事件（授权由 prepare/confirm 两步与 `ResultCommitAuthorized` 表达） | 设计名保留，未实现 |
 | `CandidateBuilt` / `SelfTestCompleted` / `StablePromoted` / `StableRollbackCompleted` | 未实现 | 设计名保留（Self Evolution 阶段） |
-| `SchedulerGlobalCapacityChanged` / `SchedulerGlobalPauseRequested` / `SchedulerGlobalPaused` / `SchedulerGlobalResumeRequested` / `SchedulerGlobalResumed` / `SchedulerGlobalControlRecoveryRequired` | **ADR-0061 设计名**：`SchedulerGlobalCapacityChanged` 已由 FOUNDATION-096 实现（schema v34）；其余五个仍属待实现的全局暂停 | 名字已随 Accepted ADR 固定；实现时采用这些名字，不另起一套。`Requested` 与完成事实必须分开，部分结果只能写 RecoveryRequired |
+| `SchedulerGlobalCapacityChanged` / `SchedulerGlobalPauseRequested` / `SchedulerGlobalPaused` / `SchedulerGlobalResumeRequested` / `SchedulerGlobalResumed` / `SchedulerGlobalControlRecoveryRequired` | **已实现**（schema v34：容量半边 FOUNDATION-096，暂停半边 FOUNDATION-097） | 六个名字都随 Accepted ADR 固定并已采用，不另起一套。`Requested` 与完成事实必须分开，部分结果只能写 RecoveryRequired。`project_id = NULL`、`aggregate_type = 'RuntimeSchedulerControl'`；`pause`/`resume`/`reconcile` 的回执在 `runtime_command_receipts` |
 | `ProseQuestionAttentionResolved` | **实现先行名**（FOUNDATION-069 新增，本格补登记） | 本格**登记为长期名**；`UserAnswerDelivered` 不适用于散文提问（它没有 provider 请求），因此不合并 |
 | `TaskRetryRequested` | **实现先行名**（FOUNDATION-061 新增，本格补登记） | 本格**登记为长期名**；与 `TaskStateChanged` 同事务、不取代它 |
 | （设计目录没有的实现新增名） | `TaskArchived` / `TaskUnarchived` / **`TaskPurged`（FOUNDATION-090 / ADR-0058）** / `WorkspaceReclaimed` / `ResourcesReclaimed` / `OperationProgressed` / `OperationSettled` / `ExecutionSlot*` / `SchedulerCapacityChanged` / `TaskSchedule*` / `TaskImpactPredictionRevoked` / `Promotion*` / `Integration*`（含 ADR-0053 的 `IntegrationMemberMerged` / `IntegrationBatchStale` / `IntegrationBatchCancelled`） | 反向登记：这些是实现先行的名字，同样永不重命名。`TaskPurged` 是**唯一一条在它自己的聚合根行被删除的同一个事务里写入的事件**：它没有外键，因此任务行消失后它仍在 `events.list`/SSE 里可读，并且是「这个任务存在过、什么时候被谁删除、删掉了什么」的最后一条记录（ADR-0058 D08） |
@@ -262,7 +262,7 @@ Runtime 的本地 socket 同时承载一次性命令与长连接订阅；两者�
 - 订阅只读：不写事件、不写 `event_deliveries`、不重放任何 command，也不改变 Task/Execution 状态；崩溃或断开只影响该订阅，重连凭 cursor 继续。因此订阅不构成"已交付"证据，投递语义仍由 outbox 与消费者幂等决定。
 - 读取失败（如日志不可读）是终止性错误：Runtime 发出 `EVENT_READ_FAILED` 终止帧并移除该订阅，不假装仍在跟踪。
 - 订阅连接是一条命令一条连接：客户端在订阅建立后继续发送 command 属于协议违约，Runtime 直接关闭该连接。
-- 可选 `projectId` 过滤只影响交付；游标仍会前进，因此过滤订阅的 resume 语义与全量订阅一致。**ADR-0061/v34（FOUNDATION-096）起，Project 过滤交付“该 Project 的事件 + `project_id IS NULL` 的 Runtime 全局事件”**，因为全局容量会影响每个 Project；cursor 仍按同一 sequence 前进，重连在边界上不漏不重。全局暂停事件使用同一规则（随 GLC-2 落地）。Phase 1 未实现按 project 的权限隔离——本地单用户 socket 权限（0600）是这一层的边界。
+- 可选 `projectId` 过滤只影响交付；游标仍会前进，因此过滤订阅的 resume 语义与全量订阅一致。**ADR-0061/v34（FOUNDATION-096）起，Project 过滤交付“该 Project 的事件 + `project_id IS NULL` 的 Runtime 全局事件”**，因为全局容量会影响每个 Project；cursor 仍按同一 sequence 前进，重连在边界上不漏不重。全局暂停事件（FOUNDATION-097）使用同一规则，且已落地。Phase 1 未实现按 project 的权限隔离——本地单用户 socket 权限（0600）是这一层的边界。
 - 投影由 Runtime 的事件写入路径负责；订阅不引入第二个事件源，也不允许客户端写入事件。
 - 本地 Web UI 经 `RuntimeHttpApi` 的 `/api/events` 消费同一组帧（SSE 编码，`fetch` 流式读取而非 `EventSource`，因此 bearer token 不出现在 URL 中）；命令经 `/api/command` 走同一 Zod 请求 schema 与同一 dispatch，HTTP 不是第二条业务语义路径。
 

@@ -66,7 +66,7 @@ Self Task → Candidate → 自托管测试 → 用户 Promotion → 排空 → 
 - Agent 可加载的插件/资源按作用域持久化（`agent plugins list|select`、`agent.config.set --pluginSelection`，schema v27），只有声明 `pluginSelection: SUPPORTED` 的 Adapter 能应用；其余以稳定码拒绝而不假装写入（ADR-0044）。界面效果设置（`settings ui *`）是设置不是门禁，不驱动任何领域状态迁移（ADR-0045）。
 - 用户可从 Task 入口接管真实 Agent：Pi 在安全点从 RPC 交接到原生 TUI/PTY，普通输入是 Session Guidance，规格变化仍走 TaskRevision；任意时刻只有一个 Provider writer。
 - 取消协作停止，超时需人工处理；提高优先级不抢占。
-- ADR-0061 已接受、待实现：一个 Runtime 只保留一个跨项目并行上限；全局暂停先建立持久启动屏障，再可核验地冻结 Provider 主进程，不向已运行工具子进程发停止信号，重启后也不自动继续。它不替代单 Task pause。
+- ADR-0061 已实现（schema v34，两半）：一个 Runtime 只保留一个跨项目并行上限；全局暂停先建立持久启动屏障，再可核验地冻结 Provider 主进程，不向已运行工具子进程发停止信号，重启后也不自动继续。它不替代单 Task pause。
 - Stable Promotion 排空活动任务后切换，不迁移活动 Session。
 
 ## 最大风险与建议

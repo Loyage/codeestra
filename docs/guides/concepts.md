@@ -1,9 +1,10 @@
 # 领域概念与边界
 
-> **适用版本** `dev@4667d32`（2026-09-16） · **schema** v33 · **最后校对** 2026-09-16
+> **适用版本** `dev@de03448` + 本格分支 `Loyage/glc-pause-ui`（2026-09-16） · **schema** v34（本格暂停半边） · **最后校对** 2026-09-16
 > 版本会前进：`dev@4667d32` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
-> §「调度三态」由 FOUNDATION-091 按 ADR-0059 重写（声明同一功能才冲突）。
+> §「调度三态」由 FOUNDATION-091 按 ADR-0059 重写（声明同一功能才冲突）；
+> §「调度三态」末尾新增「全局暂停」一段、§「运行边界」补充控制状态的持久性（FOUNDATION-097 / ADR-0061 D04/D08）。
 > §「双分支与 Task 工作树基线」由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目可跑完整 Task，只有集成与提升需要 dev 分支）；其余内容沿用 FOUNDATION-091 的校对基线。
 
 这份文档解释 Codeestra 里的名词到底指什么、哪些东西**不是**调度主实体、以及几条会影响你日常判断的硬边界。
@@ -276,6 +277,23 @@ IntegrationBatch 阶段以 `CONFLICTED` 暴露（ADR-0059 D02 明确选择的权
 
 > 因此「一个 Task 现在为什么不跑」有三种互不相同的答案：**依赖未满足（BLOCKED）**、**冲突等待**、**容量等待**。
 > CLI 用退出码 3 表示「等待」，退出码 1 表示「确实不会跑，需要处理」。详见 [cli-reference.md](./cli-reference.md)。
+
+### 全局暂停：Runtime 控制状态，不是 Task 状态
+
+ADR-0061 的全局暂停是一层**控制面覆盖状态**（`RUNNING → PAUSING → PAUSED → RESUMING → RUNNING`，
+任一事実不可核验则 `RECOVERY_REQUIRED`），它与每个 Task 自己的生命周期状态**正交**：
+
+- 被冻结的 Task **仍然是**它冻结前的状态（通常 `RUNNING`），仍然持有它的 Execution、workspace 与全局容量槽位。
+  全局 `PAUSED` **不是** `task pause`：后者是 ADR-0016 的单 Task 协作停止，会结束旧 Execution，恢复时新建 Execution。
+- 暂停**先拦新启动**（新的 reservation/Execution/Session/successor 与向 Provider 的投递都延后），
+  再按 `pid + OS start token + incarnación` 核验后冻结**模型请求发起者**（Provider 主进程）。
+- **已经发出的模型请求不会被取消**（可能已在服务端完成并计费）；**工具子进程不会收到** Codeestra 的停止信号，
+  但主进程停止读管道时大输出工具可能因 OS 管道背压阻塞。
+- 「观察到 stopped」才算冻结：只看到 PID、只成功调用 `kill(SIGSTOP)`、只看到 stdout 安静都不成立。
+- 暂停**跨 Runtime 重启保持**：启动会先读屏障，**不自动继续、不自动 kill** 上一代 boot 冻结的进程；
+  `runtime stop` 也不清除它。
+- 因此它还有第四种「不跑」：**全局暂停等待**（等待码 `SCHEDULER_GLOBALLY_PAUSED`，CLI 退 3），
+  **不是** `BLOCKED`。`BLOCKED` 仍然只表示依赖未满足。
 
 ---
 

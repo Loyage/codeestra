@@ -167,6 +167,13 @@ export interface ScheduleServiceOptions {
     readonly actor: string;
   }) => Promise<SchedulePauseOutcome>;
   readonly draining: () => { readonly draining: boolean; readonly reason: string | null };
+  /**
+   * The Runtime's persistent global barrier (ADR-0061 D08). It is read *before* the dependency and
+   * conflict judgements: a Task that waits because the whole Runtime is paused must not be reported
+   * as `BLOCKED` (unmet dependency) or as a capacity wait, because neither is what stopped it.
+   * Absent means "no global control plane", which is how the unit tests drive the engine directly.
+   */
+  readonly control?: () => { readonly blocked: boolean; readonly state: string };
   /** The Adapter the engine uses when a caller does not name one: `pi` when it is registered. */
   readonly defaultAdapterId?: string;
   readonly now?: () => number;
@@ -273,6 +280,7 @@ export class ScheduleService {
   readonly #start: (input: ScheduledStartRequest) => Promise<ScheduledStartResult>;
   readonly #pause: ScheduleServiceOptions['pause'];
   readonly #draining: () => { readonly draining: boolean; readonly reason: string | null };
+  readonly #control: (() => { readonly blocked: boolean; readonly state: string }) | null;
   readonly #defaultAdapterId: string | undefined;
   readonly #now: () => number;
   readonly #randomUUID: () => string;
@@ -289,6 +297,7 @@ export class ScheduleService {
     this.#start = options.start;
     this.#pause = options.pause;
     this.#draining = options.draining;
+    this.#control = options.control ?? null;
     this.#defaultAdapterId = options.defaultAdapterId;
     this.#now = options.now ?? Date.now;
     this.#randomUUID = options.randomUUID ?? (() => crypto.randomUUID());
@@ -533,7 +542,8 @@ export class ScheduleService {
       : evaluation.disposition === 'STARTED' || evaluation.disposition === 'WOULD_START'
         ? 'START_NOW' as const
         : evaluation.wait?.kind === 'CAPACITY' ? 'WAIT_CAPACITY' as const
-          : 'WAIT_CONFLICT' as const;
+          : evaluation.wait?.kind === 'CONTROL' ? 'WAIT_CONTROL' as const
+            : 'WAIT_CONFLICT' as const;
     return {
       ...this.#explanationBase(project, task, adapterId, capacity, activeTaskIds),
       candidate: true,
@@ -713,6 +723,22 @@ export class ScheduleService {
     if (task === null) {
       throw new ScheduleServiceError('NOT_FOUND', 'Task was not found in this project');
     }
+    if (this.#control?.().blocked === true) {
+      // A resume is a start path, so the global barrier holds it too: resuming under a pause would
+      // spawn a provider the barrier exists to prevent (ADR-0061 D05/D08).
+      const state = this.#control().state;
+      const wait: ScheduleWaitView = {
+        kind: 'CONTROL',
+        code: 'SCHEDULER_GLOBALLY_PAUSED',
+        detail: `the Runtime is globally ${state}, so the PAUSED Task cannot be resumed yet`,
+        reasonCodes: ['SCHEDULER_GLOBALLY_PAUSED'],
+        hits: [],
+        blocking: [],
+        since: null,
+      };
+      return { outcome: 'WAIT', wait, assessment: null, detail: wait.detail,
+        clearedUnknownBy: null };
+    }
     const activeRefs = this.#activeTaskRefs(project.id, task.id);
     const assessment = await this.#assess(project, task, activeRefs);
     const decision = this.#conflictDecision({
@@ -867,6 +893,23 @@ export class ScheduleService {
       startedDetail: null,
       clearedUnknownBy: null,
     };
+    // 0. The Runtime's own global barrier (ADR-0061 D08). This is checked before anything else,
+    //    because nothing else could have started this Task: no dependency, conflict or capacity
+    //    verdict is a truthful answer to "why is nothing running" while the whole host is paused.
+    if (this.#control?.().blocked === true) {
+      const state = this.#control().state;
+      const wait: ScheduleWaitView = {
+        kind: 'CONTROL',
+        code: 'SCHEDULER_GLOBALLY_PAUSED',
+        detail: `the Runtime is globally ${state}, so no new Execution or Session may start; the`
+          + ' Task waits (it is not BLOCKED) until the barrier comes down',
+        reasonCodes: ['SCHEDULER_GLOBALLY_PAUSED'],
+        hits: [],
+        blocking: [],
+        since: null,
+      };
+      return { ...base, disposition: 'WAITING', detail: wait.detail, wait };
+    }
     if (!this.#adapters.ids().includes(input.adapterId)) {
       // An Adapter the Runtime does not have is not `BLOCKED`: it is a fact about resources, so the
       // Task is skipped and a later tick with a registered Adapter picks it up.
@@ -1090,6 +1133,28 @@ export class ScheduleService {
       const code = typeof error === 'object' && error !== null && 'code' in error
         ? String(error.code) : 'START_FAILED';
       const message = error instanceof Error ? error.message : String(error);
+      if (code === 'SCHEDULER_GLOBALLY_PAUSED') {
+        // The barrier committed after this candidate was judged but before its provider started.
+        // That is a *wait*, not a failure: nothing was started and nothing is wrong with the Task.
+        const wait: ScheduleWaitView = {
+          kind: 'CONTROL',
+          code: 'SCHEDULER_GLOBALLY_PAUSED',
+          detail: 'the global pause barrier was committed while this Task was being started, so no'
+            + ' Execution was created; the Task waits for the barrier to come down',
+          reasonCodes: ['SCHEDULER_GLOBALLY_PAUSED'],
+          hits: [],
+          blocking: [],
+          since: null,
+        };
+        await this.#releaseReservation({
+          projectId: project.id,
+          reservationId: reservation.reservationId,
+          reason: 'the global pause barrier stopped this start; the reservation was released',
+          commandId: derivedScheduleId('schedule-paused-release', input.commandId, task.id),
+          actor: input.actor,
+        });
+        return { ...withAssessment, disposition: 'WAITING', detail: wait.detail, wait };
+      }
       this.#logger('a scheduled start failed', {
         taskId: task.id, code, reason: message,
       });
@@ -1914,6 +1979,13 @@ export class ScheduleService {
     readonly actor: string;
     readonly disposition: string;
   }): Promise<void> {
+    if (input.wait.kind === 'CONTROL') {
+      // The barrier is a Runtime-global fact, and it is already recorded by
+      // `SchedulerGlobalPauseRequested`/`SchedulerGlobalPaused`; writing a Task-level
+      // `TaskWaitingForConflict`/`TaskWaitingForCapacity` here would misattribute it to a conflict
+      // or a capacity limit that does not exist (ADR-0061 D08/D10).
+      return;
+    }
     const latest = this.#storage.listTaskScheduleEvents({
       projectId: input.project.id, taskId: input.task.id, limit: 1,
     })[0];

@@ -4,11 +4,12 @@
 > 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > §7 的 `session handoff terminal resize` 一节由 FOUNDATION-083 校对（ADR-0054）；
+> §14 新增 `scheduler control` 一节，并把 §0.2 的退出码与「等待码」表补上 `SCHEDULER_GLOBALLY_PAUSED`（FOUNDATION-097 / ADR-0061 D08/D09）；
 > §3 的 `project impact *` 与 §4 的 `task submit`/`task resume`/`--feature` 由 FOUNDATION-091 新增/改写（ADR-0059）；
 > §4 的 `task purge` 一节由 FOUNDATION-090 新增（ADR-0058，其余 §4 内容沿用 FOUNDATION-070 的校对基线）；
 > §14 的 `scheduler capacity` 一节由 **FOUNDATION-096** 重写（ADR-0061 D02：破坏性变更——命令去掉 project/adapter 参数，
-> 旧 `get|set|clear <project-id>` 形态被移除）。本格交付在候选分支上完成，**schema v34 只含 Runtime 全局容量这一半**；
-> 同版本的全局暂停（`scheduler control *`）尚未实现，本节不描述它。
+> 旧 `get|set|clear <project-id>` 形态被移除）；§14 的 `scheduler control` 一节由 **FOUNDATION-097** 新增
+> （同一个 schema v34 的暂停半边，两半已合并在同一次集成里）。
 > 同一事实还有一个设置面拼写：`settings concurrency get|set --limit|reset`（见 §19），它发的是同一条 Runtime 命令。
 > §7 的 `session handoff terminal resize` 一节由 FOUNDATION-083 校对（ADR-0054）。
 > §3 的 `project inspect`/`project trust` 段、§1 `open` 的失败码、§4 的 `task run` 与 `task depends` 两节由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目的常态路径不再出现 `DEV_REPO_REQUIRED`）；其余段落沿用 FOUNDATION-091 的校对基线。
@@ -48,9 +49,11 @@ bun run codeestra <group> [<action>] [<argument>…] [--flag …]
 | `0` | 成功。注意：某些命令的成功是「已受理」而不是「已完成」（见各命令说明） |
 | `1` | 拒绝或失败（含 `RECOVERY_REQUIRED` 这类需要人处理的状态） |
 | `2` | **用法错误**：参数个数/取值不合法、未知 flag、缺少必填 flag（`usage()` 与个别显式 `process.exit(2)`） |
-| `3` | **等待**（调度冲突/容量等待、draining、`promotion promote` 的「已推送、等待拉取」）或**没什么可做**（reclaim 计划/执行没有可回收项） |
+| `3` | **等待**（调度冲突/容量等待、Runtime 全局暂停 `SCHEDULER_GLOBALLY_PAUSED`、draining、`promotion promote` 的「已推送、等待拉取」）或**没什么可做**（reclaim 计划/执行没有可回收项） |
 
 `3` 从不表示 `BLOCKED`：`BLOCKED` 只表示**依赖未满足**，它属于「需要处理」而不是「等一等」。
+`3` 也从不表示「部分冻结」：`scheduler control pause` 只有收口成完整 `PAUSED`（或已幂等处于目标状态）才退 `0`，
+任何目标不可核验都退 `1` 并给出稳定码——见 §14。
 `3` 也从不表示「已完成」：提升在「已推送、等待拉取」时退 `3`，该状态下没有任何重启记账。
 
 ### 0.3 环境变量
@@ -849,8 +852,9 @@ bun run codeestra scheduler capacity reset [--json]
   项目过滤的 `events subscribe` **同时**收到该项目事件与这类全局事件，游标仍按同一 sequence 前进。
 - 同一个上限也可以从**设置面**调整：`settings concurrency get|set --limit <n>|reset`（见 §19），
   它发的是同一条命令——不存在第二个状态源。
-- 全局暂停（`SCHEDULER_GLOBALLY_PAUSED`、`scheduler control *`）属于 ADR-0061 的另一半，**尚未实现**；
-  `get` 的 `pauseState` 因此只可能是 `RUNNING`。
+- 全局暂停（`SCHEDULER_GLOBALLY_PAUSED`、`scheduler control *`）属于 ADR-0061 的另一半，**已实现**（FOUNDATION-097，
+  见本节下方 `scheduler control`）：`get` 的 `pauseState` 因此可能是 `RUNNING`/`PAUSING`/`PAUSED`/`RESUMING`/
+  `RECOVERY_REQUIRED`，容量判断之前会先返回 `SCHEDULER_GLOBALLY_PAUSED`（exit 3）。
 
 ### `scheduler reservations`
 
@@ -882,6 +886,61 @@ bun run codeestra scheduler reservations reconcile <project-id> [--json]
   （`RECOVERY_REQUIRED`）。**不发信号、不删资源。** 只有出现 `FAILED` 结果才是退出码 `1`。
 
 > **已由 FOUNDATION-074 校准**：`scheduler reservations get` 现已在 `usage()` 里（本指南的「其他只在源码里出现的东西」行也已更新）。
+
+### `scheduler control`（Runtime 全局负载控制，FOUNDATION-097 / ADR-0061 D09）
+
+```sh
+bun run codeestra scheduler control status    [--json]
+bun run codeestra scheduler control pause     [--json]
+bun run codeestra scheduler control resume    [--json]
+bun run codeestra scheduler control reconcile [--json]
+```
+
+这四个命令**不属于任何 Project**（缺 `projectId`，事件以 `project_id = NULL` 写入）：它们控制的屏障是整台机器的。
+FULL 与 STRICT **都是零确认**——暂停按钮/命令本身就是显式用户命令，不叠第二次确认。
+
+- 状态机：`RUNNING → PAUSING → PAUSED → RESUMING → RUNNING`；任何身份/停止/恢复事实不可核验 → `RECOVERY_REQUIRED`，
+  **启动屏障保持**，已冻结的目标保持冻结。**部分成功永远不会被报成 `PAUSED`。**
+- `status` 返回状态、epoch、版本、请求/结算时间、actor、每个目标的 project/task/execution/session/incarnation
+  与 pid + start token + 观测结论，以及平台是否具备 POSIX 语义。`capacity` 字段恒为 `null`（全局容量数字属于
+  `scheduler capacity get` 的契约，不在这里发明）。
+- `pause` 顺序固定：**先提交屏障**（`PAUSING` + 递增 epoch + 固定目标清单）→ 逐目标**重验** `pid + start token + incarnation`
+  → 只向 Adapter 声明并经实测为「模型请求发起者」的 **Provider 主进程发 `SIGSTOP`**（工具子进程/进程组**不**收信号）
+  → **复读**进程状态，只有确实 stopped 才记 `STOPPED`。
+- `resume` 只从 `PAUSED` 或可处置的 `RECOVERY_REQUIRED` 进入 `RESUMING`；逐目标重验身份与 stopped 事实，
+  **只对完全匹配的主进程发 `SIGCONT`**；已退出的目标**不复活**；PID 复用或身份不可读 → 不发信号并进入 `RECOVERY_REQUIRED`。
+  全部收口后写 `RUNNING`，随后触发一次事件型调度 pass，并投递暂停期间已耐久记录、仍然有效的 answer/guidance。
+- `reconcile` **只观察**：不发 `SIGSTOP`/`SIGCONT`/终止信号；可以把「已证明退出」的目标收口，但**不会**把无法核验的目标猜成已停止，
+  也不会把 `RECOVERY_REQUIRED` 提升成 `PAUSED`。若 `PAUSING` 且所有目标已解决，它会据此结算。
+  它**只记录事实**：一次什么也没改变的观察**不写事件**（事件只说发生过的事），观察结果看 `status`。
+- **不改业务状态**：`Task.state`/`Execution.state`/`AgentSession.state`、slot、workspace、writer lease 都不变；
+  被冻结的 Task 仍占用全局容量。单 Task 的 `task pause`/`task resume` 仍走 ADR-0016 的协作停止路径。
+- 暂停期间**继续可用**：只读查询、事件订阅、容量/控制查询、记录用户输入、`task cancel/recover/purge`、`runtime stop`，
+  以及不调用模型的 Git/验证/集成操作。**延后**：新 Execution/Session/successor、answer/guidance 的实际投递、
+  任何可能引发下一轮模型调用的写入（正文可先耐久记录）。
+- 退出码：`0` = 达到完整稳定状态或已幂等处于目标状态；`1` = 任何目标不可核验/平台或 Adapter 不支持/上一次变更未收口
+  （**不用 `3` 掩盖部分冻结**）；`3` 只用于「Task 因全局暂停而等待启动」（`task run`/`task resume`/`task retry`/
+  `scheduler reservations acquire` 都会以 `SCHEDULER_GLOBALLY_PAUSED` 退 `3`）。
+- 稳定码：
+
+  | 码 | 含义 |
+  |---|---|
+  | `SCHEDULER_GLOBALLY_PAUSED` | 屏障生效，Task/获取槽位**等待**（exit 3，**不是** `BLOCKED`） |
+  | `GLOBAL_PAUSE_UNSUPPORTED` | 平台没有 POSIX 停止/继续语义，或该 Adapter 的 `providerProcessSuspension` 不是 `SUPPORTED` |
+  | `GLOBAL_PAUSE_IDENTITY_UNVERIFIABLE` | 目标的进程身份读不出来（未发任何信号） |
+  | `GLOBAL_PAUSE_TARGET_NOT_STOPPED` | 发了 `SIGSTOP`，但复读没有证实它停止 |
+  | `GLOBAL_RESUME_TARGET_CHANGED` | 目标的 pid 已属于别的进程（PID 复用）或已不是记录的 stopped 主进程（未发 `SIGCONT`） |
+  | `GLOBAL_PAUSE_RECOVERY_REQUIRED` | 至少一个目标无法收口，屏障保持 |
+  | `GLOBAL_CONTROL_IN_PROGRESS` | 上一次状态变更尚未收口（`PAUSING`/`RESUMING` 中），没有开始第二次变更 |
+
+- 事件：`SchedulerGlobalPauseRequested`、`SchedulerGlobalPaused`、`SchedulerGlobalResumeRequested`、
+  `SchedulerGlobalResumed`、`SchedulerGlobalControlRecoveryRequired`。**`Requested` ≠ `Paused`**，只写已发生的事实；
+  进程身份与逐目标结果在 payload 与 `runtime_pause_targets` 里，**正文不进事件**。
+- 重启语义：控制记录与目标**持久化**；Runtime 启动在第一次 tick/Adapter start/投递**之前**读取它，
+  状态不是 `RUNNING` 就先建立屏障，**不自动 `SIGCONT`、不自动 kill** 旧 boot 的冻结进程；
+  `runtime stop` **不清除**暂停状态，下次启动仍是暂停态直到显式 `resume`。
+- **诚实边界**：暂停**不取消**已发出的模型请求（可能已在服务端完成并计费）；工具子进程不会收到 Codeestra 的暂停/终止信号，
+  但 Provider 主进程停止读管道时大输出工具可能因 OS 管道背压阻塞；第三方插件、MCP daemon 或无法证明归属的外部进程**不在保证内**。
 
 ---
 

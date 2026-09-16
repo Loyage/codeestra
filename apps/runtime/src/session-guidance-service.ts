@@ -67,6 +67,12 @@ export interface SessionGuidanceServiceOptions {
    * Task that has guidance instead of starting it with less input than the record says (ADR-0057).
    */
   readonly runtimeHome: string | undefined;
+  /**
+   * Whether a delivery to a running provider is allowed right now (ADR-0061 D08). When the Runtime's
+   * global barrier is up, a guidance message is still recorded durably, but it is not handed to the
+   * provider, because that could drive the next model request. Absent means "always allowed".
+   */
+  readonly deliveryAllowed?: () => boolean;
   /** How long the provider channel may take to accept the message before it is a recorded timeout. */
   readonly deliveryDeadlineMs?: number;
   readonly now?: () => number;
@@ -109,6 +115,7 @@ export class SessionGuidanceService {
   readonly #storage: Phase1Database;
   readonly #registry: AdapterRegistry;
   readonly #runtimeHome: string | undefined;
+  readonly #deliveryAllowed: (() => boolean) | null;
   readonly #deliveryDeadlineMs: number;
   readonly #now: () => number;
   readonly #randomUUID: () => string;
@@ -118,6 +125,7 @@ export class SessionGuidanceService {
     this.#storage = options.storage;
     this.#registry = options.registry;
     this.#runtimeHome = options.runtimeHome;
+    this.#deliveryAllowed = options.deliveryAllowed ?? null;
     this.#deliveryDeadlineMs = options.deliveryDeadlineMs ?? 15_000;
     this.#now = options.now ?? Date.now;
     this.#randomUUID = options.randomUUID ?? (() => crypto.randomUUID());
@@ -170,6 +178,22 @@ export class SessionGuidanceService {
           ? null : concluded.errorCode ?? concluded.state,
         detail: concluded?.detail ?? 'No Execution was holding this Task, so the guidance is'
           + ' recorded and will be handed to the next Execution that starts',
+        modelAcknowledgement: 'UNSUPPORTED',
+      };
+    }
+    if (this.#deliveryAllowed !== null && !this.#deliveryAllowed()) {
+      // ADR-0061 D08: the body is already durable and the attempt row is open; what is deferred is
+      // handing it to the provider. Saying `RECORDED` is the honest answer — nothing was delivered,
+      // and nothing was lost. `deliverDeferred()` concludes the open attempt after the barrier is
+      // down, through the same ledger.
+      return {
+        guidance: toGuidanceView(current),
+        taskState: task?.state ?? 'UNKNOWN',
+        taskVersion: created.taskVersion,
+        outcome: 'RECORDED',
+        code: 'SCHEDULER_GLOBALLY_PAUSED',
+        detail: 'The Runtime is globally paused, so the guidance is recorded but not handed to the'
+          + ' provider yet; the open delivery attempt is concluded after `scheduler control resume`',
         modelAcknowledgement: 'UNSUPPORTED',
       };
     }
@@ -271,6 +295,54 @@ export class SessionGuidanceService {
    * moment*, and a capability that is not `SUPPORTED`, a missing port method, or a conversation that
    * is no longer live are all recorded as the facts they are — never as a delivery.
    */
+  /**
+   * The post-resume pass of ADR-0061 D06 step 5 for guidance: concludes every delivery attempt that
+   * is still open because the global barrier deferred it.
+   *
+   * It reuses the ledger rather than inventing a queue: an open (`IN_FLIGHT`) attempt whose Session
+   * this Runtime still holds is exactly the set of messages that were recorded but not handed over.
+   * Each one goes through `#attemptDelivery`, which is capability-gated and idempotent — a delivered
+   * attempt is refused by the ledger, so a resume that races a projection cannot deliver twice.
+   */
+  async deliverDeferred(): Promise<readonly {
+    readonly guidanceId: string;
+    readonly outcome: string;
+    readonly code: string | null;
+  }[]> {
+    if (this.#deliveryAllowed !== null && !this.#deliveryAllowed()) return [];
+    const results = [];
+    for (const project of this.#storage.listTrustedProjects()) {
+      for (const task of this.#storage.listTasks(project.id)) {
+        for (const record of this.#storage.listSessionGuidance(project.id, task.id)) {
+          const open = record.attempts.find((attempt) => attempt.state === 'IN_FLIGHT') ?? null;
+          if (open === null) continue;
+          const delivered = await this.#attemptDelivery({
+            projectId: project.id,
+            taskId: task.id,
+            guidanceId: record.id,
+            attemptId: open.id,
+            commandId: deriveCommandId(open.id, 'guidance-deferred-delivery'),
+            message: record.body,
+          }).catch((error: unknown) => {
+            this.#logger('a deferred session guidance delivery could not be attempted', {
+              guidanceId: record.id,
+              reason: error instanceof Error ? error.message : String(error),
+            });
+            return null;
+          });
+          if (delivered === null) continue;
+          const attempt = delivered.attempts.at(-1) ?? null;
+          results.push({
+            guidanceId: record.id,
+            outcome: attempt?.state ?? 'FAILED',
+            code: attempt?.errorCode ?? null,
+          });
+        }
+      }
+    }
+    return results;
+  }
+
   async #attemptDelivery(input: {
     readonly projectId: string;
     readonly taskId: string;

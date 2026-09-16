@@ -317,3 +317,55 @@ USER PROMPT: Codeestra: this execution was paused and has now resumed (revision 
 - **未验证**：多工具批次下的 interrupt 行为；`item/fileChange/requestApproval` 的真实触发（本次只实测了 command 审批）；`item/permissions/requestApproval` 的粒度授权语义；`mcpServer/elicitation/request`；Windows；Codex 版本升级后的协议兼容（app-server 标注为 experimental）；`--enable default_mode_request_user_input` 在后续版本中的可用性。
 - **不支持**：pause/resume、revision ACK、attach 到 live app-server 或 TUI、Runtime 重启后重接 live 进程、完全受控启动、interrupt 后工具静止保证。
 - **不做**：使用 `dangerously-bypass-approvals-and-sandbox` 或 `--dangerously-bypass-hook-trust`（两者都绕过本机策略，不在 Codeestra 的控制范围内）；不修改用户 `~/.codex` 配置或凭据。
+
+## 7. Provider 进程冻结（ADR-0061，FOUNDATION-097 补测）
+
+状态：**部分实测，能力仍为 `REQUIRES_VALIDATION`**。ADR-0061 需要证明「哪个受控进程是模型请求发起者，
+以及冻结它之后不再产生下一次模型请求」。本格只完成了**进程归属的一半**：模型那一半被账号状态挡住了。
+
+### 7.1 已实测：受控 app-server 子进程与它的后代
+
+探针（已入库）：`docs/spikes/global-freeze/codex-freeze-probe.ts`（发起真实 turn）与本节引用的一次结构观测
+（`codex app-server --stdio` → `initialize` → `thread/start` → 12 秒后读真实进程表）。spike 的临时目录
+（`/tmp/ce-glc2/…`）已在交付收尾时按要求清理；下方逐字引用关键原始输出行，探针可复跑。实测环境：本机 `codex` **0.154.0**
+（不是本文件首轮的 0.151.0），`codex login status` → `Logged in using ChatGPT`，未修改 `~/.codex`。
+
+```text
+### app-server pid 90499
+### descendants of the app-server child: 3
+  90926 90499 90926 S  …/cua_node/bin/node …/.codex/plugins/cache/openai-bundled/unified-computer-use/…/launch.mjs
+  90927 90499 90927 S  …/cua_node/bin/node_repl
+  90971 90926 90926 S  …/cua_node/bin/node_repl
+```
+
+事实：
+
+- 受控启动产生的 `codex app-server --stdio` 子进程是**唯一**由 Adapter 持有 stdio 的 provider 主进程，
+  这一点与 ADR-0029 的实现一致（`CodexAdapter` 启动时记录它的 `{pid, startToken}`）。
+- 该子进程会自行拉起**第三方插件/MCP 进程**作为自己的后代（上表三个 `node`/`node_repl`，各自独立 process group）。
+  这既说明「工具链进程是主进程的后代」在结构上成立，也说明 Codex 上有**Codeestra 无法证明归属的外部进程**——
+  ADR-0061 的保证对它们不适用，本文件 §1/§6 关于「app-server 无法排除用户配置」的结论在 0.154.0 上依然成立。
+
+### 7.2 未能实测：冻结后的「没有下一次模型请求」
+
+同一个探针用真实 `turn/start` 驱动了一次真实 turn（thread 与 turn id 都成功返回，`userMessage` 也落库），
+但模型请求本身失败：
+
+```text
+[notify] error {"error":{"message":"Reconnecting... 5/5", … "additionalDetails":"request timed out"}}
+[notify] error {"error":{"message":"You've hit your usage limit. Upgrade to Pro … try again at Sep 19th, 2026
+  4:08 PM.","codexErrorInfo":"usageLimitExceeded"},"willRetry":false}
+[notify] turn/completed {… "status":"failed" …}
+```
+
+本机 ChatGPT 账号在测量窗口内已用尽额度（`account/rateLimits/updated` 报 `credits.balance: "0"`），
+因此**没有**任何工具被真实执行：探针的「第一次 bash 工具」从未出现，`codex app-server` 上也没有可
+冻结的正在运行的工具子进程。没有这一步，就不能声称「冻结后不再产生下一次模型请求」——
+
+**结论：`codexProviderProcessSuspension` 保持 `REQUIRES_VALIDATION`**（`packages/agent-adapters/src/codex-adapter.ts`）。
+它与「本格想用」无关：进程归属的一半有证据，模型请求那一半没有。
+
+补齐这一格所需的最少步骤（恢复额度后即可复跑）：`bun run docs/spikes/global-freeze/codex-freeze-probe.ts
+/tmp/ce-glc2/codex-freeze`，期望看到与 Pi 相同的判据（第一次 bash 工具出现 → 只对 app-server 主进程
+`SIGSTOP` → 工具继续、第二个 marker 不出现 → `SIGCONT` 后出现）。注意 0.154.0 要求显式 `model`
+（本文件 §0 记录的默认模型被服务端拒绝问题在 0.154.0 上仍需要显式指定）。

@@ -4,7 +4,7 @@ import { basename, join, resolve } from 'node:path';
 import { devBranchRef, impactPolicyPath, runtimeRequestSchema, uiSettingKeys,
   validateQuestionnaireAnswer,
   questionnairePromptSchema,
-  type RuntimeRequest, type RuntimeResponse,
+  type RuntimePauseStateView, type RuntimeRequest, type RuntimeResponse,
   type RuntimeStreamFrame } from '@codeestra/contracts';
 import { inspectRepository, listRemoteRefsContainingCommit, readLocalRefCommit } from '@codeestra/git';
 import {
@@ -30,7 +30,7 @@ import {
   detectAgentPlugins,
   piProviderConfigDirectory,
 } from './agent-plugin-detection-service.js';
-import { declaredPluginSelectionSupport, inspectPiPluginPath } from '@codeestra/agent-adapters';
+import { declaredProviderProcessSuspension, declaredPluginSelectionSupport, inspectPiPluginPath } from '@codeestra/agent-adapters';
 import { agentPluginKinds, agentPluginSelectionSchema,
   type AgentPluginSelection } from '@codeestra/contracts';
 import { AgentRuntimeCoordinator, deriveCommandId } from './agent-runtime-service.js';
@@ -65,6 +65,7 @@ import {
   resetRuntimeCapacity,
   setRuntimeCapacity,
 } from './capacity-service.js';
+import { RuntimeGlobalControlService, RuntimeControlMutex } from './runtime-control-service.js';
 import { ScheduleService } from './schedule-service.js';
 import { SlotReservationService } from './slot-reservation-service.js';
 import { prepareReservedWorkspace } from './workspace-service.js';
@@ -222,10 +223,45 @@ const proseQuestionAttentionSettings = () => ({
 });
 const storage = new Phase1Database(join(home, 'runtime.sqlite'));
 const registry = createAdapterRegistry({ runtimeHome: home, environment: Bun.env });
+/**
+ * The Runtime global control plane (FOUNDATION-097 / ADR-0061). It is created before anything that
+ * can start a provider or deliver to one, because the barrier it publishes has to be observable from
+ * the first start of this boot. Its mutex is the section shared with the provider-start paths.
+ */
+const controlMutex = new RuntimeControlMutex();
+// A function declaration, not a `const`: the control service is constructed below and its
+// `afterResume` hook has to call the same scheduling/delivery pass the rest of the Runtime uses,
+// which is only assembled after it.
+let deliverAfterResume: () => Promise<void> = async () => {};
+const globalControl = new RuntimeGlobalControlService({
+  storage,
+  // The Adapter's own declaration, never a probe: a pause must not claim an Adapter is unsupported
+  // merely because its provider binary cannot be started at this moment.
+  adapterSupport: () => declaredProviderProcessSuspension,
+  mutex: controlMutex,
+  logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
+  afterResume: () => deliverAfterResume(),
+});
+/**
+ * The startup read of the persisted barrier (ADR-0061 D07). It happens here — before the reconciles
+ * below, before the first scheduling pass and before any Adapter can be started — so a barrier left
+ * by an earlier boot is in force from the first instant of this one. Nothing is signalled: a provider
+ * a previous boot froze is left exactly as it is, never continued and never killed.
+ */
+const startupControl = globalControl.startupBarrier();
+if (startupControl.blocked) {
+  console.error(`[runtime] the global control barrier is ${startupControl.state}`
+    + ` (pause epoch ${startupControl.pauseEpoch}, ${startupControl.targetCount} recorded target(s));`
+    + ' no scheduling, Agent start or Provider delivery happens until `scheduler control resume`'
+    + ' (or `scheduler control reconcile` first, if the recorded identities cannot be verified)');
+}
 const coordinator = new AgentRuntimeCoordinator({
   storage,
   registry,
   runtimeHome: home,
+  // The provider-start path reads the persisted barrier at the instant it is about to spawn, inside
+  // the section shared with `scheduler control pause` (ADR-0061 D05 step 1).
+  control: globalControl,
   // The Runtime generation that owns a slot reservation may only start its Execution; the
   // scheduling engine passes the same boot id it recorded on the reservation.
   bootId,
@@ -317,6 +353,8 @@ const sessionGuidance = new SessionGuidanceService({
   storage,
   registry,
   runtimeHome: home,
+  // Guidance recorded while the global barrier is up is durable but not handed over (ADR-0061 D08).
+  deliveryAllowed: () => globalControl.deliveryAllowed(),
   logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
 });
 /**
@@ -328,15 +366,30 @@ const drain = new RuntimeDrainState();
 /**
  * The persistent global control state a capacity query reports alongside its numbers (ADR-0061 D04).
  *
- * Only the **capacity** half of ADR-0061 lives here. This Runtime has no pause barrier table yet, so
- * "there is no barrier" is the only fact it can honestly report, and `RUNNING` is exactly that: it is
- * not an optimistic default standing in for a state nobody wrote down. The pause half owns
- * `runtime_pause_control` and replaces this provider with a read of that row plus the launch barrier
- * — the seam is one function so the two halves cannot drift into two different answers about the same
- * fact.
+ * The capacity report carries the pause state, and it is read from the one control row the pause half
+ * owns (`runtime_pause_control`) — never from a second copy. Both halves were integrated into one
+ * schema version and there is one answer to "is the Runtime paused": the control service's. The
+ * seam the capacity half left here is filled by that read, so the two halves cannot drift apart.
  */
-const globalPauseState = (): { readonly state: 'RUNNING'; readonly pauseEpoch: 0;
-  readonly detail: null } => ({ state: 'RUNNING', pauseEpoch: 0, detail: null });
+const globalPauseState = (): RuntimePauseStateView => {
+  const control = storage.getRuntimePauseControl();
+  // `detail` in the capacity report is one sentence, never the structured control detail: the report
+  // says *what* the state is, `scheduler control status` is where the per-target evidence lives.
+  return {
+    state: control.state,
+    pauseEpoch: control.pauseEpoch,
+    detail: control.detail === null ? null : summarizePauseDetail(control.detail),
+  };
+};
+
+/** One readable sentence for the capacity report's `pauseState.detail`; never the raw object. */
+function summarizePauseDetail(detail: unknown): string {
+  if (typeof detail !== 'object' || detail === null) return 'the Runtime global control state';
+  const record = detail as { readonly stage?: unknown; readonly code?: unknown };
+  const stage = typeof record.stage === 'string' ? record.stage : null;
+  const code = typeof record.code === 'string' ? record.code : null;
+  return `${stage === null ? 'global control' : stage}${code === null ? '' : `: ${code}`}`;
+}
 const slotReservations = new SlotReservationService({
   storage,
   bootId,
@@ -345,6 +398,10 @@ const slotReservations = new SlotReservationService({
   // generation compares the same token before it believes a recorded holder is gone.
   startToken: await readProcessStartToken(process.pid),
   draining: () => drain.state(),
+  // A `reservations acquire` while the host is paused is a wait on the barrier, checked inside the
+  // same write transaction that would otherwise grant the slot (ADR-0061 D05 step 1).
+  barrier: () => ({ blocked: globalControl.barrier().blocked,
+    state: globalControl.barrier().state }),
   logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
 });
 /**
@@ -393,6 +450,8 @@ const schedule = new ScheduleService({
     return { ...stopped, detail: `${stopped.detail} (requested: ${reason})` };
   },
   draining: () => drain.state(),
+  // The global barrier is judged before every other reason a Task might not run (ADR-0061 D08).
+  control: () => ({ blocked: globalControl.barrier().blocked, state: globalControl.barrier().state }),
   // The Adapter a scheduled start uses when nothing else is said is the same default the CLI has:
   // `pi`, or the first registered Adapter when Pi is not there.
   defaultAdapterId: 'pi',
@@ -529,6 +588,29 @@ try {
     error instanceof Error ? error.message : String(error));
 }
 schedule.startPeriodicTicks(scheduleTickMs);
+/**
+ * What `scheduler control resume` does once every target is verified resumed (ADR-0061 D06 step 5):
+ * one event-driven scheduling pass, then the deliveries that were durably recorded while the barrier
+ * was up. Both are the *existing* idempotent paths — the pass re-runs the same judgements, and each
+ * delivery re-reads its own durable record — so a resume cannot start or deliver anything twice.
+ */
+deliverAfterResume = async () => {
+  try {
+    await schedule.tick('GLOBAL_RESUME');
+  } catch (error) {
+    console.error('[runtime] the post-resume scheduling pass failed',
+      error instanceof Error ? error.message : String(error));
+  }
+  for (const result of await coordinator.deliverPendingAnswers()) {
+    console.error(`[runtime] post-resume answer ${result.operationId}: ${result.delivery}`
+      + `${result.code === null ? '' : ` (${result.code})`}`);
+  }
+  for (const result of await sessionGuidance.deliverDeferred()) {
+    console.error(`[runtime] post-resume guidance ${result.guidanceId}: ${result.outcome}`
+      + `${result.code === null ? '' : ` (${result.code})`}`);
+  }
+};
+
 
 let listener: ReturnType<typeof Bun.listen<SocketState>>;
 
@@ -1757,6 +1839,39 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         commandId: request.commandId,
         actor: 'local-user',
       }));
+    /**
+     * Runtime global load control (FOUNDATION-097 / ADR-0061 D09). These four commands belong to no
+     * Project: the barrier they touch is host-wide, so none of them takes a `projectId`.
+     *
+     * `status` and `reconcile` only observe and record. `pause`/`resume` are the explicit user
+     * command themselves — zero confirmation in FULL and STRICT, exactly one state transition each,
+     * and a partial result is returned as a *refusal* with its own stable code (exit 1), never as a
+     * tidy `PAUSED`.
+     */
+    case 'scheduler.control.status':
+      return success(request.requestId, globalControl.status());
+    case 'scheduler.control.pause': {
+      const outcome = await globalControl.pause({
+        commandId: request.commandId, actor: 'local-user',
+      });
+      if (outcome.code !== null) {
+        // The state and its event are already recorded; the refusal is reported as a failure so a
+        // script sees a non-zero exit and the stable code, not a success with a warning inside.
+        throw new RuntimeCommandError(outcome.code, outcome.detail);
+      }
+      return success(request.requestId, outcome.view);
+    }
+    case 'scheduler.control.resume': {
+      const outcome = await globalControl.resume({
+        commandId: request.commandId, actor: 'local-user',
+      });
+      if (outcome.code !== null) {
+        throw new RuntimeCommandError(outcome.code, outcome.detail);
+      }
+      return success(request.requestId, outcome.view);
+    }
+    case 'scheduler.control.reconcile':
+      return success(request.requestId, (await globalControl.reconcile({ actor: 'local-user' })).view);
     case 'promotion.prepare':
       return success(request.requestId, await prepareStablePromotion({
         storage,

@@ -1915,13 +1915,15 @@ export function resolveMigratedGlobalLimit(
 }
 
 /**
- * Runtime-wide capacity, global event facts and command receipts (FOUNDATION-096, schema v34).
+ * Schema v34, capacity half (FOUNDATION-096 / ADR-0061 D01–D03): one concurrency limit for the whole
+ * Runtime, the retirement of the two project-scoped configuration tables, and a
+ * `runtime_command_receipts` for commands that belong to no Project.
  *
- * This is the *first half* of ADR-0061: one concurrency limit for the whole Runtime, the retirement
- * of the two project-scoped configuration tables, and the ability to write an event that belongs to
- * no Project. Global pause (`runtime_pause_control`, `runtime_pause_targets`) is the other half and
- * adds its own tables in this same version number; this script owns the two tables below, the
- * `domain_events` rebuild, and nothing else.
+ * **This is one half of one schema version.** The pause half
+ * (`runtimePauseControlMigration`, FOUNDATION-097) appends its own tables in the same version number,
+ * and the two appends were merged into a single `if (version < 34)` step when the branches were
+ * integrated: the `domain_events` rebuild and `runtime_command_receipts` exist **once** in this file,
+ * owned here, and the pause half neither repeats them nor depends on their order.
  *
  * - `runtime_capacity_settings` is a singleton. **No row means "never set explicitly"**, so the
  *   reader returns the documented default 2 and reports `limitSource = 'DEFAULT'`; a row exists only
@@ -1930,27 +1932,29 @@ export function resolveMigratedGlobalLimit(
  * - `runtime_command_receipts` gives a command that belongs to no Project the same idempotency a
  *   project command gets from `command_receipts`: the same command id replays the recorded result,
  *   and the same key with a different payload is refused. A global command cannot be stored in
- *   `command_receipts` because that table carries a `NOT NULL project_id`.
+ *   `command_receipts` because that table carries a `NOT NULL project_id`. Both halves' commands share
+ *   this one table.
  * - `domain_events.project_id` becomes nullable, because a Runtime global fact (a global capacity
- *   change, and later a global pause) must not be disguised as some Project's event. SQLite cannot
- *   relax `NOT NULL` in place, so the table is rebuilt with the documented create → copy → drop →
- *   rename procedure while foreign keys are off; `NULL` is the only change, every other column,
- *   index and row is copied as it was. `event_deliveries` keeps resolving because the old table is
- *   dropped *before* the new one takes the name over.
+ *   change, and a global pause) must not be disguised as some Project's event. SQLite cannot relax
+ *   `NOT NULL` in place, so the table is rebuilt with the documented create → copy → drop → rename
+ *   procedure while foreign keys are off; `NULL` is the only change, every other column, index and
+ *   row is copied as it was. `event_deliveries` keeps resolving because the old table is dropped
+ *   *before* the new one takes the name over.
  * - The two retired configuration tables are dropped **after** the migration runner has read every
  *   explicit value out of them (the runner computes the minimum, refuses values outside 1–16, and
  *   writes the singleton inside the same transaction). Dropping them first — or losing a value to a
  *   swallowed `exec()` error — is exactly what the row-count guard in `migrate()` is there to catch.
  *
  * Bun's `Database.exec()` swallows a step-time error inside a multi-statement script and keeps
- * going, so the runner compares `domain_events` and `event_deliveries` row counts around this step
- * and `PRAGMA foreign_key_check` after it. Schema version 34 is this step's own number: 25 is
- * FOUNDATION-065/ADR-0039, 26 is FOUNDATION-067/ADR-0041, 27 is FOUNDATION-071/ADR-0044, 28 is
- * FOUNDATION-075/ADR-0046, 29 is FOUNDATION-077/ADR-0052, 30 is FOUNDATION-081/ADR-0053, 31 is
- * FOUNDATION-088/ADR-0057, 32 is FOUNDATION-091/ADR-0059, 33 is FOUNDATION-093/ADR-0060, and 16
- * stays permanently unused. A database may already be stamped 17–33 and would skip a later
- * `version < 16` step, so the runner only appends `if (version < 34)` after the existing ascending
- * steps and never inserts an earlier number.
+ * going, so the runner compares `domain_events` and `event_deliveries` row counts around this step,
+ * asserts the end state the step promised (a nullable `domain_events.project_id`, the pause
+ * singleton) and runs `PRAGMA foreign_key_check` after it. Schema version 34 is this step's own
+ * number: 25 is FOUNDATION-065/ADR-0039, 26 is FOUNDATION-067/ADR-0041, 27 is FOUNDATION-071/ADR-0044,
+ * 28 is FOUNDATION-075/ADR-0046, 29 is FOUNDATION-077/ADR-0052, 30 is FOUNDATION-081/ADR-0053, 31 is
+ * FOUNDATION-088/ADR-0057, 32 is FOUNDATION-091/ADR-0059, 33 is FOUNDATION-093/ADR-0060, and 16 stays
+ * permanently unused. A database may already be stamped 17–33 and would skip a later `version < 16`
+ * step, so the runner only appends `if (version < 34)` after the existing ascending steps and never
+ * inserts an earlier number.
  */
 export const runtimeGlobalCapacityMigration = `
 CREATE TABLE runtime_capacity_settings (
@@ -1992,6 +1996,65 @@ CREATE INDEX event_aggregate ON domain_events(aggregate_type,aggregate_id,aggreg
 
 DROP TABLE project_adapter_slot_limits;
 DROP TABLE project_capacity_limits;
+`;
+
+/**
+ * Schema v34, pause half (FOUNDATION-097 / ADR-0061 D10): the persistent Runtime global control state
+ * and its per-incarnation freeze targets.
+ *
+ * These are **control-plane** facts, not Task business state: nothing here changes `tasks.state`,
+ * `executions.state` or `agent_sessions.state`, and the five business IDs on a target are a
+ * deliberate identity *snapshot* with no foreign key. `task purge` deletes the business aggregates,
+ * yet this Runtime must still be able to say which process it froze in this epoch and what happened
+ * to it (ADR-0058 keeps the "prove the provider is stopped first" rule on the purge path itself).
+ *
+ * The singleton row is written here instead of being created lazily by the Runtime: a Runtime that
+ * starts with no reader-visible control row would have to invent `RUNNING` on read, and an invented
+ * default is exactly the kind of "no row means continue" that ADR-0061 D07 forbids. `pause_epoch = 0`
+ * with `state = 'RUNNING'` is the only state a fresh database can be in.
+ *
+ * `runtime_command_receipts` is **not** created here: the capacity half owns it, both halves' global
+ * commands share it, and this version is one step.
+ */
+export const runtimePauseControlMigration = `
+CREATE TABLE runtime_pause_control (
+  singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+  state TEXT NOT NULL CHECK(state IN
+    ('RUNNING','PAUSING','PAUSED','RESUMING','RECOVERY_REQUIRED')),
+  pause_epoch INTEGER NOT NULL CHECK(pause_epoch >= 0),
+  version INTEGER NOT NULL CHECK(version >= 0),
+  requested_at INTEGER,
+  requested_by TEXT,
+  settled_at INTEGER,
+  detail_json TEXT CHECK(detail_json IS NULL OR json_valid(detail_json))
+) STRICT;
+
+CREATE TABLE runtime_pause_targets (
+  id TEXT PRIMARY KEY,
+  pause_epoch INTEGER NOT NULL CHECK(pause_epoch > 0),
+  -- Identity snapshots taken when the barrier was committed. Deliberately no FK: see the comment on
+  -- this migration's header. A purged Task must not be able to delete the fact that this Runtime
+  -- froze its provider process.
+  project_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  execution_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  incarnation_id TEXT NOT NULL,
+  provider_pid INTEGER NOT NULL CHECK(provider_pid > 0),
+  provider_start_token TEXT NOT NULL CHECK(length(trim(provider_start_token)) > 0),
+  state TEXT NOT NULL CHECK(state IN
+    ('PENDING','STOPPED','RESUMED','EXITED','RECOVERY_REQUIRED')),
+  observation_json TEXT NOT NULL CHECK(json_valid(observation_json)),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+  UNIQUE(pause_epoch,incarnation_id)
+) STRICT;
+CREATE INDEX runtime_pause_targets_by_epoch
+  ON runtime_pause_targets(pause_epoch,state);
+
+INSERT INTO runtime_pause_control(singleton_id,state,pause_epoch,version,requested_at,
+  requested_by,settled_at,detail_json)
+  VALUES (1,'RUNNING',0,0,NULL,NULL,NULL,NULL);
 `;
 
 export const integrationBatchTerminalStatesMigration = `

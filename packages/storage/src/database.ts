@@ -30,6 +30,8 @@ import type { AgentAnswer, CapacityWaitReason, SessionHandoffCompletedPayload,
   SlotReservationView, TakeoverFailedPayload, TakeoverReleasedPayload, TakeoverRequestedPayload,
   TakeoverSafePointReachedPayload, TerminalWriterLeaseChangedPayload } from '@codeestra/contracts';
 import { defaultConcurrencyLimit, maxConcurrencyLimit, sessionHandoffEventTypes,
+  schedulerGlobalAggregateType,
+  type SchedulerGlobalEventType, type RuntimeGlobalControlState,
   sessionHandoffStartedPayloadSchema, sessionHandoffCompletedPayloadSchema,
   takeoverFailedPayloadSchema, takeoverReleasedPayloadSchema, takeoverRequestedPayloadSchema,
   takeoverSafePointReachedPayloadSchema,
@@ -58,6 +60,7 @@ import {
   resolveMigratedGlobalLimit,
   revisionDeliveryMigration,
   runtimeGlobalCapacityMigration,
+  runtimePauseControlMigration,
   sessionGuidanceMigration,
   taskBaselineRefMigration,
   taskRevisionFeaturesMigration,
@@ -511,11 +514,11 @@ export interface StoredEventEnvelope {
   readonly eventType: string;
   readonly schemaVersion: number;
   /**
-   * The Project this fact belongs to, or `null` for a Runtime global fact (ADR-0061 D10).
+   * The Project this fact belongs to, or `null` for a Runtime-global fact (ADR-0061 D10, schema v34).
    *
    * `NULL` is not "unknown": it means the fact genuinely belongs to no Project — a global capacity
-   * change today, a global pause once that half lands — and a Project-filtered subscriber receives it
-   * *in addition to* that Project's own events, because global capacity affects every Project.
+   * change and a global pause — and a Project-filtered subscriber receives it *in addition to* that
+   * Project's own events, because a global decision affects every Project.
    */
   readonly projectId: string | null;
   readonly aggregateType: string;
@@ -1918,12 +1921,20 @@ export class Phase1Database {
         // worktree was prepared from. A pure `ADD COLUMN` on `workspaces`; a database stamped
         // 17–32 still gets it, and earlier numbers are never re-pointed.
         if (version < 33) this.sqlite.exec(taskBaselineRefMigration);
-        // Version 34 is this half of ADR-0061 (FOUNDATION-096): the single Runtime-wide capacity
-        // limit, Runtime-scoped command receipts, and a `domain_events.project_id` that may be NULL
-        // for a global fact. The other half (global pause) adds its own tables under the same
-        // version number, so the two blocks are merged into one `if (version < 34)` step at
-        // integration; this block owns the two tables below and the `domain_events` rebuild.
-        if (version < 34) this.migrateRuntimeGlobalCapacity();
+        // Version 34 is one schema version for **two** halves of ADR-0061: the Runtime-wide capacity
+        // limit with its command receipts and the nullable `domain_events.project_id`
+        // (FOUNDATION-096), and the persistent global pause state with its freeze targets
+        // (FOUNDATION-097). Both branches appended their own block under this number; the integration
+        // merged them into this single step, so a database stamped 17–33 gets all of it at once and
+        // the capacity half's `domain_events` rebuild happens exactly once.
+        //
+        // Each half keeps its own method: the capacity half owns the two new tables, the rebuild and
+        // the retirement of the legacy configuration tables, the pause half owns `runtime_pause_control`
+        // / `runtime_pause_targets` and asserts the end state of the step.
+        if (version < 34) {
+          this.migrateRuntimeGlobalCapacity();
+          this.migrateRuntimePauseControl();
+        }
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -2005,6 +2016,41 @@ export class Phase1Database {
   private countTableRows(table: 'domain_events' | 'event_deliveries'): number {
     return this.sqlite.query<{ rows: number }, []>(
       `SELECT COUNT(*) AS rows FROM ${table}`).get()?.rows ?? 0;
+  }
+
+  /**
+   * Schema v34, the pause half (FOUNDATION-097 / ADR-0061 D07/D10): the persistent Runtime global
+   * control state, its per-incarnation freeze targets, and the only pre-existing state a fresh
+   * database may be in (`RUNNING`, epoch 0).
+   *
+   * It runs in the same transaction as the capacity half and after it, because the two halves are one
+   * schema version: `domain_events` is rebuilt exactly once (by the capacity half, which owns that
+   * statement) and `runtime_command_receipts` is created exactly once (also there, because both
+   * halves' global commands share it).
+   *
+   * The end-state assertions matter as much as the DDL. Bun's `Database.exec()` swallows a step-time
+   * error inside a multi-statement script and keeps going, so a statement that failed *after* the
+   * capacity half's `DROP TABLE domain_events` would leave the row counts equal while the schema
+   * stayed half-built. These reads turn exactly that case into a loud rollback.
+   */
+  private migrateRuntimePauseControl(): void {
+    this.sqlite.exec(runtimePauseControlMigration);
+    const globalColumn = this.sqlite.query<{ name: string; notnull: number }, []>(
+      "PRAGMA table_info('domain_events')").all()
+      .find((column) => column.name === 'project_id');
+    if (globalColumn === undefined || globalColumn.notnull !== 0) {
+      throw new StorageError('INVALID_STATE',
+        'Schema v34 promised a nullable domain_events.project_id and the rebuilt table does not have'
+        + ' one; the upgrade was rolled back and nothing was changed');
+    }
+    const controlRows = this.sqlite.query<{ rows: number }, []>(
+      'SELECT COUNT(*) AS rows FROM runtime_pause_control WHERE singleton_id=1')
+      .get()?.rows ?? 0;
+    if (controlRows !== 1) {
+      throw new StorageError('INVALID_STATE',
+        'Schema v34 promised one runtime_pause_control singleton row; the upgrade was rolled back'
+        + ' and nothing was changed');
+    }
   }
 
   /** Records the explicit confirmation that established project trust, including the
@@ -4528,13 +4574,16 @@ export class Phase1Database {
     }
     return this.sqlite.query<{
       event_id: string; sequence: number; event_type: string; schema_version: number;
-      project_id: string | null;
-      aggregate_type: string; aggregate_id: string; aggregate_version: number; correlation_id: string;
+      project_id: string | null; aggregate_type: string; aggregate_id: string;
+      aggregate_version: number; correlation_id: string;
       causation_id: string | null; occurred_at: number; payload_json: string;
     }, [number, string | null, number]>(`
       SELECT event_id,sequence,event_type,schema_version,project_id,aggregate_type,aggregate_id,
         aggregate_version,correlation_id,causation_id,occurred_at,payload_json
       FROM domain_events
+      -- ADR-0061 D10: a Project-filtered reader must also receive the Runtime-global facts
+      -- (project_id IS NULL), because global capacity and global pause affect every Project. The
+      -- cursor still advances by the one shared sequence, so nothing is delivered twice.
       WHERE sequence>?1 AND (?2 IS NULL OR project_id=?2 OR project_id IS NULL)
       ORDER BY sequence LIMIT ?3
     `).all(input.sinceSequence, input.projectId ?? null, input.limit).map((row) => ({
@@ -14392,6 +14441,546 @@ export class Phase1Database {
       payload: JSON.parse(row.payload_json) as unknown,
     }));
   }
+
+  // -------------------------------------------------------------------------------------------
+  // Runtime global load control (FOUNDATION-097 / ADR-0061 D04–D10, schema v34).
+  //
+  // These are control-plane facts, not Task business state. Every write below is one immediate
+  // transaction so that "the receipt exists" and "the state moved" are the same fact, and so a
+  // crash can never leave a recorded receipt whose transition did not happen (or the reverse).
+  // The methods deliberately take *observations* and *state*, never a signal: this layer never
+  // touches a process. Process identity verification and the OS signals live in the Runtime service.
+  // -------------------------------------------------------------------------------------------
+
+  /** The singleton control row. The v34 migration always writes it, so it is never absent. */
+  getRuntimePauseControl(): RuntimePauseControlRecord {
+    const row = this.sqlite.query<{
+      state: RuntimeGlobalControlState; pause_epoch: number; version: number;
+      requested_at: number | null; requested_by: string | null; settled_at: number | null;
+      detail_json: string | null;
+    }, []>(`
+      SELECT state,pause_epoch,version,requested_at,requested_by,settled_at,detail_json
+      FROM runtime_pause_control WHERE singleton_id=1
+    `).get();
+    if (row === null || row === undefined) {
+      throw new StorageError('INVALID_STATE',
+        'The Runtime global control row is missing; the schema v34 migration always creates it');
+    }
+    return {
+      state: row.state,
+      pauseEpoch: row.pause_epoch,
+      version: row.version,
+      requestedAt: row.requested_at,
+      requestedBy: row.requested_by,
+      settledAt: row.settled_at,
+      detail: row.detail_json === null ? null : JSON.parse(row.detail_json) as unknown,
+    };
+  }
+
+  /**
+   * The targets of one pause epoch, oldest first. Absent epoch = the newest epoch that has targets,
+   * which is what `status` reports; an explicit epoch is what `resume` needs, because it must
+   * continue **the epoch it paused**, not whatever epoch is newest by the time it runs.
+   */
+  listRuntimePauseTargets(pauseEpoch?: number): readonly RuntimePauseTargetRecord[] {
+    const epoch = pauseEpoch ?? this.sqlite.query<{ pause_epoch: number | null }, []>(
+      'SELECT MAX(pause_epoch) AS pause_epoch FROM runtime_pause_targets').get()?.pause_epoch ?? 0;
+    if (epoch === 0) return Object.freeze([]);
+    return Object.freeze(this.sqlite.query<RuntimePauseTargetRow, [number]>(`
+      SELECT id,pause_epoch,project_id,task_id,execution_id,session_id,incarnation_id,provider_pid,
+        provider_start_token,state,observation_json,created_at,updated_at
+      FROM runtime_pause_targets WHERE pause_epoch=?1 ORDER BY created_at,id
+    `).all(epoch).map(mapRuntimePauseTargetRow));
+  }
+
+  /**
+   * A global command's receipt, or null when it has not run. A replayed command id with a different
+   * payload is `COMMAND_CONFLICT` — the same rule project commands already follow — because
+   * `pause`/`resume`/`reconcile` belong to no Project, so `command_receipts` (which is keyed by
+   * `project_id`) cannot hold them.
+   */
+  findRuntimeCommandReceipt(input: {
+    readonly commandId: string;
+    readonly payloadHash: string;
+  }): RuntimeCommandReceiptRecord | null {
+    const row = this.sqlite.query<{ payload_hash: string; result_json: string; created_at: number },
+      [string]>('SELECT payload_hash,result_json,created_at FROM runtime_command_receipts WHERE command_id=?1')
+      .get(input.commandId);
+    if (row === null || row === undefined) return null;
+    if (row.payload_hash !== input.payloadHash) {
+      throw new StorageError('COMMAND_CONFLICT',
+        'Command ID was already used with a different payload');
+    }
+    return { commandId: input.commandId, payloadHash: row.payload_hash,
+      result: JSON.parse(row.result_json) as unknown, createdAt: row.created_at };
+  }
+
+  /**
+   * Commits the barrier (ADR-0061 D05 step 1): from this instant the control row says `PAUSING`, the
+   * epoch has moved, and every target of that epoch is recorded as `PENDING` with the identity
+   * snapshot taken now. Callers must have verified nothing yet — the barrier comes first, which is
+   * what makes "no new start after this commit" a fact rather than a race.
+   *
+   * A replay of the same command returns the recorded receipt instead of opening a second epoch.
+   */
+  beginRuntimeGlobalPause(input: {
+    readonly commandId: string;
+    readonly payloadHash: string;
+    readonly actor: string;
+    readonly epoch: number;
+    readonly targets: readonly RuntimePauseTargetInput[];
+    readonly eventId: string;
+    readonly occurredAt: number;
+  }): RuntimeGlobalControlWrite {
+    return this.sqlite.transaction(() => {
+      const existing = this.findRuntimeCommandReceipt({
+        commandId: input.commandId, payloadHash: input.payloadHash,
+      });
+      if (existing !== null) {
+        const control = this.getRuntimePauseControl();
+        return { control, targets: this.listRuntimePauseTargets(control.pauseEpoch),
+          replayed: true };
+      }
+      const current = this.getRuntimePauseControl();
+      this.sqlite.query(`
+        UPDATE runtime_pause_control SET state='PAUSING',pause_epoch=?1,version=version+1,
+          requested_at=?2,requested_by=?3,settled_at=NULL,detail_json=?4 WHERE singleton_id=1
+      `).run(input.epoch, input.occurredAt, input.actor,
+        JSON.stringify({ stage: 'PAUSE', requestedBy: input.actor }));
+      const insert = this.sqlite.query(`
+        INSERT INTO runtime_pause_targets(id,pause_epoch,project_id,task_id,execution_id,session_id,
+          incarnation_id,provider_pid,provider_start_token,state,observation_json,created_at,
+          updated_at)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'PENDING',?10,?11,?11)
+        ON CONFLICT(pause_epoch,incarnation_id) DO NOTHING
+      `);
+      for (const target of input.targets) {
+        insert.run(target.id, input.epoch, target.projectId, target.taskId, target.executionId,
+          target.sessionId, target.incarnationId, target.providerPid, target.providerStartToken,
+          JSON.stringify(target.observation), input.occurredAt);
+      }
+      this.appendRuntimeGlobalEvent({
+        eventId: input.eventId,
+        eventType: 'SchedulerGlobalPauseRequested',
+        aggregateVersion: current.pauseEpoch + 1,
+        commandId: input.commandId,
+        actor: input.actor,
+        occurredAt: input.occurredAt,
+        payload: {
+          pauseEpoch: input.epoch,
+          actor: input.actor,
+          targets: input.targets.map((target) => ({
+            sessionId: target.sessionId,
+            executionId: target.executionId,
+            incarnationId: target.incarnationId,
+            projectId: target.projectId,
+            taskId: target.taskId,
+            providerPid: target.providerPid,
+          })),
+        },
+      });
+      return {
+        control: this.getRuntimePauseControl(),
+        targets: this.listRuntimePauseTargets(input.epoch),
+        replayed: false,
+      };
+    })();
+  }
+
+  /**
+   * Settles a pause epoch: records each target's observed outcome and writes either
+   * `SchedulerGlobalPaused` (every target `STOPPED`/`EXITED`) or
+   * `SchedulerGlobalControlRecoveryRequired`. A partial result is never written as `PAUSED` — the
+   * caller passes the verdict it can prove, and the state and the event are written together.
+   */
+  settleRuntimeGlobalPause(input: {
+    readonly epoch: number;
+    readonly outcome: 'PAUSED' | 'RECOVERY_REQUIRED';
+    readonly detail: unknown;
+    readonly targetUpdates: readonly RuntimePauseTargetUpdate[];
+    /** The command that caused this settlement, for the event's correlation only. */
+    readonly commandId: string;
+    readonly actor: string;
+    readonly eventId: string;
+    readonly occurredAt: number;
+  }): RuntimeGlobalControlWrite {
+    return this.sqlite.transaction(() => {
+      this.applyRuntimePauseTargetUpdates(input.targetUpdates, input.occurredAt);
+      this.sqlite.query(`
+        UPDATE runtime_pause_control SET state=?1,version=version+1,settled_at=?2,detail_json=?3
+        WHERE singleton_id=1
+      `).run(input.outcome, input.occurredAt, JSON.stringify(input.detail));
+      const targets = this.listRuntimePauseTargets(input.epoch);
+      this.appendRuntimeGlobalEvent({
+        eventId: input.eventId,
+        eventType: input.outcome === 'PAUSED'
+          ? 'SchedulerGlobalPaused' : 'SchedulerGlobalControlRecoveryRequired',
+        aggregateVersion: input.epoch,
+        commandId: input.commandId,
+        actor: input.actor,
+        occurredAt: input.occurredAt,
+        payload: {
+          pauseEpoch: input.epoch,
+          settledAt: input.occurredAt,
+          stage: 'PAUSE',
+          detail: input.detail,
+          targets: targets.map(runtimePauseTargetFact),
+        },
+      });
+      return { control: this.getRuntimePauseControl(), targets, replayed: false };
+    })();
+  }
+
+  /**
+   * Entering `RESUMING` for one epoch (ADR-0061 D06 step 1). Only `PAUSED` and a disposible
+   * `RECOVERY_REQUIRED` may get here; the caller decides that from the control row it read, and this
+   * write records the transition and its request event.
+   */
+  beginRuntimeGlobalResume(input: {
+    readonly epoch: number;
+    readonly actor: string;
+    readonly commandId: string;
+    readonly eventId: string;
+    readonly occurredAt: number;
+  }): RuntimeGlobalControlWrite {
+    return this.sqlite.transaction(() => {
+      this.sqlite.query(`
+        UPDATE runtime_pause_control SET state='RESUMING',version=version+1,settled_at=NULL,
+          detail_json=?1 WHERE singleton_id=1
+      `).run(JSON.stringify({ stage: 'RESUME', requestedBy: input.actor }));
+      const targets = this.listRuntimePauseTargets(input.epoch);
+      this.appendRuntimeGlobalEvent({
+        eventId: input.eventId,
+        eventType: 'SchedulerGlobalResumeRequested',
+        aggregateVersion: input.epoch,
+        commandId: input.commandId,
+        actor: input.actor,
+        occurredAt: input.occurredAt,
+        payload: { pauseEpoch: input.epoch, actor: input.actor, targetCount: targets.length },
+      });
+      return { control: this.getRuntimePauseControl(), targets, replayed: false };
+    })();
+  }
+
+  /**
+   * Settles a resume: `RUNNING` only when every target was verified resumed or provably exited,
+   * otherwise `RECOVERY_REQUIRED` — never a global `RUNNING` over targets that are still stopped or
+   * unverifiable, because that would silently drop the barrier the user asked for.
+   */
+  settleRuntimeGlobalResume(input: {
+    readonly epoch: number;
+    readonly outcome: 'RUNNING' | 'RECOVERY_REQUIRED';
+    readonly detail: unknown;
+    readonly targetUpdates: readonly RuntimePauseTargetUpdate[];
+    /** The command that caused this settlement, for the event's correlation only. */
+    readonly commandId: string;
+    readonly actor: string;
+    readonly eventId: string;
+    readonly occurredAt: number;
+  }): RuntimeGlobalControlWrite {
+    return this.sqlite.transaction(() => {
+      this.applyRuntimePauseTargetUpdates(input.targetUpdates, input.occurredAt);
+      this.sqlite.query(`
+        UPDATE runtime_pause_control SET state=?1,version=version+1,settled_at=?2,detail_json=?3
+        WHERE singleton_id=1
+      `).run(input.outcome, input.occurredAt, JSON.stringify(input.detail));
+      const targets = this.listRuntimePauseTargets(input.epoch);
+      this.appendRuntimeGlobalEvent({
+        eventId: input.eventId,
+        eventType: input.outcome === 'RUNNING'
+          ? 'SchedulerGlobalResumed' : 'SchedulerGlobalControlRecoveryRequired',
+        aggregateVersion: input.epoch,
+        commandId: input.commandId,
+        actor: input.actor,
+        occurredAt: input.occurredAt,
+        payload: {
+          pauseEpoch: input.epoch,
+          settledAt: input.occurredAt,
+          stage: 'RESUME',
+          detail: input.detail,
+          targets: targets.map(runtimePauseTargetFact),
+        },
+      });
+      return { control: this.getRuntimePauseControl(), targets, replayed: false };
+    })();
+  }
+
+  /**
+   * `scheduler control reconcile`: records what was **observed** and closes the targets that are
+   * provably gone. It sends no signal, and it never turns an unverifiable target into a stopped one.
+   * When the state is `PAUSING` and every target has now resolved, the epoch is settled to the state
+   * those observations prove; from `RECOVERY_REQUIRED` the barrier stays up, because dropping it
+   * would be exactly the "assume it worked" the design forbids.
+   */
+  recordRuntimeGlobalReconcile(input: {
+    readonly epoch: number;
+    readonly targetUpdates: readonly RuntimePauseTargetUpdate[];
+    readonly outcome: 'UNCHANGED' | 'PAUSED' | 'RECOVERY_REQUIRED';
+    readonly detail: unknown;
+    readonly actor: string;
+    /**
+     * Whether this reconcile recorded a fact worth an event. A read-only pass that changed nothing must
+     * not write `SchedulerGlobalControlRecoveryRequired` — that event says a target needs attention,
+     * and emitting it for a quiet observation would be a false statement (ADR-0061 D10: only facts
+     * that happened are written).
+     */
+    readonly recordEvent: boolean;
+    readonly eventId: string;
+    readonly occurredAt: number;
+  }): RuntimeGlobalControlWrite {
+    return this.sqlite.transaction(() => {
+      this.applyRuntimePauseTargetUpdates(input.targetUpdates, input.occurredAt);
+      const current = this.getRuntimePauseControl();
+      let state = current.state;
+      if (input.outcome === 'PAUSED' && current.state === 'PAUSING') state = 'PAUSED';
+      if (input.outcome === 'RECOVERY_REQUIRED' && current.state === 'PAUSING') {
+        state = 'RECOVERY_REQUIRED';
+      }
+      this.sqlite.query(`
+        UPDATE runtime_pause_control SET state=?1,version=version+1,settled_at=?2,detail_json=?3
+        WHERE singleton_id=1
+      `).run(state, state === current.state ? current.settledAt : input.occurredAt,
+        JSON.stringify(input.detail));
+      const targets = this.listRuntimePauseTargets(input.epoch);
+      if (input.recordEvent) {
+        this.appendRuntimeGlobalEvent({
+          eventId: input.eventId,
+          eventType: 'SchedulerGlobalControlRecoveryRequired',
+          aggregateVersion: input.epoch,
+          commandId: input.actor,
+          actor: input.actor,
+          occurredAt: input.occurredAt,
+          payload: {
+            pauseEpoch: input.epoch,
+            stage: 'STARTUP_RECONCILE',
+            reasonCode: input.outcome,
+            state,
+            targets: targets.map(runtimePauseTargetFact),
+          },
+        });
+      }
+      return { control: this.getRuntimePauseControl(), targets, replayed: false };
+    })();
+  }
+
+  /**
+   * The `pause`/`resume` receipt on its own, for the paths that settle by recording a fact instead
+   * of a state change (an idempotent command that finds the target state already reached).
+   */
+  writeRuntimeCommandReceipt(input: RuntimeCommandReceiptInput, at: number): void {
+    const existing = this.sqlite.query<{ payload_hash: string }, [string]>(
+      'SELECT payload_hash FROM runtime_command_receipts WHERE command_id=?1').get(input.commandId);
+    if (existing !== null && existing !== undefined) {
+      if (existing.payload_hash !== input.payloadHash) {
+        throw new StorageError('COMMAND_CONFLICT',
+          'Command ID was already used with a different payload');
+      }
+      return;
+    }
+    this.sqlite.query(`
+      INSERT INTO runtime_command_receipts(command_id,payload_hash,result_json,created_at)
+      VALUES (?1,?2,?3,?4)
+    `).run(input.commandId, input.payloadHash, JSON.stringify(input.result), at);
+  }
+
+  private applyRuntimePauseTargetUpdates(
+    updates: readonly RuntimePauseTargetUpdate[],
+    at: number,
+  ): void {
+    const statement = this.sqlite.query(`
+      UPDATE runtime_pause_targets SET state=?1,observation_json=?2,updated_at=?3 WHERE id=?4
+    `);
+    for (const update of updates) {
+      statement.run(update.state, JSON.stringify(update.observation), at, update.targetId);
+    }
+  }
+
+  /**
+   * A Runtime-global event: `project_id = NULL` is the whole point (ADR-0061 D10). It is written
+   * through the same `domain_events` log so a Project-filtered subscriber receives it and its cursor
+   * keeps advancing by the one shared sequence.
+   */
+  private appendRuntimeGlobalEvent(input: {
+    readonly eventId: string;
+    readonly eventType: SchedulerGlobalEventType;
+    readonly aggregateVersion: number;
+    readonly commandId: string;
+    readonly actor: string;
+    readonly occurredAt: number;
+    readonly payload: Readonly<Record<string, unknown>>;
+  }): void {
+    this.sqlite.query(`
+      INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
+        aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
+      VALUES (?1,NULL,?2,1,?3,'runtime-global-control',?4,?5,NULL,?6,?7)
+    `).run(input.eventId, input.eventType, schedulerGlobalAggregateType, input.aggregateVersion,
+      input.commandId, input.occurredAt, JSON.stringify(input.payload));
+  }
+
+  /**
+   * Every active provider incarnation this Runtime must consider when it builds a pause target list
+   * (ADR-0061 D05 step 1). It is the same read the startup Session/Execution convergence uses — a
+   * Session whose projection still claims a running provider — so a Session that already converged to
+   * `RECOVERY_REQUIRED` is not frozen again on the next pause.
+   *
+   * It is a read: it signals nothing and decides nothing.
+   */
+  listActiveProviderIncarnations(): readonly ActiveProviderIncarnation[] {
+    const incarnations: ActiveProviderIncarnation[] = [];
+    for (const session of this.listStaleAgentSessions()) {
+      const incarnation = session.incarnation;
+      if (incarnation === null || incarnation.providerPid === null) continue;
+      incarnations.push({
+        projectId: session.projectId,
+        taskId: session.taskId,
+        executionId: session.executionId,
+        sessionId: session.sessionId,
+        incarnationId: incarnation.id,
+        adapterId: session.adapterId,
+        providerPid: incarnation.providerPid,
+        processIdentity: incarnation.processIdentity,
+        processTree: incarnation.processTree,
+      });
+    }
+    return Object.freeze(incarnations);
+  }
+}
+
+/**
+ * Runtime global load-control records (FOUNDATION-097 / ADR-0061 D10, schema v34).
+ *
+ * `observation` is deliberately `unknown` here: this layer stores and returns the facts the Runtime
+ * control service recorded, and the contract that gives them shape (`RuntimePauseTargetObservation`)
+ * lives in `@codeestra/contracts`. Storage validating a projection it does not own would create a
+ * second definition of the same fact.
+ */
+export interface RuntimePauseControlRecord {
+  readonly state: RuntimeGlobalControlState;
+  readonly pauseEpoch: number;
+  readonly version: number;
+  readonly requestedAt: number | null;
+  readonly requestedBy: string | null;
+  readonly settledAt: number | null;
+  readonly detail: unknown;
+}
+
+export type RuntimePauseTargetState = 'PENDING' | 'STOPPED' | 'RESUMED' | 'EXITED'
+  | 'RECOVERY_REQUIRED';
+
+export interface RuntimePauseTargetRecord {
+  readonly id: string;
+  readonly pauseEpoch: number;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly executionId: string;
+  readonly sessionId: string;
+  readonly incarnationId: string;
+  readonly providerPid: number;
+  readonly providerStartToken: string;
+  readonly state: RuntimePauseTargetState;
+  readonly observation: unknown;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+/** One target as the barrier is committed. The identity snapshot is taken by the caller. */
+export interface RuntimePauseTargetInput {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly executionId: string;
+  readonly sessionId: string;
+  readonly incarnationId: string;
+  readonly providerPid: number;
+  readonly providerStartToken: string;
+  readonly observation: unknown;
+}
+
+/** One target's observed outcome, applied by the settling write. */
+export interface RuntimePauseTargetUpdate {
+  readonly targetId: string;
+  readonly state: RuntimePauseTargetState;
+  readonly observation: unknown;
+}
+
+export interface RuntimeCommandReceiptRecord {
+  readonly commandId: string;
+  readonly payloadHash: string;
+  readonly result: unknown;
+  readonly createdAt: number;
+}
+
+export interface RuntimeCommandReceiptInput {
+  readonly commandId: string;
+  readonly payloadHash: string;
+  readonly actor: string;
+  readonly result: unknown;
+}
+
+export interface RuntimeGlobalControlWrite {
+  readonly control: RuntimePauseControlRecord;
+  readonly targets: readonly RuntimePauseTargetRecord[];
+  readonly replayed: boolean;
+}
+
+/**
+ * One active provider incarnation as the control service sees it before any signal is sent: which
+ * Session/Execution/Task it belongs to, which Adapter declares it, and the recorded process identity
+ * that must be re-verified against the live process table.
+ */
+export interface ActiveProviderIncarnation {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly executionId: string;
+  readonly sessionId: string;
+  readonly incarnationId: string;
+  readonly adapterId: string;
+  readonly providerPid: number;
+  readonly processIdentity: unknown;
+  readonly processTree: unknown;
+}
+
+interface RuntimePauseTargetRow {
+  id: string; pause_epoch: number; project_id: string; task_id: string; execution_id: string;
+  session_id: string; incarnation_id: string; provider_pid: number;
+  provider_start_token: string; state: RuntimePauseTargetState; observation_json: string;
+  created_at: number; updated_at: number;
+}
+
+function mapRuntimePauseTargetRow(row: RuntimePauseTargetRow): RuntimePauseTargetRecord {
+  return {
+    id: row.id,
+    pauseEpoch: row.pause_epoch,
+    projectId: row.project_id,
+    taskId: row.task_id,
+    executionId: row.execution_id,
+    sessionId: row.session_id,
+    incarnationId: row.incarnation_id,
+    providerPid: row.provider_pid,
+    providerStartToken: row.provider_start_token,
+    state: row.state,
+    observation: JSON.parse(row.observation_json) as unknown,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * The per-target facts a global control event carries. Identity and outcome only: the payload never
+ * contains provider output, a prompt or anything else a user wrote (ADR-0061 D10).
+ */
+function runtimePauseTargetFact(target: RuntimePauseTargetRecord): Readonly<Record<string, unknown>> {
+  return {
+    projectId: target.projectId,
+    taskId: target.taskId,
+    executionId: target.executionId,
+    sessionId: target.sessionId,
+    incarnationId: target.incarnationId,
+    providerPid: target.providerPid,
+    providerStartToken: target.providerStartToken,
+    state: target.state,
+    observation: target.observation,
+  };
 }
 
 /**

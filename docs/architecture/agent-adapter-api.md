@@ -1,6 +1,6 @@
 # Agent Adapter API
 
-状态：Runtime port 设计，不是 Pi SDK API 的复述。当前代码导出 start/observation/typed-answer 子集与 deterministic fake、真实 `PiRpcAdapter`（自有子进程、身份采集、attention/completion/disconnect 映射、typed answer 写入）、第二个真实 Adapter **`CodexAdapter`**（ADR-0029，`codex app-server --stdio`）与第三个真实 Adapter **`ClaudeAdapter`**（ADR-0040，`claude --print` 控制通道）；pause/revision/stop control 尚未落地。**ADR-0061 已接受一个尚未实现的新能力维度：可核验的 Provider 模型驱动进程冻结。它不是 `pauseWithQuiescence`，也不能在完成每个 Adapter 的进程归属 spike 前写成 `SUPPORTED`。**Runtime 已接入 adapter registry 与事件 pump；提交/回答仍由 CLI 显式触发。Pi 0.84.4 首轮文档核对、受控 RPC spike 与 adapter transport smoke 已完成，结论见 [`../spikes/pi-0.84.4.md`](../spikes/pi-0.84.4.md)；Codex 0.151.0 结论见 [`../spikes/codex-0.151.0.md`](../spikes/codex-0.151.0.md)；Claude 2.1.268 结论见 [`../spikes/claude-2.1.268.md`](../spikes/claude-2.1.268.md)（本机无凭据，模型层全部未验证）；commit/trust 产品策略已确认，真实工具执行/取消门禁仍未验收。
+状态：Runtime port 设计，不是 Pi SDK API 的复述。当前代码导出 start/observation/typed-answer 子集与 deterministic fake、真实 `PiRpcAdapter`（自有子进程、身份采集、attention/completion/disconnect 映射、typed answer 写入）、第二个真实 Adapter **`CodexAdapter`**（ADR-0029，`codex app-server --stdio`）与第三个真实 Adapter **`ClaudeAdapter`**（ADR-0040，`claude --print` 控制通道）；pause/revision/stop control 尚未落地。**ADR-0061 新增的能力维度「可核验的 Provider 模型驱动进程冻结」已由 FOUNDATION-097 落地：`AdapterCapabilities.providerProcessSuspension` 已导出并如实声明，Runtime 控制层在 `apps/runtime/src/runtime-control-service.ts`。它不是 `pauseWithQuiescence`；只有完成真实进程归属 spike 的 Adapter 才是 `SUPPORTED`（当前只有 Pi）。**Runtime 已接入 adapter registry 与事件 pump；提交/回答仍由 CLI 显式触发。Pi 0.84.4 首轮文档核对、受控 RPC spike 与 adapter transport smoke 已完成，结论见 [`../spikes/pi-0.84.4.md`](../spikes/pi-0.84.4.md)；Codex 0.151.0 结论见 [`../spikes/codex-0.151.0.md`](../spikes/codex-0.151.0.md)；Claude 2.1.268 结论见 [`../spikes/claude-2.1.268.md`](../spikes/claude-2.1.268.md)（本机无凭据，模型层全部未验证）；commit/trust 产品策略已确认，真实工具执行/取消门禁仍未验收。
 
 ## 1. 合约草案
 
@@ -77,8 +77,10 @@ interface AgentAdapter {
   start(request: StartRequest): Promise<SessionRef>;
   observe(session: SessionRef, cursor?: string): AsyncIterable<AdapterEvent>;
   requestPause(session: SessionRef, operationId: string): Promise<ControlReceipt>;
-  // ADR-0061 完整设计层端口；当前实现尚未导出。返回的是可供 Runtime OS 控制层重验的计划，
-  // Adapter 自己不得只凭“信号已发送”声称进程已经 stopped/resumed。
+  // ADR-0061 完整设计层端口；**当前实现仍然没有导出它**。FOUNDATION-097 落地的是 Runtime 控制层：
+  // 它从 `session_incarnations` 的进程身份（Adapter 启动时写入的 {pid,startToken}）构建 target，
+  // 自己完成重验、SIGSTOP/SIGCONT、状态复读与持久屏障。这个类型仍然描述目标语义：Adapter 不得只凭
+  // “信号已发送”声称进程已经 stopped/resumed，而 `excludedToolProcesses` 是“不要向它们发信号”的清单。
   planProviderSuspension(session: SessionRef): Promise<ProviderSuspensionPlan>;
   applyRevision(session: SessionRef, input: RevisionInput): Promise<ControlReceipt>;
   guide(session: SessionRef, input: GuidanceInput): Promise<ControlReceipt>;
@@ -152,7 +154,7 @@ type AdapterEvent = {
 
 这是完整设计层类型；当前 `packages/contracts` 只导出 `AgentStartAdapter` / `AgentObserveAdapter` / `AgentAnswerAdapter` 及 attention/completed/disconnected event 子集，不用尚未实现的方法冒充完整 Adapter。
 
-实现层的 `AdapterCapabilities`（`packages/contracts/src/index.ts`）在 ADR-0061 之前**已与本文旧类型一致**（FOUNDATION-063 / ADR-0035）：它包含 `controlledConfiguration`（ADR-0029）、`pluginSelection`（ADR-0044，FOUNDATION-074 补记）与本文的 `nativeTerminalHandoff`、`safePointNotification` 两个维度。**`providerProcessSuspension` 是 ADR-0061 新增的目标维度，当前 contracts 尚未导出；下表该行是实施前必须达到的诚实初值，不是代码事实。**这些维度由各 Adapter **如实声明**，不是占位：
+实现层的 `AdapterCapabilities`（`packages/contracts/src/index.ts`）在 ADR-0061 之前**已与本文旧类型一致**（FOUNDATION-063 / ADR-0035）：它包含 `controlledConfiguration`（ADR-0029）、`pluginSelection`（ADR-0044，FOUNDATION-074 补记）与本文的 `nativeTerminalHandoff`、`safePointNotification` 两个维度。**`providerProcessSuspension` 是 ADR-0061 新增的维度，已由 FOUNDATION-097 随 schema v34 一起导出并如实声明**（`declaredProviderProcessSuspension` 是给只读投影用的声明表，与 `declaredPluginSelectionSupport` 同一模式）。这些维度由各 Adapter **如实声明**，不是占位：
 
 | 维度 | Pi | Codex | Claude Code |
 |---|---|---|---|
@@ -161,14 +163,16 @@ type AdapterEvent = {
 | `controlledConfiguration` | `SUPPORTED` | `UNSUPPORTED` | `SUPPORTED` |
 | `pluginSelection` | `SUPPORTED` | `UNSUPPORTED` | `UNSUPPORTED` |
 | `sessionGuidance`（ADR-0057） | `SUPPORTED` | `REQUIRES_VALIDATION` | `UNSUPPORTED` |
-| `providerProcessSuspension`（ADR-0061，尚未实现） | `REQUIRES_VALIDATION` | `REQUIRES_VALIDATION` | `REQUIRES_VALIDATION` |
+| `providerProcessSuspension`（ADR-0061，FOUNDATION-097 实测） | `SUPPORTED` | `REQUIRES_VALIDATION` | `REQUIRES_VALIDATION` |
+
+`providerProcessSuspension` 的 `SUPPORTED` 只来自一次真实进程测量（`docs/spikes/pi-0.84.4.md` §「Provider 进程冻结（ADR-0061）」）：`pi --mode rpc` 子进程就是模型请求发起者，bash 工具是它自己的后代且在独立 process group，只对该主进程 `SIGSTOP` 时工具不被触碰、且冻结期间新增 0 条 provider 记录、恢复后下一次模型请求才发生。Codex 只完成了「进程归属」那一半（`codex app-server` 子进程及其第三方插件后代），模型那一半被本机 ChatGPT 额度挡住；Claude Code 因本机无凭据连工具层都未跑起来。因此后两者保持 `REQUIRES_VALIDATION`，全局 `pause` 遇到它们会 fail closed 到 `RECOVERY_REQUIRED` 而不是假装已冻结。
 
 Pi 按 ADR-0010/0023/0026 的实测声明前两者 `SUPPORTED`（原生 TUI 在同一 provider session file 上接管、gate extension 上报 tool_start/tool_end/agent_settled）；Codex 按 `docs/spikes/codex-0.151.0.md` 的实测声明两者 `UNSUPPORTED`（app-server 无终端交接，其 TUI 是同一 thread 的第二个 writer；interrupted turn 不产生完成事实）；Claude Code 按 `docs/spikes/claude-2.1.268.md` 声明两者 `UNSUPPORTED`（`--print` 子进程无终端交接，控制通道不暴露工具级开始/结束）。deterministic fake 与测试 stub 声明 `pluginSelection: 'UNSUPPORTED'`（它们不启动任何 provider）。**声明本身不改变行为**：本版本没有把交接路径改为「查能力再决定」，`session.handoff.*` 仍按 ADR-0023/0026 的平台与归属判定执行（在 macOS/unix 上可用），把 Pi 专属机制套到 Codex 上确实会被拒；是否加适配器能力门禁属另一次语义变更，未在本格实施。Pi 自己的 `SessionHandoffCapabilities` 也如实报告残留差距，其取值集是 `IMPLEMENTED / UNSUPPORTED / PARTIAL / UNVERIFIED`（**不是** `AdapterCapabilities` 的 `SUPPORTED/UNSUPPORTED/REQUIRES_VALIDATION`）：`ptyResize: IMPLEMENTED`（ADR-0054，平台范围 = POSIX，见 §5）、`parallelToolBatchSafePoint: IMPLEMENTED`（ADR-0054，真实 Pi 实测，见 §6）、`crossHandoffPermissionModeMatrix: PARTIAL`（ADR-0054，矩阵与**不成立的那一格**见 §7）、`attachToLiveRpcProcess`/`sessionCompactionDuringHandoff`/`windows` 仍 `UNSUPPORTED`。交接与终端的事实现在也有七个 domain event（`TakeoverRequested`、`TakeoverSafePointReached`、`SessionHandoffStarted`、`SessionHandoffCompleted`、`TerminalWriterLeaseChanged`、`TakeoverReleased`、`TakeoverFailed`，见 `event-model.md` §2.1）。**结构化问卷（ADR-0014）没有新增事件类型**：它复用 `attention`，把问卷放在 `prompt` 里（`kind: "codeestra.questionnaire"`），回答用 `AgentAnswer` 的 `QUESTIONNAIRE` 变体表达，因此“一条 Attention = 一个 provider 请求 = 一次 answer Operation”不变。自有 provider 进程的 Adapter 可额外实现可选的 `AgentProcessRelease`（`releaseSession`），供 Runtime shutdown 请求协作释放；缺少该能力时不假定已停止。观察事件经 Zod 校验；只有显式 `toolsQuiescent=true` 与 `ownedWritersStopped=true` 的 completion evidence 才能释放失败 Execution 的资源。`packages/agent-adapters` 的 deterministic fake 只验证协议与编排行为，不执行命令，也不能作为 Pi 验收。PTY 原始字节、resize、input 路由是独立 versioned TerminalTransport 合约，不混入 AdapterEvent（契约与帧表见 §5）。`guide`（会话指导）已实现（FOUNDATION-088 / ADR-0057）：契约面用 `AdapterCapabilities.sessionGuidance` 如实声明，运行中会话的投递由 Adapter 自己的端口（`guide`）承担——Pi `SUPPORTED`（RPC `steer` + provider 自己的 `queue_update`）、Codex `REQUIRES_VALIDATION`、Claude Code `UNSUPPORTED`；Runtime 在投递那一刻读该能力位，不是 `SUPPORTED` 或缺少该端口一律记 `CHANNEL_UNSUPPORTED`，绝不把「消息发出去了」当成投递（「已入队 ≠ 模型已读」，见 ADR-0057）。本文 §1 的类型仍是完整设计层类型，实现层只导出实际落地的方法。原生接管、successor start 与 PTY attachment 已由 ADR-0026 实现，不能因本文类型存在就声称其他 provider 也能接管。
 
 ## 2. 语义
 
 - ACCEPTED 仅表示控制请求已受理，不代表已经暂停、回答生效或取消完成。
-- ADR-0061 的全局冻结不复用 `requestPause`：前者保持 Task/Execution/Session 状态不变并暂停模型驱动主进程；后者属于单 Task 协作暂停，最终结束旧 Execution。`providerProcessSuspension=SUPPORTED` 只表示 Adapter 能给出并证明模型请求发起进程与应排除的工具进程；真正的 `SIGSTOP`/`SIGCONT`、进程状态复读、pause epoch 与持久屏障由 Runtime 控制层承担。
+- ADR-0061 的全局冻结不复用 `requestPause`：前者保持 Task/Execution/Session 状态不变并暂停模型驱动主进程；后者属于单 Task 协作暂停，最终结束旧 Execution。`providerProcessSuspension=SUPPORTED` 只表示 Adapter 能给出并证明模型请求发起进程与应排除的工具进程；真正的 `SIGSTOP`/`SIGCONT`、进程状态复读、pause epoch 与持久屏障由 Runtime 控制层承担（FOUNDATION-097 实现：`apps/runtime/src/runtime-control-service.ts`，命令面 `scheduler control status|pause|resume|reconcile`）。
 - 全局冻结前后都要重验 `pid + start token + current incarnation`。只看到 PID、只成功调用 `kill(SIGSTOP)`、只看到 stdout 安静，都不能写 `STOPPED`。PID 复用或身份不可读时不发信号并进入全局控制 `RECOVERY_REQUIRED`。
 - 已发出的模型请求不被取消；工具子进程不接收全局暂停信号。若 Provider 主进程被冻结后停止读取管道，大输出工具可能因背压阻塞，因此“未发停止信号”不等于“工具绝不会停顿”。
 - start timeout 不能盲重试，可能已创建真实进程。通过 operation/session identity 核对。

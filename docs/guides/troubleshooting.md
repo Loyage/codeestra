@@ -3,7 +3,7 @@
 > **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
 > 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
-> `task purge` 的拒绝码一节由 FOUNDATION-090 新增（ADR-0058）；冲突判定与 `--feature` 的拒绝码由
+> 「全局暂停」一节的稳定码由 FOUNDATION-097 新增（ADR-0061 D08/D09）；`task purge` 的拒绝码一节由 FOUNDATION-090 新增（ADR-0058）；冲突判定与 `--feature` 的拒绝码由
 > FOUNDATION-091 新增/改写（ADR-0059）。
 > 「报 `DEV_REPO_REQUIRED`」一节由 FOUNDATION-093 第三轮重写（ADR-0060 修订）。
 > 「任务一直不跑」与「调度 / 容量 / 槽位」两处的容量码由 **FOUNDATION-096** 同步（ADR-0061：只剩一个
@@ -170,6 +170,28 @@ bun run codeestra task cancel   $PROJECT $OCCUPIER <expected-version>
 > 而 Codeestra 的账本不会因此改变：`workspaces` 行仍写 `RETAINED`/`RECOVERY_REQUIRED`，Task 分支可能被一并删除。
 > 本机 2026-09-14 就发生过一次（全部任务 worktree 被移走，`#7`/`#8` 因此变成不可观测的占用者）。
 > 要回收请用 `reclaim plan` / `reclaim apply`——那是唯一带归属校验与审计的路径。
+
+### 全局暂停：`scheduler control` 的稳定码（ADR-0061）
+
+`scheduler control pause|resume` 退 `1` 时**不是**含糊的 `INVALID_STATE`，每个码有自己的处置：
+
+| 码 | 事实 | 怎么做 |
+|---|---|---|
+| `GLOBAL_PAUSE_IDENTITY_UNVERIFIABLE` | 某个目标的 pid/start token 读不出来或对不上，**没有向它发任何信号** | `scheduler control status` 看该目标；确认那个进程是否还在，再决定 `resume`（已退出的目标会被如实记为 `EXITED`，不会复活）或按既有 `task recover` 收口 |
+| `GLOBAL_PAUSE_TARGET_NOT_STOPPED` | 发出 `SIGSTOP` 后复读仍不是 stopped | 该目标保持 `RECOVERY_REQUIRED`；屏障保持，不要把它当成已暂停 |
+| `GLOBAL_PAUSE_UNSUPPORTED` | 平台没有 POSIX 停止/继续语义，或该 Adapter 的 `providerProcessSuspension` **不是** `SUPPORTED`（当前 Codex 与 Claude Code 是 `REQUIRES_VALIDATION`） | 该目标无法被全局冻结；用单 Task 的 `task pause`（ADR-0016 协作停止）处置，或继续跑完 |
+| `GLOBAL_RESUME_TARGET_CHANGED` | 目标的 pid 已属于别的进程（PID 复用），或不再是记录的 stopped 主进程 → **没有发 `SIGCONT`** | 按 `task recover` 收口该 Session；绝不重试 `resume` 去「把它弄醒」 |
+| `GLOBAL_PAUSE_RECOVERY_REQUIRED` | 至少一个目标无法收口 | 屏障保持；先 `scheduler control reconcile` 观察，再逐目标处置 |
+| `GLOBAL_CONTROL_IN_PROGRESS` | 上一次 `pause`/`resume` 还没收口（`PAUSING`/`RESUMING`） | 先 `scheduler control status` 看进度，不要连点 |
+
+其它容易误读的事实：
+
+- 任务因全局暂停而等待时 **`task run` / `task resume` / `task retry` / `scheduler reservations acquire` 都退 3**，
+  码是 `SCHEDULER_GLOBALLY_PAUSED`；这是**等待**，任务既不是 `BLOCKED` 也不是失败。
+- 暂停**不会**取消已经发出的模型请求（可能已在服务端完成并计费），也**不会**给工具子进程发停止信号；
+  但 Provider 主进程停止读管道时，大输出工具可能因 OS 管道背压阻塞。
+- `runtime stop` **不清除**暂停状态：重启后仍然是暂停态，必须显式 `scheduler control resume`。
+  启动时 Runtime **不会**自动 `SIGCONT`、也**不会**自动 kill 上一代 boot 冻结的进程。
 
 ### 任务一直不跑（退出码 3）
 `3` 表示**等待**，不是失败。三种互不相同的答案：

@@ -5,6 +5,7 @@ import { AgentSettingsPanel } from './agent-settings.js';
 import { SettingsPage, UiSettingsProvider } from './settings.js';
 import { usePendingAction } from './use-pending-action.js';
 import { RuntimeClient, describeError } from './api.js';
+import { GlobalControlBar } from './global-control-bar.js';
 import { TranscriptPanel } from './transcript.js';
 import { TerminalPanel } from './terminal.js';
 import { DependencyPanel } from './dependencies.js';
@@ -622,6 +623,11 @@ function Console({ token, initialProjectId }: {
           </button>
         </div>
       </header>
+      {/*
+        The global load control bar (ADR-0061 D09) sits in the shell, not on a project page: the
+        barrier it drives belongs to no Project, and it must be reachable whatever is selected.
+      */}
+      <GlobalControlBar client={client} />
 
       <aside className="sidebar">
       <nav aria-label="主导航">

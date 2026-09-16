@@ -60,7 +60,17 @@ interface Harness {
   readonly primary: { readonly taskId: string; readonly version: number };
 }
 
-async function harness(options: { withMapping: boolean }): Promise<Harness> {
+async function harness(options: {
+  withMapping: boolean;
+  /** The Runtime's persistent global barrier (ADR-0061), as the engine reads it. */
+  control?: () => { readonly blocked: boolean; readonly state: string };
+  /**
+   * Make the injected start fail with this stable code instead of starting. It is how the
+   * "the barrier committed while this start was in flight" race is reproduced: the engine judged the
+   * candidate while the barrier was still down and the start itself was refused.
+   */
+  startFailureCode?: string;
+}): Promise<Harness> {
   const fixture = await createAgentFixture();
   if (options.withMapping) {
     const text = `${JSON.stringify(mapping, null, 2)}\n`;
@@ -122,6 +132,10 @@ async function harness(options: { withMapping: boolean }): Promise<Harness> {
     // The injected start: a real worktree bound to the reservation and a real Execution row, and
     // nothing else. It is the one step a test may not take for a real Agent.
     start: async (request): Promise<ScheduledStartResult> => {
+      if (options.startFailureCode !== undefined) {
+        throw Object.assign(new Error(`the start was refused (${options.startFailureCode})`),
+          { code: options.startFailureCode });
+      }
       const workspace = await prepareReservedWorkspace({
         storage: fixture.storage,
         runtimeHome: fixture.home,
@@ -168,6 +182,7 @@ async function harness(options: { withMapping: boolean }): Promise<Harness> {
       return { state: 'PAUSED', stop: 'RELEASED', detail: 'test pause' };
     },
     draining: () => drain.state(),
+    ...(options.control === undefined ? {} : { control: options.control }),
     defaultAdapterId: 'pi',
     now: () => Date.now(),
     randomUUID: nextId,
@@ -648,5 +663,62 @@ describe('scheduling loop', () => {
     expect(refused.outcome).toBe('REFUSED');
     expect(refused.detail).toContain('SLOT_ALREADY_RESERVED');
     expect(executionsOf(harnessed.fixture, task.taskId)).toHaveLength(0);
+  });
+});
+
+/**
+ * The Runtime's persistent global barrier inside the scheduling loop (FOUNDATION-097 / ADR-0061 D08).
+ *
+ * A Task that cannot start because the whole host is paused is neither `BLOCKED` (that means an unmet
+ * dependency and nothing else) nor a capacity wait: it gets its own wait kind and the stable code
+ * `SCHEDULER_GLOBALLY_PAUSED`, which is what the CLI turns into exit code 3.
+ */
+describe('the global pause barrier inside the scheduling loop', () => {
+  test('a paused Runtime makes every candidate a CONTROL wait and starts nothing', async () => {
+    const h = await harness({ withMapping: true, control: () => ({ blocked: true, state: 'PAUSED' }) });
+    try {
+      const outcome = await h.runNow({ taskId: h.primary.taskId, version: h.primary.version });
+      expect(outcome.outcome).toBe('WAIT');
+      expect(outcome.wait?.kind).toBe('CONTROL');
+      expect(outcome.wait?.code).toBe('SCHEDULER_GLOBALLY_PAUSED');
+      // Nothing was reserved, prepared or started, and the Task's own state is untouched: the
+      // barrier is not a dependency verdict, so it must not have moved the Task to BLOCKED.
+      expect(h.starts).toHaveLength(0);
+      expect(executionsOf(h.fixture, h.primary.taskId)).toHaveLength(0);
+      expect(taskOf(h.fixture, h.primary.taskId).state).toBe('READY');
+
+      const tick = await h.tick('TEST');
+      for (const candidate of tick.projects.flatMap((project) => project.candidates)) {
+        expect(candidate.disposition).toBe('WAITING');
+        expect(candidate.wait?.kind).toBe('CONTROL');
+      }
+      expect(h.starts).toHaveLength(0);
+      // The barrier is a Runtime-global fact: it is not written as a Task conflict or capacity wait.
+      const waits = h.fixture.storage.listTaskScheduleEvents({
+        projectId: h.fixture.projectId, limit: 50,
+      }).map((event) => event.eventType);
+      expect(waits).not.toContain('TaskWaitingForConflict');
+      expect(waits).not.toContain('TaskWaitingForCapacity');
+    } finally {
+      h.fixture.storage.close();
+    }
+  });
+
+  test('a barrier that commits while a start is in flight is a wait, not a failed Task', async () => {
+    // The engine judged this candidate while the barrier was still down; the provider start itself
+    // was refused by it. Reporting `FAILED` here would blame the Task for a Runtime-wide state, so
+    // the disposition is a wait and the reservation is released.
+    const h = await harness({ withMapping: true, startFailureCode: 'SCHEDULER_GLOBALLY_PAUSED' });
+    try {
+      const outcome = await h.runNow({ taskId: h.primary.taskId, version: h.primary.version });
+      expect(outcome.outcome).toBe('WAIT');
+      expect(outcome.wait?.kind).toBe('CONTROL');
+      expect(outcome.wait?.code).toBe('SCHEDULER_GLOBALLY_PAUSED');
+      expect(executionsOf(h.fixture, h.primary.taskId)).toHaveLength(0);
+      // The occupant count is Runtime-wide now (ADR-0061 D01), so it is read without a Project.
+      expect(h.fixture.storage.countActiveSlotOccupants().globalUsed).toBe(0);
+    } finally {
+      h.fixture.storage.close();
+    }
   });
 });

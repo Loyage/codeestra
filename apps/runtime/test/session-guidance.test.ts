@@ -51,6 +51,7 @@ const capabilitiesWithGuidance: AdapterCapabilities = Object.freeze({
   controlledConfiguration: 'SUPPORTED',
   pluginSelection: 'UNSUPPORTED',
   sessionGuidance: 'SUPPORTED',
+  providerProcessSuspension: 'UNSUPPORTED',
 });
 
 /**
@@ -254,7 +255,7 @@ describe('session guidance', () => {
 
   test('records CHANNEL_UNSUPPORTED for a provider without a guidance channel and fabricates nothing', async () => {
     const adapter = new GuidableAdapter({ ...capabilitiesWithGuidance,
-      sessionGuidance: 'UNSUPPORTED' });
+      sessionGuidance: 'UNSUPPORTED', providerProcessSuspension: 'UNSUPPORTED' });
     const value = await harness({ adapter });
     const result = await record(value, 'This provider has no live channel.');
 

@@ -136,9 +136,11 @@ export const eventEnvelopeSchema = z.strictObject({
   eventType: z.string().min(1),
   schemaVersion: z.number().int().positive(),
   /**
-   * The Project this fact belongs to, or `null` for a Runtime global fact (ADR-0061 D10). A global
-   * capacity change is delivered to a Project-filtered subscriber *in addition to* that Project's own
-   * events, because it affects every Project; `null` means "belongs to no Project", never "unknown".
+   * The Project this fact belongs to, or `null` for a Runtime-global fact (ADR-0061 D10, schema v34).
+   *
+   * A global capacity change or a global pause decision is delivered to a Project-filtered
+   * subscriber *in addition to* that Project's own events, because it affects every Project. `null`
+   * means "belongs to no Project", never "unknown".
    */
   projectId: z.string().min(1).nullable(),
   aggregateType: z.string().min(1),
@@ -464,7 +466,13 @@ export const maxSlotReservationReadLimit = 200;
 export type CapacityWaitReasonCode =
   | 'CAPACITY_GLOBAL_LIMIT_REACHED'
   | 'CAPACITY_ADAPTER_SLOT_LIMIT_REACHED'
-  | 'SCHEDULER_DRAINING';
+  | 'SCHEDULER_DRAINING'
+  /**
+   * ADR-0061 D08: the Runtime's persistent global barrier is up, so no new Execution/Session may
+   * start. It is a **wait** (exit code 3), never `BLOCKED`: `BLOCKED` still means exactly one thing —
+   * an unmet dependency. It is also not a capacity verdict, so it is checked before capacity.
+   */
+  | 'SCHEDULER_GLOBALLY_PAUSED';
 
 export interface CapacityWaitReason {
   readonly code: CapacityWaitReasonCode;
@@ -674,10 +682,11 @@ export interface ReservedWorkspaceView {
 /**
  * The scheduling engine's vocabulary (FOUNDATION-055). A wait is never `BLOCKED` (§2.10):
  * `CONFLICT` carries the analyzer's reason codes and intersecting scopes, `CAPACITY` carries the
- * capacity reason code and the slots that produced it. `BLOCKED` is a separate disposition and only
- * ever means an unmet dependency.
+ * capacity reason code and the slots that produced it, and `CONTROL` (ADR-0061 D08) carries the
+ * Runtime's own global barrier fact, which is neither of the two. `BLOCKED` is a separate disposition
+ * and only ever means an unmet dependency.
  */
-export type ScheduleWaitKind = 'CONFLICT' | 'CAPACITY';
+export type ScheduleWaitKind = 'CONFLICT' | 'CAPACITY' | 'CONTROL';
 
 /** One measured intersection behind a conflict wait, as the analyzer reported it. */
 export interface ScheduleConflictHitView {
@@ -836,7 +845,7 @@ export interface ScheduleExplanationView {
   readonly taskState: string;
   readonly adapterId: string;
   readonly candidate: boolean;
-  readonly decision: 'START_NOW' | 'WAIT_CONFLICT' | 'WAIT_CAPACITY' | 'BLOCKED'
+  readonly decision: 'START_NOW' | 'WAIT_CONFLICT' | 'WAIT_CAPACITY' | 'WAIT_CONTROL' | 'BLOCKED'
     | 'ACTIVE' | 'NOT_A_CANDIDATE';
   readonly detail: string;
   readonly wait: ScheduleWaitView | null;
@@ -1152,6 +1161,124 @@ export const takeoverFailedPayloadSchema = z.strictObject({
   evidenceRef: z.string().min(1).nullable(),
 });
 export type TakeoverFailedPayload = z.infer<typeof takeoverFailedPayloadSchema>;
+
+/**
+ * ADR-0061 D09/D10 — the Runtime global control surface.
+ *
+ * The state machine is `RUNNING → PAUSING → PAUSED → RESUMING → RUNNING`, with any failure to
+ * *verify* an identity, a stop or a resume leading to `RECOVERY_REQUIRED`. It is a control-plane
+ * overlay: it never rewrites `Task.state`, `Execution.state` or `AgentSession.state`, and it never
+ * releases a slot, a workspace or a writer lease.
+ */
+/**
+ * The control states, under the name the global load control surface uses. It is an alias of
+ * `GlobalControlState` (defined with the capacity contract) and deliberately **not** a second union:
+ * the capacity report's `pauseState` and the control command's `state` must be the same five values,
+ * and two declarations of them would be two things to keep in step.
+ */
+export type RuntimeGlobalControlState = GlobalControlState;
+
+/** One freeze target's own state (ADR-0061 D10). `RESUMED` and `EXITED` are both settled closures. */
+export type RuntimePauseTargetState =
+  | 'PENDING' | 'STOPPED' | 'RESUMED' | 'EXITED' | 'RECOVERY_REQUIRED';
+
+/**
+ * The stable codes the global control commands return (ADR-0061 D09). They are **not** collapsed into
+ * `INVALID_STATE`: a caller has to be able to tell "this platform cannot freeze a provider" from
+ * "this target's identity could not be read" from "this target is not stopped", because the remedies
+ * differ. `SCHEDULER_GLOBALLY_PAUSED` is a *wait* (CLI exit code 3); every other code is a refusal
+ * (exit code 1) and leaves the barrier up.
+ */
+export type RuntimeGlobalControlCode =
+  | 'SCHEDULER_GLOBALLY_PAUSED'
+  | 'GLOBAL_PAUSE_UNSUPPORTED'
+  | 'GLOBAL_PAUSE_IDENTITY_UNVERIFIABLE'
+  | 'GLOBAL_PAUSE_TARGET_NOT_STOPPED'
+  | 'GLOBAL_RESUME_TARGET_CHANGED'
+  | 'GLOBAL_PAUSE_RECOVERY_REQUIRED'
+  /** A `resume` was still in flight; no second state transition is started from `RESUMING`. */
+  | 'GLOBAL_CONTROL_IN_PROGRESS';
+
+/**
+ * One target's *observed* facts, as the Runtime recorded them. `startToken` is the token read back
+ * from the real process at this observation — never the one the freeze was planned with — because
+ * comparing the two is the whole point (ADR-0061: PID 复用 must be caught here).
+ */
+export interface RuntimePauseTargetObservation {
+  readonly code: RuntimeGlobalControlCode | 'STOPPED' | 'RESUMED' | 'EXITED' | 'PENDING';
+  readonly detail: string;
+  readonly observedAt: number;
+  /** Null when the recorded process could not be read at all. */
+  readonly startToken: string | null;
+  /** Whether the recorded identity still matches the live process at the time of observation. */
+  readonly identityMatched: boolean;
+  /** The raw OS process state the observation is based on (`RUNNING`/`STOPPED`/`EXITED`/`UNKNOWN`). */
+  readonly processState: 'RUNNING' | 'STOPPED' | 'EXITED' | 'UNKNOWN';
+  /** The Adapter's own `providerProcessSuspension` declaration at the time of the observation. */
+  readonly adapterSupport: AdapterSupport | 'ADAPTER_NOT_REGISTERED';
+}
+
+export interface RuntimePauseTargetView {
+  readonly targetId: string;
+  readonly pauseEpoch: number;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly executionId: string;
+  readonly sessionId: string;
+  readonly incarnationId: string;
+  readonly providerPid: number;
+  readonly providerStartToken: string;
+  readonly state: RuntimePauseTargetState;
+  readonly observation: RuntimePauseTargetObservation;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+/**
+ * The whole control-plane picture `scheduler control status` reports: the state and its epoch, who
+ * asked and when, and **every** target with its own observation. A caller never has to infer a
+ * per-target fact from a global boolean — `PAUSED` is only ever written when every target is
+ * `STOPPED` or provably `EXITED` (ADR-0061 D04/D05).
+ */
+export interface RuntimeGlobalControlView {
+  readonly state: RuntimeGlobalControlState;
+  readonly pauseEpoch: number;
+  readonly version: number;
+  readonly requestedAt: number | null;
+  readonly requestedBy: string | null;
+  readonly settledAt: number | null;
+  readonly detail: unknown;
+  /** The code this state means, or null while `RUNNING` with nothing recorded. */
+  readonly code: RuntimeGlobalControlCode | null;
+  /** Whether this platform has the POSIX stop/continue semantics the design requires. */
+  readonly platformSupported: boolean;
+  readonly platform: string;
+  readonly targets: readonly RuntimePauseTargetView[];
+  /**
+   * The Runtime-global capacity numbers are **not** here. They belong to the capacity command face
+   * (`scheduler capacity get`), which is the other half of schema v34 (ADR-0061 D01–D03); inventing
+   * fields for them in this projection would create a second, drifting definition.
+   */
+  readonly capacity: null;
+  readonly capacityNote: string;
+}
+
+/**
+ * The five Events ADR-0061 D10 names, with the aggregate type they are written under and the
+ * `project_id = NULL` fact that makes them Runtime-global. `Requested` is never `Paused`, and
+ * `ResumeRequested` is never `Resumed`: a partial result is written as
+ * `SchedulerGlobalControlRecoveryRequired` instead.
+ */
+export const schedulerGlobalEventTypes = [
+  'SchedulerGlobalPauseRequested',
+  'SchedulerGlobalPaused',
+  'SchedulerGlobalResumeRequested',
+  'SchedulerGlobalResumed',
+  'SchedulerGlobalControlRecoveryRequired',
+] as const;
+export type SchedulerGlobalEventType = (typeof schedulerGlobalEventTypes)[number];
+/** Every global control event has this aggregate; its id is the singleton control row. */
+export const schedulerGlobalAggregateType = 'RuntimeSchedulerControl';
 
 export const runtimeRequestSchema = z.discriminatedUnion('command', [
   z.strictObject({ ...requestBase, command: z.literal('runtime.ping') }),
@@ -2296,6 +2423,33 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     projectId: z.string().uuid(),
   }),
   /**
+   * The Runtime global load-control face (FOUNDATION-097 / ADR-0061 D09). These four are the only
+   * commands here that belong to **no Project**: the barrier they control is host-wide, so they
+   * carry no `projectId`, their events are written with `project_id = NULL`, and their receipts live
+   * in the Runtime-global `runtime_command_receipts` table.
+   *
+   * `status`/`reconcile` only observe and record. `pause`/`resume` are the explicit user commands
+   * themselves: zero confirmation in FULL and STRICT, exactly one state transition each.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('scheduler.control.status'),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('scheduler.control.pause'),
+    commandId: z.string().uuid(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('scheduler.control.resume'),
+    commandId: z.string().uuid(),
+  }),
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('scheduler.control.reconcile'),
+  }),
+  /**
    * The scheduling loop (FOUNDATION-055 / ADR-0030 D04). `status` reports the engine's own facts
    * (active set, capacity, occupancy, the last decisions); `plan` is the ordered dry run of the
    * candidate loop, and `explain` answers "why is this Task not running now" for one Task. None of
@@ -2599,6 +2753,23 @@ export interface AdapterCapabilities {
    * startup channel (ADR-0051's knowledge precedent), and is deliberately not gated by this bit.
    */
   readonly sessionGuidance: AdapterSupport;
+  /**
+   * Whether this Adapter can name and prove **which controlled process originates this provider's
+   * model requests**, so the Runtime can freeze and resume exactly that main process by
+   * `pid + OS start token + incarnation` without ever signalling the tool subprocesses that process
+   * started (ADR-0061 D05).
+   *
+   * This is *not* a provider-native pause and it is not `pauseWithQuiescence`: nothing here asks the
+   * provider to stop at a safe point, and the frozen Task keeps its Task/Execution/Session state and
+   * its capacity slot. `SUPPORTED` claims exactly two things, both measured on real processes:
+   * (1) the Adapter's own child process is the model-request origin (so a stopped main process
+   * produces no next request), and (2) the tools that child spawned are *its* descendants rather than
+   * peers, so the Runtime's signal never reaches them. `REQUIRES_VALIDATION` means the shape looks
+   * right but no real measurement exists, and `UNSUPPORTED` means the Adapter cannot prove the
+   * ownership at all. A value other than `SUPPORTED` makes a global `pause` fail closed: the target
+   * is recorded as `RECOVERY_REQUIRED` and the global barrier stays up, never `PAUSED`.
+   */
+  readonly providerProcessSuspension: AdapterSupport;
 }
 /** Provider process evidence. A PID alone is never treated as proof of identity. */
 export const agentProcessIdentitySchema = z.strictObject({

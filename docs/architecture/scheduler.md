@@ -1,6 +1,6 @@
 # Conservative Scheduler
 
-状态：§1–§6 是 Phase 2 设计（ADR-0030）；§7 记录**当前已实现的原语**（ADR-0032，schema v21）。**调度引擎本体已由 ADR-0033 / FOUNDATION-055 实现**（`apps/runtime/src/schedule-service.ts` + `CODEESTRA_SCHEDULE_TICK_MS`，默认 5000ms），因此 §1.2 的触发模型与 §7.6 不再是「未实现」：它们已经是实现事实（保留原文的措辞只在下面显式标注更正，不重写历史）。**ADR-0059 把冲突判定从「证明不相交」改为「两侧声明同一功能且对方未完成」（FOUNDATION-091），§1 的活跃集合与 §2 的判定流程下面各有一节显式更正。ADR-0061 的容量上半（唯一跨项目 Runtime 上限，schema v34）已由 FOUNDATION-096 实现；同 ADR 的持久全局 Provider 冻结（§8.2/§8.3）仍未实现。**
+状态：§1–§6 是 Phase 2 设计（ADR-0030）；§7 记录**当前已实现的原语**（ADR-0032，schema v21）。**调度引擎本体已由 ADR-0033 / FOUNDATION-055 实现**（`apps/runtime/src/schedule-service.ts` + `CODEESTRA_SCHEDULE_TICK_MS`，默认 5000ms），因此 §1.2 的触发模型与 §7.6 不再是「未实现」：它们已经是实现事实（保留原文的措辞只在下面显式标注更正，不重写历史）。**ADR-0059 把冲突判定从「证明不相交」改为「两侧声明同一功能且对方未完成」（FOUNDATION-091），§1 的活跃集合与 §2 的判定流程下面各有一节显式更正。ADR-0061 的两半都已实现（schema v34）：唯一跨项目 Runtime 上限是 FOUNDATION-096，持久全局 Provider 冻结是 FOUNDATION-097，因此 §8.1–§8.3 都是实现事实。**
 
 ## 1. 调度输入和顺序
 
@@ -222,7 +222,11 @@ scheduler reservations reconcile <project-id> [--json]
 
 因此在本格及其基线里：**不得写「自动 tick 已实现」或「两个 SAFE 任务真的会同时开始」。** Wave E 交付的是原语：E1 的 ImpactSnapshot/Conflict Analyzer 与 E2 的容量/槽位预留已经就位，但没有引擎驱动它们；本格的端到端证据只到「第三个任务得到容量等待」，没有两个 Task 真的同时跑。
 
-## 8. Runtime 全局负载控制（ADR-0061；上半已实现，下半待实现）
+## 8. Runtime 全局负载控制（ADR-0061；**§8.1–§8.3 都已实现**，schema v34：容量上半 FOUNDATION-096，暂停下半 FOUNDATION-097）
+
+实现位置：容量 `apps/runtime/src/capacity-service.ts`（Runtime 全局上限）与
+`apps/runtime/src/runtime-control-service.ts`（屏障与 Provider 冻结）；屏障接入点见
+`state-machines.md` §6.1。
 
 ### 8.1 唯一全局容量（**已实现**：FOUNDATION-096，schema v34 上半）
 
@@ -234,9 +238,9 @@ scheduler capacity set --limit <1..16> [--json]
 scheduler capacity reset [--json]
 ```
 
-`get` 列出跨项目占用者（project/task/adapter/since/source）与当前 `pauseState`；`set`/`reset` 零确认、同值幂等，`reset` 回到默认 2，越界按稳定码拒绝。`scheduler reservations *` 仍按 Project 操作，但 `acquire` 在同一个 immediate transaction 中统计**整个 Runtime**的占用，而不是只统计请求 Project。暂停状态不是容量的一部分；它在容量判断之前返回 `SCHEDULER_GLOBALLY_PAUSED`（exit 3，尚未实现）。
+`get` 列出跨项目占用者（project/task/adapter/since/source）与当前 `pauseState`；`set`/`reset` 零确认、同值幂等，`reset` 回到默认 2，越界按稳定码拒绝。`scheduler reservations *` 仍按 Project 操作，但 `acquire` 在同一个 immediate transaction 中统计**整个 Runtime**的占用，而不是只统计请求 Project。暂停状态不是容量的一部分；它在容量判断之前返回 `SCHEDULER_GLOBALLY_PAUSED`（exit 3，已随 FOUNDATION-097 实现）。
 
-### 8.2 全局控制状态（**尚未实现**）
+### 8.2 全局控制状态（**已实现**：FOUNDATION-097，schema v34 下半）
 
 ```text
 RUNNING → PAUSING → PAUSED → RESUMING → RUNNING
@@ -260,8 +264,18 @@ scheduler control reconcile [--json]
 
 `reconcile` 只观察，不发暂停、继续或终止信号。`pause`/`resume` 只有在完整收口或幂等命中目标状态时 exit 0；部分结果 exit 1 并逐目标报告。普通 Task 因屏障等待仍 exit 3，且永远不是 `BLOCKED`。
 
-### 8.3 暂停期间（**尚未实现**）
+事件名已实现：`SchedulerGlobalPauseRequested`、`SchedulerGlobalPaused`、`SchedulerGlobalResumeRequested`、
+`SchedulerGlobalResumed`、`SchedulerGlobalControlRecoveryRequired`（`project_id = NULL`，
+`aggregate_type = RuntimeSchedulerControl`）。`pause`/`resume`/`reconcile` 的幂等回执在
+`runtime_command_receipts` 里（同 commandId 重放返回同一结果，同键异文 `COMMAND_CONFLICT`）。
+
+调度等待的实现细节：候选判定的**第 0 步**先读屏障，命中时 disposition 为 `WAITING`、
+`wait.kind = 'CONTROL'`、`wait.code = 'SCHEDULER_GLOBALLY_PAUSED'`；它**不写** Task 级
+`TaskWaitingForConflict`/`TaskWaitingForCapacity`（那会把全局事实误记成冲突或容量）。屏障在 start 已经发出后
+才提交的竞态会让 start 抛 `SCHEDULER_GLOBALLY_PAUSED`，调度层把该结果记为 **WAIT**（不是 `FAILED`）并释放预留。
+
+### 8.3 暂停期间（**已实现**）
 
 已经运行的工具/验证命令不因全局暂停收到停止信号；已经发出的模型请求不被取消，可能在服务端完成。只读查询、事件订阅、记录用户输入、显式 task cancel/pause/recover/purge、Runtime stop 与不调用模型的 Git/验证/集成操作继续可用。answer/guidance 可耐久记录，但实际 Provider 投递延后到恢复并重验有效性之后。
 
-实现前必须完成各 Adapter 的进程归属 spike；Pi/Codex/Claude 在证据形成前都只能把“可核验 Provider 进程冻结”报告为 `REQUIRES_VALIDATION`。POSIX 以外的平台不能降级成只暂停调度后仍声称 `PAUSED`。
+各 Adapter 的进程归属 spike 已完成（FOUNDATION-097）：Pi 实测为 `SUPPORTED`，Codex 与 Claude Code 保持 `REQUIRES_VALIDATION`（证据见 `docs/spikes/*.md` 的「Provider 进程冻结」一节），因此它们的目标会让 epoch 进入 `RECOVERY_REQUIRED` 而不是 `PAUSED`。POSIX 以外的平台不能降级成只暂停调度后仍声称 `PAUSED`。

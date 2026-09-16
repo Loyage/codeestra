@@ -75,6 +75,7 @@ const unsupportedCapabilities: AdapterCapabilities = Object.freeze({
   controlledConfiguration: 'SUPPORTED',
   pluginSelection: 'UNSUPPORTED',
   sessionGuidance: 'UNSUPPORTED',
+  providerProcessSuspension: 'UNSUPPORTED',
 });
 
 /**

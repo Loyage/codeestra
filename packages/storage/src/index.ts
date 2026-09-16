@@ -4,6 +4,10 @@ export { Phase1Database, SlotReservationError, StorageError, TaskDependencyError
 export type { TaskScheduleEventType } from './database.js';
 export type { ExecutionSlotAcquisition, ExecutionSlotReservationRecord } from './database.js';
 export type {
+  ActiveProviderIncarnation,
+  RuntimeCommandReceiptInput, RuntimeCommandReceiptRecord,
+  RuntimeGlobalControlWrite, RuntimePauseControlRecord, RuntimePauseTargetInput,
+  RuntimePauseTargetRecord, RuntimePauseTargetState, RuntimePauseTargetUpdate,
   AdapterEventResult, AgentAnswerPlan, AgentConfigurationRecord, AgentSessionLifecycleState,
   AgentStartPlan, AgentThinkingLevel, AttentionSummary,
   RuntimeCapacityChange, RuntimeCapacityRecord,
@@ -72,7 +76,7 @@ export {
   intentKindShrinkMigration, intentKinds,
   operationProgressMigration,
   phase1Migration, phase1SchemaVersion, reclamationMigration,
-  resolveMigratedGlobalLimit, runtimeGlobalCapacityMigration,
+  resolveMigratedGlobalLimit, runtimeGlobalCapacityMigration, runtimePauseControlMigration,
   sessionGuidanceMigration,
   sessionHandoffMigration,
   sessionTerminalMigration,

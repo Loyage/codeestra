@@ -145,6 +145,9 @@ const retryCodeGlossary: Record<string, string> = {
   CAPACITY_GLOBAL_LIMIT_REACHED: '项目并发上限已满：本次未启动，等待下一个调度 tick',
   CAPACITY_ADAPTER_SLOT_LIMIT_REACHED: '该 Adapter 的槽位上限已满：本次未启动，等待下一个调度 tick',
   SCHEDULER_DRAINING: '调度器正在 draining（停止接收新启动）：本次未启动',
+  // ADR-0061 D08: the whole Runtime is paused, so nothing may start. It is a wait (CLI exit 3), and
+  // it is *not* a dependency verdict: the Task is not BLOCKED.
+  SCHEDULER_GLOBALLY_PAUSED: 'Runtime 全局暂停中（scheduler control resume 之前不启动）：本次未启动',
 };
 
 /** The glossary note for one code, or null when this code has no documented note. */

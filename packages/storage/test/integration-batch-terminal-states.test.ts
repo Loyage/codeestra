@@ -20,7 +20,7 @@ import {
   Phase1Database,
   phase1SchemaVersion,
 } from '../src/index.js';
-import { restorePreV34CapacitySchema } from './support/restore-pre-v34.js';
+import { restorePreV34Schema } from './support/restore-pre-v34.js';
 
 /** The exact DDL schema v29 had, so the fixture below can be downgraded to it. */
 const stateCheckV29 = `CHECK(state IN ('CREATED','PREPARING','VERIFYING','INTEGRATING_DEV',
@@ -41,7 +41,7 @@ function downgradeToV29(database: Database): void {
   database.exec('ALTER TABLE workspaces DROP COLUMN base_ref');
   // ...and everything schema v34 (ADR-0061) added, with the two tables it retires restored: a real
   // v29 database has the project-scoped capacity configuration and no Runtime singleton.
-  restorePreV34CapacitySchema(database);
+  restorePreV34Schema(database);
   database.exec(`
     CREATE TABLE integration_batches_v29 (
       id TEXT PRIMARY KEY,
@@ -66,6 +66,11 @@ function downgradeToV29(database: Database): void {
     DROP TABLE integration_batches;
     ALTER TABLE integration_batches_v29 RENAME TO integration_batches;
     CREATE INDEX integration_batches_by_project ON integration_batches(project_id,created_at,id);
+    -- The tables added by schema v34 (Runtime global load control, ADR-0061) are not part of a real
+    -- version 29 database either.
+    DROP TABLE IF EXISTS runtime_pause_targets;
+    DROP TABLE IF EXISTS runtime_command_receipts;
+    DROP TABLE IF EXISTS runtime_pause_control;
     PRAGMA user_version=29;
   `);
 }
