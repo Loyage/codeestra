@@ -7086,6 +7086,18 @@ cd /Users/loyage/Documents/codeestra-dev && just check   # 等价 bun run check
 **本记录能被 `main` 读到，本身就是这四步全部通过的证据**；精确 SHA、boot id/pid 与读回值见紧随其后的补充提交。
 数据库无需迁新版本（v32 已在第一次提升的重启里完成，本记录与 `6aacaff` 都不碰 schema）。
 
+**第二次提升的实际读回值（提升完成后补记；本提交不引用自身 SHA）**：
+
+| 项 | 值 |
+|---|---|
+| 第二次提升的候选 | `892ab2f21044b1625dacf36e80e52c932d7d4fec`（= 本记录提交；其父提交 `6aacaff` 是超时修复） |
+| 提升前 `main`（= `origin/dev` = `origin/main`） | `69d649f0fe450ffb7e133e6f5c6264a48bcd70b5` |
+| 提升后 `main` = `origin/main` = `origin/dev` | `892ab2f21044b1625dacf36e80e52c932d7d4fec`（两次读回都逐字符等于候选；push 都是 fast-forward：`69d649f..892ab2f`） |
+| 提升前全量证据（该候选上） | `just check` **exit 0**、Vitest 22 文件 / 490 项、Bun **871 pass / 0 fail**、104 文件、530.45s |
+| 重启 | 提升前 boot `8d7eb7b9-7607-4b6e-abc6-1da0c2a86072`（pid 98614）被 `stop` 正常停掉（`status: STOPPED`）；提升后 boot `9f41e026-7a4a-4eff-a07b-8a1bb5995fc2`（pid 46741），独立读回 `status: READY`、`uiRunning: true`、`activeSessions: []` |
+| main clone | `HEAD = origin/main = origin/dev`、工作树 0 行改动 |
+| 稳定库 | 仍是 **v32**、`features_json` 列在、`PRAGMA foreign_key_check` 0 行、10 任务 / 1 项目不变（第二次提升不碰 schema，无需迁移） |
+
 ### 重启序列与证据（`AGENTS.md` 规程，在 main clone 执行，由 `just promote-main` 串起）
 
 第一次提升（`69d649f`），每步退出码均 0：`bun install --frozen-lockfile` → `bun run build:ui` → `bun run codeestra stop` →
