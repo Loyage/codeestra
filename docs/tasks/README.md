@@ -8116,9 +8116,10 @@ Web UI HTTP 面读写同一条命令。
 
 ## 用户任务（`Loyage/task_auto`）— 任务输入字段重构：显示标题 / 命名标题 / 任务详情，删除约束与任务类型（ADR-**0065**，schema **v35**）
 
-状态：**已实现并定向验证；已 commit `364e877`，并已把 `dev@06bcf97` 合入本分支完成集成**（ADR-0062/0063/0064 都已在 `dev` 上）。
-合入 `dev` 的合并提交、`dev` 上的全量检查结果与**未 push `origin/dev`** 的事实由本节末尾的「落地」小节记。
-worktree `/Users/loyage/orca/workspaces/codeestra-dev/task_auto`，分支 `Loyage/task_auto`；基线 `dev = 7425556`。
+状态：**已实现、定向验证，并已合入 `dev`（merge `db4e1ba`）**；`dev` 上的全量检查已跑并全绿（见末尾「落地」）。
+**未 push `origin/dev`、未提升 `main`、未重启任何 Runtime**。
+分支 `Loyage/task_auto`：`364e877`（本格实现）+ `97bf503`（把 `dev@06bcf97` 合入分支完成集成）。
+worktree `/Users/loyage/orca/workspaces/codeestra-dev/task_auto`；原始基线 `dev = 7425556`（集成时已前进到 `06bcf97`）。
 定向测试计划见本分支的 [`.codeestra/tests.json`](../../.codeestra/tests.json)（ADR-0038/0039；用 `targetedTestPlanSchema` 校验通过）。
 
 用户原话（本轮任务）：`优化任务输入功能，首先任务字段添加：标题（分显示标题和命名标题）…然后就是任务详情，任务模板，
@@ -8190,7 +8191,15 @@ worktree `/Users/loyage/orca/workspaces/codeestra-dev/task_auto`，分支 `Loyag
 
 ### 落地（合入 `dev`）
 
-见紧随其后的收尾提交（`docs(tasks): record the landing of Loyage/task_auto …`）：其中记合并提交 SHA 与 `dev` 上的全量检查结果。
+- **合并提交**：`db4e1ba Merge branch 'Loyage/task_auto' into dev`（在 dev clone `/Users/loyage/Documents/codeestra-dev` 执行 `git merge --no-ff`），
+  `dev` 从 `06bcf97` 前进到 `db4e1ba`；合并分支前先把 `dev@06bcf97` 合入本分支（`97bf503`）解决冲突，因此这次合入本身无冲突。
+- **`dev` 上的全量检查**（在精确 `db4e1ba` 上；等同 `just verify`）：`bun run check` 全程退出码 0 ——
+  `tsc --noEmit`、UI `tsc --noEmit`、`vitest run`（26 个文件 529 项）、`bun test`（115 个文件 **956 项，0 fail**）、UI Vite 构建均通过。
+  执行方式是 `bun run check`（`Justfile` 的 `verify` recipe 就是它），没有额外手段。
+- **未做**：未 push `origin/dev`（`origin/dev` 仍在 `7425556`；按 ADR-0047/0052 只在提升时 push 固定候选）、未提升 `main`、
+  未重启任何 Runtime。本次未触碰稳定 clone，也未操作任何用户仓库。
+- 集成时额外修掉的两处（本次合入的一部分，不是遗留）：`packages/storage/test/task-latest-execution.test.ts` 的当前 schema 夹具
+  与 `apps/runtime/test/cli-integrate.test.ts` 的 worktree/branch 断言（改读记录值，ADR-0065 D03）。
 
 ## NEXT — 最小可用纵向切片
 
