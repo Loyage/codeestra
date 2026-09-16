@@ -1229,15 +1229,18 @@ function usage(): never {
     (quiescenceProven: false, signalsSent: 0). A refusal changes nothing and exits 1 with
     RECOVERY_PROVIDER_ALIVE / RECOVERY_DESCENDANTS_ALIVE / RECOVERY_OWNERSHIP_UNVERIFIABLE /
     RECOVERY_PROCESS_IDENTITY_MISSING; TASK_NOT_IN_RECOVERY is exit 1 as well, ALREADY_RECONCILED is
-    exit 0 and read-only. After it, "task retry" can requeue the Task and "task cancel" can retire it.
+    exit 0 and read-only. After it, "task retry" can requeue the Task and "task cancel" can retire it
+    ("task purge" performs this same reconcile itself before deleting, so a manual recover is optional).
   bun run codeestra task cancel <project-id> <task-id> <expected-version>
   bun run codeestra task archive <project-id> <task-id> <expected-version>
   bun run codeestra task unarchive <project-id> <task-id> <expected-version>
   bun run codeestra task purge <project-id> <task-id> <expected-version> --yes [--reason <text>] [--json]
     # DESTRUCTIVE and irreversible: deletes the Task, its revisions, executions, sessions, evidence,
     # owned worktrees, verification copies and branches. A non-terminal Task is cancelled first
-    # through the ordinary cooperative stop, and a stop that cannot be confirmed deletes nothing
-    # (RECONCILE_REQUIRED, exit 1). A Task whose commit already reached dev/main is refused
+    # through the ordinary cooperative stop, and a RECOVERY_REQUIRED Task is reconciled by
+    # observation first (the "task recover" rule; result stop.stop: "RECOVERED"); a stop or a
+    # provider that cannot be proven gone deletes nothing (RECONCILE_REQUIRED, exit 1). A Task whose
+    # commit already reached dev/main is refused
     # (TASK_INTEGRATED_INTO_DEV / TASK_IN_STABLE_PROMOTION, exit 1) — archive it instead.
     # --yes is required and is the only guard; without it the command exits 2 without sending
     # anything. Replaying the same command ID returns the receipt instead of a second deletion.

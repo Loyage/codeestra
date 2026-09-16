@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { ProviderOwnershipObservation, ProviderProcessTree } from '@codeestra/agent-adapters';
 import { deleteOwnedTaskBranch } from '@codeestra/git';
 import {
   type Phase1Database,
@@ -13,6 +14,7 @@ import { deriveCommandId } from './agent-runtime-service.js';
 import { taskWorkspaceRepositoryRoot } from './dev-repo-service.js';
 import { applyReclamation, planReclamation, type ReclaimPlan } from './reclaim-service.js';
 import { pauseOrCancelTask } from './task-control-service.js';
+import { recoverTask } from './task-recovery-service.js';
 
 /**
  * Permanent deletion of one Task (ADR-0058).
@@ -20,9 +22,12 @@ import { pauseOrCancelTask } from './task-control-service.js';
  * The command is deliberately a **sequence of reversible steps with one database transaction at the
  * end**, because the irreversibility lives in two different places:
  *
- *  1. the Task may be non-terminal, in which case it is cancelled first — through the ordinary
+ *  1. the Task may be non-terminal, in which case it is stopped first — through the ordinary
  *     cooperative stop, so a provider process is only reported stopped when the Adapter confirmed it
- *     exited. An unconfirmed stop ends the command with `RECONCILE_REQUIRED` and **nothing deleted**;
+ *     exited. A `RECOVERY_REQUIRED` Task is first reconciled by observation (the `task recover`
+ *     ADR-0055 rule): only a provider that is provably gone lets the deletion continue. An
+ *     unconfirmed stop or an unprovable provider ends the command with `RECONCILE_REQUIRED` and
+ *     **nothing deleted**;
  *  2. the owned worktrees, verification copies and branches are removed through the existing
  *     ownership checks (ADR-0021) before any row is deleted. A resource whose ownership cannot be
  *     proven is a refusal, not a `rm -rf`.
@@ -32,9 +37,11 @@ import { pauseOrCancelTask } from './task-control-service.js';
  *
  * Three refusals are first-class and each names its own reason instead of a generic failure:
  *
- *  - `RECONCILE_REQUIRED` — the Task is `RECOVERY_REQUIRED`, or the stop could not be confirmed. The
- *    Runtime will not delete the record of a provider process it cannot prove is gone; `task recover`
- *    (ADR-0055) reconciles that by observation first.
+ *  - `RECONCILE_REQUIRED` — the stop could not be confirmed, or a `RECOVERY_REQUIRED` Task could not
+ *    be reconciled because the provider process may still be alive (or its ownership could not be
+ *    observed). The Runtime will not delete the record of a provider process it cannot prove is
+ *    gone; `task recover` (ADR-0055) expresses the same refusal, and `task purge` performs that
+ *    observation itself instead of asking the user to run a second command.
  *  - `TASK_INTEGRATED_INTO_DEV` / `TASK_IN_STABLE_PROMOTION` — a commit this Task produced lives in
  *    `dev`/`main` and outlives it; deleting the Task would erase where that commit came from.
  *    `task archive` keeps every row and is the answer for those Tasks.
@@ -52,7 +59,7 @@ export class TaskPurgeError extends Error {
 /** The stop a purge had to perform, reported so the user sees what happened before the deletion. */
 export interface TaskPurgeStopFact {
   readonly state: string;
-  readonly stop: 'TERMINAL' | 'RELEASED' | 'UNCERTAIN';
+  readonly stop: 'TERMINAL' | 'RELEASED' | 'RECOVERED' | 'UNCERTAIN';
   readonly executionId: string | null;
   readonly sessionId: string | null;
   readonly detail: string;
@@ -83,6 +90,10 @@ export interface TaskPurgeInput {
   readonly reason?: string | undefined;
   readonly now?: () => number;
   readonly randomUUID?: () => string;
+  /** Process-table observation for a `RECOVERY_REQUIRED` reconcile; overridable in tests. */
+  readonly inspectOwnership?: (tree: ProviderProcessTree) => Promise<ProviderOwnershipObservation>;
+  /** Whether the recorded workspace path still exists; overridable in tests. */
+  readonly pathExists?: (path: string) => boolean;
 }
 
 const terminalStates: ReadonlySet<string> = new Set(['SUCCEEDED', 'CANCELLED']);
@@ -229,9 +240,13 @@ function requireSubject(input: TaskPurgeInput, phase: string): TaskPurgeSubject 
 }
 
 /**
- * Cancels a non-terminal Task through the ordinary cooperative stop. `RECOVERY_REQUIRED` is refused
- * before the attempt rather than after it: that state *is* "a provider process may still be alive",
- * and a stop that cannot be confirmed must not be turned into a deletion.
+ * Stops a non-terminal Task before it is deleted.
+ *
+ * A `RECOVERY_REQUIRED` Task is not cancelled: that state *is* "a provider process may still be
+ * alive", so the only thing that can make it deletable is the ADR-0055 observation. The reconcile is
+ * therefore performed here, with the same `task recover` service, instead of refusing and asking the
+ * user to run a second command. A provider that is provably gone closes the run as `FAILED` and the
+ * deletion continues; anything else is `RECONCILE_REQUIRED` and **nothing is deleted**.
  */
 async function stopIfNeeded(
   input: TaskPurgeInput,
@@ -240,9 +255,7 @@ async function stopIfNeeded(
 ): Promise<TaskPurgeStopFact | null> {
   if (terminalStates.has(subject.state)) return null;
   if (subject.state === 'RECOVERY_REQUIRED') {
-    throw new TaskPurgeError('RECONCILE_REQUIRED',
-      'The Task is RECOVERY_REQUIRED: run `task recover` (ADR-0055) to reconcile it by observation'
-      + ' before purging it');
+    return await reconcileBeforePurge(input, subject, randomUUID);
   }
   const stopped = await pauseOrCancelTask({
     storage: input.storage,
@@ -258,8 +271,8 @@ async function stopIfNeeded(
   });
   if (stopped.stop === 'UNCERTAIN' || stopped.state === 'RECOVERY_REQUIRED') {
     throw new TaskPurgeError('RECONCILE_REQUIRED',
-      `The Task was not proven stopped (${stopped.detail}); nothing was deleted. Reconcile it with`
-      + ' `task recover` first.');
+      `The Task was not proven stopped (${stopped.detail}); nothing was deleted. Retry \`task purge\``
+      + ' once the process is gone (it reconciles by observation), or run `task recover` first.');
   }
   return {
     state: stopped.state,
@@ -267,6 +280,55 @@ async function stopIfNeeded(
     executionId: stopped.executionId,
     sessionId: stopped.sessionId,
     detail: stopped.detail,
+  };
+}
+
+/**
+ * Reconciles a `RECOVERY_REQUIRED` Task from real facts before it is deleted (ADR-0055).
+ *
+ * This is the `task recover` service, called with a command ID derived from the purge command, so a
+ * replayed successful purge reaches its purge receipt instead of reconciling again. Only
+ * `RECONCILED`/`ALREADY_RECONCILED` let the deletion continue; every refusal (provider alive,
+ * descendant alive, identity missing, ownership unverifiable) is reported as `RECONCILE_REQUIRED`
+ * and changes nothing, leaving a later retry free to observe again.
+ */
+async function reconcileBeforePurge(
+  input: TaskPurgeInput,
+  subject: TaskPurgeSubject,
+  randomUUID: () => string,
+): Promise<TaskPurgeStopFact> {
+  const reason = input.reason ?? null;
+  const payloadHash = createHash('sha256').update(JSON.stringify({
+    command: 'task.recover',
+    projectId: input.projectId,
+    taskId: input.taskId,
+    expectedVersion: subject.version,
+    purgeCommandId: input.commandId,
+    reason,
+  })).digest('hex');
+  const view = await recoverTask({
+    storage: input.storage,
+    projectId: input.projectId,
+    taskId: input.taskId,
+    expectedVersion: subject.version,
+    commandId: deriveCommandId(input.commandId, 'purge-recover'),
+    payloadHash,
+    actor: input.actor,
+    ...(input.reason === undefined ? {} : { reason: input.reason }),
+    ...(input.now === undefined ? {} : { now: input.now }),
+    randomUUID,
+    ...(input.inspectOwnership === undefined ? {} : { inspectOwnership: input.inspectOwnership }),
+    ...(input.pathExists === undefined ? {} : { pathExists: input.pathExists }),
+  });
+  if (view.outcome === 'REFUSED') {
+    throw new TaskPurgeError('RECONCILE_REQUIRED', view.detail);
+  }
+  return {
+    state: view.taskState,
+    stop: 'RECOVERED',
+    executionId: view.observation.executionId,
+    sessionId: view.observation.sessionId,
+    detail: view.detail,
   };
 }
 

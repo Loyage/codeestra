@@ -77,4 +77,14 @@ describe('purge outcome rendering', () => {
       `refs/heads/task/t → ${'a'.repeat(40)}（已删除）`,
     ]);
   });
+
+  it('names the observation reconcile when the deleted Task was RECOVERY_REQUIRED', () => {
+    const line = purgeOutcomeLine({
+      ...outcome,
+      state: 'FAILED',
+      stop: { state: 'FAILED', stop: 'RECOVERED', executionId: 'e1', sessionId: 's1',
+        detail: 'provider is gone; the run is closed as FAILED' },
+    });
+    expect(line).toContain('删除前已按观察对账（FAILED）');
+  });
 });

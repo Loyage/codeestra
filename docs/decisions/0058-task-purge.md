@@ -58,7 +58,8 @@ bun run codeestra task purge <project-id> <task-id> <expected-version> --yes [--
 
 - 任务状态为 `SUCCEEDED` / `CANCELLED` 时直接删除。
 - 其它任何状态先走**既有**的协作停止（`pauseOrCancelTask(kind:'CANCEL')`，用派生 command ID，不改写既有事实）：`DRAFT/BLOCKED/READY/EXECUTED/FAILED/PAUSED` 直接 `CANCELLED`；`RUNNING/WAITING_FOR_USER/PAUSING` 先 `CANCELLING` 并请 Adapter 释放 provider 进程，**只有 Adapter 确认进程退出**才落 `CANCELLED`。
-- 停止无法确认（`UNCERTAIN`）或任务本来就是 `RECOVERY_REQUIRED` → `RECONCILE_REQUIRED`，**什么都不删**，提示先用 `task recover`（ADR-0055）按观察对账。理由与 ADR-0016/0055 一致：**不删除「可能仍有存活进程」的记录**。
+- 停止无法确认（`UNCERTAIN`）→ `RECONCILE_REQUIRED`，**什么都不删**。任务本来就是 `RECOVERY_REQUIRED` 时，purge 先执行**与 `task recover` 同一实现**的观察对账（派生 command ID，ADR-0055）：只有能证明 provider 已退出才收口为 `FAILED` 并继续删除（结果里 `stop.stop: "RECOVERED"`）；provider 仍存活 / 记录的后代仍存活 / 身份缺失 / 所有权无法核验 → `RECONCILE_REQUIRED`，**什么都不删**。理由与 ADR-0016/0055 一致：**不删除「可能仍有存活进程」的记录**。
+  > **修订（本次）**：原 D02 写的是「本来就是 `RECOVERY_REQUIRED` 就直接 `RECONCILE_REQUIRED`，提示先用 `task recover`」，与 Options 第 5 项「非终态先自动走『协作停止 + 静止核验』」不一致，也让界面上出错的 Task 无路可清（界面没有 recover 入口）。现按 Options 第 5 项把观察对账内建进 purge：安全不变（未证明静止仍拒绝），只是不再要求用户先手敲第二条命令。
 - 删除用的 `expectedVersion` 是**停止之后**读到的版本：调用者的 `expectedVersion` 描述的是他看到的状态，停止合法地移动了它，两者都被记账。
 
 ### D03：append-only 是显式例外，且只在 purge 事务内让路
@@ -115,7 +116,9 @@ bun run codeestra task purge <project-id> <task-id> <expected-version> --yes [--
 3. `apps/runtime/test/cli-task-purge.test.ts`（2 项，`bun test`，**通过**，真实 CLI + 真实 Runtime + 独立 `CODEESTRA_HOME` + 真实 worktree/branch）：`EXECUTED` 任务 `--yes` 删除 → 退出码 0、先 `CANCELLED`（`stop.state='CANCELLED'`）、`plan.worktrees=1`/`branches=1`、`branchFacts[0].tipCommit` 是 40 位 OID、`rowsDeleted` 含 `task_revisions`/`executions`/`workspaces`/`tasks`，**worktree 目录与分支都真的消失**、`task list --all` 不含它、`task status` 以 `NOT_FOUND` 退出 1，且五个 `_no_delete` 触发器事后都在；缺 `--yes` → 退出码 2、worktree 与分支仍在、任务仍是 `EXECUTED`。
 4. `apps/ui/test/task-purge.test.ts`（3 项，`vitest`，**通过**）：输入框只接受该任务的编号（`012`/空白通过，`#12`/别的编号/非数字/空/负数不通过）；`purgeCommand` 发送 `confirmed: true` 且空原因不带字段、原因被 trim；结果行如实说出被删行数、工作树/验证副本/分支数量、删除前的终止与依赖边数量，以及分支 tip。
 
-未验证（不得声称）：`RECOVERY_REQUIRED` 任务的 purge 路径（只有拒绝分支被走到）、`PURGE_RESOURCE_NOT_OWNED` 的真实 Git 竞态、reclaim 与分支删除之间崩溃的恢复全流程、UI 的实际点击（ADR-0008 边界）。
+5. `apps/runtime/test/task-purge-recovery.test.ts`（3 项，`bun test`，**通过**，本次修订新增）：`RECOVERY_REQUIRED` 任务在观察为 `STOPPED` 时先写 `TaskRecoveryReconciled` 再写 `TaskPurged`、worktree 与分支真的消失、结果 `stop.stop='RECOVERED'`/最终状态 `FAILED`；观察为 `ALIVE` 或无 provider 身份时 `RECONCILE_REQUIRED` 且任务仍 `RECOVERY_REQUIRED`、worktree 仍在、无 `TaskPurged`。
+
+未验证（不得声称）：`PURGE_RESOURCE_NOT_OWNED` 的真实 Git 竞态、reclaim 与分支删除之间崩溃的恢复全流程、UI 的实际点击（ADR-0008 边界）。
 
 ## 关联文档
 

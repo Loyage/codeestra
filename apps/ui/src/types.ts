@@ -1625,7 +1625,7 @@ export interface TaskPurgeOutcomeView {
   readonly replayed: boolean;
   readonly stop: {
     readonly state: string;
-    readonly stop: 'TERMINAL' | 'RELEASED' | 'UNCERTAIN';
+    readonly stop: 'TERMINAL' | 'RELEASED' | 'RECOVERED' | 'UNCERTAIN';
     readonly executionId: string | null;
     readonly sessionId: string | null;
     readonly detail: string;
