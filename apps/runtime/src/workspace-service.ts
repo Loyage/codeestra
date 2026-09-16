@@ -484,6 +484,9 @@ export async function prepareReservedWorkspace(input: {
     projectId: input.projectId,
     taskId: reservation.taskId,
     expectedTaskVersion: input.expectedTaskVersion,
+    // ADR-0060: the explicit baseline travels with the command all the way to the workspace plan —
+    // dropping it here would silently base the Task on the project's default ref instead.
+    baseRef: input.baseRef ?? null,
     ...(input.now === undefined ? {} : { now: input.now }),
     ...(input.randomUUID === undefined ? {} : { randomUUID: input.randomUUID }),
   });

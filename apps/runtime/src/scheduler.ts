@@ -6,7 +6,7 @@ import {
   type DependencyEdge,
   type DependencyGraph,
 } from '@codeestra/domain';
-import { readLocalRefCommit, isAncestor } from '@codeestra/git';
+import { isAncestor } from '@codeestra/git';
 import {
   Phase1Database,
   StorageError,
@@ -14,7 +14,7 @@ import {
   type TaskDependencyFact,
   type TaskLifecycleState,
 } from '@codeestra/storage';
-import { requireRecordedDevRepoPath } from './dev-repo-service.js';
+import { resolveTaskBaselineRepository } from './dev-repo-service.js';
 
 /**
  * The conservative dependency scheduler (Phase 2, first step — ADR-0024).
@@ -23,8 +23,9 @@ import { requireRecordedDevRepoPath } from './dev-repo-service.js';
  *
  *  1. **Is this Task allowed to be READY?** An edge is satisfied only when the pinned upstream
  *     revision has an IntegrationBatch that actually reached `INTEGRATED`, *and* that merged commit
- *     is still reachable from the project's current `dev` ref. Only Task verification, or a
- *     `dev` rewrite that drops the upstream commit, therefore leaves the dependent `BLOCKED`.
+ *     is still reachable from the project's current Task baseline (the dev clone's `dev`, or the
+ *     project folder's checked out branch for a managed project — ADR-0060). Only Task verification,
+ *     or a baseline rewrite that drops the upstream commit, therefore leaves the dependent `BLOCKED`.
  *  2. **Did this graph edit keep the DAG acyclic?** The reasoning itself lives in the pure domain
  *     graph and runs inside the storage write transaction, so two edges that are each legal cannot
  *     be committed together into a cycle.
@@ -66,8 +67,11 @@ export interface TaskDependencyView {
   readonly taskId: string | null;
   readonly taskState: TaskLifecycleState | null;
   readonly taskVersion: number | null;
+  /** The baseline ref this verdict was read against: the dev clone's `dev`, or the project folder's
+   * checked out branch for a managed project (ADR-0060). */
   readonly devRef: string;
-  /** Current `dev` OID, or null when the project has no `dev` ref (all edges stay blocked). */
+  /** That baseline ref's commit, or null when the project has no baseline that can be named (all
+   * edges stay blocked). */
   readonly devCommit: string | null;
   readonly edges: readonly TaskDependencyEdgeView[];
   readonly blocked: boolean;
@@ -123,18 +127,46 @@ function graphOf(facts: readonly TaskDependencyFact[]): DependencyGraph {
   }
 }
 
+/** The baseline a dependency verdict is read against, with the fact that it could not be read. */
+interface DependencyBaseline {
+  readonly repositoryRoot: string;
+  readonly ref: string;
+  /** Null when no baseline could be established; every edge then stays blocked. */
+  readonly commit: string | null;
+  /** Why there is no baseline; null when there is one. */
+  readonly detail: string | null;
+}
+
 /**
- * Reads the dev clone's `dev` OID (ADR-0056: the long-lived branch lives in `projects.dev_repo_path`,
- * not in the stable checkout). A project without a dev clone is refused before anything is read, so
- * no caller can mistake "there is no dev repository" for "the baseline moved"; a repository that
- * cannot be read is reported as "no baseline", which keeps every edge blocked: an unresolvable
- * baseline must never be read as "satisfied".
+ * The baseline a dependency verdict is read against (ADR-0060): the recorded dev clone's `dev` when
+ * there is one, otherwise the project folder and the branch it has checked out right now. Resolved
+ * once per projection so the loop does not repeat the same read.
+ *
+ * A baseline that cannot be established — a managed folder on a detached HEAD, a dev clone whose
+ * `dev` branch is gone, a repository that cannot be read — is reported with `commit: null`, which
+ * keeps every edge blocked with its own reason code (ADR-0024: 无法判定一律按未满足处理): a baseline
+ * nobody can read must never be read as "satisfied", and a read-only listing must not turn into an
+ * exception either. The strict, code-bearing refusal belongs to the start path, which resolves the
+ * same baseline with `resolveTaskBaselineRepository` and refuses (`TASK_BASE_REF_*`, `DEV_REPO_*`)
+ * before anything is reserved.
  */
-async function readDevCommit(devRepoPath: string, devRef: string): Promise<string | null> {
+async function resolveDependencyBaseline(
+  project: Parameters<typeof resolveTaskBaselineRepository>[0],
+): Promise<DependencyBaseline> {
   try {
-    return await readLocalRefCommit({ repositoryRoot: devRepoPath, ref: devRef });
-  } catch {
-    return null;
+    const baseline = await resolveTaskBaselineRepository(project);
+    return { repositoryRoot: baseline.repositoryRoot, ref: baseline.baseRef,
+      commit: baseline.baseCommit, detail: null };
+  } catch (error) {
+    return {
+      repositoryRoot: project.devRepoPath ?? project.repoRoot,
+      // The ref this read was aimed at: the project's long-lived branch when a dev clone is recorded,
+      // otherwise the project folder's `HEAD` — which is the only thing there is to read there, and
+      // exactly the thing that could not name a branch.
+      ref: project.devRepoPath === null ? 'HEAD' : project.devRef,
+      commit: null,
+      detail: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 
@@ -163,9 +195,11 @@ function factView(
 async function evaluateEdge(input: {
   readonly fact: TaskDependencyFact;
   readonly repositoryRoot: string;
-  readonly devCommit: string | null;
+  readonly baselineCommit: string | null;
+  /** Why the baseline could not be read; only used when `baselineCommit` is null. */
+  readonly baselineDetail: string | null;
 }): Promise<TaskDependencyEdgeView> {
-  const { fact, repositoryRoot, devCommit } = input;
+  const { fact, repositoryRoot, baselineCommit } = input;
   const blocked = (code: TaskDependencyBlockReason['code'], detail: string): TaskDependencyEdgeView =>
     factView(fact, false, Object.freeze({
       code,
@@ -177,15 +211,17 @@ async function evaluateEdge(input: {
     return blocked('UPSTREAM_NOT_INTEGRATED',
       `#${fact.prerequisiteDisplayNumber} revision ${fact.requiredRevisionNumber} has no INTEGRATED batch`);
   }
-  if (devCommit === null) {
-    return blocked('DEV_BASELINE_MISSING', 'the project has no readable dev baseline ref');
+  if (baselineCommit === null) {
+    return blocked('DEV_BASELINE_MISSING',
+      `the project has no readable Task baseline ref (${input.baselineDetail
+        ?? 'the baseline was not resolved'})`);
   }
-  if (fact.integratedCommit === devCommit) return factView(fact, true, null);
+  if (fact.integratedCommit === baselineCommit) return factView(fact, true, null);
   try {
     const reachable = await isAncestor({
       repositoryRoot,
       ancestor: fact.integratedCommit,
-      descendant: devCommit,
+      descendant: baselineCommit,
     });
     if (reachable) return factView(fact, true, null);
   } catch (error) {
@@ -193,7 +229,7 @@ async function evaluateEdge(input: {
       error instanceof Error ? error.message : String(error));
   }
   return blocked('NOT_REACHABLE_FROM_DEV',
-    `${fact.integratedCommit} is no longer reachable from ${devCommit}`);
+    `${fact.integratedCommit} is no longer reachable from the Task baseline ${baselineCommit}`);
 }
 
 /** The `task.depends.list` projection. Read-only: it never writes a Task state. */
@@ -213,13 +249,18 @@ export async function inspectTaskDependencies(input: {
   const taskFacts = input.taskId === undefined
     ? allFacts
     : allFacts.filter((fact) => fact.dependentTaskId === input.taskId);
-  // The dev clone is resolved once, so a missing one is refused before any edge is judged and the
-  // loop does not repeat the same check.
-  const devRepoPath = requireRecordedDevRepoPath(project);
-  const devCommit = await readDevCommit(devRepoPath, project.devRef);
+  // ADR-0060: the baseline is resolved once, so every edge below is judged against one read and a
+  // managed project is judged exactly like a project with a dev clone — from the ref it recorded,
+  // not from a refusal nobody can act on.
+  const baseline = await resolveDependencyBaseline(project);
   const edges: TaskDependencyEdgeView[] = [];
   for (const fact of taskFacts) {
-    edges.push(await evaluateEdge({ fact, repositoryRoot: devRepoPath, devCommit }));
+    edges.push(await evaluateEdge({
+      fact,
+      repositoryRoot: baseline.repositoryRoot,
+      baselineCommit: baseline.commit,
+      baselineDetail: baseline.detail,
+    }));
   }
   const blockedReasons = edges
     .map((edge) => edge.reason)
@@ -232,8 +273,8 @@ export async function inspectTaskDependencies(input: {
     taskId: input.taskId ?? null,
     taskState: task?.state ?? null,
     taskVersion: task?.version ?? null,
-    devRef: project.devRef,
-    devCommit,
+    devRef: baseline.ref,
+    devCommit: baseline.commit,
     edges: Object.freeze(edges),
     blocked: blockedReasons.length > 0,
     blockedReasons: Object.freeze(blockedReasons),

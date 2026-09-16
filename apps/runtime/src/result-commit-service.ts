@@ -19,7 +19,7 @@ import {
   type ResultCommitAuthorization,
   type ResultCommitCapturePlan,
 } from '@codeestra/storage';
-import { requireRecordedDevRepoPath } from './dev-repo-service.js';
+import { taskWorkspaceRepositoryRoot } from './dev-repo-service.js';
 
 export class ResultCommitServiceError extends Error {
   constructor(readonly code: string, message: string) {
@@ -164,11 +164,12 @@ export async function prepareResultCommit(input: {
       'Agent tools and owned writers are not proven stopped; result commit is not allowed yet');
   }
   const project = input.storage.getTrustedProject(input.projectId);
-  // The Task worktree is a worktree of the dev clone (ADR-0056), so the ownership proof has to be
-  // taken from that repository; asking the stable checkout would report MISSING for a live worktree.
-  const devRepoPath = requireRecordedDevRepoPath(project);
+  // The Task worktree belongs to the repository that owns this project's Task branches (ADR-0060):
+  // the dev clone when one is recorded, otherwise the project folder itself. Asking the wrong root
+  // would report MISSING for a live worktree.
+  const repositoryRoot = taskWorkspaceRepositoryRoot(project);
   await assertOwnedWorkspace({
-    repositoryRoot: devRepoPath,
+    repositoryRoot,
     workspacePath: subject.workspacePath,
     branchRef: subject.workspaceBranchRef,
     executionId: subject.executionId,
@@ -275,10 +276,10 @@ export async function captureResultCommit(input: {
   }
   assertQuiescent(authorization);
   const project = input.storage.getTrustedProject(input.projectId);
-  // The Task worktree belongs to the dev clone (ADR-0056).
-  const devRepoPath = requireRecordedDevRepoPath(project);
+  // The Task worktree belongs to the repository that owns this project's Task branches (ADR-0060).
+  const repositoryRoot = taskWorkspaceRepositoryRoot(project);
   await assertOwnedWorkspace({
-    repositoryRoot: devRepoPath,
+    repositoryRoot,
     workspacePath: authorization.workspacePath,
     branchRef: authorization.workspaceBranchRef,
     executionId: authorization.executionId,

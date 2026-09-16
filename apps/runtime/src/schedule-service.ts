@@ -31,7 +31,6 @@ import {
   type ImpactSubject,
   impactReasonClass,
 } from '@codeestra/domain';
-import { readLocalRefCommit } from '@codeestra/git';
 import {
   Phase1Database,
   SlotReservationError,
@@ -57,7 +56,8 @@ import {
   type ImpactPathCaseDetection,
 } from './impact-analysis-service.js';
 import { inspectTaskDependencies, reconcileTaskDependencyState } from './scheduler.js';
-import { requireRecordedDevRepoPath } from './dev-repo-service.js';
+import { resolveTaskBaselineRepository, TaskBaselineError,
+  type TaskBaselineRepository } from './dev-repo-service.js';
 import type { SlotReservationService } from './slot-reservation-service.js';
 
 /**
@@ -907,7 +907,7 @@ export class ScheduleService {
 
     // 2. Conflict assessment against the active/reserved set (ADR-0031).
     const activeRefs = this.#activeTaskRefs(project.id, task.id);
-    const assessment = await this.#assess(project, task, activeRefs);
+    const assessment = await this.#assess(project, task, activeRefs, input.baseRef ?? null);
     const decision = this.#conflictDecision({
       project,
       task,
@@ -960,6 +960,7 @@ export class ScheduleService {
       assessment,
       commandId: input.commandId,
       actor: input.actor,
+      baseRef: input.baseRef ?? null,
     });
     if (acquisition.kind === 'WAIT') {
       return { ...withAssessment, disposition: 'WAITING', detail: acquisition.wait.detail,
@@ -970,21 +971,36 @@ export class ScheduleService {
     }
     const reservation = acquisition.reservation;
 
-    // 4. Before starting: re-check the external baseline and the revision this reservation was
-    //    assessed against. A `dev` that moved in between invalidates the assessment, so nothing is
-    //    started; the slot is released with the reason and the Task waits with `STALE_BASE`.
-    // ADR-0056: the baseline this reservation was assessed against is the dev clone's `dev` ref. The
-    // refusal for a project without one is raised before the read, so it is never swallowed as "no
-    // baseline" (which would be read as "the baseline moved").
-    const devRepoPath = requireRecordedDevRepoPath(project);
-    const currentDev = await readLocalRefCommit({
-      repositoryRoot: devRepoPath, ref: project.devRef,
-    }).catch(() => null);
+    // 4. Before starting: re-check the baseline this reservation was assessed against. A baseline
+    //    that moved — or one that can no longer be resolved at all — invalidates the assessment, so
+    //    nothing is started; the slot is released with the reason and the Task waits with `STALE_BASE`.
+    //    ADR-0060: the baseline is the one this Task would start from: the dev clone's `dev` when one
+    //    is recorded, otherwise the project folder's checked out branch (or the explicit `--base-ref`).
+    let baseline: Awaited<ReturnType<typeof resolveTaskBaselineRepository>>;
+    try {
+      baseline = await resolveTaskBaselineRepository(project, { baseRef: input.baseRef ?? null });
+    } catch (error) {
+      // A baseline that cannot be resolved is a refusal with its own stable code, and the reservation
+      // is released first: a Task that never started must not keep holding a slot.
+      const code = typeof error === 'object' && error !== null && 'code' in error
+        ? String(error.code) : 'BASELINE_UNRESOLVED';
+      const message = error instanceof Error ? error.message : String(error);
+      await this.#releaseReservation({
+        projectId: project.id,
+        reservationId: reservation.reservationId,
+        reason: `the Task baseline could not be resolved (${code}: ${message}); the reservation was`
+          + ' not started',
+        commandId: derivedScheduleId('schedule-baseline-release', input.commandId, task.id),
+        actor: input.actor,
+      });
+      return { ...withAssessment, disposition: 'FAILED', detail: `${code}: ${message}` };
+    }
+    const currentDev = baseline.baseCommit;
     if (currentDev !== reservation.assessedDevCommit) {
       await this.#releaseReservation({
         projectId: project.id,
         reservationId: reservation.reservationId,
-        reason: `the ${project.devRef} baseline moved from`
+        reason: `the ${baseline.baseRef} baseline moved from`
           + ` ${reservation.assessedDevCommit ?? 'an unreadable ref'} to`
           + ` ${currentDev ?? 'an unreadable ref'} after the assessment; the reservation was not`
           + ' started',
@@ -994,7 +1010,7 @@ export class ScheduleService {
       const wait: ScheduleWaitView = {
         kind: 'CONFLICT',
         code: 'STALE_BASE',
-        detail: `the ${project.devRef} baseline moved from`
+        detail: `the ${baseline.baseRef} baseline moved from`
           + ` ${(reservation.assessedDevCommit ?? 'unknown').slice(0, 12)} to`
           + ` ${(currentDev ?? 'unknown').slice(0, 12)} after the assessment, so the assessment no`
           + ' longer applies and nothing was started',
@@ -1191,6 +1207,7 @@ export class ScheduleService {
     project: TrustedProject,
     task: TaskSummary,
     activeRefs: readonly ImpactActiveTaskRef[],
+    baseRef: string | null = null,
   ): Promise<AssessmentFacts> {
     const candidateRef = this.#storage.getImpactCandidateTask(project.id, task.id);
     let candidateSnapshot: ImpactSnapshotRecord | null = null;
@@ -1219,7 +1236,7 @@ export class ScheduleService {
       // No workspace yet: the observed change set is empty, which is the one case where a prediction
       // is legitimate. It still goes through the analyzer's own snapshot constructor, so completeness
       // (and therefore UNKNOWN) is decided in one place.
-      candidateSnapshot = await this.#preStartSnapshot(project, task);
+      candidateSnapshot = await this.#preStartSnapshot(project, task, baseRef);
       if (candidateSnapshot === null) {
         unavailableDetail = 'the project has no readable development baseline, so no prediction'
           + ' could be derived';
@@ -1378,6 +1395,7 @@ export class ScheduleService {
   async #preStartSnapshot(
     project: TrustedProject,
     task: TaskSummary,
+    baseRef: string | null,
   ): Promise<ImpactSnapshotRecord | null> {
     let inspection: ImpactPolicyInspection;
     try {
@@ -1391,13 +1409,25 @@ export class ScheduleService {
       });
       return null;
     }
-    // ADR-0056: the development baseline lives in the project's dev clone (resolved first, so a
-    // missing clone is a refusal and never an empty observation).
-    const devRepoPath = requireRecordedDevRepoPath(project);
-    const baseCommit = await readLocalRefCommit({
-      repositoryRoot: devRepoPath, ref: project.devRef,
-    }).catch(() => null);
-    if (baseCommit === null) return null;
+    // ADR-0060: the baseline a prediction is made against is the one this Task would start from — the
+    // dev clone's `dev` when one is recorded, otherwise the project folder's checked out branch (or the
+    // explicit `--base-ref`). A baseline that cannot be **named** leaves no prediction at all; it is
+    // never replaced by some other ref. A recorded dev clone that cannot be verified still refuses,
+    // because a broken claim is not a missing one.
+    let baseline: TaskBaselineRepository;
+    try {
+      baseline = await resolveTaskBaselineRepository(project, { baseRef });
+    } catch (error) {
+      if (error instanceof TaskBaselineError) {
+        this.#logger('a pre-start prediction had no nameable baseline', {
+          projectId: project.id, taskId: task.id,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      }
+      throw error;
+    }
+    const baseCommit = baseline.baseCommit;
     const confirmation: ConfirmedImpactPolicy | null =
       this.#storage.getConfirmedImpactPolicy(project.id);
     const incompleteReasons = policyIncompleteReasons(inspection, confirmation);
@@ -1421,7 +1451,7 @@ export class ScheduleService {
       incompleteReasons,
       evidence: [
         `no workspace exists yet for ${task.id}, so the observed change set is empty`,
-        `prediction made against ${project.devRef} ${baseCommit.slice(0, 12)}`,
+        `prediction made against ${baseline.baseRef} ${baseCommit.slice(0, 12)}`,
         `path case mode measured on ${caseDetection.detail}`,
         'an empty observation is only safe when the mapping is complete; the residual risk of a'
         + ' prediction is handled by the growth detection of docs/architecture/scheduler.md §4',
@@ -1502,6 +1532,8 @@ export class ScheduleService {
     readonly assessment: AssessmentFacts;
     readonly commandId: string;
     readonly actor: string;
+    /** Explicit baseline ref for a new workspace (ADR-0060); the reservation records its commit. */
+    readonly baseRef?: string | null;
   }): Promise<
     | { readonly kind: 'RESERVED'; readonly reservation: {
       readonly reservationId: string; readonly assessedDevCommit: string | null } }
@@ -1518,6 +1550,7 @@ export class ScheduleService {
         actor: actorOf(input.actor),
         commandId: input.commandId,
         impactSnapshotId: input.assessment.view.candidateSnapshotId,
+        baseRef: input.baseRef ?? null,
       });
       if (acquisition.outcome === 'RESERVED' && acquisition.reservation !== null) {
         return { kind: 'RESERVED', reservation: {

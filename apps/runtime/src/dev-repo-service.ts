@@ -336,6 +336,24 @@ export interface ProjectDevRepository {
 }
 
 /**
+ * The repository that owns this project's Task worktrees, Task branches and result commits
+ * (ADR-0060 D04): the recorded dev clone when there is one, otherwise the project folder itself —
+ * the same `COALESCE(projects.dev_repo_path, projects.repo_root)` the storage layer projects as
+ * `repoRoot`.
+ *
+ * Cheap on purpose: a caller that already knows *which* repository it needs (the worktree registry,
+ * a Task branch, a result commit) must not be refused for a managed project, and must not pay for a
+ * second verification of the dev clone either. A caller that needs the baseline **ref** and the
+ * verification behind it resolves it with `resolveTaskBaselineRepository` instead.
+ */
+export function taskWorkspaceRepositoryRoot(project: {
+  readonly repoRoot: string;
+  readonly devRepoPath: string | null;
+}): string {
+  return project.devRepoPath ?? project.repoRoot;
+}
+
+/**
  * The recorded dev clone path, or the stable refusal that names the one command which fixes it.
  * Cheap and side-effect free: a caller that only needs to know *whether* a dev repository exists
  * (and which path it is) uses this instead of the full verification below.

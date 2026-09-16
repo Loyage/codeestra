@@ -2,6 +2,8 @@
 
 Status：Accepted（本轮范围与三条核心语义由用户派单直接指定：上游必须先进入 `dev` 才满足依赖、DAG 变更必须检验环、`BLOCKED` 只表示依赖未满足。其余为实现层的局部选择。）
 
+**Amended（2026-09-16，ADR-0060 第三轮 / FOUNDATION-093）**：正文里判定所读的「`dev` ref」是该项目的 **Task 基线 ref**——有 dev clone 的项目仍是那个 clone 的 `dev`（语义不变），被管理项目是项目文件夹当前检出的分支；三种未满足原因码与 fail-closed 语义不变，基线读不到仍报 `DEV_BASELINE_MISSING`（有界枚举不改名，它们是本 ADR 记录的用户可见契约）。
+
 ## Context
 
 Phase 1 已把单任务流水线做完（Task create/submit/run、owned worktree、Execution、成果 commit、Task verification、IntegrationBatch 合入 `dev`），但「依赖」在代码里并不存在：
