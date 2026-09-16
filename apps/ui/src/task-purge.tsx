@@ -59,7 +59,11 @@ export function purgeOutcomeLine(result: TaskPurgeOutcomeView): string {
     `验证副本 ${result.plan.verificationCopies}`,
     `分支 ${result.plan.branches}`,
   ];
-  if (result.stop !== null) parts.push(`删除前已终止（${result.stop.state}）`);
+  if (result.stop !== null) {
+    parts.push(result.stop.stop === 'RECOVERED'
+      ? `删除前已按观察对账（${result.stop.state}）`
+      : `删除前已终止（${result.stop.state}）`);
+  }
   if (result.dependencyEdgesRemoved > 0) {
     parts.push(`移除依赖边 ${result.dependencyEdgesRemoved}`);
   }

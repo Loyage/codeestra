@@ -91,7 +91,7 @@ TerminalAttachment 是瞬时客户端连接与单 writer lease 的记录；多�
 
 Task 独占逻辑 workspace，关联 branch/worktree、baseCommit、ownershipToken、state、dirty status。安全重试可复用已确认静止且归属正确的 workspace；同一 Task 不允许旧执行与新执行同时写入。删除/重建必须另有明确授权，不在取消流程中隐式清理。
 
-**授权形态已明确（ADR-0058）**：「另有明确授权」就是 `task purge`——一条显式、不可逆、只删除一个任务的命令。它**不是**流程内的隐式清理：`task cancel` 仍然只释放资源、只保留记录；`task archive` 仍然只写 `archived_at`；回收（ADR-0021）仍然只回收资源、不删记录。而 `purge` 反过来——它删除任务与它拥有的全部行（含五张 append-only 任务子表，只在 purge 事务内让路）以及它自己的 worktree/验证副本/分支，并在同一个事务里写下 `TaskPurged`。两个界限写死：**成果已进入 `dev`/`main` 的任务拒绝删除**（`TASK_INTEGRATED_INTO_DEV` / `TASK_IN_STABLE_PROMOTION`），**无法证明 provider 进程已消失的任务拒绝删除**（`RECONCILE_REQUIRED`）。
+**授权形态已明确（ADR-0058）**：「另有明确授权」就是 `task purge`——一条显式、不可逆、只删除一个任务的命令。它**不是**流程内的隐式清理：`task cancel` 仍然只释放资源、只保留记录；`task archive` 仍然只写 `archived_at`；回收（ADR-0021）仍然只回收资源、不删记录。而 `purge` 反过来——它删除任务与它拥有的全部行（含五张 append-only 任务子表，只在 purge 事务内让路）以及它自己的 worktree/验证副本/分支，并在同一个事务里写下 `TaskPurged`。两个界限写死：**成果已进入 `dev`/`main` 的任务拒绝删除**（`TASK_INTEGRATED_INTO_DEV` / `TASK_IN_STABLE_PROMOTION`），**无法证明 provider 进程已消失的任务拒绝删除**（`RECONCILE_REQUIRED`；`RECOVERY_REQUIRED` 任务会先按观察对账，证明已退出才继续删除，否则同样拒绝并一行不删）。
 
 ### ImpactAssessment / ConflictAssessment
 

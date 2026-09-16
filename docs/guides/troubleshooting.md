@@ -6,6 +6,7 @@
 > `task purge` 的拒绝码一节由 FOUNDATION-090 新增（ADR-0058）；冲突判定与 `--feature` 的拒绝码由
 > FOUNDATION-091 新增/改写（ADR-0059）。
 > 「报 `DEV_REPO_REQUIRED`」一节由 FOUNDATION-093 第三轮重写（ADR-0060 修订）；其余内容沿用 FOUNDATION-091 的校对基线。
+> `RECONCILE_REQUIRED` 与 `task purge` 拒绝码一节里 `RECOVERY_REQUIRED` 的对账说明由用户任务 `task/930f5325` 同步（ADR-0058 D02 修订，2026-09-16）。
 
 本文只列**源码里实际存在**的错误码与状态。每条给出「什么时候出现 / 怎么办」。
 
@@ -317,8 +318,9 @@ Runtime 恢复应答后重跑 `promotion promote` 会重跑已记录的后置步
 | `scheduler reservations reconcile` 的 `RECOVERY_REQUIRED` | 预留持有者活着或无法核验，**槽位保留**（不发信号、不删资源） |
 
 相关码：`RECONCILE_REQUIRED`（操作被拒绝并要求对账，例如 `TASK_PAUSED` 的 retry、
-`task operation cancel` 的某些路径、**以及 `task purge` 遇到非终态任务却无法证明 provider 已停止**（含
-任务本来就是 `RECOVERY_REQUIRED`）。purge 遇到它时**什么都不删**：先 `task recover` 对账。
+`task operation cancel` 的某些路径、**以及 `task purge` 无法证明 provider 已停止时**）。purge 遇到它时**什么都不删**：
+`RECOVERY_REQUIRED` 任务会先按观察对账（与 `task recover` 同一判定）——provider 确已退出就继续删除，否则保持原状；
+想单独先把状态收口也可以手动 `task recover`。
 
 ### `task purge` 被拒绝
 
@@ -327,7 +329,7 @@ Runtime 恢复应答后重跑 `promotion promote` 会重跑已记录的后置步
 | `PURGE_CONFIRMATION_REQUIRED` | 请求没带 `confirmed: true`（CLI 缺 `--yes` 时本地就会以退出码 2 拦住，根本不会发出请求） | 确认确实要永久删除，再加 `--yes` |
 | `TASK_INTEGRATED_INTO_DEV` | 这个任务的成果已经作为成员进入了某个 IntegrationBatch，即它的 commit 在 `dev` 里 | 改用 `task archive`（隐藏任务，但保留「谁把这个 commit 带进 dev」的记录）。`SUCCEEDED` 任务都属于这一类 |
 | `TASK_IN_STABLE_PROMOTION` | 这个任务的名字出现在某条稳定提升记录里 | 同上 |
-| `RECONCILE_REQUIRED` | 非终态任务无法被证明已停止，或它本来就是 `RECOVERY_REQUIRED` | 先 `task recover` 按观察对账，再重试 |
+| `RECONCILE_REQUIRED` | 非终态任务无法被证明已停止，或 `RECOVERY_REQUIRED` 任务的 provider 仍存活/身份缺失/无法核验 | 确认该进程真的已退出（必要时先 `task recover` 按观察对账），再重试；这是有意拒绝，不是可绕过的开关 |
 | `PURGE_RESOURCE_NOT_OWNED` | 记录的 worktree / 验证副本 / 分支无法证明属于这个任务（例如分支被别的 worktree 检出、路径是 symlink 或注册不符） | **一行都没删**；看 `reclaim.records` 里的 `reasonCode`，先处理那个资源（如先释放它所在的 worktree） |
 | `CONCURRENT_MODIFICATION` | 版本已变（例如你看到后它又停了/改了） | 重新 `task status` 读当前版本再发一次 |
 | `NOT_FOUND` | 任务不存在（已被别人删掉，或 ID 写错） | 核对 `task list --all`；如果只是想确认自己那条命令是否生效，**用同一个 commandId 重放**会读到收据而不是这个错 |

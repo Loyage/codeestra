@@ -60,7 +60,7 @@
 - [ADR-0055](0055-recovery-required-reconcile-command.md)：`task recover` 只读事实，**能证明 provider 已消失才收口**，其余一律拒绝并保持占用；`occupiers` 投影不可观测的占用者。
 - [ADR-0056](0056-dev-repo-path-single-dev-fact-source.md)：`dev` 事实的唯一来源是 dev clone（读本地 `refs/heads/dev`，运行期不联网）。**Amends ADR-0018**（集成推进的唯一例外是 dev clone 自己的 `dev` 检出）。**必需性已被 ADR-0060 改为可选**。
 - [ADR-0057](0057-session-guidance-channel-and-fact-layering.md)：Session Guidance 是会话级事实，不产生 TaskRevision、不使旧验证失效；「已投递」= provider 通道接收，「模型已读」不存在（schema v31）。
-- [ADR-0058](0058-task-purge.md)：`task purge` 永久删除任务：全产品唯一一次显式 `--yes` 且不在任何常态路径上；append-only 只在 purge 事务内让路、触发器缺失即拒绝；成果已进 `dev`/`main` 即拒绝。
+- [ADR-0058](0058-task-purge.md)：`task purge` 永久删除任务：全产品唯一一次显式 `--yes` 且不在任何常态路径上；append-only 只在 purge 事务内让路、触发器缺失即拒绝；成果已进 `dev`/`main` 即拒绝；`RECOVERY_REQUIRED` 任务先按观察对账（与 `task recover` 同一判定），只有证明 provider 已退出才继续删除。
 - [ADR-0059](0059-feature-declaration-conflict-rule.md)：冲突判定只看「两侧声明同一功能且对方未完成」；文件/目录/模块/共享资源重叠与映射完整性都不再影响判定（schema v32）。**Supersedes ADR-0031 的判定语义**。
 - [ADR-0060](0060-managed-project-task-baseline.md)：被管理项目的 Task 基线取「项目文件夹当前检出的分支」，`dev clone` 变为可选（schema v33）。**Amends ADR-0056** 的必需性与 **ADR-0018** 的基线来源。**第三轮修订（2026-09-16，FOUNDATION-093）**：依赖判定从 dev-only 清单移出（它位于 `task submit`/`task run` 的常态路径），`DEV_REPO_REQUIRED` 只剩集成与提升。
 - [ADR-0061](0061-runtime-global-load-control.md)：Runtime 全局负载控制 —— 只保留一个跨全部项目/Adapter 的并行上限（默认 2、范围 1–16，旧显式值取最小值迁移）；全局暂停 = 持久启动屏障 + 按 `pid + start token + incarnation` 可核验的 Provider 主进程冻结（不改 Task 状态、不向工具子进程发停止信号、跨重启保持，只有显式继续才解除）。**Amends ADR-0030/0032/0033 的容量层级**。**已接受设计、尚未实现**（计划 schema v34；计划命令面 `scheduler capacity get|set|reset` 与 `scheduler control status|pause|resume|reconcile`）。

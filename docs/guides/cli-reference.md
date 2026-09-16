@@ -8,6 +8,7 @@
 > §4 的 `task purge` 一节由 FOUNDATION-090 新增（ADR-0058，其余 §4 内容沿用 FOUNDATION-070 的校对基线）。
 > §7 的 `session handoff terminal resize` 一节由 FOUNDATION-083 校对（ADR-0054）。
 > §3 的 `project inspect`/`project trust` 段、§1 `open` 的失败码、§4 的 `task run` 与 `task depends` 两节由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目的常态路径不再出现 `DEV_REPO_REQUIRED`）；其余段落沿用 FOUNDATION-091 的校对基线。
+> §4 `task purge` 的 `RECOVERY_REQUIRED` 行为由用户任务 `task/930f5325` 修订（ADR-0058 D02 修订，2026-09-16）：purge 先按观察对账，只有证明 provider 已退出才继续删除。
 
 本文覆盖 `apps/cli/src/main.ts` 中 `usage()` 列出的**每一个命令组**，以及 Runtime 的 HTTP/SSE 面。
 所有事实来自源码核对；核对方法见 `docs/tasks/README.md` 的 FOUNDATION-070 一节。
@@ -421,7 +422,7 @@ impact 快照与它的配对判定、槽位预留、回收记录、依赖边、`
 | 任务成果已进 `dev` | `1`，`TASK_INTEGRATED_INTO_DEV`（见下） |
 | 任务参与过稳定提升 | `1`，`TASK_IN_STABLE_PROMOTION` |
 | 非终态任务 | 先走一次协作停止：能确认 provider 退出才继续删除；无法确认则 `1` / `RECONCILE_REQUIRED`，**什么都不删** |
-| `RECOVERY_REQUIRED` 任务 | `1` / `RECONCILE_REQUIRED`，先用 `task recover` 对账 |
+| `RECOVERY_REQUIRED` 任务 | 先按观察对账（与 `task recover` 同一判定）：provider 确已不在才继续删除，结果 `stop.stop: "RECOVERED"`、最终状态 `FAILED`；provider 仍存活 / 后代仍存活 / 身份缺失 / 无法核验则 `1` / `RECONCILE_REQUIRED`，**什么都不删** |
 | 记录的 worktree/验证副本/分支无法证明属于它 | `1` / `PURGE_RESOURCE_NOT_OWNED`，**一行都不删** |
 
 固定事实（不只是约定）：
@@ -431,6 +432,7 @@ impact 快照与它的配对判定、槽位预留、回收记录、依赖边、`
 - **`SUCCEEDED` 任务实际上不可 purge**：按定义它的成果已进 `dev`（ADR-0053），因此会被 `TASK_INTEGRATED_INTO_DEV` 拒绝，
   请改用 `task archive`（它隐藏任务但不销毁那个 commit 的来源记录）。
 - **删除是幂等的**：同一 `commandId` 重放会读到收据（`replayed: true`），不会发生第二次删除；同一 ID 换 payload 报 `COMMAND_CONFLICT`。
+- **`RECOVERY_REQUIRED` 不需要先手动 `task recover`**：`task purge` 自己完成那次观察对账（`TaskRecoveryReconciled` 事件先于 `TaskPurged`）。安全性没有放宽——只有可证明已经退出的 provider 才让删除继续，其余情况 `RECONCILE_REQUIRED` 且一行不删。
 - **`domain_events`、`command_receipts`、`operations`、`intents` 与项目级知识快照不删**：所以任务被删后，事件流里仍能读到它的历史
   以及最后那条 `TaskPurged`。**除逐表行数与分支 tip 之外不可恢复**（无墓碑、无备份）。
 - **会连带删掉指向它的依赖边**（条数在 `dependencyEdgesRemoved` 里），下游任务会因此重新判定；也会删掉**另一方**与它配对的那条 impact 判定。

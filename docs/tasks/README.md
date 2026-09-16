@@ -7409,6 +7409,36 @@ cd /Users/loyage/Documents/codeestra-dev && just check   # 等价 bun run check
 - 合入方式：本格在 Orca worktree `all_max`（分支 `Loyage/all_max`，基线 `dev@4667d32`）交付；提交后先把 `dev` 合进本分支对齐（dev 上的 `FOUNDATION-094` 已占用 094 编号，本格编号改为 **FOUNDATION-095**；`docs/decisions/README.md`、`docs/tasks/README.md`、`PROJECT_SPEC.md` 三处冲突按 FOUNDATION-094 压缩后的结构重写），再以 merge commit 合入本地 `dev`。**未 push `origin/dev`**（用户 2026-09-16 决定本格只合并本地 `dev`）、未提升 `main`、未重启任何 Runtime。
 - `docs/guides/**` 本格**确认不修改**：这些文件描述已交付用户行为，而 ADR-0061 尚未实现；实现分支必须按 ADR-0050 同步 `cli-reference.md`、`manual.md`、`features.md`、`recipes.md`、`ui.md`、`concepts.md` 与 `troubleshooting.md`，并更新统一版本/校对头。
 
+## 用户任务（`task/930f5325`）— 让出错的任务可以被删除（ADR-0058 修订 D02，无 schema 变更、不占迁移号）
+
+状态：已实现并定向验证；**未合入 `dev`、未运行全量测试**（ADR-0038，开发分支只跑定向测试）。
+
+用户原话：`让出错的任务可以被删除`。背景：真实 Runtime 里 Task #1（`bd2250e4`）在 Runtime shutdown 时留下
+`RECOVERY_REQUIRED` + 仍占用的 Execution/workspace；`task purge` 当时一律以 `RECONCILE_REQUIRED` 拒绝并要求先手动
+`task recover`，而界面没有 recover 入口，出错任务因此无路可清。
+
+修改：
+- `apps/runtime/src/task-purge-service.ts`：`stopIfNeeded` 遇到 `RECOVERY_REQUIRED` 时调用 `recoverTask`
+  （派生 command ID `purge-recover`，ADR-0055 的同一观察对账）。只有 `RECONCILED`/`ALREADY_RECONCILED` 才继续删除，
+  结果 `stop.stop='RECOVERED'`、最终状态 `FAILED`；`REFUSED`（provider 存活/后代存活/身份缺失/无法核验）抛
+  `RECONCILE_REQUIRED` 且一行不删。新增可选 `inspectOwnership`/`pathExists` 注入点供测试。
+- `packages/contracts/src/index.ts`、`apps/ui/src/types.ts`：`TaskPurgeOutcomeView.stop.stop` 加 `'RECOVERED'`。
+- `apps/ui/src/task-purge.tsx`：结果为对账时显示 `删除前已按观察对账（FAILED）`。
+- 文档：ADR-0058 D02 修订、ADR 索引、`state-machines.md`、`domain-model.md`、
+  `guides/{cli-reference,ui,features,manual,troubleshooting}.md`。
+
+定向验证（全部通过）：
+- `bun test apps/runtime/test/task-purge-recovery.test.ts`（新增，3 项）：STOPPED → 先 `TaskRecoveryReconciled`
+  再 `TaskPurged`、worktree/分支真的消失、`stop.stop='RECOVERED'`；ALIVE / 身份缺失 → `RECONCILE_REQUIRED`，
+  任务仍 `RECOVERY_REQUIRED`、worktree 仍在、无 `TaskPurged`。
+- 回归：`cli-task-purge`（2）、`task-recovery-service`（8）、`packages/storage/test/task-purge`（4）、
+  `packages/git/test/purge`（3）共 17 项通过。
+- `bunx vitest run apps/ui/test/task-purge.test.ts` 4 项通过。
+- `bun run typecheck`、`bun run typecheck:ui` 通过。
+
+剩余 / 未做：未合入 `dev`、未跑全量测试、未提升 `main`、未重启稳定 Runtime；UI 对 `RECOVERY_REQUIRED` 任务仍只显示
+「永久删除」，未单独加 `task recover` 按钮（本次按「让删除自己完成对账」实现，recover 入口仍缺）。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），

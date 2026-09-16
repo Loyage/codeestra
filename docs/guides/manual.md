@@ -6,6 +6,7 @@
 > §「任务」的永久删除一条由 FOUNDATION-090 新增（ADR-0058）；§3.1、§4.2、§4.3、§4.5、§10.1、§10.3 与
 > 「名词表」的冲突判定由 FOUNDATION-091 按 ADR-0059 改写（声明同一功能才冲突，默认不冲突）。
 > §3.1、§3.2、§10.2 由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目的常态路径不变）；其余内容沿用 FOUNDATION-091 的校对基线。
+> §「任务」永久删除一条与 §13.5 `RECOVERY_REQUIRED` 的 purge 行为由用户任务 `task/930f5325` 同步（ADR-0058 D02 修订，2026-09-16）。
 
 这是**写给使用者的说明书**：从头读到尾就能把 Codeestra 用起来，不需要先读架构文档或 ADR。
 需要细节时，每一节末尾都有「想深入看哪篇」。
@@ -461,7 +462,7 @@ bun run codeestra task purge  $PROJECT <task-id> <expected-version> --yes [--rea
 - **永久删除**（`task purge --yes`）是唯一不可撤销的操作：它删掉任务的全部记录与它自己的 worktree、验证副本、`task/<id>` 分支，
   同时在事件流里留下一条 `TaskPurged`（含每个被删分支的 tip）。三点必须知道：
   1. **成果已进 `dev` 的任务删不掉**（`TASK_INTEGRATED_INTO_DEV`）——否则那个 commit 会失去「谁把它带进来」的记录；这类任务只能归档，`SUCCEEDED` 任务都属于这一类。
-  2. **正在跑的任务会先被真地终止**（能确认 provider 退出才继续）；无法确认时什么都不删，先用 `task recover` 对账。
+  2. **正在跑的任务会先被真地终止**（能确认 provider 退出才继续）；`RECOVERY_REQUIRED` 任务会先按观察对账（与 `task recover` 同一判定）：能证明 provider 已退出就继续删除（最终状态 `FAILED`、结果里 `stop.stop: "RECOVERED"`），否则什么都不删并报 `RECONCILE_REQUIRED`。
   3. 它会连带删掉**指向该任务的依赖边**（下游会因此重新判定）。
 
 日常清理不再需要的任务：先 `task cancel`（如果需要），再 `task purge --yes`。只想让列表安静下来就用 `task archive`。
@@ -1195,7 +1196,9 @@ Task/Execution 的 `RECOVERY_REQUIRED` 用 **`task recover <project-id> <task-id
 只有能证明 provider 已消失才收口为 `FAILED`（workspace 保留、不发信号、不声称静止），
 否则拒绝并保持占用（退出码 `1`，码为 `RECOVERY_PROVIDER_ALIVE` / `RECOVERY_DESCENDANTS_ALIVE` /
 `RECOVERY_OWNERSHIP_UNVERIFIABLE` / `RECOVERY_PROCESS_IDENTITY_MISSING`）。收口后 `task retry` 可重排、
-`task cancel` 可作废。IntegrationBatch 与 Promotion 的 `RECOVERY_REQUIRED` 各自有自己的收口命令，见
+`task cancel` 可作废。**只想清理这个出错任务时不必先手动 `task recover`**：`task purge --yes` 会自己做同一次
+观察对账，只有能证明 provider 已退出才删除（否则 `RECONCILE_REQUIRED`）。IntegrationBatch 与 Promotion 的
+`RECOVERY_REQUIRED` 各自有自己的收口命令，见
 [cli-reference.md](./cli-reference.md)。
 
 ### 13.6 完整的错误码表在哪
