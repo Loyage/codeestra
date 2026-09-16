@@ -1,6 +1,6 @@
 # 常见故障与稳定码表
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
+> **适用版本** `dev@de03448`（2026-09-16） · **schema** v35 · **最后校对** 2026-09-16
 > 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > 「全局暂停」一节的稳定码由 FOUNDATION-097 新增（ADR-0061 D08/D09）；`task purge` 的拒绝码一节由 FOUNDATION-090 新增（ADR-0058）；冲突判定与 `--feature` 的拒绝码由
@@ -173,19 +173,19 @@ bun run codeestra task cancel   $PROJECT $OCCUPIER <expected-version>
 > 本机 2026-09-14 就发生过一次（全部任务 worktree 被移走，`#7`/`#8` 因此变成不可观测的占用者）。
 > 要回收请用 `reclaim plan` / `reclaim apply`——那是唯一带归属校验与审计的路径。
 
-### 任务集成后 worktree 还在？
+### 任务跑完/合并后 worktree 还在？
 
-先看集成报告的 `reclamation` 汇总（以及 `reclaim records` 的 `reasonCode`）：
+**这是预期行为**（ADR-0064）：产品没有任何自动回收路径——ADR-0062 的「集成成功后自动回收」随集成一起删除。
+要回收就显式跑：
 
-- `reclamation.enabled === false`：`settings auto-reclaim off` 开着，自动回收被关掉了；
-  `settings auto-reclaim on` 恢复，或直接跑 `reclaim apply`。
-- worktree 脏（有未提交/未跟踪改动）、成果未合入基线 ref、Task 是 `FAILED`/`CANCELLED`：属于**失败现场**，
-  自动回收**默认不删**（这是设计）。要么合入/清理后重跑 `reclaim apply`，要么显式 `--include-failure-scenes`
-  承担丢弃未提交改动的风险。
-- `reclamation.failed > 0`：自动回收本身失败（例如上一次回收中断需要 reconcile），worktree 留在磁盘上；
-  集成结果仍有效（ADR-0062），按 `reclamation.detail` 处理后重跑 `reclaim apply`。
-- managed 项目（无 dev clone）：用户把任务分支合到了**别的**分支上时不算「已合并」（判据是 Task 基线 ref，
-  ADR-0062 D02），worktree 因此保留；这是当前语义，需要删就显式 `reclaim apply --include-failure-scenes`。
+```sh
+bun run codeestra reclaim plan --project <project-id> --json   # 先看决策
+bun run codeestra reclaim apply --project <project-id>
+```
+
+worktree 脏（有未提交/未跟踪改动）、成果未进入该 workspace 记录的 `base_ref`、Task 是 `FAILED`/`CANCELLED`：
+属于**失败现场**，默认 `RETAIN`。要么合并/清理后重跑，要么显式 `--include-failure-scenes` 承担丢弃未提交改动的风险。
+`reclamation.failed > 0` 说明上一次回收中断需要 reconcile（`RECOVERY_REQUIRED`），按 `detail` 处理后再重跑。
 
 ### 全局暂停：`scheduler control` 的稳定码（ADR-0061）
 

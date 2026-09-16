@@ -1,6 +1,6 @@
 # Codeestra 用户说明书
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
+> **适用版本** `dev@de03448`（2026-09-16） · **schema** v35 · **最后校对** 2026-09-16
 > 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > §10.5 的「全局暂停」由 FOUNDATION-097 新增（ADR-0061 D04–D10）；§「任务」的永久删除一条由 FOUNDATION-090 新增（ADR-0058）；§3.1、§4.2、§4.3、§4.5、§10.1、§10.3 与
@@ -8,7 +8,6 @@
 > §3.1、§3.2、§10.2 由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目的常态路径不变）。
 > §10.3 的 `WAIT_CAPACITY` 一行、§10.4、§11.2 与 §13.4 由 **FOUNDATION-096** 同步（ADR-0061：容量只剩一个
 > Runtime 全局上限，命令去掉 project/adapter 参数，并可从 `settings concurrency` 实时调整）；
-> §11.2.2 与 §12.3 由 ADR-0062 新增/补充（集成成功后自动回收 Task worktree，`settings auto-reclaim` 默认开启）。
 > §10.3 新增 `WAIT_CONTROL` 一行并由 **FOUNDATION-097** 新增 §10.5「全局暂停」。
 > §「任务」永久删除一条与 §13.5 `RECOVERY_REQUIRED` 的 purge 行为由用户任务 `task/930f5325` 同步（ADR-0058 D02 修订，2026-09-16）。
 > 其余内容沿用 FOUNDATION-091 的校对基线。
@@ -33,8 +32,8 @@
 5. [看它干活：会话、提问、指导、执行过程、终端](#5-看它干活会话提问指导执行过程终端)
 6. [审阅成果](#6-审阅成果)
 7. [任务验证](#7-任务验证)
-8. [合入 dev](#8-合入-dev)
-9. [发布到 main](#9-发布到-main)
+8. [成果怎么交给你](#8-成果怎么交给你)
+9. [本仓库自身的 `dev → main`（仓库约定）](#9-本仓库自身的-dev--main仓库约定不是产品能力)
 10. [日常使用：并行、依赖、调度、容量、全局暂停](#10-日常使用并行依赖调度容量)
 11. [设置与权限：FULL 与 STRICT](#11-设置与权限full-与-strict)
 12. [数据在哪、怎么备份与回收](#12-数据在哪怎么备份与回收)
@@ -46,10 +45,10 @@
 ## 1. 这是什么
 
 Codeestra 是 **Task-first、local-first 的 AI Development Runtime**：**你管理产品意图，Codeestra 管理软件工程**
-（分支、工作树、执行、验证、集成、提升）。
+（分支、工作树、执行、验证）。
 
 它不是聊天助手，也不是多 Agent UI。你描述「要完成的一项改动」，Codeestra 负责：给它一个独立的工作目录与
-分支、让一个 Coding Agent 去干、把成果固定成一个 commit、独立验证、合入开发分支，最后在你要发布时提升到
+分支、让一个 Coding Agent 去干、把成果固定成一个 commit、独立验证，然后把成果交给
 稳定分支并重启服务。
 
 ### 三条必须先知道的第一原则
@@ -69,14 +68,15 @@ Codeestra 的每一步都**只报事实，不报乐观猜测**。所以你会反
 
 - **Task 显示「执行中」不等于 provider 此刻在跑。** 状态是 Runtime 记录的状态，不是进程心跳。
 - **「已受理」不是「已完成」。** `task verify --background` 退 0 只表示验证**开始了**。
-- **「已验证」不是「已集成」。** Task 验证通过不释放依赖，也不代表进了 `dev`。
-- **「已合入 dev」不是「已发布」。** `dev` 与 `main` 是两条不同的线。
-- **「main 已更新」不是「Runtime 已重启完成」。** 重启只有在每步退 0 且 Runtime 回答 `READY` 时才被记录。
+- **「已验证」不是「已合并」。** Task 验证通过不释放依赖，也不代表成果进了你的分支（合并是你自己的事）。
+- **「成果已提交」不是「已合并」。** 成果停在 `refs/heads/task/<task-id>`，是否合并由你决定。
+- **「main 已更新」不是「Runtime 已重启完成」。**（本仓库自身的 `dev → main` 人工流程）重启只有在
+  每步退 0 且 Runtime 回答 `READY` 时才被记录。
 - **提交不等于要等。** 没有声明功能的 Task `task submit` 后会在**容量允许时立即开始**（ADR-0059）；
   想让两个 Task 互斥，就给它们声明**同一个功能**（`task create --feature <module-id>`）。
 
 > 图：`00-overview.png` — Codeestra 的总流水线：用户意图 → Task → 依赖/冲突判定 → 调度 → 独立工作树 →
-> Coding Agent → Task 验证 → 合入 dev → 集成验证 → 稳定提升 → 重启 Runtime。
+> Coding Agent → Task 验证 → 成果停在 task 分支（**合并由用户自己完成**，ADR-0064）。
 
 ### 想深入看哪篇
 
@@ -170,7 +170,7 @@ bun run codeestra ui --no-open  # 只打印地址
 - **Runtime 重启会更换内存 token**：旧的带 token 链接会立刻失效，重新执行 `codeestra ui` 即可。
 - **关掉页面不会停止 Runtime 或任何 Task。** 页面顶部会写明这一点。
 
-### 2.5 两个 clone 与 dev 通道标记（本机构造）
+### 2.5 两个 clone（本机构造，仓库约定）
 
 本机把 `main` 与 `dev` 放在**两个分别 clone 的独立仓库**里，各自有 `.git` 目录与 `origin`，不是彼此的 worktree。这个拆分的**唯一理由是 Codeestra 自己要被开发（自进化）**：开发中的代码要能真的跑，而稳定实例不被它干扰。用 Codeestra 开发别的项目不涉及（也不该建立）这种 main/dev 目录拆分。
 
@@ -186,21 +186,16 @@ bun run codeestra ui --no-open  # 只打印地址
 
 ```sh
 cd ~/Documents/codeestra-dev
-bun run build:ui:dev                                   # 等价：VITE_CODEESTRA_CHANNEL=dev bun run build:ui
+bun run build:ui
 CODEESTRA_HOME=~/.local/state/codeestra-dev bun run codeestra status
 CODEESTRA_HOME=~/.local/state/codeestra-dev bun run codeestra ui --no-open
 ```
 
-上面四步的等价入口是 `just restart-dev`（在 dev clone 里跑）：它按顺序执行 install → dev 通道构建 UI →
-`stop` → `status` → `ui --no-open`，并在构建后核对 `index.html` 真的带 dev 标记，不带就停止。
+等价入口是 `just restart-dev`（在 dev clone 里跑）：install → 构建 UI → `stop` → `status` → `ui --no-open`。
 
-**dev 界面的通道标记来自构建期变量**：只有构建时设了 `VITE_CODEESTRA_CHANNEL=dev`（即用
-`bun run build:ui:dev`），界面才会带橙色的「Codeestra DEV」横幅与 `Codeestra DEV` 品牌名。
-**不加这个变量就没有标记**——在 dev clone 里跑 `bun run build:ui` 得到的是一个**没有标记**的界面，
-此时不要把该界面当稳定版或 dev 版汇报。
-
-> 图：`14-dev-banner.png` — dev 构建的顶部横幅：「开发版 DEV / 非稳定代码：这是 dev clone 的运行结果，
-> 不要当作稳定版」。强调色为橙色。
+**界面不再有「dev 版」标记**（ADR-0064 删除 ADR-0049 的构建期通道）：`VITE_CODEESTRA_CHANNEL=dev`、
+`data-channel`、橙色横幅与 `Codeestra DEV` 品牌名都不存在，UI 只有一种构建产物、一个品牌名 `Codeestra`。
+区分「这是 dev 代码」靠的是 `CODEESTRA_HOME` 与目录，不是界面上的标记。
 
 ### 2.6 停止
 
@@ -230,79 +225,36 @@ bun run codeestra stop --wait 30      # 最多等 30 秒（0–600）
 ### 3.1 先看清 Runtime 读到了什么
 
 ```sh
-bun run codeestra project inspect /path/to/repo --dev-repo /path/to/dev-clone
+bun run codeestra project inspect /path/to/repo
 ```
 
-关键是这几项：`repoRoot`（工作树根）、`mainRef` / `objectFormat`（主分支 ref 与对象格式）、`headCommit`、
-`devRef` / `devCommit`（**dev clone 上的** `dev` 分支是否存在及 commit），以及 `devRepoPath`（那个 dev clone 的核验结果）。
+关键是这几项：`repoRoot`（工作树根）、`mainRef` / `objectFormat`（主分支 ref 与对象格式）、`headCommit`。
 
-**Codeestra 要求项目长期保留 `main` 与 `dev` 两个分支**，并且所有功能 Task 从固定的 `dev` commit 建基线。
-`main` 分支与判定策略由你的**主检出**提供；`dev` 分支（以及所有 Task 的 worktree、集成、提升候选）由第二个 clone
-提供 —— 这就是下面的 **dev clone**。
+**Task 基线只有一种**（ADR-0064）：**这个文件夹建 workspace 时当前检出的分支**。ref 与 commit 会一起
+固定进这条 Task 的记录，所以你之后切分支**不会**移动已建 Task 的基线。产品不再有 dev clone、长期 `dev`
+集成分支或 `dev → main` 提升——因此 `project inspect` 也不再返回 `devRef` / `devCommit` / `devRepoPath` /
+`devRefRetirement`。
 
-### 3.1.1 准备一个 dev clone
-
-dev clone 是**同一 origin 的另一个独立 clone**，并且它检出 `dev`：
-
-```sh
-git clone <你的 origin URL> /path/to/dev-clone
-git -C /path/to/dev-clone checkout dev
-```
-
-要求（`project trust` 逐条核验，任一不成立就用稳定码拒绝）：是一个 Git work tree；**不是**主检出、也不是主检出的
-worktree（Git common dir 不同）；`origin` 与主检出一致；HEAD 在项目的 `dev` 分支上，且该分支在本地存在。
-
-它是**长期 `dev` 分支的全部事实来源**：集成 worktree 与 ref 推进、提升候选对象、全量证据的副本与锁文件。
-ADR-0060（第三轮修订）之后，需要它的**只剩**集成与提升两条命令面（`task integrate`、`promotion *`、
-`promotion full-suite run`），它们会以 `DEV_REPO_REQUIRED` 拒绝并直接给出补救命令；Task 基线、依赖判定、
-槽位、调度启动前重检、结果 commit 归属、任务级验证与回收对**没有 dev clone 的项目**同样成立
-（基线取项目文件夹当前检出的分支，归属取项目文件夹）。
-
-再看**谁将来判定你的成果**：
-
-```sh
-bun run codeestra project policy /path/to/repo
-```
-
-它读取**项目 `main` ref 上**的 `.codeestra/policies/verification.json` 并打印策略状态与 digest。
-这个文件是**人工维护**的：Task 分支改不动判定它自己的命令（这是安全不变量，不是配置细节）。
-策略不存在时 `task verify` 会拒绝，直到该 ref 上有这个文件。
-
-最后看**功能声明用的影响映射**：
-
-```sh
-bun run codeestra project impact validate /path/to/repo --json
-```
-
-它读 `main` ref 上的 `.codeestra/impact.json`。这张映射现在只被两件事用到：`--feature` 的写入校验（功能 id 必须是它的 `modules[].id`）和影响快照的证据。**没有映射不再让判定变成 `UNKNOWN`**：没有声明同一个功能就是 `SAFE`，提交后就会开始。退出码 `0` 仅当映射存在**且**是已确认的那一份。
+一个前提：**不要让它停在 detached HEAD**。那没有分支可命名，建 Task/跑 Task 时会被
+`TASK_BASE_REF_UNRESOLVED` 拒绝（切到一条分支即可）。也不需要为「任务树」准备第二个 clone；如果你确实
+想要一个可随时清理的沙箱，切一条分支或另建一个普通 clone 都属于你自己的 Git 选择。
 
 ### 3.2 接入（trust）
 
 ```sh
 # FULL（默认）：零确认
-bun run codeestra project trust /path/to/repo --dev-repo /path/to/dev-clone
+bun run codeestra project trust /path/to/repo --yes
 
 # STRICT：需要确认，交互输入 TRUST，或脚本传 --yes
 bun run codeestra permission set strict
-bun run codeestra project trust /path/to/repo --dev-repo /path/to/dev-clone --yes
+bun run codeestra project trust /path/to/repo --yes
 ```
 
-`--dev-repo` 是**可选**的（ADR-0060）。给了它，项目就有长期 `dev` 基线（集成目标、提升候选、提升前全量证据）；
-省略它则 Task 基线取**项目文件夹当前检出的分支**，成果留在 task 分支由你自己合。没有 dev clone 的项目照常
-`task submit` / `task run` / `task result capture` / `task verify`、`task depends list` 也按它自己的基线判定，
-只有 `task integrate` / `promotion prepare` 会在需要长期 `dev` 分支时以 `DEV_REPO_REQUIRED` 拒绝（拒绝的是那条分支，
-不是新的审批）。`--dev-repo none` 明确表示「这个项目没有 dev clone」。**Codeestra 自身自进化时仍用 dev clone**
-（见 ADR-0048 的本机布局）。
+**没有 `--dev-repo`**：ADR-0064 之后产品不再有 dev clone，trust 记录的是仓库身份与两份已提交策略的确认。
+Task 基线就是**项目文件夹建 workspace 时当前检出的分支**，成果停在 task 分支由你自己合（§8）。
+如果这个文件夹处于 detached HEAD，建 Task 时会被 `TASK_BASE_REF_UNRESOLVED` 拒绝——切到一条分支即可。
 
-若给了 dev clone，它会被逐项核验（另一个 clone、同 origin、HEAD 在 `dev` 上、该分支存在），不成立就以 `DEV_REPO_*` 拒绝，
-不写入任何东西。
-而且**什么都还没写**：项目不会被登记，补救命令就在错误消息里。
-
-**dev clone 会被推进**：集成成功时 Runtime 用 Git 自己的快进（`git merge --ff-only`）把 dev clone 里的 `refs/heads/dev`
-**和它自己的工作树**一起前移，因此那个 clone 的工作区会落到新提交上。集成前会先核验它干净、在 `dev` 上、且就在
-批次固定的基线上；不成立就以 `DEV_CHECKOUT_NOT_ON_DEV` / `DEV_CHECKOUT_DIRTY` / `DEV_CHECKOUT_MOVED` 拒绝，
-不合并、不推进。所以**不要在 dev clone 里留未提交/未跟踪的改动**（它会被拒绝而不是被覆盖），也**不要**在集成
-进行中手工切它的分支。
+而如果 trust 被拒，**什么都还没写**：项目不会被登记，补救命令就在错误消息里。
 
 **影响**：一旦 trust，Agent 工具、验证命令与 Git hooks 会**以你的用户权限**运行。
 STRICT 下界面会明确写着：这**不**授权 commit、更新 main、push 或使用未知工具。
@@ -319,42 +271,13 @@ STRICT 下界面会明确写着：这**不**授权 commit、更新 main、push �
 日常最快的路径是 `open`，它把 inspect → 策略展示 →（必要时）确认 → 打开界面串起来：
 
 ```sh
-bun run codeestra open /path/to/repo --dev-repo /path/to/dev-clone              # 接入并打开 Web UI
-bun run codeestra open /path/to/repo --dev-repo /path/to/dev-clone --no-open    # 只打印带 token 的地址
-bun run codeestra open /path/to/repo --dev-repo /path/to/dev-clone --yes        # STRICT 非交互确认
+bun run codeestra open /path/to/repo              # 接入并打开 Web UI
+bun run codeestra open /path/to/repo --no-open    # 只打印带 token 的地址
+bun run codeestra open /path/to/repo --yes        # STRICT 非交互确认
 ```
 
-因为这条命令会组合一次 `project trust`，它的 `--dev-repo` 同样**可选**（ADR-0060：留空 = Task 基线取项目文件夹当前检出的分支；
-给了就给 dev 基线与提升）。打开一个**已信任**仓库的另一个
-工作树时 trust 会被跳过，那条路径不需要该 flag。
-
-`open` 会明确打印 `dev baseline`（**来自 dev clone**）、验证策略命令清单、影响映射状态、当前检出的
-过渡本地 `dev` ref 状态，以及**是否需要再次确认**。
-
-### 3.4 过渡的本地 `dev` ref：什么时候可以删
-
-如果你的主检出里还有一个本地 `refs/heads/dev`（分离两个 clone 之前的遗留），要明确：
-**Runtime 不再从它读任何东西**。所有 dev 事实都来自 dev clone（§3.1.1），Task 基线、集成与提升候选都不看它。
-
-想知道它现在还有没有用，只读地问一次：
-
-```sh
-bun run codeestra project inspect /path/to/main-checkout --dev-repo /path/to/dev-clone
-```
-
-输出里的 `devRefRetirement` 就是答案：
-
-| 情况 | 含义 |
-|---|---|
-| `localDevRefPresent: false` | 那个检出里已经没有这个 ref 了 |
-| `projectsWithoutDevRepo` 非空 | 这些已信任项目**还没有** dev clone，那个 ref 是它们仅存的一份 `dev` —— **先给它们 trust 一个 dev clone**，别删 |
-| `projectsWithoutDevRepo: []` | 没有任何项目依赖它：可以人工删除（`git -C <检出> branch -D dev`） |
-
-删除**永远是人工动作**：Runtime 不替你删，也不会因为它的状态改变任何判定。CLI 会在
-`project inspect` 的 stderr 里把上面的结论写成一句话（含"是否有项目仍需要它"）。
-
-> 图：`02-project-trust.png` — 「项目」标签页的「添加本地项目」：路径输入、检查项目后的仓库身份表、
-> 验证策略命令表，以及底部的「添加此项目」（FULL）或「信任此项目 + 输入 TRUST」（STRICT）。
+`open` 只有这两个 flag（ADR-0064 删掉了 `--dev-repo`）。它会打印仓库身份、验证策略命令清单、影响映射状态，
+以及**是否需要再次确认**；打开一个**已信任**仓库的另一个工作树时 trust 会被跳过。
 
 ### 想深入看哪篇
 
@@ -420,7 +343,7 @@ bun run codeestra task run $PROJECT <task-id> <expected-version> \
 
 ### 4.4 不做任何事也会被调度
 
-Runtime **自己会调度**：一次相关事件（提交、合入 dev、停止、revision 投递、槽位释放、容量变化）触发一次 pass，
+Runtime **自己会调度**：一次相关事件（提交、停止、revision 投递、槽位释放、容量变化）触发一次 pass，
 另有一个周期性恢复 pass 收敛崩溃遗留的状态。周期由环境变量 `CODEESTRA_SCHEDULE_TICK_MS` 控制（默认 `5000` 毫秒）。
 
 排序规则：**priority 降序 → 创建时间 → ID 升序**。提高优先级只改变**下一次**顺序，**不会抢占**已经持有
@@ -445,15 +368,14 @@ DRAFT → BLOCKED → READY → RUNNING ⇄ (PAUSING → PAUSED → RUNNING)
 | `WAITING_FOR_USER` 等你处理 | 有请求等你回答（只暂停这一个 Task） |
 | `PAUSING` / `PAUSED` | 正在协作停止 / 现场已保留，可继续 |
 | `CANCELLING` / `CANCELLED` | 正在终止 / 已终止，**不会自动重开** |
-| `EXECUTED` 成果已提交 | 有成果 commit，等待验证与合入；**尚非发布** |
-| `SUCCEEDED` 已合入 dev | 已完成**任务集成**；**不等于 main 已发布** |
+| `EXECUTED` 成果已提交 | 有成果 commit，等待验证；**合并不是产品动作** |
 | `FAILED` / `RECOVERY_REQUIRED` | 失败 / 需要人工对账（**不要靠重试掩盖**） |
 
 其他常用操作：
 
 ```sh
 bun run codeestra task list $PROJECT [--all]           # 列出任务（--all 含归档）
-bun run codeestra task status $PROJECT <task-id>       # 执行/验证/集成投影 + 会话结束注记
+bun run codeestra task status $PROJECT <task-id>       # 执行/验证投影 + 会话结束注记
 bun run codeestra task pause  $PROJECT <task-id> <expected-version>
 bun run codeestra task resume $PROJECT <task-id> <expected-version> [--adapter <id>]
 bun run codeestra task retry  $PROJECT <task-id> <expected-version> [--adapter <id>]
@@ -470,7 +392,7 @@ bun run codeestra task purge  $PROJECT <task-id> <expected-version> --yes [--for
   同时在事件流里留下一条 `TaskPurged`（含每个被删分支的 tip）。三点必须知道：
   1. **成果已进 `dev` 的任务删不掉**（`TASK_INTEGRATED_INTO_DEV`）——否则那个 commit 会失去「谁把它带进来」的记录；这类任务只能归档，`SUCCEEDED` 任务都属于这一类。
   2. **正在跑的任务会先被真地终止**（能确认 provider 退出才继续）；`RECOVERY_REQUIRED` 任务会先按观察对账（与 `task recover` 同一判定）：能证明 provider 已退出就继续删除（最终状态 `FAILED`、结果里 `stop.stop: "RECOVERED"`），否则什么都不删并报 `RECONCILE_REQUIRED`。
-  3. **被拒绝时可以加 `--force`**（ADR-0058 D09）：它是同一条命令的更宽的声明，不是第二道确认（`--yes` 仍是唯一一次确认）。它先对任务**记录过的身份**发 `SIGTERM`→`SIGKILL` 终止 provider（记录里没有 start token 的 pid 一律不发信号），再删掉本来会拒绝的行：成果已进 `dev`/`main` 的来源记录会一起删，必要时那条稳定提升记录（连同它的全部成员行）也必须一起删（外键决定的）。**归属不明**的目录与分支留在磁盘上并逐项列出；`forced`（以及 CLI 的 stderr）会告诉你跳过了什么、进程是否真的终止。
+  3. **被拒绝时可以加 `--force`**（ADR-0058 D09）：它是同一条命令的更宽的声明，不是第二道确认（`--yes` 仍是唯一一次确认）。它先对任务**记录过的身份**发 `SIGTERM`→`SIGKILL` 终止 provider（记录里没有 start token 的 pid 一律不发信号），再删掉本来只由「活占用」保护的资源（ADR-0064 之后没有「成果已进入 dev/main」这一类拒绝了）。**归属不明**的目录与分支留在磁盘上并逐项列出；`forced`（以及 CLI 的 stderr）会告诉你跳过了什么、进程是否真的终止。
   3. 它会连带删掉**指向该任务的依赖边**（下游会因此重新判定）。
 
 日常清理不再需要的任务：先 `task cancel`（如果需要），再 `task purge --yes`；被拒绝又确实不再需要它时加 `--force`。只想让列表安静下来就用 `task archive`。
@@ -688,7 +610,7 @@ Agent 一退出，任务详情顶部就出现**「Agent 运行结果」卡片**�
 如果这次结束**什么都没记下来**，两边都会这么写，不会当成成功。
 
 > 图：`04-task-detail.png` — 任务详情：「Agent 运行结果」卡片（含最后的输出）、`下一步` 提示行、
-> 任务操作按钮组（提交为就绪 / 启动 Agent / 暂停 / 提交成果 / 验证任务 / 合入 dev）、规格正文与约束列表。
+> 任务操作按钮组（提交为就绪 / 启动 Agent / 暂停 / 提交成果 / 验证任务）、规格正文与约束列表。
 
 ### 想深入看哪篇
 
@@ -749,176 +671,55 @@ bun run codeestra task tests history $PROJECT <task-id> [--limit <n>]
 
 ---
 
-## 8. 合入 dev
+## 8. 成果怎么交给你
+
+**Codeestra 不合入任何东西**（ADR-0064）。任务跑完、验证通过之后，成果 commit 停在
+`refs/heads/task/<task-id>`，**合并是你自己的事**：
 
 ```sh
-bun run codeestra task integrate $PROJECT <task-id> <expected-version>
-bun run codeestra task integration list $PROJECT [<task-id>]
+# 先看这个任务的结果 commit
+bun run codeestra task status $PROJECT $TASK --json
+
+# 在你自己检出的分支上合并它（ff-only 只在你确认没有分叉时成立）
+git -C <项目文件夹> merge --ff-only <result-commit>
 ```
 
-过程固定三步：
-
-1. 在 Runtime 数据目录的 **detached integration worktree** 里合并成果 commit（**能 ff 就 ff，否则 `--no-ff`**）；
-2. 跑**独立的集成验证**（它是独立实体、独立记录）；
-3. 集成验证 `PASSED` 之后才用 **CAS** 推进 `dev`，并把 Task 推到 `SUCCEEDED`。
-
-**退出码**：只有 `state === "INTEGRATED"` 才是 `0`；`CONFLICTED`/`FAILED`/`STALE`/`CANCELLED` 等已记录的
-非集成终态是 `1`；需要人先处理的未收口批次（`RECOVERY_REQUIRED`）是 `3`；用法错误是 `2`。
-它们都**不推进 `dev`**。
-
-### 一次合入多个 Task（多成员批次）
-
-两个（或更多）Task 的成果可以先**组成一个批次**，一次集成验证覆盖整批，`PASSED` 才一起进入 `dev`：
-
-```sh
-bun run codeestra task integration create $PROJECT \
-  --member <task-id>:<expected-version> --member <task-id>:<expected-version>
-bun run codeestra task integration integrate $PROJECT <batch-id>
-bun run codeestra task integration cancel $PROJECT <batch-id> --reason "<为什么不要了>"
-```
-
-- `create` **不碰 Git**：它固定每个成员当前的 revision/成果提交与整批的 `dev` 基线。成员按 task-id 排序，
-  与实际命令行顺序无关（同一组成员集合总是产生同一次集成）。
-- `integrate` 按该顺序逐个成员合并，然后对最终提交跑**一次**独立验证；`PASSED` 后才推进 `dev` 并把**每个**
-  成员 Task 推到 `SUCCEEDED`。
-- 组成后但集成前，任一成员的 revision 或 `dev` 基线移动，批次会落 **`STALE`**（不合并、不推进、成员状态如实保留）；
-  这时按当前事实重新 `create` 即可（`STALE` 不阻塞新批次）。
-- `cancel` 只对一个还没碰过 Git 的批次成立；已经合并或已经排了验证的批次会变成 `RECOVERY_REQUIRED`
-  并**继续占用**该成员，等人工按记录处理。取消不需要确认（FULL 与 STRICT 都一样）。
-- 一个已组成但未集成的批次会占用它的成员：这些 Task 上的 `task integrate` 会以 `INTEGRATION_IN_PROGRESS` 拒绝，
-  直到批次被 `integrate` 或 `cancel`。
-
-**常见拒绝前提**：Task 验证未通过（`TASK_VERIFICATION_NOT_PASSED`）、没有成果 commit（`NO_CAPTURED_RESULT`）、
-`dev` 正被某个工作树检出（`DEV_REF_CHECKED_OUT`）、`dev` 分支缺失（`DEV_REF_MISSING`）、已有集成在进行
-（`INTEGRATION_IN_PROGRESS`）。
-
-**Task 验证 ≠ 集成验证**：前者判定一个 Task 的成果 commit，后者判定合并后的 dev 提交。两者不能互相替代。
-
-### 在界面上组批、集成与取消
-
-「项目」标签页的 `集成批次 · dev` 面板是同一命令面的前端（不新增语义、不绕过门禁）：
-
-- 上面的批次表与成员表是**只读**投影（列表来自 `task integration list`）；成员按 task-id 排序。
-- 「组批（task integration create）」用项目里的任务组一个批次：成员下拉框列出每一个任务（不按状态过滤），
-  每个成员旁边写清这次发送的 `expected-version`（CAS），下面是请求字段预览。
-- 每个批次的「集成」与「取消」按钮**不按本地状态隐藏或禁用**：能不能做由 Runtime 判断，被拒绝时界面
-  逐字显示它返回的稳定码（如 `TASK_NOT_EXECUTED`、`INTEGRATION_IN_PROGRESS`、`CONCURRENT_MODIFICATION`）。
-- 「取消」不保证成功：只有记录能证明无副作用（仍 `CREATED`且无 worktree/合并/验证）才会真正 `CANCELLED`；
-  否则它变成 `RECOVERY_REQUIRED`（退出码 3）并继续占用成员。界面把这个差别分开写。
-- 批级 `INTEGRATED` **不等于**已进 `main`：稳定提升是下一步（见下章）。
-
-界面**不**提供删除批次或重试合并；失败/失效的批次保留现场，按当前事实重新组批。
+- 产品**没有** `task integrate`、`task integration *`、`promotion *` 这些命令：它们随 ADR-0064 一起删除，
+  连同 IntegrationBatch、独立集成验证与 `dev → main` 提升。执行它们只会得到用法错误。
+- 为什么不自动合：合并是把代码放进你日常使用分支的动作，冲突与取舍属于你的产品判断；Codeestra 不替你做，
+  也就不会替你记账。
+- **回收**是分开的一件事：`reclaim plan/apply` 只删归属校验通过、且成果**已经进入该 workspace 记录的
+  `base_ref`** 的 worktree；没有自动路径（见 §12.3）。
+- 依赖释放跟着变：下游要等到上游的结果 commit 对**它自己的基线 ref** 可达。这个重判发生在每一趟调度
+  （默认每 5 秒一次），所以下游可能比你先看到的早一点转 `READY`；`task depends list` 是只读的，
+  它可能显示「边已满足、任务仍是 `BLOCKED`」，最多滞后一个 tick。
 
 ### 想深入看哪篇
 
-- 集成的完整流程：[workflow.md](./workflow.md) §7
-- 集成相关拒绝码：[troubleshooting.md](./troubleshooting.md) §1
-- `task integrate` / `task integration`：[cli/integration-dag-scheduler.md](./cli/integration-dag-scheduler.md)（§11）
-- 界面上的批次视图与组批/集成/取消：[ui.md](./ui.md) §5.3
+- [`cli/integration-dag-scheduler.md`](./cli/integration-dag-scheduler.md) §11（删除说明）、§12、§16
+- [`architecture/git-workspace-api.md`](../architecture/git-workspace-api.md) §3
+- [`decisions/0064-remove-dev-clone-and-dual-baseline.md`](../decisions/0064-remove-dev-clone-and-dual-baseline.md)
 
----
+## 9. 本仓库自身的 `dev → main`（仓库约定，不是产品能力）
 
-## 9. 发布到 main
+**产品没有发布到 main 的命令**（ADR-0064）。如果你是在用 Codeestra 开发**别的**项目，这一节与你无关：
+成果停在 task 分支，合并由你自己在自己的分支上完成（§8）。
 
-这是全流程里**唯一需要人工介入**的一步，也是**最容易误解**的一步。先把三件事分开：
+Codeestra **自身的开发**仍按仓库约定走两个 clone：`~/Documents/codeestra` 检出 `main`（稳定实例）、
+`~/Documents/codeestra-dev` 检出 `dev`（开发与集成）。`dev → main` 是人工四步，写在
+[`docs/agents/runbook.md`](../agents/runbook.md) 与 `AGENTS.md`：
 
-| 事实 | 它的含义 |
-|---|---|
-| 任务验证通过 | 这个 Task 的成果 commit 在固定副本上跑过了项目策略 |
-| 合入 `dev` | 成果进了开发分支；**不等于发布** |
-| 提升到 `main` | 开发分支的内容进入稳定分支，并且稳定服务重启 |
+1. push 固定 dev 候选到 `origin/dev` 并读回核对；
+2. 在 main clone `git fetch` + `git merge --ff-only origin/dev`；
+3. 在 main clone 重启稳定 Runtime 并核对 `status: READY`；
+4. 核对通过后才把 `main` 推回 `origin/main`（重启失败则不推回，保留现场）。
 
-### 9.1 本机构造：`main` 与 `dev` 是两个独立 clone，提升**必须经 GitHub 中转**
-
-本机的 `main` 与 `dev` 是**两个分别 clone 的独立仓库**（各有两个 `.git` 目录与 `origin`，不是彼此的 worktree）。
-因此提升不能是本地的 `git merge`：**dev 的代码必须先经 GitHub 上传，再由 main 检出自己拉取。**
-唯一提升路径是四步：
-
-```text
-① 在 dev clone：把固定候选 push 到 origin/dev，并读回核对 origin/dev == 候选 SHA
-② 在 main clone：git fetch origin，然后 git merge --ff-only origin/dev
-③ 在 main clone：重启稳定 Runtime（并拉起 Web UI）后核对 status: READY 且 uiRunning: true
-④ 核对通过后，才把 main 推回 origin/main
-```
-
-硬性约束（写死在 `AGENTS.md`，不是建议）：
-
-- **只 push 固定候选这一个 ref**；**不 `--force`**、不覆盖远端已有提交、不对已检出的 `main` 用 `update-ref`。
-- **断网、SSH 认证失败或远端不可达时不推进任何 ref**；也不得把「本地等价」当作提升成功。
-- `git merge --ff-only` 不成立（`main` 与候选分叉）就**停止并报告**，不改用 merge commit、reset 或强推。
-- **重启核对通过之前不得报告提升完成**；失败时**不擅自回滚**，保留现场并如实报告。
-- 提升前必须在**精确的 dev 候选 SHA** 上跑完全量测试；候选、测试配置或锁文件变化即证据失效，必须重跑。
-
-可照抄的操作序列（在 main clone 里）：
-
-```sh
-cd ~/Documents/codeestra
-git fetch origin
-git merge --ff-only origin/dev        # 只在本次是已批准的提升时执行
-bun install --frozen-lockfile
-bun run build:ui
-bun run codeestra stop
-bun run codeestra status              # 拉起 Runtime
-bun run codeestra ui --no-open        # 再拉起 Web UI 服务器（不自动开浏览器），并打印带 token 的链接
-bun run codeestra status              # 必须看到 status: "READY" 且 uiRunning: true
-git push origin main                  # 提升收尾：把已拉取并验证过的 main 推回
-```
-
-**为什么第 ③ 步要多一条 `codeestra ui --no-open`**：`stop` / `status` 不会把 Web UI 服务器带回来
-（ADR-0007：UI 是按需客户端），实测重启后 `uiRunning` 为 `false`。而恢复判据要求 `uiRunning: true`，
-所以必须显式拉起，否则这一步永远无法通过。
-
-上面第 ②–④ 步的等价入口是 `just promote-main <候选SHA>`（在 dev clone 里跑；候选 SHA 必须显式给出）；
-只重启、不提升的等价入口是 `just restart-main`。第 ① 步与提升前的全量测试证据仍需人工完成。
-
-### 9.2 产品命令 `promotion` 的现状（**重要边界**）
-
-产品里有一套 `promotion` 命令面：
-
-```sh
-bun run codeestra promotion full-suite run $PROJECT --dev-commit <full-sha> [--json]
-bun run codeestra promotion full-suite list $PROJECT [--limit <n>] [--json]
-bun run codeestra promotion prepare $PROJECT <batch-id> <expected-dev-commit> <expected-main-commit>
-bun run codeestra promotion approve $PROJECT <promotion-id>          # 仅 STRICT
-bun run codeestra promotion promote $PROJECT <promotion-id> [--json]
-bun run codeestra promotion get|list|abandon …
-```
-
-- `promotion full-suite run` 由 **Runtime** 在精确 dev SHA 的 detached 副本里运行项目固定策略并**观察**结果
-  （客户端**不能自报**「我跑过了」）；证据绑定三样东西：**候选 commit**、该策略的 **digest**、
-  **候选 commit 上的锁文件 digest**。
-- `prepare` **不写 Git**：它只是把「已验证的 dev commit / 预期旧 main commit / 该 commit 的集成验证 +
-  dev 全量证据」固定下来。
-- `promote` **一次只推进一步**：先把固定候选 push 到远端 `dev` 并读回核对，此时报「已推送、等待拉取」
-  （`state: PROMOTING`，`phase: AWAITING_PULL`，**退出码 3**）且**不记录任何重启步骤**；你在 main 检出做完
-  第 ② 步后**再调用一次**，它才核对到 main 检出已在候选上、记录并执行重启序列
-  `bun install --frozen-lockfile` → `bun run build:ui` → `bun run codeestra stop` → `bun run codeestra status`，
-  最后把候选推回远端 `main`。
-  **重启只有在每一步都退 0、且重启后的 Runtime 回答 `READY` 时才会被记录**（`uiRunning` 只记录为事实，
-  不是产品侧的重启判据；`promote` 不替你把 UI 拉起来）。
-- 失败时**不会自动回滚**：若 main 已被推进而重启序列失败，CLI 会明确打印这一点，并说明重跑
-  `promotion promote` 会重跑已记录的后置步骤。
-
-> **⚠ 现状（必须如实说明）**：`promotion prepare/approve/promote` **已经实现** §9.1 的 GitHub 中转路径
-> （ADR-0047 / FOUNDATION-077、schema v29，落地细则见 ADR-0052），旧的本地 `git merge --ff-only` 实现已删除。
-> 但**本仓库自身的提升仍一律走 §9.1 的人工四步，不得使用产品 `promotion promote`**；
-> 交付记录里要如实写明实际用了哪条路径、执行到哪一步。
-
-界面上的「稳定提升记录 · dev → main」面板是**只读**的：它显示记录里的事实（候选 commit、main 是否被改动、
-权限模式与批准、重启步骤与退出码），**不执行任何提升**。它还明确写着：**main 已移动不等于 Runtime 已完成重启**。
-
-> 图：`15-promotion-record.png` — 「稳定提升记录 · dev → main」表格与详情：状态、候选 commit、dev 基线、
-> main 结果、模式、重启状态、结果，以及展开后的「Runtime 重启」步骤表（命令 / 退出码 / 耗时）。
+这不是产品能力：没有记录、没有命令、没有稳定码，也没有任何东西替你保证它被执行过。
 
 ### 想深入看哪篇
 
-- 提升的完整流程与全部拒绝码：[workflow.md](./workflow.md) §8、[troubleshooting.md](./troubleshooting.md) §1
-- `promotion` 每条命令：[cli/promotion.md](./cli/promotion.md)
-- 经 GitHub 中转的决策与理由：[ADR-0047](../decisions/0047-github-mediated-promotion.md)、
-  本机两个 clone 的布置：[ADR-0048](../decisions/0048-dev-clone-and-separate-runtime-home.md)
-- 本仓库自身的四步操作与重启规程：[AGENTS.md](../../AGENTS.md)
-
----
+- [`architecture/git-workspace-api.md`](../architecture/git-workspace-api.md) §3
+- [`agents/runbook.md`](../agents/runbook.md)（人工四步与重启规程）
 
 ## 10. 日常使用：并行、依赖、调度、容量
 
@@ -959,11 +760,13 @@ bun run codeestra task depends list   $PROJECT [task-id] [--json]
 ```
 
 - 依赖图必须是 **DAG**；加环会以 `DEPENDENCY_CYCLE` / `DEPENDENCY_GRAPH_INVALID` 拒绝，**且不部分应用**。
-- **关键语义**：上游必须通过集成验证并进入 `dev`，下游的 **Task 基线 ref** 才包含它的结果。
-  **仅 Task 验证成功不释放依赖。**
-- 基线来源（ADR-0060 第三轮修订）：有 dev clone 时是那个 clone 的 `dev`，managed 时是项目文件夹当前检出的分支；
-  读不到基线就按未满足阻塞（`DEV_BASELINE_MISSING`），**不会**因此拒绝整条命令。managed 项目不会产生
-  INTEGRATED 批次，所以带依赖边的 Task 会以 `UPSTREAM_NOT_INTEGRATED` 保持未满足。
+- **关键语义**（ADR-0064）：上游**指定修订自己的结果 commit** 必须对下游的 **Task 基线 ref** 可达。
+  **仅 Task 验证成功不释放依赖**——你要把上游的成果合并进自己的分支，下游才会解锁。
+- 基线来源：项目文件夹**建 workspace 时当前检出的分支**（只有这一种）；读不到基线就按未满足阻塞
+  （`BASE_REF_MISSING`），**不会**因此拒绝整条命令。上游没有结果 commit 是 `UPSTREAM_RESULT_MISSING`，
+  结果 commit 不在基线里是 `NOT_REACHABLE_FROM_BASE`。
+- **重判发生在每一趟调度**（默认 5 秒一次，或你显式 `task schedule run`）：`task depends list` 是只读的，
+  它可能显示「边已满足、任务仍是 `BLOCKED`」，最多滞后一个 tick。
 
 ### 10.3 调度：三种「不跑」互不相同
 
@@ -1046,11 +849,11 @@ bun run codeestra scheduler control reconcile [--json]
 启动时 Runtime **不自动** `SIGCONT`、也**不自动 kill** 上一代 boot 冻结的进程——它只把事实报出来。
 
 **暂停期间还能做什么**：所有只读查询、事件订阅、容量/控制状态查询、记录用户输入、`task cancel/recover/purge`、
-`runtime stop`，以及不调用模型的 Git/验证/集成操作。**延后**的是新启动与 answer/guidance 的实际投递
+`runtime stop`，以及不调用模型的 Git/验证操作。**延后**的是新启动与 answer/guidance 的实际投递
 （正文可以先耐久记录，恢复后按既有有效性与幂等规则投递）。
 
 `reconcile` 只**观察**：不发任何信号，可以把「已证明退出」的目标收口，但**不会**把不可核验的目标猜成已停止，
-也**不会**把 `RECOVERY_REQUIRED` 提升成 `PAUSED`。
+也**不会**把 `RECOVERY_REQUIRED` 写成 `PAUSED`。
 
 > **当前实现的可冻结范围**：只有 **Pi** 的 `providerProcessSuspension` 是 `SUPPORTED`（真实进程实测）。
 > Codex 与 Claude Code 仍是 `REQUIRES_VALIDATION`，因此它们的会话会让本次 epoch 进入 `RECOVERY_REQUIRED`
@@ -1083,7 +886,7 @@ bun run codeestra permission set full      # 切回默认
 | Agent 工具调用 | 自动允许 | gate 逐次审批（Attention） |
 | 成果 commit | `task result capture` 单步 | `prepare` → `commit … --confirm` 两步；保留敏感路径拒绝 |
 | 验证策略变化 | 不确认 | 需确认 |
-| 提升 `dev → main` | 无需批准 | 保留批准（`promotion approve`） |
+| 本仓库自身的 `dev → main` 人工四步 | 无需批准 | 保留人工确认（`AGENTS.md`；产品无此能力） |
 
 **不变的**：revision/ref/归属/进程身份核对、静止证据、幂等与崩溃恢复**始终有效**。那些是正确性核对，
 不是权限审批，不会被 FULL 关掉，也不会被包装成审批。
@@ -1132,22 +935,10 @@ bun run codeestra settings concurrency reset [--json]
 降低上限**不会**暂停、释放或终止已经在跑的 Task（`get` 的 `used` 因此可能大于 `limit`）。
 它和 §11.2 的五个界面键一样是**设置、不是门禁**：零确认，FULL/STRICT 行为相同。
 
-### 11.2.2 集成成功后自动回收 worktree
+### 11.2.2 自动回收 worktree（已删除）
 
-`settings auto-reclaim` 是 ADR-0062 的那个开关（默认 `on`）：
-
-```sh
-bun run codeestra settings auto-reclaim        # 读取 {enabled, default, file, appliesTo}
-bun run codeestra settings auto-reclaim on     # 默认
-bun run codeestra settings auto-reclaim off    # 回到手动 reclaim
-```
-
-- 开启时：`task integrate` / `task integration integrate` **成功后**（`dev` 已前进、成员 Task 已是 `SUCCEEDED`），
-  对该批每个成员执行与 `reclaim` **完全相同**的归属决策（只删 clean + 成果已是基线 ref 祖先 + 无 held Execution/活跃预留的
-  worktree）。**失败现场仍默认保留**，**绝不删 branch**（仍可 `task retry` 重建）。
-- 关闭时：集成照常，什么都不自动删；`reclaim plan/apply` 幂等且不受影响。
-- 设置存在 `<CODEESTRA_HOME>/auto-reclaim.json`；自动回收是集成成功后的**最佳努力**，它失败不影响集成结果，
-  失败细节在集成报告的 `reclamation` 汇总里。Web UI 的「设置 → 资源回收」卡写入同一条命令。
+ADR-0064 把 `settings auto-reclaim` 连同集成一起删除：**没有自动回收路径**，回收只有显式
+`reclaim plan/apply/records`（见 §12.3）。ADR-0062 的 `<CODEESTRA_HOME>/auto-reclaim.json` 也不再被读取。
 
 ### 11.3 Agent 配置
 
@@ -1181,12 +972,11 @@ bun run codeestra agent plugins select [--project <project-id>] [--adapter <id>]
 
 | 位置 | 内容 | 是否进 Git |
 |---|---|---|
-| `$CODEESTRA_HOME/runtime.sqlite` | 领域数据库（Task / revision / Execution / Session / Attention / 验证 / 集成 / 预留 / 账本等），当前 schema **v28** | 否 |
+| `$CODEESTRA_HOME/runtime.sqlite` | 领域数据库（Task / revision / Execution / Session / Attention / 验证 / 预留 / 账本等），当前 schema **v35** | 否 |
 | `$CODEESTRA_HOME/runtime.sock` | Runtime 的 Unix socket（`0600`） | 否 |
 | `$CODEESTRA_HOME/*.json` 等 | 生命周期记录、锁、`ui-settings.json`、`prose-question-attention.json` | 否 |
 | `$CODEESTRA_HOME/worktrees/<project-id>/<task-id>/` | Task 独占的工作树 | **否**（Task 成果在内部 `refs/heads/task/<task-id>`） |
 | `$CODEESTRA_HOME/verifications/...` | 验证用的 detached 副本 | 否 |
-| `$CODEESTRA_HOME/integrations/...` | 集成用的 detached worktree | 否 |
 | `$CODEESTRA_HOME/knowledge/<project-id>/generated/` | 机器生成的知识层 | 否 |
 | 项目仓库 `.codeestra/instructions/`、`.codeestra/skills/` | 人工维护的知识层（只从 `main` ref 读） | **是** |
 | 项目仓库 `.codeestra/policies/verification.json` | 人工维护的验证策略（只从 `main` ref 读） | **是** |
@@ -1230,14 +1020,14 @@ bun run codeestra reclaim records --project $PROJECT [--task <task-id>] \
 **这是唯一具有破坏性的命令面**，务必注意：
 
 - 每个被考虑的资源都有动作：`RECLAIM / RETAIN / REFUSE / ALREADY_ABSENT / RECOVERY_REQUIRED`，并带归属证据。
-- **失败现场默认保留**：没有 `--include-failure-scenes` 时，未提交改动、失败/取消的验证或集成是 `RETAIN`。
+- **失败现场默认保留**：没有 `--include-failure-scenes` 时，未提交改动、失败/取消的验证是 `RETAIN`。
 - **未注册目录不会被删**，除非用 `--remove-unregistered <精确路径>` 指名。
 - 不带 `--project`（或加 `--all-projects`）覆盖**所有**已信任项目，结果按项目分组。
 - 退出码：`FAILED` → `1`；可回收数量为 0（plan）或实际回收数量为 0（apply）→ `3`（「没什么可回收」不是错误）；
   否则 `0`。
 - 被回收的 Task 工作树之后可以用 `task retry` 从保留的 Task 分支**重建**。
-- **集成成功后会自动回收**（ADR-0062，默认开启）：不想要就 `settings auto-reclaim off`；失败现场依旧保留，
-  `reclaim plan/apply` 仍然可用。
+- **没有自动回收路径**（ADR-0064）：ADR-0062 的「集成成功后自动回收」随集成一起删除；要么显式
+  `reclaim apply`，要么让 worktree 留着。
 
 ### 想深入看哪篇
 
@@ -1296,9 +1086,7 @@ Task/Execution 的 `RECOVERY_REQUIRED` 用 **`task recover <project-id> <task-id
 `RECOVERY_OWNERSHIP_UNVERIFIABLE` / `RECOVERY_PROCESS_IDENTITY_MISSING`）。收口后 `task retry` 可重排、
 `task cancel` 可作废。**只想清理这个出错任务时不必先手动 `task recover`**：`task purge --yes` 会自己做同一次
 观察对账，只有能证明 provider 已退出才删除（否则 `RECONCILE_REQUIRED`）；确实要强行清掉就加 `--force`——
-它会先按记录的身份终止 provider，再删除（结果里 `stop.stop: "FORCED"`，`forced` 列出被跳过的拒绝与终止结果）。IntegrationBatch 与 Promotion 的
-`RECOVERY_REQUIRED` 各自有自己的收口命令，见
-[cli/integration-dag-scheduler.md](./cli/integration-dag-scheduler.md) 与 [cli/promotion.md](./cli/promotion.md)。
+它会先按记录的身份终止 provider，再删除（结果里 `stop.stop: "FORCED"`，`forced` 列出被跳过的拒绝与终止结果）。
 
 ### 13.6 完整的错误码表在哪
 
@@ -1324,7 +1112,7 @@ Task/Execution 的 `RECOVERY_REQUIRED` 用 **`task recover <project-id> <task-id
 | **CLI** | 完备命令面。每个能力都能只靠它完成并脚本化驱动（`--json`、稳定退出码） |
 | **Web UI** | Runtime 的便利前端，与 CLI 走**同一个命令面**，不新增业务语义、不绕过门禁、不直接访问 SQLite |
 | **Project** | 一个已接入（trust）的 Git 仓库。按 **Git common dir** 识别，所以同一仓库的多份工作树是同一个 Project |
-| **Task** | **业务主实体**：一次有边界的开发工作。持有当前规格、不可覆盖的 revision 历史、约束、依赖、执行历史、验证与集成状态 |
+| **Task** | **业务主实体**：一次有边界的开发工作。持有当前规格、不可覆盖的 revision 历史、约束、依赖、执行历史与验证状态 |
 | **TaskRevision** | Task 规格的快照，append-only。第一次创建 Task 就产生第一条 |
 | **Revision Delivery** | 「修订是否真的到达了运行中的 Execution」的独立可观察过程。`revisionAcknowledgement` 不支持的 Adapter 会**如实保持未确认** |
 | **Execution** | **一次执行尝试**，恰好绑定**一个**主 Agent。换 Agent 要新建 Execution |
@@ -1334,8 +1122,6 @@ Task/Execution 的 `RECOVERY_REQUIRED` 用 **`task recover <project-id> <task-id
 | **散文提问等待** | Agent 没用工具、在正文里提问并结束轮次，被记成 `PROSE_QUESTION_NO_TOOL_USE`。**provider 已退出**，用 `attention resolve` 结束 |
 | **result commit（成果 commit）** | Agent 的改动被固定成的一个 commit，落在内部 `refs/heads/task/<task-id>` |
 | **Task verification** | 判定**一个 Task 的成果 commit**。命令来自 `main` ref 上人工维护的策略，在固定 commit 的 detached 副本里跑 |
-| **Integration verification** | 判定**一个 IntegrationBatch 合并后的 dev 提交**。**独立实体、独立记录**，不能与 Task 验证互相替代 |
-| **IntegrationBatch** | 把成果合入 `dev` 的正式记录：成员 Task 与 revision、成果 commit、固定的 `dev` 基线、集成结果与验证证据 |
 | **Promotion** | `dev → main` 的正式记录。固定「已验证的 dev commit + 预期旧 main commit + 证据」三元组 |
 | **dev 全量测试证据** | 对**精确 dev 候选 SHA** 在 detached 副本里运行项目固定策略的结果，由 Runtime 运行并观察。客户端不能自报 |
 | **ImpactSnapshot** | 一次影响分析的 append-only 记录：changed 路径集合、命中的目录/模块/全局资源、是否完整 |
@@ -1344,7 +1130,7 @@ Task/Execution 的 `RECOVERY_REQUIRED` 用 **`task recover <project-id> <task-id
 | **Capacity** | 两个上限：项目全局与每 adapter。它是**配置**不是测量 |
 | **Operation（长命令）** | `task.run` / `task.verify` 这类长命令的持久句柄，带步骤级进度，可查、可取消 |
 | **Handoff / writer lease** | 原生终端接管的编排：attach / detach / release、单一 writer、安全点与准入决策 |
-| **Reclaim** | Runtime 数据目录下工作树 / 验证副本 / 集成工作树的回收。**唯一具有破坏性的命令面** |
+| **Reclaim** | Runtime 数据目录下工作树与验证副本的回收。**唯一具有破坏性的命令面**（账本里仍可能读到历史的 `INTEGRATION_WORKTREE` 取值） |
 | **Project Knowledge** | 分层知识：人工层（`.codeestra/instructions`、`.codeestra/skills`，只从 `main` ref 读）+ 机器生成层（Runtime 数据目录） |
 | **FULL / STRICT** | 权限模式。FULL 零确认（默认），STRICT 恢复旧门禁。两者都用同一个 CLI 无确认切换 |
 

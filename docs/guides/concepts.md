@@ -1,6 +1,6 @@
 # 领域概念与边界
 
-> **适用版本** `dev@de03448` + 本格分支 `Loyage/glc-pause-ui`（2026-09-16） · **schema** v34（本格暂停半边） · **最后校对** 2026-09-16
+> **适用版本** `dev@de03448` + 本格分支 `Loyage/glc-pause-ui`（2026-09-16） · **schema** v35（本格暂停半边） · **最后校对** 2026-09-16
 > 版本会前进：`dev@4667d32` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > §「调度三态」由 FOUNDATION-091 按 ADR-0059 重写（声明同一功能才冲突）；
@@ -188,12 +188,12 @@ dev 集成结果与集成验证证据。
 - `reclaim plan` 是**只读试运行**，返回与 `apply` **完全相同**的决策形状，所以「预览」永远不会和「真跑」不一致。
 - 每个被考虑的资源都有明确动作：`RECLAIM / RETAIN / REFUSE / ALREADY_ABSENT / RECOVERY_REQUIRED`，
   并带上授权或拒绝它所依据的**归属证据**。
-- **失败现场默认保留**：未提交改动、失败/取消的验证或集成，在没有 `--include-failure-scenes` 时是 `RETAIN`。
+- **失败现场默认保留**：未提交改动、失败/取消的验证，在没有 `--include-failure-scenes` 时是 `RETAIN`。
 - **未注册目录不会被删**，除非调用方用 `--remove-unregistered <精确路径>` 指明它（ADR-0037）。
 - 回收过的 Task worktree 之后可以由 `task retry` 从保留的 Task 分支**重建**（ADR-0042）。
-- **集成成功后会有一次自动回收**（ADR-0062，`settings auto-reclaim` 默认 `on`）：对该批成员的 Task worktree
-  执行与 `reclaim` 完全相同的决策（因此失败现场仍默认保留、branch 不动）；它失败不影响集成结果，
-  细节在集成报告的 `reclamation` 汇总与账本 evidence（`automatic: true`）里。
+- **没有自动回收路径**（ADR-0064）：ADR-0062 的「集成成功后自动回收」随集成一起删除。回收只有显式
+  `reclaim plan/apply/records` 一条路径；「已合并」按该 workspace 记录的 `base_ref`（项目文件夹建 workspace
+  时检出的分支）判定。
 
 ### Project Knowledge（项目知识）
 

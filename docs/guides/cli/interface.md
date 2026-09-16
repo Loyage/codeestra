@@ -1,6 +1,6 @@
 # CLI 参考 · 事件、Attention 与 HTTP/SSE 面
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
+> **适用版本** `dev@de03448`（2026-09-16） · **schema** v35 · **最后校对** 2026-09-16
 > 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一，
@@ -39,11 +39,9 @@ bun run codeestra events tail [--project <project-id>] [--since <sequence>]
 | Agent Session | `AgentSessionStarted`、`AgentSessionStateChanged`、`AgentSessionCompleted` |
 | Workspace | `WorkspacePrepared`、`WorkspaceReclaimed` |
 | 验证 | `VerificationCompleted` |
-| 集成 | `IntegrationBatchCreated`、`IntegrationVerificationCompleted`、`IntegrationCompleted`、`IntegrationFailed`、`IntegrationReconcileRequired` |
 | 调度 | `TaskScheduleDecided`、`TaskWaitingForConflict`、`TaskWaitingForCapacity`、`TaskUnknownCleared`、`TaskImpactPredictionRevoked` |
 | 容量 / 槽位 | `SchedulerCapacityChanged`、`ExecutionSlotReserved`、`ExecutionSlotReleased`、`ExecutionSlotReconciled`、`ExecutionSlotWorkspaceBound` |
 | Operation | `OperationProgressed`、`OperationSettled`、`ResourcesReclaimed` |
-| 提升 | `PromotionCreated`、`PromotionApproved`、`PromotionDevPushed`、`PromotionPushRefused`、`PromotionMainUpdated`、`PromotionRestartRecorded`、`PromotionMainPushRefused`、`PromotionCompleted`、`PromotionFailed`、`PromotionStale`、`PromotionReconcileRequired` |
 | 交接 / 终端 | `TakeoverRequested`、`TakeoverSafePointReached`、`SessionHandoffStarted`、`SessionHandoffCompleted`、`TerminalWriterLeaseChanged`、`TakeoverReleased`、`TakeoverFailed` |
 | 修订投递 | `TaskRevisionDeliveryRecorded` |
 
@@ -149,7 +147,6 @@ Runtime 的本地 HTTP 面只绑定 `127.0.0.1`，端口在 `codeestra ui` 时�
 | `session handoff terminal write` 的 `--text` | 服务端收到的是 base64（CLI 负责编码） |
 | `session handoff terminal resize --cols/--rows` | 必须是 `1..1000` 的整数；越界在 CLI 就以退出码 2 + `TERMINAL_RESIZE_INVALID_SIZE` 拒绝（不打给 Runtime） |
 | `session handoff terminal resize --holder` | 终端已有 `WRITER` attachment 时必填且必须是该 holder；否则 `TERMINAL_RESIZE_WRITER_BUSY` |
-| `promotion.restart.record` | CLI 在 `promote` 的重启序列之后调用；不是可直接执行的用户命令 |
 
 ---
 

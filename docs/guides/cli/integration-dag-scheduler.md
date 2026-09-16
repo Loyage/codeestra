@@ -1,6 +1,6 @@
-# CLI 参考 · 集成、依赖 DAG、调度与回收
+# CLI 参考 · 依赖 DAG、调度与回收
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
+> **适用版本** `dev@de03448`（2026-09-16） · **schema** v35 · **最后校对** 2026-09-16
 > 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一，
@@ -10,70 +10,25 @@
 > §14 的 `scheduler capacity` 一节由 **FOUNDATION-096** 重写（ADR-0061 D02：破坏性变更——命令去掉 project/adapter 参数，
 > 旧 `get|set|clear <project-id>` 形态被移除）；§14 的 `scheduler control` 一节由 **FOUNDATION-097** 新增
 > （同一个 schema v34 的暂停半边，两半已合并在同一次集成里）。
-> §19 新增 `settings auto-reclaim` 一节，并在 §16 标注集成后的自动回收（ADR-0062 / 用户任务，无 schema 变更）。
-> §3 的 `project inspect`/`project trust` 段、§1 `open` 的失败码、§4 的 `task run` 与 `task depends` 两节由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目的常态路径不再出现 `DEV_REPO_REQUIRED`）；其余段落沿用 FOUNDATION-091 的校对基线。
+> **本次修订（ADR-0064 / schema v35）**：从产品中删除了 dev clone、长期 `dev` 集成分支与
+> `dev → main` 提升，因此 §11 的 `task integrate` / `task integration` 整节、`promotion` 一篇（§15）
+> 与 §19 的 `settings auto-reclaim` 全部作废；§12 的依赖原因码与 §16 的「已合并」判定按新语义改写。
+> 其余段落沿用 FOUNDATION-091/093 的校对基线。
 
-## 11. `task integrate` / `task integration`（IntegrationBatch）
+## 11. `task integrate` / `task integration`（ADR-0064 已删除）
+
+这两个命令连同 IntegrationBatch、独立集成验证与 `dev` 集成分支一起从产品中删除（ADR-0064，schema v35）：
 
 ```sh
-# 单成员：组成一个成员的批次并立刻集成（ADR-0018 的既有形态）
+# 这些命令不再存在；执行会得到用法错误（退出码 2）。
 bun run codeestra task integrate <project-id> <task-id> <expected-version>
-
-# 多成员：先组成（不碰 Git），再集成（ADR-0053）
-bun run codeestra task integration create <project-id> --member <task-id>:<expected-version> \
-  [--member <task-id>:<expected-version> ...] [--json]
-bun run codeestra task integration integrate <project-id> <batch-id> [--json]
-bun run codeestra task integration list <project-id> [task-id] [--json]
-bun run codeestra task integration get <project-id> <batch-id> [--json]
-bun run codeestra task integration cancel <project-id> <batch-id> [--reason <text>] [--json]
+bun run codeestra task integration create|integrate|list|get|cancel …
 ```
 
-`create` **不写任何 Git 副作用**：它固定每个成员当前 revision 的 `(revision, 结果提交, Execution)`、
-整批的 `dev` 基线与项目验证策略摘要（`CREATED`）。成员全部通过校验才落一条批次——每个成员都必须是
-`EXECUTED`、版本匹配、当前 revision 有一个已捕获结果提交的 `SUCCEEDED` Execution，并且该 revision+commit
-有 `PASSED` 的 Task 验证；一个不合法即整体拒绝（不写半批）。成员按 `task_id` 排序（请求顺序不是批次的一部分，
-**同一成员集合因此总是产生同一次集成**）。
-
-`integrate` 的过程：在 Runtime 数据目录的 detached integration worktree 中**按 `task_id` 顺序**逐个成员合并
-（**能 ff 就 ff，否则 `--no-ff`**）→ 对最终合并提交跑**一次覆盖整批的独立验证** → `PASSED` 后才用 CAS 推进
-`dev`，并把**每个**成员 Task 推到 `SUCCEEDED`。
-
-**退出码**（`task integrate` / `task integration integrate` / `task integration cancel` 一致）：
-
-| 码 | 含义 |
-|---|---|
-| `0` | `dev` 已按本批次证据推进（`INTEGRATED`）；或读取/取消得到已记录的终态 |
-| `1` | 拒绝（前置条件、策略未确认、参数不合法之外的情形）或已记录的**非集成终态**：`FAILED`/`CONFLICTED`/`STALE`/`CANCELLED` |
-| `2` | 用法错误 |
-| `3` | 批次未收口、**需要人工先处理**（`RECOVERY_REQUIRED`）；重跑同一条命令不会有别的结果 |
-
-`STALE` 表示批次固定的证据已过期：某成员 revision/结果提交/验证移动（`MEMBER_EVIDENCE_MOVED`），
-或 `dev` 基线在集成前/推进时移动（`DEV_REF_MOVED`）。**不合并、不推进、成员状态保持原样**；终态，
-不阻塞用当前事实重新组成批次。`CANCELLED` 只在记录能证明没有副作用时成立（仍 `CREATED` 且无
-worktree/merge/验证）；否则得到 `RECOVERY_REQUIRED` + `RECONCILE_REQUIRED` 并**保留占用**。
-**取消在 FULL 与 STRICT 下都是零确认**（`permission mode` 见 §0/§1，本命令没有新增门禁）。
-
-部分失败如实可读：只有失败的成员被标 `CONFLICTED`/`FAILED`，已合并的成员保持 `MERGED`，未尝试的
-保持 `PREPARED`；验证失败这类批次级失败不改写成员状态。**任何情况下都不会把部分成功写成整批成功**。
-
-`list` / `get` / `create` / `cancel` / `integrate` 的标准输出都是记录的 JSON（`--json` 是显式同义写法），
-`members[]` 里逐成员给出 `taskId`/`revisionId`/`candidateCommit`/`state`/`integratedCommit`。
-
-稳定码：`TASK_VERIFICATION_NOT_PASSED`、`NO_CAPTURED_RESULT`、`TASK_NOT_EXECUTED`、`STALE_REVISION`、
-`DEV_REF_MISSING`、`DEV_REF_CHECKED_OUT`、`INTEGRATION_IN_PROGRESS`（已有未结算批次持有成员，或该批次仍在
-中途）、`INTEGRATION_BATCH_INVALID`、`INVALID_REQUEST`、`INVALID_COMMIT_ID`、`REPOSITORY_CHANGED`、
-`EXECUTION_NOT_FOUND`、`VERIFICATION_POLICY_ABSENT`、`VERIFICATION_POLICY_NOT_CONFIRMED`、`NOT_FOUND`、
-`CONCURRENT_MODIFICATION`。批级 `outcome_code`：`MEMBER_EVIDENCE_MOVED`、`DEV_REF_MOVED`、`DEV_REF_CHANGED`、
-`MERGE_CONFLICT`、`MERGE_FAILED`、`WORKTREE_FAILED`、`INSPECTION_FAILED`、`INTEGRATION_VERIFICATION_FAILED`、
-`CANCELLED_BY_USER`、`RECONCILE_REQUIRED`、`DEV_REF_OBSERVED`。
-
-集成成功后会以 `INTEGRATION` 触发一次调度 pass，结果里附带每个成员的 `dependencyReconcile`。
-
-事件名：`IntegrationBatchCreated`、`IntegrationMemberMerged`、`IntegrationVerificationCompleted`、
-`IntegrationCompleted`、`IntegrationFailed`、`IntegrationBatchStale`、`IntegrationBatchCancelled`、
-`IntegrationReconcileRequired`。
-
----
+成果 commit 停在 `refs/heads/task/<task-id>`，是否合并由你自己决定（`git merge --ff-only <result-commit>`
+在你的分支上），Codeestra 不自动合、不自动推、不记账。完整语义见
+[git-workspace-api.md §3](../../architecture/git-workspace-api.md) 与
+[ADR-0064](../../decisions/0064-remove-dev-clone-and-dual-baseline.md)。
 
 ## 12. `task depends`（DAG）
 
@@ -85,15 +40,16 @@ bun run codeestra task depends list   <project-id> [task-id] [--json]
 
 - flag 可以出现在**任意位置**（解析器按顺序走 token），但 `--revision` 只对 `add` 有意义。
 - 依赖图必须是 **DAG**；加环以 `DEPENDENCY_CYCLE` 拒绝，且**不部分应用**。自依赖是 `SELF_DEPENDENCY`。
-- **满足条件**：上游必须**通过集成验证并进入 `dev`**；下游的 **Task 基线 ref** 必须包含上游结果。
-  **仅 Task verification 成功不释放依赖**，进入 `dev` 也不等于已提升到 `main`。
+- **满足条件**：上游**指定修订自己的结果 commit** 必须对下游的 **Task 基线 ref** 可达
+  （ADR-0064）。**仅 Task verification 成功不释放依赖**：验证通过不等于那个 commit 已经进了基线。
 - 基线来源（ADR-0060 第三轮修订）：`devRef`/`devCommit` 是**该项目 Task 基线**的 ref 与 commit——
-  有 dev clone 时是那个 clone 的 `dev`，managed 时是项目文件夹**当前检出的分支**（managed 项目不会产生
+  就是项目文件夹**建 workspace 时检出的分支**（ADR-0064 之后只有这一种；不会产生
   INTEGRATED 批次，因此带依赖边的 Task 会以 `UPSTREAM_NOT_INTEGRATED` 保持未满足，而**不会**以
-  `DEV_REPO_REQUIRED` 拒绝整条命令）。基线 ref 读不到时所有边保持未满足（`DEV_BASELINE_MISSING`），
-  绝不当作已满足；原因码沿用 ADR-0024 的有界枚举（`DEV_*` 是历史命名）。
+  任何「缺 dev clone」类拒绝）。基线 ref 读不到时所有边保持未满足（`BASE_REF_MISSING`），
+  绝不当作已满足；原因码是有界枚举 `UPSTREAM_RESULT_MISSING` / `BASE_REF_MISSING` /
+  `BASE_REF_UNREADABLE` / `NOT_REACHABLE_FROM_BASE`。
 - `list` 无 `--json` 时打印人读视图：项目与基线 commit、该 Task 的状态与版本、逐条 `✓/✗ 依赖`、
-  要求的 revision 编号、上游合入 commit 的前 12 位，以及上游闭包/下游影响数量。
+  要求的 revision 编号、上游结果 commit 的前 12 位，以及上游闭包/下游影响数量。
 
 其他码：`DUPLICATE_EDGE`、`DEPENDENCY_GRAPH_INVALID`、`UPSTREAM_NOT_INTEGRATED`、`DEPENDENCY_RECONCILE_FAILED`。
 
@@ -111,8 +67,13 @@ bun run codeestra task schedule run    <project-id> [--adapter <id>] [--json]
 bun run codeestra task schedule clear-unknown <project-id> <task-id> [--json]
 ```
 
-- Runtime **自己会调度**：相关事件（submit、合入 dev、停止、revision 投递、槽位释放、容量变化）触发一次 pass，
+- Runtime **自己会调度**：相关事件（submit、停止、revision 投递、槽位释放、容量变化）触发一次 pass，
   另有周期恢复 pass（`CODEESTRA_SCHEDULE_TICK_MS`，默认 5000ms）收敛崩溃遗留状态。
+- **每一趟 pass 先重新评估 `BLOCKED` 任务**（ADR-0064）：旧实现里唯一的触发者是已删除的
+  `task integrate`，所以现在由 pass 在挑选候选之前对每个 `BLOCKED` 任务重判依赖。上游结果 commit
+  进入项目当前分支后，下游会在下一次 pass（或你显式跑一次 `task schedule run`）转为 `READY` 并可能立即启动。
+  `task depends list` / `task schedule status` 是只读的，因此它们可能显示「边已满足、任务仍是 `BLOCKED`」，
+  最多滞后一个 tick。
 - 排序：**priority 降序 → 创建时间 → ID 升序**。提高优先级只改变**下一次**顺序，**不抢占**已持有资源的 Task。
 - `plan` 是**有序 dry run**：不预留、不启动任何东西。
 - `explain` 退出码：`0` = 正在跑或现在会启动；`3` = `WAIT_CONFLICT` / `WAIT_CAPACITY`；
@@ -226,7 +187,7 @@ FULL 与 STRICT **都是零确认**——暂停按钮/命令本身就是显式�
 - **不改业务状态**：`Task.state`/`Execution.state`/`AgentSession.state`、slot、workspace、writer lease 都不变；
   被冻结的 Task 仍占用全局容量。单 Task 的 `task pause`/`task resume` 仍走 ADR-0016 的协作停止路径。
 - 暂停期间**继续可用**：只读查询、事件订阅、容量/控制查询、记录用户输入、`task cancel/recover/purge`、`runtime stop`，
-  以及不调用模型的 Git/验证/集成操作。**延后**：新 Execution/Session/successor、answer/guidance 的实际投递、
+  以及不调用模型的 Git/验证操作。**延后**：新 Execution/Session/successor、answer/guidance 的实际投递、
   任何可能引发下一轮模型调用的写入（正文可先耐久记录）。
 - 退出码：`0` = 达到完整稳定状态或已幂等处于目标状态；`1` = 任何目标不可核验/平台或 Adapter 不支持/上一次变更未收口
   （**不用 `3` 掩盖部分冻结**）；`3` 只用于「Task 因全局暂停而等待启动」（`task run`/`task resume`/`task retry`/
@@ -270,11 +231,15 @@ bun run codeestra reclaim records [--project <project-id> | --all-projects] [--t
   所以预览永远不会与真跑不一致。
 - 每个被考虑资源都有 `action`（`RECLAIM` / `RETAIN` / `REFUSE` / `ALREADY_ABSENT` / `RECOVERY_REQUIRED`）、
   `reasonCode` / `detail` 与授权或拒绝它的**归属证据**。
-- **失败现场默认保留**：没有 `--include-failure-scenes` 时，未提交改动、失败/取消的验证或集成是 `RETAIN`
+- **失败现场默认保留**：没有 `--include-failure-scenes` 时，未提交改动、失败/取消的验证是 `RETAIN`
   （`FAILURE_SCENE`）。
 - **未注册目录不会被删**：只有用 `--remove-unregistered <精确路径>` 指名才会（`UNREGISTERED_EXPLICIT_SELECTION`）；
   最多 200 个选择。`--scan-root` 必须是 home 内的绝对路径（`SCAN_ROOT_NOT_ABSOLUTE` / `SCAN_ROOT_OUTSIDE_HOME`），
   并且它隐含 `--unregistered`。
+- **`--kind INTEGRATION_WORKTREE` 仍然可以写，但不再匹配任何东西**（ADR-0064）：Runtime 不再创建集成
+  工作树，所以它只作为 append-only 账本里的历史取值保留；旧目录会落进「未注册目录」处置通道。
+- **「已合并」按该 workspace 记录的 `base_ref` 判定**（ADR-0064）：`resultCommit` 对项目文件夹建这个
+  workspace 时检出分支的 commit 做 ancestor 检查。读不到该 ref 时不按已合并处理，资源 `RETAIN`。
 - `--project` 与 `--all-projects` 互斥；`--task` 需要 `--project`。
 - `records` 专用 flag：`--source`、`--since`/`--until`（epoch 毫秒或任何 ISO-8601；`since >= until` 是用法错误）、
   `--limit`（1–500，默认 100）。`--unregistered`、`--include-failure-scenes`、`--scan-root`、`--remove-unregistered`

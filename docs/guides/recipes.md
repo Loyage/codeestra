@@ -1,6 +1,6 @@
 # 常见任务的做法（recipes）
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
+> **适用版本** `dev@de03448`（2026-09-16） · **schema** v35 · **最后校对** 2026-09-16
 > 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > recipe 3 与 recipe 4 由 FOUNDATION-091 按 ADR-0059 改写（默认不冲突、声明同一功能才互斥）；
@@ -562,9 +562,8 @@ bun run codeestra task recover $PROJECT $TASK <expected-version> [--reason "…"
 
 **目标**：把 Runtime 数据目录下不再需要的资源清掉，**并且知道每一样为什么被清或被留**。
 
-> 从 ADR-0062 起，**集成成功后会自动回收**该批成员里「clean + 已合并」的 Task worktree（默认开启）。
-> 这一步不再需要你记得跑；要关掉用 `settings auto-reclaim off`。下面仍然是那个**带审计的手动路径**，
-> 失败现场、未合并成果与任何手动选定都靠它。
+> **没有自动路径**（ADR-0064）：回收只有下面这条带审计的手动路径，失败现场、未合并成果与任何手动选定
+> 都靠它。「已合并」按该 workspace 记录的 `base_ref`（项目文件夹建 workspace 时检出的分支）判定。
 
 ```sh
 # 1) 先看（plan 是只读试运行，返回的结构与 apply 完全相同）

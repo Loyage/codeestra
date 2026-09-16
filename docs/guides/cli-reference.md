@@ -1,6 +1,6 @@
 # CLI 命令参考（索引）
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
+> **适用版本** `dev@de03448`（2026-09-16） · **schema** v35 · **最后校对** 2026-09-16
 > 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > 拆分说明（ADR-0063）：原来这一篇 1322 行的参考已**按功能拆成 [`cli/`](./cli/README.md) 下的九篇**。
@@ -28,11 +28,11 @@
 | §8 `task result`（成果 commit） | [cli/task-result-verify.md](./cli/task-result-verify.md) |
 | §9 `task verify` / `task verification` / `task tests` | [cli/task-result-verify.md](./cli/task-result-verify.md) |
 | §10 `task operation`（长命令） | [cli/task-result-verify.md](./cli/task-result-verify.md) |
-| §11 `task integrate` / `task integration`（IntegrationBatch） | [cli/integration-dag-scheduler.md](./cli/integration-dag-scheduler.md) |
+| §11 `task integrate` / `task integration`（IntegrationBatch） | **ADR-0064 已删除**；说明见 [cli/integration-dag-scheduler.md](./cli/integration-dag-scheduler.md) §11 |
 | §12 `task depends`（DAG） | [cli/integration-dag-scheduler.md](./cli/integration-dag-scheduler.md) |
 | §13 `task schedule`（调度引擎） | [cli/integration-dag-scheduler.md](./cli/integration-dag-scheduler.md) |
 | §14 `scheduler`（容量与槽位预留） | [cli/integration-dag-scheduler.md](./cli/integration-dag-scheduler.md) |
-| §15 `promotion`（稳定提升） | [cli/promotion.md](./cli/promotion.md) |
+| §15 `promotion`（稳定提升） | **ADR-0064 已删除**（原 `cli/promotion.md` 一并删除） |
 | §16 `reclaim`（资源回收） | [cli/integration-dag-scheduler.md](./cli/integration-dag-scheduler.md) |
 | §17 `events`（订阅） | [cli/interface.md](./cli/interface.md) |
 | §18 `attention` | [cli/interface.md](./cli/interface.md) |
@@ -44,7 +44,7 @@
 ## 为什么拆
 
 - 原先一篇 1322 行，而章节号已经到 §21：查一条命令要在一整篇里滚动，而「`task` 生命周期」与
-  「`promotion`」之间没有任何关系。
+  「已删除的 `promotion`」之间没有任何关系。
 - 拆分后每篇 92–302 行，按**你正在做的事**归类；章节号不动，所以既有的 §N 引用与各篇内部的
   `§N` 交叉引用（如 §4 提到 §7）仍然对得上。
 - 结构性理由与决策记录：[ADR-0063](../decisions/0063-split-cli-reference-by-command-group.md)。

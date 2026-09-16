@@ -1,6 +1,6 @@
 # CLI 参考 · task 生命周期
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
+> **适用版本** `dev@de03448`（2026-09-16） · **schema** v35 · **最后校对** 2026-09-16
 > 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一，
@@ -10,7 +10,7 @@
 > §4 的 `task purge` 一节由 FOUNDATION-090 新增（ADR-0058，其余 §4 内容沿用 FOUNDATION-070 的校对基线）；
 > §4 的 `task list` / `task status` 由用户任务 `Loyage/simplize_task_ui`（2026-09-16）补上 `latestExecution` 投影字段的说明
 > （只读字段，无新命令、无 flag、无退出码变化）。
-> §3 的 `project inspect`/`project trust` 段、§1 `open` 的失败码、§4 的 `task run` 与 `task depends` 两节由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目的常态路径不再出现 `DEV_REPO_REQUIRED`）；其余段落沿用 FOUNDATION-091 的校对基线。
+> **本次修订（ADR-0064 / schema v35）**：`--base-ref` 与基线语义按「只有一种基线」改写；删除 dev clone / 集成相关的表述。
 > §4 `task purge` 的 `RECOVERY_REQUIRED` 行为由用户任务 `task/930f5325` 修订（ADR-0058 D02 修订，2026-09-16）：purge 先按观察对账，只有证明 provider 已退出才继续删除。
 > §4 `task purge` 新增 `--force` 与其代价一节由 `lane/purge-force` 同步（ADR-0058 D09，2026-09-16）：`--force` 是同一条命令的放宽（不是第二道确认），先终止记录过的 provider 身份，再越过 D02/D06/D05 三类拒绝；跳过了什么写在 `forced` 与 stderr 里。
 
@@ -49,7 +49,7 @@ ADR-0059 之后**未声明功能的 Task 会在容量允许时就在这个命令
 
 显式启动请求，走与自动调度**同一个门禁**。`--adapter` 默认 `pi`。
 
-`--base-ref <refs/heads/…>` 显式指定**新 workspace** 的基线（ADR-0060）：本地的分支名，在有 dev clone 的项目里从那个 clone 读，在 managed 项目里从项目文件夹读。省略时用项目默认（dev clone 的 `dev`，或项目文件夹**当前检出的分支**）。**已有 workspace 的 Task 保持已记录的基线**，此时给这个 flag 会被拒为 `TASK_BASE_REF_ALREADY_FIXED`（不是静默忽略）；自动调度从不选基线。
+`--base-ref <refs/heads/…>` 显式指定**新 workspace** 的基线（ADR-0064）：项目文件夹里的一个**本地分支**名。省略时用项目文件夹**建 workspace 时当前检出的分支**；`HEAD` detached 则以 `TASK_BASE_REF_UNRESOLVED` 拒绝。**已有 workspace 的 Task 保持已记录的基线**，此时给这个 flag 会被拒为 `TASK_BASE_REF_ALREADY_FIXED`（不是静默忽略）；自动调度从不选基线。
 
 **换 `--adapter` 是新建 Execution，不是在同一个 Execution 里换 Agent。**
 
@@ -62,8 +62,8 @@ ADR-0059 之后当前规则**不再产生 `UNKNOWN`**，所以这条路日常不
 | `3` | `outcome: WAIT`——冲突等待或容量等待；stderr 打印 `[scheduler] CONFLICT|CAPACITY wait: <code> — <detail>` |
 | `1` | `outcome: REFUSED`——依赖未满足、状态不可启动、revision 过期等 |
 
-managed 项目（没有 dev clone）同样可以 submit/run/depends 判定/result commit/verify：这些操作按它自己的
-基线（项目文件夹当前检出的分支）与归属（项目文件夹）工作，**不会**因缺少长期 `dev` 分支被拒绝（ADR-0060 第三轮修订）。
+所有项目都按同一个模型工作（ADR-0064 之后没有第二种）：基线是项目文件夹当前检出的分支，归属是项目文件夹本身。
+submit/run/depends 判定/result commit/verify 都照常，**不会**有「缺少长期 `dev` 分支」的拒绝——那个概念已不存在。
 
 相关稳定码：`TASK_NOT_STARTABLE`、`TASK_ARCHIVED`、`CONFLICT_WAIT`、`CAPACITY_WAIT`、
 `CAPACITY_GLOBAL_LIMIT_REACHED`（唯一的 Runtime 全局上限已满）、`SCHEDULER_DRAINING`、
@@ -168,16 +168,16 @@ impact 快照与它的配对判定、槽位预留、回收记录、依赖边、`
 
 - **`--yes` 是整个产品唯一一次显式确认，且不在任何常态路径上**：接入、工具、成果 commit、验证策略、调度、提升、`cancel`/`archive`
   都不需要它。它不是审批层：Runtime 不再叠第二次询问，`confirmed` 是调用者自己的声明。
-- **`SUCCEEDED` 任务实际上不可 purge**：按定义它的成果已进 `dev`（ADR-0053），因此会被 `TASK_INTEGRATED_INTO_DEV` 拒绝，
-  请改用 `task archive`（它隐藏任务但不销毁那个 commit 的来源记录）。
+- **`--force` 只越过「活占」类拒绝**：ADR-0064 删除了「成果已进入 `dev`/`main` 即拒绝」
+  （`TASK_INTEGRATED_INTO_DEV` / `TASK_IN_STABLE_PROMOTION`）这一类，因为没有 Runtime 管理的 ref 再承载
+  本任务的 commit 来源记录了。
 - **删除是幂等的**：同一 `commandId` 重放会读到收据（`replayed: true`），不会发生第二次删除；同一 ID 换 payload 报 `COMMAND_CONFLICT`。
 - **`RECOVERY_REQUIRED` 不需要先手动 `task recover`**：`task purge` 自己完成那次观察对账（`TaskRecoveryReconciled` 事件先于 `TaskPurged`）。安全性没有放宽——只有可证明已经退出的 provider 才让删除继续，其余情况 `RECONCILE_REQUIRED` 且一行不删。
 - **`--force` 是同一条命令的更宽声明，不是第二道确认**（ADR-0058 D09）：它不加确认、不加等待、不需要在场的人，`--yes` 依旧是唯一一次确认。它做的事，按顺序：
   1. **终止**：对**任务记录过的身份**（pid + start token）发信号——先 `SIGTERM`，有界等待，再对仍存活的发 `SIGKILL`，再有界等待；**记录里没有 start token 的 pid 一个信号都不发**（pid 会被复用，杀错进程比留下孤儿更糟），**不按进程组杀、不扫描「看起来像 provider」的进程**。两轮后仍存活就如实报为 `survivors`，**不声称静止**。
-  2. **删掉它本来会拒绝的行**：`dev`/`main` 里 commit 的来源记录（`integration_batch_items` / `integration_verification_runs` / `stable_promotion_members`）会一起删；当该任务就是那条集成验证行记录的任务时，**引用了它的 `stable_promotions` 记录本身、连同这条 promotion 的全部成员行（可能含其他任务）**也必须一起删——这是外键决定的，逐表条数在 `rowsDeleted` 里。
-  3. **只越过「活占」类门禁**：`ACTIVE_EXECUTION` / `ACTIVE_RESERVATION` / `ACTIVE_VERIFICATION` / `TASK_NOT_TERMINAL` 不再拦住删除（它们保护的那次运行正是本命令刚退役的）。**归属校验从不越过**：symlink 逃逸、路径不在 owned root 内、注册/HEAD/分支与记录不符、未注册目录 —— 这些资源**留在磁盘上**，逐项写在 `forced.bypassed` 里，绝不会 `rm -rf`。注意它们的 `workspaces`/`reclamation_records` 行已随任务删除，于是磁盘上留下的是「未注册目录」，需要时用 `reclaim --unregistered` 收拾。
-  4. **如实记账**：结果里的 `forced`（`null` 表示没用 `--force`）含 `bypassed[]`（每条被跳过的拒绝码与原文理由）与 `termination`（是否尝试、发了几个信号、是否终止、幸存与不可归属的 pid、原文说明），同一份事实写进 `TaskPurged` 事件；CLI 另外把它打到 **stderr**（stdout 仍是那一个可解析的文档）。被强制删除的 `RECOVERY_REQUIRED` 任务，`stop.stop` 是 `"FORCED"`（不是 `RECOVERED`：它没有被证明静止）。
-  5. **它管不到的东西**：集成工作树/集成验证副本（属于批次，不属于任务）不由 purge 回收；`NOT_FOUND` / `CONCURRENT_MODIFICATION` / 缺 `--yes` 仍然失败；**退出码 3 仍不使用**。
+  2. **只越过「活占」类门禁**：`ACTIVE_EXECUTION` / `ACTIVE_RESERVATION` / `ACTIVE_VERIFICATION` / `TASK_NOT_TERMINAL` 不再拦住删除（它们保护的那次运行正是本命令刚退役的）。**归属校验从不越过**：symlink 逃逸、路径不在 owned root 内、注册/HEAD/分支与记录不符、未注册目录 —— 这些资源**留在磁盘上**，逐项写在 `forced.bypassed` 里，绝不会 `rm -rf`。注意它们的 `workspaces`/`reclamation_records` 行已随任务删除，于是磁盘上留下的是「未注册目录」，需要时用 `reclaim --unregistered` 收拾。
+  3. **如实记账**：结果里的 `forced`（`null` 表示没用 `--force`）含 `bypassed[]`（每条被跳过的拒绝码与原文理由）与 `termination`（是否尝试、发了几个信号、是否终止、幸存与不可归属的 pid、原文说明），同一份事实写进 `TaskPurged` 事件；CLI 另外把它打到 **stderr**（stdout 仍是那一个可解析的文档）。被强制删除的 `RECOVERY_REQUIRED` 任务，`stop.stop` 是 `"FORCED"`（不是 `RECOVERED`：它没有被证明静止）。
+  4. **它管不到的东西**：`NOT_FOUND` / `CONCURRENT_MODIFICATION` / 缺 `--yes` 仍然失败；**退出码 3 仍不使用**。
 - **`domain_events`、`command_receipts`、`operations`、`intents` 与项目级知识快照不删**：所以任务被删后，事件流里仍能读到它的历史
   以及最后那条 `TaskPurged`。**除逐表行数与分支 tip 之外不可恢复**（无墓碑、无备份）。
 - **会连带删掉指向它的依赖边**（条数在 `dependencyEdgesRemoved` 里），下游任务会因此重新判定；也会删掉**另一方**与它配对的那条 impact 判定。
