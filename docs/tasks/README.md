@@ -7777,8 +7777,8 @@ FOUNDATION-096 的容量上半，因此这次合并本身就是 ADR-0061 两半�
 
 ## 用户任务（`Loyage/simplize_task_ui`）— 把 Agent 运行结局与最后的输出摆到任务详情最前面（无 ADR、**无 schema 变更**、不占迁移号、新命令面无）
 
-状态：**已实现并定向验证**；**未 commit、未 push、未提升 `main`、未重启任何 Runtime**（工作区分支 `Loyage/simplize_task_ui`，
-基线 `dev@7425556`，无独立 worktree）。
+状态：**已实现并定向验证，已合入 `dev`（merge `2c5a0f4`）**；**未 push `origin/dev`、未提升 `main`、未重启任何 Runtime**（工作区分支 `Loyage/simplize_task_ui`，
+`865f79f` → merge `2c5a0f4` into `dev@7425556`；Orca worktree `/Users/loyage/orca/workspaces/codeestra-dev/simplize_task_ui`）。
 
 用户原话（两轮）：
 1. `简化任务详情页面的信息，目前这套太难关注到关键信息了，你先列出所有模块，我来选择哪些保留`；
@@ -7834,7 +7834,11 @@ FOUNDATION-096 的容量上半，因此这次合并本身就是 ADR-0061 两半�
 - 卡片只显示最新一次尝试；用户在下拉框里选了另一次执行时，卡片**不会**跟着换（有意：它就是「最后一次说了什么」）。
 - `finalAssistantText` 依赖 Adapter 报告 facts；无 facts 时只能如实说「没有记录 provider 事实」，不回退去读会话文件（用户已选择该取舍）。
 - 未验证：超长输出在真实浏览器里的滚动高度、`#agent-session-transcript` 在非根滚动容器（`.workspace-shell`）里的实际落点。
-- 未 commit/push/提升/重启；`docs/guides/ui.md` 头部已把适用版本写成 `dev@7425556 + 本格分支`。
+- **未跑全量**（全量在合入后的 `dev` 候选上、提升前跑）、**未 push `origin/dev`**、未提升 `main`、未重启任何 Runtime。
+- 合入方式是**人工 `--no-ff` merge**（与 `lane/purge-force`、`lane/fix-impact-capacity-fixture` 同一做法），
+  **没有**走产品 `task integration` 的 IntegrationBatch 路径，也**没有**在合入后单独跑一次独立集成验证——
+  本次 merge 前 `dev == 本分支基线`，merge 结果的树与 `865f79f` 完全一致（`git diff 865f79f dev` 为空），
+  因此「合并引入的风险」为零；但**这个 dev SHA 目前没有全量证据**，不得当成已验证的候选。
 
 ## NEXT — 最小可用纵向切片
 
