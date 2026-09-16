@@ -6712,7 +6712,115 @@ domain/ui 一行未动，且 ADR-0038 禁止在 lane 上跑全量（协调者在
 - **N1 汇报期的一次误执行**：新 CLI 连到了旧代码的稳定 Runtime（旧 Runtime 不返回 `devRefRetirement`，新 CLI 崩），已修掉该兼容缺陷。协调者独立只读核验：稳定实例仍是一个项目、`devRepoPath: null`、`trustedAt` 仍是 2026-09-13，**稳定库未被改动**。
 - **未验证**：Session Guidance 的真实模型效果（模型是否读了 guidance、真实 Pi 在忙碌轮次里是否接受 `steer`、Codex `turn/steer`）、guidance 的 UI 投影、N3 报告的多成员批次命令面缺口（批级无进度/耗时；`task.integration.get` 的 `members` 缺字段；`integrate`/`cancel` 的过期表现为批级 `STALE` 而非 `CONCURRENT_MODIFICATION`；`INTEGRATED` 的 `outcomeCode` 为 `null`；任务详情既有的「合入 dev」按钮仍按本地允许清单隐藏）。
 - **N2 的新 e2e 用 `project trust --dev-repo` 而非 `open --dev-repo`**（因为后者在它的基线分支上还不存在），因此 `open` 组合 trust 的路径在本波**没有**新的 e2e 覆盖；已知并如实记录。
-- **仍未做**：`## NEXT` 与 `docs/roadmap/mvp.md` 的校准（NEXT 第 3/4/7/12/13 条文字已被 Wave L/M 的实现推翻，见 PARALLEL-PLAN 的 Wave N §9 表）、`docs/guides/**` 的版本/校对头刷新（ADR-0050 D02）、本波的 `dev → main` 提升与重启。
+- **仍未做**：`## NEXT` 与 `docs/roadmap/mvp.md` 的校准（NEXT 第 3/4/7/12/13 条文字已被 Wave L/M 的实现推翻，见 PARALLEL-PLAN 的 Wave N §9 表）、`docs/guides/**` 的版本/校对头刷新（ADR-0050 D02）；本波的 `dev → main` 提升与重启**已在下面第五次提升里完成**。
+
+## 第五次真实 `dev → main` 提升（`main` `01b47c0` → `d2c4be7`，18 个提交，Wave N + FOUNDATION-086/087/088/089）
+
+状态：**已执行并成功**（用户在本会话显式授权「回收垃圾资源，将改变提升到 main」，并在三个分叉处逐项裁决）。这是 FOUNDATION-086（`task recover`）、FOUNDATION-087（ADR-0056 的 `dev_repo_path`）、FOUNDATION-088（ADR-0057 / schema v31）与 FOUNDATION-089（多成员批次 UI 投影）进入稳定分支，仍按 ADR-0047 的 GitHub 中转人工四步完成（`just promote-main`，**未使用**产品 `promotion` 命令面）。
+
+| 项 | 值 |
+|---|---|
+| 提升前 `main` | `01b47c0a95309861f833927db9b93f6ccf6a3f49` |
+| 提升后 `main` | `d2c4be7606cc38193c46430d89846ee780f7ee29`（= 被验证的精确 dev 候选） |
+| 推进的提交数 | 18 |
+| 方式 | ①push 固定候选到 `origin/dev` 并读回核对 ②main clone `git fetch` + `git merge --ff-only origin/dev` ③重启并核对 ④推回 `origin/main` 并读回 |
+| `origin/dev` | `01b47c0` → **`d2c4be7`**（读回值逐字符等于候选） |
+| `origin/main` | `01b47c0` → **`d2c4be7`**（读回值逐字符等于候选） |
+| main clone 工作树 | 提升前 clean（0 行）、提升后 clean（0 行） |
+| `phase1SchemaVersion` | 30 → **31**（`session_guidance` / `session_guidance_deliveries`） |
+| 本波占用的 ADR | ADR-0055、ADR-0056、ADR-0057 |
+
+### 提升前全量证据（ADR-0038 D03；用户选择本机 CLI 路径）
+
+```sh
+cd /Users/loyage/Documents/codeestra-dev && bun run check   # 等价 just check
+```
+
+| 字段 | 值 |
+|---|---|
+| 候选 / 被检验 SHA | `d2c4be7606cc38193c46430d89846ee780f7ee29` |
+| 退出码 | **0** |
+| 墙钟耗时 | 13 分 16 秒（11:44:14 → 11:57:30） |
+| Vitest | 21 文件 / 502 项通过 |
+| Bun（`test:storage`） | **862 pass / 0 fail**、5804 `expect()`、101 文件、788.12s |
+| 工作树 | clean（`git status --porcelain` 0 行） |
+
+**这次没有走产品 `promotion full-suite run`**（与第四次提升的记录不同）：用户在「全量证据用哪种」里选了本机 `bun run check`。因此本次**没有**产生领域 `FullSuiteEvidence` 行，产品侧的下一格若要绑定证据仍需自己重新生成。
+
+### 提升前发现并修掉的测试卫生缺陷（集成期才暴露）
+
+第一版候选 `f23b15c`（= Wave N 的 `bd7568d` + 一条 docs 记录，代码完全相同）在本机**可重现地红**：
+
+| 运行 | 结果 | 两条失败测试的耗时 |
+|---|---|---|
+| 第 1 次 | exit 1 | 5030.41ms / 5031.04ms |
+| 第 2 次 | exit 1 | 5034.36ms / 5030.17ms |
+
+两条都在 `apps/runtime/test/promotion-service.test.ts`，都卡在 **Bun 默认 5000ms**：
+`refuses a batch that is not INTEGRATED or whose verification did not pass` 与
+`promotes only after an approval of the exact triple, and FULL refuses to approve`。
+单独跑该文件时它们只要 3.02s / 3.67s；`bun run check` 会并发跑 101 个文件，同一台机器（8 核）上就变成 >5.03s。
+两轮的失败值只差 4ms，说明不是随机抖动，而是**默认值本身不是这两条测试能维持的界**。
+
+同仓的 `cli-promotion.test.ts` 给 6 条同类重测试都写了显式 `300_000`，本文件里也已有两条写了 `120_000` / `180_000`，
+只有其余 24 条靠默认值。修法（提交 `d2c4be7`）：给这 24 条补上显式 `30_000`，**不动任何测试体、断言或夹具**。
+修完后的同一负载下这两条实测 **5074.03ms / 6483.47ms**（后者超默认值 30%），说明补超时是必要的，不是「把测试改绿」。
+
+### 重启序列与证据（`AGENTS.md` 规程，在 main clone 执行，由 `just promote-main` 串起）
+
+每步退出码均 0：`bun install --frozen-lockfile` → `bun run build:ui` → `bun run codeestra stop` → `bun run codeestra status` → `bun run codeestra ui --no-open`。
+
+| | boot id | pid |
+|---|---|---|
+| 提升前 | `00cb4132-9769-4a9e-96aa-6e91189ba6df` | 36697 |
+| 提升后 | `95919cfe-310b-4163-9807-d881ada1c684` | 39270 |
+
+提升后又独立读回一次（不只信 recipe 自己的结论）：`status: READY`、`uiRunning: true`、`activeSessions: []`；
+main clone `HEAD = origin/main = origin/dev = d2c4be7`、工作树 0 行改动。
+
+**稳定库迁移 30 → 31**（重启时由新代码完成）。用**副本**（`cp` 到 `/tmp` 后只读打开，不碰运行中的库）核对：
+`PRAGMA user_version = 31`、`session_guidance` 与 `session_guidance_deliveries` 两表存在、`PRAGMA foreign_key_check` **0 行违规**。
+
+### 附带完成的资源回收（用户在清单里逐项裁决 ①②③；④⑤ 明确不做）
+
+**① 已合并 lane worktree 与分支**（每项先过「分支已并入 `dev` + 工作树 clean + 无进程持有」三关后才动手）：
+
+| 目标 | 归属证据 | 处置 |
+|---|---|---|
+| `/Users/loyage/Documents/codeestra-wt/n1-dev-baseline` | 分支 `0fe8371` 已并入 `dev`、clean、持有者 0 | `git worktree remove` + 删分支 |
+| `.../n2-session-guidance` | `24c63af` 同上 | 同上 |
+| `.../n3-integration-batch-ui` | `405bd35` 同上 | 同上 |
+
+`/Users/loyage/Documents/codeestra-wt`：**265MB → 132K**（剩下的 132K 是用户选择保留的 `PARALLEL-PLAN.md`）。
+
+**② 陈旧且已合并的分支引用**：dev clone 落后的本地 `main`（`c50730f`，已并入 `dev`）；
+stable clone 的 `lane/g1-event-model-alignment`（`975fd15`）、`lane/h1-scheduling-ui`（`2db1514`）、
+`lane/h2-snapshot-recheck`（`8ce269e`）、`lane/h3-failure-retry`（`a0b7254`）、`lane/h4-reclaim-batch`（`0d35b1c`）、
+`task/86b59dfe-b1d7-421a-b75d-8eb9e0dad98c`（`8058eb9`）——全部已并入 `origin/main`，逐条 `-d` 删除。
+两个 clone 各跑一次 `git gc --prune=now`：dev clone `.git` **29M → 3.6M**、stable clone `.git` **6.3M → 3.9M**；
+两侧 `git fsck --connectivity-only` 退出码 0。
+
+**③ 过渡 `dev` ref 退休**（Wave N 记录里写明的一次性人工补救）：
+先 `bun run codeestra project trust /Users/loyage/Documents/codeestra --dev-repo /Users/loyage/Documents/codeestra-dev`
+（退出码 0；`project list` 显示 `devRepoPath = /Users/loyage/Documents/codeestra-dev`，`trustedAt = 1789531109256`），
+再核对新代码自己的判据 `devRefRetirement.projectsWithoutDevRepo = []`、该 ref 未被任何工作树检出、且已并入 `main`，
+然后删除 `refs/heads/dev`（`7292ddcc5a0d480c46fc3feb997ff94ed6d8504f`）。
+删除后 `project inspect` 报告 `localDevRefPresent = false`，dev 基线仍从 dev clone 读出 `d2c4be7`——即 ADR-0056 的路径真的在跑。
+
+**明确不做**（用户裁决）：④ `codeestra-wt` 的杂项（空文件 `0`、`PARALLEL-PLAN.md`、`prompts/` 软链目录）保留；
+⑤ 稳定库 16 条 `ALREADY_ABSENT` 记录不跑 `reclaim apply` 记账。
+**按「保留失败现场」不动**：稳定库 `reclaim plan` 仍对 task#8（`RECOVERY_REQUIRED`）的 worktree 给
+`REFUSE / ACTIVE_EXECUTION`（`total 17 / reclaim 0 / retain 0 / refuse 1 / alreadyAbsent 16`），未做任何绕过。
+
+### 记录与诚实边界
+
+- **本记录是提升之后**在 dev clone 上新增的提交，**未 push**：按 `AGENTS.md`「只 push 固定候选这一个 ref」，`origin/dev` 仍停在 `d2c4be7`，本地 `dev` 比它多这一条。下一次提升会带上。
+- **仍然没有产生领域 `PromotionRecord` 行**：本仓库自身的提升按 `AGENTS.md` 一律走人工四步，不使用产品 `promotion prepare/approve/promote`；与第四次提升相同的长期缺口。
+- **`project trust --dev-repo` 写入了稳定库**（`projects.dev_repo_path`）：这是 ③ 的必要步骤，用户已选；其余稳定数据与提升前一致（任务仍 10 条、`promotion list` 仍 0 条）。
+- **重启更换了 Web UI 的内存 token**，旧的带 token URL 已失效；本次未在任何文件、日志或提交里记录 token。
+- **`docs/guides/**` 按 ADR-0050 本次无需改动**：本次交付没有改命令面、设置键、UI 行为或权限语义，自动化只增了测试超时；N1/N2/N3 的文档同步已在各自 lane 内写明，未因提升而失效。逐篇校对头（ADR-0050 D02）仍未刷新。
+- **仍未做**（与 Wave N 记录的遗留相同）：`## NEXT` 与 `docs/roadmap/mvp.md` 的校准、`docs/guides/**` 的版本/校对头刷新。
+- **真实 provider 仍未验收**：`docs/notes/real-provider-acceptance-runbook.md` 的 A1–A8 一条都没跑。
 
 ## NEXT — 最小可用纵向切片
 
