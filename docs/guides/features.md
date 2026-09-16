@@ -1,7 +1,9 @@
 # 功能清单：「这软件能做什么」
 
-> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v35 · **最后校对** 2026-09-17
+> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
 > 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
+> **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
+> 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > 「创建任务」与「规格修订」两行由本分支按 **ADR-0065** 改写（三个必填字段；约束与任务类型已删除）。
 > 「调度、容量与冲突」一节新增「全局暂停」一行，并由 FOUNDATION-097 标明容量行的目标语义（ADR-0061 D01–D03）；
@@ -35,12 +37,11 @@
 
 | 能力 | 能做什么 | CLI 入口 | UI 位置 | ADR |
 |---|---|---|---|---|
-| 项目识别 | 读仓库身份：工作树根、`main` ref、对象格式、HEAD，以及**dev clone 的** `dev` ref/commit（没有 dev clone 时如实为 `null`）与只读的本地 `dev` ref 退役证据（`devRefRetirement`） | `project inspect [path] [--dev-repo <dev-clone>]` | 项目 → 添加本地项目（dev clone 路径输入**可留空**=managed，ADR-0060） | [0047](../decisions/0047-github-mediated-stable-promotion.md)、[0056](../decisions/0056-dev-repo-path-single-dev-fact-source.md)、[0060](../decisions/0060-managed-project-task-baseline.md) |
+| 项目识别 | 读仓库身份：工作树根、`main` ref、对象格式、HEAD（ADR-0066 删除了 dev clone 与 `dev` 基线字段） | `project inspect [path]` | 项目 → 添加本地项目 | [0064](../decisions/0066-remove-dev-clone-and-dual-baseline.md) |
 | 验证策略展示 | 打印 `main` ref 上 `.codeestra/policies/verification.json` 的状态、digest 与逐条命令 | `project policy [path]` | 项目 → 验证策略 | [0006](../decisions/0006-task-verification-policy.md) |
-| 项目接入（trust） | 注册项目；把「你刚看到的身份 + 验证策略 digest + 影响映射 digest + dev clone 核验结果」一起确认；**`--dev-repo` 可选**（ADR-0060：省略=沿用已记录的值，`none`=没有 dev clone；给了路径则逐项核验，不成立的以 `DEV_REPO_*` 拒绝）；FULL 零确认 / STRICT 输 `TRUST` | `project trust [path] [--dev-repo <dev-clone\|none>] [--yes]` | 项目 → 添加/信任此项目（dev clone 路径**可留空**，留空即 managed；被拒绝时显示稳定码 + 本地解释） | [0011](../decisions/0011-default-full-permission-mode.md)、[0031](../decisions/0031-impact-snapshot-and-deterministic-conflict-analyzer.md)、[0047](../decisions/0047-github-mediated-stable-promotion.md)、[0056](../decisions/0056-dev-repo-path-single-dev-fact-source.md)、[0060](../decisions/0060-managed-project-task-baseline.md) |
-| Task 基线 | 有 dev clone 的项目：从该 clone 的本地 `dev` 建基线。没有 dev clone 的项目（managed，ADR-0060）：从**项目文件夹当前检出的分支**建基线，建 workspace 时读 HEAD 并把 ref 与 commit 一起固定（`workspaces.base_ref`）；detached HEAD 以 `TASK_BASE_REF_UNRESOLVED` 拒绝，因为它没有分支可名 | `task run`（准备 workspace 时） | —（同一命令面） | [0009](../decisions/0009-main-dev-promotion-and-restart.md)、[0018](../decisions/0018-task-result-integration-into-dev.md)、[0060](../decisions/0060-managed-project-task-baseline.md) |
-| dev 事实的唯一来源 | 长期 `dev` 分支、集成 worktree 与 ref 推进、提升候选对象与全量证据的副本/锁文件都来自 `projects.dev_repo_path`；未记录时以 `DEV_REPO_REQUIRED` 拒绝，绝不回退到某个 clone 自己的本地 `dev` ref（ADR-0060 没有放宽这条：managed 项目本来就没声明 dev 基线） | `task integrate`、`promotion *`、`promotion full-suite run`（ADR-0060 第三轮修订后**只剩这些**是真的 dev-only：依赖判定、槽位、调度启动前重检、结果 commit 归属、任务级验证与 `reclaim *` 对两类项目都工作，根/基线取 `COALESCE(dev_repo_path, repo_root)` 与该项目记录的 `base_ref`） | —（同一命令面） | [0056](../decisions/0056-dev-repo-path-single-dev-fact-source.md)、[0060](../decisions/0060-managed-project-task-baseline.md) |
-| 一条命令接入并打开 | inspect → 策略展示 → 必要时确认 → 打开界面并预选该项目（`--dev-repo` 必需，因为它组合一次 trust） | `open [path] --dev-repo <dev-clone> [--yes] [--no-open]` | —（它就是打开 UI 的那条路） | [0007](../decisions/0007-local-web-ui-entry.md)、[0008](../decisions/0008-efficiency-first-service-form.md) |
+| 项目接入（trust） | 注册项目；把「你刚看到的身份 + 验证策略 digest + 影响映射 digest」一起确认；FULL 零确认 / STRICT 输 `TRUST` | `project trust [path] [--yes]` | 项目 → 添加/信任此项目（被拒绝时显示稳定码 + 本地解释） | [0011](../decisions/0011-default-full-permission-mode.md)、[0031](../decisions/0031-impact-snapshot-and-deterministic-conflict-analyzer.md)、[0064](../decisions/0066-remove-dev-clone-and-dual-baseline.md) |
+| Task 基线 | **只有一种**（ADR-0066）：从**项目文件夹建 workspace 时当前检出的分支**建基线，把 ref 与 commit 一起固定（`workspaces.base_ref`/`base_commit`）；detached HEAD 以 `TASK_BASE_REF_UNRESOLVED` 拒绝，因为它没有分支可名。`task run --base-ref <refs/heads/…>` 可单次覆盖 | `task run`（准备 workspace 时） | —（同一命令面） | [0005](../decisions/0005-task-entry-and-worktree-location.md)、[0064](../decisions/0066-remove-dev-clone-and-dual-baseline.md) |
+| 一条命令接入并打开 | inspect → 策略展示 → 必要时确认 → 打开界面并预选该项目 | `open [path] [--yes] [--no-open]` | —（它就是打开 UI 的那条路） | [0007](../decisions/0007-local-web-ui-entry.md)、[0008](../decisions/0008-efficiency-first-service-form.md) |
 | 项目列表 | 列出已信任项目及其确认策略 | `project list` | 顶部项目选择器 | — |
 | 影响映射校验 | 报告 `main` ref 上的 `.codeestra/impact.json` 是否存在且是已确认的那一份 | `project impact validate [path] [--json]` | **调度 → 影响映射 · impact.json** | [0031](../decisions/0031-impact-snapshot-and-deterministic-conflict-analyzer.md) |
 
@@ -106,22 +107,20 @@
 | 成果提交 | FULL 单步 capture；STRICT 两步 prepare + commit `--confirm`。固定 HEAD/ChangeSet/revision，沿用仓库 identity，正常跑 hooks，失败保留现场 | `task result capture`、`task result prepare`、`task result commit … --confirm` | 任务详情 → 提交成果 / 成果提交授权 | [0003](../decisions/0003-task-result-commit-policy.md)、[0011](../decisions/0011-default-full-permission-mode.md) |
 | 任务验证 | 用 `main` ref 上人工维护的策略，在固定 commit 的 detached 副本里运行；证据不含原始输出 | `task verify [execution-id] [--policy auto\|targeted\|project] [--background]` | 任务详情 → 验证任务 | [0006](../decisions/0006-task-verification-policy.md)、[0008](../decisions/0008-efficiency-first-service-form.md) |
 | 分层测试证据 | 分支把定向范围写进 `.codeestra/tests.json`；`record` 把它快照成绑定 `(task, revision, commit, digest)` 的 append-only 记录；`verify` 只消费已记录的计划 | `task tests record/show/history` | —（界面只显示验证结果与证据，无计划/来源面板） | [0038](../decisions/0038-branch-targeted-tests-and-dev-full-suite.md)、[0039](../decisions/0039-layered-verification-evidence.md) |
-| 集成批次 | 在 detached integration worktree 合并（能 ff 就 ff，否则 `--no-ff`）→ 独立集成验证 → PASSED 后 CAS 推进 `dev`；多成员批次可显式组批，一次验证覆盖整批 | `task integrate`、`task integration create\|integrate\|list\|get\|cancel` | 任务详情 → `集成批次 · dev`（只读）；「项目」标签页 → 项目级批次视图 + `组批` / `集成` / `取消`（写控件不按本地状态隐藏，取消不保证成功） | [0018](../decisions/0018-task-result-integration-into-dev.md)、[0053](../decisions/0053-multi-member-integration-batch.md) |
 
-## 稳定提升
+## 稳定提升（已删除）
 
-| 能力 | 能做什么 | CLI 入口 | UI 位置 | ADR |
-|---|---|---|---|---|
-| dev 全量测试证据 | 在精确 dev SHA 的 detached 副本上运行项目固定策略，**Runtime 观察结果**，客户端不能自报；证据绑定 SHA/策略 digest/锁文件 digest | `promotion full-suite run --dev-commit <full-sha>`、`promotion full-suite list` | —（界面无入口） | [0038](../decisions/0038-branch-targeted-tests-and-dev-full-suite.md)、[0039](../decisions/0039-layered-verification-evidence.md) |
-| 提升 prepare/approve/promote | `prepare` 固定三元组与 dev clone（不写 Git）；`promote` 一次只推进一步：push 固定候选到远端 `dev` → 读回核对 → **已推送、等待拉取**（`phase: AWAITING_PULL`，退出码 3，不记录任何重启）→ 你在 main 检出 ff-only 拉取后再次调用 → 记录并执行 install/build/stop/status → 重启核对成功后推回远端 `main` | `promotion prepare/approve/promote/abandon/get/list` | 任务详情 → 稳定提升记录（**只读投影**，界面不推送、不拉取、不重启） | [0009](../decisions/0009-main-dev-promotion-and-restart.md)、[0022](../decisions/0022-stable-branch-promotion.md)、[0047](../decisions/0047-github-mediated-promotion.md)、[0052](../decisions/0052-promotion-fact-layering.md) |
-| 「已推送 ≠ 已提升」投影 | 展示派生 `phase`、读回的 `origin/dev`/`origin/main` SHA 与「下一步」：`AWAITING_PULL` 时给出你必须在 main 检出执行的两条命令，且不把任何东西显示成已提升 | `promotion get/list --json` 的 `phase`/`remoteDevCommit`/`remoteMainCommit` | 任务详情与「项目」标签页 → `稳定提升记录 · dev → main`（**只读**） | [0047](../decisions/0047-github-mediated-promotion.md)、[0052](../decisions/0052-promotion-fact-layering.md) |
+**ADR-0066 把整条 `dev → main` 提升路径从产品中删除**（schema v36）：`promotion prepare/approve/promote/
+abandon/get/list`、`promotion full-suite run|list`、IntegrationBatch 与独立集成验证都不存在，
+`dev_full_suite_evidence` 表也已 DROP。成果停在 `refs/heads/task/<task-id>`，是否合并由你自己决定。
+本仓库自身仍走 `AGENTS.md` / `docs/agents/runbook.md` 的人工四步（push 固定候选到远端 `dev` → main 检出
+ff-only 拉取 → 重启核对 → 推回远端 `main`），但那是仓库约定，产品不提供命令、不记账。
 
 ## 资源与知识
 
 | 能力 | 能做什么 | CLI 入口 | UI 位置 | ADR |
 |---|---|---|---|---|
 | 资源回收 | 试运行与执行共用同一决策形状；未注册目录不被删（除非指名）；失败现场默认保留 | `reclaim plan/apply/records` | —（CLI-only） | [0021](../decisions/0021-resource-reclamation.md)、[0037](../decisions/0037-reclaim-batch-and-unregistered-directories.md) |
-| 集成后自动回收 worktree | 集成成功后对该批成员的 Task worktree 自动执行同一条 `reclaim` 决策（默认开启，`settings auto-reclaim off` 关闭）；只删 clean + 已合并的；不删 branch；失败不影响集成结果，写进集成报告与账本 | `settings auto-reclaim [on|off]`（自动回收本身由 `task integrate` / `task integration integrate` 触发） | 设置页「资源回收」卡 | [0062](../decisions/0062-automatic-worktree-reclamation-after-integration.md) |
 | worktree 重建 | 回收后从保留的 Task 分支重建 worktree，供 `task retry` 使用 | `task retry`（重建路径）；`reclaim plan/apply` 决定保留 | —（CLI-only） | [0042](../decisions/0042-rebuild-reclaimed-worktree.md) |
 | Project Knowledge | 分层知识（人工 `instructions`/`skills` 从 `main` ref 读 + Runtime 数据目录里的机器生成层）；无覆盖语义、重复 id/路径 fail-closed；逐条来源与 digest 进快照 | `project knowledge validate/list/show/resolve` | —（界面无投影） | [0041](../decisions/0041-project-knowledge-layers-and-execution-binding.md) |
 | Session Guidance 台账 | 一条指导的耐久记录（正文）+ append-only 尝试台账 + 每个 Execution 启动时带上它的产物事实（`launchedWith[]`）；artifact 在 `<CODEESTRA_HOME>/guidance/<project>/<task>/guidance-context.md`，**绝不写进 Task worktree**，也不与 Project Knowledge 共用文件 | `session guidance list/get` | —（CLI-only） | [0057](../decisions/0057-session-guidance-channel-and-fact-layering.md) |

@@ -1,15 +1,15 @@
 # CLI 参考 · Runtime 生命周期、Agent 配置与设置
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
+> **适用版本** `dev@de03448`（2026-09-16） · **schema** v36 · **最后校对** 2026-09-16
 > 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../../tasks/README.md) 的最新 FOUNDATION 记录为准。
-> 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一，
+> 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一（ADR-0066 之后为八篇），
 > **内容自 `cli-reference.md @ dev@de03448` 搬移，一句未改写；本次未重新核对源码**，最后校对日期因此不变。
 > 本文件覆盖 §1–§2、§19；章节号沿用拆分前的编号，因此可能不连续。正文里提到本文件没有的号（例如 §14、§17）时，到 [README.md](./README.md) 的索引表查它在哪一篇。
-> §19 新增 `settings auto-reclaim` 一节，并在 §16 标注集成后的自动回收（ADR-0062 / 用户任务，无 schema 变更）。
 > §19 新增 `settings list` 总览，并把权限模式从 §1 移入 §19（`settings permission get|set`，顶层 `permission` 已移除；ADR-0064 / 用户任务，无 schema 变更）。
+> **本次修订（ADR-0066 / schema v36）**：删除 `settings auto-reclaim` 一节（该开关随集成一起移除）、
+> 删除 `open` 的 `--dev-repo` 参数，并删除所有 dev clone / 提升相关的失败码。
 > 同一事实还有一个设置面拼写：`settings concurrency get|set --limit|reset`（见 §19），它发的是同一条 Runtime 命令。
-> §3 的 `project inspect`/`project trust` 段、§1 `open` 的失败码、§4 的 `task run` 与 `task depends` 两节由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目的常态路径不再出现 `DEV_REPO_REQUIRED`）；其余段落沿用 FOUNDATION-091 的校对基线。
 
 ## 1. Runtime 生命周期
 
@@ -67,20 +67,19 @@ bun run codeestra ui [--no-open]
 ### `open`
 
 ```sh
-bun run codeestra open [path] [--dev-repo <dev-clone>] [--yes] [--no-open]
+bun run codeestra open [path] [--yes] [--no-open]
 ```
 
 一条命令完成：`project.inspect` → 展示验证策略与影响映射 →（必要时）确认 → `project.trust` → `runtime.ui` 并预选该项目。
 `path` 默认当前目录；`--yes` 是 STRICT 下的非交互确认；`--no-open` 不打开浏览器。
 
-`--dev-repo <dev-clone>` 是**可选**的（ADR-0060）：给了它，项目就有 `dev` 基线与 `dev → main` 提升；
-`--dev-repo none` 表示「这个项目没有 dev clone」；省略时沿用上次 trust 记录的值。留空（managed）时
-Task 基线取项目文件夹当前检出的分支，而 `task integrate` / `promotion prepare` 会在需要长期 `dev` 分支时
-以 `DEV_REPO_REQUIRED` 拒绝。
-（打开一个**已信任**仓库的另一个工作树时 trust 会被跳过，因此那条路径不需要该 flag。）
+ADR-0066 之后 `open` 只有 `--yes` 与 `--no-open` 两个 flag：产品不再有 dev clone 可记，所以也没有
+`--dev-repo`；Task 基线就是项目文件夹当前检出的分支（建 Task 时固定 ref 与 commit）。
+（打开一个**已信任**仓库的另一个工作树时 trust 会被跳过。）
 
 已经确认过且策略 digest 未变时会跳过确认（正常路径**一次项目一次确认**；FULL 下没有这一步）。
-失败：确认被拒（`Project trust was not confirmed`）、trust 后项目未出现在列表中、给出的 dev clone 无法核验（`DEV_REPO_*`）。
+失败：确认被拒（`Project trust was not confirmed`）、trust 后项目未出现在列表中、
+`REPOSITORY_CHANGED` / `VERIFICATION_POLICY_CHANGED` / `IMPACT_POLICY_CHANGED`（你审阅过的身份或策略在这期间变了）。
 
 ---
 
@@ -121,10 +120,6 @@ bun run codeestra settings prose-question-attention auto       # 写入
 bun run codeestra settings prose-question-attention record-only
 bun run codeestra settings prose-question-attention off
 
-bun run codeestra settings auto-reclaim          # 读取
-bun run codeestra settings auto-reclaim on       # 写入
-bun run codeestra settings auto-reclaim off
-
 bun run codeestra settings ui list [--json]             # 五个界面效果键
 bun run codeestra settings ui get <key> [--json]
 bun run codeestra settings ui set <key> <value> [--json]
@@ -137,17 +132,17 @@ bun run codeestra settings concurrency reset [--json]
 
 ### `settings list`（全部设置总览）
 
-一条**只读**命令回答「有哪些设置、现在是什么状态」：列出上述九项，逐项给出**生效值**、**产品默认**、
+一条**只读**命令回答「有哪些设置、现在是什么状态」：列出上述八项，逐项给出**生效值**、**产品默认**、
 **取值**（闭集用 `values`，数值上限用 `range`）、是「本 home 显式设置」还是「产品默认」，以及**值存在哪里**
 （文件的绝对路径，或 Runtime 数据库）。
 
 - 数据来自 Runtime（`settings.list`），每项都由**它自己那条命令的同一次读取**填充，所以总览不可能与
-  `settings permission get`、`settings prose-question-attention`、`settings auto-reclaim`、
-  `settings ui get <key>`、`scheduler capacity get` 读出的值不一致；也不存在第二个状态源。
+  `settings permission get`、`settings prose-question-attention`、`settings ui get <key>`、
+  `scheduler capacity get` 读出的值不一致；也不存在第二个状态源。
 - 默认输出是**人读列表**；`--json` 打印逐字段原文，每个条目还带 `appliesTo`——「改这一项会影响什么」。
-- 键名就是命令路径加一个点：`permission.mode`、`attention.proseQuestion`、`reclaim.auto`、`ui.theme`（及
-  另外四个 ui 键）、`capacity.globalLimit`。布尔开关按**它自己命令的词**汇报（`reclaim.auto` 是 `on`/`off`），
-  不是 `true`/`false`。
+- 键名就是命令路径加一个点：`permission.mode`、`attention.proseQuestion`、`ui.theme`（及另外四个 ui 键）、
+  `capacity.globalLimit`。每项按**它自己命令的词**汇报取值（`settings auto-reclaim` 已随 ADR-0066 删除，
+  因此没有 `reclaim.auto` 这一项）。
 - 零确认、不写任何文件、不改变任何值。多余参数、未知 flag 是用法错误（退出码 2）。
 
 ### `settings permission`（权限模式）
@@ -169,23 +164,6 @@ bun run codeestra settings permission set <full|strict>
 - 取值只有三个：`auto`（默认）/ `record-only` / `off`。其他取值是用法错误。
 - **不需要确认**，且**不会改写已经记录下来的等待**。
 - `--json` 被接受（输出本来就是 JSON）。
-
-### `settings auto-reclaim`（集成成功后自动回收 worktree）
-
-一个 Runtime 一个开关（ADR-0062）。**读与写是同一条命令**：不给值就是读，给 `on`/`off` 就是写；
-其他取值、或多余的位置参数是用法错误（退出码 2）。**默认 `on`，零确认**。
-
-- 存储：`<CODEESTRA_HOME>/auto-reclaim.json`（`{"version":1,"enabled":true}`，0600/0700）；
-  缺文件 = 默认开启；文件不可读/非法时 Runtime 在启动时**记录错误并使用默认值**（与 prose 设置同处理，
-  不静默改写；下一次 `on|off` 写入会把它替换成合法文件）。
-- `on`（默认）：`task integrate` / `task integration integrate` 成功后（`dev` 已前进、成员 Task 已是 `SUCCEEDED`），
-  对该批**每个成员**执行一次 scoped 回收（`kinds=['TASK_WORKTREE']`），复用 `reclaim` 的同一套归属校验与账本。
-  只有「clean + 成果已是基线 ref 的祖先 + 无 held Execution/活跃预留」才会删；失败现场（脏/未合入/失败或取消）
-  默认保留。**不删 branch**（`task retry` 仍可重建）。
-- `off`：集成照常进行，**不**回收任何 worktree；显式 `reclaim apply` 的行为一字不变。
-- 自动回收是「集成成功之后的最佳努力」：它失败**不影响**集成结果（`state=INTEGRATED` 仍成立），失败细节在集成报告的
-  `reclamation` 汇总里；账本行的 evidence 带 `automatic: true` / `trigger: 'INTEGRATION'` / `batchId`。
-- `get` 返回 `{enabled, default, file, appliesTo}`。
 
 ### `settings ui`（界面效果）
 

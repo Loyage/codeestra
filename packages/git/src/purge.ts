@@ -1,4 +1,4 @@
-import { listCheckedOutRefs, readLocalRefCommit } from './integration.js';
+import { listCheckedOutRefs, readLocalRefCommit } from './refs.js';
 
 /**
  * The one Git operation that destroys work instead of creating it: deleting a Task's own branch

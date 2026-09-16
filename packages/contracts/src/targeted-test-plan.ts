@@ -127,10 +127,3 @@ export function targetedTestPlanCommands(plan: TargetedTestPlan): readonly {
   }));
 }
 
-/**
- * The lockfile whose digest is part of the `dev → main` full-suite evidence binding (ADR-0038 D03:
- * a change to the candidate, the test configuration or the lockfile invalidates the evidence).
- * This project's toolchain is Bun, so the lockfile is `bun.lock`; a project without one gets an
- * explicit refusal instead of a quietly weaker binding.
- */
-export const devFullSuiteLockfilePath = 'bun.lock';

@@ -19,11 +19,7 @@ Desktop / 最小本地客户端（可断开与重连）
           ↓
   Agent Adapter Port → Pi（首个）/ Codex / Claude Code
           ↕ Session Guidance / 原生 TUI-PTY 接管（安全点进程交接）
-  Task Verification → IntegrationBatch → Integration Verification → Dev
-                                                                  ↓
-                                          固定 dev/main SHA（仅 STRICT 批准）
-                                                                  ↓
-                                       Main → CLI stop/status → Runtime 重启
+  Task Verification → （成果留在 task 分支，由用户自己合并；ADR-0066）
 
 SQLite + Outbox + Operations + Audit + Recovery（基础设施）
 Knowledge Service（Phase 6）
@@ -56,8 +52,8 @@ Self Task → Candidate → 自托管测试 → 用户 Promotion → 排空 → 
 - 软件本体是服务，CLI 必须完备且可脚本化；UI/桌面是便利层。
 - 自动化测试与验收仅通过 CLI/命令面驱动，不获取电脑控制权。
 - 活动修订先暂停，确认新规格后恢复；无法可靠暂停/确认时保留现场并重新执行。
-- 固定 `main`/`dev` 双分支：main 运行稳定服务，功能 Task 从 dev 建基线并先集成回 dev。
-- 依赖结果经集成验证且进入下游可达的 dev 基线才能释放下游。
+- 固定基线的 Task worktree：**只有一种基线** —— 项目文件夹建 workspace 时当前检出的分支（ADR-0066）。
+- 依赖结果对**项目当前 Task 基线 ref** 可达才能释放下游（ADR-0066）。
 - dev→main 固定 SHA 与证据；FULL 无需批准，STRICT 保留批准；main 更新后立即以 CLI stop/status 重启并检查 Runtime。
 - Runtime 独立于窗口，关闭客户端不结束任务。
 - 首个真实 Adapter 用 Pi；FULL 自动允许全部已注册工具，STRICT 保留原生审批与未知工具拒绝。

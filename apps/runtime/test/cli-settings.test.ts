@@ -105,7 +105,6 @@ describe('codeestra settings', () => {
         setting.source, setting.explicit])).toEqual([
         ['permission.mode', 'FULL', 'FULL', 'PRODUCT_DEFAULT', false],
         ['attention.proseQuestion', 'auto', 'auto', 'PRODUCT_DEFAULT', false],
-        ['reclaim.auto', 'on', 'on', 'PRODUCT_DEFAULT', false],
         ['ui.theme', 'system', 'system', 'PRODUCT_DEFAULT', false],
         ['ui.density', 'comfortable', 'comfortable', 'PRODUCT_DEFAULT', false],
         ['ui.fontSize', 'medium', 'medium', 'PRODUCT_DEFAULT', false],
@@ -119,16 +118,12 @@ describe('codeestra settings', () => {
         file: permissionFile(home) });
       expect(entry(view, 'capacity.globalLimit')).toMatchObject({
         values: null, range: { min: 1, max: 16 }, store: 'RUNTIME_DATABASE', file: null });
-      // A boolean switch is reported in the vocabulary its own command accepts, never as true/false.
-      expect(entry(view, 'reclaim.auto')).toMatchObject({
-        values: ['on', 'off'], range: null, store: 'RUNTIME_FILE',
-        file: join(home, 'auto-reclaim.json') });
       // Each entry says what a change to it applies to, so the list needs no second explanation.
       for (const setting of view.settings) expect(setting.appliesTo.length).toBeGreaterThan(0);
 
       // A read invents no settings file: "no explicit choice" stays visible as such.
       for (const name of ['permission-mode.json', 'prose-question-attention.json',
-        'auto-reclaim.json', 'ui-settings.json']) {
+        'ui-settings.json']) {
         expect(existsSync(join(home, name))).toBe(false);
       }
 
@@ -195,15 +190,12 @@ describe('codeestra settings', () => {
       expect((await cli(['settings', 'permission', 'set', 'strict'], environment)).exitCode).toBe(0);
       expect((await cli(['settings', 'prose-question-attention', 'record-only'], environment))
         .exitCode).toBe(0);
-      expect((await cli(['settings', 'auto-reclaim', 'off'], environment)).exitCode).toBe(0);
       expect((await cli(['settings', 'ui', 'set', 'theme', 'dark'], environment)).exitCode).toBe(0);
       expect((await cli(['settings', 'concurrency', 'set', '--limit', '3'], environment)).exitCode)
         .toBe(0);
 
       const view = await list(environment);
       expect(entry(view, 'attention.proseQuestion')).toMatchObject({ value: 'record-only',
-        explicit: true, source: 'RUNTIME' });
-      expect(entry(view, 'reclaim.auto')).toMatchObject({ value: 'off', default: 'on',
         explicit: true, source: 'RUNTIME' });
       expect(entry(view, 'ui.theme')).toMatchObject({ value: 'dark', default: 'system',
         explicit: true, source: 'RUNTIME' });
@@ -216,12 +208,10 @@ describe('codeestra settings', () => {
         .stdout) as { readonly mode: string };
       const attention = JSON.parse((await cli(['settings', 'prose-question-attention'], environment))
         .stdout) as { readonly mode: string };
-      const autoReclaim = JSON.parse((await cli(['settings', 'auto-reclaim'], environment)).stdout) as { readonly enabled: boolean };
       const theme = JSON.parse((await cli(['settings', 'ui', 'get', 'theme'], environment)).stdout) as { readonly value: string };
       const capacity = JSON.parse((await cli(['scheduler', 'capacity', 'get'], environment)).stdout) as { readonly limit: number };
       expect(entry(view, 'permission.mode').value).toBe(permission.mode);
       expect(entry(view, 'attention.proseQuestion').value).toBe(attention.mode);
-      expect(entry(view, 'reclaim.auto').value).toBe(autoReclaim.enabled ? 'on' : 'off');
       expect(entry(view, 'ui.theme').value).toBe(theme.value);
       expect(entry(view, 'capacity.globalLimit').value).toBe(capacity.limit);
 
@@ -234,8 +224,6 @@ describe('codeestra settings', () => {
       expect(entry(afterRestart, 'permission.mode')).toMatchObject({ value: 'STRICT',
         explicit: true, source: 'RUNTIME' });
       expect(entry(afterRestart, 'attention.proseQuestion')).toMatchObject({ value: 'record-only',
-        explicit: true, source: 'RUNTIME' });
-      expect(entry(afterRestart, 'reclaim.auto')).toMatchObject({ value: 'off', default: 'on',
         explicit: true, source: 'RUNTIME' });
       expect(entry(afterRestart, 'ui.theme')).toMatchObject({ value: 'dark', explicit: true });
       expect(entry(afterRestart, 'capacity.globalLimit')).toMatchObject({ value: 3, explicit: true });

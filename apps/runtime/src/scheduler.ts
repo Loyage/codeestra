@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 import {
   createDependencyGraph,
   dependencyImpact,
-  transitiveDependents,
   type DependencyEdge,
   type DependencyGraph,
 } from '@codeestra/domain';
@@ -14,7 +13,7 @@ import {
   type TaskDependencyFact,
   type TaskLifecycleState,
 } from '@codeestra/storage';
-import { resolveTaskBaselineRepository } from './dev-repo-service.js';
+import { resolveTaskBaselineRepository } from './task-baseline-service.js';
 
 /**
  * The conservative dependency scheduler (Phase 2, first step — ADR-0024).
@@ -53,9 +52,8 @@ export interface TaskDependencyEdgeView {
   readonly requiredRevisionId: string;
   readonly requiredRevisionNumber: number;
   readonly createdAt: number;
-  /** Merged commit recorded for the pinned revision, or null when no integration fact exists. */
-  readonly integratedCommit: string | null;
-  readonly integrationBatchId: string | null;
+  /** Captured result commit of the pinned revision, or null when that revision captured none. */
+  readonly resultCommit: string | null;
   readonly satisfied: boolean;
   /** Null exactly when `satisfied` is true. */
   readonly reason: TaskDependencyBlockReason | null;
@@ -67,12 +65,11 @@ export interface TaskDependencyView {
   readonly taskId: string | null;
   readonly taskState: TaskLifecycleState | null;
   readonly taskVersion: number | null;
-  /** The baseline ref this verdict was read against: the dev clone's `dev`, or the project folder's
-   * checked out branch for a managed project (ADR-0060). */
-  readonly devRef: string;
+  /** The baseline ref this verdict was read against: the project folder's checked out branch. */
+  readonly baseRef: string;
   /** That baseline ref's commit, or null when the project has no baseline that can be named (all
    * edges stay blocked). */
-  readonly devCommit: string | null;
+  readonly baseCommit: string | null;
   readonly edges: readonly TaskDependencyEdgeView[];
   readonly blocked: boolean;
   readonly blockedReasons: readonly TaskDependencyBlockReason[];
@@ -91,16 +88,6 @@ export interface DependencyReconcileResult {
   /** True only when this call moved the Task between READY and BLOCKED. */
   readonly changed: boolean;
   readonly blockedReasons: readonly TaskDependencyBlockReason[];
-}
-
-export interface DependentsReconcileResult {
-  readonly taskId: string;
-  readonly readied: readonly string[];
-  readonly blocked: readonly string[];
-  readonly unchanged: readonly string[];
-  /** Per-Task failures; the parent command is not failed by a dependent that could not be updated. */
-  readonly errors: readonly { readonly taskId: string; readonly code: string;
-    readonly message: string }[];
 }
 
 /** Command IDs derived from the parent command, so a replayed command is never applied twice. */
@@ -138,17 +125,15 @@ interface DependencyBaseline {
 }
 
 /**
- * The baseline a dependency verdict is read against (ADR-0060): the recorded dev clone's `dev` when
- * there is one, otherwise the project folder and the branch it has checked out right now. Resolved
- * once per projection so the loop does not repeat the same read.
+ * The baseline a dependency verdict is read against (ADR-0062): the project folder and the branch it
+ * has checked out right now. Resolved once per projection so the loop does not repeat the same read.
  *
- * A baseline that cannot be established — a managed folder on a detached HEAD, a dev clone whose
- * `dev` branch is gone, a repository that cannot be read — is reported with `commit: null`, which
- * keeps every edge blocked with its own reason code (ADR-0024: 无法判定一律按未满足处理): a baseline
- * nobody can read must never be read as "satisfied", and a read-only listing must not turn into an
- * exception either. The strict, code-bearing refusal belongs to the start path, which resolves the
- * same baseline with `resolveTaskBaselineRepository` and refuses (`TASK_BASE_REF_*`, `DEV_REPO_*`)
- * before anything is reserved.
+ * A baseline that cannot be established — a folder on a detached HEAD, a repository that cannot be
+ * read — is reported with `commit: null`, which keeps every edge blocked with its own reason code
+ * (ADR-0024: 无法判定一律按未满足处理): a baseline nobody can read must never be read as "satisfied",
+ * and a read-only listing must not turn into an exception either. The strict, code-bearing refusal
+ * belongs to the start path, which resolves the same baseline with
+ * `resolveTaskBaselineRepository` and refuses (`TASK_BASE_REF_*`) before anything is reserved.
  */
 async function resolveDependencyBaseline(
   project: Parameters<typeof resolveTaskBaselineRepository>[0],
@@ -159,11 +144,10 @@ async function resolveDependencyBaseline(
       commit: baseline.baseCommit, detail: null };
   } catch (error) {
     return {
-      repositoryRoot: project.devRepoPath ?? project.repoRoot,
-      // The ref this read was aimed at: the project's long-lived branch when a dev clone is recorded,
-      // otherwise the project folder's `HEAD` — which is the only thing there is to read there, and
-      // exactly the thing that could not name a branch.
-      ref: project.devRepoPath === null ? 'HEAD' : project.devRef,
+      repositoryRoot: project.repoRoot,
+      // The ref this read was aimed at: the project folder's `HEAD` — the only thing there is to
+      // read there, and exactly the thing that could not name a branch.
+      ref: 'HEAD',
       commit: null,
       detail: error instanceof Error ? error.message : String(error),
     };
@@ -185,8 +169,7 @@ function factView(
     requiredRevisionId: fact.requiredRevisionId,
     requiredRevisionNumber: fact.requiredRevisionNumber,
     createdAt: fact.createdAt,
-    integratedCommit: fact.integratedCommit,
-    integrationBatchId: fact.integrationBatchId,
+    resultCommit: fact.resultCommit,
     satisfied,
     reason,
   });
@@ -207,29 +190,30 @@ async function evaluateEdge(input: {
       requiredRevisionId: fact.requiredRevisionId,
       detail,
     }));
-  if (fact.integratedCommit === null) {
-    return blocked('UPSTREAM_NOT_INTEGRATED',
-      `#${fact.prerequisiteDisplayNumber} revision ${fact.requiredRevisionNumber} has no INTEGRATED batch`);
+  if (fact.resultCommit === null) {
+    return blocked('UPSTREAM_RESULT_MISSING',
+      `#${fact.prerequisiteDisplayNumber} revision ${fact.requiredRevisionNumber} has no captured`
+      + ' result commit');
   }
   if (baselineCommit === null) {
-    return blocked('DEV_BASELINE_MISSING',
+    return blocked('BASE_REF_MISSING',
       `the project has no readable Task baseline ref (${input.baselineDetail
         ?? 'the baseline was not resolved'})`);
   }
-  if (fact.integratedCommit === baselineCommit) return factView(fact, true, null);
+  if (fact.resultCommit === baselineCommit) return factView(fact, true, null);
   try {
     const reachable = await isAncestor({
       repositoryRoot,
-      ancestor: fact.integratedCommit,
+      ancestor: fact.resultCommit,
       descendant: baselineCommit,
     });
     if (reachable) return factView(fact, true, null);
   } catch (error) {
-    return blocked('DEV_REF_UNREADABLE',
+    return blocked('BASE_REF_UNREADABLE',
       error instanceof Error ? error.message : String(error));
   }
-  return blocked('NOT_REACHABLE_FROM_DEV',
-    `${fact.integratedCommit} is no longer reachable from the Task baseline ${baselineCommit}`);
+  return blocked('NOT_REACHABLE_FROM_BASE',
+    `${fact.resultCommit} is no longer reachable from the Task baseline ${baselineCommit}`);
 }
 
 /** The `task.depends.list` projection. Read-only: it never writes a Task state. */
@@ -273,8 +257,8 @@ export async function inspectTaskDependencies(input: {
     taskId: input.taskId ?? null,
     taskState: task?.state ?? null,
     taskVersion: task?.version ?? null,
-    devRef: baseline.ref,
-    devCommit: baseline.commit,
+    baseRef: baseline.ref,
+    baseCommit: baseline.commit,
     edges: Object.freeze(edges),
     blocked: blockedReasons.length > 0,
     blockedReasons: Object.freeze(blockedReasons),
@@ -357,73 +341,6 @@ export async function reconcileTaskDependencyState(input: {
     changed: change.changed,
     blockedReasons: view.blockedReasons,
   };
-}
-
-/**
- * Recomputes every Task that transitively waits for `taskId`. This is what turns "the upstream
- * reached `dev`" into downstream progress without a background loop; a per-Task failure is reported
- * instead of failing the command that triggered it, so a successful integration is never reported
- * as failed because an unrelated Task could not be updated.
- */
-export async function reconcileDependentTasks(input: {
-  readonly storage: Phase1Database;
-  readonly projectId: string;
-  readonly taskId: string;
-  readonly commandId: string;
-  readonly actor: string;
-  readonly now?: () => number;
-  readonly randomUUID?: () => string;
-}): Promise<DependentsReconcileResult> {
-  const facts = input.storage.listTaskDependencyFacts(input.projectId);
-  let dependents: readonly string[];
-  try {
-    dependents = transitiveDependents(graphOf(facts), input.taskId);
-  } catch (error) {
-    // A corrupt stored graph must not turn an already-completed integration into a failure; it is
-    // reported as an unreconciled dependent set so a human sees it instead of silence.
-    return Object.freeze({
-      taskId: input.taskId,
-      readied: Object.freeze([]),
-      blocked: Object.freeze([]),
-      unchanged: Object.freeze([]),
-      errors: Object.freeze([{ taskId: input.taskId, code: 'DEPENDENCY_GRAPH_INVALID',
-        message: error instanceof Error ? error.message : String(error) }]),
-    });
-  }
-  const readied: string[] = [];
-  const blocked: string[] = [];
-  const unchanged: string[] = [];
-  const errors: { taskId: string; code: string; message: string }[] = [];
-  for (const dependent of dependents) {
-    try {
-      const result = await reconcileTaskDependencyState({
-        storage: input.storage,
-        projectId: input.projectId,
-        taskId: dependent,
-        commandId: derivedId('dependency-dependents', input.commandId, dependent),
-        actor: input.actor,
-        ...(input.now === undefined ? {} : { now: input.now }),
-        ...(input.randomUUID === undefined ? {} : { randomUUID: input.randomUUID }),
-      });
-      if (!result.changed) unchanged.push(dependent);
-      else if (result.state === 'READY') readied.push(dependent);
-      else blocked.push(dependent);
-    } catch (error) {
-      errors.push({
-        taskId: dependent,
-        code: typeof error === 'object' && error !== null && 'code' in error
-          ? String(error.code) : 'DEPENDENCY_RECONCILE_FAILED',
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-  return Object.freeze({
-    taskId: input.taskId,
-    readied: Object.freeze(readied),
-    blocked: Object.freeze(blocked),
-    unchanged: Object.freeze(unchanged),
-    errors: Object.freeze(errors),
-  });
 }
 
 /** Read-only guard for paths that must not start writing (for example resuming a paused Task). */

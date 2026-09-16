@@ -17,23 +17,6 @@ import { proseQuestionAttentionPath } from './prose-question-attention-settings.
 import { inspectUiSettings, uiSettingsPath } from './ui-settings.js';
 
 /**
- * The auto-reclaim switch as its own command reports it (`settings.autoReclaim.get`).
- */
-export interface AutoReclaimSettingsView {
-  readonly enabled: boolean;
-  readonly default: boolean;
-  readonly file: string;
-  readonly appliesTo: string;
-}
-
-/** The two words `settings auto-reclaim` accepts, in the order a person reads them. */
-const onOffValues = ['on', 'off'] as const;
-/** A boolean switch is reported in the vocabulary of its own command, never as `true`/`false`. */
-function onOff(enabled: boolean): string {
-  return enabled ? 'on' : 'off';
-}
-
-/**
  * The settings face of one Runtime home (ADR-0064).
  *
  * Every Runtime-level setting is reported here in one read, so "which settings exist and what are
@@ -41,9 +24,9 @@ function onOff(enabled: boolean): string {
  * rules make the answer trustworthy:
  *
  * 1. **Each entry is filled from the same read its own command uses.** The permission mode, the
- *    prose-question switch and the auto-reclaim switch come from the values this Runtime booted with
- *    and writes on change (the in-memory facts `permission.get`, `settings prose-question-attention`
- *    and `settings auto-reclaim` report); the five interface keys come from `inspectUiSettings`,
+ *    prose-question switch come from the values this Runtime booted with and writes on change (the
+ *    in-memory facts `permission.get` and `settings prose-question-attention` report); the five
+ *    interface keys come from `inspectUiSettings`,
  *    which reads the file on every call; the concurrency limit comes from the same
  *    `runtime_capacity_settings` read `scheduler capacity get` uses. The aggregate therefore cannot
  *    disagree with the dedicated command — a second reader of the same fact is exactly how two
@@ -63,9 +46,6 @@ export function inspectSettings(input: {
   /** The prose-question switch this Runtime is enforcing, and whether this home stores one. */
   readonly proseQuestionAttention: ProseQuestionAttentionSettings;
   readonly proseQuestionAttentionExplicit: boolean;
-  /** The auto-reclaim switch this Runtime is enforcing, and whether this home stores one. */
-  readonly autoReclaim: AutoReclaimSettingsView;
-  readonly autoReclaimExplicit: boolean;
   readonly storage: Phase1Database;
 }): SettingsListView {
   const ui = inspectUiSettings(input.runtimeHome);
@@ -107,18 +87,6 @@ export function inspectSettings(input: {
         store: 'RUNTIME_FILE',
         file: attentionFile,
         appliesTo: input.proseQuestionAttention.appliesTo,
-      },
-      {
-        key: 'reclaim.auto',
-        value: onOff(input.autoReclaim.enabled),
-        default: onOff(input.autoReclaim.default),
-        values: [...onOffValues],
-        range: null,
-        explicit: input.autoReclaimExplicit,
-        source: input.autoReclaimExplicit ? 'RUNTIME' : 'PRODUCT_DEFAULT',
-        store: 'RUNTIME_FILE',
-        file: input.autoReclaim.file,
-        appliesTo: input.autoReclaim.appliesTo,
       },
       ...ui.settings.map((entry): SettingEntry => ({
         key: `ui.${entry.key}` as SettingEntry['key'],

@@ -4,8 +4,8 @@ import { z } from 'zod';
  * The settings face of one Runtime home (ADR-0064).
  *
  * Before this file the product had several settings that each knew only their own command
- * (`permission get|set`, `settings prose-question-attention`, `settings auto-reclaim`, `settings
- * ui …`, and the concurrency limit reachable as `scheduler capacity` / `settings concurrency`).
+ * (`permission get|set`, `settings prose-question-attention`, `settings ui …`, and the concurrency
+ * limit reachable as `scheduler capacity` / `settings concurrency`).
  * Nothing said *which* settings exist, so "show me my settings" had no answer and a newly added
  * setting was invisible unless a user already knew its name. `settings.list` is that answer: one
  * read that enumerates every Runtime-level setting with its effective value, its product default,
@@ -43,14 +43,13 @@ export const defaultPermissionMode: PermissionMode = 'FULL';
  * one limit under both of its spellings. A client that wants to point at one setting prints the
  * key; there is no second name for it.
  *
- * A boolean setting is reported as the word its own command accepts (`on`/`off` for `settings
- * auto-reclaim`) rather than as `true`/`false`: the list is read by the same people who type the
- * command, and one setting must not have two vocabularies.
+ * A setting is reported in the vocabulary of its own command: the permission mode as `FULL`/`STRICT`,
+ * the prose-question mode as `auto`/`record-only`/`off`, and so on. The list is read by the same
+ * people who type the command, and one setting must not have two vocabularies.
  */
 export const settingKeys = [
   'permission.mode',
   'attention.proseQuestion',
-  'reclaim.auto',
   'ui.theme',
   'ui.density',
   'ui.fontSize',

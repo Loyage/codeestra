@@ -17,7 +17,7 @@ import {
 } from '@codeestra/storage';
 import type { AgentRuntimeCoordinator } from './agent-runtime-service.js';
 import { inspectTaskDependencies } from './scheduler.js';
-import { taskWorkspaceRepositoryRoot } from './dev-repo-service.js';
+import { taskWorkspaceRepositoryRoot } from './task-baseline-service.js';
 
 export class TaskControlError extends Error {
   constructor(readonly code: string, message: string) {

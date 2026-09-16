@@ -222,7 +222,7 @@
     <header class="hero" id="intro">
       <div class="hero-meta"><span class="eyebrow">Codeestra / 项目导览</span><span class="pill">面向新加入的开发者</span></div>
       <h1>不只让 AI 写代码，<br>让开发意图成为<br><em>可验证的工程成果。</em></h1>
-      <p class="lead">Codeestra 是一个 <strong>Task-first、local-first 的 AI Development Runtime</strong>。它围绕任务组织 Agent、工作目录、依赖、验证与集成，让软件开发不再依赖人手工维系的一组聊天窗口。</p>
+      <p class="lead">Codeestra 是一个 <strong>Task-first、local-first 的 AI Development Runtime</strong>。它围绕任务组织 Agent、工作目录、依赖与验证，让软件开发不再依赖人手工维系的一组聊天窗口。</p>
       <div class="hero-quote">用户管理产品意图，Codeestra 管理软件工程。</div>
       <div class="hero-actions"><a class="button" href="#duel">先看设计精髓 ↓</a><a class="button secondary" href="#vision">从愿景开始</a><a class="button secondary" href="#progress">直接看当前进展</a></div>
       <p class="hero-foot">建议讲解顺序：为什么做 → 如何工作 → 已经做到什么 → 如何参与。单文件、无外部资源，可离线阅读；使用浏览器打印可另存为 PDF。</p>
@@ -232,7 +232,7 @@
       <div class="section-head"><span class="section-number">01 /</span><div><h2 id="vision-title">从“与 Agent 对话”，到“管理开发任务”</h2><p>要解决的不只是生成代码，而是从意图到稳定可用结果的工程协调成本。</p></div></div>
       <div class="grid two">
         <article class="card"><span class="label">THE PROBLEM / 今天的摩擦</span><h3>写代码之外，还有大量人肉编排</h3><p>任务交给哪个 Agent？两个任务会不会改到同一模块？上游“完成”后，下游是否真的拿到了代码？刚跑过的测试，验证的还是当前版本吗？重启之后，谁还在写工作目录？</p><p>如果这些答案只存在于聊天记录和人的记忆里，多开几个 Agent 窗口并不能自动带来可靠的并行开发。</p></article>
-        <article class="card dark"><span class="label">THE VISION / 我们的方向</span><h3>把工程关系变成系统能处理的事实</h3><p>以 Task 表达目标，以 Revision 固定规格，以 Execution 记录尝试，以 Git commit 与验证证据定义成果。</p><p>长期愿景是把<strong>意图、依赖、执行、验证、集成与稳定交付</strong>串起来；人专注产品判断，Runtime 承担可自动化的工程协调。愿景不等于这些环节已经全部自动化。</p></article>
+        <article class="card dark"><span class="label">THE VISION / 我们的方向</span><h3>把工程关系变成系统能处理的事实</h3><p>以 Task 表达目标，以 Revision 固定规格，以 Execution 记录尝试，以 Git commit 与验证证据定义成果。</p><p>长期愿景是把<strong>意图、依赖、执行、验证与稳定交付</strong>串起来；人专注产品判断，Runtime 承担可自动化的工程协调。愿景不等于这些环节已经全部自动化。</p></article>
       </div>
       <div class="callout"><strong>定位边界：</strong>不是聊天客户端，不是终端管理器，也不是套在多个 Agent 外面的 UI。它是本机单用户的开发编排服务；不以云端调度、多租户、分布式基础设施或桌面控制为目标。</div>
     </section>
@@ -341,7 +341,7 @@
       <div class="section-head"><span class="section-number">04 /</span><div><h2 id="concepts-title">先记住这几个名词</h2><p>Task 是业务主实体；Agent、Terminal、Conversation 和 Worktree 都围绕它服务。</p></div></div>
       <div class="grid two">
         <article class="card"><dl>
-          <div class="concept"><dt>Task<small>要完成什么</small></dt><dd>一项有边界的开发工作，持有规格、约束、依赖、执行历史、验证与集成状态。不是一条临时 prompt。</dd></div>
+          <div class="concept"><dt>Task<small>要完成什么</small></dt><dd>一项有边界的开发工作，持有规格、约束、依赖、执行历史与验证状态。不是一条临时 prompt。</dd></div>
           <div class="concept"><dt>Revision<small>哪一版要求</small></dt><dd>不可覆盖的规格快照。需求变化生成新 revision；旧版本的验证不能证明新要求已经实现。</dd></div>
           <div class="concept"><dt>Execution<small>哪一次尝试</small></dt><dd>一次执行只绑定一个主 Agent。重试或换 Agent 产生新 Execution，旧失败和证据保留。</dd></div>
           <div class="concept"><dt>Session<small>哪一个会话</small></dt><dd>有身份与生命周期的 provider 会话。不是无身份的 shell 调用；同一会话任意时刻最多一个 provider writer。</dd></div>
@@ -349,8 +349,8 @@
         <article class="card"><dl>
           <div class="concept"><dt>Worktree<small>在哪里修改</small></dt><dd>运行中 Task 独占的 branch / 工作目录，从固定 dev commit 建立，位于 Runtime 数据目录。</dd></div>
           <div class="concept"><dt>Attention<small>哪里需要人</small></dt><dd>提问、STRICT 权限请求或恢复介入。某个 Task 等待用户，不应让其他合格任务一起停下。</dd></div>
-          <div class="concept"><dt>Verification<small>凭什么算对</small></dt><dd>对固定 revision / commit 的验证记录。Task 验证与合并后集成验证分别记账，不能互相替代。</dd></div>
-          <div class="concept"><dt>IntegrationBatch<small>如何进入 dev</small></dt><dd>绑定任务、revision、成果 commit、dev 基线和集成验证证据。当前命令每批只集成一个 Task。</dd></div>
+          <div class="concept"><dt>Verification<small>凭什么算对</small></dt><dd>对固定 revision / commit 的验证记录；证据绑定 revision、commit 与策略 digest。合并后的集成验证已随 ADR-0066 删除。</dd></div>
+          <div class="concept"><dt>成果 commit<small>任务产出什么</small></dt><dd>固定在 <code>refs/heads/task/&lt;task-id&gt;</code> 上。是否合并、何时合并由你自己决定：产品不合、不推、不记账（ADR-0066）。</dd></div>
         </dl></article>
       </div>
       <div class="equation">规格 → <code>Revision</code> &nbsp; · &nbsp; 尝试 → <code>Execution</code> &nbsp; · &nbsp; 成果 → <code>Commit</code> &nbsp; · &nbsp; 结论 → <code>Evidence</code></div>
@@ -365,15 +365,15 @@
         <li><span class="step">04 / CAPTURE</span><h3>固定成果 commit</h3><p>核对 revision、HEAD、ChangeSet 与写入静止事实。FULL 使用单步 capture，正常执行 Git hooks。</p></li>
         <li><span class="step">05 / VERIFY TASK</span><h3>验证这项改动</h3><p>在固定 commit 的 detached 副本跑已记录的定向计划，生成绑定 revision / commit 的证据。</p></li>
         <li><span class="step">06 / INTEGRATE</span><h3>独立验证后进 dev</h3><p>在 integration worktree 合并并独立验证；通过后才以 CAS 推进 dev。失败保留现场。</p></li>
-        <li><span class="step">07 / VERIFY DEV</span><h3>固定提升候选</h3><p>所有候选集成后，对精确 dev SHA 跑全量测试。候选、策略或锁文件变化，证据失效。</p></li>
+        <li><span class="step">07 / HAND OFF</span><h3>成果交给你</h3><p>Task verification 通过后，成果停在 <code>refs/heads/task/&lt;task-id&gt;</code>：合并进哪条分支、什么时候合，都是你自己的 Git 决定（ADR-0066）。</p></li>
         <li><span class="step">08 / PROMOTE</span><h3>经远端进入稳定版</h3><p>远端 dev 核对 → main ff-only 拉取 → 稳定 Runtime 重启核对 → 最后推回 origin/main。</p></li>
       </ol>
       <div class="equation">Agent 结束 ≠ 验证通过 ≠ 已进入 dev ≠ 已提升 main ≠ 稳定服务已恢复</div>
       <div class="grid two spaced">
-        <article class="card"><h3>示例：给导出功能增加新字段</h3><p>如果 Task B 的导出逻辑依赖 Task A 的数据结构，A 的 Agent 说“完成了”不够，Task verification 通过也不够。A 必须通过独立集成验证并进入 dev，B 的固定基线还必须包含 A 的成果。</p><p>一个与它们无关的文档 Task C，只有通过影响与容量判断，才可能并行。这个例子说明设计规则，不代表真实 provider 并发已经验收。</p></article>
+        <article class="card"><h3>示例：给导出功能增加新字段</h3><p>如果 Task B 的导出逻辑依赖 Task A 的数据结构，A 的 Agent 说“完成了”不够，Task verification 通过也不够。A 的结果 commit 必须对 B 的固定基线可达——也就是你要把 A 合并进那条分支。</p><p>一个与它们无关的文档 Task C，只有通过影响与容量判断，才可能并行。这个例子说明设计规则，不代表真实 provider 并发已经验收。</p></article>
         <article class="card"><h3>运行中改变要求怎么办？</h3><p>新增约束必须生成 Revision，并走暂停、投递与应用确认链。“消息发出去了”不是 ACK。</p><p>目前没有 Adapter 实现 <code>applyRevision</code>；不支持热投递时，走核验停止后新建 Execution 的路径，不能声称 Agent 已热更新规格。</p></article>
       </div>
-      <div class="callout warn"><strong>当前边界：</strong>ADR-0047 的 GitHub 中转提升已落到产品命令面（FOUNDATION-077 / ADR-0052，schema v29）：<code>promotion promote</code> 逐步推进 push 固定候选 → 读回核对 → 等待 main 检出人工拉取 → 收口 → 重启 → 推回 origin/main，「已推送、等待拉取」不会被报告成 SUCCEEDED。当前 <code>task.integrate</code> 每次仍只集成一个 Task，且在目标 dev 已被工作树检出时拒绝；它不是在任意开发目录里直接 merge 的替代命令。</div>
+      <div class="callout warn"><strong>当前边界：</strong>产品不再有集成与提升命令面。ADR-0066（schema v35）删除了 dev clone、长期 <code>dev</code> 集成分支、<code>task integrate</code>、<code>task integration *</code>、<code>promotion *</code> 与 dev 构建通道：Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），成果停在 <code>refs/heads/task/&lt;task-id&gt;</code>，合并由用户自己完成。<code>docs/agents/runbook.md</code> 里的人工四步只是本仓库自身的约定。</div>
     </section>
 
     <section id="architecture" aria-labelledby="architecture-title">
@@ -393,7 +393,7 @@
       </div>
       <div class="table-wrap spaced"><table><caption>从问题找到代码：当前真实目录</caption><thead><tr><th scope="col">路径</th><th scope="col">职责 / 阅读切入点</th></tr></thead><tbody>
         <tr><td><code>apps/cli</code></td><td>参数、机器可读输出、退出码、自动连接 / 启动 Runtime。</td></tr>
-        <tr><td><code>apps/runtime</code></td><td>命令分发、调度、执行、验证、集成、知识、生命周期与恢复编排。</td></tr>
+        <tr><td><code>apps/runtime</code></td><td>命令分发、调度、执行、验证、知识、生命周期与恢复编排。</td></tr>
         <tr><td><code>apps/ui</code></td><td>同一命令面的 React / Vite 投影；不直接读写数据库或定义业务语义。</td></tr>
         <tr><td><code>packages/domain</code></td><td>纯 TypeScript 规则与状态机；不导入 Bun、数据库驱动、UI 或 Agent SDK。</td></tr>
         <tr><td><code>packages/contracts</code></td><td>Zod 运行时边界、命令 / 事件 schema、Adapter ports。</td></tr>
@@ -406,7 +406,7 @@
     <section id="progress" aria-labelledby="progress-title">
       <div class="section-head"><span class="section-number">07 /</span><div><h2 id="progress-title">已经超出概念验证，但尚未完整验收</h2><p>内容基线：dev @ Wave L（FOUNDATION-077～080 合入后，2026-09-15）。下面是仓库进展快照，不是 main 部署证明。</p></div></div>
       <div class="grid three">
-        <article class="card dark"><span class="label">FOUNDATION</span><h3>可运行的纵向基础</h3><p>Task、成果 commit、Task verification、单成员集成与提升证据机制已实现，CLI 与本地 Web UI 已可用。</p></article>
+        <article class="card dark"><span class="label">FOUNDATION</span><h3>可运行的纵向基础</h3><p>Task、成果 commit 与 Task verification 已实现，CLI 与本地 Web UI 已可用；集成与稳定提升已按 ADR-0066 从产品中删除。</p></article>
         <article class="card"><span class="label">PROVIDER INTEGRATION</span><h3>3 个真实 Adapter</h3><p>Pi、Codex、Claude Code 已接入。接入不等于能力一致，更不等于三个 provider 的全部模型行为已验收。</p></article>
         <article class="card"><span class="label">LATEST MILESTONE</span><h3>稳定 / 开发实例分离</h3><p>main 与 dev 已改为两个独立 clone；dev 使用独立 home 与构建期 DEV 标记。ADR-0047 的提升已落到产品命令面，用户说明书（ADR-0050）与知识注入（ADR-0051）同批落地。</p></article>
       </div>
@@ -420,7 +420,7 @@
         <li><span class="phase">PHASE 6</span><div><h3>Project Knowledge <span class="badge partial">第一小步</span></h3><p>分层读取、快照、Execution 绑定与 CLI 已有；知识注入已在三个 Adapter 接通，模型层消费效果仍待验收（ADR-0051）。</p></div></li>
         <li><span class="phase">PHASE 7</span><div><h3>Self Evolution <span class="badge future">未开始</span></h3><p>Self Task、Candidate、自托管测试、独立 bootstrap、兼容切换与回滚仍是设计目标；不是当前可使用的功能。</p></div></li>
       </ol>
-      <div class="callout"><strong>如何读“通过”？</strong>Pi 真实模型 / write 工具 / 成果 commit / Task verification 已有首轮受控验收记录（FOUNDATION-019）。历史记录中的三次稳定提升走的是当时的人工路径，没有产生领域 PromotionRecord。协议 stub、fake 和脚本 Adapter 只证明对应编排，不能替代真实 provider 验收。ADR-0047 的新提升路径已实现，但尚未在本仓库真实执行过一次提升（Wave L 未 push、未提升 main）。</div>
+      <div class="callout"><strong>如何读“通过”？</strong>Pi 真实模型 / write 工具 / 成果 commit / Task verification 已有首轮受控验收记录（FOUNDATION-019）。协议 stub、fake 和脚本 Adapter 只证明对应编排，不能替代真实 provider 验收。</div>
     </section>
 
     <section id="next" aria-labelledby="next-title">
@@ -444,7 +444,7 @@
         <tr><td>Task → dev</td><td>Task verification 通过后，经 IntegrationBatch 和独立 Integration verification 集成。</td><td>任务自身通过不能代替合并后的验证；也不能代替提升前全量证据。</td></tr>
         <tr><td>dev → main 前</td><td>在 dev 发起，对精确候选 SHA 完成全量测试；Runtime 的证据命令在该 SHA 的隔离副本运行。</td><td>候选、策略或锁文件变化后必须重跑。普通 dev 文档修改不触发立即全量测试。</td></tr>
       </tbody></table></div>
-      <div class="card dark spaced"><span class="label">STABLE PROMOTION / 当前有效规程</span><h3>dev → origin/dev → main → 重启核对 → origin/main</h3><p>固定候选与预期 main SHA，确认精确候选的全量证据后：</p><ol><li>只 push 固定候选到远端 dev，并读回核对 SHA 相等。</li><li>在 main clone 执行 fetch + merge --ff-only origin/dev，核对拉到的就是候选。</li><li>在 main clone 按顺序 install → build:ui → stop → status；只有 <strong>READY 且 uiRunning: true</strong> 才报告稳定服务恢复。</li><li>重启核对成功后，才 fast-forward push main 回 origin/main。任一步失败就停下，保留现场，不擅自回滚或强推。</li></ol><p class="spaced">FULL 不增加常态批准，STRICT 保留精确证据批准；正确性检查不省略。此处是流程说明，不是授权执行发布。产品命令面（<code>promotion prepare/approve/promote</code>）按 ADR-0047 逐步推进同一序列：push → 读回核对 → <code>AWAITING_PULL</code>（不执行任何重启记账）→ 核对拉取并收口 → 重启记账成功后才推回远端 main；任一环节失败都保留现场、可续走，不假装一步到位。</p></div>
+      <div class="card dark spaced"><span class="label">本仓库自身的发布约定 / 不是产品能力</span><h3>dev → origin/dev → main → 重启核对 → origin/main</h3><p>这一节只适用于 Codeestra 自己这个仓库（ADR-0066 之后产品没有任何提升命令）。固定候选与预期 main SHA 后：</p><ol><li>只 push 固定候选到远端 dev，并读回核对 SHA 相等。</li><li>在 main clone 执行 fetch + merge --ff-only origin/dev，核对拉到的就是候选。</li><li>在 main clone 按顺序 install → build:ui → stop → status；只有 <strong>READY 且 uiRunning: true</strong> 才报告稳定服务恢复。</li><li>重启核对成功后，才 fast-forward push main 回 origin/main。任一步失败就停下，保留现场，不擅自回滚或强推。</li></ol><p class="spaced">完整命令序列见 <code>docs/agents/runbook.md</code>。产品不提供命令、不记账、不校验它。</p></div>
     </section>
 
     <section id="start" aria-labelledby="start-title">
@@ -470,10 +470,10 @@ bun run codeestra status
 bun run codeestra permission get
 bun run codeestra ui --no-open</code></pre>
       <p class="hero-foot">这段命令会启动 dev Runtime，但不会创建任务或启动 provider 执行开发工作。本次 HTML 文档交付没有代你运行这些命令。生成的 UI 地址含临时 token，不要写入文档、日志或提交。</p>
-      <div class="callout warn"><strong>最常见的误判：</strong>在 dev clone 执行不带独立 <code>CODEESTRA_HOME</code> 的 CLI，可能连接的是已经运行的稳定 Runtime，不能证明 dev 代码已生效。稳定 clone 保留的本地 dev ref 目前还是过渡基线指针，不随 origin/dev 自动前进，也不能作为提升证据。</div>
+      <div class="callout warn"><strong>最常见的误判：</strong>在 dev clone 执行不带独立 <code>CODEESTRA_HOME</code> 的 CLI，可能连接的是已经运行的稳定 Runtime，不能证明 dev 代码已生效。区分两个实例靠 <code>CODEESTRA_HOME</code> 与所在目录，界面上没有 dev 标记（ADR-0066 删除了它）。</div>
       <div class="card spaced"><h3>讲解结束后，确认大家能回答这四个问题</h3>
         <details open><summary>为什么不是“一个 Agent = 一个任务”？</summary><p>Task 表达目标与交付，Execution 表达一次尝试，Agent 是执行资源。换 Agent 不该丢掉任务身份、规格历史与失败证据。</p></details>
-        <details open><summary>为什么“Agent 已完成”不是成功？</summary><p>Agent 结束只是一条观察事实。还需成果 commit、Task 验证、独立集成验证、dev 全量证据，以及稳定提升与重启核对。</p></details>
+        <details open><summary>为什么“Agent 已完成”不是成功？</summary><p>Agent 结束只是一条观察事实。还需成果 commit 与 Task 验证；验证通过后成果仍停在 task 分支，合并由你自己完成（ADR-0066）。</p></details>
         <details open><summary>为什么已经有并行调度，仍写“并发未验收”？</summary><p>调度器与夹具下的测试证明了编排规则；真实 provider 的两个 SAFE 任务同时执行，是另一项必须单独完成的受控验收。</p></details>
         <details open><summary>接到第一个开发任务后，先做什么？</summary><p>读相关规格与 ADR，检查现有改动，明确本次获准范围、涉及的不变量和少量定向测试，再开始实现。不要为熟悉项目顺手实施下一阶段或运行全量测试。</p></details>
       </div>

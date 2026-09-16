@@ -277,7 +277,7 @@ describe('result commit capture', () => {
     try {
       // ADR-0056: the commit is written in a worktree of the dev clone, so its hooks are the ones
       // Git runs — installing them in the main checkout would no longer be observed.
-      const hooksDirectory = join(value.devRepo, '.git', 'hooks');
+      const hooksDirectory = join(value.repo, '.git', 'hooks');
       const hook = join(hooksDirectory, 'pre-commit');
       await Bun.write(hook, '#!/bin/sh\necho "hook refused" >&2\nexit 1\n');
       chmodSync(hook, 0o755);

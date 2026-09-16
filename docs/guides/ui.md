@@ -1,13 +1,15 @@
 # 界面说明（逐屏 UI 走查）
 
-> **适用版本** `dev@06bcf97` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v35 · **最后校对** 2026-09-17
+**适用版本** `dev@06bcf97` + 本格分支 `Loyage/delete_dev`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
 > 版本会前进：`dev@06bcf97` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > §1.8（新建任务停靠条）、§2.2 的任务行与 §2.3（a）由 **ADR-0065** 改写：停靠条改为三个必填字段、无收起态；
 > 任务列表以显示标题为主行、命名标题作为次信息；任务详情展示两个标题与任务详情（无约束列表），
 > 且「任务自己的说明」（声明的功能 + 任务详情）位于 Agent 运行卡片与按钮组之下（ADR-0062/FOUNDATION-056 的版式）。
 > 权限模式的命令拼写由 FOUNDATION-098 同步为 `settings permission get|set`（ADR-0064：顶层 `permission` 已移除；§19 另新增 `settings list` 总览）。
-> 项目接入的「dev 基线」一行小字、依赖原因码文案与影响投影的「项目基线」一行由 FOUNDATION-093 第三轮同步（ADR-0060 修订）；其余内容沿用 FOUNDATION-091 的校对基线。
+> **本次修订（ADR-0066 / schema v36）**：删除 dev 横幅与 `Codeestra DEV` 品牌名、「集成批次 · dev」
+> 与「稳定提升记录」两个面板、「设置 → 资源回收」卡、`合入 dev` 按钮与集成/提升相关的状态文案；
+> 项目接入去掉 dev clone 输入；依赖投影去掉「集成批次」列。
 > §1.2.1 的「全局负载控制条」与 §4.2 的容量卡改名由 FOUNDATION-097 新增/改写（ADR-0061 D09）。
 > 任务工作台的「永久删除」块由 FOUNDATION-090 新增（ADR-0058）；**声明的功能一行、`SAME_UNFINISHED_FEATURE`
 > 标签、冲突命中里的功能 id，以及影响投影中「快照/映射不再决定判定」的文案由 FOUNDATION-091 同步（ADR-0059）**；
@@ -57,18 +59,17 @@ Web UI 是**本地 Runtime 的便利前端**，不是另一个产品：
 这一层不属于任何标签页，但它决定了你在哪一屏。**标题栏、左侧导航与底部停靠条不随主内容滚动**
 （FOUNDATION-072）——只有中间的工作区滚动。
 
-### 1.1 跳转链接与 dev 横幅
+### 1.1 跳转链接
 
 | 元素 | 文案 | 说明 |
 |---|---|---|
 | skip-link | `跳转到工作区` | 键盘用户的第一个焦点；跳到 `<main id="workspace">` |
-| dev 横幅 | `开发版 DEV` / `非稳定代码：这是 dev clone 的运行结果，不要当作稳定版；改动请与稳定界面自行对照。` | **只有 dev 构建**（`VITE_CODEESTRA_CHANNEL=dev`）才渲染；`role="status"`，纯提示、**没有任何控件** |
 
 ### 1.2 顶部标题栏
 
 | 元素 | 文案 | 行为 |
 |---|---|---|
-| 品牌 | `C` 图标 + `Codeestra`（dev 构建为 `Codeestra DEV`）+ 副标题 `让意图成为成果` | 无交互 |
+| 品牌 | `C` 图标 + `Codeestra` + 副标题 `让意图成为成果` | 无交互（ADR-0066 删除了 `Codeestra DEV` 品牌名与 dev 横幅） |
 | 项目选择器 | 下拉框，`aria-label="当前项目"`，空项显示 `未选择项目`，其余是已接入项目名 | **改状态**：切换项目会清空当前选中的任务、任务列表、待处理列表与所有横幅 |
 | 刷新 | 按钮 `刷新` | 重新加载项目列表、权限模式、任务列表、待处理列表，并重读当前选中任务的详情。不重启 Runtime |
 
@@ -223,8 +224,7 @@ Web UI 是**本地 Runtime 的便利前端**，不是另一个产品：
 | `PAUSED` | 已暂停 | 现场已保留 · 可继续执行 |
 | `CANCELLING` | 正在终止 | 等待协作停止 · 尚未确认结束 |
 | `CANCELLED` | 已终止 | 记录保留 · 不会自动重开 |
-| `EXECUTED` | 成果已提交 | 查看任务验证与 dev 集成 · **尚非发布** |
-| `SUCCEEDED` | 已合入 dev | 已完成任务集成 · **不等于 main 已发布** |
+| `EXECUTED` | 成果已提交 | 查看任务验证 · **合并不是产品动作** |
 | `FAILED` | 执行失败 | 查看失败原因与执行记录 |
 | `RECOVERY_REQUIRED` | 需要恢复 | 状态需人工核对 · **不自动重试** |
 
@@ -309,14 +309,11 @@ Web UI 是**本地 Runtime 的便利前端**，不是另一个产品：
 | `DRAFT` | 提交后进入自动调度，满足依赖、冲突与容量条件才会启动。创建草稿不会自动运行。 |
 | `READY` | 任务等待调度；可手动尝试启动，Runtime 会核对依赖、冲突与容量，不保证立即运行。 |
 | `BLOCKED` | 正在等待上游依赖满足。展开下方任务依赖，查看尚未满足的条件。 |
-| 有进行中集成 | 集成尚未完成，请查看下方独立集成验证与合入记录。 |
-| 验证进行中 | 任务验证进行中。下方显示实际步骤，可请求取消；完成前不能合入 dev。 |
+| 验证进行中 | 任务验证进行中。下方显示实际步骤，可请求取消。 |
 | 可捕获成果、结局 `SUCCESS` | Agent 运行已结束（provider 记为成功）。若有代码变更，可提交成果，然后独立验证。 |
 | 可捕获成果、**没有结局** | Agent 会话已退出，但没有记录到结局。提交成果前先在下方核对它实际做了什么。 |
-| `EXECUTED`、无集成 | 成果已提交。先在固定 commit 上运行任务验证；验证通过后才能合入 dev。 |
-| `EXECUTED`、验证通过 | 验证已通过，可以合入 dev。合入会产生独立集成验证，并只在通过后移动 dev 引用。 |
-| 已集成 | 已合入 dev。dev → main 的稳定提升是另一条流程，不在这一步内。 |
-| `SUCCEEDED` | 成果已合入 dev；这不等于已提升到稳定的 main。 |
+| `EXECUTED`、验证未通过 | 成果已提交。先在固定 commit 上运行任务验证。 |
+| `EXECUTED`、验证通过 | 验证已通过。成果停在 task 分支上，由你自己合并（ADR-0066）。 |
 | `RUNNING`、Session 在跑 | Agent 正在运行；可查看下方执行过程，或暂停（保留现场、稍后继续）、终止。 |
 | `RUNNING`、正在启动 | Agent 正在启动，尚未进入运行；可查看下方长命令步骤。 |
 | `RUNNING`、Session 在等用户 | Agent 正在等待你回答一个请求；在下方回答后它会继续。 |
@@ -346,11 +343,10 @@ Web UI 是**本地 Runtime 的便利前端**，不是另一个产品：
 | `提交成果`（FULL）| 可捕获时，见下 | `task.result.capture` | 提交工作树中的成果，Runtime 会再次核对静止证据与差异 |
 | `准备成果提交`（STRICT）| 可捕获时 | `task.result.prepare` | 之后出现「成果提交授权」区块 |
 | `验证任务` / `重新验证` / `验证进行中…` | `EXECUTED` | `task.verify`（`background: true`） | 在固定 commit 上独立运行验证；后台运行，可在此查看进度并取消 |
-| `合入 dev` | 见下 | `task.integrate` | 把成果 commit 合入 dev：先在独立工作树里合并，再跑独立集成验证，通过后才移动 dev 引用 |
 | `更多操作` → `终止` | 多数状态 | `task.cancel` | 终止是**终态**；协作停止 Agent，保留工作树与全部记录 |
 | `更多操作` → `归档` / `取消归档` | 见下 | `task.archive` / `task.unarchive` | 归档**只隐藏任务**，不删除记录或回收工作树；可随时取消归档 |
 | `更多操作` → `重试（task retry）` | **总是可见**（不做本地状态判断） | `task.retry` | 重新入队这个任务并请调度门禁尝试启动一次；被拒绝时显示 Runtime 返回的稳定码 |
-| `更多操作` → `永久删除（不可撤销）` | 折叠块，见下 | `task.purge` | 删掉任务及其全部记录、它自己的工作树/验证副本/分支；**输入任务编号才启用**；已进 `dev` 的任务会被拒绝 |
+| `更多操作` → `永久删除（不可撤销）` | 折叠块，见下 | `task.purge` | 删掉任务及其全部记录、它自己的工作树/验证副本/分支；**输入任务编号才启用** |
 
 **（c2）`更多操作` 里的重试块（`task retry`）**
 
@@ -384,8 +380,6 @@ Web UI 是**本地 Runtime 的便利前端**，不是另一个产品：
 
 - **可捕获成果**：任务 `RUNNING`、最近一次 Execution 仍在 `RUNNING`、它仍持有资源、
   **且它的 Session 已经是 `EXITED`**。此时标题旁还会出现 `会话已退出 · 等待提交成果`。
-- **可以合入 dev**：任务 `EXECUTED`、存在一次 `PASSED` 的任务验证且它的 revision 与 result commit
-  都**对得上当前事实**、且**没有**已完成的集成批次、也**没有**进行中的集成。
 - **可以归档**：非归档状态，且状态不是 `RUNNING` / `WAITING_FOR_USER` / `PAUSING` / `PAUSED` /
   `CANCELLING` / `RECOVERY_REQUIRED`。「更多操作」底部的说明原文：
   `终止后不能重开；归档只隐藏任务，不删除记录或回收工作树。`
@@ -450,7 +444,7 @@ FULL 下这个区块**不出现**。
 
 - 最近一次执行有错误时出现红字：`执行失败：<code> <message>`。
 - 有验证记录时出现一行摘要：`最近验证` + 状态徽标 + 被验证 commit 前 10 位 +
-  `<结果码 或 "等待结果"> · 不代表集成或发布`。
+  `<结果码 或 "等待结果"> · 不代表已合并或已发布`。
 
 **（i）会话结束注记**（有注记时才出现）
 
@@ -462,32 +456,21 @@ FULL 下这个区块**不出现**。
 
 > **边界**：这一块**不声称** Agent 在等你回答。它说的是「这次结束的形态需要注记」。
 
-**（j）执行、验证与集成记录（可折叠）**
+**（j）执行与验证记录（可折叠）**
 
-折叠标题带计数：`执行、验证与集成记录 · N 次执行 / N 次验证 / N 次合入`。展开后是三张表 + 一段说明：
+折叠标题带计数：`执行与验证记录 · N 次执行 / N 次验证`。展开后是两张表 + 一段说明：
 
 | 表 | 列 |
 |---|---|
 | 执行记录 | `#`（第几次）/ 状态 / 适配器 / 模型·思考 / 会话 / 占用资源 / 基线（前 10 位）/ 失败原因 |
 | 验证记录 | 状态 / 结果 / 提交（前 10 位）/ 策略 digest（前 10 位）/ 结束时间 |
-| 集成批次 · dev | 批次（前 10 位 + `N 个成员` + `devRef`）/ 状态 / dev 基线（前 10 位）/ 合入后 dev（未改动时显示 `未改动`）/ 合并（`fast-forward` 或 `merge commit` + 合并提交前 10 位）/ 集成验证（前 10 位）/ 结果码（有 `detail` 时在下面一行）/ 时间 |
 
-空表各有自己的文案：`暂无执行记录。` / `暂无验证记录。` /
-`本任务还没有集成批次；成果不会自动进入 dev。`（「项目」标签页的同一张表用的是 `这个项目还没有集成批次；成果不会自动进入 dev。`——空列表在两个位置的含义不同）。
+空表各有自己的文案：`暂无执行记录。` / `暂无验证记录。`
 
-集成批次表的每一行下面**紧跟一张成员表**（`成员任务` / `revision` / `结果提交` / 成员状态 /
-`合入其中的 commit` / `说明`），**按 `task_id` 排序**——这是 ADR-0053 的成员顺序，所以一个跨任务的批次
-不会只显示第一个成员。状态文案由 `apps/ui/src/integration-batches.tsx` 给出：`PREPARING` 是「正在合并成员」
-（批次的 `PREPARING` 是合并，与 Execution 的 `PREPARING`（在启动进程）不是一回事）、`INTEGRATED` 是
-「已合入 dev」、`STALE`/`CANCELLED` 写明「未合并、dev 未动」/「未合入」，`RECOVERY_REQUIRED` 写明
-「未收口（成员仍被占用）」。表下方一行小字提醒「批级 INTEGRATED 只说明已合入 dev，不等于已进 main」。
+**ADR-0066 删除了第三张表**（`集成批次 · dev`）以及它的成员表：IntegrationBatch、独立集成验证与
+`dev` 集成分支都不存在，所以这个界面不再有「合入记录」。
 
-**只读**：这张表与它的成员表里没有任何按钮或输入框（组批/集成/取消在「项目」标签页，见 §5.3）。
-
-第三张表的小标题是 `集成批次 · dev`，带小字 `只读 · 一个批次可以跨多个任务（ADR-0053）`；
-表后一行小字：`成员按 task_id 顺序列出；批级 INTEGRATED 只说明已合入 dev，不等于已进 main。`
-
-> 本节的表格由任务详情与「项目」标签页的 `集成批次` 面板共用同一个组件，所以两处的列与文案一致。
+> 这里曾由任务详情与「项目」标签页共用同一张集成批次表；两者都已删除，§5.3 一并删除。
 
 **（k）Agent 会话与执行过程**
 
@@ -576,34 +559,20 @@ FULL 下这个区块**不出现**。
 > 图：`06-transcript.png` — 「Agent 执行过程」面板：排列下拉框、单行时间线条目、
 > 展开后的分段正文与「展开全文」按钮。
 
-**（l）依赖与稳定提升投影**
+**（l）依赖投影**
 
-同一屏里还有两个面板：
+只有**一个**面板：
 
-- **`依赖与 BLOCKED 原因`**（小字 `只读投影 · 不写任务状态`）：显示 `dev ref` 与 commit、
+- **`依赖与 BLOCKED 原因`**（小字 `只读投影 · 不写任务状态`）：显示项目当前基线 ref 与 commit、
   该任务的状态、`刷新` 按钮；若被阻塞则有一个红色区域列出每条未满足原因（原因码 + 前置任务 + revision），
-  外加一张表（`前置任务` / `已合入 commit` / `判定` / `原因` / `集成批次`）与一行上下游闭包。
-  说明原文：`一条边只有在钉住的上游 revision 有真正到达 INTEGRATED 的合入、且该 commit 仍可从当前 dev
+  外加一张表（`前置任务` / `结果 commit` / `判定` / `原因`）与一行上下游闭包。
+  说明原文：`一条边只有在上游钉住的 revision 有真正捕获的成果 commit、且该 commit 仍可从项目当前基线
   到达时才算满足。BLOCKED 只表示依赖未满足；冲突等待、容量等待与 revision 等待不会被算成 BLOCKED。`
-- **`稳定提升记录 · dev → main`**（小字 `只读 · ADR-0022 / ADR-0052`）：只列出**包含本任务**的提升记录；
-  表格列 `状态` / `候选 commit` / `dev 基线` / `main 结果` / `模式` / `重启` / `结果` / `时间` / `详情`。
-  `状态` 单元格里有**两个分别的标记**：`state`（Runtime 的状态机）和**派生的 `phase`**——
-  `尚未推送` / `已推送、等待拉取` / `待重启核对` / `重启已记录、远端 main 未发布` / `已完成` / `记录已失效或未推进`。
-  只有 `已完成`（`phase: COMPLETE`）用成功色，其余阶段用等待/失败色调。另外两列各多一行**读回值**：
-  `origin/dev <SHA>`（push 后 `git ls-remote` 读回来的）与 `origin/main <SHA>`（推回并读回后才非空）。
-  说明原文：
-  `提升是另一条流程：合入 dev 不等于提升到 main，「已推送远端 dev」也不等于已提升——推送之后还需要你在 main 检出执行 git fetch origin + git merge --ff-only origin/dev，再次运行 promotion promote 才会核对、记录并执行重启，最后推回远端 main。main 已移动也不等于 Runtime 已完成重启。这里只显示记录里的事实。`
-  `phase` 为 `已推送、等待拉取` 时：`main 结果` 列显示 `尚未拉到 main 检出`（不是「未改动」），`重启` 列显示 `此阶段不记录`。
-  `详情` 打开一个只读详情卡：`阶段（派生）`、`远端读回`（两个 SHA + 推送/推回时间 + dev clone 路径，
-  并注明它们是读回来的观察值而不是输入）、`Runtime 重启` 的逐步表，以及一个 **`下一步`** 块。
-  `下一步` 按 `phase` 给出下一件真事：`AWAITING_PULL` 时标题为
-  `已推送 ≠ 已提升：候选已在远端 dev，main 检出还没有拉取`，下面是一个命令块
-  （`cd <检出 main 的那个 clone>` / `git fetch origin` / `git merge --ff-only origin/dev`），
-  并写明「本界面不执行 Git、不拉取、也不重启；这两条命令只能在 main 检出里由你执行」，
-  且「命令面在这一阶段退出码 3——那是等待，不是失败，也没有任何重启记账」；
-  `RESTART_PENDING` 时列出接下来会跑的四步（`bun install --frozen-lockfile` / `bun run build:ui` /
-  `bun run codeestra stop` / `bun run codeestra status`）；`MAIN_PUSH_PENDING` 时说明重跑只重试推回。
-  这个面板**不发任何命令**：它只读 `promotion.list` / `promotion.get`。
+  原因码是 `UPSTREAM_RESULT_MISSING` / `BASE_REF_MISSING` / `BASE_REF_UNREADABLE` /
+  `NOT_REACHABLE_FROM_BASE`；**重判发生在每一趟调度**，而本面板是只读的，所以它可能比存储里的任务状态
+  早一个 tick 显示「边已满足」。
+
+**`稳定提升记录 · dev → main` 面板已删除**（ADR-0066：`promotion` 命令面与提升记录本身都不存在）。
 
 **（m）调度判定与影响投影**
 
@@ -618,7 +587,7 @@ FULL 下这个区块**不出现**。
     放行后失效条件包括任务修订、基线变化、映射/分析器/策略版本变化、实际 diff 超出预测。
 - **`影响与冲突判定`**（小字 `project impact show / explain · 只读`）：
   - 按钮 `刷新快照`（`project.impact.show`）与 `解释判定（explain）`（`project.impact.explain`）——**都只读**。
-  - `候选快照`：任务状态、处置（disposition）、revision、工作区基线与**项目基线**是否一致（ADR-0060：有 dev clone 时是那个 clone 的 `dev`，managed 时是项目文件夹当前检出的分支；界面文案为「项目基线 … 与基线一致/不一致」，不再写「项目 dev」）
+  - `候选快照`：任务状态、处置（disposition）、revision、工作区基线与**项目基线**是否一致（ADR-0066：项目基线 = 项目文件夹建 workspace 时当前检出的分支；界面文案为「项目基线 … 与基线一致/不一致」）
     （不一致时写 `只作为事实记录，判定不再因此变成 UNKNOWN`）、
     路径大小写实测，然后是快照详情：完整性（`完整` / `不完整（complete=false；它只是证据，不再决定判定）`）、
     变更指纹、changed 路径（可展开）、命中重要目录/模块/全局资源、映射未分类的路径、证据行。
@@ -796,20 +765,14 @@ reconcile 结果卡：`reconcile 观测` + boot id；表格列 `预留` / `任�
 | 元素 | 文案 | 行为 |
 |---|---|---|
 | 主路径输入 | `aria-label="Git 仓库绝对路径"`，占位 `/仓库/路径` | 改动它会清空下面已检查出的结果（以及信任被拒绝的提示） |
-| dev clone 路径输入 | `aria-label="dev clone 绝对路径"`，标签 `dev clone 路径（可留空）`，占位 `/另一个检出 dev 的 clone` | **可选**（CLI 的 `--dev-repo`，字段 `project.trust` 的 `devRepoPath`，ADR-0060）；改动它同样清空已检查出的结果 |
-| 检查项目 | `检查项目` | **只读**：并发发 `project.inspect`（带上填好的 `devRepoPath`）与 `project.verificationPolicy` |
+| 检查项目 | `检查项目` | **只读**：并发发 `project.inspect`（只带 `path`）与 `project.verificationPolicy` |
 
-dev clone 路径输入下面固定一行小字（原文）：`与 CLI 的 --dev-repo 同一个字段（project.trust 的 devRepoPath）：记了它，稳定提升就用这个 clone 把固定候选推到远端 dev。值原样放进请求；能不能用由 Runtime 核验 —— 拒绝时这里显示它返回的 DEV_REPO_* 稳定码与解释。`；该输入为空时（含只有空格）额外出现一行提示：`留空 = 这个项目没有 dev clone（ADR-0060）：Task 基线取该项目文件夹当前检出的分支，task integrate 与 promotion 会在需要 dev 分支时以 DEV_REPO_REQUIRED 拒绝。`（带 `data-project-trust="dev-repo-missing"`；它是**说明**，不再阻止提交）。
+**ADR-0066 删除了 dev clone 路径输入**（以及它下面那两行小字）：`project.inspect` 不再接受 `devRepoPath`。
 
 检查结果分两段：
 
-- **仓库身份**键值表：`仓库根目录` / `main 引用` / `对象格式` / `HEAD`，加两行开发基线相关的新行：
-  - `dev 基线`：`refs/heads/dev <commit 前 12 位>`，下面一行小字有三种（FOUNDATION-093 第三轮按 ADR-0060 改）：
-    ref 存在 → `这个 ref 存在：Task 工作树与集成目标都从它建基线`；没有 dev clone（`devRepoPath: null`）→
-    `没有 dev clone（managed，ADR-0060）：Task 基线取这个项目文件夹当前检出的分支；task integrate / promotion * 需要在长期 dev 分支上工作时才以 DEV_REPO_REQUIRED 拒绝`；
-    给了 clone 但未通过核验 → `这个 dev clone 未通过核验（<稳定码>）：信任会被拒绝`。
-  - `dev clone（这次会记录）`：键值表里的一项，内容**全部来自 `project.inspect` 返回的核验结果**，界面不自己判断路径：路径、徽标 `已核验（这个 clone 可以作为该项目的 dev clone）` 或 `未通过核验 · <稳定码>`、Runtime 的 `detail`、稳定码对应的本地解释，以及核验读到的事实（dev 分支 / HEAD 的 ref / dev ref commit / HEAD / 工作树干净 / origin 与主检出相同 / origin）。`clean` 与 `originMatchesProject` 为 `null` 时写 `未核验`（“没核实到”，不是“否”）。
-  - 未给 dev clone 路径且项目也没记录过时，这一行写 `未指定：检查时没有给 dev clone 路径，也没有已记录的路径。` 与 `不要写 dev clone 就能用：Task 基线取项目文件夹当前检出的分支；task integrate / promotion 会在需要 dev 分支时以 DEV_REPO_REQUIRED 拒绝（ADR-0060）。`。
+- **仓库身份**键值表：`仓库根目录` / `main 引用` / `对象格式` / `HEAD` / `Task 基线`，最后一行为一句说明
+  `这个项目文件夹当前检出的分支；建 Task 时固定 ref 与 commit。`（不再是 dev clone 的核验结果）。
 - **验证策略**：`ABSENT` 时显示
   `main 引用上没有策略。您仍可信任此项目，但在 .codeestra/policies/verification.json 存在之前，验证会被拒绝。`；
   存在时是一张表 `ID` / `命令` / `工作目录` / `超时`（秒），下面是 `main <sha12> · 摘要 <sha12>`。
@@ -821,100 +784,36 @@ dev clone 路径输入下面固定一行小字（原文）：`与 CLI 的 --dev-
 | `FULL` | `添加此项目` | `全权限模式已默认开启：Agent、未知工具、验证命令和 Git 钩子均以当前用户权限运行，不再请求确认。` | 无 | `添加项目` |
 | `STRICT` | `信任此项目` | `严格模式下，信任后 Agent、验证命令和 Git 钩子可使用您的用户权限运行，但提交和未知工具仍受门禁。` | 输入框 `aria-label="输入 TRUST 以确认信任"`，占位 `输入 TRUST 以确认`；不输入 `TRUST` 按钮不可点 | `信任项目` |
 
-按钮上方固定一行小字：`这个按钮会发出 project.trust：把你审阅的身份（含上面的 dev clone 核验结果）、验证策略 digest 与 dev clone 路径一起提交。dev clone 路径为空表示这个项目没有 dev clone（ADR-0060）：Task 基线取该项目文件夹当前检出的分支；路径能不能用由 Runtime 核验。`
+按钮上方固定一行小字：`这个按钮会发出 project.trust：把你审阅的身份与验证策略 digest 一起提交。`
 
-**按钮的可用条件只有一条**（能在界面上看到原因）：在 `STRICT` 下已输入 `TRUST`。dev clone 路径留空**不再**阻止提交（ADR-0060：留空就是 managed，界面不把它当成错误）。
-按钮发的是 `project.trust`，并**把刚刚看到的身份（含 dev clone 核验结果与 dev 基线）与策略 digest 一起提交**（防漂移：这期间它们变了会被拒为 `REPOSITORY_CHANGED` / `VERIFICATION_POLICY_CHANGED`）。若被拒绝，按钮下方出现红字 `信任被拒绝：<稳定码>: <Runtime 说明>（<本地词汇表一句解释>）`——**稳定码逐字保留**，词汇表覆盖 `DEV_REPO_*` 家族（含 `DEV_REPO_REQUIRED`）与信任面本身的拒绝码。成功后清空确认输入并重新加载项目列表。
+**按钮的可用条件只有一条**（能在界面上看到原因）：在 `STRICT` 下已输入 `TRUST`。
+按钮发的是 `project.trust`，并**把刚刚看到的身份与策略 digest 一起提交**（防漂移：这期间它们变了会被拒为
+`REPOSITORY_CHANGED` / `VERIFICATION_POLICY_CHANGED`）。若被拒绝，按钮下方出现红字
+`信任被拒绝：<稳定码>: <Runtime 说明>（<本地词汇表一句解释>）`——**稳定码逐字保留**，词汇表覆盖信任面
+本身的拒绝码（`DEV_REPO_*` 家族已随 ADR-0066 删除）。成功后清空确认输入并重新加载项目列表。
 
 > 图：`02-project-trust.png` — 「项目」标签页的「添加本地项目」区块：路径输入与「检查项目」、
 > 仓库身份表、验证策略命令表、以及底部的添加/信任区块。
 
-### 5.2 项目级依赖与稳定提升记录
+### 5.2 项目级依赖
 
-选了项目之后，第二张卡片里有三个面板（不绑定某个任务）：
+选了项目之后，第二张卡片里有**一个**面板（不绑定某个任务）：
 
 - `依赖与 BLOCKED 原因`：项目级的依赖图，**按依赖任务分组**，表格列
-  `依赖任务` / `前置任务` / `已合入 commit` / `判定` / `原因` / `集成批次`。
-- `集成批次 · dev`：这个项目所有批次的**项目级视图**（含跨任务的多成员批次），见 §5.3。
-- `稳定提升记录 · dev → main`：这个项目的提升记录（最多 20 条，超出时界面会写明
-  `最多显示最近 20 条，可能还有更早的记录。`），列与状态/阶段标记、读回值与 `详情` 卡（含 `下一步`）
-  都与任务详情里的一致；同样是**只读**投影，不发任何命令。
+  `依赖任务` / `前置任务` / `结果 commit` / `判定` / `原因`。
 
-### 5.3 项目级集成批次（`集成批次 · dev`）——本页唯一能改集成状态的地方
+**ADR-0066 删掉了原来的另外两个面板**：`集成批次 · dev` 的项目级视图（含组批/集成/取消按钮）与
+`稳定提升记录 · dev → main` 的只读投影。它们投影的命令面（`task integration *`、`promotion *`）已不存在，
+所以这个页面不再有任何能改变 Git 状态的控件。
 
-标题 `集成批次 · dev`，小字 `同一 CLI 命令面 · ADR-0018 / ADR-0053`。这个面板把已经存在的批次命令面
-（`task integration list|create|integrate|cancel`）投影进界面；它**不新增业务语义**，也不绕过任何门禁。
+### 5.3 集成与提升的界面（已删除）
 
-**（a）只读部分**
+「项目」标签页曾有一张 `集成批次 · dev` 卡：它的只读部分列出批次（`批次` / `状态` / `dev 基线` /
+`合入后 dev` / `合并` / `集成验证` / `结果码` / `时间`，每行下面紧跟成员表），写入部分是**整个界面唯一**
+能改 Git 状态的地方（`组批` / `集成` / `取消` 按钮）。
 
-说明原文（两段）：
-
-- `这是项目级的批次记录：一个批次可以有一个或多个成员任务，按 task_id 顺序合并，然后跑一次覆盖整批的独立集成验证，只有 PASSED 才推进 dev。`（其中「一次」是 `<strong>`），紧接着是固定提醒句 `批级 INTEGRATED 只说明这批成员的成果已合入 dev，且 dev ref 已被 CAS 推进。它不等于「已进 main」：稳定提升是另一条流程，需要在 main 检出里拉取并重启稳定 Runtime（见下方「稳定提升记录 · dev → main」）。合入 dev ≠ 已发布。`
-- 两条「命令面没有的事实」说明：批级没有「进度百分比 / 剩余时间」这类字段（状态就是唯一的进度事实：`CREATED` → `PREPARING` → `VERIFYING` → `INTEGRATING_DEV` → 终态）；成员行只记录批次组成的时间，不记录成员自己的开始时间，所以界面**不显示**「成员耗时」。
-
-然后是 `刷新批次记录`（标注 `只读`；读 `task.integration.list`）与批次表：列与文案与任务详情里的
-`集成批次 · dev` 完全相同（见 §2.3（j）），每个批次行下面挂着按 `task_id` 排序的成员表。
-
-**（b）`组批（task integration create）`区块**
-
-小字 `会写一条批次记录 · 不碰 Git`。说明写清了：create 把每个成员当前的 revision、成果 commit 与整批的
-`dev` 基线固定下来，不合并、不验证、`dev` 不动；成员按 `task_id` 排序；契约上限
-`32` 个成员（显示为事实，界面**不**用它当门禁）；同一个任务写两次或一个成员都不给会被 Runtime 拒为
-`INVALID_REQUEST`。
-
-接着是一段小字（在下拉框之前、按钮之前）：
-
-- `每个成员行上显示的 v<version> 就是这次要发送的 expected-version（CAS）；它过期时 Runtime 会拒绝为 CONCURRENT_MODIFICATION，请刷新后重试。下拉框列出项目里每一个任务，不按状态过滤，也不隐藏按钮：能不能当成员由 Runtime 判断。`
-
-成员选择是一个可重复的 `成员 N 的任务` 下拉框（列出**当前项目里每一个任务**，
-`#编号 · 状态 · v版本 · 规格前 60 字`——**不按状态过滤**），每行右侧写清这次会发送的
-`expected-version v<n>`（CAS），行尾是 `移除`；列表下面是 `＋ 增加一个成员`。
-
-然后是 `<pre>` 请求预览，即这一份请求的字段（按对象顺序逐行：`command` / `commandId` /
-`projectId` / `members[i].taskId` / `members[i].expectedVersion`；`commandId` 显示为 `（点击时新生成）`，
-因为真值每次点击才生成）。再下面是按钮 `组批（task integration create）`。
-
-结果卡分两种：`批次已组成（未碰 Git）` 与 `返回既有批次（created: false）`（命令重放），卡里列出
-`batchId`、固定的 `devRef`/`devCommit` 与成员表；被拒绝时是红字 `组批被拒绝：<码>: <Runtime 说明>（<本地词汇表一句>）`。
-
-**（c）`批次的集成与取消`区块（唯一会真的改状态的地方）**
-
-每个批次一张卡：批次 id 前 10 位、状态徽标、成员 id 列表、一行「按记录里这条批次的状态（…）」的说明，
-然后是两个控件。**按钮不按本地允许清单隐藏或禁用**：批次处于任何状态都渲染两个按钮，只有「有一个请求在飞」
-时禁用；能不能集成/取消由 Runtime 判断，被拒绝时逐字显示它返回的稳定码。
-
-| 控件 | 按钮上方的原文（每个按钮正上方都有一句） |
-|---|---|
-| `集成（task integration integrate）` | `这个按钮会做（task integration integrate）：按 task_id 顺序合并全部成员，然后对最终提交跑一次覆盖整批的独立集成验证，只有 PASSED 才用 CAS 把 dev 从记录里的基线推进到合并提交。失败、冲突、成员证据移动或 dev 基线移动都不会推进 dev；已经是终态的批次不会重跑，只返回既有记录。` |
-| `取消（task integration cancel）` | `这个按钮会做（task integration cancel）：尝试结束这个批次。只有在记录能证明它还没有任何副作用（仍是 CREATED，且没有 worktree、没有合并、没有验证）时才会真的变成 CANCELLED；否则命令面把它改为 RECOVERY_REQUIRED / RECONCILE_REQUIRED（退出码 3）——没有被取消、成员继续被占用，需要人工按记录处理。所以取消不保证成功，也从来不会推进 dev。FULL 与 STRICT 下都是零确认。` |
-
-取消控件还有一个可选的 `取消原因` 输入框（`可选，1–1000 字符；留空则不发送 reason`）。
-
-结果卡有三种，且带 `data-integration-verdict` 属性：
-
-| 情况 | 卡片 | `data-integration-verdict` |
-|---|---|---|
-| integrate 真的推进了 `dev` | `已合入 dev`（绿）+ 退出码 0 + 合并提交/dev 推进到/整批验证状态 + `不等于「已进 main」` | `INTEGRATED` |
-| integrate 是命令重放 | `此前已合入（本次未重跑）` | `ALREADY_INTEGRATED` |
-| integrate 得到 `STALE`/`CANCELLED`/`FAILED`/`CONFLICTED` | `未合入`（非绿）+ 退出码 1 + 结果码 + `dev 未推进（integratedCommit 仍为 null）` | `NOT_INTEGRATED` |
-| integrate 得到 `RECOVERY_REQUIRED` | `未收口 · 需要人工对账` + 退出码 3 | `NEEDS_RECONCILIATION` |
-| cancel 成功 | `已取消` + 退出码 0 | `CANCELLED` |
-| cancel 未能证明无副作用 | `未被取消 · 需要人工对账` + `没有被取消（命令面退出码 3）` | `RECOVERY_REQUIRED` |
-| cancel 遇到已终态批次 | `批次已是终态` + 幂等 + 退出码 1 | `ALREADY_TERMINAL` |
-| 任一命令被拒绝 | 红字 `<组批/集成/取消>被拒绝：<码>: <Runtime 说明>（<本地词汇表一句>）` | `REFUSED` |
-
-integrate 的结果卡还会列出 `dev 基线` / `合并提交` / `合入后 dev` / `整批的集成验证`（`verificationId`
-与状态，并注明「任务验证 ≠ 集成验证」）/ `工作树` / `结果`，加上本次返回的验证命令表（`argv`/退出码/耗时/输出字节）
-与验证树摘要；重放既有记录时没有命令结果，界面如实写 `这次调用没有返回验证命令的结果（重放既有记录时不重跑命令）。`。
-
-面板末尾一行小字：不提供「删除批次」或「重试合并」；失败/失效的批次保留现场、按当前事实重新组批。
-不做 `promotion` 的任何动作（不推送、不拉取、不重启）。
-
-> 这个面板**不**调用 `task integration get`：`list` 返回的记录带每个成员的全部字段
-> （含 `taskVersion`/`devCommit`/`createdAt`/`completedAt`），`get` 的 `members` 没有这几列；
-> 一次读取就够，且同样的记录任务详情里也在用。
-
----
+**ADR-0066 删除了整个面板**：`task integration create|integrate|cancel` 已不存在，所以这些按钮没有
+对应的命令面，界面也没有任何替代物。合并成果是你自己的 Git 动作，不在界面里（见 manual.md §8）。
 
 ## 6. Agent 设置（`Agent 设置`）
 
@@ -1025,22 +924,11 @@ Runtime 后依然生效，命令行（codeestra settings ui …）读写的是�
 
 读写失败时显示错误横幅 `读取或写入 Runtime 设置失败：<CODE>: <message>`。
 
-### 8.1 「资源回收」卡（ADR-0062）
+### 8.1 「资源回收」卡（已删除）
 
-「设置」标签页在「界面效果」下方还有一张「资源回收」卡，只有一个开关：
-
-| 位置 | 元素 | 命令 |
-|---|---|---|
-| 资源回收卡 | 标题 `资源回收` + `重新读取` | `settings.autoReclaim.get` |
-| 资源回收卡 | `集成后自动回收 worktree` 复选框（改动即写） | `settings.autoReclaim.set` |
-| 资源回收卡 | 当前/默认状态、设置文件真实路径与等价命令 | —（只读投影） |
-
-- 标题下说明原文：`集成成功后，Codeestra 按 reclaim 的同一套归属校验自动回收该批成员的 Task worktree；失败现场（脏 / 未合入 / 失败或取消）仍然保留。关闭后回到手动 reclaim。`
-- 复选框默认勾选（`enabled: true`）；取消后写入 `settings.autoReclaim.set {enabled:false}`，与 CLI
-  `codeestra settings auto-reclaim off` 是同一条命令、同一份文件（`<CODEESTRA_HOME>/auto-reclaim.json`）。
-- 和界面效果一样，它是**设置不是门禁**：零确认；`reclaim plan/apply` 行为不受影响。
-
----
+这颗卡只有一个开关：`集成后自动回收 worktree`（读写 `settings.autoReclaim.get|set`）。**ADR-0064 把它
+连同集成一起删除**：没有自动回收路径，`<CODEESTRA_HOME>/auto-reclaim.json` 不再被读取，设置页也不再
+有「资源回收」卡。回收只用 CLI 的 `reclaim plan/apply/records`。
 
 ## 9. 汇总：只读投影 vs 真的改状态
 
@@ -1050,9 +938,8 @@ Runtime 后依然生效，命令行（codeestra settings ui …）读写的是�
 
 | 位置 | 元素 |
 |---|---|
-| 任务工作台 | 搜索 / 状态筛选 / 排序 / 含归档 / 重置 / 任务行 / 返回 / 各折叠块 / 执行·验证·集成记录 / 会话结束注记 |
-| 任务工作台 | `集成批次 · dev` 表与它下面的成员表（没有按钮/输入框） |
-| 任务工作台 | `依赖与 BLOCKED 原因`（整块）、`稳定提升记录 · dev → main`（整块，含 `详情`、`phase` 标记、`origin/dev`/`origin/main` 读回值与 `下一步` 块） |
+| 任务工作台 | 搜索 / 状态筛选 / 排序 / 含归档 / 重置 / 任务行 / 返回 / 各折叠块 / 执行·验证记录 / 会话结束注记 |
+| 任务工作台 | `依赖与 BLOCKED 原因`（整块） |
 | 任务工作台 | `更多操作` 里重试块的**只读部分**：`当前版本` / `上一次运行的 Adapter` / `这次使用的 Adapter` 下拉框（只改本地选择，不发请求）/ 结果卡；`runtime.ping` 的 adapter 列表读取 |
 | 任务工作台 | `影响与冲突判定` 的 `刷新快照` 与 `解释判定（explain）` |
 | 任务工作台 | 原生终端面板的 `刷新状态`；`Agent 执行过程` 的 `刷新` / `排列` / 展开与加载更多 |
@@ -1061,7 +948,6 @@ Runtime 后依然生效，命令行（codeestra settings ui …）读写的是�
 | 调度 | 容量表的全部数字、`当前占用者`、`包含已释放` 开关、`刷新`；预留表的 `详情` |
 | 调度 | `影响映射 · impact.json` 的 `重新校验` |
 | 项目 | `检查项目`；两段检查结果 |
-| 项目 | `集成批次 · dev` 的只读部分：`刷新批次记录`、批次表与成员表、每条批次的状态说明、`组批` 区的成员下拉框（只改本地选择，不发请求）、请求预览、结果卡 |
 | Agent 设置 | `当前生效值` 表、`插件候选` 列表、adapter 与作用域下拉框 |
 | 运行事件 | 全部（含 `停止跟随` / `清空`，它们只影响本标签页的显示） |
 | 设置 | `重新读取`、五行的下拉框**当前值回显**（改它才写） |
@@ -1092,7 +978,6 @@ Runtime 后依然生效，命令行（codeestra settings ui …）读写的是�
 | 调度 | `执行 reconcile` / `释放预留（需原因）` | `scheduler.reservations.reconcile` / `release` |
 | 项目 | `添加项目` / `信任项目` | `project.trust` |
 | 项目 | `组批（task integration create）` | `task.integration.create`（只写一条批次记录：不合并、不验证、不碰 Git；同一个任务写两次或没有成员会被拒为 `INVALID_REQUEST`） |
-| 项目 | `集成（task integration integrate）` | `task.integration.integrate`（合并全部成员 + 一次整批的独立集成验证；只有 PASSED 才 CAS 推进 `dev`） |
 | 项目 | `取消（task integration cancel）` | `task.integration.cancel`（只在记录证明无副作用时真正取消；否则 `RECOVERY_REQUIRED`，退出码 3） |
 | Agent 设置 | `保存` / `清除选择` / `清除该范围的模型配置` | `agent.config.set` / `agent.config.set`（清选择）/ `agent.config.clear` |
 | 设置 | 五个下拉框（改动时）、`恢复默认`、`全部恢复默认` | `settings.ui.set` / `settings.ui.reset` |
@@ -1110,10 +995,8 @@ Runtime 后依然生效，命令行（codeestra settings ui …）读写的是�
 | 能力 | 现状 |
 |---|---|
 | `attention resolve`（散文提问等待的回应） | 界面尚无该控件；等待会以 `WAITING_FOR_USER` + 会话结束注记显示，退出方式在 CLI |
-| `settings prose-question-attention` | 全局开关，界面未提供（设置页只有界面效果与资源回收卡） |
-| `settings auto-reclaim` | 全局开关（ADR-0062），**界面已提供**：设置页「资源回收」卡的复选框读写同一条命令 |
+| `settings prose-question-attention` | 全局开关，界面未提供（设置页只有界面效果） |
 | `reclaim plan/apply/records` | 破坏性命令面，界面未提供 |
-| `promotion prepare/approve/promote/abandon` | 界面上的稳定提升记录是**只读**的 |
 | `task tests record/show/history` | 界面只显示验证结果与策略摘要 |
 | `project knowledge validate/list/show/resolve` | **界面完全没有投影**（`apps/ui/src/**` 里没有 knowledge 相关组件） |
 | `task revision create/list` 与 `task revision delivery list/get/resolve` | 界面未提供专用视图 |
@@ -1133,7 +1016,7 @@ Runtime 后依然生效，命令行（codeestra settings ui …）读写的是�
 
 - 从头读到尾的说明书：[manual.md](./manual.md)
 - 功能清单：[features.md](./features.md)
-- CLI 完整命令参考（含 `/api/command`、`/api/events`）：[cli/](./cli/README.md)（九篇索引；HTTP/SSE 面在 [cli/interface.md](./cli/interface.md) §20）
+- CLI 完整命令参考（含 `/api/command`、`/api/events`）：[cli/](./cli/README.md)（八篇索引；HTTP/SSE 面在 [cli/interface.md](./cli/interface.md) §20）
 - 常见任务的做法：[recipes.md](./recipes.md)
 - 人工观感核对清单：[acceptance-checklist.md](./acceptance-checklist.md)
 - 插图清单：[images/README.md](./images/README.md)

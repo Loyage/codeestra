@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { describeError, type RuntimeClient } from './api.js';
-import type { AutoReclaimView } from './types.js';
 import {
   UiSettingsContext,
   applyDocumentAttributes,
@@ -112,7 +111,7 @@ export function UiSettingsProvider({ client, children }: {
  * whether the value was explicitly chosen — plus the exact CLI command for each change, because the
  * UI is a front end to that command face and never a second implementation of it (ADR-0008).
  */
-export function SettingsPage({ client }: { readonly client: RuntimeClient }) {
+export function SettingsPage() {
   const settings = useUiSettingsOrNull();
   if (settings === null) {
     return <p className="muted">设置尚未加载。</p>;
@@ -194,90 +193,7 @@ export function SettingsPage({ client }: { readonly client: RuntimeClient }) {
         </p>
       )}
     </section>
-    <AutoReclaimCard client={client} />
     </>
   );
 }
 
-/**
- * The automatic task-worktree reclamation switch (ADR-0062). Like every settings control, it writes
- * through the same Runtime command the CLI uses and shows the exact CLI spelling; nothing is stored
- * in the browser.
- */
-function AutoReclaimCard({ client }: { readonly client: RuntimeClient }) {
-  const [view, setView] = useState<AutoReclaimView | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const refresh = useCallback(async (): Promise<void> => {
-    setBusy(true);
-    try {
-      setView(await client.command<AutoReclaimView>({ command: 'settings.autoReclaim.get' }));
-      setError(null);
-    } catch (failure) {
-      setError(describeError(failure));
-    } finally {
-      setBusy(false);
-    }
-  }, [client]);
-
-  useEffect(() => { void refresh(); }, [refresh]);
-
-  const setEnabled = useCallback(async (enabled: boolean): Promise<void> => {
-    setBusy(true);
-    try {
-      setView(await client.command<AutoReclaimView>({
-        command: 'settings.autoReclaim.set', enabled,
-      }));
-      setError(null);
-    } catch (failure) {
-      setError(describeError(failure));
-    } finally {
-      setBusy(false);
-    }
-  }, [client]);
-
-  return (
-    <section className="card settings-page">
-      <div className="section-heading">
-        <h2>资源回收</h2>
-        <button type="button" disabled={busy} onClick={() => { void refresh(); }}>
-          {busy ? '正在读取…' : '重新读取'}
-        </button>
-      </div>
-      <p className="hint">
-        集成成功后，Codeestra 按 <span className="mono">reclaim</span> 的同一套归属校验自动回收该批成员的
-        Task worktree；失败现场（脏 / 未合入 / 失败或取消）仍然保留。关闭后回到手动
-        <span className="mono">reclaim</span>。
-      </p>
-      {error === null ? null : (
-        <div className="banner error" role="alert">读取或写入 Runtime 设置失败：{error}</div>
-      )}
-      {view === null ? <p className="muted">Runtime 尚未返回设置。</p> : (
-        <div className="settings-row">
-          <div className="settings-row-head">
-            <strong>集成后自动回收 worktree</strong>
-            <span className="mono muted">auto-reclaim</span>
-          </div>
-          <p className="hint muted mono">{view.file}</p>
-          <p className="hint muted">{view.appliesTo}</p>
-          <div className="settings-row-control">
-            <label>
-              <input
-                type="checkbox"
-                checked={view.enabled}
-                disabled={busy}
-                onChange={(event) => { void setEnabled(event.target.checked); }}
-              />{' '}
-              自动回收（当前 <span className="mono">{view.enabled ? 'on' : 'off'}</span> · 默认{' '}
-              <span className="mono">{view.default ? 'on' : 'off'}</span>）
-            </label>
-            <p className="hint muted mono">
-              codeestra settings auto-reclaim {view.enabled ? 'off' : 'on'}
-            </p>
-          </div>
-        </div>
-      )}
-    </section>
-  );
-}

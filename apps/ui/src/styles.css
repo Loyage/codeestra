@@ -36,11 +36,6 @@
   --shadow: none;
 }
 
-/* ADR-0049: the dev channel re-colours the existing accent pair, so buttons, focus rings, active
-   tabs and borders read as orange against the stable interface. Danger/warn/ok keep their meaning. */
-:root[data-channel="dev"] { --accent: #b45309; --accent-soft: #fef3c7; }
-:root[data-theme="dark"][data-channel="dev"] { --accent: #fbbf24; --accent-soft: #3a2a10; }
-
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.6 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
@@ -73,12 +68,9 @@ p { margin: 0.45rem 0; }
 /* The shell owns exactly one viewport: `height`, not `min-height`, so the grid never grows with
    its content. That growth is what used to scroll the header and the "工作空间" sidebar off-screen
    when the task list got long. The workspace column is the only scroll container (FOUNDATION-072). */
-/* The banner is the first grid row of the shell and the header the second; both span the width, so
-   a banner never lands inside the scrolling workspace column (ADR-0049). Row 1 is zero-height in
-   the stable build, where no banner element is rendered at all. */
-.app { display: grid; grid-template-columns: 146px minmax(0, 1fr); grid-template-rows: auto 56px auto minmax(0, 1fr); height: 100vh; height: 100dvh; overflow: hidden; }
-.dev-banner { grid-column: 1 / -1; grid-row: 1; display: flex; gap: 0.6rem; align-items: baseline; margin: 0; padding: 0.4rem 1rem; background: #f59e0b; color: #26170a; border-bottom: 1px solid #b45309; font-size: 0.78rem; }
-.dev-banner strong { letter-spacing: 0.04em; font-size: 0.78rem; }
+/* The header is the first grid row and spans the width, so it never lands inside the scrolling
+   workspace column. (ADR-0064 removed the dev banner that used to occupy row 1.) */
+.app { display: grid; grid-template-columns: 146px minmax(0, 1fr); grid-template-rows: 56px auto minmax(0, 1fr); height: 100vh; height: 100dvh; overflow: hidden; }
 .app-header { grid-column: 1 / -1; grid-row: 2; display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.45rem 1rem; border-bottom: 1px solid var(--line); background: var(--panel); }
 .brand { display: flex; gap: 0.75rem; align-items: center; }
 .brand-mark { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 11px; background: var(--accent); color: var(--panel); font-weight: 750; font-size: 1.2rem; }
@@ -298,7 +290,6 @@ details summary { cursor: pointer; color: var(--muted); padding: 0.3rem 0; }
      navigation bar stay put, and only the workspace column scrolls (FOUNDATION-072). */
   .app { display: flex; flex-direction: column; }
   .app-header { flex: none; padding: 0.8rem 1rem; }
-  .dev-banner { flex: none; flex-wrap: wrap; }
   .sidebar { flex: none; padding: 0.35rem 1rem; border-right: 0; border-bottom: 1px solid var(--line); }
   .sidebar > nav { flex: none; flex-direction: row; overflow-x: auto; overflow-y: hidden; }
   .workspace-shell { flex: 1 1 auto; min-height: 0; }

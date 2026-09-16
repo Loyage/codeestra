@@ -17,7 +17,7 @@ import {
 } from '@codeestra/storage';
 import type { AgentRuntimeCoordinator } from './agent-runtime-service.js';
 import { deriveCommandId } from './agent-runtime-service.js';
-import { taskWorkspaceRepositoryRoot } from './dev-repo-service.js';
+import { taskWorkspaceRepositoryRoot } from './task-baseline-service.js';
 import { applyReclamation, planReclamation, type ReclaimPlan } from './reclaim-service.js';
 import { pauseOrCancelTask } from './task-control-service.js';
 import { recoverTask, recordedRecoveryTree } from './task-recovery-service.js';
@@ -55,10 +55,6 @@ import { recoverTask, recordedRecoveryTree } from './task-recovery-service.js';
  *    is the caller's explicit statement that the deletion should happen anyway: the Runtime then
  *    terminates the recorded provider tree (identity-verified pids only) and deletes, recording the
  *    refusal it stepped over and whether the process really died.
- *  - `TASK_INTEGRATED_INTO_DEV` / `TASK_IN_STABLE_PROMOTION` — a commit this Task produced lives in
- *    `dev`/`main` and outlives it; deleting the Task would erase where that commit came from.
- *    `task archive` keeps every row and is the answer for those Tasks. `--force` deletes the
- *    membership rows instead, which is exactly the provenance record it gives up.
  *  - `PURGE_RESOURCE_NOT_OWNED` — the recorded worktree, verification copy or branch could not be
  *    proven to be this Task's. Nothing is deleted, not even the database rows. Under `--force` the
  *    unprovable resources are left where they are and reported in `forced.bypassed`.
@@ -165,20 +161,17 @@ export async function purgeTask(input: TaskPurgeInput): Promise<TaskPurgeOutcome
       plan: countsOf(recorded.reclamation, recorded.branchFacts) };
   }
 
-  // The refusals `--force` steps over, read before anything is stopped so the record describes what
-  // was known at that moment. Without `--force` this stays empty and `requireSubject` refuses.
-  const bypassed: { readonly code: string; readonly detail: string }[] = force
-    ? input.storage.inspectTaskPurgeBlockers({
-      projectId: input.projectId, taskId: input.taskId,
-    }).map((blocker) => ({ code: blocker.code, detail: blocker.detail }))
-    : [];
+  // The refusals `--force` steps over are read while the Task is stopped (a live provider claim), so
+  // the record describes what was known at that moment. ADR-0062 removed the "its commit already
+  // reached `dev`/`main`" refusal: no Runtime-managed ref carries a Task's commit any more.
+  const bypassed: { readonly code: string; readonly detail: string }[] = [];
 
-  const subject = requireSubject(input, 'lookup', force);
+  const subject = requireSubject(input, 'lookup');
   const stopped = await stopIfNeeded(input, subject, randomUUID, force);
   bypassed.push(...stopped.bypassed);
   // The version the deletion is decided against is the one the Task has *after* the stop: the
   // caller's `expectedVersion` described the state they saw, and the stop legitimately moved it.
-  const current = requireSubject(input, 'after stop', force);
+  const current = requireSubject(input, 'after stop');
   if (current.state === 'RECOVERY_REQUIRED' && !force) {
     throw new TaskPurgeError('RECONCILE_REQUIRED',
       'The Task is RECOVERY_REQUIRED: the Runtime cannot prove its provider process is gone, so it'
@@ -267,7 +260,7 @@ function countsOf(
   };
 }
 
-function requireSubject(input: TaskPurgeInput, phase: string, force: boolean): TaskPurgeSubject {
+function requireSubject(input: TaskPurgeInput, phase: string): TaskPurgeSubject {
   const subject = input.storage.inspectTaskPurge({
     projectId: input.projectId, taskId: input.taskId,
   });
@@ -281,17 +274,6 @@ function requireSubject(input: TaskPurgeInput, phase: string, force: boolean): T
   if (phase === 'lookup' && subject.version !== input.expectedVersion) {
     throw new StorageError('CONCURRENT_MODIFICATION',
       `Task version is ${subject.version}, not the expected ${input.expectedVersion}`);
-  }
-  const blockers = input.storage.inspectTaskPurgeBlockers({
-    projectId: input.projectId, taskId: input.taskId,
-  });
-  // `--force` steps over this refusal; storage re-checks it and only the recorded `forced` facts let
-  // the deletion proceed there, so this is the same decision seen twice, not a second gate.
-  if (blockers.length > 0 && !force) {
-    const first = blockers[0] as (typeof blockers)[number];
-    throw new TaskPurgeError(first.code,
-      `Task cannot be purged: ${first.detail}. Its commit is already in a ref;`
-      + ' `task archive` hides it without destroying that record.');
   }
   return subject;
 }

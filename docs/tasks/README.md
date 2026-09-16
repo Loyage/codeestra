@@ -8033,7 +8033,7 @@ Web UI HTTP 面读写同一条命令。
 3. 总览的数据来源：**新增 Runtime 命令 `settings.list`**（而不是 CLI 侧拼装）。
 4. 总览列出哪些设置：**权限模式 + 散文开关 + 五个界面键 + 并发上限**；Agent 配置（三层作用域）排除。
    本格补充：fast-forward 后同属「Runtime 级、一个 home 一份值、零确认」的 `settings auto-reclaim`（ADR-0062）按同一判据
-   一并纳入，共**九项**；这不是新增用户未答复的语义，已写进 ADR-0064 的 Options 4 备注。
+   一并纳入，共**九项**；这不是新增用户未答复的语义，已写进 ADR-0066 的 Options 4 备注。
 
 ### 改了什么
 
@@ -8103,7 +8103,7 @@ Web UI HTTP 面读写同一条命令。
 - 无规格修订（`PROJECT_SPEC.md` 未改）；不新增权限门禁、审批层、信任流程或沙箱（ADR-0008/0011 的第一原则不变）。
 - ADR-0011 的**语义**（默认 FULL、CLI 可无确认切 STRICT、存储文件、生效范围）一字未改，只改 CLI 拼写；已在 ADR-0011 索引行注明。
 - 历史记录（`docs/tasks/README.md` 的 FOUNDATION-070 等旧节、ADR-0011/0029/0040 正文）**保留原有 `permission get|set` 写法**：那是当时的事实记录，不重写历史；
-  当前有效拼写以 ADR-0064、`cli/runtime.md` §19 与本记录为准。
+  当前有效拼写以 ADR-0066、`cli/runtime.md` §19 与本记录为准。
 
 ### 剩余问题 / 集成注意（必须由协调者处理）
 
@@ -8200,6 +8200,68 @@ worktree `/Users/loyage/orca/workspaces/codeestra-dev/task_auto`；原始基线 
   未重启任何 Runtime。本次未触碰稳定 clone，也未操作任何用户仓库。
 - 集成时额外修掉的两处（本次合入的一部分，不是遗留）：`packages/storage/test/task-latest-execution.test.ts` 的当前 schema 夹具
   与 `apps/runtime/test/cli-integrate.test.ts` 的 worktree/branch 断言（改读记录值，ADR-0065 D03）。
+
+## 用户任务（`Loyage/delete_dev`）— 删除 dev clone、双基线、dev 集成与稳定提升（ADR-0066，schema **v36**，不可逆 DROP）
+
+用户 2026-09-16 决策：「只有一种开发基线，打开的项目是什么分支就从什么分支开始开发」；随本格 A/B/C 选择题逐项选定
+「文档 + 实现一起删」「彻底删除 dev clone 概念」「dev 构建通道也删」「schema 直接 DROP 列和表」「命令直接删除」
+「依赖按上游 commit 对当前分支可达判定」。记录见 [ADR-0066](../decisions/0066-remove-dev-clone-and-dual-baseline.md)
+（ADR 号先因 ADR-0062/0063 改为 0064，又在合并 dev 时为 ADR-0064/0065 让号，最终定为 0066；schema 号同理由 v35 让给 ADR-0065，定为 v36）。
+
+**产品面删除**（`packages/contracts`、`packages/storage`、`packages/git`、`packages/domain`、`apps/runtime`、`apps/cli`、`apps/ui`）：
+
+- schema **v36**（不可逆）：`workspaces.base_ref` 先由历史 `projects.dev_ref` 回填，再重建 `projects` 去掉
+  `dev_ref`/`dev_repo_path`；DROP `integration_batches(_items)`、`integration_verification_runs`、
+  `stable_promotions(_members)`、`dev_full_suite_evidence`。重建带行数守卫（Bun 的 `exec()` 会吞掉脚本内的 step 错误）。
+- 删除服务：`dev-repo-service`、`integration-service`、`promotion-service`、`promotion-evidence-service`；
+  `packages/git` 的 `promotion.ts` 与 `integration.ts`（只留 `refs.ts` 的 `readLocalRefCommit`/`isAncestor`/`listCheckedOutRefs`）。
+- 新增 `apps/runtime/src/task-baseline-service.ts`：唯一基线规则（项目文件夹建 workspace 时当前检出的分支；
+  detached HEAD 以 `TASK_BASE_REF_UNRESOLVED` 拒绝；`--base-ref` 单次覆盖）。
+- 删除命令：`task integrate`、`task integration {list,create,integrate,get,cancel}`、
+  `promotion {prepare,approve,promote,restart.record,abandon,get,list}`、`promotion.fullSuite {run,list}`；
+  `project inspect|trust|open` 去掉 `--dev-repo`；`task status` 不再返回 `integrations`；`task.depends.list` 返回 `baseRef`/`baseCommit`。
+- 依赖判定改为「上游修订自己的 result commit 对项目当前 Task 基线 ref 可达」；原因码改为
+  `UPSTREAM_RESULT_MISSING` / `BASE_REF_MISSING` / `BASE_REF_UNREADABLE` / `NOT_REACHABLE_FROM_BASE`。
+- `task purge` 删除「成果已进入 dev/main 即拒绝」一类（`TASK_INTEGRATED_INTO_DEV` / `TASK_IN_STABLE_PROMOTION`）。
+- `reclaim` 不再产生 `INTEGRATION_WORKTREE` 候选；**账本取值保留**（append-only 审计不改写，见 §8 的 v36 一节）。
+- UI：删除 dev 构建通道（`VITE_CODEESTRA_CHANNEL`、`data-channel`、横幅、`Codeestra DEV`、橙色强调、
+  `build:ui:dev`、`just ui-build-dev`）与 promotion / integration-batches 两页、设置页「资源回收」卡；
+  同时把 dev 的 ADR-0064 设置总览里的 `reclaim.auto` 一项去掉（`settings list` 现在枚举八项）。
+
+**合并 `dev` 时一并处理**（第二次合并 `dev`，dev 已前进到 `f1bee1c`）：ADR-0064（settings 成为设置的唯一入口）
+与 ADR-0065（任务输入字段：两个标题、删除约束与任务类型，占 schema **v35**）都已在 dev 上落地，因此本格的
+ADR 号由 0064 再让给 0066、schema 号由 v35 让给 v36（我的迁移是 `user_version=36`，在 v35 的任务输入字段重建之后跑，
+因为它的 `workspaces.base_ref` 回填要读 `projects.dev_ref`）。dev 的 ADR-0062（`task integrate` 成功后自动回收 worktree）随集成一起删除
+（`auto-reclaim-settings.ts`、`cli-auto-reclaim.test.ts`、`settings.autoReclaim.*`、CLI 子命令、UI 卡片），
+ADR-0062 标 Superseded by ADR-0066。
+
+**顺带修复的真实回归**：旧实现里 `BLOCKED → READY` 的唯一触发者是 `task integrate`（`reconcileDependentTasks`）。
+删除集成后没有任何东西会重判阻塞任务，因此 scheduling pass 在挑选候选之前先对每个 `BLOCKED` 任务调用
+`reconcileTaskDependencyState`（`schedule-service.#reconcileBlockedTasks`）；`task.depends.list` 只读，
+所以下游状态最多滞后一个 tick（或一次显式 `task schedule run`）。失去唯一调用者的 `reconcileDependentTasks` 已删除。
+
+**测试**：36 个使用共享夹具（`provisionDevClone` / `fixture.devRepo`）的 runtime 测试文件迁移到
+「项目文件夹当前检出的分支」模型（移动基线改为真实的 `git merge --ff-only`）；storage/domain/contracts/ui 的
+受影响用例按新语义改写，删除已不存在的场景（dev 基线/retirement 报告、集成批次 `--force` 拒绝、dev 全量证据）。
+
+实际运行的检查：
+
+| 检查 | 结果 |
+|---|---|
+| `bun run typecheck` | 0 错 |
+| `bun run typecheck:ui` | 0 错 |
+| `bun test apps/runtime/test`（全量：夹具横跨整个套件，故按此范围运行） | **428 pass / 0 fail** |
+| `bun test packages/{contracts,storage,git,domain,agent-adapters}/test` | **725 pass / 0 fail** |
+| `bunx vitest run --root apps/ui` | 13 文件 **155 pass / 0 fail** |
+| `bun run build:ui` | 退出码 0；`apps/ui/dist/index.html` 不含 `data-channel`（标记已删除） |
+
+**未做 / 不在本格**：
+
+- 未 push `origin/dev`、未提升 `main`、未重启任何 Runtime。
+- 本仓库自身的 `main`/`dev` 人工四步与 `AGENTS.md` 的不变量**继续有效**，但它现在明确写明那是**仓库约定**而非产品能力。
+- `docs/notes/real-provider-acceptance-runbook.md` 的 A8（真实提升验收）已标为「随 ADR-0066 删除」，
+  `scripts/real-provider-acceptance.sh` 的 `promotion` 步骤改为只打印说明（不再调用已删除的命令）。
+- 集成前的「多成员批次」相关历史记录（FOUNDATION-081 等）按原样保留，未改写历史。
 
 ## NEXT — 最小可用纵向切片
 

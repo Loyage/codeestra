@@ -1,7 +1,9 @@
 # 人工观感核对清单
 
-> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v35 · **最后校对** 2026-09-17
+> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
 > 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
+> **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
+> 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > C2、J1–J5 由本分支按 **ADR-0065** 改写：停靠条没有收起态，三个字段都必填。
 
@@ -235,19 +237,11 @@ bun run codeestra settings ui reset                 # 全部恢复默认
       没有静默降级成「看起来支持」。
 - [ ] **L11** 窄屏（≤620px）下终端的三组控件竖排后仍可操作，投影区仍有可用高度。
 
-### M. dev 通道标记（ADR-0049）
+### M. dev 通道标记（已删除，ADR-0066）
 
-> 只有在 dev clone 里用 `bun run build:ui:dev`（即 `VITE_CODEESTRA_CHANNEL=dev`）构建过才会出现。
-> 不加变量构建出来的界面**没有标记**，这是刻意的 fail-visible-absent。
-
-- [ ] **M1** 顶部出现整宽横幅，文案是 `开发版 DEV` 与
-      `非稳定代码：这是 dev clone 的运行结果，不要当作稳定版；改动请与稳定界面自行对照。`
-- [ ] **M2** 品牌区显示 `Codeestra DEV`；浏览器标签标题也是 `Codeestra DEV`。
-- [ ] **M3** 强调色变成橙色，与稳定版的强调色**一眼能分辨**。
-- [ ] **M4** 横幅在**浅色与深色**下都清楚（对比度够、不与标题栏糊在一起）。
-- [ ] **M5** 窄屏（≤850px）下横幅折行显示，**不会把项目选择器与刷新按钮挤出屏幕**。
-- [ ] **M6** 横幅**没有任何控件**（它只是提示，不是开关）。
-- [ ] **M7** 稳定版界面（不带该变量的构建）**完全看不到**这个横幅。
+ADR-0066 删除了 ADR-0049 的 dev 构建通道：`VITE_CODEESTRA_CHANNEL`、`data-channel`、`开发版 DEV` 横幅、
+`Codeestra DEV` 品牌名与橙色强调**都不存在**，所以本节没有可验收项。UI 只有一种构建产物、一个品牌名
+`Codeestra`；人工判断「这是 dev 代码」靠的是 `CODEESTRA_HOME` 与目录，不是界面标记。
 
 ---
 
@@ -281,7 +275,6 @@ bun run codeestra settings ui reset                 # 全部恢复默认
 
 - 逐屏 UI 走查（每个按钮做什么、哪些是只读）：[ui.md](./ui.md)
 - 界面效果的五个设置键：[manual.md](./manual.md) §11.2、[ADR-0045](../decisions/0045-global-ui-settings.md)
-- 固定 shell 与 dev 通道标记：[ADR-0049](../decisions/0049-dev-ui-channel-marker.md)、
-  [docs/tasks/README.md](../tasks/README.md) FOUNDATION-072
+- 固定 shell 的布局（dev 通道标记已由 [ADR-0066](../decisions/0066-remove-dev-clone-and-dual-baseline.md) 删除）
 - 为什么不能用自动化代替这份清单：[ADR-0008](../decisions/0008-efficiency-first-service-form.md)、
   `PROJECT_SPEC.md` §1.1

@@ -198,8 +198,8 @@ describe('impact snapshot persistence', () => {
     const created = new Phase1Database();
     // Project, trust, Task and revision rows the foreign keys require.
     created.sqlite.query(`INSERT INTO projects
-      (id,name,repo_root,git_common_dir,main_ref,dev_ref,object_format,created_at)
-      VALUES ('p1','Project','/repo','/repo/.git','refs/heads/main','refs/heads/dev','sha1',1)`).run();
+      (id,name,repo_root,git_common_dir,main_ref,object_format,created_at)
+      VALUES ('p1','Project','/repo','/repo/.git','refs/heads/main','sha1',1)`).run();
     created.sqlite.query(`INSERT INTO project_trusts
       (id,project_id,repo_root,git_common_dir,object_format,policy_version,actor,status,accepted_at)
       VALUES ('trust1','p1','/repo','/repo/.git','sha1',1,'user','ACTIVE',1)`).run();
@@ -329,7 +329,6 @@ describe('impact policy confirmation', () => {
       repoRoot: '/repo',
       gitCommonDir: '/repo/.git',
       mainRef: 'refs/heads/main',
-      devRef: 'refs/heads/dev',
       objectFormat: 'sha1' as const,
       policyVersion: 1,
       verificationPolicyConfirmationId: crypto.randomUUID(),

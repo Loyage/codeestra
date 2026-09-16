@@ -27,8 +27,8 @@ let storage: Phase1Database;
 
 function seedProject(projectId: string): void {
   storage.sqlite.query(`INSERT INTO projects
-    (id,name,repo_root,git_common_dir,main_ref,dev_ref,object_format,created_at)
-    VALUES (?1,?1,?2,?2 || '/.git','refs/heads/main','refs/heads/dev','sha1',1)`)
+    (id,name,repo_root,git_common_dir,main_ref,object_format,created_at)
+    VALUES (?1,?1,?2,?2 || '/.git','refs/heads/main','sha1',1)`)
     .run(projectId, `/${projectId}`);
   storage.sqlite.query(`INSERT INTO project_trusts
     (id,project_id,repo_root,git_common_dir,object_format,policy_version,actor,status,accepted_at)

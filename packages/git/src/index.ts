@@ -30,40 +30,12 @@ export {
 } from './sensitive-paths.js';
 export type { SensitivePathHit } from './sensitive-paths.js';
 export {
-  advanceLocalRef,
-  createIntegrationWorktree,
-  fastForwardCheckedOutWorktree,
-  inspectDevCheckout,
   isAncestor,
   listCheckedOutRefs,
-  mergeResultCommit,
+  readHeadCommitOrNull,
   readLocalRefCommit,
-  removeIntegrationWorktree,
-} from './integration.js';
-export type {
-  CheckedOutRef,
-  DevCheckoutState,
-  IntegrationWorktree,
-  MergeOutcome,
-  MergeResult,
-} from './integration.js';
-export {
-  commitExists,
-  findCheckedOutWorktree,
-  inspectDevClone,
-  inspectPromotionWorktree,
-  promotionRemote,
-  pushCommitToRemote,
-  readRemoteRef,
-  readRemoteUrl,
-} from './promotion.js';
-export type {
-  CheckedOutWorktree,
-  DevCloneInspection,
-  PromotionWorktreeInspection,
-  RemotePushResult,
-  RemoteRefRead,
-} from './promotion.js';
+} from './refs.js';
+export type { CheckedOutRef } from './refs.js';
 export {
   createVerificationCopy,
   inspectVerificationCopy,

@@ -23,8 +23,6 @@ import {
   type TaskLifecycleState,
   type TrustedProject,
 } from '@codeestra/storage';
-import { DevRepoError } from './dev-repo-service.js';
-
 export class ReclaimServiceError extends Error {
   constructor(readonly code: string, message: string) {
     super(message);
@@ -140,7 +138,6 @@ export interface ReclaimPlan {
   readonly taskId: string | null;
   readonly includeFailureScenes: boolean;
   readonly kinds: readonly ReclaimKind[];
-  readonly devCommit: string | null;
   readonly targets: readonly ReclaimTarget[];
   readonly counts: ReclaimCounts;
   /** Present only when the caller asked for unregistered directories. */
@@ -295,8 +292,6 @@ const terminalTaskStates: ReadonlySet<TaskLifecycleState> = new Set([
   'EXECUTED', 'SUCCEEDED', 'FAILED', 'CANCELLED',
 ]);
 
-const activeIntegrationStates = new Set(['CREATED', 'PREPARING', 'VERIFYING', 'INTEGRATING_DEV']);
-const failureIntegrationStates = new Set(['CONFLICTED', 'FAILED', 'RECOVERY_REQUIRED']);
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
@@ -685,16 +680,11 @@ async function evaluateUnregisteredCandidate(input: {
   }
   let registration: Awaited<ReturnType<typeof inspectOwnedWorktreeRegistration>>;
   try {
-    // The owned worktree is registered in the repository that owns it: the project's dev clone when
-    // one is recorded, otherwise the project folder itself (ADR-0056 / ADR-0060).
+    // The owned worktree is registered in the project folder that owns it (ADR-0062).
     registration = await inspectOwnedWorktreeRegistration({
-      repositoryRoot: trusted.devRepoPath ?? trusted.repoRoot, path: input.path,
+      repositoryRoot: trusted.repoRoot, path: input.path,
     });
   } catch (error) {
-    if (error instanceof DevRepoError) {
-      return recovery(error.code,
-        `${error.message}; this directory's Git registration cannot be attributed to a repository`);
-    }
     return recovery('GIT_INSPECTION_FAILED',
       `The Git worktree registry could not be read: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -833,10 +823,9 @@ async function recheckUnregisteredCandidate(input: {
     ? ''
     : (() => {
       const trusted = input.context.trustedProjects.get(input.target.projectId as string);
-      // ADR-0060: the owning repository is the dev clone when one is recorded, otherwise the project
-      // folder (`COALESCE(dev_repo_path, repo_root)`) — the same repository the worktree was created
-      // in, so ownership can be re-proven at removal time either way.
-      return trusted === undefined ? '' : trusted.devRepoPath ?? trusted.repoRoot;
+      // ADR-0062: the owning repository is the project folder — the same repository the worktree was
+      // created in, so ownership can be re-proven at removal time.
+      return trusted === undefined ? '' : trusted.repoRoot;
     })();
   const fresh = evaluation.target;
   const evidence = fresh?.evidence ?? { recheck: 'CLAIMED_BY_LEDGER' };
@@ -1089,19 +1078,8 @@ async function buildPlan(input: ReclaimPlanInput): Promise<BuiltPlan> {
     if (error instanceof StorageError) throw new ReclaimServiceError(error.code, error.message);
     throw error;
   }
-  // ADR-0056 / ADR-0060: every recorded worktree and Task branch lives in the repository that owns
-  // them — the dev clone when one is recorded, otherwise the project folder itself (`repoRoot` is
-  // already that `COALESCE`). No project is refused for lacking a dev clone: a managed project's
-  // worktrees are just as reclaimable as a promoting project's.
+  // ADR-0062: every recorded worktree and Task branch lives in the project folder itself.
   const repositoryRoot = candidates.project.repoRoot;
-  let devCommit: string | null = null;
-  try {
-    devCommit = await readLocalRefCommit({ repositoryRoot, ref: candidates.project.devRef });
-  } catch {
-    // An unreadable baseline only means "mergedness is unknown"; every unknown is treated as
-    // "not merged", which retains the resource instead of deleting it.
-    devCommit = null;
-  }
   const taskById = new Map(candidates.tasks.map((task) => [task.taskId, task]));
   const targets: ReclaimTarget[] = [];
   const wanted = new Set(kinds);
@@ -1118,12 +1096,12 @@ async function buildPlan(input: ReclaimPlanInput): Promise<BuiltPlan> {
       const state = registration.registered && registration.pathExists
         ? await inspectWorktreeState({ path: workspace.path })
         : null;
+      // ADR-0062: "already merged" is measured against the very ref this workspace was based on.
+      // A result that is not reachable from that ref is *not* merged, so the worktree is retained; a
+      // workspace with no readable base ref is retained too (unknown is never treated as merged).
       let merged: boolean | null = null;
-      if (task.resultCommit !== null) {
-        // ADR-0060: "already merged" is measured against the ref this workspace was based on — the
-        // dev clone's `dev` for a promoting project, the project folder's branch for a managed one.
-        // A result that is not reachable from that ref is *not* merged, so the worktree is retained.
-        const mergeTargetRef = workspace.baseRef ?? candidates.project.devRef;
+      const mergeTargetRef = workspace.baseRef;
+      if (task.resultCommit !== null && mergeTargetRef !== null) {
         const mergeTarget = await readLocalRefCommit({
           repositoryRoot, ref: mergeTargetRef,
         }).catch(() => null);
@@ -1157,8 +1135,7 @@ async function buildPlan(input: ReclaimPlanInput): Promise<BuiltPlan> {
         reservationState: workspace.reservationState,
         activeReservationId: workspace.reservationId,
         resultCommit: task.resultCommit,
-        devCommit,
-        mergeTargetRef: workspace.baseRef ?? candidates.project.devRef,
+        mergeTargetRef,
         merged,
         clean: state === null ? null : state.clean,
         trackedModifications: state?.trackedModifications ?? [],
@@ -1313,81 +1290,6 @@ async function buildPlan(input: ReclaimPlanInput): Promise<BuiltPlan> {
     }
   }
 
-  if (wanted.has('INTEGRATION_WORKTREE')) {
-    for (const batch of candidates.integrationWorktrees) {
-      const task = taskById.get(batch.taskId);
-      if (task === undefined) continue;
-      const ownedRoot = ownedRootFor(input.runtimeHome, 'INTEGRATION_WORKTREE');
-      const owned = await inspectOwnedPath({ ownedRoot, path: batch.worktreePath });
-      const registration = await inspectOwnedWorktreeRegistration({
-        repositoryRoot, path: batch.worktreePath,
-      });
-      const recordedCommits = [batch.devCommit, batch.mergedCommit, batch.integratedCommit]
-        .filter((commit): commit is string => commit !== null);
-      const evidence: Record<string, unknown> = {
-        ownedRoot: owned.ownedRoot,
-        pathExists: owned.exists,
-        symlink: owned.symlink,
-        canonicalPath: owned.canonicalPath,
-        insideOwnedRoot: owned.insideOwnedRoot,
-        registered: registration.registered,
-        registeredPath: registration.registeredPath,
-        detached: registration.detached,
-        registrationHead: registration.headCommit,
-        devCommit: batch.devCommit,
-        mergedCommit: batch.mergedCommit,
-        integratedCommit: batch.integratedCommit,
-        batchState: batch.state,
-        worktreeOwnershipToken: batch.ownershipToken,
-        batchDetail: batch.detail,
-      };
-      const base = {
-        kind: 'INTEGRATION_WORKTREE' as const,
-        projectId: input.projectId,
-        taskId: batch.taskId,
-        taskDisplayNumber: task.displayNumber,
-        resourceId: batch.batchId,
-        resourceState: batch.state,
-        path: batch.worktreePath,
-        ownershipToken: batch.ownershipToken,
-        externalRef: batch.mergedCommit ?? batch.integratedCommit ?? batch.devCommit,
-        evidence,
-      };
-      const refusal = (reasonCode: string, detail: string): ReclaimTarget =>
-        ({ ...base, action: 'REFUSE', reasonCode, detail });
-      if (activeIntegrationStates.has(batch.state)) {
-        targets.push(refusal('ACTIVE_INTEGRATION',
-          `Integration batch is ${batch.state} and still owns its worktree`));
-      } else if (owned.symlink) {
-        targets.push(refusal('SYMLINK_ESCAPE',
-          'The recorded integration worktree path is a symlink and is never followed'));
-      } else if (owned.exists && !owned.insideOwnedRoot) {
-        targets.push(refusal('PATH_OUTSIDE_OWNED_ROOT',
-          'The recorded integration path resolves outside the Runtime integrations root'));
-      } else if (!registration.registered && !registration.pathExists) {
-        targets.push({ ...base, action: 'ALREADY_ABSENT', reasonCode: 'ALREADY_ABSENT',
-          detail: 'The integration worktree is neither registered nor present on disk' });
-      } else if (registration.registered && !registration.pathExists) {
-        targets.push({ ...base, action: 'RECLAIM', reasonCode: 'REGISTRATION_ONLY',
-          detail: 'Only a stale integration worktree registration is left; it is pruned' });
-      } else if (!registration.registered) {
-        targets.push(refusal('UNREGISTERED_DIRECTORY',
-          'A directory exists at the recorded integration path but Git does not register it'));
-      } else if (!registration.detached || registration.headCommit === null
-        || !recordedCommits.includes(registration.headCommit)) {
-        targets.push(refusal('HEAD_MISMATCH',
-          'The integration worktree is not the detached checkout of a commit its batch recorded'));
-      } else if (failureIntegrationStates.has(batch.state) && !includeFailureScenes) {
-        targets.push({ ...base, action: 'RETAIN', reasonCode: 'FAILURE_SCENE',
-          detail: `Retained as a failure scene: integration batch is ${batch.state}` });
-      } else {
-        targets.push({ ...base, action: 'RECLAIM',
-          reasonCode: failureIntegrationStates.has(batch.state)
-            ? 'FAILURE_SCENE_INCLUDED' : 'COMPLETED_INTEGRATION',
-          detail: 'The recorded integration worktree still exists and its ownership matches its batch' });
-      }
-    }
-  }
 
   targets.sort((left, right) => left.taskDisplayNumber - right.taskDisplayNumber
     || left.kind.localeCompare(right.kind)
@@ -1423,7 +1325,6 @@ async function buildPlan(input: ReclaimPlanInput): Promise<BuiltPlan> {
       taskId: input.taskId ?? null,
       includeFailureScenes,
       kinds,
-      devCommit,
       targets,
       counts,
       unregistered,
@@ -2161,7 +2062,6 @@ export async function planReclamationBatch(input: ReclaimBatchInput): Promise<Re
         taskId: input.taskId ?? null,
         includeFailureScenes,
         kinds,
-        devCommit: null,
         targets: [],
         counts: { total: 0, reclaim: 0, retain: 0, refuse: 0, alreadyAbsent: 0,
           recoveryRequired: 0 },

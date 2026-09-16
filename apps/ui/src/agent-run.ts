@@ -134,10 +134,8 @@ export interface TaskNextStepInput {
   readonly taskState: string;
   readonly archived: boolean;
   readonly openAttentionCount: number;
-  readonly integrationInFlight: boolean;
   readonly verifying: boolean;
   readonly canCapture: boolean;
-  readonly integrated: boolean;
   readonly verificationPassed: boolean;
   readonly agentRun: AgentRunFactView | null;
   /** The newest attempt's recorded failure code, when one was recorded (`task status` only). */
@@ -161,22 +159,17 @@ export function taskNextStep(input: TaskNextStepInput): string {
   if (input.taskState === 'BLOCKED') {
     return '正在等待上游依赖满足。展开下方任务依赖，查看尚未满足的条件。';
   }
-  if (input.integrationInFlight) return '集成尚未完成，请查看下方独立集成验证与合入记录。';
-  if (input.verifying) return '任务验证进行中。下方显示实际步骤，可请求取消；完成前不能合入 dev。';
+  if (input.verifying) return '任务验证进行中。下方显示实际步骤，可请求取消。';
   if (input.canCapture) {
     return phase === 'ENDED_UNRECORDED'
       ? 'Agent 会话已退出，但没有记录到结局。提交成果前先在下方核对它实际做了什么。'
       : 'Agent 运行已结束（provider 记为成功）。若有代码变更，可提交成果，然后独立验证。';
   }
   if (input.taskState === 'EXECUTED') {
-    if (!input.integrated) {
-      return input.verificationPassed
-        ? '验证已通过，可以合入 dev。合入会产生独立集成验证，并只在通过后移动 dev 引用。'
-        : '成果已提交。先在固定 commit 上运行任务验证；验证通过后才能合入 dev。';
-    }
-    return '已合入 dev。dev → main 的稳定提升是另一条流程，不在这一步内。';
+    return input.verificationPassed
+      ? '验证已通过。成果停在 task 分支上，由你自己合并（ADR-0064：产品不再有集成与提升）。'
+      : '成果已提交。先在固定 commit 上运行任务验证。';
   }
-  if (input.taskState === 'SUCCEEDED') return '成果已合入 dev；这不等于已提升到稳定的 main。';
   if (input.taskState === 'RUNNING') {
     if (phase === 'ENDED_UNRECORDED' || phase === 'ENDED_OK' || phase === 'ENDED_FAILED') {
       // The Session is gone but the attempt is not capturable, so "提交成果" is not on the table.

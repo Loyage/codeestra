@@ -1,7 +1,9 @@
 # 常见任务的做法（recipes）
 
-> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v35 · **最后校对** 2026-09-17
+> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
 > 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
+> **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
+> 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > recipe 1/2/3 的创建命令与 §「我想改一个 bug」后的修订示例由 **ADR-0065** 改写
 > （必填 `--title`/`--name`；`--constraint`/`--kind` 已删除，限制写进详情）。
@@ -19,7 +21,7 @@
 - `$TASK` = `task create` 返回的 task id；
 - `<version>` = 该 Task 当前的 `version`（乐观版本号）。**它每次改状态都会变**——用 `task status` 或
   上一条命令的输出重新取，不要凭记忆复用。
-- 每条命令的完整参数与退出码见 [cli/README.md](./cli/README.md)（九篇索引）；
+- 每条命令的完整参数与退出码见 [cli/README.md](./cli/README.md)（八篇索引）；
   报错怎么办见 [troubleshooting.md](./troubleshooting.md)。
 
 ---
@@ -567,9 +569,8 @@ bun run codeestra task recover $PROJECT $TASK <expected-version> [--reason "…"
 
 **目标**：把 Runtime 数据目录下不再需要的资源清掉，**并且知道每一样为什么被清或被留**。
 
-> 从 ADR-0062 起，**集成成功后会自动回收**该批成员里「clean + 已合并」的 Task worktree（默认开启）。
-> 这一步不再需要你记得跑；要关掉用 `settings auto-reclaim off`。下面仍然是那个**带审计的手动路径**，
-> 失败现场、未合并成果与任何手动选定都靠它。
+> **没有自动路径**（ADR-0066）：回收只有下面这条带审计的手动路径，失败现场、未合并成果与任何手动选定
+> 都靠它。「已合并」按该 workspace 记录的 `base_ref`（项目文件夹建 workspace 时检出的分支）判定。
 
 ```sh
 # 1) 先看（plan 是只读试运行，返回的结构与 apply 完全相同）

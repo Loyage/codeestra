@@ -117,10 +117,10 @@ export function decisionLabel(decision: string): string {
 /** Dependency block reason codes (`task depends list`), the only meaning of `BLOCKED`. */
 export function dependencyBlockReasonLabel(code: string): string {
   return label({
-    UPSTREAM_NOT_INTEGRATED: '上游还没有到达 INTEGRATED 的合入批次',
-    DEV_BASELINE_MISSING: '项目没有可读的 Task 基线 ref（所有边保持未满足）',
-    DEV_REF_UNREADABLE: '基线 ref 读取失败（不当作“无冲突”或“已满足”）',
-    NOT_REACHABLE_FROM_DEV: '上游已合入的 commit 已不在当前基线上',
+    UPSTREAM_RESULT_MISSING: '上游修订还没有捕获成果 commit（ADR-0064）',
+    BASE_REF_MISSING: '项目没有可读的 Task 基线 ref（所有边保持未满足）',
+    BASE_REF_UNREADABLE: '基线 ref 读取失败（不当作“无冲突”或“已满足”）',
+    NOT_REACHABLE_FROM_BASE: '上游成果 commit 已不在项目当前基线上',
   }, code);
 }
 

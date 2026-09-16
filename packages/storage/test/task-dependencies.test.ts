@@ -31,8 +31,8 @@ const merged = 'c'.repeat(40);
 function seed(storage: Phase1Database): void {
   const db = storage.sqlite;
   db.query(`INSERT INTO projects
-    (id,name,repo_root,git_common_dir,main_ref,dev_ref,object_format,created_at)
-    VALUES ('p1','Project','/repo','/repo/.git','refs/heads/main','refs/heads/dev','sha1',1)`).run();
+    (id,name,repo_root,git_common_dir,main_ref,object_format,created_at)
+    VALUES ('p1','Project','/repo','/repo/.git','refs/heads/main','sha1',1)`).run();
   db.query(`INSERT INTO project_trusts
     (id,project_id,repo_root,git_common_dir,object_format,policy_version,actor,status,accepted_at)
     VALUES ('trust1','p1','/repo','/repo/.git','sha1',1,'user','ACTIVE',1)`).run();
@@ -60,46 +60,31 @@ function seedIntegratedTask(
     readonly revisionId: string;
     readonly executionId: string;
     readonly resultCommit: string;
+    /** Attempt number of this Execution; a newer attempt supersedes an older capture. */
+    readonly attemptNumber?: number;
+    /** Workspace the attempt runs in; a retry reuses the one its predecessor created. */
+    readonly workspaceId?: string;
   },
 ): void {
   const db = storage.sqlite;
-  const workspaceId = `w-${input.executionId}`;
-  db.query(`INSERT INTO workspaces
-    (id,task_id,branch_ref,path,ownership_token,base_commit,state,created_at)
-    VALUES (?1,?2,?3,?4,?5,?6,'RETAINED',3)`).run(
-    workspaceId, input.taskId, `refs/heads/task/${input.taskId}`,
-    `/work/${input.executionId}`, `owner-${input.executionId}`, oid);
+  const workspaceId = input.workspaceId ?? `w-${input.executionId}`;
+  // A retry runs in the workspace its predecessor created, so the row is only written by the attempt
+  // that owns it (`one_live_workspace` allows exactly one per Task).
+  if (input.workspaceId === undefined) {
+    db.query(`INSERT INTO workspaces
+      (id,task_id,branch_ref,path,ownership_token,base_commit,state,created_at)
+      VALUES (?1,?2,?3,?4,?5,?6,'RETAINED',3)`).run(
+      workspaceId, input.taskId, `refs/heads/task/${input.taskId}`,
+      `/work/${input.executionId}`, `owner-${input.executionId}`, oid);
+  }
   db.query(`INSERT INTO executions
     (id,task_id,attempt_number,initial_revision_id,applied_revision_id,workspace_id,adapter_id,
      adapter_version,state,resource_held,base_commit,result_commit,started_at,ended_at)
-    VALUES (?1,?2,1,?3,?3,?4,'pi','1','SUCCEEDED',0,?5,?6,4,5)`).run(
-    input.executionId, input.taskId, input.revisionId, workspaceId, oid, input.resultCommit);
+    VALUES (?1,?2,?7,?3,?3,?4,'pi','1','SUCCEEDED',0,?5,?6,4,5)`).run(
+    input.executionId, input.taskId, input.revisionId, workspaceId, oid, input.resultCommit,
+    input.attemptNumber ?? 1);
 }
 
-function seedIntegrationBatch(
-  storage: Phase1Database,
-  input: {
-    readonly taskId: string;
-    readonly revisionId: string;
-    readonly executionId: string;
-    readonly batchId: string;
-    readonly integratedCommit: string;
-    /** A batch that never reached INTEGRATED, so the item row must not count as a fact. */
-    readonly batchState?: 'INTEGRATED' | 'FAILED';
-  },
-): void {
-  const db = storage.sqlite;
-  db.query(`INSERT INTO integration_batches
-    (id,project_id,dev_ref,dev_commit,state,worktree_ownership_token,created_at)
-    VALUES (?1,'p1','refs/heads/dev',?2,?3,?4,20)`).run(
-    input.batchId, oid, input.batchState ?? 'INTEGRATED', `owner-${input.batchId}`);
-  db.query(`INSERT INTO integration_batch_items
-    (batch_id,project_id,task_id,revision_id,execution_id,candidate_commit,dev_commit,state,
-     integrated_commit,created_at)
-    VALUES (?1,'p1',?2,?3,?4,?5,?6,'INTEGRATED',?5,20)`).run(
-    input.batchId, input.taskId, input.revisionId, input.executionId,
-    input.integratedCommit, oid);
-}
 
 /** Asserts the stable error code, not the human-readable message. */
 async function expectCode(action: Promise<unknown> | (() => unknown), code: string): Promise<void> {
@@ -197,13 +182,14 @@ describe('task dependency persistence', () => {
       expect(upgraded.sqlite.query<{ name: string }, []>(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='task_dependencies'",
       ).get()?.name).toBe('task_dependencies');
-      // The pre-existing integration fact and Task row survived the additive step.
+      // The Task row survived every step. The integration aggregate this fixture wrote at v12 is
+      // gone, because ADR-0064 dropped it at v35 — asserted rather than merely not looked at.
       expect(upgraded.sqlite.query<{ count: number }, []>(
         'SELECT COUNT(*) AS count FROM tasks',
       ).get()?.count).toBe(1);
-      expect(upgraded.sqlite.query<{ count: number }, []>(
-        "SELECT COUNT(*) AS count FROM integration_batch_items WHERE state='INTEGRATED'",
-      ).get()?.count).toBe(1);
+      expect(upgraded.sqlite.query<{ name: string }, []>(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='integration_batch_items'",
+      ).get()).toBeNull();
       expect(upgraded.sqlite.query<Record<string, unknown>, []>('PRAGMA foreign_key_check').all())
         .toEqual([]);
       upgraded.close();
@@ -302,7 +288,7 @@ describe('task dependency persistence', () => {
     expect(facts).toHaveLength(1);
     expect(facts[0]).toMatchObject({ prerequisiteTaskId: 't2', requiredRevisionId: 'r2',
       requiredRevisionNumber: 1, dependentDisplayNumber: 1, prerequisiteDisplayNumber: 2,
-      integratedCommit: null, integrationBatchId: null });
+      resultCommit: null });
 
     // Re-pinning an existing edge is refused instead of silently retargeting it.
     expect(() => addDependency(storage, { taskId: 't1', prerequisiteTaskId: 't2',
@@ -310,21 +296,21 @@ describe('task dependency persistence', () => {
     storage.close();
   });
 
-  test('reports the recorded integration fact for the pinned revision', () => {
+  test('reports the pinned revision own captured result commit', () => {
     const storage = new Phase1Database();
     seed(storage);
     addDependency(storage, { taskId: 't1', prerequisiteTaskId: 't2', commandId: 'c1' });
+    // ADR-0064: an edge is judged by the upstream revision's *own* captured result commit; nothing
+    // has to have been "integrated", and reaching the project baseline is the scheduler's Git
+    // question. Before any capture the fact is null.
+    expect(storage.listTaskDependencyFacts('p1', { taskId: 't1' })[0]?.resultCommit).toBeNull();
     seedIntegratedTask(storage, { taskId: 't2', revisionId: 'r2', executionId: 'e2',
       resultCommit: candidate });
-    // A batch that never reached INTEGRATED is not a fact, even with an item row.
-    seedIntegrationBatch(storage, { taskId: 't2', revisionId: 'r2', executionId: 'e2',
-      batchId: 'batch2', integratedCommit: candidate, batchState: 'FAILED' });
-    expect(storage.listTaskDependencyFacts('p1', { taskId: 't1' })[0]?.integratedCommit).toBeNull();
-    seedIntegrationBatch(storage, { taskId: 't2', revisionId: 'r2', executionId: 'e2',
-      batchId: 'batch1', integratedCommit: merged });
-    const fact = storage.listTaskDependencyFacts('p1', { taskId: 't1' })[0];
-    expect(fact?.integratedCommit).toBe(merged);
-    expect(fact?.integrationBatchId).toBe('batch1');
+    expect(storage.listTaskDependencyFacts('p1', { taskId: 't1' })[0]?.resultCommit).toBe(candidate);
+    // A newer attempt of the same pinned revision supersedes the older capture.
+    seedIntegratedTask(storage, { taskId: 't2', revisionId: 'r2', executionId: 'e3',
+      resultCommit: merged, attemptNumber: 2, workspaceId: 'w-e2' });
+    expect(storage.listTaskDependencyFacts('p1', { taskId: 't1' })[0]?.resultCommit).toBe(merged);
     storage.close();
   });
 
@@ -402,7 +388,7 @@ describe('task dependency persistence', () => {
     const storage = new Phase1Database();
     seed(storage);
     addDependency(storage, { taskId: 't1', prerequisiteTaskId: 't2', commandId: 'c1' });
-    const reason = { code: 'UPSTREAM_NOT_INTEGRATED' as const, prerequisiteTaskId: 't2',
+    const reason = { code: 'UPSTREAM_RESULT_MISSING' as const, prerequisiteTaskId: 't2',
       requiredRevisionId: 'r2', detail: null };
     const blocked = storage.applyTaskDependencyState({
       projectId: 'p1', taskId: 't1', expectedVersion: 1, target: 'BLOCKED',

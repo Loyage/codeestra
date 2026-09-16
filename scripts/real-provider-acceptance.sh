@@ -34,7 +34,7 @@ LAST_STATUS=0
 LAST_OUTPUT=""
 LAST_ERROR=""
 
-readonly KNOWN_STEPS="concurrency pause-resume revision-delivery knowledge plugins-gate prose-question terminal-handoff promotion"
+readonly KNOWN_STEPS="concurrency pause-resume revision-delivery knowledge plugins-gate prose-question terminal-handoff"
 
 usage() {
   cat <<'EOF'
@@ -60,7 +60,7 @@ Options:
                            plugins-gate        A5 third-party plugin vs. the gate
                            prose-question      A6 prose question -> WAITING_FOR_USER
                            terminal-handoff    A7 native terminal takeover and release
-                           promotion           A8 real GitHub promotion path (needs go-ahead)
+                           (promotion/A8 was removed with ADR-0064)
   --clean                Remove the fresh temporary root on success. Failures always keep it.
   --repo <path>          Use this repository instead of a fresh temporary one.
   --home <path>          Use this CODEESTRA_HOME instead of a fresh temporary one.
@@ -139,7 +139,7 @@ wants_step() {
 
 wants_any_setup_step() {
   for candidate in concurrency pause-resume revision-delivery knowledge \
-                   plugins-gate prose-question terminal-handoff promotion; do
+                   plugins-gate prose-question terminal-handoff; do
     if wants_step "$candidate"; then return 0; fi
   done
   return 1
@@ -503,31 +503,12 @@ step_terminal_handoff() {
   note "  continued the SAME session file; the exit code itself is audit data only"
 }
 
+# A8 (real promotion path) was removed with ADR-0064: the product no longer has `task integrate`,
+# `task integration *` or `promotion *`, so there is nothing to accept here. The repository's own
+# `dev -> main` flow is the human four-step procedure in docs/agents/runbook.md, not a product path.
 step_promotion() {
-  note "A8 — the real GitHub promotion path (ADR-0047 / ADR-0052)"
-  note "THIS STEP MOVES REMOTE REFS. It needs the user's explicit go-ahead for a real push."
-  note "The script never pushes by itself; it prints and records the calls for the user to run."
-  if [ -z "${BATCH_ID:-}" ] || [ -z "${DEV_COMMIT:-}" ] || [ -z "${MAIN_COMMIT:-}" ]; then
-    note "set BATCH_ID / DEV_COMMIT (full sha) / MAIN_COMMIT (full sha) before running for real"
-    return 0
-  fi
-  ce 1800 promotion full-suite run "$PROJECT_ID" --dev-commit "$DEV_COMMIT" --json
-  note "  exit 0 only when state=PASSED; that evidence binds candidate SHA + policy digest + lockfile"
-  assert_ok "promotion full-suite run"
-  record "a8-full-suite.json"
-  ce 120 promotion prepare "$PROJECT_ID" "$BATCH_ID" "$DEV_COMMIT" "$MAIN_COMMIT"
-  assert_ok "promotion prepare"
-  record "a8-prepare.json"
-  local promotion_id; promotion_id="$(maybe_id "$LAST_OUTPUT" promotionId "<promotion-id>")"
-  ce 600 promotion promote "$PROJECT_ID" "$promotion_id" --json
-  note_exit "promotion promote (push step)" "(3 = pushed, awaiting pull — not a failure)"
-  record "a8-promote-push.json"
-  note "in the main checkout (the user runs this, not the script):"
-  note "  cd <main-clone> && git fetch origin && git merge --ff-only origin/dev"
-  note "then call promote again from the main checkout so it closes out, restarts and pushes origin/main:"
-  ce 900 promotion promote "$PROJECT_ID" "$promotion_id" --json
-  note_exit "promotion promote (close-out)" "(0 only when phase=COMPLETE)"
-  record "a8-promote-complete.json"
+  note "A8 — removed (ADR-0064): the product has no promotion command face any more"
+  note "the repository's own dev -> main flow is the human four-step procedure in docs/agents/runbook.md"
 }
 
 # ---- retention / cleanup ----------------------------------------------------

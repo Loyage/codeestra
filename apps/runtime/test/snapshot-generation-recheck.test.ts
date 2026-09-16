@@ -70,15 +70,14 @@ async function recordPreStartSnapshot(
   const inspection = await inspectImpactPolicy({
     repositoryRoot: project.repoRoot, mainRef: project.mainRef,
   });
-  // ADR-0056: the development baseline a pre-start prediction is made against is the **dev clone's**
-  // `dev` ref, so the snapshot has to record that commit — recording the stable checkout's own `dev`
-  // would describe a fact the recheck never reads.
-  const devCommit = await git(fixture.devRepo, ['rev-parse', project.devRef]);
+  // ADR-0064: the baseline a pre-start prediction is made against is the project folder's checked out
+  // branch, so the snapshot records that commit.
+  const baseCommit = await git(fixture.repo, ['rev-parse', 'HEAD']);
   const caseDetection = await detectImpactPathCaseMode(project.repoRoot);
   const snapshot = createImpactSnapshot({
     taskId: fixture.taskId,
     revisionId: overrides.revisionId ?? task.currentRevision.id,
-    baseCommit: overrides.baseCommit ?? devCommit,
+    baseCommit: overrides.baseCommit ?? baseCommit,
     policyVersion: overrides.policyVersion ?? impactPolicyVersionKey(inspection),
     policyDigest: '0'.repeat(64),
     caseMode: caseDetection.mode,
@@ -233,16 +232,14 @@ describe('snapshot generation recheck', () => {
     const snapshot = await recordPreStartSnapshot(harnessed);
     // `dev` advances after the prediction was recorded: a Task with no worktree is predicted against
     // the development baseline, so the whole prediction is about a base that no longer exists.
-    // ADR-0056: that baseline is the **dev clone's** `dev` ref, so the move happens in that clone, as a
-    // real commit — the kind of step that moves the baseline in practice (a hand-written `update-ref`
-    // in the stable checkout would not move it any more, which is exactly what this case used to do).
-    const project = harnessed.fixture.storage.getTrustedProject(harnessed.fixture.projectId);
-    const previous = await git(harnessed.fixture.devRepo, ['rev-parse', project.devRef]);
-    await Bun.write(join(harnessed.fixture.devRepo, 'dev-moves.txt'), 'dev moves\n');
-    await git(harnessed.fixture.devRepo, ['add', 'dev-moves.txt']);
-    await git(harnessed.fixture.devRepo,
-      ['-c', 'user.name=Dev', '-c', 'user.email=dev@example.invalid', 'commit', '-q', '-m', 'dev moves']);
-    const moved = await git(harnessed.fixture.devRepo, ['rev-parse', 'HEAD']);
+    // ADR-0064: that baseline is the project folder's checked out branch, so the move is a real commit
+    // on it — the kind of step that moves the baseline in practice.
+    const previous = await git(harnessed.fixture.repo, ['rev-parse', 'HEAD']);
+    await Bun.write(join(harnessed.fixture.repo, 'baseline-moves.txt'), 'baseline moves\n');
+    await git(harnessed.fixture.repo, ['add', 'baseline-moves.txt']);
+    await git(harnessed.fixture.repo,
+      ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-q', '-m', 'baseline moves']);
+    const moved = await git(harnessed.fixture.repo, ['rev-parse', 'HEAD']);
     expect(moved).not.toBe(previous);
     const refused = await expectRefusal(acquire(harnessed, { impactSnapshotId: snapshot.id }));
     expect(refused.code).toBe('SNAPSHOT_STALE');
@@ -266,8 +263,11 @@ describe('snapshot generation recheck', () => {
     await git(harnessed.fixture.repo, ['commit', '-q', '-m', 'declare an impact mapping']);
     const refused = await expectRefusal(acquire(harnessed, { impactSnapshotId: snapshot.id }));
     expect(refused.code).toBe('SNAPSHOT_STALE');
-    expect(refused.detail?.['reasonCodes']).toEqual(['STALE_POLICY']);
-    expect(refused.detail?.['differing']).toEqual(['policyVersion']);
+    // The mapping is read from the project's `main` ref, and ADR-0064 makes that same branch the Task
+    // baseline, so committing an edited mapping moves the baseline as well: both reasons are facts
+    // about this edit and both are reported.
+    expect(refused.detail?.['reasonCodes']).toEqual(['STALE_BASE', 'STALE_POLICY']);
+    expect(refused.detail?.['differing']).toEqual(['baseCommit', 'policyVersion']);
     expect(rows(harnessed)).toHaveLength(0);
   });
 

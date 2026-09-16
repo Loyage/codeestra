@@ -1,14 +1,18 @@
 # CLI 命令参考
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
+> **适用版本** `dev@de03448`（2026-09-16） · **schema** v36 · **最后校对** 2026-09-16
 > 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../../tasks/README.md) 的最新 FOUNDATION 记录为准。
-> 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一，
+> **本次修订（ADR-0066 / schema v36）**：`promotion` 一篇（§15）与 `task integrate`/`task integration`（§11）
+> 已随集成与提升一起删除，因此现在是八篇。
+> 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一（ADR-0066 之后为八篇），
 > **内容自 `cli-reference.md @ dev@de03448` 搬移，一句未改写；本次未重新核对源码**，最后校对日期因此不变。
 > 唯一未搬移的一行是原文件头部的第 17 行——它与第 6 行是同一句（只有句末标点不同），只保留了一份。
 > §14 新增 `scheduler control` 一节，并把 §0.2 的退出码与「等待码」表补上 `SCHEDULER_GLOBALLY_PAUSED`（FOUNDATION-097 / ADR-0061 D08/D09）；
 > §0.1 的人读视图清单新增 `settings list`（§19），索引表里 §1 不再含 `permission`（ADR-0064 / 用户任务）。
-> 本文件既是**这套参考的入口**（九篇索引），也是原来那篇的 §0 通用约定（连接、自动启动、退出码、环境变量）。
+> **本次修订（ADR-0066 / schema v36）**：`promotion` 一篇（§15）与 `task integrate`/`task integration`（§11）已删除，
+> 因此索引由九篇变为**八篇**。
+> 本文件既是**这套参考的入口**（八篇索引），也是原来那篇的 §0 通用约定（连接、自动启动、退出码、环境变量）。
 > 旧编号（§1–§21）到新文件的对照表在 [`../cli-reference.md`](../cli-reference.md)；各篇内部沿用拆分前的章节号。
 
 本文覆盖 `apps/cli/src/main.ts` 中 `usage()` 列出的**每一个命令组**，以及 Runtime 的 HTTP/SSE 面。
@@ -22,7 +26,7 @@ bun run codeestra <group> [<action>] [<argument>…] [--flag …]
 
 （`bun run codeestra` 对应 `package.json` 的 `"codeestra": "bun run apps/cli/src/main.ts"`。）
 
-## 九篇索引
+## 八篇索引
 
 | 文件 | 覆盖章节 |
 |---|---|
@@ -32,8 +36,7 @@ bun run codeestra <group> [<action>] [<argument>…] [--flag …]
 | [task-lifecycle.md](./task-lifecycle.md) | §4 `task` 生命周期（`create` 到 `purge`/`status`）与 `--feature` |
 | [task-revision-session.md](./task-revision-session.md) | §5 `task revision` 与投递、§6 `task transcript`/`session transcript`、§6.1 `session guide`、§7 `session handoff` |
 | [task-result-verify.md](./task-result-verify.md) | §8 `task result`、§9 `task verify`/`task verification`/`task tests`、§10 `task operation` |
-| [integration-dag-scheduler.md](./integration-dag-scheduler.md) | §11 `task integrate`/`task integration`、§12 `task depends`、§13 `task schedule`、§14 `scheduler`、§16 `reclaim` |
-| [promotion.md](./promotion.md) | §15 `promotion`（含 `full-suite`） |
+| [integration-dag-scheduler.md](./integration-dag-scheduler.md) | §12 `task depends`、§13 `task schedule`、§14 `scheduler`、§16 `reclaim`（§11 `task integrate`/§15 `promotion` 已由 ADR-0066 删除） |
 | [interface.md](./interface.md) | §17 `events`、§18 `attention`、§20 HTTP/SSE 面、§21 其他只在源码里出现的东西 |
 
 旧引用（例如其他地方写的「`cli-reference.md` §14」）在 [`../cli-reference.md`](../cli-reference.md)
@@ -51,7 +54,7 @@ bun run codeestra <group> [<action>] [<argument>…] [--flag …]
   `stop` 刻意**不**启动它要停的东西。
 - 输出是 JSON（`JSON.stringify(value, null, 2)`）。人读视图只存在于少数命令的**默认**（非 `--json`）分支：
   `project impact validate/show/explain`、`project knowledge *`、`task depends list`、`task transcript`、
-  `session transcript`、`task operation list/get`、`promotion promote`、`settings list`。
+  `session transcript`、`task operation list/get`、`settings list`。
 - 其余命令默认就是 JSON，`--json` 的作用是**让脚本声明意图**而不是改变输出。
 - 错误写到 stderr，形如 `CODE: message`；带事实的拒绝（例如 `SNAPSHOT_STALE`）会先打印一段 JSON 再退 1。
 
@@ -62,7 +65,7 @@ bun run codeestra <group> [<action>] [<argument>…] [--flag …]
 | `0` | 成功。注意：某些命令的成功是「已受理」而不是「已完成」（见各命令说明） |
 | `1` | 拒绝或失败（含 `RECOVERY_REQUIRED` 这类需要人处理的状态） |
 | `2` | **用法错误**：参数个数/取值不合法、未知 flag、缺少必填 flag（`usage()` 与个别显式 `process.exit(2)`） |
-| `3` | **等待**（调度冲突/容量等待、Runtime 全局暂停 `SCHEDULER_GLOBALLY_PAUSED`、draining、`promotion promote` 的「已推送、等待拉取」）或**没什么可做**（reclaim 计划/执行没有可回收项） |
+| `3` | **等待**（调度冲突/容量等待、Runtime 全局暂停 `SCHEDULER_GLOBALLY_PAUSED`、draining）或**没什么可做**（reclaim 计划/执行没有可回收项、`task schedule run` 这一趟没有可启动的候选） |
 
 `3` 从不表示 `BLOCKED`：`BLOCKED` 只表示**依赖未满足**，它属于「需要处理」而不是「等一等」。
 `3` 也从不表示「部分冻结」：`scheduler control pause` 只有收口成完整 `PAUSED`（或已幂等处于目标状态）才退 `0`，

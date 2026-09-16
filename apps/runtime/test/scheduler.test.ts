@@ -11,7 +11,6 @@ import {
   assertDependenciesSatisfied,
   assertTaskRunnable,
   inspectTaskDependencies,
-  reconcileDependentTasks,
   reconcileTaskDependencyState,
 } from '../src/scheduler.js';
 
@@ -67,40 +66,36 @@ function createSubmittedTask(
  * Records the integration fact for one upstream revision: the Execution/Workspace rows the item
  * references, the IntegrationBatch, and its item. This is the same shape `task.integrate` writes.
  */
-function recordIntegrationFact(
+/**
+ * A recorded result commit for one upstream revision (ADR-0064).
+ *
+ * The edge is judged by the upstream revision's *own* captured result commit; whether the project's
+ * checked out branch contains it is the Git question `reconcileTaskDependencyState` answers. No
+ * integration batch or `dev` ref is involved any more.
+ */
+function recordResultCommitFact(
   storage: Phase1Database,
   input: {
     readonly projectId: string;
     readonly taskId: string;
     readonly revisionId: string;
     readonly executionId: string;
-    readonly batchId: string;
-    readonly integratedCommit: string;
-    readonly devCommit: string;
+    readonly resultCommit: string;
   },
 ): void {
   const db = storage.sqlite;
+  const workspaceId = `workspace-${input.executionId}`;
   db.query(`INSERT INTO workspaces
     (id,task_id,branch_ref,path,ownership_token,base_commit,state,created_at)
     VALUES (?1,?2,?3,?4,?5,?6,'RETAINED',3)`).run(
-    `workspace-${input.executionId}`, input.taskId, `refs/heads/task/${input.taskId}`,
-    `/work/${input.executionId}`, `owner-${input.executionId}`, input.integratedCommit);
+    workspaceId, input.taskId, `refs/heads/task/${input.taskId}`,
+    `/work/${input.executionId}`, `owner-${input.executionId}`, input.resultCommit);
   db.query(`INSERT INTO executions
     (id,task_id,attempt_number,initial_revision_id,applied_revision_id,workspace_id,adapter_id,
      adapter_version,state,resource_held,base_commit,result_commit,started_at,ended_at)
     VALUES (?1,?2,1,?3,?3,?4,'pi','1','SUCCEEDED',0,?5,?6,4,5)`).run(
-    input.executionId, input.taskId, input.revisionId, `workspace-${input.executionId}`,
-    input.integratedCommit, input.integratedCommit);
-  db.query(`INSERT INTO integration_batches
-    (id,project_id,dev_ref,dev_commit,state,worktree_ownership_token,integrated_commit,created_at)
-    VALUES (?1,?2,'refs/heads/dev',?3,'INTEGRATED',?4,?5,20)`).run(
-    input.batchId, input.projectId, input.devCommit, `owner-${input.batchId}`, input.integratedCommit);
-  db.query(`INSERT INTO integration_batch_items
-    (batch_id,project_id,task_id,revision_id,execution_id,candidate_commit,dev_commit,state,
-     integrated_commit,created_at)
-    VALUES (?1,?2,?3,?4,?5,?6,?7,'INTEGRATED',?6,20)`).run(
-    input.batchId, input.projectId, input.taskId, input.revisionId, input.executionId,
-    input.integratedCommit, input.devCommit);
+    input.executionId, input.taskId, input.revisionId, workspaceId,
+    input.resultCommit, input.resultCommit);
 }
 
 /** A real commit object on top of `parent`, so `dev` can be moved with real reachability. */
@@ -130,7 +125,7 @@ async function addDependency(
 }
 
 describe('dependency scheduler', () => {
-  test('keeps a downstream Task BLOCKED until the upstream revision is in dev', async () => {
+  test('keeps a downstream Task BLOCKED until the upstream result reachable from the baseline', async () => {
     const fixture = await createAgentFixture();
     const { storage, projectId, taskId: upstreamTaskId, revisionId: upstreamRevisionId } = fixture;
     createSubmittedTask(storage, projectId, 'downstream', 'downstream-revision', 'Consume the upstream');
@@ -142,7 +137,7 @@ describe('dependency scheduler', () => {
     });
     expect(blocked.changed).toBe(true);
     expect(blocked.state).toBe('BLOCKED');
-    expect(blocked.blockedReasons.map((reason) => reason.code)).toEqual(['UPSTREAM_NOT_INTEGRATED']);
+    expect(blocked.blockedReasons.map((reason) => reason.code)).toEqual(['UPSTREAM_RESULT_MISSING']);
     expect(storage.getTask(projectId, 'downstream')?.state).toBe('BLOCKED');
 
     // A blocked Task cannot be started, and nothing is reserved for it.
@@ -161,13 +156,14 @@ describe('dependency scheduler', () => {
       "SELECT COUNT(*) AS count FROM executions WHERE task_id='downstream'",
     ).get()?.count).toBe(0);
 
-    // The upstream result reaches dev: an INTEGRATED batch whose merged commit is on dev.
-    const devBefore = await git(fixture.devRepo, ['rev-parse', 'refs/heads/dev']);
-    const integrated = await commitTree(fixture.devRepo, devBefore, 'upstream result');
-    await git(fixture.devRepo, ['update-ref', 'refs/heads/dev', integrated]);
-    recordIntegrationFact(storage, { projectId, taskId: upstreamTaskId,
-      revisionId: upstreamRevisionId, executionId: 'execution-upstream', batchId: 'batch-1',
-      integratedCommit: integrated, devCommit: devBefore });
+    // The upstream result reaches the shared branch: the project folder is fast-forwarded onto the
+    // commit, which is what a person merging the Task branch would do.
+    const baseBefore = await git(fixture.repo, ['rev-parse', 'HEAD']);
+    const integrated = await commitTree(fixture.repo, baseBefore, 'upstream result');
+    await git(fixture.repo, ['merge', '--ff-only', '-q', integrated]);
+    recordResultCommitFact(storage, { projectId, taskId: upstreamTaskId,
+      revisionId: upstreamRevisionId, executionId: 'execution-upstream',
+      resultCommit: integrated });
 
     const readied = await reconcileTaskDependencyState({
       storage, projectId, taskId: 'downstream', commandId: 'reconcile-2', actor: 'local-user',
@@ -190,35 +186,36 @@ describe('dependency scheduler', () => {
     storage.close();
   });
 
-  test('blocks the downstream again when dev no longer contains the upstream commit', async () => {
+  test('blocks the downstream again when the baseline no longer contains the upstream commit', async () => {
     const fixture = await createAgentFixture();
     const { storage, projectId, taskId: upstreamTaskId, revisionId: upstreamRevisionId } = fixture;
     createSubmittedTask(storage, projectId, 'downstream', 'downstream-revision', 'Consume the upstream');
     await addDependency(storage, fixture, 'downstream', upstreamTaskId, 'dep-add-1');
-    const devStart = await git(fixture.devRepo, ['rev-parse', 'refs/heads/dev']);
-    const integrated = await commitTree(fixture.devRepo, devStart, 'upstream result');
-    const advanced = await commitTree(fixture.devRepo, integrated, 'later dev work');
-    await git(fixture.devRepo, ['update-ref', 'refs/heads/dev', advanced]);
-    recordIntegrationFact(storage, { projectId, taskId: upstreamTaskId, revisionId: upstreamRevisionId,
-      executionId: 'execution-upstream', batchId: 'batch-1', integratedCommit: integrated,
-      devCommit: devStart });
-    // A strict ancestor counts: `isAncestor` is what makes an advanced dev satisfy the edge.
+    const baseStart = await git(fixture.repo, ['rev-parse', 'HEAD']);
+    const integrated = await commitTree(fixture.repo, baseStart, 'upstream result');
+    const advanced = await commitTree(fixture.repo, integrated, 'later work');
+    await git(fixture.repo, ['merge', '--ff-only', '-q', advanced]);
+    recordResultCommitFact(storage, { projectId, taskId: upstreamTaskId,
+      revisionId: upstreamRevisionId, executionId: 'execution-upstream',
+      resultCommit: integrated });
+    // A strict ancestor counts: `isAncestor` is what makes an advanced baseline satisfy the edge.
     expect((await reconcileTaskDependencyState({
       storage, projectId, taskId: 'downstream', commandId: 'reconcile-1', actor: 'local-user',
     })).state).toBe('READY');
 
-    // dev is rewritten from the same starting point, so the upstream commit is no longer reachable.
-    const divergent = await commitTree(fixture.devRepo, devStart, 'rewritten dev');
-    await git(fixture.devRepo, ['update-ref', 'refs/heads/dev', divergent]);
+    // The branch is rewritten from the same starting point, so the upstream commit is no longer
+    // reachable. The scratch fixture repository is moved onto the rewritten commit outright.
+    const divergent = await commitTree(fixture.repo, baseStart, 'rewritten branch');
+    await git(fixture.repo, ['reset', '--hard', '-q', divergent]);
     const reblocked = await reconcileTaskDependencyState({
       storage, projectId, taskId: 'downstream', commandId: 'reconcile-2', actor: 'local-user',
     });
     expect(reblocked.state).toBe('BLOCKED');
-    expect(reblocked.blockedReasons.map((reason) => reason.code)).toEqual(['NOT_REACHABLE_FROM_DEV']);
+    expect(reblocked.blockedReasons.map((reason) => reason.code)).toEqual(['NOT_REACHABLE_FROM_BASE']);
     storage.close();
   });
 
-  test('unblocks the transitive dependents of an integrated Task', async () => {
+  test('unblocks a blocked chain as its upstream results become reachable', async () => {
     const fixture = await createAgentFixture();
     const { storage, projectId, taskId: upstreamTaskId, revisionId: upstreamRevisionId } = fixture;
     createSubmittedTask(storage, projectId, 'middle', 'middle-revision', 'Middle');
@@ -233,25 +230,35 @@ describe('dependency scheduler', () => {
     expect(storage.getTask(projectId, 'middle')?.state).toBe('BLOCKED');
     expect(storage.getTask(projectId, 'leaf')?.state).toBe('BLOCKED');
 
-    const devStart = await git(fixture.devRepo, ['rev-parse', 'refs/heads/dev']);
-    const integrated = await commitTree(fixture.devRepo, devStart, 'upstream result');
-    await git(fixture.devRepo, ['update-ref', 'refs/heads/dev', integrated]);
-    recordIntegrationFact(storage, { projectId, taskId: upstreamTaskId, revisionId: upstreamRevisionId,
-      executionId: 'execution-upstream', batchId: 'batch-1', integratedCommit: integrated,
-      devCommit: devStart });
+    // The upstream result becomes reachable from the project's checked out branch.
+    const baseStart = await git(fixture.repo, ['rev-parse', 'HEAD']);
+    const integrated = await commitTree(fixture.repo, baseStart, 'upstream result');
+    await git(fixture.repo, ['merge', '--ff-only', '-q', integrated]);
+    recordResultCommitFact(storage, { projectId, taskId: upstreamTaskId,
+      revisionId: upstreamRevisionId, executionId: 'execution-upstream',
+      resultCommit: integrated });
 
-    // `middle` is now satisfied; `leaf` still waits for `middle`, which has not been integrated.
-    const result = await reconcileDependentTasks({
-      storage, projectId, taskId: upstreamTaskId, commandId: 'integrate-1', actor: 'local-user',
+    // ADR-0064: the scheduling pass re-evaluates blocked Tasks; this is the same primitive it calls.
+    await reconcileTaskDependencyState({
+      storage, projectId, taskId: 'middle', commandId: 'reconcile-middle-2', actor: 'scheduler',
     });
-    expect(result.readied).toEqual(['middle']);
-    // `leaf` was already BLOCKED and stays blocked: only the Tasks this call actually moved are
-    // reported as transitions, so an unchanged Task is never reported as a new event.
-    expect(result.blocked).toEqual([]);
-    expect(result.unchanged).toEqual(['leaf']);
-    expect(result.errors).toEqual([]);
     expect(storage.getTask(projectId, 'middle')?.state).toBe('READY');
+    // `leaf` waits for `middle`, which has produced no result commit yet, so it stays BLOCKED.
+    await reconcileTaskDependencyState({
+      storage, projectId, taskId: 'leaf', commandId: 'reconcile-leaf-2', actor: 'scheduler',
+    });
     expect(storage.getTask(projectId, 'leaf')?.state).toBe('BLOCKED');
+
+    // Once `middle`'s own result commit is reachable too, the chain unblocks end to end.
+    const middleStart = await git(fixture.repo, ['rev-parse', 'HEAD']);
+    const middleResult = await commitTree(fixture.repo, middleStart, 'middle result');
+    await git(fixture.repo, ['merge', '--ff-only', '-q', middleResult]);
+    recordResultCommitFact(storage, { projectId, taskId: 'middle', revisionId: 'middle-revision',
+      executionId: 'execution-middle', resultCommit: middleResult });
+    await reconcileTaskDependencyState({
+      storage, projectId, taskId: 'leaf', commandId: 'reconcile-leaf-3', actor: 'scheduler',
+    });
+    expect(storage.getTask(projectId, 'leaf')?.state).toBe('READY');
     storage.close();
   });
 
@@ -264,11 +271,12 @@ describe('dependency scheduler', () => {
     await addDependency(storage, fixture, 'leaf', 'middle', 'dep-add-2');
 
     const view = await inspectTaskDependencies({ storage, projectId, taskId: 'leaf' });
-    expect(view.devRef).toBe('refs/heads/dev');
-    expect(view.devCommit).not.toBeNull();
+    // ADR-0064: the one baseline is the project folder's checked out branch.
+    expect(view.baseRef).toBe('refs/heads/main');
+    expect(view.baseCommit).not.toBeNull();
     expect(view.edges).toHaveLength(1);
     expect(view.edges[0]).toMatchObject({ prerequisiteTaskId: 'middle', satisfied: false,
-      reason: { code: 'UPSTREAM_NOT_INTEGRATED' } });
+      reason: { code: 'UPSTREAM_RESULT_MISSING' } });
     expect([...view.prerequisites].sort()).toEqual([fixture.taskId, 'middle'].sort());
     expect(view.dependents).toEqual([]);
     expect(view.blocked).toBe(true);
@@ -313,20 +321,20 @@ describe('dependency scheduler', () => {
     storage.close();
   });
 
-  test('reports a missing dev baseline as blocked instead of satisfied', async () => {
+  test('reports a missing Task baseline as blocked instead of satisfied', async () => {
     const fixture = await createAgentFixture();
     const { storage, projectId, taskId: upstreamTaskId, revisionId: upstreamRevisionId } = fixture;
     createSubmittedTask(storage, projectId, 'downstream', 'downstream-revision', 'Consume the upstream');
     await addDependency(storage, fixture, 'downstream', upstreamTaskId, 'dep-add-1');
-    recordIntegrationFact(storage, { projectId, taskId: upstreamTaskId, revisionId: upstreamRevisionId,
-      executionId: 'execution-upstream', batchId: 'batch-1', integratedCommit: 'd'.repeat(40),
-      devCommit: 'd'.repeat(40) });
-    // Deleting the branch removes the only baseline that could make the fact true.
-    await git(fixture.devRepo, ['update-ref', '-d', 'refs/heads/dev']);
+    recordResultCommitFact(storage, { projectId, taskId: upstreamTaskId,
+      revisionId: upstreamRevisionId, executionId: 'execution-upstream',
+      resultCommit: 'd'.repeat(40) });
+    // Detaching HEAD removes the only baseline that could make the fact readable as a baseline.
+    await git(fixture.repo, ['checkout', '--detach', '-q']);
     const view = await inspectTaskDependencies({ storage, projectId, taskId: 'downstream' });
-    expect(view.devCommit).toBeNull();
+    expect(view.baseCommit).toBeNull();
     expect(view.edges[0]?.satisfied).toBe(false);
-    expect(view.edges[0]?.reason?.code).toBe('DEV_BASELINE_MISSING');
+    expect(view.edges[0]?.reason?.code).toBe('BASE_REF_MISSING');
     storage.close();
   });
 });

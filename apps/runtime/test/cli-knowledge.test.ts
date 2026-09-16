@@ -12,7 +12,6 @@ import {
   registerTemporaryDirectory,
   runCli,
 } from './support/runtime-reclamation.js';
-import { provisionDevClone } from './support/agent-fixture.js';
 import { taskWorkspaceName } from '@codeestra/domain';
 
 /**
@@ -129,8 +128,6 @@ Only self tasks read this.
 
 interface RepositoryFixture {
   readonly repository: string;
-  /** The dev clone the project is trusted with (ADR-0056). */
-  readonly devRepo: string;
   readonly tools: string;
   readonly assets: string;
 }
@@ -167,14 +164,13 @@ async function createRepository(input: {
   await git(repository, ['branch', 'dev']);
   // ADR-0056: every dev fact comes from a second clone of the same origin that sits on
   // `dev`; the project is trusted with it explicitly.
-  const devRepo = await provisionDevClone({ repository: repository });
 
   const stubPath = join(tools, 'stub-pi.ts');
   const shimPath = join(tools, 'pi');
   await Bun.write(stubPath, stubSource);
   await Bun.write(shimPath, `#!/bin/sh\nexec "${process.execPath}" "${stubPath}" "$@"\n`);
   chmodSync(shimPath, 0o755);
-  return { repository, devRepo, tools: shimPath, assets };
+  return { repository, tools: shimPath, assets };
 }
 
 interface TaskPayload {
@@ -250,9 +246,8 @@ interface ResolveView {
 async function openAndIdentify(
   environment: Record<string, string>,
   repository: string,
-  devRepo: string,
 ): Promise<string> {
-  const opened = await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
+  const opened = await cli(['open', repository, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { readonly id: string }[];
@@ -284,7 +279,7 @@ describe('project knowledge', () => {
     });
     const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: main.assets,
       CODEESTRA_PI_EXECUTABLE: main.tools };
-    const projectId = await openAndIdentify(environment, main.repository, main.devRepo);
+    const projectId = await openAndIdentify(environment, main.repository);
 
     // validate/list read the human layers out of the main ref and ignore other extensions.
     const validated = await cli(['project', 'knowledge', 'validate', projectId, '--json'],
@@ -417,7 +412,7 @@ describe('project knowledge', () => {
     });
     const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: main.assets,
       CODEESTRA_PI_EXECUTABLE: main.tools };
-    const projectId = await openAndIdentify(environment, main.repository, main.devRepo);
+    const projectId = await openAndIdentify(environment, main.repository);
 
     const before = JSON.parse((await cli(['project', 'knowledge', 'list', projectId, '--json'],
       environment)).stdout) as ListView;
@@ -506,7 +501,7 @@ describe('project knowledge', () => {
     });
     const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: main.assets,
       CODEESTRA_PI_EXECUTABLE: main.tools };
-    const projectId = await openAndIdentify(environment, main.repository, main.devRepo);
+    const projectId = await openAndIdentify(environment, main.repository);
 
     // Neither Task declares a feature, so both are SAFE under ADR-0059 and submission starts them
     // without an UNKNOWN override. This is the concurrency behavior the regression now protects.
@@ -558,7 +553,7 @@ describe('project knowledge', () => {
     });
     const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: main.assets,
       CODEESTRA_PI_EXECUTABLE: main.tools };
-    const projectId = await openAndIdentify(environment, main.repository, main.devRepo);
+    const projectId = await openAndIdentify(environment, main.repository);
 
     const validated = await cli(['project', 'knowledge', 'validate', projectId, '--json'],
       environment);
@@ -600,7 +595,7 @@ describe('project knowledge', () => {
     });
     const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: main.assets,
       CODEESTRA_PI_EXECUTABLE: main.tools };
-    const projectId = await openAndIdentify(environment, main.repository, main.devRepo);
+    const projectId = await openAndIdentify(environment, main.repository);
     const generated = join(home, 'knowledge', projectId, 'generated');
 
     // Absent or empty is a valid empty layer, never an error.

@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { cleanupTemporaryDirectories, registerTemporaryDirectory } from './support/agent-fixture.js';
 import { reclaimTestResources, runCli } from './support/runtime-reclamation.js';
-import { provisionDevClone } from './support/agent-fixture.js';
 
 const repositoryRoot = join(import.meta.dir, '..', '..', '..');
 const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
@@ -150,7 +149,6 @@ async function fixture(mode: 'PROSE_QUESTION' | 'TOOL_THEN_QUESTION'): Promise<{
   await git(repository, ['branch', 'dev']);
   // ADR-0056: every dev fact comes from a second clone of the same origin that sits on
   // `dev`; the project is trusted with it explicitly.
-  const devRepo = await provisionDevClone({ repository: repository });
 
   const stubPath = join(tools, 'stub-pi.ts');
   const shimPath = join(tools, 'pi');
@@ -164,7 +162,7 @@ async function fixture(mode: 'PROSE_QUESTION' | 'TOOL_THEN_QUESTION'): Promise<{
     CODEESTRA_PI_EXECUTABLE: shimPath,
     CODEESTRA_STUB_MODE: mode,
   };
-  const opened = await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
+  const opened = await cli(['open', repository, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);
   // FOUNDATION-069 made the product default `auto`, which records the note *and* the wait it stands
   // for. The contract this file pins is FOUNDATION-056's: annotate the completion and change no

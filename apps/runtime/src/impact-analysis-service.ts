@@ -3,7 +3,6 @@ import { existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { realpath } from 'node:fs/promises';
 import {
-  devBranchRef,
   impactPolicyContentDigest,
   impactPolicyDigest,
   impactPolicyLabel,
@@ -29,8 +28,7 @@ import {
   type ImpactSnapshot,
   type ImpactSubject,
 } from '@codeestra/domain';
-import { changeSetPaths, inspectChangeSet, inspectRepository, readRefFile,
-  readLocalRefCommit } from '@codeestra/git';
+import { changeSetPaths, inspectChangeSet, inspectRepository, readRefFile } from '@codeestra/git';
 import type {
   ConfirmedImpactPolicy, ImpactPolicyConfirmationInput, ImpactSnapshotRecord, Phase1Database,
   TrustedProject,
@@ -612,18 +610,14 @@ async function loadContext(input: {
 }
 
 /**
- * Reads the development baseline the impact facts are expressed against (ADR-0056 / ADR-0060): the
- * project's dev clone and its long-lived `dev` when one is recorded, otherwise the project folder's
- * own HEAD — the same repository a managed project's Task worktrees come from. A folder on a detached
+ * Reads the development baseline the impact facts are expressed against (ADR-0062): the project
+ * folder's own HEAD — the same repository every Task worktree comes from. A folder on a detached
  * HEAD (or an unreadable one) reports null instead of inventing a branch: the Task's own recorded
  * workspace base is reported separately, and a missing project baseline stays visible as missing.
  */
-async function readProjectDevCommit(project: TrustedProject): Promise<string | null> {
-  if (project.devRepoPath === null) {
-    return await inspectRepository(project.repoRoot).then((repository) => repository.headCommit)
-      .catch(() => null);
-  }
-  return await readLocalRefCommit({ repositoryRoot: project.devRepoPath, ref: devBranchRef });
+async function readProjectBaselineCommit(project: TrustedProject): Promise<string | null> {
+  return await inspectRepository(project.repoRoot).then((repository) => repository.headCommit)
+    .catch(() => null);
 }
 
 export interface ImpactSnapshotReport {
@@ -759,7 +753,7 @@ export async function inspectTaskImpact(input: {
     caseDetail: context.caseDetection.detail,
     now: input.now,
   });
-  const projectDevCommit = await readProjectDevCommit(project);
+  const projectDevCommit = await readProjectBaselineCommit(project);
   return {
     projectId: input.projectId,
     taskId: task.taskId,
@@ -919,7 +913,7 @@ export async function assessTaskImpact(input: {
     }
   }
 
-  const projectDevCommit = await readProjectDevCommit(project);
+  const projectDevCommit = await readProjectBaselineCommit(project);
   return {
     projectId: input.projectId,
     taskId: task.taskId,

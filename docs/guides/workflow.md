@@ -1,14 +1,15 @@
 # 端到端流程走查
 
-> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v35 · **最后校对** 2026-09-17
+> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
 > 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > §1 的创建任务与 §4.4 的修订示例由本分支按 **ADR-0065** 改写（必填 `--title`/`--name`；`--constraint`/`--kind` 已删除）。
 > §3.1 的 `task run` 门禁由 FOUNDATION-091 按 ADR-0059 改写。
 > §10 的依赖满足语义由 FOUNDATION-093 第三轮同步（ADR-0060 修订）；其余内容沿用 FOUNDATION-091 的校对基线。
-> §9 补充集成成功后的自动回收（ADR-0062）。
+> **本次修订（ADR-0066 / schema v36）**：§7「合入 `dev`」与 §8「稳定提升」整节删除，改为成果去向与
+> 本仓库自身的人工四步；§9 去掉自动回收；§3.3 的依赖语义按「上游结果 commit 对当前基线可达」改写。
 
-本文按真实顺序走一遍：**建任务 → 提交 → 运行 → 回答 Agent → 提交成果 → 验证 → 合入 dev → 稳定提升 → 资源回收**。
+本文按真实顺序走一遍：**建任务 → 提交 → 运行 → 回答 Agent → 提交成果 → 验证 → 把成果交给你 → 资源回收**。
 每一步给出可以照抄的命令和**预期输出形状**。
 
 总流水线（[PROJECT_SPEC.md](../../PROJECT_SPEC.md) §1）：
@@ -150,7 +151,7 @@ bun run codeestra task depends list   $PROJECT [task-id] [--json]
 `task depends list` 的人读视图（不加 `--json`）逐条打印 `✓/✗ 依赖`、要求的 revision 编号，以及上游合入的
 dev commit 前 12 位。
 
-**关键语义**：**上游必须通过集成验证并进入 `dev`，下游的 Task 基线 ref 才包含它的结果**（有 dev clone 时该基线是那个 clone 的 `dev`；managed 项目是项目文件夹当前检出的分支，读不到就按未满足阻塞而不是拒绝命令，ADR-0060 第三轮修订）。仅 Task verification 成功
+**关键语义**（ADR-0066）：**上游指定修订自己的结果 commit 必须对下游的 Task 基线 ref 可达**（基线就是项目文件夹建 workspace 时检出的分支；读不到就按未满足阻塞而不是拒绝命令）。仅 Task verification 成功
 **不**释放依赖。
 
 ---
@@ -321,113 +322,40 @@ bun run codeestra task tests history $PROJECT <task-id> [--limit <n>] [--json]
 
 ---
 
-## 7. 合入 `dev`（IntegrationBatch）
+## 7. 把成果交给你（合并由你完成）
+
+**Codeestra 不合入任何东西**（ADR-0066）。任务跑完、验证通过之后，成果 commit 停在
+`refs/heads/task/<task-id>`：
 
 ```sh
-bun run codeestra task integrate $PROJECT <task-id> <expected-version>
-bun run codeestra task integration list $PROJECT [<task-id>]
-
-# 多成员：先组成（不碰 Git），再一次性集成（ADR-0053）
-bun run codeestra task integration create $PROJECT --member <task-id>:<version> --member <task-id>:<version>
-bun run codeestra task integration integrate $PROJECT <batch-id>
-bun run codeestra task integration cancel $PROJECT <batch-id> --reason "<为什么不要了>"
+bun run codeestra task status $PROJECT $TASK --json     # 读 resultCommit
+git -C <项目文件夹> merge --ff-only <result-commit>     # 你自己合并（ff-only 只在你确认没分叉时成立）
 ```
 
-过程（ADR-0018 / ADR-0053）：
+- `task integrate`、`task integration create|integrate|list|get|cancel`、`promotion *`、`promotion full-suite *`
+  全部**已删除**（ADR-0066，schema v36）：IntegrationBatch、独立集成验证、`dev` 集成分支与 `dev → main` 提升
+  都不存在。执行它们只会得到用法错误（退出码 2）。
+- 为什么：合并是把代码放进你日常使用分支的动作，冲突与取舍是你的产品判断。Codeestra 不替你做，也就不替你记账。
+- **依赖释放**跟着变：下游要等上游的 result commit 对它自己的基线 ref 可达。这个重判发生在每一趟调度
+  （默认 5 秒一次），所以 `task depends list` 可能显示「边已满足、任务仍是 `BLOCKED`」，最多滞后一个 tick。
+- **没有自动回收**：合并之后 worktree 仍在磁盘上，要回收就显式 `reclaim apply`（§9）。
 
-1. 在 Runtime 数据目录的 **detached integration worktree** 中合并成果 commit（**能 ff 就 ff，否则 `--no-ff`**）；
-   多成员批次按 task-id 顺序逐个成员合并；
-2. 跑**独立的集成验证**（独立实体，见 [concepts.md](./concepts.md)）——多成员批次是**一次覆盖整批**的验证；
-3. 集成验证 `PASSED` 后才用 **CAS** 推进 `dev`，并把（每个）成员 Task 推到 `SUCCEEDED`。
+## 8. 本仓库自身的 `dev → main`（仓库约定）
 
-**退出码**：只有 `state === "INTEGRATED"` 才是 `0`；`CONFLICTED`/`FAILED`/`STALE`/`CANCELLED` 等已记录的
-非集成终态是 `1`；未收口、需要人先处理的批次（`RECOVERY_REQUIRED`）是 `3`；用法错误是 `2`。
-它们都**不推进 `dev`**。
+产品没有发布到 main 的命令。**如果你在用 Codeestra 开发别的项目，这一节与你无关**：成果停在 task 分支，
+合并由你自己完成（§7）。
 
-**拒绝的常见前提**：Task 验证未通过（`TASK_VERIFICATION_NOT_PASSED`）、没有成果 commit（`NO_CAPTURED_RESULT`）、
-`dev` 正被某个工作树检出（`DEV_REF_CHECKED_OUT`）、`dev` 分支缺失（`DEV_REF_MISSING`）、已有集成在进行
-（`INTEGRATION_IN_PROGRESS`）。
+Codeestra **自身**的开发仍按仓库约定走两个 clone（`~/Documents/codeestra` 检出 `main` 跑稳定实例、
+`~/Documents/codeestra-dev` 检出 `dev`），`dev → main` 是人工四步：
 
-集成会以 `INTEGRATION` 触发一次调度 pass，因此刚满足的下游 Task 可能立刻被重新判定。
+1. push 固定 dev 候选到 `origin/dev` 并读回核对；
+2. 在 main clone `git fetch` + `git merge --ff-only origin/dev`；
+3. 在 main clone `bun install --frozen-lockfile` → `bun run build:ui` → `bun run codeestra stop` → `status`，
+   核对 `status: "READY"` 且 `uiRunning: true`；
+4. 核对通过后才把 `main` 推回 `origin/main`（重启失败则不推回，保留现场并如实报告）。
 
----
-
-## 8. 稳定提升（`dev → main`）
-
-### 8.1 先跑 dev 全量测试证据
-
-```sh
-bun run codeestra promotion full-suite run  $PROJECT --dev-commit <full-sha> [--json]
-bun run codeestra promotion full-suite list $PROJECT [--limit <n>] [--json]
-```
-
-- 对**精确那个 dev SHA**，在 detached 副本里运行项目 `main` ref 的固定策略；
-- **Runtime 运行并观察**结果——客户端**不能自报**「我跑过了」；
-- 证据绑定三样东西：**候选 commit**、该策略的 **digest**、**候选 commit 上的锁文件 digest**；
-- `run` 退出码 `0` 仅当 `state === "PASSED"`。
-
-### 8.2 prepare →（STRICT: approve）→ promote
-
-```sh
-bun run codeestra promotion prepare $PROJECT <batch-id> <expected-dev-commit> <expected-main-commit>
-bun run codeestra promotion approve $PROJECT <promotion-id>          # 仅 STRICT
-bun run codeestra promotion promote $PROJECT <promotion-id> [--json]
-bun run codeestra promotion get     $PROJECT <promotion-id>
-bun run codeestra promotion list    $PROJECT [--limit <n>]
-bun run codeestra promotion abandon $PROJECT <promotion-id> --reason <text>
-```
-
-- `prepare` **不写 Git**（也不写远端）：它只是把「已验证的 dev commit / 预期旧 main commit / 该 commit 的集成验证 +
-  dev 全量证据」三个事实固定下来，并固定推送用的 dev clone（ADR-0047 D05）。
-- `promote` **一次只推进一步**，每一步都要读回事实：
-
-  1. **push 固定候选到远端 `dev`**（源是候选 OID，不是分支名；从不 `--force`），再 `git ls-remote` **读回核对**。
-  2. main 检出还没有拉取 → 报**「已推送、等待拉取」**（`state: PROMOTING`，`phase: AWAITING_PULL`，**退出码 3**），
-     **不执行也不记录任何重启步骤**。**这一步是你在检出 main 的那个 clone 里做的事**：
-
-     ```sh
-     git fetch origin
-     git merge --ff-only origin/dev
-     ```
-
-     它**不是** Runtime 做的 ff，也不能用别的 merge 方式代替。
-  3. 拉取后**再次调用同一命令**：核对到 main 检出确实在候选上、且候选是预期旧 main 的后代后，记录重启计划，
-     然后在 main 检出依次执行：
-
-     ```text
-     bun install --frozen-lockfile
-     bun run build:ui
-     bun run codeestra stop
-     bun run codeestra status
-     ```
-
-     **重启只有在每一步都退 0、重启后的 Runtime 回答 `READY`、且应答的 boot 与发出计划的 boot 不同时才会被记录**。
-  4. 重启记录成功**之后**才把候选 push 回远端 `main` 并读回核对，然后 `SUCCEEDED`。推回失败保持可续：
-     再次调用**只重试推回**，不会重复停 Runtime。
-
-  **界面上的投影**（只读，`promotion.list` / `promotion.get`）：任务详情与「项目」标签页的
-  `稳定提升记录 · dev → main` 显示派生的 `phase`、读回的 `origin/dev` / `origin/main` SHA，并按阶段给出 `下一步`。
-  `AWAITING_PULL` 时它**不会把任何东西显示成已提升/已完成**，而是直接列出上面第 2 步的两条命令，
-  并写明「命令面在这一阶段退出码 3——那是等待，不是失败」。它不推送、不拉取、不重启。
-- **权限差异**：`FULL` 下不需要 `approve`；`STRICT` 下需要针对**那一组精确三元组**的 `approve`——dev/main/证据任一移动，
-  批准即失效。
-- **证据过期**：main 上的策略被编辑、候选里锁文件变了、或出现更新的失败运行 → 以
-  `DEV_FULL_SUITE_EVIDENCE_STALE` 拒绝（退出码 1）。
-- 退出码：`0` 仅在`SUCCEEDED`；`1` 拒绝或失败；`2` 用法错误；**`3` 已推送、等待拉取**。
-- 失败时**不会自动回滚**：如果 main 已被拉取到候选但重启序列失败，CLI 会明确打印「main 检出已在候选上且未回滚；
-  远端 `main` 未发布」，重跑 `promotion promote` 会重跑已记录的后置步骤（推回仍只在重启记录成功后才尝试）。
-
-### 8.3 手工 stop + status（任何 main 更新之后）
-
-```sh
-cd /path/to/main-worktree
-bun run codeestra stop
-bun run codeestra status
-```
-
-只有 `status: "READY"` 且 `uiRunning: true` 才算 Runtime 已恢复。**重启成功前不得报告提升完成**（ADR-0009）。
-
----
+实现细节与失败处置见 [`docs/agents/runbook.md`](../agents/runbook.md)。这不是产品能力：没有记录、没有命令、
+没有稳定码，也没有任何东西替你保证它被执行过。
 
 ## 9. 资源回收
 
@@ -447,7 +375,7 @@ bun run codeestra reclaim records --project $PROJECT [--task <task-id>] \
 **这是唯一具有破坏性的命令面**，务必注意：
 
 - 每个被考虑资源都有动作：`RECLAIM / RETAIN / REFUSE / ALREADY_ABSENT / RECOVERY_REQUIRED`，并带归属证据。
-- **失败现场默认保留**：没有 `--include-failure-scenes` 时，未提交改动、失败/取消的验证或集成是 `RETAIN`。
+- **失败现场默认保留**：没有 `--include-failure-scenes` 时，未提交改动、失败/取消的验证是 `RETAIN`。
 - **未注册目录不会被删**，除非用 `--remove-unregistered <精确路径>` 指名（ADR-0037）。
 - 不带 `--project`（或加 `--all-projects`）覆盖**所有**已信任项目，结果按项目分组。
 - 退出码：`FAILED` → `1`；可回收数量为 0（plan）或实际回收数量为 0（apply）→ `3`（「没什么可回收」不是错误）；
@@ -456,8 +384,8 @@ bun run codeestra reclaim records --project $PROJECT [--task <task-id>] \
 被回收的 Task worktree 之后可以用 `task retry` 从保留的 Task 分支重建（ADR-0042）。
 
 从 ADR-0062 起，**合入 `dev` 成功之后**会对该批成员的 Task worktree 自动执行同一条决策（默认开启）：
-clean + 已合入的会被回收，失败现场仍保留；`settings auto-reclaim off` 可关掉。自动回收是集成后的
-最佳努力，失败不影响集成结果，细节见集成报告的 `reclamation` 字段。
+clean + 成果已进入该 workspace 记录的 `base_ref` 的会被回收，失败现场仍保留。**没有自动回收路径**
+（ADR-0066 删掉了 ADR-0062 的「集成成功后自动回收」），只有显式 `reclaim plan/apply`。
 
 ---
 
@@ -488,6 +416,6 @@ bun run codeestra task status $PROJECT <task-id>
 
 ## 下一步
 
-- 每条命令的完整参数与退出码：[cli/README.md](./cli/README.md)（九篇索引）
+- 每条命令的完整参数与退出码：[cli/README.md](./cli/README.md)（八篇索引）
 - 界面上的每个面板：[ui.md](./ui.md)
 - 报错怎么办：[troubleshooting.md](./troubleshooting.md)

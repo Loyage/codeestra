@@ -260,8 +260,8 @@ describe('schema v35 Task input fields (ADR-0065)', () => {
     const upgraded = new Phase1Database();
     try {
       upgraded.sqlite.query(`INSERT INTO projects(id,name,repo_root,git_common_dir,
-        main_ref,dev_ref,object_format,policy_version,created_at)
-        VALUES ('p1','P','/r','/r/.git','refs/heads/main','refs/heads/dev','sha1',1,1)`).run();
+        main_ref,object_format,policy_version,created_at)
+        VALUES ('p1','P','/r','/r/.git','refs/heads/main','sha1',1,1)`).run();
       upgraded.sqlite.query(`INSERT INTO project_trusts(id,project_id,repo_root,git_common_dir,
         object_format,policy_version,actor,status,accepted_at)
         VALUES ('trust1','p1','/r','/r/.git','sha1',1,'user','ACTIVE',1)`).run();
