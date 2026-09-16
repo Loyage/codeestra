@@ -7563,7 +7563,9 @@ CREATE TABLE runtime_command_receipts (
 
 - 本格在 Orca worktree `glc-capacity-foundation`（分支 `Loyage/glc-capacity-foundation`，基线 `dev@de03448`）交付，
   **未把新的 `dev` 合进本分支**（本格任务约束明确禁止 `rebase`/合入新 `dev`），而是由用户指令以 **merge commit** 把本分支并入
-  本地 `dev`（合并时 `dev` 已前进到 `367bd4d`，含 `task/930f5325` 的 purge 对账修订）。
+  本地 `dev`：本分支提交 `4d1e2a5`，合并时 `dev` 为 `367bd4d`（含 `task/930f5325` 的 purge 对账修订），
+  合并提交为 **`2c377de`**。冲突只有 4 个文档文件（两边都往同一处追加了校对说明），已手工合并并保留双方内容；
+  代码文件（`apps/cli/src/main.ts`、`packages/contracts/src/index.ts`）由 git 自动合并。
 - **未 push `origin/dev`**、未提升 `main`、未重启任何 Runtime（稳定实例与 dev 实例都未触碰）；
   因此本格的合入事实只存在于本机 `dev`，远端 `origin/dev` 仍落后。
 - v34 与 GLC-2（`Loyage/glc-pause-ui`）共用同一个版本号：本次只把**容量上半**并入 `dev`，
