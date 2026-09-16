@@ -1003,10 +1003,9 @@ function printSettingsList(view: SettingsListView): void {
 function usage(): never {
   console.error(`Usage:
   bun run codeestra status
-  bun run codeestra open [path] [--dev-repo <dev-clone>] [--yes] [--no-open]
-    # Composes inspect + trust + ui. A dev clone is optional (ADR-0060): with one the project keeps
-    # the long-lived dev baseline and dev→main promotion, without one its Task baselines come from
-    # the folder's checked out branch and the dev-only commands refuse until one is recorded.
+  bun run codeestra open [path] [--yes] [--no-open]
+    # Composes inspect + trust + ui. There is exactly one Task baseline (ADR-0066): the branch the
+    # project folder has checked out right now, fixed with the workspace when a Task starts.
   bun run codeestra ui [--no-open]
   bun run codeestra stop [--wait <seconds>]
   bun run codeestra agent config get [--project <project-id>] [--adapter <id>]
@@ -1025,24 +1024,16 @@ function usage(): never {
     # Every selected path is verified before anything is written and again before a Session starts;
     # a path that cannot be loaded is refused with a stable code and no Execution is created.
     # Exit codes: 0 applied, 1 refused (unusable path or adapter without plugin selection), 2 usage.
-  bun run codeestra project inspect [path] [--dev-repo <dev-clone|none>]
+  bun run codeestra project inspect [path]
   bun run codeestra project policy [path]
-  bun run codeestra project trust [path] [--dev-repo <dev-clone|none>] [--yes]
+  bun run codeestra project trust [path] [--yes]
   bun run codeestra project list
-    # ADR-0047 D05 / ADR-0060: a dev clone is a second, independent clone of the same origin, and it
-    # is what makes \`task integrate\` and \`promotion *\` usable (they need the long-lived dev branch).
-    # \`--dev-repo <path>\` records one — the Runtime verifies it (a Git work tree, another clone rather
-    # than the main checkout or one of its worktrees, the same origin, HEAD on the project dev branch)
-    # and refuses with a stable code (DEV_REPO_*) when it cannot, so trust never records a path it
-    # could not verify. \`--dev-repo none\` states that the project has none; omitting the flag
-    # re-reads what a previous trust recorded. No value is ever inferred from a path or branch name.
-    #
-    # Without a dev clone (ADR-0060 calls this the "managed" case) Task worktrees are based on the
-    # project folder's **currently checked out branch** instead, and \`task integrate\` / \`promotion
-    # prepare\` refuse with DEV_REPO_REQUIRED because that long-lived branch does not exist — a missing
-    # branch, not an approval step. A detached HEAD there is refused with TASK_BASE_REF_UNRESOLVED.
-    # project inspect reports which of the two baselines applies and, read-only, whether this checkout
-    # still has its own transitional local dev ref.
+    # ADR-0066: the product no longer models a dev clone, a long-lived dev branch, integration into
+    # it or dev→main promotion, so there is no \`--dev-repo\` flag and no DEV_REPO_* code. A Task
+    # worktree is based on the branch the project folder has checked out right now, fixed with the
+    # workspace; a detached HEAD there is refused with TASK_BASE_REF_UNRESOLVED (check out a branch,
+    # or pass --base-ref to task run). project inspect reports the repository identity and says the
+    # baseline in one line.
   bun run codeestra project impact validate [path] [--json]
   bun run codeestra project impact show <project-id> <task-id> [--json]
   bun run codeestra project impact explain <project-id> <task-id> [--json]
@@ -1077,10 +1068,9 @@ function usage(): never {
     new Execution rather than switching the Agent inside one. This is the explicit start request of
     the same gate the automatic scheduler applies, so it exits 3 when the Task is *waiting* (the
     conflict or capacity reason code is in --json and on stderr) and 1 when it is refused.
-    --base-ref fixes the baseline of a **new** workspace (ADR-0060): a local branch of the project's
-    dev clone when one is recorded, otherwise a local branch of the project folder itself. Omitted,
-    the baseline is the project's default (the dev clone's dev, or the project folder's currently
-    checked out branch). A Task that already has a workspace keeps its recorded baseline and the flag
+    --base-ref fixes the baseline of a **new** workspace (ADR-0066): a local branch of the project
+    folder. Omitted, the baseline is the branch that folder has checked out right now. A Task that
+    already has a workspace keeps its recorded baseline and the flag
     is refused with TASK_BASE_REF_ALREADY_FIXED instead of being ignored; a ref that is not a local
     branch exits 1 with TASK_BASE_REF_NOT_A_BRANCH, and a missing one with TASK_BASE_REF_MISSING.
   bun run codeestra task pause <project-id> <task-id> <expected-version>
@@ -1118,15 +1108,12 @@ function usage(): never {
     # owned worktrees, verification copies and branches. A non-terminal Task is cancelled first
     # through the ordinary cooperative stop, and a RECOVERY_REQUIRED Task is reconciled by
     # observation first (the "task recover" rule; result stop.stop: "RECOVERED"); a stop or a
-    # provider that cannot be proven gone deletes nothing (RECONCILE_REQUIRED, exit 1). A Task whose
-    # commit already reached dev/main is refused
-    # (TASK_INTEGRATED_INTO_DEV / TASK_IN_STABLE_PROMOTION, exit 1) — archive it instead.
+    # provider that cannot be proven gone deletes nothing (RECONCILE_REQUIRED, exit 1).
     # --yes is required and is the only guard; without it the command exits 2 without sending
     # anything. --force (ADR-0058 D09) is the same caller saying "delete it anyway": the Runtime
     # first tries to terminate the provider processes the Task recorded (identity-verified pids
-    # only), then deletes what it otherwise would have refused — a provider it could not prove gone,
-    # resources whose ownership it cannot prove (those files are left on disk) and a Task whose
-    # commit is already in dev/main (the membership rows that record who brought it in are deleted).
+    # only), then deletes what it otherwise would have refused — a provider it could not prove gone
+    # and resources whose ownership it cannot prove (those files are left on disk).
     # Everything stepped over is printed to stderr and recorded in the forced field of the view
     # (stop.stop: "FORCED") and in the TaskPurged audit event. Replaying the same command ID returns
     # the receipt instead of a second deletion.
@@ -1194,15 +1181,6 @@ function usage(): never {
   bun run codeestra task operation list <project-id> <task-id> [--json]
   bun run codeestra task operation get <project-id> <operation-id> [--json]
   bun run codeestra task operation cancel <project-id> <task-id> <operation-id> [--json]
-  bun run codeestra task integrate <project-id> <task-id> <expected-version>
-    # one member: composes a batch and integrates it in one command (exit 0 integrated, 1 refused
-    # or a recorded terminal verdict, 3 a batch that needs a human first)
-  bun run codeestra task integration create <project-id> --member <task-id>:<expected-version>
-    [--member <task-id>:<expected-version> ...]
-  bun run codeestra task integration integrate <project-id> <batch-id>
-  bun run codeestra task integration list <project-id> [task-id]
-  bun run codeestra task integration get <project-id> <batch-id>
-  bun run codeestra task integration cancel <project-id> <batch-id> [--reason <text>]
   bun run codeestra task depends add <project-id> <task-id> <expected-version>
     <prerequisite-task-id> [--revision <revision-id>] [--json]
   bun run codeestra task depends remove <project-id> <task-id> <expected-version>
@@ -1276,14 +1254,6 @@ function usage(): never {
     GLOBAL_CONTROL_IN_PROGRESS) in --json and on stderr; 3 is used only by a Task that *waits* for the
     barrier (SCHEDULER_GLOBALLY_PAUSED), never for a partially frozen Runtime. reconcile only observes
     and records: it sends no signal, and it never turns an unverifiable target into a stopped one.
-  bun run codeestra promotion prepare <project-id> <batch-id> <expected-dev-commit> <expected-main-commit>
-  bun run codeestra promotion approve <project-id> <promotion-id>
-  bun run codeestra promotion promote <project-id> <promotion-id> [--json]
-  bun run codeestra promotion abandon <project-id> <promotion-id> --reason <text>
-  bun run codeestra promotion get <project-id> <promotion-id>
-  bun run codeestra promotion list <project-id> [--limit <n>]
-  bun run codeestra promotion full-suite run <project-id> --dev-commit <full-sha> [--json]
-  bun run codeestra promotion full-suite list <project-id> [--limit <n>] [--json]
 
 attention resolve ends a prose-question wait: an Agent that used no tool and ended its turn by
 asking its question in ordinary prose leaves a Task whose provider process already exited. The
@@ -1344,23 +1314,12 @@ a running verification, and the Operation's settle, arrive on the same stream as
 (events tail; the Web UI shows them live). A progress event never carries a verdict — a passed
 verification is only ever reported by VerificationCompleted and by the run's own state.
 
-promotion prepare fixes the verified dev commit, the expected old main commit and the integration
-verification of that commit, and fixes the dev clone it will push from; it writes nothing to Git and
-nothing to the remote. The candidate is removed from the stable clone, so ADR-0047 D01's only
-promotion path is a round trip through the remote: promotion promote pushes the fixed candidate from
-the recorded dev clone to the remote dev branch, reads the remote ref back and compares it with the
-candidate (a push that exited 0 is not evidence), and stops there with exit code 3 and "pushed,
-awaiting pull" while the main checkout has not pulled it. In the main checkout the user runs
-\`git fetch origin && git merge --ff-only origin/dev\`; running promotion promote again then verifies
-that pull and runs the recorded sequence there: bun install --frozen-lockfile, bun run build:ui, bun
-run codeestra stop, bun run codeestra status. The restart counts as recorded only when every step
-exited 0 and the restarted Runtime answered READY, and only then is the candidate pushed to the
-remote main branch and read back, which is what makes the promotion SUCCEEDED. Nothing is ever
-forced and no ref is moved with update-ref; a remote dev branch that moved away from the candidate,
-a non-fast-forward push, an unreachable remote or a failed readback is refused without moving any
-ref (a refused push or publish leaves the record open so the same command retries it). STRICT
-additionally needs promotion approve for that exact triple; a dev/main/evidence move makes it
-invalid. Exit codes: 0 promoted, 1 refused or failed, 2 usage, 3 pushed but not pulled yet.
+ADR-0066 removed the whole integration and promotion face this text used to describe: there is no
+\`task integrate\`, no \`task integration *\`, no \`promotion *\`, no IntegrationBatch, no independent
+integration verification and no dev clone. A Task's result commit stays on \`refs/heads/task/<task-id>\`
+and merging it is the user's own Git step; the Runtime never merges, never pushes and keeps no
+promotion records. Likewise no command reports a dev baseline any more: the one Task baseline is the
+branch the project folder has checked out when the workspace is prepared.
 
 ADR-0038 splits verification cost by branch responsibility. A \`task/*\`, \`lane/*\` or feature branch
 commits its own small \`.codeestra/tests.json\` (a scope statement plus 1-16 argv commands, each with
@@ -1368,14 +1327,9 @@ what it covers); \`task tests record\` snapshots that file into an append-only r
 exact task/revision/commit, and \`task verify\` runs that recorded plan -- never the file, so a scope
 change is an explicit audited append. A Task with no recorded plan keeps using the fixed project
 policy, and a recorded plan that belongs to another revision or commit is refused instead of being
-silently replaced by the project policy. The full suite moves to the promotion gate:
-\`promotion full-suite run <project-id> --dev-commit <full-sha>\` runs the fixed project policy
-against that exact candidate SHA in a detached copy (the Runtime observes the result; a client
-cannot submit one) and binds the evidence to the candidate commit, the policy digest at the
-project's main ref and the lockfile digest at that commit. \`promotion prepare/approve/promote\` all
-require a PASSED run of exactly that SHA with all three bindings unchanged; a policy edit on main, a
-lockfile change inside the candidate or a newer failing run makes the evidence stale and the
-promotion is refused with DEV_FULL_SUITE_EVIDENCE_STALE (exit 1).
+silently replaced by the project policy. (The \`dev → main\` full-suite evidence gate this paragraph
+used to describe went with the promotion face; this repository's own full-suite discipline is stated
+in AGENTS.md instead.)
 
 scheduler capacity get reports the **Runtime-wide** concurrency facts a scheduler uses: the single
 limit for this CODEESTRA_HOME and where it came from, how many slots are occupied across every
