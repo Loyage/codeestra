@@ -8,6 +8,7 @@
 > §3.1、§3.2、§10.2 由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目的常态路径不变）。
 > §10.3 的 `WAIT_CAPACITY` 一行、§10.4、§11.2 与 §13.4 由 **FOUNDATION-096** 同步（ADR-0061：容量只剩一个
 > Runtime 全局上限，命令去掉 project/adapter 参数，并可从 `settings concurrency` 实时调整）；
+> §11.2.2 与 §12.3 由 ADR-0062 新增/补充（集成成功后自动回收 Task worktree，`settings auto-reclaim` 默认开启）。
 > §10.3 新增 `WAIT_CONTROL` 一行并由 **FOUNDATION-097** 新增 §10.5「全局暂停」。
 > §「任务」永久删除一条与 §13.5 `RECOVERY_REQUIRED` 的 purge 行为由用户任务 `task/930f5325` 同步（ADR-0058 D02 修订，2026-09-16）。
 > 其余内容沿用 FOUNDATION-091 的校对基线。
@@ -1131,6 +1132,23 @@ bun run codeestra settings concurrency reset [--json]
 降低上限**不会**暂停、释放或终止已经在跑的 Task（`get` 的 `used` 因此可能大于 `limit`）。
 它和 §11.2 的五个界面键一样是**设置、不是门禁**：零确认，FULL/STRICT 行为相同。
 
+### 11.2.2 集成成功后自动回收 worktree
+
+`settings auto-reclaim` 是 ADR-0062 的那个开关（默认 `on`）：
+
+```sh
+bun run codeestra settings auto-reclaim        # 读取 {enabled, default, file, appliesTo}
+bun run codeestra settings auto-reclaim on     # 默认
+bun run codeestra settings auto-reclaim off    # 回到手动 reclaim
+```
+
+- 开启时：`task integrate` / `task integration integrate` **成功后**（`dev` 已前进、成员 Task 已是 `SUCCEEDED`），
+  对该批每个成员执行与 `reclaim` **完全相同**的归属决策（只删 clean + 成果已是基线 ref 祖先 + 无 held Execution/活跃预留的
+  worktree）。**失败现场仍默认保留**，**绝不删 branch**（仍可 `task retry` 重建）。
+- 关闭时：集成照常，什么都不自动删；`reclaim plan/apply` 幂等且不受影响。
+- 设置存在 `<CODEESTRA_HOME>/auto-reclaim.json`；自动回收是集成成功后的**最佳努力**，它失败不影响集成结果，
+  失败细节在集成报告的 `reclamation` 汇总里。Web UI 的「设置 → 资源回收」卡写入同一条命令。
+
 ### 11.3 Agent 配置
 
 ```sh
@@ -1218,6 +1236,8 @@ bun run codeestra reclaim records --project $PROJECT [--task <task-id>] \
 - 退出码：`FAILED` → `1`；可回收数量为 0（plan）或实际回收数量为 0（apply）→ `3`（「没什么可回收」不是错误）；
   否则 `0`。
 - 被回收的 Task 工作树之后可以用 `task retry` 从保留的 Task 分支**重建**。
+- **集成成功后会自动回收**（ADR-0062，默认开启）：不想要就 `settings auto-reclaim off`；失败现场依旧保留，
+  `reclaim plan/apply` 仍然可用。
 
 ### 想深入看哪篇
 

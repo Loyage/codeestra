@@ -12,6 +12,7 @@
 > 「调度、容量与冲突」的容量与上限、槽位预留两行由 **FOUNDATION-096** 改写（ADR-0061：唯一 Runtime 全局上限），
 > 同一表的「全局暂停」一行由 **FOUNDATION-097** 从「尚未实现」改为实现事实（ADR-0061 D04–D10：持久屏障与
 > Provider 主进程冻结，Pi 为 `SUPPORTED`、Codex/Claude 为 `REQUIRES_VALIDATION`）；
+> 「资源与知识」表新增「集成后自动回收 worktree」一行（ADR-0062 / 用户任务，无 schema 变更）。
 > 「设置」表的并发上限设置一行同轮新增（同一个值也可从设置面实时调整）；
 > 「永久删除」一行的 `RECOVERY_REQUIRED` 对账由用户任务 `task/930f5325` 同步（ADR-0058 D02 修订，2026-09-16）；
 > 其余行沿用 FOUNDATION-091 的校对基线。
@@ -116,6 +117,7 @@
 | 能力 | 能做什么 | CLI 入口 | UI 位置 | ADR |
 |---|---|---|---|---|
 | 资源回收 | 试运行与执行共用同一决策形状；未注册目录不被删（除非指名）；失败现场默认保留 | `reclaim plan/apply/records` | —（CLI-only） | [0021](../decisions/0021-resource-reclamation.md)、[0037](../decisions/0037-reclaim-batch-and-unregistered-directories.md) |
+| 集成后自动回收 worktree | 集成成功后对该批成员的 Task worktree 自动执行同一条 `reclaim` 决策（默认开启，`settings auto-reclaim off` 关闭）；只删 clean + 已合并的；不删 branch；失败不影响集成结果，写进集成报告与账本 | `settings auto-reclaim [on|off]`（自动回收本身由 `task integrate` / `task integration integrate` 触发） | 设置页「资源回收」卡 | [0062](../decisions/0062-automatic-worktree-reclamation-after-integration.md) |
 | worktree 重建 | 回收后从保留的 Task 分支重建 worktree，供 `task retry` 使用 | `task retry`（重建路径）；`reclaim plan/apply` 决定保留 | —（CLI-only） | [0042](../decisions/0042-rebuild-reclaimed-worktree.md) |
 | Project Knowledge | 分层知识（人工 `instructions`/`skills` 从 `main` ref 读 + Runtime 数据目录里的机器生成层）；无覆盖语义、重复 id/路径 fail-closed；逐条来源与 digest 进快照 | `project knowledge validate/list/show/resolve` | —（界面无投影） | [0041](../decisions/0041-project-knowledge-layers-and-execution-binding.md) |
 | Session Guidance 台账 | 一条指导的耐久记录（正文）+ append-only 尝试台账 + 每个 Execution 启动时带上它的产物事实（`launchedWith[]`）；artifact 在 `<CODEESTRA_HOME>/guidance/<project>/<task>/guidance-context.md`，**绝不写进 Task worktree**，也不与 Project Knowledge 共用文件 | `session guidance list/get` | —（CLI-only） | [0057](../decisions/0057-session-guidance-channel-and-fact-layering.md) |

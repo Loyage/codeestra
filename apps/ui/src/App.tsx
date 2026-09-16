@@ -747,7 +747,7 @@ function Console({ token, initialProjectId }: {
             tasks={state.tasks} refreshToken={state.detailToken} run={run} update={update}
             reloadProjects={loadProjects} />
         ) : null}
-        {tab === 'settings' ? <SettingsPage /> : null}
+        {tab === 'settings' ? <SettingsPage client={client} /> : null}
       </main>
 
       <footer className="muted">

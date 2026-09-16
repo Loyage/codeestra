@@ -1026,6 +1026,21 @@ Runtime 后依然生效，命令行（codeestra settings ui …）读写的是�
 
 读写失败时显示错误横幅 `读取或写入 Runtime 设置失败：<CODE>: <message>`。
 
+### 8.1 「资源回收」卡（ADR-0062）
+
+「设置」标签页在「界面效果」下方还有一张「资源回收」卡，只有一个开关：
+
+| 位置 | 元素 | 命令 |
+|---|---|---|
+| 资源回收卡 | 标题 `资源回收` + `重新读取` | `settings.autoReclaim.get` |
+| 资源回收卡 | `集成后自动回收 worktree` 复选框（改动即写） | `settings.autoReclaim.set` |
+| 资源回收卡 | 当前/默认状态、设置文件真实路径与等价命令 | —（只读投影） |
+
+- 标题下说明原文：`集成成功后，Codeestra 按 reclaim 的同一套归属校验自动回收该批成员的 Task worktree；失败现场（脏 / 未合入 / 失败或取消）仍然保留。关闭后回到手动 reclaim。`
+- 复选框默认勾选（`enabled: true`）；取消后写入 `settings.autoReclaim.set {enabled:false}`，与 CLI
+  `codeestra settings auto-reclaim off` 是同一条命令、同一份文件（`<CODEESTRA_HOME>/auto-reclaim.json`）。
+- 和界面效果一样，它是**设置不是门禁**：零确认；`reclaim plan/apply` 行为不受影响。
+
 ---
 
 ## 9. 汇总：只读投影 vs 真的改状态
@@ -1096,7 +1111,8 @@ Runtime 后依然生效，命令行（codeestra settings ui …）读写的是�
 | 能力 | 现状 |
 |---|---|
 | `attention resolve`（散文提问等待的回应） | 界面尚无该控件；等待会以 `WAITING_FOR_USER` + 会话结束注记显示，退出方式在 CLI |
-| `settings prose-question-attention` | 全局开关，界面未提供（「设置」标签页只有界面效果五项） |
+| `settings prose-question-attention` | 全局开关，界面未提供（设置页只有界面效果与资源回收卡） |
+| `settings auto-reclaim` | 全局开关（ADR-0062），**界面已提供**：设置页「资源回收」卡的复选框读写同一条命令 |
 | `reclaim plan/apply/records` | 破坏性命令面，界面未提供 |
 | `promotion prepare/approve/promote/abandon` | 界面上的稳定提升记录是**只读**的 |
 | `task tests record/show/history` | 界面只显示验证结果与策略摘要 |

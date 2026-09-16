@@ -12,6 +12,7 @@
 > （同一个 schema v34 的暂停半边，两半已合并在同一次集成里）。
 > §4 的 `task list` / `task status` 由用户任务 `Loyage/simplize_task_ui`（2026-09-16）补上 `latestExecution` 投影字段的说明
 > （只读字段，无新命令、无 flag、无退出码变化）。
+> §19 新增 `settings auto-reclaim` 一节，并在 §16 标注集成后的自动回收（ADR-0062 / 用户任务，无 schema 变更）。
 > 同一事实还有一个设置面拼写：`settings concurrency get|set --limit|reset`（见 §19），它发的是同一条 Runtime 命令。
 > §7 的 `session handoff terminal resize` 一节由 FOUNDATION-083 校对（ADR-0054）。
 > §3 的 `project inspect`/`project trust` 段、§1 `open` 的失败码、§4 的 `task run` 与 `task depends` 两节由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目的常态路径不再出现 `DEV_REPO_REQUIRED`）；其余段落沿用 FOUNDATION-091 的校对基线。
@@ -1213,6 +1214,10 @@ bun run codeestra settings prose-question-attention auto       # 写入
 bun run codeestra settings prose-question-attention record-only
 bun run codeestra settings prose-question-attention off
 
+bun run codeestra settings auto-reclaim          # 读取
+bun run codeestra settings auto-reclaim on       # 写入
+bun run codeestra settings auto-reclaim off
+
 bun run codeestra settings concurrency get   [--json]
 bun run codeestra settings concurrency set   --limit <n> [--json]
 bun run codeestra settings concurrency reset [--json]
@@ -1224,6 +1229,23 @@ bun run codeestra settings concurrency reset [--json]
 - 取值只有三个：`auto`（默认）/ `record-only` / `off`。其他取值是用法错误。
 - **不需要确认**，且**不会改写已经记录下来的等待**。
 - `--json` 被接受（输出本来就是 JSON）。
+
+### `settings auto-reclaim`（集成成功后自动回收 worktree）
+
+一个 Runtime 一个开关（ADR-0062）。**读与写是同一条命令**：不给值就是读，给 `on`/`off` 就是写；
+其他取值、或多余的位置参数是用法错误（退出码 2）。**默认 `on`，零确认**。
+
+- 存储：`<CODEESTRA_HOME>/auto-reclaim.json`（`{"version":1,"enabled":true}`，0600/0700）；
+  缺文件 = 默认开启；文件不可读/非法时 Runtime 在启动时**记录错误并使用默认值**（与 prose 设置同处理，
+  不静默改写；下一次 `on|off` 写入会把它替换成合法文件）。
+- `on`（默认）：`task integrate` / `task integration integrate` 成功后（`dev` 已前进、成员 Task 已是 `SUCCEEDED`），
+  对该批**每个成员**执行一次 scoped 回收（`kinds=['TASK_WORKTREE']`），复用 `reclaim` 的同一套归属校验与账本。
+  只有「clean + 成果已是基线 ref 的祖先 + 无 held Execution/活跃预留」才会删；失败现场（脏/未合入/失败或取消）
+  默认保留。**不删 branch**（`task retry` 仍可重建）。
+- `off`：集成照常进行，**不**回收任何 worktree；显式 `reclaim apply` 的行为一字不变。
+- 自动回收是「集成成功之后的最佳努力」：它失败**不影响**集成结果（`state=INTEGRATED` 仍成立），失败细节在集成报告的
+  `reclamation` 汇总里；账本行的 evidence 带 `automatic: true` / `trigger: 'INTEGRATION'` / `batchId`。
+- `get` 返回 `{enabled, default, file, appliesTo}`。
 
 ### `settings concurrency`（全局并发上限）
 
