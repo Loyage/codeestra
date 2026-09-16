@@ -10,6 +10,18 @@ Specification 是人类可读文本，constraints 是带稳定 ID 的文本条�
 
 ## 2. 聚合与归属
 
+### RuntimeSchedulerControl（ADR-0061，已接受、待实现）
+
+每个 `CODEESTRA_HOME` 只有一个 Runtime 负载控制聚合，不属于任何 Project：
+
+- `globalLimit` 是跨全部 Project / Adapter 的唯一并行上限（默认 2，范围 1–16）；不存在项目级或 Adapter 级覆写。
+- `pauseState ∈ RUNNING | PAUSING | PAUSED | RESUMING | RECOVERY_REQUIRED`、`pauseEpoch`、version、actor 与请求/结算时间构成持久控制事实。
+- `PauseTarget` 固定一个 epoch 内每个活动 provider incarnation 的 project/task/execution/session/incarnation、pid + start token、状态与观测。这些业务 ID 是身份快照而非 FK（Task purge 后进程恢复/审计事实仍须保留）；它只证明进程冻结/恢复事实，不改变 Task、Execution 或 AgentSession 状态。
+- 全局冻结中的 Task 仍持有原 slot/workspace/writer lease 并继续计入容量。`PAUSED` 只在所有目标主进程被真实观察为 stopped（或已证明先退出）后成立；部分成功是 `RECOVERY_REQUIRED`。
+- 该聚合跨 Runtime 重启保持。新 boot 先恢复屏障，绝不自动继续旧 boot 的 Provider；失去 transport 的 Session 仍走既有 reconcile，不能从 PauseTarget 伪造 live reconnect。
+
+这是 Runtime 控制聚合，不是调度业务主实体的替代品：Task 仍是业务主实体，reservation 仍归属 Task/Project。
+
 ### Project
 
 保存 canonical repo root、Git common directory、mainRef、显示名、创建时间与策略版本。启动先核对 Git 仓库身份，目录搬迁不能悄悄关联到另一仓库。不自动把现有任意分支改名为 main；实际目标分支由项目配置指定。
@@ -46,6 +58,10 @@ id、taskId、number、previousRevisionId、specification、constraints、**feat
 **待用户确认的后续语义**：上游在依赖满足前又修订时，是否自动移动 requiredRevision。安全默认不是替用户选版本，而是使该边 NEEDS_REVIEW、阻止下游启动，并要求明确选择版本后再激活；Phase 1 不实现 DAG 编辑，因此不阻塞 Phase 0/1。
 
 满足条件：指定上游 revision 有成功进入 `dev` 的 IntegrationBatch 记录，且结果 commit 在下游选定 dev 基线的祖先链中。dev 被外部重写导致不可达时重新阻塞。无法自动判断外部 revert 的语义，必须暴露此限制。进入 dev 只满足开发依赖，不代表已提升到稳定 main（FULL 下提升不需批准，STRICT 下需要）。
+
+### ExecutionSlotReservation / 全局容量
+
+现有 reservation 仍绑定 project/task/revision/adapter/workspace 与 holder identity；ADR-0061 只改变**计数域**与配置来源：容量查询把整个 Runtime 的活跃 reservation 与 `resource_held=1` Execution 按 Task 去重，不再按 Project 筛选，也不再读取 Adapter 覆写。降低 `globalLimit` 不改任何已有 reservation/Execution。
 
 ### Execution / RevisionDelivery
 

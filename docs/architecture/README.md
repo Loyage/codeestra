@@ -10,6 +10,9 @@ Desktop / 最小本地客户端（可断开与重连）
 独立本地 Runtime │
   Intent Intake → Task Service → DAG / Impact / Conflict
                                       ↓
+                       Runtime Global Load Control
+                    （唯一并行上限 + 全局 Provider 冻结，ADR-0061 待实现）
+                                      ↓
                                   Scheduler
                                       ↓
   Execution Coordinator → Git Workspace Port → Git CLI
@@ -63,6 +66,7 @@ Self Task → Candidate → 自托管测试 → 用户 Promotion → 排空 → 
 - Agent 可加载的插件/资源按作用域持久化（`agent plugins list|select`、`agent.config.set --pluginSelection`，schema v27），只有声明 `pluginSelection: SUPPORTED` 的 Adapter 能应用；其余以稳定码拒绝而不假装写入（ADR-0044）。界面效果设置（`settings ui *`）是设置不是门禁，不驱动任何领域状态迁移（ADR-0045）。
 - 用户可从 Task 入口接管真实 Agent：Pi 在安全点从 RPC 交接到原生 TUI/PTY，普通输入是 Session Guidance，规格变化仍走 TaskRevision；任意时刻只有一个 Provider writer。
 - 取消协作停止，超时需人工处理；提高优先级不抢占。
+- ADR-0061 已接受、待实现：一个 Runtime 只保留一个跨项目并行上限；全局暂停先建立持久启动屏障，再可核验地冻结 Provider 主进程，不向已运行工具子进程发停止信号，重启后也不自动继续。它不替代单 Task pause。
 - Stable Promotion 排空活动任务后切换，不迁移活动 Session。
 
 ## 最大风险与建议
@@ -74,6 +78,7 @@ Self Task → Candidate → 自托管测试 → 用户 Promotion → 排空 → 
 | 依赖满足但上游代码不在下游 | dev 基线祖先可达性检查；仅执行成功不满足依赖 |
 | 预测不完整造成误并行 | UNKNOWN 不并行；实际 diff 越界撤销 SAFE，暂停并报告 |
 | SQLite、Git 与进程非原子 | Operation + outbox + 幂等键 + 外部身份核对；不能盲目重试 start/promote |
+| 全局暂停误把“发过信号”当成“已冻结” | pause epoch 固定目标；按 pid + start token + incarnation 复读 stopped 事实；部分成功进入全局 `RECOVERY_REQUIRED` 并保持屏障；Provider 进程归属未经 spike 不声明 SUPPORTED |
 | 已 checkout main 被直接 update-ref | dev→main 提升时拒绝使用户 index/worktree 不一致的更新；具体安全交接策略 Phase 4 前确认；成功更新后必须重启 Runtime |
 | 宿主权限、hooks、日志秘密 | worktree 不是沙箱；FULL 明确允许当前用户主机级副作用与敏感路径提交，终端输出仍不可信；需要旧门禁时显式切换 STRICT（ADR-0011） |
 | 自我升级数据不可逆 | Candidate 数据隔离；迁移/备份/bootstrap 更新策略 Phase 7 前明确批准 |
@@ -82,4 +87,4 @@ Self Task → Candidate → 自托管测试 → 用户 Promotion → 排空 → 
 
 完整产品的语义不可能用一次草案全部锁死。这里采用按阶段准入：Phase 0 的领域纯函数不涉及外部副作用；Phase 1 必须验证 Pi 协议并确认 Git 成果提交策略；Phase 2/4/7 的待决项只阻塞对应阶段，不被当作已批准默认值。
 
-SQLite 文档第 2–6 节为关系设计（含明确标注的待细化约束），第 8 节逐版本记录**已执行**的 migration（当前 `phase1SchemaVersion = 28`，v28 为 `intents.kind` 收窄/ADR-0046；v16 永久未使用、v22 未占用）。API 为 Runtime port 合约草案，不是供应商能力承诺；`agent-adapter-api.md` 已记录 Pi、Codex 与 Claude Code 的实测能力矩阵。
+SQLite 文档第 2–6 节为关系设计（含明确标注的待细化约束），第 8 节逐版本记录**已执行**的 migration（当前最新实现为 schema v33，ADR-0060；v16 永久未使用、v22 未占用）。ADR-0061 计划的 v34 仍是设计，不是已执行 migration。API 为 Runtime port 合约草案，不是供应商能力承诺；`agent-adapter-api.md` 已记录 Pi、Codex 与 Claude Code 的实测能力矩阵。

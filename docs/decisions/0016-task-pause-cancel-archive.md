@@ -1,6 +1,6 @@
 # ADR-0016：Task 暂停 / 终止 / 归档
 
-Status：Accepted（用户明确选择：暂停运行中的执行、CANCELLED 为终态、归档软删除并保留 worktree、CLI 与 Web UI 同批）
+Status：Accepted（用户明确选择：暂停运行中的执行、CANCELLED 为终态、归档软删除并保留 worktree、CLI 与 Web UI 同批。**ADR-0061 的全局 Provider 冻结是另一层 Runtime 控制状态：不结束 Execution、不写 Task `PAUSED`，不取代本 ADR。**）
 
 ## Context
 

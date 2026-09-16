@@ -51,19 +51,21 @@ Task verification（ADR-0006）、Task 暂停/取消/归档（ADR-0016/FOUNDATIO
 
 ## Phase 2 — Task DAG + Scheduler + Parallel Worktrees
 
-交付：DAG 校验、依赖满足策略、影响分析、保守冲突分析、资源预留和多 worktree 调度。
+交付：DAG 校验、依赖满足策略、影响分析、冲突分析、资源预留和多 worktree 调度；负载控制最终形态为每个 Runtime 一个跨项目并行上限，并支持持久的全局 Provider 冻结/继续（ADR-0061）。
 
 验收：SAFE 的独立任务并行；UNKNOWN/CONFLICTING 不并行；循环依赖拒绝；下游 dev 基线含所需上游代码。ADR-0009 要求上游先进入 dev 才满足依赖；Phase 4 前允许下游继续 BLOCKED，不提前偷做完整集成。
 
 ### 当前状态（截至 FOUNDATION-074）
 
 **交付项已实现**：DAG 校验与 `BLOCKED` 语义（ADR-0024/FOUNDATION-044，含环校验）、影响分析与确定性 Conflict Analyzer
-（ADR-0031/FOUNDATION-053，`SAFE|UNKNOWN|CONFLICTING` + 稳定 reason code）、容量原语（ADR-0032/FOUNDATION-054，全局默认 2 +
+（ADR-0031/FOUNDATION-053，`SAFE|UNKNOWN|CONFLICTING` + 稳定 reason code）、容量原语（ADR-0032/FOUNDATION-054，**当前实现为每项目**“全局”默认 2 +
 每 adapter 上限 + reservation/release/崩溃 reconcile）、调度引擎本体（ADR-0033/FOUNDATION-055，自动 tick、候选顺序、等待语义、
 `--allow-unknown`）与其 UI 投影（FOUNDATION-059）。
 
 **未验证（因此本 Phase 的验收矩阵尚未成立）**：验收第一项「两个 SAFE 任务真的同时跑」只在调度器/命令面与测试夹具下验证过，
 **真实 provider 的并发运行没有完成受控验收**（`docs/guides/troubleshooting.md` §4 第 1 条）。调度器本身有门禁这一事实不能替代该验收。
+
+**已接受但尚未实现的下一步（ADR-0061 / FOUNDATION-095）**：当前“全局上限”其实是每 Project 一份，并另有 Adapter 覆写；它将被替换为每个 `CODEESTRA_HOME` 唯一的跨项目上限（旧显式值取最小值迁移），并新增 `scheduler control status|pause|resume|reconcile`。全局 pause 是持久启动屏障 + 可核验 Provider 主进程冻结，不改 Task 状态、不向运行中工具子进程发停止信号、重启不自动继续。实现分支还必须完成三种 Adapter 的进程归属 spike；在此之前不能把该能力写成已交付。
 
 ## Phase 3 — Interactive Agent Sessions
 

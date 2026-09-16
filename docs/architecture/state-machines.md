@@ -1,6 +1,6 @@
 # 状态机与迁移规则
 
-状态：§1–§7 是已实现的状态机与迁移规则（第 8 节登记 Wave I/J 的持久事实与命令面）。未列出的迁移拒绝；所有迁移需 expected aggregateVersion、actor、reason，并在事务中记录事实事件。恢复操作不绕过 guard。Self Evolution（§5）仍是后续阶段合约。
+状态：§1–§7 除显式标注外是已实现的状态机与迁移规则（第 8 节登记 Wave I/J 的持久事实与命令面）；**§6.1 的 ADR-0061 Runtime 全局负载控制是已接受、待实现的目标状态机，不是当前代码事实。**未列出的迁移拒绝；所有迁移需 expected aggregateVersion、actor、reason，并在事务中记录事实事件。恢复操作不绕过 guard。Self Evolution（§5）仍是后续阶段合约。
 
 ## 1. Task lifecycle
 
@@ -36,7 +36,7 @@
 | CANCELLING | confirmed stopped | →CANCELLED，保留 workspace |
 | RECOVERY_REQUIRED | reconcile | 依据真实事实回到已证实状态；必须审计，不能直接释放资源。命令面是 `task recover <project> <task> <expected-version>`（ADR-0055）：只读事实（记录的 provider 身份按真实进程表 + start token + 后代核对、记录的后代快照、workspace 路径是否仍在磁盘），**只有能证明 provider 已消失**才收口为 `FAILED`（同时 `Execution → FAILED`、`resource_held=0`、Session `→ EXITED`、workspace `→ RETAINED`）；存活 / 后代存活 / 无法核验 / 无身份一律**拒绝并保持占用**（退出码 1、零行变化）。收口**不主张工作树静止**（`quiescenceProven:false`、`signalsSent:0`），不发信号、不删工作树 |
 
-READY 的等待原因单独派生为 CONFLICT / CAPACITY / DRAINING / REVISION_REVIEW 等，不误用 BLOCKED。依赖未满足是 BLOCKED 唯一含义。SUCCEEDED/CANCELLED 不自动重开。
+READY 的等待原因单独派生为 CONFLICT / CAPACITY / DRAINING / REVISION_REVIEW 等，不误用 BLOCKED。ADR-0061 实现后，全局负载屏障另以 `SCHEDULER_GLOBALLY_PAUSED` 表达（仍是等待、退出码 3，不是 Task 状态）。依赖未满足是 BLOCKED 唯一含义。SUCCEEDED/CANCELLED 不自动重开。
 
 Task Verification：`NOT_RUN → QUEUED → RUNNING → PASSED | FAILED | ERROR | CANCELLED`；revision/commit/策略失效产生 `STALE`。重验创建新 VerificationRun，旧证据不改写。
 
@@ -224,6 +224,27 @@ Runtime 是每个 `CODEESTRA_HOME` 的单实例，归属是**持久事实**而�
 - 启动取不到锁时：owner 存活 `exit 3`，争用 `exit 4`；旧版本 Runtime 无锁文件但 endpoint 仍应答时，释放自己的锁并 `exit 0`。
 - `runtime.stop` 只报告「被要求停止的进程是谁」（`{stopping, pid, bootId, startedAt}`），**不隐含已停止**。CLI `codeestra stop [--wait <seconds>]`（默认 10s）先只读读取归属记录，再请求、有界轮询、按事实报告：`STOPPED` / `NOT_EXITED`（exit 0/1）、`NOT_RUNNING`（exit 0，且**不启动** Runtime）、`UNREACHABLE_PROCESS`（exit 1，**不杀**进程）。
 - shutdown 顺序完成后：只有 `coordinator.activeSessionIds()` 与 `verificationRunner.unconfirmedStops` **都为空**时才 `process.exit(0)`——即没有未确认停止的 provider 或验证进程；任一非空则不退出并保持可观察，让 `stop` 如实报 `NOT_EXITED`。
+
+### 6.1 Runtime 全局负载控制（ADR-0061，已接受、待实现）
+
+这是一层**控制状态机**，不加入 Task / Execution / AgentSession 的枚举：
+
+```text
+RUNNING → PAUSING → PAUSED → RESUMING → RUNNING
+             └──────────────→ RECOVERY_REQUIRED
+```
+
+| 迁移 | 条件与事实 |
+|---|---|
+| `RUNNING → PAUSING` | 在与 Session start 共用的控制互斥区内提交新 pause epoch 与目标清单；提交后立即阻止新 reservation/start/successor 与 Provider 投递 |
+| `PAUSING → PAUSED` | epoch 内每个目标都按 pid + start token + incarnation 被观察为 Provider 主进程 stopped，或已证明在屏障前退出；“信号已发送”不够 |
+| `PAUSING → RECOVERY_REQUIRED` | 任一目标身份不可核验、平台/Adapter 不支持、或无法证明 stopped；屏障与已冻结目标保留 |
+| `PAUSED → RESUMING` | 用户显式 `scheduler control resume`；重启本身永不触发 |
+| `RESUMING → RUNNING` | 同 epoch 的全部目标都已核验恢复或证明退出；随后才触发调度 pass 与待投递 answer/guidance |
+| `RESUMING → RECOVERY_REQUIRED` | PID 复用、身份不可读、目标不是已记录的 stopped 主进程或恢复结果不可核验；不向该目标发信号，不启动新 Task |
+| 任一非 `RUNNING` → 同态 | `status` / `reconcile` 只观察；同 commandId 重放不产生第二次状态变化 |
+
+全局控制状态跨 Runtime 重启保留；启动先恢复屏障。Task/Execution/Session 维持冻结前状态，slot/workspace/writer lease 不释放。单 Task `task pause` 仍按 §1/§2 与 ADR-0016 执行协作停止并结束旧 Execution；不能用全局 `PAUSED` 冒充它。
 
 ## 7. Revision 投递 FSM（ADR-0028，schema v19）
 

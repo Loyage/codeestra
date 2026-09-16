@@ -1,6 +1,6 @@
 # ADR-0033：调度引擎（自动 tick、候选顺序、等待语义、UNKNOWN 放行接线与 §4 越界处置）
 
-Status：Accepted（本轮实现：FOUNDATION-055，schema **未占用**——仍是 v21；零新增确认门禁）
+Status：Accepted（本轮实现：FOUNDATION-055，schema **未占用**——仍是 v21；零新增确认门禁。**Amended by ADR-0061（已接受、待实现）**：候选循环在依赖/冲突之前先服从持久的 Runtime 全局暂停屏障，容量从项目级 + Adapter 级改为唯一跨项目上限；其余排序/冲突/预留语义不变。）
 
 ## Context
 
@@ -44,6 +44,8 @@ Wave E 已把三样东西落地：依赖与 `BLOCKED` 的唯一含义（E0/ADR-0
 - FULL 下新增确认步骤：**0**。
 
 ### D02：候选顺序与循环照 `scheduler.md` §1–§2，不重新发明
+
+> **后续修订（ADR-0061，尚待实现）**：每个 pass 先读取 Runtime 全局控制状态；不是 `RUNNING` 时不启动任何候选，并以 `SCHEDULER_GLOBALLY_PAUSED` 表达等待。容量检查统计整个 Runtime，不再按 Project/Adapter 限额。以下保留 v21/F1 当前实现。
 
 顺序是 priority 降序 → `createdAt` 升序 → ID 升序（E2 已有的「提优先级不抢占」语义因此自然成立：优先级只被读来排序，循环从不写任何运行中任务的资源）。逐候选：依赖未满足或上游 commit 不可达 ⇒ `BLOCKED` → 冲突判定（含外部基线重检）⇒ `wait(CONFLICT)` → 容量 ⇒ `wait(CAPACITY)` → 预留（`BEGIN IMMEDIATE` 内重检）→ 事务外准备 workspace → 启动前重检基线/revision ⇒ 启动**一个**主 Agent → 新预留进入活跃集合后再看下一个候选。**没有 Adapter 可用不是 `BLOCKED`**（是一类 `SKIPPED`，带稳定 detail）。
 

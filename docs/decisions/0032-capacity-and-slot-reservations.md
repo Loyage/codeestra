@@ -1,6 +1,6 @@
 # ADR-0032：容量与槽位预留（全局上限 + 每 adapter 上限 + reservation/release/崩溃 reconcile）
 
-Status：Accepted（本轮实现：FOUNDATION-054，schema **v21**；零新增确认门禁）
+Status：Accepted（本轮实现：FOUNDATION-054，schema **v21**；零新增确认门禁。**Amended by ADR-0061（已接受、待实现）**：`project_capacity_limits` / `project_adapter_slot_limits` 与项目内计数将退役，改为每 Runtime 唯一跨项目上限；reservation/归属/reconcile 原语继续保留。）
 
 ## Context
 
@@ -48,6 +48,8 @@ Wave E 的用户决策（并发容量 = 全局上限、默认 2、可配置；ad
 ## Decision
 
 ### D01：容量是配置事实，两个维度都显式
+
+> **后续修订（ADR-0061，尚待实现）**：容量仍是显式配置、默认 2、范围 1–16，但只剩一个 Runtime 维度；项目级与 Adapter 级两张配置表、`clear --adapter` 与 Adapter 容量等待将被删除。旧显式值迁移取最小值。以下是 v21 当前实现与历史依据。
 
 - `project_capacity_limits(project_id, global_limit, version, updated_at, updated_by)`：项目级并发上限。**没有行就是「未显式设置」**，读取时返回文档默认值 `2`，并如实报告 `limitSource = 'DEFAULT'`。
 - `project_adapter_slot_limits(project_id, adapter_id, slot_limit, ...)`：adapter 覆写。**只有显式设置过才存在行**，因此「缺省等于全局上限」是**派生事实**而不是复制值：改全局上限会移动所有没有覆写的 adapter，`capacity get` 也能报出每个上限的来源（`DEFAULT`/`EXPLICIT`）。
@@ -116,6 +118,8 @@ Wave E 的用户决策（并发容量 = 全局上限、默认 2、可配置；ad
 - 启动序列：在 `apps/runtime/src/main.ts` 既有 reconcile 序列**之后追加**这一步，理由写在代码注释里——槽位必须按其他 reconcile 收敛后的最终图景判定（例如某个 Execution 刚被收敛成 `RECOVERY_REQUIRED`，它的槽位仍然被占），且既有顺序（D1 的 revision delivery reconcile 在前）一行未动。
 
 ### D06：容量等待有自己的稳定码，`BLOCKED` 不扩容
+
+> ADR-0061 增加 `SCHEDULER_GLOBALLY_PAUSED`（仍是 exit 3 的等待，不是 `BLOCKED`）；`CAPACITY_GLOBAL_LIMIT_REACHED` 保留名字但改指整个 Runtime，`CAPACITY_ADAPTER_SLOT_LIMIT_REACHED` 新实现不再产生。
 
 - `BLOCKED` 继续只表示依赖未满足（不变量 10）。没有槽位是 `CAPACITY_WAIT` + `{ code, adapterId, limit, used, blocking[] }`。
 - 容量事实可查询：`scheduler capacity get` 返回全局与每 adapter 的上限、来源、占用、可预留数、此时此刻新获取会拿到的 reason code、Runtime 的 draining 事实，以及当前占用者（含 `since`，供上层显示等待时长）。

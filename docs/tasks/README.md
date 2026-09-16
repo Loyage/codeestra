@@ -7264,6 +7264,53 @@ cd /Users/loyage/Documents/codeestra-dev && just check   # 等价 bun run check
 4. **未逐一写测试**：managed 项目的槽位预留与结果 commit 归属走 `COALESCE(dev_repo_path, repo_root)`（代码上成立，本格未逐条覆盖）；`reclaim` 的 managed 分支只验到「计划成立 + 证据来自项目文件夹 + 未完成的 Task 不删」。
 5. 未跑全量测试；未在真实稳定实例上验证（本分支不动稳定 clone）。
 
+## FOUNDATION-095 — Runtime 全局负载控制设计（ADR-0061）
+
+状态：**用户决策已固化、文档设计已完成；代码 / CLI / UI / schema migration 尚未开始。** 后续应在独立开发分支实现，不得把本节当作已有能力。
+
+### 用户已决定
+
+1. 容量只保留**一个 Runtime 全局上限**，跨全部项目与 Adapter；不保留项目级 / Adapter 级附加限制。
+2. 全局暂停采用**冻结 Provider 主进程**：先阻止新启动，再按进程身份核验后做 OS 级暂停；不向已经运行的工具子进程发停止/终止信号。
+3. 暂停状态**跨 Runtime 重启持久保持**，只有显式继续才解除；启动不能自动恢复模型 API。
+4. 旧项目级 / Adapter 级显式上限迁移时取**最小值**；没有显式值则用默认 2。
+
+### 已完成的设计同步
+
+- 新增 `docs/decisions/0061-runtime-global-load-control.md`（Accepted，纯设计，计划 schema v34）。
+- `PROJECT_SPEC.md`：新增唯一全局容量与全局冻结不变量；明确当前实现与目标语义不同。
+- `docs/architecture/`：同步 scheduler、Adapter 能力、Runtime 控制聚合/状态机、计划持久表与全局事件。
+- `docs/roadmap/mvp.md`：把该能力列为 Phase 2 已接受但待实现的下一步。
+- `docs/decisions/README.md`：登记 ADR 与它对 ADR-0030/0032/0033 的修订关系。
+
+### 已锁定的实现边界
+
+- 唯一上限默认 2、范围 1–16；占用按整个 Runtime 的 reservation ∪ `resource_held` Task 去重。降低上限不抢占，`used > limit` 可以如实存在。
+- 目标命令面：`scheduler capacity get|set|reset`（无 project/adapter 参数）和 `scheduler control status|pause|resume|reconcile`。
+- 全局控制 FSM：`RUNNING → PAUSING → PAUSED → RESUMING → RUNNING`；任何身份/停止/恢复事实不可核验都进入 `RECOVERY_REQUIRED` 并保持启动屏障。
+- `PAUSED` 不改 Task/Execution/Session 状态，不释放 slot/workspace/writer lease，不替代 `task pause`。
+- 已发出的模型请求不取消；Provider 主进程被冻结后，工具子进程虽不接收信号，但可能因管道背压阻塞，文档不得夸大为“绝不暂停”。
+- Pi/Codex/Claude 的 `providerProcessSuspension` 在完成进程归属 spike 前都只能是 `REQUIRES_VALIDATION`；非 POSIX 平台不能降级成只暂停调度后仍显示 `PAUSED`。
+- 正常路径新增确认 0；pause/resume 是用户主动的一条命令/一次按钮，不新增审批层。
+
+### 后续实现分支的定向验证范围
+
+- v33→v34 migration（旧显式值取最小值、无值为 2、事件 sequence/FK/行数保持、故障注入回滚）。
+- 跨两个及以上项目的全局容量与并发 acquire 竞态。
+- pause 与 Session start/successor/answer delivery 的竞态；屏障后不得漏出新 Provider。
+- 真实 POSIX 进程冻结/继续、PID 复用/start token 不符、部分失败与重启恢复。
+- 三个 Adapter 分别做“模型请求发起进程 vs 工具子进程”的受控 spike；fake 不能替代。
+- CLI/HTTP/SSE 与 UI 静态投影；不使用 desktop/computer-use。
+
+### 本格验证
+
+- 仅文档修改；没有代码、migration、命令或 UI 行为变化。
+- `git diff --check`：通过。
+- 用 Bun 对本格涉及的 16 份 Markdown（先排除 fenced code block）检查本地相对链接：全部存在。
+- 未运行测试/构建：按 ADR-0038，纯文档设计格不在开发分支运行全量检查。
+- 未 commit、未 push、未提升 `dev`/`main`、未重启任何 Runtime。
+- `docs/guides/**` 本格**确认不修改**：这些文件描述已交付用户行为，而 ADR-0061 尚未实现；实现分支必须按 ADR-0050 同步 `cli-reference.md`、`manual.md`、`features.md`、`recipes.md`、`ui.md`、`concepts.md` 与 `troubleshooting.md`，并更新统一版本/校对头。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），
@@ -7283,6 +7330,8 @@ cd /Users/loyage/Documents/codeestra-dev && just check   # 等价 bun run check
 **2026-09-16 更新（FOUNDATION-092）**：用户更正了本机两个 clone 的拆分口径（只为 Codeestra 自进化），并裁定
 产品层 main/dev 双分支模型**只属于 Codeestra 自身**；被管理项目的替代形态**未定**，因此新增下面第 14 条与文末
 「需要用户裁决」的一项（剩余列表此后为 1–4、6–10、12–14 号）。本次**没有**从剩余列表移出任何条目。
+
+**2026-09-16 更新（FOUNDATION-095）**：用户已裁定 Runtime 全局负载控制（ADR-0061）：只保留一个跨项目并行上限，新增持久的 Provider 全局冻结/继续，旧显式上限取最小值迁移。本格只完成设计，因此新增下面第 15 条；剩余列表为 1–4、6–10、12–15 号。
 
 ### 仍然剩余
 
@@ -7359,6 +7408,11 @@ cd /Users/loyage/Documents/codeestra-dev && just check   # 等价 bun run check
     **仍未做（不再需要用户裁决）**：UI 不提供 `--base-ref` 输入（有意子集）、`task retry`/`resume` 不接受该 flag、
     managed 项目的槽位/结果 commit 归属未逐一写测试、未跑全量测试。`--base-ref` 命令面、`reclaim` 的 managed 语义与
     过渡 `dev` ref 的退役判据（`publishedOnRemote`）已在第二轮完成。
+15. **Runtime 全局负载控制实现**（FOUNDATION-095 / ADR-0061）：当前代码仍是每项目上限 + 每 Adapter 覆写，也没有全局暂停。
+    后续独立分支需要实现：唯一 Runtime 全局上限与 v34 迁移（旧显式值取最小值）；`scheduler capacity get|set|reset` 的新命令面；
+    `scheduler control status|pause|resume|reconcile`；跨重启持久屏障；Provider 主进程的可核验 SIGSTOP/SIGCONT；三 Adapter
+    进程归属 spike；全局事件与 Project 过滤订阅；全局 shell 的“暂停全部/继续全部”及调度页全局容量投影；对应用户指南同步。
+    在真实 Provider 进程归属与“不向工具子进程发停止信号”完成定向验收前，不能声称该能力可用。
 
 ### 原 0–7 编号对照
 
