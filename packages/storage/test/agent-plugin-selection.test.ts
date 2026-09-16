@@ -66,6 +66,12 @@ describe('agent plugin selection storage', () => {
       legacy.exec('ALTER TABLE task_revisions DROP COLUMN features_json');
       // ...and the column added by schema v33 (the per-Task base ref, ADR-0060).
       legacy.exec('ALTER TABLE workspaces DROP COLUMN base_ref');
+      // ...and the same for the tables added by schema v34 (Runtime global load control, ADR-0061):
+      // a real database at this version does not have them either.
+      for (const table of ['runtime_pause_targets', 'runtime_command_receipts',
+        'runtime_pause_control']) {
+        legacy.exec(`DROP TABLE IF EXISTS ${table}`);
+      }
       legacy.exec('PRAGMA user_version=26');
       legacy.close();
 

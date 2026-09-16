@@ -109,7 +109,8 @@ Phase 1（ADR-0006）的 `VerificationCompleted` 不写入命令原始输出；`
 
 `SchedulerCapacityChanged` 只在值真正变化时发布（重复设置同一值不 bump 版本、不发事件）。`ExecutionSlotReconciled` 也会为「决定保持占用、状态未变」的观测发布——那是审计事实，不是状态迁移。`TaskSchedule*` 的重放保护是 `(event_type, correlation_id, aggregate_id)`，不是 event id。
 
-ADR-0061 实现后，`SchedulerCapacityChanged` 与 `CAPACITY_ADAPTER_SLOT_LIMIT_REACHED` **不再产生新事实**（历史行原样保留），改用下列 Runtime 全局事件。它们均以 `project_id = NULL`、`aggregate_type='RuntimeSchedulerControl'` 写入；这是**已接受设计、尚未实现**：
+ADR-0061 实现后，`SchedulerCapacityChanged` 与 `CAPACITY_ADAPTER_SLOT_LIMIT_REACHED` **不再产生新事实**（历史行原样保留），改用下列 Runtime 全局事件。它们均以 `project_id = NULL`、`aggregate_type='RuntimeSchedulerControl'` 写入。
+**暂停半边已实现**（FOUNDATION-097，schema v34；`domain_events.project_id` 已可空、Project 过滤订阅同时收到全局事件）：
 
 | Event | 关键 payload |
 |---|---|
@@ -231,7 +232,8 @@ FOUNDATION-074 的 doc-sync 把它们补齐（名字都是实现先行的，按 
 | `ExecutionPauseRequested` / `ExecutionPaused` / `ExecutionCancelled` / `ExecutionSuperseded` | 未找到同名事件；暂停/取消的投影通过 `TaskStateChanged` / `ExecutionStateChanged` 与 Operation 状态表达 | **未验证**是否存在等价专名，本格不改动 |
 | `ResultCommitAuthorizationRequested` | 未实现同名事件（授权由 prepare/confirm 两步与 `ResultCommitAuthorized` 表达） | 设计名保留，未实现 |
 | `CandidateBuilt` / `SelfTestCompleted` / `StablePromoted` / `StableRollbackCompleted` | 未实现 | 设计名保留（Self Evolution 阶段） |
-| `SchedulerGlobalCapacityChanged` / `SchedulerGlobalPauseRequested` / `SchedulerGlobalPaused` / `SchedulerGlobalResumeRequested` / `SchedulerGlobalResumed` / `SchedulerGlobalControlRecoveryRequired` | **ADR-0061 设计名，尚未实现** | 名字已随 Accepted ADR 固定；实现时采用这些名字，不另起一套。`Requested` 与完成事实必须分开，部分结果只能写 RecoveryRequired |
+| `SchedulerGlobalPauseRequested` / `SchedulerGlobalPaused` / `SchedulerGlobalResumeRequested` / `SchedulerGlobalResumed` / `SchedulerGlobalControlRecoveryRequired` | **已实现**（FOUNDATION-097，schema v34） | `project_id = NULL`、`aggregate_type = 'RuntimeSchedulerControl'`；`Requested` 与完成事实分开，部分结果只写 RecoveryRequired。`pause`/`resume`/`reconcile` 的回执在 `runtime_command_receipts` |
+| `SchedulerGlobalCapacityChanged` | **ADR-0061 设计名，尚未实现**（容量半边属并行分支） | 名字已随 Accepted ADR 固定；实现时采用该名字，不另起一套 |
 | `ProseQuestionAttentionResolved` | **实现先行名**（FOUNDATION-069 新增，本格补登记） | 本格**登记为长期名**；`UserAnswerDelivered` 不适用于散文提问（它没有 provider 请求），因此不合并 |
 | `TaskRetryRequested` | **实现先行名**（FOUNDATION-061 新增，本格补登记） | 本格**登记为长期名**；与 `TaskStateChanged` 同事务、不取代它 |
 | （设计目录没有的实现新增名） | `TaskArchived` / `TaskUnarchived` / **`TaskPurged`（FOUNDATION-090 / ADR-0058）** / `WorkspaceReclaimed` / `ResourcesReclaimed` / `OperationProgressed` / `OperationSettled` / `ExecutionSlot*` / `SchedulerCapacityChanged` / `TaskSchedule*` / `TaskImpactPredictionRevoked` / `Promotion*` / `Integration*`（含 ADR-0053 的 `IntegrationMemberMerged` / `IntegrationBatchStale` / `IntegrationBatchCancelled`） | 反向登记：这些是实现先行的名字，同样永不重命名。`TaskPurged` 是**唯一一条在它自己的聚合根行被删除的同一个事务里写入的事件**：它没有外键，因此任务行消失后它仍在 `events.list`/SSE 里可读，并且是「这个任务存在过、什么时候被谁删除、删掉了什么」的最后一条记录（ADR-0058 D08） |

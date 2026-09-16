@@ -263,3 +263,26 @@ Adapter 依此实现：`allow` → `{behavior:"allow", toolUseID}`（**不**发�
 - 修改用户 `~/.claude` 配置或凭据；不打印 token。
 
 **已知缺口（不在本格范围）**：`session.transcript`（ADR-0013）仍只认 Runtime 的 Pi 会话目录，因此 Claude Session 上会以 `SESSION_FILE_NOT_OWNED` 明确失败，而不是显示执行过程；把该视图做成 provider-agnostic 需要另立一格。
+
+## 7. Provider 进程冻结（ADR-0061，FOUNDATION-097 补测）
+
+状态：**`REQUIRES_VALIDATION`**（与「本机无凭据」是同一个原因，不是流程遗漏）。
+
+ADR-0061 要求每个 Adapter 证明「哪个受控进程是模型请求发起者」以及「冻结它之后不再产生下一次模型请求」。
+本机对 Claude Code 只能走到进程层：
+
+- 用 Adapter 自己的受控 argv 启动真实 `claude 2.1.268 --print --input-format stream-json
+  --output-format stream-json --verbose --safe-mode --strict-mcp-config --permission-prompts host
+  --permission-mode bypassPermissions --dangerously-skip-permissions --session-id <uuid>`，工作目录在
+  `/tmp` 下。真实 CLI 接受了该 argv，返回了 `system/init`（`tools` 列表含 `Bash`，
+  `mcp_servers: []`，`permissionMode: "bypassPermissions"`）。**未修改 `~/.claude`，未打印 token。**
+- 提示它运行 `sleep 20` 后，在 12 秒的窗口内**没有**观察到任何后代进程：本机无凭据，模型调用不会
+  真正执行工具，因此「工具子进程是谁的后代」「冻结主进程后是否还有下一次模型请求」都无法测量。
+- 可以确认的只有一条结构事实（与本文件 §2/§3 一致）：Adapter 持有 stdio 的那个 `claude --print`
+  子进程是它启动并记录 `{pid,startToken}` 的 provider 主进程；`--print` 模式下没有第二个 writer。
+
+因此 `claudeProviderProcessSuspension` 保持 **`REQUIRES_VALIDATION`**
+（`packages/agent-adapters/src/claude-adapter.ts`）：本格**没有**把「看起来应该可以」写成 `SUPPORTED`，
+全局 `pause` 遇到 Claude 目标时会 fail closed（该 target 记 `RECOVERY_REQUIRED`、屏障保留），而不是
+假装已经冻结。补齐所需的最少步骤与本文件 §6 的其他凭据相关项相同：真实登录后复跑同样的
+「两次 bash 调用 + 只对主进程 SIGSTOP」判据。

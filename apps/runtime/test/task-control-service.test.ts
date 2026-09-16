@@ -34,6 +34,7 @@ const capabilities: AdapterCapabilities = Object.freeze({
   controlledConfiguration: 'SUPPORTED',
   pluginSelection: 'UNSUPPORTED',
   sessionGuidance: 'UNSUPPORTED',
+  providerProcessSuspension: 'UNSUPPORTED',
 });
 
 interface Deferred { readonly promise: Promise<void>; readonly resolve: () => void }

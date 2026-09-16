@@ -7409,6 +7409,85 @@ cd /Users/loyage/Documents/codeestra-dev && just check   # 等价 bun run check
 - 合入方式：本格在 Orca worktree `all_max`（分支 `Loyage/all_max`，基线 `dev@4667d32`）交付；提交后先把 `dev` 合进本分支对齐（dev 上的 `FOUNDATION-094` 已占用 094 编号，本格编号改为 **FOUNDATION-095**；`docs/decisions/README.md`、`docs/tasks/README.md`、`PROJECT_SPEC.md` 三处冲突按 FOUNDATION-094 压缩后的结构重写），再以 merge commit 合入本地 `dev`。**未 push `origin/dev`**（用户 2026-09-16 决定本格只合并本地 `dev`）、未提升 `main`、未重启任何 Runtime。
 - `docs/guides/**` 本格**确认不修改**：这些文件描述已交付用户行为，而 ADR-0061 尚未实现；实现分支必须按 ADR-0050 同步 `cli-reference.md`、`manual.md`、`features.md`、`recipes.md`、`ui.md`、`concepts.md` 与 `troubleshooting.md`，并更新统一版本/校对头。
 
+## FOUNDATION-097 — 全局暂停：持久屏障 + Provider 主进程冻结 + 三 Adapter 进程归属 spike + UI 全局 shell（GLC-2，ADR-0061 下半，schema **v34**）
+
+状态：**已在 `Loyage/glc-pause-ui`（基线 `dev@de03448`）实现并跑过定向检查；未合入 `dev`、未 push、未提升 `main`、未重启任何 Runtime。** 本格只做 ADR-0061 的**暂停半边**（D04–D10）；容量半边（D01–D03）属并行的 GLC-1。
+
+### 改了什么
+
+- **schema v34（本格追加块）**：`runtime_pause_control`（singleton：state/pauseEpoch/version/requested/settled/actor/detail）、`runtime_pause_targets`（epoch + session/incarnation 身份快照 + pid + start token + 状态 + 观测；`UNIQUE(pause_epoch,incarnation_id)`；**五个业务 ID 刻意无 FK**）、`runtime_command_receipts`（无 Project 的全局命令幂等）；`domain_events.project_id` 重建为**可空**，`NULL` = Runtime 全局事实。`phase1SchemaVersion` 33 → 34。migration 内除行数核对外，新增**结束态断言**（`domain_events.project_id` 确实可空、control singleton 确实存在），因为 Bun 的 `exec()` 会吞掉多语句脚本里的 step 错误。
+- **控制层**：`apps/runtime/src/runtime-control-service.ts` —— `RUNNING → PAUSING → PAUSED → RESUMING → RUNNING`，任一身份/停止/恢复事实不可核验 → `RECOVERY_REQUIRED` 且**保持屏障**；`SIGSTOP`/`SIGCONT` 只发给 Adapter 记录并经复读核验的 **Provider 主进程**，从不发给工具子进程/进程组；`RUNNING` 才写；`PENDING`≠`PAUSED`、`Requested`≠`Paused`。共享互斥区 `RuntimeControlMutex` 与 Provider 启动路径共用。
+- **屏障接入点**：调度候选（第 0 步，先于依赖/冲突/容量）、`task resume` 冲突门禁、slot `acquire`（走同一个 write transaction 内的 no-new-reservation 输入）、`AgentRuntimeCoordinator` 的三种 Provider 启动（主启动 / scheduler 启动 / successor）与 answer 投递、`SessionGuidanceService` 投递。竞态下 start 被拒 → 调度层报 **WAIT**（exit 3），不是 FAILED。
+- **命令面**：`scheduler control status|pause|resume|reconcile`（无 `projectId`；FULL/STRICT 零确认；exit 0 完整稳定/幂等，exit 1 + 稳定码，任务等待仍 exit 3）。稳定码：`SCHEDULER_GLOBALLY_PAUSED`、`GLOBAL_PAUSE_UNSUPPORTED`、`GLOBAL_PAUSE_IDENTITY_UNVERIFIABLE`、`GLOBAL_PAUSE_TARGET_NOT_STOPPED`、`GLOBAL_RESUME_TARGET_CHANGED`、`GLOBAL_PAUSE_RECOVERY_REQUIRED`、`GLOBAL_CONTROL_IN_PROGRESS`。
+- **契约**：`AdapterCapabilities.providerProcessSuspension` 与 `declaredProviderProcessSuspension`（pi/codex/claude）；`ScheduleWaitKind` 增 `CONTROL`，`CapacityWaitReasonCode` 增 `SCHEDULER_GLOBALLY_PAUSED`；`eventEnvelopeSchema.project_id` 可空；五个全局事件名常量。
+- **重启语义**：Runtime 启动在第一次 reconcile/tick/Adapter start 之前读屏障并打印事实；**不自动 SIGCONT、不自动 kill** 旧 boot 的 stopped Provider；`runtime stop` 不清除 pause 状态。
+- **UI（只投影命令面）**：`apps/ui/src/global-control.tsx` + `global-control-bar.tsx` 放在不依赖选中 Project 的 shell 行（`grid-row: 3`，跨两列），「暂停全部 / 继续全部 / 重新核对（只读）」始终渲染（无本地允许清单）；`PAUSING`/`RESUMING`/`RECOVERY_REQUIRED` 时逐目标事实**默认展开**，每条带 pid/start token 核验结论与进程状态；被拒时显示 Runtime 稳定码 + 一句本地解释。调度页容量卡标题改为「Runtime 全局容量」，并明确本次构建仍是项目级命令面（`scope='PROJECT'`），不发明全局字段。
+- **事件与订阅**：五个全局事件以 `project_id = NULL` 写入；Project 过滤订阅改为 `(project_id = ? OR project_id IS NULL)`，游标仍是同一 sequence。
+- **`reconcile` 只观察**：不发 `SIGSTOP`/`SIGCONT`/终止信号；可把「已证明退出」的 target 收口，但不把无法核验的猜成已停止，也不把 `RECOVERY_REQUIRED` 提升成 `PAUSED`。**一次什么都没改变的观察不写事件**（`SchedulerGlobalControlRecoveryRequired` 只在确实需要处置或确实收口了 target 时写入），观察结果通过 `status` 读取。
+
+### 实际跑了什么检查、结果如何（定向，ADR-0038；**未跑** `bun run check` / `just check` / `just verify` / `check:fast`）
+
+| 检查 | 结果 |
+|---|---|
+| `bun run typecheck` | 退出码 0 |
+| `bun run typecheck:ui` | 退出码 0 |
+| `bunx vitest run apps/ui` | **14 文件 / 185 用例全部通过** |
+| `bun run build:ui:dev` + `grep -o 'data-channel="dev"' apps/ui/dist/index.html` | 构建成功，命中（ADR-0049） |
+| `bun test packages/storage/test` | 160 通过 / 0 失败（含本格新增 `runtime-pause-control-migration.test.ts`：v33 真实文件库升级、事件与投递行保留、`project_id` 变可空、`foreign_key_check` 为空、Project 过滤同时收到全局事件、**故障注入整笔回滚**） |
+| `bun test packages/agent-adapters/test` | 全通过（能力矩阵断言已同步新增维度） |
+| `bun test apps/runtime/test/runtime-global-pause.test.ts` | **11 通过 / 0 失败**：真实 `sh` 主进程 + 真实工具子进程（主进程 `T` 且 start token 不变、工具继续写 marker、冻结后受控 Provider 无新记录）、身份不可核验不发信号、Adapter 未声明 `SUPPORTED` 不冻结、部分冻结保持已冻结者、PID 复用/已退出目标的 resume 结论、重启后屏障仍在且拒绝启动且不清状态、非 POSIX 平台门、回执幂等与同键异文拒绝、不改业务状态/不释放资源、reconcile 只观察 |
+| `bun test apps/runtime/test/cli-global-control.test.ts` | **3 通过 / 0 失败**：真实 Runtime + socket 上的 `scheduler control *` exit 0/3 语义、`SCHEDULER_GLOBALLY_PAUSED` 稳定码、`task run` 与 `reservations acquire` 同时 exit 3、`stop` 后重启状态仍在 |
+| `bun test apps/runtime/test/schedule-service.test.ts` | 12 通过 / 0 失败（含新增两条 CONTROL 等待用例） |
+| `bun test apps/runtime/test/event-subscription-service.test.ts` / `event-subscription-ipc.test.ts` / `slot-reservation-service.test.ts` / `session-guidance.test.ts` / `http-api.test.ts` / `packages/contracts/test` | 全通过 |
+
+**没跑及原因**：`bun run check` / `just check` / `just verify` / `check:fast`（ADR-0038 禁止在开发分支跑全量）；`test:e2e` 全列表（本格只跑与之相关的 CLI 用例）；真实 Claude Code 的模型层验收（本机无凭据）；真实 Codex 的模型层验收（本机 ChatGPT 额度到 2026-09-19 才恢复，见下）。
+
+### 三 Adapter 的 `providerProcessSuspension` 与证据位置
+
+| Adapter | 值 | 证据 |
+|---|---|---|
+| Pi | **`SUPPORTED`** | `docs/spikes/pi-0.84.4.md` §「Provider 进程冻结（ADR-0061）」：真实 `pi` 0.85.1 + 真实模型 `deepseek-flash`；`pi --mode rpc` 子进程是模型请求发起者，bash 工具是它自己的后代且在独立 process group；只对该主进程 `SIGSTOP` 后工具继续、26 秒内 provider stdout 新增 **0** 条、第二个 marker 不出现，`SIGCONT` 后出现。探针：`docs/spikes/global-freeze/pi-freeze-probe.ts` |
+| Codex | **`REQUIRES_VALIDATION`** | `docs/spikes/codex-0.151.0.md` §7：只完成「进程归属」一半 —— 真实 `codex` 0.154.0 的 `app-server --stdio` 子进程是唯一受控主进程，且它会拉起第三方插件/MCP 后代（`node_repl` 等，独立 process group）；模型那一半被本机 ChatGPT 额度挡住（`usageLimitExceeded`），没有工具被真实执行，因此不能声称「冻结后不再产生下一次模型请求」。探针：`docs/spikes/global-freeze/codex-freeze-probe.ts`（额度恢复后可直接复跑） |
+| Claude Code | **`REQUIRES_VALIDATION`** | `docs/spikes/claude-2.1.268.md` §7：受控 argv 被真实 CLI 接受并返回 `system/init`（`tools` 含 `Bash`），但本机无凭据 → 提示运行 `sleep 20` 时没有任何后代工具出现，模型层无法测量 |
+
+未完成验证的两个 Adapter **不是** `SUPPORTED`：全局 `pause` 遇到它们会把该 target 记 `RECOVERY_REQUIRED` 并返回 `GLOBAL_PAUSE_UNSUPPORTED`，屏障保持。
+
+### 设计选择及其依据（单列）
+
+- 「屏障先提交、再核验、后发信号」（`PAUSING` 与目标清单先落库）：ADR-0061 **D05 step 1**。
+- 只有复读确认 `pid + start token` 匹配且进程 stopped 才写 `STOPPED`：**D05 step 4** 与「诚实边界」（不得用 stdout 安静/只看到 PID/信号已发送当证据）。
+- 部分失败保持已冻结者冻结、`RECOVERY_REQUIRED` 而非 `PAUSED`：**D05 step 5**。
+- `resume` 只 `SIGCONT` 完全匹配的 stopped 主进程、已退出不复活、PID 复用不唤醒：**D06**。
+- 启动先读屏障、不自动继续/不自动 kill 旧 Provider：**D07**。
+- 暂停期间允许只读/记录输入/cancel/recover/purge/stop，延后新 Execution 与 Provider 投递：**D08**。
+- exit 0/1/3 与稳定码集合、零确认、UI 只投影命令面：**D09**。
+- 两张 pause 表 + 全局事件 `project_id = NULL` + target 身份快照无 FK：**D10**。
+- 平台/Adapter 不支持即 fail closed（不降级成「只暂停调度」）：**D05 诚实边界**。
+- 全局暂停**不**复用 `requestPause`、不改写 Task/Execution/Session、不释放 slot/workspace/lease：**D04**（`task pause` 仍是 ADR-0016）。
+
+### 需要人工目视确认的项（不在自动化范围内，ADR-0008）
+
+- 全局 shell 的在三主题（跟随系统/浅色/深色）、窄窗口（≤850px 走 flex 列布局）下的可读性：控件是否仍一眼可达、`逐目标事实` 折叠块展开后是否遮挡工作区。
+- 「逐目标事实」与「乐观布尔值」是否一眼可分：`PAUSING`/`RECOVERY_REQUIRED` 下是否仍有人会误读为「已经全停」。
+- 容量卡新标题下的措辞（本次构建仍为项目级）是否被理解为「不是全局数字」。
+
+### 与 GLC-1 重复定义 / 重复重建（集成时以 GLC-1 为准、逐列核对）
+
+- `runtime_command_receipts`：本格按 ADR-0061 D10 的**最小形态**自建（`command_id` PK、`payload_hash`、`result_json`、`created_at`）以供无 Project 的 `pause`/`resume`/`reconcile` 幂等与同键异文拒绝；GLC-1 也定义同名表。集成时**保留一份**、按 GLC-1 的列定义逐列核对（本格未加列）。
+- `domain_events.project_id` 可空重建：两格都会重建。集成时合成**一个** `if (version < 34)` 步骤，本格只放宽该列、不夹带其他列改动。
+- 本格把 `Phase1Database.migrate()` 的 `rebuildsTable` 条件从 `version < 30` 放宽到 `version < 34`（域事件重建需要关 FK + 事后 `foreign_key_check`）；GLC-1 若同样改动，合并结果相同。
+- **本格分支上的证据不能替合并后的证据背书**：合并后必须重跑 v33→v34 真实文件库迁移、`foreign_key_check` 为空、四张表齐全、故障注入整笔回滚。
+- 三处既有 storage 测试的「模拟旧版本」降级步骤被追加了 v34 表的 `DROP TABLE IF EXISTS`（`agent-plugin-selection.test.ts`、`dev-clone-promotion.test.ts`、`integration-batch-terminal-states.test.ts`）：它们从当前 schema 往回删，不删就会在 `version < 34` 步骤上撞到「表已存在」。这是既有先例（v31 表在 v26 测试里就是这么删的）。
+- `apps/runtime/test/support/agent-fixture.ts` 新增可选 `databaseFilename`（默认仍是 `:memory:`），供重启类测试在同一个文件库上开第二次 boot。
+
+### 剩余问题 / 未做
+
+- Codex 与 Claude 的 `providerProcessSuspension` 仍是 `REQUIRES_VALIDATION`（原因见上表）：**当前实现下，只有 Pi 的会话能被全局冻结成 `PAUSED`；Codex/Claude 目标会让 epoch 进入 `RECOVERY_REQUIRED` 并保持屏障**。这是诚实结果，不是实现缺陷；补齐需要真实模型额度/凭据。
+- 大输出工具在 Provider 主进程被冻结时的**管道背压**未实测（Pi spike 的工具只输出一行）。
+- 未实测：工具子进程、第三方插件/MCP 在被冻结期间的孤儿化行为；Codex 的 `node_repl`/`cua_repl` 后代不在保证内。
+- `scheduler control *` 的 UI 轮询为 10 秒一次（命令面始终是权威）；未做 SSE 推送驱动的即时刷新。
+- 容量半边的全局命令面（`scheduler capacity get|set|reset` 去除 project/adapter）属 GLC-1，本格未实现；UI 已按契约留出 `scope='GLOBAL'` 的开关点。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），

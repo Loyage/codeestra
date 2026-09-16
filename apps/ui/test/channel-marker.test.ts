@@ -94,10 +94,14 @@ describe('the stylesheet carries the marker and keeps the fixed shell', () => {
     // Row 1 is the banner row: zero height when no banner element is rendered.
     expect(rows?.startsWith('auto')).toBe(true);
     expect(declarationsFor('.app').filter(([name]) => name === 'overflow').at(-1)?.[1]).toBe('hidden');
-    // The header is pinned to row 2 and the scroll container to row 3, so the banner cannot end up
-    // inside the scrolling column.
+    // The header is pinned to row 2, the Runtime global load control (ADR-0061 D09) owns row 3 as a
+    // shell row spanning both columns, and the scroll container is row 4 — so neither the banner, nor
+    // the header, nor the global control bar can end up inside the scrolling column.
     expect(declarationsFor('.app-header').find(([name]) => name === 'grid-row')?.[1]).toBe('2');
-    expect(declarationsFor('.workspace-shell').find(([name]) => name === 'grid-row')?.[1]).toBe('3');
+    const control = declarationsFor('.global-control-bar');
+    expect(control.find(([name]) => name === 'grid-row')?.[1]).toBe('3');
+    expect(control.find(([name]) => name === 'grid-column')?.[1]).toBe('1 / -1');
+    expect(declarationsFor('.workspace-shell').find(([name]) => name === 'grid-row')?.[1]).toBe('4');
   });
 
   it('applies the channel attribute to the document root before the bundle runs', () => {

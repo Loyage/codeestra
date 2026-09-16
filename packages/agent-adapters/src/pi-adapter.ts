@@ -46,6 +46,14 @@ export const piPluginSelectionSupport = 'SUPPORTED' as const;
  */
 export const piGuidanceSupport = 'SUPPORTED' as const;
 
+/**
+ * Whether Pi can be frozen and continued at the process level (ADR-0061): declared as a constant for
+ * the same reason as `piPluginSelectionSupport`, because a read-only projection must be able to
+ * answer without launching a provider. The value is decided by the process-ownership spike recorded
+ * in `docs/spikes/pi-0.84.4.md` — never by what this branch would like to use.
+ */
+export const piProviderProcessSuspension = 'SUPPORTED' as const;
+
 const piCapabilities: AdapterCapabilities = Object.freeze({
   persistentSession: 'SUPPORTED',
   structuredAttention: 'SUPPORTED',
@@ -81,6 +89,11 @@ const piCapabilities: AdapterCapabilities = Object.freeze({
   // This is why `sessionGuidance: 'SUPPORTED'` is paired with a delivery state named `DELIVERED`,
   // never `ACKNOWLEDGED`.
   sessionGuidance: piGuidanceSupport,
+  // ADR-0061, measured on the real Pi 0.85.1 RPC child with a real model
+  // (`docs/spikes/pi-0.84.4.md` §「Provider 进程冻结（ADR-0061）」): the `pi --mode rpc` child is the
+  // model-request origin, the bash tool it starts is its own descendant in its own process group, and
+  // `SIGSTOP` on the child stops the next model request without touching that tool.
+  providerProcessSuspension: piProviderProcessSuspension,
 });
 
 export interface PiRpcAdapterOptions {

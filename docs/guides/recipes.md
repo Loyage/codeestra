@@ -1,9 +1,10 @@
 # 常见任务的做法（recipes）
 
-> **适用版本** `dev@17b4dd6`（2026-09-16） · **schema** v32 · **最后校对** 2026-09-16
+> **适用版本** `dev@de03448` + 本格分支 `Loyage/glc-pause-ui`（2026-09-16） · **schema** v34（本格暂停半边） · **最后校对** 2026-09-16
 > 版本会前进：`dev@17b4dd6` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
-> recipe 3 与 recipe 4 由 FOUNDATION-091 按 ADR-0059 改写（默认不冲突、声明同一功能才互斥）。
+> recipe 3 与 recipe 4 由 FOUNDATION-091 按 ADR-0059 改写（默认不冲突、声明同一功能才互斥）；
+> 新增 recipe 15「机器快扛不住了 / 我要它先别动」（FOUNDATION-097 / ADR-0061 D04–D10）。
 
 本文是**步骤化**的：每条 recipe 回答一个「我想做 X」，给出可以照抄的命令与**做完之后看什么**。
 
@@ -656,6 +657,36 @@ bun run codeestra session guidance get  $PROJECT <guidance-id>
   消息仍然被耐久记录，并在下一次 Execution 启动时交给 provider。
 
 ---
+
+## 15. 机器快扛不住了，或者我要它先别动
+
+想**同时减少并发的任务数**时，改容量上限；想让**正在跑的 Agent 先别再发模型请求**时，用全局暂停。
+两者都不需要重启 Runtime，也不需要任何确认。
+
+```sh
+# 1）先看现在到底什么状态（只读，安全）
+bun run codeestra scheduler control status --json
+
+# 2）暂停全部：先立屏障，再逐个核验并冻结 Provider 主进程
+bun run codeestra scheduler control pause --json      # exit 0 = 已收口成 PAUSED；exit 1 = 有目标没核验成
+
+# 3）（可选）只看事实、不发任何信号
+bun run codeestra scheduler control reconcile --json
+
+# 4）继续：只唤醒身份完全一致的那些主进程
+bun run codeestra scheduler control resume --json
+```
+
+- **退 `1` 时不要当成「已经暂停了」**：看 `status` 的 `targets[]`，每个目标都有自己的 `state`、身份核验结论与
+  进程状态。`RECOVERY_REQUIRED` 时屏障**保持**，这是设计（宁可保持，也不假装冻住了）。
+- **Codex / Claude Code 的会话目前无法被全局冻结**（`providerProcessSuspension: REQUIRES_VALIDATION`）：
+  它们会让本次 epoch 进入 `RECOVERY_REQUIRED`。想只停某一个 Task，用 `task pause`（协作停止，ADR-0016）。
+- **工具不会被 Codeestra 停掉**：已经跑起来的工具/验证命令不会收到暂停信号（大输出工具可能因管道背压阻塞）；
+  **已经发出的模型请求也不会被取消**（可能已在服务端完成并计费）。保证只是「屏障建立并核验冻结后，
+  受控 Provider 主进程不会再发出下一次请求」。
+- **重启不会自动继续**：`stop` 之后重启，屏障仍在；必须显式 `resume`。
+- 暂停期间仍然可以：只读查询、`task cancel/recover/purge`、`runtime stop`、不调用模型的 Git/验证/集成操作。
+  新的 Execution 与 answer/guidance 的实际投递会被延后（正文可以先记下来，恢复后按既有规则投递）。
 
 ## 相关阅读
 

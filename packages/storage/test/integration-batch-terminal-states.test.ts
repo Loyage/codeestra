@@ -62,6 +62,11 @@ function downgradeToV29(database: Database): void {
     DROP TABLE integration_batches;
     ALTER TABLE integration_batches_v29 RENAME TO integration_batches;
     CREATE INDEX integration_batches_by_project ON integration_batches(project_id,created_at,id);
+    -- The tables added by schema v34 (Runtime global load control, ADR-0061) are not part of a real
+    -- version 29 database either.
+    DROP TABLE IF EXISTS runtime_pause_targets;
+    DROP TABLE IF EXISTS runtime_command_receipts;
+    DROP TABLE IF EXISTS runtime_pause_control;
     PRAGMA user_version=29;
   `);
 }

@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 33;
+export const phase1SchemaVersion = 34;
 
 /** The kinds `intents.kind` accepts (ADR-0046) and the only kinds any command can write. */
 export const intentKinds = ['CREATE_TASK', 'AMEND_TASK', 'ADD_CONSTRAINT', 'CANCEL_TASK',
@@ -1897,6 +1897,110 @@ ALTER TABLE task_revisions ADD COLUMN features_json TEXT NOT NULL DEFAULT '[]'
 export const taskBaselineRefMigration = `
 ALTER TABLE workspaces ADD COLUMN base_ref TEXT
   CHECK(base_ref IS NULL OR length(trim(base_ref)) > 0);
+`;
+
+/**
+ * Version 34, pause half (FOUNDATION-097 / ADR-0061 D10): the persistent Runtime global control
+ * state, its per-incarnation freeze targets, and the receipts that make the commands which belong to
+ * no Project idempotent.
+ *
+ * These are **control-plane** facts, not Task business state: nothing here changes `tasks.state`,
+ * `executions.state` or `agent_sessions.state`, and the five business IDs on a target are a
+ * deliberate identity *snapshot* with no foreign key. `task purge` deletes the business aggregates,
+ * yet this Runtime must still be able to say which process it froze in this epoch and what happened
+ * to it (ADR-0058 keeps the "prove the provider is stopped first" rule on the purge path itself).
+ *
+ * The singleton row is written here instead of being created lazily by the Runtime: a Runtime that
+ * starts with no reader-visible control row would have to invent `RUNNING` on read, and an invented
+ * default is exactly the kind of "no row means continue" that ADR-0061 D07 forbids. `pause_epoch = 0`
+ * with `state = 'RUNNING'` is the only state a fresh database can be in.
+ */
+export const runtimePauseControlMigration = `
+CREATE TABLE runtime_pause_control (
+  singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+  state TEXT NOT NULL CHECK(state IN
+    ('RUNNING','PAUSING','PAUSED','RESUMING','RECOVERY_REQUIRED')),
+  pause_epoch INTEGER NOT NULL CHECK(pause_epoch >= 0),
+  version INTEGER NOT NULL CHECK(version >= 0),
+  requested_at INTEGER,
+  requested_by TEXT,
+  settled_at INTEGER,
+  detail_json TEXT CHECK(detail_json IS NULL OR json_valid(detail_json))
+) STRICT;
+
+CREATE TABLE runtime_pause_targets (
+  id TEXT PRIMARY KEY,
+  pause_epoch INTEGER NOT NULL CHECK(pause_epoch > 0),
+  -- Identity snapshots taken when the barrier was committed. Deliberately no FK: see the comment on
+  -- this migration's header. A purged Task must not be able to delete the fact that this Runtime
+  -- froze its provider process.
+  project_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  execution_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  incarnation_id TEXT NOT NULL,
+  provider_pid INTEGER NOT NULL CHECK(provider_pid > 0),
+  provider_start_token TEXT NOT NULL CHECK(length(trim(provider_start_token)) > 0),
+  state TEXT NOT NULL CHECK(state IN
+    ('PENDING','STOPPED','RESUMED','EXITED','RECOVERY_REQUIRED')),
+  observation_json TEXT NOT NULL CHECK(json_valid(observation_json)),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+  UNIQUE(pause_epoch,incarnation_id)
+) STRICT;
+CREATE INDEX runtime_pause_targets_by_epoch
+  ON runtime_pause_targets(pause_epoch,state);
+
+CREATE TABLE runtime_command_receipts (
+  command_id TEXT PRIMARY KEY,
+  payload_hash TEXT NOT NULL,
+  result_json TEXT NOT NULL CHECK(json_valid(result_json)),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0)
+) STRICT;
+
+INSERT INTO runtime_pause_control(singleton_id,state,pause_epoch,version,requested_at,
+  requested_by,settled_at,detail_json)
+  VALUES (1,'RUNNING',0,0,NULL,NULL,NULL,NULL);
+`;
+
+/**
+ * Version 34, global-event half (FOUNDATION-097 / ADR-0061 D10): `domain_events.project_id` becomes
+ * nullable so a Runtime-global fact is not dressed up as some Project's event.
+ *
+ * Only that one column changes. `sequence`, `event_id`, every payload and every `event_deliveries`
+ * row are copied unchanged, so a client's cursor keeps meaning what it meant. `NULL` is the new
+ * meaning; historical rows keep their original `projectId` (ADR-0061: 历史行保持原 projectId).
+ *
+ * A `STRICT` table's column nullability is part of its definition, so this is a rebuild, and the
+ * runner must therefore have foreign keys off (`Phase1Database.migrate` extends `rebuildsTable` to
+ * this version) and must verify with `PRAGMA foreign_key_check` afterwards. The copy is guarded by an
+ * explicit row-count comparison at the call site, because Bun's `exec()` swallows a step-time error
+ * inside a multi-statement script and would happily run the `DROP TABLE` that follows it.
+ */
+export const domainEventsGlobalProjectMigration = `
+CREATE TABLE domain_events_v34 (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id TEXT NOT NULL UNIQUE,
+  project_id TEXT REFERENCES projects(id),
+  event_type TEXT NOT NULL,
+  schema_version INTEGER NOT NULL CHECK(schema_version > 0),
+  aggregate_type TEXT NOT NULL,
+  aggregate_id TEXT NOT NULL,
+  aggregate_version INTEGER NOT NULL CHECK(aggregate_version >= 0),
+  correlation_id TEXT NOT NULL,
+  causation_id TEXT,
+  occurred_at INTEGER NOT NULL CHECK(occurred_at >= 0),
+  payload_json TEXT NOT NULL CHECK(json_valid(payload_json))
+) STRICT;
+INSERT INTO domain_events_v34(sequence,event_id,project_id,event_type,schema_version,
+  aggregate_type,aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,
+  payload_json)
+  SELECT sequence,event_id,project_id,event_type,schema_version,aggregate_type,aggregate_id,
+    aggregate_version,correlation_id,causation_id,occurred_at,payload_json
+  FROM domain_events;
+DROP TABLE domain_events;
+ALTER TABLE domain_events_v34 RENAME TO domain_events;
+CREATE INDEX event_aggregate ON domain_events(aggregate_type,aggregate_id,aggregate_version);
 `;
 
 export const integrationBatchTerminalStatesMigration = `

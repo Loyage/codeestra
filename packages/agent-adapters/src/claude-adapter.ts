@@ -51,6 +51,12 @@ import { GuidanceContextError, guidanceContextUnavailableCode, readVerifiedGuida
  */
 export const claudePluginSelectionSupport = 'UNSUPPORTED' as const;
 
+/**
+ * Whether Claude Code can be frozen and continued at the process level (ADR-0061). Decided by the
+ * process-ownership spike in `docs/spikes/claude-2.1.268.md`.
+ */
+export const claudeProviderProcessSuspension = 'REQUIRES_VALIDATION' as const;
+
 function claudeCapabilities(): AdapterCapabilities {
   return Object.freeze({
     // Measured: `--session-id <uuid>` pins the conversation and the transcript is written at
@@ -102,6 +108,10 @@ function claudeCapabilities(): AdapterCapabilities {
     // conversation has **no** channel for live session guidance. Recording `CHANNEL_UNSUPPORTED` is
     // the honest answer; writing text into the child's stdin would be inventing a channel.
     sessionGuidance: 'UNSUPPORTED',
+    // ADR-0061: the `claude --print` child is the process this Adapter spawns and owns; see
+    // `docs/spikes/claude-2.1.268.md` §「Provider 进程冻结（ADR-0061）」 for the measured part and the
+    // part this machine could not measure (it has no Claude Code credentials).
+    providerProcessSuspension: claudeProviderProcessSuspension,
   });
 }
 

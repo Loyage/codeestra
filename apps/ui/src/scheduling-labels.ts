@@ -107,6 +107,7 @@ export function decisionLabel(decision: string): string {
     START_NOW: '现在会启动',
     WAIT_CONFLICT: '冲突等待',
     WAIT_CAPACITY: '容量等待',
+    WAIT_CONTROL: 'Runtime 全局暂停等待（不是 BLOCKED）',
     BLOCKED: '阻塞（仅表示依赖未满足）',
     ACTIVE: '已在活跃集合中',
     NOT_A_CANDIDATE: '不是调度候选（状态或 revision 不满足候选条件）',

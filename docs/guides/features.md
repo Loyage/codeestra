@@ -1,8 +1,9 @@
 # 功能清单：「这软件能做什么」
 
-> **适用版本** `dev@4667d32`（2026-09-16） · **schema** v33 · **最后校对** 2026-09-16
+> **适用版本** `dev@de03448` + 本格分支 `Loyage/glc-pause-ui`（2026-09-16） · **schema** v34（本格暂停半边） · **最后校对** 2026-09-16
 > 版本会前进：`dev@4667d32` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> 「调度、容量与冲突」一节新增「全局暂停」一行，并由 FOUNDATION-097 标明容量行的目标语义（ADR-0061 D01–D03）；
 > 「任务」表的「永久删除」一行由 FOUNDATION-090 新增（ADR-0058）；「调度、容量与冲突」一节的声明功能与
 > 冲突判定两行由 FOUNDATION-091 改写（ADR-0059）。
 > 「接入与项目」表的 dev 事实来源一行由 FOUNDATION-093 第三轮同步（ADR-0060 修订）；其余行沿用 FOUNDATION-091 的校对基线。
@@ -77,7 +78,8 @@
 | 调度引擎 | 事件触发 + 周期恢复的 pass；`status` 报事实、`plan` 是有序 dry run、`explain` 回答「为什么它现在不跑」 | `task schedule status/plan/explain/run` | 调度 → 调度引擎 / 调度判定 | [0030](../decisions/0030-phase2-parallel-scheduling.md)、[0033](../decisions/0033-scheduling-engine.md) |
 | 声明功能 | 在 revision 上声明「这个 Task 在做哪个功能」（`modules[].id`）；写入时按项目 `main` ref 的映射校验；省略即继承上一条 revision 的声明 | `task create --feature <module-id>`（可重复）、`task revision create --feature <module-id>` | 新建任务 / 任务详情（声明的功能） | [0059](../decisions/0059-feature-declaration-conflict-rule.md) |
 | UNKNOWN 显式放行 | 对 `CONFLICTING` **永不放行**；对 `UNKNOWN` 做单次、绑定 revision/基线/分析器版本的放行（当前规则不产生 `UNKNOWN`，所以日常不可达） | `task run --allow-unknown`、`task schedule clear-unknown` | 调度 → UNKNOWN 的显式单次放行 | [0030](../decisions/0030-phase2-parallel-scheduling.md) D05、[0059](../decisions/0059-feature-declaration-conflict-rule.md) D02 |
-| 容量与上限 | 项目级并发上限（默认 2，上限 16）+ 每 Adapter 覆盖；读回存储值，非法值有自己的稳定码 | `scheduler capacity get/set/clear` | 调度 → 容量与槽位预留 | [0032](../decisions/0032-capacity-and-slot-reservations.md) |
+| 容量与上限 | **本次构建**：项目级并发上限（默认 2，上限 16）+ 每 Adapter 覆盖；读回存储值，非法值有自己的稳定码。**ADR-0061 D01–D03 已接受的目标语义**是「整个 Runtime 只有一个上限、列出跨项目占用者」（由 schema v34 的另一半实现） | `scheduler capacity get/set/clear` | 调度 → **Runtime 全局容量**（卡片会写明当前仍是项目级） | [0032](../decisions/0032-capacity-and-slot-reservations.md)、[0061](../decisions/0061-runtime-global-load-control.md) D01–D03 |
+| **全局暂停（暂停全部 / 继续全部）** | 持久屏障 + 可核验的 Provider 主进程冻结：先拦新启动与新投递，再按 `pid + OS start token + incarnation` 核验后只对**主进程**发 `SIGSTOP`/`SIGCONT`；**不改写** Task/Execution/Session 状态、不释放 slot/workspace/lease；跨 Runtime 重启保持，只有显式 `resume` 解除；部分失败一律 `RECOVERY_REQUIRED` 且屏障保持 | `scheduler control status/pause/resume/reconcile` | 全局外壳的「全局负载控制」条（不依赖选中项目）+ 逐目标事实 | [0061](../decisions/0061-runtime-global-load-control.md) D04–D10 |
 | 槽位预留 | 在**一个 immediate 事务**里复核 Task 版本、已评估 revision、依赖事实、ImpactSnapshot 代数与两个容量维度后记录预留 | `scheduler reservations list/acquire/release/prepare-workspace/reconcile` | 调度 → 槽位预留 | [0032](../decisions/0032-capacity-and-slot-reservations.md) |
 | 预留对账 | 复核每个活跃预留的持有者进程是否真的还在：确认消失则释放并记录；活着的/无法核验的保留槽位 | `scheduler reservations reconcile` | 调度 → reconcile 观测 | [0032](../decisions/0032-capacity-and-slot-reservations.md) |
 | 冲突判定 | **只比较声明**：两侧声明了同一功能 id、且对方未完成（非 `SUCCEEDED`/`CANCELLED`、未归档）才 `CONFLICTING`；否则默认 `SAFE_TO_PARALLELIZE`。**同文件/同目录/同模块/共享资源不再拦人**（只作为事实进入解释输出） | `project impact validate/show/explain` | **调度 → 影响映射 · impact.json**；任务详情 → 影响与冲突判定 | [0059](../decisions/0059-feature-declaration-conflict-rule.md)（取代 [0031](../decisions/0031-impact-snapshot-and-deterministic-conflict-analyzer.md) 的判定语义；快照/映射/失效键/audit 表仍自 0031） |
@@ -129,6 +131,9 @@
 
 1. **真实 provider 的并发运行**未验收：多 Task 并行的调度语义有实现与容量/槽位门禁，但真实模型的并行执行没有完成受控验收。
 2. **真实模型下的暂停 / 恢复复验**未完成：ADR-0016 的暂停/恢复编排由脚本 Adapter 覆盖；真实 provider 进程的暂停/恢复与取消超时仍未复验。
+   **区分**：ADR-0061 的**全局** Provider 冻结已对 **Pi** 做过真实进程测量（`docs/spikes/pi-0.84.4.md`），
+   而 **Codex 与 Claude Code 的 `providerProcessSuspension` 仍是 `REQUIRES_VALIDATION`**——
+   全局 `pause` 遇到它们的目标会 fail closed 到 `RECOVERY_REQUIRED`（`GLOBAL_PAUSE_UNSUPPORTED`），**不会**假装已冻结。
 3. **Provider 是否真的读取 Project Knowledge 物化文件**未验证：本轮 Agent Adapter 不消费 `knowledgeSnapshotRefs`。
 4. **token 级实时流**（需要新事件与存储）未实现；transcript 是**按需读取 + 轮询**，不是逐 token 推送。
 5. **Codeestra 自升级 / Self Promotion 的完整切换**未实现（Phase 7）。

@@ -1,6 +1,6 @@
 # Codeestra 用户指南
 
-> **适用版本** `dev@036cf68`（2026-09-15） · **schema** v28 · **最后校对** 2026-09-15
+> **适用版本** `dev@de03448` + 本格分支 `Loyage/glc-pause-ui`（2026-09-16） · **schema** v34（本格暂停半边） · **最后校对** 2026-09-16
 > 版本会前进：`dev@036cf68` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 
@@ -25,7 +25,7 @@ Codeestra 是 Task-first、local-first 的 AI Development Runtime：你管理产
 | 查「这软件到底有哪些功能」 | [features.md](./features.md) |
 | 查「这条命令怎么用、参数是什么、退出码是什么」 | [cli-reference.md](./cli-reference.md) |
 | 认一下界面上的每个面板、每个按钮做什么 | [ui.md](./ui.md)（逐屏走查） |
-| 想做某件具体的事（改 bug / 并行 / 换 Agent / 发布…） | [recipes.md](./recipes.md) |
+| 想做某件具体的事（改 bug / 并行 / 换 Agent / **暂停全部** / 发布…） | [recipes.md](./recipes.md) |
 | 想人工核对界面观感（窄屏、主题、字号、焦点…） | [acceptance-checklist.md](./acceptance-checklist.md) |
 | 图放哪、缺哪张图 | [images/README.md](./images/README.md) |
 | 遇到了报错 / 想查稳定错误码 | [troubleshooting.md](./troubleshooting.md) |

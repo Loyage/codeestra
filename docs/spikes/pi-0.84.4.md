@@ -73,3 +73,75 @@ Pi extension 的 `ctx.ui.select/confirm/input/editor` 在 RPC 模式产生 `exte
 - 尚未证明 edit/write 和所有允许 extension tools 的 abort 后静止边界。
 - 受控启动使用 `--no-extensions --extension <fixed gate> --no-skills --no-prompt-templates --no-themes --no-context-files`，避免项目动态 Pi 资源和环境 prompt 资源改变 Task 输入；FULL 使用 `--approve` 且不传 `--tools`（全部已注册工具），STRICT 使用 `--no-approve --tools read,bash,edit,write,grep,find,ls`。项目知识将来通过 `knowledgeSnapshotRefs` 显式交付。已确认该 argv 可被真实 Pi 0.84.4 接受。环境变量 allowlist 尚未定稿。
 - 用户已确认：`agent_settled` 可作为 SUCCESS 完成依据，但 evidence 必须写明依据（当前为 `pi-rpc:agent_settled:session=...:epoch=...:tools=<hash>`）；进程异常退出不声明静止，而是 DISCONNECTED + RECOVERY_REQUIRED 且保留占用。
+
+## Provider 进程冻结（ADR-0061，FOUNDATION-097 补测）
+
+状态：**已实测 SUPPORTED**。这一节回答的是 ADR-0061 的一个新维度：**哪个受控进程是模型请求发起者**，以及
+冻结它时工具子进程会不会被 Codeestra 的信号碰到。它不是 provider 原生 pause，也不改变本文件上面任何结论。
+
+方法与可复跑探针（已入库）：`docs/spikes/global-freeze/pi-freeze-probe.ts`（`bun run
+docs/spikes/global-freeze/pi-freeze-probe.ts <输出目录>`）。spike 的临时目录（`/tmp/ce-glc2/…`）在交付收尾时
+按任务要求清理；下方逐字引用当时的关键原始输出行，结论不依赖那份临时文件，探针可随时复跑。环境：本机 `pi` **0.85.1**、真实模型
+`deepseek-flash`（`PI_PROVIDER=deepseek`）、macOS darwin/arm64。argv 由本仓库自己的
+`buildPiRpcArguments` 生成（与生产 `PiRpcAdapter` 的受控启动逐字相同），工作目录与所有 marker 都在
+`/tmp` 下，未触碰用户项目或稳定数据目录。
+
+判据：探针要求模型**连续两次** bash 调用——第一次 `sleep 18`，第二次写另一个 marker。因此
+「冻结后不再产生下一次模型请求」有一个直接观测：第二次 bash 只能在第一次返回后、由**新的模型请求**
+决定发起。
+
+```text
+### argv ["pi","--mode","rpc","--approve","--no-extensions","--extension",…gate…,"--extension",…question…,
+        "--no-skills","--no-prompt-templates","--no-themes","--no-context-files","--session-dir",…]
+### provider main pid 21366
+### provider start token (before freeze) 三  9月/16 20:57:01 2026
+### tool subprocess pid 21865
+### tool start token 三  9月/16 20:57:04 2026
+
+### process table while the tool runs (provider subtree + tool line)
+  21366 21360 21356 S    pi
+  21865 21366 21865 Ss   /bin/bash -c sleep 18 && echo FIRST_DONE > /tmp/ce-glc2/pi-freeze/first.marker
+  21866 21865 21865 S    sleep 18
+
+### sent SIGSTOP to provider main pid only: 21366
+### provider stat after SIGSTOP T
+### provider start token after SIGSTOP 三  9月/16 20:57:01 2026
+### tool stat after SIGSTOP Ss
+### tool start token after SIGSTOP 三  9月/16 20:57:04 2026
+
+### 26s after the freeze
+### provider stat T
+### tool stat Z
+### first marker exists true
+### second marker exists false
+### provider stdout bytes before freeze 20001 after freeze 20001
+### provider stdout records seen after the freeze: 0
+
+### sent SIGCONT to provider main pid only
+### provider stat after SIGCONT S
+### second marker exists after SIGCONT true
+### both markers true true
+```
+
+结论（每条都对应上面的一行原文）：
+
+| 问题 | 实测事实 |
+|---|---|
+| 模型请求发起者 | `pi --mode rpc` 子进程（pid 21366）本身。它就是 Adapter 记录 `{pid,startToken}` 的那个 child，也是它读取 stdin/stdout 的 JSONL 通道。 |
+| 工具子进程归属 | bash 工具是它的**子进程**（ppid=21366），且在**自己的 process group**（pgid=21865，与 provider 的 21356 不同），`sleep 18` 是它的子进程。因此「只对主进程发信号」不会连带那些工具。 |
+| `SIGSTOP` 只作用于主进程 | 主进程 stat 由 `S` 变 `T`，start token 前后逐字相同（`三 9月/16 20:57:01 2026`）；同一时刻工具子进程仍是 `Ss`，其 start token 也未变。Codeestra 没有向工具发任何信号。 |
+| 工具继续运行 | 冻结期间 `first.marker` 被真实写入（`true`），随后工具自然退出（`Z`）。 |
+| 冻结后没有下一次模型请求 | 冻结后 26 秒内 provider stdout **新增 0 条记录**（字节数 20001 → 20001），`second.marker` 为 `false`。 |
+| 恢复确实是被冻结的那一个 | `SIGCONT` 后主进程回到 `S`，`second.marker` 变为 `true`——第二次模型请求确实是被这次冻结挡住的，不是模型自己决定不做。 |
+
+`providerProcessSuspension` 因此声明为 **`SUPPORTED`**（`packages/agent-adapters/src/pi-adapter.ts` 的
+`piProviderProcessSuspension`）。
+
+**本节的诚实边界（不得外推）**：
+
+- **未实测背压**：本次工具的输出只有一行，无法触发「provider 停止读管道 → 大输出工具因 OS 管道背压阻塞」。
+  「工具没收到停止信号」不等于「工具在任何情况下都不会停顿」。
+- **未实测**：第三方 extension、hook 或 MCP 进程的归属；`--no-extensions` 下的受控启动把这类进程排除在外，
+  但它们一旦存在就不在冻结的保证内。
+- **未实测**：冻结期间 provider 已发出的那个模型请求是否已在服务端完成/计费（ADR-0061 明确不取消它）。
+- 本次用 0.85.1 实测，而本文件首轮核对的是 0.84.4；差异不影响上述进程层结论，但版本组合已如实记录。

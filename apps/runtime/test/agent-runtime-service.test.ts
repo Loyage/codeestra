@@ -46,6 +46,7 @@ const capabilities: AdapterCapabilities = Object.freeze({
   controlledConfiguration: 'SUPPORTED',
   pluginSelection: 'UNSUPPORTED',
   sessionGuidance: 'UNSUPPORTED',
+  providerProcessSuspension: 'UNSUPPORTED',
 });
 
 class ScriptedAnswerError extends Error {

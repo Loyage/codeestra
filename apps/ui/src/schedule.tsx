@@ -211,14 +211,23 @@ export function AssessmentBlock({ assessment, tasks }: {
   );
 }
 
-/** The two capacity dimensions and who holds each slot; `limitSource` explains where a limit came from. */
-export function CapacityTable({ capacity, tasks, now }: {
+/**
+ * The capacity facts and who holds each slot; `limitSource` explains where a limit came from.
+ *
+ * `scope` is not decoration. ADR-0061 D01 makes the limit a **Runtime-global** one and the card is
+ * titled accordingly, but this build's capacity command面 is still project-scoped (schema v34's other
+ * half owns the global command). Rather than printing project numbers under a global heading, the
+ * table says which scope it is showing and the panel explains why — a card that silently relabelled
+ * project numbers as host-wide would be a false statement about what the machine is doing.
+ */
+export function CapacityTable({ capacity, tasks, now, scope = 'PROJECT' }: {
   readonly capacity: ProjectCapacityView;
   readonly tasks: readonly TaskView[];
   readonly now: number;
+  readonly scope?: 'PROJECT' | 'GLOBAL';
 }) {
   return (
-    <>
+    <div data-capacity-scope={scope}>
       {capacity.draining ? (
         <div className="banner error" role="status">
           <div>
@@ -232,8 +241,8 @@ export function CapacityTable({ capacity, tasks, now }: {
           <tr><th>范围</th><th>上限</th><th>来源</th><th>已用</th><th>可用</th><th>现在获取会得到</th></tr>
         </thead>
         <tbody>
-          <tr>
-            <td>全局</td>
+          <tr data-capacity-row={scope === 'GLOBAL' ? 'runtime-global' : 'project'}>
+            <td>{scope === 'GLOBAL' ? 'Runtime 全局' : '项目内（本次构建的容量命令面）'}</td>
             <td>{capacity.globalLimit}</td>
             <td>{capacityLimitSourceLabel(capacity.globalLimitSource)}</td>
             <td>{capacity.globalUsed}</td>
@@ -280,7 +289,7 @@ export function CapacityTable({ capacity, tasks, now }: {
           ))}
         </ul>
       )}
-    </>
+    </div>
   );
 }
 
@@ -769,9 +778,18 @@ export function CapacityPanel({ client, projectId, tasks, refreshToken, run }: {
 
   return (
     <section className="capacity-panel">
-      <h4>容量与槽位预留 <span className="muted hint">scheduler capacity / reservations · ADR-0032</span></h4>
+      <h4>
+        Runtime 全局容量
+        <span className="muted hint">scheduler capacity / reservations · ADR-0032，目标语义 ADR-0061 D01–D03</span>
+      </h4>
+      <p className="muted hint" data-capacity-scope-note="PROJECT">
+        ADR-0061 D01 的目标是**整个 Runtime 只有一个上限**、并列出跨项目占用者。本次构建里
+        `scheduler capacity get` 仍是项目级的，所以下面的数字与占用者都是**当前项目**的；本卡片只投影该
+        命令返回的字段，不在 UI 里发明全局字段。当全局容量命令面（schema v34 的另一半）合入后，
+        同一张卡片改为读取它并把 `scope` 传成 `GLOBAL`，数字即为跨项目全局值。
+      </p>
       <p className="muted hint">
-        两个上限同时生效：项目全局与每 adapter。容量等待不是 BLOCKED；降低上限不会释放已持有的槽位。
+        容量等待不是 BLOCKED；降低上限不会释放已持有的槽位。
         释放必须给出原因，且不会因心跳过期或客户端消失自动发生。
       </p>
       {error === null ? null : <p className="error" role="alert">容量读取失败：{error}</p>}

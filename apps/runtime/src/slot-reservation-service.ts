@@ -137,6 +137,13 @@ export interface SlotReservationServiceOptions {
   /** Read once at construction and passed to every acquisition, so the row records real evidence. */
   readonly startToken: string | null;
   readonly draining: () => { readonly draining: boolean; readonly reason: string | null };
+  /**
+   * The Runtime's persistent global barrier (ADR-0061 D05/D08): a `reservations acquire` issued while
+   * the host is paused must be refused **before** the slot transaction, not counted as a capacity
+   * wait. Absent means "no global control plane". This is a pre-check and nothing else — it changes
+   * no counting rule, which stays where it belongs.
+   */
+  readonly barrier?: () => { readonly blocked: boolean; readonly state: string };
   readonly inspectHolder?: SlotHolderInspector;
   readonly now?: () => number;
   readonly randomUUID?: () => string;
@@ -149,6 +156,7 @@ export class SlotReservationService {
   readonly #pid: number;
   readonly #startToken: string | null;
   readonly #draining: () => { readonly draining: boolean; readonly reason: string | null };
+  readonly #barrier: (() => { readonly blocked: boolean; readonly state: string }) | null;
   readonly #inspectHolder: SlotHolderInspector;
   readonly #now: () => number;
   readonly #randomUUID: () => string;
@@ -160,6 +168,7 @@ export class SlotReservationService {
     this.#pid = options.pid;
     this.#startToken = options.startToken;
     this.#draining = options.draining;
+    this.#barrier = options.barrier ?? null;
     this.#inspectHolder = options.inspectHolder ?? ((reservation) => inspectSlotHolder(reservation));
     this.#now = options.now ?? Date.now;
     this.#randomUUID = options.randomUUID ?? (() => crypto.randomUUID());
@@ -268,7 +277,19 @@ export class SlotReservationService {
         startToken: this.#startToken,
         actor: input.actor,
       },
-      draining: this.#draining,
+      // The Runtime's global barrier is fed through the same "no new reservation" input as draining,
+      // because that input is *re-read inside the write transaction* — so a `pause` that commits
+      // while this acquisition is in flight cannot slip a reservation past the barrier (ADR-0061 D05
+      // step 1). It is not a capacity verdict: the wait below is rewritten to the barrier's own code.
+      draining: () => {
+        const barrier = this.#barrier?.();
+        if (barrier?.blocked === true) {
+          return { draining: true,
+            reason: `the Runtime is globally ${barrier.state}, so no new slot is reserved and no`
+              + ' Execution may start' };
+        }
+        return this.#draining();
+      },
       commandId: input.commandId,
       payloadHash: derivedId('slot-acquire-payload', input.commandId, input.taskId, input.revisionId),
       eventId: this.#randomUUID(),
@@ -289,6 +310,20 @@ export class SlotReservationService {
     // — never released. Freeing it is the explicit release or the audited startup reconcile.
     const wait = result.wait as CapacityWaitReason;
     const holderEvidence = await this.#observeBlockingHolders(input.projectId, wait.blocking);
+    if (result.outcome === 'DRAINING' && this.#barrier?.().blocked === true) {
+      // The refusal above was the barrier, not a shutdown: report it with the barrier's own stable
+      // code so a script can tell "the whole Runtime is paused" from "this Runtime is going down".
+      return {
+        outcome: 'CAPACITY_WAIT',
+        capacity: result.capacity,
+        wait: { ...wait, code: 'SCHEDULER_GLOBALLY_PAUSED',
+          detail: `the Runtime is globally ${this.#barrier().state}, so no new slot is reserved and`
+            + ' no Execution may start; the Task waits (it is not BLOCKED) until'
+            + ' `scheduler control resume`' },
+        reservation: null,
+        holderEvidence,
+      };
+    }
     return {
       outcome: result.outcome === 'DRAINING' ? 'DRAINING' : 'CAPACITY_WAIT',
       capacity: result.capacity,

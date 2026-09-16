@@ -1,6 +1,6 @@
 # SQLite Schema
 
-状态：逻辑 SQL 设计基线 + 已实现 migration 记录。第 2–6 节是逻辑关系设计（其中若干节已被后续 ADR 修订，见第 8 节各版本的说明）；第 8 节逐版本记录 `packages/storage/src/migration.ts` 中**实际存在**的 migration，当前最新实现为 schema **v33**（ADR-0060；v16 永久未使用、v22 未占用）。ADR-0061 已接受但尚未实现的 Runtime 全局负载控制计划占用 **v34**，其小节是实施契约，不得据此声称 migration 已存在。**schema version 16 永久未使用**，原因见第 8 节。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与第 2–6 节的约束等价，并以第 8 节的实现记录为准。
+状态：逻辑 SQL 设计基线 + 已实现 migration 记录。第 2–6 节是逻辑关系设计（其中若干节已被后续 ADR 修订，见第 8 节各版本的说明）；第 8 节逐版本记录 `packages/storage/src/migration.ts` 中**实际存在**的 migration。**本分支（FOUNDATION-097 / GLC-2）当前最新实现为 schema v34 的暂停半边**：`runtime_pause_control`、`runtime_pause_targets`、`runtime_command_receipts` 与 `domain_events.project_id` 可空（v16 永久未使用、v22 未占用）。v34 的容量半边（`runtime_capacity_settings`、退役旧容量表）由并行分支实现；两半在集成时合成**一个** `if (version < 34)` 步骤，合并后的版本号才是 `dev` 上的事实。**schema version 16 永久未使用**，原因见第 8 节。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与第 2–6 节的约束等价，并以第 8 节的实现记录为准。
 
 ## 1. 约定
 
@@ -1361,7 +1361,14 @@ ADR-0060 之前，一个 Task 的基线 ref 只有一个可能：项目行的 `p
   于是历史记录仍然如实；升级不发明数据、不改写任何已有行。
 - 有 dev clone 的项目行为不变（写入的仍是那个 clone 的 `refs/heads/dev`）；managed 项目写入项目文件夹当时检出的分支。
 
-### Runtime 唯一全局容量与 Provider 冻结（计划 schema version 34，ADR-0061；尚未实现）
+### Runtime 唯一全局容量与 Provider 冻结（schema version 34，ADR-0061；**暂停半边已实现**，FOUNDATION-097）
+
+> **实现状态**：`runtime_pause_control`、`runtime_pause_targets`、`runtime_command_receipts` 与
+> `domain_events.project_id` 可空**已实现**（本分支的 v34 追加块，`phase1SchemaVersion = 34`）。
+> `runtime_capacity_settings`、退役旧容量表属并行的容量半边（GLC-1）；集成时两半合成**一个** `if (version < 34)` 步骤，
+> 合并后必须重跑 v33→v34 真实文件库迁移与 `foreign_key_check`。
+> 实现与本节的差异只有一处：收据表按 ADR-0061 D10 的**最小形态**建成（`command_id`/`payload_hash`/`result_json`/`created_at`），
+> 集成时以容量半边的定义为准确认一次逐列一致。
 
 计划新增的持久事实：
 
@@ -1423,5 +1430,7 @@ CREATE TABLE runtime_command_receipts (
 **状态一致性**：
 
 - `RUNNING` 时不得有 `PENDING`/`STOPPED` 目标；`PAUSED` 时本 epoch 不得有 `PENDING`/`RECOVERY_REQUIRED`；这些跨表约束由同一 immediate transaction 的 storage service 强制并以故障注入测试覆盖。
+- 已实现的迁移在提交前除行数核对外，还断言**结束态**（`domain_events.project_id` 确实可空、singleton 控制行确实存在）：
+  Bun 的 `exec()` 会吞掉多语句脚本里的 step 错误，只比行数会漏掉「复制之后才失败」的情形。
 - `RECOVERY_REQUIRED` 仍保持全局启动屏障；target 行不因超时、心跳或 Runtime 重启自动删除/改成 `EXITED`。
 - `runtime_pause_targets` 不是 Session 状态来源，不得据它把 Session 写回 ACTIVE/PAUSED；Session/Execution 的重启收敛仍走既有表与 ADR-0028。它的五个业务 ID 刻意是无 FK 的身份快照：`task purge` 删除 Task 聚合后，本 pause epoch 的进程控制/审计事实仍必须保留；purge 前仍须按 ADR-0058 证明 provider 已停止，并把对应 target 如实收口。

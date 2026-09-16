@@ -1,6 +1,6 @@
 # Conservative Scheduler
 
-状态：§1–§6 是 Phase 2 设计（ADR-0030）；§7 记录**当前已实现的原语**（ADR-0032，schema v21）。**调度引擎本体已由 ADR-0033 / FOUNDATION-055 实现**（`apps/runtime/src/schedule-service.ts` + `CODEESTRA_SCHEDULE_TICK_MS`，默认 5000ms），因此 §1.2 的触发模型与 §7.6 不再是「未实现」：它们已经是实现事实（保留原文的措辞只在下面显式标注更正，不重写历史）。**ADR-0059 把冲突判定从「证明不相交」改为「两侧声明同一功能且对方未完成」（FOUNDATION-091），§1 的活跃集合与 §2 的判定流程下面各有一节显式更正。ADR-0061 又接受了容量与全局控制的下一版目标：删除项目级/Adapter 级额度，只保留一个跨项目 Runtime 上限，并新增持久全局 Provider 冻结；该设计尚未实现，§7 仍是当前代码事实，§8 是待开发契约。**
+状态：§1–§6 是 Phase 2 设计（ADR-0030）；§7 记录**当前已实现的原语**（ADR-0032，schema v21）。**调度引擎本体已由 ADR-0033 / FOUNDATION-055 实现**（`apps/runtime/src/schedule-service.ts` + `CODEESTRA_SCHEDULE_TICK_MS`，默认 5000ms），因此 §1.2 的触发模型与 §7.6 不再是「未实现」：它们已经是实现事实（保留原文的措辞只在下面显式标注更正，不重写历史）。**ADR-0059 把冲突判定从「证明不相交」改为「两侧声明同一功能且对方未完成」（FOUNDATION-091），§1 的活跃集合与 §2 的判定流程下面各有一节显式更正。ADR-0061 又接受了容量与全局控制的下一版目标：删除项目级/Adapter 级额度，只保留一个跨项目 Runtime 上限，并新增持久全局 Provider 冻结。**其中暂停半边（D04–D10）已由 FOUNDATION-097 实现**（`apps/runtime/src/runtime-control-service.ts` + `scheduler control *` + schema v34 的两张 pause 表），§8.2/§8.3 已是实现事实；§7 仍是容量部分的当前代码事实，§8.1 的唯一全局容量待容量半边合入。**
 
 ## 1. 调度输入和顺序
 
@@ -212,7 +212,10 @@ scheduler reservations reconcile <project-id> [--json]
 
 因此在本格及其基线里：**不得写「自动 tick 已实现」或「两个 SAFE 任务真的会同时开始」。** Wave E 交付的是原语：E1 的 ImpactSnapshot/Conflict Analyzer 与 E2 的容量/槽位预留已经就位，但没有引擎驱动它们；本格的端到端证据只到「第三个任务得到容量等待」，没有两个 Task 真的同时跑。
 
-## 8. Runtime 全局负载控制（ADR-0061，已接受、待实现）
+## 8. Runtime 全局负载控制（ADR-0061；**§8.2/§8.3 已实现**（FOUNDATION-097，schema v34 暂停半边），§8.1 待实现）
+
+实现位置：控制层 `apps/runtime/src/runtime-control-service.ts`；屏障接入点见
+`state-machines.md` §6.1。§8.1 的唯一全局容量属于并行的容量格，本节的暂停语义不依赖它。
 
 ### 8.1 唯一全局容量
 
@@ -249,6 +252,16 @@ scheduler control reconcile [--json]
 ```
 
 `reconcile` 只观察，不发暂停、继续或终止信号。`pause`/`resume` 只有在完整收口或幂等命中目标状态时 exit 0；部分结果 exit 1 并逐目标报告。普通 Task 因屏障等待仍 exit 3，且永远不是 `BLOCKED`。
+
+事件名已实现：`SchedulerGlobalPauseRequested`、`SchedulerGlobalPaused`、`SchedulerGlobalResumeRequested`、
+`SchedulerGlobalResumed`、`SchedulerGlobalControlRecoveryRequired`（`project_id = NULL`，
+`aggregate_type = RuntimeSchedulerControl`）。`pause`/`resume`/`reconcile` 的幂等回执在
+`runtime_command_receipts` 里（同 commandId 重放返回同一结果，同键异文 `COMMAND_CONFLICT`）。
+
+调度等待的实现细节：候选判定的**第 0 步**先读屏障，命中时 disposition 为 `WAITING`、
+`wait.kind = 'CONTROL'`、`wait.code = 'SCHEDULER_GLOBALLY_PAUSED'`；它**不写** Task 级
+`TaskWaitingForConflict`/`TaskWaitingForCapacity`（那会把全局事实误记成冲突或容量）。屏障在 start 已经发出后
+才提交的竞态会让 start 抛 `SCHEDULER_GLOBALLY_PAUSED`，调度层把该结果记为 **WAIT**（不是 `FAILED`）并释放预留。
 
 ### 8.3 暂停期间
 

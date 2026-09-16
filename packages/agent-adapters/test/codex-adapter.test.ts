@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { agentProcessIdentitySchema, type AgentKnowledgeContext, type AgentStartRequest } from '@codeestra/contracts';
-import { CodexAdapter } from '../src/codex-adapter.js';
+import { CodexAdapter, codexProviderProcessSuspension } from '../src/codex-adapter.js';
 import { CodexAdapterError } from '../src/codex-protocol.js';
 
 /**
@@ -353,6 +353,7 @@ describe('Codex adapter capabilities', () => {
       pauseWithQuiescence: 'UNSUPPORTED',
       revisionAcknowledgement: 'UNSUPPORTED',
       sessionGuidance: 'REQUIRES_VALIDATION',
+      providerProcessSuspension: codexProviderProcessSuspension,
       cooperativeStop: 'REQUIRES_VALIDATION',
       attach: 'UNSUPPORTED',
       nativeTerminalHandoff: 'UNSUPPORTED',

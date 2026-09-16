@@ -72,14 +72,18 @@ export {
   knowledgeContextUnavailableCode,
   readVerifiedKnowledgeContext,
 } from './knowledge-context.js';
+import { piProviderProcessSuspension } from './pi-adapter.js';
+import { codexProviderProcessSuspension } from './codex-adapter.js';
+import { claudeProviderProcessSuspension } from './claude-adapter.js';
 export {
   piGuidanceSupport,
   piPluginSelectionSupport,
+  piProviderProcessSuspension,
   PiRpcAdapter,
 } from './pi-adapter.js';
 export { codexDeveloperInstructions } from './codex-guidance.js';
-export { claudePluginSelectionSupport } from './claude-adapter.js';
-export { codexPluginSelectionSupport } from './codex-adapter.js';
+export { claudePluginSelectionSupport, claudeProviderProcessSuspension } from './claude-adapter.js';
+export { codexPluginSelectionSupport, codexProviderProcessSuspension } from './codex-adapter.js';
 /**
  * The plugin-selection capability each Adapter this build ships *declares*, for read-only
  * projections (ADR-0044 D03/D05). It exists so the Agent settings page and `agent plugins list` never
@@ -93,6 +97,19 @@ export const declaredPluginSelectionSupport: Readonly<Record<string, 'SUPPORTED'
     codex: codexPluginSelectionSupport,
     claude: claudePluginSelectionSupport,
   });
+/**
+ * The provider-process-suspension capability each shipped Adapter declares (ADR-0061 D05/D09), for
+ * the same reason `declaredPluginSelectionSupport` exists: the global control service must be able to
+ * answer "can this Adapter's main process be frozen?" from the Adapter's own declaration, without
+ * starting a provider. A pause that read this as unsupported merely because a binary could not be
+ * launched right now would be a false statement about the Adapter.
+ */
+export const declaredProviderProcessSuspension:
+Readonly<Record<string, AdapterSupport>> = Object.freeze({
+  pi: piProviderProcessSuspension,
+  codex: codexProviderProcessSuspension,
+  claude: claudeProviderProcessSuspension,
+});
 export type { PiRpcAdapterOptions } from './pi-adapter.js';
 export { CodexAdapter } from './codex-adapter.js';
 export type { CodexAdapterOptions } from './codex-adapter.js';
@@ -163,6 +180,7 @@ export type { ClaudeFrame, ClaudePendingControlRequest } from './claude-process.
 
 import type {
   AdapterCapabilities,
+  AdapterSupport,
   AgentAnswerAdapter,
   AgentAnswerRequest,
   AgentCompletionFacts,
@@ -205,6 +223,9 @@ const capabilities: AdapterCapabilities = Object.freeze({
   controlledConfiguration: 'SUPPORTED',
   pluginSelection: 'UNSUPPORTED',
   sessionGuidance: 'UNSUPPORTED',
+  // The fake starts no provider process at all, so it must not claim the process-level freeze
+  // dimension: a fake that claimed it would hide exactly the refusal paths it exists to exercise.
+  providerProcessSuspension: 'UNSUPPORTED',
 });
 
 export type FakeObservedEvent = Readonly<

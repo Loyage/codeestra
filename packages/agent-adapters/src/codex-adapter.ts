@@ -46,6 +46,12 @@ import { codexDeveloperInstructions } from './codex-guidance.js';
  */
 export const codexPluginSelectionSupport = 'UNSUPPORTED' as const;
 
+/**
+ * Whether Codex can be frozen and continued at the process level (ADR-0061). Decided by the
+ * process-ownership spike in `docs/spikes/codex-0.151.0.md`, not by this branch's wishes.
+ */
+export const codexProviderProcessSuspension = 'REQUIRES_VALIDATION' as const;
+
 function codexCapabilities(options: { readonly enableRequestUserInput: boolean }): AdapterCapabilities {
   return Object.freeze({
     persistentSession: 'SUPPORTED',
@@ -88,6 +94,10 @@ function codexCapabilities(options: { readonly enableRequestUserInput: boolean }
     // primitive's existence. Either way the Runtime records `CHANNEL_UNSUPPORTED` instead of
     // pretending the conversation was told.
     sessionGuidance: 'REQUIRES_VALIDATION',
+    // ADR-0061: the app-server child is the process this Adapter spawns and owns, and its shell tools
+    // are that child's descendants; the value is what the spike measured, see
+    // `docs/spikes/codex-0.151.0.md` §「Provider 进程冻结（ADR-0061）」.
+    providerProcessSuspension: codexProviderProcessSuspension,
   });
 }
 

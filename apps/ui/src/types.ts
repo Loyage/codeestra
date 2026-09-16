@@ -1017,7 +1017,9 @@ export interface TaskDependencyView {
  */
 
 export type CapacityWaitReasonCodeView = 'CAPACITY_GLOBAL_LIMIT_REACHED'
-  | 'CAPACITY_ADAPTER_SLOT_LIMIT_REACHED' | 'SCHEDULER_DRAINING';
+  | 'CAPACITY_ADAPTER_SLOT_LIMIT_REACHED' | 'SCHEDULER_DRAINING'
+  /** ADR-0061 D08: the Runtime's persistent global barrier. A wait, never `BLOCKED`. */
+  | 'SCHEDULER_GLOBALLY_PAUSED';
 
 /** Why a Task did not get a slot; a capacity wait is a fact about now, not a failure. */
 export interface CapacityWaitReasonView {
@@ -1167,8 +1169,8 @@ export interface ScheduleExplanationView {
   readonly taskState: string;
   readonly adapterId: string;
   readonly candidate: boolean;
-  readonly decision: 'START_NOW' | 'WAIT_CONFLICT' | 'WAIT_CAPACITY' | 'BLOCKED' | 'ACTIVE'
-    | 'NOT_A_CANDIDATE';
+  readonly decision: 'START_NOW' | 'WAIT_CONFLICT' | 'WAIT_CAPACITY' | 'WAIT_CONTROL' | 'BLOCKED'
+    | 'ACTIVE' | 'NOT_A_CANDIDATE';
   readonly detail: string;
   readonly wait: ScheduleWaitView | null;
   readonly blockedReasons: readonly { readonly code: string; readonly prerequisiteTaskId: string;
@@ -1690,4 +1692,67 @@ export interface TaskRetryOutcomeView {
     readonly detail: string | null;
   }[];
   readonly start: ScheduleStartOutcomeView;
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * Runtime global load control (FOUNDATION-097 / ADR-0061 D04–D10).
+ *
+ * The whole shape is the `scheduler control status` result; the UI adds nothing to it and derives no
+ * state of its own. `state` is the Runtime's own enumerated control state, and `targets` is the
+ * per-incarnation evidence a caller needs to tell "every process is verified stopped" from "the
+ * command was accepted".
+ * ---------------------------------------------------------------------------------------------- */
+
+export type RuntimeGlobalControlState =
+  | 'RUNNING' | 'PAUSING' | 'PAUSED' | 'RESUMING' | 'RECOVERY_REQUIRED';
+
+export type RuntimePauseTargetState =
+  | 'PENDING' | 'STOPPED' | 'RESUMED' | 'EXITED' | 'RECOVERY_REQUIRED';
+
+export interface RuntimePauseTargetObservationView {
+  /** A stable code, or one of the settled names (`STOPPED`/`RESUMED`/`EXITED`/`PENDING`). */
+  readonly code: string;
+  readonly detail: string;
+  readonly observedAt: number;
+  /** The start token read from the real process at this observation; null when unreadable. */
+  readonly startToken: string | null;
+  readonly identityMatched: boolean;
+  readonly processState: 'RUNNING' | 'STOPPED' | 'EXITED' | 'UNKNOWN';
+  readonly adapterSupport: string;
+}
+
+export interface RuntimePauseTargetView {
+  readonly targetId: string;
+  readonly pauseEpoch: number;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly executionId: string;
+  readonly sessionId: string;
+  readonly incarnationId: string;
+  readonly providerPid: number;
+  readonly providerStartToken: string;
+  readonly state: RuntimePauseTargetState;
+  readonly observation: RuntimePauseTargetObservationView;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+export interface RuntimeGlobalControlView {
+  readonly state: RuntimeGlobalControlState;
+  readonly pauseEpoch: number;
+  readonly version: number;
+  readonly requestedAt: number | null;
+  readonly requestedBy: string | null;
+  readonly settledAt: number | null;
+  readonly detail: unknown;
+  readonly code: string | null;
+  readonly platformSupported: boolean;
+  readonly platform: string;
+  readonly targets: readonly RuntimePauseTargetView[];
+  /**
+   * Always `null`: the Runtime-global capacity numbers are `scheduler capacity get`'s contract
+   * (schema v34's other half, ADR-0061 D01–D03). The UI must not invent them here.
+   */
+  readonly capacity: null;
+  readonly capacityNote: string;
 }

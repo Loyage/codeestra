@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { agentProcessIdentitySchema, type AgentKnowledgeContext, type AgentStartRequest } from '@codeestra/contracts';
-import { ClaudeAdapter } from '../src/claude-adapter.js';
+import { ClaudeAdapter, claudeProviderProcessSuspension } from '../src/claude-adapter.js';
 import { ClaudeAdapterError, claudeProjectKey } from '../src/claude-protocol.js';
 
 /**
@@ -330,6 +330,7 @@ describe('Claude adapter capabilities', () => {
       pauseWithQuiescence: 'UNSUPPORTED',
       revisionAcknowledgement: 'UNSUPPORTED',
       sessionGuidance: 'UNSUPPORTED',
+      providerProcessSuspension: claudeProviderProcessSuspension,
       cooperativeStop: 'REQUIRES_VALIDATION',
       attach: 'UNSUPPORTED',
       nativeTerminalHandoff: 'UNSUPPORTED',

@@ -1,9 +1,9 @@
 # Codeestra 用户说明书
 
-> **适用版本** `dev@4667d32`（2026-09-16） · **schema** v33 · **最后校对** 2026-09-16
+> **适用版本** `dev@de03448` + 本格分支 `Loyage/glc-pause-ui`（2026-09-16） · **schema** v34（本格暂停半边） · **最后校对** 2026-09-16
 > 版本会前进：`dev@4667d32` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
-> §「任务」的永久删除一条由 FOUNDATION-090 新增（ADR-0058）；§3.1、§4.2、§4.3、§4.5、§10.1、§10.3 与
+> §10.5 的「全局暂停」由 FOUNDATION-097 新增（ADR-0061 D04–D10）；§「任务」的永久删除一条由 FOUNDATION-090 新增（ADR-0058）；§3.1、§4.2、§4.3、§4.5、§10.1、§10.3 与
 > 「名词表」的冲突判定由 FOUNDATION-091 按 ADR-0059 改写（声明同一功能才冲突，默认不冲突）。
 > §3.1、§3.2、§10.2 由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目的常态路径不变）；其余内容沿用 FOUNDATION-091 的校对基线。
 
@@ -27,7 +27,7 @@
 7. [任务验证](#7-任务验证)
 8. [合入 dev](#8-合入-dev)
 9. [发布到 main](#9-发布到-main)
-10. [日常使用：并行、依赖、调度、容量](#10-日常使用并行依赖调度容量)
+10. [日常使用：并行、依赖、调度、容量、全局暂停](#10-日常使用并行依赖调度容量)
 11. [设置与权限：FULL 与 STRICT](#11-设置与权限full-与-strict)
 12. [数据在哪、怎么备份与回收](#12-数据在哪怎么备份与回收)
 13. [出问题怎么办](#13-出问题怎么办)
@@ -964,6 +964,7 @@ bun run codeestra task schedule clear-unknown $PROJECT <task-id> [--json]
 | `BLOCKED` | **依赖未满足**（唯一含义） | 1 |
 | `WAIT_CONFLICT` | 与某个**未完成且声明了同一功能**的 Task 冲突 | 3 |
 | `WAIT_CAPACITY` | 项目级上限或 Adapter 上限已满 | 3 |
+| `WAIT_CONTROL` | **Runtime 全局暂停**（`SCHEDULER_GLOBALLY_PAUSED`），见 §10.5 | 3 |
 | `SCHEDULER_DRAINING` | Runtime 正在 draining，不接受新预留 | 3 |
 
 `UNKNOWN` 的**显式单次放行**（`task schedule clear-unknown` 或 `task run --allow-unknown`）绑定
@@ -993,6 +994,47 @@ bun run codeestra scheduler reservations reconcile $PROJECT [--json]
 
 > 图：`08-schedule.png` — 「调度」标签页：调度引擎面板（adapter / 调度循环 / draining / 最近一次 tick /
 > 容量一行）、活跃集合表、候选顺序卡片（含等待块与命中路径）、容量与槽位预留表。
+
+### 10.5 全局暂停：机器负载太高，或者我要它先别动
+
+```sh
+bun run codeestra scheduler control status    [--json]
+bun run codeestra scheduler control pause     [--json]
+bun run codeestra scheduler control resume    [--json]
+bun run codeestra scheduler control reconcile [--json]
+```
+
+这四个命令**不属于任何项目**（控制的屏障是整台机器的），FULL 与 STRICT **都不需要二次确认**。
+界面上对应外壳里的「全局负载控制」条（暂停全部 / 继续全部），与选中的项目无关。
+
+**它做什么**：先立屏障（新的 Execution/Session/successor 与向 Provider 的投递都停下），
+再按 `pid + OS start token + 这次 incarnation` 核验，然后只对**模型请求发起进程**发 `SIGSTOP`；
+工具子进程**不会**收到 Codeestra 的信号（大输出工具仍可能因管道背压阻塞）。
+继续时逐目标重验，只唤醒**身份完全一致**的那些。
+
+**它不做什么**：不改写任何 Task/Execution/Session 状态，不释放槽位、工作树或写者租约，
+不清空已发出的模型请求（它可能已在服务端完成并计费），不替代 `task pause`（那是单 Task 的协作停止）。
+
+**部分失败不会被粉饰**：只要有一个目标的身份读不出来、平台不支持、或复读没有证实它停止，
+全局状态就是 `RECOVERY_REQUIRED` 且**屏障保持**，命令退 `1` 并给出稳定码
+（`GLOBAL_PAUSE_IDENTITY_UNVERIFIABLE` / `GLOBAL_PAUSE_TARGET_NOT_STOPPED` / `GLOBAL_PAUSE_UNSUPPORTED` /
+`GLOBAL_RESUME_TARGET_CHANGED` / `GLOBAL_PAUSE_RECOVERY_REQUIRED`）。用 `scheduler control status` 看**逐目标**事实。
+
+**跨重启保持**：暂停状态持久化；`runtime stop` 不清除它，重启后仍是暂停态，直到你显式 `resume`。
+启动时 Runtime **不自动** `SIGCONT`、也**不自动 kill** 上一代 boot 冻结的进程——它只把事实报出来。
+
+**暂停期间还能做什么**：所有只读查询、事件订阅、容量/控制状态查询、记录用户输入、`task cancel/recover/purge`、
+`runtime stop`，以及不调用模型的 Git/验证/集成操作。**延后**的是新启动与 answer/guidance 的实际投递
+（正文可以先耐久记录，恢复后按既有有效性与幂等规则投递）。
+
+`reconcile` 只**观察**：不发任何信号，可以把「已证明退出」的目标收口，但**不会**把不可核验的目标猜成已停止，
+也**不会**把 `RECOVERY_REQUIRED` 提升成 `PAUSED`。
+
+> **当前实现的可冻结范围**：只有 **Pi** 的 `providerProcessSuspension` 是 `SUPPORTED`（真实进程实测）。
+> Codex 与 Claude Code 仍是 `REQUIRES_VALIDATION`，因此它们的会话会让本次 epoch 进入 `RECOVERY_REQUIRED`
+> 并保持屏障——这是诚实结果，不是「已经冻住了」。详情见
+> [ADR-0061](../decisions/0061-runtime-global-load-control.md) 与 `docs/spikes/*.md` 的「Provider 进程冻结」一节。
+
 
 ### 想深入看哪篇
 

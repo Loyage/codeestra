@@ -1363,6 +1363,22 @@ function usage(): never {
   bun run codeestra scheduler reservations prepare-workspace <project-id> <reservation-id>
     <expected-task-version> [--json]
   bun run codeestra scheduler reservations reconcile <project-id> [--json]
+  bun run codeestra scheduler control status [--json]
+  bun run codeestra scheduler control pause [--json]
+  bun run codeestra scheduler control resume [--json]
+  bun run codeestra scheduler control reconcile [--json]
+    The Runtime global load control (ADR-0061). It belongs to no Project: one CODEESTRA_HOME has one
+    host-wide barrier. pause freezes the admitted execution set at the process level — no new
+    Execution/Session starts and no new Provider delivery, while running tasks keep their Task,
+    Execution and Session state and their capacity slot. resume continues exactly the processes this
+    pause epoch verified and froze; a target whose pid changed or exited is reported instead of being
+    woken. Exit codes: 0 reached the complete target state (or it was already there); 1 a target could
+    not be verified, the platform cannot freeze a provider, or a resume is still in flight, with the
+    stable code (GLOBAL_PAUSE_UNSUPPORTED, GLOBAL_PAUSE_IDENTITY_UNVERIFIABLE,
+    GLOBAL_PAUSE_TARGET_NOT_STOPPED, GLOBAL_RESUME_TARGET_CHANGED, GLOBAL_PAUSE_RECOVERY_REQUIRED,
+    GLOBAL_CONTROL_IN_PROGRESS) in --json and on stderr; 3 is used only by a Task that *waits* for the
+    barrier (SCHEDULER_GLOBALLY_PAUSED), never for a partially frozen Runtime. reconcile only observes
+    and records: it sends no signal, and it never turns an unverifiable target into a stopped one.
   bun run codeestra promotion prepare <project-id> <batch-id> <expected-dev-commit> <expected-main-commit>
   bun run codeestra promotion approve <project-id> <promotion-id>
   bun run codeestra promotion promote <project-id> <promotion-id> [--json]
@@ -2741,7 +2757,10 @@ try {
         allowUnknown: split.bare.has('--allow-unknown'),
       }));
     } catch (error) {
-      if (errorCodeOf(error) === 'CONFLICT_WAIT') {
+      if (errorCodeOf(error) === 'CONFLICT_WAIT'
+        || errorCodeOf(error) === 'SCHEDULER_GLOBALLY_PAUSED') {
+        // Both are *waits*, not refusals: a conflict verdict and the Runtime's global barrier each
+        // mean "not now", and a script tells them apart by the stable code, not by the exit code.
         console.error(`[scheduler] the Task stays paused: ${errorText(error)}`);
         process.exit(3);
       }
@@ -4036,7 +4055,40 @@ try {
     // error with a stable code and exit code 1.
     const [subcommand, ...tokens] = [action, firstArgument, ...remainingArguments]
       .filter((token): token is string => token !== undefined);
-    if (subcommand === 'capacity') {
+    if (subcommand === 'control') {
+      // The Runtime global load control (FOUNDATION-097 / ADR-0061 D09). These commands belong to no
+      // Project: the barrier is host-wide. `status` and `reconcile` only observe; `pause`/`resume`
+      // are the explicit user command themselves (zero confirmation, in FULL and STRICT alike), and
+      // they exit 1 with a stable code when any target could not be verified — a partial freeze is
+      // never reported as a complete one. A Task merely *waiting* for the barrier still exits 3.
+      const split = splitFlagTokens(tokens, [], ['--json']);
+      const [controlAction, ...extra] = split.positionals;
+      if (controlAction === undefined || extra.length !== 0) usage();
+      const status = async (): Promise<void> => {
+        print(await call({ command: 'scheduler.control.status' }));
+      };
+      if (controlAction === 'status') {
+        await status();
+      } else if (controlAction === 'pause' || controlAction === 'resume') {
+        try {
+          print(await call({
+            command: controlAction === 'pause'
+              ? 'scheduler.control.pause' : 'scheduler.control.resume',
+            commandId: crypto.randomUUID(),
+          }));
+        } catch (error) {
+          // The refusal carries a stable code and one sentence; the per-target facts are what makes it
+          // actionable, and they are read back from the *command face* rather than guessed here.
+          console.error(`[scheduler] ${errorText(error)}`);
+          await status();
+          process.exit(1);
+        }
+      } else if (controlAction === 'reconcile') {
+        print(await call({ command: 'scheduler.control.reconcile' }));
+      } else {
+        usage();
+      }
+    } else if (subcommand === 'capacity') {
       const split = splitFlagTokens(tokens, ['--adapter', '--limit'], ['--json']);
       const [capacityAction, projectId, ...extra] = split.positionals;
       if (capacityAction === undefined || projectId === undefined || extra.length !== 0) usage();

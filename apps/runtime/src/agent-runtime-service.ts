@@ -118,7 +118,27 @@ export interface AgentRuntimeCoordinatorOptions {
    * the slot service records.
    */
   readonly bootId?: string;
+  /**
+   * The Runtime global control plane (ADR-0061 D05/D08). When it is supplied, every provider start
+   * happens inside the section it shares with `scheduler control pause`, and reads the persisted
+   * barrier immediately before reserving the Execution — so a start either completes before the
+   * barrier commits or is refused with `SCHEDULER_GLOBALLY_PAUSED` without writing anything.
+   */
+  readonly control?: RuntimeStartControl;
   readonly logger?: (message: string, detail?: Readonly<Record<string, unknown>>) => void;
+}
+
+/**
+ * The narrow slice of the global control plane the coordinator needs. It is an interface rather than
+ * the service itself so the coordinator's contract stays "start a provider, observe it, answer it"
+ * and the barrier stays one fact read from one place.
+ */
+export interface RuntimeStartControl {
+  readonly mutex: { run<T>(operation: () => Promise<T> | T): Promise<T> };
+  /** Throws `SCHEDULER_GLOBALLY_PAUSED` when the Runtime is not `RUNNING`. */
+  assertStartAllowed(): void;
+  /** Whether a delivery to a running provider is allowed right now (ADR-0061 D08). */
+  deliveryAllowed(): boolean;
 }
 
 /**
@@ -145,6 +165,7 @@ export class AgentRuntimeCoordinator {
   readonly #randomUUID: () => string;
   readonly #shutdownGraceMs: number;
   readonly #bootId: string;
+  readonly #control: RuntimeStartControl | null;
   readonly #logger: (message: string, detail?: Readonly<Record<string, unknown>>) => void;
   readonly #pumps = new Map<string, Promise<void>>();
 
@@ -162,6 +183,7 @@ export class AgentRuntimeCoordinator {
     this.#randomUUID = options.randomUUID ?? (() => crypto.randomUUID());
     this.#shutdownGraceMs = options.shutdownGraceMs ?? 5_000;
     this.#bootId = options.bootId ?? 'runtime';
+    this.#control = options.control ?? null;
     this.#logger = options.logger ?? (() => {});
   }
 
@@ -235,7 +257,7 @@ export class AgentRuntimeCoordinator {
         },
         recordedAt: this.#now(),
       });
-      return await this.#startPreparedExecution({
+      return await this.#inControlSection(() => this.#startPreparedExecution({
         projectId: input.projectId,
         taskId: input.taskId,
         expectedTaskVersion: input.expectedTaskVersion,
@@ -249,7 +271,7 @@ export class AgentRuntimeCoordinator {
           baseCommit: workspace.baseCommit,
         },
         ...(input.resume === undefined ? {} : { resume: input.resume }),
-      });
+      }));
     } catch (error) {
       // A run that never reached a Session is closed from the error it actually produced. The
       // workspace and Agent start Operations keep their own, more specific recovery records.
@@ -285,6 +307,25 @@ export class AgentRuntimeCoordinator {
    * exactly one primary Agent). Both paths then record the same Execution and run steps, because a
    * Task must not be able to tell from its audit which of the two started it.
    */
+  /**
+   * Runs a provider-start path inside the section shared with the global control plane (ADR-0061 D05
+   * step 1). The barrier is read *inside* the section, before the Execution is reserved, so the two
+   * possible orderings are the only ones: the start reserves and spawns while the barrier is still
+   * down, or it is refused before writing anything. There is deliberately no third ordering in which
+   * an Execution exists but no barrier noticed it.
+   *
+   * Without a control plane (unit tests that only exercise the run path) this is a pass-through: it
+   * adds no state and no behaviour of its own.
+   */
+  async #inControlSection<T>(operation: () => Promise<T>): Promise<T> {
+    const control = this.#control;
+    if (control === null) return await operation();
+    return await control.mutex.run(async () => {
+      control.assertStartAllowed();
+      return await operation();
+    });
+  }
+
   async #startPreparedExecution(input: {
     readonly projectId: string;
     readonly taskId: string;
@@ -516,7 +557,7 @@ export class AgentRuntimeCoordinator {
         },
         recordedAt: this.#now(),
       });
-      return await this.#startPreparedExecution({
+      return await this.#inControlSection(() => this.#startPreparedExecution({
         projectId: input.projectId,
         taskId: input.taskId,
         expectedTaskVersion: input.expectedTaskVersion,
@@ -529,7 +570,7 @@ export class AgentRuntimeCoordinator {
           path: workspace.path,
           baseCommit: workspace.baseCommit,
         },
-      });
+      }));
     } catch (error) {
       const code = typeof error === 'object' && error !== null && 'code' in error
         ? String(error.code) : 'RUN_FAILED';
@@ -559,6 +600,32 @@ export class AgentRuntimeCoordinator {
    * answer recorded while no live provider process is held stays recorded instead of
    * being replayed or reported as delivered.
    */
+  /**
+   * Delivers every recorded-but-undelivered answer whose Session this Runtime still holds. It is the
+   * post-resume pass of ADR-0061 D06 step 5: an answer recorded while the barrier was up is durably
+   * stored already, and this is what hands it over once the barrier is down.
+   *
+   * It is the same idempotent path the projection events use (`deliverAnswer` re-reads the recorded
+   * plan and refuses a second delivery), so a resume that races a projection cannot deliver twice.
+   */
+  async deliverPendingAnswers(): Promise<readonly {
+    readonly operationId: string;
+    readonly delivery: AnswerDeliveryOutcome;
+    readonly code: string | null;
+  }[]> {
+    const results = [];
+    for (const plan of this.#storage.listIncompleteAgentAnswers()) {
+      if (!this.#pumps.has(plan.sessionId)) continue;
+      const result = await this.deliverAnswer(plan.operationId);
+      results.push({
+        operationId: plan.operationId,
+        delivery: result.delivery,
+        code: result.error?.code ?? null,
+      });
+    }
+    return results;
+  }
+
   async deliverAnswer(operationId: string): Promise<AnswerDeliveryResult> {
     const plan = this.#storage.getAgentAnswerPlan(operationId);
     if (plan.operationState === 'SUCCEEDED') return { plan, delivery: 'DELIVERED' };
@@ -569,6 +636,21 @@ export class AgentRuntimeCoordinator {
         error: {
           code: 'NO_LIVE_SESSION',
           message: 'No live Agent Session is held for this answer; it stays recorded',
+        },
+      };
+    }
+    if (this.#control !== null && !this.#control.deliveryAllowed()) {
+      // ADR-0061 D08: the answer text is durably recorded already (that is what `plan` is), but
+      // handing it to the provider could drive the next model request, so it is deferred. This is a
+      // deferral, not a failure: the record stays exactly as it is and is delivered on the next
+      // projection after the barrier comes down, through this same method's idempotent path.
+      return {
+        plan,
+        delivery: 'NOT_DELIVERED',
+        error: {
+          code: 'SCHEDULER_GLOBALLY_PAUSED',
+          message: 'The Runtime is globally paused, so the recorded answer is not handed to the'
+            + ' provider yet; it stays recorded and is delivered after `scheduler control resume`',
         },
       };
     }
@@ -761,7 +843,34 @@ export class AgentRuntimeCoordinator {
    * The observation loop is started here, because this coordinator is what owns provider processes
    * and their event projection; the caller only records the resulting incarnation.
    */
+  /**
+   * A successor start is a provider start like any other (ADR-0061 D05: `... 与 successor`), so it
+   * runs inside the same section and reads the same barrier. Without a control plane this is a
+   * pass-through.
+   */
   async startAutomationSuccessor(input: {
+    readonly sessionId: string;
+    readonly commandId: string;
+    readonly reason: string;
+  }): Promise<{
+    readonly adapterId: string;
+    readonly projectId: string;
+    readonly sessionId: string;
+    readonly executionId: string;
+    readonly providerSessionId: string | null;
+    readonly sessionStorageRef: string | null;
+    readonly providerPid: number | null;
+    readonly processIdentity: unknown;
+  }> {
+    const control = this.#control;
+    if (control === null) return await this.#startAutomationSuccessorLocked(input);
+    return await control.mutex.run(async () => {
+      control.assertStartAllowed();
+      return await this.#startAutomationSuccessorLocked(input);
+    });
+  }
+
+  async #startAutomationSuccessorLocked(input: {
     readonly sessionId: string;
     readonly commandId: string;
     readonly reason: string;

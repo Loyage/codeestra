@@ -119,6 +119,13 @@ export interface AgentFixtureOptions {
    * written before trust, so a fixture can tell the human layer apart from the machine layer.
    */
   readonly generatedKnowledge?: string;
+  /**
+   * Where the Runtime database lives. The default is an in-memory database, which is what almost
+   * every test wants; a test that has to **restart** the Runtime over the same home (the global
+   * control barrier of ADR-0061 is persisted, so it must be read again by the next boot) passes a
+   * file path instead and opens the file again itself.
+   */
+  readonly databaseFilename?: string;
 }
 
 const defaultVerificationCommands = [{ id: 'smoke', argv: ['echo', 'verification-ok'],
@@ -180,7 +187,7 @@ export async function createAgentFixture(options: AgentFixtureOptions = {}): Pro
   await git(repo, ['branch', 'dev']);
   const devRepo = await provisionDevClone({ repository: repo });
   const identity = await inspectRepository(repo);
-  const storage = new Phase1Database();
+  const storage = new Phase1Database(options.databaseFilename ?? ':memory:');
   storage.trustProject({
     id: projectId,
     trustId: '30000000-0000-4000-8000-000000000003',

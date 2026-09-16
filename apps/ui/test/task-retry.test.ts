@@ -99,13 +99,15 @@ describe('the refusal glossary covers what the domain can answer with', () => {
     }
   });
 
-  it('documents the three capacity wait codes as waits, not as failures', () => {
+  it('documents every capacity wait code as a wait, not as a failure', () => {
     const contracts = codeSources[1] ?? '';
     const union = /export type CapacityWaitReasonCode =([\s\S]*?);/.exec(contracts);
     if (union === null) throw new Error('CapacityWaitReasonCode not found in the contracts');
     const capacityCodes = [...(union[1] ?? '').matchAll(/'([A-Z_]+)'/g)]
       .map((match) => match[1] as string);
-    expect(capacityCodes).toHaveLength(3);
+    // The set is read from the contracts, so a new code cannot be added there without a glossary
+    // note here — which is the drift this assertion exists to catch (ADR-0061 added the fourth).
+    expect(capacityCodes).toHaveLength(4);
     for (const code of capacityCodes) {
       expect(retryCodeNote(code)).toContain('本次未启动');
     }
