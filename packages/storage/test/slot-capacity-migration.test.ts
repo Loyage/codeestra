@@ -194,11 +194,12 @@ describe('capacity and slot reservation migration', () => {
           VALUES ('p','P','/p','/p/.git','refs/heads/main','sha1',1)`).run();
         database.sqlite.transaction(() => {
           database.sqlite.query(`INSERT INTO tasks
-            (id,project_id,display_number,kind,current_revision_id,state,created_at,updated_at)
-            VALUES ('t','p',1,'DEVELOPMENT','r','READY',1,1)`).run();
+            (id,project_id,display_number,display_title,naming_title,current_revision_id,state,
+              created_at,updated_at)
+            VALUES ('t','p',1,'x','x','r','READY',1,1)`).run();
           database.sqlite.query(`INSERT INTO task_revisions
-            (id,task_id,number,previous_revision_id,specification,constraints_json,actor,reason,created_at)
-            VALUES ('r','t',1,NULL,'x','[]','u','i',1)`).run();
+            (id,task_id,number,previous_revision_id,specification,actor,reason,created_at)
+            VALUES ('r','t',1,NULL,'x','u','i',1)`).run();
         })();
         // RELEASED without released_at/release_reason/release_kind is not a state the schema allows.
         expect(() => database.sqlite.query(`

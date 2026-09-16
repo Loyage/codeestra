@@ -1,8 +1,9 @@
 # 端到端流程走查
 
-> **适用版本** `dev@4667d32`（2026-09-16） · **schema** v33 · **最后校对** 2026-09-16
-> 版本会前进：`dev@4667d32` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v35 · **最后校对** 2026-09-17
+> 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> §1 的创建任务与 §4.4 的修订示例由本分支按 **ADR-0065** 改写（必填 `--title`/`--name`；`--constraint`/`--kind` 已删除）。
 > §3.1 的 `task run` 门禁由 FOUNDATION-091 按 ADR-0059 改写。
 > §10 的依赖满足语义由 FOUNDATION-093 第三轮同步（ADR-0060 修订）；其余内容沿用 FOUNDATION-091 的校对基线。
 > §9 补充集成成功后的自动回收（ADR-0062）。
@@ -38,11 +39,14 @@ bun run codeestra open . --no-open          # 注册项目并拿到带 token 的
 
 ```sh
 bun run codeestra task create $PROJECT "为 parser 增加一个 CRLF 输入用例" \
-  --constraint "不得改动公开 API"
+  --title "给 parser 补一个 CRLF 输入用例" --name "parser-crlf-case"
 ```
 
-- `--constraint <text>` 可以重复，用来说明约束。
-- `--kind DEVELOPMENT` 是当前允许的值（默认就是它）。
+- 位置参数是**任务详情**（Agent 实际依据的正文）：多词原样拼接。
+- `--title <显示标题>`：非空、单行、≤ 200 字符；任务列表显示的就是它。
+- `--name <命名标题>`：小写英文短横线 slug（`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`，≤ 50 字符）；
+  分支与 worktree 目录叫 `task/<编号>-<name>` 与 `<编号>-<name>`。
+- 三个字段都必填；`--constraint` 与 `--kind` 已删除（ADR-0065），传入即用法错误（退出码 2）。
 
 **预期形状**：打印 Task 的摘要 JSON，包含 `taskId`、`displayNumber`（人读编号，如 `#3`）、
 `state: "DRAFT"`、`revisionId`（第一条 revision）、`version`。原始意图、首 revision、事实事件与幂等回执
@@ -213,7 +217,7 @@ bun run codeestra settings prose-question-attention off        # 什么都不记
 
 ```sh
 bun run codeestra task revision create $PROJECT <task-id> <expected-version> \
-  [--specification <text>] [--constraint <text>]… [--reason <text>] [--json]
+  [--specification <text>] [--feature <module-id>]… [--reason <text>] [--json]
 bun run codeestra task revision list $PROJECT <task-id> [--json]
 
 bun run codeestra task revision delivery list   $PROJECT <task-id> [--json]

@@ -45,13 +45,14 @@ function seedTask(input: {
 }): void {
   storage.sqlite.transaction(() => {
     storage.sqlite.query(`INSERT INTO tasks
-      (id,project_id,display_number,kind,current_revision_id,state,created_at,updated_at)
-      VALUES (?1,?2,?3,'DEVELOPMENT',?4,?5,2,2)`)
+      (id,project_id,display_number,display_title,naming_title,current_revision_id,state,
+        created_at,updated_at)
+      VALUES (?1,?2,?3,?1,?1,?4,?5,2,2)`)
       .run(input.taskId, input.projectId, input.displayNumber, input.revisionId,
         input.state ?? 'READY');
     storage.sqlite.query(`INSERT INTO task_revisions
-      (id,task_id,number,previous_revision_id,specification,constraints_json,actor,reason,created_at)
-      VALUES (?1,?2,1,NULL,'Do work','[]','user','initial',2)`)
+      (id,task_id,number,previous_revision_id,specification,actor,reason,created_at)
+      VALUES (?1,?2,1,NULL,'Do work','user','initial',2)`)
       .run(input.revisionId, input.taskId);
   })();
 }

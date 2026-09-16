@@ -7,7 +7,6 @@ import {
 const input = (overrides: Partial<RevisionInput> = {}): RevisionInput => ({
   id: 'revision-1',
   specification: '优化地图生成',
-  constraints: [{ id: 'seed', text: '不能破坏 seed determinism' }],
   actor: 'user',
   reason: '创建任务',
   sourceIntentId: 'intent-1',
@@ -26,7 +25,7 @@ describe('TaskRevision', () => {
 
   it('appends a snapshot and preserves old revision and caller state', () => {
     const old = createSpecificationHistory('task-1', input());
-    const next = appendTaskRevision(old, 0, input({ id: 'revision-2', reason: '新增约束' }));
+    const next = appendTaskRevision(old, 0, input({ id: 'revision-2', reason: '新增验收方式' }));
     expect(next.version).toBe(1);
     expect(next.currentRevision.number).toBe(2);
     expect(next.currentRevision.previousRevisionId).toBe('revision-1');
@@ -35,16 +34,11 @@ describe('TaskRevision', () => {
     expect(old.currentRevision.id).toBe('revision-1');
   });
 
-  it('defensively copies and freezes nested constraints', () => {
-    const constraints = [{ id: 'seed', text: '原约束' }];
-    const history = createSpecificationHistory('task-1', input({ constraints }));
-    constraints[0]!.text = '外部修改';
-    constraints.push({ id: 'new', text: '新约束' });
-    expect(history.currentRevision.constraints).toEqual([{ id: 'seed', text: '原约束' }]);
+  it('freezes the history and every revision it holds', () => {
+    const history = createSpecificationHistory('task-1', input());
     expect(Object.isFrozen(history)).toBe(true);
     expect(Object.isFrozen(history.revisions)).toBe(true);
     expect(Object.isFrozen(history.currentRevision)).toBe(true);
-    expect(Object.isFrozen(history.currentRevision.constraints[0])).toBe(true);
   });
 
   it('rejects stale concurrent revisions without changing history', () => {
@@ -67,14 +61,5 @@ describe('TaskRevision', () => {
 
   it.each([-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])('rejects invalid timestamp %s', (createdAt) => {
     expect(() => createSpecificationHistory('task-1', input({ createdAt }))).toThrow(DomainError);
-  });
-
-  it('rejects duplicate constraint IDs and empty constraint text', () => {
-    expect(() => createSpecificationHistory('task-1', input({ constraints: [
-      { id: 'seed', text: 'a' }, { id: 'seed', text: 'b' },
-    ] }))).toThrow(DomainError);
-    expect(() => createSpecificationHistory('task-1', input({ constraints: [
-      { id: 'seed', text: ' ' },
-    ] }))).toThrow(DomainError);
   });
 });

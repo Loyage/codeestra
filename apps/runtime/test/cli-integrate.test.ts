@@ -8,6 +8,7 @@ import {
   runCli,
 } from './support/runtime-reclamation.js';
 import { provisionDevClone } from './support/agent-fixture.js';
+import { recordedWorkspaceBranch, recordedWorkspacePath } from './support/workspace-naming.js';
 
 const repositoryRoot = join(import.meta.dir, '..', '..', '..');
 const cliEntry = join(repositoryRoot, 'apps', 'cli', 'src', 'main.ts');
@@ -165,7 +166,8 @@ async function capturedTask(options: { readonly failingPolicy?: boolean } = {}):
   readonly resultCommit: string;
 }> {
   const { environment, repository, devRepo, projectId } = await fixture(options);
-  const created = JSON.parse((await cli(['task', 'create', projectId, 'Write a file'],
+  const created = JSON.parse((await cli(['task', 'create', projectId, 'Write a file',
+    '--title', 'Write a file', '--name', 'write-a-file'],
     environment)).stdout) as { readonly id: string };
   const taskId = created.id;
   // Submission immediately enters scheduling. Under ADR-0059 an undeclared Task is SAFE, so the
@@ -211,13 +213,14 @@ describe('codeestra task integrate', () => {
 
     // ADR-0062: a successful integration reclaims the member Task worktree by default, through the
     // same ownership-checked decision `reclaim` uses. The branch is never touched, so `task retry`
-    // can still rebuild from it (ADR-0042).
-    const worktreePath = join(environment['CODEESTRA_HOME'] as string, 'worktrees', projectId,
-      taskId);
+    // can still rebuild from it (ADR-0042). ADR-0065 D03: the workspace is named
+    // `<displayNumber>-<namingTitle>`, so the recorded row — not the Task id — is the fact.
+    const home = environment['CODEESTRA_HOME'] as string;
+    const worktreePath = recordedWorkspacePath(home, taskId);
     expect(report.reclamation).toMatchObject({ enabled: true, attempted: 1, reclaimed: 1,
       retained: 0, failed: 0 });
     expect(existsSync(worktreePath)).toBe(false);
-    expect(await git(devRepo, ['rev-parse', '--verify', `refs/heads/task/${taskId}`]))
+    expect(await git(devRepo, ['rev-parse', '--verify', recordedWorkspaceBranch(home, taskId)]))
       .toBe(resultCommit);
 
     // The ref moved, the stable branch did not, and the Task reached SUCCEEDED.
@@ -240,8 +243,8 @@ describe('codeestra task integrate', () => {
   test('leaves the worktree in place when auto-reclaim is off, and the explicit reclaim still takes it',
     async () => {
       const { environment, projectId, taskId, resultCommit } = await capturedTask();
-      const worktreePath = join(environment['CODEESTRA_HOME'] as string, 'worktrees', projectId,
-        taskId);
+      const home = environment['CODEESTRA_HOME'] as string;
+      const worktreePath = recordedWorkspacePath(home, taskId);
       expect(existsSync(worktreePath)).toBe(true);
 
       const off = await cli(['settings', 'auto-reclaim', 'off'], environment);

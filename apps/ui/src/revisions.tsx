@@ -131,10 +131,10 @@ export function deliveryResolvable(delivery: RevisionDeliveryRecordView): boolea
 }
 
 /**
- * `task revision create` exactly as the CLI builds it: an absent specification means "keep the
- * current one and only add constraints", which is how "追加约束" is expressed. Every constraint gets
- * its own id, and the command is refused before it leaves the client when the revision would change
- * nothing (the Runtime refuses that too — this only avoids a pointless round trip).
+ * `task revision create` exactly as the CLI builds it. The detail is the only field this panel can
+ * change (it exposes no feature declaration and constraints no longer exist, ADR-0065 D04), so a
+ * revision that would change nothing is refused before it leaves the client — the Runtime refuses it
+ * too, this only avoids a pointless round trip.
  */
 export function revisionCreateCommand(input: {
   readonly projectId: string;
@@ -142,28 +142,20 @@ export function revisionCreateCommand(input: {
   readonly expectedVersion: number;
   readonly commandId: string;
   readonly specification: string | null;
-  readonly constraints: readonly string[];
   readonly reason: string;
-  /** Injected so a test can assert the whole command without depending on a random UUID. */
-  readonly constraintIdFactory?: () => string;
 }): Record<string, unknown> {
   const specification = input.specification === null ? null : input.specification.trim();
-  const constraints = input.constraints
-    .map((text) => text.trim())
-    .filter((text) => text.length > 0);
-  if ((specification === null || specification.length === 0) && constraints.length === 0) {
-    throw new Error('新建修订必须修改规格或至少追加一条约束');
+  if (specification === null || specification.length === 0) {
+    throw new Error('新建修订必须修改任务详情');
   }
   const reason = input.reason.trim();
-  const newConstraintId = input.constraintIdFactory ?? (() => crypto.randomUUID());
   return {
     command: 'task.revision.create',
     commandId: input.commandId,
     projectId: input.projectId,
     taskId: input.taskId,
     expectedVersion: input.expectedVersion,
-    ...(specification === null || specification.length === 0 ? {} : { specification }),
-    constraints: constraints.map((text) => ({ id: newConstraintId(), text })),
+    specification,
     reason: reason.length === 0 ? 'user revision request' : reason,
   };
 }
@@ -357,13 +349,13 @@ export function RevisionDeliveryCard({ delivery, adapterId, busy, onResolve }: {
   );
 }
 
-/** The revision history itself: version, time, specification, constraint count, reason/actor. */
+/** The revision history itself: version, time, detail, reason and the actor who recorded it. */
 export function RevisionTable({ revisions }: { readonly revisions: readonly TaskRevisionSummaryView[] }) {
   if (revisions.length === 0) return <p className="muted">还没有读取到修订记录。</p>;
   return (
     <div className="table-scroll"><table>
       <thead>
-        <tr><th>版本</th><th>修订</th><th>时间</th><th>规格摘要</th><th>约束</th><th>原因 / 记录者</th></tr>
+        <tr><th>版本</th><th>修订</th><th>时间</th><th>任务详情摘要</th><th>原因 / 记录者</th></tr>
       </thead>
       <tbody>
         {revisions.map((revision) => (
@@ -379,19 +371,10 @@ export function RevisionTable({ revisions }: { readonly revisions: readonly Task
             <td>
               {revisionSpecSummary(revision.specification)}
               <details>
-                <summary>完整规格与约束</summary>
+                <summary>完整任务详情</summary>
                 <pre>{revision.specification}</pre>
-                {revision.constraints.length === 0 ? <p className="muted">没有约束。</p> : (
-                  <ul>
-                    {revision.constraints.map((constraint) => (
-                      <li key={constraint.id}>{constraint.text}
-                        <span className="muted mono"> {constraint.id.slice(0, 8)}</span></li>
-                    ))}
-                  </ul>
-                )}
               </details>
             </td>
-            <td>{revision.constraints.length}</td>
             <td>{revision.reason}
               <div className="muted">{revision.actor}</div></td>
           </tr>
@@ -402,43 +385,31 @@ export function RevisionTable({ revisions }: { readonly revisions: readonly Task
 }
 
 /** The one line of the create form that says what creating a revision will actually change. */
-const createEffectNote = '新建修订会追加一条不可变的规格版本（当前规格与旧修订保留）。'
+const createEffectNote = '新建修订会追加一条不可变的任务详情版本（当前详情与旧修订保留）。'
   + '若此刻有执行在运行该任务，Runtime 会额外记录一条投递要求；'
   + '记录投递要求不等于投递，更不等于确认。';
 
 export function RevisionCreateForm({ busy, taskVersion, onCreate }: {
   readonly busy: boolean;
   readonly taskVersion: number;
-  readonly onCreate: (draft: { readonly specification: string; readonly constraints: readonly string[];
-    readonly reason: string }) => void;
+  readonly onCreate: (draft: { readonly specification: string; readonly reason: string }) => void;
 }) {
   const [specification, setSpecification] = useState('');
-  const [constraints, setConstraints] = useState('');
   const [reason, setReason] = useState('');
-  const constraintLines = constraints.split('\n').map((line) => line.trim())
-    .filter((line) => line.length > 0);
   // A revision that changes nothing is refused; the form says so before the button is usable.
-  const valid = specification.trim().length > 0 || constraintLines.length > 0;
+  const valid = specification.trim().length > 0;
   return (
     <details className="revision-create">
-      <summary>新建修订（会追加规格版本）</summary>
+      <summary>新建修订（会追加任务详情版本）</summary>
       <fieldset disabled={busy} aria-busy={busy}>
         <p className="muted hint">{createEffectNote}</p>
-        <label htmlFor="revision-specification">规格（留空表示保留当前规格，只追加约束）</label>
+        <label htmlFor="revision-specification">任务详情（必填）</label>
         <textarea
           id="revision-specification"
           value={specification}
           rows={5}
-          placeholder="新的完整规格；留空则只追加下面的约束"
+          placeholder="新的完整任务详情"
           onChange={(event) => { setSpecification(event.target.value); }}
-        />
-        <label htmlFor="revision-constraints">追加约束（一行一条，可为空）</label>
-        <textarea
-          id="revision-constraints"
-          value={constraints}
-          rows={3}
-          placeholder="每行一条约束文本"
-          onChange={(event) => { setConstraints(event.target.value); }}
         />
         <label htmlFor="revision-reason">修改原因（记录在修订里）</label>
         <input
@@ -452,10 +423,10 @@ export function RevisionCreateForm({ busy, taskVersion, onCreate }: {
           type="button"
           className="primary"
           disabled={busy || !valid}
-          title={valid ? createEffectNote : '必须修改规格或至少追加一条约束'}
+          title={valid ? createEffectNote : '必须修改任务详情'}
           onClick={() => {
-            onCreate({ specification, constraints: constraintLines, reason });
-            setSpecification(''); setConstraints(''); setReason('');
+            onCreate({ specification, reason });
+            setSpecification(''); setReason('');
           }}
         >
           新建修订（追加版本）
@@ -508,8 +479,7 @@ export function RevisionDeliveryPanel({ client, projectId, taskId, taskVersion, 
     if (onChanged !== undefined) await onChanged();
   };
 
-  const create = (draft: { readonly specification: string; readonly constraints: readonly string[];
-    readonly reason: string }): void => {
+  const create = (draft: { readonly specification: string; readonly reason: string }): void => {
     void run('正在新建修订', async () => {
       setPending(true);
       try {
@@ -518,8 +488,7 @@ export function RevisionDeliveryPanel({ client, projectId, taskId, taskVersion, 
           taskId,
           expectedVersion: taskVersion,
           commandId: crypto.randomUUID(),
-          specification: draft.specification.trim().length === 0 ? null : draft.specification,
-          constraints: draft.constraints,
+          specification: draft.specification,
           reason: draft.reason,
         }));
         await after(creationNotice(created));

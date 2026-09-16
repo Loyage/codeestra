@@ -1,8 +1,9 @@
 # Codeestra 用户说明书
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
-> 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v35 · **最后校对** 2026-09-17
+> 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> §4.1（创建任务）、§4.6 的任务详情描述与末尾术语表的 Task 一行由本分支按 **ADR-0065** 改写（三个必填字段；约束与任务类型已删除）。
 > §10.5 的「全局暂停」由 FOUNDATION-097 新增（ADR-0061 D04–D10）；§「任务」的永久删除一条由 FOUNDATION-090 新增（ADR-0058）；§3.1、§4.2、§4.3、§4.5、§10.1、§10.3 与
 > 「名词表」的冲突判定由 FOUNDATION-091 按 ADR-0059 改写（声明同一功能才冲突，默认不冲突）。
 > §3.1、§3.2、§10.2 由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目的常态路径不变）。
@@ -372,21 +373,26 @@ bun run codeestra project inspect /path/to/main-checkout --dev-repo /path/to/dev
 
 ```sh
 bun run codeestra task create $PROJECT "为 parser 增加一个 CRLF 输入用例" \
-  --constraint "不得改动公开 API"
+  --title "给 parser 补一个 CRLF 输入用例" --name "parser-crlf-case"
 ```
 
 - `$PROJECT` 是 `project list` 返回的 Project ID。
-- `--constraint <text>` 可以重复；每条约束都是 Agent 必须遵守的具体限制，会作为规格的一部分保存。
-- `--kind DEVELOPMENT` 是当前允许的值（默认就是它）。`SELF` 会被拒绝：Runtime 还没有 Self-Evolution 行为。
+- 三个字段**都必填**（ADR-0065）：位置参数是**任务详情**（Agent 实际依据的正文）；
+  `--title <显示标题>` 是一句话摘要，任务列表显示的就是它；`--name <命名标题>` 是小写英文短横线 slug
+  （`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`，≤ 50 字符），分支与 worktree 目录叫 `task/<编号>-<name>` 与 `<编号>-<name>`。
+- 两个标题是 **Task 级**字段：创建后没有任何命令可以修改它们（要改就新建任务）。
+- `--constraint` 与 `--kind` **已删除**：约束列表与任务类型都不再存在，把它们当 flag 传会以用法错误（退出码 2）结束。
+  过去写成约束的限制现在写进任务详情即可。
 
 **创建出来的 Task 是 `DRAFT`**：它**不会**自动启动 Agent。结果里要记住两个值：`taskId` 与 `version`
 （乐观版本号，后面每条改状态的命令都要传它）。
 
-界面上对应底部常驻的**新建任务停靠条**：收起时是一行输入（回车即创建），展开后可以写多行规格、加约束。
+界面上对应底部常驻的**新建任务停靠条**：它**没有收起态**（三个字段都必填，单行收起形态凑不出合法命令），
+直接就是三个字段——显示标题、命名标题、任务详情——加「＋ 创建草稿」。
 从任何标签页都能创建；创建成功后界面自动切回任务工作台，让新草稿立刻可见。
 
-> 图：`12-new-task-dock.png` — 停靠条展开状态：多行规格正文、约束列表（＋ 添加约束）、任务类型下拉框、
-> 「＋ 创建草稿」与「收起」按钮。
+> 图：`12-new-task-dock.png` — 停靠条：显示标题、命名标题（下方写着 slug 规则与分支命名）、任务详情、
+> 「＋ 创建草稿」。
 
 ### 4.2 提交为就绪
 
@@ -613,7 +619,7 @@ bun run codeestra session guidance get  $PROJECT <guidance-id>
 必须知道的边界：
 
 - **它不改变任务**：不产生 revision、不动 Task 的 revision 与 version、**不使任何验证失效**。
-  改规格、改约束、改验收目标**必须**走 `task amend`（`task revision create`），旧验证仍然因此失效。这两条通道不能互相代替。
+  改任务详情、改功能声明或改验收目标**必须**走 `task amend`（`task revision create`），旧验证仍然因此失效。这两条通道不能互相代替。
 - **记录之后它不会随进程消失**：该 Task 的每条 guidance 会在**新建 Execution**（`task resume` 的 successor、`task retry`
   的新 Execution）启动时随启动参数一并交给 provider。用户不需要为了让它生效而重发一遍。
 - **`0` 与 `1` 的意思不一样**：退出码 `0` = 已经交给运行中的 provider 通道（`DELIVERED`），**或**当时没有会话可交付而消息
@@ -690,7 +696,8 @@ Agent 一退出，任务详情顶部就出现**「Agent 运行结果」卡片**�
 如果这次结束**什么都没记下来**，两边都会这么写，不会当成成功。
 
 > 图：`04-task-detail.png` — 任务详情：「Agent 运行结果」卡片（含最后的输出）、`下一步` 提示行、
-> 任务操作按钮组（提交为就绪 / 启动 Agent / 暂停 / 提交成果 / 验证任务 / 合入 dev）、规格正文与约束列表。
+> 任务操作按钮组（提交为就绪 / 启动 Agent / 暂停 / 提交成果 / 验证任务 / 合入 dev）、
+> 显示标题与命名标题、任务详情正文（ADR-0065）。
 
 ### 想深入看哪篇
 
@@ -1338,7 +1345,7 @@ Task/Execution 的 `RECOVERY_REQUIRED` 用 **`task recover <project-id> <task-id
 | **CLI** | 完备命令面。每个能力都能只靠它完成并脚本化驱动（`--json`、稳定退出码） |
 | **Web UI** | Runtime 的便利前端，与 CLI 走**同一个命令面**，不新增业务语义、不绕过门禁、不直接访问 SQLite |
 | **Project** | 一个已接入（trust）的 Git 仓库。按 **Git common dir** 识别，所以同一仓库的多份工作树是同一个 Project |
-| **Task** | **业务主实体**：一次有边界的开发工作。持有当前规格、不可覆盖的 revision 历史、约束、依赖、执行历史、验证与集成状态 |
+| **Task** | **业务主实体**：一次有边界的开发工作。持有两个 Task 级标题（显示标题、命名标题）、任务详情（不可覆盖的 revision 历史）、依赖、执行历史、验证与集成状态 |
 | **TaskRevision** | Task 规格的快照，append-only。第一次创建 Task 就产生第一条 |
 | **Revision Delivery** | 「修订是否真的到达了运行中的 Execution」的独立可观察过程。`revisionAcknowledgement` 不支持的 Adapter 会**如实保持未确认** |
 | **Execution** | **一次执行尝试**，恰好绑定**一个**主 Agent。换 Agent 要新建 Execution |

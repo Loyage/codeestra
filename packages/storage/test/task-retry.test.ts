@@ -28,13 +28,13 @@ function seedTask(target: Database, options: {
   const attempts = options.attempts ?? 1;
   target.transaction(() => {
     target.query(`INSERT INTO tasks
-      (id,project_id,display_number,kind,current_revision_id,state,version,created_at,updated_at,
-       archived_at)
-      VALUES ('t1','p1',1,'DEVELOPMENT','r1',?1,4,2,2,?2)`).run(options.state,
+      (id,project_id,display_number,display_title,naming_title,current_revision_id,state,version,
+        created_at,updated_at,archived_at)
+      VALUES ('t1','p1',1,'Do work','do-work','r1',?1,4,2,2,?2)`).run(options.state,
       options.archived ? 5 : null);
     target.query(`INSERT INTO task_revisions
-      (id,task_id,number,previous_revision_id,specification,constraints_json,actor,reason,created_at)
-      VALUES ('r1','t1',1,NULL,'Do work','[]','user','initial',2)`).run();
+      (id,task_id,number,previous_revision_id,specification,actor,reason,created_at)
+      VALUES ('r1','t1',1,NULL,'Do work','user','initial',2)`).run();
     target.query(`INSERT INTO workspaces
       (id,task_id,branch_ref,path,ownership_token,base_commit,state,created_at)
       VALUES ('w1','t1','refs/heads/task/t1','/work/t1','owner-1',?1,?2,3)`)

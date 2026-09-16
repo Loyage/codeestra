@@ -139,8 +139,8 @@ async function promotionFixture(options: {
       intentEventId: crypto.randomUUID(),
       taskEventId: crypto.randomUUID(),
       specification: 'A second member of the integration batch',
-      constraints: [],
-      kind: 'DEVELOPMENT',
+      displayTitle: 'fixture task',
+      namingTitle: null,
       actor: 'local-user',
       createdAt: 50,
     });

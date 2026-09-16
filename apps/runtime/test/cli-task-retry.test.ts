@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { cleanupTemporaryDirectories, registerTemporaryDirectory } from './support/agent-fixture.js';
 import { reclaimTestResources, runCli } from './support/runtime-reclamation.js';
 import { provisionDevClone } from './support/agent-fixture.js';
+import { recordedWorkspaceName, recordedWorkspacePath } from './support/workspace-naming.js';
 
 /**
  * `task retry` through the real CLI and the real Runtime (ADR-0036).
@@ -264,7 +265,8 @@ async function createTask(
   projectId: string,
   specification: string,
 ): Promise<string> {
-  const created = JSON.parse((await cli(['task', 'create', projectId, specification],
+  const created = JSON.parse((await cli(['task', 'create', projectId, specification,
+    '--title', 'fixture task', '--name', 'fixture-task'],
     environment)).stdout) as { readonly id: string };
   return created.id;
 }
@@ -366,10 +368,13 @@ describe('codeestra task retry', () => {
     expect(failed.executions).toHaveLength(1);
     const firstExecution = failed.executions[0];
     expect(firstExecution?.state).toBe('FAILED');
-    const worktree = join(value.home, 'worktrees', value.projectId, taskId);
-    await waitFor(() => existsSync(join(worktree, `runs-${taskId}.log`)));
+    // ADR-0065 D03: the workspace directory is `<displayNumber>-<namingTitle>`, and the stub provider
+    // keys every file it writes on the directory name it runs in. The recorded name is the fact.
+    const ws = recordedWorkspaceName(value.home, taskId);
+    const worktree = recordedWorkspacePath(value.home, taskId);
+    await waitFor(() => existsSync(join(worktree, `runs-${ws}.log`)));
     // The first attempt left work in its worktree, and that work is what a retry must not throw away.
-    expect(readFileSync(join(worktree, `runs-${taskId}.log`), 'utf8')).toBe(`start ${taskId}\n`);
+    expect(readFileSync(join(worktree, `runs-${ws}.log`), 'utf8')).toBe(`start ${ws}\n`);
 
     const retried = await retry(value.environment, value.projectId, taskId, failed.task.version);
     expect(retried.exitCode).toBe(0);
@@ -396,10 +401,10 @@ describe('codeestra task retry', () => {
     });
     expect(after.task.state).toBe('RUNNING');
     // Both attempts ran in the *same* worktree: two start lines, one file.
-    await waitFor(() => readFileSync(join(worktree, `runs-${taskId}.log`), 'utf8').split('\n')
+    await waitFor(() => readFileSync(join(worktree, `runs-${ws}.log`), 'utf8').split('\n')
       .filter((line) => line.length > 0).length === 2);
-    expect(readFileSync(join(worktree, `runs-${taskId}.log`), 'utf8')).toBe(
-      `start ${taskId}\nstart ${taskId}\n`);
+    expect(readFileSync(join(worktree, `runs-${ws}.log`), 'utf8')).toBe(
+      `start ${ws}\nstart ${ws}\n`);
 
     // The audit answers who retried which failure, on which Agent, with which workspace decision.
     const events = JSON.parse((await cli(['events', 'list', '--project', value.projectId,
@@ -551,21 +556,24 @@ describe('codeestra task retry', () => {
     const value = await fixture();
     const taskId = await startTask(value.environment, value.projectId, 'Reclaim me (fail-once)');
     const failed = await waitForState(value.environment, value.projectId, taskId, 'FAILED');
-    const worktree = join(value.home, 'worktrees', value.projectId, taskId);
-    await waitFor(() => existsSync(join(worktree, `runs-${taskId}.log`)));
+    // ADR-0065 D03: the recorded workspace directory is `<displayNumber>-<namingTitle>`, which is also
+    // the name the stub provider writes its files under.
+    const reclaimWs = recordedWorkspaceName(value.home, taskId);
+    const worktree = recordedWorkspacePath(value.home, taskId);
+    await waitFor(() => existsSync(join(worktree, `runs-${reclaimWs}.log`)));
     // A failed attempt that already committed: the rebuild attaches the branch, so that commit is
     // what the new Execution starts on — it is not silently replaced by a fresh dev baseline.
     await git(worktree, ['add', '-A']);
     await git(worktree, ['commit', '-q', '-m', 'work the failed attempt already committed']);
-    const branchCommit = await git(value.devRepo, ['rev-parse', `refs/heads/task/${taskId}`]);
+    const branchCommit = await git(value.devRepo, ['rev-parse', `refs/heads/task/${reclaimWs}`]);
 
     const applied = await cli(['reclaim', 'apply', '--project', value.projectId, '--task', taskId,
       '--kind', 'TASK_WORKTREE', '--include-failure-scenes', '--json'], value.environment);
     expect(applied.exitCode).toBe(0);
     expect(existsSync(worktree)).toBe(false);
     // The reclamation deliberately keeps the Task branch; that branch is what the rebuild needs.
-    expect(await git(value.devRepo, ['branch', '--list', `task/${taskId}`]))
-      .toContain(`task/${taskId}`);
+    expect(await git(value.devRepo, ['branch', '--list', `task/${reclaimWs}`]))
+      .toContain(`task/${reclaimWs}`);
 
     const retried = await retry(value.environment, value.projectId, taskId, failed.task.version);
     expect(retried.exitCode).toBe(0);
@@ -579,21 +587,21 @@ describe('codeestra task retry', () => {
     // The recorded mode is a *verified plan*; the preparation path is what carried it out.
     expect(view.workspace.detail).toContain('does not exist yet');
     expect(existsSync(worktree)).toBe(true);
-    expect(await git(worktree, ['symbolic-ref', '-q', 'HEAD'])).toBe(`refs/heads/task/${taskId}`);
+    expect(await git(worktree, ['symbolic-ref', '-q', 'HEAD'])).toBe(`refs/heads/task/${reclaimWs}`);
     expect(await git(worktree, ['rev-parse', 'HEAD'])).toBe(branchCommit);
     // Exactly one worktree for this Task — never a second one — and its branch was not moved.
     const registrations = (await git(value.devRepo, ['worktree', 'list', '--porcelain']))
       .split('\n').filter((line) => line.startsWith('worktree '))
       .map((line) => line.slice('worktree '.length));
     expect(registrations.filter((path) => path === worktree)).toHaveLength(1);
-    expect(await git(value.devRepo, ['rev-parse', `refs/heads/task/${taskId}`]))
+    expect(await git(value.devRepo, ['rev-parse', `refs/heads/task/${reclaimWs}`]))
       .toBe(branchCommit);
     // The new Execution really ran in the re-created worktree: the committed line is still there
     // and the second attempt appended its own start.
-    await waitFor(() => readFileSync(join(worktree, `runs-${taskId}.log`), 'utf8')
+    await waitFor(() => readFileSync(join(worktree, `runs-${reclaimWs}.log`), 'utf8')
       .split('\n').filter((line) => line.length > 0).length === 2);
-    expect(readFileSync(join(worktree, `runs-${taskId}.log`), 'utf8')).toBe(
-      `start ${taskId}\nstart ${taskId}\n`);
+    expect(readFileSync(join(worktree, `runs-${reclaimWs}.log`), 'utf8')).toBe(
+      `start ${reclaimWs}\nstart ${reclaimWs}\n`);
 
     const events = JSON.parse((await cli(['events', 'list', '--project', value.projectId,
       '--limit', '400'], value.environment)).stdout) as {
@@ -607,7 +615,7 @@ describe('codeestra task retry', () => {
       .filter((event) => event.payload['reattachedBranch'] === true);
     expect(rebuilt).toHaveLength(1);
     expect(rebuilt[0]?.payload).toMatchObject({
-      taskId, path: worktree, branchRef: `refs/heads/task/${taskId}`,
+      taskId, path: worktree, branchRef: `refs/heads/task/${reclaimWs}`,
       previousState: 'RELEASED',
       rebuild: { outcome: 'REBUILT', reasonCode: 'REBUILT_FROM_TASK_BRANCH', headCommit: branchCommit },
     });
@@ -624,8 +632,9 @@ describe('codeestra task retry', () => {
     const value = await fixture();
     const taskId = await startTask(value.environment, value.projectId, 'Branch gone (fail-once)');
     const failed = await waitForState(value.environment, value.projectId, taskId, 'FAILED');
-    const worktree = join(value.home, 'worktrees', value.projectId, taskId);
-    await waitFor(() => existsSync(join(worktree, `runs-${taskId}.log`)));
+    const goneWs = recordedWorkspaceName(value.home, taskId);
+    const worktree = recordedWorkspacePath(value.home, taskId);
+    await waitFor(() => existsSync(join(worktree, `runs-${goneWs}.log`)));
 
     const applied = await cli(['reclaim', 'apply', '--project', value.projectId, '--task', taskId,
       '--kind', 'TASK_WORKTREE', '--include-failure-scenes', '--json'], value.environment);
@@ -634,8 +643,8 @@ describe('codeestra task retry', () => {
     // Both halves are gone: the directory was reclaimed and the Task branch is deleted out of band,
     // so `decideRetryWorkspace` observes MISSING and answers PREPARE_FRESH — while the ledger still
     // holds the `RELEASED` row for the very same path.
-    await git(value.devRepo, ['update-ref', '-d', `refs/heads/task/${taskId}`]);
-    expect(await git(value.repository, ['branch', '--list', `task/${taskId}`])).toBe('');
+    await git(value.devRepo, ['update-ref', '-d', `refs/heads/task/${goneWs}`]);
+    expect(await git(value.repository, ['branch', '--list', `task/${goneWs}`])).toBe('');
     const devCommit = await git(value.repository, ['rev-parse', 'refs/heads/dev']);
 
     const retried = await retry(value.environment, value.projectId, taskId, failed.task.version);
@@ -649,10 +658,10 @@ describe('codeestra task retry', () => {
     // The fresh preparation really prepared something: the recorded path holds a worktree on a newly
     // created Task branch at the fixed dev baseline, and the reclaimed attempt's work is gone.
     expect(existsSync(worktree)).toBe(true);
-    expect(await git(worktree, ['symbolic-ref', '-q', 'HEAD'])).toBe(`refs/heads/task/${taskId}`);
+    expect(await git(worktree, ['symbolic-ref', '-q', 'HEAD'])).toBe(`refs/heads/task/${goneWs}`);
     expect(await git(worktree, ['rev-parse', 'HEAD'])).toBe(devCommit);
-    await waitFor(() => existsSync(join(worktree, `runs-${taskId}.log`)));
-    expect(readFileSync(join(worktree, `runs-${taskId}.log`), 'utf8')).toBe(`start ${taskId}\n`);
+    await waitFor(() => existsSync(join(worktree, `runs-${goneWs}.log`)));
+    expect(readFileSync(join(worktree, `runs-${goneWs}.log`), 'utf8')).toBe(`start ${goneWs}\n`);
 
     // The `RELEASED` row is history, not a blocker: the ledger now holds a *second* row for the same
     // path (the partial unique index only covers live rows), which `reclaim plan` reports as its own
@@ -679,14 +688,15 @@ describe('codeestra task retry', () => {
     // commit with no relation to dev, built with plumbing so the fixture's own checkout is untouched.
     const diverged = await startTask(value.environment, value.projectId, 'Diverged (fail-once)');
     const divergedFailed = await waitForState(value.environment, value.projectId, diverged, 'FAILED');
-    const divergedWorktree = join(value.home, 'worktrees', value.projectId, diverged);
+    const divergedWs = recordedWorkspaceName(value.home, diverged);
+    const divergedWorktree = recordedWorkspacePath(value.home, diverged);
     await waitFor(() => existsSync(divergedWorktree));
     await cli(['reclaim', 'apply', '--project', value.projectId, '--task', diverged,
       '--kind', 'TASK_WORKTREE', '--include-failure-scenes', '--json'], value.environment);
     // ADR-0056: both the tree and the orphan branch live in the dev clone, which owns the Task refs.
     const tree = await git(value.devRepo, ['rev-parse', 'HEAD^{tree}']);
     const unrelated = await git(value.devRepo, ['commit-tree', tree, '-m', 'unrelated root']);
-    await git(value.devRepo, ['update-ref', `refs/heads/task/${diverged}`, unrelated]);
+    await git(value.devRepo, ['update-ref', `refs/heads/task/${divergedWs}`, unrelated]);
 
     const refused = await retry(value.environment, value.projectId, diverged,
       divergedFailed.task.version);
@@ -697,14 +707,14 @@ describe('codeestra task retry', () => {
     expect(afterDiverged.task.version).toBe(divergedFailed.task.version);
     expect(afterDiverged.executions).toHaveLength(1);
     expect(existsSync(divergedWorktree)).toBe(false);
-    expect(await git(value.devRepo, ['rev-parse', `refs/heads/task/${diverged}`]))
+    expect(await git(value.devRepo, ['rev-parse', `refs/heads/task/${divergedWs}`]))
       .toBe(unrelated);
 
     // (2) The recorded path is occupied by a directory Git does not register: never deleted to make
     // room, because that is an explicit reclamation decision.
     const occupied = await startTask(value.environment, value.projectId, 'Occupied (fail-once)');
     const occupiedFailed = await waitForState(value.environment, value.projectId, occupied, 'FAILED');
-    const occupiedWorktree = join(value.home, 'worktrees', value.projectId, occupied);
+    const occupiedWorktree = recordedWorkspacePath(value.home, occupied);
     await waitFor(() => existsSync(occupiedWorktree));
     await cli(['reclaim', 'apply', '--project', value.projectId, '--task', occupied,
       '--kind', 'TASK_WORKTREE', '--include-failure-scenes', '--json'], value.environment);

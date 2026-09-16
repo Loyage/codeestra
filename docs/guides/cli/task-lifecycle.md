@@ -1,10 +1,12 @@
 # CLI 参考 · task 生命周期
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v34 · **最后校对** 2026-09-16
-> 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@06bcf97` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v35 · **最后校对** 2026-09-17
+> 版本会前进：`dev@06bcf97` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一，
-> **内容自 `cli-reference.md @ dev@de03448` 搬移，一句未改写；本次未重新核对源码**，最后校对日期因此不变。
+> **内容自 `cli-reference.md` 搬移，除下面列出的几节外一句未改写**。
+> §4 的 `task create` 一节由本分支按 **ADR-0065** 重写：三个必填字段（`--title`/`--name`/任务详情），
+> `--constraint` 与 `--kind` 已删除（传入即未知 flag，退出码 2）。
 > 本文件覆盖 §4；章节号沿用拆分前的编号，因此可能不连续。正文里提到本文件没有的号（例如 §14、§17）时，到 [README.md](./README.md) 的索引表查它在哪一篇。
 > §3 的 `project impact *` 与 §4 的 `task submit`/`task resume`/`--feature` 由 FOUNDATION-091 新增/改写（ADR-0059）；
 > §4 的 `task purge` 一节由 FOUNDATION-090 新增（ADR-0058，其余 §4 内容沿用 FOUNDATION-070 的校对基线）；
@@ -16,10 +18,24 @@
 
 ## 4. `task`：生命周期
 
-### `task create <project-id> <specification> [--constraint <text>]… [--feature <module-id>]… [--kind DEVELOPMENT]`
+### `task create <project-id> <任务详情…> --title <显示标题> --name <命名标题> [--feature <module-id>]…`
 
-原子创建：原始意图 + 首 revision + 事实事件 + 幂等回执在同一事务。`--kind` 只接受 `DEVELOPMENT`。
-至少需要一个非空规格；`--constraint` 不可为空字符串（用法错误）。
+原子创建：原始意图 + 首 revision + 事实事件 + 幂等回执在同一事务。
+
+三个字段**都必须给出**（ADR-0065 D01）；缺任何一个、或值不合法都是用法错误（退出码 2）：
+
+| 字段 | 形状 | 用途 |
+|---|---|---|
+| `<任务详情…>`（位置参数） | 非空文本，多词原样拼接 | revision 正文，Agent 提示词的主体 |
+| `--title <显示标题>` | 非空、单行、≤ 200 字符 | 任务列表与任务详情渲染的一句话摘要 |
+| `--name <命名标题>` | `^[a-z][a-z0-9]*(-[a-z0-9]+)*$`，≤ 50 字符 | 分支与 worktree 目录名：`task/<编号>-<name>` |
+
+两个标题是 **Task 级**字段：它们不是 revision 事实，创建后没有命令可以修改（要改标题就新建任务）。
+`--title` 里的换行与超长、`--name` 里的大写/空格/连续短横线/首字符非字母都会在客户端与契约两层被拒。
+任务创建于命名标题落地之前时 `namingTitle` 为 `null`，它的分支与目录仍是内部 ID（迁移不改名）。
+
+**已删除的 flag**：`--constraint` 与 `--kind`（ADR-0065 D04）。约束功能与任务类型都不再存在，所以它们是未知 flag（退出码 2），
+不会静默忽略；旧脚本需要改写，过去写成约束的限制现在写进任务详情即可。
 
 命令面**总是**带一个随机 `commandId`，因此重放同一命令不会产生第二个 Task（幂等回执）。
 

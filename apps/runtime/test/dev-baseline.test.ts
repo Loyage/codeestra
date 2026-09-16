@@ -169,7 +169,8 @@ describe('Task baselines and dev facts are two different things (ADR-0056 / ADR-
         payloadHash: crypto.randomUUID(), intentId: crypto.randomUUID(),
         taskId: crypto.randomUUID(), revisionId: crypto.randomUUID(),
         intentEventId: crypto.randomUUID(), taskEventId: crypto.randomUUID(),
-        specification: 'second', constraints: [], features: [], kind: 'DEVELOPMENT',
+        displayTitle: 'second', namingTitle: 'second', features: [],
+        specification: 'second',
         actor: 'local-user', createdAt: Date.now(),
       });
       await expect(prepareTaskWorkspace({

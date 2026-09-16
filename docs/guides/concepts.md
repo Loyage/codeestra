@@ -1,8 +1,9 @@
 # 领域概念与边界
 
-> **适用版本** `dev@de03448` + 本格分支 `Loyage/glc-pause-ui`（2026-09-16） · **schema** v34（本格暂停半边） · **最后校对** 2026-09-16
-> 版本会前进：`dev@4667d32` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v35 · **最后校对** 2026-09-17
+> 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> §「Task」与 §「Revision」由本分支按 **ADR-0065** 改写（两个 Task 级标题；约束已删除）。
 > §「调度三态」由 FOUNDATION-091 按 ADR-0059 重写（声明同一功能才冲突）；
 > §「调度三态」末尾新增「全局暂停」一段、§「运行边界」补充控制状态的持久性（FOUNDATION-097 / ADR-0061 D04/D08）。
 > §「双分支与 Task 工作树基线」由 FOUNDATION-093 第三轮同步（ADR-0060 修订：managed 项目可跑完整 Task，只有集成与提升需要 dev 分支）；其余内容沿用 FOUNDATION-091 的校对基线。
@@ -38,9 +39,14 @@ Project 记录包含：`main` ref、`dev` ref、对象格式（sha1/sha256）、
 
 ### Task（任务）
 
-一次有边界的开发工作。Task 持有：当前 specification、**不可覆盖**的 revision 历史、constraints、priority、
+一次有边界的开发工作。Task 持有：**两个 Task 级标题**（显示标题 `displayTitle`：任务列表与详情渲染的
+一句话摘要；命名标题 `namingTitle`：分支与 worktree 目录名，`task/<编号>-<name>`；两者创建时必填、创建后不可改，
+ADR-0065）、当前 specification（任务详情）、**不可覆盖**的 revision 历史、priority、
 dependencies、**声明的功能（`features`，见下）**、predicted impact、conflict state、execution 历史、
 branch/worktree、验证与集成状态、归档标记。
+
+约束（`constraints`）自 ADR-0065 起**不再是 Task 或 revision 的字段**：它过去表达的「Agent 必须遵守的具体限制」
+写进任务详情即可，产品不再有单独的约束列表、`--constraint` flag 或约束界面。任务类型（`kind`）同样已删除。
 
 功能声明属于 **revision**：`task create --feature <module-id>` 在第一条 revision 上声明，
 `task revision create --feature …` 替换后续 revision 的声明（**省略即继承**）。id 必须是项目 `main` ref 上
@@ -67,14 +73,14 @@ DRAFT → BLOCKED → READY → RUNNING ⇄ (PAUSING → PAUSED → RUNNING)
 
 Task 的规格快照，append-only。第一次创建 Task 就产生第一条 revision。之后
 
-- `task revision create`：显式修订（可只改理由、只加约束）；
+- `task revision create`：显式修订（改任务详情，或改功能声明，二者至少其一）；
 - 修订进入**正在运行的** Execution 是一个独立可观察的过程：**Revision Delivery**。
   一个 delivery 只有在台账里被确认后才算满足；对没有确认通道的 Adapter，它会**如实保持未确认**，直到
   显式的 stop-and-restart 在**那条 revision** 上记录出后继 Execution（见 [features.md](./features.md)）。
 
 旧 revision 的验证**不能**作为新 revision 的交付证据。
 
-**两条输入通道，不要混。** 改规格/约束/验收目标 = Revision（`task revision create`，产生不可变 revision，
+**两条输入通道，不要混。** 改任务详情/功能声明/验收目标 = Revision（`task revision create`，产生不可变 revision，
 并使旧验证失效）；对**正在运行的会话**说一句「怎么做」而不改验收标准 = **Session Guidance**
 （`session guide`，不产生 revision、不动 `appliedRevisionId`、不使验证失效，见 §Session 与 features.md）。
 CLI/UI 不会根据自然语言猜测意图：想改验收标准就必须显式提交修订。

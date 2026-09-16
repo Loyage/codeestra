@@ -13,6 +13,7 @@ import {
   runCli,
 } from './support/runtime-reclamation.js';
 import { provisionDevClone } from './support/agent-fixture.js';
+import { taskWorkspaceName } from '@codeestra/domain';
 
 /**
  * End-to-end evidence for `project knowledge` (FOUNDATION-067 / ADR-0041) through the real CLI and
@@ -178,8 +179,17 @@ async function createRepository(input: {
 
 interface TaskPayload {
   readonly id: string;
+  readonly displayNumber: number;
+  readonly namingTitle: string | null;
   readonly state: string;
   readonly version: number;
+}
+
+/** The worktree directory name of a Task (ADR-0065 D03). */
+function workspaceName(task: TaskPayload): string {
+  return taskWorkspaceName({
+    taskId: task.id, displayNumber: task.displayNumber, namingTitle: task.namingTitle,
+  });
 }
 
 interface EntryView {
@@ -256,7 +266,8 @@ async function createAndSubmit(
   projectId: string,
   specification: string,
 ): Promise<TaskPayload> {
-  const created = JSON.parse((await cli(['task', 'create', projectId, specification],
+  const created = JSON.parse((await cli(['task', 'create', projectId, specification,
+    '--title', 'fixture task', '--name', 'fixture-task'],
     environment)).stdout) as TaskPayload;
   const submitted = await cli(['task', 'submit', projectId, created.id, '0'], environment);
   expect(submitted.exitCode).toBe(0);
@@ -322,8 +333,8 @@ describe('project knowledge', () => {
 
     // ADR-0059 makes an undeclared Task SAFE, so submission already started the same Execution path.
     // Wait for the fact that it ran rather than assuming process completion from the submit response.
-    const worktree = join(realpathSync(home), 'worktrees', projectId, task.id);
-    await waitFor(() => Bun.file(join(worktree, 'src', 'agent', `${task.id}.ts`)).size > 0);
+    const worktree = join(realpathSync(home), 'worktrees', projectId, workspaceName(task));
+    await waitFor(() => Bun.file(join(worktree, 'src', 'agent', `${workspaceName(task)}.ts`)).size > 0);
 
     // The Execution materialized the context into the Runtime's own knowledge directory — *not* into
     // the worktree — and the binding records exactly those bytes.
@@ -333,8 +344,10 @@ describe('project knowledge', () => {
     // Adapter handed to Pi names the Runtime-owned file, and it is the same file whose bytes the
     // binding recorded. Nothing about the rest of the controlled launch changed.
     const sessionDir = join(home, 'pi-sessions');
+    // The report is named after the workspace the provider ran in (ADR-0065 D03), not the Task id.
     const launchArgv = (JSON.parse(readFileSync(
-      join(sessionDir, `argv-report-${task.id}.json`), 'utf8')) as { argv: readonly string[] }).argv;
+      join(sessionDir, `argv-report-${workspaceName(task)}.json`), 'utf8')) as {
+        argv: readonly string[] }).argv;
     expect(launchArgv.filter((argument) => argument === '--append-system-prompt'))
       .toHaveLength(1);
     const handedOver = launchArgv[launchArgv.indexOf('--append-system-prompt') + 1];
@@ -380,7 +393,7 @@ describe('project knowledge', () => {
     const status = Bun.spawnSync({ cmd: ['git', '-C', worktree, 'status', '--porcelain', '-uall'],
       env: { PATH: Bun.env.PATH ?? '' } });
     expect(status.stdout.toString().trim().split('\n').filter((line) => line.length > 0))
-      .toEqual([`?? src/agent/${task.id}.ts`]);
+      .toEqual([`?? src/agent/${workspaceName(task)}.ts`]);
     expect(existsSync(join(worktree, '.codeestra', 'generated'))).toBe(false);
 
     // The snapshot is the same one `list` would report now, and it is discoverable by id.
@@ -501,17 +514,17 @@ describe('project knowledge', () => {
     const second = await createAndSubmit(environment, projectId, 'Second area');
 
     const worktrees = join(home, 'worktrees', projectId);
-    await waitFor(() => Bun.file(join(worktrees, first.id, 'src', 'agent',
-      `${first.id}.ts`)).size > 0);
-    await waitFor(() => Bun.file(join(worktrees, second.id, 'src', 'agent',
-      `${second.id}.ts`)).size > 0);
+    await waitFor(() => Bun.file(join(worktrees, workspaceName(first), 'src', 'agent',
+      `${workspaceName(first)}.ts`)).size > 0);
+    await waitFor(() => Bun.file(join(worktrees, workspaceName(second), 'src', 'agent',
+      `${workspaceName(second)}.ts`)).size > 0);
 
     for (const task of [first, second]) {
-      const worktree = join(worktrees, task.id);
+      const worktree = join(worktrees, workspaceName(task));
       const status = Bun.spawnSync({ cmd: ['git', '-C', worktree, 'status', '--porcelain', '-uall'],
         env: { PATH: Bun.env.PATH ?? '' } });
       expect(status.stdout.toString().trim().split('\n').filter((line) => line.length > 0))
-        .toEqual([`?? src/agent/${task.id}.ts`]);
+        .toEqual([`?? src/agent/${workspaceName(task)}.ts`]);
       expect(existsSync(join(worktree, '.codeestra', 'generated'))).toBe(false);
     }
 
@@ -531,7 +544,7 @@ describe('project knowledge', () => {
       readonly candidate: { readonly snapshot: { readonly files: readonly string[] } | null };
       readonly assessment: { readonly verdict: string; readonly reasonCodes: readonly string[] };
     };
-    expect(explained.candidate.snapshot?.files).toEqual([`src/agent/${second.id}.ts`]);
+    expect(explained.candidate.snapshot?.files).toEqual([`src/agent/${workspaceName(second)}.ts`]);
     expect(explained.assessment.reasonCodes).not.toContain('SAME_FILE');
     expect(explained.assessment.verdict).not.toBe('CONFLICTING');
   }, 120_000);

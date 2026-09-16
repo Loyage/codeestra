@@ -8,8 +8,9 @@ const base = {
   command: 'task.create' as const,
   commandId: '22222222-2222-4222-8222-222222222222',
   projectId: '33333333-3333-4333-8333-333333333333',
+  displayTitle: 'Keep the original task text',
+  namingTitle: 'keep-the-original-text',
   specification: 'Keep the original task text',
-  kind: 'DEVELOPMENT' as const,
 };
 
 describe('Runtime task request boundary', () => {
@@ -20,17 +21,55 @@ describe('Runtime task request boundary', () => {
     expect(runtimeRequestSchema.safeParse({ ...command, mode: 'UNKNOWN' }).success).toBe(false);
   });
 
-  test('defaults constraints without rewriting specification text', () => {
+  test('defaults the feature list without rewriting detail text', () => {
     const request = runtimeRequestSchema.parse({ ...base, specification: '  exact spacing  ' });
-    expect(request).toMatchObject({ specification: '  exact spacing  ', constraints: [] });
+    expect(request).toMatchObject({ specification: '  exact spacing  ', features: [] });
   });
 
-  test('rejects blank specifications and duplicate constraint IDs', () => {
+  test('requires both titles and rejects blank details (ADR-0065 D01)', () => {
     expect(runtimeRequestSchema.safeParse({ ...base, specification: '   ' }).success).toBe(false);
-    expect(runtimeRequestSchema.safeParse({
-      ...base,
-      constraints: [{ id: 'same', text: 'first' }, { id: 'same', text: 'second' }],
-    }).success).toBe(false);
+    const { displayTitle: _displayTitle, ...withoutDisplayTitle } = base;
+    expect(runtimeRequestSchema.safeParse(withoutDisplayTitle).success).toBe(false);
+    const { namingTitle: _namingTitle, ...withoutNamingTitle } = base;
+    expect(runtimeRequestSchema.safeParse(withoutNamingTitle).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({ ...base, displayTitle: '   ' }).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({ ...base, displayTitle: 'two\nlines' }).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({ ...base, displayTitle: 'x'.repeat(201) }).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({ ...base, namingTitle: 'Has Spaces' }).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({ ...base, namingTitle: 'Upper' }).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({ ...base, namingTitle: 'trailing-' }).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({ ...base, namingTitle: 'double--dash' }).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({ ...base, namingTitle: '1-leading-digit' }).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({ ...base, namingTitle: 'x'.repeat(51) }).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({ ...base, namingTitle: 'a-b-c2' }).success).toBe(true);
+  });
+
+  test('refuses the removed constraint and kind fields instead of ignoring them', () => {
+    expect(runtimeRequestSchema.safeParse({ ...base,
+      constraints: [{ id: 'c', text: 'x' }] }).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({ ...base, kind: 'SELF' }).success).toBe(false);
+    expect(runtimeRequestSchema.safeParse({ ...base, kind: 'DEVELOPMENT' }).success).toBe(false);
+  });
+
+  test('a revision must change the detail or the features, and carries neither constraint nor kind', () => {
+    const revision = {
+      requestId: base.requestId,
+      schemaVersion: 1 as const,
+      command: 'task.revision.create' as const,
+      commandId: base.commandId,
+      projectId: base.projectId,
+      taskId: '66666666-6666-4666-8666-666666666666',
+      expectedVersion: 1,
+      reason: 'user revision request',
+    };
+    expect(runtimeRequestSchema.safeParse({ ...revision, specification: 'new detail' }).success)
+      .toBe(true);
+    expect(runtimeRequestSchema.safeParse({ ...revision, features: ['a'] }).success).toBe(true);
+    // A revision with neither is still a valid *shape*: the refusal is a Runtime decision with its
+    // own code (`INVALID_REVISION`), so the boundary does not invent a product rule here.
+    expect(runtimeRequestSchema.safeParse(revision).success).toBe(true);
+    expect(runtimeRequestSchema.safeParse({ ...revision, specification: 'new detail',
+      constraints: [] }).success).toBe(false);
   });
 
   test('keeps strict result commit confirmation while exposing full-mode single-step capture', () => {

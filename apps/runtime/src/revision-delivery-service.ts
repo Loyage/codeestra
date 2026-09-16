@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 import type { AgentSessionRef } from '@codeestra/contracts';
 import {
   Phase1Database,
-  type StoredConstraint,
   type TaskRevisionCreation,
   type TaskRevisionDeliveryAttemptRecord,
   type TaskRevisionDeliveryChannel,
@@ -45,8 +44,8 @@ export interface RevisionDeliveryPort {
     readonly executionId: string;
     readonly revision: {
       readonly id: string;
+      readonly displayTitle: string;
       readonly specification: string;
-      readonly constraints: readonly StoredConstraint[];
     };
   }): Promise<{
     readonly acknowledged: boolean;
@@ -159,7 +158,6 @@ export class RevisionDeliveryService {
     readonly expectedVersion: number;
     readonly commandId: string;
     readonly specification?: string;
-    readonly constraints: readonly StoredConstraint[];
     /**
      * The features the *new* revision declares. `null`/absent inherits the previous revision's
      * declaration (ADR-0059 D03): amending a specification is not a statement that the Task stopped
@@ -176,24 +174,17 @@ export class RevisionDeliveryService {
       throw new RevisionDeliveryError('CONCURRENT_MODIFICATION',
         `Task is at version ${task.version}, not ${input.expectedVersion}`);
     }
-    // A revision must change *something*. Since ADR-0059 the feature declaration is such a thing in
-    // its own right: "I now want this Task to count as working on feature X" is a real specification
-    // change even when the prose and the constraints stay as they are.
+    // A revision must change *something*. Two things count: the detail, and the declared features
+    // (ADR-0059: "I now want this Task to count as working on feature X" is a specification change
+    // even when the prose stays as it is). Constraints used to be a third; they no longer exist
+    // (ADR-0065 D04), so an amendment that changes neither is refused as before.
     const requestedFeatures = input.features ?? null;
     const featureChange = requestedFeatures !== null
       && !sameFeatureDeclaration(requestedFeatures, task.currentRevision.features);
-    if (input.specification === undefined && input.constraints.length === 0 && !featureChange) {
+    if (input.specification === undefined && !featureChange) {
       throw new RevisionDeliveryError('INVALID_REVISION',
-        'A revision must change the specification, add at least one constraint, or change the'
-        + ' declared features');
+        'A revision must change the detail or the declared features');
     }
-    const constraints = input.specification === undefined
-      ? mergeConstraints(task.currentRevision.constraints, input.constraints)
-      : [...input.constraints];
-    // The kind follows what actually changed: `AMEND_TASK` for prose or a feature declaration (both
-    // are specification facts), `ADD_CONSTRAINT` for constraints alone.
-    const intentKind: 'AMEND_TASK' | 'ADD_CONSTRAINT' =
-      input.specification === undefined && !featureChange ? 'ADD_CONSTRAINT' : 'AMEND_TASK';
     const specification = input.specification ?? task.currentRevision.specification;
     const revisionId = this.#randomUUID();
     const deliveryId = this.#randomUUID();
@@ -208,7 +199,6 @@ export class RevisionDeliveryService {
         taskId: input.taskId,
         expectedVersion: input.expectedVersion,
         specification,
-        constraints,
         features: input.features ?? null,
         reason: input.reason,
       }),
@@ -219,9 +209,7 @@ export class RevisionDeliveryService {
       revisionEventId: this.#randomUUID(),
       deliveryEventId: this.#randomUUID(),
       specification,
-      constraints,
       features: input.features ?? null,
-      kind: intentKind,
       reason: input.reason,
       actor: input.actor,
       createdAt: this.#now(),
@@ -718,32 +706,20 @@ export class RevisionDeliveryService {
 
   #revisionFor(delivery: TaskRevisionDeliveryRecord): {
     readonly id: string;
+    readonly displayTitle: string;
     readonly specification: string;
-    readonly constraints: readonly StoredConstraint[];
   } {
     const revision = this.#storage.listTaskRevisions(delivery.projectId, delivery.taskId)
       .find((candidate) => candidate.id === delivery.revisionId);
     if (revision === undefined) {
       throw new RevisionDeliveryError('NOT_FOUND', 'The revision of this delivery was not found');
     }
-    return { id: revision.id, specification: revision.specification,
-      constraints: revision.constraints };
-  }
-}
-
-function mergeConstraints(
-  existing: readonly StoredConstraint[],
-  added: readonly StoredConstraint[],
-): readonly StoredConstraint[] {
-  const seen = new Set(existing.map((constraint) => constraint.id));
-  const merged = [...existing];
-  for (const constraint of added) {
-    if (seen.has(constraint.id)) {
-      throw new RevisionDeliveryError('INVALID_REVISION',
-        `Constraint ID ${constraint.id} already exists on this Task`);
+    // The title is a Task-level fact (ADR-0065 D01), so it is read from the Task, not the revision.
+    const task = this.#storage.getTask(delivery.projectId, delivery.taskId);
+    if (task === null) {
+      throw new RevisionDeliveryError('NOT_FOUND', 'The Task of this delivery was not found');
     }
-    seen.add(constraint.id);
-    merged.push(constraint);
+    return { id: revision.id, displayTitle: task.displayTitle,
+      specification: revision.specification };
   }
-  return merged;
 }

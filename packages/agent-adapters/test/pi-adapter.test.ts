@@ -123,8 +123,8 @@ function fixture(mode: 'SUCCEED' | 'CRASH_AFTER_PROMPT' | 'PROVIDER_ERROR' | 'NO
     workspace: { id: '30000000-0000-4000-8000-000000000003', cwd: workspace, ownershipToken: 'owner' },
     revision: {
       id: '40000000-0000-4000-8000-000000000004',
+      displayTitle: 'Implement the owned worktree change',
       specification: 'Implement the owned worktree change',
-      constraints: [{ id: 'no-main', text: 'Never update main' }],
     },
     knowledgeSnapshotRefs: [],
     permissionMode: 'STRICT',
@@ -206,7 +206,11 @@ describe('Pi RPC process adapter', () => {
     expect(observed.argv).toContain('--tools');
     expect(observed.commands.map((command) => command.type)).toEqual(['get_state', 'prompt']);
     expect(observed.commands[1]?.message).toContain(request.revision.id);
-    expect(observed.commands[1]?.message).toContain('Never update main');
+    // ADR-0065 D02: the prompt carries the display title and the detail, and nothing else — the
+    // removed constraint section must not reappear as an implicit "Constraints:" block.
+    expect(observed.commands[1]?.message).toContain(`Task: ${request.revision.displayTitle}`);
+    expect(observed.commands[1]?.message).toContain(request.revision.specification);
+    expect(observed.commands[1]?.message).not.toContain('Constraints:');
     await adapter.releaseSession(request.sessionId);
   });
 

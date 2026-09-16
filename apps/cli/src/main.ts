@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOptions,
   maxQuestionnaireQuestions,
+  taskNamingTitlePattern,
   maxSlotReservationReadLimit,
   maxTranscriptEntryReadLimit,
   runtimePingResultSchema,
@@ -618,28 +619,25 @@ function parseTranscriptFlags(flags: readonly string[]): TranscriptFlags {
 }
 
 interface TaskCreateInput {
+  readonly displayTitle: string;
+  readonly namingTitle: string;
   readonly specification: string;
-  /** Mutable array: the IPC request type is not readonly. */
-  readonly constraints: { readonly id: string; readonly text: string }[];
   /** Declared feature ids (`--feature <id>`, repeatable); validated by the Runtime. */
   readonly features: string[];
-  readonly kind: 'DEVELOPMENT';
 }
 
 /**
- * `task create` keeps its free-form specification, so only `--constraint` and `--kind` are read as
- * flags. Constraint IDs are generated here because the Runtime treats them as the stable identity
- * of a constraint inside one revision and requires them to be unique and non-blank.
- *
- * `SELF` is refused instead of silently becoming a development task: the Runtime has no
- * Self-Evolution behaviour (no isolated self worktree, no candidate/stable separation), so accepting
- * the kind would claim a capability that does not exist.
+ * `task create` takes the Task detail as its positional text, so only the two titles and the
+ * declared features are read as flags. Both titles are required (ADR-0065 D01): the display title is
+ * what the task list shows, the naming title is what the branch and worktree directory are called,
+ * and neither is derived from the other. The naming shape is checked here too, so a script gets the
+ * usage error (exit 2) instead of a contract refusal.
  */
 function parseTaskCreateFlags(tokens: readonly string[]): TaskCreateInput {
   const specification: string[] = [];
-  const constraints: { id: string; text: string }[] = [];
   const features: string[] = [];
-  let kind: 'DEVELOPMENT' = 'DEVELOPMENT';
+  let displayTitle: string | undefined;
+  let namingTitle: string | undefined;
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index] as string;
     const value = tokens[index + 1];
@@ -649,44 +647,38 @@ function parseTaskCreateFlags(tokens: readonly string[]): TaskCreateInput {
       if (value === undefined || value.trim().length === 0) usage();
       features.push(value.trim());
       index += 1;
-    } else if (token === '--constraint') {
+    } else if (token === '--title') {
       if (value === undefined || value.trim().length === 0) usage();
-      constraints.push({ id: crypto.randomUUID(), text: value.trim() });
+      displayTitle = value.trim();
       index += 1;
-    } else if (token === '--kind') {
-      if (value === undefined) usage();
-      if (value === 'SELF') {
-        throw new Error('TASK_KIND_UNSUPPORTED: SELF（自演进）尚未实现：Runtime 没有隔离的 self'
-          + ' worktree，也没有 Candidate/Stable 隔离；请使用 DEVELOPMENT');
-      }
-      if (value !== 'DEVELOPMENT') usage();
-      kind = value;
+    } else if (token === '--name') {
+      if (value === undefined || !taskNamingTitlePattern.test(value)) usage();
+      namingTitle = value;
       index += 1;
     } else if (token.startsWith('--')) {
-      // An unknown flag is a mistake, not part of the specification; the specification itself can
-      // always be passed first or quoted.
+      // An unknown flag is a mistake, not part of the detail; the detail itself can always be passed
+      // first or quoted. `--constraint` and `--kind` land here on purpose (ADR-0065 D04).
       usage();
     } else {
       specification.push(token);
     }
   }
-  if (specification.length === 0) usage();
-  return { specification: specification.join(' '), constraints, features, kind };
+  if (specification.length === 0 || displayTitle === undefined || namingTitle === undefined) usage();
+  return { displayTitle, namingTitle, specification: specification.join(' '), features };
 }
 
 /**
- * Flags for `task revision create`. A specification is optional: omitting it keeps the current one
- * and records an `ADD_CONSTRAINT` revision, which is exactly how "追加约束" is expressed.
+ * Flags for `task revision create`. The detail is optional: omitting it keeps the current one and
+ * changes only the feature declaration, which since ADR-0065 is the only other revision-level fact
+ * (constraints were deleted, so there is no "only add a constraint" revision any more).
  */
 function parseRevisionFlags(tokens: readonly string[]): {
   readonly specification: string | undefined;
-  readonly constraints: readonly { readonly id: string; readonly text: string }[];
   /** Absent means "inherit the current revision's declaration" (ADR-0059 D03). */
   readonly features: readonly string[] | undefined;
   readonly reason: string;
 } {
   const specification: string[] = [];
-  const constraints: { id: string; text: string }[] = [];
   const features: string[] = [];
   let featuresGiven = false;
   let reason = 'user revision request';
@@ -696,10 +688,6 @@ function parseRevisionFlags(tokens: readonly string[]): {
     if (token === '--specification') {
       if (value === undefined || value.trim().length === 0) usage();
       specification.push(value.trim());
-      index += 1;
-    } else if (token === '--constraint') {
-      if (value === undefined || value.trim().length === 0) usage();
-      constraints.push({ id: crypto.randomUUID(), text: value.trim() });
       index += 1;
     } else if (token === '--feature') {
       // An explicit `--feature` is how a Task begins (or stops) declaring a feature: repeated flags
@@ -723,7 +711,6 @@ function parseRevisionFlags(tokens: readonly string[]): {
   }
   return {
     specification: specification.length === 0 ? undefined : specification.join(' '),
-    constraints,
     features: featuresGiven ? features : undefined,
     reason,
   };
@@ -1250,12 +1237,16 @@ function usage(): never {
     # and list exit 1 when any entry is refused (there is then no snapshot at all); show exits 1 when
     # the project has no recorded snapshot; resolve reports what the next Execution would use and
     # exits 1 only when no honest answer exists.
-  bun run codeestra task create <project-id> <specification> [--constraint <text>]…
-    [--feature <module-id>]… [--kind DEVELOPMENT]
+  bun run codeestra task create <project-id> <任务详情…> --title <显示标题> --name <命名标题>
+    [--feature <module-id>]…
+    # 三个字段都必须给出（ADR-0065）：--title 是一句话摘要（任务列表显示它），
+    # --name 是小写英文短横线 slug（^[a-z][a-z0-9]*(-[a-z0-9]+)*$，≤ 50 字符），
+    # 用于分支 task/<编号>-<name> 与 worktree 目录；位置参数是任务详情。缺任一字段退出码 2。
     # --feature declares the feature(s) this Task works on: module ids from the project's
     # .codeestra/impact.json as read from its main ref. The Runtime refuses an id the mapping does
     # not declare (UNKNOWN_FEATURE), and refuses any declaration when the mapping cannot be read.
     # A Task that declares nothing is never in a feature conflict (ADR-0059).
+    # --constraint 与 --kind 已删除（ADR-0065），传入会被当作未知 flag。
   bun run codeestra task list <project-id> [--all]
   bun run codeestra task submit <project-id> <task-id> <expected-version>
   bun run codeestra task run <project-id> <task-id> <expected-version> [--adapter <pi|codex|claude>]
@@ -1326,10 +1317,12 @@ function usage(): never {
     # assistant text ends with a question mark). The note is printed to stderr.
     # --json is accepted and is the default, so a script can state its intent.
   bun run codeestra task revision create <project-id> <task-id> <expected-version>
-    [--specification <text>] [--constraint <text>]… [--feature <module-id>]… [--reason <text>] [--json]
+    [--specification <text>] [--feature <module-id>]… [--reason <text>] [--json]
     # --feature sets the feature declaration of the new revision (validated against the project's
     # mapping). Omitting it inherits the current revision's declaration; passing it at all replaces
     # the declaration with the ids given (ADR-0059).
+    # 至少要有 --specification 或 --feature 之一：什么都不改的修订会被拒为 INVALID_REVISION。
+    # --constraint 已删除（ADR-0065），传入会被当作未知 flag。
   bun run codeestra task revision list <project-id> <task-id> [--json]
   bun run codeestra task revision delivery list <project-id> <task-id> [--json]
   bun run codeestra task revision delivery get <project-id> <delivery-id> [--json]
@@ -2784,10 +2777,10 @@ try {
       command: 'task.create',
       commandId: crypto.randomUUID(),
       projectId: firstArgument,
+      displayTitle: input.displayTitle,
+      namingTitle: input.namingTitle,
       specification: input.specification,
-      constraints: input.constraints,
       features: input.features,
-      kind: input.kind,
     }));
   } else if (group === 'task' && action === 'list') {
     const includeArchived = remainingArguments.length === 1 && remainingArguments[0] === '--all';
@@ -3810,7 +3803,6 @@ try {
         taskId,
         expectedVersion,
         ...(input.specification === undefined ? {} : { specification: input.specification }),
-        constraints: [...input.constraints],
         ...(input.features === undefined ? {} : { features: [...input.features] }),
         reason: input.reason,
       }));

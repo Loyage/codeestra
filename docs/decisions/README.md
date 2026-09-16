@@ -67,6 +67,7 @@
 - [ADR-0062](0062-automatic-worktree-reclamation-after-integration.md)：集成成功后自动回收该批成员的 Task worktree（默认开启，`settings auto-reclaim on|off` 可关闭；复用 `reclaim` 的同一套归属校验与 append-only 账本，失败现场仍默认保留；无 schema 变更）。
 - [ADR-0063](0063-split-cli-reference-by-command-group.md)：CLI 命令参考按功能拆为 [`docs/guides/cli/`](../guides/cli/README.md) 九篇；各篇**沿用拆分前的章节号**，`cli-reference.md` 保留为索引 + 旧 §N 对照表（历史记录里的 §N 引用仍可解析）；正文逐行搬移、不重新核对、逐节校对注随节搬迁。**Amends ADR-0050** 的文件集合（D02）与 D03 的映射目标。**无代码、无 schema、无命令面变化**。
 - [ADR-0064](0064-settings-list-and-permission-as-a-setting.md)：`settings` 成为设置的唯一入口 —— 新增 Runtime 命令 `settings.list` 与 CLI `settings list [--json]`（一条只读命令枚举**九项** Runtime 级设置：生效值/产品默认/取值或区间/是否显式设置/存储位置，每项由它自己那条命令的同一次读取填充，契约强制键集完备）；权限模式的 CLI 拼写移入 `settings permission get|set` 并**移除顶层 `permission`**（破坏性；Runtime 命令、`permission-mode.json` 与语义一字未改）。**无 schema 变更、不占迁移号**。
+- [ADR-0065](0065-task-input-fields.md)：任务输入字段 —— 三个必填字段（显示标题 `displayTitle`、命名标题 `namingTitle`、任务详情），两个标题是 Task 级且不可修订，命名标题驱动分支与 worktree 目录（`task/<编号>-<slug>`，schema v35）；**删除**约束与任务类型（含 `--constraint`/`--kind`、`ADD_CONSTRAINT` 写入路径与三个 Adapter 的 Constraints 提示词段）；`intents.kind` 的历史值不重写，知识 `scope` 保持解析。**Amends ADR-0005 的「分支用内部稳定 ID」（只对新任务）与 ADR-0017 的停靠条形态字段**。**「任务模板」本轮明确不实现**。
 
 ## 当前有效语义（与旧 ADR 冲突时按此执行）
 
@@ -81,6 +82,7 @@
 - **IntegrationBatch**：ADR-0053 —— 一次覆盖整批的集成验证、批级 `STALE`/`CANCELLED`、成员按 `task_id` 排序、部分失败如实。
 - **终端与交接**：ADR-0054 —— PTY resize 合约（POSIX 范围）；并行工具批次安全点规则与 ADR-0010 相同；跨交接权限矩阵仍 `PARTIAL`。
 - **`RECOVERY_REQUIRED` 对账**：ADR-0055 —— 只读事实、能证明 provider 已消失才收口、不声称静止、不发信号、不删资源。
+- **Task 输入字段**：ADR-0065 —— `task create` 三个必填字段（显示标题 / 命名标题 / 任务详情）；两个标题是 Task 级、创建后不可修订；命名标题决定分支与 worktree 目录（`task/<编号>-<slug>`，旧任务仍用内部 ID）；约束与任务类型已删除（`--constraint`/`--kind` 现在是未知 flag）；`intents.kind` 保留 `ADD_CONSTRAINT` 仅为历史行、知识 `scope: SELF` 暂无适用对象。
 - **`dev` 事实来源与 Task 基线**：ADR-0056/0060 —— 记了 dev clone 的项目取其本地 `refs/heads/dev`；没记（managed）的取项目文件夹当前检出的分支；`dev_repo_path` 可选。**只有集成与提升需要长期 `dev` 分支**；依赖判定、槽位预留、调度启动前重检、结果 commit 归属、任务级验证与回收对两类项目都成立（第三轮修订）。
 - **Session Guidance**：ADR-0057 —— 会话级事实；命令面写明「已入队 ≠ 模型已读」，无通道即 `CHANNEL_UNSUPPORTED`。
 - **任务永久删除**：ADR-0058 —— 唯一显式 `--yes`，不在常态路径；`cancel` 仍是终态、`archive` 仍是软删除；被拒绝时可用 `--force`（同一条命令的放宽，D09）删掉本来会被拒绝的任务，代价逐项写在 `forced` 与审计事件里。

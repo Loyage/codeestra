@@ -1341,7 +1341,6 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         expectedVersion: request.expectedVersion,
         commandId: request.commandId,
         ...(request.specification === undefined ? {} : { specification: request.specification }),
-        constraints: request.constraints,
         // Validated against the project's mapping like `task create`; absent means "inherit".
         features: request.features === undefined
           ? null
@@ -2207,9 +2206,9 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       });
       const payloadHash = createHash('sha256').update(JSON.stringify({
         projectId: request.projectId,
+        displayTitle: request.displayTitle,
+        namingTitle: request.namingTitle,
         specification: request.specification,
-        constraints: request.constraints,
-        kind: request.kind,
         features,
       })).digest('hex');
       return success(request.requestId, storage.createTask({
@@ -2221,10 +2220,10 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         revisionId: crypto.randomUUID(),
         intentEventId: crypto.randomUUID(),
         taskEventId: crypto.randomUUID(),
+        displayTitle: request.displayTitle,
+        namingTitle: request.namingTitle,
         specification: request.specification,
-        constraints: request.constraints,
         features,
-        kind: request.kind,
         actor: 'local-user',
         createdAt: Date.now(),
       }));

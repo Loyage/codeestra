@@ -195,7 +195,8 @@ async function submittedTask(
   specification: string,
 ): Promise<{ readonly task: TaskRef; readonly submit: { readonly started: readonly unknown[];
   readonly waiting: readonly { readonly code: string }[] } }> {
-  const created = await cli(['task', 'create', fixtureState.projectId, specification],
+  const created = await cli(['task', 'create', fixtureState.projectId, specification,
+    '--title', 'fixture task', '--name', 'fixture-task'],
     fixtureState.environment);
   expect(created.exitCode).toBe(0);
   const taskId = (JSON.parse(created.stdout) as { readonly id: string }).id;

@@ -220,8 +220,8 @@ export async function createAgentFixture(options: AgentFixtureOptions = {}): Pro
     intentEventId: '70000000-0000-4000-8000-000000000007',
     taskEventId: '80000000-0000-4000-8000-000000000008',
     specification: 'Run one Agent Session',
-    constraints: [],
-    kind: 'DEVELOPMENT',
+    displayTitle: 'fixture task',
+    namingTitle: null,
     actor: 'local-user',
     createdAt: 2,
   });

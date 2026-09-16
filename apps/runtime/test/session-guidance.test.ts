@@ -242,7 +242,6 @@ describe('session guidance', () => {
       expectedVersion: afterGuidance?.version ?? 0,
       commandId: crypto.randomUUID(),
       specification: 'A changed acceptance criterion',
-      constraints: [],
       reason: 'the user changed the requirement',
       actor: 'local-user',
     });

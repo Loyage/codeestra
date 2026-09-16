@@ -8114,6 +8114,84 @@ Web UI HTTP 面读写同一条命令。
 - 已知不足（有意）：`settings list` 没有 UI 投影；`cli-reference.md` §19 原本从未记录 `settings ui`，本格补了一节**最小**说明（键名/取值/零确认/稳定码），
   逐屏细节仍以 `manual.md` 与 `ui.md` 为准。
 
+## 用户任务（`Loyage/task_auto`）— 任务输入字段重构：显示标题 / 命名标题 / 任务详情，删除约束与任务类型（ADR-**0065**，schema **v35**）
+
+状态：**已实现并定向验证；已 commit `364e877`，并已把 `dev@06bcf97` 合入本分支完成集成**（ADR-0062/0063/0064 都已在 `dev` 上）。
+合入 `dev` 的合并提交、`dev` 上的全量检查结果与**未 push `origin/dev`** 的事实由本节末尾的「落地」小节记。
+worktree `/Users/loyage/orca/workspaces/codeestra-dev/task_auto`，分支 `Loyage/task_auto`；基线 `dev = 7425556`。
+定向测试计划见本分支的 [`.codeestra/tests.json`](../../.codeestra/tests.json)（ADR-0038/0039；用 `targetedTestPlanSchema` 校验通过）。
+
+用户原话（本轮任务）：`优化任务输入功能，首先任务字段添加：标题（分显示标题和命名标题）…然后就是任务详情，任务模板，
+删除现在的任务约束，任务类型及相关功能，这两个没用了，用户必须给出这些字段所有信息才能创建任务。`
+
+用户逐项裁决（本轮问答的实际答复，未答复项不作批准）：
+1. **任务模板**：`目前先不开发这个功能，就当不存在` → 本格不引入该字段、也不预留空列（ADR-0065 D09）。
+2. **命名标题生效面**：`分支 + worktree 目录都用它` → `task/<编号>-<slug>` 与 `<编号>-<slug>`（D03）。
+3. **字段与修订的关系**：`Task 级标题 + revision 存详情与模板` → 两个标题是 Task 级、创建后不可修订；任务详情是 revision 正文。
+4. **删除深度**：`彻底删除` → 契约/DB 列/领域/Adapter/CLI/UI 全删（D04）。
+5. **历史 `ADD_CONSTRAINT` intent 行**：`保留为历史值，不再写入` → 不重建 `intents`、不改写历史（D05）。
+6. **旧任务迁移**：`派生显示标题，命名标题留空` → 首行派生 + `naming_title IS NULL`（D06）。
+7. **命名格式**：`编号 + 命名标题` → 编号保证项目内唯一，不另加唯一性门禁。
+
+改了什么：
+- `packages/contracts/src/index.ts`：新增 `maxTaskDisplayTitleChars` / `maxTaskNamingTitleChars` / `taskNamingTitlePattern` 与两个
+  title schema；`task.create` 改为 `displayTitle` + `namingTitle` + `specification`（必填）；`task.revision.create` 去掉 `constraints`；
+  删除 `taskKindSchema`/`constraintSchema`/`constraintsSchema`；`AgentStartRequest.revision` 改为 `{id, displayTitle, specification}`。
+- `packages/domain/src/task-naming.ts`（新）：`taskWorkspaceName` 与 `taskWorkspaceNameFromBranchRef`——工作区命名的**唯一**推导规则。
+- `packages/domain/src/task-revision.ts`：`RevisionInput`/`Constraint` 去掉约束。
+- `packages/storage/src/migration.ts`：`phase1SchemaVersion = 35`；新增 `taskInputFieldsMigration`（重建 `tasks` 与 `task_revisions`，
+  重建 append-only 触发器与两个索引，派生 `display_title`、`naming_title` 留 NULL）；`intentKinds` 注释说明 `ADD_CONSTRAINT` 只作历史值。
+- `packages/storage/src/database.ts`：`migrateTaskInputFields()`（预检「正文没有任何非空白字符」+ 行数比对 + 结束态断言）；
+  `createTask`/`createTaskRevision`/`TaskSummary`/`TaskRevisionSummary`/`AgentStartPlan` 去掉 `kind`/`constraints`、加上两个标题；
+  `TaskCreated`/`TaskRevisionCreated` 载荷相应更新；`createTaskRevision` 固定写 `AMEND_TASK`。集成时与 `dev` 的
+  `TaskSummaryRow`/`latestExecution`（FOUNDATION-056 那次落地）合并为同一个行类型与同一条 SELECT。
+- `packages/git/src/index.ts` + `rebuild.ts`：`prepareWorkspace` 与 `rebuildOwnedWorktree` 按 `workspaceName` 建立分支/目录
+  （后者原本硬编码内部 ID，是一条被定向测试抓到的真实回归）。
+- `apps/runtime/src/`：`main.ts`（两个命令的接线）、`revision-delivery-service.ts`（去掉约束合并与 `ADD_CONSTRAINT`，
+  改修订规则为「改详情或改功能声明」）、`workspace-service.ts`（从记录的 branch 取命名，重建路径用它）、
+  `agent-start-service.ts`/`agent-runtime-service.ts`（标题进提示词载荷）、`knowledge-service.ts`（Task 无 kind 后一律按 `DEVELOPMENT` 判定 scope）。
+- `packages/agent-adapters/src/{pi,codex,claude}-adapter.ts`：提示词改为「标题 + 详情」，删除 Constraints 段。
+- `apps/cli/src/main.ts`：`task create <详情…> --title --name`；`task revision create` 去掉 `--constraint`；usage 文本同步；
+  `TASK_KIND_UNSUPPORTED` 移除。集成时与 `dev` 的 `settings`/`auto-reclaim` 改动同文件共存（无冲突）。
+- `apps/ui/src/`：`new-task-dock.tsx` 重写（三个必填字段、无收起态）、`task-list.tsx`（主行改为显示标题、搜索含命名标题）、
+  `App.tsx`（两个标题 + 任务详情；**保留 `dev` 的版式**——「任务自己的说明」仍在 Agent 运行卡片与按钮组之下，只是其中的约束列表被删掉）、
+  `revisions.tsx`（修订表单/表格去掉约束）、`types.ts`、`styles.css`。
+- 文档（ADR-0050 D01 映射）：新增 **ADR-0065**（原稿编号 0062 与 `dev` 上已落地的 ADR-0062 自动回收冲突，集成时改号）与
+  `docs/decisions/README.md` 索引/当前有效语义；`PROJECT_SPEC.md`（§1 intent 取值、§2.2、§2.7 分支命名、§2.11、§2.21、§3）；
+  `docs/architecture/{domain-model,sqlite-schema,event-model,knowledge,agent-adapter-api}.md`；
+  `docs/guides/{features,concepts,workflow,manual,ui,acceptance-checklist,recipes,troubleshooting}.md`（逐篇在头部记录了改了哪一节），
+  以及——按 ADR-0063 拆分后的位置——`docs/guides/cli/task-lifecycle.md`（`task create`）与 `docs/guides/cli/task-revision-session.md`
+  （`task revision create`）：命令面文档写进了拆分后的正文，`cli-reference.md` 保持为索引（本格不再改它）。
+
+实际跑了什么检查、结果如何（定向，ADR-0038；**未跑** `bun run check` / `just check` / `just verify` / `check:fast`；`dev` 上的全量在合入后单独跑）：
+- 集成前（分支基线 `7425556`）：`bunx tsc --noEmit`、`bun run typecheck:ui` 通过；`packages/domain+contracts+git` 421 项、
+  `packages/storage/test` 181 项（含新增 `task-input-fields-migration.test.ts` 4 项）、`packages/agent-adapters/test` 146 项、
+  `bunx vitest run`（domain + UI）504 项、`apps/runtime/test` 全部 68 个文件分批跑完 0 fail。
+- 迁移冒烟（真实文件数据库，v33 建库 → 当前代码升级）：`display_title` 由首行派生、`naming_title` 为 NULL、
+  `ADD_CONSTRAINT` 行保留、`PRAGMA foreign_key_check` 为空、append-only 触发器仍在且 UPDATE 被拒；已固化为测试文件。
+- 集成后（把 `dev@06bcf97` 合入本分支）：`bunx tsc --noEmit`、`bun run typecheck:ui` 通过；`bun test packages/storage/test`
+  181 项、`bunx vitest run` 504 项通过；受集成影响的运行时文件重跑通过（含 `cli-task-create`、`cli-reclaim-batch`、
+  `cli-knowledge`、`cli-schedule`、`cli-task-retry`、`workspace-service`、`packages/git/test/rebuild.test.ts`）。
+
+本格抓到并修掉的真实回归（不是测试问题）：
+- `rebuildOwnedWorktree` 把期望布局硬编码为 `join(ownedRoot, projectId, taskId)`，改名后重建会以 `PATH_NOT_OWNED_LAYOUT` 拒绝
+  ——已改为按记录的 `workspaceName` 建立布局，并由 `cli-task-retry`（真实 CLI+git）与 `packages/git/test/rebuild.test.ts` 覆盖。
+- 迁移最初用 SQLite 的单参数 `trim()` 派生标题，而它**只去空格**：一个以换行开头的正文会产出「多行的一句话摘要」。
+  已改为显式给出空白字符集，并对没有非空白字符的正文以 `INVALID_STATE` 在动表之前拒绝升级（两者都有测试）。
+- 集成复核：核对了 `dev` 上 ADR-0062 的自动回收与未注册目录扫描——两者都按 `workspaces` 行（记录路径）归属，**不**从目录名反推 Task，
+  因此与本格的命名改动相容；`cli-reclaim-batch` 里那条「命名 workspace 仍被 ledger 认领」的断言在集成后仍通过。
+
+仍未做 / 已知边界（不得当作已完成）：
+- **未 push `origin/dev`**、未提升 `main`、未重启任何 Runtime（提升前的全量证据必须在精确 `dev` 候选 SHA 上重新产生）。
+- **未验证**：真实稳定 Runtime 上的 v34→v35 升级（禁止触碰稳定工作树与稳定 Runtime）；`task create` 三个字段在真实浏览器里的排版/焦点/窄屏换行
+  （观感类，只能人工确认，见 `docs/guides/acceptance-checklist.md` J1–J5）。
+- **破坏性变更**：`task.create`/`task.revision.create` 的请求形状不向后兼容——旧客户端缺 `displayTitle`/`namingTitle` 会被拒。这是有意选择，已写入 ADR-0065。
+- 历史任务没有命名标题，因此它们的分支/目录仍是内部 ID（迁移**不改名**）；Phase 7 的 Self Task 需要新的迁移重新引入 kind（ADR-0065 D04 记录了这个代价）。
+
+### 落地（合入 `dev`）
+
+见紧随其后的收尾提交（`docs(tasks): record the landing of Loyage/task_auto …`）：其中记合并提交 SHA 与 `dev` 上的全量检查结果。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），

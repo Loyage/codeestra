@@ -8,6 +8,7 @@ import {
   registerTemporaryDirectory,
   runCli,
 } from './support/runtime-reclamation.js';
+import { taskWorkspaceName } from '@codeestra/domain';
 
 /**
  * What this file proves, through the real CLI and the real Runtime: `session guide` and
@@ -117,6 +118,8 @@ for await (const chunk of Bun.stdin.stream()) {
 
 interface TaskPayload {
   readonly id: string;
+  readonly displayNumber: number;
+  readonly namingTitle: string | null;
   readonly state: string;
   readonly version: number;
 }
@@ -233,7 +236,8 @@ describe('session guidance command face', () => {
     };
     expect(inspected.devRepoPath?.verified).toBe(true);
     expect(realpathSync(inspected.devRepoPath?.path as string)).toBe(main.devClone);
-    const created = JSON.parse((await cli(['task', 'create', projectId, 'Change the first area'],
+    const created = JSON.parse((await cli(['task', 'create', projectId, 'Change the first area',
+      '--title', 'Change the first area', '--name', 'change-first-area'],
       environment)).stdout) as TaskPayload;
 
     // A DRAFT Task has no running attempt: guidance is durably recorded and reports that honestly.
@@ -256,15 +260,21 @@ describe('session guidance command face', () => {
 
     // Submission starts the undeclared Task and the new Execution consumes the pending guidance.
     expect((await cli(['task', 'submit', projectId, created.id, '0'], environment)).exitCode).toBe(0);
-    const worktree = join(realpathSync(home), 'worktrees', projectId, created.id);
-    await waitFor(() => existsSync(join(worktree, 'src', 'agent', `${created.id}.ts`)));
+    // ADR-0065 D03: the workspace directory is `<displayNumber>-<namingTitle>`, and the stub provider
+    // keys every file it writes on the directory name it runs in.
+    const workspaceName = taskWorkspaceName({
+      taskId: created.id, displayNumber: created.displayNumber, namingTitle: created.namingTitle,
+    });
+    const worktree = join(realpathSync(home), 'worktrees', projectId, workspaceName);
+    await waitFor(() => existsSync(join(worktree, 'src', 'agent', `${workspaceName}.ts`)));
 
     // The artifact the Runtime materialized from the ledger, never a worktree file (ADR-0057).
     const artifactPath = join(home, 'guidance', projectId, created.id, 'guidance-context.md');
     expect(readFileSync(artifactPath, 'utf8')).toContain(message);
     const sessionDir = join(home, 'pi-sessions');
+    // The report is named after the workspace the provider ran in (ADR-0065 D03), not the Task id.
     const reportName = readdirSync(sessionDir)
-      .find((entry) => entry.startsWith('argv-report-') && entry.includes(created.id));
+      .find((entry) => entry.startsWith('argv-report-') && entry.includes(workspaceName));
     expect(reportName).toBeDefined();
     const reportPath = join(sessionDir, reportName as string);
     const argv = (JSON.parse(readFileSync(reportPath as string, 'utf8')) as {

@@ -1003,6 +1003,16 @@ export interface KnowledgeResolveReport {
 }
 
 /**
+ * Every Task the Runtime can execute is a development Task (ADR-0065 D05).
+ *
+ * The Task-level kind was deleted, but Project Knowledge keeps its `scope: ALL|DEVELOPMENT|SELF`
+ * front-matter so that human-authored files stay valid: a `scope: SELF` entry is declared but applies
+ * to nothing until Phase 7 introduces Self Tasks. Reporting `DEVELOPMENT` here is the honest
+ * statement "no other kind of Execution exists", not a reintroduced Task field.
+ */
+export const knowledgeTaskKindForEveryTask: KnowledgeTaskKind = 'DEVELOPMENT';
+
+/**
  * `project knowledge resolve <project-id> <task-id>`: what the *next* Execution of this Task would
  * use, without creating anything. The digest it reports is the digest an Execution started right
  * now would bind, which is the point — a user can see the knowledge version before running.
@@ -1019,7 +1029,7 @@ export async function resolveProjectKnowledge(input: {
       `No Task ${input.taskId} in project ${input.projectId}`);
   }
   const inspection = await inspectProjectKnowledge(input);
-  const taskKind: KnowledgeTaskKind = task.kind;
+  const taskKind = knowledgeTaskKindForEveryTask;
   const selected = inspection.snapshot === null
     ? []
     : selectKnowledgeEntriesForTaskKind(inspection.snapshot.entries, taskKind);
