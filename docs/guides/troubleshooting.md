@@ -436,6 +436,12 @@ bun run codeestra events list --limit 1        # 或者从你保存的最后一�
 | `VERSION_CONFLICT` | Task 提交等 | 同上 |
 | `INVALID_STATE` / `INVALID_TRANSITION` / `INVALID_VALUE` | 领域 / storage | 状态或取值不允许 |
 | `UNSUPPORTED_INTENT_KIND` | storage（`assertIntentKind`） | Intent 取值不在 schema v28 收窄后的 `intents.kind` 集合内（ADR-0046）；边界直接拒绝，报文列出可接受取值 |
+| `UNKNOWN_COMMAND` | CLI（`apps/cli/src/main.ts`） | 未知命令：退出码 `2`，stderr 一行，并指向上一层 `help`（ADR-0068） |
+| `USAGE` | CLI | 参数个数/取值/flag 不合法：退出码 `2`，一行，带该命令自己的用法行与 `<命令> help` 提示 |
+| `UNHANDLED_COMMAND` | CLI | 退出码 `70`：命令树里有这个命令、分发却没有分支——**Codeestra 的缺陷**，不是你的用法错误；请把它当 bug 报告 |
+
+> **ADR-0068 起**：用法错误不再打印整份命令清单（那是旧 `usage()` 的行为），长文本已完整搬进命令树，
+> 通过 `codeestra help` / `codeestra <路径> help` 读取（§22）。
 
 ### Runtime / 生命周期
 
@@ -535,8 +541,11 @@ ADR-0061 删除了 Adapter 级容量上限，当前命令面不再产生它。�
 ## 3. 文档与实现不一致的处置（FOUNDATION-074 校准 + FOUNDATION-075 收口 + FOUNDATION-078 逐屏走查校准）
 
 J1（FOUNDATION-070）曾在上一版这里如实列出 10 项「文档与实现不一致」，并明确「没有在文档里被悄悄改掉、只列出不裁决」。
-FOUNDATION-074（Wave K / K1 文档校准）逐条处置了这份清单：**8 项已修**（含唯一一处代码改动：`apps/cli/src/main.ts` 的 `usage()` 文本），
-**2 项保留为「待裁决」**——它们需要用户裁决，本格没有自行改。用户于 2026-09-15 就这两项作出裁决，
+> **后记（ADR-0068）**：本节多处提到的 `usage()` 文本已被**命令树**取代（`apps/cli/src/command-tree.ts`）：
+> 那些行说的「已列入 `usage()`」现在是「已在命令树里」，并且由 `cli-command-surface.test.ts` 核对
+> `docs/guides/cli` 的覆盖。本节保留原文，不改写历史。
+
+FOUNDATION-074（Wave K / K1 文档校准）逐条处置了这份清单：**8 项已修**（含唯一一处代码改动：`apps/cli/src/main.ts` 的 `usage()` 文本），**2 项保留为「待裁决」**——它们需要用户裁决，本格没有自行改。用户于 2026-09-15 就这两项作出裁决，
 FOUNDATION-075（Wave K / K2）把第 7、10 条**一并收口**（处置见下表末列与本节末段）。
 
 | # | 位置 | 原不一致 | 本格处置 | 依据 |

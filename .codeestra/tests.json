@@ -1,34 +1,34 @@
 {
   "version": 1,
-  "scope": "暂停 Web UI 开发并默认禁用全部 Web UI 入口：删除 ui/open、runtime.ui 与 UI 设置命令面；保留实现源码但移出默认检查、构建、重启和提升流程；删除 UI 与专用 HTTP/SSE 测试，现有 CLI 测试改用 project trust。",
+  "scope": "CLI 每一层自描述（ADR-0068，PROJECT_SPEC §1.1 第 4 条）：命令树成为唯一命令清单，argv 解析与分发分支都按 tree id，链尾 assertNever 穷尽；help 在三层拼写下由命令树生成且不启动 Runtime；用法错误改为一行（退 2）；新增 runtime commands 与 help 两个命令；并修复 ADR-0055 / FOUNDATION-086 记录中缺失的 task recover CLI 分支。分发链被整体改写，因此把 CLI 命令面 e2e 全量作为本格的定向验证。",
   "commands": [
     {
-      "id": "typecheck-cli-runtime",
+      "id": "typecheck-cli-tree",
       "argv": ["bun", "run", "typecheck"],
       "cwd": ".",
-      "timeoutSeconds": 180,
-      "covers": "CLI/Runtime/contracts 在移除 Web UI 命令与 Runtime 启动路径后仍保持严格类型一致；apps/ui 按 ADR-0067 不进入默认检查"
+      "timeoutSeconds": 300,
+      "covers": "命令树与分发的一致性由类型系统承担：加节点不加分支、分支写错 id、unit 子命令名写错都必须编译失败（ChainId 的 assertNever）"
     },
     {
-      "id": "contracts-boundary",
-      "argv": ["bun", "test", "packages/contracts/test/request.test.ts"],
+      "id": "cli-self-description",
+      "argv": ["bun", "test", "apps/runtime/test/cli-help.test.ts", "apps/runtime/test/cli-command-surface.test.ts"],
       "cwd": ".",
-      "timeoutSeconds": 120,
-      "covers": "移除 Web UI request variants 后，剩余 versioned Runtime 请求 union 仍通过其现有边界用例"
+      "timeoutSeconds": 300,
+      "covers": "树里每个节点的 help 与树自身逐项一致、help 不启动 Runtime、用法错误一行退 2；每个 Runtime 命令都能追到 CLI 节点且其名字出现在 CLI 代码里；docs/guides/cli 覆盖每条命令"
     },
     {
-      "id": "runtime-settings-cli",
-      "argv": ["bun", "test", "apps/runtime/test/cli-settings.test.ts"],
+      "id": "cli-task-recover",
+      "argv": ["bun", "test", "apps/runtime/test/cli-task-recover.test.ts"],
       "cwd": ".",
-      "timeoutSeconds": 180,
-      "covers": "settings list 只枚举仍启用的 CLI/Runtime 设置，权限、散文提问和全局容量命令保持可用"
+      "timeoutSeconds": 300,
+      "covers": "task recover 从真实 CLI 到达 Runtime 的 reconcile（而不是退 2 的用法错误），并保留自己的用法错误与 help"
     },
     {
-      "id": "runtime-cli-smoke",
-      "argv": ["bun", "test", "apps/runtime/test/cli-task-create.test.ts", "apps/runtime/test/cli-attention.test.ts", "apps/runtime/test/operation-progress-events.test.ts"],
+      "id": "cli-command-face-regression",
+      "argv": ["bun", "test", "apps/runtime/test/cli-agent-config.test.ts", "apps/runtime/test/cli-agent-plugins.test.ts", "apps/runtime/test/cli-attention.test.ts", "apps/runtime/test/cli-capacity-slots.test.ts", "apps/runtime/test/cli-claude-adapter.test.ts", "apps/runtime/test/cli-codex-adapter.test.ts", "apps/runtime/test/cli-global-control.test.ts", "apps/runtime/test/cli-impact.test.ts", "apps/runtime/test/cli-knowledge.test.ts", "apps/runtime/test/cli-managed-project.test.ts", "apps/runtime/test/cli-prose-question.test.ts", "apps/runtime/test/cli-prose-question-attention.test.ts", "apps/runtime/test/cli-reclaim-batch.test.ts", "apps/runtime/test/cli-reclaim.test.ts", "apps/runtime/test/cli-schedule.test.ts", "apps/runtime/test/cli-session-attach.test.ts", "apps/runtime/test/cli-session-guidance.test.ts", "apps/runtime/test/cli-session-handoff.test.ts", "apps/runtime/test/cli-settings.test.ts", "apps/runtime/test/cli-snapshot-recheck.test.ts", "apps/runtime/test/cli-targeted-tests.test.ts", "apps/runtime/test/cli-task-control.test.ts", "apps/runtime/test/cli-task-create.test.ts", "apps/runtime/test/cli-task-depends.test.ts", "apps/runtime/test/cli-task-purge.test.ts", "apps/runtime/test/cli-task-retry.test.ts", "apps/runtime/test/cli-task-run-progress.test.ts", "apps/runtime/test/cli-transcript.test.ts"],
       "cwd": ".",
-      "timeoutSeconds": 360,
-      "covers": "共享测试改用 project trust 后，Task 创建、结构化回答与 Operation 进度仍只经 CLI/socket 命令面工作"
+      "timeoutSeconds": 1800,
+      "covers": "整条分发链（39 个分支、16 个 unit 内部解析、退出码 0/1/2/3 与等待码）改写后，既有 CLI 命令面行为不变"
     }
   ]
 }

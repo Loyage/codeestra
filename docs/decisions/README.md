@@ -70,6 +70,7 @@
 - [ADR-0065](0065-task-input-fields.md)：任务输入字段 —— 三个必填字段（显示标题 `displayTitle`、命名标题 `namingTitle`、任务详情），两个标题是 Task 级且不可修订，命名标题驱动分支与 worktree 目录（`task/<编号>-<slug>`，schema v35）；**删除**约束与任务类型（含 `--constraint`/`--kind`、`ADD_CONSTRAINT` 写入路径与三个 Adapter 的 Constraints 提示词段）；`intents.kind` 的历史值不重写，知识 `scope` 保持解析。**Amends ADR-0005 的「分支用内部稳定 ID」（只对新任务）与 ADR-0017 的停靠条形态字段**。**「任务模板」本轮明确不实现**。
 - [ADR-0066](0066-remove-dev-clone-and-dual-baseline.md)：**删除 dev clone、双基线、dev 集成与稳定提升；Task 基线只有一种**（项目文件夹建 workspace 时当前检出的分支，schema **v36**，不可逆 DROP）。删除 `task integrate`、`task integration *`、`promotion *` 命令；依赖判定改为「上游 result commit 对当前基线可达」；dev 构建通道（ADR-0049）也删。**Supersedes / Amends ADR-0009/0018/0022/0038(产品部分)/0039/0047/0048(产品语义)/0049/0052/0053/0056/0060、ADR-0062**。本仓库自身的 `main`/`dev` 人工四步只是仓库约定（`AGENTS.md`），不再是产品能力。
 - [ADR-0067](0067-pause-web-ui-and-cli-focus.md)：**暂停 Web UI、集中开发 CLI**。删除 `ui`/`open`、`runtime.ui`、`settings ui *`、`uiRunning`，删除 UI/HTTP 专用测试并把 UI 移出默认检查、构建、重启与提升；`apps/ui`、HTTP 与 UI settings 实现源码静态保留但不可达。无 schema 变更。
+- [ADR-0068](0068-self-describing-cli-command-tree.md)：**CLI 每一层自描述且清单与实际命令同源**（`help` 从命令树生成，分发按树 id 且 `assertNever` 穷尽；`runtime commands` 从请求 union 派生）。**Amends ADR-0008**（§1.1 由三条第一原则变为四条）；修掉 ADR-0055 / FOUNDATION-086 记录中「`task recover` 命令面缺失」的真实缺陷；按 ADR-0050 D03 同步 `docs/guides/cli/`。
 
 ## 当前有效语义（与旧 ADR 冲突时按此执行）
 
@@ -82,6 +83,7 @@
 - **本机布局与客户端**：ADR-0048（**产品语义部分由 ADR-0066 删除**）—— 两个独立 clone 的拆分只服务 Codeestra 自身的开发。ADR-0067 起 Web UI 暂停：没有启用的 UI 构建产物、HTTP 入口或 UI 启动步骤；源码静态保留。
 - **`dev` 事实与 Task 基线**：ADR-0066 —— 只有一种基线：项目文件夹建 workspace 时当前检出的分支；`HEAD` detached 以 `TASK_BASE_REF_UNRESOLVED` 拒绝，`--base-ref` 单次覆盖。没有 dev clone、没有 `DEV_REPO_*` 稳定码、没有 `TASK_IN_STABLE_PROMOTION` / `TASK_INTEGRATED_INTO_DEV`。
 - **CLI 优先 / Web UI 暂停**：ADR-0067 —— 当前产品只启用 CLI/Unix socket 命令面；`ui`/`open`/`runtime.ui`/`settings ui *` 与 `uiRunning` 已删除，UI/HTTP 专用测试和默认构建已移除。保留源码不得描述成可用功能。
+- **CLI 自描述**：ADR-0068 —— 每一层的命令清单由**命令树**（`apps/cli/src/command-tree.ts`）生成，argv 由它解析，分发分支按 tree id 且编译期穷尽；用法错误一行（`2`）并指向 `help`，`UNHANDLED_COMMAND`（`70`）表示树与分发不一致的缺陷；`runtime commands` 按请求 union 列出 Runtime 命令面。文档覆盖由定向测试核对，**过时**仍属人工纪律（ADR-0050 不变）。
 - **用户文档纪律**：ADR-0050 —— 功能变更同步 `docs/guides/` 对应段落，交付说明写明改了哪一篇的哪一节；**ADR-0063** —— 命令面变更的落点具体是 [`docs/guides/cli/`](../guides/cli/README.md) 里覆盖该命令的那一篇，旧 §N 对照表在 `docs/guides/cli-reference.md`。
 - **Project Knowledge**：ADR-0041/0051 —— 每个 provider 用自己的通道注入；`applyRevision` 三者 `UNSUPPORTED`。
 - **终端与交接**：ADR-0054 —— PTY resize 合约（POSIX 范围）；并行工具批次安全点规则与 ADR-0010 相同；跨交接权限矩阵仍 `PARTIAL`。

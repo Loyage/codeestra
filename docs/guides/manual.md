@@ -1024,8 +1024,11 @@ bun run codeestra task status $PROJECT <task-id>     # 执行 / 验证 / 会话�
 |---|---|
 | `0` | 成功。**注意**：某些命令的成功是「已受理」而不是「已完成」 |
 | `1` | 拒绝或失败（含 `RECOVERY_REQUIRED` 这类需要人处理的状态） |
-| `2` | **用法错误**：参数个数/取值不合法、未知 flag、缺少必填 flag |
+| `2` | **用法错误**：未知命令、缺少子命令、参数个数/取值不合法、未知 flag、缺少必填 flag。stderr 只有**一行**，并提示对应层的 `help`（ADR-0068） |
 | `3` | **等待**（冲突/容量等待、draining）或**没什么可做**（reclaim 没有可回收项） |
+
+**不知道某一层有哪些命令，就问那一层**：`codeestra help`、`codeestra task help`、`codeestra task revision help`
+（`codeestra task revision --help` 等价）。这份清单由命令树生成，不会与实际命令不一致，也不需要 Runtime（ADR-0068）。
 
 **`3` 从不表示 `BLOCKED`**——`BLOCKED` 只表示依赖未满足，属于「需要处理」而不是「等一等」。
 看到一个 `1` 时，**先读错误码，不要读文案**：文案可能会变，码不会。
@@ -1036,6 +1039,7 @@ bun run codeestra task status $PROJECT <task-id>     # 执行 / 验证 / 会话�
 |---|---|
 | `ui` / `open` 返回用法错误 | Web UI 已按 ADR-0067 暂停；改用 `project trust` 与其它 CLI 命令 |
 | 命令打到了「另一个」Runtime | 检查 `CODEESTRA_HOME`；一个 home 只跑一个 Runtime |
+| 想知道 CLI 到底有哪些命令 | `codeestra help`（或任意层的 `<命令路径> help`）；`codeestra runtime commands` 列出 Runtime 侧接受的每一条 versioned 命令 |
 
 ### 13.4 任务一直不跑
 

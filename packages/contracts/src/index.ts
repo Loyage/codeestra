@@ -18,6 +18,8 @@ export * from './targeted-test-plan.js';
 export * from './prose-question.js';
 export * from './settings.js';
 export * from './agent-plugins.js';
+export * from './runtime-commands.js';
+import type { RuntimeCommandInfo } from './runtime-commands.js';
 
 export const repositoryIdentitySchema = z.strictObject({
   repoRoot: z.string().min(1),
@@ -2256,8 +2258,24 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     projectId: z.string().uuid(),
     guidanceId: z.string().uuid(),
   }),
+  /**
+   * The discovery command of this very command face (ADR-0068): a client asks the Runtime what it
+   * accepts instead of reading the source. It reads `runtimeRequestSchema` itself, so the answer
+   * cannot list a command the Runtime does not have, and `runtimeCommandSummaries` is keyed by the
+   * union member, so a new command without a description does not compile.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('runtime.commands'),
+  }),
 ]);
 export type RuntimeRequest = z.infer<typeof runtimeRequestSchema>;
+
+/** What `runtime.commands` answers: every command of this face, one line each. */
+export interface RuntimeCommandsView {
+  readonly schemaVersion: 1;
+  readonly commands: readonly RuntimeCommandInfo[];
+}
 
 /**
  * One guidance delivery attempt as a client reads it (ADR-0057).
