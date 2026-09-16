@@ -7308,7 +7308,7 @@ cd /Users/loyage/Documents/codeestra-dev && just check   # 等价 bun run check
 
 ### 实际验证（本轮实际执行）
 
-- 结构自检：60 条 ADR 全部在索引中且 `docs/decisions/README.md` 的 60 个链接全部可解析；四个文件的代码围栏闭合；`PROJECT_SPEC.md` 的 4 个文档链接与 `AGENTS.md`/runbook 的相对链接均存在；无 `#锚点` 引用会断。
+- 结构自检：59 条 ADR 正文（`0001`–`0060`，无 `0020`）全部在索引中且 `docs/decisions/README.md` 的 59 个链接全部可解析；四个文件的代码围栏闭合；`PROJECT_SPEC.md` 的 4 个文档链接与 `AGENTS.md`/runbook 的相对链接均存在；无 `#锚点` 引用会断。
 - 规则未丢核对：在**旧 `AGENTS.md`** 中抽 24 个关键点（`just restart-dev` / `just restart-main` / `VITE_CODEESTRA_CHANNEL` / `data-channel` / `~/.local/state/codeestra-dev` / `git worktree list` / `refs/heads/dev` / `promote-main` / `uiRunning` / 内存 token / 后台监控 / 分支保护 / 屏幕读取 / `check:fast` / Mock adapter / `ADR-0050 D01` / `D02` / `bootstrap` / `FOUNDATION-093` / `allow-unknown` / `node_modules` / 独立仓库 等），逐个 grep 确认现在至少出现在 `AGENTS.md` 或 `docs/agents/runbook.md` 之一。
 - **没有跑测试**：本轮只改文档，不涉及代码路径；仓库内没有任何测试读取 `AGENTS.md`/`docs/**`（`grep` 确认只有注释提及，`cli-promotion.test.ts`、`cli-ui-settings.test.ts` 里的 AGENTS.md 均为注释）。未跑全量（ADR-0038：全量只在准备 `dev → main` 前对精确 `dev` 候选执行）。
 - 合入方式：本格在 `Loyage/reduce_context` worktree（基线 `dev@4667d32`）交付，提交后在 dev clone 以 fast-forward 合入 `dev`。
