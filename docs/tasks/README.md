@@ -7305,6 +7305,61 @@ cd /Users/loyage/Documents/codeestra-dev && just check   # 等价 bun run check
    `baselineSource` 改名只改了内存传递，未加落库断言（该字段本来就不落库）。
 5. 未跑全量测试；未在真实稳定实例上验证（本分支不动稳定 clone）。
 
+## FOUNDATION-094 — 精简 Agent 上下文：AGENTS.md、PROJECT_SPEC.md、ADR 索引，并把发布/重启规程移入 runbook（纯文档，无代码、无 schema、无 ADR）
+
+状态：**已完成**（本轮实际执行的验证见下）；只合入本地 `dev`，**未 push `origin/dev`、未提升 `main`、未重启稳定 Runtime**。
+
+### 背景（用户要求）
+
+用户指出 `AGENTS.md` 每轮自动加载的上下文过于冗长，尤其是它要求读的 `PROJECT_SPEC.md` 与 `docs/decisions/README.md`；要求先删「没啥用的描述」，再删「重复含义的内容」。
+
+### 用户选定的幅度（两轮 A/B/C 选择题，均选推荐项）
+
+1. `docs/decisions/README.md` 的 ADR 条目压成「一行摘要 + 关系标注（Amended / Amends / Superseded）」，选项、后果与稳定码留给各 ADR 正文；
+2. 同文件底部「**优先级标注**」压成「当前有效语义」短清单；「阶段准入与待决项」表只留未决/未做项（删除「已由 ADR-xxxx 确认并实现」的行，含一条重复的 Phase 2 行）；
+3. `PROJECT_SPEC.md` 删掉实现现状叙述（开头状态段、§6 现状句、§8 现状罗列），改为指向 `docs/tasks/README.md`；
+4. `AGENTS.md` 保留全部规则与安全边界，只删解释、历史与重复；
+5. 发布与重启规程从 `AGENTS.md` 移出到新的 `docs/agents/runbook.md`，`AGENTS.md` 只留不变量 + 「动手前先读 runbook」的硬触发（`开始工作` 第 1 条也带同一句）。
+
+### 修改的文件与体积
+
+| 文件 | 旧 | 新 | 变化 |
+|---|---|---|---|
+| `AGENTS.md`（每轮自动加载） | 16 566 B | 10 343 B | −38% |
+| `docs/agents/runbook.md`（新，按需读） | — | 6 870 B | 新增 |
+| `PROJECT_SPEC.md` | 30 960 B | 23 147 B | −25% |
+| `docs/decisions/README.md` | 95 243 B | 19 500 B | −80% |
+
+`docs/agents/runbook.md` 收下：本机检出布局（ADR-0048）、dev 实例、稳定提升人工四步（含 `just promote-main`）、重启 main 稳定服务（命令序列 + 6 条执行要求）、「不要做的事」。
+
+### 有意保留的边界
+
+- `PROJECT_SPEC.md` §2 的 24 条不变量与 §1.1/§3/§4/§6/§8 的章节号**一字未动**：代码注释引用了 §1.1/§2.6/§2.10/§2.11/§2.12/§2.14/§3/§4/§6/§8，改名或删号会断引用。只删条目内部的元叙述。
+- `docs/agents/runbook.md` 的小节名沿用原 `AGENTS.md` 的「本机检出布局（ADR-0048）」「重启 main 稳定服务」，ADR 正文对该小节的引用仍能对上（`AGENTS.md` 里也写明「原同名小节的规程已移入该文件」）。
+- `docs/guides/**` 按 ADR-0050 确认**无需修改**：未触及命令面、UI 行为、设置键、权限语义或用户日常做法；每篇顶部的版本/校对头按 D02 不因此推进。
+
+### 按既有记录改正的 4 处过时陈述（未引入新的事实主张）
+
+1. `PROJECT_SPEC.md` §2.24「物理删除与资源回收是待决策的独立高风险能力」→ 物理删除已由 ADR-0058 的 `task purge` 决定；
+2. §2.12「远端中转的产品命令面实现待落」→ 已由 FOUNDATION-077 / ADR-0052（schema v29）落地；
+3. §3「当前模型尚不能自动表达该分层」→ 已由 ADR-0039 落地；
+4. `AGENTS.md`「当前仍为设计阶段」→ 删（Phase 1 起已持续实现），保留「只推进已批准阶段 / 不编造默认产品语义」这条规则本身。
+
+另外按各 ADR 正文声明的 `Amends/Amended by/Supersedes` 复核了索引里的关系标注，改掉 3 处本轮推断出但正文没有声明的关系（ADR-0004←0025、ADR-0005←0060、ADR-0018←0053），改为指针式表述。
+
+### 实际验证（本轮实际执行）
+
+- 结构自检：59 条 ADR 正文（`0001`–`0060`，无 `0020`）全部在索引中且 `docs/decisions/README.md` 的 59 个链接全部可解析；四个文件的代码围栏闭合；`PROJECT_SPEC.md` 的 4 个文档链接与 `AGENTS.md`/runbook 的相对链接均存在；无 `#锚点` 引用会断。
+- 规则未丢核对：在**旧 `AGENTS.md`** 中抽 24 个关键点（`just restart-dev` / `just restart-main` / `VITE_CODEESTRA_CHANNEL` / `data-channel` / `~/.local/state/codeestra-dev` / `git worktree list` / `refs/heads/dev` / `promote-main` / `uiRunning` / 内存 token / 后台监控 / 分支保护 / 屏幕读取 / `check:fast` / Mock adapter / `ADR-0050 D01` / `D02` / `bootstrap` / `FOUNDATION-093` / `allow-unknown` / `node_modules` / 独立仓库 等），逐个 grep 确认现在至少出现在 `AGENTS.md` 或 `docs/agents/runbook.md` 之一。
+- **没有跑测试**：本轮只改文档，不涉及代码路径；仓库内没有任何测试读取 `AGENTS.md`/`docs/**`（`grep` 确认只有注释提及，`cli-promotion.test.ts`、`cli-ui-settings.test.ts` 里的 AGENTS.md 均为注释）。未跑全量（ADR-0038：全量只在准备 `dev → main` 前对精确 `dev` 候选执行）。
+- 合入方式：本格在 `Loyage/reduce_context` worktree（基线 `dev@4667d32`）交付，提交后在 dev clone 以 fast-forward 合入 `dev`。
+
+### 仍未做
+
+1. **未 push `origin/dev`**、未提升 `main`、未重启稳定 Runtime（本格无代码变更，无需重启）。
+2. **未新增 ADR**：本轮是文档组织决策（仿 ADR-0050 的纯文档 ADR 已有先例），是否要为此立 ADR 待用户决定。
+3. ADR-0022/0048/0060 正文提到的 `AGENTS.md`「本机检出布局」「重启 main 稳定服务」两节现在在 runbook（同名小节）；ADR 是 append-only，本格**未改正文**，是否追加指针待用户决定。
+
 ## NEXT — 最小可用纵向切片
 
 本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），
