@@ -57,6 +57,7 @@ import {
   reclamationMigration,
   revisionDeliveryMigration,
   sessionGuidanceMigration,
+  taskRevisionFeaturesMigration,
   sessionHandoffMigration,
   sessionTerminalMigration,
   stablePromotionMigration,
@@ -106,7 +107,12 @@ export class StorageError extends Error {
       // `task.recover` only means something for a Task the Runtime is waiting to reconcile
       // (ADR-0055), so "there is nothing to reconcile here" is its own refusal instead of a generic
       // state error a caller would have to read a sentence to understand.
-      | 'TASK_NOT_IN_RECOVERY',
+      | 'TASK_NOT_IN_RECOVERY'
+      // `task.purge` (ADR-0058) permanently deletes a Task, so a Task that already put a commit into
+      // `dev` or into a stable promotion is refused with its own code instead of one generic
+      // "cannot delete": deleting it would erase the record of which commit entered which ref.
+      | 'TASK_INTEGRATED_INTO_DEV'
+      | 'TASK_IN_STABLE_PROMOTION',
     message: string,
   ) {
     super(message);
@@ -1069,11 +1075,29 @@ export interface ImpactActiveTaskRef {
   readonly workspaceState: WorkspaceLifecycleState | null;
 }
 
+/**
+ * One Task a feature conflict is decided against (ADR-0059): its state, its archive flag and the
+ * features its current revision declares. `features` is never empty — the projection that produces
+ * this shape excludes Tasks that declare nothing, because a Task with no declaration cannot share a
+ * feature with anyone.
+ */
+export interface FeatureConflictPeerRef {
+  readonly taskId: string;
+  readonly displayNumber: number;
+  readonly taskState: TaskLifecycleState;
+  readonly archived: boolean;
+  readonly revisionId: string;
+  readonly features: readonly string[];
+}
+
 /** The Task an assessment is made for, plus the newest workspace it could still produce changes in. */
 export interface ImpactCandidateTaskRef {
   readonly taskId: string;
   readonly taskState: TaskLifecycleState;
   readonly revisionId: string;
+  readonly archived: boolean;
+  /** The declared features of the current revision; the only judged fact of a conflict (ADR-0059). */
+  readonly features: readonly string[];
   readonly workspaceId: string | null;
   readonly workspacePath: string | null;
   readonly workspaceBaseCommit: string | null;
@@ -1569,12 +1593,94 @@ export interface TaskSummary {
     readonly number: number;
     readonly specification: string;
     readonly constraints: readonly StoredConstraint[];
+    /**
+     * The feature ids this revision declares (ADR-0059). They are the only judged fact of a conflict:
+     * two unfinished Tasks that declare the same feature conflict, and a Task that declares none is
+     * never in a feature conflict.
+     */
+    readonly features: readonly string[];
     readonly createdAt: number;
   };
   readonly createdAt: number;
   readonly updatedAt: number;
   /** Set when the Task is archived (soft-deleted); archived Tasks keep every row and worktree. */
   readonly archivedAt: number | null;
+}
+
+/** What `task.purge` would delete, read without touching anything (ADR-0058). */
+export interface TaskPurgeSubject {
+  readonly taskId: string;
+  readonly displayNumber: number;
+  readonly state: TaskLifecycleState;
+  readonly version: number;
+  readonly archived: boolean;
+  readonly currentRevisionId: string;
+  readonly revisionCount: number;
+  readonly executionCount: number;
+}
+
+/**
+ * History outside the Task that a purge would outlive. `dev` (or a stable promotion) would keep a
+ * commit whose origin record the deletion erased, so the refusal names which relation holds it.
+ */
+export interface TaskPurgeBlocker {
+  readonly code: 'TASK_INTEGRATED_INTO_DEV' | 'TASK_IN_STABLE_PROMOTION';
+  readonly detail: string;
+  readonly count: number;
+}
+
+/** One owned resource the purge removed, recorded in the audit event before the rows disappear. */
+export interface TaskPurgeReclaimedResource {
+  readonly kind: string;
+  readonly resourceId: string;
+  readonly path: string;
+  readonly outcome: string;
+  readonly reasonCode: string;
+  readonly branchRef: string | null;
+}
+
+/**
+ * The tip of a branch a purge deleted. The branch itself is the Task's unmerged growth and is gone
+ * afterwards, so the commit it pointed at is recorded: "a branch was destroyed, at this OID" is a
+ * fact, while "a Task was deleted" alone would hide it.
+ */
+export interface TaskPurgeBranchFact {
+  readonly branchRef: string;
+  readonly tipCommit: string | null;
+  readonly deleted: boolean;
+  readonly detail: string;
+}
+
+export interface TaskPurgeInput {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly expectedVersion: number;
+  readonly commandId: string;
+  readonly payloadHash: string;
+  readonly eventId: string;
+  readonly actor: string;
+  readonly reason: string | null;
+  readonly purgedAt: number;
+  readonly reclamation: readonly TaskPurgeReclaimedResource[];
+  readonly branches: readonly TaskPurgeBranchFact[];
+}
+
+export interface TaskPurgeResult {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly displayNumber: number;
+  readonly state: TaskLifecycleState;
+  readonly version: number;
+  readonly archived: boolean;
+  readonly reason: string | null;
+  readonly purgedAt: number;
+  readonly eventId: string;
+  readonly currentRevisionId: string;
+  readonly branchFacts: readonly TaskPurgeBranchFact[];
+  readonly reclamation: readonly TaskPurgeReclaimedResource[];
+  readonly dependencyEdgesRemoved: number;
+  readonly rowsDeleted: Readonly<Record<string, number>>;
+  readonly detail: string;
 }
 
 /**
@@ -1594,6 +1700,18 @@ function promotionPhase(input: {
   if (input.state === 'CREATED' || input.state === 'AWAITING_APPROVAL') return 'READY_TO_PUSH';
   if (input.state === 'PROMOTING') return 'AWAITING_PULL';
   return input.restart === null ? 'RESTART_PENDING' : 'MAIN_PUSH_PENDING';
+}
+
+/**
+ * A stored feature list is re-validated on read (ADR-0059). The column only guarantees that the JSON
+ * parses as an array; a row edited outside this path must not become a judged fact, and a non-string
+ * element would otherwise reach the comparison as `undefined`.
+ */
+function parseTaskFeatures(json: string): readonly string[] {
+  const parsed = JSON.parse(json) as unknown;
+  if (!Array.isArray(parsed)) return Object.freeze([]);
+  return Object.freeze(parsed.filter((value): value is string =>
+    typeof value === 'string' && value.trim().length > 0));
 }
 
 function mapAgentConfigurationRow(row: AgentConfigurationRow): AgentConfigurationRecord {
@@ -1759,6 +1877,10 @@ export class Phase1Database {
         // `PRAGMA foreign_key_check` because an upgrade from any older stamped version may rebuild a
         // table on the way. No earlier number is ever inserted.
         if (version < 31) this.sqlite.exec(sessionGuidanceMigration);
+        // Version 32 is this step's own number (FOUNDATION-091 / ADR-0059): declared features on a
+        // Task revision. A pure `ADD COLUMN`, so it needs no foreign-key handling of its own; a
+        // database stamped 17–31 still gets it, and no earlier number is ever inserted.
+        if (version < 32) this.sqlite.exec(taskRevisionFeaturesMigration);
         this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
       })();
       if (rebuildsTable) {
@@ -1981,6 +2103,12 @@ export class Phase1Database {
     readonly taskEventId: string;
     readonly specification: string;
     readonly constraints: readonly StoredConstraint[];
+    /**
+     * Feature ids already validated against the project's declared mapping (ADR-0059). Omitting the
+     * list means exactly what an empty list means: this Task declares no feature, so it can never be
+     * in a feature conflict.
+     */
+    readonly features?: readonly string[];
     readonly kind: 'DEVELOPMENT' | 'SELF';
     readonly actor: string;
     readonly createdAt: number;
@@ -2014,10 +2142,11 @@ export class Phase1Database {
           input.revisionId, input.createdAt);
         database.query(`
           INSERT INTO task_revisions(id,task_id,number,previous_revision_id,specification,
-            constraints_json,source_intent_id,actor,reason,created_at)
-          VALUES (?1,?2,1,NULL,?3,?4,?5,?6,'initial task creation',?7)
+            constraints_json,features_json,source_intent_id,actor,reason,created_at)
+          VALUES (?1,?2,1,NULL,?3,?4,?5,?6,?7,'initial task creation',?8)
         `).run(input.revisionId, input.taskId, input.specification,
-          JSON.stringify(input.constraints), input.intentId, input.actor, input.createdAt);
+          JSON.stringify(input.constraints), JSON.stringify(input.features ?? []), input.intentId,
+          input.actor, input.createdAt);
         database.query('INSERT INTO intent_targets(intent_id,task_id) VALUES (?1,?2)')
           .run(input.intentId, input.taskId);
         database.query(`
@@ -2032,7 +2161,8 @@ export class Phase1Database {
           VALUES (?1,?2,'TaskCreated',1,'Task',?3,0,?4,?5,?6,?7)
         `).run(input.taskEventId, input.projectId, input.taskId, input.commandId,
           input.intentEventId, input.createdAt,
-          JSON.stringify({ taskId: input.taskId, revisionId: input.revisionId, kind: input.kind }));
+          JSON.stringify({ taskId: input.taskId, revisionId: input.revisionId, kind: input.kind,
+        features: input.features ?? [] }));
         return {
           id: input.taskId,
           projectId: input.projectId,
@@ -2046,6 +2176,7 @@ export class Phase1Database {
             number: 1,
             specification: input.specification,
             constraints: input.constraints,
+            features: Object.freeze([...(input.features ?? [])]),
             createdAt: input.createdAt,
           },
           createdAt: input.createdAt,
@@ -2066,11 +2197,13 @@ export class Phase1Database {
     return this.sqlite.query<{
       id: string; project_id: string; display_number: number; kind: 'DEVELOPMENT' | 'SELF';
       state: TaskLifecycleState; priority: number; version: number; revision_id: string; revision_number: number;
-      specification: string; constraints_json: string; revision_created_at: number;
+      specification: string; constraints_json: string; features_json: string;
+      revision_created_at: number;
       created_at: number; updated_at: number; archived_at: number | null;
     }, [string]>(`
       SELECT t.id,t.project_id,t.display_number,t.kind,t.state,t.priority,t.version,
         r.id AS revision_id,r.number AS revision_number,r.specification,r.constraints_json,
+        r.features_json,
         r.created_at AS revision_created_at,t.created_at,t.updated_at,t.archived_at
       FROM tasks t JOIN task_revisions r ON r.task_id=t.id AND r.id=t.current_revision_id
       WHERE t.project_id=?1 ${archivedClause} ORDER BY t.display_number
@@ -2087,11 +2220,13 @@ export class Phase1Database {
     const row = this.sqlite.query<{
       id: string; project_id: string; display_number: number; kind: 'DEVELOPMENT' | 'SELF';
       state: TaskLifecycleState; priority: number; version: number; revision_id: string; revision_number: number;
-      specification: string; constraints_json: string; revision_created_at: number;
+      specification: string; constraints_json: string; features_json: string;
+      revision_created_at: number;
       created_at: number; updated_at: number; archived_at: number | null;
     }, [string, string]>(`
       SELECT t.id,t.project_id,t.display_number,t.kind,t.state,t.priority,t.version,
         r.id AS revision_id,r.number AS revision_number,r.specification,r.constraints_json,
+        r.features_json,
         r.created_at AS revision_created_at,t.created_at,t.updated_at,t.archived_at
       FROM tasks t JOIN task_revisions r ON r.task_id=t.id AND r.id=t.current_revision_id
       WHERE t.project_id=?1 AND t.id=?2
@@ -2102,7 +2237,8 @@ export class Phase1Database {
   private mapTaskSummary(row: {
     id: string; project_id: string; display_number: number; kind: 'DEVELOPMENT' | 'SELF';
     state: TaskLifecycleState; priority: number; version: number; revision_id: string; revision_number: number;
-    specification: string; constraints_json: string; revision_created_at: number;
+    specification: string; constraints_json: string; features_json: string;
+    revision_created_at: number;
     created_at: number; updated_at: number; archived_at: number | null;
   }): TaskSummary {
     return {
@@ -2118,6 +2254,7 @@ export class Phase1Database {
         number: row.revision_number,
         specification: row.specification,
         constraints: JSON.parse(row.constraints_json) as readonly StoredConstraint[],
+        features: parseTaskFeatures(row.features_json),
         createdAt: row.revision_created_at,
       },
       createdAt: row.created_at,
@@ -4861,6 +4998,273 @@ export class Phase1Database {
       JSON.stringify({ taskId: input.taskId, from: task.state, to: task.state,
         reason: input.archived ? 'archived' : 'unarchived', actor: input.actor }));
     return { taskId: input.taskId, state: task.state, version, archived: input.archived };
+  }
+
+  /**
+   * The read-only half of `task.purge` (ADR-0058): who would be deleted, and whether anything in the
+   * repository's history forbids it.
+   *
+   * It is separated from {@link purgeTask} because the irreversible Git side effects (removing the
+   * owned worktrees and branches) must be decided *before* the database transaction opens, and a
+   * refusal must therefore be knowable without having touched anything. `purgeTask` re-runs both
+   * checks inside its transaction, so a race cannot turn this pre-flight answer into the decision.
+   */
+  inspectTaskPurge(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+  }): TaskPurgeSubject | null {
+    const row = this.sqlite.query<{
+      id: string; display_number: number; state: TaskLifecycleState; version: number;
+      archived_at: number | null; current_revision_id: string;
+    }, [string, string]>(`
+      SELECT t.id,t.display_number,t.state,t.version,t.archived_at,t.current_revision_id
+      FROM tasks t
+      JOIN project_trusts trust ON trust.project_id=t.project_id AND trust.status='ACTIVE'
+      WHERE t.project_id=?1 AND t.id=?2
+    `).get(input.projectId, input.taskId);
+    if (row === null) return null;
+    const revisions = this.sqlite.query<{ count: number }, [string]>(
+      'SELECT COUNT(*) AS count FROM task_revisions WHERE task_id=?1').get(input.taskId);
+    const executions = this.sqlite.query<{ count: number }, [string]>(
+      'SELECT COUNT(*) AS count FROM executions WHERE task_id=?1').get(input.taskId);
+    return {
+      taskId: row.id,
+      displayNumber: row.display_number,
+      state: row.state,
+      version: row.version,
+      archived: row.archived_at !== null,
+      currentRevisionId: row.current_revision_id,
+      revisionCount: revisions?.count ?? 0,
+      executionCount: executions?.count ?? 0,
+    };
+  }
+
+  /**
+   * Why this Task may not be purged, as facts rather than a guess. Both reasons are about history
+   * that lives outside the Task: a commit this Task put into `dev` (or into a stable promotion)
+   * outlives it, and deleting the Task would leave that commit in the ref with nothing naming where
+   * it came from. Archiving keeps every row and is the answer for those Tasks.
+   */
+  inspectTaskPurgeBlockers(input: {
+    readonly projectId: string;
+    readonly taskId: string;
+  }): readonly TaskPurgeBlocker[] {
+    const blockers: TaskPurgeBlocker[] = [];
+    const batchItems = this.countTaskRows('integration_batch_items', input.taskId);
+    const batchVerifications = this.countTaskRows('integration_verification_runs', input.taskId);
+    if (batchItems > 0 || batchVerifications > 0) {
+      blockers.push({
+        code: 'TASK_INTEGRATED_INTO_DEV',
+        detail: `the Task is a member of ${batchItems} integration batch item(s) and`
+          + ` ${batchVerifications} integration verification run(s)`,
+        count: batchItems + batchVerifications,
+      });
+    }
+    const promotionMembers = this.countTaskRows('stable_promotion_members', input.taskId);
+    if (promotionMembers > 0) {
+      blockers.push({
+        code: 'TASK_IN_STABLE_PROMOTION',
+        detail: `the Task is a member of ${promotionMembers} stable promotion record(s)`,
+        count: promotionMembers,
+      });
+    }
+    return blockers;
+  }
+
+  private countTaskRows(table: string, taskId: string): number {
+    // The table name is never user text: the only callers pass string literals from this file.
+    const row = this.sqlite.query<{ count: number }, [string]>(
+      `SELECT COUNT(*) AS count FROM ${table} WHERE task_id=?1`).get(taskId);
+    return row?.count ?? 0;
+  }
+
+  /**
+   * Permanent deletion of one Task (ADR-0058).
+   *
+   * Everything this Task owns is deleted in one transaction — revisions, Executions, Sessions,
+   * terminals, guidance, Attention, verification runs, impact snapshots and their paired
+   * assessments, slot reservations, reclamation records and the Task row itself — and the deletion is
+   * recorded as a `TaskPurged` domain event before the transaction commits.
+   *
+   * Three deliberate exceptions to the usual rules are stated here instead of being implied:
+   *
+   *  - **The append-only `no_delete` triggers are suspended for this command only.** `task_revisions`,
+   *    `impact_snapshots`, `impact_assessments`, `targeted_test_plans` and
+   *    `execution_knowledge_snapshots` can be deleted by a purge and by nothing else. Their trigger SQL
+   *    is read from `sqlite_master`, dropped, and re-created verbatim inside the same transaction, so
+   *    a rollback restores them and a failure to restore aborts the whole command.
+   *  - **`domain_events` are kept.** The Task's own history stays readable: a purge removes rows the
+   *    Runtime owns, not the record of what happened. `command_receipts`, `operations` and `intents`
+   *    are project-scoped audit and are likewise kept; `intent_targets` (which references the Task) is
+   *    deleted.
+   *  - **Foreign keys are checked, not disabled.** `PRAGMA defer_foreign_keys=ON` moves every check to
+   *    commit time, which is what makes "delete the whole subgraph in any order" safe while still
+   *    refusing a deletion that would leave a dangling reference.
+   */
+  /**
+   * The purge one command already performed, so a replayed `task.purge` reaches its own receipt
+   * instead of being refused with `NOT_FOUND` — the Task it names no longer exists, which is exactly
+   * what makes the ordinary pre-flight check useless for a replay.
+   */
+  findTaskPurgeByCommand(input: {
+    readonly projectId: string;
+    readonly commandId: string;
+    readonly taskId: string;
+    readonly payloadHash: string;
+  }): TaskPurgeResult | null {
+    const receipt = this.sqlite.query<{ payload_hash: string; result_json: string }, [string, string]>(
+      'SELECT payload_hash,result_json FROM command_receipts WHERE project_id=?1 AND command_id=?2')
+      .get(input.projectId, input.commandId);
+    if (receipt === null) return null;
+    if (receipt.payload_hash !== input.payloadHash) {
+      throw new StorageError('COMMAND_CONFLICT',
+        'Command ID was already used with a different payload');
+    }
+    const recorded = JSON.parse(receipt.result_json) as Partial<TaskPurgeResult>;
+    // The receipt has to be the purge it claims to be: a same-hash replay of some *other* command
+    // that was given this ID is a conflict here, never a silent `NOT_FOUND` that would hide it.
+    if (recorded.taskId !== input.taskId || recorded.purgedAt === undefined
+      || recorded.rowsDeleted === undefined) {
+      throw new StorageError('COMMAND_CONFLICT', 'Command receipt does not describe a Task purge');
+    }
+    return recorded as TaskPurgeResult;
+  }
+
+  purgeTask(input: TaskPurgeInput): TaskPurgeResult {
+    return this.executeCommand({
+      projectId: input.projectId,
+      commandId: input.commandId,
+      payloadHash: input.payloadHash,
+      createdAt: input.purgedAt,
+      apply: (database) => this.applyTaskPurge(database, input),
+    });
+  }
+
+  private applyTaskPurge(database: Database, input: TaskPurgeInput): TaskPurgeResult {
+    const row = database.query<{
+      id: string; display_number: number; state: TaskLifecycleState; version: number;
+      archived_at: number | null; current_revision_id: string;
+    }, [string, string]>(`
+      SELECT t.id,t.display_number,t.state,t.version,t.archived_at,t.current_revision_id
+      FROM tasks t
+      JOIN project_trusts trust ON trust.project_id=t.project_id AND trust.status='ACTIVE'
+      WHERE t.project_id=?1 AND t.id=?2
+    `).get(input.projectId, input.taskId);
+    if (row === null) {
+      throw new StorageError('NOT_FOUND', 'Task or active project trust was not found');
+    }
+    if (row.version !== input.expectedVersion) {
+      throw new StorageError('CONCURRENT_MODIFICATION', 'Task version did not match');
+    }
+    // Re-checked in the transaction: the caller's pre-flight answer is evidence, not the decision.
+    const blockers = this.inspectTaskPurgeBlockers({
+      projectId: input.projectId, taskId: input.taskId,
+    });
+    if (blockers.length > 0) {
+      const first = blockers[0] as TaskPurgeBlocker;
+      throw new StorageError(first.code, `Task cannot be purged: ${first.detail}`);
+    }
+
+    // Every check that follows happens with the checks deferred to commit; nothing is written yet.
+    database.exec('PRAGMA defer_foreign_keys=ON');
+    const suspended = this.suspendAppendOnlyTriggers(database);
+    const rowsDeleted: Record<string, number> = {};
+    for (const [table, statement] of taskPurgeDeletions()) {
+      const result = database.query(statement).run(input.taskId);
+      if (result.changes > 0) rowsDeleted[table] = result.changes;
+    }
+    this.restoreAppendOnlyTriggers(database, suspended);
+
+    const removed = database.query(
+      'DELETE FROM tasks WHERE id=?1 AND project_id=?2').run(input.taskId, input.projectId);
+    if (removed.changes !== 1) {
+      throw new StorageError('CONCURRENT_MODIFICATION', 'Task changed during purge');
+    }
+    rowsDeleted['tasks'] = 1;
+
+    const aggregateVersion = row.version + 1;
+    insertDomainEvent(database, {
+      eventId: input.eventId,
+      projectId: input.projectId,
+      eventType: 'TaskPurged',
+      aggregateType: 'Task',
+      aggregateId: input.taskId,
+      aggregateVersion,
+      correlationId: input.actor,
+      causationId: input.actor,
+      occurredAt: input.purgedAt,
+      payload: {
+        taskId: input.taskId,
+        displayNumber: row.display_number,
+        from: row.state,
+        to: 'PURGED',
+        actor: input.actor,
+        reason: input.reason,
+        archived: row.archived_at !== null,
+        currentRevisionId: row.current_revision_id,
+        rowsDeleted,
+        dependencyEdgesRemoved: rowsDeleted['task_dependencies'] ?? 0,
+        branchFacts: input.branches,
+        reclamation: input.reclamation,
+        appendOnlyTriggersSuspended: suspended.map((trigger) => trigger.name),
+      },
+    });
+
+    return {
+      projectId: input.projectId,
+      taskId: input.taskId,
+      displayNumber: row.display_number,
+      state: row.state,
+      version: row.version,
+      archived: row.archived_at !== null,
+      reason: input.reason,
+      purgedAt: input.purgedAt,
+      eventId: input.eventId,
+      currentRevisionId: row.current_revision_id,
+      branchFacts: input.branches,
+      reclamation: input.reclamation,
+      dependencyEdgesRemoved: rowsDeleted['task_dependencies'] ?? 0,
+      rowsDeleted,
+      detail: `Task #${row.display_number} (${row.state}) and every row it owned were deleted`,
+    };
+  }
+
+  /**
+   * Takes the append-only delete guards down for the duration of one purge transaction. The SQL is
+   * read back from `sqlite_master` rather than hard-coded, so a trigger whose definition was widened
+   * by a later migration is restored exactly as it was found.
+   */
+  private suspendAppendOnlyTriggers(database: Database): readonly { name: string; sql: string }[] {
+    const tables = appendOnlyTaskTables.map((table) => `'${table}'`).join(',');
+    const triggers = database.query<{ name: string; sql: string }, []>(`
+      SELECT name,sql FROM sqlite_master
+      WHERE type='trigger' AND tbl_name IN (${tables}) AND name LIKE '%no_delete'
+    `).all();
+    // A guard this command never suspends is a guard it can never break: the expected set is fixed,
+    // so a missing trigger is a refusal rather than a silent append-only bypass.
+    const missing = appendOnlyTaskTables.filter((table) =>
+      !triggers.some((trigger) => trigger.name === `${table}_no_delete`));
+    if (missing.length > 0) {
+      throw new StorageError('INVALID_STATE',
+        `Append-only guard missing for ${missing.join(', ')}; refusing to purge`);
+    }
+    for (const trigger of triggers) database.exec(`DROP TRIGGER ${trigger.name}`);
+    return triggers;
+  }
+
+  private restoreAppendOnlyTriggers(
+    database: Database,
+    suspended: readonly { name: string; sql: string }[],
+  ): void {
+    for (const trigger of suspended) database.exec(trigger.sql);
+    const restored = database.query<{ count: number }, []>(`
+      SELECT COUNT(*) AS count FROM sqlite_master WHERE type='trigger'
+      AND name IN (${suspended.map((trigger) => `'${trigger.name}'`).join(',')})
+    `).get();
+    if ((restored?.count ?? 0) !== suspended.length) {
+      throw new StorageError('INVALID_STATE',
+        'Append-only guards could not be restored; the purge was rolled back');
+    }
   }
 
   /**
@@ -11132,6 +11536,12 @@ export class Phase1Database {
     readonly deliveryEventId: string;
     readonly specification: string;
     readonly constraints: readonly StoredConstraint[];
+    /**
+     * The feature declaration of the *new* revision. An omitted list inherits the previous
+     * revision's declaration instead of silently dropping it: amending a specification is not a
+     * statement that the Task stopped working on that feature (ADR-0059 D03).
+     */
+    readonly features?: readonly string[] | null;
     readonly kind: 'AMEND_TASK' | 'ADD_CONSTRAINT';
     readonly reason: string;
     readonly actor: string;
@@ -11167,13 +11577,20 @@ export class Phase1Database {
           rawText: input.specification, kind: input.kind, status: 'APPLIED',
           actor: input.actor, createdAt: input.createdAt,
         });
+        const requested = input.features ?? null;
+        const inherited = requested === null
+          ? database.query<{ features_json: string }, [string]>(
+            'SELECT features_json FROM task_revisions WHERE id=?1').get(task.current_revision_id)
+          : null;
+        const features = requested
+          ?? (inherited === null ? [] : JSON.parse(inherited.features_json) as readonly string[]);
         database.query(`
           INSERT INTO task_revisions(id,task_id,number,previous_revision_id,specification,
-            constraints_json,source_intent_id,actor,reason,created_at)
-          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+            constraints_json,features_json,source_intent_id,actor,reason,created_at)
+          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
         `).run(input.revisionId, input.taskId, next.number, task.current_revision_id,
-          input.specification, JSON.stringify(input.constraints), input.intentId, input.actor,
-          input.reason, input.createdAt);
+          input.specification, JSON.stringify(input.constraints), JSON.stringify(features),
+          input.intentId, input.actor, input.reason, input.createdAt);
         const taskVersion = input.expectedVersion + 1;
         const taskUpdate = database.query(`
           UPDATE tasks SET current_revision_id=?1,version=?2,updated_at=?3
@@ -11200,7 +11617,7 @@ export class Phase1Database {
           input.intentEventId, input.createdAt,
           JSON.stringify({ taskId: input.taskId, revisionId: input.revisionId,
             revisionNumber: next.number, previousRevisionId: task.current_revision_id,
-            constraintCount: input.constraints.length, reason: input.reason,
+            constraintCount: input.constraints.length, features, reason: input.reason,
             actor: input.actor }));
         const running = database.query<{
           execution_id: string; session_id: string | null; incarnation_id: string | null;
@@ -12688,13 +13105,17 @@ export class Phase1Database {
   getImpactCandidateTask(projectId: string, taskId: string): ImpactCandidateTaskRef | null {
     const row = this.sqlite.query<{
       task_id: string; task_state: TaskLifecycleState; revision_id: string;
+      archived_at: number | null; features_json: string;
       workspace_id: string | null; workspace_path: string | null;
       workspace_base_commit: string | null; workspace_state: WorkspaceLifecycleState | null;
     }, [string, string]>(`
       SELECT task.id AS task_id,task.state AS task_state,task.current_revision_id AS revision_id,
+        task.archived_at,revision.features_json,
         workspace.id AS workspace_id,workspace.path AS workspace_path,
         workspace.base_commit AS workspace_base_commit,workspace.state AS workspace_state
       FROM tasks task
+      JOIN task_revisions revision ON revision.task_id=task.id
+        AND revision.id=task.current_revision_id
       LEFT JOIN workspaces workspace
         ON workspace.task_id=task.id AND workspace.state <> 'RELEASED'
       WHERE task.project_id=?1 AND task.id=?2
@@ -12705,11 +13126,49 @@ export class Phase1Database {
       taskId: row.task_id,
       taskState: row.task_state,
       revisionId: row.revision_id,
+      archived: row.archived_at !== null,
+      features: parseTaskFeatures(row.features_json),
       workspaceId: row.workspace_id,
       workspacePath: row.workspace_path,
       workspaceBaseCommit: row.workspace_base_commit,
       workspaceState: row.workspace_state,
     };
+  }
+
+  /**
+   * The Tasks a feature conflict can be decided against (ADR-0059): every Task of the project that is
+   * **unfinished** (any state other than `SUCCEEDED`/`CANCELLED`) and **not archived**, and that
+   * **declares at least one feature**. A Task that declares nothing can never share a feature, so it
+   * is excluded here rather than compared and answered `SAFE` — the rule is about declarations, not
+   * about every Task the project happens to contain.
+   *
+   * This projection replaces "Tasks holding an Execution resource" as the conflict input (ADR-0031
+   * D06): a `READY` Task that has not started yet is exactly the case the rule is about, so the judge
+   * can no longer be limited to Tasks that already hold a worktree.
+   */
+  listFeatureConflictPeers(projectId: string, excludeTaskId?: string): readonly FeatureConflictPeerRef[] {
+    return this.sqlite.query<{
+      task_id: string; display_number: number; task_state: TaskLifecycleState;
+      archived_at: number | null; revision_id: string; features_json: string;
+    }, [string, string]>(`
+      SELECT task.id AS task_id,task.display_number,task.state AS task_state,task.archived_at,
+        revision.id AS revision_id,revision.features_json
+      FROM tasks task
+      JOIN task_revisions revision ON revision.task_id=task.id
+        AND revision.id=task.current_revision_id
+      WHERE task.project_id=?1 AND (?2 = '' OR task.id <> ?2)
+        AND task.archived_at IS NULL
+        AND task.state NOT IN ('SUCCEEDED','CANCELLED')
+        AND json_array_length(revision.features_json) > 0
+      ORDER BY task.id
+    `).all(projectId, excludeTaskId ?? '').map((row) => ({
+      taskId: row.task_id,
+      displayNumber: row.display_number,
+      taskState: row.task_state,
+      archived: row.archived_at !== null,
+      revisionId: row.revision_id,
+      features: parseTaskFeatures(row.features_json),
+    }));
   }
   // ---------------------------------------------------------------------------------------------
   // Project Knowledge (FOUNDATION-067 / ADR-0041).
@@ -14711,6 +15170,82 @@ export interface TaskRecoveryOutcome {
  * its inline inserts; this helper exists because that path writes four events that share one payload
  * shape, and spelling the same statement out four times invites them to drift apart.
  */
+/**
+ * The append-only tables a purge is allowed to delete from, and nothing else is (ADR-0058 D03).
+ *
+ * This list is also the guard's expectation: {@link Phase1Database.suspendAppendOnlyTriggers} refuses
+ * to purge when one of these `_no_delete` triggers is absent, so the list cannot silently fall behind
+ * a migration that renamed or dropped one. `knowledge_snapshots` is deliberately absent: it is
+ * project-scoped, so a Task's deletion has no claim on it.
+ */
+const appendOnlyTaskTables: readonly string[] = Object.freeze([
+  'task_revisions', 'impact_snapshots', 'impact_assessments', 'targeted_test_plans',
+  'execution_knowledge_snapshots',
+]);
+
+/**
+ * Everything one purge deletes, in an order that reads children-before-parents even though the
+ * command defers foreign-key checking to commit. The order is documentation, not a correctness
+ * requirement: `PRAGMA defer_foreign_keys=ON` is what makes "the whole subgraph or none of it" hold.
+ *
+ * The three guarded tables (`integration_batch_items`, `integration_verification_runs`,
+ * `stable_promotion_members`) are absent on purpose: a Task named by one of them is refused, because
+ * the commit it put into `dev`/`main` outlives it.
+ */
+function taskPurgeDeletions(): readonly (readonly [string, string])[] {
+  const executions = 'SELECT e.id FROM executions e WHERE e.task_id=?1';
+  const sessions = `SELECT s.id FROM agent_sessions s WHERE s.execution_id IN (${executions})`;
+  return [
+    ['adapter_events',
+      `DELETE FROM adapter_events WHERE session_id IN (${sessions})`],
+    ['attention_answers',
+      `DELETE FROM attention_answers WHERE request_id IN (SELECT r.id FROM attention_requests r WHERE r.session_id IN (${sessions}))`],
+    ['intent_attention_targets',
+      `DELETE FROM intent_attention_targets WHERE attention_id IN (SELECT r.id FROM attention_requests r WHERE r.session_id IN (${sessions}))`],
+    ['session_permission_requests',
+      `DELETE FROM session_permission_requests WHERE session_id IN (${sessions})`],
+    ['attention_requests',
+      `DELETE FROM attention_requests WHERE session_id IN (${sessions})`],
+    ['session_guidance_deliveries',
+      'DELETE FROM session_guidance_deliveries WHERE guidance_id IN (SELECT id FROM session_guidance WHERE task_id=?1)'],
+    ['session_guidance', 'DELETE FROM session_guidance WHERE task_id=?1'],
+    ['execution_guidance_contexts', 'DELETE FROM execution_guidance_contexts WHERE task_id=?1'],
+    ['session_writer_leases',
+      `DELETE FROM session_writer_leases WHERE session_id IN (${sessions})`],
+    ['session_terminal_attachments',
+      `DELETE FROM session_terminal_attachments WHERE session_id IN (${sessions})`],
+    ['session_terminals', `DELETE FROM session_terminals WHERE session_id IN (${sessions})`],
+    ['session_handoff_requests',
+      `DELETE FROM session_handoff_requests WHERE session_id IN (${sessions}) OR execution_id IN (${executions})`],
+    ['task_revision_delivery_attempts',
+      `DELETE FROM task_revision_delivery_attempts WHERE delivery_id IN (SELECT id FROM task_revision_deliveries WHERE task_id=?1) OR session_id IN (${sessions})`],
+    ['task_revision_deliveries', 'DELETE FROM task_revision_deliveries WHERE task_id=?1'],
+    ['agent_session_startup_reconciliations',
+      `DELETE FROM agent_session_startup_reconciliations WHERE execution_id IN (${executions}) OR session_id IN (${sessions})`],
+    ['session_incarnations',
+      `DELETE FROM session_incarnations WHERE execution_id IN (${executions})`],
+    ['agent_sessions', `DELETE FROM agent_sessions WHERE execution_id IN (${executions})`],
+    ['execution_slot_reservation_events',
+      'DELETE FROM execution_slot_reservation_events WHERE reservation_id IN (SELECT id FROM execution_slot_reservations WHERE task_id=?1)'],
+    ['execution_slot_reservations', 'DELETE FROM execution_slot_reservations WHERE task_id=?1'],
+    ['result_commit_authorizations', 'DELETE FROM result_commit_authorizations WHERE task_id=?1'],
+    ['verification_runs', 'DELETE FROM verification_runs WHERE task_id=?1'],
+    ['execution_knowledge_snapshots',
+      'DELETE FROM execution_knowledge_snapshots WHERE task_id=?1'],
+    ['targeted_test_plans', 'DELETE FROM targeted_test_plans WHERE task_id=?1'],
+    ['impact_assessments',
+      'DELETE FROM impact_assessments WHERE candidate_snapshot_id IN (SELECT id FROM impact_snapshots WHERE task_id=?1) OR other_snapshot_id IN (SELECT id FROM impact_snapshots WHERE task_id=?1)'],
+    ['impact_snapshots', 'DELETE FROM impact_snapshots WHERE task_id=?1'],
+    ['reclamation_records', 'DELETE FROM reclamation_records WHERE task_id=?1'],
+    ['task_dependencies',
+      'DELETE FROM task_dependencies WHERE prerequisite_task_id=?1 OR dependent_task_id=?1'],
+    ['intent_targets', 'DELETE FROM intent_targets WHERE task_id=?1'],
+    ['executions', 'DELETE FROM executions WHERE task_id=?1'],
+    ['task_revisions', 'DELETE FROM task_revisions WHERE task_id=?1'],
+    ['workspaces', 'DELETE FROM workspaces WHERE task_id=?1'],
+  ];
+}
+
 function insertDomainEvent(database: Database, event: {
   readonly eventId: string;
   readonly projectId: string;

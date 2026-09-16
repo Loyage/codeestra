@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import {
   reclaimTestResources,
   registerTemporaryDirectory,
+  createFixtureTaskForExplicitStart,
   runCli,
 } from './support/runtime-reclamation.js';
 import { provisionDevClone } from './support/agent-fixture.js';
@@ -153,6 +154,7 @@ async function fixture(verificationCommands: readonly unknown[]): Promise<{
     CODEESTRA_HOME: home,
     CODEESTRA_UI_DIST: assets,
     CODEESTRA_PI_EXECUTABLE: shimPath,
+    CODEESTRA_SCHEDULE_TICK_MS: '600000',
   };
   const opened = await cli(['open', repository, '--dev-repo', devRepo, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);
@@ -194,17 +196,20 @@ async function waitFor(
   throw new Error(`Timed out waiting for: ${message}`);
 }
 
-/** Creates, submits, runs, and captures one Task through the CLI only. */
+/** Creates, explicitly runs, and captures one Task; READY setup bypasses automatic scheduling. */
 async function executedTask(fixtureValue: {
   readonly environment: Record<string, string>;
   readonly projectId: string;
 }): Promise<string> {
   const { environment, projectId } = fixtureValue;
-  const created = JSON.parse((await cli(['task', 'create', projectId, 'Write a file'],
-    environment)).stdout) as { readonly id: string };
-  const taskId = created.id;
-  expect((await cli(['task', 'submit', projectId, taskId, '0'], environment)).exitCode).toBe(0);
-  const ran = await cli(['task', 'run', projectId, taskId, '1'], environment);
+  await cli(['stop'], environment);
+  const ready = await createFixtureTaskForExplicitStart({
+    home: environment.CODEESTRA_HOME!, environment, projectId, specification: 'Write a file',
+    startable: true,
+  });
+  const taskId = ready.taskId;
+  const ran = await cli(['task', 'run', projectId, taskId, String(ready.expectedVersion)],
+    environment);
   expect(ran.exitCode).toBe(0);
   await waitFor(async () => (await status(environment, projectId, taskId))
     .executions[0]?.session?.state === 'EXITED', 'the Agent Session to exit');

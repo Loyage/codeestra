@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync } from 'n
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  createFixtureTaskForExplicitStart,
   reclaimTestResources,
   registerTemporaryDirectory,
   runCli,
@@ -184,6 +185,7 @@ interface Fixture {
   readonly repository: string;
   readonly projectId: string;
   readonly taskId: string;
+  readonly taskVersion: number;
   readonly codexReportPath: string;
   readonly codexRolloutPath: string;
 }
@@ -233,6 +235,9 @@ async function fixture(options: { readonly strict?: boolean;
     CODEESTRA_CODEX_CLI_STUB_REPORT: codexReportPath,
     CODEESTRA_CODEX_CLI_STUB_ROLLOUT: codexRolloutPath,
     CODEESTRA_CODEX_CLI_STUB_MODE: 'APPROVAL',
+    // These tests drive the explicit `task run --adapter …` command, so the recovery pass must not
+    // start the READY Task on its own default adapter while they are setting up.
+    CODEESTRA_SCHEDULE_TICK_MS: '600000',
   };
   if (options.strict === true) {
     // STRICT is a live Runtime switch; the project trust then needs the explicit confirmation flag.
@@ -244,10 +249,15 @@ async function fixture(options: { readonly strict?: boolean;
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { id: string }[];
   const projectId = projects[0]?.id as string;
-  const created = JSON.parse((await cli(['task', 'create', projectId, 'Write a file'],
-    environment)).stdout) as { readonly id: string };
-  expect((await cli(['task', 'submit', projectId, created.id, '0'], environment)).exitCode).toBe(0);
-  return { environment, repository, projectId, taskId: created.id, codexReportPath, codexRolloutPath };
+  // ADR-0059 starts an undeclared Task as soon as it is submitted, and the automatic pass would use
+  // the default adapter. The shared helper keeps the fixture behind a real feature conflict and
+  // leaves it READY, so each test's explicit `task run --adapter …` is what actually starts it.
+  await cli(['stop'], environment);
+  const ready = await createFixtureTaskForExplicitStart({
+    home, environment, projectId, specification: 'Write a file', startable: true,
+  });
+  return { environment, repository, projectId, taskId: ready.taskId,
+    taskVersion: ready.expectedVersion, codexReportPath, codexRolloutPath };
 }
 
 interface TaskStatus {
@@ -302,11 +312,13 @@ function codexReport(path: string): CodexStubReport {
 describe('codeestra task run --adapter codex', () => {
   test('routes a STRICT command approval to the existing Attention face and back to Codex',
     async () => {
-      const { environment, projectId, taskId, codexReportPath } = await fixture({ strict: true });
+      const { environment, projectId, taskId, taskVersion, codexReportPath } =
+        await fixture({ strict: true });
       // FULL would launch Codex with `approvalPolicy: never`; STRICT must ask.
       expect((await cli(['permission', 'get'], environment)).stdout)
         .toContain('"mode": "STRICT"');
-      const ran = await cli(['task', 'run', projectId, taskId, '1', '--adapter', 'codex'], environment);
+      const ran = await cli(['task', 'run', projectId, taskId, String(taskVersion), '--adapter', 'codex'],
+        environment);
       expect(ran.exitCode).toBe(0);
       expect(JSON.parse(ran.stdout)).toMatchObject({ adapterId: 'codex' });
 
@@ -332,8 +344,9 @@ describe('codeestra task run --adapter codex', () => {
     }, 120_000);
 
   test('runs without any approval in FULL mode and never asks for confirmation', async () => {
-    const { environment, projectId, taskId, codexReportPath } = await fixture();
-    const ran = await cli(['task', 'run', projectId, taskId, '1', '--adapter', 'codex'], environment);
+    const { environment, projectId, taskId, taskVersion, codexReportPath } = await fixture();
+    const ran = await cli(['task', 'run', projectId, taskId, String(taskVersion), '--adapter', 'codex'],
+      environment);
     expect(ran.exitCode).toBe(0);
     const exited = await waitForSessionExit(environment, projectId, taskId);
     expect(exited.executions[0]?.session?.state).toBe('EXITED');
@@ -347,15 +360,17 @@ describe('codeestra task run --adapter codex', () => {
   test('replaces a failed run attempt with a new run on a different adapter', async () => {
     // The Codex executable is missing, so this attempt fails during the version probe, before any
     // Execution or worktree is reserved. The Task stays runnable and a different Agent can run it.
-    const { environment, projectId, taskId } = await fixture({ codexExecutable: 'missing' });
-    const failed = await cli(['task', 'run', projectId, taskId, '1', '--adapter', 'codex'], environment);
+    const { environment, projectId, taskId, taskVersion } = await fixture({ codexExecutable: 'missing' });
+    const failed = await cli(['task', 'run', projectId, taskId, String(taskVersion), '--adapter', 'codex'],
+      environment);
     expect(failed.exitCode).toBe(1);
     expect(failed.stderr).toContain('PROVIDER_VERSION_UNAVAILABLE');
     const afterFailure = await status(environment, projectId, taskId);
     expect(afterFailure.task.state).toBe('READY');
     expect(afterFailure.executions).toEqual([]);
 
-    const replaced = await cli(['task', 'run', projectId, taskId, '1', '--adapter', 'pi'], environment);
+    const replaced = await cli(['task', 'run', projectId, taskId,
+      String(afterFailure.task.version), '--adapter', 'pi'], environment);
     expect(replaced.exitCode).toBe(0);
     expect(JSON.parse(replaced.stdout)).toMatchObject({ adapterId: 'pi' });
     const exited = await waitForSessionExit(environment, projectId, taskId);
@@ -365,7 +380,7 @@ describe('codeestra task run --adapter codex', () => {
   }, 120_000);
 
   test('applies the per-adapter Agent configuration to the Codex launch only', async () => {
-    const { environment, projectId, taskId, codexReportPath } = await fixture();
+    const { environment, projectId, taskId, taskVersion, codexReportPath } = await fixture();
     const configured = await cli(['agent', 'config', 'set', '--adapter', 'codex',
       '--provider', 'openai', '--model', 'cli-stub-model', '--thinking', 'high'], environment);
     expect(configured.exitCode).toBe(0);
@@ -379,7 +394,7 @@ describe('codeestra task run --adapter codex', () => {
     // Unset fields are reported as null on the command face, and the Pi scope has no model.
     expect(pi.effective.model).toBeNull();
 
-    expect((await cli(['task', 'run', projectId, taskId, '1', '--adapter', 'codex'],
+    expect((await cli(['task', 'run', projectId, taskId, String(taskVersion), '--adapter', 'codex'],
       environment)).exitCode).toBe(0);
     await waitForSessionExit(environment, projectId, taskId);
     const report = codexReport(codexReportPath);
@@ -390,8 +405,8 @@ describe('codeestra task run --adapter codex', () => {
   }, 120_000);
 
   test('resumes a paused Codex Task on Codex and refuses a cross-provider resume', async () => {
-    const { environment, projectId, taskId, codexReportPath } = await fixture();
-    expect((await cli(['task', 'run', projectId, taskId, '1', '--adapter', 'codex'],
+    const { environment, projectId, taskId, taskVersion, codexReportPath } = await fixture();
+    expect((await cli(['task', 'run', projectId, taskId, String(taskVersion), '--adapter', 'codex'],
       environment)).exitCode).toBe(0);
     await waitForSessionExit(environment, projectId, taskId);
 

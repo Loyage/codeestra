@@ -194,23 +194,17 @@ async function startHandoffTask(mode: 'permission' | 'fence'): Promise<{
   readonly environment: Record<string, string>;
   readonly projectId: string;
   readonly reportPath: string;
-  readonly run: Bun.Subprocess<'ignore', 'pipe', 'pipe'>;
 }> {
   const fixture = await handoffFixture(mode);
   const created = JSON.parse((await cli(['task', 'create', fixture.projectId,
     'Hand off one Agent session'], fixture.environment)).stdout) as { readonly id: string };
   const taskId = created.id;
+  // ADR-0059: submitting an undeclared Task starts it in the same command (the automatic pass
+  // judges it SAFE), so the Agent Session this file drives exists without a second `task run`.
   expect((await cli(['task', 'submit', fixture.projectId, taskId, '0'], fixture.environment)).exitCode)
     .toBe(0);
-
-  const run = Bun.spawn({
-    cmd: [process.execPath, cliEntry, 'task', 'run', fixture.projectId, taskId, '1'],
-    cwd: repositoryRoot,
-    env: { ...Bun.env, ...fixture.environment, no_proxy: '127.0.0.1,localhost' },
-    stdin: 'ignore', stdout: 'pipe', stderr: 'pipe',
-  });
   return { environment: fixture.environment, projectId: fixture.projectId,
-    reportPath: fixture.reportPath, run };
+    reportPath: fixture.reportPath };
 }
 
 /**
@@ -263,14 +257,12 @@ async function startHandoffTask(mode: 'permission' | 'fence'): Promise<{
 }
 
 /**
- * The Session this project is running, read from the same command face a client has. `task run`
- * returns as soon as the Agent Session exists, so this waits for the recorded Session instead of
- * assuming it is already there.
+ * The Session this project is running, read from the same command face a client has. Submission
+ * already started it, so this waits for the recorded Session instead of assuming it is there.
  */
 async function currentSessionId(
   environment: Record<string, string>,
   projectId: string,
-  run?: Bun.Subprocess<'ignore', 'pipe', 'pipe'>,
 ): Promise<string> {
   const deadline = Date.now() + 30_000;
   let last = '';
@@ -286,12 +278,7 @@ async function currentSessionId(
       const sessionId = status.executions[0]?.session?.sessionId;
       if (sessionId !== undefined) return sessionId;
     }
-    if (run !== undefined && run.exitCode !== null && run.exitCode !== 0) {
-      const stderr = await new Response(run.stderr).text();
-      throw new Error(`task run exited with ${run.exitCode}: ${stderr}`);
-    }
-    await Bun.sleep(100);
-  }
+    await Bun.sleep(100);  }
   throw new Error(`The Task never started an Agent Session; last status was ${last}`);
 }
 
@@ -326,9 +313,9 @@ async function waitForStatus(
 
 describe('codeestra session handoff', () => {
   test('routes a STRICT permission to the existing attention face and reports the denial', async () => {
-    const { environment, projectId, reportPath, run } = await startHandoffTask('permission');
+    const { environment, projectId, reportPath } = await startHandoffTask('permission');
     try {
-      const sessionId = await currentSessionId(environment, projectId, run);
+      const sessionId = await currentSessionId(environment, projectId);
       const status = await waitForStatus(environment, projectId, sessionId,
         (candidate) => candidate.incarnation !== null && candidate.sideChannel !== null);
       expect(status.incarnation).toMatchObject({ incarnationNumber: 1, mode: 'AUTOMATED_RPC',
@@ -396,15 +383,14 @@ describe('codeestra session handoff', () => {
       // The denial is not an approval the Runtime recorded elsewhere: the Execution has no result.
       expect(afterDeny.sessionState).toBe('EXITED');
     } finally {
-      run.kill('SIGTERM');
       await cli(['stop'], environment);
     }
   }, 60_000);
 
   test('requires a safe point, then hands the conversation to a native terminal', async () => {
-    const { environment, projectId, run } = await startHandoffTask('fence');
+    const { environment, projectId } = await startHandoffTask('fence');
     try {
-      const sessionId = await currentSessionId(environment, projectId, run);
+      const sessionId = await currentSessionId(environment, projectId);
       await waitForStatus(environment, projectId, sessionId,
         (candidate) => candidate.incarnation !== null && candidate.sideChannel !== null);
 
@@ -446,7 +432,6 @@ describe('codeestra session handoff', () => {
       expect(afterAdmit.incarnation?.state).toBe('ACTIVE');
       expect(afterAdmit.terminal?.held).toBe(true);
     } finally {
-      run.kill('SIGTERM');
       await cli(['stop'], environment);
     }
   }, 60_000);
@@ -482,9 +467,9 @@ const eventsOfType = (events: readonly HandoffEventRow[], eventType: string): re
  */
 describe('handoff and terminal events over the command face', () => {
   test('every fact is readable from events list, in one aggregate per takeover', async () => {
-    const { environment, projectId, run } = await startHandoffTask('fence');
+    const { environment, projectId } = await startHandoffTask('fence');
     try {
-      const sessionId = await currentSessionId(environment, projectId, run);
+      const sessionId = await currentSessionId(environment, projectId);
       await waitForStatus(environment, projectId, sessionId,
         (candidate) => candidate.incarnation !== null && candidate.sideChannel !== null);
 
@@ -598,15 +583,14 @@ describe('handoff and terminal events over the command face', () => {
       const names = new Set(afterRelease.map((event) => event.eventType));
       for (const name of sessionHandoffEventTypes) expect([...names]).toContain(name);
     } finally {
-      run.kill('SIGTERM');
       await cli(['stop'], environment);
     }
   }, 90_000);
 
   test('replaying an admission adds no second handoff fact', async () => {
-    const { environment, projectId, run } = await startHandoffTask('fence');
+    const { environment, projectId } = await startHandoffTask('fence');
     try {
-      const sessionId = await currentSessionId(environment, projectId, run);
+      const sessionId = await currentSessionId(environment, projectId);
       await waitForStatus(environment, projectId, sessionId,
         (candidate) => candidate.incarnation !== null && candidate.sideChannel !== null);
       await cli(['session', 'handoff', 'request', projectId, sessionId, 'takeover'], environment);
@@ -629,7 +613,6 @@ describe('handoff and terminal events over the command face', () => {
       const status = await readStatus(environment, projectId, sessionId);
       expect(status.incarnations).toHaveLength(2);
     } finally {
-      run.kill('SIGTERM');
       await cli(['stop'], environment);
     }
   }, 90_000);

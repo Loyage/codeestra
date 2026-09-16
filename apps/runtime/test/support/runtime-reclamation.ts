@@ -1,6 +1,7 @@
 import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
+import { Phase1Database } from '@codeestra/storage';
 import {
   inspectRuntimeHome,
   readProcessStartToken,
@@ -78,6 +79,114 @@ export function isTemporaryPath(path: string): boolean {
 /** Registers a temporary fixture directory so teardown can reclaim it on success and failure. */
 export function registerTemporaryDirectory(path: string): void {
   temporaryDirectories.push(path);
+}
+
+/**
+ * Puts a DRAFT fixture Task into READY without invoking the Runtime scheduler. The caller must stop
+ * the fixture Runtime first. This is intentionally test setup for command faces such as `task run`
+ * and reservation acquisition: ADR-0059 makes a real `task submit` immediately start an undeclared
+ * Task, so using the public submit command would consume the very READY precondition those tests
+ * need to exercise.
+ */
+export function submitFixtureTaskWithoutScheduling(input: {
+  readonly home: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly expectedVersion?: number;
+}): void {
+  if (!isTemporaryPath(input.home)) {
+    throw new Error(`Refusing to open a non-temporary Runtime home in test setup: ${input.home}`);
+  }
+  const storage = new Phase1Database(join(input.home, 'runtime.sqlite'));
+  try {
+    storage.submitTask({
+      projectId: input.projectId,
+      taskId: input.taskId,
+      expectedVersion: input.expectedVersion ?? 0,
+      commandId: crypto.randomUUID(),
+      payloadHash: `fixture-submit:${input.taskId}`,
+      eventId: crypto.randomUUID(),
+      actor: 'test-fixture',
+      submittedAt: Date.now(),
+    });
+  } finally {
+    storage.close();
+  }
+}
+
+/**
+ * Creates a READY Task behind a real DRAFT feature blocker and leaves it un-run, which is the
+ * precondition `task run` and the reservation primitive need now that ADR-0059 starts an undeclared
+ * Task the moment it is submitted.
+ *
+ * The blocker is why the Task stays READY: both revisions declare the same feature and the blocker is
+ * unfinished, so every scheduling pass — including the one a fresh Runtime runs at boot — judges the
+ * candidate `CONFLICTING` and starts nothing. That is stable across Runtime restarts, unlike
+ * archiving the blocker, which only holds until the next boot.
+ *
+ * `startable: true` archives the blocker afterwards, because a conflicting Task is refused by `task
+ * run` as well. The Task is then READY with nothing in its way, so the caller must keep this Runtime
+ * generation alive until it sends its own explicit start request.
+ */
+export async function createFixtureTaskForExplicitStart(input: {
+  readonly home: string;
+  readonly environment: Record<string, string>;
+  readonly projectId: string;
+  readonly specification: string;
+  /** Archive the blocker so an explicit `task run` is allowed (see above; default false). */
+  readonly startable?: boolean;
+}): Promise<{ readonly taskId: string; readonly expectedVersion: number }> {
+  if (!isTemporaryPath(input.home)) {
+    throw new Error(`Refusing to open a non-temporary Runtime home in test setup: ${input.home}`);
+  }
+  const storage = new Phase1Database(join(input.home, 'runtime.sqlite'));
+  const blockerId = crypto.randomUUID();
+  const taskId = crypto.randomUUID();
+  const feature = 'fixture-explicit-start';
+  const create = (id: string, specification: string, role: string) => storage.createTask({
+    projectId: input.projectId,
+    commandId: crypto.randomUUID(),
+    payloadHash: `fixture-${role}:${id}`,
+    intentId: crypto.randomUUID(),
+    taskId: id,
+    revisionId: crypto.randomUUID(),
+    intentEventId: crypto.randomUUID(),
+    taskEventId: crypto.randomUUID(),
+    specification,
+    constraints: [],
+    features: [feature],
+    kind: 'DEVELOPMENT' as const,
+    actor: 'test-fixture',
+    createdAt: Date.now(),
+  });
+  try {
+    create(blockerId, 'Hold an explicit-start fixture in READY', 'blocker');
+    create(taskId, input.specification, 'candidate');
+    storage.submitTask({
+      projectId: input.projectId,
+      taskId,
+      expectedVersion: 0,
+      commandId: crypto.randomUUID(),
+      payloadHash: `fixture-submit:${taskId}`,
+      eventId: crypto.randomUUID(),
+      actor: 'test-fixture',
+      submittedAt: Date.now(),
+    });
+  } finally {
+    storage.close();
+  }
+
+  if (input.startable === true) {
+    const archived = await runCli(
+      ['task', 'archive', input.projectId, blockerId, '0'],
+      input.environment,
+      { entry: cliEntry },
+    );
+    if (archived.exitCode !== 0) {
+      throw new Error(`Could not archive the fixture feature blocker: ${archived.stderr.trim()}`);
+    }
+  }
+  return { taskId, expectedVersion: 1 };
 }
 
 /**

@@ -20,6 +20,7 @@ import {
   projectTrustRejectionNotice,
 } from './project-trust.js';
 import { TaskRetryControls } from './task-retry.js';
+import { TaskPurgeControls } from './task-purge.js';
 import { RevisionDeliveryPanel } from './revisions.js';
 import { ProseQuestionWaitCard, isProseQuestionWait, readProseQuestionWait, proseQuestionResolveCommand } from './prose-wait.js';
 import { SchedulePanel, ScheduleExplainPanel, CapacityPanel } from './schedule.js';
@@ -923,6 +924,10 @@ function TasksTab(props: CommonProps & {
               {canCapture ? <span className="muted hint">会话已退出 · 等待提交成果</span> : null}
               {task.archivedAt === null ? null : <span className="muted">已归档</span>}</div>
             <p className="muted hint">规格 r{task.currentRevision.number} · 状态版本 v{task.version}</p>
+            <p className="muted hint" title="声明的功能（ADR-0059）：两个未完成任务声明同一功能时才会被判为冲突">
+              声明的功能：{task.currentRevision.features.length === 0 ? '（未声明，永不参与功能冲突）'
+                : task.currentRevision.features.join('、')}
+            </p>
             <pre className="spec">{task.currentRevision.specification}</pre>
             {task.currentRevision.constraints.length === 0 ? null : (
               <ul>
@@ -1161,6 +1166,16 @@ function TasksTab(props: CommonProps & {
                   run={run}
                 />
                 <p className="muted hint">终止后不能重开；归档只隐藏任务，不删除记录或回收工作树。</p>
+                <TaskPurgeControls
+                  client={client}
+                  projectId={projectId}
+                  task={task}
+                  onChanged={async () => {
+                    await props.reloadTasks(projectId);
+                    await props.loadDetail(projectId, task.id);
+                  }}
+                  run={run}
+                />
               </details>
             </div>
             {waiting === 0 ? null : (

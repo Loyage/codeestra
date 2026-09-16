@@ -29,7 +29,13 @@ Specification 是人类可读文本，constraints 是带稳定 ID 的文本条�
 
 ### TaskRevision
 
-id、taskId、number、previousRevisionId、specification、constraints、intentId、actor、reason、createdAt。append-only。所有代码成果和验证绑定精确 revision。
+id、taskId、number、previousRevisionId、specification、constraints、**features**、intentId、actor、reason、createdAt。append-only。所有代码成果和验证绑定精确 revision。
+
+**`features` 是功能声明（ADR-0059，schema v32）**：字符串数组，取值必须是项目 `main` ref 上
+`.codeestra/impact.json` 的 `modules[].id`（**写入时**校验：`UNKNOWN_FEATURE` / `IMPACT_POLICY_ABSENT` /
+`INVALID_IMPACT_POLICY` / `INVALID_FEATURE`，都不要求该映射已被 trust 确认）。它是**声明**而非推断：
+两个 Task 的当前 revision 声明了同一个功能、且对方未完成（非 `SUCCEEDED`/`CANCELLED`、未归档）时才是
+`CONFLICTING`；未声明的 Token 永远不参与功能冲突。省略 `--feature` 的新 revision **继承**上一条的声明。
 
 修订使用 expected aggregateVersion；并发修改失败返回冲突，不覆盖他人修订。输入改变立即使此前当前验证失效。已集成或已取消的 Task 不静默重开：新输入先请求确认其是否创建后续 Task，此路径在 MVP 尚不自动分类。
 
@@ -69,9 +75,16 @@ TerminalAttachment 是瞬时客户端连接与单 writer lease 的记录；多�
 
 Task 独占逻辑 workspace，关联 branch/worktree、baseCommit、ownershipToken、state、dirty status。安全重试可复用已确认静止且归属正确的 workspace；同一 Task 不允许旧执行与新执行同时写入。删除/重建必须另有明确授权，不在取消流程中隐式清理。
 
+**授权形态已明确（ADR-0058）**：「另有明确授权」就是 `task purge`——一条显式、不可逆、只删除一个任务的命令。它**不是**流程内的隐式清理：`task cancel` 仍然只释放资源、只保留记录；`task archive` 仍然只写 `archived_at`；回收（ADR-0021）仍然只回收资源、不删记录。而 `purge` 反过来——它删除任务与它拥有的全部行（含五张 append-only 任务子表，只在 purge 事务内让路）以及它自己的 worktree/验证副本/分支，并在同一个事务里写下 `TaskPurged`。两个界限写死：**成果已进入 `dev`/`main` 的任务拒绝删除**（`TASK_INTEGRATED_INTO_DEV` / `TASK_IN_STABLE_PROMOTION`），**无法证明 provider 进程已消失的任务拒绝删除**（`RECONCILE_REQUIRED`）。
+
 ### ImpactAssessment / ConflictAssessment
 
 Impact 绑定 revision、baseCommit、analyzerVersion，保存 path/directory/module 集合、完整性与证据。Conflict 绑定有序任务对及两份 impact 的 ID/版本，保存结论和原因。Task summary 只是派生显示，不能替代 pairwise 判断。
+
+**判定语义已由 ADR-0059 取代（FOUNDATION-091）**：`impactAnalyzerVersion` 前进到 `impact-analyzer-v2`，
+判定只读两侧声明的 `features` 与「对方是否未完成」，命中 `SAME_UNFINISHED_FEATURE`。快照、映射、基线、
+变更集仍然是**记录的证据**（`impact_assessments` 仍按「两侧都有可观测快照」写配对行），但**不再参与判定**；
+所以「没有 assessment 行」不等于「没有冲突」——判定的审计是 `TaskScheduleDecided`/`TaskWaitingForConflict` 事件与 `explain` 输出。
 
 ### VerificationRun
 

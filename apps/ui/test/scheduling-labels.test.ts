@@ -25,13 +25,20 @@ import {
 import type { AgentCompletionNoteView } from '../src/types.js';
 
 describe('verdicts', () => {
-  it('renders UNKNOWN as "cannot be proven", never as a soft SAFE', () => {
-    const text = verdictLabel('UNKNOWN');
-    expect(text).toContain('无法证明');
-    expect(text).toContain('不是「没有冲突」');
-    expect(text).toContain('也不是 SAFE');
+  it('renders the current rule: SAFE means no shared declared feature (ADR-0059)', () => {
+    const text = verdictLabel('SAFE_TO_PARALLELIZE');
+    expect(text).toContain('没有');
+    expect(text).toContain('声明同一个功能');
+    expect(verdictLabel('CONFLICTING')).toContain('声明了同一个功能');
     // A code this client does not know keeps its recorded name instead of being guessed at.
     expect(verdictLabel('SOMETHING_NEW')).toBe('SOMETHING_NEW');
+  });
+
+  it('never renders a historical UNKNOWN as SAFE', () => {
+    const text = verdictLabel('UNKNOWN');
+    expect(text).toContain('UNKNOWN');
+    expect(text).toContain('不再产生');
+    expect(text).toContain('不等于 SAFE');
   });
 
   it('gives UNKNOWN the attention tone rather than the success tone', () => {
@@ -42,7 +49,7 @@ describe('verdicts', () => {
   });
 
   it('keeps `SAFE_TO_PARALLELIZE` distinct from the class name `SAFE`', () => {
-    expect(verdictLabel('SAFE_TO_PARALLELIZE')).toContain('已证明可并行');
+    expect(verdictLabel('SAFE_TO_PARALLELIZE')).toContain('SAFE_TO_PARALLELIZE');
   });
 });
 
@@ -61,10 +68,11 @@ describe('waits', () => {
     expect(capacityWaitReasonLabel('CAPACITY_UNKNOWN_CODE')).toBe('CAPACITY_UNKNOWN_CODE');
   });
 
-  it('explains why an assessment is UNKNOWN rather than asserting a conflict', () => {
-    expect(waitReasonLabel('INCOMPLETE_IMPACT')).toContain('无法证明不相交');
-    expect(waitReasonLabel('MISSING_IMPACT_SNAPSHOT')).toContain('没有可用');
+  it('explains the conflict reason code instead of a generic refusal', () => {
+    expect(waitReasonLabel('SAME_UNFINISHED_FEATURE')).toContain('同一功能');
+    // Historical codes stay renderable (ADR-0059 keeps them for old assessments and events).
     expect(waitReasonLabel('SAME_FILE')).toContain('同一路径');
+    expect(waitReasonLabel('MISSING_IMPACT_SNAPSHOT')).toContain('没有可用');
   });
 
   it('reserves `BLOCKED` wording for unmet dependencies only', () => {
@@ -114,9 +122,9 @@ describe('impact wording', () => {
     expect(impactIncompleteReasonLabel('POLICY_NOT_CONFIRMED')).toContain('尚未重新确认');
   });
 
-  it('says a missing or invalid mapping makes every verdict UNKNOWN', () => {
-    expect(impactValidationCodeLabel('POLICY_ABSENT')).toContain('UNKNOWN');
-    expect(impactValidationCodeLabel('POLICY_INVALID')).toContain('UNKNOWN');
+  it('says a missing or invalid mapping only blocks feature declarations (ADR-0059)', () => {
+    expect(impactValidationCodeLabel('POLICY_ABSENT')).toContain('--feature');
+    expect(impactValidationCodeLabel('POLICY_INVALID')).toContain('--feature');
     expect(impactValidationCodeLabel('OK')).toContain('生效');
   });
 });

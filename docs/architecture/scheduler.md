@@ -1,6 +1,6 @@
 # Conservative Scheduler
 
-状态：§1–§6 是 Phase 2 设计（ADR-0030）；§7 记录**已实现的原语**（ADR-0032，schema v21）。**调度引擎本体已由 ADR-0033 / FOUNDATION-055 实现**（`apps/runtime/src/schedule-service.ts` + `CODEESTRA_SCHEDULE_TICK_MS`，默认 5000ms），因此 §1.2 的触发模型与 §7.6 不再是「未实现」：它们已经是实现事实（保留原文的措辞只在下面显式标注更正，不重写历史）。
+状态：§1–§6 是 Phase 2 设计（ADR-0030）；§7 记录**已实现的原语**（ADR-0032，schema v21）。**调度引擎本体已由 ADR-0033 / FOUNDATION-055 实现**（`apps/runtime/src/schedule-service.ts` + `CODEESTRA_SCHEDULE_TICK_MS`，默认 5000ms），因此 §1.2 的触发模型与 §7.6 不再是「未实现」：它们已经是实现事实（保留原文的措辞只在下面显式标注更正，不重写历史）。**ADR-0059 把冲突判定从「证明不相交」改为「两侧声明同一功能且对方未完成」（FOUNDATION-091），§1 的活跃集合与 §2 的判定流程下面各有一节显式更正。**
 
 ## 1. 调度输入和顺序
 
@@ -9,6 +9,17 @@
 第一版不自动 aging 或猜测任务成本；持续高优先级输入可能导致饥饿，UI 显示等待时长，后续以产品决策引入公平策略。
 
 活跃集合包括准备/启动、RUNNING、WAITING_FOR_USER、PAUSING、PAUSED、STOPPING/CANCELLING、RECOVERY_REQUIRED 和已预留尚未启动的执行。不能因用户等待、心跳过期或 UI 消失就释放资源。
+
+> **更正（ADR-0059，FOUNDATION-091）：这句话同时描述了两个不同的集合，现在必须分开读。**
+>
+> - **占用/容量集合**（不变）：仍按「持有资源」定义——准备/启动、RUNNING、WAITING_FOR_USER、PAUSING、
+>   PAUSED、STOPPING/CANCELLING、RECOVERY_REQUIRED 与已预留未启动的执行。它决定槽位计数与
+>   `scheduler reservations *` 的占用。
+> - **冲突集合**（已变）：判定只比较**声明**——同项目里状态不是 `SUCCEEDED`/`CANCELLED`、**且未归档**、
+>   **且至少声明一个功能**的 Task（排除候选自己）。一个从未启动的 `READY` Task 正是这条规则的对象；
+>   而一个持有 worktree 但**没有声明功能**的任务不再参与冲突判定。
+>
+> 两个集合仍然都被调度器使用（前者定容量，后者定冲突），但它们**不是同一个集合**。
 
 ### 1.1 容量模型（ADR-0030 D01/D02）
 
@@ -63,6 +74,25 @@ on relevant committed event or periodic recovery tick:
 
 单任务且影响未知可独占运行，但不得与任何占用资源的任务并行。READY 不意味着立刻启动。没有 Adapter 可用不是 BLOCKED。
 
+> **更正（ADR-0059，FOUNDATION-091）：上面这段是 ADR-0031 时代的判定流程，已不是当前事实。**
+> 当前 §2 的对应步骤是：
+>
+> ```text
+> for candidate in stable priority order:
+>   load revision and DAG requirements
+>   if unmet dependency: BLOCKED; continue
+>   conflict_peers = same project, not SUCCEEDED/CANCELLED, not archived, declares >= 1 feature,
+>                     excluding the candidate
+>   if candidate.features ∩ peer.features ≠ ∅ for some peer: wait(CONFLICT, SAME_UNFINISHED_FEATURE); continue
+>   if no compatible adapter slot: wait(CAPACITY); continue
+>   …（预留、workspace、启动前基线重检都不变）
+> ```
+>
+> 取代掉的是三条旧规则：①「impact unknown 且活跃集合非空 → wait」——现在没有产生 `UNKNOWN` 的路径；
+> ②「与每个活跃/已预留 Task 比较变更集」——判定不再读快照、映射、基线或文件集合（`ImpactSnapshot`
+> 仍然派生，但只是证据）；③「任何 verdict != SAFE 就等待」——SAFE 现在是默认值而不是被证明的结论。
+> **`CONFLICTING` 仍然永不放行**，`--allow-unknown` 也只对 `UNKNOWN` 有意义。
+
 ## 3. 两类锁
 
 - Runtime 实例锁：同一数据库/资源域只允许一个写入执行协调实例。IPC token 与进程身份独立校验。
@@ -72,13 +102,17 @@ on relevant committed event or periodic recovery tick:
 
 ## 4. 修订、实际影响扩大与恢复
 
-用户修订按照 ADR-0001 暂停对应任务、使旧影响评估失效。恢复前重新与活跃集合进行冲突分析，存在 UNKNOWN/CONFLICTING 就保持暂停。不能为解决冲突自动抢占其他任务。
+用户修订按照 ADR-0001 暂停对应任务、使旧影响评估失效。恢复前重新跑一次冲突判定，`CONFLICTING` 就保持暂停（ADR-0059：**只有两侧声明同一功能且对方未完成**才是 `CONFLICTING`；当前规则不再产生 `UNKNOWN`）。不能为解决冲突自动抢占其他任务。
 
 实际 diff 超出预测时撤销旧 SAFE，不再启动相关新任务，向执行协调层报告并请求受影响执行进入安全暂停。无法可靠停止时标 RECOVERY_REQUIRED、保留隔离现场，禁止自动集成。第一版 analyzer 无法事先证明运行中的两个 Agent 永不越界，必须明确此残余风险。
 
 取消超时：保留 slot 与 workspace，提醒人工处理；不通过超时自动认定死亡。排空升级需确认所有潜在写入资源已静止。
 
 ### 4.1 UNKNOWN 的显式单次放行（ADR-0030 D05）
+
+> **ADR-0059 之后当前规则不再产生 `UNKNOWN`（FOUNDATION-091）**，所以本节描述的放行日常不可达；
+> 取值、`--allow-unknown`、`scheduler.unknown.clear`/`TaskUnknownCleared` 与历史 assessment 行都保留，
+> `clear-unknown` 对 `CONFLICTING` 一律拒绝。下面保留原文作为该能力的语义记录。
 
 `UNKNOWN` 默认等待：评估未知时**不启动、不并行**（§2 的 `wait(CONFLICT)`）。用户可以对本条 Task 做**显式单次放行**（`--allow-unknown`；命令形态在实现波次落地，本波只固化语义）。
 
@@ -108,7 +142,10 @@ on relevant committed event or periodic recovery tick:
 
 以下三项被用户明确否决进入本波，**不是遗漏、也不是「待补齐的实现细节」**：
 
-- **非 Git 共享资源的 resource claim（端口、数据库、dev server）**：不引入。不同文件不能证明这些资源可共享，因此这类冲突继续由 `complete=false → UNKNOWN` 保守承载，而不是用一个没有归属校验的声明字段假装安全；留后续。（全局共享资源清单仍由 `.codeestra/impact.json` 的 `globalResources` 表达，那只覆盖 Git 可见影响。）
+- **非 Git 共享资源的 resource claim（端口、数据库、dev server）**：不引入。不同文件不能证明这些资源可共享，但 ADR-0059
+  之后已经没有「`complete=false` → UNKNOWN」这个兜底（判定不再读映射与快照），所以这类冲突**根本不被启动前门禁覆盖**：
+  它们只在真实运行时暴露（或两个 Agent 真的撞上），由使用方自己用功能声明表达互斥意愿。要用声明字段假装安全仍然不做。
+  （全局共享资源清单仍由 `.codeestra/impact.json` 的 `globalResources` 表达，那只覆盖 Git 可见影响，且现在只是证据。）
 - **多成员 IntegrationBatch 的自动组批**：**CLI 显式组批已实现**（FOUNDATION-081 / ADR-0053：`task integration create` 组成多成员批次，一次覆盖整批的独立验证，`PASSED` 才推进 `dev`；见 `state-machines.md` §4）。**调度器仍然不会自动组批**：一次调度 tick 的候选仍各自独立成一个批次，「哪些 Task 合成一批」继续由人显式决定，属后续。
 - **饥饿公平策略（aging）**：不加 aging。持续高优先级输入可能饿死低优先级任务，UI 只显示等待时长；公平策略作为独立产品决策留后续。
 

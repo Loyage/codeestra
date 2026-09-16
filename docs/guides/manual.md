@@ -1,8 +1,10 @@
 # Codeestra 用户说明书
 
-> **适用版本** `dev@75fa7b8`（2026-09-15） · **schema** v30 · **最后校对** 2026-09-15
-> 版本会前进：`dev@75fa7b8` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@17b4dd6`（2026-09-16） · **schema** v32 · **最后校对** 2026-09-16
+> 版本会前进：`dev@17b4dd6` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> §「任务」的永久删除一条由 FOUNDATION-090 新增（ADR-0058）；§3.1、§4.2、§4.3、§4.5、§10.1、§10.3 与
+> 「名词表」的冲突判定由 FOUNDATION-091 按 ADR-0059 改写（声明同一功能才冲突，默认不冲突）。
 
 这是**写给使用者的说明书**：从头读到尾就能把 Codeestra 用起来，不需要先读架构文档或 ADR。
 需要细节时，每一节末尾都有「想深入看哪篇」。
@@ -61,7 +63,8 @@ Codeestra 的每一步都**只报事实，不报乐观猜测**。所以你会反
 - **「已验证」不是「已集成」。** Task 验证通过不释放依赖，也不代表进了 `dev`。
 - **「已合入 dev」不是「已发布」。** `dev` 与 `main` 是两条不同的线。
 - **「main 已更新」不是「Runtime 已重启完成」。** 重启只有在每步退 0 且 Runtime 回答 `READY` 时才被记录。
-- **`UNKNOWN` 不是「无冲突」的软版本。** 它是「无法证明」，默认等待。
+- **提交不等于要等。** 没有声明功能的 Task `task submit` 后会在**容量允许时立即开始**（ADR-0059）；
+  想让两个 Task 互斥，就给它们声明**同一个功能**（`task create --feature <module-id>`）。
 
 > 图：`00-overview.png` — Codeestra 的总流水线：用户意图 → Task → 依赖/冲突判定 → 调度 → 独立工作树 →
 > Coding Agent → Task 验证 → 合入 dev → 集成验证 → 稳定提升 → 重启 Runtime。
@@ -254,14 +257,13 @@ bun run codeestra project policy /path/to/repo
 这个文件是**人工维护**的：Task 分支改不动判定它自己的命令（这是安全不变量，不是配置细节）。
 策略不存在时 `task verify` 会拒绝，直到该 ref 上有这个文件。
 
-最后看**冲突判定映射**：
+最后看**功能声明用的影响映射**：
 
 ```sh
 bun run codeestra project impact validate /path/to/repo --json
 ```
 
-它读 `main` ref 上的 `.codeestra/impact.json`。**没有映射就不可能有「已证明无冲突」**：所有冲突判定都是
-`UNKNOWN`，因而不能并行。退出码 `0` 仅当映射存在**且**是已确认的那一份。
+它读 `main` ref 上的 `.codeestra/impact.json`。这张映射现在只被两件事用到：`--feature` 的写入校验（功能 id 必须是它的 `modules[].id`）和影响快照的证据。**没有映射不再让判定变成 `UNKNOWN`**：没有声明同一个功能就是 `SAFE`，提交后就会开始。退出码 `0` 仅当映射存在**且**是已确认的那一份。
 
 ### 3.2 接入（trust）
 
@@ -371,7 +373,9 @@ bun run codeestra task submit $PROJECT <task-id> <expected-version>
 ```
 
 `submit` 把 `DRAFT` 变成 `READY`，并在**同一条命令里**核对依赖 + 跑一次调度 pass。
-所以提交之后你不需要再推任何东西——**但也不保证立刻跑起来**，见下一小节。
+所以提交之后你不需要再推任何东西：**未声明功能的 Task 会在容量允许时就在这条命令里被启动**
+（返回的 `schedule.started` 就是它）；只有被依赖、被功能冲突、被容量或 draining 拦住时才停在
+`READY`——见下一小节与 §10.1。
 
 版本不符会以版本冲突类错误拒绝，而不是覆盖别人的修改。
 
@@ -382,7 +386,7 @@ bun run codeestra task run $PROJECT <task-id> <expected-version> \
   [--adapter pi|codex|claude] [--allow-unknown] [--json]
 ```
 
-`task run` 是**与自动调度同一道门禁的显式启动请求**：依赖判定 → 对每个活跃/已预留 Task 的冲突判定 → 容量。
+`task run` 是**与自动调度同一道门禁的显式启动请求**：依赖判定 → 对每个**未完成且声明了功能**的 Task 的冲突判定 → 容量。
 
 **`task run` 有三个不同的退出码**，这是脚本区分「现在没轮到」与「确实不行」的方式：
 
@@ -415,7 +419,7 @@ DRAFT → BLOCKED → READY → RUNNING ⇄ (PAUSING → PAUSED → RUNNING)
 | 状态 | 人话 |
 |---|---|
 | `DRAFT` 草稿 | 还没提交，不会自动启动 |
-| `READY` 就绪 / 待调度 | 等待调度或手动启动；**不代表 Agent 已运行** |
+| `READY` 就绪 / 待调度 | 等待调度或手动启动；**不代表 Agent 已运行**。容量允许时，`task submit` 后会在同一个命令里就被启动（ADR-0059） |
 | `BLOCKED` 等待依赖 | **专指依赖未满足**。冲突等待、容量等待都不叫 `BLOCKED` |
 | `RUNNING` 执行中 | 有一次执行在进行；查看会话、实时步骤或待提交成果 |
 | `WAITING_FOR_USER` 等你处理 | 有请求等你回答（只暂停这一个 Task） |
@@ -435,12 +439,20 @@ bun run codeestra task resume $PROJECT <task-id> <expected-version> [--adapter <
 bun run codeestra task retry  $PROJECT <task-id> <expected-version> [--adapter <id>]
 bun run codeestra task cancel $PROJECT <task-id> <expected-version>
 bun run codeestra task archive|unarchive $PROJECT <task-id> <expected-version>
+bun run codeestra task purge  $PROJECT <task-id> <expected-version> --yes [--reason <text>]
 ```
 
 - **暂停**是协作停止：确认 provider 进程退出后才进 `PAUSED`，工作树与会话保留。
 - **继续**在同一工作树新建一次执行，并**复用已暂停会话的 provider conversation**。
 - **重试**只对 `FAILED` 生效，只由这条显式命令触发；重试后仍走同一道调度门禁（会排队，不会插队）。
 - **终止**是终态；**归档**只隐藏任务，不删记录、不回收工作树，可随时取消归档。
+- **永久删除**（`task purge --yes`）是唯一不可撤销的操作：它删掉任务的全部记录与它自己的 worktree、验证副本、`task/<id>` 分支，
+  同时在事件流里留下一条 `TaskPurged`（含每个被删分支的 tip）。三点必须知道：
+  1. **成果已进 `dev` 的任务删不掉**（`TASK_INTEGRATED_INTO_DEV`）——否则那个 commit 会失去「谁把它带进来」的记录；这类任务只能归档，`SUCCEEDED` 任务都属于这一类。
+  2. **正在跑的任务会先被真地终止**（能确认 provider 退出才继续）；无法确认时什么都不删，先用 `task recover` 对账。
+  3. 它会连带删掉**指向该任务的依赖边**（下游会因此重新判定）。
+
+日常清理不再需要的任务：先 `task cancel`（如果需要），再 `task purge --yes`。只想让列表安静下来就用 `task archive`。
 
 > 图：`03-task-workbench.png` — 任务工作台：顶部「项目任务概况」四个计数卡（全部任务 / 执行中 /
 > 需要你处理 / 成果已提交）、搜索与筛选行、任务行（状态徽标 + 提示文字 + 「查看详情 →」）。
@@ -883,15 +895,22 @@ bun run codeestra promotion get|list|abandon …
 
 ## 10. 日常使用：并行、依赖、调度、容量
 
-### 10.1 想让两件事同时做：先证明它们不冲突
+### 10.1 想让两件事同时做：默认就是并行的
 
-冲突判定是**确定性、不用模型**的：把工作树的 Git change set 映射到 `main` ref 上的 `.codeestra/impact.json`，
-再与所有**当前持有资源**的 Task 比较。结论只有三种：
+冲突判定是**确定性、不用模型**的：它只比较**声明**——两个 Task 的当前 revision 是否声明了**同一个功能 id**
+（`task create --feature <module-id>` / `task revision create --feature <module-id>`，取自项目 `main` ref 上
+`.codeestra/impact.json` 的 `modules[].id`，ADR-0059）。结论只有三种：
 
-- `SAFE_TO_PARALLELIZE`：**有证据**证明可以并行。
-- `UNKNOWN`：**无法被证明**——映射缺失/未确认/非法/为空，或某个活跃 Task 的 change set 观察不到。
-  它**不是**「无冲突」的软版本，默认**等待**。
-- `CONFLICTING`：**已证明的重叠**，**永远不放行**。
+- `SAFE_TO_PARALLELIZE`：**默认**。没有与任何**未完成**的 Task 声明同一个功能（同一文件、同目录、共享依赖
+  都不再阻止并发）。
+- `CONFLICTING`：双方声明了同一功能，且对方还没完成（非 `SUCCEEDED`/`CANCELLED`、未归档）。**永远不放行**。
+  想让两件事互斥，就给它们声明同一个功能。
+- `UNKNOWN`：**当前规则不再产生它**。取值、`--allow-unknown` 与 `task schedule clear-unknown` 都保留
+  （历史 assessment 行与客户端仍要能渲染），但日常不可达；`task schedule explain` 对 `CONFLICTING`
+  继续拒绝单次放行。
+
+代价要说清楚：两个都没声明功能的 Task 可以并发改同一个文件，冲突要到成果 commit / 合入 `dev` 时以
+`CONFLICTED` 暴露——这是你选定的权衡，启动前门禁不再兜底。
 
 看一个 Task 为什么没在跑：
 
@@ -928,13 +947,13 @@ bun run codeestra task schedule clear-unknown $PROJECT <task-id> [--json]
 | 现象 | 含义 | 退出码 |
 |---|---|---|
 | `BLOCKED` | **依赖未满足**（唯一含义） | 1 |
-| `WAIT_CONFLICT` | 与某个活跃/已预留 Task 的影响重叠**未证明安全** | 3 |
+| `WAIT_CONFLICT` | 与某个**未完成且声明了同一功能**的 Task 冲突 | 3 |
 | `WAIT_CAPACITY` | 项目级上限或 Adapter 上限已满 | 3 |
 | `SCHEDULER_DRAINING` | Runtime 正在 draining，不接受新预留 | 3 |
 
 `UNKNOWN` 的**显式单次放行**（`task schedule clear-unknown` 或 `task run --allow-unknown`）绑定
-revision、基线与分析器/策略版本，写入审计台账，被**恰好一次**启动消费，并且**不改变已记录的判定**
-（仍然是 `UNKNOWN`）。这是**放宽**，不是新增门禁；越界责任在放行的人，Runtime 不做额外隔离。
+revision、基线与分析器/策略版本，写入审计台账，被**恰好一次**启动消费，并且**不改变已记录的判定**。
+ADR-0059 之后当前规则**不再产生 `UNKNOWN`**，所以这条路日常不可达；`CONFLICTING` 永远不放行。
 
 ### 10.4 容量与槽位
 
@@ -1203,7 +1222,7 @@ Task/Execution 的 `RECOVERY_REQUIRED` 用 **`task recover <project-id> <task-id
 | **Promotion** | `dev → main` 的正式记录。固定「已验证的 dev commit + 预期旧 main commit + 证据」三元组 |
 | **dev 全量测试证据** | 对**精确 dev 候选 SHA** 在 detached 副本里运行项目固定策略的结果，由 Runtime 运行并观察。客户端不能自报 |
 | **ImpactSnapshot** | 一次影响分析的 append-only 记录：changed 路径集合、命中的目录/模块/全局资源、是否完整 |
-| **Conflict assessment** | `SAFE_TO_PARALLELIZE` / `UNKNOWN` / `CONFLICTING`。**`UNKNOWN` 默认等待**，可显式单次放行 |
+| **Conflict assessment** | `SAFE_TO_PARALLELIZE`（默认）/ `UNKNOWN`（当前规则不产生）/ `CONFLICTING`。**只有「双方声明同一功能且对方未完成」是冲突** |
 | **Slot reservation（槽位预留）** | 一次执行权的正式记录。归属证据 = Runtime boot + pid + OS start token。释放必须显式且有原因 |
 | **Capacity** | 两个上限：项目全局与每 adapter。它是**配置**不是测量 |
 | **Operation（长命令）** | `task.run` / `task.verify` 这类长命令的持久句柄，带步骤级进度，可查、可取消 |

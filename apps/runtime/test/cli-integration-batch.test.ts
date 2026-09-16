@@ -154,9 +154,9 @@ async function capturedTask(fixture: BatchFixture): Promise<{ readonly taskId: s
   const created = JSON.parse((await cli(['task', 'create', fixture.projectId, 'Write a file'],
     fixture.environment)).stdout) as { readonly id: string };
   const taskId = created.id;
+  // Submission immediately enters scheduling; with no feature declaration this Task is SAFE and
+  // starts in the automatic pass.
   expect((await cli(['task', 'submit', fixture.projectId, taskId, '0'],
-    fixture.environment)).exitCode).toBe(0);
-  expect((await cli(['task', 'run', fixture.projectId, taskId, '1'],
     fixture.environment)).exitCode).toBe(0);
   const deadline = Date.now() + 30_000;
   let exited = false;

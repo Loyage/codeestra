@@ -113,6 +113,8 @@ export function HitList({ hits, tasks }: {
             : <div className="mono hint">模块：{hit.modules.join('、')}</div>}
           {hit.globalResources.length === 0 ? null
             : <div className="mono hint">全局资源：{hit.globalResources.join('、')}</div>}
+          {(hit.features ?? []).length === 0 ? null
+            : <div className="mono hint">声明的功能：{(hit.features ?? []).join('、')}</div>}
           <div className="hint">{hit.detail}</div>
         </li>
       ))}
@@ -178,7 +180,7 @@ export function AssessmentBlock({ assessment, tasks }: {
               {assessment.candidateIncompleteReasons.map((code) => (
                 <li key={code} className="muted">
                   <span className="mono">{code}</span> {impactIncompleteReasonLabel(code)}
-                  {'（complete=false，因此不可能是 SAFE）'}
+                  {'（complete=false：证据不完整，不再决定判定）'}
                 </li>
               ))}
             </ul>

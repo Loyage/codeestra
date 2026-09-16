@@ -21,6 +21,7 @@ import { defaultTranscriptEntryReadLimit, maxEventReadLimit, maxQuestionnaireOpt
   type DevRepoInspection,
   type DevRefRetirement,
   type TaskRetryOutcomeView,
+  type TaskPurgeOutcomeView,
   type AgentPluginDetection,
   type VerificationPolicyInspection,
   agentPluginKinds,
@@ -576,6 +577,8 @@ interface TaskCreateInput {
   readonly specification: string;
   /** Mutable array: the IPC request type is not readonly. */
   readonly constraints: { readonly id: string; readonly text: string }[];
+  /** Declared feature ids (`--feature <id>`, repeatable); validated by the Runtime. */
+  readonly features: string[];
   readonly kind: 'DEVELOPMENT';
 }
 
@@ -591,11 +594,18 @@ interface TaskCreateInput {
 function parseTaskCreateFlags(tokens: readonly string[]): TaskCreateInput {
   const specification: string[] = [];
   const constraints: { id: string; text: string }[] = [];
+  const features: string[] = [];
   let kind: 'DEVELOPMENT' = 'DEVELOPMENT';
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index] as string;
     const value = tokens[index + 1];
-    if (token === '--constraint') {
+    if (token === '--feature') {
+      // The id is validated against the project's declared mapping by the Runtime, not here: which
+      // features exist is a property of the repository (ADR-0059).
+      if (value === undefined || value.trim().length === 0) usage();
+      features.push(value.trim());
+      index += 1;
+    } else if (token === '--constraint') {
       if (value === undefined || value.trim().length === 0) usage();
       constraints.push({ id: crypto.randomUUID(), text: value.trim() });
       index += 1;
@@ -617,7 +627,7 @@ function parseTaskCreateFlags(tokens: readonly string[]): TaskCreateInput {
     }
   }
   if (specification.length === 0) usage();
-  return { specification: specification.join(' '), constraints, kind };
+  return { specification: specification.join(' '), constraints, features, kind };
 }
 
 /**
@@ -627,10 +637,14 @@ function parseTaskCreateFlags(tokens: readonly string[]): TaskCreateInput {
 function parseRevisionFlags(tokens: readonly string[]): {
   readonly specification: string | undefined;
   readonly constraints: readonly { readonly id: string; readonly text: string }[];
+  /** Absent means "inherit the current revision's declaration" (ADR-0059 D03). */
+  readonly features: readonly string[] | undefined;
   readonly reason: string;
 } {
   const specification: string[] = [];
   const constraints: { id: string; text: string }[] = [];
+  const features: string[] = [];
+  let featuresGiven = false;
   let reason = 'user revision request';
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index] as string;
@@ -642,6 +656,13 @@ function parseRevisionFlags(tokens: readonly string[]): {
     } else if (token === '--constraint') {
       if (value === undefined || value.trim().length === 0) usage();
       constraints.push({ id: crypto.randomUUID(), text: value.trim() });
+      index += 1;
+    } else if (token === '--feature') {
+      // An explicit `--feature` is how a Task begins (or stops) declaring a feature: repeated flags
+      // build the list, and no flag at all inherits the previous declaration instead of clearing it.
+      if (value === undefined || value.trim().length === 0) usage();
+      features.push(value.trim());
+      featuresGiven = true;
       index += 1;
     } else if (token === '--reason') {
       if (value === undefined || value.trim().length === 0) usage();
@@ -659,6 +680,7 @@ function parseRevisionFlags(tokens: readonly string[]): {
   return {
     specification: specification.length === 0 ? undefined : specification.join(' '),
     constraints,
+    features: featuresGiven ? features : undefined,
     reason,
   };
 }
@@ -1157,7 +1179,11 @@ function usage(): never {
     # the project has no recorded snapshot; resolve reports what the next Execution would use and
     # exits 1 only when no honest answer exists.
   bun run codeestra task create <project-id> <specification> [--constraint <text>]…
-    [--kind DEVELOPMENT]
+    [--feature <module-id>]… [--kind DEVELOPMENT]
+    # --feature declares the feature(s) this Task works on: module ids from the project's
+    # .codeestra/impact.json as read from its main ref. The Runtime refuses an id the mapping does
+    # not declare (UNKNOWN_FEATURE), and refuses any declaration when the mapping cannot be read.
+    # A Task that declares nothing is never in a feature conflict (ADR-0059).
   bun run codeestra task list <project-id> [--all]
   bun run codeestra task submit <project-id> <task-id> <expected-version>
   bun run codeestra task run <project-id> <task-id> <expected-version> [--adapter <pi|codex|claude>]
@@ -1195,6 +1221,16 @@ function usage(): never {
   bun run codeestra task cancel <project-id> <task-id> <expected-version>
   bun run codeestra task archive <project-id> <task-id> <expected-version>
   bun run codeestra task unarchive <project-id> <task-id> <expected-version>
+  bun run codeestra task purge <project-id> <task-id> <expected-version> --yes [--reason <text>] [--json]
+    # DESTRUCTIVE and irreversible: deletes the Task, its revisions, executions, sessions, evidence,
+    # owned worktrees, verification copies and branches. A non-terminal Task is cancelled first
+    # through the ordinary cooperative stop, and a stop that cannot be confirmed deletes nothing
+    # (RECONCILE_REQUIRED, exit 1). A Task whose commit already reached dev/main is refused
+    # (TASK_INTEGRATED_INTO_DEV / TASK_IN_STABLE_PROMOTION, exit 1) — archive it instead.
+    # --yes is required and is the only guard; without it the command exits 2 without sending
+    # anything. Replaying the same command ID returns the receipt instead of a second deletion.
+    # stdout is the printed view (JSON shape regardless of --json), including rowsDeleted,
+    # dependencyEdgesRemoved and the tip commit of every branch that was deleted.
   bun run codeestra task status <project-id> <task-id> [--json]
     # every Execution's Agent completion is printed with its note; a code such as
     # PROSE_QUESTION_NO_TOOL_USE marks a completion the Runtime annotated instead of
@@ -1202,7 +1238,10 @@ function usage(): never {
     # assistant text ends with a question mark). The note is printed to stderr.
     # --json is accepted and is the default, so a script can state its intent.
   bun run codeestra task revision create <project-id> <task-id> <expected-version>
-    [--specification <text>] [--constraint <text>]… [--reason <text>] [--json]
+    [--specification <text>] [--constraint <text>]… [--feature <module-id>]… [--reason <text>] [--json]
+    # --feature sets the feature declaration of the new revision (validated against the project's
+    # mapping). Omitting it inherits the current revision's declaration; passing it at all replaces
+    # the declaration with the ids given (ADR-0059).
   bun run codeestra task revision list <project-id> <task-id> [--json]
   bun run codeestra task revision delivery list <project-id> <task-id> [--json]
   bun run codeestra task revision delivery get <project-id> <delivery-id> [--json]
@@ -2600,6 +2639,7 @@ try {
       projectId: firstArgument,
       specification: input.specification,
       constraints: input.constraints,
+      features: input.features,
       kind: input.kind,
     }));
   } else if (group === 'task' && action === 'list') {
@@ -2607,6 +2647,32 @@ try {
     if (firstArgument === undefined
       || (remainingArguments.length !== 0 && !includeArchived)) usage();
     print(await call({ command: 'task.list', projectId: firstArgument, includeArchived }));
+  } else if (group === 'task' && action === 'purge') {
+    const [taskId, versionText, ...flags] = remainingArguments;
+    const expectedVersion = Number(versionText);
+    if (firstArgument === undefined || taskId === undefined || versionText === undefined
+      || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
+    const split = splitFlagTokens(flags, ['--reason'], ['--yes', '--json']);
+    if (split.positionals.length !== 0) usage();
+    // `--yes` is the whole guard, and it is the command's own statement rather than a permission
+    // layer: nothing else in the product costs a step because of it, and a script that meant to
+    // archive cannot reach permanent deletion by accident.
+    if (!split.bare.has('--yes')) {
+      console.error('task purge permanently deletes the Task, its revisions, executions, evidence'
+        + ' and its own worktree/branch. Pass --yes to confirm.');
+      process.exit(2);
+    }
+    const reason = split.flags.get('--reason');
+    const result = await call({
+      command: 'task.purge',
+      commandId: crypto.randomUUID(),
+      projectId: firstArgument,
+      taskId,
+      expectedVersion,
+      confirmed: true,
+      ...(reason === undefined ? {} : { reason }),
+    }) as TaskPurgeOutcomeView;
+    print(result);
   } else if (group === 'task' && (action === 'pause'
     || action === 'cancel' || action === 'archive' || action === 'unarchive')) {
     const [taskId, versionText, ...extra] = remainingArguments;
@@ -3526,6 +3592,7 @@ try {
         expectedVersion,
         ...(input.specification === undefined ? {} : { specification: input.specification }),
         constraints: [...input.constraints],
+        ...(input.features === undefined ? {} : { features: [...input.features] }),
         reason: input.reason,
       }));
     } else if (subcommand === 'list') {

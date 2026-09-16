@@ -1,8 +1,9 @@
 # 领域概念与边界
 
-> **适用版本** `dev@75fa7b8`（2026-09-15） · **schema** v30 · **最后校对** 2026-09-15
-> 版本会前进：`dev@036cf68` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@17b4dd6`（2026-09-16） · **schema** v32 · **最后校对** 2026-09-16
+> 版本会前进：`dev@17b4dd6` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> §「调度三态」由 FOUNDATION-091 按 ADR-0059 重写（声明同一功能才冲突）。
 
 这份文档解释 Codeestra 里的名词到底指什么、哪些东西**不是**调度主实体、以及几条会影响你日常判断的硬边界。
 规格原文见 [PROJECT_SPEC.md](../../PROJECT_SPEC.md) §2「核心不变量」；这里是面向使用者的说明。
@@ -35,7 +36,13 @@ Project 记录包含：`main` ref、`dev` ref、对象格式（sha1/sha256）、
 ### Task（任务）
 
 一次有边界的开发工作。Task 持有：当前 specification、**不可覆盖**的 revision 历史、constraints、priority、
-dependencies、predicted impact、conflict state、execution 历史、branch/worktree、验证与集成状态、归档标记。
+dependencies、**声明的功能（`features`，见下）**、predicted impact、conflict state、execution 历史、
+branch/worktree、验证与集成状态、归档标记。
+
+功能声明属于 **revision**：`task create --feature <module-id>` 在第一条 revision 上声明，
+`task revision create --feature …` 替换后续 revision 的声明（**省略即继承**）。id 必须是项目 `main` ref 上
+`.codeestra/impact.json` 的 `modules[].id`，写入时校验（`UNKNOWN_FEATURE` / `IMPACT_POLICY_ABSENT` /
+`INVALID_IMPACT_POLICY` / `INVALID_FEATURE`），**不要求该映射已被 `project trust` 确认**。
 
 Task 生命周期状态（数据库 CHECK 与领域类型一致）：
 
@@ -240,15 +247,23 @@ Runtime 数据目录（不进 Git，机器生成）
 
 ### 调度三态：SAFE / UNKNOWN / CONFLICTING
 
-冲突判定（ADR-0031）是**确定性、不用模型**的：把 owned worktree 的 Git change set 映射到 `main` ref 上的
-`.codeestra/impact.json`，再与所有**当前持有资源**的 Task 比较。
+冲突判定（**ADR-0059**，取代 ADR-0031 的判定语义）是**确定性、不用模型**的：它只比较**声明**——两个 Task
+的当前 revision 是否声明了**同一个功能 id**（取自项目 `main` ref 上 `.codeestra/impact.json` 的 `modules[].id`）。
 
-- `SAFE_TO_PARALLELIZE`：有证据证明可以并行。
-- `UNKNOWN`：**无法被证明**——映射缺失/未确认/非法/为空，或某个活跃 Task 的 change set 观察不到。
-  它**不是**「无冲突」的软版本，默认**等待**。可以用 `--allow-unknown` 或
-  `task schedule clear-unknown` 做**显式单次放行**：绑定 revision、基线与分析器/策略版本，写入审计台账，
-  被恰好一次启动消费，并且**不改变已记录的判定**（仍然是 UNKNOWN）。这是「放宽」，不是「新增门禁」。
-- `CONFLICTING`：已证明的重叠，**永远不放行**。
+- `SAFE_TO_PARALLELIZE`：**默认**。没有与任何**未完成**的 Task 声明同一个功能。
+  **同文件、同目录、同模块、共享构建/依赖/schema/全局资源都不再阻止并发**：它们仍是可观测事实并进入解释输出，
+  但不再按它们拦人。
+- `CONFLICTING`：双方声明了同一功能，且对方**未完成**（状态不是 `SUCCEEDED`/`CANCELLED`，且未归档）。
+  **永远不放行**。想让两件事互斥，就给它们声明同一个功能。
+- `UNKNOWN`：**当前规则没有产生它的路径**。取值、`--allow-unknown` 与 `task schedule clear-unknown` 都保留
+  （历史的 assessment 行与客户端仍要能渲染），但日常不可达；`clear-unknown` 对 `CONFLICTING` 继续拒绝
+  （`recorded:false`）。
+
+启动前门禁不再兜底残余风险：两个都没声明功能的 Task 可以并发改同一个文件，冲突在成果 commit /
+IntegrationBatch 阶段以 `CONFLICTED` 暴露（ADR-0059 D02 明确选择的权衡）。
+
+> 需要看「引擎看到的每一条事实」时：`project impact validate/show/explain` 与 `task schedule explain`
+> 仍然完整报告映射、快照、基线与占用者（含 `occupiers[].code`）；只是这些事实不再改变判定。
 
 > 因此「一个 Task 现在为什么不跑」有三种互不相同的答案：**依赖未满足（BLOCKED）**、**冲突等待**、**容量等待**。
 > CLI 用退出码 3 表示「等待」，退出码 1 表示「确实不会跑，需要处理」。详见 [cli-reference.md](./cli-reference.md)。

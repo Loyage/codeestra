@@ -283,6 +283,13 @@ const requestBase = {
 const taskKindSchema = z.enum(['DEVELOPMENT', 'SELF']);
 const nonBlankString = z.string().min(1).refine((value) => value.trim().length > 0, 'Must not be blank');
 const constraintSchema = z.strictObject({ id: z.string().min(1), text: nonBlankString });
+/**
+ * A declared feature is a module id from the project's `.codeestra/impact.json` (ADR-0059). The
+ * schema only bounds the shape — the id is validated against the project's own mapping before it is
+ * written, because "which features exist" is a property of the repository, not of this contract.
+ */
+export const maxTaskFeatures = 32;
+export const taskFeaturesSchema = z.array(nonBlankString).max(maxTaskFeatures);
 export const agentAnswerSchema = z.discriminatedUnion('type', [
   z.strictObject({ type: z.literal('CONFIRM'), confirmed: z.boolean() }),
   z.strictObject({ type: z.literal('VALUE'), value: z.string() }),
@@ -609,6 +616,11 @@ export interface ScheduleConflictHitView {
   readonly directories: readonly string[];
   readonly modules: readonly string[];
   readonly globalResources: readonly string[];
+  /**
+   * The feature ids both sides declared, for `SAME_UNFINISHED_FEATURE` (ADR-0059). Empty for the
+   * historical codes, which were about paths and declared scopes rather than about a declaration.
+   */
+  readonly features: readonly string[];
   readonly relation: string | null;
   readonly detail: string;
 }
@@ -847,6 +859,56 @@ export interface TaskRetryOutcomeView {
   };
   readonly dependencyReasons: readonly unknown[];
   readonly start: ScheduleStartOutcomeView;
+}
+
+/**
+ * The facts `task.purge` reports (ADR-0058). This is the one command whose success means the Task no
+ * longer exists, so the view carries what was destroyed rather than a new state: the final state it
+ * was deleted from, the rows deleted per table, the reclaimed resources, and the tip of each branch
+ * that was deleted. `replayed: true` says the receipt answered instead of a second deletion.
+ */
+export interface TaskPurgeOutcomeView {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly displayNumber: number;
+  /** The state the Task was in when it was deleted, after the optional cancel. */
+  readonly state: string;
+  readonly version: number;
+  readonly archived: boolean;
+  readonly reason: string | null;
+  readonly purgedAt: number;
+  readonly eventId: string;
+  readonly currentRevisionId: string;
+  readonly replayed: boolean;
+  readonly stop: {
+    readonly state: string;
+    readonly stop: 'TERMINAL' | 'RELEASED' | 'UNCERTAIN';
+    readonly executionId: string | null;
+    readonly sessionId: string | null;
+    readonly detail: string;
+  } | null;
+  readonly plan: {
+    readonly worktrees: number;
+    readonly verificationCopies: number;
+    readonly branches: number;
+  };
+  readonly branchFacts: readonly {
+    readonly branchRef: string;
+    readonly tipCommit: string | null;
+    readonly deleted: boolean;
+    readonly detail: string;
+  }[];
+  readonly reclamation: readonly {
+    readonly kind: string;
+    readonly resourceId: string;
+    readonly path: string;
+    readonly outcome: string;
+    readonly reasonCode: string;
+    readonly branchRef: string | null;
+  }[];
+  readonly dependencyEdgesRemoved: number;
+  readonly rowsDeleted: Readonly<Record<string, number>>;
+  readonly detail: string;
 }
 
 /* ---------------------------------------------------------------------------------------------
@@ -1152,6 +1214,13 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     projectId: z.string().uuid(),
     specification: nonBlankString,
     constraints: constraintsSchema.default([]),
+    /**
+     * The features this Task declares (ADR-0059): module ids from the project's
+     * `.codeestra/impact.json`. They are validated against that mapping before anything is written,
+     * so an undeclared id is refused (`UNKNOWN_FEATURE`) instead of stored. An omitted list means the
+     * Task declares no feature, which is why it can never be in a feature conflict.
+     */
+    features: taskFeaturesSchema.default([]),
     kind: taskKindSchema.default('DEVELOPMENT'),
   }),
   z.strictObject({
@@ -1281,6 +1350,27 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     projectId: z.string().uuid(),
     taskId: z.string().uuid(),
     expectedVersion: z.number().int().nonnegative(),
+  }),
+  /**
+   * Permanent deletion (ADR-0058). Unlike `task.archive` this destroys the Task, its revisions,
+   * Executions, Sessions, evidence and its owned worktree/branch; it is irreversible and therefore
+   * the only command face in the product that requires an explicit `confirmed: true`.
+   *
+   * The `confirmed` bit is the command's own statement that the caller knows this is destructive, not
+   * a permission gate: the Runtime adds no approval step on top of it, and FULL keeps zero
+   * confirmations on every normal path. A request without it is refused as
+   * `PURGE_CONFIRMATION_REQUIRED` **before** anything is read or stopped.
+   */
+  z.strictObject({
+    ...requestBase,
+    command: z.literal('task.purge'),
+    commandId: z.string().uuid(),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    expectedVersion: z.number().int().nonnegative(),
+    confirmed: z.boolean(),
+    /** The user's own statement about the deletion; recorded verbatim in the audit, not judged. */
+    reason: nonBlankString.optional(),
   }),
   z.strictObject({
     ...requestBase,
@@ -1923,6 +2013,13 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     /** Absent means "keep the current specification and only add constraints". */
     specification: nonBlankString.optional(),
     constraints: constraintsSchema.default([]),
+    /**
+     * The features of the *new* revision. Absent means "inherit the current revision's declaration"
+     * (ADR-0059 D03) — amending a specification must not silently drop the Task out of the feature
+     * rule. An explicit empty list *does* clear the declaration, which is how a Task stops declaring
+     * a feature.
+     */
+    features: taskFeaturesSchema.optional(),
     reason: nonBlankString,
   }),
   z.strictObject({

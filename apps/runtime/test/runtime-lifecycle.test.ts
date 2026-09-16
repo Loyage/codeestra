@@ -535,8 +535,8 @@ describe('Runtime lifecycle: a stopping Runtime owns provider processes', () => 
     const projectId = projects[0]?.id as string;
     const created = JSON.parse((await cli(['task', 'create', projectId, 'Write a file'],
       environment)).stdout) as { readonly id: string };
+    // Submission starts this undeclared Task immediately under ADR-0059.
     expect((await cli(['task', 'submit', projectId, created.id, '0'], environment)).exitCode).toBe(0);
-    expect((await cli(['task', 'run', projectId, created.id, '1'], environment)).exitCode).toBe(0);
 
     const runtimePid = (JSON.parse((await cli(['status'], environment)).stdout) as StatusReport)
       .pid as number;

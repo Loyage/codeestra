@@ -15,6 +15,7 @@ import {
 } from '@codeestra/contracts';
 import {
   assessCandidate,
+  taskIsUnfinishedForConflict,
   createImpactSnapshot,
   explainAssessment,
   impactAnalyzerVersion,
@@ -49,7 +50,13 @@ export type ImpactAnalysisErrorCode =
   | 'TASK_NOT_FOUND'
   | 'IMPACT_POLICY_UNREADABLE'
   | 'IMPACT_SNAPSHOT_UNAVAILABLE'
-  | 'IMPACT_WORKSPACE_ABSENT';
+  | 'IMPACT_WORKSPACE_ABSENT'
+  // ADR-0059: declaring a feature is validated when it is written, so these four are refusals of a
+  // `task create` / `task revision create` request rather than of an assessment.
+  | 'INVALID_FEATURE'
+  | 'UNKNOWN_FEATURE'
+  | 'IMPACT_POLICY_ABSENT'
+  | 'INVALID_IMPACT_POLICY';
 
 export class ImpactAnalysisError extends Error {
   constructor(readonly code: ImpactAnalysisErrorCode, message: string) {
@@ -251,6 +258,9 @@ interface ImpactSubjectRef {
   readonly taskId: string;
   readonly taskState: string;
   readonly revisionId: string;
+  /** The revision's declared features; absent means the caller did not read them (ADR-0059). */
+  readonly features?: readonly string[];
+  readonly archived?: boolean;
   readonly workspacePath: string | null;
   readonly workspaceBaseCommit: string | null;
   readonly executionState?: string;
@@ -636,6 +646,83 @@ export interface ImpactSnapshotReport {
   readonly workspaceStatus: WorkspaceObservationStatus;
 }
 
+/** Trimmed, de-duplicated, order-preserving: a feature list is a set of ids, not a sequence. */
+function normalizeFeatures(features: readonly string[] | undefined): readonly string[] {
+  if (features === undefined) return Object.freeze([]);
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const raw of features) {
+    const feature = raw.trim();
+    if (feature.length === 0) {
+      throw new ImpactAnalysisError('INVALID_FEATURE',
+        'A feature id must not be blank');
+    }
+    if (seen.has(feature)) continue;
+    seen.add(feature);
+    normalized.push(feature);
+  }
+  return Object.freeze(normalized);
+}
+
+/**
+ * Validates a Task's declared features against the project's **declared mapping** (ADR-0059 D03).
+ *
+ * The feature ids are module ids from `.codeestra/impact.json` as read from the project's main ref,
+ * so a Task can only declare a feature the repository actually knows about — and the same file that
+ * already describes the project's boundaries stays the single place where they are named.
+ *
+ * Two deliberate choices, both stated in the ADR:
+ *
+ *  - **Validation happens when the Task is created or amended, not when a conflict is judged.** Once
+ *    the id is stored, the verdict is a pure comparison of ids and needs no mapping at all. That is
+ *    what removes the old "missing/unconfirmed mapping ⇒ `UNKNOWN`" failure mode entirely.
+ *  - **The mapping does not have to be *trust-confirmed* to be used here.** `project trust` records a
+ *    confirmation of the mapping (ADR-0031 D07) and the UI's trust flow does not send one, so
+ *    requiring it would make `--feature` unusable for projects trusted from the interface. What is
+ *    required is that the mapping can be *read* and declares the id; whether it is confirmed remains
+ *    a fact `project impact validate` reports.
+ */
+export async function resolveDeclaredFeatures(input: {
+  readonly storage: Phase1Database;
+  readonly projectId: string;
+  readonly features: readonly string[] | undefined;
+}): Promise<readonly string[]> {
+  const features = normalizeFeatures(input.features);
+  if (features.length === 0) return features;
+  const project = input.storage.listTrustedProjects()
+    .find((candidate) => candidate.id === input.projectId);
+  if (project === undefined) {
+    throw new ImpactAnalysisError('PROJECT_NOT_FOUND', `Project ${input.projectId} is not trusted`);
+  }
+  const inspection = await inspectImpactPolicy({
+    repositoryRoot: project.repoRoot, mainRef: project.mainRef,
+  });
+  if (inspection.state === 'ABSENT') {
+    throw new ImpactAnalysisError('IMPACT_POLICY_ABSENT',
+      `Project ${project.repoRoot} declares no ${impactPolicyPath} on ${project.mainRef}, so no`
+      + ' feature id can be declared: list them under `modules` in that file first');
+  }
+  if (inspection.state === 'INVALID') {
+    throw new ImpactAnalysisError('INVALID_IMPACT_POLICY',
+      `${project.mainRef}:${impactPolicyPath} is not a valid mapping (${inspection.errorCode}):`
+      + ` ${inspection.errorMessage}`);
+  }
+  const policy = inspection.policy;
+  if (policy === undefined) {
+    throw new ImpactAnalysisError('INVALID_IMPACT_POLICY',
+      `${project.mainRef}:${impactPolicyPath} could not be parsed`);
+  }
+  const declared = new Set(policy.modules.map((module) => module.id));
+  const unknown = features.filter((feature) => !declared.has(feature));
+  if (unknown.length > 0) {
+    throw new ImpactAnalysisError('UNKNOWN_FEATURE',
+      `Feature(s) ${unknown.join(', ')} are not declared as a module id in`
+      + ` ${project.mainRef}:${impactPolicyPath}; declared: `
+      + `${[...declared].sort().join(', ') || 'none'}`);
+  }
+  return features;
+}
+
 /**
  * Derives (or reuses) the ImpactSnapshot of one Task's current revision against its own baseline.
  * The Task does not have to be READY: a snapshot is an observation of the owned worktree, so it
@@ -703,6 +790,10 @@ export interface ImpactAssessmentReport {
     readonly taskState: string;
     readonly executionState: string;
     readonly revisionId: string;
+    /** The peer's declared features: the judged fact of the comparison (ADR-0059). */
+    readonly features: readonly string[];
+    /** Whether the peer is "not finished yet", which is what makes a shared feature a conflict. */
+    readonly unfinished: boolean;
     readonly disposition: ImpactSubjectResolution['disposition'];
     readonly complete: boolean;
     readonly incompleteReasons: readonly string[];
@@ -742,6 +833,8 @@ export async function assessTaskImpact(input: {
     taskId: task.taskId,
     taskState: task.taskState,
     revisionId: task.revisionId,
+    features: task.features,
+    archived: task.archived,
     workspacePath: task.workspacePath,
     workspaceBaseCommit: task.workspaceBaseCommit,
   };
@@ -750,23 +843,34 @@ export async function assessTaskImpact(input: {
     inspection: context.inspection, confirmation: context.confirmation,
     caseMode: context.caseDetection.mode, caseDetail: context.caseDetection.detail, now: input.now,
   });
-  const activeRefs = input.storage.listImpactActiveTasks(input.projectId, input.taskId);
-  const active: ImpactSubjectResolution[] = [];
-  for (const ref of activeRefs) {
-    active.push(await resolveImpactSubject({
-      storage: input.storage, project, projectId: input.projectId,
+  // The conflict input is the *declaration* set, not the resource-holding set (ADR-0059 D05): a
+  // `READY` Task that has not started yet is exactly the case the rule is about. Snapshot evidence is
+  // read from what is already recorded instead of being derived per peer, because the verdict no
+  // longer depends on it.
+  const featurePeers = input.storage.listFeatureConflictPeers(input.projectId, input.taskId);
+  const active: ImpactSubjectResolution[] = featurePeers.map((peer) => {
+    const snapshot = input.storage.listImpactSnapshots({ projectId: input.projectId,
+      taskId: peer.taskId, limit: 1 })[0] ?? null;
+    return {
       ref: {
-        taskId: ref.taskId,
-        taskState: ref.taskState,
-        revisionId: ref.revisionId,
-        workspacePath: ref.workspacePath,
-        workspaceBaseCommit: ref.workspaceBaseCommit,
-        executionState: ref.executionState,
+        taskId: peer.taskId,
+        taskState: peer.taskState,
+        revisionId: peer.revisionId,
+        features: peer.features,
+        archived: peer.archived,
+        workspacePath: null,
+        workspaceBaseCommit: null,
       },
-      inspection: context.inspection, confirmation: context.confirmation,
-      caseMode: context.caseDetection.mode, caseDetail: context.caseDetection.detail, now: input.now,
-    }));
-  }
+      snapshot,
+      observedFiles: snapshot?.files ?? [],
+      changeFingerprint: snapshot?.changeFingerprint ?? null,
+      disposition: snapshot === null ? 'UNAVAILABLE' : 'REUSED',
+      detail: snapshot === null
+        ? 'no ImpactSnapshot is recorded for this Task; the verdict does not depend on one'
+        : null,
+      workspaceStatus: 'ABSENT',
+    };
+  });
 
   const contextFacts: ImpactAssessmentContext = {
     baseCommit: candidate.snapshot?.baseCommit ?? candidateRef.workspaceBaseCommit ?? '',
@@ -844,6 +948,11 @@ export async function assessTaskImpact(input: {
       taskState: resolution.ref.taskState,
       executionState: resolution.ref.executionState ?? 'UNKNOWN',
       revisionId: resolution.ref.revisionId,
+      /** The declaration the comparison was made of (ADR-0059); the reason a pair conflicts. */
+      features: resolution.ref.features ?? Object.freeze([]),
+      unfinished: taskIsUnfinishedForConflict({
+        state: resolution.ref.taskState, archived: resolution.ref.archived ?? false,
+      }),
       disposition: resolution.disposition,
       complete: resolution.snapshot?.complete ?? false,
       incompleteReasons: resolution.snapshot?.incompleteReasons ?? Object.freeze([]),
@@ -861,6 +970,9 @@ function toSubject(resolution: ImpactSubjectResolution): ImpactSubject {
   return {
     taskId: resolution.ref.taskId,
     currentRevisionId: resolution.ref.revisionId,
+    features: resolution.ref.features ?? Object.freeze([]),
+    taskState: resolution.ref.taskState,
+    archived: resolution.ref.archived ?? false,
     snapshot: resolution.snapshot === null ? null : toDomainSnapshot(resolution.snapshot),
     observedFiles: resolution.observedFiles,
     ...(resolution.detail === null ? {} : { unavailableDetail: resolution.detail }),

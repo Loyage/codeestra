@@ -15,6 +15,14 @@ import { AgentRuntimeCoordinator, deriveCommandId } from './agent-runtime-servic
 import { withDeadline } from './lifecycle.js';
 import { pauseOrCancelTask, resumePausedTask } from './task-control-service.js';
 
+/** Whether two feature declarations say the same thing, order-insensitively. */
+function sameFeatureDeclaration(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  return sortedLeft.every((feature, index) => feature === sortedRight[index]);
+}
+
 export class RevisionDeliveryError extends Error {
   constructor(readonly code: string, message: string) {
     super(message);
@@ -152,6 +160,13 @@ export class RevisionDeliveryService {
     readonly commandId: string;
     readonly specification?: string;
     readonly constraints: readonly StoredConstraint[];
+    /**
+     * The features the *new* revision declares. `null`/absent inherits the previous revision's
+     * declaration (ADR-0059 D03): amending a specification is not a statement that the Task stopped
+     * working on the feature, and silently dropping the declaration would turn a conflict into a
+     * silent parallel start.
+     */
+    readonly features?: readonly string[] | null;
     readonly reason: string;
     readonly actor: string;
   }): Promise<CreateRevisionResult> {
@@ -161,13 +176,24 @@ export class RevisionDeliveryService {
       throw new RevisionDeliveryError('CONCURRENT_MODIFICATION',
         `Task is at version ${task.version}, not ${input.expectedVersion}`);
     }
-    if (input.specification === undefined && input.constraints.length === 0) {
+    // A revision must change *something*. Since ADR-0059 the feature declaration is such a thing in
+    // its own right: "I now want this Task to count as working on feature X" is a real specification
+    // change even when the prose and the constraints stay as they are.
+    const requestedFeatures = input.features ?? null;
+    const featureChange = requestedFeatures !== null
+      && !sameFeatureDeclaration(requestedFeatures, task.currentRevision.features);
+    if (input.specification === undefined && input.constraints.length === 0 && !featureChange) {
       throw new RevisionDeliveryError('INVALID_REVISION',
-        'A revision must change the specification or add at least one constraint');
+        'A revision must change the specification, add at least one constraint, or change the'
+        + ' declared features');
     }
     const constraints = input.specification === undefined
       ? mergeConstraints(task.currentRevision.constraints, input.constraints)
       : [...input.constraints];
+    // The kind follows what actually changed: `AMEND_TASK` for prose or a feature declaration (both
+    // are specification facts), `ADD_CONSTRAINT` for constraints alone.
+    const intentKind: 'AMEND_TASK' | 'ADD_CONSTRAINT' =
+      input.specification === undefined && !featureChange ? 'ADD_CONSTRAINT' : 'AMEND_TASK';
     const specification = input.specification ?? task.currentRevision.specification;
     const revisionId = this.#randomUUID();
     const deliveryId = this.#randomUUID();
@@ -183,6 +209,7 @@ export class RevisionDeliveryService {
         expectedVersion: input.expectedVersion,
         specification,
         constraints,
+        features: input.features ?? null,
         reason: input.reason,
       }),
       intentId: this.#randomUUID(),
@@ -193,7 +220,8 @@ export class RevisionDeliveryService {
       deliveryEventId: this.#randomUUID(),
       specification,
       constraints,
-      kind: input.specification === undefined ? 'ADD_CONSTRAINT' : 'AMEND_TASK',
+      features: input.features ?? null,
+      kind: intentKind,
       reason: input.reason,
       actor: input.actor,
       createdAt: this.#now(),

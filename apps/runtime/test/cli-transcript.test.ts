@@ -188,25 +188,26 @@ async function runOneTask(): Promise<{
   const created = JSON.parse((await cli(['task', 'create', projectId,
     'Create greeting.txt and stop'], environment)).stdout) as { readonly id: string };
   const taskId = created.id;
+  // Submission starts this undeclared Task immediately under ADR-0059.
   const submitted = await cli(['task', 'submit', projectId, taskId, '0'], environment);
   expect(submitted.exitCode).toBe(0);
-  const ran = await cli(['task', 'run', projectId, taskId, '1'], environment);
-  expect(ran.exitCode).toBe(0);
-  const sessionId = (JSON.parse(ran.stdout) as { readonly sessionId: string }).sessionId;
 
   const deadline = Date.now() + 30_000;
   let sessionState = '';
+  let sessionId = '';
   while (Date.now() < deadline) {
     const status = JSON.parse((await cli(['task', 'status', projectId, taskId],
       environment)).stdout) as {
       readonly executions: readonly { readonly state: string;
-        readonly session: { readonly state: string } | null }[];
+        readonly session: { readonly sessionId: string; readonly state: string } | null }[];
     };
     sessionState = status.executions[0]?.session?.state ?? '';
+    sessionId = status.executions[0]?.session?.sessionId ?? '';
     if (sessionState === 'EXITED') break;
     await Bun.sleep(50);
   }
   expect(sessionState).toBe('EXITED');
+  expect(sessionId.length).toBeGreaterThan(0);
   return { home, environment, projectId, taskId, sessionId };
 }
 

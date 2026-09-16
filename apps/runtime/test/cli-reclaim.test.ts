@@ -32,6 +32,7 @@ import {
   reclaimTestResources,
   registerTemporaryDirectory,
   runCli,
+  submitFixtureTaskWithoutScheduling,
 } from './support/runtime-reclamation.js';
 import { provisionDevClone } from './support/agent-fixture.js';
 
@@ -113,7 +114,8 @@ async function openedProject(): Promise<ReclaimFixture> {
   // ADR-0056: every dev fact comes from a second clone of the same origin that sits on
   // `dev`; the project is trusted with it explicitly.
   const devRepo = await provisionDevClone({ repository: repo });
-  const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets };
+  const environment = { CODEESTRA_HOME: home, CODEESTRA_UI_DIST: assets,
+    CODEESTRA_SCHEDULE_TICK_MS: '600000' };
   const opened = await cli(['open', repo, '--dev-repo', devRepo, '--no-open'], environment);
   expect(opened.exitCode).toBe(0);
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
@@ -132,9 +134,10 @@ async function seededExecutedTask(
 ): Promise<SeededTask> {
   const created = JSON.parse((await cli(['task', 'create', fixture.projectId, specification],
     fixture.environment)).stdout) as { readonly id: string };
-  const submitted = await cli(['task', 'submit', fixture.projectId, created.id, '0'], fixture.environment);
-  expect(submitted.exitCode).toBe(0);
   await cli(['stop'], fixture.environment);
+  submitFixtureTaskWithoutScheduling({
+    home: fixture.home, projectId: fixture.projectId, taskId: created.id,
+  });
   return await withStorage(fixture.home, async (storage) => {
     const adapter = new DeterministicFakeAdapter('SUCCEED', [{
       type: 'completed', eventId: 'fake-completed-1', cursor: 'cursor-1',
@@ -316,10 +319,10 @@ describe('codeestra reclaim command face', () => {
     try {
       const created = JSON.parse((await cli(['task', 'create', fixture.projectId, 'Active work'],
         fixture.environment)).stdout) as { readonly id: string };
-      const submitted = await cli(['task', 'submit', fixture.projectId, created.id, '0'],
-        fixture.environment);
-      expect(submitted.exitCode).toBe(0);
       await cli(['stop'], fixture.environment);
+      submitFixtureTaskWithoutScheduling({
+        home: fixture.home, projectId: fixture.projectId, taskId: created.id,
+      });
       await withStorage(fixture.home, async (storage) => {
         const workspace = await prepareTaskWorkspace({
           storage, runtimeHome: fixture.home, commandId: crypto.randomUUID(),

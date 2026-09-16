@@ -235,10 +235,10 @@ describe('session guidance command face', () => {
     expect(realpathSync(inspected.devRepoPath?.path as string)).toBe(main.devClone);
     const created = JSON.parse((await cli(['task', 'create', projectId, 'Change the first area'],
       environment)).stdout) as TaskPayload;
-    expect((await cli(['task', 'submit', projectId, created.id, '0'], environment)).exitCode).toBe(0);
 
-    // Nothing is running yet: the guidance is durably recorded, no attempt is opened, and the command
-    // reports that honestly instead of pretending a delivery happened.
+    // A DRAFT Task has no running attempt: guidance is durably recorded and reports that honestly.
+    // Recording before submit keeps this pre-execution contract explicit now that ADR-0059 makes an
+    // undeclared submitted Task start immediately.
     const recorded = await cli(['session', 'guide', projectId, created.id, '--message', message,
       '--json'], environment);
     expect(recorded.exitCode).toBe(0);
@@ -254,8 +254,8 @@ describe('session guidance command face', () => {
       environment)).stdout) as { readonly revisions: readonly unknown[] };
     expect(revisions.revisions).toHaveLength(1);
 
-    const run = await cli(['task', 'run', projectId, created.id, '1'], environment);
-    expect(run.exitCode).toBe(0);
+    // Submission starts the undeclared Task and the new Execution consumes the pending guidance.
+    expect((await cli(['task', 'submit', projectId, created.id, '0'], environment)).exitCode).toBe(0);
     const worktree = join(realpathSync(home), 'worktrees', projectId, created.id);
     await waitFor(() => existsSync(join(worktree, 'src', 'agent', `${created.id}.ts`)));
 

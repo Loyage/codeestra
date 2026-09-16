@@ -230,7 +230,6 @@ async function startTask(options: { readonly permissionMode?: 'FULL' | 'STRICT' 
   readonly sessionId: string;
   readonly reportPath: string;
   readonly modesPath: string;
-  readonly run: Bun.Subprocess<'ignore', 'pipe', 'pipe'>;
 }> {
   const repository = temporaryDirectory('codeestra-attach-repo-');
   const home = temporaryDirectory('codeestra-attach-home-');
@@ -281,13 +280,9 @@ async function startTask(options: { readonly permissionMode?: 'FULL' | 'STRICT' 
   const projectId = projects[0]?.id as string;
   const created = JSON.parse((await cli(['task', 'create', projectId,
     'Attach one native terminal'], environment)).stdout) as { readonly id: string };
+  // ADR-0059: submitting an undeclared Task starts it in the same command (the automatic pass judges
+  // it SAFE), so the Session this file drives exists without a second `task run`.
   expect((await cli(['task', 'submit', projectId, created.id, '0'], environment)).exitCode).toBe(0);
-  const run = Bun.spawn({
-    cmd: [process.execPath, cliEntry, 'task', 'run', projectId, created.id, '1'],
-    cwd: repositoryRoot,
-    env: { ...Bun.env, ...environment, no_proxy: '127.0.0.1,localhost' },
-    stdin: 'ignore', stdout: 'pipe', stderr: 'pipe',
-  });
   // The Session is read from the same command face a client has.
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
@@ -296,7 +291,7 @@ async function startTask(options: { readonly permissionMode?: 'FULL' | 'STRICT' 
       readonly session: { readonly sessionId: string } | null }[] };
     const sessionId = parsed.executions[0]?.session?.sessionId;
     if (sessionId !== undefined) {
-      return { environment, projectId, sessionId, reportPath, modesPath, run };
+      return { environment, projectId, sessionId, reportPath, modesPath };
     }
     await Bun.sleep(100);
   }
@@ -305,7 +300,7 @@ async function startTask(options: { readonly permissionMode?: 'FULL' | 'STRICT' 
 
 describe('codeestra session handoff attach / detach / release', () => {
   test('takes over into a real PTY, survives detach/reattach, and hands back to automation', async () => {
-    const { environment, projectId, sessionId, reportPath, modesPath, run } = await startTask();
+    const { environment, projectId, sessionId, reportPath, modesPath } = await startTask();
     try {
       // 1. An automation incarnation exists and the capability projection is honest.
       const initial = await waitForStatus(environment, projectId, sessionId,
@@ -512,7 +507,6 @@ describe('codeestra session handoff attach / detach / release', () => {
       expect([...new Set(modes.map((entry) => entry.argvMode))]).toEqual(['FULL']);
       expect(returned.permissionMode).toBe('FULL');
     } finally {
-      run.kill('SIGTERM');
       await cli(['stop'], environment);
     }
   }, 180_000);
@@ -522,8 +516,7 @@ describe('codeestra session handoff attach / detach / release', () => {
     // launch, so the automation, the native TUI successor and the returned automation must all be
     // launched with it — and none of the three handoff commands may ask for anything extra.
     for (const permissionMode of ['FULL', 'STRICT'] as const) {
-      const { environment, projectId, sessionId, modesPath, run }
-        = await startTask({ permissionMode });
+      const { environment, projectId, sessionId, modesPath } = await startTask({ permissionMode });
       try {
         const initial = await waitForStatus(environment, projectId, sessionId,
           (status) => status.incarnation !== null && status.terminal === null);
@@ -555,7 +548,6 @@ describe('codeestra session handoff attach / detach / release', () => {
         expect((await readStatus(environment, projectId, sessionId)).permissionMode)
           .toBe(permissionMode);
       } finally {
-        run.kill('SIGTERM');
         await cli(['stop'], environment);
       }
     }

@@ -1,8 +1,9 @@
 # 端到端流程走查
 
-> **适用版本** `dev@75fa7b8`（2026-09-15） · **schema** v30 · **最后校对** 2026-09-15
-> 版本会前进：`dev@036cf68` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@17b4dd6`（2026-09-16） · **schema** v32 · **最后校对** 2026-09-16
+> 版本会前进：`dev@17b4dd6` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> §3.1 的 `task run` 门禁由 FOUNDATION-091 按 ADR-0059 改写。
 
 本文按真实顺序走一遍：**建任务 → 提交 → 运行 → 回答 Agent → 提交成果 → 验证 → 合入 dev → 稳定提升 → 资源回收**。
 每一步给出可以照抄的命令和**预期输出形状**。
@@ -78,7 +79,7 @@ bun run codeestra task submit $PROJECT <task-id> <expected-version>
 bun run codeestra task run $PROJECT <task-id> <expected-version> [--adapter pi|codex|claude] [--allow-unknown] [--json]
 ```
 
-`task run` 是**与自动调度同一个门禁的显式启动请求**：依赖判定 → 对每个活跃/已预留 Task 的冲突判定 → 容量。
+`task run` 是**与自动调度同一个门禁的显式启动请求**：依赖判定 → 对**未完成且声明了功能**的 Task 的冲突判定 → 容量。
 `--adapter` 默认 `pi`；**每次运行绑定一个 Agent，换 `--adapter` 是新建 Execution，而不是在同一个 Execution 里换 Agent**。
 
 **预期形状**（`ScheduleStartOutcomeView`）：

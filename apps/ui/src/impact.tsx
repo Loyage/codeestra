@@ -33,7 +33,7 @@ function shortId(value: string | null): string {
   return value === null ? '—' : value.slice(0, 10);
 }
 
-/** The mapping report behind every verdict; a mapping that is not confirmed makes everything UNKNOWN. */
+/** The mapping report behind every verdict; an unconfirmed mapping now only affects `--feature`. */
 function PolicySummary({ policy }: { readonly policy: ImpactPolicyReportView }) {
   return (
     <dl className="kv">
@@ -41,7 +41,7 @@ function PolicySummary({ policy }: { readonly policy: ImpactPolicyReportView }) 
       <dd>
         {impactPolicyStateLabel(policy.state)}
         {' · '}确认：{impactConfirmationStateLabel(policy.confirmationState)}
-        {' · '}{policy.confirmed ? '正在生效' : '不生效：所有判定都会是 UNKNOWN'}
+        {' · '}{policy.confirmed ? '正在生效' : '不生效：未确认的映射不能作为功能声明的依据（判定本身不再读映射）'}
       </dd>
       <dt>main 引用</dt>
       <dd className="mono">{policy.mainRef} @ {shortId(policy.mainCommit)}</dd>
@@ -74,8 +74,8 @@ function SnapshotDetails({ snapshot }: { readonly snapshot: ImpactSnapshotView }
       <p>
         完整性：
         {snapshot.complete
-          ? <span className="state state-ready">完整（可参与 SAFE）</span>
-          : <span className="state state-unknown">不完整（complete=false，不可能是 SAFE）</span>}
+          ? <span className="state state-ready">完整</span>
+          : <span className="state state-unknown">不完整（complete=false；它只是证据，不再决定判定）</span>}
       </p>
       {snapshot.incompleteReasons.length === 0 ? null : (
         <ul className="list">
@@ -148,13 +148,13 @@ function ImpactSubject({ view }: { readonly view: ImpactTaskSnapshotView }) {
         {' '}项目 dev <span className="mono">{shortId(view.baseline.projectDevCommit)}</span> ·
         {view.baseline.matchesProjectDev
           ? ' 与 dev 一致'
-          : ' 与 dev 不一致：在另一个基线之上的任务与它的对比是 UNKNOWN'}
+          : ' 与 dev 不一致：只作为事实记录，判定不再因此变成 UNKNOWN'}
       </p>
       <p className="muted hint">路径大小写实测 {view.caseMode}（{view.caseModeSource}）：{view.caseModeDetail}</p>
       {view.snapshot === null ? (
         <p className="error">
           无法派生快照：{view.unavailableDetail ?? 'Runtime 没有给出原因'}
-          {' '}——没有快照就意味着无法排除与它的重叠，相关判定只能是 UNKNOWN。
+          {' '}——快照只是证据：判定只看是否声明了同一功能，所以缺快照不再让判定变成 UNKNOWN。
         </p>
       ) : <SnapshotDetails snapshot={view.snapshot} />}
     </>
@@ -191,7 +191,7 @@ export function ImpactPolicyPanel({ client, projectId, repoRoot, refreshToken, r
       <h4>影响映射 · impact.json <span className="muted hint">project impact validate · ADR-0031</span></h4>
       <p className="muted hint">
         映射只从项目 main 引用读取，Task 分支上的同名文件不参与判定。映射缺失、无效或未确认时，
-        <strong>每一个判定都会是 UNKNOWN</strong>（不是「无冲突」）。
+        <strong>功能声明（--feature）会被拒绝</strong>，而判定不再受影响：没有声明同一功能就是 SAFE（ADR-0059）。
       </p>
       {error === null ? null : <p className="error" role="alert">影响映射校验失败：{error}</p>}
       <div className="actions">

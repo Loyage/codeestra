@@ -43,7 +43,8 @@ type CommandEnvelope<T extends string, P> = {
 | `TaskCreated` | `Task` | taskId, revisionId, kind |
 | `TaskStateChanged` | `Task` | taskId, from, to, reason |
 | `TaskArchived` / `TaskUnarchived` | `Task` | taskId, from, to（同态，只改 `archived_at`）, reason, actor |
-| `TaskRevisionCreated` | `Task` | taskId, revisionId, revisionNumber, previousRevisionId（首个修订为 null）, constraintCount, reason, actor（**设计名 `TaskRevisionAppended` 已废弃**） |
+| `TaskPurged` | `Task` | taskId, displayNumber, from, to=`PURGED`（**不是一个状态**：行已删除，见下）, archived, currentRevisionId, rowsDeleted（逐表行数）, dependencyEdgesRemoved, branchFacts（每个被删分支的 `branchRef`/`tipCommit`/`deleted`）, reclamation（每个被回收资源）, appendOnlyTriggersSuspended, reason, actor |
+| `TaskRevisionCreated` | `Task` | taskId, revisionId, revisionNumber, previousRevisionId（首个修订为 null）, constraintCount, **features**（声明的功能，ADR-0059）, reason, actor（**设计名 `TaskRevisionAppended` 已废弃**） |
 | `TaskDependencyAdded` / `TaskDependencyRemoved` | `Task` | dependentId, prerequisiteId, requiredRevisionId（**设计名 `DependencyAdded`/`DependencyNeedsReview` 已废弃**） |
 | `ExecutionReserved` | `Execution` | executionId, taskId, revisionId, workspaceId |
 | `ExecutionStateChanged` | `Execution` | executionId, from, to, reason |
@@ -219,7 +220,7 @@ FOUNDATION-074 的 doc-sync 把它们补齐（名字都是实现先行的，按 
 | `CandidateBuilt` / `SelfTestCompleted` / `StablePromoted` / `StableRollbackCompleted` | 未实现 | 设计名保留（Self Evolution 阶段） |
 | `ProseQuestionAttentionResolved` | **实现先行名**（FOUNDATION-069 新增，本格补登记） | 本格**登记为长期名**；`UserAnswerDelivered` 不适用于散文提问（它没有 provider 请求），因此不合并 |
 | `TaskRetryRequested` | **实现先行名**（FOUNDATION-061 新增，本格补登记） | 本格**登记为长期名**；与 `TaskStateChanged` 同事务、不取代它 |
-| （设计目录没有的实现新增名） | `TaskArchived` / `TaskUnarchived` / `WorkspaceReclaimed` / `ResourcesReclaimed` / `OperationProgressed` / `OperationSettled` / `ExecutionSlot*` / `SchedulerCapacityChanged` / `TaskSchedule*` / `TaskImpactPredictionRevoked` / `Promotion*` / `Integration*`（含 ADR-0053 的 `IntegrationMemberMerged` / `IntegrationBatchStale` / `IntegrationBatchCancelled`） | 反向登记：这些是实现先行的名字，同样永不重命名 |
+| （设计目录没有的实现新增名） | `TaskArchived` / `TaskUnarchived` / **`TaskPurged`（FOUNDATION-090 / ADR-0058）** / `WorkspaceReclaimed` / `ResourcesReclaimed` / `OperationProgressed` / `OperationSettled` / `ExecutionSlot*` / `SchedulerCapacityChanged` / `TaskSchedule*` / `TaskImpactPredictionRevoked` / `Promotion*` / `Integration*`（含 ADR-0053 的 `IntegrationMemberMerged` / `IntegrationBatchStale` / `IntegrationBatchCancelled`） | 反向登记：这些是实现先行的名字，同样永不重命名。`TaskPurged` 是**唯一一条在它自己的聚合根行被删除的同一个事务里写入的事件**：它没有外键，因此任务行消失后它仍在 `events.list`/SSE 里可读，并且是「这个任务存在过、什么时候被谁删除、删掉了什么」的最后一条记录（ADR-0058 D08） |
 
 ## 3. 一致性、投递和恢复
 

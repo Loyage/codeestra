@@ -131,8 +131,8 @@ describe('schema v31 session guidance migration', () => {
     const upgraded = new Phase1Database(filename);
     try {
       expect(upgraded.sqlite.query<{ user_version: number }, []>('PRAGMA user_version')
-        .get()?.user_version).toBe(31);
-      expect(phase1SchemaVersion).toBeGreaterThanOrEqual(31);
+        .get()?.user_version).toBe(phase1SchemaVersion);
+      expect(phase1SchemaVersion).toBeGreaterThanOrEqual(32);
       // Every pre-existing row is still there: this step only adds tables.
       expect(upgraded.sqlite.query<{ rows: number }, []>(
         'SELECT COUNT(*) AS rows FROM tasks').get()?.rows).toBe(1);
@@ -155,14 +155,14 @@ describe('schema v31 session guidance migration', () => {
     }
   });
 
-  test('a database already stamped 31 opens without re-running the step', () => {
+  test('a database already at the current schema opens without re-running the step', () => {
     const filename = temporaryDatabase();
     const first = new Phase1Database(filename);
     first.close();
     const reopened = new Phase1Database(filename);
     try {
       expect(reopened.sqlite.query<{ user_version: number }, []>('PRAGMA user_version')
-        .get()?.user_version).toBe(31);
+        .get()?.user_version).toBe(phase1SchemaVersion);
       expect(reopened.sqlite.query<Record<string, unknown>, []>('PRAGMA foreign_key_check').all())
         .toHaveLength(0);
     } finally {

@@ -1,8 +1,10 @@
 # 功能清单：「这软件能做什么」
 
-> **适用版本** `dev@75fa7b8`（2026-09-15） · **schema** v30 · **最后校对** 2026-09-15
-> 版本会前进：`dev@036cf68` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@17b4dd6`（2026-09-16） · **schema** v32 · **最后校对** 2026-09-16
+> 版本会前进：`dev@17b4dd6` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> 「任务」表的「永久删除」一行由 FOUNDATION-090 新增（ADR-0058）；「调度、容量与冲突」一节的声明功能与
+> 冲突判定两行由 FOUNDATION-091 改写（ADR-0059）。
 
 一行一个能力。列的含义：
 
@@ -38,6 +40,7 @@
 | 暂停 / 恢复 | 暂停是协作停止（确认 provider 退出后才 `PAUSED`）；恢复以 provider conversation resume 继续 | `task pause`、`task resume <…> [--adapter <id>] [--allow-unknown]` | 任务详情 → 暂停 / 继续 | [0016](../decisions/0016-task-pause-cancel-archive.md) |
 | 重试失败任务 | 只对 `FAILED` 生效；重新入队（可能需要先重建 worktree）后，用同一个门禁请求一次启动 | `task retry <project> <task> <expected-version> [--adapter <id>] [--json]` | 任务详情 →「更多操作」→ `重试`（显示 CAS 版本与将使用的 Adapter，可换成已注册的 Adapter；被拒绝时显示 Runtime 的稳定码，「等待」与「已启动」分开显示） | [0036](../decisions/0036-task-retry-after-failure.md)、[0042](../decisions/0042-rebuild-reclaimed-worktree.md) |
 | 取消 / 归档 | 取消是终态（不自动重开）；归档是软删除（只写 `archived_at`，不删行、不回收） | `task cancel`、`task archive`、`task unarchive` | 任务详情 →「更多操作」 | [0016](../decisions/0016-task-pause-cancel-archive.md) |
+| 永久删除 | **不可撤销**：删掉任务的全部记录（含 append-only 的修订/impact/定向测试计划/知识绑定）与它自己的 worktree、验证副本、`task/<id>` 分支，并写一条 `TaskPurged`；需 `--yes`；非终态先协作停止；**成果已进 `dev`/`main` 的任务拒绝**（只能归档） | `task purge <project> <task> <expected-version> --yes [--reason <text>]` | 任务详情 →「更多操作」→「永久删除」（输入任务编号才启用） | [0058](../decisions/0058-task-purge.md) |
 | 状态投影 | 列出 Execution / Session / 验证 / 集成投影，附 Agent 完成注记与散文提问等待 | `task status <project> <task> [--json]` | 任务详情（执行 / 验证 / `集成批次 · dev` 记录，后者含每个批次的成员表） | [0013](../decisions/0013-read-only-agent-transcript-view.md) |
 | 规格修订 | 创建新 revision（可只改理由、只加约束）并列出历史 | `task revision create`、`task revision list` | —（界面无入口） | [0028](../decisions/0028-revision-delivery-and-stale-session-startup-reconcile.md) |
 | Revision 投递台账 | 单独读取与解决「修订是否真的到达运行中的 Execution」 | `task revision delivery list/get/resolve` | —（界面无投影） | [0028](../decisions/0028-revision-delivery-and-stale-session-startup-reconcile.md) |
@@ -70,11 +73,12 @@
 | 能力 | 能做什么 | CLI 入口 | UI 位置 | ADR |
 |---|---|---|---|---|
 | 调度引擎 | 事件触发 + 周期恢复的 pass；`status` 报事实、`plan` 是有序 dry run、`explain` 回答「为什么它现在不跑」 | `task schedule status/plan/explain/run` | 调度 → 调度引擎 / 调度判定 | [0030](../decisions/0030-phase2-parallel-scheduling.md)、[0033](../decisions/0033-scheduling-engine.md) |
-| UNKNOWN 显式放行 | 对**未证明**的重叠做单次、绑定 revision/基线/分析器版本的放行；写入审计，不改变已记录判定 | `task run --allow-unknown`、`task schedule clear-unknown` | 调度 → UNKNOWN 的显式单次放行 | [0030](../decisions/0030-phase2-parallel-scheduling.md) D05 |
+| 声明功能 | 在 revision 上声明「这个 Task 在做哪个功能」（`modules[].id`）；写入时按项目 `main` ref 的映射校验；省略即继承上一条 revision 的声明 | `task create --feature <module-id>`（可重复）、`task revision create --feature <module-id>` | 新建任务 / 任务详情（声明的功能） | [0059](../decisions/0059-feature-declaration-conflict-rule.md) |
+| UNKNOWN 显式放行 | 对 `CONFLICTING` **永不放行**；对 `UNKNOWN` 做单次、绑定 revision/基线/分析器版本的放行（当前规则不产生 `UNKNOWN`，所以日常不可达） | `task run --allow-unknown`、`task schedule clear-unknown` | 调度 → UNKNOWN 的显式单次放行 | [0030](../decisions/0030-phase2-parallel-scheduling.md) D05、[0059](../decisions/0059-feature-declaration-conflict-rule.md) D02 |
 | 容量与上限 | 项目级并发上限（默认 2，上限 16）+ 每 Adapter 覆盖；读回存储值，非法值有自己的稳定码 | `scheduler capacity get/set/clear` | 调度 → 容量与槽位预留 | [0032](../decisions/0032-capacity-and-slot-reservations.md) |
 | 槽位预留 | 在**一个 immediate 事务**里复核 Task 版本、已评估 revision、依赖事实、ImpactSnapshot 代数与两个容量维度后记录预留 | `scheduler reservations list/acquire/release/prepare-workspace/reconcile` | 调度 → 槽位预留 | [0032](../decisions/0032-capacity-and-slot-reservations.md) |
 | 预留对账 | 复核每个活跃预留的持有者进程是否真的还在：确认消失则释放并记录；活着的/无法核验的保留槽位 | `scheduler reservations reconcile` | 调度 → reconcile 观测 | [0032](../decisions/0032-capacity-and-slot-reservations.md) |
-| 影响分析与冲突判定 | 确定性地把 change set 映射到 `.codeestra/impact.json`，与所有持有资源的 Task 比较，得出 `SAFE_TO_PARALLELIZE / UNKNOWN / CONFLICTING` 及交叉路径 | `project impact validate/show/explain` | **调度 → 影响映射 · impact.json**；任务详情 → 影响与冲突判定 | [0031](../decisions/0031-impact-snapshot-and-deterministic-conflict-analyzer.md) |
+| 冲突判定 | **只比较声明**：两侧声明了同一功能 id、且对方未完成（非 `SUCCEEDED`/`CANCELLED`、未归档）才 `CONFLICTING`；否则默认 `SAFE_TO_PARALLELIZE`。**同文件/同目录/同模块/共享资源不再拦人**（只作为事实进入解释输出） | `project impact validate/show/explain` | **调度 → 影响映射 · impact.json**；任务详情 → 影响与冲突判定 | [0059](../decisions/0059-feature-declaration-conflict-rule.md)（取代 [0031](../decisions/0031-impact-snapshot-and-deterministic-conflict-analyzer.md) 的判定语义；快照/映射/失效键/audit 表仍自 0031） |
 | 任务依赖 DAG | 增删查依赖；加环拒绝且不部分应用；上游必须进 `dev` 才满足 | `task depends add/remove/list` | 任务详情 → 依赖与 BLOCKED 原因 | [0024](../decisions/0024-task-dependency-dag-and-blocked.md) |
 
 ## 成果、验证与集成

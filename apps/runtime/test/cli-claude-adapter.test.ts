@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync } from 'n
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  createFixtureTaskForExplicitStart,
   reclaimTestResources,
   registerTemporaryDirectory,
   runCli,
@@ -193,6 +194,7 @@ interface Fixture {
   readonly repository: string;
   readonly projectId: string;
   readonly taskId: string;
+  readonly taskVersion: number;
   readonly claudeReportPath: string;
   readonly configDir: string;
 }
@@ -241,6 +243,9 @@ async function fixture(options: { readonly strict?: boolean; readonly mode?: str
     CLAUDE_CONFIG_DIR: configDir,
     CODEESTRA_CLAUDE_CLI_STUB_REPORT: claudeReportPath,
     CODEESTRA_CLAUDE_CLI_STUB_MODE: options.mode ?? 'APPROVAL',
+    // These tests drive the explicit `task run --adapter …` command, so the recovery pass must not
+    // start the READY Task on its own default adapter while they are setting up.
+    CODEESTRA_SCHEDULE_TICK_MS: '600000',
   };
   if (options.strict === true) {
     // STRICT is a live Runtime switch; the project trust then needs the explicit confirmation flag.
@@ -252,10 +257,15 @@ async function fixture(options: { readonly strict?: boolean; readonly mode?: str
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { id: string }[];
   const projectId = projects[0]?.id as string;
-  const created = JSON.parse((await cli(['task', 'create', projectId, 'Write a file'],
-    environment)).stdout) as { readonly id: string };
-  expect((await cli(['task', 'submit', projectId, created.id, '0'], environment)).exitCode).toBe(0);
-  return { environment, repository, projectId, taskId: created.id, claudeReportPath, configDir };
+  // ADR-0059 starts an undeclared Task as soon as it is submitted, and the automatic pass would use
+  // the default adapter. The shared helper keeps the fixture behind a real feature conflict and
+  // leaves it READY, so each test's explicit `task run --adapter …` is what actually starts it.
+  await cli(['stop'], environment);
+  const ready = await createFixtureTaskForExplicitStart({
+    home, environment, projectId, specification: 'Write a file', startable: true,
+  });
+  return { environment, repository, projectId, taskId: ready.taskId,
+    taskVersion: ready.expectedVersion, claudeReportPath, configDir };
 }
 
 interface TaskStatus {
@@ -311,11 +321,13 @@ function claudeReport(path: string): ClaudeStubReport {
 describe('codeestra task run --adapter claude', () => {
   test('routes a STRICT permission request to the existing Attention face and back to Claude',
     async () => {
-      const { environment, projectId, taskId, claudeReportPath } = await fixture({ strict: true });
+      const { environment, projectId, taskId, taskVersion, claudeReportPath } =
+        await fixture({ strict: true });
       // FULL would launch Claude with `bypassPermissions`; STRICT must let the provider ask.
       expect((await cli(['permission', 'get'], environment)).stdout)
         .toContain('"mode": "STRICT"');
-      const ran = await cli(['task', 'run', projectId, taskId, '1', '--adapter', 'claude'], environment);
+      const ran = await cli(['task', 'run', projectId, taskId, String(taskVersion), '--adapter', 'claude'],
+        environment);
       expect(ran.exitCode).toBe(0);
       expect(JSON.parse(ran.stdout)).toMatchObject({ adapterId: 'claude' });
 
@@ -345,8 +357,10 @@ describe('codeestra task run --adapter claude', () => {
 
   test('runs without any approval in FULL mode and never asks for confirmation', async () => {
     // FULL is driven by `bypassPermissions`, so the stub's prompt never appears in this mode.
-    const { environment, projectId, taskId, claudeReportPath } = await fixture({ mode: 'CANCEL' });
-    const ran = await cli(['task', 'run', projectId, taskId, '1', '--adapter', 'claude'], environment);
+    const { environment, projectId, taskId, taskVersion, claudeReportPath } =
+      await fixture({ mode: 'CANCEL' });
+    const ran = await cli(['task', 'run', projectId, taskId, String(taskVersion), '--adapter', 'claude'],
+      environment);
     expect(ran.exitCode).toBe(0);
     const exited = await waitForSessionExit(environment, projectId, taskId);
     expect(exited.executions[0]?.session?.state).toBe('EXITED');
@@ -364,15 +378,17 @@ describe('codeestra task run --adapter claude', () => {
   test('replaces a failed run attempt with a new run on a different adapter', async () => {
     // The Claude executable is missing, so this attempt fails during the version probe, before any
     // Execution or worktree is reserved. The Task stays runnable and a different Agent can run it.
-    const { environment, projectId, taskId } = await fixture({ claudeExecutable: 'missing' });
-    const failed = await cli(['task', 'run', projectId, taskId, '1', '--adapter', 'claude'], environment);
+    const { environment, projectId, taskId, taskVersion } = await fixture({ claudeExecutable: 'missing' });
+    const failed = await cli(['task', 'run', projectId, taskId, String(taskVersion), '--adapter', 'claude'],
+      environment);
     expect(failed.exitCode).toBe(1);
     expect(failed.stderr).toContain('PROVIDER_VERSION_UNAVAILABLE');
     const afterFailure = await status(environment, projectId, taskId);
     expect(afterFailure.task.state).toBe('READY');
     expect(afterFailure.executions).toEqual([]);
 
-    const replaced = await cli(['task', 'run', projectId, taskId, '1', '--adapter', 'pi'], environment);
+    const replaced = await cli(['task', 'run', projectId, taskId,
+      String(afterFailure.task.version), '--adapter', 'pi'], environment);
     expect(replaced.exitCode).toBe(0);
     expect(JSON.parse(replaced.stdout)).toMatchObject({ adapterId: 'pi' });
     const exited = await waitForSessionExit(environment, projectId, taskId);
@@ -383,7 +399,8 @@ describe('codeestra task run --adapter claude', () => {
 
   test('applies the per-adapter Agent configuration to the Claude launch, and refuses provider',
     async () => {
-      const { environment, projectId, taskId, claudeReportPath } = await fixture({ mode: 'CANCEL' });
+      const { environment, projectId, taskId, taskVersion, claudeReportPath } =
+        await fixture({ mode: 'CANCEL' });
       // Claude Code has no provider launch parameter, so the scope refuses the field instead of
       // recording a provider that could never take effect.
       const refused = await cli(['agent', 'config', 'set', '--adapter', 'claude',
@@ -402,7 +419,7 @@ describe('codeestra task run --adapter claude', () => {
         environment)).stdout) as { readonly effective: Readonly<Record<string, string>> };
       expect(pi.effective.model).toBeNull();
 
-      expect((await cli(['task', 'run', projectId, taskId, '1', '--adapter', 'claude'],
+      expect((await cli(['task', 'run', projectId, taskId, String(taskVersion), '--adapter', 'claude'],
         environment)).exitCode).toBe(0);
       await waitForSessionExit(environment, projectId, taskId);
       const report = claudeReport(claudeReportPath);
@@ -412,8 +429,9 @@ describe('codeestra task run --adapter claude', () => {
     }, 120_000);
 
   test('resumes a paused Claude Task on Claude and refuses a cross-provider resume', async () => {
-    const { environment, projectId, taskId, claudeReportPath } = await fixture({ mode: 'CANCEL' });
-    expect((await cli(['task', 'run', projectId, taskId, '1', '--adapter', 'claude'],
+    const { environment, projectId, taskId, taskVersion, claudeReportPath } =
+      await fixture({ mode: 'CANCEL' });
+    expect((await cli(['task', 'run', projectId, taskId, String(taskVersion), '--adapter', 'claude'],
       environment)).exitCode).toBe(0);
     await waitForSessionExit(environment, projectId, taskId);
 

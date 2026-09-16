@@ -64,6 +64,8 @@ describe('dev clone promotion storage', () => {
         'session_guidance']) {
         legacy.exec(`DROP TABLE IF EXISTS ${table}`);
       }
+      // ...and the column added by schema v32 (declared features, ADR-0059).
+      legacy.exec('ALTER TABLE task_revisions DROP COLUMN features_json');
       legacy.exec('PRAGMA user_version=28');
       legacy.close();
 

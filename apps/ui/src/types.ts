@@ -20,6 +20,11 @@ export interface TaskRevisionView {
   readonly number: number;
   readonly specification: string;
   readonly constraints: readonly { readonly id: string; readonly text: string }[];
+  /**
+   * The features this revision declares (ADR-0059): module ids from the project's
+   * `.codeestra/impact.json`. Empty means the Task never participates in a feature conflict.
+   */
+  readonly features: readonly string[];
   readonly createdAt: number;
 }
 
@@ -1063,6 +1068,8 @@ export interface ConflictHitView {
   readonly directories: readonly string[];
   readonly modules: readonly string[];
   readonly globalResources: readonly string[];
+  /** The feature ids both sides declared (`SAME_UNFINISHED_FEATURE`); empty for older codes. */
+  readonly features?: readonly string[];
   readonly relation: string | null;
   readonly detail: string;
 }
@@ -1595,6 +1602,55 @@ export interface ScheduleStartOutcomeView {
   readonly assessment: ScheduleAssessmentView | null;
   readonly clearedUnknownBy: string | null;
   readonly code: string | null;
+  readonly detail: string;
+}
+
+/**
+ * The result of `task.purge` (ADR-0058). This is the one command whose success means the Task no
+ * longer exists, so the view reports what was destroyed instead of a new state: the final state it
+ * was deleted from, the rows deleted per table, the reclaimed resources, and the tip of every branch
+ * that was deleted. `replayed: true` says the receipt answered rather than a second deletion.
+ */
+export interface TaskPurgeOutcomeView {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly displayNumber: number;
+  readonly state: string;
+  readonly version: number;
+  readonly archived: boolean;
+  readonly reason: string | null;
+  readonly purgedAt: number;
+  readonly eventId: string;
+  readonly currentRevisionId: string;
+  readonly replayed: boolean;
+  readonly stop: {
+    readonly state: string;
+    readonly stop: 'TERMINAL' | 'RELEASED' | 'UNCERTAIN';
+    readonly executionId: string | null;
+    readonly sessionId: string | null;
+    readonly detail: string;
+  } | null;
+  readonly plan: {
+    readonly worktrees: number;
+    readonly verificationCopies: number;
+    readonly branches: number;
+  };
+  readonly branchFacts: readonly {
+    readonly branchRef: string;
+    readonly tipCommit: string | null;
+    readonly deleted: boolean;
+    readonly detail: string;
+  }[];
+  readonly reclamation: readonly {
+    readonly kind: string;
+    readonly resourceId: string;
+    readonly path: string;
+    readonly outcome: string;
+    readonly reasonCode: string;
+    readonly branchRef: string | null;
+  }[];
+  readonly dependencyEdgesRemoved: number;
+  readonly rowsDeleted: Readonly<Record<string, number>>;
   readonly detail: string;
 }
 

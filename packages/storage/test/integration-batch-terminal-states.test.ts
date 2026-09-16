@@ -33,6 +33,8 @@ function downgradeToV29(database: Database): void {
     'session_guidance']) {
     database.exec(`DROP TABLE IF EXISTS ${table}`);
   }
+  // ...and the column added by schema v32 (declared features, ADR-0059).
+  database.exec('ALTER TABLE task_revisions DROP COLUMN features_json');
   database.exec(`
     CREATE TABLE integration_batches_v29 (
       id TEXT PRIMARY KEY,

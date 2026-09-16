@@ -1,8 +1,10 @@
 # 常见故障与稳定码表
 
-> **适用版本** `dev@75fa7b8`（2026-09-15） · **schema** v30 · **最后校对** 2026-09-15
-> 版本会前进：`dev@036cf68` 只是本目录最后一次校对的基线；当前适用版本以
+> **适用版本** `dev@17b4dd6`（2026-09-16） · **schema** v32 · **最后校对** 2026-09-16
+> 版本会前进：`dev@17b4dd6` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> `task purge` 的拒绝码一节由 FOUNDATION-090 新增（ADR-0058）；冲突判定与 `--feature` 的拒绝码由
+> FOUNDATION-091 新增/改写（ADR-0059）。
 
 本文只列**源码里实际存在**的错误码与状态。每条给出「什么时候出现 / 怎么办」。
 
@@ -99,31 +101,45 @@ Codeestra 要求项目长期保留 `main` 与 `dev`（ADR-0009），并且**所�
 在你**查看**与**确认**之间，`main` ref 上的策略文件 / 影响映射 / 仓库身份变了。
 这是防漂移，不是 bug。重新执行一次 `project trust`（或 `open`），重新看一遍再确认。
 
-### 所有冲突判定都是 `UNKNOWN`，任务绝不并行
-看映射：
+### 为什么这两个任务不冲突了（ADR-0059）
 
-```sh
-bun run codeestra project impact validate /path/to/repo
-```
+症状：以前它们会因为改同一个文件/同一个目录而互相等待，现在它们同时跑。
 
-`POLICY_ABSENT` / `POLICY_INVALID` / `POLICY_NOT_CONFIRMED` 都会让每个判定变成 `UNKNOWN`——
-**`UNKNOWN` 不是「无冲突」的软版本**，它默认等待。修好 `.codeestra/impact.json` 并重新 trust
-（同一 trust 事件会一并确认映射）。
+含义：这是**故意的行为反转**。判定只比较**声明**——两个 revision 是否声明了**同一个功能**
+（`task create --feature <module-id>` / `task revision create --feature <module-id>`，取自 `main` ref 上
+`.codeestra/impact.json` 的 `modules[].id`）。同文件、同目录、同模块、共享构建/依赖/schema/全局资源
+**都不再阻止并发**；它们仍然作为事实出现在 `project impact explain` / `task schedule explain` 的输出里。
 
-确认「无法证明」的具体原因用：
+想让两个 Task 互斥：给它们**声明同一个功能**。这是唯一的互斥手段，也没有「严格模式」开关。
 
-```sh
-bun run codeestra project impact explain $PROJECT <task-id> --json
-```
+代价要自己担：两个都没声明功能的 Task 可以并发改同一个文件，冲突要到成果 commit / 合入 `dev` 时以
+`CONFLICTED` 暴露——启动前门禁不再兜底。
+
+`UNKNOWN` 取值、`--allow-unknown` 与 `task schedule clear-unknown` 都保留，但**当前规则不再产生
+`UNKNOWN`**（只能从历史 assessment 行读到），所以这条路日常不可达；`CONFLICTING` 永远不放行。
+
+### 声明功能被拒绝：`UNKNOWN_FEATURE` / `IMPACT_POLICY_ABSENT` / `INVALID_IMPACT_POLICY` / `INVALID_FEATURE`
+
+`--feature <module-id>` 是**写入时**校验的（不在判定时），所以写错不可能悄悄生效：
+
+| 码 | 含义 | 怎么办 |
+|---|---|---|
+| `INVALID_FEATURE` | id 是空串（或只有空白） | 给一个真实的功能 id |
+| `IMPACT_POLICY_ABSENT` | 项目 `main` ref 上没有 `.codeestra/impact.json` | 先提交映射再声明；不声明也能用（就是默认不冲突） |
+| `INVALID_IMPACT_POLICY` | 映射存在但不合法（JSON/结构/路径规则不通过） | `project impact validate /path/to/repo` 看具体原因 |
+| `UNKNOWN_FEATURE` | id 不在该映射的 `modules[].id` 里 | `project impact show` 或直接读映射，换成已声明的 id |
+
+**不要求映射已被 `project trust` 确认**：`--feature` 只看映射存不存在/合不合法/id 认不认识（ADR-0059 D03）。
+未确认的映射仍由 `project impact validate` 报告，且不影响判定（判定本来就不读映射）。
 
 ### 占用者无法被观测：工作树已经不在磁盘上（ADR-0055）
 
-症状：某个 Task 一直等，stderr 说「无法与 N 个活跃/已预留 Task 证明不相交」，判定是 `UNKNOWN`，
-理由码是 `MISSING_IMPACT_SNAPSHOT`，而 `--json` 里的 `occupiers[]` 给出 `code: "WORKSPACE_MISSING"`
-（`project impact explain` 的 `active[].code` 是同一个事实）。
+症状：`project impact show/explain` 里某个 Task 的 `code` 是 `WORKSPACE_MISSING`（账本里写着 workspace
+路径，但目录已不在磁盘上），或者 `task schedule explain` 的 `occupiers[].code` 是同一个事实。
 
-含义：账本里还写着一个 workspace 路径，但那目录已经不在磁盘上了。因此那一侧的变更集**永远观测不到**，
-调度器不能证明它不相交，于是每个新任务都要等。`UNKNOWN` 不是「无冲突」，这里也不是“等一等就好”。
+含义：那一侧的变更集**永远观测不到**。ADR-0059 之后这不再是一个「任务跑不了」的理由：判定只看声明，
+未声明同一功能的 Task 仍会 `SAFE` 并开始。但工作树丢失仍是**需要处理的故障**：它的成果不可观测、
+集成与验证都拿不到证据，所以下面的对账仍然要做。
 
 怎么办（按占用者的状态）：
 
@@ -139,8 +155,8 @@ bun run codeestra task resume   $PROJECT $OCCUPIER <expected-version>
 bun run codeestra task cancel   $PROJECT $OCCUPIER <expected-version>
 ```
 
-只有把占用者从活跃集合里移出去（或修好它自己的工作树），后续任务才可能重新变回 `SAFE_TO_PARALLELIZE`。
-在这一刻之前，唯一的临时出路仍然是显式的 `--allow-unknown`（单次、有审计，但**不改判定**）。
+只有把占用者自己的故障处理完（对账、或修好它的工作树），它才可能重新产出可观察的成果。
+在这一刻之前，后续任务**不再**因为它而等待（ADR-0059）。
 
 > **不要用外部 worktree 管理器（例如 Orca）清理 `CODEESTRA_HOME/worktrees`。**
 > 那些目录同时是本仓库的 **git worktree**，外部工具会把它们当成“可回收的 worktree”移进自己的 trash 目录，
@@ -153,7 +169,7 @@ bun run codeestra task cancel   $PROJECT $OCCUPIER <expected-version>
 
 | 现象 | 含义 |
 |---|---|
-| `WAIT_CONFLICT` | 与某个活跃/已预留 Task 的影响重叠未证明安全 |
+| `WAIT_CONFLICT` | 与某个**未完成且声明了同一功能**的 Task 冲突（唯一冲突） |
 | `WAIT_CAPACITY` | 项目级上限或 Adapter 上限已满（`CAPACITY_GLOBAL_LIMIT_REACHED` / `CAPACITY_ADAPTER_SLOT_LIMIT_REACHED`） |
 | `SCHEDULER_DRAINING` | Runtime 正在 draining，不接受新的 slot |
 
@@ -298,7 +314,23 @@ Runtime 恢复应答后重跑 `promotion promote` 会重跑已记录的后置步
 | `scheduler reservations reconcile` 的 `RECOVERY_REQUIRED` | 预留持有者活着或无法核验，**槽位保留**（不发信号、不删资源） |
 
 相关码：`RECONCILE_REQUIRED`（操作被拒绝并要求对账，例如 `TASK_PAUSED` 的 retry、
-`task operation cancel` 的某些路径）。
+`task operation cancel` 的某些路径、**以及 `task purge` 遇到非终态任务却无法证明 provider 已停止**（含
+任务本来就是 `RECOVERY_REQUIRED`）。purge 遇到它时**什么都不删**：先 `task recover` 对账。
+
+### `task purge` 被拒绝
+
+| 码 | 含义 | 怎么办 |
+|---|---|---|
+| `PURGE_CONFIRMATION_REQUIRED` | 请求没带 `confirmed: true`（CLI 缺 `--yes` 时本地就会以退出码 2 拦住，根本不会发出请求） | 确认确实要永久删除，再加 `--yes` |
+| `TASK_INTEGRATED_INTO_DEV` | 这个任务的成果已经作为成员进入了某个 IntegrationBatch，即它的 commit 在 `dev` 里 | 改用 `task archive`（隐藏任务，但保留「谁把这个 commit 带进 dev」的记录）。`SUCCEEDED` 任务都属于这一类 |
+| `TASK_IN_STABLE_PROMOTION` | 这个任务的名字出现在某条稳定提升记录里 | 同上 |
+| `RECONCILE_REQUIRED` | 非终态任务无法被证明已停止，或它本来就是 `RECOVERY_REQUIRED` | 先 `task recover` 按观察对账，再重试 |
+| `PURGE_RESOURCE_NOT_OWNED` | 记录的 worktree / 验证副本 / 分支无法证明属于这个任务（例如分支被别的 worktree 检出、路径是 symlink 或注册不符） | **一行都没删**；看 `reclaim.records` 里的 `reasonCode`，先处理那个资源（如先释放它所在的 worktree） |
+| `CONCURRENT_MODIFICATION` | 版本已变（例如你看到后它又停了/改了） | 重新 `task status` 读当前版本再发一次 |
+| `NOT_FOUND` | 任务不存在（已被别人删掉，或 ID 写错） | 核对 `task list --all`；如果只是想确认自己那条命令是否生效，**用同一个 commandId 重放**会读到收据而不是这个错 |
+
+**不会做但很容易误传的两件事**：purge **不会**删 `domain_events`/`command_receipts`/`operations`/`intents`（事件流里仍能读到它的历史与最后那条 `TaskPurged`），
+且**不代表可恢复**——没有墓碑、没有备份，除了逐表行数与每个被删分支的 `tipCommit` 之外不可找回。
 
 ### Agent 起不来：`PROVIDER_VERSION_UNAVAILABLE`
 
@@ -603,5 +635,5 @@ K1 留下的两条待裁决已由 FOUNDATION-075 收口，因此这份清单**�
 ## 相关阅读
 
 - 每条命令的参数、退出码与码位：[cli-reference.md](./cli-reference.md)
-- 领域概念（为什么 `UNKNOWN` 不是 `SAFE`、为什么 Task 验证 ≠ 集成验证）：[concepts.md](./concepts.md)
+- 领域概念（为什么 `UNKNOWN` 不代表“无冲突”、为什么 Task 验证 ≠ 集成验证）：[concepts.md](./concepts.md)
 - 完整流程：[workflow.md](./workflow.md)

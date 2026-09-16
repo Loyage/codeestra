@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  createFixtureTaskForExplicitStart,
   reclaimTestResources,
   registerTemporaryDirectory,
   runCli,
@@ -70,12 +71,22 @@ async function trustedProject(): Promise<{ environment: Record<string, string>; 
   return { environment, projectId: projects[0]?.id as string };
 }
 
+/**
+ * One READY Task that nothing has started. ADR-0059 starts an undeclared Task the moment it is
+ * submitted, so the fixture is held by a real feature conflict instead: these tests are about
+ * `task cancel`/`task archive` on a Task that has not run yet.
+ */
 async function submittedTask(environment: Record<string, string>, projectId: string): Promise<TaskPayload> {
-  const created = JSON.parse((await cli(['task', 'create', projectId, 'Do a thing'],
-    environment)).stdout) as TaskPayload;
-  const submitted = await cli(['task', 'submit', projectId, created.id, '0'], environment);
-  expect(submitted.exitCode).toBe(0);
-  return { ...created, state: 'READY', version: 1 };
+  await cli(['stop'], environment);
+  const ready = await createFixtureTaskForExplicitStart({
+    home: environment.CODEESTRA_HOME as string, environment, projectId,
+    specification: 'Do a thing',
+  });
+  const status = await cli(['task', 'status', projectId, ready.taskId], environment);
+  expect(status.exitCode).toBe(0);
+  const payload = JSON.parse(status.stdout) as { readonly task: TaskPayload };
+  expect(payload.task.state).toBe('READY');
+  return payload.task;
 }
 
 describe('codeestra task control', () => {
@@ -108,13 +119,15 @@ describe('codeestra task control', () => {
       expect(archived.exitCode).toBe(0);
       expect(JSON.parse(archived.stdout)).toMatchObject({ state: 'READY', archived: true });
 
+      // The fixture also holds an unfinished peer Task (that peer is what keeps this one from being
+      // started), so the assertions are about this Task's own row rather than about the list length.
       const list = JSON.parse((await cli(['task', 'list', projectId], environment)).stdout) as
         readonly TaskPayload[];
-      expect(list).toHaveLength(0);
+      expect(list.filter((entry) => entry.id === task.id)).toHaveLength(0);
       const all = JSON.parse((await cli(['task', 'list', projectId, '--all'], environment)).stdout) as
         readonly TaskPayload[];
-      expect(all.map((entry) => entry.id)).toEqual([task.id]);
-      expect(all[0]?.archivedAt).not.toBeNull();
+      const archivedRow = all.find((entry) => entry.id === task.id);
+      expect(archivedRow?.archivedAt).not.toBeNull();
 
       // The archived Task is still readable by ID, and unarchive restores it.
       const status = JSON.parse((await cli(['task', 'status', projectId, task.id],
@@ -125,7 +138,7 @@ describe('codeestra task control', () => {
       expect(JSON.parse(unarchived.stdout)).toMatchObject({ archived: false });
       const restored = JSON.parse((await cli(['task', 'list', projectId], environment)).stdout) as
         readonly TaskPayload[];
-      expect(restored.map((entry) => entry.id)).toEqual([task.id]);
+      expect(restored.filter((entry) => entry.id === task.id)).toHaveLength(1);
     } finally {
       await cli(['stop'], environment);
     }
@@ -140,7 +153,7 @@ describe('codeestra task control', () => {
       expect(stale.stderr).toContain('CONCURRENT_MODIFICATION');
       const list = JSON.parse((await cli(['task', 'list', projectId], environment)).stdout) as
         readonly TaskPayload[];
-      expect(list).toHaveLength(1);
+      expect(list.find((entry) => entry.id === task.id)?.state).toBe('READY');
     } finally {
       await cli(['stop'], environment);
     }

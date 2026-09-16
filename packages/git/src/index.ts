@@ -89,6 +89,8 @@ export type {
   OwnedWorktreeRemovalOutcome,
   OwnedWorktreeState,
 } from './reclaim.js';
+export { deleteOwnedTaskBranch } from './purge.js';
+export type { OwnedBranchRemoval } from './purge.js';
 export {
   inspectOwnedWorktreeRebuild,
   inspectTaskBranch,

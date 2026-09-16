@@ -1164,13 +1164,16 @@ export class ScheduleService {
   // -------------------------------------------------------------------------------------------
 
   /**
-   * Assesses one candidate against the active/reserved set through the analyzer service, and fills
-   * the one gap the analyzer's observational model leaves: a candidate that has never had a worktree
-   * has no observed change set, so its snapshot is derived from an *empty* observation instead of
-   * being reported as unavailable. That distinction matters — "this Task has not changed anything
-   * yet" is a fact, while "this Task's change set cannot be read" is `MISSING_IMPACT_SNAPSHOT` and
-   * stays `UNKNOWN`. The residual risk of an empty prediction is the one `scheduler.md` §4 names and
-   * is handled there (growth detection), not hidden here.
+   * Assesses one candidate through the analyzer service.
+   *
+   * Under ADR-0059 the verdict is made of **declarations**: the candidate's own features against the
+   * project's unfinished Tasks that declared one (`listFeatureConflictPeers`). The observed change set
+   * is still derived — it is what the reservation path rechecks and what the explanation shows — but
+   * it no longer decides anything, and a candidate with no worktree is therefore judged exactly like
+   * any other instead of being reported as `UNKNOWN`.
+   *
+   * `activeRefs` (the Task's resource-holding occupancy) is kept for the occupancy projections, which
+   * answer a different question: "who is holding the machine", not "whose declaration overlaps mine".
    */
   async #assess(
     project: TrustedProject,
@@ -1210,38 +1213,33 @@ export class ScheduleService {
           + ' could be derived';
       }
     }
-    const peers = await this.#refreshSubjects(project, activeRefs);
-    if (candidateSnapshot === null) {
-      return this.#unavailableAssessment({
-        task,
-        activeRefs,
-        activeSubjects: peers.subjects,
-        baseCommit: candidateRef?.workspaceBaseCommit ?? '',
-        detail: unavailableDetail
-          ?? `${task.id} holds a worktree but no ImpactSnapshot could be derived from it, so no`
-            + ' overlap with it can be excluded',
-      });
-    }
+    const peers = this.#featureSubjects(project, task.id);
     const candidateSubject: ImpactSubject = {
       taskId: task.id,
       currentRevisionId: task.currentRevision.id,
-      snapshot: toDomainSnapshot(candidateSnapshot),
-      observedFiles: candidateSnapshot.files,
+      features: task.currentRevision.features,
+      taskState: task.state,
+      archived: task.archivedAt !== null,
+      snapshot: candidateSnapshot === null ? null : toDomainSnapshot(candidateSnapshot),
+      observedFiles: candidateSnapshot?.files ?? [],
+      ...(unavailableDetail === null ? {} : { unavailableDetail }),
     };
     const context: ImpactAssessmentContext = {
-      baseCommit: candidateSnapshot.baseCommit,
-      policyVersion: candidateSnapshot.policyVersion,
-      analyzerVersion: candidateSnapshot.analyzerVersion,
+      baseCommit: candidateSnapshot?.baseCommit ?? candidateRef?.workspaceBaseCommit ?? '',
+      policyVersion: candidateSnapshot?.policyVersion ?? 'unavailable',
+      analyzerVersion: impactAnalyzerVersion,
     };
     const assessment = assessCandidate({
       candidate: candidateSubject, active: peers.subjects, context,
     });
     // The pair-wise audit row of the analyzer's own contract: one append-only row per compared pair,
-    // keyed by the two snapshots. A pair whose peer has no snapshot is already reported as
-    // `MISSING_IMPACT_SNAPSHOT` in the verdict and has no snapshot to key a row by.
+    // keyed by the two snapshots. It is deliberately partial and must not be read as "an absent row
+    // means no conflict": the **`TaskWaitingForConflict`/`TaskStarted` event** is the record of every
+    // decision, and this table adds a durable copy only for pairs whose two revisions both have an
+    // observable snapshot.
     for (const peer of peers.subjects) {
       const peerSnapshot = peers.snapshots.get(peer.taskId) ?? null;
-      if (peer.snapshot === null || peerSnapshot === null) continue;
+      if (candidateSnapshot === null || peerSnapshot === null) continue;
       const pair = assessCandidate({ candidate: candidateSubject, active: [peer], context });
       try {
         this.#storage.recordImpactAssessment({
@@ -1272,17 +1270,17 @@ export class ScheduleService {
         verdict: assessment.verdict,
         reasonCodes: assessment.reasonCodes,
         revisionId: task.currentRevision.id,
-        baseCommit: candidateSnapshot.baseCommit,
-        analyzerVersion: candidateSnapshot.analyzerVersion,
-        policyVersion: candidateSnapshot.policyVersion,
-        candidateSnapshotId: candidateSnapshot.id,
-        candidateComplete: candidateSnapshot.complete,
-        candidateIncompleteReasons: candidateSnapshot.incompleteReasons,
+        baseCommit: context.baseCommit,
+        analyzerVersion: context.analyzerVersion,
+        policyVersion: context.policyVersion,
+        candidateSnapshotId: candidateSnapshot?.id ?? null,
+        candidateComplete: candidateSnapshot?.complete ?? false,
+        candidateIncompleteReasons: candidateSnapshot?.incompleteReasons ?? Object.freeze([]),
         comparedTaskIds: assessment.comparedTaskIds,
         activeTaskIds: activeRefs.map((ref) => ref.taskId),
         explanation,
         occupiers: occupierViews(activeRefs,
-          (taskId) => (peers.snapshots.get(taskId) ?? null) !== null),
+          (taskId) => this.#newestSnapshot(project.id, taskId) !== null),
       },
       verdict: assessment.verdict,
       reasonCodes: assessment.reasonCodes,
@@ -1296,105 +1294,31 @@ export class ScheduleService {
   }
 
   /**
-   * Refreshes every active Task's *observed* impact and returns them as analyzer subjects. Refreshing
-   * is what keeps a verdict honest: a peer whose diff has grown is compared by what its worktree shows
-   * now, not by what it showed when the Task started.
+   * The Task's conflict peers as analyzer subjects: the project's unfinished, non-archived Tasks that
+   * declared at least one feature (ADR-0059). The newest *recorded* snapshot is attached when one
+   * exists, purely as evidence — it is not derived here, because the verdict does not need it and
+   * deriving one per peer on every tick was the most expensive part of a scheduling pass.
    */
-  async #refreshSubjects(
-    project: TrustedProject,
-    activeRefs: readonly ImpactActiveTaskRef[],
-  ): Promise<{
+  #featureSubjects(project: TrustedProject, candidateTaskId: string): {
     readonly subjects: readonly ImpactSubject[];
     readonly snapshots: Map<string, ImpactSnapshotRecord | null>;
-  }> {
+  } {
     const snapshots = new Map<string, ImpactSnapshotRecord | null>();
     const subjects: ImpactSubject[] = [];
-    for (const ref of activeRefs) {
-      try {
-        await inspectTaskImpact({
-          storage: this.#storage,
-          projectId: project.id,
-          taskId: ref.taskId,
-          now: this.#now(),
-        });
-      } catch (error) {
-        this.#logger('the observed impact of an active Task could not be refreshed', {
-          taskId: ref.taskId, reason: error instanceof Error ? error.message : String(error),
-        });
-      }
-      const snapshot = this.#newestSnapshot(project.id, ref.taskId);
-      snapshots.set(ref.taskId, snapshot);
+    for (const peer of this.#storage.listFeatureConflictPeers(project.id, candidateTaskId)) {
+      const snapshot = this.#newestSnapshot(project.id, peer.taskId);
+      snapshots.set(peer.taskId, snapshot);
       subjects.push({
-        taskId: ref.taskId,
-        currentRevisionId: ref.revisionId,
+        taskId: peer.taskId,
+        currentRevisionId: peer.revisionId,
+        features: peer.features,
+        taskState: peer.taskState,
+        archived: peer.archived,
         snapshot: snapshot === null ? null : toDomainSnapshot(snapshot),
         observedFiles: snapshot?.files ?? [],
-        ...(snapshot === null
-          ? { unavailableDetail: `${ref.taskId} holds a resource but has no recorded`
-            + ' ImpactSnapshot, so no overlap with it can be excluded' }
-          : {}),
       });
     }
     return { subjects: Object.freeze(subjects), snapshots };
-  }
-
-  /** `UNKNOWN`/`MISSING_IMPACT_SNAPSHOT`: the candidate's own impact is not available at all. */
-  #unavailableAssessment(input: {
-    readonly task: TaskSummary;
-    readonly activeRefs: readonly ImpactActiveTaskRef[];
-    readonly activeSubjects: readonly ImpactSubject[];
-    readonly baseCommit: string;
-    readonly detail: string;
-  }): AssessmentFacts {
-    const assessment: ConflictAssessment = {
-      verdict: 'UNKNOWN',
-      reasonCodes: Object.freeze(['MISSING_IMPACT_SNAPSHOT'] as ImpactReasonCode[]),
-      candidateTaskId: input.task.id,
-      candidateRevisionId: input.task.currentRevision.id,
-      candidateChangeFingerprint: preStartChangeFingerprint,
-      candidateComplete: false,
-      candidateIncompleteReasons: Object.freeze([]),
-      comparedTaskIds: Object.freeze(input.activeRefs.map((ref) => ref.taskId)),
-      hits: Object.freeze([]),
-      safePairs: Object.freeze([]),
-      evidence: Object.freeze([input.detail]),
-    };
-    return {
-      view: {
-        verdict: 'UNKNOWN',
-        reasonCodes: assessment.reasonCodes,
-        revisionId: input.task.currentRevision.id,
-        baseCommit: input.baseCommit,
-        analyzerVersion: impactAnalyzerVersion,
-        policyVersion: 'unavailable',
-        candidateSnapshotId: null,
-        candidateComplete: false,
-        candidateIncompleteReasons: Object.freeze([]),
-        comparedTaskIds: assessment.comparedTaskIds,
-        activeTaskIds: input.activeRefs.map((ref) => ref.taskId),
-        explanation: explainAssessment(assessment),
-        occupiers: occupierViews(input.activeRefs,
-          (taskId) => (input.activeSubjects.find((subject) => subject.taskId === taskId)?.snapshot
-            ?? null) !== null),
-      },
-      verdict: 'UNKNOWN',
-      reasonCodes: assessment.reasonCodes,
-      hits: assessment.hits,
-      explanation: explainAssessment(assessment),
-      candidateSubject: {
-        taskId: input.task.id,
-        currentRevisionId: input.task.currentRevision.id,
-        snapshot: null,
-        unavailableDetail: input.detail,
-      },
-      activeSubjects: input.activeSubjects,
-      context: {
-        baseCommit: input.activeSubjects[0]?.snapshot?.baseCommit ?? input.baseCommit,
-        policyVersion: input.activeSubjects[0]?.snapshot?.policyVersion ?? 'unavailable',
-        analyzerVersion: impactAnalyzerVersion,
-      },
-      activeTaskIds: input.activeRefs.map((ref) => ref.taskId),
-    };
   }
 
   /**
@@ -1734,18 +1658,29 @@ export class ScheduleService {
       const after = current;
       const added = after.files.filter((path) => !before.files.includes(path));
       const removed = before.files.filter((path) => !after.files.includes(path));
+      // The verdict here is decided by declarations (ADR-0059), so a *grown diff* cannot turn a
+      // SAFE pair into a conflict on its own: what this pass can still find is a peer whose
+      // declaration now overlaps this Task's, which is a real reason to stop one of them.
       const peers = input.activeRefs.filter((peer) => peer.taskId !== ref.taskId);
+      const task = this.#storage.getTask(input.project.id, ref.taskId);
       const candidateSubject: ImpactSubject = {
         taskId: ref.taskId,
         currentRevisionId: ref.revisionId,
+        features: task?.currentRevision.features ?? Object.freeze([]),
+        taskState: task?.state ?? ref.taskState,
+        archived: task?.archivedAt !== null && task?.archivedAt !== undefined,
         snapshot: toDomainSnapshot(after),
         observedFiles: after.files,
       };
       const activeSubjects: ImpactSubject[] = peers.map((peer) => {
         const snapshot = snapshots.get(peer.taskId) ?? null;
+        const peerTask = this.#storage.getTask(input.project.id, peer.taskId);
         return {
           taskId: peer.taskId,
           currentRevisionId: peer.revisionId,
+          features: peerTask?.currentRevision.features ?? Object.freeze([]),
+          taskState: peerTask?.state ?? peer.taskState,
+          archived: peerTask !== null && peerTask.archivedAt !== null,
           snapshot: snapshot === null ? null : toDomainSnapshot(snapshot),
           observedFiles: snapshot?.files ?? [],
           ...(snapshot === null
@@ -2172,6 +2107,7 @@ function toHitView(hit: ImpactHit): ScheduleConflictHitView {
     directories: hit.directories,
     modules: hit.modules,
     globalResources: hit.globalResources,
+    features: hit.features,
     relation: hit.relation,
     detail: hit.detail,
   };

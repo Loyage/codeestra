@@ -190,7 +190,7 @@ async function waitFor(
   throw new Error(`Timed out waiting for: ${message}`);
 }
 
-/** Creates, submits and runs one Task through the CLI only, then waits for the Session to exit. */
+/** Creates and submits one Task through the CLI, then waits for its automatically started Session. */
 async function executedTask(
   value: { readonly environment: Record<string, string>; readonly projectId: string },
 ): Promise<string> {
@@ -198,9 +198,8 @@ async function executedTask(
   const created = JSON.parse((await cli(['task', 'create', projectId, 'Ask the user something'],
     environment)).stdout) as { readonly id: string };
   const taskId = created.id;
+  // ADR-0059 makes an undeclared Task SAFE, so submit itself starts the Session.
   expect((await cli(['task', 'submit', projectId, taskId, '0'], environment)).exitCode).toBe(0);
-  const ran = await cli(['task', 'run', projectId, taskId, '1'], environment);
-  expect(ran.exitCode).toBe(0);
   await waitFor(async () => {
     const status = JSON.parse((await cli(['task', 'status', projectId, taskId, '--json'],
       environment)).stdout) as TaskStatusPayload;
