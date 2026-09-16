@@ -18,7 +18,7 @@
 | 源 | 触发 | Guard / 目标 |
 |---|---|---|
 | DRAFT | submit | 规格有效；依赖未满足→BLOCKED，否则 READY |
-| BLOCKED | dependencies satisfied | 上游指定结果已入 dev 且项目**当前 Task 基线 ref**（有 dev clone=该 clone 的 `dev`；managed=项目文件夹当前检出的分支）可达→READY |
+| BLOCKED | dependencies satisfied | 上游指定修订的结果 commit 对项目**当前 Task 基线 ref**（项目文件夹当前检出的分支）可达→READY；由 scheduling pass 重新评估（ADR-0064，见 §4） |
 | READY | dependency invalidated | →BLOCKED |
 | READY | schedule | 当前 revision、依赖、冲突、容量、workspace 预留均通过→RUNNING（含 Execution 准备过程） |
 | RUNNING | agent needs input | 真实 AttentionRequest 已建立→WAITING_FOR_USER |
@@ -33,9 +33,8 @@
 | RUNNING / PAUSING / PAUSED / WAITING_FOR_USER | execution failed | 明确失败且进程已静止→FAILED |
 | RUNNING / PAUSING / PAUSED / WAITING_FOR_USER / CANCELLING | ownership/liveness uncertain | 保持资源隔离→RECOVERY_REQUIRED |
 | FAILED | user retry | 旧执行静止、依赖重验→READY 或 BLOCKED |
-| EXECUTED | revision added | 失效旧证据和未提升批次；旧执行静止→READY 或 BLOCKED |
-| EXECUTED | integrated to dev | 当前 revision 的固定候选经独立集成验证成功进入 dev→SUCCEEDED |
-| DRAFT / BLOCKED / READY / EXECUTED / FAILED | cancel | 没有活动写入或正在提升的竞争操作→CANCELLED |
+| EXECUTED | revision added | 失效旧证据；旧执行静止→READY 或 BLOCKED |
+| DRAFT / BLOCKED / READY / EXECUTED / FAILED | cancel | 没有活动写入的竞争操作→CANCELLED |
 | RUNNING / PAUSING / PAUSED / WAITING_FOR_USER | cancel | →CANCELLING，协作中断 |
 | CANCELLING | confirmed stopped | →CANCELLED，保留 workspace |
 | RECOVERY_REQUIRED | reconcile | 依据真实事实回到已证实状态；必须审计，不能直接释放资源。命令面是 `task recover <project> <task> <expected-version>`（ADR-0055）：只读事实（记录的 provider 身份按真实进程表 + start token + 后代核对、记录的后代快照、workspace 路径是否仍在磁盘），**只有能证明 provider 已消失**才收口为 `FAILED`（同时 `Execution → FAILED`、`resource_held=0`、Session `→ EXITED`、workspace `→ RETAINED`）；存活 / 后代存活 / 无法核验 / 无身份一律**拒绝并保持占用**（退出码 1、零行变化）。收口**不主张工作树静止**（`quiescenceProven:false`、`signalsSent:0`），不发信号、不删工作树 |
@@ -46,14 +45,12 @@ Task Verification：`NOT_RUN → QUEUED → RUNNING → PASSED | FAILED | ERROR 
 
 `CANCELLED` 是一等终态（ADR-0027，schema v17 重建 `verification_runs` 的 CHECK，`integration_verification_runs` 未变）：与其它终态一样**必须**带 `ended_at` 与 `outcome_code`，因此「未确认进程组静止」仍写不成终态；确认静止后落 `CANCELLED/CANCELLED_BY_USER`。被取消的副本与失败现场同类，仍只经 ADR-0021 的 `reclaim` 显式回收。
 
-Phase 1 判定（ADR-0006）：全部命令 exit 0 且副本 tracked 内容未变→`PASSED`；命令非零退出或无法 spawn→`FAILED/COMMAND_FAILED`（不继续后续命令）；超时→`ERROR/COMMAND_TIMEOUT`；tracked 修改或 HEAD 移动→`ERROR/TREE_MUTATED`（不覆盖已判定的 `FAILED`）；副本无法创建→`ERROR/WORKTREE_FAILED`；Runtime 重启→`ERROR/RUNTIME_RESTARTED` 并保留副本路径。终态一旦写入，重放 completion 不改变结论。Task 自身状态不因验证而变成 SUCCEEDED：`PASSED` 只是当前 revision/commit 的 Task scope 证据，仍须经 IntegrationBatch 进入 `dev`。
+Phase 1 判定（ADR-0006）：全部命令 exit 0 且副本 tracked 内容未变→`PASSED`；命令非零退出或无法 spawn→`FAILED/COMMAND_FAILED`（不继续后续命令）；超时→`ERROR/COMMAND_TIMEOUT`；tracked 修改或 HEAD 移动→`ERROR/TREE_MUTATED`（不覆盖已判定的 `FAILED`）；副本无法创建→`ERROR/WORKTREE_FAILED`；Runtime 重启→`ERROR/RUNTIME_RESTARTED` 并保留副本路径。终态一旦写入，重放 completion 不改变结论。Task 自身状态不因验证而变成 SUCCEEDED：`PASSED` 只是当前 revision/commit 的 Task scope 证据。
 
-Task Integration summary：`NOT_READY → ELIGIBLE → BATCHED → INTEGRATED`；失败/修订产生 `NEEDS_ATTENTION / STALE`。这些是查询投影，不是替代 Batch 的权威状态。
+Task worktree 基线（ADR-0064）：新 Task 的 workspace 从**项目文件夹建 workspace 时当前检出的分支**的当前 OID 建立，ref 与 commit 一起固定进 `workspaces.base_ref`/`base_commit`；`HEAD` detached 时以 `TASK_BASE_REF_UNRESOLVED` 拒绝，不静默回退到其他分支。已有 workspace 不回改基线。
 
-Task worktree 基线（ADR-0009/ADR-0018）：新 Task 的 workspace 从 `projects.dev_ref`（默认 `refs/heads/dev`）的当前 OID 建立；仓库没有 `dev` 时 `project.trust` 以 `DEV_REF_MISSING` 拒绝，不静默回退到其他分支。已有 workspace 不回改基线。
-
-Task worktree 回收（ADR-0021/ADR-0062）：只有 `reclaim plan/apply` 与「集成成功后的自动回收」两条删除路径，共享同一条归属决策；
-自动回收在 `SUCCEEDED` 产生后对该批每个成员执行，`settings auto-reclaim off` 可关闭。两者都不删 branch，失败现场默认保留。
+Task worktree 回收（ADR-0021）：只有显式 `reclaim plan/apply/records` 一条删除路径（`INTEGRATION_WORKTREE` 取值保留在 append-only 账本词汇表里，但 Runtime 不再产生该类候选）；
+它不删 branch，失败现场默认保留。ADR-0062 的「集成成功后自动回收」随 ADR-0064 删除集成而移除，没有自动路径。
 
 ## 2. Execution
 
@@ -148,63 +145,27 @@ RECORDED ──(存在活会话且通道为 SUPPORTED)──→ DELIVERED       
 - 启动交付 fail-closed：Task 有 guidance 记录却拿不到 Runtime home 或 artifact 核验不过（绝对路径/普通文件/digest/字节数/UTF-8）
   时以 `GUIDANCE_CONTEXT_UNAVAILABLE` **拒绝启动**，不静默少注入；**零 guidance 时 argv/入参逐字节不变**。
 
-## 4. IntegrationBatch / StableBranchPromotion
+## 4. IntegrationBatch / StableBranchPromotion（已删除，ADR-0064）
 
-实现状态（ADR-0018 / ADR-0053 / ADR-0022）：**已实现多成员合入**（`task integrate` 单成员简写 +
-`task integration create|integrate|list|get|cancel`，CLI + 同一命令面 + UI 读取同一记录），
-**也已实现 `StableBranchPromotion` 段**（`promotion prepare/approve/promote/abandon/get/list`，ADR-0022/FOUNDATION-042，见本节末）。
-IntegrationBatch 的状态为 `CREATED → PREPARING → VERIFYING → INTEGRATING_DEV → INTEGRATED`，另有
-`CONFLICTED / FAILED / RECOVERY_REQUIRED` 与两个批级终态 `STALE / CANCELLED`。
-**批级 `STALE`、批级 `CANCELLED` 与多成员批次已由 FOUNDATION-081（ADR-0053，schema v30）实现**：
-一个批次显式组成**多个成员**（各自固定 revision/结果提交/Execution），顺序合并后由**一次**独立集成验证覆盖整批，
-`PASSED` 才推进 `dev`。
+这一整段曾描述「Task 成果进入 `dev`」与「`dev` 提升 `main`」两层状态机。**ADR-0064 把它从产品中删除**：
+命令（`task integrate`、`task integration create|integrate|list|get|cancel`、
+`promotion prepare|approve|promote|restart.record|abandon|get|list`、
+`promotion full-suite run|list`）、服务（`integration-service`、`promotion-service`、
+`promotion-evidence-service`）、领域表（`integration_batches(_items)`、`integration_verification_runs`、
+`stable_promotions(_members)`、`dev_full_suite_evidence`）与对应状态全部不再存在（schema **v35**）。
 
-### 4.1 批次与成员状态
+它留下的三个后果，写在别处而不是这里的状态机里：
 
-批次：
+1. **成果停在 `refs/heads/task/<task-id>`**（ADR-0005）。是否合并由用户决定，产品不合并、不推送、不记账。
+2. **依赖释放**改由「上游修订自己的 result commit 是否对项目当前 Task 基线 ref 可达」判定；原因码是有界枚举
+   `UPSTREAM_RESULT_MISSING` / `BASE_REF_MISSING` / `BASE_REF_UNREADABLE` / `NOT_REACHABLE_FROM_BASE`
+   （见 §1 的 `BLOCKED → READY` 行）。
+3. **`BLOCKED → READY` 的触发者**改为 scheduling pass：`schedule-service.#reconcileBlockedTasks` 在挑选候选前
+   对每个 `BLOCKED` 任务调用 `reconcileTaskDependencyState`。旧的 `reconcileDependentTasks`（由集成命令触发）
+   已删除；`task.depends.list` / `task schedule status` 只读，所以下游状态最多滞后一个 tick。
 
-| 状态 | 含义与守卫 |
-|---|---|
-| `CREATED` | 已固定每个成员的 (revision, 结果提交, Execution)、整批 `dev` 基线（`dev_ref`+`dev_commit`）与策略摘要；**不碰 Git**。成员全部校验通过（`EXECUTED` + 版本匹配 + 同 revision/commit 的 `PASSED` Task 验证）才写入，一个成员不合法即整体拒绝。覆盖同一成员且未结算的既有批次使新批次被拒（`INTEGRATION_IN_PROGRESS`） |
-| `PREPARING` | 在 Runtime 数据目录的 detached integration worktree 中**按 `task_id` 顺序**逐个合并成员；第 i 个成员的基线是前 i-1 个的结果。能 ff 就 `--ff-only`，否则 `--no-ff`（第一父必须是该成员合并前的基线，候选必须是其后代）；冲突→`CONFLICTED`，其他错误→`FAILED`。批次级 `merge_strategy`/`merged_commit` 取最后一个成员的那一步，此时 `dev` 仍未被触及 |
-| `VERIFYING` | 在最终 `merged_commit` 的 detached 副本上运行**一次**独立集成验证（独立实体 `integration_verification_runs`，`UNIQUE(batch_id)`；绑定整批成员、固定 dev 基线、policy digest/main commit）；失败→`FAILED` |
-| `INTEGRATING_DEV` | 已核验集成验证 `PASSED` 后记录，随后把 `dev` 从记录基线前移到 `merged_commit`（ADR-0056：读 ref 比对基线 → 核验 dev clone 自己的检出的三项前置 → `git merge --ff-only` 把 ref、索引与工作区一起前移 → 核验 ref、HEAD 与 `status` 为空）。该状态存在的原因是：崩溃可能发生在 ref 写入前后，只有拿记录的 `merged_commit` 与 ref 实际值对比才能判定 |
-| `INTEGRATED` | ref 已更新才写入 `integrated_commit`，此时每个成员 Task 才 `EXECUTED → SUCCEEDED`。成功后才尝试 `git worktree remove`（不加 force） |
-| `STALE` | 批次固定的证据不再是当前事实：某成员证据移动（`MEMBER_EVIDENCE_MOVED`）或 `dev` 基线在推进时已移动（`DEV_REF_MOVED`）。**不合并、不推进**，成员状态保持原样，成员与 Task 不被改写；终态，不阻塞新批次 |
-| `CANCELLED` | 用户结束一个**记录可证明无副作用**的批次（仍 `CREATED` 且 `worktree_path`/`merge_strategy`/`merged_commit`/`verification_id` 全为空）。取消在 FULL 与 STRICT 下都零确认；取消不成立即见下 |
-| `CONFLICTED` / `FAILED` | 合并冲突 / 其他失败（含集成验证失败）。`dev` 未被本批次改写，现场保留 |
-| `RECOVERY_REQUIRED` | 重启中断，或**取消请求无法确认无副作用**（`RECONCILE_REQUIRED`）。终态但未收口：继续占用其成员直到人工处理，新批次被拒 |
-
-成员（`integration_batch_items`，主键 `(batch_id,task_id)`）：
-
-- `PREPARED`：已固定、尚未合并。**终态批次里仍为 `PREPARED` 的成员就是「未处理」**
-  （没有单独的 `SKIPPED` 取值：批次终态 + 成员状态已经唯一确定了这一点）。
-- `MERGED`：已进入本批次的集成树（**不等于**进入 `dev`）。
-- `INTEGRATED`：随批次写入 `integrated_commit`，即已在 `dev` 里。
-- `FAILED` / `CONFLICTED`：该成员自己的合并/证据失败。
-
-**部分失败如实**：只有实际失败的成员被写成 `FAILED`/`CONFLICTED`；已合并的成员保持 `MERGED`，未尝试的保持
-`PREPARED`。批次级失败（验证失败、检查失败）不指向任何成员，成员保持 `MERGED`。不存在「部分成功被写成整批成功」
-或反向的路径。
-
-- 恢复：未完成集成验证→`ERROR(RUNTIME_RESTARTED)` 并保留副本；`CREATED/PREPARING/VERIFYING`→
-  `RECOVERY_REQUIRED`（明确 dev 未被推进）；`INTEGRATING_DEV`→ref 等于 `merged_commit` 则核验后补记 `INTEGRATED`
-  （不二次写 ref，且**每个成员**都在同一事务里转为 `INTEGRATED`/`SUCCEEDED`），否则
-  `RECOVERY_REQUIRED/DEV_REF_OBSERVED` 并写明观察值。`RECOVERY_REQUIRED` 阻止新尝试直到人工处理；不自动部分集成。
-- 幂等：`task integration integrate` 对已终态批次返回记录的结论（`alreadyCompleted`），不重复合并、不重复推进 `dev`；
-  同一 command id 的组成请求返回它已保留的那个批次。
-
-StableBranchPromotion：`CREATED → AWAITING_APPROVAL → PROMOTING → RESTARTING → SUCCEEDED`（ADR-0047 后；早期文中的 `VERIFYING` 不是一个状态——
-全量证据在 `prepare`/`promote` 时同步核对，不存在持久的 VERIFYING 停留）。
-
-- 固定 expected dev SHA、expected main SHA 与独立验证证据；验证失败→FAILED。
-- **提升前的全量证据是一等对象**（ADR-0038/ADR-0039，schema v25 的 `dev_full_suite_evidence`）：`promotion full-suite run <project-id> --dev-commit <full-sha>` 在一个 detached 副本里对**精确候选 SHA** 跑项目 `main` ref 上的固定策略，由 Runtime 自己观测结果（客户端不能提交证据），并把证据三重绑定在候选 commit、该 ref 的策略 digest、该 commit 的 lockfile digest 上。`prepare`/`approve`/`promote` 都要求**正是这个 SHA** 的一次 `PASSED` 运行且三个绑定均未变；main 上的策略被改、候选内的 lockfile 变了、或出现更新的失败运行，都会使证据 `STALE` 并以 `DEV_FULL_SUITE_EVIDENCE_STALE` 拒绝（退出码 1）。
-- AWAITING_APPROVAL（仅 STRICT）：用户批准精确 dev/main/verification 三元组后→PROMOTING；dev、main、远端 `dev` 或证据变化→STALE。FULL 下固定三元组后直接进入 PROMOTING，不停留此状态。
-- PROMOTING（ADR-0047 D03）：从项目记录的 dev clone 把**固定候选 OID** push 到远端 `dev`（从不 `--force`），再 `git ls-remote` 读回核对；相等才写入 `remote_dev_commit` 并进入此状态。因此 `PROMOTING` 意味着**「已推送、等待拉取」**，**不再**意味着 main 已变。读回不等→不记已推送（`REMOTE_DEV_READBACK_MISMATCH`）；push 被拒或远端不可达→记录保持可重试；远端 `dev` 移到非候选 SHA→`STALE` 且不移动任何 ref。
-- PROMOTING → RESTARTING：在 main 检出（用户自己执行 `git fetch` + `git merge --ff-only origin/dev`）观察到 `main` 已在候选上，且该候选确实是 expected main 的后代（fast-forward 而非 merge/reset）；此时记录重启计划与「读出 pull 的那个 boot」。
-- RESTARTING：在 main 检出执行 CLI stop，再执行 status 拉起并检查 Runtime；成功响应→推回远端 `main` 并读回核对→SUCCEEDED。失败→FAILED（不推回、不擅自回滚）；重启已记录但推回失败→保持 `RESTARTING`（投影 `MAIN_PUSH_PENDING`）并可只重试推回，不重复停 Runtime。
-- 恢复：`PROMOTING` + `main` 仍在 expected → 报 `AWAITING_PULL` 并保持记录可续（断网/重启都不是失败）；`main` 已在候选 → `RECOVERY_REQUIRED/RESTART_UNPROVEN`（不二次写 ref）；`main` 是别的值 → `RECOVERY_REQUIRED/MAIN_REF_OBSERVED`。
-- FULL 下无显式门禁；STRICT 下批准是唯一显式门禁。重启都是提升后的自动后置步骤，不要求第二次确认；**拉取（fetch + ff-only）是用户的显式步骤**，Runtime 不代替它执行，也不把它当成已完成。
+本仓库自身仍以 `main`/`dev` 两个 clone 开发并把 `dev` 提升到 `main`，但那是仓库约定
+（`AGENTS.md` 的人工四步、`docs/agents/runbook.md`），产品不提供命令、不记账、不校验它。
 
 ## 5. Self Evolution
 
@@ -302,11 +263,8 @@ PENDING → IN_FLIGHT → ACKNOWLEDGED
 |---|---|---|
 | v23 | `tasks.pending_retry_from_execution_id`、`executions.retry_from_execution_id` | §1 的 `FAILED` → user retry 行：`FAILED → READY/BLOCKED` **不是自动的**，只有 `task retry` 写这两列，并产生 `TaskRetryRequested` |
 | v24 | 重建 `reclamation_records`（`source`、`kind='UNREGISTERED_DIRECTORY'`、可空 `task_id`、`outcome='RECOVERY_REQUIRED'`） | 不属于状态迁移：这是 ADR-0021 回收账本能表达「未登记目录」与「归属不可核验」的事实 |
-| v25 | `targeted_test_plans`、`dev_full_suite_evidence`（append-only）、`verification_runs.policy_source/plan_*`、`stable_promotions.full_suite_*` | 见 §4：提升前的全量证据是绑定三元组的一等对象，未完成的运行写不成终态 |
 | v26 | `knowledge_snapshots`、`execution_knowledge_snapshots`（两张 append-only） | 不在状态机里：绑定在 `reserveExecution` 的同一事务内写入，因此「Execution 存在」与「已绑定所用知识」不可分开观察（ADR-0041） |
 | v27 | `agent_configurations.plugin_selection_json` | 不在状态机里：见下节 |
-| —（无 schema 变更） | FOUNDATION-087 / ADR-0056 的 dev 事实来源收口：`projects.dev_repo_path` 成为**必需**，长期 `dev` 分支与全部 Task/集成/回收/提升候选事实都在该 clone 里解析 | §4 的集成推进：不再手写 ref，而是读 ref 比对基线 → 核验 dev clone 自己的检出的三项前置 → `merge --ff-only` 前移 ref+索引+工作区 → 核验「ref、HEAD 与 `status` 为空」；`DEV_CHECKOUT_*` 是拒绝而非新状态；批级 `STALE`（`DEV_REF_MOVED`）与 `INTEGRATING_DEV` 仍照旧 |
-| v29 | `projects.dev_repo_path`、`stable_promotions.dev_repo_path/remote_dev_commit/remote_main_commit/pushed_at/main_pushed_at` | §4：`PROMOTING` 的含义由「main 已变」改为「已 push 到远端 `dev` 且读回核对通过、等待拉取」；三个新事实（本地候选 SHA、读回的远端 `dev` SHA、读回的远端 `main` SHA）把「已推送」与「已拉取」分开，不新增状态 |
 
 **命令组（零确认、`--json`、稳定退出码；全部是同一命令面，UI 不新增语义）**
 

@@ -1,6 +1,6 @@
 # SQLite Schema
 
-状态：逻辑 SQL 设计基线 + 已实现 migration 记录。第 2–6 节是逻辑关系设计（其中若干节已被后续 ADR 修订，见第 8 节各版本的说明）；第 8 节逐版本记录 `packages/storage/src/migration.ts` 中**实际存在**的 migration，当前最新实现为 schema **v34**（ADR-0061 的两半：容量上半 FOUNDATION-096，暂停下半 FOUNDATION-097；v16 永久未使用、v22 未占用）。**schema version 16 永久未使用**，原因见第 8 节。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与第 2–6 节的约束等价，并以第 8 节的实现记录为准。
+状态：逻辑 SQL 设计基线 + 已实现 migration 记录。第 2–6 节是逻辑关系设计（其中若干节已被后续 ADR 修订，见第 8 节各版本的说明）；第 8 节逐版本记录 `packages/storage/src/migration.ts` 中**实际存在**的 migration，当前最新实现为 schema **v35**（ADR-0064 删除 dev clone / 双基线 / 集成 / 稳定提升；v34 是 ADR-0061 的两半：容量上半 FOUNDATION-096，暂停下半 FOUNDATION-097；v16 永久未使用、v22 未占用）。**schema version 16 永久未使用**，原因见第 8 节。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与第 2–6 节的约束等价，并以第 8 节的实现记录为准。
 
 ## 1. 约定
 
@@ -25,8 +25,8 @@ CREATE TABLE projects (
   repo_root TEXT NOT NULL UNIQUE,
   git_common_dir TEXT NOT NULL UNIQUE,
   main_ref TEXT NOT NULL,
-  dev_ref TEXT NOT NULL,               -- schema v1/v2，新 Task worktree 的固定基线（ADR-0009/0018）
-  dev_repo_path TEXT,                  -- schema v29，可空；推送 push 用的第二个 clone（ADR-0047 D05）
+  -- v1/v29 曾有 dev_ref 与 dev_repo_path；ADR-0064（schema v35）把它们删除：
+  -- Task 基线改为「项目文件夹建 workspace 时检出的分支」，记在 workspaces.base_ref/base_commit 上。
   object_format TEXT NOT NULL CHECK (object_format IN ('sha1','sha256')),
   policy_version INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL
@@ -437,6 +437,8 @@ CREATE INDEX verification_subject ON verification_runs(task_id,revision_id,teste
 
 Schema version 1 仅创建 TASK verification 所需列和复合外键，不创建 `integration_batches`、`integration_batch_items`、`stable_branch_promotions`、`stable_promotion_approvals` 或 INTEGRATION scope；Phase 4 migration 引入上述逻辑形态并补做 subject XOR 测试。version 6 已将 Phase 1 实际使用的 TASK scope 重建为带 evidence/policy/operation 列的形态，见第 8 节。
 
+**ADR-0064 起本节描述的集成与提升逻辑对象在实现中已全部删除**（schema v35）：`integration_batches`、`integration_batch_items`、`integration_verification_runs`、`stable_promotions`、`stable_promotion_members`、`dev_full_suite_evidence` 都不存在。下面第 8 节里 v10/v13/v25/v29/v30 各段是**历史记录**，描述当时确实创建过的结构，不代表当前 schema。
+
 ## 6. 操作日志、事件、幂等
 
 ```sql
@@ -566,7 +568,7 @@ CREATE UNIQUE INDEX one_held_execution ON executions(task_id) WHERE resource_hel
 
 `resume_from_execution_id` 记录「这次 Execution 续接了哪个 predecessor 的 provider conversation」；provider resume 总是新建 Execution，而不是复活旧行。
 
-### Phase 4 集成管线（schema version 10，ADR-0018）
+### Phase 4 集成管线（schema version 10，ADR-0018）—— **v35 已删除**
 
 新增持久对象，取代 §5 的逻辑 `integration_batches` / `integration_batch_items`：`projects` 追加 `dev_ref`（默认 `refs/heads/dev`，新 Task worktree 的固定基线）。
 
@@ -619,7 +621,7 @@ CREATE UNIQUE INDEX one_reclamation_record_per_resource
 
 append-only：后来的一次尝试追加新行，从不改写或删除旧行。
 
-### Phase 4 稳定提升（schema version 13，ADR-0022）
+### Phase 4 稳定提升（schema version 13，ADR-0022）—— **v35 已删除**
 
 取代 §5 的逻辑 `stable_branch_promotions` / `stable_promotion_approvals`：
 
@@ -1162,7 +1164,7 @@ CREATE UNIQUE INDEX one_reclamation_record_per_resource
 假归属；`outcome` 增加 `RECOVERY_REQUIRED`，是「无法核验归属」（目录内有活进程、Git 状态不可读、项目未知）的诚实结局。既有行按
 原样复制并标 `REGISTERED`。没有任何外键引用 `reclamation_records`，所以开外键重建是安全的。
 
-### 分层验证证据（schema version 25，ADR-0038 / ADR-0039）
+### 分层验证证据（schema version 25，ADR-0038 / ADR-0039）—— **全量证据部分 v35 已删除**
 
 `verification_runs` 只加四列（不重建），并新增两张表：
 
@@ -1209,7 +1211,7 @@ ALTER TABLE stable_promotions ADD COLUMN approved_full_suite_evidence_id TEXT;
 v27 Agent 插件选择/ADR-0044，v28 `intents.kind` 收窄/ADR-0046，v29 dev clone 与经 GitHub 中转的提升/ADR-0047，
 v30 多成员 IntegrationBatch 的两个终态/ADR-0053）。当前 `phase1SchemaVersion = 30`。
 
-### 经 GitHub 中转的提升与 dev clone（schema version 29，ADR-0047）
+### 经 GitHub 中转的提升与 dev clone（schema version 29，ADR-0047）—— **v35 已删除**
 
 两步纯 `ALTER TABLE ... ADD COLUMN`，**不重建任何表**，因此既有行原样保留（`projects` 的 `CHECK` 只拒绝空字符串，
 「没有 dev clone」与「有 dev clone」都是合法事实）：
@@ -1232,7 +1234,7 @@ ALTER TABLE stable_promotions ADD COLUMN main_pushed_at INTEGER;
 - `phase`（`READY_TO_PUSH` / `AWAITING_PULL` / `RESTART_PENDING` / `MAIN_PUSH_PENDING` / `COMPLETE` / `REFUSED`）不是列，
   而是从 `state` 与 `restart_result_json` 推导的投影：同一事实只有一个来源，不会出现状态机与派生字段互相矛盾。
 
-### 多成员 IntegrationBatch 的批级终态（schema version 30，ADR-0053）
+### 多成员 IntegrationBatch 的批级终态（schema version 30，ADR-0053）—— **v35 已删除**
 
 只加宽 `integration_batches.state` 的 `CHECK`，**不加列、不加表、不改成员状态集合**。`STRICT` 表的 `CHECK`
 不能就地加宽，因此这一步**重建**该表，并按 v28 `intents` 的先例在 `database.ts` 里做前置校验与**行数核对**
@@ -1458,3 +1460,45 @@ CREATE TABLE runtime_pause_targets (
   Bun 的 `exec()` 会吞掉多语句脚本里的 step 错误，只比行数会漏掉「复制之后才失败」的情形。
 - `RECOVERY_REQUIRED` 仍保持全局启动屏障；target 行不因超时、心跳或 Runtime 重启自动删除/改成 `EXITED`。
 - `runtime_pause_targets` 不是 Session 状态来源，不得据它把 Session 写回 ACTIVE/PAUSED；Session/Execution 的重启收敛仍走既有表与 ADR-0028。它的五个业务 ID 刻意是无 FK 的身份快照：`task purge` 删除 Task 聚合后，本 pause epoch 的进程控制/审计事实仍必须保留；purge 前仍须按 ADR-0058 证明 provider 已停止，并把对应 target 如实收口。
+
+### 删除 dev clone / 双基线 / 集成 / 稳定提升（schema version 35，ADR-0064）
+
+用户决策下的**不可逆删除**：把 dev clone（第二个 clone）、长期 `dev` 集成分支、`dev → main` 提升与
+dev 构建通道一起从产品中去掉。`migrate()` 里这一步带 `projects` 行数守卫（Bun 的 `exec()` 会吞掉脚本内的
+step 错误，没有守卫就会在复制失败后照样 DROP），并在整步结束后跑 `PRAGMA foreign_key_check`。
+
+```sql
+-- 1) 历史 workspace 先拿回它当时记录的基线 ref：v33 之前只写在 projects.dev_ref 上。
+UPDATE workspaces SET base_ref = (
+  SELECT p.dev_ref FROM projects p JOIN tasks t ON t.project_id = p.id
+  WHERE t.id = workspaces.task_id
+) WHERE base_ref IS NULL;
+
+-- 2) 重建 projects，去掉 dev_ref 与 dev_repo_path（列上的 CHECK 使 DROP COLUMN 不可用）。
+CREATE TABLE projects_v35 ( ... 同列，去掉 dev_ref / dev_repo_path ... ) STRICT;
+INSERT INTO projects_v35(...) SELECT ... FROM projects;
+DROP TABLE projects;
+ALTER TABLE projects_v35 RENAME TO projects;
+
+-- 3) 集成与提升聚合整体删除（先子表后父表；FK 在迁移期间关闭）。
+DROP TABLE integration_batch_items;
+DROP TABLE integration_verification_runs;
+DROP TABLE integration_batches;
+DROP TABLE stable_promotion_members;
+DROP TABLE stable_promotions;
+DROP TABLE dev_full_suite_evidence;
+```
+
+- **`workspaces.base_ref` 不需要回填成常量**：v33 起的行本来就写了它；更早的行由上面的 `UPDATE` 从
+  `projects.dev_ref` 取回。删掉 `projects.dev_ref` 之后，读基线的路径只剩 `workspaces.base_ref`。
+- **被删除的数据是不可恢复的**：集成批次、独立集成验证与全部提升记录都在本次 DROP 中消失。Task、
+  revision、execution、任务级 `verification_runs`、`workspaces`、`reclamation_records` 与审计事件不受影响。
+- **保留的词汇**：`reclamation_records.kind` 的 `'INTEGRATION_WORKTREE'` 取值**不删除**。账本是 append-only
+  审计，历史行不能被改写，去掉取值需要另一次 schema 变更；Runtime 只是不再产生该类候选（不再创建集成工作树），
+  既有目录落进「未注册目录」处置通道。
+- **不再产生的稳定码**：`DEV_REPO_*`、`DEV_REF_*`、`DEV_CHECKOUT_*`、`TASK_BASE_REF_ALREADY_FIXED` 之外的
+  `projects.dev_ref` 相关码、`TASK_INTEGRATED_INTO_DEV` / `TASK_IN_STABLE_PROMOTION`、
+  `DEV_FULL_SUITE_EVIDENCE_*`。`TASK_BASE_REF_UNRESOLVED` / `TASK_BASE_REF_MISSING` /
+  `TASK_BASE_REF_NOT_A_BRANCH` / `TASK_BASE_REF_ALREADY_FIXED` 保留。
+- 依赖判定的原因码随之改名（同一有界枚举，旧名不再出现）：
+  `UPSTREAM_RESULT_MISSING`、`BASE_REF_MISSING`、`BASE_REF_UNREADABLE`、`NOT_REACHABLE_FROM_BASE`。
