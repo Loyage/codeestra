@@ -1,5 +1,7 @@
 # Repository / Module Structure
 
+> 层级：L1 · 体量 ≈ 4k 字符 · **何时读**：不确定代码放哪、依赖能不能这么引、测试该用什么形态 · 权威来源：仓库实际目录与 `package.json`；本文只解释边界。
+
 ## 1. 目标边界
 
 ```text
@@ -28,16 +30,28 @@ ServiceRegistry、SignalDispatcher、Scheduler、ProcessCoordinator 与 Integrat
 
 ## 2. 当前实际创建范围
 
-当前建立根 workspace、`packages/domain`、`packages/storage`、`packages/contracts`、`packages/git`、含 start-only fake 的 `packages/agent-adapters`，以及最小 `apps/cli` / `apps/runtime` 骨架。不提前创建 Desktop 或 bootstrap package，也不提供空函数冒充运行时。
+```text
+apps/runtime/src/     # 40+ 个服务模块：schedule/capacity/runtime-control/slot-reservation、
+                      # agent-{start,answer,observation,config,plugin-detection,runtime}、
+                      # session-{guidance,handoff,transcript}、terminal、workspace、task-{baseline,control,purge,recovery}、
+                      # verification、revision-delivery、impact-analysis、knowledge、reclaim、result-commit、
+                      # service-kernel、event-{delivery,subscription}、operation、lifecycle、main
+apps/cli/src/         # 命令面（含 usage）
+apps/ui/              # 暂停的 React/Vite 源码（ADR-0067）；默认不构建、不测试、不发布
+packages/domain/      # 纯领域：TaskRevision 追加与版本冲突校验、状态迁移与终态保护、DAG 环校验、影响分析纯函数
+packages/contracts/   # Zod commands/events/Service contracts/ports + Adapter 端口与能力位
+packages/storage/     # Bun 原生 SQLite、migration.ts（v1–v37）、append-only 触发器、CAS、command receipt、Service/Signal store
+packages/git/         # Git CLI 封装：worktree prepare/inspect/capture/reconcile/release、ref 读取、回收与 purge
+packages/agent-adapters/ # deterministic fake、PiRpcAdapter、CodexAdapter、ClaudeAdapter、PTY host helper
+```
 
-根配置：`package.json`、`bun.lock`、`tsconfig.json`、`vitest.config.ts`、`.gitignore`、`README.md`。工具使用 Nix 提供的 Bun；项目依赖在本地 workspace 安装，不全局安装 npm 工具。
+根配置：`package.json`、`bun.lock`、`tsconfig.json`、`vitest.config.ts`、`.gitignore`、`README.md`、`Justfile`、`docs/`。工具链用 Nix 提供的 Bun；依赖装在工作区本地，不装全局 npm 工具。
 
-Domain 第一批：
-- immutable TaskRevision 创建及追加、版本冲突检查；
-- Execution 状态迁移及终态保护；
-- 类型检查、非法输入和不变量测试。
+**已实现并接入 Runtime**：workspace prepare/reconcile、Agent start 与 observation、typed answer 与持久投递、真实 Pi/Codex/Claude adapter、成果 commit（FULL 单步 / STRICT prepare+confirm）、任务级验证与隔离副本、事件长连接订阅（`events.list` / `events.subscribe`）、自动调度（事件驱动 + 周期恢复 pass）、槽位预留与 reconcile、Runtime 全局容量与全局暂停/恢复屏障、Task 暂停/取消/归档/重试/恢复/purge、revision 投递、Session guidance、终端接管与 PTY、知识快照与绑定、项目知识/影响/验证策略读取、Service kernel 与 Signal dispatcher。
 
-Storage 使用 Bun 原生 SQLite，包含 Phase 1 子集 migration、revision append-only trigger、活动资源/授权约束、CAS 与 command receipt。CLI/Runtime 提供版本化本用户 IPC、项目接入和 Task create/list/submit；应用服务以 Operation 包裹 owned worktree 与 Agent start，启动时保守处理未完成操作，并可原子预留 Execution。deterministic fake 已覆盖 Session 启动、Attention/completion observation、typed answer 投递/reconcile、provider event 去重、明确 pre-start/pre-delivery 失败与不确定副作用；真实 `PiRpcAdapter` 另外自有 `pi --mode rpc` 子进程、采集 provider 身份、映射 attention/completion/disconnect 与写入 typed answer；durable worker 提供按 eventId 幂等要求的至少一次 outbox 投递；`EventSubscriptionHub` 在同一 socket 上提供只读长连接订阅（`events.subscribe` / `events.list`），按排他 sequence 游标交付既有事件并在断开后凭 cursor 重连；同一 Hub 也以 SSE 形式供本地 Web UI 使用（`RuntimeHttpApi`，只绑 127.0.0.1、内存 token、与 CLI 共用同一 dispatch）。Pi 子集另有 LF-only RPC framing、按权限模式选择的受控启动参数（FULL 无工具 allowlist 且 `--approve`，STRICT 保留 allowlist 与 fail-closed gate）；尚无自动 Scheduler、真实 Pi 工具执行与取消超时验收、pause/revision 投递以及 Integration/main 提升。Drizzle 映射、完整 repository、真实进程 reconcile 和暂停证明尚未实现。Domain 纯函数接收的 evidence 是应用层提供的已验证事实，不能自证真实进程静止。
+**仍未实现或未验收**：原生 Agent-supervising Process 控制面（S5）、intention/Attention 路由（S6）、Project/Task Service 单一写路径（S7）、受管 integration / merge queue（S8）、eligibility 解耦（S9）；Self Evolution 与 bootstrap；真实 provider 的并发运行与取消超时、跨交接权限矩阵、Windows。Drizzle 映射与完整 repository 层尚未实现（当前是手写 SQL + Zod 边界校验）。
+
+**没有的入口**：HTTP/SSE 与本地 Web UI 入口（ADR-0067，源码保留但 Runtime 不实例化 `RuntimeHttpApi`）；桌面客户端尚未创建。
 
 ## 3. 依赖与测试边界
 
@@ -47,8 +61,8 @@ Storage 使用 Bun 原生 SQLite，包含 Phase 1 子集 migration、revision ap
 - runtime：编排业务事务和事务外 Operation；不将 SQL 放入 domain。
 - tests：domain 的纯函数用 Vitest；storage 用真实临时 SQLite；Git 用临时仓库；Adapter fake 和真实验证分别记录。
 
-测试边界（ADR-0008）：自动化测试与验收只通过 CLI 命令与 Runtime 命令面（含其 HTTP/SSE 传输）驱动断言；不使用 computer-use、OS 级键鼠/窗口自动化、桌面应用操作或真实桌面会话。UI 验证用 headless 命令面/HTTP 断言加用户在场时的人工确认。代码库不得引入这类依赖或脚本。
+测试边界（ADR-0008）：自动化测试与验收**只**通过 CLI 命令与 Runtime 命令面驱动断言，不用 computer-use、OS 级键鼠/窗口自动化、桌面应用操作或真实桌面会话；UI 验证改用 headless 命令面断言加用户在场时的人工确认。代码库不得引入这类依赖或脚本。测试使用临时仓库与临时 SQLite，**不用真实用户仓库做破坏性测试**；Domain 纯函数接收的 evidence 是应用层提供的已验证事实，不能自证真实进程静止。
 
-测试分层（ADR-0038）：创建 task/lane/feature/Self candidate branch/worktree 时，按计划改动的模块与不变量选择少量具体测试；开发分支不运行 `bun run check`、`just check`、`just verify` 或等价全仓检查。全量测试只在长期 `dev` 上对精确候选 SHA 运行，并作为 `dev → main` 的必备证据；候选或测试输入变化后必须重跑。当前 Task verification 的固定项目策略与 promotion 的证据结构尚未自动表达该分层，这是明确实现缺口。
+测试分层（ADR-0038）：创建 task/lane/feature/Self candidate branch/worktree 时，按计划改动的模块与不变量选择少量具体测试；开发分支**不**运行 `bun run check`、`just check`、`just verify` 或等价全仓检查。全量测试只在长期 `dev` 上对精确候选 SHA 运行，并作为 `dev → main` 的必备证据；候选或测试输入变化后必须重跑。
 
 Phase 0 测试不要求真实 Agent 凭据，也不访问真实用户仓库。

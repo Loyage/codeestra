@@ -1,6 +1,8 @@
 # Domain Model
 
-状态：既有 Task/Execution 模型的实现说明 + ADR-0068 目标映射。当前 schema v37 仍以 Project/Task/Execution 表为 core 权威；Service/Process/Signal 的 S1–S4 内核与兼容投影已实现，S5–S10 尚未完成，详见 [`service-process-signal.md`](./service-process-signal.md)。
+> 层级：L1 · 体量 ≈ 9k 字符 · **何时读**：弄清楚某个领域对象归谁、持有哪些事实、边界在哪 · 权威来源：`packages/domain/src/**`（纯领域）与各表 DDL（[`sqlite-schema.md`](./sqlite-schema.md)）。状态迁移见 [`state-machines.md`](./state-machines.md)。
+
+状态：既有 Task/Execution 模型的实现说明 + ADR-0068 目标映射。当前 schema v37 仍以 Project/Task/Execution 表为 core 权威；Service/Process/Signal 的 S1–S4 内核与兼容投影已实现，S5–S10 尚未完成（[`service-process-signal.md`](./service-process-signal.md)）。
 
 ## 0. ADR-0068 目标聚合
 
@@ -21,7 +23,7 @@ Specification 是人类可读文本。机器解释必须保存来源，不能丢
 
 ## 2. 聚合与归属
 
-### RuntimeSchedulerControl（ADR-0061，已接受、待实现）
+### RuntimeSchedulerControl（ADR-0061，**已实现**：FOUNDATION-096/097，schema v34）
 
 每个 `CODEESTRA_HOME` 只有一个 Runtime 负载控制聚合，不属于任何 Project：
 
@@ -80,25 +82,25 @@ id、taskId、number、previousRevisionId、specification、**features**、inten
 
 目标 Process 是 Agent supervisor；当前 Execution 记录它的权威执行事实：attemptNumber、primaryAdapterId、initialRevisionId、appliedRevisionId、workspaceId、baseCommit、resultCommit、state、stopReason、timestamps、error。S2/S5 先建立一一 projection link，再逐步把通用查询/控制映射为 Process；不能复制一套独立可写状态。
 
-同一 Execution 可在已可靠暂停/确认后应用新 revision，因此保存 initial 与 applied revision，并通过 RevisionDelivery 保留全部变更。Delivery 保存 revisionId、deliveryKey、status（PENDING/SENT/ACKNOWLEDGED/REJECTED/SUPERSEDED）、证据和时间。终端输出看似赞同不能自动当结构化 ACK。
+同一 Execution 可在已可靠暂停/确认后应用新 revision，因此保存 initial 与 applied revision，并通过 RevisionDelivery 保留全部变更（**投递 FSM 与 `satisfied` 口径见 [`state-machines-sessions.md`](./state-machines-sessions.md) §7**）。**终端输出看似赞同不能自动当结构化 ACK。**
 
-当 Adapter 不支持可靠确认：停止旧 Execution，确认进程不再写入后建立新 Execution，其完整启动输入包含新 revision。旧分支/现场保留且记录继承来源。协作停止超时阻止新尝试。
+当 Adapter 不支持可靠确认（当前三个 provider 都是）：停止旧 Execution，确认进程不再写入后建立新 Execution，其完整启动输入包含新 revision。旧分支/现场保留且记录继承来源。协作停止超时阻止新尝试。
 
 ### AgentSession / SessionGuidance / TakeoverRequest / AttentionRequest
 
-Session 保存 adapterId、mode（`AUTOMATED_RPC | HUMAN_TUI`）、providerSessionId、processIdentity、capabilities snapshot、transport locator、session storage reference、state、退出信息与可选 predecessorSessionId。PID 单独不足以证明身份；需要启动 token/时间及进程控制记录。Session 持久化不等于 OS 进程永不退出。
+Session 保存 adapterId、mode（`AUTOMATED_RPC | HUMAN_TUI`）、providerSessionId、processIdentity、capabilities snapshot、transport locator、session storage reference、state、退出信息与 `current_incarnation_id`。PID 单独不足以证明身份；需要启动 token/时间与进程控制记录。Session 持久化不等于 OS 进程永不退出。
 
-一个 Execution 在任意时刻只有一个主活动 Session，但 ADR-0010 的 RPC↔TUI 进程交接会形成有序 Session incarnation 历史：前一进程确认退出后才创建 successor；provider conversation ID/file 可以连续，Codeestra session ID 与 OS process identity 必须更新，不能把新进程伪装成旧进程。一个 Session 内可有多轮交互。
+一个 Execution 在任意时刻只有一个主活动 Session，但 RPC↔TUI 进程交接会形成有序 **incarnation** 历史：前一进程确认退出后才创建 successor；provider conversation ID/file 可以连续，Codeestra session ID 与 OS process identity 必须更新，不能把新进程伪装成旧进程。**逐状态、逐 guard 的完整口径见 [`state-machines-sessions.md`](./state-machines-sessions.md) §3，接管的传输与安全点见 [`terminal-and-handoff.md`](./terminal-and-handoff.md)。**
 
-SessionGuidance 表达不改变验收规格的人工指导，绑定 source（COMMAND/TUI）、execution/session/provider conversation entry、actor、hash/长度与投递状态；`task guide` 的正文需耐久保存到投递完成，TUI 已落 provider conversation 的正文只保存 entry 引用而不重复复制，二者正文都不进入 domain event。它不改变 `appliedRevisionId`、不生成 TaskRevision、不使验证自动失效。改变规格/约束必须走明确的 TaskRevision 命令；Pi 仍按不支持 revision ACK 的 fallback 新建 Execution。
+SessionGuidance 表达不改变验收规格的人工指导，绑定 source（COMMAND/TUI）、execution/session/provider entry、actor、hash/长度与投递状态；`task guide` 的正文需耐久保存到投递完成，TUI 已落 provider conversation 的正文只保存 entry 引用而不重复复制，二者正文都不进入 domain event。它不改变 `appliedRevisionId`、不生成 TaskRevision、不使验证自动失效。改变规格/约束必须走明确的 TaskRevision 命令。
 
-TakeoverRequest 是 Execution 的控制记录，不是新的调度主实体。保存 requested Session/process/cursor、状态（`REQUESTED | WAITING_FOR_ATTENTION | WAITING_FOR_SAFE_POINT | STOPPING_SOURCE | STARTING_TARGET | ACTIVE | RETURN_REQUESTED | COMPLETED | FAILED | RECOVERY_REQUIRED`）、目标 mode、writer lease 与交接 Operation。接管请求先于 settled 事实提交时，settled 作为交接安全点而非 completion；反之请求拒绝为 Execution 已非活动。attach/detach 只管理 TerminalAttachment，release 才触发 TUI→RPC 交接。
+TakeoverRequest 是 Execution 的控制记录，不是新的调度主实体：保存 requested Session/process/cursor、状态、目标 mode、writer lease 与交接 Operation。接管请求先于 settled 事实提交时，settled 作为交接安全点而非 completion；反之请求被拒为 Execution 已非活动。attach/detach 只管理 TerminalAttachment，release 才触发 TUI→RPC 交接。
 
-AttentionRequest 保存类型（PERMISSION/QUESTION/RECOVERY）、responseType（CONFIRM/VALUE）、providerRequestId、提示和状态；typed answer 另存回答者与投递 Operation。回答已写 DB 不代表 Agent 已恢复，confirmed=false 与 cancel 都是有效但语义不同的回答。TUI gate side channel 同样建立 Attention 与 answer 事实；原生 TUI 和其他客户端竞争回答时只接受第一份合法决议。
+AttentionRequest 保存类型（PERMISSION/QUESTION/RECOVERY）、responseType（CONFIRM/VALUE）、providerRequestId、提示和状态；typed answer 另存回答者与投递 Operation。**回答已写 DB 不代表 Agent 已恢复**；`confirmed=false` 与 `cancel` 都是有效但语义不同的回答。TUI gate side channel 同样建立 Attention 与 answer 事实；原生 TUI 和其他客户端竞争回答时只接受第一份合法决议。
 
-Session 身份分三层持久化：Codeestra sessionId、provider session ID/file、provider process identity（pid、executable、start token、argv hash、采集时间）。缺少 start token 时拒绝启动，因为 PID 可被复用。Runtime 丢失 RPC/PTY 控制连接后不重接 live process：记录 DISCONNECTED，并让 Execution/workspace 保持占用并进入 RECOVERY_REQUIRED，直到 reconcile 取得真实事实。
+Session 身份分三层持久化：Codeestra sessionId、provider session ID/file、provider process identity（pid、executable、start token、argv hash、采集时间）。**缺少 start token 时拒绝启动**，因为 PID 可被复用。Runtime 丢失 RPC/PTY 控制连接后不重接 live process：记 DISCONNECTED，并让 Execution/workspace 保持占用且进入 RECOVERY_REQUIRED，直到 reconcile 取得真实事实。
 
-TerminalAttachment 是瞬时客户端连接与单 writer lease 的记录；多个只读 attachment 可并存。PTY bytes/resize/input 走独立有界 transport，不作为领域事实，不从 ANSI 文本推断完成、审批或静止。首版只保留 Runtime 内存中的有界重连缓冲；detach 不停止 HUMAN_TUI Session。
+TerminalAttachment 是瞬时客户端连接与单 writer lease 的记录；多个只读 attachment 可并存。PTY bytes/resize/input 走独立有界 transport，不作为领域事实，也不从 ANSI 文本推断完成、审批或静止。首版只保留 Runtime 内存中的有界重连缓冲；detach 不停止 `HUMAN_TUI` Session。
 
 ### Workspace
 

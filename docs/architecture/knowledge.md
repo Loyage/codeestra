@@ -1,8 +1,8 @@
 # Project Knowledge
 
-状态：Phase 6 第一小步已实现（FOUNDATION-067 / ADR-0041，schema v26）。Provider 侧消费**未验证**。
+> 层级：L1 · 体量 ≈ 5k 字符 · **何时读**：改知识层、front-matter、快照/绑定或注入通道 · 权威来源：`packages/storage/src/database.ts`（两张表）、`apps/runtime/src/knowledge-service.ts`、`apps/runtime/src/guidance-context.ts`。Provider 侧交付通道见 [`agent-adapter-providers.md`](./agent-adapter-providers.md) §5。
 
-本文描述已落地的知识分层、只读来源、适用面与 Execution 绑定。语义裁决见 [ADR-0041](../decisions/0041-project-knowledge-layers-and-execution-binding.md)，规格见 `PROJECT_SPEC.md` §4 与 §2 不变量 15。
+状态：Phase 6 第一小步已实现（FOUNDATION-067 / ADR-0041，schema v26）；**Provider 侧是否真的读了知识仍未验证**。语义裁决见 [ADR-0041](../decisions/0041-project-knowledge-layers-and-execution-binding.md)，规格见 `PROJECT_SPEC.md` §4 与 §2 不变量 15。
 
 ## 1. 三个层与它们的位置
 
@@ -70,18 +70,11 @@ bun run codeestra project knowledge resolve <project-id> <task-id> [--json]
 
 ## 6. schema
 
-v26 只新增两张 append-only 表，**不重建 `executions`**：
-
-- `knowledge_snapshots(project_id, main_commit, snapshot_digest, policy_version, human_digest, generated_digest, entry_count, …, entries_json, created_by, created_at)`，`UNIQUE(project_id, main_commit, snapshot_digest)`，`no_update`/`no_delete` 触发器；
-- `execution_knowledge_snapshots(execution_id PK, project_id, task_id, snapshot_id, snapshot_digest, context_path, context_digest, context_bytes, entry_count, refs_json, command_id, created_at)`，`no_update`/`no_delete` 触发器。
-
-`phase1SchemaVersion` 24 → 26，只追加 `if (version < 26)`；v25 属并行 lane，v16 永久未使用。测试断言用迁移常量或 `>= 26`，禁止写死 `== 26`。
+v26 只新增两张 append-only 表，**不重建 `executions`**：`knowledge_snapshots`（按 `(project_id, main_commit, snapshot_digest)` 去重）与 `execution_knowledge_snapshots`（`execution_id` 为主键）。两边都有 `no_update`/`no_delete` 触发器。DDL 与列语义见 [`sqlite-schema-task.md`](./sqlite-schema-task.md)；测试应断言 `>= 26` 而不是写死 `== 26`。
 
 ## 7. 已知边界（不得声称已完成）
 
-- **Provider 侧未验证**：Agent Adapter 目前不消费 `knowledgeSnapshotRefs`，本格也不含 `packages/agent-adapters/**`。因此只有「解析、物化、绑定、可追溯与拒绝路径」成立，**不**成立「Agent 真的读到了知识」。
+- **Provider 侧未验证**：只有「解析、物化、绑定、可追溯与拒绝路径」成立；**不**成立「Agent 真的读到了知识」（启动参数携带了路径/文本，但三个 provider 都没有可核验的「读了」通道）。
 - 机器生成层的其它写入者尚未实现（`generated/` 的读取、provenance 校验与拒绝路径已实现并有测试）。
 - 不做向量检索 / embedding / LLM 摘要。
-- 没有 UI 投影（`apps/ui/**` 不在本格领地）。
 - 上限（每层 256 条、单条 64 KiB、整快照 1 MiB、front-matter 32 行）是常量，不是项目配置。
-- 未明确的语义：把知识注入 Provider prompt / 原生指令文件的方式与时机，属后续格。

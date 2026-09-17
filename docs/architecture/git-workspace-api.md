@@ -1,5 +1,7 @@
 # Git Workspace API 与安全边界
 
+> 层级：L1 · 体量 ≈ 8k 字符 · **何时读**：改 worktree 归属/路径、基线解析、成果 commit 或验证副本 · 权威来源：`packages/git/src/**`、`apps/runtime/src/workspace-service.ts`、`apps/runtime/src/task-baseline-service.ts`。基线语义见 ADR-0066，验证语义见 [`state-machines.md`](./state-machines.md) §1。
+
 ## 1. 合约
 
 ```ts
@@ -55,7 +57,7 @@ interface ChangeSet {
 
 ## 2. Task Workspace
 
-> 当前 v36 的基线来源见下文；ADR-0068 S8 完成后，新 Task 默认改从 Project Service managed integration ref 的当时 OID 建立。两种时期都必须固定 base ref/commit，既有 workspace 不回写。
+> 当前基线来源见下文；ADR-0068 S8 完成后，新 Task 默认改从 Project Service managed integration ref 的当时 OID 建立。两种时期都必须固定 base ref/commit，既有 workspace 不回写。
 
 - prepare 以**项目基线**的固定 SHA 为基线，创建独立 `refs/heads/task/<task-id>` 与 Runtime 数据目录 owned worktree（ADR-0005）。ref/path 只使用校验后的安全段，不把未经规范化的用户文本当 ref/path，也不在用户仓库根目录创建 worktree。
 - **基线只有一种来源**（ADR-0066）：在**项目文件夹**（`projects.repo_root`）里取**建 workspace 时当前检出的分支**，把 ref 与 commit 一起固定进 `workspaces.base_ref`/`base_commit`（此后切分支不会移动已建 Task 的基线）；`task run --base-ref <refs/heads/…>` 可以显式选一条本地分支。`HEAD` detached 时以 `TASK_BASE_REF_UNRESOLVED` 拒绝，不猜一条分支。同一目录同时拥有仓库身份与 `main` ref（判定策略、影响映射的读取来源）。**哪个根指向哪个仓库**见下表：
@@ -87,10 +89,10 @@ interface ChangeSet {
 
 ## 3. 成果去向
 
-### 3.1 当前 v36：停在 task 分支（ADR-0066）
+### 3.1 当前：成果停在 task 分支（ADR-0066）
 
 当前产品不建模 dev clone、长期 `dev` 集成分支或 `dev → main` 提升：`task integrate`、
-`task integration *`、`promotion *`、`promotion full-suite run` 全部从命令面删除，schema **v35** 也
+`task integration *`、`promotion *`、`promotion full-suite run` 全部从命令面删除，schema **v36** 也
 DROP 了 `integration_batches(_items)`、`integration_verification_runs`、`stable_promotions(_members)`
 与 `dev_full_suite_evidence`。`packages/git` 侧的 `IntegrationGitPort` / `promotion.ts` 随之删除，
 只保留 `refs.ts` 的 `readLocalRefCommit` / `isAncestor` / `listCheckedOutRefs`。

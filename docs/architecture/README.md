@@ -1,19 +1,49 @@
 # Codeestra Architecture
 
-状态：Runtime 架构已实现到 schema v37；ADR-0068 S1–S4 的 Service / Process / Signal 内核、持久 dispatcher 与 CLI 已实现，S5–S10 仍是目标。本文同时标注“当前事实”与“目标架构”，不得把后续能力当成当前能力。
+> 层级：**L0 索引** · 体量 ≈ 6k 字符 · **先读这一篇**：它只做路由，不重复任何细节。细节在其所指的 L1/L2 文档与源码里，**不要整篇读**。
 
-## 总体架构
+状态：Runtime 已实现到 **schema v37**。ADR-0068 的 Service / Process / Signal 内核 S1–S4 已实现（纯领域、additive storage、registry/dispatcher、`service/process/signal/intent` CLI）；**S5–S10 仍是目标**，不得把受管 integration、原生 Process Agent、自然语言意图路由当成当前能力。当前 v37 的 Project/Task/Execution 旧表仍是 core 写权威。
+
+## 1. 读取协议（省上下文的用法）
+
+1. **只读与当前任务相关的那一层。** 多数任务只需要本篇 + 一到两篇 L1。
+2. **优先按节读**：用 `grep -n '^##' <file>` 看目录，再用 `read` 的 `offset/limit` 取你需要的节，不要整篇拉进上下文。
+3. **L2 默认不读**：逐表 DDL、逐事件 payload、逐 provider 能力矩阵只在真的要改那一块时打开。
+4. **权威来源永远不是文档**：DDL 看 `packages/storage/src/migration.ts`，当前 schema 看实际库（`sqlite_master`），事件名看 `packages/storage/src/database.ts` 与 `apps/runtime/src/**` 的真实写入，能力位看 `packages/contracts/src/index.ts`。文档与实现冲突时按 `AGENTS.md` 的处理流程明确变更，不静默改口径。
+5. **历史不在文档里**：被取代的设计、逐版本 DDL、旧事件名对照表已删除，改用 `git log docs/architecture/`、对应 ADR 与源码追溯。
+
+## 2. 路由表：先问自己要回答什么
+
+| 问题 | 读 | 层级 | 体量 |
+|---|---|---|---|
+| 现在的架构拓扑与内核不变量是什么 | 本文 §3；[`service-process-signal.md`](./service-process-signal.md) | L0/L1 | 6k / 9k |
+| 我要改的领域对象是什么、归谁管 | [`domain-model.md`](./domain-model.md) | L1 | 11k |
+| 某个状态能不能迁移到另一个状态 | [`state-machines.md`](./state-machines.md)（Task/Execution/内核 FSM，9k）；Session 与接管/修订投递看 [`state-machines-sessions.md`](./state-machines-sessions.md)（8k）；Runtime 生命周期与全局控制看 [`state-machines-runtime.md`](./state-machines-runtime.md)（5k） | L1→L2 | 9k / 8k / 5k |
+| 某张表/某列是什么、能不能改 | [`sqlite-schema.md`](./sqlite-schema.md) → 对应域篇 | L1→L2 | 8k + 8–19k |
+| 会写什么事件、payload 是什么 | [`event-model.md`](./event-model.md)（目录）→ [`event-model-payloads.md`](./event-model-payloads.md)（细节） | L1→L2 | 11k / 10k |
+| Adapter 端口、能力声明与实测边界 | [`agent-adapter-api.md`](./agent-adapter-api.md) → [`agent-adapter-providers.md`](./agent-adapter-providers.md) | L1→L2 | 6k / 8k |
+| 终端接管、PTY 帧、安全点、跨交接权限 | [`terminal-and-handoff.md`](./terminal-and-handoff.md) | L2 | 4k |
+| 调度顺序、容量、等待原因 | [`scheduler.md`](./scheduler.md) | L1 | 11k |
+| 冲突怎么判、影响快照怎么失效 | [`conflict-analyzer.md`](./conflict-analyzer.md) | L1 | 4k |
+| Git/worktree 归属、成果 commit 边界 | [`git-workspace-api.md`](./git-workspace-api.md) | L1 | 8k |
+| 项目知识的层、来源与 Execution 绑定 | [`knowledge.md`](./knowledge.md) | L1 | 5k |
+| 代码放在哪个 package、依赖方向 | [`repository-structure.md`](./repository-structure.md) | L1 | 4k |
+| 某个决策为什么这么做、当前有效语义 | [`../decisions/README.md`](../decisions/README.md)（索引 + 有效语义） | L1 | 30k→按节 |
+| 某个能力到底做完没有 | [`../tasks/README.md`](../tasks/README.md)（按 FOUNDATION-编号搜索） | L1 | 1MB→**只 grep** |
+| MVP 波次与解锁条件 | [`../roadmap/mvp.md`](../roadmap/mvp.md) | L1 | 15k |
+
+## 3. 总体架构
 
 ```text
 CLI（当前唯一客户端；可断开与重连）
-        │ versioned commands / queries / events
+        │ versioned commands / queries / events（Unix socket）
 独立本地 Runtime（宿主 OS 进程）
         └── Codeestra Service #0（持久根 Actor）
              ├── Scheduler Service（Task-first 准入与资源）
              ├── Attention Service（全局待办索引）
              └── Project Service*
                   ├── Task Service* → Development Process → Agent
-                  └── Integration Process → Agent
+                  └── Integration Process → Agent        # S8 目标，尚未实现
 
 SIG_A：明确 API → Service handler → Operation → Git / verification / filesystem
 SIG_P：intention → Service → Process → Agent → typed Service APIs
@@ -24,66 +54,49 @@ Knowledge：按 Execution/Process 绑定
 Self Evolution：Candidate / bootstrap（后续阶段）
 ```
 
-当前 v37 已落地 Service 树、通用 Signal/Process 命令与兼容投影；Project/Task/Execution 旧表仍是 core 写权威。受管 integration、原生 Process Agent 与 intention 解释尚未落地。
+这是模块分层，不是微服务：所有 Service 都在同一个 Runtime 进程内，由 registry、SQLite inbox 与事件唤醒托管，不为每个 Service 建 OS 进程或 busy-loop。Domain 不依赖 Bun、数据库、UI 或具体 Agent SDK。Git worktree 隔离工作目录，但**不是**权限沙箱。
 
-这是模块分层，不是微服务。Domain 不依赖具体运行时、数据库、UI 或 Agent。Git worktree 隔离工作目录，不提供 OS 权限沙箱。
+服务形态：独立本地 Runtime 是软件本体；**CLI 是完备、权威、可脚本化的命令面**（`--json` + 稳定退出码）。ADR-0067 起 Web UI 暂停，当前只启用 CLI/Unix socket；保留的 UI/HTTP 源码不属于可用产品面。未来恢复的 UI/桌面只能是同一 versioned command/query/event 面的便利前端，不新增业务语义、不绕过门禁、不直接访问 SQLite。
 
-服务形态：独立本地 Runtime 是软件本体；**CLI 是完备、权威、可脚本化的命令面**。ADR-0067 起 Web UI 暂停，当前只启用 CLI/Unix socket；保留的 UI/HTTP 源码不属于可用产品面。未来恢复的 UI/桌面仍只能是同一 versioned command/query/event 面的便利前端。
+## 4. 当前事实与目标的分界（一句话版）
 
-## 设计导航
+| 领域 | 当前 v37 | 目标（ADR-0068） |
+|---|---|---|
+| 内核对象 | Service/Process/Signal 表与 CLI 已存在；Project/Task/Execution 旧表仍写权威 | S5–S7 把写路径与 Agent 控制迁到 Service/Process |
+| 分支与集成 | 成果停在 `refs/heads/task/<task-id>`，由用户自己合并；产品无集成/提升命令 | S8 Project Service 独占 integration ref/worktree + 串行 merge queue + 独立 Integration Verification |
+| 调度 | `schedule-service.ts` 事件驱动 + 周期 pass，按 ADR-0059 的功能声明判冲突 | S9 依赖/冲突求值解耦为带版本证据的 `TaskEligibility` |
+| 意图 | `intent` 命令与记录已存在 | S6 root/project/task intention 与全局 Attention 路由 |
+| 前端 | 仅 CLI/Unix socket | 恢复的 UI/桌面只做同一命令面的前端 |
 
-- [AI 的操作系统愿景](../vision/ai-operating-system.md)
-- **[Service / Process / Agent / Signal 内核](service-process-signal.md)**（ADR-0068 目标架构）
-- [Domain Model](domain-model.md)
-- [Task / Execution / AgentSession / Integration / Self 状态机](state-machines.md)
-- [SQLite Schema](sqlite-schema.md)
-- [内部 Event Model](event-model.md)
-- [Agent Adapter API](agent-adapter-api.md)
-- [Git Workspace API](git-workspace-api.md)
-- [Conservative Scheduler](scheduler.md)
-- [Conflict Analyzer](conflict-analyzer.md)
-- [Project Knowledge](knowledge.md)
-- [Repository / Module Structure](repository-structure.md)
-- [MVP roadmap](../roadmap/mvp.md)
-- [决策索引与剩余门禁](../decisions/README.md)
+详细波次、owner 与逐波验收见 [`../roadmap/mvp.md`](../roadmap/mvp.md)。
 
-## 已确认的重要语义
+## 5. 已确认的重要语义（指针，不展开）
 
-- 效率至上；默认 FULL 主机级全权限且常态零确认，CLI 可无确认切换 STRICT（ADR-0011）。
-- 软件本体是服务，CLI 必须完备且可脚本化；UI/桌面是便利层。
-- 自动化测试与验收仅通过 CLI/命令面驱动，不获取电脑控制权。
-- 活动修订先暂停，确认新规格后恢复；无法可靠暂停/确认时保留现场并重新执行。
-- 内核 Service-first、调度 Task-first；Service 是 Runtime 内持久 Actor，Process 只监督 Agent（ADR-0068）。
-- Signal 分 `SIG_A` / `SIG_P`，持久至少一次投递并以幂等键收敛；Service 不直接拥有 Agent。
-- 目标分支模型是 Project Service 独占的 integration ref/worktree + merge queue + 独立 Integration Verification；当前 v37 的兼容 Task 路径仍按 ADR-0066 把成果留在 task branch，由用户自己合并。
-- Codeestra 自身仓库的 `dev→main` 人工发布继续固定 SHA 与证据，main 更新后立即以 CLI stop/status 重启；它不是产品 integration ref。
-- Runtime 独立于窗口，关闭客户端不结束任务。
-- 首个真实 Adapter 用 Pi；FULL 自动允许全部已注册工具，STRICT 保留原生审批与未知工具拒绝。
-- Agent 配置按 Adapter 持久化，分全局默认与每项目覆盖，逐字段 环境变量 > 项目 > 全局 > 适配器默认；仅新 Session 生效，生效值随 Execution 记录（ADR-0012）。
-- Agent 实际执行过程以**只读视图**呈现：`session.transcript` 直接读 Provider 自己的会话文件，不入库、不是 domain event、不是 attach、不新增确认；文件路径不离开 Runtime，仅限 Runtime 自己的 session 目录（ADR-0013）。Claude Code 的 Session 上该命令以 `SESSION_FILE_NOT_OWNED` 明确失败，不显示执行过程。
-- Agent 可加载的插件/资源按作用域持久化（`agent plugins list|select`、`agent.config.set --pluginSelection`，schema v27），只有声明 `pluginSelection: SUPPORTED` 的 Adapter 能应用；其余以稳定码拒绝而不假装写入（ADR-0044）。Web UI 与 `settings ui *` 当前按 ADR-0067 暂停。
-- 用户可从 Task 入口接管真实 Agent：Pi 在安全点从 RPC 交接到原生 TUI/PTY，普通输入是 Session Guidance，规格变化仍走 TaskRevision；任意时刻只有一个 Provider writer。
-- 取消协作停止，超时需人工处理；提高优先级不抢占。
-- ADR-0061 已实现（schema v34，两半）：一个 Runtime 只保留一个跨项目并行上限；全局暂停先建立持久启动屏障，再可核验地冻结 Provider 主进程，不向已运行工具子进程发停止信号，重启后也不自动继续。它不替代单 Task pause。
-- Stable Promotion / Self Evolution 排空活动 Process 后切换，不迁移活动 AgentSession。
+- 效率至上；默认 `FULL` 主机级全权限且常态零确认，可无确认切换 `STRICT`（ADR-0011）。→ `PROJECT_SPEC.md` §1.1
+- 软件本体是服务，CLI 必须完备且可脚本化；UI/桌面只是便利层（ADR-0008/0011/0067）。
+- 自动化测试与验收只用 CLI/命令面驱动，不获取电脑控制权（ADR-0008）。
+- 内核 Service-first、调度 Task-first；Service 只拥有 Process，Process 只监督 Agent；Signal 持久至少一次并按幂等键收敛（ADR-0068）。
+- 冲突判定只看「两侧声明同一功能且对方未完成」，默认 `SAFE_TO_PARALLELIZE`；`--allow-unknown` 永不放宽 `CONFLICTING`（ADR-0059）。
+- 验证分层：Task Verification 与 Integration Verification 是不同事实，证据绑定 revision/commit/policy digest（ADR-0006/0039）。
+- Agent 能力按实测如实声明，不伪造 resume/attach/interrupt（ADR-0029/0040/0051/0054/0057/0061）。
+- 保留失败现场：不 `--force`、不自动回收、不声称静止；`task purge` 是全产品唯一一次显式 `--yes`（ADR-0021/0037/0055/0058）。
+- 本仓库自身的 `dev → main` 是人工四步（`AGENTS.md` + [`../agents/runbook.md`](../agents/runbook.md)），不是产品能力。
 
-## 最大风险与建议
+## 6. 最大风险与建议门禁
 
 | 风险 | 建议与门禁 |
 |---|---|
-| Pi 是否真的具备所需交互、暂停与 attach 能力 | Pi RPC 不能原地附着原生 TUI；按 ADR-0010 做安全点 RPC↔TUI 进程交接 spike，核对 session file、PTY、权限模式 side channel 与单 writer；能力不足回报阻塞，不用 fake 冒充验收 |
-| 修订后仍交付旧代码/证据 | revision、applied revision、commit、验证全链路固定引用；暂停和 ACK 分开 |
-| 依赖满足但上游代码不在下游 | 目标模型中以 Project integration ref 的祖先可达性与 merge 事实核对；仅执行成功不满足依赖 |
-| 功能声明不完整造成误并行 | ADR-0059 只按同一功能声明判冲突；这是已接受的残余风险，实际越界时暂停并报告 |
-| Signal 被误解为 exactly-once | 持久 inbox/outbox 只保证至少一次；handler 幂等，外部副作用继续用 Operation + 身份/ref 核对 |
-| SQLite、Git 与进程非原子 | Operation + Signal receipt + 幂等键 + 外部身份核对；不能盲目重试 start/merge |
-| 全局暂停误把“发过信号”当成“已冻结” | pause epoch 固定目标；按 pid + start token + incarnation 复读 stopped 事实；部分成功进入全局 `RECOVERY_REQUIRED` 并保持屏障；Provider 进程归属未经 spike 不声明 SUPPORTED |
-| integration ref 影响用户 checkout | Project Service 使用独立 owned integration ref/worktree；不直接推进用户已检出 branch，推进前 expected OID CAS |
-| 宿主权限、hooks、日志秘密 | worktree 不是沙箱；FULL 明确允许当前用户主机级副作用与敏感路径提交，终端输出仍不可信；需要旧门禁时显式切换 STRICT（ADR-0011） |
-| 自我升级数据不可逆 | Candidate 数据隔离；迁移/备份/bootstrap 更新策略 Phase 7 前明确批准 |
+| 把目标当已实现 | 每篇文档的「当前/目标」标注 + §4 表；`docs/tasks/README.md` 才有验收状态 |
+| Pi 的真实交互、暂停与 attach 能力 | 按 ADR-0010 在结构化安全点做 RPC↔TUI 进程交接；能力不足回报阻塞，不用 fake 冒充验收 |
+| 修订后仍交付旧代码/证据 | revision、applied revision、commit、验证全链路固定引用；「暂停」与「已确认」分开 |
+| 依赖满足但上游代码不在下游 | 以基线 ref 的祖先可达性核对；仅执行成功不满足依赖 |
+| 功能声明不完整造成误并行 | ADR-0059 只按声明判冲突，这是已接受的残余风险；实际越界时暂停并报告 |
+| Signal 被误解为 exactly-once | 持久 inbox/outbox 只保证至少一次；handler 幂等，外部副作用用 Operation + 身份/ref 核对 |
+| SQLite、Git 与进程非原子 | Operation + Signal receipt + 幂等键 + 外部身份核对；不盲重试 start/merge |
+| 全局暂停误把「发过信号」当「已冻结」 | 固定 pause epoch，按 pid + start token + incarnation 复读 stopped；部分成功进 `RECOVERY_REQUIRED` 并保持屏障 |
+| 宿主权限、hooks、日志中的秘密 | worktree 不是沙箱；FULL 允许当前用户的主机级副作用；终端输出仍按不可信内容处理 |
+| 自我升级数据不可逆 | Candidate 数据隔离；迁移/备份/bootstrap 更新策略在 Phase 7 前明确批准 |
 
-## 设计成熟度
+## 7. 设计成熟度
 
-完整产品的语义不可能用一次草案全部锁死。当前成熟事实到 schema v37；ADR-0068 的 Service kernel 按 S1–S10 分阶段准入，S1–S4 已完成。纯领域、additive storage、Signal dispatcher、兼容 CLI、Process 投影与受管 integration 各自有独立退出条件，后续阶段不得被当作已经批准实现细节。
-
-SQLite 文档第 8 节记录**已执行**的 migration；当前最新实现为 schema v37（Service/Signal/Process 内核），后继版本才可加入受管 integration，且只有实际实现格能把它写成已执行 migration。API 为 Runtime port 合约，不是供应商能力承诺；`agent-adapter-api.md` 记录 Pi、Codex 与 Claude Code 的实测能力矩阵。
+产品语义不可能一次锁死：ADR-0068 的 Service kernel 按 S1–S10 分阶段准入，S1–S4 已完成并各有独立退出条件。API 是 Runtime port 合约，不是供应商能力承诺；实测能力矩阵记录在 [`agent-adapter-providers.md`](./agent-adapter-providers.md)，证据在 [`../spikes/`](../spikes/)。

@@ -71,6 +71,7 @@
 - [ADR-0066](0066-remove-dev-clone-and-dual-baseline.md)：**schema v36 引入、当前 v37 兼容业务路径仍有效的事实**——删除 dev clone、双基线、dev 集成与稳定提升；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支）。**目标语义由 ADR-0068 supersede**：未来恢复为 Project Service 管理的独立 integration ref/worktree，但不原样恢复旧 dev clone / promotion 模型。
 - [ADR-0067](0067-pause-web-ui-and-cli-focus.md)：**暂停 Web UI、集中开发 CLI**。删除 `ui`/`open`、`runtime.ui`、`settings ui *`、`uiRunning`，删除 UI/HTTP 专用测试并把 UI 移出默认检查、构建、重启与提升；`apps/ui`、HTTP 与 UI settings 实现源码静态保留但不可达。无 schema 变更。
 - [ADR-0068](0068-service-process-signal-kernel.md)：**目标架构：AI 的操作系统内核**。内核 Service-first、调度 Task-first；Service 是 Runtime 内持久 Actor，Process 只监督 Agent，Signal 为持久 `SIG_A`/`SIG_P`；保留现有 CLI facade 并增量新增内核命令；Project Service 未来管理独立 integration ref/worktree 与串行 merge queue。**Accepted；S1–S4 已由 FOUNDATION-099 / schema v37 实现，S5–S10 待完成。**
+- [ADR-0069](0069-architecture-docs-layering.md)：**架构文档分层、按需读入与低价值内容删除**。新增 L0 路由入口与每篇「层级/体量/何时读/权威来源」头；`sqlite-schema` / `event-model` / `agent-adapter-api` 按领域拆出 L2 子文档（逐域 DDL 由 v37 库导出）；逐版本 migration 叙述、已删除能力的完整描述、设计稿 DDL、设计名对照表与 doc-sync 记账被删除，靠 git + ADR + 源码追溯；旧章节号保留并提供对照表。**无代码、无 schema、无命令面变化。**
 
 ## 当前有效语义（与旧 ADR 冲突时按此执行）
 

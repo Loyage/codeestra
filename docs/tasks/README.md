@@ -8551,3 +8551,50 @@ Process 原生控制/路由属于 S5/S6；跨 SQLite/Git/Provider 不宣称 exac
 
 - **被管理项目的分支/基线形态**（FOUNDATION-092 → FOUNDATION-093）：**用户 2026-09-16 已选定形态**（基线=项目文件夹
   当前检出分支、成果自己合、不加模式字段），ADR-0060 与本格主路径已落地，剩余子项见上面第 14 条，**不需要新的用户裁决**。
+
+## FOUNDATION-100 — 架构文档分层、按需读入与低价值内容删除（ADR-0069，纯文档）
+
+**背景（用户报告）**：每次 Agent 读 `docs/architecture/**` 都耗费巨量上下文，尤其几篇超 30k 的大文档；希望删除作用不大的内容，并通过多层架构与按需读入减少浪费。
+
+**用户本轮确认（三个选择题，2026-09-16）**：
+1. 低价值内容处理：**直接删除**，靠 git + ADR + 源码追溯（不建 archive 目录）。
+2. 范围：`docs/architecture/**` 全部 + 新的分层 README 入口（`docs/tasks/README.md` 与 `docs/decisions/README.md` 的结构不在本轮范围）。
+3. 形式：**L0 索引 + 每篇「体量/何时读」头 + 拆出按需子文档**，旧章节号保留并附对照表。
+
+**改动**
+
+| 文件 | 动作 |
+|---|---|
+| `docs/architecture/README.md` | 重写为 L0 入口：读取协议（按节读、L2 默认不读、权威来源是源码）、问题→文档节→体量→权威来源路由表、拓扑、当前/目标分界表、风险门禁、成熟度 |
+| `docs/architecture/sqlite-schema.md` | 79.8k → 7.7k：只留跨表约定、**迁移工程规则**（升序判定、v16 未使用、`Bun.exec()` 吞错 → 行数比对 + 结束态断言 + `foreign_key_check`、重建表时显式重建索引与 append-only 触发器、历史行不重写）、v1–v37 一行一版本台账、旧 §1–§8 对照表 |
+| `sqlite-schema-{task,execution,sessions,pipeline,runtime,kernel}.md` | 新增 6 篇 L2 域文档（11k/8k/19k/13k/12k/10k）：每篇先写「表与事实 + 关键不变量」，其下逐表 DDL **由当前 v37 库的 `sqlite_master` 导出后按表拼接**（56 张表，无手抄） |
+| `docs/architecture/event-model.md` | 27.3k → 10.8k：信封、事件目录（核心 + 内核 + 其余域一行式）、命名规则、一致性/投递、订阅、终端边界、只读 transcript、测试；删除设计名对照表与已删除能力的完整事件表 |
+| `event-model-payloads.md` | 新增 L2（9.6k）：`TaskPurged`/`TaskRecoveryReconciled`/进度/验证/修订投递/容量调度/交接/guidance/重试与散文提问/回收的逐事件 payload 与事实边界 |
+| `docs/architecture/agent-adapter-api.md` | 25.8k → 5.6k：实现层端口表（`AgentStartAdapter`/`AgentObserveAdapter`/`AgentAnswerAdapter`/可选 `AgentProcessRelease`）、四个新增能力位的语义、目标端口清单（未导出即未实现）、语义条目 |
+| `agent-adapter-providers.md` | 新增 L2（8.1k）：15 个能力位的三 provider 矩阵、冻结能力的实测依据、Codex/Claude 边界、知识交付通道、插件选择、Pi spike 门禁 |
+| `terminal-and-handoff.md` | 新增 L2（4.1k）：沿用旧 §5–§7（PTY 帧表与 resize 合约、并行工具批次安全点、跨交接权限矩阵及不成立的那一格） |
+| `docs/architecture/state-machines.md` | 22.1k → 8.5k：拆为三篇并保留旧章节号（L1 本篇：§0 内核 FSM、§1 Task lifecycle、§2 Execution、§8 补充事实 + 路由/对照表）；§8 由 doc-sync 记账压成四条「不改变状态集合的持久事实」；修正「全局暂停尚未实现」这一过时陈述（FOUNDATION-097 已实现）；§2 的成果 commit 补上 FULL 单步口径 |
+| `state-machines-sessions.md` / `state-machines-runtime.md` | 新增 L2（8.2k / 5.5k）：沿用旧 §3/§3.1/§3.2/§7（Session、接管、incarnation/lease、Guidance、修订投递）与 §4/§5/§6/§6.1（已删除的集成状态机压为三条后果、Self Evolution、Runtime 生命周期与全局负载控制） |
+| `docs/architecture/scheduler.md` | 15.9k → 10.8k：§2 合并「设计流程 + 更正块」为当前算法；§7 历史命令面删除、只留预留/reconcile 原语；§4.1 压缩为「日常不可达但语义保留」；§5 删掉与 ADR-0059 冲突的验收行 |
+| `docs/architecture/conflict-analyzer.md` | 9.7k → 4.3k：§1–§5 压成「ADR-0031 历史 + 仍有效的失效键/解释/测试」，§6 保留实现事实，§8 当前判定规则 |
+| `docs/architecture/domain-model.md` | 加元信息头；`RuntimeSchedulerControl` 由「待实现」改为「已实现 FOUNDATION-096/097、schema v34」；Session/接管段改为指针 + 保留事实 |
+| `docs/architecture/repository-structure.md` | 4.3k → 4.3k：§2 按实际目录与 40+ Runtime 服务模块重写（删除「尚无自动 Scheduler」「SSE 供 UI 使用」等过时陈述），列明已实现/未实现/没有的入口 |
+| `docs/architecture/{service-process-signal,knowledge,git-workspace-api}.md` | 各加元信息头；`git-workspace-api` 的 `schema v35` 口误改为 v36；`knowledge` 的 schema 节改为指针 |
+| `docs/decisions/0069-architecture-docs-layering.md` | 新增 ADR（背景/选项/决定/后果/验证/关联）+ `docs/decisions/README.md` 索引一行 |
+| `packages/agent-adapters/src/pi-pty-host.ts` | 唯一代码改动：注释里的帧表指针由 `agent-adapter-api.md` 改为 `terminal-and-handoff.md`（§5） |
+
+**删除清单（可追溯）**：逐版本 migration DDL 叙述与验收记录（旧 `sqlite-schema.md` §8 约 55k 字符）、v36 已删除能力的表/事件/命令面完整描述、已被实现取代的 Phase 0 设计稿 DDL、事件设计名对照表、doc-sync 与「更正（FOUNDATION-0xx）」补记、已暂停 `settings ui *` 的说明。追溯路径：`git log docs/architecture/`、对应 ADR 正文、`packages/storage/src/migration.ts` 与真实 `sqlite_master`。
+
+**ADR-0050 用户文档同步检查**：本次**无命令面变化**（命令/子命令/flag/退出码/稳定错误码）、**无 UI 行为变化**、**无设置键增删改**、**无权限语义变化**，因此 `docs/guides/**` **不需要修改**（不是「没提到」）。唯一涉及用户可见承诺的调整是把已暂停的 `settings ui *` 描述从架构文档删除——这在 `docs/guides/features.md` 与 `cli/interface.md` 中早已按 ADR-0067 标注为暂停，口径一致。
+
+**实际验证**：
+- 逐域 DDL 由脚本从**真实迁移库**（`new Phase1Database(file)` + `sqlite_master`，`user_version=37`，56 张表）导出后按表拼进文档，非手抄。
+- `docs/architecture/**` 相对链接人工核对全部解析；新文件与旧章节号对照表覆盖代码注释/ADR 实际引用到的号（`scheduler.md` §1–§4、`conflict-analyzer.md` §2–§4/§8、`state-machines.md` §1–§4/§6.1/§7、`event-model.md` §2.x/§3.1/§4、`sqlite-schema.md` §5/§8）。
+- 运行 `bunx vitest run packages/agent-adapters/test/pi-pty.test.ts`（唯一被触及的源码文件是注释）：**通过**。
+- **未运行**全量测试与 `check:fast`：本次是纯文档改动（唯一代码改动为注释），按 ADR-0038 开发分支只跑定向测试，全量只在精确 `dev` 候选上执行。
+- 体量：`docs/architecture/**` 合计约 222k → 200k 字符；默认路径由「整篇 26–80k」变为「L0 6k + 一到两篇 4–11k」，拆分后最大的 L1 文档为 9k（`state-machines.md`）。
+
+**剩余问题 / 未做**：
+- `docs/tasks/README.md`（1MB，且是 `AGENTS.md` 的必读项）与 `docs/decisions/README.md`（30k，「当前有效语义」与 `PROJECT_SPEC` 有重复）**未重排**——本轮范围由用户限定在 `docs/architecture/**`；它们才是下一个更大的上下文瓶颈。
+- `docs/guides/**`（`manual.md` 71k、`troubleshooting.md` 54k、`recipes.md` 37k）未动；受 ADR-0050 的版本/校对头规则约束，需单独一轮。
+- 本仓库自身 `dev → main` 的提升与精简后的文档尚未合入 `dev`；本次交付停留在工作分支，合入 `dev` 与提升前全量测试按 `AGENTS.md` 的人工流程进行。
