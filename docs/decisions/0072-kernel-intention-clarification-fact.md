@@ -130,8 +130,9 @@ handler 在解析前先校验 `process.parentServiceId === signal.targetServiceI
 - kernel 级 Intention 的澄清**不在** `attention list` 里：用户必须从 `process get` / `events list` / `signal get`
   看到它；在 Attention 索引接通前，UI 若只读 `attention list` 会看不到这类等待。
 - `history`：收到 `INTENTION_RESOLVED` 的 Service 写 Process、审计与 receipt 需要的是同一事务；这是本 lane 自己实现
-  的存储端口（`IntentionStore`），其中 `transitionProcess` 会在 S5 方法存在时**委托**它，否则做等价的本地 CAS。
-  这是一段明确的**过渡代码**，S5 合并后自动走委托分支。
+  的存储端口（`IntentionStore`）。**集成修正（协调者，2026-09-17）**：该端口最初在 S5 方法缺席时用本地 CAS 复制了一份
+  Process 写路径；合并 S5 后该分支恒不可达，且违反「Process 状态只有一个 writer」，因此改为**严格委托**
+  `ServiceKernelStore.transitionProcess`，拿不到委托就以 `PROCESS_STATE_UNAVAILABLE` 大声失败，本地 CAS 已删除。
 - D02 的第二个 `Phase1Database` 门面是 lane 边界的产物，应在接线可改后删除。
 - `attention answer` 仍然只对 provider dialog 有意义，绝不能被当成 kernel 澄清的回答路径。
 

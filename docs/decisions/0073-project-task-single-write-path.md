@@ -1,8 +1,8 @@
 # ADR-0073：Project / Task Service 成为单一写路径（S7）
 
-Status：**Proposed**（lane G-ProjectTask 的 S7 实现记录，2026-09-17）。其中 **D03** 与 **D04** 是对 lane 契约
-`docs/roadmap/lane-contracts-s5-s7.md` §4 冻结接口的两处取舍，需要协调者在合并时确认；其余各条按 ADR-0070
-既有方向实施。未确认前不把这些取舍写成已冻结的产品语义。
+Status：**Accepted**（lane G-ProjectTask 的 S7 实现记录，2026-09-17）。其中 **D03** 与 **D04** 是对 lane 契约
+`docs/roadmap/lane-contracts-s5-s7.md` §4 冻结接口的两处取舍：**协调者已于 2026-09-17 合并时确认接受**
+（D04 的加法字段用于保住既有用户可见行为；D03 的 metadata 只是标记、权威事实仍是 `services` 行，且不参与任何 guard）。其余各条按 ADR-0070 既有方向实施。
 
 **Amends** ADR-0070 D02/D06/D10：Service 树与 Task Service 已经不只是只读投影，Project/Task 的**创建**写路径
 已经由 Service handler 拥有；其余（submit/revision/验证/取消/归档、eligibility、原生 Process）仍按 ADR-0070 的波次。

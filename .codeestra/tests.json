@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "scope": "dev 合入后的定向测试集合：ADR-0070 S1-S4 Service/Process/Signal 内核（领域合同、schema v37 additive projection、持久 dispatcher/registry、内核 CLI 与旧 Task/Session 兼容 facade）与 ADR-0068 CLI 每一层自描述（命令树是唯一命令清单、help/runtime commands、用法错误一行、补回 task recover）。",
+  "scope": "dev 合入后的定向测试集合：ADR-0070 S1-S4 Service/Process/Signal 内核（领域合同、schema v37 additive projection、持久 dispatcher/registry、内核 CLI 与旧 Task/Session 兼容 facade）、ADR-0068 CLI 每一层自描述，以及 S5/S6/S7 三个最小纵向切片（Process 完成写路径与只读进度、intention 结构化路由与澄清内核事实、Project/Task 创建单一写路径）。",
   "commands": [
     {
       "id": "cross-package-typecheck",
@@ -73,8 +73,43 @@
       "covers": "task recover 从真实 CLI 到达 Runtime 的 reconcile（而不是退 2 的用法错误），并保留自己的用法错误与 help"
     },
     {
+      "id": "service-kernel-process",
+      "argv": ["bun", "test", "apps/runtime/test/service-kernel-process.test.ts"],
+      "cwd": ".",
+      "timeoutSeconds": 120,
+      "covers": "S5：PROCESS_COMPLETED 的 version CAS、receipt 幂等、终态不复活、parent 校验、只读 progress 与 succession 不变量"
+    },
+    {
+      "id": "intention-routing",
+      "argv": ["bun", "test", "packages/domain/test/intention-routing.test.ts"],
+      "cwd": ".",
+      "timeoutSeconds": 120,
+      "covers": "S6：结构化 outcome 形状、目标可见性、白名单命令、澄清匹配与 CREATE_TASK 具名拒绝（纯领域）"
+    },
+    {
+      "id": "intention-service",
+      "argv": ["bun", "test", "apps/runtime/test/intention-service.test.ts"],
+      "cwd": ".",
+      "timeoutSeconds": 120,
+      "covers": "S6：IntentionService 的路由编排（fake kernel port）——状态计划、审计事实、guidance 端口与幂等"
+    },
+    {
+      "id": "cli-intention",
+      "argv": ["bun", "test", "apps/runtime/test/cli-intention.test.ts"],
+      "cwd": ".",
+      "timeoutSeconds": 300,
+      "covers": "S6：真实 CLI + 临时 Runtime 的 intent send → INTENTION_RESOLVED 全链路（ROUTE/澄清问答/guidance/CREATE_TASK 具名拒绝/幂等）"
+    },
+    {
+      "id": "task-service-write-path",
+      "argv": ["bun", "test", "apps/runtime/test/cli-task-service.test.ts"],
+      "cwd": ".",
+      "timeoutSeconds": 300,
+      "covers": "S7：project trust / task create 经 Service 写路径（Service 树 parent 关系、task status 与 service get 一致、幂等、失败零部分应用、单一 writer 源码证据）"
+    },
+    {
       "id": "cli-command-face-regression",
-      "argv": ["bun", "test", "apps/runtime/test/cli-agent-config.test.ts", "apps/runtime/test/cli-agent-plugins.test.ts", "apps/runtime/test/cli-attention.test.ts", "apps/runtime/test/cli-capacity-slots.test.ts", "apps/runtime/test/cli-claude-adapter.test.ts", "apps/runtime/test/cli-codex-adapter.test.ts", "apps/runtime/test/cli-global-control.test.ts", "apps/runtime/test/cli-impact.test.ts", "apps/runtime/test/cli-knowledge.test.ts", "apps/runtime/test/cli-managed-project.test.ts", "apps/runtime/test/cli-prose-question.test.ts", "apps/runtime/test/cli-prose-question-attention.test.ts", "apps/runtime/test/cli-reclaim-batch.test.ts", "apps/runtime/test/cli-reclaim.test.ts", "apps/runtime/test/cli-schedule.test.ts", "apps/runtime/test/cli-session-attach.test.ts", "apps/runtime/test/cli-session-guidance.test.ts", "apps/runtime/test/cli-session-handoff.test.ts", "apps/runtime/test/cli-settings.test.ts", "apps/runtime/test/cli-snapshot-recheck.test.ts", "apps/runtime/test/cli-targeted-tests.test.ts", "apps/runtime/test/cli-task-control.test.ts", "apps/runtime/test/cli-task-create.test.ts", "apps/runtime/test/cli-task-depends.test.ts", "apps/runtime/test/cli-task-purge.test.ts", "apps/runtime/test/cli-task-retry.test.ts", "apps/runtime/test/cli-task-run-progress.test.ts", "apps/runtime/test/cli-transcript.test.ts"],
+      "argv": ["bun", "test", "apps/runtime/test/cli-agent-config.test.ts", "apps/runtime/test/cli-agent-plugins.test.ts", "apps/runtime/test/cli-attention.test.ts", "apps/runtime/test/cli-capacity-slots.test.ts", "apps/runtime/test/cli-claude-adapter.test.ts", "apps/runtime/test/cli-codex-adapter.test.ts", "apps/runtime/test/cli-global-control.test.ts", "apps/runtime/test/cli-impact.test.ts", "apps/runtime/test/cli-knowledge.test.ts", "apps/runtime/test/cli-managed-project.test.ts", "apps/runtime/test/cli-prose-question.test.ts", "apps/runtime/test/cli-prose-question-attention.test.ts", "apps/runtime/test/cli-reclaim-batch.test.ts", "apps/runtime/test/cli-reclaim.test.ts", "apps/runtime/test/cli-schedule.test.ts", "apps/runtime/test/cli-session-attach.test.ts", "apps/runtime/test/cli-session-guidance.test.ts", "apps/runtime/test/cli-session-handoff.test.ts", "apps/runtime/test/cli-settings.test.ts", "apps/runtime/test/cli-snapshot-recheck.test.ts", "apps/runtime/test/cli-targeted-tests.test.ts", "apps/runtime/test/cli-task-control.test.ts", "apps/runtime/test/cli-task-create.test.ts", "apps/runtime/test/cli-task-depends.test.ts", "apps/runtime/test/cli-task-purge.test.ts", "apps/runtime/test/cli-task-retry.test.ts", "apps/runtime/test/cli-task-run-progress.test.ts", "apps/runtime/test/cli-task-recover.test.ts", "apps/runtime/test/cli-transcript.test.ts"],
       "cwd": ".",
       "timeoutSeconds": 1800,
       "covers": "整条分发链（39 个分支、16 个 unit 内部解析、退出码 0/1/2/3 与等待码）改写后，既有 CLI 命令面行为不变；含 v37 下 Task purge 与 Execution-backed Process 的兼容"

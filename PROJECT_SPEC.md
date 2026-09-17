@@ -1,6 +1,6 @@
 # Codeestra — 产品与架构规格
 
-状态：长期产品与目标架构基线；关键决策持续以 ADR 确认。**四条第一原则（默认 FULL 零确认、CLI 完备的服务形态、测试仅限 CLI/命令面且不获取电脑控制权、CLI 每一层自描述且与实际命令同源）见 §1.1，优先级最高（ADR-0008/0011/0068）。**ADR-0070 已把目标架构升级为 Service / Process / Agent / Signal 内核；S1–S4 已实现于 schema v37，S5–S10 尚未完成，差异见 `docs/roadmap/mvp.md`。
+状态：长期产品与目标架构基线；关键决策持续以 ADR 确认。**四条第一原则（默认 FULL 零确认、CLI 完备的服务形态、测试仅限 CLI/命令面且不获取电脑控制权、CLI 每一层自描述且与实际命令同源）见 §1.1，优先级最高（ADR-0008/0011/0068）。**ADR-0070 已把目标架构升级为 Service / Process / Agent / Signal 内核；S1–S4 已实现于 schema v37；S5–S7 各已交付一个最小纵向切片（ADR-0071/0072/0073：Process 完成写路径与只读进度、intention 结构化路由、Project/Task 创建写路径），S8–S10 与其余 S5–S7 内容尚未完成，差异见 `docs/roadmap/mvp.md`。
 
 **实现进度不写在本文件**：已完成、未验收与未实现的能力见 `docs/tasks/README.md`，当前有效决策与待决项见 `docs/decisions/README.md`。本文件只写长期产品与架构语义；规格与实现不一致时按 `AGENTS.md` 的决策流程先明确变更，不静默重新解释规格，也不把目标命令写成当前已可用。
 
@@ -157,7 +157,9 @@ Agent 配置（provider/model/thinking level）按 ADR-0012 分全局默认与�
 
 本次实现交付 ADR-0070 S1–S4：纯领域内核、schema v37 additive storage、Runtime registry/dispatcher、内核 CLI 与兼容 facade。S5–S10 不在本次范围；后续只能按 roadmap 的已解锁波次推进，migration 文件与版本号必须由单一 owner 管理。
 
-当前实现进度（已完成能力、未验收与未实现项）见 `docs/tasks/README.md`；本阶段验收只用 CLI/命令面，不使用 computer-use。`service/process/signal/intent` 已交付，但把原生 Process Agent、intention 解释、Project/Task 写路径切换或受管 integration 描述成当前已交付，仍是本规格明确禁止的。
+**后续切片（2026-09-17，三条并行 lane，同一 schema v37、无 migration）**：S5 交付 Process 完成写路径与只读进度投影（ADR-0071）；S6 交付 intention 结构化 outcome 路由与澄清内核事实（ADR-0072，Attention 全局索引未接通）；S7 把 Project/Task **创建**收敛到 Service 写路径（ADR-0073）。这三格各自只完成最小纵向切片，其余内容（原生 Process Agent 控制、真实模型意图解释、submit/revision/验证/取消/归档切换、Scheduler 建 Process、eligibility 解耦、受管 integration）仍未实现，见 `docs/roadmap/mvp.md` 的进度表。
+
+当前实现进度（已完成能力、未验收与未实现项）见 `docs/tasks/README.md`；本阶段验收只用 CLI/命令面，不使用 computer-use。`service/process/signal/intent` 已交付；把原生 Process Agent 控制、真实模型意图解释、Attention 全局索引、submit/revision/验证/取消/归档的写路径切换、受管 integration 或 eligibility 解耦描述成当前已交付，仍是本规格明确禁止的。
 
 ## 9. 文档导航与决策纪律
 

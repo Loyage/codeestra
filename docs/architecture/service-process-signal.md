@@ -2,9 +2,9 @@
 
 > 层级：L1 · 体量 ≈ 9k 字符 · **何时读**：改内核对象语义、Service 树、Process 控制、Signal 可靠性或 CLI 内核命令面 · 权威来源：`packages/domain/src/**`（纯领域）、`packages/storage/src/service-kernel-store.ts`、`apps/runtime/src/service-kernel.ts`。DDL 见 [`sqlite-schema-kernel.md`](./sqlite-schema-kernel.md)，落地波次见 [`../roadmap/mvp.md`](../roadmap/mvp.md)。
 
-状态：S1–S4 已实现（纯领域 contract、additive storage、持久 Signal dispatcher 与 registry、`service/process/signal/intent` CLI 与兼容 facade）。**S5–S10 仍是目标**；本文区分「目标语义」与「S4 当前的实现边界」，不把后续能力写成已交付。
+状态：S1–S4 已实现（纯领域 contract、additive storage、持久 Signal dispatcher 与 registry、`service/process/signal/intent` CLI 与兼容 facade），S5–S7 各完成一个最小纵向切片（Process 完成写路径与只读进度、intention 结构化路由、Project/Task 创建写路径，ADR-0071/0072/0073）；**其余仍待完成**。本文区分「目标语义」与「当前实现边界」，不把后续能力写成已交付。
 
-状态：**S1–S4 已实现，S5–S10 待完成**。决策依据为 [ADR-0070](../decisions/0070-service-process-signal-kernel.md)。当前产品为 schema v37：领域内核、持久 Service/Process/Signal、dispatcher/registry 与 CLI 已可用；Project/Task/Execution 仍由既有表提供 core 权威，原生 Process 控制、intention 解释、写路径切换与 managed integration 不提前声称。当前命令见 [`docs/guides/cli/kernel.md`](../guides/cli/kernel.md)。
+状态：**S1–S4 已实现；S5–S7 部分实现（见上方与 §4.1/§5.1/§6.3/§8.1）；S8–S10 待完成**。决策依据为 [ADR-0070](../decisions/0070-service-process-signal-kernel.md)。当前产品为 schema v37：领域内核、持久 Service/Process/Signal、dispatcher/registry 与 CLI 已可用；Project/Task/Execution 仍由既有表提供 core 权威（Task/Project 创建已收敛到 Service 写路径），**未完成**的是原生 Process Agent 控制、真实模型意图解释、Attention 全局索引对 kernel 级 Intention 的接通、受管 integration 与 eligibility 解耦。当前命令见 [`docs/guides/cli/kernel.md`](../guides/cli/kernel.md)。
 
 ## 1. 为什么需要这层内核
 

@@ -1,6 +1,14 @@
 # Service Kernel 改造 Roadmap
 
-状态：**ADR-0070 S1–S4 已由 FOUNDATION-099 实现，S5–S10 待完成**。当前可运行基线是 schema v37：既有业务 CLI 与通用 `service` / `process` / `signal` / `intent` CLI 并存；Project/Task/Execution 仍是 core 写权威，产品侧受管 integration 尚未实现。
+状态：**ADR-0070 S1–S4 已由 FOUNDATION-099 实现；S5 / S6 / S7 各已交付一个最小纵向切片（ADR-0071/0072/0073，见下方进度表），S8–S10 待完成**。当前可运行基线是 schema v37：既有业务 CLI 与通用 `service` / `process` / `signal` / `intent` CLI 并存；Project/Task/Execution 的旧表仍是 core 权威（Task/Project **创建**已收敛到 Service 写路径），产品侧受管 integration 尚未实现。
+
+本轮进度（2026-09-17，三条并行 lane 合入 `Loyage/service_level`）：
+
+| 格 | 本轮交付 | 仍未做 |
+|---|---|---|
+| S5 | `PROCESS_COMPLETED` SIG_A、`transitionProcess`/`completeProcess` 写路径（version CAS + receipt 幂等）、只读 `progress` 投影、succession 不变量 | Agent runner、原生 Process 控制 API（无 Execution 的 Process 仍 `PROCESS_CONTROL_UNAVAILABLE`）、token/cost/tool 计数事实 |
+| S6 | `INTENTION_RESOLVED` 结构化 outcome（ROUTE / TYPED_COMMAND=SESSION_GUIDANCE_RECORD / REQUEST_CLARIFICATION）、澄清审计事实与回答匹配、`CREATE_TASK` 具名拒绝 | 真实模型解释意图、Attention 全局索引接通（需新 migration）、`CREATE_TASK` 应用 |
+| S7 | Project/Task **创建**路径收敛到 Service 写路径（`ServiceWriteStore`、`TaskService.create`）、单一 writer 源码证据 | `task submit`/revision/验证/取消/归档切换、Scheduler 请求 Task Service 建 Development Process |
 
 本文件是接下来多 Agent 改造的权威分波计划。历史实现记录不在这里重复，见 [`docs/tasks/README.md`](../tasks/README.md)；旧 ADR 保留原样，不因 roadmap 改写而失去审计价值。
 
