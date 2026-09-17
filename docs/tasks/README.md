@@ -8910,7 +8910,14 @@ writer」，因此改为严格委托 `ServiceKernelStore.transitionProcess`，�
 
 ## 用户任务（`Loyage/task_cli`）— `task` 命令以 Task id 为地址，project 是 Task 的字段（ADR-**0076**，无 schema 变更）
 
-状态：已实现、已在工作区验证；**未 commit、未 push、未合入 `dev`、未跑全量测试**（本分支按 ADR-0038 只跑定向测试）。
+状态：已 commit、已合入 `dev`、**未 push `origin/dev`、未提升 `main`、未跑全量测试**（本分支按 ADR-0038 只跑定向测试）。
+
+流程说明（按用户显式指令「合并到 dev」）：
+
+- 已 commit：`c35970a`（本分支 `Loyage/task_cli`，55 个文件：代码 / 测试 / 文档 / ADR）。
+- 已合入 `dev`：`771781f`（`--no-ff`，无冲突、未 `--force`；合并前 `dev == origin/dev == 25b51ef`，dev clone 工作区干净）。
+- **未 push `origin/dev`**（本轮只要求合并）、**未提升 `main`**、**未触碰稳定 clone 与稳定 Runtime**。
+- **未跑全量测试与 `just check`**：按 ADR-0038，全量测试只在 `dev → main` 提升前、对精确 dev 候选运行；本次交付只有定向测试证据（下列实际验证），不得声称已跑全量。
 
 用户原话：「改进 task 的 cli 接口，task 应该是直接由 codeestra task 搜寻到的，project 只是它的字段信息，
 列出 task 和对 task 进行操作的时候不需要指定 project。」四道选择题的答复（本 ADR 的 Decision 直接来自它们）：
@@ -8972,7 +8979,7 @@ writer」，因此改为严格委托 `ServiceKernelStore.transitionProcess`，�
 
 ### 剩余问题（未做 / 不得当成已完成）
 
-1. **未 commit / 未 push / 未合入 `dev`**：按仓库纪律由人执行；本 Agent 未动任何 Git 状态。
+1. **未 push `origin/dev`、未提升 `main`**：`771781f` 目前只存在于本机 `dev`；推 `dev` 与提升是独立动作（ADR-0075 的 `dev` 单写者就是本机，但仍需显式执行），本轮未做。
 2. **只改了 `task *` 组**：`session guidance`、`project impact`、`project.integration.request`、`reclaim --task`、
    `scheduler reservations *` 仍要求 `project-id`；要不要统一是**下一个决策**，本轮用户明确选了「只限 `task *`」。
 3. **`task depends list` 没有「全部项目」形态**：`baseRef` 是单数、绑定一个项目，所以两个主体都不给是用法错误；
