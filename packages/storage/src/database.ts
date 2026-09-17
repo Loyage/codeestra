@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
   DependencyGraphError,
@@ -77,9 +77,11 @@ import {
   unregisteredReclamationMigration,
   verificationLayeringMigration,
   verificationProgressMigration,
+  rootServiceId,
   workspaceRetryMigration,
 } from './migration.js';
 import type { IntentKind } from './migration.js';
+import { ServiceWriteStore } from './service-write-store.js';
 
 /**
  * The `intents.kind` values this build accepts (ADR-0046). The database CHECK is the last line of
@@ -1455,6 +1457,7 @@ function parsePluginSelection(json: string | null): AgentPluginSelection | null 
 
 export class Phase1Database {
   readonly sqlite: Database;
+  #serviceWriteStore: ServiceWriteStore | null = null;
 
   constructor(filename = ':memory:') {
     this.sqlite = new Database(filename, { create: true, strict: true });
@@ -1466,6 +1469,16 @@ export class Phase1Database {
       this.sqlite.close();
       throw error;
     }
+  }
+
+  /**
+   * S7 (ADR-0070): Project/Task Service creation has exactly one writer. The store is created on
+   * first use because most reads never create anything, and because it must not be built before the
+   * connection exists.
+   */
+  private get serviceWriteStore(): ServiceWriteStore {
+    this.#serviceWriteStore ??= new ServiceWriteStore(this);
+    return this.#serviceWriteStore;
   }
 
   close(): void {
@@ -1857,26 +1870,16 @@ export class Phase1Database {
     readonly impactPolicy?: ImpactPolicyConfirmationInput;
   }): void {
     this.sqlite.transaction(() => {
-      const existing = this.sqlite.query<{
-        id: string; repo_root: string; git_common_dir: string; main_ref: string;
-        object_format: 'sha1' | 'sha256';
-      }, [string]>(`
-        SELECT id,repo_root,git_common_dir,main_ref,object_format FROM projects WHERE repo_root=?1
-      `).get(input.repoRoot);
-      let projectId = input.id;
-      if (existing === null) {
-        this.sqlite.query(`
-          INSERT INTO projects(id,name,repo_root,git_common_dir,main_ref,
-            object_format,policy_version,created_at)
-          VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
-        `).run(input.id, input.name, input.repoRoot, input.gitCommonDir, input.mainRef,
-          input.objectFormat, input.policyVersion, input.trustedAt);
-      } else {
-        if (existing.repo_root !== input.repoRoot || existing.git_common_dir !== input.gitCommonDir
-          || existing.object_format !== input.objectFormat) {
-          throw new StorageError('INVALID_STATE', 'Repository identity does not match the trusted project');
-        }
-        projectId = existing.id;
+      // S7 (ADR-0070): the `projects` row and the PROJECT Service that projects it have one writer
+      // and one transaction. The project row comes first because `services.project_id` references it,
+      // and the Service row follows in the same transaction, so a trust that cannot place the project
+      // in the Service tree (no root Service) rolls back the project row too instead of leaving a
+      // project that no Service addresses.
+      const project = this.serviceWriteStore.ensureProjectRow({ project: input });
+      const projectId = project.projectId;
+      this.serviceWriteStore.ensureProjectService({ projectId, rootServiceId,
+        now: input.trustedAt, eventId: randomUUID() });
+      if (!project.created) {
         // The project row carries no per-project branch: every Task baseline is read from the
         // project folder's checked out branch at preparation time (ADR-0062).
         this.sqlite.query(`
@@ -2055,41 +2058,36 @@ export class Phase1Database {
           SELECT COALESCE(MAX(display_number),0)+1 AS display_number FROM tasks WHERE project_id=?1
         `).get(input.projectId);
         if (next === null) throw new Error('Could not allocate a Task display number');
+        const projectService = this.serviceWriteStore.ensureProjectService({
+          projectId: input.projectId, rootServiceId, now: input.createdAt, eventId: randomUUID(),
+        });
 
         this.insertIntent(database, {
           id: input.intentId, projectId: input.projectId, idempotencyKey: input.commandId,
           rawText: input.specification, kind: 'CREATE_TASK', status: 'APPLIED',
           actor: input.actor, createdAt: input.createdAt,
         });
-        database.query(`
-          INSERT INTO tasks(id,project_id,display_number,display_title,naming_title,
-            current_revision_id,state,priority,version,created_at,updated_at)
-          VALUES (?1,?2,?3,?4,?5,?6,'DRAFT',0,0,?7,?7)
-        `).run(input.taskId, input.projectId, next.display_number, input.displayTitle,
-          input.namingTitle, input.revisionId, input.createdAt);
-        database.query(`
-          INSERT INTO task_revisions(id,task_id,number,previous_revision_id,specification,
-            features_json,source_intent_id,actor,reason,created_at)
-          VALUES (?1,?2,1,NULL,?3,?4,?5,?6,'initial task creation',?7)
-        `).run(input.revisionId, input.taskId, input.specification,
-          JSON.stringify(input.features ?? []), input.intentId, input.actor, input.createdAt);
+        // S7 (ADR-0070): the `tasks` row, its first revision, the TASK Service that projects it and
+        // the two events this command records are one write path (`ServiceWriteStore`), not four
+        // INSERTs here. This method keeps what the store deliberately does not own: the command
+        // receipt, the `intents` row and the display-number allocation.
+        this.serviceWriteStore.createTaskService({
+          projectId: input.projectId,
+          projectServiceId: projectService.id,
+          taskId: input.taskId,
+          displayNumber: next.display_number,
+          displayTitle: input.displayTitle,
+          namingTitle: input.namingTitle,
+          revisionId: input.revisionId,
+          specification: input.specification,
+          feature: (input.features ?? [])[0] ?? null,
+          features: input.features ?? [],
+          now: input.createdAt,
+          eventIds: [input.intentEventId, input.taskEventId],
+          command: { intentId: input.intentId, commandId: input.commandId, actor: input.actor },
+        });
         database.query('INSERT INTO intent_targets(intent_id,task_id) VALUES (?1,?2)')
           .run(input.intentId, input.taskId);
-        database.query(`
-          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-          VALUES (?1,?2,'IntentRecorded',1,'Intent',?3,0,?4,?4,?5,?6)
-        `).run(input.intentEventId, input.projectId, input.intentId, input.commandId, input.createdAt,
-          JSON.stringify({ intentId: input.intentId, kind: 'CREATE_TASK' }));
-        database.query(`
-          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-          VALUES (?1,?2,'TaskCreated',1,'Task',?3,0,?4,?5,?6,?7)
-        `).run(input.taskEventId, input.projectId, input.taskId, input.commandId,
-          input.intentEventId, input.createdAt,
-          JSON.stringify({ taskId: input.taskId, revisionId: input.revisionId,
-        displayTitle: input.displayTitle, namingTitle: input.namingTitle,
-        features: input.features ?? [] }));
         return {
           id: input.taskId,
           projectId: input.projectId,

@@ -258,6 +258,14 @@ PENDING → CLAIMED → ACKED
 
 UI/CLI 可以把组合投影成“等待开始、执行中、等待指示、等待合并、合并中、合并完成”，但底层不压成一个易撒谎的枚举。
 
+**S7 当前实现边界（ADR-0073）**：Task Service 行与 `tasks` 行由同一事务写入，Service 的 id 就是 Task id，
+`parent_service_id` 是该项目的 Project Service；`task create` 是唯一创建入口
+（`apps/runtime/src/task-service.ts` → `Phase1Database.createTask` → `packages/storage/src/service-write-store.ts`），
+所以 `service get <task-id>` 与 `task status <project> <task-id>` 是同一行的两次读取，lifecycle 与 version 不可能分叉。
+上面三个正交维度仍是**目标**：今天 `service get` 只投影 `tasks.state`（lifecycle）与 `tasks.version`，
+verification 与 integration 两个维度还没有进入 core state。本轮只切了**创建**写路径：
+`task submit` / revision / 验证 / 取消 / 归档仍走既有表与既有路径。
+
 ## 7. Scheduler 边界
 
 Scheduler 管准入与计算资源，不负责理解意图，也不把 DAG 逻辑埋在排序循环里。
@@ -283,6 +291,12 @@ Task/Project 领域服务计算 eligibility；Scheduler 只做：
 5. 请求 Task Service 创建 Development Process。
 
 提交前在同一事务重验 eligibility version，避免检查后条件变化。
+
+**S7 当前实现边界（ADR-0073）**：Scheduler 仍按既有调度引擎读写 `tasks` 行，本轮只把 **Project/Task 的创建**写路径
+收敛到 Project/Task Service handler。`TaskEligibility` 类型、领域服务计算 eligibility、以及第 5 步
+“请求 Task Service 创建 Development Process”都还没实现，Scheduler 也不直接拼装 Agent start。
+已经改变的是：Task Service 现在真实存在且是 Task 事实的同一个行（`services.task_id` = `tasks.id`），
+所以 Scheduler 将来要请求的那个 handler 已经有地址。
 
 ## 8. Intention 与 Attention
 
