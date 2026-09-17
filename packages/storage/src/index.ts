@@ -92,5 +92,8 @@ export type { IntentKind } from './migration.js';
 export { KernelStorageError, ServiceKernelStore, systemServiceIds } from './service-kernel-store.js';
 export type { ProcessView, ServiceView, SignalAttemptView, SignalView }
   from './service-kernel-store.js';
+// S7 (ADR-0070): the single write path for the `projects`/`tasks` core rows and the Services that
+// project them. Exported so a Runtime-level handler can name it without reaching into the file.
+export { ServiceWriteStore } from './service-write-store.js';
 export { agentThinkingLevelSchema, agentThinkingLevels, storedAgentConfigurationSchema }
   from './database.js';

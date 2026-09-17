@@ -115,6 +115,8 @@ import { RevisionDeliveryService } from './revision-delivery-service.js';
 import { SessionGuidanceService } from './session-guidance-service.js';
 import { ServiceContractRegistry, SignalDispatcher, intentionSignalSubtype,
   serviceMetadataSignalSubtype } from './service-kernel.js';
+/** S7 (ADR-0070): the one entry point that creates a Task; `task.create` is its first caller. */
+import { TaskService } from './task-service.js';
 import {
   VerificationRunner,
   inspectVerificationPolicy,
@@ -220,6 +222,10 @@ const storage = new Phase1Database(join(home, 'runtime.sqlite'));
 // Execution rows, then expired Signal claims are reconciled before any command can enqueue more.
 const kernelStore = new ServiceKernelStore(storage);
 kernelStore.reconcileProjections(Date.now());
+// The Task creation handler (S7). It owns the declared-feature check and the command identity; the
+// `tasks` row, its first revision and the TASK Service are one transaction inside storage
+// (`ServiceWriteStore`), and project registration does the same for the PROJECT Service.
+const taskService = new TaskService({ storage });
 const serviceContracts = new ServiceContractRegistry();
 const signalDispatcher = new SignalDispatcher({ store: kernelStore, contracts: serviceContracts,
   bootId });
@@ -2080,34 +2086,16 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       });
     }
     case 'task.create': {
-      // Declared features are validated before anything is written (ADR-0059 D03): an id that the
-      // project's mapping does not declare is a refusal with its own code, not a stored string that a
-      // later judgment would have to guess about.
-      const features = await resolveDeclaredFeatures({
-        storage, projectId: request.projectId, features: request.features,
-      });
-      const payloadHash = createHash('sha256').update(JSON.stringify({
-        projectId: request.projectId,
-        displayTitle: request.displayTitle,
-        namingTitle: request.namingTitle,
-        specification: request.specification,
-        features,
-      })).digest('hex');
-      return success(request.requestId, storage.createTask({
-        projectId: request.projectId,
+      // The whole command — feature validation, command identity, the `tasks` row and the TASK
+      // Service that projects it — belongs to `TaskService.create` (S7): the Runtime branch must not
+      // be a second writer of the same fact.
+      return success(request.requestId, await taskService.create({
         commandId: request.commandId,
-        payloadHash,
-        intentId: crypto.randomUUID(),
-        taskId: crypto.randomUUID(),
-        revisionId: crypto.randomUUID(),
-        intentEventId: crypto.randomUUID(),
-        taskEventId: crypto.randomUUID(),
+        projectId: request.projectId,
         displayTitle: request.displayTitle,
         namingTitle: request.namingTitle,
-        specification: request.specification,
-        features,
-        actor: 'local-user',
-        createdAt: Date.now(),
+        detail: request.specification,
+        features: request.features,
       }));
     }
     case 'project.trust': {
