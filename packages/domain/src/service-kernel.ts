@@ -170,6 +170,49 @@ export function transitionProcess(state: ProcessState, next: ProcessState): Proc
   return next;
 }
 
+export const processCompletionOutcomes = ['SUCCEEDED', 'FAILED', 'CANCELLED'] as const;
+export type ProcessCompletionOutcome = (typeof processCompletionOutcomes)[number];
+
+/** The outcome a Process reports on completion, as the Process state it must land in. */
+export function processCompletionState(outcome: ProcessCompletionOutcome): ProcessState {
+  if (outcome === 'SUCCEEDED') return 'SUCCEEDED';
+  if (outcome === 'FAILED') return 'FAILED';
+  if (outcome === 'CANCELLED') return 'CANCELLED';
+  throw new DomainError('INVALID_VALUE', `Unknown Process completion outcome ${String(outcome)}`);
+}
+
+/** Terminal Processes are finished facts: they are never revived, only superseded by a successor. */
+export function isTerminalProcessState(state: ProcessState): boolean {
+  return terminalProcessStates.has(state);
+}
+
+/**
+ * Process kinds that hold a Task's single execution slot. An `INTENTION` Process interprets an
+ * intention for its parent Service and owns no Task execution, so it contends for no slot.
+ */
+export const processSlotKinds = ['DEVELOPMENT', 'INTEGRATION'] as const;
+
+export interface ProcessFact {
+  readonly kind: ProcessKind;
+  readonly state: ProcessState;
+}
+
+export function claimsProcessSlot(kind: ProcessKind): boolean {
+  return (processSlotKinds as readonly ProcessKind[]).includes(kind);
+}
+
+/**
+ * A Task's execution slot is held by at most one non-terminal Process. A successor may only take the
+ * slot once its predecessor is terminal (or is a `SUPERSEDED` Execution projected as terminal); two
+ * live slot holders would mean two Agents writing one Task at the same time.
+ */
+export function assertProcessSuccession(previous: ProcessFact | null, next: ProcessFact): void {
+  if (previous === null || !claimsProcessSlot(previous.kind) || !claimsProcessSlot(next.kind)) return;
+  if (isTerminalProcessState(previous.state) || isTerminalProcessState(next.state)) return;
+  throw new DomainError('PROCESS_PREDECESSOR_ACTIVE',
+    `Task execution slot is still held by a ${previous.state} ${previous.kind} Process`);
+}
+
 export function assertSinglePrimaryAgent(processState: ProcessState, primaryAgentIds: readonly string[]): void {
   const active = !terminalProcessStates.has(processState) && processState !== 'CREATED';
   if (active && primaryAgentIds.length !== 1) {

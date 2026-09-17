@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { rootServiceId } from '@codeestra/storage';
+import { rootServiceId, schedulerServiceId } from '@codeestra/storage';
 import { cleanupTemporaryDirectories, registerTemporaryDirectory } from './support/agent-fixture.js';
 import { reclaimTestResources, runCli } from './support/runtime-reclamation.js';
 
@@ -118,6 +118,94 @@ describe('Service kernel CLI', () => {
       environment);
       expect(incompatible.exitCode).toBe(1);
       expect(incompatible.stderr).toContain('SIGNAL_NOT_ACCEPTED');
+    } finally {
+      await cli(['stop'], environment);
+    }
+  }, 120_000);
+
+  test('records one PROCESS_COMPLETED fact and keeps the terminal Process terminal', async () => {
+    const environment = fixture();
+    try {
+      const sent = await cli(['intent', 'send', 'Finish', 'the', 'plan', '--json'], environment);
+      expect(sent.exitCode).toBe(0);
+      const processId = (JSON.parse(sent.stdout) as {
+        readonly process: { readonly id: string } }).process.id;
+      const payload = (outcome: string, expectedVersion: number): string => JSON.stringify({
+        processId, outcome, expectedVersion, summary: `${outcome} it` });
+
+      const completed = await cli(['signal', 'send', rootServiceId, '--kind', 'SIG_A',
+        '--subtype', 'PROCESS_COMPLETED', '--payload-json', payload('CANCELLED', 0),
+        '--idempotency-key', 'complete-1', '--json'], environment);
+      expect(completed.exitCode).toBe(0);
+      expect(JSON.parse(completed.stdout)).toMatchObject({ created: true,
+        signal: { kind: 'SIG_A', subtype: 'PROCESS_COMPLETED', state: 'ACKED',
+          receipt: { effect: { type: 'PROCESS_COMPLETED', processId, outcome: 'CANCELLED',
+            state: 'CANCELLED', version: 1 } } } });
+
+      const observed = JSON.parse((await cli(['process', 'get', processId, '--json'], environment))
+        .stdout) as { readonly state: string; readonly version: number;
+        readonly progress: { readonly budgetKnown: boolean; readonly lastProgressAt: number | null;
+          readonly tokenUsage: null; readonly costUsd: null;
+          readonly toolCallCount: null } };
+      expect(observed).toMatchObject({ state: 'CANCELLED', version: 1,
+        progress: { budgetKnown: false, tokenUsage: null, costUsd: null, toolCallCount: null } });
+      // A recorded Process fact is reported as a number; absent accounting stays null, never zero.
+      expect(typeof observed.progress.lastProgressAt).toBe('number');
+
+      const replayed = await cli(['signal', 'send', rootServiceId, '--kind', 'SIG_A',
+        '--subtype', 'PROCESS_COMPLETED', '--payload-json', payload('CANCELLED', 0),
+        '--idempotency-key', 'complete-1', '--json'], environment);
+      expect(replayed.exitCode).toBe(0);
+      expect(JSON.parse(replayed.stdout)).toMatchObject({ created: false,
+        signal: { state: 'ACKED', receipt: { effect: { version: 1 } } } });
+      expect(JSON.parse((await cli(['process', 'get', processId, '--json'], environment)).stdout))
+        .toMatchObject({ state: 'CANCELLED', version: 1 });
+
+      const stale = await cli(['signal', 'send', rootServiceId, '--kind', 'SIG_A',
+        '--subtype', 'PROCESS_COMPLETED', '--payload-json', payload('CANCELLED', 9),
+        '--idempotency-key', 'complete-stale', '--json'], environment);
+      expect(stale.exitCode).toBe(1);
+      expect(JSON.parse(stale.stdout)).toMatchObject({ signal: { state: 'DEAD_LETTER',
+        lastErrorCode: 'PROCESS_VERSION_CONFLICT' } });
+
+      const revived = await cli(['signal', 'send', rootServiceId, '--kind', 'SIG_A',
+        '--subtype', 'PROCESS_COMPLETED', '--payload-json', payload('SUCCEEDED', 1),
+        '--idempotency-key', 'complete-revive', '--json'], environment);
+      expect(revived.exitCode).toBe(1);
+      expect(JSON.parse(revived.stdout)).toMatchObject({ signal: { state: 'DEAD_LETTER',
+        lastErrorCode: 'PROCESS_TERMINAL' } });
+      expect(JSON.parse((await cli(['process', 'get', processId, '--json'], environment)).stdout))
+        .toMatchObject({ state: 'CANCELLED', version: 1 });
+    } finally {
+      await cli(['stop'], environment);
+    }
+  }, 120_000);
+
+  test('refuses native Process control and a Service that supervises no Process', async () => {
+    const environment = fixture();
+    try {
+      const sent = await cli(['intent', 'send', 'Investigate', 'the', 'kernel', '--json'], environment);
+      expect(sent.exitCode).toBe(0);
+      const processId = (JSON.parse(sent.stdout) as {
+        readonly process: { readonly id: string } }).process.id;
+      for (const args of [
+        ['process', 'input', processId, '--message', 'continue'],
+        ['process', 'pause', processId, '0'],
+        ['process', 'resume', processId, '0'],
+        ['process', 'terminate', processId, '0'],
+      ]) {
+        const refused = await cli(args, environment);
+        expect(refused.exitCode).toBe(1);
+        expect(refused.stderr).toContain('PROCESS_CONTROL_UNAVAILABLE');
+      }
+
+      // The Scheduler Service supervises no Process, so it does not accept the subtype at all.
+      const unsupported = await cli(['signal', 'send', schedulerServiceId, '--kind', 'SIG_A',
+        '--subtype', 'PROCESS_COMPLETED', '--payload-json', JSON.stringify({ processId,
+          outcome: 'CANCELLED', expectedVersion: 0, summary: 'never accepted' }),
+        '--idempotency-key', 'scheduler-complete'], environment);
+      expect(unsupported.exitCode).toBe(1);
+      expect(unsupported.stderr).toContain('SIGNAL_NOT_ACCEPTED');
     } finally {
       await cli(['stop'], environment);
     }

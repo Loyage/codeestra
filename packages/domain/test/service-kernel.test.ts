@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   assertEligibilityVersion,
+  assertProcessSuccession,
   assertSinglePrimaryAgent,
+  isTerminalProcessState,
+  processCompletionState,
   serviceMetadataKey,
   setServiceMetadata,
   signalDedupeKey,
@@ -90,5 +93,28 @@ describe('Service kernel domain', () => {
     expect(assertEligibilityVersion(eligibility, 7)).toBeUndefined();
     expect(() => assertEligibilityVersion({ ...eligibility, evidenceVersion: 8 }, 7))
       .toThrow(/version/i);
+  });
+
+  it('maps a completion outcome onto the state it must land in', () => {
+    expect(processCompletionState('SUCCEEDED')).toBe('SUCCEEDED');
+    expect(processCompletionState('FAILED')).toBe('FAILED');
+    expect(processCompletionState('CANCELLED')).toBe('CANCELLED');
+    expect(() => processCompletionState('OK' as never)).toThrow(/Unknown/);
+    expect(isTerminalProcessState('SUCCEEDED')).toBe(true);
+    expect(isTerminalProcessState('CANCELLED')).toBe(true);
+    expect(isTerminalProcessState('RUNNING')).toBe(false);
+    expect(isTerminalProcessState('RECOVERY_REQUIRED')).toBe(false);
+  });
+
+  it('lets at most one non-terminal Process hold a Task execution slot', () => {
+    const running = { kind: 'DEVELOPMENT' as const, state: 'RUNNING' as const };
+    const finished = { kind: 'DEVELOPMENT' as const, state: 'CANCELLED' as const };
+    expect(assertProcessSuccession(null, running)).toBeUndefined();
+    expect(assertProcessSuccession(finished, running)).toBeUndefined();
+    expect(assertProcessSuccession(running, finished)).toBeUndefined();
+    expect(() => assertProcessSuccession(running, running)).toThrow(/slot/);
+    // An Intention Process interprets an intention; it owns no Task execution slot.
+    expect(assertProcessSuccession(running, { kind: 'INTENTION', state: 'RUNNING' }))
+      .toBeUndefined();
   });
 });

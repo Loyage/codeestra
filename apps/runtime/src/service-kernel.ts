@@ -1,5 +1,10 @@
 import { z, type ZodType } from 'zod';
-import { intentionSignalPayloadSchema, serviceMetadataSetPayloadSchema } from '@codeestra/contracts';
+import {
+  intentionSignalPayloadSchema,
+  processCompletedPayloadSchema,
+  processCompletedSubtype,
+  serviceMetadataSetPayloadSchema,
+} from '@codeestra/contracts';
 import type { ServiceKind, SignalKind } from '@codeestra/domain';
 import {
   KernelStorageError,
@@ -10,6 +15,9 @@ import {
 
 export const serviceMetadataSignalSubtype = 'SERVICE_METADATA_SET';
 export const intentionSignalSubtype = 'INTENT_SUBMITTED';
+// The completion subtype string is defined once, in the contracts package, and re-exported here so a
+// caller of the kernel does not spell the literal a second time.
+export { processCompletedSubtype };
 export const signalClaimLeaseMs = 30_000;
 export const signalRetryDelaysMs = Object.freeze([1_000, 5_000, 30_000, 120_000, 300_000]);
 // One initial delivery plus five automatic retries. The sixth failed delivery dead-letters.
@@ -39,16 +47,21 @@ export class ServiceContractRegistry {
     const intention: AcceptedSignalContract = {
       kind: 'SIG_P', subtype: intentionSignalSubtype, payload: intentionSignalPayloadSchema,
     };
+    // A Process completes through its parent Service. A Process's parent is always a ROOT, PROJECT or
+    // TASK Service; Scheduler and Attention supervise no Process and must not accept the subtype.
+    const completed: AcceptedSignalContract = {
+      kind: 'SIG_A', subtype: processCompletedSubtype, payload: processCompletedPayloadSchema,
+    };
     const entries: ServiceContract[] = [
-      { kind: 'ROOT', version: 1, acceptedSignals: [metadata, intention],
+      { kind: 'ROOT', version: 1, acceptedSignals: [metadata, intention, completed],
         childKinds: ['SCHEDULER', 'ATTENTION', 'PROJECT'], acceptsPrompt: true },
       { kind: 'SCHEDULER', version: 1, acceptedSignals: [metadata],
         childKinds: [], acceptsPrompt: false },
       { kind: 'ATTENTION', version: 1, acceptedSignals: [metadata],
         childKinds: [], acceptsPrompt: false },
-      { kind: 'PROJECT', version: 1, acceptedSignals: [metadata, intention],
+      { kind: 'PROJECT', version: 1, acceptedSignals: [metadata, intention, completed],
         childKinds: ['TASK'], acceptsPrompt: true },
-      { kind: 'TASK', version: 1, acceptedSignals: [metadata, intention],
+      { kind: 'TASK', version: 1, acceptedSignals: [metadata, intention, completed],
         childKinds: [], acceptsPrompt: true },
     ];
     this.contracts = new Map(entries.map((entry) => [entry.kind, Object.freeze(entry)]));
@@ -158,6 +171,13 @@ export class SignalDispatcher {
           namespace: metadata.namespace, key: metadata.key, value: metadata.value,
           expectedVersion: metadata.expectedVersion, actor: 'signal-dispatcher', now,
           eventIds: [this.#randomUUID(), this.#randomUUID()] });
+        return;
+      }
+      if (signal.kind === 'SIG_A' && signal.subtype === processCompletedSubtype) {
+        const completed = processCompletedPayloadSchema.parse(payload);
+        this.#store.completeProcess({ signalId: signal.id, processId: completed.processId,
+          outcome: completed.outcome, expectedVersion: completed.expectedVersion,
+          summary: completed.summary, now, eventIds: [this.#randomUUID(), this.#randomUUID()] });
         return;
       }
       if (signal.kind === 'SIG_P' && signal.subtype === intentionSignalSubtype) {
