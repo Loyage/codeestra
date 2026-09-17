@@ -8860,7 +8860,15 @@ writer」，因此改为严格委托 `ServiceKernelStore.transitionProcess`，�
 
 ## FOUNDATION-101 — 多机并行开发：`dev` 单写者与开发机布局（ADR-0075，纯文档）
 
-状态：约定已冻结并写进仓库（ADR + runbook + README + AGENTS.md）。**无代码、无 schema、无命令面变化**；未 commit、未合入 `dev`、未 push、未提升 `main`、未重启任何 Runtime。
+状态：约定已冻结并写进仓库（ADR + runbook + README + AGENTS.md）。**无代码、无 schema、无命令面变化**。
+
+流程说明（按用户显式指令，本次不再停在「未 commit」）：
+
+- 已 commit：`fcd270b`（只含本条的 6 个文档文件，作者 `loyage <792058350@qq.com>`）。
+- 已由人合入 `dev`：`460fe3a`（`--no-ff` merge，正常合并、无冲突、未 `--force`）。
+- **未** push `origin/dev`（用户本轮明确「暂不推，我自己确认后再推」）、**未** 提升 `main`、**未** 触碰稳定 clone 与稳定 Runtime。
+- **未跑全量测试与 `just check`**：按用户显式指令「不用 check」；本次改动只涉及 Markdown，ADR-0038 的全量测试本来只在提升前必需，因此这次没有可消费的测试证据，也不得声称已跑。
+- 提交时 `git add -A` 曾把一份**不属于本任务**的在飞改动（`apps/runtime/test/snapshot-generation-recheck.test.ts`，把基线改读 `refs/codeestra/integration`）一并暂存；已从提交中剥离，并**原样保留为工作区未提交改动**（未覆盖、未撤销、未代提）。
 
 用户本轮四题确认（均取推荐项）：
 
