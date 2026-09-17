@@ -77,6 +77,7 @@
 - [ADR-0072](0072-kernel-intention-clarification-fact.md)：**kernel 级 Intention 的澄清是内核事实，不是 Attention 行**（A/B/C 选 A）：v37 的 `attention_requests.session_id` 是非空外键（→ `agent_sessions` → `executions`），kernel 级 Intention Process 没有 provider 会话，因此澄清只落 Process `WAITING_FOR_USER` + append-only 审计事实 + Signal receipt（`attentionIndex: "NOT_CONNECTED"`），回答用同一 Process 的 `INTENTION_RESOLVED` + `causationId` 匹配；`CREATE_TASK` 用具名 schema 立即 `DEAD_LETTER`（`INTENTION_CREATE_TASK_UNSUPPORTED`）。**未决项**：接 Attention 全局索引需要一次新 migration（v38 号已预留给 S8）。
 - [ADR-0073](0073-project-task-single-write-path.md)：**Project/Task 单一写路径**（最小切片）：`ServiceWriteStore.ensureProjectService`/`createTaskService` 与 `TaskService.create` 是 `projects`/`tasks` 行的唯一 writer，`task.create` 与 `project trust` 经它们调用；同事务、失败零部分应用、重复调用幂等；定向测试扫描源码断言 `INSERT INTO tasks|projects` 只出现在该文件。**未做**：submit/revision/验证/取消/归档切换、Scheduler 请求 Task Service 建 Development Process。
 - [ADR-0074](0074-managed-integration-ref-and-merge-queue.md)：**受管 integration 的准确拼写与落地（S8）**：ref 为 `refs/codeestra/integration`（私有命名空间，`git branch` 列不出、默认 push 带不走、checkout 不可能停在它上面）；`project trust` 创建、缺失时首次需要补建；CLI 挂在 `project integration status|init|queue|request|run|retry|cancel` + `task integration show`；持久 merge queue 以「`MERGING`/`VERIFYING` 上的部分唯一索引」保证同项目串行、跨项目并行；`run` = claim → 固定 expected OID → owned worktree `--no-ff` 合并 → 候选 ref → 独立 Integration Verification（候选 commit 的独立副本）→ `git update-ref` CAS → `MERGED` + Task 投影 + `TASK_MERGE_SETTLED`；冲突/验证失败/ref 移动/重启一律保留现场且**不 force**；**新 Task 默认基线改为 integration commit**（ADR-0066 的基线规则被 amend，「不发布到用户分支」保留）。**仍未做**：Integration Process/Agent、发布出口、内核级冲突的 Attention 行。**schema v38**。
+- [ADR-0075](0075-multi-machine-dev-layout-and-single-writer-dev.md)：**多机并行开发：`dev` 单写者与开发机布局**。`dev` 的合入与 push 固定在稳定机；开发机只检出 `dev`（只 `--ff-only` 前进）、只推 feature/task 分支，不推 `dev`/`main`/`refs/codeestra/*`、不建 main clone、不跑稳定 Runtime、不执行提升；开发机首次 `project trust`/建 workspace **前**本地 `dev` 必须与 `origin/dev` 一致（ADR-0074 物化的 integration ref 永不移动）；不新增机器门禁（稳定机专属动作在开发机上自然失败）。**无代码、无 schema、无命令面变化**；**Amends** ADR-0048 的单机布局口径。
 
 ## 当前有效语义（与旧 ADR 冲突时按此执行）
 
@@ -87,7 +88,7 @@
 - **测试范围与时机**：ADR-0038/0039 —— task/lane/feature/Self candidate 分支只跑建分支时选定的定向测试；全量只在精确 `dev` 候选上、作为提升前必备证据。**注（ADR-0066）**：产品侧的「提升前全量证据」随提升一起删除；本条作为本仓库自身的开发/发布纪律仍在 `AGENTS.md` 生效。
 - **集成与发布**：受管集成为 **schema v38 / ADR-0074**：`project integration status|init|queue|request|run|retry|cancel` 与 `task integration show`（ADR-0063 §23），Project Service 独占 `refs/codeestra/integration` 与 `<CODEESTRA_HOME>/integration/<project-id>/`，同项目串行、跨项目并行，冲突/验证失败/ref 移动/重启都保留现场且不 force。**发布出口仍未定义**：没有任何命令把该 ref 推到用户 main/release，也不恢复旧 `promotion *`；Integration Process/Agent 未实现，冲突只报告不自动解决。本仓库自身的 `dev → main` 继续走 `AGENTS.md` 人工四步。
 - **分支职责与重启**：ADR-0009（**由 ADR-0066 收窄为仓库约定**）—— 本仓库自身长期保留 `main`/`dev`；`main` 更新后立即 `stop` + `status`。产品不再建模这两个分支。
-- **本机布局与客户端**：ADR-0048（**产品语义部分由 ADR-0066 删除**）—— 两个独立 clone 的拆分只服务 Codeestra 自身的开发。ADR-0067 起 Web UI 暂停：没有启用的 UI 构建产物、HTTP 入口或 UI 启动步骤；源码静态保留。
+- **本机布局与客户端**：ADR-0048（**产品语义部分由 ADR-0066 删除**）—— 两个独立 clone 的拆分只服务 Codeestra 自身的开发。**多机口径见 ADR-0075**：`dev` 集成与 push 的**单写者是稳定机**，开发机只检出 `dev`（`--ff-only` 前进）、只推 feature/task 分支、不推 `dev`/`main`/`refs/codeestra/*`，也不建 main clone 或跑稳定 Runtime；开发机首次 `project trust`/建 workspace **前**必须让本地 `dev` 与 `origin/dev` 完全一致（ADR-0074 物化 integration ref 后永不移动）。ADR-0067 起 Web UI 暂停：没有启用的 UI 构建产物、HTTP 入口或 UI 启动步骤；源码静态保留。
 - **Task 基线（ADR-0074，已切换）**：新 Task 的默认基线是 Project Service 受管 integration ref 当时的 commit（`workspaces.base_ref = refs/codeestra/integration`，ref 与 commit 同时固定）；`--base-ref` 仍可覆盖为项目本地分支；**既有 workspace 不回写**；依赖释放与回收的「已合并」判定都读这条 ref。老项目在首次需要时按当时项目文件夹检出的分支补建该 ref（detached HEAD 且 ref 缺失 → 按未满足处理）。
 - **CLI 优先 / Web UI 暂停**：ADR-0067 —— 当前产品只启用 CLI/Unix socket 命令面；`ui`/`open`/`runtime.ui`/`settings ui *` 与 `uiRunning` 已删除，UI/HTTP 专用测试和默认构建已移除。保留源码不得描述成可用功能。
 - **CLI 自描述**：ADR-0068 —— 每一层的命令清单由**命令树**（`apps/cli/src/command-tree.ts`）生成，argv 由它解析，分发分支按 tree id 且编译期穷尽；用法错误一行（`2`）并指向 `help`，`UNHANDLED_COMMAND`（`70`）表示树与分发不一致的缺陷；`runtime commands` 按请求 union 列出 Runtime 命令面。文档覆盖由定向测试核对，**过时**仍属人工纪律（ADR-0050 不变）。
@@ -122,6 +123,7 @@
 | Phase 3 | revision 投递的真实 ACK | 无 Adapter 实现 `applyRevision`；真实 provider ACK 与真实模型对投递提示的理解未验收 |
 | Phase 3 | 原生终端接管的真实验证 | 真实模型在 TUI 中键入后交还 RPC 的完整复验、跨交接权限模式完整矩阵（ADR-0054 仍 `PARTIAL`）、Windows 未验证 |
 | Phase 4 | `main` 未检出时的提升路径、多批次合并提升 | 不自动推断，需另立决策 |
+| 任意阶段 | 多机并行开发（ADR-0075）的实际接入 | 约定已冻结（单写者、开发机只建 dev clone、开工前 `dev` 必须与 `origin/dev` 一致）；**第二台机器尚未接入，双机同时工作没有实测**；本仓库 `origin/dev` 也仍待稳定机推送。不提供跨机 Runtime 状态同步，也不声称任何跨机一致性 |
 | Phase 5 | 真实模型驱动的完整 CLI 流程 | 真实模型端到端、`fileChange`/`permissions` 审批、多工具批次 interrupt、Windows 未验证 |
 | Phase 7 | migration/备份兼容策略、bootstrap 自身更新授权 | 禁止自动实现不可逆升级；实现前确认 |
 | 任意阶段 | Runtime 自有资源回收的并发与归因 | 并发压力测试未做；无法归因到任何已信任项目的目录只报告不入账（ADR-0037） |
