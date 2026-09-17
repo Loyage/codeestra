@@ -1,5 +1,7 @@
 import { z, type ZodType } from 'zod';
 import {
+  intentionResolvedSignalPayloadSchema,
+  intentionResolvedSubtype,
   intentionSignalPayloadSchema,
   processCompletedPayloadSchema,
   processCompletedSubtype,
@@ -12,12 +14,13 @@ import {
   type ServiceView,
   type SignalView,
 } from '@codeestra/storage';
+import { IntentionService, createIntentionService } from './intention-service.js';
 
 export const serviceMetadataSignalSubtype = 'SERVICE_METADATA_SET';
 export const intentionSignalSubtype = 'INTENT_SUBMITTED';
-// The completion subtype string is defined once, in the contracts package, and re-exported here so a
-// caller of the kernel does not spell the literal a second time.
-export { processCompletedSubtype };
+// The kernel's own SIG_A subtypes are defined once, in the contracts package, and re-exported here so
+// a caller of the kernel does not spell a literal a second time.
+export { intentionResolvedSubtype, processCompletedSubtype };
 export const signalClaimLeaseMs = 30_000;
 export const signalRetryDelaysMs = Object.freeze([1_000, 5_000, 30_000, 120_000, 300_000]);
 // One initial delivery plus five automatic retries. The sixth failed delivery dead-letters.
@@ -47,21 +50,26 @@ export class ServiceContractRegistry {
     const intention: AcceptedSignalContract = {
       kind: 'SIG_P', subtype: intentionSignalSubtype, payload: intentionSignalPayloadSchema,
     };
-    // A Process completes through its parent Service. A Process's parent is always a ROOT, PROJECT or
-    // TASK Service; Scheduler and Attention supervise no Process and must not accept the subtype.
+    // A Process reports its own facts through its parent Service: completion (S5) and the structured
+    // interpretation of an intention (S6). A Process's parent is always a ROOT, PROJECT or TASK
+    // Service; Scheduler and Attention supervise no Process and must not accept either subtype.
     const completed: AcceptedSignalContract = {
       kind: 'SIG_A', subtype: processCompletedSubtype, payload: processCompletedPayloadSchema,
     };
+    const resolvedIntention: AcceptedSignalContract = {
+      kind: 'SIG_A', subtype: intentionResolvedSubtype,
+      payload: intentionResolvedSignalPayloadSchema,
+    };
     const entries: ServiceContract[] = [
-      { kind: 'ROOT', version: 1, acceptedSignals: [metadata, intention, completed],
+      { kind: 'ROOT', version: 1, acceptedSignals: [metadata, intention, completed, resolvedIntention],
         childKinds: ['SCHEDULER', 'ATTENTION', 'PROJECT'], acceptsPrompt: true },
       { kind: 'SCHEDULER', version: 1, acceptedSignals: [metadata],
         childKinds: [], acceptsPrompt: false },
       { kind: 'ATTENTION', version: 1, acceptedSignals: [metadata],
         childKinds: [], acceptsPrompt: false },
-      { kind: 'PROJECT', version: 1, acceptedSignals: [metadata, intention, completed],
+      { kind: 'PROJECT', version: 1, acceptedSignals: [metadata, intention, completed, resolvedIntention],
         childKinds: ['TASK'], acceptsPrompt: true },
-      { kind: 'TASK', version: 1, acceptedSignals: [metadata, intention, completed],
+      { kind: 'TASK', version: 1, acceptedSignals: [metadata, intention, completed, resolvedIntention],
         childKinds: [], acceptsPrompt: true },
     ];
     this.contracts = new Map(entries.map((entry) => [entry.kind, Object.freeze(entry)]));
@@ -101,6 +109,12 @@ export interface SignalDispatcherOptions {
   readonly bootId: string;
   readonly now?: () => number;
   readonly randomUUID?: () => string;
+  /**
+   * The intention resolver. Absent means the dispatcher builds the production one from its store on
+   * first use, so the Runtime bootstrap does not have to hand it over (S6 lane contract §1 keeps
+   * `main.ts` out of this lane's reach); a test can supply its own.
+   */
+  readonly intention?: IntentionService;
 }
 
 /** Event-woken plus periodically reconciled dispatcher; no Service owns a busy-loop. */
@@ -111,6 +125,7 @@ export class SignalDispatcher {
   readonly #now: () => number;
   readonly #randomUUID: () => string;
   #dispatching = false;
+  #intention: IntentionService | null;
 
   constructor(options: SignalDispatcherOptions) {
     this.#store = options.store;
@@ -118,6 +133,12 @@ export class SignalDispatcher {
     this.#bootId = options.bootId;
     this.#now = options.now ?? Date.now;
     this.#randomUUID = options.randomUUID ?? (() => crypto.randomUUID());
+    this.#intention = options.intention ?? null;
+  }
+
+  #intentionService(): IntentionService {
+    this.#intention ??= createIntentionService(this.#store);
+    return this.#intention;
   }
 
   send(input: {
@@ -171,6 +192,15 @@ export class SignalDispatcher {
           namespace: metadata.namespace, key: metadata.key, value: metadata.value,
           expectedVersion: metadata.expectedVersion, actor: 'signal-dispatcher', now,
           eventIds: [this.#randomUUID(), this.#randomUUID()] });
+        return;
+      }
+      if (signal.kind === 'SIG_A' && signal.subtype === intentionResolvedSubtype) {
+        // The handler owns the whole outcome vocabulary, including the `CREATE_TASK` boundary it
+        // refuses by name; the registry only checked that the envelope is well formed.
+        this.#intentionService().resolve({ signalId: signal.id,
+          targetServiceId: signal.targetServiceId, idempotencyKey: signal.idempotencyKey,
+          correlationId: signal.correlationId, causationId: signal.causationId,
+          payload: signal.payload });
         return;
       }
       if (signal.kind === 'SIG_A' && signal.subtype === processCompletedSubtype) {

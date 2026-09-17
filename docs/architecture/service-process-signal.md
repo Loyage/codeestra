@@ -316,6 +316,42 @@ codeestra intent send --task T "不要新增依赖，沿用现有 helper"
 - 任意 Service 的结构化问题进入 Attention Service 的全局索引；回答后 Signal 路由回原 Service/Process；
 - 一个 Task 等用户时，其它 Task 和 Service 继续运行。
 
+### 8.1 S6 当前实现边界（2026-09-17）
+
+`intent send` 仍只可靠受理 `INTENT_SUBMITTED` `SIG_P` 并幂等创建一个 `CREATED` 的 `INTENTION` Process（返回值
+`interpretation: "PENDING_S6"`）；**没有 Agent 在解释自然语言**。已实现的是它的结构化另一半：`INTENTION_RESOLVED`
+`SIG_A`（注册到 ROOT / PROJECT / TASK），payload 为 `{processId, expectedVersion, outcome}`，`outcome` 只有三种：
+
+- `ROUTE`：目标必须是该 Process 的 parent Service **可见**的 Service（root 可到直属 PROJECT，PROJECT 可到自己
+  的 TASK；其余一律 `INTENTION_TARGET_NOT_VISIBLE`）。成功只落一条 append-only 审计事实 `IntentionRouted`——
+  本轮**不**创建新 Process、**不**改任何 Task 规格，真正的执行交给后续波次。
+- `TYPED_COMMAND`：白名单只有一个成员 `SESSION_GUIDANCE_RECORD`。命令名是字面量，kernel 绝不运行调用方给的
+  命令字符串。它写的是既有 Session Guidance 账本（ADR-0057），**不**产生 TaskRevision；能解析出 target Task 就
+  落记录并如实回报 `RECORDED`（`RECORDED` ≠ 模型已读）。与 `ROUTE` **故意不同**：这里不套用子树可见性规则，
+  因为 guidance 是会话级事实、不改验收标准（判据只是“目标是一个存在且能解析出 project/task 的 TASK Service”）。
+  若该 Task 正被一个 Execution 持有，kernel 派发器没有 provider 会话通道，因此以
+  `INTENTION_GUIDANCE_CHANNEL_UNAVAILABLE` 拒绝并指向 `session guide`，而不是伪造一次投递。
+- `REQUEST_CLARIFICATION`：Process 进 `WAITING_FOR_USER` 并落一条 `IntentionClarificationRequested` 审计事实
+  （含 `requestId`、`question`、`options?`、`correlationId`、`causationId`）。回答仍走**既有 `signal send`**：对同一
+  Process 再发一条 `INTENTION_RESOLVED`（新 idempotency key），并把该 `requestId` 放进 Signal 信封的 `causationId`
+  （payload 是 `strictObject`，不能再加字段）；对不上就以 `INTENTION_CLARIFICATION_MISMATCH` 拒绝。
+
+**Attention 全局索引对 kernel 级 Intention 尚未接通**：本轮**没有**为澄清建立 `attention_requests` 行。原因是
+schema v37 的 `attention_requests.session_id` 是 `NOT NULL REFERENCES agent_sessions(id)`，而 `agent_sessions.execution_id`
+又是 `NOT NULL REFERENCES executions(id)`——一个由 `intent send` 建出的 native `INTENTION` Process 根本没有 provider
+会话，所以“无会话的 Attention”在 v37 下不可表达。接通它需要一次新的 migration（v38 号已预留给 S8 managed
+integration），属未决项，本轮不做、也不得写成已实现。因此澄清是 kernel 事实：`process get` 读到 `WAITING_FOR_USER`、
+`events list` 读到 `IntentionClarificationRequested`、`signal get` 的 receipt effect 读到 `requestId` 与
+`attentionIndex: "NOT_CONNECTED"`，而 `attention list <project-id>` 对它**不会**出现任何行。
+
+`CREATE_TASK` **明确不在本轮**：`intentionOutcomeSchema` 没有这个成员（创建 Task 是 S7 的 Project/Task Service
+写路径）。它仍被**具名拒绝**——`INTENTION_CREATE_TASK_UNSUPPORTED` 立即进入 `DEAD_LETTER`，不动 Process、不落
+审计、不写 receipt；绝不被静默丢弃。
+
+Process 状态迁移走既有 FSM：`CREATED → STARTING → RUNNING → SUCCEEDED`（`REQUEST_CLARIFICATION` 收在
+`WAITING_FOR_USER`，回答时 `WAITING_FOR_USER → RUNNING → SUCCEEDED`）。注意 lane 契约写的 `CREATED → RUNNING`
+在现成 FSM 里没有这条边，因此走 `STARTING`（见 ADR-0072 D03）。
+
 ## 9. CLI 目标面与当前兼容面
 
 目标内核命令：
