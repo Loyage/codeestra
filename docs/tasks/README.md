@@ -8857,3 +8857,45 @@ writer」，因此改为严格委托 `ServiceKernelStore.transitionProcess`，�
 - **决策记录**：新增 ADR-0074；`docs/decisions/README.md` 索引、当前有效语义（目标与实现边界、集成与发布、Task 基线）与待决项同步。
 
 流程说明：**未 commit、未合入 `dev`、未 push、未提升 `main`、未重启任何 Runtime**；稳定 clone 与稳定 Runtime 未被触碰。任何合入仍是人工 Git 动作（`AGENTS.md`）。
+
+## FOUNDATION-101 — 多机并行开发：`dev` 单写者与开发机布局（ADR-0075，纯文档）
+
+状态：约定已冻结并写进仓库（ADR + runbook + README + AGENTS.md）。**无代码、无 schema、无命令面变化**；未 commit、未合入 `dev`、未 push、未提升 `main`、未重启任何 Runtime。
+
+用户本轮四题确认（均取推荐项）：
+
+1. `origin/dev` 写入权 = **单写者**：`dev` 的合入与 push 固定在稳定机（机器1）；开发机（机器2…）只推 feature/task 分支。
+2. 第二台机器角色 = **只建 dev clone**：只检出 `dev`、只跑独立 `CODEESTRA_HOME` 的 dev 实例；不建 main clone、不跑稳定 Runtime、不执行提升。
+3. 文档落地 = **新增 ADR + 更新 runbook**（而不是只改 runbook 或口头约定）。
+4. 现在的 `origin/dev` = **暂不推送**，由用户自己确认后再推（本次交付因此不含任何远端写入）。
+
+### 修改的文件
+
+- **新增 [`docs/decisions/0075-multi-machine-dev-layout-and-single-writer-dev.md`](../decisions/0075-multi-machine-dev-layout-and-single-writer-dev.md)**：Context/Options（D01 dev 写入权 A 单写者、D02 开发机角色 A 只建 dev clone、D03 文档化 A、D04 是否加机器门禁 A 不加）/Decision 七条/Consequences/Verification/Related。**Amends** ADR-0048 的「本机两个 clone」单机口径（其余部分——独立仓库、dev 独立 home——继续有效）。
+- **[`docs/decisions/README.md`](../decisions/README.md)**：索引新增 ADR-0075 项；「当前有效语义」的「本机布局与客户端」条目补多机口径；「待决项」新增一行（多机实际接入未实测）。
+- **[`docs/agents/runbook.md`](../agents/runbook.md)**：§1 由「本机检出布局」改写为「稳定机 / 开发机 / 通用」三段（含开发机的只前进规则、可推与不可推、开工前提、路径覆盖环境变量）；§2 补开发机无稳定实例与 Runtime 状态不跨机；§3 标注提升**只在稳定机**执行；§5 补三条禁止项（开发机不合入/不推 `dev`/不提升、不把推 feature 分支说成已进 `dev`、不跳过开工前提与不推 `refs/codeestra/*`）。
+- **[`README.md`](../../README.md)**：「本机工作树」补开发机段落。
+- **[`AGENTS.md`](../../AGENTS.md)**：「分支与发布工作流」新增多机不变量条目（含同步 `docs/agents/runbook.md` 的口径），并把指针改为「ADR-0048 / ADR-0075」。（人工规范文件，此处显式声明改动。）
+- **同一文件顺带同步**：`AGENTS.md` 里「Task 基线 = 项目文件夹建 workspace 时当前检出的分支」与「schema v37」两处说法已被 ADR-0074（v38）取代，按已接受 ADR 改为「受管 integration ref + `project trust` 时按当时检出分支物化」与「schema v38」。这是**代际不同步的修正**，不是本次多机决策的一部分，但同处一节故一并改掉并在此声明。
+
+### 落地时核对的事实
+
+- `origin/dev = 79337e1`，本机 `dev = 1fc5e5b`：`dev..origin/dev = 0`、`origin/dev..dev = 16`（纯 fast-forward，可安全推送；本次**未推**），dev clone 工作区干净。开发机现在 clone 只能拿到旧 `dev`，因此「开工前提」被写成硬前置。
+- `Justfile` 事实：`restart-main` 要求检出当前分支为 `main`、`promote-main` 额外要求工作区干净且候选是 `origin/dev` 尖端；开发机没有 main clone，这些动作会自然失败——据此选择 D04 A（不加机器门禁）。
+- 本机布局：`~/Documents/codeestra`（`main`，稳定 Runtime）、`~/Documents/codeestra-dev`（`dev`，dev Runtime）；Orca workspace `~/orca/workspaces/codeestra-dev/service_level` 是 dev clone 的 **git worktree**（分支 `Loyage/service_level`，已全部并入 `dev`）。ADR-0075 只约束 clone 布局，不改变本机 worktree 用法。
+
+### 实际验证
+
+- 脚本核对本次改动文件（ADR-0075 / decisions README / runbook / README / AGENTS.md）的全部相对链接：**无断链**；`docs/decisions/` 下所有 `NNNN-*.md` 都在索引里。
+- 未运行 typecheck 与任何测试：本次改动只涉及 Markdown，不触碰代码、CLI 命令树、schema 或 `docs/guides/**`，ADR-0038 的定向测试计划与 `cli-self-description`（覆盖 `docs/guides/cli`）都不覆盖本改动，无新增覆盖目标。
+
+### 用户文档同步（ADR-0050 D01 / D03）
+
+- **确认无需修改 `docs/guides/**`**：该映射的对象是产品**命令面**（命令/子命令/flag/退出码/稳定错误码）、**UI 行为**、**设置键**与**权限语义**。本次改的是 Codeestra **仓库自身的开发流程**（哪台机器能推 `dev`、开发机怎么接入），产品行为零变化，命令面与设置面零变化；并且 ADR-0048/0060/0066 已确认「dev clone / main-dev 提升」不是产品能力。因此没有可同步的 `docs/guides/` 段落，不是「忘记写」。
+
+### 剩余问题（未做 / 不得当成已完成）
+
+1. **`origin/dev` 未推送**：稳定机推送前，第二台机器不能开工（拿到的是旧 `dev`）；推送是用户确认后的动作，本 Agent 未执行。
+2. **第二台机器尚未接入**：ADR-0075 的约定没有双机实测（没有两台机器同时开发的证据），只核对了单机事实与命令面必然失败的路径。
+3. **Runtime 状态不跨机**：Task/Session/Execution/verification/worktree 仍然只在本机有效，在一台机器建的 Task 不能在另一台继续——这不是缺陷而是当前边界，已写入 runbook §2 与 ADR Consequence。
+4. **开发机若自行跑 `project integration run`**：其 integration ref 仍是该机器本地事实，不等于成果已进 `dev`；这一点在 ADR-0075 D05/决定 7 中写明，但没有命令层面的阻止（按 D04 A 不新增门禁）。

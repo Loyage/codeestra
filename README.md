@@ -34,7 +34,9 @@
 | `~/Documents/codeestra` | `main` | 稳定工作树：只运行稳定实例、拉取已批准的提升 |
 | `~/Documents/codeestra-dev` | `dev` | 开发工作树：Codeestra 自身的新功能实验与集成 |
 
-两个工作树的 `node_modules` 与 `.codeestra/` 是各自的本地状态，互不共享；在 dev 工作树里首次使用要执行 `bun install --frozen-lockfile`。Web UI 源码虽保留，但默认流程不构建 `apps/ui/dist`。
+两个工作树的 `node_modules` 与 `.codeestra/` 是各自的本地状态，互不共享；在 dev 工作树里首次使用要执行 `bun install --frozen-lockfile`。
+
+**第二台及以后的机器（ADR-0075）**：只建 `dev` 工作树并检出 `dev`，只推 feature/task 分支；`dev` 的合入与 push 只在一台**稳定机**上发生，开发机不建 main 工作树、不跑稳定实例、不执行提升。开发机第一次建 workspace 前必须让本地 `dev` 与 `origin/dev` 完全一致（Task 基线会在 `project trust` 那一刻被物化且不再移动）。完整步骤与禁止项见 [`docs/agents/runbook.md`](docs/agents/runbook.md) §1。Web UI 源码虽保留，但默认流程不构建 `apps/ui/dist`。
 
 **单实例注意**：Runtime 按 `CODEESTRA_HOME` 每用户只跑一个。在 dev 工作树运行 `bun run codeestra …` 时，如果稳定 Runtime 已在运行，命令会打到稳定 Runtime（即 `main` 代码），不会启动 dev 构建。要跑 dev 代码请换一个数据目录，例如：
 

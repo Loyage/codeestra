@@ -9,17 +9,37 @@
 - 要在 dev clone 跑 dev 实例（`just restart-dev`、带 `CODEESTRA_HOME` 的 CLI）；
 - 要判断某个目录是稳定 clone 还是开发 clone。
 
-## 1. 本机检出布局（ADR-0048）
+## 1. 检出布局（ADR-0048 / **ADR-0075 多机**）
+
+本仓库自身是**一台稳定机 + 若干台开发机**的模型；本文下面的「机器1」就是稳定机。
+
+**稳定机（机器1）**
 
 - `~/Documents/codeestra` 检出 `main`：**稳定 clone**。只用于运行稳定服务与拉取已批准的提升；只接受 pull / `bun install --frozen-lockfile` / `stop` / `status`。不得在其中开发新功能、建 task/lane worktree，或把 dev 的未提交改动复制过去。
-- `~/Documents/codeestra-dev` 检出 `dev`：**开发 clone**。所有开发、集成与定向验证都在这里进行。
-- 两者是**独立仓库**，不是彼此的 worktree：各自 `.git` 是目录、各有 `origin`；`git worktree list` 不得出现对方。
-- 两个 clone 的 `node_modules` 与 Runtime 数据目录都是各自的本地状态，不共享；各自需要 `bun install --frozen-lockfile`。ADR-0067 起默认流程不构建 UI。
+- `~/Documents/codeestra-dev` 检出 `dev`：**开发 clone**。开发、集成与定向验证都在这里进行。
+- **`dev` 的合入与 push 只在这台机器发生**（ADR-0075 D01）：`origin/dev` 的单写者就是它。
+
+**开发机（机器2 及以后，ADR-0075）**
+
+- 只建一个开发 clone（本机路径即 `~/Documents/codeestra-dev`）检出 `dev`（`git switch dev`，跟踪 `origin/dev`），跑 `CODEESTRA_HOME=~/.local/state/codeestra-dev` 的 dev 实例。
+- **不建 main clone、不跑稳定 Runtime、不执行提升**：`restart-main` / `promote-main` 在这台机器上会自然失败（没有 main clone，或检出分支不是 `main`），这是设计而不是要绕过的故障。
+- **`dev` 只前进、不当集成目标**：只 `git fetch origin` + `git merge --ff-only origin/dev`；不 `--force`、不在 `dev` 上直接 commit。要写代码就建 feature/task 分支或 worktree。
+- **可以推 / 不可以推**：可以推 feature 分支与 Runtime 生成的 `task/*` 成果分支（这是把成果交给稳定机的方式）；**不推 `dev`、不推 `main`、不推 `refs/codeestra/*`**。
+- **开工前提**：第一次 `project trust` / 建 workspace **之前**，本地 `dev` 必须与 `origin/dev` 完全一致（`git rev-list --count dev..origin/dev` 与反向都必须为 0）。Task 基线由 `project trust` 从**当时项目文件夹检出的分支 commit** 物化 `refs/codeestra/integration`（ADR-0074），而**已存在的 ref 永不被移动**——检出落后就会把基线永久钉在旧 commit 上。
+
+**通用**
+
+- 稳定机的两个 clone 是**独立仓库**，不是彼此的 worktree：各自 `.git` 是目录、各有 `origin`；`git worktree list` 不得出现对方。开发机上只有其中的 dev clone。
+- 各机器 clone 的 `node_modules` 与 `CODEESTRA_HOME` 都是**本地状态**，不共享、不同步；每台机器各自 `bun install --frozen-lockfile`。ADR-0067 起默认流程不构建 UI。
+- 路径与 `Justfile` 默认值不同时，用 `CODEESTRA_MAIN_CLONE` / `CODEESTRA_DEV_CLONE` / `CODEESTRA_DEV_HOME` 覆盖。
+- 开发机的 GitHub 凭据缺失时，只能报告「无法推送 feature 分支」，不得改用别的方式绕开 `origin` 传输成果。
 - **产品侧的 dev 建模已由 ADR-0066 删除**：没有 dev clone、长期 `dev` 集成分支、`task integrate` 或
   `promotion *`，也没有 dev 构建通道。本文件里的 `main`/`dev` 两个 clone、人工四步与重启规程是
   **本仓库自身的仓库约定**，不是产品能力：产品不提供命令、不记账、不校验它。
-- Task 基线就取项目文件夹**建 workspace 时当前检出的分支**（`workspaces.base_ref`）。本机开发时，
-  dev clone（`~/Documents/codeestra-dev`）检出的是 `dev`，所以在那里建的 Task 都以 `dev` 为基线。
+- **Task 基线与「当前检出的分支」的关系（ADR-0074）**：新 Task 的默认基线是项目受管的
+  `refs/codeestra/integration` 当时的 commit；该 ref 在 `project trust` 时按**当时项目文件夹检出的分支 commit**
+  物化，此后只被 `project integration run` 的 CAS 推进。因此在哪台机器、在哪个检出上 trust，仍然决定基线从哪里开始——
+  这也是开发机必须先把 `dev` 对齐 `origin/dev` 再开工的原因（见上一节）。
 
 ## 2. dev 实例（独立 home，可与稳定实例同时运行）
 
@@ -29,11 +49,14 @@ CODEESTRA_HOME=~/.local/state/codeestra-dev bun run codeestra status
 ```
 
 - 等价入口：`just restart-dev`（`install --frozen-lockfile` → `stop` → `status`）。
+- 开发机（ADR-0075）上这就是唯一实例，命令同上；它没有稳定实例，所以「不写 `CODEESTRA_HOME` 就连到稳定 Runtime」在开发机没有对象，但仍建议始终显式写 home，避免以后接入稳定 clone 时误连。
 - ADR-0067 起 Web UI 暂停：没有 UI 构建、端口、token 或启动步骤。区分 dev/稳定靠 `CODEESTRA_HOME` 与目录。
 - 不写 `CODEESTRA_HOME` 时，从 dev clone 运行 CLI 连的是**稳定 Runtime**、执行的是 `main` 代码：不能用来证明 dev 代码已运行。
-- dev 实例的数据库、任务与会话是独立的临时数据，不得据它声称稳定数据迁移或稳定服务已更新。
+- dev 实例的数据库、任务与会话是独立的临时数据，不得据它声称稳定数据迁移或稳定服务已更新。**它们也只在本机有效**：Task/Session/Execution/verification/worktree 不跨机同步，在一台机器上建的 Task 不能到另一台机器继续（ADR-0075）。
 
 ## 3. 稳定提升（`dev → main`）：人工四步（ADR-0009/0047）
+
+**只在稳定机（机器1）执行**（ADR-0075）：开发机不建 main clone、不做提升，也不合入 `dev`。
 
 1. 把固定 dev 候选 push 到 `origin/dev`，并读回核对 `origin/dev == 候选 SHA`；
 2. 在 main clone 执行 `git fetch` + `git merge --ff-only origin/dev`；
@@ -72,6 +95,9 @@ git push origin main                  # 提升收尾：把已拉取并验证过�
 
 ## 5. 不要做的事
 
+- 不在开发机上尝试把成果合入 `dev`、推送 `dev`/`main` 或执行提升：`dev` 的单写者是稳定机（ADR-0075），成果一律经 `origin` 上的 feature/task 分支交给稳定机。
+- 不把「开发机已推送 feature 分支」报告成「已进 `dev`」或「已提升」；`dev` 的合入仍是稳定机上人的 `git merge`。
+- 不在开发机第一次 `project trust` / 建 workspace 之前跳过「本地 `dev` 与 `origin/dev` 一致」这个前提；也不推 `refs/codeestra/*`。
 - 不把「已推送、等待拉取」报告成提升成功；拉取是用户显式的人工步骤。
 - 不声称覆盖了用户在系统外手动更新 `main` 的场景，也不声称 GitHub 侧已配置分支保护、必经评审或 CI 门禁。
 - 不在 dev clone 直接运行「重启 main」的命令；不在 main clone 开发新功能或建 task/lane worktree。

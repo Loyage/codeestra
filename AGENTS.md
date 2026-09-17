@@ -42,11 +42,12 @@
 
 ## 分支与发布工作流（ADR-0009/0047）
 
-**执行任何提升、重启 main 稳定服务或运行 dev 实例之前，先读 `docs/agents/runbook.md`**：命令序列、本机检出布局（ADR-0048）、dev 实例与「重启 main 稳定服务」规程的全文都在那里（原先写在本文件同名小节的规程已移入该文件）。本节只写不变量。
+**执行任何提升、重启 main 稳定服务或运行 dev 实例之前，先读 `docs/agents/runbook.md`**：命令序列、检出布局（ADR-0048 / **多机见 ADR-0075**）、dev 实例与「重启 main 稳定服务」规程的全文都在那里（原先写在本文件同名小节的规程已移入该文件）。本节只写不变量。
 
+- **多机并行开发（ADR-0075）**：`dev` 的合入与 push 是**单写者**——只在一台稳定机上发生。开发机只检出 `dev`（只 `git fetch` + `merge --ff-only`，不 `--force`、不在 `dev` 上直接 commit），只把 feature 分支与 Runtime 生成的 `task/*` 成果分支推到 `origin`；不推 `dev`、不推 `main`、不推 `refs/codeestra/*`，也不建 main clone、不跑稳定 Runtime、不执行提升。开发机第一次 `project trust` / 建 workspace **前**，本地 `dev` 必须与 `origin/dev` 完全一致。不同步任何 Runtime 状态（Task/Session/Execution/verification/worktree），也不声称跨机一致性。
 - 项目必须长期保留 `main` 与 `dev` 两个分支，不得删除、重命名或用临时 integration branch 取代；两者在 GitHub 上都必须存在（`origin/main`、`origin/dev`）。`main` 是用户日常运行的稳定实例，不得在其上开发新功能。
-- 该双分支模型**只属于 Codeestra 自身**。当前 ADR-0066 / schema v37 没有任何产品集成/提升命令；ADR-0070 的目标 managed integration ref 也不是本仓库 `dev`，不得拿未来产品能力替代这里的人工四步。
-- `dev` 是新功能实验与集成分支：功能 Task/worktree 的基线是**项目文件夹（本机即 dev clone）建 workspace 时当前检出的分支**（`workspaces.base_ref`），在本机就是 `dev`；功能完成、Task verification 通过后，由**人**把成果合回 `dev`（`git merge`），不得直接进入 `main`。当前 v37 产品不做合并；未来 ADR-0070 managed integration 也不得用于本仓库自身发布。
+- 该双分支模型**只属于 Codeestra 自身**。当前 ADR-0066 / schema v38 没有任何产品集成/提升命令；ADR-0074 的 managed integration ref 也不是本仓库 `dev`，不得拿未来产品能力替代这里的人工四步。
+- `dev` 是新功能实验与集成分支：功能 Task/worktree 的基线是项目受管的 integration ref（`refs/codeestra/integration`）当时的 commit，该 ref 在 `project trust` 时按当时项目文件夹检出的分支 commit 物化（ADR-0074，amend ADR-0066 的基线规则）；功能完成、Task verification 通过后，由**人**把成果合回 `dev`（`git merge`），不得直接进入 `main`。当前 schema v38 产品不做本仓库自身的合并；ADR-0070 managed integration 也不得用于本仓库自身发布。
 - `dev → main` 是唯一稳定提升路径，且**必须经 GitHub 中转**（沿用 ADR-0047 的口径，现在是人工步骤而非产品命令）：只 push 固定 dev 候选这一个 ref 并读回核对，main clone 以 fast-forward-only 拉取，重启核对通过后才推回 `origin/main`。不 `--force`、不覆盖远端已有提交、不对已检出的 `main` 用 `update-ref`；断网、SSH 认证失败或远端不可达时不推进任何 ref，也不得把本地等价当作提升成功。
 - 每批固定 dev SHA、预期 main SHA 与验证证据；提升前必须在精确 `dev` 候选 SHA 上跑完全量测试（在 dev clone 发起），候选、测试配置或锁文件变化即证据失效并重跑。FULL 下不批准，STRICT 下保留用户批准且 ref/证据变化使批准失效。
 - 产品 `promotion *` 已由 ADR-0066 删除；ADR-0070 也不恢复它。本仓库自身的提升一律走 runbook 人工四步，并在交付记录里写明执行到哪一步。
