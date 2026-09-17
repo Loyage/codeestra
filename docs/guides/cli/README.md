@@ -1,6 +1,6 @@
 # CLI 命令参考
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v36 · **最后校对** 2026-09-16
+> **适用版本** ADR-0068 S1–S4 实现分支（2026-09-17） · **schema** v37 · **最后校对** 2026-09-17
 > 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > **本次修订（ADR-0066 / schema v36）**：`promotion` 一篇（§15）与 `task integrate`/`task integration`（§11）
@@ -11,8 +11,8 @@
 > §14 新增 `scheduler control` 一节，并把 §0.2 的退出码与「等待码」表补上 `SCHEDULER_GLOBALLY_PAUSED`（FOUNDATION-097 / ADR-0061 D08/D09）；
 > §0.1 的人读视图清单新增 `settings list`（§19），索引表里 §1 不再含 `permission`（ADR-0064 / 用户任务）。
 > **本次修订（ADR-0066 / schema v36）**：`promotion` 一篇（§15）与 `task integrate`/`task integration`（§11）已删除，
-> 因此索引由九篇变为**八篇**。
-> 本文件既是**这套参考的入口**（八篇索引），也是原来那篇的 §0 通用约定（连接、自动启动、退出码、环境变量）。
+> 因此索引由九篇变为八篇；ADR-0068 S4 新增 `kernel.md`，现在恢复为**九篇**。
+> 本文件既是**这套参考的入口**（九篇索引），也是原来那篇的 §0 通用约定（连接、自动启动、退出码、环境变量）。
 > 旧编号（§1–§21）到新文件的对照表在 [`../cli-reference.md`](../cli-reference.md)；各篇内部沿用拆分前的章节号。
 
 本文覆盖 `apps/cli/src/main.ts` 中 `usage()` 列出的**每一个命令组**。HTTP/SSE 面已按 ADR-0067 暂停。
@@ -26,13 +26,14 @@ bun run codeestra <group> [<action>] [<argument>…] [--flag …]
 
 （`bun run codeestra` 对应 `package.json` 的 `"codeestra": "bun run apps/cli/src/main.ts"`。）
 
-## 八篇索引
+## 九篇索引
 
 | 文件 | 覆盖章节 |
 |---|---|
 | **README.md**（本文件） | §0 通用约定（连接 / 自动启动 / 退出码 / 环境变量） |
 | [runtime.md](./runtime.md) | §1 Runtime 生命周期（`status`/`stop`；`ui`/`open` 已删除）、§2 `agent config`、§19 `settings`（含权限模式） |
 | [project.md](./project.md) | §3 `project`（`inspect`/`policy`/`trust`/`list`、`project impact *`、`project knowledge *`） |
+| [kernel.md](./kernel.md) | ADR-0068 S4 `service` / `process` / `signal` / `intent` 内核命令 |
 | [task-lifecycle.md](./task-lifecycle.md) | §4 `task` 生命周期（`create` 到 `purge`/`status`）与 `--feature` |
 | [task-revision-session.md](./task-revision-session.md) | §5 `task revision` 与投递、§6 `task transcript`/`session transcript`、§6.1 `session guide`、§7 `session handoff` |
 | [task-result-verify.md](./task-result-verify.md) | §8 `task result`、§9 `task verify`/`task verification`/`task tests`、§10 `task operation` |
@@ -65,7 +66,7 @@ bun run codeestra <group> [<action>] [<argument>…] [--flag …]
 | `0` | 成功。注意：某些命令的成功是「已受理」而不是「已完成」（见各命令说明） |
 | `1` | 拒绝或失败（含 `RECOVERY_REQUIRED` 这类需要人处理的状态） |
 | `2` | **用法错误**：参数个数/取值不合法、未知 flag、缺少必填 flag（`usage()` 与个别显式 `process.exit(2)`） |
-| `3` | **等待**（调度冲突/容量等待、Runtime 全局暂停 `SCHEDULER_GLOBALLY_PAUSED`、draining）或**没什么可做**（reclaim 计划/执行没有可回收项、`task schedule run` 这一趟没有可启动的候选） |
+| `3` | **等待**（调度冲突/容量等待、Runtime 全局暂停 `SCHEDULER_GLOBALLY_PAUSED`、draining、Signal 等待重试）或**没什么可做**（reclaim 计划/执行没有可回收项、`task schedule run` 这一趟没有可启动的候选） |
 
 `3` 从不表示 `BLOCKED`：`BLOCKED` 只表示**依赖未满足**，它属于「需要处理」而不是「等一等」。
 `3` 也从不表示「部分冻结」：`scheduler control pause` 只有收口成完整 `PAUSED`（或已幂等处于目标状态）才退 `0`，

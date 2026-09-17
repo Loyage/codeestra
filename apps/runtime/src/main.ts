@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { impactPolicyPath, runtimeRequestSchema,
+  processViewSchema, serviceViewSchema, signalViewSchema,
   validateQuestionnaireAnswer,
   questionnairePromptSchema,
   type RuntimePauseStateView, type RuntimeRequest, type RuntimeResponse,
@@ -11,7 +12,8 @@ import {
   defaultProseQuestionAttentionMode,
   type ProseQuestionAttentionMode,
 } from '@codeestra/domain';
-import { Phase1Database, StorageError, type AgentAnswerPlan } from '@codeestra/storage';
+import { Phase1Database, ServiceKernelStore, StorageError, systemServiceIds,
+  type AgentAnswerPlan } from '@codeestra/storage';
 import {
   createAdapterRegistry,
   piControlledLaunch,
@@ -110,6 +112,8 @@ import {
 } from './recovery-service.js';
 import { RevisionDeliveryService } from './revision-delivery-service.js';
 import { SessionGuidanceService } from './session-guidance-service.js';
+import { ServiceContractRegistry, SignalDispatcher, intentionSignalSubtype,
+  serviceMetadataSignalSubtype } from './service-kernel.js';
 import {
   VerificationRunner,
   inspectVerificationPolicy,
@@ -211,6 +215,22 @@ const proseQuestionAttentionSettings = () => ({
   appliesTo: 'Agent completions observed after this change; an already recorded wait is unchanged',
 });
 const storage = new Phase1Database(join(home, 'runtime.sqlite'));
+// S2/S3 kernel bootstrap: projections are repaired from the still-authoritative Project/Task/
+// Execution rows, then expired Signal claims are reconciled before any command can enqueue more.
+const kernelStore = new ServiceKernelStore(storage);
+kernelStore.reconcileProjections(Date.now());
+const serviceContracts = new ServiceContractRegistry();
+const signalDispatcher = new SignalDispatcher({ store: kernelStore, contracts: serviceContracts,
+  bootId });
+signalDispatcher.dispatchAvailable();
+// Event wake-ups call the same bounded dispatcher immediately. This periodic pass is only recovery;
+// it is one Runtime timer, never one busy-loop per Service.
+const signalReconcileTimer = setInterval(() => {
+  try { signalDispatcher.dispatchAvailable(); }
+  catch (error) {
+    console.error('[runtime] Signal reconcile failed', error instanceof Error ? error.message : String(error));
+  }
+}, 1_000);
 const registry = createAdapterRegistry({ runtimeHome: home, environment: Bun.env });
 /**
  * The Runtime global control plane (FOUNDATION-097 / ADR-0061). It is created before anything that
@@ -928,6 +948,171 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         confirmedPolicy: storage.getConfirmedVerificationPolicy(project.id),
         confirmedImpactPolicy: storage.getConfirmedImpactPolicy(project.id),
       })));
+    case 'service.list':
+      return success(request.requestId, serviceViewSchema.array().parse(kernelStore.listServices({
+        ...(request.kind === undefined ? {} : { kind: request.kind }),
+        ...(request.parentServiceId === undefined ? {} : { parentServiceId: request.parentServiceId }),
+        includeRetired: request.includeRetired,
+      })));
+    case 'service.get':
+    case 'service.state.get':
+      return success(request.requestId, serviceViewSchema.parse(kernelStore.getService(request.serviceId)));
+    case 'service.tree':
+      return success(request.requestId, serviceViewSchema.array().parse(
+        kernelStore.serviceTree(request.serviceId)));
+    case 'service.state.set': {
+      signalDispatcher.send({ signalId: request.commandId, kind: 'SIG_A',
+        subtype: serviceMetadataSignalSubtype, sourceServiceId: null, sourceProcessId: null,
+        targetServiceId: request.serviceId, contractVersion: 1,
+        payload: { namespace: request.namespace, key: request.key, value: request.value,
+          expectedVersion: request.expectedVersion },
+        idempotencyKey: request.commandId, correlationId: request.commandId,
+        causationId: request.commandId, priority: 0 });
+      signalDispatcher.dispatchAvailable();
+      const signal = kernelStore.getSignal(request.commandId);
+      if (signal.state !== 'ACKED') {
+        throw new RuntimeCommandError(signal.lastErrorCode ?? 'SIGNAL_NOT_ACKNOWLEDGED',
+          signal.lastErrorMessage ?? `Signal ended in ${signal.state}`);
+      }
+      return success(request.requestId, { service: serviceViewSchema.parse(
+        kernelStore.getService(request.serviceId)), signal: signalViewSchema.parse(signal) });
+    }
+    case 'process.list':
+      return success(request.requestId, processViewSchema.array().parse(kernelStore.listProcesses({
+        ...(request.parentServiceId === undefined ? {} : { parentServiceId: request.parentServiceId }),
+        ...(request.state === undefined ? {} : { state: request.state }),
+      })));
+    case 'process.get':
+      return success(request.requestId, processViewSchema.parse(kernelStore.getProcess(request.processId)));
+    case 'process.input': {
+      const process = kernelStore.getProcess(request.processId);
+      if (process.executionId === null || process.projectId === null || process.taskId === null) {
+        throw new RuntimeCommandError('PROCESS_CONTROL_UNAVAILABLE',
+          'This Process has no projected Agent conversation; intention interpretation starts in S6');
+      }
+      const result = await sessionGuidance.record({ projectId: process.projectId,
+        taskId: process.taskId, commandId: request.commandId, message: request.message,
+        actor: 'local-user' });
+      return success(request.requestId, { process: kernelStore.getProcess(request.processId), input: result });
+    }
+    case 'process.pause': {
+      const process = kernelStore.getProcess(request.processId);
+      if (process.projectId === null || process.taskId === null || process.executionId === null) {
+        throw new RuntimeCommandError('PROCESS_CONTROL_UNAVAILABLE',
+          'Only an Execution-backed Development Process can be paused in S4');
+      }
+      if (process.controlVersion !== request.expectedControlVersion) {
+        throw new RuntimeCommandError('VERSION_CONFLICT', 'Process control version did not match');
+      }
+      const result = await pauseOrCancelTask({ storage, coordinator, kind: 'PAUSE',
+        projectId: process.projectId, taskId: process.taskId,
+        expectedVersion: request.expectedControlVersion, commandId: request.commandId,
+        actor: 'local-user' });
+      kernelStore.reconcileProjections(Date.now());
+      return success(request.requestId, { process: kernelStore.getProcess(request.processId), result,
+        schedule: await scheduleTick('PROCESS_PAUSED', process.projectId) });
+    }
+    case 'process.terminate': {
+      const process = kernelStore.getProcess(request.processId);
+      if (process.projectId === null || process.taskId === null || process.executionId === null) {
+        throw new RuntimeCommandError('PROCESS_CONTROL_UNAVAILABLE',
+          'Only an Execution-backed Development Process can be terminated in S4');
+      }
+      if (process.controlVersion !== request.expectedControlVersion) {
+        throw new RuntimeCommandError('VERSION_CONFLICT', 'Process control version did not match');
+      }
+      const result = await pauseOrCancelTask({ storage, coordinator, kind: 'CANCEL',
+        projectId: process.projectId, taskId: process.taskId,
+        expectedVersion: request.expectedControlVersion, commandId: request.commandId,
+        actor: 'local-user' });
+      return success(request.requestId, { process: kernelStore.getProcess(request.processId), result,
+        schedule: await scheduleTick('PROCESS_TERMINATED', process.projectId) });
+    }
+    case 'process.resume': {
+      const process = kernelStore.getProcess(request.processId);
+      if (process.projectId === null || process.taskId === null || process.executionId === null) {
+        throw new RuntimeCommandError('PROCESS_CONTROL_UNAVAILABLE',
+          'Only an Execution-backed Development Process can be resumed in S4');
+      }
+      if (process.controlVersion !== request.expectedControlVersion) {
+        throw new RuntimeCommandError('VERSION_CONFLICT', 'Process control version did not match');
+      }
+      await assertDependenciesSatisfied({ storage, projectId: process.projectId, taskId: process.taskId });
+      const adapterId = request.adapterId ?? process.adapterId ?? 'pi';
+      const gate = await schedule.assertResumeAllowed({ projectId: process.projectId,
+        taskId: process.taskId, adapterId, commandId: request.commandId,
+        allowUnknown: request.allowUnknown, actor: 'local-user' });
+      if (gate.outcome !== 'ALLOWED') {
+        throw new RuntimeCommandError(gate.outcome === 'WAIT' ? 'CONFLICT_WAIT' : 'CONFLICTING',
+          `The Process stays paused: ${gate.detail}`);
+      }
+      const result = await resumePausedTask({ storage, coordinator, projectId: process.projectId,
+        taskId: process.taskId, expectedVersion: request.expectedControlVersion,
+        commandId: request.commandId, adapterId });
+      if (result.sessionId !== null) await handoff.recordAutomationIncarnation({ sessionId: result.sessionId });
+      kernelStore.reconcileProjections(Date.now());
+      const successors = kernelStore.listProcesses({ parentServiceId: process.parentServiceId });
+      return success(request.requestId, { predecessor: kernelStore.getProcess(request.processId),
+        successor: successors.at(-1) ?? null, result, conflictGate: gate });
+    }
+    case 'signal.send': {
+      const sent = signalDispatcher.send({ signalId: request.commandId, kind: request.kind,
+        subtype: request.subtype, sourceServiceId: request.sourceServiceId ?? null,
+        sourceProcessId: request.sourceProcessId ?? null, targetServiceId: request.targetServiceId,
+        contractVersion: request.contractVersion, payload: request.payload,
+        idempotencyKey: request.idempotencyKey,
+        correlationId: request.correlationId ?? request.commandId,
+        causationId: request.causationId ?? null, priority: request.priority });
+      signalDispatcher.dispatchAvailable();
+      return success(request.requestId, { created: sent.created,
+        signal: signalViewSchema.parse(kernelStore.getSignal(sent.signal.id)) });
+    }
+    case 'signal.list':
+      return success(request.requestId, signalViewSchema.array().parse(kernelStore.listSignals({
+        ...(request.targetServiceId === undefined ? {} : { targetServiceId: request.targetServiceId }),
+        ...(request.state === undefined ? {} : { state: request.state }),
+        ...(request.kind === undefined ? {} : { kind: request.kind }), limit: request.limit,
+      })));
+    case 'signal.get':
+      return success(request.requestId, signalViewSchema.parse(kernelStore.getSignal(request.signalId)));
+    case 'signal.retry': {
+      kernelStore.retrySignal({ signalId: request.signalId, now: Date.now(),
+        eventId: crypto.randomUUID() });
+      signalDispatcher.dispatchAvailable();
+      return success(request.requestId, signalViewSchema.parse(kernelStore.getSignal(request.signalId)));
+    }
+    case 'intent.send': {
+      const targets = [request.serviceId, request.projectId, request.taskId]
+        .filter((value): value is string => value !== undefined);
+      if (targets.length > 1) {
+        throw new RuntimeCommandError('INTENT_TARGET_AMBIGUOUS',
+          'Choose only one of service, project, or task as the intention target');
+      }
+      const targetServiceId = targets[0] ?? systemServiceIds.root;
+      const service = kernelStore.getService(targetServiceId);
+      if ((request.projectId !== undefined && service.kind !== 'PROJECT')
+        || (request.taskId !== undefined && service.kind !== 'TASK')) {
+        throw new RuntimeCommandError('INTENT_TARGET_KIND_MISMATCH',
+          `Target ${targetServiceId} is ${service.kind}`);
+      }
+      const sent = signalDispatcher.send({ signalId: request.commandId, kind: 'SIG_P',
+        subtype: intentionSignalSubtype, sourceServiceId: null, sourceProcessId: null,
+        targetServiceId, contractVersion: 1,
+        payload: { text: request.text, adapterId: request.adapterId },
+        idempotencyKey: request.commandId, correlationId: request.commandId,
+        causationId: request.commandId, priority: 0 });
+      signalDispatcher.dispatchAvailable();
+      const signal = kernelStore.getSignal(sent.signal.id);
+      if (signal.state !== 'ACKED') {
+        throw new RuntimeCommandError(signal.lastErrorCode ?? 'INTENT_NOT_ACCEPTED',
+          signal.lastErrorMessage ?? `Intention Signal ended in ${signal.state}`);
+      }
+      const processId = (signal.receipt?.effect as { processId?: unknown } | null)?.processId;
+      return success(request.requestId, { signal: signalViewSchema.parse(signal),
+        process: typeof processId === 'string'
+          ? processViewSchema.parse(kernelStore.getProcess(processId)) : null,
+        interpretation: 'PENDING_S6' });
+    }
     case 'events.list': {
       const events = storage.listEventsAfter({
         sinceSequence: request.sinceSequence,
@@ -2109,6 +2294,7 @@ async function shutdown(): Promise<void> {
   // was already in flight, and a reservation must not be granted by a Runtime that is stopping.
   drain.begin('RUNTIME_SHUTDOWN');
   schedule.stopPeriodicTicks();
+  clearInterval(signalReconcileTimer);
   listener.stop(true);
   subscriptions.close();
   // Terminals this Runtime owns are ended first, while the database is still open: the recorded

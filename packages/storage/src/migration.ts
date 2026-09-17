@@ -1,4 +1,9 @@
-export const phase1SchemaVersion = 36;
+export const phase1SchemaVersion = 37;
+
+/** Stable system Service identities. Projection Services reuse their Project/Task UUIDs. */
+export const rootServiceId = '00000000-0000-4000-8000-000000000000';
+export const schedulerServiceId = '00000000-0000-4000-8000-000000000001';
+export const attentionServiceId = '00000000-0000-4000-8000-000000000002';
 
 /**
  * The kinds `intents.kind` accepts.
@@ -2280,4 +2285,179 @@ DROP TABLE tasks;
 ALTER TABLE tasks_v35 RENAME TO tasks;
 CREATE INDEX tasks_schedule ON tasks(project_id,state,priority DESC,created_at,id);
 CREATE INDEX tasks_project_archived ON tasks(project_id,archived_at);
+`;
+
+/**
+ * Schema v37 (ADR-0068 / S2): additive Service, Signal and Process kernel storage.
+ *
+ * Existing Project/Task/Execution rows remain the only writable authority for their core lifecycle.
+ * Their Service/Process rows are identity projections: Project and Task Service IDs deliberately
+ * equal the corresponding legacy aggregate IDs, and a Process projection equals its Execution ID.
+ * This lets old and new command faces name the same fact without a translation-only public ID.
+ */
+export const serviceKernelMigration = `
+CREATE TABLE services (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK(kind IN ('ROOT','SCHEDULER','ATTENTION','PROJECT','TASK')),
+  parent_service_id TEXT REFERENCES services(id),
+  lifecycle TEXT NOT NULL CHECK(lifecycle IN ('ACTIVE','PAUSED','RECOVERY_REQUIRED','RETIRED')),
+  state_version INTEGER NOT NULL DEFAULT 0 CHECK(state_version >= 0),
+  contract_version INTEGER NOT NULL DEFAULT 1 CHECK(contract_version > 0),
+  project_id TEXT UNIQUE REFERENCES projects(id) ON DELETE SET NULL,
+  task_id TEXT UNIQUE REFERENCES tasks(id) ON DELETE SET NULL,
+  inbox_cursor INTEGER NOT NULL DEFAULT 0 CHECK(inbox_cursor >= 0),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+  CHECK((kind='ROOT' AND parent_service_id IS NULL AND project_id IS NULL AND task_id IS NULL)
+    OR (kind IN ('SCHEDULER','ATTENTION') AND parent_service_id IS NOT NULL
+      AND project_id IS NULL AND task_id IS NULL)
+    OR (kind='PROJECT' AND parent_service_id IS NOT NULL AND task_id IS NULL)
+    OR (kind='TASK' AND parent_service_id IS NOT NULL AND project_id IS NULL))
+) STRICT;
+CREATE UNIQUE INDEX one_root_service ON services((1)) WHERE kind='ROOT';
+CREATE UNIQUE INDEX one_scheduler_service ON services((1)) WHERE kind='SCHEDULER';
+CREATE UNIQUE INDEX one_attention_service ON services((1)) WHERE kind='ATTENTION';
+CREATE INDEX services_by_parent ON services(parent_service_id,kind,id);
+CREATE TRIGGER services_validate_parent_insert
+BEFORE INSERT ON services BEGIN
+  SELECT CASE
+    WHEN NEW.kind IN ('SCHEDULER','ATTENTION','PROJECT')
+      AND COALESCE((SELECT kind FROM services WHERE id=NEW.parent_service_id),'') <> 'ROOT'
+      THEN RAISE(ABORT,'system and project services must be direct children of root')
+    WHEN NEW.kind='TASK'
+      AND COALESCE((SELECT kind FROM services WHERE id=NEW.parent_service_id),'') <> 'PROJECT'
+      THEN RAISE(ABORT,'task services must be direct children of project')
+  END;
+END;
+CREATE TRIGGER services_parent_and_kind_immutable
+BEFORE UPDATE OF parent_service_id,kind ON services BEGIN
+  SELECT RAISE(ABORT,'service parent and kind are immutable');
+END;
+
+CREATE TABLE service_metadata (
+  service_id TEXT NOT NULL REFERENCES services(id),
+  namespace TEXT NOT NULL CHECK(length(namespace) BETWEEN 1 AND 63),
+  key TEXT NOT NULL CHECK(length(key) BETWEEN 1 AND 63),
+  value_json TEXT NOT NULL CHECK(json_valid(value_json)),
+  version INTEGER NOT NULL CHECK(version > 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= 0),
+  updated_by TEXT NOT NULL CHECK(length(trim(updated_by)) > 0),
+  PRIMARY KEY(service_id,namespace,key)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE processes (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK(kind IN ('DEVELOPMENT','INTENTION','INTEGRATION')),
+  parent_service_id TEXT NOT NULL REFERENCES services(id),
+  status_source TEXT NOT NULL CHECK(status_source IN ('PROCESS','EXECUTION')),
+  status TEXT CHECK(status IS NULL OR status IN ('CREATED','STARTING','RUNNING','WAITING_FOR_USER',
+    'PAUSING','PAUSED','SUCCEEDED','FAILED','CANCELLED','RECOVERY_REQUIRED')),
+  version INTEGER NOT NULL DEFAULT 0 CHECK(version >= 0),
+  objective TEXT NOT NULL CHECK(length(trim(objective)) > 0),
+  adapter_id TEXT,
+  agent_config_json TEXT CHECK(agent_config_json IS NULL OR json_valid(agent_config_json)),
+  budget_json TEXT CHECK(budget_json IS NULL OR json_valid(budget_json)),
+  context_ref TEXT,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+  CHECK((status_source='PROCESS' AND status IS NOT NULL)
+    OR (status_source='EXECUTION' AND status IS NULL))
+) STRICT;
+CREATE INDEX processes_by_parent ON processes(parent_service_id,created_at,id);
+CREATE TABLE process_execution_links (
+  process_id TEXT PRIMARY KEY REFERENCES processes(id) ON DELETE CASCADE,
+  execution_id TEXT NOT NULL UNIQUE REFERENCES executions(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0)
+) STRICT;
+
+CREATE TABLE signals (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK(kind IN ('SIG_A','SIG_P')),
+  subtype TEXT NOT NULL CHECK(length(trim(subtype)) > 0),
+  source_service_id TEXT REFERENCES services(id) ON DELETE SET NULL,
+  source_process_id TEXT REFERENCES processes(id) ON DELETE SET NULL,
+  target_service_id TEXT NOT NULL REFERENCES services(id),
+  contract_version INTEGER NOT NULL CHECK(contract_version > 0),
+  payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+  idempotency_key TEXT NOT NULL CHECK(length(trim(idempotency_key)) > 0),
+  correlation_id TEXT NOT NULL CHECK(length(trim(correlation_id)) > 0),
+  causation_id TEXT,
+  priority INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL CHECK(state IN ('PENDING','CLAIMED','RETRYABLE','ACKED','DEAD_LETTER',
+    'RECOVERY_REQUIRED')),
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+  automatic_attempts INTEGER NOT NULL DEFAULT 0 CHECK(automatic_attempts >= 0),
+  next_attempt_at INTEGER,
+  claim_boot_id TEXT,
+  claim_deadline_at INTEGER,
+  last_error_code TEXT,
+  last_error_message TEXT,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+  acknowledged_at INTEGER,
+  dead_lettered_at INTEGER,
+  UNIQUE(target_service_id,idempotency_key),
+  CHECK((state='CLAIMED' AND claim_boot_id IS NOT NULL AND claim_deadline_at IS NOT NULL)
+    OR (state<>'CLAIMED' AND claim_boot_id IS NULL AND claim_deadline_at IS NULL)),
+  CHECK((state='ACKED' AND acknowledged_at IS NOT NULL) OR (state<>'ACKED' AND acknowledged_at IS NULL)),
+  CHECK((state='DEAD_LETTER' AND dead_lettered_at IS NOT NULL)
+    OR (state<>'DEAD_LETTER' AND dead_lettered_at IS NULL))
+) STRICT;
+CREATE INDEX signals_dispatch ON signals(state,next_attempt_at,priority DESC,created_at,id);
+CREATE INDEX signals_by_target ON signals(target_service_id,created_at,id);
+
+CREATE TABLE signal_attempts (
+  signal_id TEXT NOT NULL REFERENCES signals(id),
+  attempt_number INTEGER NOT NULL CHECK(attempt_number > 0),
+  boot_id TEXT NOT NULL CHECK(length(trim(boot_id)) > 0),
+  state TEXT NOT NULL CHECK(state IN ('CLAIMED','ACKED','RETRYABLE','DEAD_LETTER','RECOVERY_REQUIRED')),
+  claimed_at INTEGER NOT NULL CHECK(claimed_at >= 0),
+  settled_at INTEGER,
+  error_code TEXT,
+  error_message TEXT,
+  PRIMARY KEY(signal_id,attempt_number),
+  CHECK((state='CLAIMED' AND settled_at IS NULL) OR (state<>'CLAIMED' AND settled_at IS NOT NULL))
+) STRICT, WITHOUT ROWID;
+CREATE TRIGGER signal_attempts_no_delete BEFORE DELETE ON signal_attempts BEGIN
+  SELECT RAISE(ABORT,'signal attempts are append-only');
+END;
+
+CREATE TABLE signal_receipts (
+  target_service_id TEXT NOT NULL REFERENCES services(id),
+  idempotency_key TEXT NOT NULL,
+  signal_id TEXT NOT NULL UNIQUE REFERENCES signals(id),
+  effect_json TEXT NOT NULL CHECK(json_valid(effect_json)),
+  acknowledged_at INTEGER NOT NULL CHECK(acknowledged_at >= 0),
+  PRIMARY KEY(target_service_id,idempotency_key)
+) STRICT, WITHOUT ROWID;
+CREATE TRIGGER signal_receipts_no_update BEFORE UPDATE ON signal_receipts BEGIN
+  SELECT RAISE(ABORT,'signal receipts are append-only');
+END;
+CREATE TRIGGER signal_receipts_no_delete BEFORE DELETE ON signal_receipts BEGIN
+  SELECT RAISE(ABORT,'signal receipts are append-only');
+END;
+
+INSERT INTO services(id,kind,parent_service_id,lifecycle,state_version,contract_version,
+  project_id,task_id,inbox_cursor,created_at,updated_at)
+VALUES
+  ('${rootServiceId}','ROOT',NULL,'ACTIVE',0,1,NULL,NULL,0,0,0),
+  ('${schedulerServiceId}','SCHEDULER','${rootServiceId}','ACTIVE',0,1,NULL,NULL,0,0,0),
+  ('${attentionServiceId}','ATTENTION','${rootServiceId}','ACTIVE',0,1,NULL,NULL,0,0,0);
+INSERT INTO services(id,kind,parent_service_id,lifecycle,state_version,contract_version,
+  project_id,task_id,inbox_cursor,created_at,updated_at)
+SELECT id,'PROJECT','${rootServiceId}','ACTIVE',0,1,id,NULL,0,created_at,created_at FROM projects;
+INSERT INTO services(id,kind,parent_service_id,lifecycle,state_version,contract_version,
+  project_id,task_id,inbox_cursor,created_at,updated_at)
+SELECT id,'TASK',project_id,'ACTIVE',0,1,NULL,id,0,created_at,updated_at FROM tasks;
+INSERT INTO processes(id,kind,parent_service_id,status_source,status,version,objective,adapter_id,
+  agent_config_json,budget_json,context_ref,created_at,updated_at)
+SELECT execution.id,'DEVELOPMENT',execution.task_id,'EXECUTION',NULL,0,revision.specification,
+  execution.adapter_id,execution.agent_config_json,NULL,NULL,
+  COALESCE(execution.started_at,task.created_at),
+  COALESCE(execution.ended_at,execution.started_at,task.updated_at)
+FROM executions execution
+JOIN tasks task ON task.id=execution.task_id
+JOIN task_revisions revision ON revision.id=execution.applied_revision_id;
+INSERT INTO process_execution_links(process_id,execution_id,created_at)
+SELECT id,id,COALESCE(started_at,0) FROM executions;
 `;

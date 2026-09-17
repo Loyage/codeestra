@@ -8316,7 +8316,7 @@ ADR-0062 标 Superseded by ADR-0066。
 
 ## 用户任务 — AI 操作系统定位与 Service Kernel 改造规划（ADR-0068）
 
-状态：**文档与方案已完成；实现尚未开始。**
+状态：**文档与方案已完成；S1–S4 已由 FOUNDATION-099 实现，S5–S10 待推进。**
 
 用户提出 Codeestra 的长期定位与 Service / Process / Agent / Signal 设计，并经两轮选择确认：内核 Service-first、调度 Task-first；Service 是 Runtime 内持久 Actor；Process 只监督 Agent；Signal 使用持久 inbox/outbox；恢复 Project Service 受管 integration ref/worktree；兼容现有 CLI 并新增内核面；Service 状态使用类型化核心 + namespaced metadata；后续增量迁移。
 
@@ -8330,6 +8330,34 @@ ADR-0062 标 Superseded by ADR-0066。
 
 验证：纯文档格只执行链接/术语/`git diff --check` 等定向检查；未运行代码测试或全量检查。
 
+## FOUNDATION-099 — Service Kernel S1–S4（ADR-0068，schema v37）
+
+状态：S1–S4 代码、定向测试、CLI 与文档已完成；S5–S10 未提前实施。
+
+已实现：
+
+- S1：`packages/domain/src/service-kernel.ts` 的 Service 树、core/metadata CAS、Signal/Process FSM、单 primary Agent 与 eligibility version；无 Bun/SQLite/SDK 导入。
+- S2：additive schema v37 的七张内核表、稳定 root/system ID、Project/Task/Execution 唯一投影、基数/FK 升级守卫；旧表继续是 core lifecycle 权威。
+- S3：静态 per-kind contract registry、30 秒 claim lease、1/5/30/120/300 秒五次自动重试、第六次失败 dead-letter、显式 retry、启动/周期 reconcile；ACK/receipt 与 handler 状态同事务收敛。
+- S4：`service` / `process` / `signal` / `intent` 全部目标命令、strict Zod request/response schema、`--value-json` / `--payload-json`、稳定退出码；Development Process 控制复用 Task/Session handler；`intent send` 只创建 `CREATED` Process 并诚实返回 `PENDING_S6`。
+
+定向验证（开发分支未运行禁止的全量 `bun run check` / `just check` / `just verify`）：
+
+- `bun run typecheck`：通过（本格横跨 domain/storage/contracts/runtime/cli，因此执行跨包类型检查）。
+- `bun test packages/domain/test/service-kernel.test.ts`：11 pass / 0 fail。
+- `bun test packages/storage/test/service-kernel-migration.test.ts`：5 pass / 0 fail。
+- `bun test packages/storage/test/database.test.ts`：51 pass / 0 fail（既有 migration/storage 回归）。
+- `bun test apps/runtime/test/service-kernel.test.ts`：7 pass / 0 fail。
+- `bun test packages/contracts/test/service-kernel.test.ts`：3 pass / 0 fail。
+- `bun test packages/contracts/test/request.test.ts`：22 pass / 0 fail（既有 strict request 回归）。
+- `bun test apps/runtime/test/cli-service-kernel.test.ts`：3 pass / 0 fail。
+- `bun test apps/runtime/test/cli-task-purge.test.ts`：2 pass / 0 fail（v37 Process/Service projection 与 purge 兼容）。
+
+诚实边界：mock/临时 Runtime 证明协议、SQLite 与 CLI 编排，不证明真实 provider；S4 Intention Process 没有 Agent，
+Process 原生控制/路由属于 S5/S6；跨 SQLite/Git/Provider 不宣称 exactly-once；尚未在长期 `dev` 精确候选 SHA 上跑提升前全量测试。
+用户文档同步：`docs/guides/cli/kernel.md` 新增完整命令参考；`guides/README.md` 实现边界、`cli/README.md` §索引/退出码、
+`cli-reference.md` 索引、`manual.md` §1.1、`concepts.md` §Service-first、`features.md` §Service Kernel、`workflow.md` 顶部流程均切到 schema v37。
+
 ## NEXT — Service Kernel 增量改造（ADR-0068）
 
 > **优先级更新**：本节顶部的新主线取代下方历史“最小可用纵向切片”作为后续多 Agent 改造顺序。下方既有 1–14 项继续保留为真实缺口与历史记录，但除非会改变内核 contract，不应抢在 S1–S4 之前修改公共接口。
@@ -8340,11 +8368,11 @@ ADR-0062 标 Superseded by ADR-0066。
 
 | 顺序 | 任务 | 依赖 | 关键退出条件 |
 |---|---|---|---|
-| S0 | 文档、ADR-0068、目标架构与 roadmap | — | 本次文档格完成；明确目标≠当前 v36 |
-| S1 | 纯领域 Service / Signal / Process / Eligibility contract | S0 | 无 Bun/SQLite/SDK；非法树边、Signal 幂等、Process 终态有定向测试 |
-| S2 | v37 additive storage + Project/Task/Execution 只读投影 | S1 | 单一 migration owner；v36→v37 保留数据、root singleton、FK clean |
-| S3 | Service registry + 持久 Signal dispatcher/reconcile | S2 | claim/handler/ack 各崩溃点不丢 Signal、不双副作用 |
-| S4 | `service/process/signal/intent` CLI + 现有 facade 兼容 | S3 contract | `--json`、稳定退出码；新旧查询同一事实 |
+| S0 | 文档、ADR-0068、目标架构与 roadmap | — | 文档格完成；当时明确目标≠v36，现由 S1–S4 推进到 v37 |
+| S1 | **已完成**：纯领域 Service / Signal / Process / Eligibility contract | S0 | FOUNDATION-099：无 Bun/SQLite/SDK；非法树边、Signal 幂等、Process 终态有定向测试 |
+| S2 | **已完成**：v37 additive storage + Project/Task/Execution 只读投影 | S1 | FOUNDATION-099：v36→v37 保留数据、root singleton、FK clean |
+| S3 | **已完成**：Service registry + 持久 Signal dispatcher/reconcile | S2 | FOUNDATION-099：lease/retry/reclaim/receipt 定向测试 |
+| S4 | **已完成**：`service/process/signal/intent` CLI + 现有 facade 兼容 | S3 contract | FOUNDATION-099：`--json`、稳定退出码；新旧查询同一事实 |
 | S5 | Execution/Session → Process 控制面 | S2/S3 | 不支持能力诚实拒绝；无双 writer |
 | S6 | root/project/task intention + Attention 路由 | S3/S5 | 目标不明建 Attention；guidance/revision 不混淆 |
 | S7 | Project/Task Service 单一写路径 | S3，S4 可并行 | 一条 command 只有一个权威 handler，无双写漂移 |
@@ -8360,7 +8388,7 @@ ADR-0062 标 Superseded by ADR-0066。
 - `PROJECT_SPEC.md`、ADR 索引、roadmap 与本节由协调者统一收口，不让多个 Agent并行改同一文档。
 - 先冻结跨 lane contract，再并行 CLI / Process / Intention；managed integration 必须等 Project/Task 单一写路径成立。
 - 开发分支只跑任务书列出的定向测试；全量只在所有候选合入长期 `dev` 后的精确 SHA 上执行。
-- 当前 v36 没有新内核命令与产品自动集成；任何格都不得把目标表述成已实现。
+- 当前 v37 已有 S1–S4 内核命令，但没有产品自动集成、原生 Process Agent 控制或 intention 解释；任何格都不得把 S5–S10 表述成已实现。
 
 ### 历史剩余项（继续保留）
 

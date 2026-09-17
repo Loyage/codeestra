@@ -1,6 +1,6 @@
 # Service Kernel 改造 Roadmap
 
-状态：**ADR-0068 已接受，目标架构尚未实现**。当前可运行基线仍是 schema v36 / ADR-0066/0067：只有现有 `project` / `task` / `session` / `attention` / `scheduler` CLI，没有通用 `service` / `process` / `signal` / `intent` 命令，也没有产品侧受管 integration。
+状态：**ADR-0068 S1–S4 已由 FOUNDATION-099 实现，S5–S10 待完成**。当前可运行基线是 schema v37：既有业务 CLI 与通用 `service` / `process` / `signal` / `intent` CLI 并存；Project/Task/Execution 仍是 core 写权威，产品侧受管 integration 尚未实现。
 
 本文件是接下来多 Agent 改造的权威分波计划。历史实现记录不在这里重复，见 [`docs/tasks/README.md`](../tasks/README.md)；旧 ADR 保留原样，不因 roadmap 改写而失去审计价值。
 
@@ -65,9 +65,9 @@ S0 文档与契约冻结（本次）
 - 本 roadmap 与多 Agent 分工；
 - 当前实现与目标设计明确分层，不伪造已实现命令。
 
-验收：本地链接成立；全文检索不再把“产品永远不集成”当长期目标；当前用户指南仍明确 v36 不具备新命令。
+验收（S0 当时）：本地链接成立；全文检索不再把“产品永远不集成”当长期目标；用户指南当时明确 v36 不具备新命令。S1–S4 完成后该实现边界已更新为 v37。
 
-### S1 — 纯领域内核（无 schema、无副作用）
+### S1 — 纯领域内核（无 schema、无副作用）【已完成：FOUNDATION-099】
 
 负责模块：`packages/domain`、必要的 `packages/contracts` 纯类型。
 
@@ -91,7 +91,7 @@ S0 文档与契约冻结（本次）
 
 退出条件：领域对象不导入 Bun/SQLite/Agent SDK；没有空 port 冒充能力。
 
-### S2 — v37 additive storage 与只读投影
+### S2 — v37 additive storage 与只读投影【已完成：FOUNDATION-099】
 
 **migration 唯一 owner：一个 Agent。其他 Agent 不修改 migration/version。**
 
@@ -112,7 +112,7 @@ S0 文档与契约冻结（本次）
 
 定向测试：v36→v37 真实文件升级、root singleton、树约束、幂等回执、FK check、故障注入与重新打开。
 
-### S3 — Service registry 与持久 Signal dispatcher
+### S3 — Service registry 与持久 Signal dispatcher【已完成：FOUNDATION-099】
 
 负责模块：`apps/runtime`，复用 storage/outbox/Operation 原语。
 
@@ -137,7 +137,7 @@ S0 文档与契约冻结（本次）
 
 退出条件：每格都通过真实 SQLite + 临时 Runtime 测试证明“零丢失、不双副作用、不谎报 exactly-once”。
 
-### S4 — 内核 CLI 与兼容 facade
+### S4 — 内核 CLI 与兼容 facade【已完成：FOUNDATION-099】
 
 负责模块：`packages/contracts`、`apps/cli`、Runtime dispatch；不得改 migration。
 

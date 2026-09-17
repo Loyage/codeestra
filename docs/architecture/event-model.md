@@ -4,7 +4,7 @@
 
 客户端发 command（期望行为），Runtime 写 domain event（已发生事实）；Adapter event（外部观察）先经身份、顺序、状态校验，再转换为领域事实。数据库是权威状态，事件支持审计和订阅，不以终端日志重建业务状态。
 
-ADR-0068 新增的 **Signal 不等于 domain event**：Signal 是有目标 Service、可 claim/ack/retry 的工作信封；domain event 是已经发生且 append-only 的事实。handler 可以因一个 Signal 产生多个 event，也可以幂等命中而不产生新 event。Signal 的准确表与事件名在 S1/S2 冻结，当前 v36 尚无该命令面。
+ADR-0068 新增的 **Signal 不等于 domain event**：Signal 是有目标 Service、可 claim/ack/retry 的工作信封；domain event 是已经发生且 append-only 的事实。handler 可以因一个 Signal 产生多个 event，也可以幂等命中而不产生新 event。schema v37 已实现持久 Signal 命令面与下列事实；跨 SQLite/Git/Provider 只承诺 at-least-once + 幂等收敛，不宣称 exactly-once。
 
 ```ts
 type EventEnvelope<T extends string, P> = {
@@ -63,6 +63,23 @@ type CommandEnvelope<T extends string, P> = {
 | `TaskRecoveryReconciled` | `Task` | `taskId`、`executionId`、`sessionId`、`workspaceId`、`workspacePath`、`providerPid`、`processState`（`STOPPED`/`ALIVE`/`DESCENDANTS_ALIVE`/`UNVERIFIABLE`/`IDENTITY_MISSING`）、`descendantRecord`（`RECORDED`/`MISSING`）、`descendantCount`、`workspacePresent`、`quiescenceProven`（恒为 `false`）、`signalsSent`（恒为 `0`）、`evidenceRef`、`reason`（可为 `null`）、`actor`（ADR-0055）。它只在**收口**时发布（`Execution`/`Task` 置 `FAILED`、Session `EXITED`、workspace `RETAINED` 的同一事务里），是三个状态投影的 causation 起点；**拒绝路径不写事件**（无状态变化） |
 | `VerificationCompleted` | `VerificationRun` | verificationId, taskId, executionId, revisionId, testedCommit, testedTree, policyVersion, policyDigest, mainCommit, `state`, `outcomeCode`, 非敏感 evidence |
 | `VerificationInvalidated` | `Task` | taskId, reason, verificationIds, testedCommit, policyDigest |
+
+**Service Kernel（schema v37 / ADR-0068 S2–S4）**
+
+| Event | aggregate | payload 要点 |
+|---|---|---|
+| `SignalEnqueued` | `Signal` | signalId, kind, subtype, targetServiceId |
+| `SignalClaimed` | `Signal` | signalId, attempt, bootId |
+| `SignalRetryScheduled` | `Signal` | signalId, state, code, retryAt |
+| `SignalDeadLettered` | `Signal` | signalId, state, code, retryAt=null |
+| `SignalRecoveryRequired` | `Signal` | signalId, state, code, retryAt=null |
+| `SignalAcknowledged` | `Signal` | signalId, effect（与 receipt 同事务） |
+| `SignalRetryRequested` | `Signal` | signalId |
+| `ServiceMetadataChanged` | `Service` | serviceId, namespace, key, stateVersion |
+| `ProcessCreated` | `Process` | processId, kind, parentServiceId, objective, adapterId, sourceSignalId |
+
+事件不承载 metadata value 或 intention 正文；这些值留在受约束的状态/Signal payload 中。claim lease 过期先把旧 attempt
+记为 `RETRYABLE` 并发布 retry 事实，再由新 boot 重新 claim。幂等命中已有 Signal/receipt 不追加第二个副作用事实。
 
 Phase 1（ADR-0006）的 `VerificationCompleted` 不写入命令原始输出；`VerificationInvalidated` 只追加 stale 原因，不重写历史 run。命名 SUCCEEDED 的 Agent 回调只产生执行事实，不能直接产生 Task integrated 事实。
 

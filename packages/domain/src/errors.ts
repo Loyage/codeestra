@@ -11,7 +11,19 @@ export type DomainErrorCode =
   // Impact analysis (ADR-0031). A scope that is not a set of repository-relative paths, or a
   // mapping that cannot be derived from, is a rejected input rather than a weaker verdict.
   | 'INVALID_IMPACT_SCOPE'
-  | 'INVALID_IMPACT_MAPPING';
+  | 'INVALID_IMPACT_MAPPING'
+  // Service kernel (ADR-0068 / S1). These errors are pure domain refusals: callers may map them to
+  // CLI stable codes, but the domain never imports a transport, database, or Agent SDK.
+  | 'DUPLICATE_SERVICE'
+  | 'INVALID_SERVICE_TREE'
+  | 'INVALID_SERVICE_PARENT'
+  | 'SERVICE_TREE_CYCLE'
+  | 'INVALID_METADATA_KEY'
+  | 'INVALID_METADATA_VALUE'
+  | 'INVALID_SIGNAL_TRANSITION'
+  | 'INVALID_PROCESS_TRANSITION'
+  | 'PROCESS_TERMINAL'
+  | 'PROCESS_AGENT_CARDINALITY';
 
 export class DomainError extends Error {
   constructor(readonly code: DomainErrorCode, message: string) {

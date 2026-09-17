@@ -66,6 +66,7 @@ import {
   taskBaselineRefMigration,
   taskInputFieldsMigration,
   taskRevisionFeaturesMigration,
+  serviceKernelMigration,
   sessionHandoffMigration,
   sessionTerminalMigration,
   stablePromotionMigration,
@@ -1631,15 +1632,35 @@ export class Phase1Database {
               + ' after); the upgrade was rolled back and nothing was changed');
           }
         }
-        this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
-      })();
-      if (rebuildsTable) {
+        // v37 is additive. Project/Task/Execution remain the writable core authority; this step
+        // installs stable Service/Process identity projections and the durable Signal inbox. Bun's
+        // multi-statement exec can swallow a step error, so all three projection cardinalities are
+        // checked before the schema version is advanced.
+        if (version < 37) {
+          const expectedServices = 3 + this.countTableRows('projects') + this.countTableRows('tasks');
+          const expectedProcesses = this.countTableRows('executions');
+          this.sqlite.exec(serviceKernelMigration);
+          const services = this.countTableRows('services');
+          const processes = this.countTableRows('processes');
+          const links = this.countTableRows('process_execution_links');
+          if (services !== expectedServices || processes !== expectedProcesses
+            || links !== expectedProcesses) {
+            throw new StorageError('INVALID_STATE',
+              `Schema v37 projection mismatch: services ${services}/${expectedServices}, processes `
+              + `${processes}/${expectedProcesses}, links ${links}/${expectedProcesses}; the upgrade `
+              + 'was rolled back and nothing was changed');
+          }
+        }
+        // Check before committing and before advancing user_version. This is required even for the
+        // additive v36→v37 path: a failed projection or a pre-existing broken reference must leave
+        // the exact v36 file intact rather than throw only after the migration transaction committed.
         const violations = this.sqlite.query<Record<string, unknown>, []>('PRAGMA foreign_key_check').all();
         if (violations.length > 0) {
           throw new StorageError('INVALID_STATE',
             `Schema migration left ${violations.length} foreign key violation(s)`);
         }
-      }
+        this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
+      })();
     } finally {
       if (rebuildsTable) this.sqlite.exec('PRAGMA foreign_keys=ON;');
     }
@@ -5062,9 +5083,12 @@ export class Phase1Database {
     }
     this.restoreAppendOnlyTriggers(database, suspended);
 
-    const removed = database.query(
-      'DELETE FROM tasks WHERE id=?1 AND project_id=?2').run(input.taskId, input.projectId);
-    if (removed.changes !== 1) {
+    // RETURNING checks the direct row rather than driver `changes`: deleting a Task now also invokes
+    // the v37 Service projection's ON DELETE SET NULL action, and auxiliary FK updates must not make
+    // a successful direct delete look like a zero-row CAS.
+    const removed = database.query<{ id: string }, [string, string]>(
+      'DELETE FROM tasks WHERE id=?1 AND project_id=?2 RETURNING id').get(input.taskId, input.projectId);
+    if (removed === null) {
       throw new StorageError('CONCURRENT_MODIFICATION', 'Task changed during purge');
     }
     rowsDeleted['tasks'] = 1;
@@ -13361,6 +13385,11 @@ function taskPurgeDeletions(): readonly (readonly [string, string])[] {
     ['task_dependencies',
       'DELETE FROM task_dependencies WHERE prerequisite_task_id=?1 OR dependent_task_id=?1'],
     ['intent_targets', 'DELETE FROM intent_targets WHERE task_id=?1'],
+    // S2 Process rows are read-only projections of these Executions. Delete the projection first;
+    // Signals that named it keep their history because source_process_id is ON DELETE SET NULL.
+    ['processes', `DELETE FROM processes WHERE id IN (
+      SELECT process_id FROM process_execution_links WHERE execution_id IN (${executions})
+    )`],
     ['executions', 'DELETE FROM executions WHERE task_id=?1'],
     ['task_revisions', 'DELETE FROM task_revisions WHERE task_id=?1'],
     ['workspaces', 'DELETE FROM workspaces WHERE task_id=?1'],

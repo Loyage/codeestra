@@ -1,6 +1,6 @@
 # Codeestra 用户说明书
 
-> **适用版本** `dev@6c7de03`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> **适用版本** ADR-0068 S1–S4 实现分支（2026-09-17） · **schema** v37 · **最后校对** 2026-09-17
 > 版本会前进：`dev@6c7de03` 只是本目录最后一次校对的基线；当前适用版本以
 > **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
 > 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
@@ -19,7 +19,7 @@
 > §10.3 新增 `WAIT_CONTROL` 一行并由 **FOUNDATION-097** 新增 §10.5「全局暂停」。
 > §「任务」永久删除一条与 §13.5 `RECOVERY_REQUIRED` 的 purge 行为由用户任务 `task/930f5325` 同步（ADR-0058 D02 修订，2026-09-16）。
 > 其余内容沿用 FOUNDATION-091 的校对基线。
-> **ADR-0068 文档修订**：§1 增加“AI 的操作系统”目标与 Service/Process/Signal 目标术语；命令正文仍只描述当前 v36，不新增未实现命令。
+> **ADR-0068 S1–S4 实现修订**：§1 与 §1.1 描述 schema v37 的 Service/Process/Signal 内核命令；S5 之后能力仍不提前声称。
 > §6 末尾的「Agent 运行结果卡片与最后的输出」一段与 `04-task-detail.png` 的图说由用户任务 `Loyage/simplize_task_ui`
 > （2026-09-16）同步（无新命令；卡片是只读投影，截图未重拍）。
 
@@ -55,7 +55,7 @@
 
 Codeestra 的长期目标是 **AI 的操作系统**：以长期 Service、短期 Process、Agent 与 Signal 统一管理 AI 工作；内核 Service-first，Scheduler 仍 Task-first。
 
-**这本手册描述当前 schema v36**：它仍以 Project / Task / Execution / Session 命令为主，没有通用 `service/process/signal/intent` CLI，也没有 Project Service 自动集成。当前你描述一项改动，Codeestra 给它独立工作目录与分支、运行 Coding Agent、固定成果 commit 并独立验证；成果仍由你自己合并。目标架构与改造计划见 [ADR-0068](../decisions/0068-service-process-signal-kernel.md) 和 [roadmap](../roadmap/mvp.md)。
+**这本手册描述当前 schema v37**：Service / Process / Signal 内核与 `service/process/signal/intent` CLI 已可用；Project / Task / Execution / Session 仍是现有业务写路径的权威事实，并由兼容 facade 投影进新内核。Project Service 自动集成、原生 Process 控制和 intention 解释仍未实现（S5–S8），成果仍由你自己合并。目标架构与后续计划见 [ADR-0068](../decisions/0068-service-process-signal-kernel.md) 和 [roadmap](../roadmap/mvp.md)。
 
 ### 三条必须先知道的第一原则
 
@@ -88,6 +88,16 @@ Codeestra 的每一步都**只报事实，不报乐观猜测**。所以你会反
 - 名词的准确定义与硬边界：[concepts.md](./concepts.md)
 - 「这软件到底有哪些功能」：[features.md](./features.md)
 - 三条第一原则的规格原文：[PROJECT_SPEC.md](../../PROJECT_SPEC.md) §1.1
+
+### 1.1 Service Kernel 的当前用法
+
+- `service list|get|tree|state get|state set`：查看稳定 root/system/Project/Task Service；`state set` 只经 `SIG_A` 写 namespaced metadata。
+- `process list|get|input|pause|resume|terminate`：既有 Execution 是只读 Development Process 投影；控制复用旧 Task/Session handler。
+- `signal send|list|get|retry`：持久、可 claim/retry/dead-letter 的 Service inbox；结构化值使用 `--payload-json`。
+- `intent send`：持久化 `SIG_P` 并创建 `CREATED` Intention Process；返回 `PENDING_S6`，当前不解释也不运行 Agent。
+
+完整参数、幂等、退避与退出码见 [Service Kernel 命令参考](./cli/kernel.md)。所有命令支持 `--json`；
+Signal 等待重试退 3，用法错误退 2，拒绝/dead-letter 退 1。
 
 ---
 

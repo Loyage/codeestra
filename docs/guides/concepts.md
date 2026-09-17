@@ -1,6 +1,6 @@
 # 领域概念与边界
 
-> **适用版本** `dev@7425556` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> **适用版本** ADR-0068 S1–S4 实现分支（2026-09-17） · **schema** v37 · **最后校对** 2026-09-17
 > 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
 > **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
 > 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
@@ -10,7 +10,7 @@
 > §「调度三态」末尾新增「全局暂停」一段、§「运行边界」补充控制状态的持久性（FOUNDATION-097 / ADR-0061 D04/D08）。
 > **本次修订（ADR-0066 / schema v36）**：删除 IntegrationBatch / Integration verification / Promotion
 > 三节与 dev clone、dev 基线、自动回收的表述，Task 基线改为「项目文件夹建 workspace 时检出的分支」这一种。
-> **ADR-0068 文档修订**：首节改为“Service-first 内核、Task-first 调度”，并明确这些是尚未实现的目标术语；其余实体仍按当前 v36 解释。
+> **ADR-0068 S1–S4 实现修订**：Service/Process/Signal 内核、v37 持久化与 CLI 已实现；Project/Task/Execution 仍是兼容投影的 core 权威。
 
 这份文档解释 Codeestra 里的名词到底指什么、哪些东西**不是**调度主实体、以及几条会影响你日常判断的硬边界。
 规格原文见 [PROJECT_SPEC.md](../../PROJECT_SPEC.md) §2「核心不变量」；这里是面向使用者的说明。
@@ -19,7 +19,7 @@
 
 ## Service-first 内核，Task-first 调度
 
-长期目标（ADR-0068）是：**Service / Process / Signal 是内核一等抽象，Task Service 仍是 Scheduler 的业务主实体**。当前 schema v36 尚未提供通用 Service/Process/Signal 命令；下面 Project / Task / Execution / Session 的说明仍按当前实现书写。
+当前 schema v37 已完成 ADR-0068 S1–S4：**Service / Process / Signal 是内核一等抽象，Task Service 仍是 Scheduler 的业务主实体**。root、Scheduler、Attention 与每个 Project/Task 都可作为持久 Service 寻址；Execution 以同 ID 投影为 Development Process。为避免双写，Project/Task/Execution 的既有表仍是 core state 权威，Service metadata 与 Signal inbox 才由新表权威保存。S5–S9 再逐步切换原生 Process、intention 路由和业务写路径。
 
 - **Agent、Terminal、Conversation、Worktree 都不是调度的业务主实体。**
   它们是 Task 执行过程中用到的资源与观察面：Agent 是一次执行绑定的一方，Terminal 是某个 Session 的
@@ -29,7 +29,7 @@
 
 好处是：换 Agent 不会变成一个新 Task；目标架构里它会形成 successor Process/Execution。关闭客户端不会停止任何 Service、Task 或 Agent 执行。
 
-目标术语：Service 是 Runtime 内持久 Actor，不是 OS 进程；Process 是只监督 Agent 的短期单元；明确 API 走 `SIG_A`，自然语言 intention 走 `SIG_P`。详见 [架构说明](../architecture/service-process-signal.md)。
+Service 是 Runtime 内持久 Actor，不是 OS 进程；Process 是只监督 Agent 的短期单元；明确 API 走 `SIG_A`，自然语言 intention 走 `SIG_P`。Signal 是至少一次投递并靠 target + idempotency key 收敛的持久工作信封，不是 domain event，也不承诺跨 Provider exactly-once。详见 [架构说明](../architecture/service-process-signal.md) 与 [CLI 参考](./cli/kernel.md)。
 
 ---
 

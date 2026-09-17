@@ -1,6 +1,6 @@
 # Codeestra Architecture
 
-状态：既有 Runtime 架构已实现到 schema v36；ADR-0068 已接受 Service / Process / Agent / Signal 目标内核，但尚未实现。本文同时标注“当前事实”与“目标架构”，不得把目标命令当成当前能力。
+状态：Runtime 架构已实现到 schema v37；ADR-0068 S1–S4 的 Service / Process / Signal 内核、持久 dispatcher 与 CLI 已实现，S5–S10 仍是目标。本文同时标注“当前事实”与“目标架构”，不得把后续能力当成当前能力。
 
 ## 总体架构
 
@@ -24,7 +24,7 @@ Knowledge：按 Execution/Process 绑定
 Self Evolution：Candidate / bootstrap（后续阶段）
 ```
 
-当前 v36 尚未落地 Service 树、通用 Signal/Process 命令与受管 integration；现有 Task/Execution/Session/outbox 是增量迁移的事实基础。
+当前 v37 已落地 Service 树、通用 Signal/Process 命令与兼容投影；Project/Task/Execution 旧表仍是 core 写权威。受管 integration、原生 Process Agent 与 intention 解释尚未落地。
 
 这是模块分层，不是微服务。Domain 不依赖具体运行时、数据库、UI 或 Agent。Git worktree 隔离工作目录，不提供 OS 权限沙箱。
 
@@ -55,7 +55,7 @@ Self Evolution：Candidate / bootstrap（后续阶段）
 - 活动修订先暂停，确认新规格后恢复；无法可靠暂停/确认时保留现场并重新执行。
 - 内核 Service-first、调度 Task-first；Service 是 Runtime 内持久 Actor，Process 只监督 Agent（ADR-0068）。
 - Signal 分 `SIG_A` / `SIG_P`，持久至少一次投递并以幂等键收敛；Service 不直接拥有 Agent。
-- 目标分支模型是 Project Service 独占的 integration ref/worktree + merge queue + 独立 Integration Verification；当前 v36 仍按 ADR-0066 把成果留在 task branch，由用户自己合并。
+- 目标分支模型是 Project Service 独占的 integration ref/worktree + merge queue + 独立 Integration Verification；当前 v37 的兼容 Task 路径仍按 ADR-0066 把成果留在 task branch，由用户自己合并。
 - Codeestra 自身仓库的 `dev→main` 人工发布继续固定 SHA 与证据，main 更新后立即以 CLI stop/status 重启；它不是产品 integration ref。
 - Runtime 独立于窗口，关闭客户端不结束任务。
 - 首个真实 Adapter 用 Pi；FULL 自动允许全部已注册工具，STRICT 保留原生审批与未知工具拒绝。
@@ -84,6 +84,6 @@ Self Evolution：Candidate / bootstrap（后续阶段）
 
 ## 设计成熟度
 
-完整产品的语义不可能用一次草案全部锁死。当前成熟事实到 schema v36；ADR-0068 的 Service kernel 按 S1–S10 分阶段准入。纯领域、additive storage、Signal dispatcher、兼容 CLI、Process 投影与受管 integration 各自有独立退出条件，后续阶段不得被当作已经批准实现细节。
+完整产品的语义不可能用一次草案全部锁死。当前成熟事实到 schema v37；ADR-0068 的 Service kernel 按 S1–S10 分阶段准入，S1–S4 已完成。纯领域、additive storage、Signal dispatcher、兼容 CLI、Process 投影与受管 integration 各自有独立退出条件，后续阶段不得被当作已经批准实现细节。
 
-SQLite 文档第 8 节记录**已执行**的 migration；当前最新实现为 schema v36。roadmap 预留 v37 给 Service/Signal/Process 内核、后继版本给受管 integration，但只有实际实现格能把它们写成已执行 migration。API 为 Runtime port 合约，不是供应商能力承诺；`agent-adapter-api.md` 记录 Pi、Codex 与 Claude Code 的实测能力矩阵。
+SQLite 文档第 8 节记录**已执行**的 migration；当前最新实现为 schema v37（Service/Signal/Process 内核），后继版本才可加入受管 integration，且只有实际实现格能把它写成已执行 migration。API 为 Runtime port 合约，不是供应商能力承诺；`agent-adapter-api.md` 记录 Pi、Codex 与 Claude Code 的实测能力矩阵。

@@ -1,6 +1,6 @@
 # 功能清单：「这软件能做什么」
 
-> **适用版本** `dev@6c7de03`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> **适用版本** ADR-0068 S1–S4 实现分支（2026-09-17） · **schema** v37 · **最后校对** 2026-09-17
 > 版本会前进：`dev@6c7de03` 只是本目录最后一次校对的基线；当前适用版本以
 > **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
 > 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
@@ -21,6 +21,7 @@
 > 「设置」表的并发上限设置一行同轮新增（同一个值也可从设置面实时调整）；
 > 「永久删除」一行的 `RECOVERY_REQUIRED` 对账由用户任务 `task/930f5325` 同步（ADR-0058 D02 修订，2026-09-16）；
 > 其余行沿用 FOUNDATION-091 的校对基线。
+> **FOUNDATION-099 / ADR-0068 S1–S4**：新增「Service Kernel」表；S5–S10 仍列为未实现边界。
 
 一行一个能力。列的含义：
 
@@ -32,6 +33,15 @@
 > 这份清单只写**当前实现真实具备**的能力。未实现 / 未验证的部分见文末「明确的未实现与未验证」。
 
 ---
+
+## Service Kernel
+
+| 能力 | 能做什么 | CLI 入口 | UI 位置 | ADR |
+|---|---|---|---|---|
+| Service 查询与 metadata | 查询稳定 root/system/Project/Task Service 树与 core 投影；通过 metadata CAS 写 namespaced JSON，不绕过 core state | `service list/get/tree/state get/state set` | —（CLI-only） | [0068](../decisions/0068-service-process-signal-kernel.md) |
+| Process 兼容 facade | 把既有 Execution 投影为同 ID Development Process；input/pause/resume/terminate 复用 Task/Session handler | `process list/get/input/pause/resume/terminate` | —（CLI-only） | [0068](../decisions/0068-service-process-signal-kernel.md) |
+| 持久 Signal | contract 校验、enqueue/claim/ACK/retry/dead-letter/reconcile；target + idempotency key 收敛 | `signal send/list/get/retry` | —（CLI-only） | [0068](../decisions/0068-service-process-signal-kernel.md) |
+| Intention 受理 | 发 `SIG_P` 并创建 `CREATED` Intention Process；当前明确返回 `PENDING_S6`，不解释、不启动 Agent | `intent send` | —（CLI-only） | [0068](../decisions/0068-service-process-signal-kernel.md) |
 
 ## 接入与项目
 
@@ -144,14 +154,15 @@ ff-only 拉取 → 重启核对 → 推回远端 `main`），但那是仓库约�
 
 以下内容**当前不成立**，不要按「已有」使用：
 
-1. **真实 provider 的并发运行**未验收：多 Task 并行的调度语义有实现与容量/槽位门禁，但真实模型的并行执行没有完成受控验收。
-2. **真实模型下的暂停 / 恢复复验**未完成：ADR-0016 的暂停/恢复编排由脚本 Adapter 覆盖；真实 provider 进程的暂停/恢复与取消超时仍未复验。
+1. **Service Kernel S5–S10** 未实现：Intention Process 尚不解释/运行 Agent；原生 Process 控制、Project/Task 单一写路径、managed integration 与 eligibility 解耦仍是后续阶段。S4 的 `PENDING_S6` 只表示持久受理。
+2. **真实 provider 的并发运行**未验收：多 Task 并行的调度语义有实现与容量/槽位门禁，但真实模型的并行执行没有完成受控验收。
+3. **真实模型下的暂停 / 恢复复验**未完成：ADR-0016 的暂停/恢复编排由脚本 Adapter 覆盖；真实 provider 进程的暂停/恢复与取消超时仍未复验。
    **区分**：ADR-0061 的**全局** Provider 冻结已对 **Pi** 做过真实进程测量（`docs/spikes/pi-0.84.4.md`），
    而 **Codex 与 Claude Code 的 `providerProcessSuspension` 仍是 `REQUIRES_VALIDATION`**——
    全局 `pause` 遇到它们的目标会 fail closed 到 `RECOVERY_REQUIRED`（`GLOBAL_PAUSE_UNSUPPORTED`），**不会**假装已冻结。
-3. **Provider 是否真的读取 Project Knowledge 物化文件**未验证：本轮 Agent Adapter 不消费 `knowledgeSnapshotRefs`。
-4. **token 级实时流**（需要新事件与存储）未实现；transcript 是**按需读取 + 轮询**，不是逐 token 推送。
-5. **Codeestra 自升级 / Self Promotion 的完整切换**未实现（Phase 7）。
-6. **Session Guidance 的模型侧未验证**：命令面、台账与启动交付已实现（ADR-0057），但「真实模型是否真的读了 guidance」与「真实 Pi 在**忙碌轮次**里是否接受 `steer`」都没有验收（ADR-0051 的 `steer` 实测是在空闲 session 上做的）；Codex 的 `turn/steer` 记为 `REQUIRES_VALIDATION`，Claude Code 的活会话通道为 `UNSUPPORTED`。**不要把 `DELIVERED` 读成「模型已经照做」。**
-7. 文档与实现不一致的地方在 [troubleshooting.md](./troubleshooting.md) §3 里**如实列出**（现为 FOUNDATION-074/075 的校准结果 + FOUNDATION-078 的逐屏走查校准），
+4. **Provider 是否真的读取 Project Knowledge 物化文件**未验证：本轮 Agent Adapter 不消费 `knowledgeSnapshotRefs`。
+5. **token 级实时流**（需要新事件与存储）未实现；transcript 是**按需读取 + 轮询**，不是逐 token 推送。
+6. **Codeestra 自升级 / Self Promotion 的完整切换**未实现（Phase 7）。
+7. **Session Guidance 的模型侧未验证**：命令面、台账与启动交付已实现（ADR-0057），但「真实模型是否真的读了 guidance」与「真实 Pi 在**忙碌轮次**里是否接受 `steer`」都没有验收（ADR-0051 的 `steer` 实测是在空闲 session 上做的）；Codex 的 `turn/steer` 记为 `REQUIRES_VALIDATION`，Claude Code 的活会话通道为 `UNSUPPORTED`。**不要把 `DELIVERED` 读成「模型已经照做」。**
+8. 文档与实现不一致的地方在 [troubleshooting.md](./troubleshooting.md) §3 里**如实列出**（现为 FOUNDATION-074/075 的校准结果 + FOUNDATION-078 的逐屏走查校准），
    未做静默改写。

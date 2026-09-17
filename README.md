@@ -2,7 +2,7 @@
 
 **目标：AI 的操作系统。** Codeestra 在宿主系统之上统一管理长期 Service、短期 Process、Agent、Signal、用户意图、Attention、调度与软件工程资源。内核 Service-first，Scheduler 仍 Task-first。
 
-> **实现边界**：ADR-0068 已接受上述目标架构，但当前可运行版本仍是 schema v36 的 Task Runtime；尚无通用 `service/process/signal/intent` CLI，也尚无 Project Service 受管 integration。改造计划见 [Service Kernel Roadmap](docs/roadmap/mvp.md)。
+> **实现边界**：ADR-0068 S1–S4 已实现于 schema v37：通用 `service/process/signal/intent` CLI、持久 Signal 与兼容投影可用；原生 Process Agent、intention 解释、Project/Task 写路径切换与 Project Service 受管 integration 尚未实现。改造计划见 [Service Kernel Roadmap](docs/roadmap/mvp.md)。
 
 ## 第一原则（优先级最高）
 
@@ -12,7 +12,7 @@
 
 完整表述见 [PROJECT_SPEC.md §1.1](PROJECT_SPEC.md)、[ADR-0008](docs/decisions/0008-efficiency-first-service-form.md)、[ADR-0011](docs/decisions/0011-default-full-permission-mode.md) 与 [ADR-0068](docs/decisions/0068-service-process-signal-kernel.md)。内核设计见 [Service / Process / Signal](docs/architecture/service-process-signal.md)。
 
-**当前 schema v36 不提供产品集成与稳定提升**（[ADR-0066](docs/decisions/0066-remove-dev-clone-and-dual-baseline.md)）：Task 从项目文件夹当前分支建基线，成果留在 task branch，由你自己合并。**目标架构将按 ADR-0068 增量加入 Project Service 独占的 integration ref/worktree 与串行 merge queue；这尚未实现，也不恢复旧 `promotion *`。**下面的 `main`/`dev` 流程仍只是本仓库自身约定。
+**当前 schema v37 不提供产品集成与稳定提升**（[ADR-0066](docs/decisions/0066-remove-dev-clone-and-dual-baseline.md)）：Task 从项目文件夹当前分支建基线，成果留在 task branch，由你自己合并。**目标架构将按 ADR-0068 增量加入 Project Service 独占的 integration ref/worktree 与串行 merge queue；这尚未实现，也不恢复旧 `promotion *`。**下面的 `main`/`dev` 流程仍只是本仓库自身约定。
 
 ## 分支与运行规则
 

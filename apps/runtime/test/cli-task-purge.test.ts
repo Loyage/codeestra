@@ -170,6 +170,12 @@ describe('codeestra task purge command face', () => {
       const task = await seededExecutedTask(fixture);
       expect(existsSync(task.workspacePath)).toBe(true);
       expect(await refExists(fixture.repo, task.branchRef)).toBe(true);
+      const projectedBefore = await cli(['process', 'list', '--service', task.taskId, '--json'],
+        fixture.environment);
+      expect(projectedBefore.exitCode).toBe(0);
+      expect(JSON.parse(projectedBefore.stdout)).toMatchObject([
+        { kind: 'DEVELOPMENT', parentServiceId: task.taskId, controlVersion: task.taskVersion },
+      ]);
 
       const purged = await cli(['task', 'purge', fixture.projectId, task.taskId,
         String(task.taskVersion), '--yes', '--reason', 'no longer wanted'], fixture.environment);
@@ -185,6 +191,7 @@ describe('codeestra task purge command face', () => {
       // The tip the branch pointed at is recorded: the branch itself is gone, the fact is not.
       expect(view.branchFacts[0]?.tipCommit).toMatch(/^[0-9a-f]{40}$/);
       expect(view.rowsDeleted['task_revisions']).toBeGreaterThan(0);
+      expect(view.rowsDeleted['processes']).toBeGreaterThan(0);
       expect(view.rowsDeleted['executions']).toBeGreaterThan(0);
       expect(view.rowsDeleted['workspaces']).toBe(1);
       expect(view.rowsDeleted['tasks']).toBe(1);
@@ -200,6 +207,16 @@ describe('codeestra task purge command face', () => {
         fixture.environment);
       expect(status.exitCode).toBe(1);
       expect(status.stderr).toContain('NOT_FOUND');
+      // v37 keeps the addressable Task Service as a retired tombstone, but its Process projection
+      // was owned by the purged Execution and is gone.
+      const retired = await cli(['service', 'get', task.taskId, '--json'], fixture.environment);
+      expect(retired.exitCode).toBe(0);
+      expect(JSON.parse(retired.stdout)).toMatchObject({ id: task.taskId, kind: 'TASK',
+        lifecycle: 'RETIRED', taskId: null });
+      const processes = await cli(['process', 'list', '--service', task.taskId, '--json'],
+        fixture.environment);
+      expect(processes.exitCode).toBe(0);
+      expect(JSON.parse(processes.stdout)).toEqual([]);
 
       // The audit event survives the Task it names, so "this Task existed and was deleted by hand"
       // is still readable in the event log after every other row is gone.

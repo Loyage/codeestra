@@ -1,6 +1,6 @@
 # Conservative Scheduler
 
-状态：当前调度引擎已实现到 schema v36；ADR-0068 接受了“内核 Service-first、调度 Task-first”与 eligibility 解耦目标，但尚未落地。下文 §1–§8 主要记录当前实现与历史演进；本节先声明目标边界。
+状态：当前调度引擎与 Service Kernel S1–S4 已实现到 schema v37；ADR-0068 的“内核 Service-first、调度 Task-first”已落地基础对象，但 S9 eligibility 解耦尚未落地。下文 §1–§8 主要记录当前实现与历史演进；本节先声明目标边界。
 
 ## 0. ADR-0068 目标边界（S9，尚未实现）
 
@@ -161,7 +161,7 @@ on relevant committed event or periodic recovery tick:
   之后已经没有「`complete=false` → UNKNOWN」这个兜底（判定不再读映射与快照），所以这类冲突**根本不被启动前门禁覆盖**：
   它们只在真实运行时暴露（或两个 Agent 真的撞上），由使用方自己用功能声明表达互斥意愿。要用声明字段假装安全仍然不做。
   （全局共享资源清单仍由 `.codeestra/impact.json` 的 `globalResources` 表达，那只覆盖 Git 可见影响，且现在只是证据。）
-- **集成组批**：旧多成员 IntegrationBatch 曾实现，已由 ADR-0066/schema v36 删除。ADR-0068 的 S8 目标是 Project Service 持久 merge queue，同项目串行、跨项目并行；Scheduler 不负责自动组批或执行 merge。
+- **集成组批**：旧多成员 IntegrationBatch 曾实现，已由 ADR-0066/schema v36 删除，schema v37 未恢复。ADR-0068 的 S8 目标是 Project Service 持久 merge queue，同项目串行、跨项目并行；Scheduler 不负责自动组批或执行 merge。
 - **饥饿公平策略（aging）**：不加 aging。持续高优先级输入可能饿死低优先级任务，UI 只显示等待时长；公平策略作为独立产品决策留后续。
 
 同样明确不做：按主机 CPU/内存自动推导并发容量；LLM 辅助的 ImpactSnapshot 预测；在 `UNKNOWN` 上新增除 `--allow-unknown` 之外的任何门禁、审批或信任流程。ADR-0061 的全局上限仍是显式配置，不是资源探测器。

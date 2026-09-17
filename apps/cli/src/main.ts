@@ -983,6 +983,29 @@ function usage(): never {
     # Every selected path is verified before anything is written and again before a Session starts;
     # a path that cannot be loaded is refused with a stable code and no Execution is created.
     # Exit codes: 0 applied, 1 refused (unusable path or adapter without plugin selection), 2 usage.
+  bun run codeestra service list [--kind <ROOT|SCHEDULER|ATTENTION|PROJECT|TASK>]
+    [--parent <service-id>] [--all] [--json]
+  bun run codeestra service get <service-id> [--json]
+  bun run codeestra service tree [service-id] [--json]
+  bun run codeestra service state get <service-id> [--json]
+  bun run codeestra service state set <service-id> --namespace <name> --key <name>
+    --value-json <json> --expected-version <n> [--json]
+  bun run codeestra process list [--service <service-id>] [--state <state>] [--json]
+  bun run codeestra process get <process-id> [--json]
+  bun run codeestra process input <process-id> --message <text> [--json]
+  bun run codeestra process pause <process-id> <expected-control-version> [--json]
+  bun run codeestra process resume <process-id> <expected-control-version> [--adapter <id>]
+    [--allow-unknown] [--json]
+  bun run codeestra process terminate <process-id> <expected-control-version> [--json]
+  bun run codeestra signal send <target-service-id> --kind <SIG_A|SIG_P> --subtype <name>
+    --payload-json <json> --idempotency-key <key> [--contract-version <n>] [--source-service <id>]
+    [--source-process <id>] [--correlation <id>] [--causation <id>] [--priority <n>] [--json]
+  bun run codeestra signal list [--service <id>] [--state <state>] [--kind <SIG_A|SIG_P>]
+    [--limit <n>] [--json]
+  bun run codeestra signal get <signal-id> [--json]
+  bun run codeestra signal retry <signal-id> [--json]
+  bun run codeestra intent send <text…> [--service <id>|--project <id>|--task <id>]
+    [--adapter <id>] [--json]
   bun run codeestra project inspect [path]
   bun run codeestra project policy [path]
   bun run codeestra project trust [path] [--yes]
@@ -2052,6 +2075,164 @@ try {
     } else {
       usage();
     }
+  } else if (group === 'service' && action === 'list') {
+    const split = splitFlagTokens([firstArgument, ...remainingArguments]
+      .filter((token): token is string => token !== undefined), ['--kind', '--parent'], ['--all', '--json']);
+    if (split.positionals.length !== 0) usage();
+    const kind = split.flags.get('--kind');
+    if (kind !== undefined && !['ROOT', 'SCHEDULER', 'ATTENTION', 'PROJECT', 'TASK'].includes(kind)) usage();
+    print(await call({ command: 'service.list',
+      ...(kind === undefined ? {} : { kind: kind as 'ROOT' | 'SCHEDULER' | 'ATTENTION' | 'PROJECT' | 'TASK' }),
+      ...(split.flags.get('--parent') === undefined ? {} : { parentServiceId: split.flags.get('--parent') as string }),
+      includeRetired: split.bare.has('--all') }));
+  } else if (group === 'service' && action === 'get') {
+    if (firstArgument === undefined || remainingArguments.some((token) => token !== '--json')) usage();
+    print(await call({ command: 'service.get', serviceId: firstArgument }));
+  } else if (group === 'service' && action === 'tree') {
+    const positional = [firstArgument, ...remainingArguments].filter((token): token is string =>
+      token !== undefined && token !== '--json');
+    if (positional.length > 1 || [firstArgument, ...remainingArguments]
+      .some((token) => token?.startsWith('--') && token !== '--json')) usage();
+    print(await call({ command: 'service.tree',
+      ...(positional[0] === undefined ? {} : { serviceId: positional[0] }) }));
+  } else if (group === 'service' && action === 'state') {
+    const stateAction = firstArgument;
+    const [serviceId, ...tokens] = remainingArguments;
+    if (serviceId === undefined) usage();
+    if (stateAction === 'get') {
+      if (tokens.some((token) => token !== '--json')) usage();
+      print(await call({ command: 'service.state.get', serviceId }));
+    } else if (stateAction === 'set') {
+      const split = splitFlagTokens(tokens,
+        ['--namespace', '--key', '--value-json', '--expected-version'], ['--json']);
+      if (split.positionals.length !== 0) usage();
+      const namespace = split.flags.get('--namespace');
+      const key = split.flags.get('--key');
+      const encoded = split.flags.get('--value-json');
+      const expectedVersion = Number(split.flags.get('--expected-version'));
+      if (namespace === undefined || key === undefined || encoded === undefined
+        || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
+      let value: unknown;
+      try { value = JSON.parse(encoded); }
+      catch { throw new Error('--value-json must be valid JSON'); }
+      print(await call({ command: 'service.state.set', commandId: crypto.randomUUID(), serviceId,
+        namespace, key, value, expectedVersion }));
+    } else usage();
+  } else if (group === 'process' && action === 'list') {
+    const split = splitFlagTokens([firstArgument, ...remainingArguments]
+      .filter((token): token is string => token !== undefined), ['--service', '--state'], ['--json']);
+    if (split.positionals.length !== 0) usage();
+    const state = split.flags.get('--state');
+    const states = ['CREATED', 'STARTING', 'RUNNING', 'WAITING_FOR_USER', 'PAUSING', 'PAUSED',
+      'SUCCEEDED', 'FAILED', 'CANCELLED', 'RECOVERY_REQUIRED'] as const;
+    if (state !== undefined && !states.includes(state as typeof states[number])) usage();
+    print(await call({ command: 'process.list',
+      ...(split.flags.get('--service') === undefined ? {} : { parentServiceId: split.flags.get('--service') as string }),
+      ...(state === undefined ? {} : { state: state as typeof states[number] }) }));
+  } else if (group === 'process' && action === 'get') {
+    if (firstArgument === undefined || remainingArguments.some((token) => token !== '--json')) usage();
+    print(await call({ command: 'process.get', processId: firstArgument }));
+  } else if (group === 'process' && action === 'input') {
+    if (firstArgument === undefined) usage();
+    const split = splitFlagTokens(remainingArguments, ['--message'], ['--json']);
+    const message = split.flags.get('--message');
+    if (split.positionals.length !== 0 || message === undefined) usage();
+    const result = await call({ command: 'process.input', commandId: crypto.randomUUID(),
+      processId: firstArgument, message });
+    print(result);
+  } else if (group === 'process' && (action === 'pause' || action === 'terminate')) {
+    const [versionText, ...tokens] = remainingArguments;
+    const expectedControlVersion = Number(versionText);
+    if (firstArgument === undefined || !Number.isSafeInteger(expectedControlVersion)
+      || expectedControlVersion < 0 || tokens.some((token) => token !== '--json')) usage();
+    print(await call({ command: action === 'pause' ? 'process.pause' : 'process.terminate',
+      commandId: crypto.randomUUID(), processId: firstArgument, expectedControlVersion }));
+  } else if (group === 'process' && action === 'resume') {
+    const [versionText, ...tokens] = remainingArguments;
+    const expectedControlVersion = Number(versionText);
+    if (firstArgument === undefined || !Number.isSafeInteger(expectedControlVersion)
+      || expectedControlVersion < 0) usage();
+    const split = splitFlagTokens(tokens, ['--adapter'], ['--allow-unknown', '--json']);
+    if (split.positionals.length !== 0) usage();
+    try {
+      print(await call({ command: 'process.resume', commandId: crypto.randomUUID(),
+        processId: firstArgument, expectedControlVersion,
+        ...(split.flags.get('--adapter') === undefined ? {} : { adapterId: split.flags.get('--adapter') as string }),
+        allowUnknown: split.bare.has('--allow-unknown') }));
+    } catch (error) {
+      if (errorCodeOf(error) === 'CONFLICT_WAIT' || errorCodeOf(error) === 'SCHEDULER_GLOBALLY_PAUSED') {
+        console.error(errorText(error)); process.exit(3);
+      }
+      throw error;
+    }
+  } else if (group === 'signal' && action === 'send') {
+    if (firstArgument === undefined) usage();
+    const split = splitFlagTokens(remainingArguments,
+      ['--kind', '--subtype', '--payload-json', '--idempotency-key', '--contract-version',
+        '--source-service', '--source-process', '--correlation', '--causation', '--priority'], ['--json']);
+    if (split.positionals.length !== 0) usage();
+    const kind = split.flags.get('--kind');
+    const subtype = split.flags.get('--subtype');
+    const encoded = split.flags.get('--payload-json');
+    const idempotencyKey = split.flags.get('--idempotency-key');
+    const priority = Number(split.flags.get('--priority') ?? '0');
+    const contractVersion = Number(split.flags.get('--contract-version') ?? '1');
+    if ((kind !== 'SIG_A' && kind !== 'SIG_P') || subtype === undefined || encoded === undefined
+      || idempotencyKey === undefined || !Number.isSafeInteger(priority)
+      || !Number.isSafeInteger(contractVersion) || contractVersion < 1) usage();
+    let payload: unknown;
+    try { payload = JSON.parse(encoded); }
+    catch { throw new Error('--payload-json must be valid JSON'); }
+    const result = await call({ command: 'signal.send', commandId: crypto.randomUUID(), kind,
+      subtype, targetServiceId: firstArgument, contractVersion, payload, idempotencyKey,
+      ...(split.flags.get('--source-service') === undefined ? {} : { sourceServiceId: split.flags.get('--source-service') as string }),
+      ...(split.flags.get('--source-process') === undefined ? {} : { sourceProcessId: split.flags.get('--source-process') as string }),
+      ...(split.flags.get('--correlation') === undefined ? {} : { correlationId: split.flags.get('--correlation') as string }),
+      ...(split.flags.get('--causation') === undefined ? {} : { causationId: split.flags.get('--causation') as string }),
+      priority }) as { readonly signal: { readonly state: string } };
+    print(result);
+    if (['PENDING', 'CLAIMED', 'RETRYABLE'].includes(result.signal.state)) process.exit(3);
+    if (result.signal.state !== 'ACKED') process.exit(1);
+  } else if (group === 'signal' && action === 'list') {
+    const split = splitFlagTokens([firstArgument, ...remainingArguments]
+      .filter((token): token is string => token !== undefined),
+    ['--service', '--state', '--kind', '--limit'], ['--json']);
+    if (split.positionals.length !== 0) usage();
+    const limit = Number(split.flags.get('--limit') ?? '100');
+    const kind = split.flags.get('--kind');
+    const state = split.flags.get('--state');
+    const states = ['PENDING', 'CLAIMED', 'RETRYABLE', 'ACKED', 'DEAD_LETTER',
+      'RECOVERY_REQUIRED'] as const;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500
+      || (kind !== undefined && kind !== 'SIG_A' && kind !== 'SIG_P')
+      || (state !== undefined && !states.includes(state as typeof states[number]))) usage();
+    print(await call({ command: 'signal.list',
+      ...(split.flags.get('--service') === undefined ? {} : { targetServiceId: split.flags.get('--service') as string }),
+      ...(kind === undefined ? {} : { kind }),
+      ...(state === undefined ? {} : { state: state as typeof states[number] }), limit }));
+  } else if (group === 'signal' && action === 'get') {
+    if (firstArgument === undefined || remainingArguments.some((token) => token !== '--json')) usage();
+    print(await call({ command: 'signal.get', signalId: firstArgument }));
+  } else if (group === 'signal' && action === 'retry') {
+    if (firstArgument === undefined || remainingArguments.some((token) => token !== '--json')) usage();
+    const result = await call({ command: 'signal.retry', commandId: crypto.randomUUID(),
+      signalId: firstArgument }) as { readonly state: string };
+    print(result);
+    if (['PENDING', 'CLAIMED', 'RETRYABLE'].includes(result.state)) process.exit(3);
+    if (result.state !== 'ACKED') process.exit(1);
+  } else if (group === 'intent' && action === 'send') {
+    const split = splitFlagTokens([firstArgument, ...remainingArguments]
+      .filter((token): token is string => token !== undefined),
+    ['--service', '--project', '--task', '--adapter'], ['--json']);
+    if (split.positionals.length === 0) usage();
+    const targets = ['--service', '--project', '--task'].filter((flag) => split.flags.has(flag));
+    if (targets.length > 1) usage();
+    print(await call({ command: 'intent.send', commandId: crypto.randomUUID(),
+      text: split.positionals.join(' '),
+      ...(split.flags.get('--service') === undefined ? {} : { serviceId: split.flags.get('--service') as string }),
+      ...(split.flags.get('--project') === undefined ? {} : { projectId: split.flags.get('--project') as string }),
+      ...(split.flags.get('--task') === undefined ? {} : { taskId: split.flags.get('--task') as string }),
+      adapterId: split.flags.get('--adapter') ?? 'pi' }));
   } else if (group === 'project' && action === 'inspect') {
     const positional = [firstArgument, ...remainingArguments]
       .filter((token): token is string => token !== undefined);

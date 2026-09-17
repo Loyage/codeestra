@@ -1,20 +1,76 @@
 {
   "version": 1,
-  "scope": "ADR-0068 文档与改造规划：确立 AI 操作系统定位、Service/Process/Agent/Signal 目标内核、managed integration 方向与 S0-S10 多 Agent 路线图；本格不修改 Runtime、CLI 或 schema。",
+  "scope": "ADR-0068 S1-S4：Service/Process/Signal 领域内核、schema v37 additive projection、持久 dispatcher/registry，以及完整 CLI 与旧 Task/Session 兼容 facade。",
   "commands": [
     {
-      "id": "documentation-diff-check",
+      "id": "service-kernel-domain",
+      "argv": ["bun", "test", "packages/domain/test/service-kernel.test.ts"],
+      "cwd": ".",
+      "timeoutSeconds": 60,
+      "covers": "Service 树与 metadata CAS、Signal FSM、Process FSM、单主 Agent 与 eligibility version"
+    },
+    {
+      "id": "storage-schema-regression",
+      "argv": ["bun", "test", "packages/storage/test/database.test.ts"],
+      "cwd": ".",
+      "timeoutSeconds": 120,
+      "covers": "既有 v1-v36 migration、外键、Task/Execution 写路径在 v37 下保持兼容"
+    },
+    {
+      "id": "service-kernel-storage",
+      "argv": ["bun", "test", "packages/storage/test/service-kernel-migration.test.ts"],
+      "cwd": ".",
+      "timeoutSeconds": 60,
+      "covers": "真实 v36→v37 文件升级、root singleton、projection/FK、metadata 与 Signal 幂等"
+    },
+    {
+      "id": "service-kernel-dispatcher",
+      "argv": ["bun", "test", "apps/runtime/test/service-kernel.test.ts"],
+      "cwd": ".",
+      "timeoutSeconds": 60,
+      "covers": "contract registry、claim lease、ACK receipt、SIG_P Process factory、crash reclaim、有界退避与 dead-letter"
+    },
+    {
+      "id": "existing-request-regression",
+      "argv": ["bun", "test", "packages/contracts/test/request.test.ts"],
+      "cwd": ".",
+      "timeoutSeconds": 60,
+      "covers": "新增 discriminated-union commands 不改变既有严格请求契约"
+    },
+    {
+      "id": "service-kernel-contracts",
+      "argv": ["bun", "test", "packages/contracts/test/service-kernel.test.ts"],
+      "cwd": ".",
+      "timeoutSeconds": 60,
+      "covers": "S4 request/response Zod contracts、strict object 与 JSON 大小边界"
+    },
+    {
+      "id": "service-kernel-cli",
+      "argv": ["bun", "test", "apps/runtime/test/cli-service-kernel.test.ts"],
+      "cwd": ".",
+      "timeoutSeconds": 180,
+      "covers": "真实 CLI/Runtime 的 service、process、signal、intent 命令、JSON 输出和稳定退出码"
+    },
+    {
+      "id": "task-purge-v37-compatibility",
+      "argv": ["bun", "test", "apps/runtime/test/cli-task-purge.test.ts"],
+      "cwd": ".",
+      "timeoutSeconds": 180,
+      "covers": "Task purge 先清理 Execution-backed Process，并把 Task Service 留作 retired tombstone"
+    },
+    {
+      "id": "cross-package-typecheck",
+      "argv": ["bun", "run", "typecheck"],
+      "cwd": ".",
+      "timeoutSeconds": 120,
+      "covers": "本格横跨 domain/storage/contracts/runtime/cli，检查跨包接口接线"
+    },
+    {
+      "id": "diff-check",
       "argv": ["git", "diff", "--check"],
       "cwd": ".",
       "timeoutSeconds": 30,
-      "covers": "所有文档与协作规范改动没有空白错误或冲突标记"
-    },
-    {
-      "id": "documentation-local-links",
-      "argv": ["node", "-e", "const fs=require('fs'),path=require('path');const files=['PROJECT_SPEC.md','README.md','AGENTS.md','docs/architecture/README.md','docs/architecture/service-process-signal.md','docs/decisions/README.md','docs/decisions/0068-service-process-signal-kernel.md','docs/roadmap/mvp.md','docs/guides/README.md','docs/guides/concepts.md','docs/guides/manual.md','docs/guides/workflow.md','docs/vision/ai-operating-system.md'];let bad=[];for(const f of files){const s=fs.readFileSync(f,'utf8');for(const m of s.matchAll(/\\[[^\\]]*\\]\\(([^)]+)\\)/g)){const u=m[1].split('#')[0];if(!u||/^(https?:|mailto:)/.test(u))continue;const p=path.resolve(path.dirname(f),decodeURIComponent(u));if(!fs.existsSync(p))bad.push(f+': '+m[1]);}}if(bad.length){console.error(bad.join('\\n'));process.exit(1)}"],
-      "cwd": ".",
-      "timeoutSeconds": 30,
-      "covers": "本格新增或重写的规格、ADR、架构、roadmap、指南与愿景文档的本地 Markdown 链接均存在"
+      "covers": "本格代码与文档改动没有空白错误或冲突标记"
     }
   ]
 }

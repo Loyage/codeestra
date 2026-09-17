@@ -1,10 +1,9 @@
 # SQLite Schema
 
-状态：逻辑 SQL 设计基线 + 已实现 migration 记录。第 2–6 节是逻辑关系设计（其中若干节已被后续 ADR 修订，见第 8 节各版本的说明）；第 8 节逐版本记录 `packages/storage/src/migration.ts` 中**实际存在**的 migration，当前最新实现为 schema **v36**（ADR-0066 删除 dev clone / 双基线 / 集成 / 稳定提升；v35 是 ADR-0065 的任务输入字段重建；v34 是 ADR-0061 的两半：容量上半 FOUNDATION-096，暂停下半 FOUNDATION-097；v16 永久未使用、v22 未占用）。**schema version 16 永久未使用**，原因见第 8 节。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与第 2–6 节的约束等价，并以第 8 节的实现记录为准。
-> **当前实现（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` /
-> `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支）。
->
-> **ADR-0068 目标，尚未迁移**：roadmap 预留下一个可用版本给 `services` / `signals` / `processes` 与既有 Project/Task/Execution 的 projection link，后继版本再加入 Project managed integration。准确 DDL 由单一 Storage lane 冻结；在 migration 实际合入前，本文件不得把 v37/v38 写成已执行。
+状态：逻辑 SQL 设计基线 + 已实现 migration 记录。第 2–6 节是逻辑关系设计（其中若干节已被后续 ADR 修订，见第 8 节各版本的说明）；第 8 节逐版本记录 `packages/storage/src/migration.ts` 中**实际存在**的 migration，当前最新实现为 schema **v37**（ADR-0068 S2 Service Kernel additive storage；v36 是 ADR-0066 删除 dev clone / 双基线 / 集成 / 稳定提升；v16 永久未使用、v22 未占用）。**schema version 16 永久未使用**，原因见第 8 节。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与第 2–6 节的约束等价，并以第 8 节的实现记录为准。
+> **当前实现（ADR-0068 / schema v37）**：新增 `services` / `service_metadata` / `processes` /
+> `process_execution_links` / `signals` / `signal_attempts` / `signal_receipts`。Project/Task/Execution 只做唯一投影，
+> 旧表仍是 core lifecycle 权威；v38 managed integration 尚未创建。
 
 ## 1. 约定
 
@@ -577,7 +576,7 @@ CREATE UNIQUE INDEX one_held_execution ON executions(task_id) WHERE resource_hel
 
 `resume_from_execution_id` 记录「这次 Execution 续接了哪个 predecessor 的 provider conversation」；provider resume 总是新建 Execution，而不是复活旧行。
 
-### Phase 4 集成管线（schema version 10，ADR-0018）—— **v35 已删除**
+### Phase 4 集成管线（schema version 10，ADR-0018）—— **v36 已删除**
 
 新增持久对象，取代 §5 的逻辑 `integration_batches` / `integration_batch_items`：`projects` 追加 `dev_ref`（默认 `refs/heads/dev`，新 Task worktree 的固定基线）。
 
@@ -630,7 +629,7 @@ CREATE UNIQUE INDEX one_reclamation_record_per_resource
 
 append-only：后来的一次尝试追加新行，从不改写或删除旧行。
 
-### Phase 4 稳定提升（schema version 13，ADR-0022）—— **v35 已删除**
+### Phase 4 稳定提升（schema version 13，ADR-0022）—— **v36 已删除**
 
 取代 §5 的逻辑 `stable_branch_promotions` / `stable_promotion_approvals`：
 
@@ -1173,7 +1172,7 @@ CREATE UNIQUE INDEX one_reclamation_record_per_resource
 假归属；`outcome` 增加 `RECOVERY_REQUIRED`，是「无法核验归属」（目录内有活进程、Git 状态不可读、项目未知）的诚实结局。既有行按
 原样复制并标 `REGISTERED`。没有任何外键引用 `reclamation_records`，所以开外键重建是安全的。
 
-### 分层验证证据（schema version 25，ADR-0038 / ADR-0039）—— **全量证据部分 v35 已删除**
+### 分层验证证据（schema version 25，ADR-0038 / ADR-0039）—— **全量证据部分 v36 已删除**
 
 `verification_runs` 只加四列（不重建），并新增两张表：
 
@@ -1209,20 +1208,21 @@ ALTER TABLE stable_promotions ADD COLUMN approved_full_suite_evidence_id TEXT;
 
 ### 迁移执行顺序与共享槽位后果
 
-`Phase1Database.migrate()` 按 `if (version < N)` 升序执行 v1…v30（跳过 v16、v22），最后写
+`Phase1Database.migrate()` 按 `if (version < N)` 升序执行 v1…v37（跳过 v16、v22），最后写
 `PRAGMA user_version=${phase1SchemaVersion}`。升级前 schema version 大于 `phase1SchemaVersion` 时以 `UNSUPPORTED_SCHEMA` 拒绝写入。
 
 已知后果（ADR-0032 记录）：单个 lane 合并后，**已经被标成更高版本号的库不会补跑后来出现的更低版本步骤**。跨格合并必须按既定顺序
 （E0 → E1 → E2；以及 Wave D 的 17 → 18 → 19）。这也是 v16 永久未使用的同一个根因。
 
-版本占用现状（以 `packages/storage/src/migration.ts` 为准，不提前创建未来表）：v22 未占用；v16 永久未使用；v23–v35 已实现
+版本占用现状（以 `packages/storage/src/migration.ts` 为准，不提前创建未来表）：v22 未占用；v16 永久未使用；v23–v37 已实现
 （v23 `task retry`/ADR-0036，v24 未注册目录回收/ADR-0037，v25 分层验证证据/ADR-0038+ADR-0039，v26 项目知识/ADR-0041，
 v27 Agent 插件选择/ADR-0044，v28 `intents.kind` 收窄/ADR-0046，v29 dev clone 与经 GitHub 中转的提升/ADR-0047，
 v30 多成员 IntegrationBatch 的两个终态/ADR-0053，v31 Session Guidance/ADR-0057，v32 revision 功能声明/ADR-0059，
 v33 `workspaces.base_ref`/ADR-0060，v34 Runtime 全局容量与 Provider 冻结/ADR-0061，
-v35 Task 输入字段：两个标题 + 删除约束/任务类型/ADR-0065）。当前 `phase1SchemaVersion = 35`。
+v35 Task 输入字段/ADR-0065，v36 删除 dev clone/集成/提升/ADR-0066，v37 Service Kernel additive storage/ADR-0068）。
+当前 `phase1SchemaVersion = 37`。
 
-### 经 GitHub 中转的提升与 dev clone（schema version 29，ADR-0047）—— **v35 已删除**
+### 经 GitHub 中转的提升与 dev clone（schema version 29，ADR-0047）—— **v36 已删除**
 
 两步纯 `ALTER TABLE ... ADD COLUMN`，**不重建任何表**，因此既有行原样保留（`projects` 的 `CHECK` 只拒绝空字符串，
 「没有 dev clone」与「有 dev clone」都是合法事实）：
@@ -1245,7 +1245,7 @@ ALTER TABLE stable_promotions ADD COLUMN main_pushed_at INTEGER;
 - `phase`（`READY_TO_PUSH` / `AWAITING_PULL` / `RESTART_PENDING` / `MAIN_PUSH_PENDING` / `COMPLETE` / `REFUSED`）不是列，
   而是从 `state` 与 `restart_result_json` 推导的投影：同一事实只有一个来源，不会出现状态机与派生字段互相矛盾。
 
-### 多成员 IntegrationBatch 的批级终态（schema version 30，ADR-0053）—— **v35 已删除**
+### 多成员 IntegrationBatch 的批级终态（schema version 30，ADR-0053）—— **v36 已删除**
 
 只加宽 `integration_batches.state` 的 `CHECK`，**不加列、不加表、不改成员状态集合**。`STRICT` 表的 `CHECK`
 不能就地加宽，因此这一步**重建**该表，并按 v28 `intents` 的先例在 `database.ts` 里做前置校验与**行数核对**
@@ -1551,3 +1551,21 @@ DROP TABLE dev_full_suite_evidence;
   `TASK_BASE_REF_NOT_A_BRANCH` / `TASK_BASE_REF_ALREADY_FIXED` 保留。
 - 依赖判定的原因码随之改名（同一有界枚举，旧名不再出现）：
   `UPSTREAM_RESULT_MISSING`、`BASE_REF_MISSING`、`BASE_REF_UNREADABLE`、`NOT_REACHABLE_FROM_BASE`。
+
+### Service Kernel additive storage（schema version 37，ADR-0068 S2）
+
+v37 不重建 v36 业务表，只新增七张 STRICT 表与索引/触发器：
+
+- `services`：稳定 root/Scheduler/Attention singleton；Project/Task 分别通过唯一 `project_id` / `task_id` 投影，
+  parent-kind trigger 保证 Project 直属 root、Task 直属 Project；`state_version` 只属于 metadata。
+- `service_metadata`：主键 `(service_id,namespace,key)`，JSON value 与逐键 version；Service CAS 成功时同步推进
+  `services.state_version`，不触碰旧 core lifecycle。
+- `processes` + `process_execution_links`：每个既有 Execution 建同 ID Development Process 与一一 link；
+  `status_source='EXECUTION'` 的状态查询继续从 Execution 投影，不复制写权威。
+- `signals` + `signal_attempts` + `signal_receipts`：target + idempotency key 唯一；claim owner/deadline、
+  automatic attempt 与 next-attempt 持久化；attempt/receipt append-only，ACK 与 receipt 在一个事务。
+
+migration 先计算 `3 + projects + tasks` 与 `executions` 的预期投影行数，再执行 additive DDL；结束后核对
+Service/Process/link 三个基数与 `PRAGMA foreign_key_check`，任一不符整步回滚且不推进 `user_version`。Runtime 启动时
+reconcile 后续新增的 Project/Task/Execution；purge 会先删除 Execution 对应 Process，Service 留作可寻址 retired tombstone，
+历史 Signal 不级联删除。

@@ -1,10 +1,10 @@
 # ADR-0068：Service / Process / Agent / Signal 内核与受管项目集成
 
-Status：Accepted（本次用户设计与后续选择题确认）；**尚未实现**。本 ADR 定义目标架构，不把当前 schema v36 或当前 CLI 误报为已经具备这些能力。
+Status：Accepted（本次用户设计与后续选择题确认）；**S1–S4 已由 FOUNDATION-099 / schema v37 实现，S5–S10 待完成**。本 ADR 同时定义后续目标，不把尚未完成的原生 Process、intention 路由或 managed integration 误报为已有能力。
 
 **Amends** ADR-0008 的“软件本体是服务”：Runtime 不再只被笼统称作一个服务，而是 0 号根 Service 与 Service 内核的宿主。
 
-**Supersedes（目标语义）** ADR-0066 的“产品不集成、Task 只从用户当前检出分支建基线、成果永远留给用户自己合并”。ADR-0066 仍准确描述当前 v36 实现；在本 ADR 的迁移波次完成前，现有命令面仍按 ADR-0066 工作。新实现不是恢复旧 IntegrationBatch / Promotion 的原样代码，而是由 Project Service 管理独立 integration ref/worktree 的新模型。
+**Supersedes（目标语义）** ADR-0066 的“产品不集成、Task 只从用户当前检出分支建基线、成果永远留给用户自己合并”。ADR-0066 仍准确描述当前 v37 兼容 Task 写路径；在 S7/S8 迁移完成前，既有业务命令仍按 ADR-0066 工作。新实现不是恢复旧 IntegrationBatch / Promotion 的原样代码，而是由 Project Service 管理独立 integration ref/worktree 的新模型。
 
 ## Context
 

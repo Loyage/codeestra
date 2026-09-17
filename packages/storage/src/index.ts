@@ -70,6 +70,7 @@ export {
   intentKindShrinkMigration, intentKinds,
   operationProgressMigration,
   phase1Migration, phase1SchemaVersion, reclamationMigration,
+  serviceKernelMigration, rootServiceId, schedulerServiceId, attentionServiceId,
   removeDevCloneMigration,
   resolveMigratedGlobalLimit, runtimeGlobalCapacityMigration, runtimePauseControlMigration,
   sessionGuidanceMigration,
@@ -88,5 +89,8 @@ export {
   workspaceRetryMigration,
 } from './migration.js';
 export type { IntentKind } from './migration.js';
+export { KernelStorageError, ServiceKernelStore, systemServiceIds } from './service-kernel-store.js';
+export type { ProcessView, ServiceView, SignalAttemptView, SignalView }
+  from './service-kernel-store.js';
 export { agentThinkingLevelSchema, agentThinkingLevels, storedAgentConfigurationSchema }
   from './database.js';

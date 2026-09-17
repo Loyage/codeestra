@@ -1,8 +1,8 @@
 # 状态机与迁移规则
 
-状态：§1–§8 记录当前 schema v36 及历史状态机；ADR-0068 的 Service/Signal/Process 与受管 integration 是已接受但尚未实现的目标。未列出的迁移拒绝；所有迁移需 expected version、actor、reason，并记录事实事件。恢复操作不绕过 guard。
+状态：§1–§8 记录当前 schema v37 及历史状态机；ADR-0068 的 Service/Signal/Process FSM 已由 S1–S4 实现，受管 integration 与 S5–S10 仍是目标。未列出的迁移拒绝；所有迁移需 expected version、actor、reason，并记录事实事件。恢复操作不绕过 guard。
 
-## 0. ADR-0068 新状态机（目标）
+## 0. ADR-0068 新状态机（S1–S4 内核已实现）
 
 ```text
 Service: ACTIVE ↔ PAUSED → RETIRED

@@ -1,6 +1,6 @@
 # Service / Process / Agent / Signal 内核
 
-状态：**目标架构，尚未实现**。决策依据为 [ADR-0068](../decisions/0068-service-process-signal-kernel.md)。当前产品仍是 schema v36；当前可用命令以 `docs/guides/cli/` 为准。
+状态：**S1–S4 已实现，S5–S10 待完成**。决策依据为 [ADR-0068](../decisions/0068-service-process-signal-kernel.md)。当前产品为 schema v37：领域内核、持久 Service/Process/Signal、dispatcher/registry 与 CLI 已可用；Project/Task/Execution 仍由既有表提供 core 权威，原生 Process 控制、intention 解释、写路径切换与 managed integration 不提前声称。当前命令见 [`docs/guides/cli/kernel.md`](../guides/cli/kernel.md)。
 
 ## 1. 为什么需要这层内核
 
@@ -58,7 +58,7 @@ type ServiceRecord = {
 };
 ```
 
-这只是方向性类型，不是已经冻结的 TypeScript API。实现波次必须把 Project/Task 的现有事实映射进来，而不是复制第二套权威状态。
+S1 已冻结对应纯领域类型；v37 持久记录另含 Project/Task 唯一投影列。S2 按要求把 Project/Task 的现有事实映射进来，没有复制第二套权威 core state。
 
 ### 3.1 状态
 
@@ -79,6 +79,13 @@ type ServiceRecord = {
 - agentContext：交给 Process 的 API 摘要与最小上下文。
 
 CLI 是 contract 的稳定映射，不从数据库内容动态生成任意命令。
+
+### 3.3 S4 当前实现边界
+
+Runtime bootstrap 建立稳定 root/Scheduler/Attention Service，并按需 reconcile Project/Task/Execution 投影。每个 kind 的
+静态 registry 只接受已注册 `(kind, subtype, version)`；当前可执行 contract 是 metadata `SIG_A` 与 intention `SIG_P`。
+claim lease 为 30 秒，自动退避为 1/5/30/120/300 秒，五次自动重试后的第六次失败进入 dead-letter；周期 reconcile 是一个 Runtime timer，
+不是每 Service busy-loop。
 
 ## 4. Process：只监督 Agent
 
