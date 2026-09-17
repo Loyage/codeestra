@@ -36,7 +36,16 @@ export type DomainErrorCode =
   | 'INTENTION_CLARIFICATION_NOT_FOUND'
   | 'INTENTION_CLARIFICATION_MISMATCH'
   | 'INTENTION_GUIDANCE_UNAVAILABLE'
-  | 'INTENTION_GUIDANCE_CHANNEL_UNAVAILABLE';
+  | 'INTENTION_GUIDANCE_CHANNEL_UNAVAILABLE'
+  // Managed integration (ADR-0070 D07 / S8, ADR-0074). A queue item that cannot move, a candidate
+  // that may not advance the ref, and a baseline ref that is not a baseline are distinct refusals;
+  // none of them is an approval step.
+  | 'INVALID_MERGE_QUEUE_ITEM'
+  | 'MERGE_QUEUE_ITEM_TERMINAL'
+  | 'INVALID_MERGE_QUEUE_TRANSITION'
+  | 'INVALID_TASK_INTEGRATION_TRANSITION'
+  | 'INTEGRATION_REF_MISSING'
+  | 'INTEGRATION_REF_MOVED';
 
 export class DomainError extends Error {
   constructor(readonly code: DomainErrorCode, message: string) {

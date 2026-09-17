@@ -1,6 +1,6 @@
 # Service Kernel 命令
 
-> **适用版本** ADR-0070 S1–S6 实现分支（2026-09-17） · **schema** v37 · **最后校对** 2026-09-17
+> **适用版本** ADR-0070 S1–S8 实现分支（2026-09-17） · **schema** v38 · **最后校对** 2026-09-17
 > 当前已实现：内核、持久 Signal、兼容 facade、Process 完成写路径与只读进度事实（S5 的一部分），以及
 > intention 解释结果的**结构化**一半（S6：`INTENTION_RESOLVED`，没有任何模型在解释意图）。
 > **仍未实现**：Process 的原生 Agent 控制 API、真实意图解释、Attention 全局索引对 kernel-level Intention 的接通。

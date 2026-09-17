@@ -1,4 +1,4 @@
-export const phase1SchemaVersion = 37;
+export const phase1SchemaVersion = 38;
 
 /** Stable system Service identities. Projection Services reuse their Project/Task UUIDs. */
 export const rootServiceId = '00000000-0000-4000-8000-000000000000';
@@ -2460,4 +2460,121 @@ JOIN tasks task ON task.id=execution.task_id
 JOIN task_revisions revision ON revision.id=execution.applied_revision_id;
 INSERT INTO process_execution_links(process_id,execution_id,created_at)
 SELECT id,id,COALESCE(started_at,0) FROM executions;
+`;
+
+/**
+ * Schema v38 (ADR-0070 / S8, ADR-0074): Project-managed integration.
+ *
+ * This step adds only new tables. Nothing existing is rebuilt or rewritten, so the upgrade cannot
+ * lose a row; the OID of an already-managed integration ref is not even stored here, because the ref
+ * itself is the fact. What the three tables record is:
+ *
+ *  - `project_integration`: the Project Service's owned integration ref/worktree, its deterministic
+ *    ownership token and the last OID this Runtime advanced the ref to (the ref stays the authority;
+ *    a disagreement is reported, never silently repaired);
+ *  - `merge_queue_items`: the durable merge queue, one project at a time. A partial unique index
+ *    (`one_active_integration_per_project`) is what makes "同一项目一次只有一个活动集成" a database
+ *    fact instead of a convention, and the second partial unique index refuses two live requests for
+ *    the same Task revision;
+ *  - `integration_runs`: Integration Verification evidence bound to the candidate commit, the policy
+ *    digest and the expected integration OID. It is a separate table from `verification_runs` because
+ *    that one is bound to an Execution and a Task revision — an integration candidate has neither,
+ *    and reusing it would have meant inventing a fake Execution.
+ *
+ * `task_integration` is the read projection of a Task's integration state. A missing row means
+ * `NOT_REQUESTED`; the row is written with the queue item that caused it, so "the Task is MERGED" is
+ * always explainable by a queue item that reached `MERGED`.
+ */
+export const managedIntegrationMigration = `
+CREATE TABLE project_integration (
+  project_service_id TEXT PRIMARY KEY REFERENCES services(id),
+  project_id TEXT NOT NULL UNIQUE REFERENCES projects(id),
+  integration_ref TEXT NOT NULL CHECK(length(trim(integration_ref)) > 0),
+  worktree_path TEXT UNIQUE,
+  ownership_token TEXT NOT NULL UNIQUE,
+  integration_oid TEXT,
+  state TEXT NOT NULL CHECK(state IN ('ACTIVE','RECOVERY_REQUIRED')),
+  version INTEGER NOT NULL DEFAULT 0 CHECK(version >= 0),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= created_at)
+) STRICT;
+CREATE TRIGGER project_integration_no_delete BEFORE DELETE ON project_integration BEGIN
+  SELECT RAISE(ABORT,'managed integration records are never deleted');
+END;
+
+CREATE TABLE merge_queue_items (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  project_service_id TEXT NOT NULL REFERENCES services(id),
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  revision_id TEXT NOT NULL,
+  result_commit TEXT NOT NULL CHECK(length(trim(result_commit)) > 0),
+  task_verification_run_id TEXT NOT NULL REFERENCES verification_runs(id),
+  priority INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL CHECK(state IN ('QUEUED','MERGING','VERIFYING','MERGED','CONFLICTED',
+    'FAILED','CANCELLED','STALE','RECOVERY_REQUIRED')),
+  candidate_commit TEXT,
+  expected_integration_oid TEXT,
+  released_integration_oid TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+  last_error_code TEXT,
+  last_error_message TEXT,
+  conflict_detail_json TEXT CHECK(conflict_detail_json IS NULL OR json_valid(conflict_detail_json)),
+  correlation_id TEXT NOT NULL CHECK(length(trim(correlation_id)) > 0),
+  idempotency_key TEXT NOT NULL CHECK(length(trim(idempotency_key)) > 0),
+  requested_at INTEGER NOT NULL CHECK(requested_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= requested_at),
+  settled_at INTEGER,
+  UNIQUE(project_id,idempotency_key),
+  FOREIGN KEY(task_id,revision_id) REFERENCES task_revisions(task_id,id),
+  CHECK((state IN ('QUEUED','MERGING','VERIFYING','RECOVERY_REQUIRED') AND settled_at IS NULL)
+    OR (state IN ('MERGED','CONFLICTED','FAILED','CANCELLED','STALE') AND settled_at IS NOT NULL)),
+  CHECK((state='MERGED' AND candidate_commit IS NOT NULL AND released_integration_oid IS NOT NULL)
+    OR state<>'MERGED')
+) STRICT;
+CREATE UNIQUE INDEX one_active_integration_per_project
+  ON merge_queue_items(project_id) WHERE state IN ('MERGING','VERIFYING');
+CREATE UNIQUE INDEX one_live_merge_request_per_task_revision
+  ON merge_queue_items(task_id,revision_id) WHERE state IN ('QUEUED','MERGING','VERIFYING');
+CREATE INDEX merge_queue_order ON merge_queue_items(project_id,state,priority DESC,requested_at,id);
+CREATE INDEX merge_queue_by_task ON merge_queue_items(task_id,requested_at DESC,id);
+
+CREATE TABLE integration_runs (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  queue_item_id TEXT NOT NULL REFERENCES merge_queue_items(id),
+  operation_id TEXT NOT NULL UNIQUE REFERENCES operations(id),
+  candidate_commit TEXT NOT NULL CHECK(length(trim(candidate_commit)) > 0),
+  expected_integration_oid TEXT NOT NULL CHECK(length(trim(expected_integration_oid)) > 0),
+  policy_version TEXT NOT NULL CHECK(length(trim(policy_version)) > 0),
+  policy_digest TEXT NOT NULL CHECK(length(trim(policy_digest)) > 0),
+  main_commit TEXT NOT NULL CHECK(length(trim(main_commit)) > 0),
+  commands_json TEXT NOT NULL CHECK(json_valid(commands_json) AND json_type(commands_json)='array'),
+  copy_path TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('QUEUED','RUNNING','PASSED','FAILED','ERROR','CANCELLED')),
+  outcome_code TEXT,
+  evidence_json TEXT CHECK(evidence_json IS NULL OR json_valid(evidence_json)),
+  queued_at INTEGER NOT NULL CHECK(queued_at >= 0),
+  started_at INTEGER,
+  ended_at INTEGER,
+  UNIQUE(queue_item_id,candidate_commit),
+  CHECK(started_at IS NULL OR started_at >= queued_at),
+  CHECK(ended_at IS NULL OR started_at IS NULL OR ended_at >= started_at),
+  CHECK((state IN ('QUEUED','RUNNING') AND ended_at IS NULL AND outcome_code IS NULL)
+    OR (state IN ('PASSED','FAILED','ERROR','CANCELLED')
+      AND ended_at IS NOT NULL AND outcome_code IS NOT NULL))
+) STRICT;
+CREATE INDEX integration_runs_by_item ON integration_runs(queue_item_id,queued_at);
+
+CREATE TABLE task_integration (
+  task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+  project_service_id TEXT NOT NULL REFERENCES services(id),
+  state TEXT NOT NULL CHECK(state IN ('NOT_REQUESTED','QUEUED','MERGING','VERIFYING','MERGED',
+    'CONFLICTED','FAILED','STALE','RECOVERY_REQUIRED')),
+  queue_item_id TEXT REFERENCES merge_queue_items(id),
+  integration_oid TEXT,
+  version INTEGER NOT NULL DEFAULT 0 CHECK(version >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= 0)
+) STRICT;
+CREATE INDEX task_integration_by_state ON task_integration(state,updated_at,task_id);
 `;

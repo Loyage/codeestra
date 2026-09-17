@@ -12,3 +12,4 @@ export * from './verification-evidence.js';
 export * from './knowledge.js';
 export * from './service-kernel.js';
 export * from './intention-routing.js';
+export * from './managed-integration.js';

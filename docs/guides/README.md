@@ -10,7 +10,7 @@
 
 Codeestra 的长期目标是 **AI 的操作系统**：内核 Service-first、Scheduler Task-first，以 Service / Process / Agent / Signal 管理 AI 工作。软件本体是独立本地 Runtime；ADR-0067 起当前只启用 CLI/Unix socket 命令面，Web UI 已暂停。
 
-> **当前实现边界**：本目录只描述 schema v37 **真实具备**的能力。ADR-0070 S1–S4 的 `service/process/signal/intent` 通用命令已写入 [Service Kernel 命令参考](./cli/kernel.md)；原生 Process Agent、intention 解释与受管 integration 尚未实现，不会提前写成可用能力。目标设计见 [Service Kernel 架构](../architecture/service-process-signal.md)。每条现有命令、参数、退出码与错误码都从仓库源码核对得到
+> **当前实现边界**：本目录只描述 schema v38 **真实具备**的能力。ADR-0070 S1–S4 的 `service/process/signal/intent` 通用命令已写入 [Service Kernel 命令参考](./cli/kernel.md)，S8 的受管 integration 写入 [受管 integration 命令参考](./cli/managed-integration.md)；原生 Process Agent、intention 解释、Integration Process/Agent 与 integration ref 的发布出口尚未实现，不会提前写成可用能力。目标设计见 [Service Kernel 架构](../architecture/service-process-signal.md)。每条现有命令、参数、退出码与错误码都从仓库源码核对得到
 > （核对方法与结果见 `docs/tasks/README.md` 的 FOUNDATION-070 一节）。文档与实现不一致的地方在本目录
 > 各文中如实标注，不替用户裁决。
 
@@ -21,9 +21,10 @@ Codeestra 的长期目标是 **AI 的操作系统**：内核 Service-first、Sch
 | **不知道该从哪读、想要一份从头读到尾的说明书** | **[manual.md](./manual.md)** |
 | 第一次把 Codeestra 跑起来 | [getting-started.md](./getting-started.md) |
 | 先搞懂 Project / Task / Execution 这些词是什么意思 | [concepts.md](./concepts.md) |
-| 走一遍当前「建任务 → 执行 → 验证 → 自己合并」流程 | [workflow.md](./workflow.md) |
+| 走一遍当前「建任务 → 执行 → 验证 → 集成到受管 ref」流程 | [workflow.md](./workflow.md) |
 | 查「这软件到底有哪些功能」 | [features.md](./features.md) |
-| 查「这条命令怎么用、参数是什么、退出码是什么」 | [cli/README.md](./cli/README.md)（八篇索引 + §0 通用约定） |
+| 把成果合进项目（受管 integration ref） | [cli/managed-integration.md](./cli/managed-integration.md) |
+| 查「这条命令怎么用、参数是什么、退出码是什么」 | [cli/README.md](./cli/README.md)（十篇索引 + §0 通用约定） |
 | 查看 Web UI 为什么不可用、未来怎样恢复 | [ui.md](./ui.md)（暂停说明） |
 | 想做某件具体的事（改 bug / 并行 / 换 Agent / **暂停全部** / 发布…） | [recipes.md](./recipes.md) |
 | 查看 UI 人工验收状态 | [acceptance-checklist.md](./acceptance-checklist.md)（当前暂停） |

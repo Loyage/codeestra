@@ -17,12 +17,11 @@
 
 读仓库身份：`repoRoot`、`mainRef`、`objectFormat`、`headCommit`、`gitCommonDir`。`path` 默认当前目录。
 
-**Task 基线只有一种**（ADR-0066）：项目文件夹**建 workspace 时当前检出的分支**，ref 与 commit 一起固定进
-`workspaces.base_ref`/`base_commit`。因此 inspect **不再**返回 `devRef` / `devCommit` / `devRefPresent` /
-`devRepoPath` / `devRefRetirement`，也**没有** `--dev-repo` 参数：dev clone、长期 `dev` 集成分支、
-`dev → main` 提升与 dev 构建通道都已从产品中删除。
-
-stderr 会打印一行 `Task 基线：该项目文件夹当前检出的分支（建 Task 时固定 ref 与 commit）。`。
+**Task 基线只有一种**（ADR-0074）：项目受管的 **integration ref `refs/codeestra/integration`** 当时的 commit，
+ref 与 commit 一起固定进 `workspaces.base_ref`/`base_commit`。该 ref 由 `project trust` 用本文件夹当时检出的分支建立
+（老项目首次需要时补建），`project integration init` 是同一件事的显式入口。因此 inspect **不再**返回 `devRef` /
+`devCommit` / `devRefPresent` / `devRepoPath` / `devRefRetirement`，也**没有** `--dev-repo` 参数：dev clone、长期
+`dev` 集成分支、`dev → main` 提升与 dev 构建通道都已从产品中删除。
 失败码含 `INVALID_REPOSITORY`、`UNSAFE_CHECKOUT`、`GIT_INSPECTION_FAILED`。
 
 ### `project policy [path]`

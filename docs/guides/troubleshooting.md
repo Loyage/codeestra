@@ -5,6 +5,7 @@
 > 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
 > **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
 > 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
+> **本次修订（ADR-0074 / schema v38）**：Task 基线改为项目受管的 integration ref（`refs/codeestra/integration`）；成果经 `project integration request|run` 进入该 ref，**发布到你的日常分支仍没有命令**。命令面见 [cli/managed-integration.md](cli/managed-integration.md)。
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > 第 15 条（ADR-0065 的未验证项）由**本分支**新增；`task create` 的 `--constraint`/`--kind` 已删除，不再是稳定码来源。
 > 权限模式的命令拼写由 FOUNDATION-098 同步为 `settings permission get|set`（ADR-0064：顶层 `permission` 已移除；§19 另新增 `settings list` 总览）。
@@ -72,7 +73,8 @@ CODEESTRA_HOME=/tmp/codeestra-dev bun run codeestra status
 
 ### 报 `DEV_REPO_REQUIRED` / `DEV_CHECKOUT_*`（已删除）
 
-这三个码都不再存在（ADR-0066）：产品不再有 dev clone、长期 `dev` 集成分支，也没有集成命令需要
+这三个码都不再存在（ADR-0066）：产品不再有 dev clone 与长期 `dev` 集成分支。**但"没有集成命令"已由 ADR-0074 改变**：
+受管 integration 命令是 `project integration *`（§23），因此
 「另一个 clone 上的那条分支」。`task integrate` / `promotion *` 本身也已删除，执行它们只会得到用法错误。
 
 如果你在历史记录里读到这些码，它们描述的是 ADR-0066 之前的行为，现在没有对应的补救动作。

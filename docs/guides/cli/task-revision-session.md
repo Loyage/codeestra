@@ -9,6 +9,7 @@
 > 「必须改点什么」现在是「改任务详情或改功能声明，至少其一」。
 > **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
 > 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
+> **本次修订（ADR-0074 / schema v38）**：Task 基线改为项目受管的 integration ref（`refs/codeestra/integration`）；Task verification 通过后由 `project integration request` / `run` 合进该 ref，**发布到你的分支仍没有命令**；命令面见 [managed-integration.md](./managed-integration.md)。
 > 本文件覆盖 §5、§6、§6.1、§7；章节号沿用拆分前的编号，因此可能不连续。正文里提到本文件没有的号（例如 §14、§17）时，到 [README.md](./README.md) 的索引表查它在哪一篇。
 > §7 的 `session handoff terminal resize` 一节由 FOUNDATION-083 校对（ADR-0054）；
 

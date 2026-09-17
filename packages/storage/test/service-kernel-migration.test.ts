@@ -44,15 +44,25 @@ function seedLegacyCore(db: Database): void {
     .run(executionId, taskId, revisionId, workspaceId, oid);
 }
 
+/**
+ * Turns a freshly created database back into a v36-shaped file: both the v37 Service kernel tables
+ * and the v38 managed-integration tables are dropped, so the upgrade under test really has to create
+ * them (ADR-0074 added the v38 half; leaving those tables behind would make the v38 step a no-op and
+ * hide exactly the migration this test exists to exercise).
+ */
 function dropV37(db: Database): void {
   db.exec('PRAGMA foreign_keys=OFF');
-  db.exec(`DROP TABLE signal_receipts; DROP TABLE signal_attempts; DROP TABLE signals;
+  db.exec(`DROP TABLE task_integration; DROP TABLE integration_runs; DROP TABLE merge_queue_items;
+    DROP TABLE project_integration;
+    DROP TABLE signal_receipts; DROP TABLE signal_attempts; DROP TABLE signals;
     DROP TABLE process_execution_links; DROP TABLE processes; DROP TABLE service_metadata;
     DROP TABLE services; PRAGMA user_version=36;`);
   db.exec('PRAGMA foreign_keys=ON');
 }
 
 describe('schema v37 Service kernel', () => {
+  // ADR-0074 keeps the v37 half of this file intact: a v36 file still reaches the current schema in
+  // one upgrade, and the S8 tables are created by the same pass.
   test('upgrades a real v36 file additively and projects existing core identities', () => {
     const directory = mkdtempSync(join(tmpdir(), 'codeestra-v37-'));
     const filename = join(directory, 'runtime.sqlite');

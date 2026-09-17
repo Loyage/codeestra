@@ -76,18 +76,19 @@
 - [ADR-0071](0071-process-completion-write-path.md)：**Process 类型化写路径、完成事实与只读进度**：`PROCESS_COMPLETED` `SIG_A`（ROOT/PROJECT/TASK 接受）、`transitionProcess`/`completeProcess`（`processes.version` CAS + 既有 receipt 幂等、非法迁移零部分应用、终态不复活）、只读 `progress` 投影（v37 无 token/cost/tool 列，三项恒为 `null` = UNAVAILABLE）、同一 Task 至多一个非终态 slot holder 的 succession 守卫。**无 schema 变更**；原生 Agent 控制 API 仍未实现。
 - [ADR-0072](0072-kernel-intention-clarification-fact.md)：**kernel 级 Intention 的澄清是内核事实，不是 Attention 行**（A/B/C 选 A）：v37 的 `attention_requests.session_id` 是非空外键（→ `agent_sessions` → `executions`），kernel 级 Intention Process 没有 provider 会话，因此澄清只落 Process `WAITING_FOR_USER` + append-only 审计事实 + Signal receipt（`attentionIndex: "NOT_CONNECTED"`），回答用同一 Process 的 `INTENTION_RESOLVED` + `causationId` 匹配；`CREATE_TASK` 用具名 schema 立即 `DEAD_LETTER`（`INTENTION_CREATE_TASK_UNSUPPORTED`）。**未决项**：接 Attention 全局索引需要一次新 migration（v38 号已预留给 S8）。
 - [ADR-0073](0073-project-task-single-write-path.md)：**Project/Task 单一写路径**（最小切片）：`ServiceWriteStore.ensureProjectService`/`createTaskService` 与 `TaskService.create` 是 `projects`/`tasks` 行的唯一 writer，`task.create` 与 `project trust` 经它们调用；同事务、失败零部分应用、重复调用幂等；定向测试扫描源码断言 `INSERT INTO tasks|projects` 只出现在该文件。**未做**：submit/revision/验证/取消/归档切换、Scheduler 请求 Task Service 建 Development Process。
+- [ADR-0074](0074-managed-integration-ref-and-merge-queue.md)：**受管 integration 的准确拼写与落地（S8）**：ref 为 `refs/codeestra/integration`（私有命名空间，`git branch` 列不出、默认 push 带不走、checkout 不可能停在它上面）；`project trust` 创建、缺失时首次需要补建；CLI 挂在 `project integration status|init|queue|request|run|retry|cancel` + `task integration show`；持久 merge queue 以「`MERGING`/`VERIFYING` 上的部分唯一索引」保证同项目串行、跨项目并行；`run` = claim → 固定 expected OID → owned worktree `--no-ff` 合并 → 候选 ref → 独立 Integration Verification（候选 commit 的独立副本）→ `git update-ref` CAS → `MERGED` + Task 投影 + `TASK_MERGE_SETTLED`；冲突/验证失败/ref 移动/重启一律保留现场且**不 force**；**新 Task 默认基线改为 integration commit**（ADR-0066 的基线规则被 amend，「不发布到用户分支」保留）。**仍未做**：Integration Process/Agent、发布出口、内核级冲突的 Attention 行。**schema v38**。
 
 ## 当前有效语义（与旧 ADR 冲突时按此执行）
 
-- **目标与实现边界**：ADR-0070 S1–S4 已实现：schema v37、Service/Process/Signal 持久内核、dispatcher/registry 与 `service/process/signal/intent` CLI。S5–S7 已各交付一个最小纵向切片：Process 完成写路径与只读进度（ADR-0071）、intention 结构化 outcome 路由与澄清内核事实（ADR-0072）、Project/Task **创建**单一写路径（ADR-0073）。**仍不得声称**：原生 Agent-supervising Process 控制、真实模型意图解释、Attention 全局索引对 kernel 级 Intention 的接通、submit/revision/验证/取消/归档写路径已切换、managed integration 或 eligibility 解耦。
+- **目标与实现边界**：ADR-0070 S1–S4 已实现：Service/Process/Signal 持久内核、dispatcher/registry 与 `service/process/signal/intent` CLI；S5–S8 各已交付一个纵向切片：Process 完成写路径与只读进度（ADR-0071）、intention 结构化 outcome 路由与澄清内核事实（ADR-0072）、Project/Task **创建**单一写路径（ADR-0073）、**受管 integration（ADR-0074，schema v38）**。**仍不得声称**：原生 Agent-supervising Process 控制、真实模型意图解释、Attention 全局索引对 kernel 级 Intention 的接通、submit/revision/验证/取消/归档写路径已切换、Integration Process/Agent 或 eligibility 解耦（S9）。
 - **权限**：ADR-0011 —— 默认 `FULL` 零确认；`STRICT` 是显式 opt-in，只恢复旧门禁；FULL 下不得新增任何确认步骤。CLI 读写拼写是 `settings permission get|set`（ADR-0064；顶层 `permission` 已移除），Runtime 命令与存储文件未变。
 - **设置面**：ADR-0064/0067 —— 一个 Runtime home 的全部**启用中**设置由 `settings list` 枚举（只读、零确认）；当前只有权限模式、散文问题处理与全局并发上限。UI settings 命令已暂停，源码与已有文件不等于启用设置。每项的值与「是否显式设置」来自它自己那条命令的同一次读取，不得引入第二状态源；新增或重新启用设置必须同时进 `settingKeys`。
 - **Task 输入字段**：ADR-0065 —— `task create` 三个必填字段（显示标题 / 命名标题 / 任务详情）；两个标题是 Task 级、创建后不可修订；命名标题决定分支与 worktree 目录（`task/<编号>-<slug>`，旧任务仍用内部 ID）；约束与任务类型已彻底删除。
 - **测试范围与时机**：ADR-0038/0039 —— task/lane/feature/Self candidate 分支只跑建分支时选定的定向测试；全量只在精确 `dev` 候选上、作为提升前必备证据。**注（ADR-0066）**：产品侧的「提升前全量证据」随提升一起删除；本条作为本仓库自身的开发/发布纪律仍在 `AGENTS.md` 生效。
-- **集成与发布**：当前 v37 仍无产品集成/提升命令（ADR-0066）。ADR-0070 的目标是重新提供 Project Service managed integration ref + merge queue + Integration Verification，**不**恢复旧 `promotion *`；integration ref 如何发布到用户 main/release 仍未定义。本仓库自身的 `dev → main` 继续走 `AGENTS.md` 人工四步。
+- **集成与发布**：受管集成为 **schema v38 / ADR-0074**：`project integration status|init|queue|request|run|retry|cancel` 与 `task integration show`（ADR-0063 §23），Project Service 独占 `refs/codeestra/integration` 与 `<CODEESTRA_HOME>/integration/<project-id>/`，同项目串行、跨项目并行，冲突/验证失败/ref 移动/重启都保留现场且不 force。**发布出口仍未定义**：没有任何命令把该 ref 推到用户 main/release，也不恢复旧 `promotion *`；Integration Process/Agent 未实现，冲突只报告不自动解决。本仓库自身的 `dev → main` 继续走 `AGENTS.md` 人工四步。
 - **分支职责与重启**：ADR-0009（**由 ADR-0066 收窄为仓库约定**）—— 本仓库自身长期保留 `main`/`dev`；`main` 更新后立即 `stop` + `status`。产品不再建模这两个分支。
 - **本机布局与客户端**：ADR-0048（**产品语义部分由 ADR-0066 删除**）—— 两个独立 clone 的拆分只服务 Codeestra 自身的开发。ADR-0067 起 Web UI 暂停：没有启用的 UI 构建产物、HTTP 入口或 UI 启动步骤；源码静态保留。
-- **Task 基线**：当前 v37 的兼容 Task 路径仍按 ADR-0066 取项目文件夹当前检出分支；ADR-0070 S8 目标改为 Project Service 当前 managed integration commit。切换前后都必须固定 base ref/commit，既有 workspace 不回写；迁移波次完成前以当前实现为准。
+- **Task 基线（ADR-0074，已切换）**：新 Task 的默认基线是 Project Service 受管 integration ref 当时的 commit（`workspaces.base_ref = refs/codeestra/integration`，ref 与 commit 同时固定）；`--base-ref` 仍可覆盖为项目本地分支；**既有 workspace 不回写**；依赖释放与回收的「已合并」判定都读这条 ref。老项目在首次需要时按当时项目文件夹检出的分支补建该 ref（detached HEAD 且 ref 缺失 → 按未满足处理）。
 - **CLI 优先 / Web UI 暂停**：ADR-0067 —— 当前产品只启用 CLI/Unix socket 命令面；`ui`/`open`/`runtime.ui`/`settings ui *` 与 `uiRunning` 已删除，UI/HTTP 专用测试和默认构建已移除。保留源码不得描述成可用功能。
 - **CLI 自描述**：ADR-0068 —— 每一层的命令清单由**命令树**（`apps/cli/src/command-tree.ts`）生成，argv 由它解析，分发分支按 tree id 且编译期穷尽；用法错误一行（`2`）并指向 `help`，`UNHANDLED_COMMAND`（`70`）表示树与分发不一致的缺陷；`runtime commands` 按请求 union 列出 Runtime 命令面。文档覆盖由定向测试核对，**过时**仍属人工纪律（ADR-0050 不变）。
 - **用户文档纪律**：ADR-0050 —— 功能变更同步 `docs/guides/` 对应段落，交付说明写明改了哪一篇的哪一节；**ADR-0063** —— 命令面变更的落点具体是 [`docs/guides/cli/`](../guides/cli/README.md) 里覆盖该命令的那一篇，旧 §N 对照表在 `docs/guides/cli-reference.md`。
@@ -107,8 +108,9 @@
 
 | 阶段 | 尚需确认/验证 | 当前处理 |
 |---|---|---|
-| S8 | managed integration ref 的精确命名、初始化与发布出口 | 已决定独立 owned ref/worktree、单项目串行 merge queue 与 CAS；发布到用户 main/release 不在 ADR-0070，未决前不恢复 `promotion *` |
-| 任意（内核） | kernel 级 Intention 的澄清如何进入 Attention 全局索引 | v37 的 `attention_requests.session_id` 是非空外键，无会话 Attention 不可表达；需要一次新 migration（ADR-0072 D01），本轮不做，v38 号与 S8 协调后再定 |
+| S8 | 发布出口：integration ref 如何交付到用户 main/release | 命名/初始化/CLI/基线已由 ADR-0074 关闭；发布出口仍不在 ADR-0070 与本 ADR 内，未定前不提供任何发布命令、不恢复 `promotion *` |
+| S8 | Integration Process/Agent（复杂合并的模型辅助解决） | ADR-0074 D05 选 A：本轮不做，冲突如实报告并保留现场；要做需要 Project Git API + 预算 + 归属校验，另立 ADR |
+| 任意（内核） | kernel 级 Intention 的澄清如何进入 Attention 全局索引 | `attention_requests.session_id` 是非空外键，无会话 Attention 不可表达；需要一次新 migration（ADR-0072 D01）。**v38 已由 S8 的受管 integration 占用且没有改这张表**，所以这件事的下一个空闲版本号尚未分配，未定前不做 |
 | Phase 1 | Pi 真实暂停/终止与取消超时的静止性 | 暂停/终止的进程释放只被脚本 Adapter 与真实 `releaseSession` 覆盖；取消超时、禁止工具的静止性、gate 拒绝路径与孤儿进程 reconcile 仍需真实 provider 复验 |
 | Phase 1 | Task verification 隔离副本的长时命令 | 副本内 argv 直接 spawn、按进程组超时与 tracked 改动失败已实现；真实命令集与长时任务未实测 |
 | Phase 1 | 本地 IPC 订阅的游标与重连 | 订阅不持久化游标、无自动重连、无按 project 鉴权，客户端重连需自带 cursor |

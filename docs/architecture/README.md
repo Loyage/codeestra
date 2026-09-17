@@ -2,7 +2,7 @@
 
 > 层级：**L0 索引** · 体量 ≈ 6k 字符 · **先读这一篇**：它只做路由，不重复任何细节。细节在其所指的 L1/L2 文档与源码里，**不要整篇读**。
 
-状态：Runtime 已实现到 **schema v37**。ADR-0070 的 Service / Process / Signal 内核 S1–S4 已实现（纯领域、additive storage、registry/dispatcher、`service/process/signal/intent` CLI）；**S5–S10 仍是目标**，不得把受管 integration、原生 Process Agent、自然语言意图路由当成当前能力。当前 v37 的 Project/Task/Execution 旧表仍是 core 写权威。
+状态：Runtime 已实现到 **schema v38**。ADR-0070 的 Service / Process / Signal 内核 S1–S4 已实现（纯领域、additive storage、registry/dispatcher、`service/process/signal/intent` CLI）；S5–S8 各交付一个纵向切片（ADR-0071/0072/0073/0074，含**受管 integration ref + 持久 merge queue + 独立 Integration Verification**）；**S9–S10 与 S5–S8 的其余内容仍是目标**，不得把 Integration Process/Agent、integration ref 的发布出口、原生 Process Agent 控制、自然语言意图路由当成当前能力。Project/Task/Execution 旧表仍是 core 写权威。
 
 ## 1. 读取协议（省上下文的用法）
 
@@ -43,7 +43,7 @@ CLI（当前唯一客户端；可断开与重连）
              ├── Attention Service（全局待办索引）
              └── Project Service*
                   ├── Task Service* → Development Process → Agent
-                  └── Integration Process → Agent        # S8 目标，尚未实现
+                  └── Integration Process → Agent        # 目标；S8 只做了确定性合并，未实现
 
 SIG_A：明确 API → Service handler → Operation → Git / verification / filesystem
 SIG_P：intention → Service → Process → Agent → typed Service APIs
@@ -60,10 +60,10 @@ Self Evolution：Candidate / bootstrap（后续阶段）
 
 ## 4. 当前事实与目标的分界（一句话版）
 
-| 领域 | 当前 v37 | 目标（ADR-0070） |
+| 领域 | 当前 v38 | 目标（ADR-0070） |
 |---|---|---|
 | 内核对象 | Service/Process/Signal 表与 CLI 已存在；Project/Task/Execution 旧表仍写权威 | S5–S7 把写路径与 Agent 控制迁到 Service/Process |
-| 分支与集成 | 成果停在 `refs/heads/task/<task-id>`，由用户自己合并；产品无集成/提升命令 | S8 Project Service 独占 integration ref/worktree + 串行 merge queue + 独立 Integration Verification |
+| 分支与集成 | **已实现（ADR-0074）**：Project Service 独占 `refs/codeestra/integration` + owned detached worktree，持久 merge queue（同项目串行、跨项目并行）、独立 Integration Verification、CAS 推进；**没有发布出口**（不推到用户 main/release，也不恢复 `promotion *`） | Integration Process/Agent（复杂合并的模型辅助）与发布出口仍未定义 |
 | 调度 | `schedule-service.ts` 事件驱动 + 周期 pass，按 ADR-0059 的功能声明判冲突 | S9 依赖/冲突求值解耦为带版本证据的 `TaskEligibility` |
 | 意图 | `intent` 命令与记录已存在 | S6 root/project/task intention 与全局 Attention 路由 |
 | 前端 | 仅 CLI/Unix socket | 恢复的 UI/桌面只做同一命令面的前端 |

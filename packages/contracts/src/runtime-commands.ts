@@ -143,6 +143,41 @@ export const runtimeCommandSummaries = {
     group: "project",
     summary: "逐条报告知识层被拒的条目（有拒条目时整层不出快照）",
   },
+  "project.integration.cancel": {
+    command: "project.integration.cancel",
+    group: "project",
+    summary: "取消一条还在 QUEUED 的 merge 请求（不删除已发生的集成事实）",
+  },
+  "project.integration.init": {
+    command: "project.integration.init",
+    group: "project",
+    summary: "创建/读取项目独占的受管 integration ref（缺失时按当前检出分支补建）",
+  },
+  "project.integration.queue": {
+    command: "project.integration.queue",
+    group: "project",
+    summary: "读项目的持久 merge queue（严格串行，按 priority/时间/id 排序）",
+  },
+  "project.integration.request": {
+    command: "project.integration.request",
+    group: "project",
+    summary: "把一条已通过 Task 验证的结果排进项目 merge queue（幂等）",
+  },
+  "project.integration.retry": {
+    command: "project.integration.retry",
+    group: "project",
+    summary: "把 CONFLICTED/FAILED 的 queue item 重新排队，并把 owned worktree 复位",
+  },
+  "project.integration.run": {
+    command: "project.integration.run",
+    group: "project",
+    summary: "合并队首候选、跑独立 Integration Verification、再 CAS 推进 integration ref",
+  },
+  "project.integration.status": {
+    command: "project.integration.status",
+    group: "project",
+    summary: "读受管 integration ref/worktree 与队列现状（Git 事实与记录并列）",
+  },
   "project.list": {
     command: "project.list",
     group: "project",
@@ -427,6 +462,11 @@ export const runtimeCommandSummaries = {
     command: "task.depends.remove",
     group: "task",
     summary: "删除一条依赖",
+  },
+  "task.integration.show": {
+    command: "task.integration.show",
+    group: "task",
+    summary: "读一个 Task 的 integration 投影（与 lifecycle/verification 正交）",
   },
   "task.list": {
     command: "task.list",

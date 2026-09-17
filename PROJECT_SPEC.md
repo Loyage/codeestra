@@ -1,6 +1,6 @@
 # Codeestra — 产品与架构规格
 
-状态：长期产品与目标架构基线；关键决策持续以 ADR 确认。**四条第一原则（默认 FULL 零确认、CLI 完备的服务形态、测试仅限 CLI/命令面且不获取电脑控制权、CLI 每一层自描述且与实际命令同源）见 §1.1，优先级最高（ADR-0008/0011/0068）。**ADR-0070 已把目标架构升级为 Service / Process / Agent / Signal 内核；S1–S4 已实现于 schema v37；S5–S7 各已交付一个最小纵向切片（ADR-0071/0072/0073：Process 完成写路径与只读进度、intention 结构化路由、Project/Task 创建写路径），S8–S10 与其余 S5–S7 内容尚未完成，差异见 `docs/roadmap/mvp.md`。
+状态：长期产品与目标架构基线；关键决策持续以 ADR 确认。**四条第一原则（默认 FULL 零确认、CLI 完备的服务形态、测试仅限 CLI/命令面且不获取电脑控制权、CLI 每一层自描述且与实际命令同源）见 §1.1，优先级最高（ADR-0008/0011/0068）。**ADR-0070 已把目标架构升级为 Service / Process / Agent / Signal 内核；S1–S4 已实现；S5–S8 各已交付一个纵向切片（ADR-0071/0072/0073/0074：Process 完成写路径与只读进度、intention 结构化路由、Project/Task 创建写路径、受管 integration ref 与持久 merge queue，schema v38），S9–S10 与其余 S5–S8 内容尚未完成，差异见 `docs/roadmap/mvp.md`。
 
 **实现进度不写在本文件**：已完成、未验收与未实现的能力见 `docs/tasks/README.md`，当前有效决策与待决项见 `docs/decisions/README.md`。本文件只写长期产品与架构语义；规格与实现不一致时按 `AGENTS.md` 的决策流程先明确变更，不静默重新解释规格，也不把目标命令写成当前已可用。
 
@@ -25,7 +25,7 @@ User Intention → SIG_P → target Service → Agent-supervising Process
 → CAS advance managed integration ref → Task integration = MERGED
 ```
 
-当前 v37 已有通用 `service/process/signal/intent` CLI 与兼容投影，但尚无原生 Process Agent 控制、自然语言解释或受管 integration；后续按 ADR-0070 的增量波次推进。
+当前 v38 已有通用 `service/process/signal/intent` CLI、兼容投影与受管 integration（`project integration *` / `task integration show`，ADR-0074），但尚无原生 Process Agent 控制、自然语言解释、Integration Process 或发布出口；后续按 ADR-0070 的增量波次推进。
 
 ### 1.1 第一原则（其他条款从属于此）
 
@@ -57,7 +57,7 @@ Codeestra 借鉴操作系统的价值：长期服务、短期进程、调度、�
 11. 运行中的 Task 可以修订；改变任务详情或功能声明必须生成 TaskRevision，请求暂停 Agent，并记录暂停、投递和应用确认。确认新修订后才恢复；无法可靠暂停或确认时保留现场并重新执行。旧 revision 的验证不能作为新 revision 的交付证据。
 12. Task Verification、Integration Verification、Task result commit 与 integration ref 前进是不同事实，不能互相替代。Task 成果通过任务级验证后向 Project Service 发送 merge-request Signal；Project Service 以持久队列保证同一项目一次只有一个活动集成，项目之间可并行。
 13. 每个 Project Service 管理一个独立 integration ref/worktree。新 Task 默认从当时的 integration commit 建固定基线；集成只在 Runtime owned workspace 操作，不直接修改用户工作树。只有独立 Integration Verification 通过且 expected integration OID 未移动，才能 CAS 推进 ref；冲突、验证失败、崩溃或 ref 移动保留现场。如何把 integration ref 发布到用户 release/main 不在当前规格内。
-14. Runtime 创建成果 commit 时固定 HEAD/ChangeSet/revision，并且只在已核验归属的 task worktree 提交，沿用现有仓库 identity 并正常执行 hooks。FULL 下 `task result capture` 单命令提交、不确认且不应用敏感路径拒绝；STRICT 下保留 prepare/confirm 与敏感路径 deny policy。当前 schema v37 的兼容 Task 路径仍按 ADR-0066 把成果留在 task branch；ADR-0070 的受管 integration 完成前不得把目标语义写成已实现。
+14. Runtime 创建成果 commit 时固定 HEAD/ChangeSet/revision，并且只在已核验归属的 task worktree 提交，沿用现有仓库 identity 并正常执行 hooks。FULL 下 `task result capture` 单命令提交、不确认且不应用敏感路径拒绝；STRICT 下保留 prepare/confirm 与敏感路径 deny policy。schema v38 起该流程的落点由 ADR-0074 给出：成果仍先停在 task branch，经 `project integration run` 的合并、独立 Integration Verification 与 CAS 才进入受管 integration ref；**没有任何命令把它发布到用户 main/release**，这一点不得写成已实现。
 15. Human-authored knowledge 和 machine-generated knowledge 分离；Agent 不能静默覆盖人工维护的知识文件。
 16. Self Task 原则上可修改全部 Codeestra 源码，但只能在隔离开发环境形成 Candidate。运行中的 Stable 不被直接覆盖；Promotion 必须由用户发起。
 17. 独立且极小的 `codeestra-bootstrap` 提供 list versions、launch version、switch version、health check、rollback，作为恢复入口。
@@ -78,7 +78,7 @@ Agent 完成不代表已捕获成果，成果 commit 不代表已验证，Task V
 
 Task Verification 在固定 commit 的隔离副本上运行项目内人工维护的验证策略；Task branch 上的同名文件不参与判定。FULL 下策略新增或变化直接执行，STRICT 下按既有门禁处理。验证证据绑定 revision/commit/policy digest，且不保存原始命令输出。Integration Verification 是 Project Service 对合并候选的独立证据，不能复用 Task Verification 冒充。
 
-开发 Task/Process 只运行与本次改动相称的定向测试；Codeestra 自身仓库的提升前全量测试仍只在长期 `dev` 的精确候选 SHA 上执行，这是本仓库人工发布纪律，不是被管理项目的产品 `promotion` 能力。受管 integration 的验证策略、lockfile digest 与候选绑定由 ADR-0070 的 S8 波次冻结，不恢复已删除的旧 `promotion.full-suite` 命令。
+开发 Task/Process 只运行与本次改动相称的定向测试；Codeestra 自身仓库的提升前全量测试仍只在长期 `dev` 的精确候选 SHA 上执行，这是本仓库人工发布纪律，不是被管理项目的产品 `promotion` 能力。受管 integration 的验证策略、候选绑定与 expected OID 由 ADR-0074 冻结：策略仍取自项目 main ref 的人工文件，在**候选 commit 的独立副本**上重跑，证据记入 `integration_runs`；不恢复已删除的旧 `promotion.full-suite` 命令。
 
 取消、修订、重试、Signal 消费、Process 控制、合并与人工回答均需要审计；Signal enqueue 可以与数据库状态同事务，但数据库与 Agent/Git/进程副作用之间不能假设原子性。恢复时必须核对真实资源状态与幂等回执。
 
@@ -132,7 +132,7 @@ Self-hosting test 不应污染 Stable 的数据库、工作树、真实运行任
 
 Agent 配置（provider/model/thinking level）按 ADR-0012 分全局默认与每项目覆盖持久化，逐字段按 环境变量 > 项目 > 全局 > 适配器默认 解析，仅影响新 Session，生效值随 Execution 记录。Agent 执行过程按 ADR-0013 只读展示，不入库、不是事件、不是 attach，文件路径不离开 Runtime。
 
-目标分支模型按 ADR-0070：每个 Project Service 管理独立 integration ref/worktree，新 Task 默认从当时的 integration commit 建固定基线，成果经 merge queue 与独立 Integration Verification 后 CAS 进入该 ref；不直接修改用户工作树。当前 v37 的兼容 Task 路径仍按 ADR-0066 从项目文件夹当前分支建 Task、成果由用户自己合并，直到对应迁移波次完成。Codeestra 自身仓库仍长期使用 `main`/`dev` 双分支，并由 `AGENTS.md` 的人工四步发布；这属于仓库约定，不与产品 integration ref 混为一谈。取消采用协作停止，超时请求人工处理并保留资源；优先级只影响后续调度、不抢占。ADR-0061 的 Runtime 全局并行上限与全局 Provider 冻结继续有效。
+目标分支模型按 ADR-0070 D07，并由 **ADR-0074 落地**：每个 Project Service 管理独立 integration ref（`refs/codeestra/integration`，私有命名空间）与 owned worktree，**新 Task 默认从当时的 integration commit 建固定基线**（既有 workspace 不回写），成果经持久 merge queue 与独立 Integration Verification 后 CAS 进入该 ref；不直接修改用户工作树，也没有把它发布到用户分支的命令。Codeestra 自身仓库仍长期使用 `main`/`dev` 双分支，并由 `AGENTS.md` 的人工四步发布；这属于仓库约定，不与产品 integration ref 混为一谈。取消采用协作停止，超时请求人工处理并保留资源；优先级只影响后续调度、不抢占。ADR-0061 的 Runtime 全局并行上限与全局 Provider 冻结继续有效。
 
 ## 7. 阶段
 
@@ -146,7 +146,7 @@ Agent 配置（provider/model/thinking level）按 ADR-0012 分全局默认与�
 - S5：Execution/AgentSession 向 Process 控制面映射。
 - S6：root/project/task intention 与全局 Attention 路由。
 - S7：Project/Task Service 成为单一写路径。
-- S8：受管 integration ref、merge queue、Integration Process/Verification。
+- S8：受管 integration ref、merge queue 与独立 Integration Verification。**已交付（schema v38 / ADR-0074）**；Integration Process/Agent 与发布出口未交付。
 - S9：Scheduler eligibility 解耦。
 - S10：迁移演练、真实验收、文档与兼容层收口。
 - Self Evolution / bootstrap 仍是其后的独立阶段，不借本轮内核改造偷带实现。
@@ -155,11 +155,11 @@ Agent 配置（provider/model/thinking level）按 ADR-0012 分全局默认与�
 
 ## 8. 本次交付范围
 
-本次实现交付 ADR-0070 S1–S4：纯领域内核、schema v37 additive storage、Runtime registry/dispatcher、内核 CLI 与兼容 facade。S5–S10 不在本次范围；后续只能按 roadmap 的已解锁波次推进，migration 文件与版本号必须由单一 owner 管理。
+ADR-0070 S1–S4（纯领域内核、additive storage、Runtime registry/dispatcher、内核 CLI 与兼容 facade）已交付；S5–S8 各自的纵向切片见 `docs/roadmap/mvp.md` 与 `docs/tasks/README.md`。S9–S10 不在已交付范围；后续只能按 roadmap 的已解锁波次推进，migration 文件与版本号必须由单一 owner 管理（v37 = FOUNDATION-099，v38 = FOUNDATION-100 / ADR-0074）。
 
-**后续切片（2026-09-17，三条并行 lane，同一 schema v37、无 migration）**：S5 交付 Process 完成写路径与只读进度投影（ADR-0071）；S6 交付 intention 结构化 outcome 路由与澄清内核事实（ADR-0072，Attention 全局索引未接通）；S7 把 Project/Task **创建**收敛到 Service 写路径（ADR-0073）。这三格各自只完成最小纵向切片，其余内容（原生 Process Agent 控制、真实模型意图解释、submit/revision/验证/取消/归档切换、Scheduler 建 Process、eligibility 解耦、受管 integration）仍未实现，见 `docs/roadmap/mvp.md` 的进度表。
+**后续切片**：S5 交付 Process 完成写路径与只读进度投影（ADR-0071）；S6 交付 intention 结构化 outcome 路由与澄清内核事实（ADR-0072，Attention 全局索引未接通）；S7 把 Project/Task **创建**收敛到 Service 写路径（ADR-0073，同一 schema v37、无 migration）；S8 交付受管 integration ref、持久 merge queue、独立 Integration Verification 与 Task 基线切换（ADR-0074，**schema v38**）。这些格子各自仍是纵向切片：原生 Process Agent 控制、真实模型意图解释、submit/revision/验证/取消/归档的写路径切换、Scheduler 建 Process、eligibility 解耦、Integration Process/Agent 与发布出口仍未实现，见 `docs/roadmap/mvp.md` 的进度表。
 
-当前实现进度（已完成能力、未验收与未实现项）见 `docs/tasks/README.md`；本阶段验收只用 CLI/命令面，不使用 computer-use。`service/process/signal/intent` 已交付；把原生 Process Agent 控制、真实模型意图解释、Attention 全局索引、submit/revision/验证/取消/归档的写路径切换、受管 integration 或 eligibility 解耦描述成当前已交付，仍是本规格明确禁止的。
+当前实现进度（已完成能力、未验收与未实现项）见 `docs/tasks/README.md`；本阶段验收只用 CLI/命令面，不使用 computer-use。`service/process/signal/intent` 与 `project integration *`/`task integration show` 已交付；把原生 Process Agent 控制、真实模型意图解释、Attention 全局索引、submit/revision/验证/取消/归档的写路径切换、Integration Process/Agent、integration ref 的发布出口或 eligibility 解耦描述成当前已交付，仍是本规格明确禁止的。
 
 ## 9. 文档导航与决策纪律
 

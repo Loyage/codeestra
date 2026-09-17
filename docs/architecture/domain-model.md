@@ -123,18 +123,19 @@ scope=TASK/INTEGRATION；subject execution/batch 二选一；revision（Task sco
 
 Phase 1 只实现 TASK scope：subject 固定 `executionId` + `revisionId`，且必须匹配 Task 当前 revision 与已捕获的 `result_commit`。命令来自 main ref 上的人工维护策略（ADR-0006）：FULL 下直接执行，STRICT 下在 trust 时一次性确认；Task branch 上的策略文件不参与判定。state 为 `QUEUED → RUNNING → PASSED | FAILED | ERROR`，新 commit 或新 policy digest 使旧 `PASSED` 变为 `STALE`（保留原结论与失效原因，不改写）。`outcomeCode` 区分 `PASSED`、`COMMAND_FAILED`、`COMMAND_TIMEOUT`、`TREE_MUTATED`、`WORKTREE_FAILED`、`RUNTIME_RESTARTED`。evidence 只含 exit code、时长、字节数、摘要、路径列表与副本处理结果，不含原始命令输出。验证证据不等于集成或发布事实。
 
-### ManagedIntegration / MergeQueueItem / IntegrationProcess（ADR-0070 目标）
+### ManagedIntegration / MergeQueueItem / IntegrationProcess（ADR-0070 D07 / S8，ADR-0074）
 
-当前 v37 没有产品侧 integration 表或命令。目标模型不复活旧 IntegrationBatch/StablePromotion 原样结构，而由 ProjectService 持有：
+**已实现于 schema v38**（除 IntegrationProcess 外）。模型不复活旧 IntegrationBatch/StablePromotion 原样结构，由 ProjectService 持有：
 
-- managed integration ref/worktree 与 ownership token；
-- `MergeQueueItem`：task/revision/result commit/task verification/request priority/correlation；
-- 单项目唯一活动 integration lease；
-- `IntegrationProcess`：Agent supervisor，复杂合并只能经 Project Service Git API；
-- `IntegrationVerification`：绑定 candidate commit、policy digest 与 expected integration OID；
-- CAS advance / STALE / conflict / failure / recovery evidence。
+- managed integration ref/worktree 与 ownership token（**已实现**：`refs/codeestra/integration`、`<CODEESTRA_HOME>/integration/<project-id>/`（detached）、`project_integration.ownership_token`（确定性 UUID））；
+- `MergeQueueItem`（**已实现**：`merge_queue_items`）：task/revision/result commit/task verification/queue priority/correlation + 双幂等键 + 终态 `settled_at`；
+- 单项目唯一活动 integration（**已实现**：`state IN ('MERGING','VERIFYING')` 上的部分唯一索引，不是内存锁）；
+- `IntegrationProcess`：Agent supervisor，复杂合并只能经 Project Service Git API——**未实现**（ADR-0074 D05 选 A：本轮只做确定性合并，冲突如实报告并保留现场）；
+- `IntegrationVerification`（**已实现**：`integration_runs`）：绑定 candidate commit、policy digest、main commit 与 expected integration OID，命令在候选 commit 的独立副本上执行；
+- CAS advance / conflict / failure / recovery evidence（**已实现**：`git update-ref <new> <expected>`；ref 外部移动记为 `INTEGRATION_REF_MOVED`，不 force）；
+- `task_integration`：Task 的 integration 投影，与 lifecycle/verification 正交（没有行 = `NOT_REQUESTED`）。
 
-发布 integration ref 到用户 main/release 分支不属于本对象，也不恢复旧 `promotion *`。Codeestra 自身仓库的人工 `dev → main` 发布仍由 `AGENTS.md` 约束。
+发布 integration ref 到用户 main/release 分支不属于本对象，也不恢复旧 `promotion *`（**仍未定义**）。Codeestra 自身仓库的人工 `dev → main` 发布仍由 `AGENTS.md` 约束。
 
 ### CandidateVersion / PromotionRecord
 

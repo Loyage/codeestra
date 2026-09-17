@@ -67,7 +67,8 @@ import { ScheduleService } from './schedule-service.js';
 import { SlotReservationService } from './slot-reservation-service.js';
 import { prepareReservedWorkspace } from './workspace-service.js';
 import { LongOperationService } from './operation-service.js';
-import { runtimeHome, runtimeSocketPath } from './paths.js';
+import { integrationWorktreesRoot, runtimeHome, runtimeSocketPath,
+  verificationCopiesRoot as verificationCopiesRootFor } from './paths.js';
 import { SessionHandoffService } from './session-handoff-service.js';
 import { TerminalService } from './terminal-service.js';
 import { inspectSettings } from './settings-view.js';
@@ -100,6 +101,7 @@ import {
   readSessionTranscript,
   readSessionTranscriptPart,
 } from './session-transcript-service.js';
+import { ManagedIntegrationService } from './managed-integration-service.js';
 import {
   reconcileInterruptedAgentAnswers,
   reconcileInterruptedAgentStarts,
@@ -114,7 +116,7 @@ import {
 import { RevisionDeliveryService } from './revision-delivery-service.js';
 import { SessionGuidanceService } from './session-guidance-service.js';
 import { ServiceContractRegistry, SignalDispatcher, intentionSignalSubtype,
-  serviceMetadataSignalSubtype } from './service-kernel.js';
+  serviceMetadataSignalSubtype, taskMergeSettledSubtype } from './service-kernel.js';
 /** S7 (ADR-0070): the one entry point that creates a Task; `task.create` is its first caller. */
 import { TaskService } from './task-service.js';
 import {
@@ -226,9 +228,42 @@ kernelStore.reconcileProjections(Date.now());
 // `tasks` row, its first revision and the TASK Service are one transaction inside storage
 // (`ServiceWriteStore`), and project registration does the same for the PROJECT Service.
 const taskService = new TaskService({ storage });
+// S8 (ADR-0070 D07 / ADR-0074): the Project-managed integration service. It owns the integration
+// ref/worktree, the durable merge queue and Integration Verification; the Signal dispatcher only
+// routes a merge request into it. Constructed before the dispatcher because the dispatcher needs the
+// handler, and the runner/copies root it shares with Task verification are created here so there is
+// exactly one process-group registry for every long verification command.
+const verificationRunner = new VerificationRunner();
+const verificationCopiesRoot = verificationCopiesRootFor(home);
+const integrationService = new ManagedIntegrationService({
+  storage,
+  integrationRoot: integrationWorktreesRoot(home),
+  copiesRoot: verificationCopiesRoot,
+  runner: verificationRunner,
+  permissionMode: () => permissionMode,
+  notifySettled: (input) => {
+    // The notification is a Signal, not a direct write: it converges on the Task Service's own
+    // receipt path and can be retried, and a failure to enqueue it never undoes the merge.
+    signalDispatcher.send({ signalId: crypto.randomUUID(), kind: 'SIG_A',
+      subtype: taskMergeSettledSubtype, sourceServiceId: null, sourceProcessId: null,
+      targetServiceId: input.targetServiceId, contractVersion: 1, payload: input.payload,
+      idempotencyKey: input.idempotencyKey, correlationId: input.correlationId,
+      causationId: input.causationId, priority: 0 });
+    signalDispatcher.dispatchAvailable();
+  },
+  logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
+});
+// A merge that was in flight when this Runtime's predecessor stopped is not re-run: the facts it
+// would need (did the ref move? did the copy survive?) are kept, and the item is marked for an
+// explicit reconcile instead of being guessed at.
+const integrationReconcile = integrationService.reconcileOnBoot();
+for (const itemId of integrationReconcile.recovered) {
+  console.error(`[runtime] merge queue item ${itemId} was interrupted by a restart and is`
+    + ' RECOVERY_REQUIRED; the integration worktree, candidate ref and verification copy are kept');
+}
 const serviceContracts = new ServiceContractRegistry();
 const signalDispatcher = new SignalDispatcher({ store: kernelStore, contracts: serviceContracts,
-  bootId });
+  bootId, integration: integrationService });
 signalDispatcher.dispatchAvailable();
 // Event wake-ups call the same bounded dispatcher immediately. This periodic pass is only recovery;
 // it is one Runtime timer, never one busy-loop per Service.
@@ -519,9 +554,8 @@ for (const terminal of terminalReconcile.maybeStillRunning) {
   console.error('[runtime] a previous terminal generation was not signalled; its recorded processes'
     + ' may still exist', terminal);
 }
-const verificationRunner = new VerificationRunner();
-/** Verification copies live inside the Runtime data directory, never in the user's repo. */
-const verificationCopiesRoot = join(home, 'verifications');
+// The verification runner and copies root were created above, before the integration service, so
+// Task verification and Integration Verification share one process-group registry.
 // Long commands (task.run / task.verify) are durable Operations: their progress is recorded as
 // facts, a cancel stops the owned process group and confirms it, and a restart reconciles them.
 const longOperations = new LongOperationService({
@@ -958,6 +992,55 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         storage, home, projectId: request.projectId, taskId: request.taskId,
       }));
     }
+    // Project-managed integration (ADR-0070 D07 / S8, ADR-0074). `status`/`init` are reads plus an
+    // idempotent ref creation; `request`/`queue` are database-only; `run`/`retry` are the only
+    // commands that touch Git, and they go through the Project Service's own Git port — never a
+    // user checkout. None of them publishes the ref anywhere.
+    case 'project.integration.status':
+      return success(request.requestId, await integrationService.status({ projectId: request.projectId }));
+    case 'project.integration.init':
+      return success(request.requestId, await integrationService.initialize({ projectId: request.projectId }));
+    case 'project.integration.request':
+      return success(request.requestId, integrationService.request({
+        projectId: request.projectId,
+        taskId: request.taskId,
+        commandId: request.commandId,
+        priority: request.priority,
+        ...(request.revisionId === undefined ? {} : { revisionId: request.revisionId }),
+        ...(request.resultCommit === undefined ? {} : { resultCommit: request.resultCommit }),
+        ...(request.taskVerificationRunId === undefined
+          ? {} : { taskVerificationRunId: request.taskVerificationRunId }),
+      }));
+    case 'project.integration.queue':
+      return success(request.requestId, integrationService.queue({
+        projectId: request.projectId, limit: request.limit,
+      }));
+    case 'project.integration.run': {
+      const report = await integrationService.runNext({
+        projectId: request.projectId,
+        ...(request.itemId === undefined ? {} : { itemId: request.itemId }),
+        actor: 'local-user',
+      });
+      // The merge may have changed the ref, so the scheduling picture is re-judged exactly as it is
+      // after a result commit or a revision delivery; the queue's next item is not auto-started.
+      return success(request.requestId, {
+        ...report,
+        schedule: await scheduleTick('INTEGRATION', request.projectId),
+      });
+    }
+    case 'project.integration.retry':
+      return success(request.requestId, await integrationService.retry({
+        projectId: request.projectId, itemId: request.itemId, actor: 'local-user',
+      }));
+    case 'project.integration.cancel':
+      return success(request.requestId, integrationService.cancel({
+        projectId: request.projectId, itemId: request.itemId, actor: 'local-user',
+        reason: request.reason,
+      }));
+    case 'task.integration.show':
+      return success(request.requestId, integrationService.taskIntegration({
+        projectId: request.projectId, taskId: request.taskId,
+      }));
     case 'project.list':
       // `confirmedPolicy` is the active ADR-0006 confirmation, so a client can tell whether the
       // policy at the main ref still matches what a human confirmed without re-confirming blindly.
@@ -2159,12 +2242,23 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         trustedAt: now,
         actor: permissionMode === 'FULL' ? 'runtime-full-permission' : 'local-user',
       });
+      // S8: trust is also what materializes the project's managed integration ref, from the commit
+      // the folder has checked out right now. It is one extra ref write inside a Git inspection the
+      // user just asked for, so the FULL-mode step count is still zero.
+      const trustedProjectId = storage.listTrustedProjects()
+        .find((candidate) => candidate.repoRoot === actual.repoRoot)?.id;
+      if (trustedProjectId === undefined) {
+        return failure(request.requestId, 'INVALID_STATE',
+          'The project that was just trusted could not be read back');
+      }
+      const integration = await integrationService.initialize({ projectId: trustedProjectId });
       return success(request.requestId, {
         trusted: true,
         permissionMode,
         repository: identity,
         verificationPolicy: policy,
         impactPolicy: impactPolicyReport({ inspection: impactPolicy, confirmation: null }),
+        integration,
       });
     }
   }

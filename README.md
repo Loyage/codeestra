@@ -12,14 +12,14 @@
 
 完整表述见 [PROJECT_SPEC.md §1.1](PROJECT_SPEC.md)、[ADR-0008](docs/decisions/0008-efficiency-first-service-form.md)、[ADR-0011](docs/decisions/0011-default-full-permission-mode.md) 与 [ADR-0070](docs/decisions/0070-service-process-signal-kernel.md)。内核设计见 [Service / Process / Signal](docs/architecture/service-process-signal.md)。
 
-**当前 schema v37 不提供产品集成与稳定提升**（[ADR-0066](docs/decisions/0066-remove-dev-clone-and-dual-baseline.md)）：Task 从项目文件夹当前分支建基线，成果留在 task branch，由你自己合并。**目标架构将按 ADR-0070 增量加入 Project Service 独占的 integration ref/worktree 与串行 merge queue；这尚未实现，也不恢复旧 `promotion *`。**下面的 `main`/`dev` 流程仍只是本仓库自身约定。
+**schema v38 提供受管 integration，但不提供发布与稳定提升**（[ADR-0074](docs/decisions/0074-managed-integration-ref-and-merge-queue.md)）：新 Task 以项目受管的 integration ref（`refs/codeestra/integration`）当时的 commit 为基线，成果经 `project integration request` / `run` 的合并、独立 Integration Verification 与 CAS 进入该 ref。**把它发布到你的 `main`/`release` 分支没有任何命令**，也不恢复旧 `promotion *`；Integration Process/Agent 仍未实现（冲突只报告、保留现场）。下面的 `main`/`dev` 流程仍只是本仓库自身约定。
 
 ## 分支与运行规则
 
 本项目（Codeestra 自己）长期保留两个分支（**仓库约定**，产品不建模它）：
 
 - `main`：可运行稳定实例的稳定分支（用户日常运行的就是它）。
-- `dev`：新功能实验与集成分支。在 dev 工作树里建的 Task 以它当前检出的分支（即 `dev`）为基线。“集成”在本仓库指人工把成果合回 `dev`。
+- `dev`：新功能实验与集成分支。在 dev 工作树里建的 Task 以该任务所在项目受管的 integration ref 为基线（见 [ADR-0074](docs/decisions/0074-managed-integration-ref-and-merge-queue.md)）。“集成”在本仓库指人工把成果合回 `dev`。
 
 `task/*`、`lane/*`、feature 与 Self Task candidate 分支在创建时按开发方向选定少量具体测试，只运行这些定向测试，不运行 `bun run check`、`just check`、`just verify` 或等价全仓检查。所有候选进入 `dev` 后，必须在准备 `dev → main` 前对精确 dev SHA 跑一次全量测试；候选变化后重跑。详见 ADR-0038。
 
@@ -44,10 +44,10 @@ CODEESTRA_HOME=/tmp/codeestra-dev bun run codeestra status
 
 ## 当前状态
 
-截至 schema **v36**（ADR-0066）：架构基线、Phase 0 领域基础、SQLite storage、CLI/独立 Runtime，以及
-**Task → 成果 commit → Task verification** 的纵向流水线都已落地。产品侧的 IntegrationBatch → `dev` →
-`main` 提升与 dev clone **已按用户决策删除**（ADR-0066）：Task 基线只有一种（项目文件夹建 workspace 时
-当前检出的分支），成果停在 `refs/heads/task/<task-id>`，合并由用户自己完成。当前能力面：默认 FULL、项目接入与常态路径零确认；Task 从项目文件夹当前检出的分支建 owned worktree（ADR-0066），显式或自动调度（`task schedule *`，Runtime 全局并发上限默认 2）；长命令后台化与进度事件（`OperationProgressed`/`OperationSettled`、`task verify --background`、`task operation cancel`）；Task 暂停/取消/归档（ADR-0016）与失败后显式 `task retry`（可换 Agent，ADR-0036）；revision 投递台账与 `resolve`（ADR-0028）；三个真实 Adapter（Pi / Codex / Claude Code，ADR-0029/0040）；Project Knowledge 第一小步（ADR-0041）。**仍未实现**：Phase 7 Self Evolution。**Session Guidance 已实现**（FOUNDATION-088 / ADR-0057 / schema v31：`session guide` 与 `session guidance list|get`；记录后每个新 Execution 启动时带上它，且不产生 TaskRevision、不使验证失效；`DELIVERED` 只表示 provider 通道接收（入队），不等于模型已读）。**仍未验证**：真实 provider 的并发运行与 revision ACK、真实模型下的暂停/恢复、Claude Code 的模型层（本机无凭据）、themes 的显式路径加载。详见 [Roadmap](docs/roadmap/mvp.md) 与 [当前任务](docs/tasks/README.md) 的 `## NEXT`。
+截至 schema **v38**（ADR-0074）：架构基线、Phase 0 领域基础、SQLite storage、CLI/独立 Runtime，以及
+**Task → 成果 commit → Task verification → merge queue → 独立 Integration Verification → 受管 integration ref**
+的纵向流水线都已落地。产品侧的 IntegrationBatch → `dev` → `main` 提升与 dev clone **已按用户决策删除**
+（ADR-0066），并未由 S8 恢复：受管集成的出口是项目私有的 `refs/codeestra/integration`，**发布到用户分支仍没有命令**。当前能力面：默认 FULL、项目接入与常态路径零确认；Task 从项目文件夹当前检出的分支建 owned worktree（ADR-0066），显式或自动调度（`task schedule *`，Runtime 全局并发上限默认 2）；长命令后台化与进度事件（`OperationProgressed`/`OperationSettled`、`task verify --background`、`task operation cancel`）；Task 暂停/取消/归档（ADR-0016）与失败后显式 `task retry`（可换 Agent，ADR-0036）；revision 投递台账与 `resolve`（ADR-0028）；三个真实 Adapter（Pi / Codex / Claude Code，ADR-0029/0040）；Project Knowledge 第一小步（ADR-0041）。**仍未实现**：Phase 7 Self Evolution。**Session Guidance 已实现**（FOUNDATION-088 / ADR-0057 / schema v31：`session guide` 与 `session guidance list|get`；记录后每个新 Execution 启动时带上它，且不产生 TaskRevision、不使验证失效；`DELIVERED` 只表示 provider 通道接收（入队），不等于模型已读）。**仍未验证**：真实 provider 的并发运行与 revision ACK、真实模型下的暂停/恢复、Claude Code 的模型层（本机无凭据）、themes 的显式路径加载。详见 [Roadmap](docs/roadmap/mvp.md) 与 [当前任务](docs/tasks/README.md) 的 `## NEXT`。
 
 最小闭环的细节：默认 FULL——CLI 自动启动 Runtime、无确认注册项目，并按 Project ID 创建/列出/提交/运行 Task，成果 commit 可单步 capture；STRICT 保留旧的 trust 与两步 commit。Task 创建会原子保存原始 Intent、首 Revision、事实事件与幂等回执；submit 使用 expected version 将 DRAFT 转为 READY；`task run` 串起 owned worktree、Execution 预留、Adapter start 与事件 pump；`task status` 可查看 Execution/Session 投影；`task result prepare`/`task result commit --confirm` 按 ADR-0003 在核验 HEAD/ChangeSet/静止证据后创建成果 commit（FULL 下是单步 `task result capture`）。
 
@@ -57,8 +57,9 @@ Agent 执行过程可见（ADR-0013）已实现：`task transcript` / `session t
 
 Agent 结构化提问（ADR-0014）已实现：受控启动额外加载 Codeestra 自己的 question 扩展，Agent 可用 `ask_user_question` 一次提 1–4 个带描述可选项的问题（可多选、可用自己的话回答）。**一份问卷 = 一个 provider dialog = 一条 `QUESTION` Attention = 一次 answer Operation**，回答以结构化 `QUESTIONNAIRE` 投递；Runtime 在记录前按被问的那份问卷校验，越界/重复/单选多选不符都返回 `INVALID_QUESTIONNAIRE_ANSWER:*` 并保持请求 OPEN，**绝不降级为“用户拒绝”或静默作废已答内容**（这正是第三方 TUI 问卷在 RPC 下的失败模式）。CLI 用 `attention answer … --choose/--text`。**“Agent 不用工具、在正文里提问并结束轮次”的形态已不再被无声记为 `SUCCESS`**：FOUNDATION-056 用稳定码 `PROSE_QUESTION_NO_TOOL_USE` 显式记录（启发式，宁可漏报），且已由 ADR-0043/FOUNDATION-069 默认升级为一等 `QUESTION` Attention + `WAITING_FOR_USER`，只由 `attention resolve --dismiss|--answer` 解除（回答**不投递**给 provider）；可用 `codeestra settings prose-question-attention record-only|off` 降级。**未验证**：真实 provider 下这一组合的行为，Codex 侧的事实层尚未实现（只漏报、不谎报）。
 
-纵向流水线现在是：Task 从**项目文件夹当前检出的分支**建基线 → 成果 commit → Task verification → 成果停在
-`refs/heads/task/<task-id>`，**合并由用户自己完成**（ADR-0066）。本仓库自身的 `dev → main` 仍按
+纵向流水线现在是：Task 从**项目受管的 integration ref** 建基线 → 成果 commit → Task verification → 入 merge queue →
+独立 Integration Verification → CAS 推进该 ref（`project integration run`，ADR-0074）；**发布到你的分支仍由你决定，
+产品没有命令**。本仓库自身的 `dev → main` 仍按
 [`docs/agents/runbook.md`](docs/agents/runbook.md) 的人工四步执行过三次，那是仓库约定而不是产品能力。Pi 有 LF-only RPC framing、受控启动参数、fail-closed gate extension 与自有子进程的 `PiRpcAdapter`（身份采集、attention/completion/disconnect 映射、typed answer 写入），Runtime 已接入 adapter registry、`task.run` 运行循环、事件 pump 与 answer 自动投递；Codex 与 Claude Code 也已接入并如实声明能力（例如 Claude Code 模型层全部 `REQUIRES_VALIDATION`）。Task verification（ADR-0006/0011）与 ADR-0038/0039 的分支定向测试计划都已实现（「提升前全量证据」随
 ADR-0066 一起删除；本仓库自身的全量测试纪律仍在 `AGENTS.md`）。`events list`/`events tail` 提供只读事件订阅长连接；`task run`/`task verify` 仍同步占用连接（可用 `--background` 与 `task operation *` 脱离），长命令进度事件已实现。
 

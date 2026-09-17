@@ -128,6 +128,10 @@ export async function createAgentFixture(options: AgentFixtureOptions = {}): Pro
   // ADR-0064: there is exactly one development baseline — the branch this project folder has checked
   // out, which is `main` here. Every Task worktree is created in this repository.
   const identity = await inspectRepository(repo);
+  // ADR-0070 D07 / S8 (ADR-0074): the Task baseline is the Project Service's managed integration
+  // ref, and `project trust` is what creates it. This fixture stands in for that handler, so it
+  // materializes the ref from the commit the folder has checked out — exactly the Runtime's rule.
+  await git(repo, ['update-ref', 'refs/codeestra/integration', identity.headCommit]);
   const storage = new Phase1Database(options.databaseFilename ?? ':memory:');
   storage.trustProject({
     id: projectId,

@@ -6,6 +6,10 @@ import {
   processCompletedPayloadSchema,
   processCompletedSubtype,
   serviceMetadataSetPayloadSchema,
+  taskMergeRequestedPayloadSchema,
+  taskMergeRequestedSubtype,
+  taskMergeSettledPayloadSchema,
+  taskMergeSettledSubtype,
 } from '@codeestra/contracts';
 import type { ServiceKind, SignalKind } from '@codeestra/domain';
 import {
@@ -20,7 +24,8 @@ export const serviceMetadataSignalSubtype = 'SERVICE_METADATA_SET';
 export const intentionSignalSubtype = 'INTENT_SUBMITTED';
 // The kernel's own SIG_A subtypes are defined once, in the contracts package, and re-exported here so
 // a caller of the kernel does not spell a literal a second time.
-export { intentionResolvedSubtype, processCompletedSubtype };
+export { intentionResolvedSubtype, processCompletedSubtype, taskMergeRequestedSubtype,
+  taskMergeSettledSubtype };
 export const signalClaimLeaseMs = 30_000;
 export const signalRetryDelaysMs = Object.freeze([1_000, 5_000, 30_000, 120_000, 300_000]);
 // One initial delivery plus five automatic retries. The sixth failed delivery dead-letters.
@@ -60,6 +65,15 @@ export class ServiceContractRegistry {
       kind: 'SIG_A', subtype: intentionResolvedSubtype,
       payload: intentionResolvedSignalPayloadSchema,
     };
+    // S8: a Task result asks its Project for integration, and the Project answers the Task Service.
+    // The request is accepted by PROJECT Services only (a Task Service asks its own parent), and the
+    // settle notification is accepted by TASK Services only (it is about one Task's projection).
+    const mergeRequested: AcceptedSignalContract = {
+      kind: 'SIG_A', subtype: taskMergeRequestedSubtype, payload: taskMergeRequestedPayloadSchema,
+    };
+    const mergeSettled: AcceptedSignalContract = {
+      kind: 'SIG_A', subtype: taskMergeSettledSubtype, payload: taskMergeSettledPayloadSchema,
+    };
     const entries: ServiceContract[] = [
       { kind: 'ROOT', version: 1, acceptedSignals: [metadata, intention, completed, resolvedIntention],
         childKinds: ['SCHEDULER', 'ATTENTION', 'PROJECT'], acceptsPrompt: true },
@@ -67,9 +81,11 @@ export class ServiceContractRegistry {
         childKinds: [], acceptsPrompt: false },
       { kind: 'ATTENTION', version: 1, acceptedSignals: [metadata],
         childKinds: [], acceptsPrompt: false },
-      { kind: 'PROJECT', version: 1, acceptedSignals: [metadata, intention, completed, resolvedIntention],
+      { kind: 'PROJECT', version: 1,
+        acceptedSignals: [metadata, intention, completed, resolvedIntention, mergeRequested],
         childKinds: ['TASK'], acceptsPrompt: true },
-      { kind: 'TASK', version: 1, acceptedSignals: [metadata, intention, completed, resolvedIntention],
+      { kind: 'TASK', version: 1,
+        acceptedSignals: [metadata, intention, completed, resolvedIntention, mergeSettled],
         childKinds: [], acceptsPrompt: true },
     ];
     this.contracts = new Map(entries.map((entry) => [entry.kind, Object.freeze(entry)]));
@@ -115,6 +131,27 @@ export interface SignalDispatcherOptions {
    * `main.ts` out of this lane's reach); a test can supply its own.
    */
   readonly intention?: IntentionService;
+  /**
+   * S8 (ADR-0070 D07): the Project-managed integration handler. It is injected rather than built here
+   * because it owns Git worktrees, verification copies and the operation ledger — none of which the
+   * dispatcher may reach. When it is absent, a `TASK_MERGE_REQUESTED` Signal is refused with
+   * `SIGNAL_HANDLER_NOT_FOUND` instead of being silently accepted.
+   */
+  readonly integration?: MergeRequestHandler;
+}
+
+/** The one method the dispatcher needs from the managed integration service (S8). */
+export interface MergeRequestHandler {
+  handleMergeRequested(input: {
+    readonly targetServiceId: string; readonly idempotencyKey: string;
+    readonly correlationId: string; readonly payload: unknown;
+  }): { readonly item: { readonly id: string; readonly state: string }; readonly created: boolean };
+  /**
+   * The Task integration projection a settle notification must agree with, or `null` when the Task
+   * has none. The dispatcher does not read the managed-integration tables itself: the same handler
+   * that wrote the projection is the one that can say whether a notification describes it.
+   */
+  settledProjection(taskId: string): { readonly state: string; readonly version: number } | null;
 }
 
 /** Event-woken plus periodically reconciled dispatcher; no Service owns a busy-loop. */
@@ -126,6 +163,7 @@ export class SignalDispatcher {
   readonly #randomUUID: () => string;
   #dispatching = false;
   #intention: IntentionService | null;
+  readonly #integration: MergeRequestHandler | null;
 
   constructor(options: SignalDispatcherOptions) {
     this.#store = options.store;
@@ -134,11 +172,23 @@ export class SignalDispatcher {
     this.#now = options.now ?? Date.now;
     this.#randomUUID = options.randomUUID ?? (() => crypto.randomUUID());
     this.#intention = options.intention ?? null;
+    this.#integration = options.integration ?? null;
   }
 
   #intentionService(): IntentionService {
     this.#intention ??= createIntentionService(this.#store);
     return this.#intention;
+  }
+
+  /**
+   * Settles a kernel Signal whose handler produced its effect before acknowledging it (the merge
+   * request is already a durable queue item when this runs), so the two writes are one transaction.
+   */
+  #acknowledgeKernelSignal(signalId: string, subtype: string): void {
+    const signal = this.#store.getSignal(signalId);
+    this.#store.acknowledgeKernelSignal({ signalId,
+      effect: { type: subtype, idempotencyKey: signal.idempotencyKey },
+      now: this.#now(), eventId: this.#randomUUID() });
   }
 
   send(input: {
@@ -210,6 +260,42 @@ export class SignalDispatcher {
           summary: completed.summary, now, eventIds: [this.#randomUUID(), this.#randomUUID()] });
         return;
       }
+      if (signal.kind === 'SIG_A' && signal.subtype === taskMergeRequestedSubtype) {
+        const integration = this.#integration;
+        if (integration === null) {
+          throw new KernelStorageError('SIGNAL_HANDLER_NOT_FOUND',
+            'This Runtime has no managed integration handler, so a merge request cannot be queued');
+        }
+        // The handler owns the whole precondition set (current revision, captured result commit and a
+        // PASSED Task verification run for that exact commit); the registry only checked the envelope.
+        integration.handleMergeRequested({ targetServiceId: signal.targetServiceId,
+          idempotencyKey: signal.idempotencyKey, correlationId: signal.correlationId,
+          payload: signal.payload });
+        this.#acknowledgeKernelSignal(signal.id, signal.subtype);
+        return;
+      }
+      if (signal.kind === 'SIG_A' && signal.subtype === taskMergeSettledSubtype) {
+        const settled = taskMergeSettledPayloadSchema.parse(payload);
+        const integration = this.#integration;
+        if (integration === null) {
+          throw new KernelStorageError('SIGNAL_HANDLER_NOT_FOUND',
+            'This Runtime has no managed integration handler, so a settle notification cannot be'
+            + ' confirmed');
+        }
+        const projection = integration.settledProjection(settled.taskId);
+        if (projection === null || projection.version !== settled.projectionVersion
+          || projection.state !== settled.state) {
+          throw new KernelStorageError('SIGNAL_EFFECT_CONFLICT',
+            `Task ${settled.taskId} does not hold the integration projection this notification`
+            + ' describes, so the Task Service cannot confirm it');
+        }
+        this.#store.acknowledgeKernelSignal({ signalId: signal.id,
+          effect: { type: 'TASK_MERGE_SETTLED', taskId: settled.taskId,
+            queueItemId: settled.queueItemId, state: settled.state,
+            integrationOid: settled.integrationOid, projectionVersion: settled.projectionVersion },
+          now, eventId: this.#randomUUID() });
+        return;
+      }
       if (signal.kind === 'SIG_P' && signal.subtype === intentionSignalSubtype) {
         const intention = intentionSignalPayloadSchema.parse(payload);
         this.#store.acknowledgeIntentionSignal({ signalId: signal.id,
@@ -221,13 +307,21 @@ export class SignalDispatcher {
         `No handler is registered for ${signal.kind}/${signal.subtype}`);
     } catch (error) {
       const storageError = error instanceof KernelStorageError ? error : null;
-      const retryable = storageError === null || storageError.retryable;
+      // A handler that declares its refusal permanent (`retryable: false`, the default for the S8
+      // managed-integration handler) is dead-lettered on the first attempt: retrying "this Task does
+      // not exist" five times over ten minutes would only delay the stable code reaching the caller.
+      // Anything else keeps the historic behaviour and is retried with the bounded backoff.
+      const declared = (error as { readonly retryable?: boolean }).retryable;
+      const retryable = storageError !== null ? storageError.retryable : declared !== false;
       const attempt = signal.automaticAttempts;
       const deadLetter = !retryable || attempt >= maxAutomaticSignalAttempts;
       const delay = signalRetryDelaysMs[Math.min(Math.max(attempt - 1, 0),
         signalRetryDelaysMs.length - 1)] as number;
+      // The stable code is preserved from any handler that carries one (wherever it is defined), so a
+      // refusal reads as `TASK_NOT_FOUND` rather than the generic bucket a reader cannot act on.
+      const declaredCode = (error as { readonly code?: string }).code;
       this.#store.failClaimedSignal({ signalId: signal.id,
-        code: storageError?.code ?? 'SIGNAL_HANDLER_FAILED',
+        code: storageError?.code ?? declaredCode ?? 'SIGNAL_HANDLER_FAILED',
         message: error instanceof Error ? error.message : String(error),
         retryAt: deadLetter ? null : this.#now() + delay, deadLetter,
         now: this.#now(), eventId: this.#randomUUID() });

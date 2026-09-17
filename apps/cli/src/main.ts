@@ -99,6 +99,134 @@ const home = Bun.env.CODEESTRA_HOME
 const socketPath = join(home, 'runtime.sock');
 const runtimeEntry = resolve(import.meta.dir, '../../runtime/src/main.ts');
 
+/**
+ * What the managed integration face reports (ADR-0070 D07 / S8, ADR-0074). Only the fields this
+ * client renders are named; `--json` prints the Runtime's payload verbatim.
+ */
+interface ManagedIntegrationStatusView {
+  readonly projectId: string;
+  readonly integrationRef: string;
+  readonly worktreePath: string | null;
+  readonly currentOid: string | null;
+  readonly recordedOid: string | null;
+  readonly refInSync: boolean;
+  readonly worktree: { readonly state: 'OWNED' | 'MISSING' | 'FOREIGN' | 'UNCERTAIN';
+    readonly headCommit: string | null; readonly evidence: string };
+  readonly activeItem: ManagedIntegrationItemView | null;
+  readonly queuedCount: number;
+  readonly state: 'ACTIVE' | 'RECOVERY_REQUIRED';
+  readonly needsAttention: boolean;
+}
+interface ManagedIntegrationItemView {
+  readonly id: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly revisionId: string;
+  readonly resultCommit: string;
+  readonly priority: number;
+  readonly state: string;
+  readonly candidateCommit: string | null;
+  readonly releasedIntegrationOid: string | null;
+  readonly attemptCount: number;
+  readonly lastErrorCode: string | null;
+  readonly lastErrorMessage: string | null;
+  readonly conflictDetail: { readonly paths?: readonly string[]; readonly detail?: string | null } | null;
+  readonly requestedAt: number;
+  readonly settledAt: number | null;
+}
+interface ManagedIntegrationRunView {
+  readonly runId: string;
+  readonly operationId: string;
+  readonly state: string | null;
+  readonly outcomeCode: string | null;
+  readonly copyPath: string;
+  readonly commandCount: number;
+}
+interface ManagedIntegrationReportView {
+  readonly item: ManagedIntegrationItemView | null;
+  readonly outcome: 'MERGED' | 'CONFLICTED' | 'FAILED' | 'NOOP';
+  readonly candidateCommit: string | null;
+  readonly integrationOid: string | null;
+  readonly integrationVerification: ManagedIntegrationRunView | null;
+  readonly conflict: { readonly paths: readonly string[]; readonly detail: string | null } | null;
+  readonly nextItemId: string | null;
+  readonly detail: string | null;
+}
+interface TaskIntegrationView {
+  readonly taskId: string;
+  readonly state: string;
+  readonly queueItemId: string | null;
+  readonly integrationOid: string | null;
+  readonly version: number;
+  readonly items: readonly ManagedIntegrationItemView[];
+  readonly integrationRun: { readonly id: string; readonly state: string;
+    readonly outcomeCode: string | null; readonly candidateCommit: string } | null;
+}
+
+/** One queue item as a person reads it: order key, state, the result it carries and its error. */
+function integrationItemLine(item: ManagedIntegrationItemView): string {
+  const error = item.lastErrorCode === null ? '' : `  ${item.lastErrorCode}`;
+  const released = item.releasedIntegrationOid === null
+    ? '' : `  -> ${item.releasedIntegrationOid.slice(0, 12)}`;
+  return `  ${item.id}  ${item.state.padEnd(18)} task ${item.taskId}`
+    + ` rev ${item.revisionId.slice(0, 8)} result ${item.resultCommit.slice(0, 12)}`
+    + ` priority ${item.priority} attempts ${item.attemptCount}${released}${error}`;
+}
+
+function printIntegrationStatus(view: ManagedIntegrationStatusView): void {
+  console.log(`project ${view.projectId}  state ${view.state}`);
+  console.log(`  ref ${view.integrationRef}`);
+  console.log(`  current ${view.currentOid ?? '(does not exist)'}`
+    + `  recorded ${view.recordedOid ?? '(never recorded)'}`
+    + `${view.refInSync ? '' : '  NOT IN SYNC: Git and the Runtime record disagree'}`);
+  console.log(`  worktree ${view.worktree.state} ${view.worktreePath ?? '(none)'}`
+    + `${view.worktree.headCommit === null ? '' : ` @ ${view.worktree.headCommit.slice(0, 12)}`}`);
+  console.log(`  active ${view.activeItem === null
+    ? '(none)'
+    : `${view.activeItem.id} ${view.activeItem.state} task ${view.activeItem.taskId}`}`
+    + `  queued ${view.queuedCount}`);
+  if (view.needsAttention) {
+    console.log('  needs attention: a queue item is CONFLICTED/RECOVERY_REQUIRED, or the worktree is'
+      + ' not an owned detached worktree. Nothing is published by this command.');
+  }
+}
+
+function printIntegrationQueue(projectId: string, items: readonly ManagedIntegrationItemView[]): void {
+  console.log(`project ${projectId}  merge queue (${items.length})`);
+  for (const item of items) console.log(integrationItemLine(item));
+  if (items.length === 0) console.log('  (empty)');
+}
+
+function printIntegrationReport(report: ManagedIntegrationReportView): void {
+  if (report.outcome === 'NOOP') {
+    console.log(`no integration ran: ${report.detail ?? 'nothing to do'}`);
+    return;
+  }
+  const item = report.item;
+  if (item === null) {
+    console.log(`outcome ${report.outcome}: the Runtime reported no queue item`);
+    return;
+  }
+  console.log(`item ${item.id}  outcome ${report.outcome}  state ${item.state}`);
+  console.log(`  task ${item.taskId} revision ${item.revisionId}`
+    + ` result ${item.resultCommit}`);
+  if (report.candidateCommit !== null) console.log(`  candidate ${report.candidateCommit}`);
+  if (report.integrationOid !== null) console.log(`  integration ref now ${report.integrationOid}`);
+  if (report.integrationVerification !== null) {
+    const run = report.integrationVerification;
+    console.log(`  integration verification ${run.runId} ${run.state ?? '(unknown)'}`
+      + `${run.outcomeCode === null ? '' : ` ${run.outcomeCode}`}`
+      + `  commands ${run.commandCount}  copy ${run.copyPath}`);
+  }
+  if (report.conflict !== null) {
+    console.log(`  conflict in ${report.conflict.paths.length} path(s); the worktree keeps the`
+      + ' conflicted merge until the item is retried or cancelled');
+    for (const path of report.conflict.paths) console.log(`    ${path}`);
+  }
+  if (report.detail !== null) console.log(`  detail: ${report.detail}`);
+  if (report.nextItemId !== null) console.log(`  next queued item: ${report.nextItemId}`);
+}
+
 function request(command: ClientRequest): Promise<RuntimeResponse> {
   return new Promise((resolveResponse, reject) => {
     let buffer = '';
@@ -2038,6 +2166,116 @@ try {
       if (view.state !== 'VALID') process.exit(1);
     } else {
       unhandledNode(child);
+    }
+  } else if (commandId === 'project.integration') {
+    // Managed integration (ADR-0070 D07 / S8, ADR-0074). Every command here is transactional on the
+    // durable queue; only init/status/run/retry touch Git, and they do it through the Project
+    // Service's owned ref and worktree. No command in this group publishes the ref anywhere.
+    const child = childIdOf('project.integration', firstArgument);
+    if (child === null) usage();
+    const { positionals, flags, bare } = splitFlagTokens(remainingArguments,
+      ['--limit', '--reason', '--revision', '--result-commit', '--verification', '--priority'],
+      ['--json']);
+    const json = bare.has('--json');
+    const optionalInt = (flag: string): number | undefined => {
+      const raw = flags.get(flag);
+      if (raw === undefined) return undefined;
+      const value = Number(raw);
+      if (!Number.isSafeInteger(value)) usage();
+      return value;
+    };
+    if (child === 'project.integration.status' || child === 'project.integration.init') {
+      if (positionals.length !== 1) usage();
+      const projectId = positionals[0] as string;
+      const view = (await call({ command: child, projectId })) as ManagedIntegrationStatusView;
+      if (json) print(view);
+      else printIntegrationStatus(view);
+    } else if (child === 'project.integration.queue') {
+      if (positionals.length !== 1) usage();
+      const projectId = positionals[0] as string;
+      const view = await call({ command: 'project.integration.queue', projectId,
+        limit: optionalInt('--limit') ?? 100 }) as
+        { readonly projectId: string; readonly items: readonly ManagedIntegrationItemView[] };
+      if (json) print(view);
+      else printIntegrationQueue(view.projectId, view.items);
+    } else if (child === 'project.integration.request') {
+      if (positionals.length !== 2) usage();
+      const view = await call({
+        command: 'project.integration.request',
+        commandId: crypto.randomUUID(),
+        projectId: positionals[0] as string,
+        taskId: positionals[1] as string,
+        priority: optionalInt('--priority') ?? 0,
+        ...(flags.get('--revision') === undefined ? {} : { revisionId: flags.get('--revision') }),
+        ...(flags.get('--result-commit') === undefined
+          ? {} : { resultCommit: flags.get('--result-commit') }),
+        ...(flags.get('--verification') === undefined
+          ? {} : { taskVerificationRunId: flags.get('--verification') }),
+      }) as { readonly item: ManagedIntegrationItemView; readonly created: boolean };
+      if (json) print(view);
+      else {
+        console.log(`${view.created ? 'queued' : 'already queued (idempotent replay)'}:`
+          + ` ${view.item.id} ${view.item.state}`);
+        console.log(integrationItemLine(view.item));
+      }
+    } else if (child === 'project.integration.run') {
+      if (positionals.length < 1 || positionals.length > 2) usage();
+      const report = await call({
+        command: 'project.integration.run',
+        projectId: positionals[0] as string,
+        ...(positionals[1] === undefined ? {} : { itemId: positionals[1] }),
+      }) as ManagedIntegrationReportView;
+      if (json) print(report);
+      else printIntegrationReport(report);
+      // A conflict or a failed verification is a real failure of this integration, not a usage error
+      // and not something to wait on: the item is settled and the caller must act (retry/cancel).
+      if (report.outcome === 'CONFLICTED' || report.outcome === 'FAILED') process.exit(1);
+    } else if (child === 'project.integration.retry') {
+      if (positionals.length !== 2) usage();
+      const view = await call({ command: 'project.integration.retry',
+        projectId: positionals[0] as string, itemId: positionals[1] as string }) as
+        { readonly item: ManagedIntegrationItemView };
+      if (json) print(view);
+      else {
+        console.log(`re-queued: ${view.item.id} ${view.item.state}`
+          + ` attempts ${view.item.attemptCount}`);
+      }
+    } else if (child === 'project.integration.cancel') {
+      if (positionals.length !== 2) usage();
+      const view = await call({ command: 'project.integration.cancel',
+        projectId: positionals[0] as string, itemId: positionals[1] as string,
+        reason: flags.get('--reason') ?? 'cancelled from the CLI' }) as
+        { readonly item: ManagedIntegrationItemView };
+      if (json) print(view);
+      else console.log(`cancelled: ${view.item.id} ${view.item.state}`);
+    } else {
+      unhandledNode(child);
+    }
+  } else if (commandId === 'task.integration') {
+    // Read-only: the Task integration projection (ADR-0070 D07 / S8). Nothing here writes.
+    const child = childIdOf('task.integration', firstArgument);
+    if (child === null) usage();
+    if (child !== 'task.integration.show') unhandledNode(child);
+    const { positionals, bare } = splitFlagTokens(remainingArguments, [], ['--json']);
+    if (positionals.length !== 2) usage();
+    const projectId = positionals[0] as string;
+    const taskId = positionals[1] as string;
+    const json = bare.has('--json');
+    const view = (await call({ command: 'task.integration.show',
+      projectId, taskId })) as TaskIntegrationView;
+    if (json) print(view);
+    else {
+      console.log(`task ${view.taskId}  integration ${view.state}`
+        + `${view.integrationOid === null ? '' : ` @ ${view.integrationOid}`}`
+        + `  version ${view.version}`);
+      if (view.integrationRun !== null) {
+        console.log(`  latest integration verification ${view.integrationRun.state}`
+          + `${view.integrationRun.outcomeCode === null
+            ? '' : ` ${view.integrationRun.outcomeCode}`}`
+          + ` on candidate ${view.integrationRun.candidateCommit.slice(0, 12)}`);
+      }
+      for (const item of view.items) console.log(integrationItemLine(item));
+      if (view.items.length === 0) console.log('  (no merge request was ever queued for this Task)');
     }
   } else if (commandId === 'task.create') {
     if (firstArgument === undefined || remainingArguments.length === 0) usage();

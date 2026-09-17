@@ -21,6 +21,7 @@ export * from './agent-plugins.js';
 export * from './intention.js';
 export * from './runtime-commands.js';
 export * from './service-kernel-signals.js';
+export * from './managed-integration.js';
 import type { RuntimeCommandInfo } from './runtime-commands.js';
 import { processProgressViewSchema } from './service-kernel-signals.js';
 
@@ -1404,6 +1405,44 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     expectedImpactPolicy: impactPolicyConfirmationSchema.optional(),
   }),
   z.strictObject({ ...requestBase, command: z.literal('project.list') }),
+  // Project-managed integration (ADR-0070 D07 / S8, ADR-0074). `init`/`status` read and create the
+  // owned integration ref; `request`/`queue`/`run`/`retry`/`cancel` drive the durable merge queue.
+  // None of these publishes the ref to a user branch.
+  z.strictObject({ ...requestBase, command: z.literal('project.integration.status'),
+    projectId: z.string().uuid() }),
+  z.strictObject({ ...requestBase, command: z.literal('project.integration.init'),
+    projectId: z.string().uuid() }),
+  z.strictObject({
+    ...requestBase, command: z.literal('project.integration.request'),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    commandId: z.string().min(1),
+    revisionId: z.string().min(1).optional(),
+    resultCommit: z.string().min(1).optional(),
+    taskVerificationRunId: z.string().min(1).optional(),
+    priority: z.number().int().min(-1_000).max(1_000).default(0),
+  }),
+  z.strictObject({ ...requestBase, command: z.literal('project.integration.queue'),
+    projectId: z.string().uuid(), limit: z.number().int().min(1).max(500).default(100) }),
+  z.strictObject({
+    ...requestBase, command: z.literal('project.integration.run'),
+    projectId: z.string().uuid(),
+    /** Optional: the item must be the head of this project's queue, never another one. */
+    itemId: z.string().min(1).optional(),
+  }),
+  z.strictObject({
+    ...requestBase, command: z.literal('project.integration.retry'),
+    projectId: z.string().uuid(), itemId: z.string().min(1),
+  }),
+  z.strictObject({
+    ...requestBase, command: z.literal('project.integration.cancel'),
+    projectId: z.string().uuid(), itemId: z.string().min(1),
+    reason: z.string().min(1).max(4096).default('cancelled from the CLI'),
+  }),
+  z.strictObject({
+    ...requestBase, command: z.literal('task.integration.show'),
+    projectId: z.string().uuid(), taskId: z.string().uuid(),
+  }),
   // Service kernel queries and metadata command (ADR-0070 S4). `service.state.set` is translated to
   // the registered SERVICE_METADATA_SET SIG_A contract; it cannot write a core lifecycle field.
   z.strictObject({

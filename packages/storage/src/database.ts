@@ -53,6 +53,7 @@ import {
   intentKindShrinkMigration,
   intentKinds,
   knowledgeLayerMigration,
+  managedIntegrationMigration,
   operationProgressMigration,
   phase1Migration,
   phase1SchemaVersion,
@@ -82,6 +83,7 @@ import {
 } from './migration.js';
 import type { IntentKind } from './migration.js';
 import { ServiceWriteStore } from './service-write-store.js';
+import { ManagedIntegrationStore } from './integration-store.js';
 
 /**
  * The `intents.kind` values this build accepts (ADR-0046). The database CHECK is the last line of
@@ -1458,6 +1460,7 @@ function parsePluginSelection(json: string | null): AgentPluginSelection | null 
 export class Phase1Database {
   readonly sqlite: Database;
   #serviceWriteStore: ServiceWriteStore | null = null;
+  #integrationStore: ManagedIntegrationStore | null = null;
 
   constructor(filename = ':memory:') {
     this.sqlite = new Database(filename, { create: true, strict: true });
@@ -1479,6 +1482,16 @@ export class Phase1Database {
   private get serviceWriteStore(): ServiceWriteStore {
     this.#serviceWriteStore ??= new ServiceWriteStore(this);
     return this.#serviceWriteStore;
+  }
+
+  /**
+   * S8 (ADR-0070 D07 / ADR-0074): the write path for the Project-managed integration ref, its
+   * durable merge queue, Integration Verification runs and the Task integration projection. Like the
+   * S7 store it is built on first use, after the connection and the migration exist.
+   */
+  get managedIntegration(): ManagedIntegrationStore {
+    this.#integrationStore ??= new ManagedIntegrationStore(this);
+    return this.#integrationStore;
   }
 
   close(): void {
@@ -1664,6 +1677,11 @@ export class Phase1Database {
               + 'was rolled back and nothing was changed');
           }
         }
+        // v38 is additive as well (ADR-0070 / S8, ADR-0074): Project-managed integration adds
+        // `project_integration`, `merge_queue_items`, `integration_runs` and the `task_integration`
+        // projection. No existing table is rebuilt, so the only guard needed is that the whole
+        // schema still passes `foreign_key_check` below before `user_version` moves.
+        if (version < 38) this.sqlite.exec(managedIntegrationMigration);
         // Check before committing and before advancing user_version. This is required even for the
         // additive v36→v37 path: a failed projection or a pre-existing broken reference must leave
         // the exact v36 file intact rather than throw only after the migration transaction committed.

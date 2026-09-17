@@ -305,6 +305,104 @@ whose change set cannot be observed — that is the point: nothing is called saf
       "project.inspect",
     ],
   },
+  "project.integration": {
+    kind: "GROUP",
+    summary: "受管 integration：Project Service 独占的 integration ref/worktree 与持久 merge queue（ADR-0070 D07 / S8）",
+    unit: true,
+    detail: `project integration is the command face of the managed integration ref (ADR-0074). It is
+# deliberately not a promotion command: nothing here publishes the ref to main, a release branch, or
+# any other branch a user has checked out. The ref is refs/codeestra/integration, a private namespace
+# that git branch never lists and that no default push refspec can carry.
+#
+# The queue is durable and strictly serial per project. request only records a merge request whose
+# Task revision is current and whose Task verification PASSED for that exact commit; run merges the
+# head of the queue in an owned detached worktree, runs independent Integration Verification on the
+# candidate, and only then advances the ref with git update-ref <new> <expected>. A conflict keeps the
+# conflicted worktree, a failed verification keeps the candidate ref and its copy, and a ref that moved
+# while verifying is reported rather than forced. Two projects integrate in parallel; one project never
+# has two active integrations.`,
+  },
+  "project.integration.cancel": {
+    kind: "COMMAND",
+    summary: "取消一条还在 QUEUED 的 merge 请求",
+    usage: `bun run codeestra project integration cancel <project-id> <item-id> [--reason <text>] [--json]`,
+    runtime: [
+      "project.integration.cancel",
+    ],
+  },
+  "project.integration.init": {
+    kind: "COMMAND",
+    summary: "创建/读取该项目独占的受管 integration ref",
+    usage: `bun run codeestra project integration init <project-id> [--json]`,
+    detail: `# Idempotent. A project trusted on schema v38 already has the ref: trust materializes it from
+# the branch the project folder has checked out at that moment. This command is the explicit form for a
+# project that was trusted before that (its ref is created from whatever the folder has checked out
+# now), and the read-back form when you want to see the exact OID without reading Git yourself.`,
+    runtime: [
+      "project.integration.init",
+    ],
+  },
+  "project.integration.queue": {
+    kind: "COMMAND",
+    summary: "读项目的持久 merge queue",
+    usage: `bun run codeestra project integration queue <project-id> [--limit <n>] [--json]`,
+    runtime: [
+      "project.integration.queue",
+    ],
+  },
+  "project.integration.request": {
+    kind: "COMMAND",
+    summary: "把一条已通过 Task 验证的结果排进 merge queue",
+    usage: `bun run codeestra project integration request <project-id> <task-id> [--revision <id>] [--result-commit <sha>] [--verification <run-id>] [--priority <n>] [--json]`,
+    detail: `# The preconditions are the ones ADR-0070 D07 names: the named revision is the Task's current
+# one, the result commit was captured for it, and a Task verification run PASSED for that exact
+# revision and commit. A request that does not satisfy them is refused by name and nothing is queued.
+# Repeating the command (or a Task Service re-sending its merge-request Signal) converges on the item
+# that already exists: the queue is idempotent per task revision, and a request for a newer revision
+# retires an older queued one as STALE instead of merging a revision the Task no longer claims.`,
+    runtime: [
+      "project.integration.request",
+    ],
+  },
+  "project.integration.retry": {
+    kind: "COMMAND",
+    summary: "把 CONFLICTED/FAILED 的 queue item 重新排队",
+    usage: `bun run codeestra project integration retry <project-id> <item-id> [--json]`,
+    detail: `# Retry is what resolves the scene rather than destroying it. The owned integration worktree is
+# aborted back to the integration ref and the temporary candidate ref is dropped, then the item goes
+# back to QUEUED with its attempt counter advanced. Only a CONFLICTED or FAILED item can be retried;
+# a MERGED item is a settled fact and an active item must be observed, not guessed about.`,
+    runtime: [
+      "project.integration.retry",
+    ],
+  },
+  "project.integration.run": {
+    kind: "COMMAND",
+    summary: "整合队首候选：merge → 独立 Integration Verification → CAS 推进 ref",
+    usage: `bun run codeestra project integration run <project-id> [<item-id>] [--json]`,
+    detail: `# One invocation advances at most one queue item, and it must be the head of this project's
+# queue: the order is the project's (priority desc, then request time, then id), not the caller's. The
+# command is not a daemon: the durable queue stays in the database, and the next item is left queued so
+# an explicit run (or a script) decides when to continue. A merge conflict, a failed integration
+# verification, or an integration ref that moved while the candidate was being verified all settle the
+# item with a stable outcome code and keep their evidence.`,
+    runtime: [
+      "project.integration.run",
+    ],
+  },
+  "project.integration.status": {
+    kind: "COMMAND",
+    summary: "读 integration ref/worktree 与队列现状",
+    usage: `bun run codeestra project integration status <project-id> [--json]`,
+    detail: `# currentOid is what Git says right now; recordedOid is what this Runtime last advanced the ref
+# to. They are reported side by side and never silently reconciled: a disagreement is a fact the caller
+# has to see. worktree.state is OWNED / MISSING / FOREIGN / UNCERTAIN and carries the evidence string
+# it was derived from. needsAttention is true when a queue item is CONFLICTED or RECOVERY_REQUIRED, or
+# when the worktree is FOREIGN/UNCERTAIN.`,
+    runtime: [
+      "project.integration.status",
+    ],
+  },
   "project.knowledge": {
     kind: "GROUP",
     summary: "分层项目知识：人工层只从 main ref 读，机器层读写都在 Runtime 数据目录（ADR-0041）",
@@ -1051,6 +1149,23 @@ socket. It never starts a Runtime to stop it and never signals a process it cann
     usage: `bun run codeestra task depends remove <project-id> <task-id> <expected-version> <prerequisite-task-id> [--json]`,
     runtime: [
       "task.depends.remove",
+    ],
+  },
+  "task.integration": {
+    kind: "GROUP",
+    summary: "Task 的 integration 投影（与 lifecycle、verification 正交）",
+    unit: true,
+  },
+  "task.integration.show": {
+    kind: "COMMAND",
+    summary: "读一个 Task 的 integration 投影与它的 queue item 历史",
+    usage: `bun run codeestra task integration show <project-id> <task-id> [--json]`,
+    detail: `# The projection is derived from the newest merge queue item, never from the Task lifecycle, so
+# "the Agent finished", "the Task verification passed" and "the result is in the integration ref" stay
+# three different facts. A Task with no queue item reads as NOT_REQUESTED; a CANCELLED request reads as
+# NOT_REQUESTED again, while a MERGED one carries the integration OID its result landed at.`,
+    runtime: [
+      "task.integration.show",
     ],
   },
   "task.list": {

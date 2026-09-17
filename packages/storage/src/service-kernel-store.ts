@@ -420,6 +420,25 @@ export class ServiceKernelStore {
     })();
   }
 
+  /**
+   * Acknowledges a claimed kernel Signal whose handler effect *is* the fact it recorded. The
+   * receipt carries the effect, the attempt settles as `ACKED` and the target Service's inbox cursor
+   * advances — the same convergence path every other handler uses, without inventing a second state
+   * change just to have something to write. `TASK_MERGE_SETTLED` uses it: the Project Service wrote
+   * the Task integration projection in the same transaction as the queue item's terminal state, and
+   * the Task Service's job is to confirm that the version it was told about is the version it holds.
+   */
+  acknowledgeKernelSignal(input: { readonly signalId: string; readonly effect: unknown;
+    readonly now: number; readonly eventId: string }): SignalView {
+    return this.sqlite.transaction(() => {
+      const { signal, receipt } = this.claimedSignalOrReceipt(input.signalId);
+      if (receipt !== null) return this.finishAlreadyReceipted(signal, input.now);
+      this.recordReceiptAndAck(signal, input.effect, input.now);
+      this.insertSignalAckEvent(signal, input.eventId, input.now, input.effect);
+      return this.getSignal(signal.id);
+    })();
+  }
+
   failClaimedSignal(input: { readonly signalId: string; readonly code: string;
     readonly message: string; readonly retryAt: number | null; readonly deadLetter: boolean;
     readonly recoveryRequired?: boolean; readonly now: number; readonly eventId: string }): SignalView {

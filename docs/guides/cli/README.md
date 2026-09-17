@@ -5,6 +5,8 @@
 > [docs/tasks/README.md](../../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > **本次修订（ADR-0066 / schema v36）**：`promotion` 一篇（§15）与 `task integrate`/`task integration`（§11）
 > 已随集成与提升一起删除，因此现在是八篇。
+> **本次修订（ADR-0074 / schema v38）**：新增 §23 受管 integration（`project integration *`、`task integration show`），
+> 索引因此由九篇变为**十篇**；§0.2 的退出码表不变（集成失败用 `1`，队列空用 `0`，用法错误用 `2`）。
 > 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一（ADR-0066 之后为八篇），
 > **内容自 `cli-reference.md @ dev@de03448` 搬移，一句未改写；本次未重新核对源码**，最后校对日期因此不变。
 > 唯一未搬移的一行是原文件头部的第 17 行——它与第 6 行是同一句（只有句末标点不同），只保留了一份。
@@ -12,7 +14,7 @@
 > §0.1 的人读视图清单新增 `settings list`（§19），索引表里 §1 不再含 `permission`（ADR-0064 / 用户任务）。
 > **本次修订（ADR-0066 / schema v36）**：`promotion` 一篇（§15）与 `task integrate`/`task integration`（§11）已删除，
 > 因此索引由九篇变为八篇；ADR-0070 S4 新增 `kernel.md`，现在恢复为**九篇**。
-> 本文件既是**这套参考的入口**（九篇索引），也是原来那篇的 §0 通用约定（连接、自动启动、退出码、环境变量）。
+> 本文件既是**这套参考的入口**（当前**十篇**索引），也是原来那篇的 §0 通用约定（连接、自动启动、退出码、环境变量）。
 > 旧编号（§1–§21）到新文件的对照表在 [`../cli-reference.md`](../cli-reference.md)；各篇内部沿用拆分前的章节号。
 
 本文覆盖**命令树**（`apps/cli/src/command-tree.ts`）里的**每一个命令**。命令树是 CLI 的唯一命令清单：
@@ -28,7 +30,7 @@ bun run codeestra <group> [<action>] [<argument>…] [--flag …]
 
 （`bun run codeestra` 对应 `package.json` 的 `"codeestra": "bun run apps/cli/src/main.ts"`。）
 
-## 九篇索引
+## 十篇索引
 
 | 文件 | 覆盖章节 |
 |---|---|
@@ -36,6 +38,7 @@ bun run codeestra <group> [<action>] [<argument>…] [--flag …]
 | [runtime.md](./runtime.md) | §1 Runtime 生命周期（`status`/`stop`；`ui`/`open` 已删除）、§2 `agent config` 与 `agent plugins`、§19 `settings`（含权限模式）、§22 `help` 与 `runtime commands` |
 | [project.md](./project.md) | §3 `project`（`inspect`/`policy`/`trust`/`list`、`project impact *`、`project knowledge *`） |
 | [kernel.md](./kernel.md) | ADR-0070 S4 `service` / `process` / `signal` / `intent` 内核命令 |
+| [managed-integration.md](./managed-integration.md) | §23 受管 integration：`project integration *` 与 `task integration show`（ADR-0070 D07 / S8 / ADR-0074） |
 | [task-lifecycle.md](./task-lifecycle.md) | §4 `task` 生命周期（`create` 到 `purge`/`status`）与 `--feature` |
 | [task-revision-session.md](./task-revision-session.md) | §5 `task revision` 与投递、§6 `task transcript`/`session transcript`、§6.1 `session guide`、§7 `session handoff` |
 | [task-result-verify.md](./task-result-verify.md) | §8 `task result`、§9 `task verify`/`task verification`/`task tests`、§10 `task operation` |
@@ -56,8 +59,8 @@ bun run codeestra <group> [<action>] [<argument>…] [--flag …]
 - 除 `stop` 外，**任何命令都会在需要时自动拉起 Runtime**（先 `runtime.ping`，超时后 spawn 并以 50ms 间隔最多探测 50 次）。
   `stop` 刻意**不**启动它要停的东西。
 - 输出是 JSON（`JSON.stringify(value, null, 2)`）。人读视图只存在于少数命令的**默认**（非 `--json`）分支：
-  `project impact validate/show/explain`、`project knowledge *`、`task depends list`、`task transcript`、
-  `session transcript`、`task operation list/get`、`settings list`。
+  `project impact validate/show/explain`、`project knowledge *`、`project integration status/queue/run/request/retry/cancel`、
+  `task integration show`、`task depends list`、`task transcript`、`session transcript`、`task operation list/get`、`settings list`。
 - 其余命令默认就是 JSON，`--json` 的作用是**让脚本声明意图**而不是改变输出。
 - 错误写到 stderr，形如 `CODE: message`；带事实的拒绝（例如 `SNAPSHOT_STALE`）会先打印一段 JSON 再退 1。
 - **想知道某一层有哪些命令，就问那一层**：`codeestra help`、`codeestra task help`、`codeestra task revision help`

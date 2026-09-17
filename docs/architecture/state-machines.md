@@ -4,7 +4,7 @@
 >
 > **只读与当前任务相关的部分**：本篇回答「Task / Execution / 内核对象」；Session 与接管、修订投递在 [`state-machines-sessions.md`](./state-machines-sessions.md)；Runtime 生命周期、全局负载控制与 Self Evolution 在 [`state-machines-runtime.md`](./state-machines-runtime.md)。
 
-状态：记录当前 schema v37。ADR-0070 的 Service/Signal/Process FSM 已由 S1–S4 实现，受管 integration 与 S5–S10 仍是目标。**未列出的迁移一律拒绝**；所有迁移需 expected version、actor、reason，并记录事实事件；恢复操作不绕过 guard。
+状态：记录当前 schema v38。ADR-0070 的 Service/Signal/Process FSM 已由 S1–S4 实现；**Task integration 的迁移已由 S8 实现**（`merge_queue_items` / `task_integration`，ADR-0074），Integration Process/Agent 与 S9–S10 仍是目标。**未列出的迁移一律拒绝**；所有迁移需 expected version、actor、reason，并记录事实事件；恢复操作不绕过 guard。
 
 ## 读取路由与章节号对照
 
@@ -32,7 +32,7 @@ Process: CREATED → STARTING → RUNNING ↔ WAITING_FOR_USER
                                   └→ SUCCEEDED | FAILED | CANCELLED | RECOVERY_REQUIRED
 
 Task integration: NOT_REQUESTED → QUEUED → MERGING → VERIFYING → MERGED
-                                      ├→ CONFLICTED
+                                      ├→ CONFLICTED → QUEUED（显式 retry）
                                       └→ FAILED | STALE | RECOVERY_REQUIRED
 ```
 

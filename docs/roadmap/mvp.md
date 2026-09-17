@@ -1,11 +1,12 @@
 # Service Kernel 改造 Roadmap
 
-状态：**ADR-0070 S1–S4 已由 FOUNDATION-099 实现；S5 / S6 / S7 各已交付一个最小纵向切片（ADR-0071/0072/0073，见下方进度表），S8–S10 待完成**。当前可运行基线是 schema v37：既有业务 CLI 与通用 `service` / `process` / `signal` / `intent` CLI 并存；Project/Task/Execution 的旧表仍是 core 权威（Task/Project **创建**已收敛到 Service 写路径），产品侧受管 integration 尚未实现。
+状态：**ADR-0070 S1–S4 已由 FOUNDATION-099 实现；S5 / S6 / S7 / S8 各已交付一个纵向切片（ADR-0071/0072/0073/0074，见下方进度表），S9–S10 待完成**。当前可运行基线是 **schema v38**：既有业务 CLI 与通用 `service` / `process` / `signal` / `intent` CLI 并存；Project/Task/Execution 的旧表仍是 core 权威（Task/Project **创建**已收敛到 Service 写路径），受管 integration ref + 持久 merge queue + 独立 Integration Verification 已实现，**发布出口与 Integration Process/Agent 仍未实现**。
 
 本轮进度（2026-09-17，三条并行 lane 合入 `Loyage/service_level`）：
 
 | 格 | 本轮交付 | 仍未做 |
 |---|---|---|
+| S8 | schema v38：`project_integration`/`merge_queue_items`/`integration_runs`/`task_integration`；`refs/codeestra/integration` + owned detached worktree；持久 merge queue（`(project,idempotencyKey)` 与 `(task,revision)` 双幂等、`MERGING`/`VERIFYING` 上部分唯一索引保证同项目串行）；`run` = claim → 固定 expected OID → `--no-ff` 合并 → 候选 ref → 独立 Integration Verification（候选 commit 的独立副本）→ `git update-ref` CAS → `MERGED` + Task 投影 + `TASK_MERGE_SETTLED`；冲突/验证失败/ref 移动/重启保留现场不 force；**新 Task 默认基线改为 integration commit**；CLI `project integration status\|init\|queue\|request\|run\|retry\|cancel` + `task integration show`（ADR-0074） | Integration Process/Agent（冲突不自动解决、不建 Attention 行）、发布到用户 main/release、跨项目并发集成的真实压力验证 |
 | S5 | `PROCESS_COMPLETED` SIG_A、`transitionProcess`/`completeProcess` 写路径（version CAS + receipt 幂等）、只读 `progress` 投影、succession 不变量 | Agent runner、原生 Process 控制 API（无 Execution 的 Process 仍 `PROCESS_CONTROL_UNAVAILABLE`）、token/cost/tool 计数事实 |
 | S6 | `INTENTION_RESOLVED` 结构化 outcome（ROUTE / TYPED_COMMAND=SESSION_GUIDANCE_RECORD / REQUEST_CLARIFICATION）、澄清审计事实与回答匹配、`CREATE_TASK` 具名拒绝 | 真实模型解释意图、Attention 全局索引接通（需新 migration）、`CREATE_TASK` 应用 |
 | S7 | Project/Task **创建**路径收敛到 Service 写路径（`ServiceWriteStore`、`TaskService.create`）、单一 writer 源码证据 | `task submit`/revision/验证/取消/归档切换、Scheduler 请求 Task Service 建 Development Process |
@@ -215,24 +216,24 @@ intent send
 
 交付：
 
-- Project Service 的 `integration_ref`、owned integration worktree 与 ownership token；
-- Task 默认从 current integration commit 建固定 base；
-- merge-request Signal、持久队列、单项目唯一活动 integration；
-- Integration Process（Agent supervisor）与受控 Project Git API；
-- task verification 与 integration verification 分离；
-- expected integration OID + CAS 推进；
-- conflict / failed verification / crash / stale ref 保留现场；
-- 成功 Signal 更新 Task integration projection并触发下一项；
-- CLI 类型化 facade（准确命名在该格 ADR 冻结），不恢复旧 `promotion *`。
+- ~~Project Service 的 `integration_ref`、owned integration worktree 与 ownership token~~（**已完成**：ADR-0074，`refs/codeestra/integration` + `<CODEESTRA_HOME>/integration/<project-id>/`）；
+- ~~Task 默认从 current integration commit 建固定 base~~（**已完成**：ADR-0074 D04）；
+- ~~merge-request Signal、持久队列、单项目唯一活动 integration~~（**已完成**：`TASK_MERGE_REQUESTED` + `one_active_integration_per_project`）；
+- Integration Process（Agent supervisor）与受控 Project Git API——**未实现**（ADR-0074 D05 选 A：本轮只做确定性合并）；
+- ~~task verification 与 integration verification 分离~~（**已完成**：`integration_runs` 独立证据，绑定候选 commit + policy digest + expected OID）；
+- ~~expected integration OID + CAS 推进~~（**已完成**：`git update-ref <new> <expected>`）；
+- ~~conflict / failed verification / crash / stale ref 保留现场~~（**已完成**：worktree/候选 ref/验证副本都保留，移动的 ref 不 force）；
+- ~~成功 Signal 更新 Task integration projection并触发下一项~~（**部分完成**：投影与 `TASK_MERGE_SETTLED` 通知已实现；"触发下一项"由显式 `run` 驱动，不自动接续）；
+- ~~CLI 类型化 facade（准确命名在该格 ADR 冻结），不恢复旧 `promotion *`~~（**已完成**：`docs/guides/cli/managed-integration.md` §23）。
 
 验收：
 
-- 两项目可同时集成，同项目严格串行；
-- 用户主工作树始终 clean、HEAD/ref 不被直接操作；
-- Task A 合入后，新 Task B 基线可达 A；
-- ref 外部移动产生 STALE，不 force；
-- merge 冲突只阻塞该项目 queue 的推进，不阻塞 root/其它项目/Attention；
-- 集成成功后回收遵守 ownership，失败现场保留。
+- 两项目可同时集成，同项目严格串行——**机制已由数据库约束实现**（跨项目并发集成的真实压力测试仍待做）；
+- 用户主工作树始终 clean、HEAD/ref 不被直接操作——**已由定向测试覆盖**（`cli-managed-integration`）；
+- Task A 合入后，新 Task B 基线可达 A——**已由定向测试覆盖**（B 的 result commit 以 A 的集成 commit 为祖先，而该 commit 不是用户 `main` 的祖先）；
+- ref 外部移动产生 STALE，不 force——**已实现**（本轮落成 `FAILED` + `INTEGRATION_REF_MOVED`；`STALE` 用于被新 revision 取代的排队请求）；
+- merge 冲突只阻塞该项目 queue 的推进，不阻塞 root/其它项目/Attention——**已实现**（队列被 `CONFLICTED` 阻塞时 `run` 以 `INTEGRATION_CONFLICT_UNRESOLVED` 拒绝；其它项目/Service 不受影响）；
+- 集成成功后回收遵守 ownership，失败现场保留——**回收仍是显式 `reclaim`**（ADR-0062 的自动回收随旧集成删除，未恢复）；失败现场保留已实现。
 
 ### S9 — Scheduler eligibility 解耦
 

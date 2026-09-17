@@ -8,7 +8,8 @@
 > §10 的依赖满足语义由 FOUNDATION-093 第三轮同步（ADR-0060 修订）；其余内容沿用 FOUNDATION-091 的校对基线。
 > **本次修订（ADR-0066 / schema v36）**：§7「合入 `dev`」与 §8「稳定提升」整节删除，改为成果去向与
 > 本仓库自身的人工四步；§9 去掉自动回收；§3.3 的依赖语义按「上游结果 commit 对当前基线可达」改写。
-> **ADR-0070 S1–S4 实现修订**：总流程加入已实现的持久 Signal 与兼容投影；managed integration 等 S5–S9 能力仍不提前声称。
+> **ADR-0070 S1–S4 实现修订**：总流程加入已实现的持久 Signal 与兼容投影；S8 受管 integration 已实现（见下方 §7），Integration Process/Agent、发布出口与 S9–S10 能力仍不提前声称。
+> **本次修订（ADR-0074 / schema v38）**：Task 基线改为项目受管的 integration ref；成果经 `project integration request|run` 进入该 ref，**发布到你的分支仍没有命令**。命令面见 [cli/managed-integration.md](cli/managed-integration.md)。
 
 本文按真实顺序走一遍：**建任务 → 提交 → 运行 → 回答 Agent → 提交成果 → 验证 → 把成果交给你 → 资源回收**。
 每一步给出可以照抄的命令和**预期输出形状**。
@@ -17,14 +18,16 @@
 
 ```text
 User Intent → Task / Task DAG → Dependency / Conflict → Scheduler
-→ Git Worktree（项目文件夹当前分支的固定基线）→ Coding Agent
-→ Result Commit → Task Verification → 成果停在 task branch → 用户自行合并
+→ Git Worktree（项目受管 integration ref 的固定基线）→ Coding Agent
+→ Result Commit → Task Verification → merge queue → 独立 Integration Verification
+→ CAS 推进 integration ref → 用户自行决定是否发布到自己的分支
 ```
 
-ADR-0070 S1–S4 已加入持久 `SIG_A`/`SIG_P`、Service 树与 Process 投影。你可以用
-`intent send <text…>` 把 intention 可靠送到 root/Project/Task Service；它当前只创建 `CREATED` Process 并返回
-`PENDING_S6`，因此本走查仍用既有 Task 命令完成实际工作。Project Service managed integration、自然语言解释与原生
-Process Agent 控制属于后续 S5–S8，不把“受理”误写成“执行完成”。
+ADR-0070 S1–S4 已加入持久 `SIG_A`/`SIG_P`、Service 树与 Process 投影；**S8（ADR-0074）已加入受管 integration**：
+`project integration request|run` 把已验证的成果合进 `refs/codeestra/integration`（同项目串行、独立 Integration Verification、
+CAS 推进、失败保留现场）。你可以用 `intent send <text…>` 把 intention 可靠送到 root/Project/Task Service；它当前只创建
+`CREATED` Process 并返回 `PENDING_S6`，因此本走查仍用既有 Task 命令完成实际工作。Integration Process/Agent、发布出口与原生
+Process Agent 控制属于后续波次，不把“受理”误写成“执行完成”。
 
 准备（详见 [getting-started.md](./getting-started.md)）：
 
@@ -327,22 +330,28 @@ bun run codeestra task tests history $PROJECT <task-id> [--limit <n>] [--json]
 
 ---
 
-## 7. 把成果交给你（合并由你完成）
+## 7. 把成果交给你（集成由 Codeestra 完成，发布由你决定）
 
-**Codeestra 不合入任何东西**（ADR-0066）。任务跑完、验证通过之后，成果 commit 停在
-`refs/heads/task/<task-id>`：
+任务跑完、验证通过之后，成果 commit 先停在 `refs/heads/task/<task-id>`；让 Codeestra 把它合进项目的受管 integration ref 是
+**一条命令**（ADR-0074）：
 
 ```sh
-bun run codeestra task status $PROJECT $TASK --json     # 读 resultCommit
-git -C <项目文件夹> merge --ff-only <result-commit>     # 你自己合并（ff-only 只在你确认没分叉时成立）
+bun run codeestra task status $PROJECT $TASK --json                  # 读 resultCommit
+bun run codeestra project integration request $PROJECT $TASK         # 入队（幂等）
+bun run codeestra project integration run $PROJECT                   # merge → 独立验证 → CAS 推进 ref
+bun run codeestra project integration status $PROJECT --json         # 读 ref/worktree/队列事实
 ```
 
+- 合进 integration ref 是 Codeestra 的受管事实（`refs/codeestra/integration`，私有命名空间）；**把它发布到你自己的
+  `main`/`dev`/release 分支没有任何命令**，仍由你决定：`git -C <项目文件夹> merge --ff-only <integration-oid>`。
 - `task integrate`、`task integration create|integrate|list|get|cancel`、`promotion *`、`promotion full-suite *`
-  全部**已删除**（ADR-0066，schema v36）：IntegrationBatch、独立集成验证、`dev` 集成分支与 `dev → main` 提升
-  都不存在。执行它们只会得到用法错误（退出码 2）。
-- 为什么：合并是把代码放进你日常使用分支的动作，冲突与取舍是你的产品判断。Codeestra 不替你做，也就不替你记账。
-- **依赖释放**跟着变：下游要等上游的 result commit 对它自己的基线 ref 可达。这个重判发生在每一趟调度
-  （默认 5 秒一次），所以 `task depends list` 可能显示「边已满足、任务仍是 `BLOCKED`」，最多滞后一个 tick。
+  仍然**已删除**（ADR-0066，schema v36）：旧 IntegrationBatch 的十个状态、`dev` 集成分支与 `dev → main` 提升都不存在，
+  执行它们只会得到用法错误（退出码 2）。新命令面是 `project integration *`（§23）。
+- 冲突不会被掩盖：`project integration run` 失败时 item 落 `CONFLICTED`/`FAILED` 并保留现场（冲突中的 worktree、
+  候选 ref、验证副本），`retry` 或 `cancel` 由你决定。没有 Agent 自动解决冲突。
+- **依赖释放**：下游要等上游的 result commit 对**同一条 integration ref** 可达，而这正是 `run` 成功后发生的事。
+  重判发生在每一趟调度（默认 5 秒一次），所以 `task depends list` 可能显示「边已满足、任务仍是 `BLOCKED`」，
+  最多滞后一个 tick。
 - **没有自动回收**：合并之后 worktree 仍在磁盘上，要回收就显式 `reclaim apply`（§9）。
 
 ## 8. 本仓库自身的 `dev → main`（仓库约定）

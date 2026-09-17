@@ -57,10 +57,15 @@ interface ChangeSet {
 
 ## 2. Task Workspace
 
-> 当前基线来源见下文；ADR-0070 S8 完成后，新 Task 默认改从 Project Service managed integration ref 的当时 OID 建立。两种时期都必须固定 base ref/commit，既有 workspace 不回写。
+> **ADR-0074 起基线来源已切换**：新 Task 默认从 Project Service 受管 integration ref（`refs/codeestra/integration`）的当时 OID 建立，
+> 把 ref 与 commit 一起固定；`--base-ref` 仍可显式选一条本地分支。既有 workspace 不回写（它们的 `base_ref` 保持当时记录的值）。
 
 - prepare 以**项目基线**的固定 SHA 为基线，创建独立 `refs/heads/task/<task-id>` 与 Runtime 数据目录 owned worktree（ADR-0005）。ref/path 只使用校验后的安全段，不把未经规范化的用户文本当 ref/path，也不在用户仓库根目录创建 worktree。
-- **基线只有一种来源**（ADR-0066）：在**项目文件夹**（`projects.repo_root`）里取**建 workspace 时当前检出的分支**，把 ref 与 commit 一起固定进 `workspaces.base_ref`/`base_commit`（此后切分支不会移动已建 Task 的基线）；`task run --base-ref <refs/heads/…>` 可以显式选一条本地分支。`HEAD` detached 时以 `TASK_BASE_REF_UNRESOLVED` 拒绝，不猜一条分支。同一目录同时拥有仓库身份与 `main` ref（判定策略、影响映射的读取来源）。**哪个根指向哪个仓库**见下表：
+- **基线只有一种来源**（ADR-0066 的原规则由 **ADR-0074 D04** 取代）：默认是**项目文件夹**（`projects.repo_root`）里那条
+  `refs/codeestra/integration` 的当时 commit，把 ref 与 commit 一起固定进 `workspaces.base_ref`/`base_commit`（此后 ref 前进不会移动已建
+  Task 的基线）。`--base-ref <refs/heads/…|refs/codeestra/integration>` 可以显式选一条基线。该 ref 在 `project trust` 时由项目文件夹当时
+  检出的分支物化；老项目首次需要时同样补建；**ref 与文件夹分支都不可得**（detached HEAD 且 ref 缺失）时以 `TASK_BASE_REF_UNRESOLVED` 拒绝，不猜一条分支。
+  同一目录同时拥有仓库身份与 `main` ref（判定策略、影响映射的读取来源）。**哪个根指向哪个仓库**见下表：
 
 | 根字段 / 事实 | 代表哪个仓库 | 谁消费它 |
 |---|---|---|
@@ -114,9 +119,9 @@ DROP 了 `integration_batches(_items)`、`integration_verification_runs`、`stab
 - **本仓库自身**仍以 `main`/`dev` 两个 clone 开发并把 `dev` 提升到 `main`：那是**仓库约定**
   （`AGENTS.md` 的人工四步、`docs/agents/runbook.md` 的命令序列），当前产品不提供命令、不记账、不校验它。
 
-### 3.2 ADR-0070 目标：Project managed integration
+### 3.2 Project managed integration（ADR-0074，已实现）
 
-Project Service 将独占一个 integration ref/worktree。Task Verification 通过后发送 merge-request Signal；同一项目的持久队列严格串行，由 Integration Process 通过类型化 Git API 生成候选，独立 Integration Verification 通过且 expected OID 未移动时才 CAS 推进 ref。它不直接修改用户 worktree，也不恢复旧 `promotion *`。准确 Git port 与错误码在 S8 冻结。
+Project Service 独占 `refs/codeestra/integration` 与 `<CODEESTRA_HOME>/integration/<project-id>/`（detached worktree）。Task Verification 通过后 `project integration request`（或 `TASK_MERGE_REQUESTED` Signal）入持久队列；同项目严格串行，`project integration run` 在 owned worktree 里 `git merge --no-ff` 生成候选，独立 Integration Verification 通过且 expected OID 未移动时才用 `git update-ref <new> <expected>` CAS 推进。它不直接修改用户 worktree，也不恢复旧 `promotion *`。**Integration Process/Agent 未实现**：冲突只报告并保留现场（候选 ref + 冲突中的 worktree + 验证副本），由 `retry`/`cancel` 收口；`project integration status` 把 Git 的 `currentOid` 与 Runtime 记录的 `recordedOid` 并列报出，不自动对账。Git port 见 `packages/git/src/managed-integration.ts`，语义见 [ADR-0074](../decisions/0074-managed-integration-ref-and-merge-queue.md)。
 
 ## 4. 崩溃恢复与测试
 

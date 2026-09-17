@@ -2,6 +2,7 @@ import { lstat, mkdir, realpath } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { RepositoryIdentity } from '@codeestra/contracts';
 import { GitInspectionError } from './errors.js';
+import { managedIntegrationRefName } from './managed-integration.js';
 
 export { GitInspectionError } from './errors.js';
 export type { GitErrorCode } from './errors.js';
@@ -36,6 +37,29 @@ export {
   readLocalRefCommit,
 } from './refs.js';
 export type { CheckedOutRef } from './refs.js';
+// S8 (ADR-0070 D07 / ADR-0074): the Project-managed integration ref and worktree, its CAS advance
+// and the merge that produces an integration candidate.
+export {
+  compareAndSwapRef,
+  createRefIfAbsent,
+  deleteRefIfUnchanged,
+  ensureIntegrationWorktree,
+  ensureManagedIntegrationRef,
+  inspectIntegrationWorktree,
+  inspectMergeState,
+  integrationWorktreePath,
+  listWorktrees,
+  managedIntegrationRefName,
+  mergeCandidateIntoIntegration,
+  readRefCommit,
+  resetIntegrationWorktree,
+} from './managed-integration.js';
+export type {
+  IntegrationWorktreeState,
+  MergeOutcome,
+  RefSwap,
+  WorktreeFact,
+} from './managed-integration.js';
 export {
   createVerificationCopy,
   inspectVerificationCopy,
@@ -280,8 +304,9 @@ export async function prepareWorkspace(input: {
       'workspaceName must be a lowercase path segment of letters, digits and hyphens');
   }
   const repository = await inspectRepository(input.repositoryRoot);
-  if (!input.baseRef.startsWith('refs/heads/')) {
-    throw new GitInspectionError('STALE_BASE', 'Configured base ref must be a local branch');
+  if (!input.baseRef.startsWith('refs/heads/') && input.baseRef !== managedIntegrationRefName) {
+    throw new GitInspectionError('STALE_BASE',
+      'A Task base ref must be a local branch or the managed integration ref');
   }
   const expectedOidLength = repository.objectFormat === 'sha1' ? 40 : 64;
   const oidPattern = new RegExp(`^[0-9a-f]{${expectedOidLength}}$`);

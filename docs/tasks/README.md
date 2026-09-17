@@ -8810,3 +8810,50 @@ writer」，因此改为严格委托 `ServiceKernelStore.transitionProcess`，�
 - 未运行任何全量聚合检查（`bun run check`/`just check`/`just verify`/`check:fast`）——ADR-0038 要求它只在精确
   `dev` 候选上运行一次。三格合并后的 `Loyage/service_level` 需要先由人合入 `dev`，再在 `dev` 候选上跑全量。
 - `.codeestra/tests.json` 由协调者加入 5 条新定向命令（3 个 lane 的新测试文件）；lane 本身不改该文件。
+
+## FOUNDATION-100 — S8 受管 integration ref、持久 merge queue 与 Task 基线切换（ADR-0074，schema **v38**）
+
+状态：代码、schema、CLI 命令面、定向测试与文档已完成；发布出口与 Integration Process/Agent **未实现**，本记录不把它们写成已有能力。
+
+已实现（唯一 migration owner：本格；v38 号只被本格占用）：
+
+- **schema v38（additive）**：`project_integration`（Project Service 独占的 ref/worktree/ownership token/最后记录 OID/`ACTIVE|RECOVERY_REQUIRED`）、`merge_queue_items`（durable queue、`(project,idempotencyKey)` 与 `(task,revision)` 双幂等、`MERGING`/`VERIFYING` 上部分唯一索引 `one_active_integration_per_project`、`settled_at` 与终态 CHECK）、`integration_runs`（绑定候选 commit + policy digest + expected OID 的独立证据，自建 `INTEGRATE_TASK` 持久 Operation，随 run 收口为 `SUCCEEDED`/`FAILED`，重启时记 `RECONCILE_REQUIRED`）、`task_integration`（Task 的正交 integration 投影）。不重建任何既有表；`bun test packages/storage/test/managed-integration-migration.test.ts` 用真实 v37 文件升级证明不丢行。
+- **领域与 Git port**：`packages/domain/src/managed-integration.ts`（ref 名/候选 ref、queue FSM、单项目槽、投影派生、队列排序、CAS 判据）；`packages/git/src/managed-integration.ts`（`readRefCommit`、`createRefIfAbsent`、`ensureManagedIntegrationRef`、`compareAndSwapRef`、`ensureIntegrationWorktree`、`mergeCandidateIntoIntegration`、`inspectMergeState`、`resetIntegrationWorktree`）。ref 为 `refs/codeestra/integration`：`git branch` 列不出、默认 push 带不走、checkout 不可能停在它上面。
+- **Runtime 服务**：`apps/runtime/src/managed-integration-service.ts` —— `initialize`（trust 时物化，幂等）、`status`、`request`（前置条件具名拒绝 + 双幂等）、`runNext`（claim → 固定 expected OID → owned worktree `--no-ff` 合并 → 候选 ref → 独立 Integration Verification → `git update-ref` CAS → `MERGED` + 投影 + `TASK_MERGE_SETTLED`）、`retry`（复位现场后重排）、`cancel`（只在 `QUEUED`）、`reconcileOnBoot`（`RECOVERY_REQUIRED`，不自动重跑）。
+- **Signal**：`TASK_MERGE_REQUESTED` 只被 PROJECT 接受（与 CLI 同一条前置检查与幂等键）；`TASK_MERGE_SETTLED` 只被 TASK 接受，handler 在 `ServiceKernelStore.acknowledgeKernelSignal` 里核对投影版本，不一致以 `SIGNAL_EFFECT_CONFLICT` 拒绝。
+- **Task 基线切换（ADR-0074 D04）**：`resolveTaskBaselineRepository` 默认返回 integration ref 与当时 commit；`--base-ref` 仍只接受本地分支或该 ref；`prepareWorkspace` 允许该 ref 并核验 commit 未移动；依赖释放（`scheduler.ts`）与回收的「已合并」判定（`reclaim-service.ts`）改读同一条 ref；既有 workspace 不回写。
+- **CLI**：`project integration status|init|queue|request|run|retry|cancel` + `task integration show`，全部 `--json`；`run` 在 `CONFLICTED`/`FAILED` 退 1、队列空退 0、用法错误退 2（一行并指向 `project integration help`）。
+
+定向验证（开发分支未运行禁止的全量 `bun run check`/`just check`/`just verify`；本格触及 domain/storage/git/runtime/cli/contracts 与既有测试，因此按 `.codeestra/tests.json` 的完整定向集合逐条执行）：
+
+- `cross-package-typecheck`（`bun run typecheck`）：通过。
+- `managed-integration-domain`：8 pass / 0 fail。
+- `managed-integration-storage`：9 pass / 0 fail（含真实 v37→v38 文件升级、部分唯一索引、零部分应用、run 一次性终态、记录不可删除）。
+- `managed-integration-service`：9 pass / 0 fail（真实临时仓库：合入推进 ref 且 merge commit 首父为 expected OID；冲突保留现场、阻塞队列、`retry` 复位；验证期间 ref 被移动则 `INTEGRATION_REF_MOVED` 且不 force；验证失败不回退 ref；无策略拒绝；重启 `RECOVERY_REQUIRED`；`cancel` 只在 `QUEUED`）。
+- `cli-managed-integration`：3 pass / 0 fail（真实 CLI + Runtime + 临时仓库：trust 物化 ref、`status/queue/run` 的 JSON 与退出码、已验证结果入队并合入、`task integration show` 投影 `MERGED`、第二个 Task 的 result commit 以 integration commit 为祖先而该 commit 不是用户 `main` 的祖先、用户工作树 clean 且仍在 `main`、用法错误一行）。
+- 其余定向格（既有 kernel/S5/S6/S7 与全量 CLI 命令面回归 `cli-command-face-regression` 共 114 项）全部通过；其中因基线切换而必须同步的测试已按 ADR-0074 改写：
+  `apps/runtime/test/cli-managed-project.test.ts`（依赖投影的 `baseRef`）、`scheduler.test.ts`（依赖释放改读 integration ref；缺基线用例改为 ref 与分支都不可得）、
+  `cli-task-depends.test.ts`、`cli-snapshot-recheck.test.ts`（baseline 移动改为移动 integration ref；映射变更只产生 `STALE_POLICY`）、
+  `cli-reclaim.test.ts` / `cli-reclaim-batch.test.ts`（「已合并」改读 integration ref）、
+  `packages/storage/test/service-kernel-migration.test.ts`（v36 形状要同时丢掉 v38 表）、`apps/runtime/test/support/agent-fixture.ts`（fixture 像 trust 一样物化 ref）。
+
+诚实边界（未做 / 不得当成已完成）：
+
+1. **Integration Process/Agent 未实现**（ADR-0074 D05 选 A）：冲突只报告并保留现场，不自动解决，也不创建 Integration Process。
+2. **没有发布出口**：没有任何命令把 integration ref 推到用户 main/release；不恢复旧 `promotion *`。
+3. **内核级冲突不产生 Attention 行**：v38 的 `attention_requests.session_id` 是指向 Agent 会话的非空外键（与 ADR-0072 D01 同一边界），冲突以 queue item、Task 投影、领域事件与 `status.needsAttention` 表达。
+4. **「触发下一项」不是自动的**：`run` 一次只推进队首一条，下一条保持 `QUEUED`，由显式命令或脚本继续。
+5. **跨项目并发集成的真实压力测试未做**：串行由数据库唯一索引与定向测试证明，但没有两项目同时跑长验证的实测。
+6. **集成验证跑的是项目策略**，不是真实模型；「Agent 解决冲突」没有任何实测。
+
+用户文档同步（ADR-0050 D01 / ADR-0063）：
+
+- **[`docs/guides/cli/managed-integration.md`](../guides/cli/managed-integration.md) 新增（§23）**：ref/worktree 语义、合并与验证流程、失败与恢复矩阵、七条 `project integration` 与 `task integration show` 的参数/退出码/稳定码、Signal 面、不做什么、与 Task 基线的关系。
+- **[`docs/guides/cli/README.md`](../guides/cli/README.md)**：九篇 → 十篇索引、落点表与本次修订说明。
+- **[`docs/guides/cli/project.md`](../guides/cli/project.md)**、**[`docs/guides/cli/task-lifecycle.md`](../guides/cli/task-lifecycle.md)**、**[`docs/guides/cli/task-result-verify.md`](../guides/cli/task-result-verify.md)**：基线来源与「成果之后怎么办」按 ADR-0074 改写（受管 ref 取代「项目文件夹当前分支」）。
+- **[`docs/guides/manual.md`](../guides/manual.md)**、**[`docs/guides/concepts.md`](../guides/concepts.md)**、**[`docs/guides/features.md`](../guides/features.md)**、**[`docs/guides/workflow.md`](../guides/workflow.md)**、**[`docs/guides/getting-started.md`](../guides/getting-started.md)**、**[`docs/guides/troubleshooting.md`](../guides/troubleshooting.md)**：Task 基线、集成阶段与「完成 ≠ 已发布」的表述同步。
+- **`README.md`**：能力清单加入受管 integration，并保留「不发布」的边界。
+- **架构文档**：`service-process-signal.md`（§6.2/§6.3 实现边界）、`git-workspace-api.md`（§3.2 由目标变实现）、`state-machines.md`（integration FSM 标注实现状态）、`domain-model.md`、`sqlite-schema.md`（v38 行与表清单）。
+- **决策记录**：新增 ADR-0074；`docs/decisions/README.md` 索引、当前有效语义（目标与实现边界、集成与发布、Task 基线）与待决项同步。
+
+流程说明：**未 commit、未合入 `dev`、未 push、未提升 `main`、未重启任何 Runtime**；稳定 clone 与稳定 Runtime 未被触碰。任何合入仍是人工 Git 动作（`AGENTS.md`）。

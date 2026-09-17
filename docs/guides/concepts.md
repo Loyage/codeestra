@@ -4,6 +4,7 @@
 > 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
 > **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
 > 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
+> **本次修订（ADR-0074 / schema v38）**：Task 基线改为 Project Service 的受管 integration ref（`refs/codeestra/integration`，由 `project trust` 从项目文件夹当时检出的分支创建、缺失时首次需要补建）；成果经 `project integration request|run` 的合并、独立 Integration Verification 与 CAS 进入该 ref，**发布到用户分支仍没有命令**。见 [managed-integration.md](cli/managed-integration.md)。
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > §「Task」与 §「Revision」由本分支按 **ADR-0065** 改写（两个 Task 级标题；约束已删除）。
 > §「调度三态」由 FOUNDATION-091 按 ADR-0059 重写（声明同一功能才冲突）；
@@ -165,9 +166,10 @@ ADR-0018/0053 的 `IntegrationBatch` 曾是「把成果合入 `dev`」的正式�
 固定的 `dev` 基线、集成验证证据）。**ADR-0066 把它整体删除**（schema v36）：没有 `task integrate`、
 没有批次状态机、没有 `dev` 集成分支。
 
-现在只有一条规则：**成果 commit 停在 `refs/heads/task/<task-id>`，是否合并与何时合并由你自己决定**
-（在你自己检出的分支上 `git merge`）。Codeestra 不自动合、不自动推、不做提升记账，因此也没有
-「谁的成果已经进去了」这类记录需要维护。
+现在是两步规则：**成果 commit 先停在 `refs/heads/task/<task-id>`，再经 `project integration request` / `run` 进入项目
+受管的 integration ref**（`refs/codeestra/integration`，ADR-0070 D07 / S8，ADR-0074），**是否把它发布到你自己的分支仍由你决定**。
+Codeestra 不自动推、不做提升记账，因此「谁的成果已经进去了」只以 merge queue item 与 Task integration 投影记录到
+integration ref 为止，没有「已到 main/release」这类事实需要维护。
 
 因此下面这些概念**不再存在**，历史记录里读到它们时按 ADR-0066 理解：`IntegrationBatch` 的十个状态、
 批级 `STALE`/`CANCELLED`、`INTEGRATED`/`MERGED`/`PREPARED` 成员状态、`dev` 基线、`DEV_REPO_*` /
@@ -251,11 +253,13 @@ Runtime 数据目录（不进 Git，机器生成）
 
 两种基线（**ADR-0060**：main/dev 双分支模型**只属于 Codeestra 自身**，被管理的其它项目不被要求这么搭）：
 
-- **只有一种模型**（ADR-0066）：Task 从**项目文件夹建 workspace 时当前检出的分支**建基线（读 HEAD，
-  把 ref 与 commit 一起固定进 `workspaces.base_ref`/`base_commit`）；成果留在 `refs/heads/task/<task-id>`，
-  **由你自己合**。`task submit` / `task run` / `task depends list` / `task result *` / `task verify`
-  都按这个基线与归属（项目文件夹本身）工作。文件夹处于 detached HEAD 时以 `TASK_BASE_REF_UNRESOLVED` 拒绝
-  （没有分支可名）；`task run --base-ref <refs/heads/…>` 可以显式指定一条本地分支作基线（只对新 workspace 生效）。
+- **只有一种模型**（ADR-0074 取代 ADR-0066 的基线规则）：Task 从**项目受管 integration ref**（`refs/codeestra/integration`）
+  的当时 commit 建基线，把 ref 与 commit 一起固定进 `workspaces.base_ref`/`base_commit`。该 ref 由 `project trust` 从项目
+  文件夹当时检出的分支创建（老项目首次需要时同样补建），此后它只由 `project integration run` 的 CAS 推进，所以你切换自己的
+  分支不再影响新 Task 的基线。成果先留在 `refs/heads/task/<task-id>`，合进 integration ref 由集成命令完成，
+  **发布到你自己的分支仍由你决定**。`task submit` / `task run` / `task depends list` / `task result *` / `task verify`
+  都按这个基线与归属（项目文件夹本身）工作。ref 与文件夹分支都不可得（detached HEAD 且 ref 缺失）时以
+  `TASK_BASE_REF_UNRESOLVED` 拒绝；`task run --base-ref <refs/heads/…>` 仍可显式指定一条本地分支作基线（只对新 workspace 生效）。
 - **Codeestra 自身**仍以 `main`/`dev` 两个 clone 开发并把 `dev` 提升到 `main`，但那是仓库约定
   （`AGENTS.md`），产品不建模它。
 - owned worktree 位于 Runtime 数据目录 `worktrees/<project-id>/<task-id>/`，**不污染你的主工作区**。
@@ -274,8 +278,9 @@ Runtime 数据目录（不进 Git，机器生成）
   （历史的 assessment 行与客户端仍要能渲染），但日常不可达；`clear-unknown` 对 `CONFLICTING` 继续拒绝
   （`recorded:false`）。
 
-启动前门禁不再兜底残余风险：两个都没声明功能的 Task 可以并发改同一个文件，冲突要到**你自己合并时**
-才暴露（ADR-0059 D02 明确选择的权衡；ADR-0066 之前它在集成批次阶段以 `CONFLICTED` 暴露）。
+启动前门禁不再兜底残余风险：两个都没声明功能的 Task 可以并发改同一个文件，冲突要到**集成时**才暴露——
+`project integration run` 会把它记为 `CONFLICTED`、保留冲突现场并阻塞该项目队列，等 `retry` 或 `cancel`
+（ADR-0059 D02 明确选择的权衡）。
 
 > 需要看「引擎看到的每一条事实」时：`project impact validate/show/explain` 与 `task schedule explain`
 > 仍然完整报告映射、快照、基线与占用者（含 `occupiers[].code`）；只是这些事实不再改变判定。

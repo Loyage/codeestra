@@ -3,11 +3,11 @@ import { mkdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   GitInspectionError,
-  inspectBaseRef,
   readHeadCommitOrNull,
   inspectRepository,
   inspectOwnedWorktreeRebuild,
   prepareWorkspace,
+  readRefCommit,
   rebuildOwnedWorktree,
 } from '@codeestra/git';
 import {
@@ -179,11 +179,23 @@ export async function prepareTaskWorkspace(input: {
   let repository;
   let baseCommit;
   try {
-    // The Task is based on the project folder and the branch checked out there right now
-    // (ADR-0062). The ref and the commit are fixed here, so a later checkout cannot move them.
-    const inspected = await inspectBaseRef(baseline.repositoryRoot, baseline.baseRef);
-    repository = inspected.repository;
-    baseCommit = inspected.commit;
+    // ADR-0070 D07 / S8 (ADR-0074): a new Task is based on the Project Service's managed
+    // integration ref, or on an explicit local-branch override. The ref *and* the commit are fixed
+    // here, so a later move of either cannot change this Task's baseline.
+    repository = await inspectRepository(baseline.repositoryRoot);
+    const commit = await readRefCommit({
+      repositoryRoot: repository.repoRoot, ref: baseline.baseRef,
+    });
+    if (commit === null) {
+      throw new GitInspectionError('MISSING_BASE_REF',
+        `The Task baseline ref ${baseline.baseRef} no longer exists`);
+    }
+    if (commit !== baseline.baseCommit) {
+      throw new GitInspectionError('STALE_BASE',
+        `${baseline.baseRef} moved from ${baseline.baseCommit} to ${commit} after the baseline was`
+        + ' resolved; the Task was not prepared against a moving baseline');
+    }
+    baseCommit = commit;
   } catch (error) {
     if (error instanceof GitInspectionError) {
       throw new WorkspaceServiceError(error.code, error.message);

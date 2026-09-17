@@ -156,11 +156,12 @@ describe('dependency scheduler', () => {
       "SELECT COUNT(*) AS count FROM executions WHERE task_id='downstream'",
     ).get()?.count).toBe(0);
 
-    // The upstream result reaches the shared branch: the project folder is fast-forwarded onto the
-    // commit, which is what a person merging the Task branch would do.
+    // The upstream result reaches the shared baseline: the managed integration ref is advanced onto
+    // the commit, which is what the Project Service does after a verified merge (ADR-0074) and what
+    // this test does directly because it is exercising the dependency projection, not the queue.
     const baseBefore = await git(fixture.repo, ['rev-parse', 'HEAD']);
     const integrated = await commitTree(fixture.repo, baseBefore, 'upstream result');
-    await git(fixture.repo, ['merge', '--ff-only', '-q', integrated]);
+    await git(fixture.repo, ['update-ref', 'refs/codeestra/integration', integrated]);
     recordResultCommitFact(storage, { projectId, taskId: upstreamTaskId,
       revisionId: upstreamRevisionId, executionId: 'execution-upstream',
       resultCommit: integrated });
@@ -194,19 +195,20 @@ describe('dependency scheduler', () => {
     const baseStart = await git(fixture.repo, ['rev-parse', 'HEAD']);
     const integrated = await commitTree(fixture.repo, baseStart, 'upstream result');
     const advanced = await commitTree(fixture.repo, integrated, 'later work');
-    await git(fixture.repo, ['merge', '--ff-only', '-q', advanced]);
+    await git(fixture.repo, ['update-ref', 'refs/codeestra/integration', advanced]);
     recordResultCommitFact(storage, { projectId, taskId: upstreamTaskId,
       revisionId: upstreamRevisionId, executionId: 'execution-upstream',
       resultCommit: integrated });
+    // ADR-0070 D07 / S8: the baseline the edge is judged against is the managed integration ref.
     // A strict ancestor counts: `isAncestor` is what makes an advanced baseline satisfy the edge.
     expect((await reconcileTaskDependencyState({
       storage, projectId, taskId: 'downstream', commandId: 'reconcile-1', actor: 'local-user',
     })).state).toBe('READY');
 
-    // The branch is rewritten from the same starting point, so the upstream commit is no longer
-    // reachable. The scratch fixture repository is moved onto the rewritten commit outright.
+    // The integration ref is rewritten from the same starting point, so the upstream commit is no
+    // longer reachable from it. The scratch fixture repository is moved onto the rewritten commit.
     const divergent = await commitTree(fixture.repo, baseStart, 'rewritten branch');
-    await git(fixture.repo, ['reset', '--hard', '-q', divergent]);
+    await git(fixture.repo, ['update-ref', 'refs/codeestra/integration', divergent]);
     const reblocked = await reconcileTaskDependencyState({
       storage, projectId, taskId: 'downstream', commandId: 'reconcile-2', actor: 'local-user',
     });
@@ -230,10 +232,10 @@ describe('dependency scheduler', () => {
     expect(storage.getTask(projectId, 'middle')?.state).toBe('BLOCKED');
     expect(storage.getTask(projectId, 'leaf')?.state).toBe('BLOCKED');
 
-    // The upstream result becomes reachable from the project's checked out branch.
+    // The upstream result becomes reachable from the managed integration ref (ADR-0074).
     const baseStart = await git(fixture.repo, ['rev-parse', 'HEAD']);
     const integrated = await commitTree(fixture.repo, baseStart, 'upstream result');
-    await git(fixture.repo, ['merge', '--ff-only', '-q', integrated]);
+    await git(fixture.repo, ['update-ref', 'refs/codeestra/integration', integrated]);
     recordResultCommitFact(storage, { projectId, taskId: upstreamTaskId,
       revisionId: upstreamRevisionId, executionId: 'execution-upstream',
       resultCommit: integrated });
@@ -252,7 +254,7 @@ describe('dependency scheduler', () => {
     // Once `middle`'s own result commit is reachable too, the chain unblocks end to end.
     const middleStart = await git(fixture.repo, ['rev-parse', 'HEAD']);
     const middleResult = await commitTree(fixture.repo, middleStart, 'middle result');
-    await git(fixture.repo, ['merge', '--ff-only', '-q', middleResult]);
+    await git(fixture.repo, ['update-ref', 'refs/codeestra/integration', middleResult]);
     recordResultCommitFact(storage, { projectId, taskId: 'middle', revisionId: 'middle-revision',
       executionId: 'execution-middle', resultCommit: middleResult });
     await reconcileTaskDependencyState({
@@ -271,8 +273,8 @@ describe('dependency scheduler', () => {
     await addDependency(storage, fixture, 'leaf', 'middle', 'dep-add-2');
 
     const view = await inspectTaskDependencies({ storage, projectId, taskId: 'leaf' });
-    // ADR-0064: the one baseline is the project folder's checked out branch.
-    expect(view.baseRef).toBe('refs/heads/main');
+    // ADR-0070 D07 / S8: the one baseline is the Project Service's managed integration ref.
+    expect(view.baseRef).toBe('refs/codeestra/integration');
     expect(view.baseCommit).not.toBeNull();
     expect(view.edges).toHaveLength(1);
     expect(view.edges[0]).toMatchObject({ prerequisiteTaskId: 'middle', satisfied: false,
@@ -329,7 +331,10 @@ describe('dependency scheduler', () => {
     recordResultCommitFact(storage, { projectId, taskId: upstreamTaskId,
       revisionId: upstreamRevisionId, executionId: 'execution-upstream',
       resultCommit: 'd'.repeat(40) });
-    // Detaching HEAD removes the only baseline that could make the fact readable as a baseline.
+    // A baseline that cannot be established at all: the managed ref is gone and the folder has no
+    // branch left to materialize it from, which is the state ADR-0024 requires be read as "not
+    // satisfied" rather than as "satisfied".
+    await git(fixture.repo, ['update-ref', '-d', 'refs/codeestra/integration']);
     await git(fixture.repo, ['checkout', '--detach', '-q']);
     const view = await inspectTaskDependencies({ storage, projectId, taskId: 'downstream' });
     expect(view.baseCommit).toBeNull();

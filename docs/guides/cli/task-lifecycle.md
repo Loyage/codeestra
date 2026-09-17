@@ -11,6 +11,7 @@
 > 只读可见性说明（`service get <task-id>` / `service tree` 与 `task status` 读同一行）；无新命令、无新 flag、
 > 无退出码变化，`task create` 回答的形状与 ADR-0065 那一版相同。
 > **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
+> **本次修订（ADR-0074 / schema v38）**：Task 基线改为项目受管的 integration ref；成果经 `project integration request|run` 进入该 ref，**发布到你的分支仍没有命令**。命令面见 [cli/managed-integration.md](cli/managed-integration.md)。
 > 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
 > 本文件覆盖 §4；章节号沿用拆分前的编号，因此可能不连续。正文里提到本文件没有的号（例如 §14、§17）时，到 [README.md](./README.md) 的索引表查它在哪一篇。
 > §3 的 `project impact *` 与 §4 的 `task submit`/`task resume`/`--feature` 由 FOUNDATION-091 新增/改写（ADR-0059）；
@@ -83,7 +84,7 @@ ADR-0059 之后**未声明功能的 Task 会在容量允许时就在这个命令
 
 显式启动请求，走与自动调度**同一个门禁**。`--adapter` 默认 `pi`。
 
-`--base-ref <refs/heads/…>` 显式指定**新 workspace** 的基线（ADR-0066）：项目文件夹里的一个**本地分支**名。省略时用项目文件夹**建 workspace 时当前检出的分支**；`HEAD` detached 则以 `TASK_BASE_REF_UNRESOLVED` 拒绝。**已有 workspace 的 Task 保持已记录的基线**，此时给这个 flag 会被拒为 `TASK_BASE_REF_ALREADY_FIXED`（不是静默忽略）；自动调度从不选基线。
+`--base-ref <refs/heads/…|refs/codeestra/integration>` 显式指定**新 workspace** 的基线（ADR-0074）：项目文件夹里的一个**本地分支**名，或项目受管的 integration ref。省略时用 integration ref 当时的 commit（由 `project trust` 物化，老项目首次需要时补建）；ref 与文件夹分支都不可得则以 `TASK_BASE_REF_UNRESOLVED` 拒绝。**已有 workspace 的 Task 保持已记录的基线**，此时给这个 flag 会被拒为 `TASK_BASE_REF_ALREADY_FIXED`（不是静默忽略）；自动调度从不选基线。
 
 **换 `--adapter` 是新建 Execution，不是在同一个 Execution 里换 Agent。**
 
@@ -96,7 +97,7 @@ ADR-0059 之后当前规则**不再产生 `UNKNOWN`**，所以这条路日常不
 | `3` | `outcome: WAIT`——冲突等待或容量等待；stderr 打印 `[scheduler] CONFLICT|CAPACITY wait: <code> — <detail>` |
 | `1` | `outcome: REFUSED`——依赖未满足、状态不可启动、revision 过期等 |
 
-所有项目都按同一个模型工作（ADR-0066 之后没有第二种）：基线是项目文件夹当前检出的分支，归属是项目文件夹本身。
+所有项目都按同一个模型工作（ADR-0066 之后没有第二种，ADR-0074 只更换了那一份基线）：基线是项目受管的 integration ref，归属是项目文件夹本身。
 submit/run/depends 判定/result commit/verify 都照常，**不会**有「缺少长期 `dev` 分支」的拒绝——那个概念已不存在。
 
 相关稳定码：`TASK_NOT_STARTABLE`、`TASK_ARCHIVED`、`CONFLICT_WAIT`、`CAPACITY_WAIT`、

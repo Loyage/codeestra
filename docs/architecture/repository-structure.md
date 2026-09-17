@@ -49,7 +49,7 @@ packages/agent-adapters/ # deterministic fake、PiRpcAdapter、CodexAdapter、Cl
 
 **已实现并接入 Runtime**：workspace prepare/reconcile、Agent start 与 observation、typed answer 与持久投递、真实 Pi/Codex/Claude adapter、成果 commit（FULL 单步 / STRICT prepare+confirm）、任务级验证与隔离副本、事件长连接订阅（`events.list` / `events.subscribe`）、自动调度（事件驱动 + 周期恢复 pass）、槽位预留与 reconcile、Runtime 全局容量与全局暂停/恢复屏障、Task 暂停/取消/归档/重试/恢复/purge、revision 投递、Session guidance、终端接管与 PTY、知识快照与绑定、项目知识/影响/验证策略读取、Service kernel 与 Signal dispatcher。
 
-**仍未实现或未验收**：原生 Agent-supervising Process 控制面（S5）、intention/Attention 路由（S6）、Project/Task Service 单一写路径（S7）、受管 integration / merge queue（S8）、eligibility 解耦（S9）；Self Evolution 与 bootstrap；真实 provider 的并发运行与取消超时、跨交接权限矩阵、Windows。Drizzle 映射与完整 repository 层尚未实现（当前是手写 SQL + Zod 边界校验）。
+**仍未实现或未验收**：原生 Agent-supervising Process 控制面（S5）、intention/Attention 路由（S6）、Project/Task Service 单一写路径的其余写路径（S7）、Integration Process/Agent 与 integration ref 发布出口（S8 的其余内容）、eligibility 解耦（S9）；Self Evolution 与 bootstrap；真实 provider 的并发运行与取消超时、跨交接权限矩阵、Windows。Drizzle 映射与完整 repository 层尚未实现（当前是手写 SQL + Zod 边界校验）。
 
 **没有的入口**：HTTP/SSE 与本地 Web UI 入口（ADR-0067，源码保留但 Runtime 不实例化 `RuntimeHttpApi`）；桌面客户端尚未创建。
 

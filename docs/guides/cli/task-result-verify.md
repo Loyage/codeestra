@@ -5,6 +5,7 @@
 > [docs/tasks/README.md](../../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一（ADR-0066 之后为八篇），
 > **内容自 `cli-reference.md @ dev@de03448` 搬移，一句未改写；本次未重新核对源码**，最后校对日期因此不变。
+> **本次修订（ADR-0074 / schema v38）**：Task 基线改为项目受管的 integration ref（`refs/codeestra/integration`）；Task verification 通过后由 `project integration request` / `run` 合进该 ref，**发布到你的分支仍没有命令**；命令面见 [managed-integration.md](./managed-integration.md)。
 > 本文件覆盖 §8–§10；章节号沿用拆分前的编号，因此可能不连续。正文里提到本文件没有的号（例如 §14、§17）时，到 [README.md](./README.md) 的索引表查它在哪一篇。
 
 ## 8. `task result`（成果 commit）

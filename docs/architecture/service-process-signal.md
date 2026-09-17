@@ -4,7 +4,7 @@
 
 状态：S1–S4 已实现（纯领域 contract、additive storage、持久 Signal dispatcher 与 registry、`service/process/signal/intent` CLI 与兼容 facade），S5–S7 各完成一个最小纵向切片（Process 完成写路径与只读进度、intention 结构化路由、Project/Task 创建写路径，ADR-0071/0072/0073）；**其余仍待完成**。本文区分「目标语义」与「当前实现边界」，不把后续能力写成已交付。
 
-状态：**S1–S4 已实现；S5–S7 部分实现（见上方与 §4.1/§5.1/§6.3/§8.1）；S8–S10 待完成**。决策依据为 [ADR-0070](../decisions/0070-service-process-signal-kernel.md)。当前产品为 schema v37：领域内核、持久 Service/Process/Signal、dispatcher/registry 与 CLI 已可用；Project/Task/Execution 仍由既有表提供 core 权威（Task/Project 创建已收敛到 Service 写路径），**未完成**的是原生 Process Agent 控制、真实模型意图解释、Attention 全局索引对 kernel 级 Intention 的接通、受管 integration 与 eligibility 解耦。当前命令见 [`docs/guides/cli/kernel.md`](../guides/cli/kernel.md)。
+状态：**S1–S4 已实现；S5–S8 各已交付一个纵向切片（见 §4.1/§5.1/§6.2/§6.3/§8.1）；S9–S10 待完成**。决策依据为 [ADR-0070](../decisions/0070-service-process-signal-kernel.md) 与 [ADR-0074](../decisions/0074-managed-integration-ref-and-merge-queue.md)。当前产品为 **schema v38**：领域内核、持久 Service/Process/Signal、dispatcher/registry、CLI 与**受管 integration ref + 持久 merge queue + 独立 Integration Verification** 已可用；Project/Task/Execution 仍由既有表提供 core 权威（Task/Project 创建已收敛到 Service 写路径），**未完成**的是原生 Process Agent 控制、真实模型意图解释、Attention 全局索引对 kernel 级 Intention 的接通、Integration Process/Agent、integration ref 的发布出口与 eligibility 解耦。当前命令见 [`docs/guides/cli/kernel.md`](../guides/cli/kernel.md) 与 [`docs/guides/cli/managed-integration.md`](../guides/cli/managed-integration.md)。
 
 ## 1. 为什么需要这层内核
 
@@ -156,7 +156,7 @@ SIG_P → Service creates Process → Process starts Agent
   `toolCallCount` 在 v37 没有对应列，**恒为 `null`（UNAVAILABLE）**，不由 session、消息数或时钟推算。
 - **原生 Process 仍需 Execution 才能被控制**：`process input|pause|resume|terminate` 对没有 Execution 的
   Process 继续以 `PROCESS_CONTROL_UNAVAILABLE` 拒绝；原生 Process 的控制 API 仍属后续波次。
-- S5 **不**启动 Agent runner、不新增 CLI 命令、不改 schema（仍是 v37）。
+- S5 **不**启动 Agent runner、不新增 CLI 命令、不改 schema（仍是 v37；S8 才引入 v38）。
 
 ## 5. Signal：可靠路由信封
 
@@ -248,6 +248,30 @@ PENDING → CLAIMED → ACKED
 
 同一项目串行，项目之间可并行。冲突或失败保留 integration workspace，不阻塞 Project Service 接收其它查询和 intention。
 
+**S8 当前实现边界（ADR-0074，schema v38）**：上面第 3–7 步中，**确定性的部分已实现，Agent 的部分没有**。
+
+- ref 与 worktree：`refs/codeestra/integration`（私有命名空间，`git branch` 列不出、默认 push 带不走、checkout 不可能停在它上面）
+  与 `<CODEESTRA_HOME>/integration/<project-id>/`（detached）。`project trust` 物化该 ref，缺失时首次需要补建。
+- 第 1 步是 `handleMergeRequested` / `project.integration.request` 的前置检查：当前 revision、该 revision 捕获的 result commit、
+  以及对该 `(revision, commit)` **PASSED** 的 Task verification run；缺一以具名稳定码拒绝，不入队。
+- 第 2 步：`merge_queue_items` 持久入队，`(project, idempotencyKey)` 与 `(task, revision)` 双幂等，
+  `MERGING`/`VERIFYING` 上的部分唯一索引让「同一项目一次只有一个活动集成」成为数据库事实。
+- **第 3 步不创建 Integration Process**：本轮只做确定性合并（ADR-0074 D05 A）。`run` 直接把 expected OID 读出来并记在 item 上。
+- **第 4 步没有 Agent、也没有 Project Git API**：`packages/git/src/managed-integration.ts` 的 `mergeCandidateIntoIntegration`
+  在 owned detached worktree 里跑 `git merge --no-ff`；命名的「受控 Git API」按 `ServiceWriteStore` 的先例落在
+  `apps/runtime/src/managed-integration-service.ts`。
+- 第 5 步：`integration_runs` 记独立证据（候选 commit + policy digest + expected OID + 每命令的 exit/duration/字节数），
+  命令在**候选 commit 的独立副本**上跑，与 Task 验证不是同一份证据。
+- 第 6 步：`git update-ref refs/codeestra/integration <new> <expected>`——这就是 CAS；ref 被外部移动时不 force，item 落
+  `FAILED/INTEGRATION_REF_MOVED`。
+- 第 7 步：item `MERGED` + Task integration 投影 `MERGED` 在同一事务里写，然后给 Task Service 发 `TASK_MERGE_SETTLED`
+  （handler 核对投影版本，不一致以 `SIGNAL_EFFECT_CONFLICT` 拒绝）。**「唤醒下一项」不是自动的**：下一条保持 `QUEUED`，
+  由显式的 `project integration run` 或脚本继续。
+- 冲突 → `CONFLICTED`（保留冲突中的 worktree、阻塞该项目队列、`retry` 复位后重排）；验证失败 → `FAILED`（保留候选 ref 与副本）；
+  重启 → `RECOVERY_REQUIRED`（不自动重跑）。**不新建 Attention 行**：v38 的 `attention_requests.session_id` 是指向 Agent
+  会话的非空外键，与 §8.1 记录的内核级 Intention 澄清是同一边界。
+- **不发布**：没有任何命令把该 ref 推到用户 main/release；也不恢复旧 `promotion *`。
+
 ### 6.3 Task Service
 
 持有用户可见任务事实。建议继续把状态拆为多个正交维度：
@@ -262,8 +286,9 @@ UI/CLI 可以把组合投影成“等待开始、执行中、等待指示、等�
 `parent_service_id` 是该项目的 Project Service；`task create` 是唯一创建入口
 （`apps/runtime/src/task-service.ts` → `Phase1Database.createTask` → `packages/storage/src/service-write-store.ts`），
 所以 `service get <task-id>` 与 `task status <project> <task-id>` 是同一行的两次读取，lifecycle 与 version 不可能分叉。
-上面三个正交维度仍是**目标**：今天 `service get` 只投影 `tasks.state`（lifecycle）与 `tasks.version`，
-verification 与 integration 两个维度还没有进入 core state。本轮只切了**创建**写路径：
+上面三个正交维度仍是**目标**：`service get` 只投影 `tasks.state`（lifecycle）与 `tasks.version`，verification 没有进入 core state；
+**integration 维度已由 S8 落下**（`task_integration` 投影 + `task integration show`，ADR-0074），但它是从队列 item 派生的独立表，
+不是 `tasks` 上的字段，也不与 lifecycle 压成一个枚举。写路径方面只有**创建**（S7）与**集成**（S8）切到 Service；
 `task submit` / revision / 验证 / 取消 / 归档仍走既有表与既有路径。
 
 ## 7. Scheduler 边界
@@ -337,7 +362,7 @@ codeestra intent send --task T "不要新增依赖，沿用现有 helper"
   （payload 是 `strictObject`，不能再加字段）；对不上就以 `INTENTION_CLARIFICATION_MISMATCH` 拒绝。
 
 **Attention 全局索引对 kernel 级 Intention 尚未接通**：本轮**没有**为澄清建立 `attention_requests` 行。原因是
-schema v37 的 `attention_requests.session_id` 是 `NOT NULL REFERENCES agent_sessions(id)`，而 `agent_sessions.execution_id`
+schema v37/v38 的 `attention_requests.session_id` 是 `NOT NULL REFERENCES agent_sessions(id)`，而 `agent_sessions.execution_id`
 又是 `NOT NULL REFERENCES executions(id)`——一个由 `intent send` 建出的 native `INTENTION` Process 根本没有 provider
 会话，所以“无会话的 Attention”在 v37 下不可表达。接通它需要一次新的 migration（v38 号已预留给 S8 managed
 integration），属未决项，本轮不做、也不得写成已实现。因此澄清是 kernel 事实：`process get` 读到 `WAITING_FOR_USER`、

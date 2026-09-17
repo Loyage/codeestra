@@ -310,11 +310,14 @@ describe('codeestra task depends', () => {
     const resultCommit = (JSON.parse(captured.stdout) as { readonly resultCommit: string }).resultCommit;
     expect((await cli(['task', 'verify', projectId, upstream], environment)).exitCode).toBe(0);
 
-    // ADR-0064: there is no integration command any more. Merging the upstream result into the
-    // project's checked out branch is the user's own step, and it is the only thing that can satisfy
-    // the edge.
-    await git(repository, ['merge', '--ff-only', '-q', resultCommit]);
-    expect(await git(repository, ['rev-parse', 'HEAD'])).toBe(resultCommit);
+    // ADR-0070 D07 / S8 (ADR-0074): the edge is satisfied by the upstream result becoming reachable
+    // from the Project Service's managed integration ref — the fact `project integration run`
+    // produces after a verified merge. There is still no `task integrate`; the ref is advanced here
+    // directly because this test is about the dependency verdict, not the merge queue.
+    await git(repository, ['update-ref', 'refs/codeestra/integration', resultCommit]);
+    expect(await git(repository, ['rev-parse', 'refs/codeestra/integration'])).toBe(resultCommit);
+    // The user's own checkout is untouched by that.
+    expect(await git(repository, ['symbolic-ref', '-q', 'HEAD'])).toBe('refs/heads/main');
 
     // A scheduling pass re-evaluates BLOCKED Tasks. With the upstream result now reachable the
     // downstream is READY, and — being SAFE under ADR-0059 — it starts immediately.

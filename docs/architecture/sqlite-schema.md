@@ -1,8 +1,8 @@
 # SQLite Schema（索引与工程规则）
 
-> 层级：L1 索引 · 体量 ≈ 8k 字符（含版本台账） · **何时读**：改 schema、判断某张表归属哪一层、实施 migration 之前 · **权威来源**：`packages/storage/src/migration.ts`（DDL 与版本号）与 `packages/storage/src/database.ts`（`migrate()` 顺序与防护）。本文各域 DDL 由当前 v37 库的 `sqlite_master` 直接导出，不是历史草案。
+> 层级：L1 索引 · 体量 ≈ 8k 字符（含版本台账） · **何时读**：改 schema、判断某张表归属哪一层、实施 migration 之前 · **权威来源**：`packages/storage/src/migration.ts`（DDL 与版本号）与 `packages/storage/src/database.ts`（`migrate()` 顺序与防护）。本文各域 DDL 由当前 v38 库的 `sqlite_master` 直接导出，不是历史草案；受管 integration 的四张表见 [`sqlite-schema-integration.md`](./sqlite-schema-integration.md)。
 
-状态：`phase1SchemaVersion = 37`。v1–v37 的实际 migration 见 `packages/storage/src/migration.ts`；**v16 永久未使用、v22 未占用**。逐版本的 DDL 叙述与验收记录已从文档移除（本文档只保留当前形态与工程规则），需要历史时用 `git log docs/architecture/sqlite-schema.md` 与各版本对应的 ADR。
+状态：`phase1SchemaVersion = 38`。v1–v38 的实际 migration 见 `packages/storage/src/migration.ts`；**v16 永久未使用、v22 未占用**。逐版本的 DDL 叙述与验收记录已从文档移除（本文档只保留当前形态与工程规则），需要历史时用 `git log docs/architecture/sqlite-schema.md` 与各版本对应的 ADR。
 
 ## 0. 按需读哪一篇
 
@@ -83,7 +83,7 @@
 | 36 | 删除 dev clone / 双基线 / 集成 / 提升 | 回填 `workspaces.base_ref`、重建 `projects`、DROP 集成与提升各表（ADR-0066） | 现行（不可逆） |
 | 37 | Service Kernel additive storage | `services`、`service_metadata`、`processes`、`process_execution_links`、`signals`、`signal_attempts`、`signal_receipts`（ADR-0070 S2） | 现行 |
 
-后续版本号留给 ADR-0070 的受管 integration（S8）与 Self Evolution，且只有真正实现后才写进上表。**v36 的删除是不可逆的**：集成批次、集成验证与提升记录已不存在，Task/revision/execution/任务级验证/workspace/回收账本不受影响。
+**v38 已由 ADR-0074 / FOUNDATION-100 占用**（受管 integration：`project_integration`、`merge_queue_items`、`integration_runs`、`task_integration`，纯 additive）。后续版本号留给 Self Evolution 与 S9/S10，且只有真正实现后才写进上表。**v36 的删除是不可逆的**：集成批次、集成验证与提升记录已不存在，Task/revision/execution/任务级验证/workspace/回收账本不受影响。
 
 ## 4. 旧章节号对照（历史引用仍可解析）
 
