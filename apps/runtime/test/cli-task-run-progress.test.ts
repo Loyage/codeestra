@@ -160,20 +160,18 @@ async function fixture(verificationCommands: readonly unknown[]): Promise<{
 
 async function status(
   environment: Record<string, string>,
-  projectId: string,
   taskId: string,
 ): Promise<TaskStatusPayload> {
-  const listed = await cli(['task', 'status', projectId, taskId], environment);
+  const listed = await cli(['task', 'status', taskId], environment);
   expect(listed.exitCode).toBe(0);
   return JSON.parse(listed.stdout) as TaskStatusPayload;
 }
 
 async function operations(
   environment: Record<string, string>,
-  projectId: string,
   taskId: string,
 ): Promise<readonly OperationPayload[]> {
-  const listed = await cli(['task', 'operation', 'list', projectId, taskId, '--json'], environment);
+  const listed = await cli(['task', 'operation', 'list', taskId, '--json'], environment);
   expect(listed.exitCode).toBe(0);
   return JSON.parse(listed.stdout) as readonly OperationPayload[];
 }
@@ -203,12 +201,12 @@ async function executedTask(fixtureValue: {
     startable: true,
   });
   const taskId = ready.taskId;
-  const ran = await cli(['task', 'run', projectId, taskId, String(ready.expectedVersion)],
+  const ran = await cli(['task', 'run', taskId, String(ready.expectedVersion)],
     environment);
   expect(ran.exitCode).toBe(0);
-  await waitFor(async () => (await status(environment, projectId, taskId))
+  await waitFor(async () => (await status(environment, taskId))
     .executions[0]?.session?.state === 'EXITED', 'the Agent Session to exit');
-  const captured = await cli(['task', 'result', 'capture', projectId, taskId], environment);
+  const captured = await cli(['task', 'result', 'capture', taskId], environment);
   expect(captured.exitCode).toBe(0);
   return taskId;
 }
@@ -233,10 +231,10 @@ describe('codeestra task operation progress', () => {
     try {
       // The run Operation is settled by the observation loop, so wait for that fact instead of
       // assuming it happened before the CLI returned from result capture.
-      await waitFor(async () => (await operations(environment, projectId, taskId))
+      await waitFor(async () => (await operations(environment, taskId))
         .some((operation) => operation.kind === 'RUN_TASK'
           && operation.state === 'SUCCEEDED'), 'the run Operation to settle');
-      const listed = await operations(environment, projectId, taskId);
+      const listed = await operations(environment, taskId);
       const run = listed.find((operation) => operation.kind === 'RUN_TASK');
       if (run === undefined) throw new Error('task.run did not record an Operation');
       expect(run.taskId).toBe(taskId);
@@ -252,27 +250,27 @@ describe('codeestra task operation progress', () => {
         .toEqual(run.steps.map((_step, index) => index));
       expect(new Set(stepKeys).size).toBe(stepKeys.length);
       // Progress is observable from the Task projection too, not only from this command.
-      expect((await status(environment, projectId, taskId)).operations
+      expect((await status(environment, taskId)).operations
         .some((operation) => operation.operationId === run.operationId)).toBe(true);
 
-      const detailed = await cli(['task', 'operation', 'get', projectId, run.operationId, '--json'],
+      const detailed = await cli(['task', 'operation', 'get', run.operationId, '--json'],
         environment);
       expect(detailed.exitCode).toBe(0);
       expect((JSON.parse(detailed.stdout) as OperationPayload).operationId).toBe(run.operationId);
 
       // The human view prints every step instead of a percentage it cannot know.
-      const human = await cli(['task', 'operation', 'list', projectId, taskId], environment);
+      const human = await cli(['task', 'operation', 'list', taskId], environment);
       expect(human.exitCode).toBe(0);
       expect(human.stdout).toContain('RUN_TASK');
       expect(human.stdout).toContain('AGENT_SETTLED');
 
       // Cancelling a finished Operation reports that it is already terminal, and does not kill a
       // Task that already produced a result.
-      const cancelled = await cli(['task', 'operation', 'cancel', projectId, taskId, run.operationId,
+      const cancelled = await cli(['task', 'operation', 'cancel', taskId, run.operationId,
         '--json'], environment);
       expect(cancelled.exitCode).toBe(0);
       expect(JSON.parse(cancelled.stdout)).toMatchObject({ stop: 'ALREADY_TERMINAL', state: 'SUCCEEDED' });
-      expect((await status(environment, projectId, taskId)).task.state).toBe('EXECUTED');
+      expect((await status(environment, taskId)).task.state).toBe('EXECUTED');
       expect(await git(repository, ['status', '--porcelain'])).toBe('');
       // Progress is a fact on the append-only event log, so it is readable by any client that reads
       // events — no separate progress query, and no polling response to invent.
@@ -296,7 +294,7 @@ describe('codeestra task operation progress', () => {
       }
 
       // Unknown flags are usage errors for scripts, never silently ignored.
-      const bogus = await cli(['task', 'operation', 'list', projectId, taskId, '--bogus'], environment);
+      const bogus = await cli(['task', 'operation', 'list', taskId, '--bogus'], environment);
       expect(bogus.exitCode).toBe(2);
     } finally {
       await cli(['stop'], environment);
@@ -312,7 +310,7 @@ describe('codeestra task operation progress', () => {
     const taskId = await executedTask(fixtureValue);
     const devBefore = await git(repository, ['rev-parse', 'refs/heads/dev']);
     try {
-      const started = await cli(['task', 'verify', projectId, taskId, '--background'], environment);
+      const started = await cli(['task', 'verify', taskId, '--background'], environment);
       // Exit 0 means "accepted": the Operation is recorded and running, not that it passed.
       expect(started.exitCode).toBe(0);
       expect(started.stderr).toContain('验证已在后台开始');
@@ -321,23 +319,23 @@ describe('codeestra task operation progress', () => {
       expect(handle.background).toBe(true);
       expect(handle.state).toBe('RUNNING');
 
-      await waitFor(async () => (await operations(environment, projectId, taskId))
+      await waitFor(async () => (await operations(environment, taskId))
         .some((operation) => operation.operationId === handle.operationId
           && operation.steps.some((step) => step.stepKey === 'COMMAND:slow:STARTED')),
       'the slow verification command to start');
-      const running = (await operations(environment, projectId, taskId))
+      const running = (await operations(environment, taskId))
         .find((operation) => operation.operationId === handle.operationId);
       expect(running?.state).toBe('IN_PROGRESS');
       expect(running?.steps.some((step) => step.stepKey === 'VERIFICATION_QUEUED')).toBe(true);
       expect(running?.steps.some((step) => step.stepKey === 'VERIFICATION_COPY_CREATED')).toBe(true);
 
-      const cancelled = await cli(['task', 'operation', 'cancel', projectId, taskId,
+      const cancelled = await cli(['task', 'operation', 'cancel', taskId,
         handle.operationId, '--json'], environment);
       expect(cancelled.exitCode).toBe(0);
       expect(JSON.parse(cancelled.stdout)).toMatchObject({
         stop: 'CANCELLED', kind: 'RUN_TASK_VERIFICATION', state: 'FAILED' });
 
-      const after = await status(environment, projectId, taskId);
+      const after = await status(environment, taskId);
       // ADR-0027: the cancelled run is its own state, so a reader never has to read ERROR and guess.
       const verification = after.verifications
         .find((row) => row.state === 'CANCELLED');
@@ -345,12 +343,12 @@ describe('codeestra task operation progress', () => {
       // A cancelled verification never moves `dev`, and the Task is not terminated by it.
       expect(await git(repository, ['rev-parse', 'refs/heads/dev'])).toBe(devBefore);
       expect(after.task.state).toBe('EXECUTED');
-      expect((await operations(environment, projectId, taskId))
+      expect((await operations(environment, taskId))
         .find((operation) => operation.operationId === handle.operationId)?.state).toBe('FAILED');
 
       // The same state through the read-only verification projection, and the same progress through
       // the event log: a cancelled run is cancelled everywhere, never folded back into a failure.
-      const listed = await cli(['task', 'verification', 'list', projectId, taskId], environment);
+      const listed = await cli(['task', 'verification', 'list', taskId], environment);
       expect(listed.exitCode).toBe(0);
       const listedRuns = JSON.parse(listed.stdout) as readonly { readonly state: string }[];
       expect(listedRuns.map((row) => row.state)).toEqual(['CANCELLED']);

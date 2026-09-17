@@ -765,17 +765,17 @@ describe('revision delivery through the CLI and the Runtime', () => {
         startable: true,
       });
       const taskId = ready.taskId;
-      const ran = await cli(['task', 'run', projectId, taskId, String(ready.expectedVersion)],
+      const ran = await cli(['task', 'run', taskId, String(ready.expectedVersion)],
         environment);
       expect(ran.exitCode).toBe(0);
       // The stub settles its turn (like a real provider finishing one turn) and stays alive; the
       // Session projection is what the Runtime observed, and the Execution still holds the Task.
-      await waitFor(async () => (await taskStatus(environment, projectId, taskId))
+      await waitFor(async () => (await taskStatus(environment, taskId))
         .executions[0]?.session?.state === 'EXITED', 'the stub Session to settle its turn');
 
       // A new revision while the Session is live: the Adapter reports no acknowledgement channel, so
       // the delivery is recorded and left unconfirmed instead of being claimed as delivered.
-      const revision = await cli(['task', 'revision', 'create', projectId, taskId, '2',
+      const revision = await cli(['task', 'revision', 'create', taskId, '2',
         '--specification', 'Write a different file', '--reason', 'narrow the scope'], environment);
       expect(revision.exitCode).toBe(0);
       const revisionResult = JSON.parse(revision.stdout) as {
@@ -791,7 +791,7 @@ describe('revision delivery through the CLI and the Runtime', () => {
       const deliveryId = revisionResult.delivery!.deliveryId;
 
       // The delivery is readable, with its channel, subject and outcome.
-      const listed = JSON.parse((await cli(['task', 'revision', 'delivery', 'list', projectId, taskId],
+      const listed = JSON.parse((await cli(['task', 'revision', 'delivery', 'list', taskId],
         environment)).stdout) as readonly {
         readonly id: string; readonly state: string; readonly satisfied: boolean;
         readonly revisionNumber: number;
@@ -804,26 +804,26 @@ describe('revision delivery through the CLI and the Runtime', () => {
       expect(listed[0]?.attempts[0]).toMatchObject({ channel: 'PROVIDER_CONVERSATION',
         state: 'CHANNEL_UNSUPPORTED', evidenceRef: 'capability:UNSUPPORTED' });
 
-      const revisions = JSON.parse((await cli(['task', 'revision', 'list', projectId, taskId],
+      const revisions = JSON.parse((await cli(['task', 'revision', 'list', taskId],
         environment)).stdout) as { readonly revisions: readonly { readonly number: number;
           readonly current: boolean }[]; readonly deliveries: readonly unknown[] };
       expect(revisions.revisions.map((entry) => entry.number)).toEqual([1, 2]);
       expect(revisions.revisions[1]?.current).toBe(true);
 
       // The old revision's result commit is no longer acceptable evidence for the Task.
-      const staleCapture = await cli(['task', 'result', 'capture', projectId, taskId], environment);
+      const staleCapture = await cli(['task', 'result', 'capture', taskId], environment);
       expect(staleCapture.exitCode).toBe(1);
       expect(staleCapture.stderr).toContain('STALE_REVISION');
 
       // A retry cannot confirm anything on this Adapter, and the exit code says so.
       const taskVersion = String(revisionResult.revision.taskVersion);
-      const retry = await cli(['task', 'revision', 'delivery', 'resolve', projectId, taskId,
+      const retry = await cli(['task', 'revision', 'delivery', 'resolve', taskId,
         deliveryId, taskVersion, '--action', 'retry'], environment);
       expect(retry.exitCode).toBe(1);
       expect(JSON.parse(retry.stdout)).toMatchObject({ outcome: 'UNSATISFIED' });
 
       // The explicit disposition stops the predecessor and starts a successor on the new revision.
-      const resolved = await cli(['task', 'revision', 'delivery', 'resolve', projectId, taskId,
+      const resolved = await cli(['task', 'revision', 'delivery', 'resolve', taskId,
         deliveryId, taskVersion, '--action', 'stop-and-restart'], environment);
       expect(resolved.exitCode).toBe(0);
       const resolvedPayload = JSON.parse(resolved.stdout) as {
@@ -836,14 +836,14 @@ describe('revision delivery through the CLI and the Runtime', () => {
       expect(resolvedPayload.delivery).toMatchObject({ satisfied: true,
         state: 'SUPERSEDED_BY_RESTART' });
 
-      const after = await taskStatus(environment, projectId, taskId);
+      const after = await taskStatus(environment, taskId);
       expect(after.executions).toHaveLength(2);
       const successor = after.executions
         .find((entry) => entry.executionId === resolvedPayload.successorExecutionId);
       expect(successor?.revisionId).toBe(revisionResult.revision.revisionId);
       expect(successor?.state).toBe('RUNNING');
 
-      const readBack = JSON.parse((await cli(['task', 'revision', 'delivery', 'get', projectId,
+      const readBack = JSON.parse((await cli(['task', 'revision', 'delivery', 'get',
         deliveryId], environment)).stdout) as {
         readonly satisfied: boolean; readonly stale: boolean;
       };
@@ -865,10 +865,9 @@ interface TaskStatusExecutions {
 
 async function taskStatus(
   environment: Record<string, string>,
-  projectId: string,
   taskId: string,
 ): Promise<TaskStatusExecutions> {
-  const status = await cli(['task', 'status', projectId, taskId], environment);
+  const status = await cli(['task', 'status', taskId], environment);
   expect(status.exitCode).toBe(0);
   return JSON.parse(status.stdout) as TaskStatusExecutions;
 }

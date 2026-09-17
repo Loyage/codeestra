@@ -186,7 +186,7 @@ describe('session guidance command face', () => {
     const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
       readonly { readonly id: string }[];
     const projectId = projects[0]?.id as string;
-    const created = JSON.parse((await cli(['task', 'create', projectId, 'Change the first area',
+    const created = JSON.parse((await cli(['task', 'create', '--project', projectId, 'Change the first area',
       '--title', 'Change the first area', '--name', 'change-first-area'],
       environment)).stdout) as TaskPayload;
 
@@ -204,12 +204,12 @@ describe('session guidance command face', () => {
     expect(result.guidance.attempts).toEqual([]);
 
     // A guidance message is not a revision: the Task still has exactly one revision.
-    const revisions = JSON.parse((await cli(['task', 'revision', 'list', projectId, created.id],
+    const revisions = JSON.parse((await cli(['task', 'revision', 'list', created.id],
       environment)).stdout) as { readonly revisions: readonly unknown[] };
     expect(revisions.revisions).toHaveLength(1);
 
     // Submission starts the undeclared Task and the new Execution consumes the pending guidance.
-    expect((await cli(['task', 'submit', projectId, created.id, '0'], environment)).exitCode).toBe(0);
+    expect((await cli(['task', 'submit', created.id, '0'], environment)).exitCode).toBe(0);
     // ADR-0065 D03: the workspace directory is `<displayNumber>-<namingTitle>`, and the stub provider
     // keys every file it writes on the directory name it runs in.
     const workspaceName = taskWorkspaceName({
@@ -254,13 +254,13 @@ describe('session guidance command face', () => {
     // current revision, which guidance never did.
     // The Task's version moved when the Execution was reserved, so the amend reads the current one
     // rather than assuming the version the guidance saw.
-    const status = JSON.parse((await cli(['task', 'status', projectId, created.id, '--json'],
+    const status = JSON.parse((await cli(['task', 'status', created.id, '--json'],
       environment)).stdout) as { readonly task: { readonly version: number } };
-    const amended = await cli(['task', 'revision', 'create', projectId, created.id,
+    const amended = await cli(['task', 'revision', 'create', created.id,
       String(status.task.version), '--specification', 'A changed acceptance criterion',
       '--reason', 'the user changed the requirement', '--json'], environment);
     expect(amended.exitCode).toBe(0);
-    const after = JSON.parse((await cli(['task', 'revision', 'list', projectId, created.id],
+    const after = JSON.parse((await cli(['task', 'revision', 'list', created.id],
       environment)).stdout) as { readonly revisions: readonly unknown[] };
     expect(after.revisions).toHaveLength(2);
     // ...and the guidance record is unchanged by it: the two channels are separate facts.

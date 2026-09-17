@@ -230,24 +230,24 @@ ce() { ( cd "$CLONE" && CODEESTRA_HOME="$CODEESTRA_HOME" bun run codeestra "$@" 
 
 ce scheduler capacity get --json                     # 记下 limit=2（容量是整个 Runtime 的，不带 project）
 
-ce task create "$PROJECT" "在 lane-a/out.txt 写入文本 lane-a，完成后结束。"
+ce task create --project "$PROJECT" "在 lane-a/out.txt 写入文本 lane-a，完成后结束。"
 #   → 记下 id 与 version（task create 的返回里 version=0）
-ce task create "$PROJECT" "在 lane-b/out.txt 写入文本 lane-b，完成后结束。"
+ce task create --project "$PROJECT" "在 lane-b/out.txt 写入文本 lane-b，完成后结束。"
 
-ce task submit "$PROJECT" "$TASK_A" 0                # → version 变为 1
-ce task submit "$PROJECT" "$TASK_B" 0
+ce task submit "$TASK_A" 0                # → version 变为 1
+ce task submit "$TASK_B" 0
 
 # 先证明判定是 SAFE（退出码 0），否则后面一次 3（WAIT）与「并发没成立」无法区分
 ce project impact explain "$PROJECT" "$TASK_A" --json; echo "exit=$?"
 ce project impact explain "$PROJECT" "$TASK_B" --json; echo "exit=$?"
 
 echo '--- 以下是真实模型请求 ---'
-ce task run "$PROJECT" "$TASK_A" 1 --adapter pi --json; echo "exit=$?"
-ce task run "$PROJECT" "$TASK_B" 1 --adapter pi --json; echo "exit=$?"
+ce task run "$TASK_A" 1 --adapter pi --json; echo "exit=$?"
+ce task run "$TASK_B" 1 --adapter pi --json; echo "exit=$?"
 
 ce scheduler capacity get --json
-ce task status "$PROJECT" "$TASK_A" --json
-ce task status "$PROJECT" "$TASK_B" --json
+ce task status "$TASK_A" --json
+ce task status "$TASK_B" --json
 ps -Ao pid=,command= | grep -i ' pi ' | grep -v grep     # 两个 provider 进程
 ce events list --project "$PROJECT" --since 0 --limit 500 --json
 ```
@@ -296,15 +296,15 @@ ce events list --project "$PROJECT" --since 0 --limit 500 --json
 PID=<上一步记下的 provider pid>
 ps -o pid=,command= -p "$PID"                                  # 必须还在
 
-ce task pause "$PROJECT" "$TASK" "$VERSION"; echo "exit=$?"     # 期望 stop=RELEASED
+ce task pause "$TASK" "$VERSION"; echo "exit=$?"     # 期望 stop=RELEASED
 ps -o pid=,command= -p "$PID"                                  # 期望：无输出
-ce task status "$PROJECT" "$TASK" --json
+ce task status "$TASK" --json
 
-ce task resume "$PROJECT" "$TASK" "$VERSION" --adapter pi; echo "exit=$?"
-ce task status "$PROJECT" "$TASK" --json
-ce task transcript "$PROJECT" "$TASK" --execution <successor-execution-id> --json
+ce task resume "$TASK" "$VERSION" --adapter pi; echo "exit=$?"
+ce task status "$TASK" --json
+ce task transcript "$TASK" --execution <successor-execution-id> --json
 
-ce task cancel "$PROJECT" "$TASK" "$VERSION"; echo "exit=$?"
+ce task cancel "$TASK" "$VERSION"; echo "exit=$?"
 ```
 
 **预期观察**
@@ -347,7 +347,7 @@ NEXT 第 1 条要求「超时进入 `RECOVERY_REQUIRED`」。事前必须知道�
 ps -Ao pid=,command= | grep 'apps/runtime/src/main.ts' | grep -v grep    # 找到本 home 的 Runtime pid
 kill -9 <runtime-pid>                                                    # 不可逆动作，留孤儿 provider 进程
 ce status                                                                # 重新拉起 → 启动 reconcile
-ce task status "$PROJECT" "$TASK" --json
+ce task status "$TASK" --json
 ce events list --project "$PROJECT" --since 0 --limit 500 --json
 ```
 
@@ -392,21 +392,21 @@ Agent 并拿到可核验 ACK」的通道。所以本项要验收的不是「热�
 **命令**
 
 ```sh
-ce task revision create "$PROJECT" "$TASK" "$VERSION" \
+ce task revision create "$TASK" "$VERSION" \
   --specification "修订：除 lane-a/out.txt 外，再写入 lane-a/extra.txt。" \
   --reason "acceptance A3"; echo "exit=$?"
 #   → 返回 { revision, delivery, task }；记下 delivery.id 与 task.version
 #     注意：create 会移动 Task version，后面的 resolve 必须用**新的** version：
-ce task status "$PROJECT" "$TASK" --json     # 读回 task.version → VERSION2
+ce task status "$TASK" --json     # 读回 task.version → VERSION2
 
-ce task revision delivery list "$PROJECT" "$TASK" --json
-ce task revision delivery resolve "$PROJECT" "$TASK" "$DELIVERY" "$VERSION2" --action retry --json
+ce task revision delivery list "$TASK" --json
+ce task revision delivery resolve "$TASK" "$DELIVERY" "$VERSION2" --action retry --json
 echo "retry exit=$?"                                        # 期望 1（UNSATISFIED）
-ce task revision delivery resolve "$PROJECT" "$TASK" "$DELIVERY" "$VERSION2" \
+ce task revision delivery resolve "$TASK" "$DELIVERY" "$VERSION2" \
   --action stop-and-restart --json; echo "stop-and-restart exit=$?"
-ce task revision delivery get "$PROJECT" "$DELIVERY" --json
-ce task status "$PROJECT" "$TASK" --json
-ce task transcript "$PROJECT" "$TASK" --execution <successor-execution-id> --json
+ce task revision delivery get "$DELIVERY" --json
+ce task status "$TASK" --json
+ce task transcript "$TASK" --execution <successor-execution-id> --json
 ```
 
 > 注：只有 `resolve` 一个子命令带 `--action`，它只接受两个取值：`retry` 与 `stop-and-restart`。
@@ -449,9 +449,9 @@ ce project knowledge validate "$PROJECT" --json; echo "exit=$?"        # 0 = 层
 ce project knowledge resolve "$PROJECT" "$TASK" --json                  # entryCount>0、appliesToTask
 ce project knowledge show "$PROJECT" --json                             # 记下 snapshotId 与绑定
 
-ce task create "$PROJECT" "读取系统提示中附带的知识，把其中的 token 原样写入 knowledge-out.txt，并在回答里复述一次。"
-ce task submit "$PROJECT" "$TASK" 0
-ce task run "$PROJECT" "$TASK" 1 --adapter pi --json; echo "exit=$?"
+ce task create --project "$PROJECT" "读取系统提示中附带的知识，把其中的 token 原样写入 knowledge-out.txt，并在回答里复述一次。"
+ce task submit "$TASK" 0
+ce task run "$TASK" 1 --adapter pi --json; echo "exit=$?"
 
 # 物化文件与记录的一致性（机器断言）
 ls "$CODEESTRA_HOME/knowledge/$PROJECT/$TASK/knowledge-context.md"
@@ -461,7 +461,7 @@ grep -c 'CE-M4-KNOWLEDGE-TOKEN-7f3a91c2' "$CODEESTRA_HOME/knowledge/$PROJECT/$TA
 # 结果检查
 grep -rl 'CE-M4-KNOWLEDGE-TOKEN-7f3a91c2' "$CODEESTRA_HOME/worktrees/$PROJECT/$TASK/" || echo "worktree 中没有该 token 的原始文件（符合预期）"
 cat "$CODEESTRA_HOME/worktrees/$PROJECT/$TASK/knowledge-out.txt" 2>/dev/null
-ce task transcript "$PROJECT" "$TASK" --json
+ce task transcript "$TASK" --json
 ```
 
 **预期观察**
@@ -540,19 +540,19 @@ ce settings permission get                                                # 确�
 
 # ---- 观察 1：FULL 模式 ----
 ce settings permission set full
-ce task create "$PROJECT" "调用 probe_side_effect 工具一次，然后结束。"
-ce task submit "$PROJECT" "$TASK" 0
-ce task run "$PROJECT" "$TASK" 1 --adapter pi --json; echo "exit=$?"
+ce task create --project "$PROJECT" "调用 probe_side_effect 工具一次，然后结束。"
+ce task submit "$TASK" 0
+ce task run "$TASK" 1 --adapter pi --json; echo "exit=$?"
 ce attention list "$PROJECT"          # 期望：没有针对 probe_side_effect 的 Attention
 ls "$CODEESTRA_HOME/plugin-side-effect.txt"     # 期望：存在（直接副作用）
 ls "$CODEESTRA_HOME/worktrees/$PROJECT/$TASK/probe-tool-out.txt"   # 期望：存在
 
 # ---- 观察 2：STRICT 模式 ----
 ce settings permission set strict
-ce task create "$PROJECT" "调用 probe_side_effect 工具一次，然后结束。"
-ce task submit "$PROJECT" "$TASK2" 0
-ce task run "$PROJECT" "$TASK2" 1 --adapter pi --json; echo "exit=$?"
-ce task transcript "$PROJECT" "$TASK2" --json   # 期望出现 "Codeestra rejected unknown tool: probe_side_effect"
+ce task create --project "$PROJECT" "调用 probe_side_effect 工具一次，然后结束。"
+ce task submit "$TASK2" 0
+ce task run "$TASK2" 1 --adapter pi --json; echo "exit=$?"
+ce task transcript "$TASK2" --json   # 期望出现 "Codeestra rejected unknown tool: probe_side_effect"
 ce events list --project "$PROJECT" --since 0 --limit 500 --json
 
 # ---- 还原（必须做） ----
@@ -596,16 +596,16 @@ ce settings permission set full
 
 ```sh
 ce settings prose-question-attention                     # 期望 auto
-ce task create "$PROJECT" "请不要使用任何工具。用一句普通话问我一个问题，然后结束本轮。"
-ce task submit "$PROJECT" "$TASK" 0
-ce task run "$PROJECT" "$TASK" 1 --adapter pi --json; echo "exit=$?"
+ce task create --project "$PROJECT" "请不要使用任何工具。用一句普通话问我一个问题，然后结束本轮。"
+ce task submit "$TASK" 0
+ce task run "$TASK" 1 --adapter pi --json; echo "exit=$?"
 
-ce task status "$PROJECT" "$TASK" --json                  # 注意 stderr 的 [note]/[waiting] 行
+ce task status "$TASK" --json                  # 注意 stderr 的 [note]/[waiting] 行
 ce attention list "$PROJECT"
 ce attention answer "$PROJECT" "$ATTENTION" value "随便答一句"; echo "answer exit=$?"   # 期望 1
 ce attention resolve "$PROJECT" "$ATTENTION" --answer "这是用户的回答" --json; echo "resolve exit=$?"
-ce task status "$PROJECT" "$TASK" --json
-ce task transcript "$PROJECT" "$TASK" --json              # resolve 之后不应新增条目
+ce task status "$TASK" --json
+ce task transcript "$TASK" --json              # resolve 之后不应新增条目
 ce events list --project "$PROJECT" --since 0 --limit 500 --json
 ```
 
@@ -669,7 +669,7 @@ ce session handoff attach "$PROJECT" "$SESSION" --holder cli-2 --writer; echo "s
 
 ce session handoff release "$PROJECT" "$SESSION"; echo "release exit=$?"
 ce session handoff status "$PROJECT" "$SESSION" --json      # 新 incarnation 应为 AUTOMATED_RPC
-ce task transcript "$PROJECT" "$TASK" --json                # 应包含刚键入内容产生的条目
+ce task transcript "$TASK" --json                # 应包含刚键入内容产生的条目
 ```
 
 **预期观察**

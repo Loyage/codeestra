@@ -190,14 +190,14 @@ async function executedTask(
   value: { readonly environment: Record<string, string>; readonly projectId: string },
 ): Promise<string> {
   const { environment, projectId } = value;
-  const created = JSON.parse((await cli(['task', 'create', projectId, 'Ask the user something',
+  const created = JSON.parse((await cli(['task', 'create', '--project', projectId, 'Ask the user something',
     '--title', 'Ask the user something', '--name', 'ask-the-user'],
     environment)).stdout) as { readonly id: string };
   const taskId = created.id;
   // ADR-0059 makes an undeclared Task SAFE, so submit itself starts the Session.
-  expect((await cli(['task', 'submit', projectId, taskId, '0'], environment)).exitCode).toBe(0);
+  expect((await cli(['task', 'submit', taskId, '0'], environment)).exitCode).toBe(0);
   await waitFor(async () => {
-    const status = JSON.parse((await cli(['task', 'status', projectId, taskId, '--json'],
+    const status = JSON.parse((await cli(['task', 'status', taskId, '--json'],
       environment)).stdout) as TaskStatusPayload;
     return status.executions[0]?.session?.state === 'EXITED';
   }, 'the Agent Session to exit');
@@ -210,7 +210,7 @@ describe('codeestra prose question notes', () => {
     const { environment, projectId } = value;
     const taskId = await executedTask(value);
     try {
-      const listed = await cli(['task', 'status', projectId, taskId, '--json'], environment);
+      const listed = await cli(['task', 'status', taskId, '--json'], environment);
       expect(listed.exitCode).toBe(0);
       const status = JSON.parse(listed.stdout) as TaskStatusPayload;
       const completion = status.executions[0]?.session?.completion;
@@ -258,7 +258,7 @@ describe('codeestra prose question notes', () => {
       expect(run?.result).toMatchObject({ code: 'AGENT_SETTLED' });
 
       // Unknown flags stay usage errors for scripts instead of being silently ignored.
-      expect((await cli(['task', 'status', projectId, taskId, '--bogus'], environment)).exitCode)
+      expect((await cli(['task', 'status', taskId, '--bogus'], environment)).exitCode)
         .toBe(2);
     } finally {
       await cli(['stop'], environment);
@@ -267,10 +267,10 @@ describe('codeestra prose question notes', () => {
 
   test('leaves a run that used a tool unannotated even when it ends with a question', async () => {
     const value = await fixture('TOOL_THEN_QUESTION');
-    const { environment, projectId } = value;
+    const { environment } = value;
     const taskId = await executedTask(value);
     try {
-      const listed = await cli(['task', 'status', projectId, taskId, '--json'], environment);
+      const listed = await cli(['task', 'status', taskId, '--json'], environment);
       expect(listed.exitCode).toBe(0);
       const status = JSON.parse(listed.stdout) as TaskStatusPayload;
       const completion = status.executions[0]?.session?.completion;

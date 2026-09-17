@@ -91,7 +91,7 @@ async function submittedTask(environment: Record<string, string>, projectId: str
     home: environment.CODEESTRA_HOME as string, environment, projectId,
     specification: 'Do a thing',
   });
-  const status = await cli(['task', 'status', projectId, ready.taskId], environment);
+  const status = await cli(['task', 'status', ready.taskId], environment);
   expect(status.exitCode).toBe(0);
   const payload = JSON.parse(status.stdout) as { readonly task: TaskPayload };
   expect(payload.task.state).toBe('READY');
@@ -103,16 +103,16 @@ describe('codeestra task control', () => {
     const { environment, projectId } = await trustedProject();
     try {
       const task = await submittedTask(environment, projectId);
-      const cancelled = await cli(['task', 'cancel', projectId, task.id, '1'], environment);
+      const cancelled = await cli(['task', 'cancel', task.id, '1'], environment);
       expect(cancelled.exitCode).toBe(0);
       expect(JSON.parse(cancelled.stdout)).toMatchObject({ state: 'CANCELLED', stop: 'TERMINAL' });
 
       // Cancelling again is a no-op with the current version, so a script does not have to guess
       // whether its first request landed.
-      const again = await cli(['task', 'cancel', projectId, task.id, '2'], environment);
+      const again = await cli(['task', 'cancel', task.id, '2'], environment);
       expect(again.exitCode).toBe(0);
       expect(JSON.parse(again.stdout)).toMatchObject({ state: 'CANCELLED', stop: 'TERMINAL' });
-      const status = JSON.parse((await cli(['task', 'status', projectId, task.id],
+      const status = JSON.parse((await cli(['task', 'status', task.id],
         environment)).stdout) as { readonly task: TaskPayload };
       expect(status.task.state).toBe('CANCELLED');
     } finally {
@@ -124,16 +124,16 @@ describe('codeestra task control', () => {
     const { environment, projectId } = await trustedProject();
     try {
       const task = await submittedTask(environment, projectId);
-      const archived = await cli(['task', 'archive', projectId, task.id, '1'], environment);
+      const archived = await cli(['task', 'archive', task.id, '1'], environment);
       expect(archived.exitCode).toBe(0);
       expect(JSON.parse(archived.stdout)).toMatchObject({ state: 'READY', archived: true });
 
       // The fixture also holds an unfinished peer Task (that peer is what keeps this one from being
       // started), so the assertions are about this Task's own row rather than about the list length.
-      const list = JSON.parse((await cli(['task', 'list', projectId], environment)).stdout) as
+      const list = JSON.parse((await cli(['task', 'list', '--project', projectId], environment)).stdout) as
         readonly TaskPayload[];
       expect(list.filter((entry) => entry.id === task.id)).toHaveLength(0);
-      const all = JSON.parse((await cli(['task', 'list', projectId, '--all'], environment)).stdout) as
+      const all = JSON.parse((await cli(['task', 'list', '--project', projectId, '--all'], environment)).stdout) as
         readonly TaskPayload[];
       const archivedRow = all.find((entry) => entry.id === task.id);
       expect(archivedRow?.archivedAt).not.toBeNull();
@@ -142,13 +142,13 @@ describe('codeestra task control', () => {
       expect(archivedRow?.latestExecution).toBeNull();
 
       // The archived Task is still readable by ID, and unarchive restores it.
-      const status = JSON.parse((await cli(['task', 'status', projectId, task.id],
+      const status = JSON.parse((await cli(['task', 'status', task.id],
         environment)).stdout) as { readonly task: TaskPayload };
       expect(status.task.state).toBe('READY');
-      const unarchived = await cli(['task', 'unarchive', projectId, task.id, '2'], environment);
+      const unarchived = await cli(['task', 'unarchive', task.id, '2'], environment);
       expect(unarchived.exitCode).toBe(0);
       expect(JSON.parse(unarchived.stdout)).toMatchObject({ archived: false });
-      const restored = JSON.parse((await cli(['task', 'list', projectId], environment)).stdout) as
+      const restored = JSON.parse((await cli(['task', 'list', '--project', projectId], environment)).stdout) as
         readonly TaskPayload[];
       expect(restored.filter((entry) => entry.id === task.id)).toHaveLength(1);
     } finally {
@@ -160,10 +160,10 @@ describe('codeestra task control', () => {
     const { environment, projectId } = await trustedProject();
     try {
       const task = await submittedTask(environment, projectId);
-      const stale = await cli(['task', 'archive', projectId, task.id, '0'], environment);
+      const stale = await cli(['task', 'archive', task.id, '0'], environment);
       expect(stale.exitCode).toBe(1);
       expect(stale.stderr).toContain('CONCURRENT_MODIFICATION');
-      const list = JSON.parse((await cli(['task', 'list', projectId], environment)).stdout) as
+      const list = JSON.parse((await cli(['task', 'list', '--project', projectId], environment)).stdout) as
         readonly TaskPayload[];
       expect(list.find((entry) => entry.id === task.id)?.state).toBe('READY');
     } finally {

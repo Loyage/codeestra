@@ -127,18 +127,18 @@ async function runAndVerify(input: {
   readonly projectId: string; readonly repository: string; readonly displayNumber: number;
   readonly name: string; readonly title: string; readonly environment: Record<string, string>;
 }): Promise<{ readonly taskId: string; readonly resultCommit: string }> {
-  const created = JSON.parse((await cli(['task', 'create', input.projectId, input.title,
+  const created = JSON.parse((await cli(['task', 'create', '--project', input.projectId, input.title,
     '--title', input.title, '--name', input.name], input.environment)).stdout) as
     { readonly id: string; readonly version: number };
-  const submitted = await cli(['task', 'submit', input.projectId, created.id,
+  const submitted = await cli(['task', 'submit', created.id,
     String(created.version)], input.environment);
   expect(submitted.exitCode).toBe(0);
   const workspaceName = `${input.displayNumber}-${input.name}`;
   const worktree = join(input.environment['CODEESTRA_HOME'] as string, 'worktrees', input.projectId,
     workspaceName);
   await waitFor(() => existsSync(join(worktree, `${workspaceName}.txt`)));
-  const captured = await waitForCapturedResult(input.projectId, created.id, input.environment);
-  const verified = JSON.parse((await cli(['task', 'verify', input.projectId, created.id],
+  const captured = await waitForCapturedResult(created.id, input.environment);
+  const verified = JSON.parse((await cli(['task', 'verify', created.id],
     input.environment)).stdout) as { readonly state: string };
   expect(verified.state).toBe('PASSED');
   expect(await git(input.repository, ['cat-file', '-t', captured.resultCommit])).toBe('commit');
@@ -146,11 +146,11 @@ async function runAndVerify(input: {
 }
 
 /** The captured result commit, once the Runtime has observed the provider settle. */
-async function waitForCapturedResult(projectId: string, taskId: string,
+async function waitForCapturedResult(taskId: string,
   environment: Record<string, string>): Promise<{ readonly resultCommit: string }> {
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
-    const capture = await cli(['task', 'result', 'capture', projectId, taskId], environment);
+    const capture = await cli(['task', 'result', 'capture', taskId], environment);
     if (capture.exitCode === 0) return JSON.parse(capture.stdout) as { readonly resultCommit: string };
     await Bun.sleep(250);
   }
@@ -241,7 +241,7 @@ describe('managed integration CLI', () => {
           .toBe(true);
 
         // The Task's integration projection is MERGED and carries the commit it landed at.
-        const taskView = JSON.parse((await cli(['task', 'integration', 'show', project.projectId,
+        const taskView = JSON.parse((await cli(['task', 'integration', 'show',
           first.taskId, '--json'], environment)).stdout) as { readonly state: string;
           readonly integrationOid: string };
         expect(taskView.state).toBe('MERGED');

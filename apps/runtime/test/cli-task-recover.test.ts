@@ -72,12 +72,12 @@ describe('codeestra task recover', () => {
         home: environment.CODEESTRA_HOME as string, environment, projectId,
         specification: 'Something a provider abandoned',
       });
-      const status = await cli(['task', 'status', projectId, task.taskId], environment);
+      const status = await cli(['task', 'status', task.taskId], environment);
       const version = (JSON.parse(status.stdout) as { readonly task: { readonly version: number } })
         .task.version;
 
       const refused = await cli(
-        ['task', 'recover', projectId, task.taskId, String(version)], environment);
+        ['task', 'recover', task.taskId, String(version)], environment);
       // The Task exists but never ran, so it has no Execution for the reconcile to look at: the
       // service answers NOT_FOUND for that, and TASK_NOT_IN_RECOVERY when there is one. Either way
       // the proof this test pins is that the CLI reached the Runtime at all: before the fix the same
@@ -87,7 +87,7 @@ describe('codeestra task recover', () => {
       expect(refused.stderr).not.toContain('USAGE:');
 
       // The Task really is untouched: a refusal is a value, and nothing was written.
-      const after = JSON.parse((await cli(['task', 'status', projectId, task.taskId],
+      const after = JSON.parse((await cli(['task', 'status', task.taskId],
         environment)).stdout) as { readonly task: { readonly version: number } };
       expect(after.task.version).toBe(version);
     } finally {

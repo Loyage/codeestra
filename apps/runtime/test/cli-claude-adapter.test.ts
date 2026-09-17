@@ -272,20 +272,20 @@ interface TaskStatus {
 }
 
 async function status(environment: Record<string, string>,
-  projectId: string, taskId: string): Promise<TaskStatus> {
-  const listed = await cli(['task', 'status', projectId, taskId], environment);
+  taskId: string): Promise<TaskStatus> {
+  const listed = await cli(['task', 'status', taskId], environment);
   expect(listed.exitCode).toBe(0);
   return JSON.parse(listed.stdout) as TaskStatus;
 }
 
 async function waitForSessionExit(environment: Record<string, string>,
-  projectId: string, taskId: string, timeoutMs = 30_000): Promise<TaskStatus> {
+  taskId: string, timeoutMs = 30_000): Promise<TaskStatus> {
   const deadline = Date.now() + timeoutMs;
-  let current = await status(environment, projectId, taskId);
+  let current = await status(environment, taskId);
   while (Date.now() < deadline) {
     if (current.executions.some((execution) => execution.session?.state === 'EXITED')) return current;
     await Bun.sleep(100);
-    current = await status(environment, projectId, taskId);
+    current = await status(environment, taskId);
   }
   throw new Error(`The Claude Session never exited; last status was ${JSON.stringify(current.task)}`);
 }
@@ -321,7 +321,7 @@ describe('codeestra task run --adapter claude', () => {
       // FULL would launch Claude with `bypassPermissions`; STRICT must let the provider ask.
       expect((await cli(['settings', 'permission', 'get'], environment)).stdout)
         .toContain('"mode": "STRICT"');
-      const ran = await cli(['task', 'run', projectId, taskId, String(taskVersion), '--adapter', 'claude'],
+      const ran = await cli(['task', 'run', taskId, String(taskVersion), '--adapter', 'claude'],
         environment);
       expect(ran.exitCode).toBe(0);
       expect(JSON.parse(ran.stdout)).toMatchObject({ adapterId: 'claude' });
@@ -337,7 +337,7 @@ describe('codeestra task run --adapter claude', () => {
       expect(answered.exitCode).toBe(0);
       expect(JSON.parse(answered.stdout)).toMatchObject({ status: 'DELIVERED' });
 
-      const exited = await waitForSessionExit(environment, projectId, taskId);
+      const exited = await waitForSessionExit(environment, taskId);
       // A denial is not a failed turn: the provider continues without the tool and the turn settles.
       expect(exited.executions[0]?.session?.state).toBe('EXITED');
       const report = claudeReport(claudeReportPath);
@@ -354,10 +354,10 @@ describe('codeestra task run --adapter claude', () => {
     // FULL is driven by `bypassPermissions`, so the stub's prompt never appears in this mode.
     const { environment, projectId, taskId, taskVersion, claudeReportPath } =
       await fixture({ mode: 'CANCEL' });
-    const ran = await cli(['task', 'run', projectId, taskId, String(taskVersion), '--adapter', 'claude'],
+    const ran = await cli(['task', 'run', taskId, String(taskVersion), '--adapter', 'claude'],
       environment);
     expect(ran.exitCode).toBe(0);
-    const exited = await waitForSessionExit(environment, projectId, taskId);
+    const exited = await waitForSessionExit(environment, taskId);
     expect(exited.executions[0]?.session?.state).toBe('EXITED');
     const attentions = JSON.parse((await cli(['attention', 'list', projectId], environment)).stdout) as
       readonly unknown[];
@@ -373,20 +373,20 @@ describe('codeestra task run --adapter claude', () => {
   test('replaces a failed run attempt with a new run on a different adapter', async () => {
     // The Claude executable is missing, so this attempt fails during the version probe, before any
     // Execution or worktree is reserved. The Task stays runnable and a different Agent can run it.
-    const { environment, projectId, taskId, taskVersion } = await fixture({ claudeExecutable: 'missing' });
-    const failed = await cli(['task', 'run', projectId, taskId, String(taskVersion), '--adapter', 'claude'],
+    const { environment, taskId, taskVersion } = await fixture({ claudeExecutable: 'missing' });
+    const failed = await cli(['task', 'run', taskId, String(taskVersion), '--adapter', 'claude'],
       environment);
     expect(failed.exitCode).toBe(1);
     expect(failed.stderr).toContain('PROVIDER_VERSION_UNAVAILABLE');
-    const afterFailure = await status(environment, projectId, taskId);
+    const afterFailure = await status(environment, taskId);
     expect(afterFailure.task.state).toBe('READY');
     expect(afterFailure.executions).toEqual([]);
 
-    const replaced = await cli(['task', 'run', projectId, taskId,
+    const replaced = await cli(['task', 'run', taskId,
       String(afterFailure.task.version), '--adapter', 'pi'], environment);
     expect(replaced.exitCode).toBe(0);
     expect(JSON.parse(replaced.stdout)).toMatchObject({ adapterId: 'pi' });
-    const exited = await waitForSessionExit(environment, projectId, taskId);
+    const exited = await waitForSessionExit(environment, taskId);
     expect(exited.executions).toHaveLength(1);
     expect(exited.executions[0]?.session?.state).toBe('EXITED');
     await cli(['stop'], environment);
@@ -394,7 +394,7 @@ describe('codeestra task run --adapter claude', () => {
 
   test('applies the per-adapter Agent configuration to the Claude launch, and refuses provider',
     async () => {
-      const { environment, projectId, taskId, taskVersion, claudeReportPath } =
+      const { environment, taskId, taskVersion, claudeReportPath } =
         await fixture({ mode: 'CANCEL' });
       // Claude Code has no provider launch parameter, so the scope refuses the field instead of
       // recording a provider that could never take effect.
@@ -414,9 +414,9 @@ describe('codeestra task run --adapter claude', () => {
         environment)).stdout) as { readonly effective: Readonly<Record<string, string>> };
       expect(pi.effective.model).toBeNull();
 
-      expect((await cli(['task', 'run', projectId, taskId, String(taskVersion), '--adapter', 'claude'],
+      expect((await cli(['task', 'run', taskId, String(taskVersion), '--adapter', 'claude'],
         environment)).exitCode).toBe(0);
-      await waitForSessionExit(environment, projectId, taskId);
+      await waitForSessionExit(environment, taskId);
       const report = claudeReport(claudeReportPath);
       expect(report.argv).toEqual(expect.arrayContaining([
         '--model', 'claude-opus-5[1m]', '--effort', 'high']));
@@ -424,32 +424,32 @@ describe('codeestra task run --adapter claude', () => {
     }, 120_000);
 
   test('resumes a paused Claude Task on Claude and refuses a cross-provider resume', async () => {
-    const { environment, projectId, taskId, taskVersion, claudeReportPath } =
+    const { environment, taskId, taskVersion, claudeReportPath } =
       await fixture({ mode: 'CANCEL' });
-    expect((await cli(['task', 'run', projectId, taskId, String(taskVersion), '--adapter', 'claude'],
+    expect((await cli(['task', 'run', taskId, String(taskVersion), '--adapter', 'claude'],
       environment)).exitCode).toBe(0);
-    await waitForSessionExit(environment, projectId, taskId);
+    await waitForSessionExit(environment, taskId);
 
-    const version = (await status(environment, projectId, taskId)).task.version;
-    expect((await cli(['task', 'pause', projectId, taskId, String(version)], environment)).exitCode)
+    const version = (await status(environment, taskId)).task.version;
+    expect((await cli(['task', 'pause', taskId, String(version)], environment)).exitCode)
       .toBe(0);
-    const pausedVersion = (await status(environment, projectId, taskId)).task.version;
-    const resumed = await cli(['task', 'resume', projectId, taskId, String(pausedVersion),
+    const pausedVersion = (await status(environment, taskId)).task.version;
+    const resumed = await cli(['task', 'resume', taskId, String(pausedVersion),
       '--adapter', 'claude'], environment);
     expect(resumed.exitCode).toBe(0);
     expect(JSON.parse(resumed.stdout)).toMatchObject({ state: 'RUNNING' });
-    await waitForSessionExit(environment, projectId, taskId);
+    await waitForSessionExit(environment, taskId);
     // The provider reopened the recorded conversation instead of starting a fresh one.
     const report = claudeReport(claudeReportPath);
     expect(report.argv).toContain('--resume');
     expect(report.argv).not.toContain('--session-id');
     expect(report.userMessages.at(-1)).toContain('has now resumed');
 
-    const secondPause = (await status(environment, projectId, taskId)).task.version;
-    expect((await cli(['task', 'pause', projectId, taskId, String(secondPause)],
+    const secondPause = (await status(environment, taskId)).task.version;
+    expect((await cli(['task', 'pause', taskId, String(secondPause)],
       environment)).exitCode).toBe(0);
-    const beforeRefusal = (await status(environment, projectId, taskId)).task.version;
-    const refused = await cli(['task', 'resume', projectId, taskId, String(beforeRefusal),
+    const beforeRefusal = (await status(environment, taskId)).task.version;
+    const refused = await cli(['task', 'resume', taskId, String(beforeRefusal),
       '--adapter', 'pi'], environment);
     // A Claude conversation cannot be handed to the Pi adapter, and the Runtime says so instead of
     // silently starting a conversation the Task never had.

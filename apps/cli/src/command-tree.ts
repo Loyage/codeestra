@@ -1093,7 +1093,7 @@ socket. It never starts a Runtime to stop it and never signals a process it cann
   "task.archive": {
     kind: "COMMAND",
     summary: "归档（软删除：只写 archived_at，默认列表隐藏）",
-    usage: `bun run codeestra task archive <project-id> <task-id> <expected-version>`,
+    usage: `bun run codeestra task archive <task-id> <expected-version>`,
     runtime: [
       "task.archive",
     ],
@@ -1101,16 +1101,18 @@ socket. It never starts a Runtime to stop it and never signals a process it cann
   "task.cancel": {
     kind: "COMMAND",
     summary: "终止任务（终态 CANCELLED，不自动重开，审计与证据保留）",
-    usage: `bun run codeestra task cancel <project-id> <task-id> <expected-version>`,
+    usage: `bun run codeestra task cancel <task-id> <expected-version>`,
     runtime: [
       "task.cancel",
     ],
   },
   "task.create": {
     kind: "COMMAND",
-    summary: "新建 Task（三个必填字段：显示标题、命名标题、任务详情）",
-    usage: `bun run codeestra task create <project-id> <任务详情…> --title <显示标题> --name <命名标题> [--feature <module-id>]…`,
-    detail: `# 三个字段都必须给出（ADR-0065）：--title 是一句话摘要（任务列表显示它），
+    summary: "新建 Task（--project 点名项目；三个必填字段：显示标题、命名标题、任务详情）",
+    usage: `bun run codeestra task create --project <project-id> <任务详情…> --title <显示标题> --name <命名标题> [--feature <module-id>]…`,
+    detail: `# --project 是必需的：创建时 Task 还不存在，没有可以从 Task 推出的项目（ADR-0076 D02）；
+# 它与 task 组其它命令的拼写不同，是为了让所有命令都不以项目位置参数开头。
+# 三个字段都必须给出（ADR-0065）：--title 是一句话摘要（任务列表显示它），
 # --name 是小写英文短横线 slug（^[a-z][a-z0-9]*(-[a-z0-9]+)*$，≤ 50 字符），
 # 用于分支 task/<编号>-<name> 与 worktree 目录；位置参数是任务详情。缺任一字段退出码 2。
 # --feature declares the feature(s) this Task works on: module ids from the project's
@@ -1130,15 +1132,16 @@ socket. It never starts a Runtime to stop it and never signals a process it cann
   "task.depends.add": {
     kind: "COMMAND",
     summary: "增加一条依赖（写入前检测环，失败不部分应用）",
-    usage: `bun run codeestra task depends add <project-id> <task-id> <expected-version> <prerequisite-task-id> [--revision <revision-id>] [--json]`,
+    usage: `bun run codeestra task depends add <task-id> <expected-version> <prerequisite-task-id> [--revision <revision-id>] [--json]`,
     runtime: [
       "task.depends.add",
     ],
   },
   "task.depends.list": {
     kind: "COMMAND",
-    summary: "列出依赖关系，以及上游 result commit 是否对基线可达",
-    usage: `bun run codeestra task depends list <project-id> [task-id] [--json]`,
+    summary: "列出依赖关系（一个 Task，或一个项目），以及上游 result commit 是否对基线可达",
+    usage: `bun run codeestra task depends list [<task-id> | --project <project-id>] [--json]`,
+    detail: `# 二者必居其一（ADR-0076 D04）：给 <task-id> 读该 Task 的边与闭包，给 --project 读该项目全部边。\n# 该投影绑定在一个项目的基线 ref 上，没有「全部项目」的单一答案，所以两个都不给是用法错误（退出码 2）。`,
     runtime: [
       "task.depends.list",
     ],
@@ -1146,7 +1149,7 @@ socket. It never starts a Runtime to stop it and never signals a process it cann
   "task.depends.remove": {
     kind: "COMMAND",
     summary: "删除一条依赖",
-    usage: `bun run codeestra task depends remove <project-id> <task-id> <expected-version> <prerequisite-task-id> [--json]`,
+    usage: `bun run codeestra task depends remove <task-id> <expected-version> <prerequisite-task-id> [--json]`,
     runtime: [
       "task.depends.remove",
     ],
@@ -1159,7 +1162,7 @@ socket. It never starts a Runtime to stop it and never signals a process it cann
   "task.integration.show": {
     kind: "COMMAND",
     summary: "读一个 Task 的 integration 投影与它的 queue item 历史",
-    usage: `bun run codeestra task integration show <project-id> <task-id> [--json]`,
+    usage: `bun run codeestra task integration show <task-id> [--json]`,
     detail: `# The projection is derived from the newest merge queue item, never from the Task lifecycle, so
 # "the Agent finished", "the Task verification passed" and "the result is in the integration ref" stay
 # three different facts. A Task with no queue item reads as NOT_REQUESTED; a CANCELLED request reads as
@@ -1170,8 +1173,9 @@ socket. It never starts a Runtime to stop it and never signals a process it cann
   },
   "task.list": {
     kind: "COMMAND",
-    summary: "列出项目的 Task（--all 含已归档）",
-    usage: `bun run codeestra task list <project-id> [--all]`,
+    summary: "列出 Task（默认本 Runtime 全部项目；--project 过滤，--all 含已归档）",
+    usage: `bun run codeestra task list [--project <project-id>] [--all]`,
+    detail: `# 不给 --project 就列出本 Runtime 每个已信任项目的 Task，每行带自己的 projectId（ADR-0076 D03）：\n# 列表不是对一个 Task 的操作，项目在这里是过滤条件。`,
     runtime: [
       "task.list",
     ],
@@ -1184,7 +1188,7 @@ socket. It never starts a Runtime to stop it and never signals a process it cann
   "task.operation.cancel": {
     kind: "COMMAND",
     summary: "取消一个 Operation（先确认进程静止，未确认则 RECONCILE_REQUIRED）",
-    usage: `bun run codeestra task operation cancel <project-id> <task-id> <operation-id> [--json]`,
+    usage: `bun run codeestra task operation cancel <task-id> <operation-id> [--json]`,
     runtime: [
       "task.operation.cancel",
     ],
@@ -1192,7 +1196,7 @@ socket. It never starts a Runtime to stop it and never signals a process it cann
   "task.operation.get": {
     kind: "COMMAND",
     summary: "按 operation-id 读回一个 Operation 的步骤级进度",
-    usage: `bun run codeestra task operation get <project-id> <operation-id> [--json]`,
+    usage: `bun run codeestra task operation get <operation-id> [--json]`,
     runtime: [
       "task.operation.get",
     ],
@@ -1200,7 +1204,7 @@ socket. It never starts a Runtime to stop it and never signals a process it cann
   "task.operation.list": {
     kind: "COMMAND",
     summary: "列出某 Task 的 Operation",
-    usage: `bun run codeestra task operation list <project-id> <task-id> [--json]`,
+    usage: `bun run codeestra task operation list <task-id> [--json]`,
     runtime: [
       "task.operation.list",
     ],
@@ -1208,7 +1212,7 @@ socket. It never starts a Runtime to stop it and never signals a process it cann
   "task.pause": {
     kind: "COMMAND",
     summary: "协作暂停：确认 provider 已退出后才落 PAUSED，保留工作树与会话证据",
-    usage: `bun run codeestra task pause <project-id> <task-id> <expected-version>`,
+    usage: `bun run codeestra task pause <task-id> <expected-version>`,
     runtime: [
       "task.pause",
     ],
@@ -1216,7 +1220,7 @@ socket. It never starts a Runtime to stop it and never signals a process it cann
   "task.purge": {
     kind: "COMMAND",
     summary: "永久删除任务及其资源（唯一显式 --yes，不在任何常态路径上）",
-    usage: `bun run codeestra task purge <project-id> <task-id> <expected-version> --yes [--force] [--reason <text>] [--json]`,
+    usage: `bun run codeestra task purge <task-id> <expected-version> --yes [--force] [--reason <text>] [--json]`,
     detail: `# DESTRUCTIVE and irreversible: deletes the Task, its revisions, executions, sessions, evidence,
 # owned worktrees, verification copies and branches. A non-terminal Task is cancelled first
 # through the ordinary cooperative stop, and a RECOVERY_REQUIRED Task is reconciled by
@@ -1239,7 +1243,7 @@ socket. It never starts a Runtime to stop it and never signals a process it cann
   "task.recover": {
     kind: "COMMAND",
     summary: "对 RECOVERY_REQUIRED 任务按事实对账，只在能证明 provider 已消失时收口",
-    usage: `bun run codeestra task recover <project-id> <task-id> <expected-version> [--reason <text>] [--json]`,
+    usage: `bun run codeestra task recover <task-id> <expected-version> [--reason <text>] [--json]`,
     detail: `The reconcile of a RECOVERY_REQUIRED Task (ADR-0055), the step the state machine promised and no
 command face had. It reads real facts only — the recorded provider process identity (checked
 against the real process table, start token and descendants), the recorded descendant snapshot,
@@ -1264,7 +1268,7 @@ exit 0 and read-only. After it, "task retry" can requeue the Task and "task canc
   "task.result.capture": {
     kind: "COMMAND",
     summary: "FULL 下的单步成果提交（不确认、不应用敏感路径拒绝）",
-    usage: `bun run codeestra task result capture <project-id> <task-id> [execution-id]`,
+    usage: `bun run codeestra task result capture <task-id> [execution-id]`,
     runtime: [
       "task.result.capture",
     ],
@@ -1272,7 +1276,7 @@ exit 0 and read-only. After it, "task retry" can requeue the Task and "task canc
   "task.result.commit": {
     kind: "COMMAND",
     summary: "STRICT 下的两步成果提交第二步：带 authorization-id 确认提交",
-    usage: `bun run codeestra task result commit <project-id> <task-id> <authorization-id> --confirm`,
+    usage: `bun run codeestra task result commit <task-id> <authorization-id> --confirm`,
     runtime: [
       "task.result.commit",
     ],
@@ -1280,7 +1284,7 @@ exit 0 and read-only. After it, "task retry" can requeue the Task and "task canc
   "task.result.prepare": {
     kind: "COMMAND",
     summary: "STRICT 下的两步成果提交第一步：准备并固定差异",
-    usage: `bun run codeestra task result prepare <project-id> <task-id> [execution-id]   # strict mode`,
+    usage: `bun run codeestra task result prepare <task-id> [execution-id]   # strict mode`,
     runtime: [
       "task.result.prepare",
     ],
@@ -1288,7 +1292,7 @@ exit 0 and read-only. After it, "task retry" can requeue the Task and "task canc
   "task.resume": {
     kind: "COMMAND",
     summary: "在同一工作树新建 Execution，并以 provider conversation resume 继续",
-    usage: `bun run codeestra task resume <project-id> <task-id> <expected-version> [--adapter <pi|codex|claude>] [--allow-unknown]`,
+    usage: `bun run codeestra task resume <task-id> <expected-version> [--adapter <pi|codex|claude>] [--allow-unknown]`,
     detail: `resume continues the *same* provider conversation of a PAUSED Task. A retry is a different
 operation: it requeues a FAILED Task and a new Execution follows.`,
     runtime: [
@@ -1298,7 +1302,7 @@ operation: it requeues a FAILED Task and a new Execution follows.`,
   "task.retry": {
     kind: "COMMAND",
     summary: "重新排队一个 FAILED Task（绝不自动重试）；新 Execution 走同一道门",
-    usage: `bun run codeestra task retry <project-id> <task-id> <expected-version> [--adapter <pi|codex|claude>] [--json]`,
+    usage: `bun run codeestra task retry <task-id> <expected-version> [--adapter <pi|codex|claude>] [--json]`,
     detail: `Retries a FAILED Task. Nothing is automatic: only this command requeues it. Without --adapter
 the Adapter this Task last ran on is reused. The Task goes back to READY (or BLOCKED when an
 upstream dependency is unmet) and the Runtime then asks the same scheduling gate that
@@ -1318,7 +1322,7 @@ was refused.`,
   "task.revision.create": {
     kind: "COMMAND",
     summary: "新建一条 TaskRevision（改任务详情或功能声明）",
-    usage: `bun run codeestra task revision create <project-id> <task-id> <expected-version> [--specification <text>] [--feature <module-id>]… [--reason <text>] [--json]`,
+    usage: `bun run codeestra task revision create <task-id> <expected-version> [--specification <text>] [--feature <module-id>]… [--reason <text>] [--json]`,
     detail: `# --feature sets the feature declaration of the new revision (validated against the project's
 # mapping). Omitting it inherits the current revision's declaration; passing it at all replaces
 # the declaration with the ids given (ADR-0059).
@@ -1335,7 +1339,7 @@ was refused.`,
   "task.revision.delivery.get": {
     kind: "COMMAND",
     summary: "按 delivery-id 读回一次投递",
-    usage: `bun run codeestra task revision delivery get <project-id> <delivery-id> [--json]`,
+    usage: `bun run codeestra task revision delivery get <delivery-id> [--json]`,
     runtime: [
       "task.revision.delivery.get",
     ],
@@ -1343,7 +1347,7 @@ was refused.`,
   "task.revision.delivery.list": {
     kind: "COMMAND",
     summary: "列出某 Task 的修订投递及其状态",
-    usage: `bun run codeestra task revision delivery list <project-id> <task-id> [--json]`,
+    usage: `bun run codeestra task revision delivery list <task-id> [--json]`,
     runtime: [
       "task.revision.delivery.list",
     ],
@@ -1351,7 +1355,7 @@ was refused.`,
   "task.revision.delivery.resolve": {
     kind: "COMMAND",
     summary: "对一次投递做显式收口（结构化 ACK 或经核验的 successor）",
-    usage: `bun run codeestra task revision delivery resolve <project-id> <task-id> <delivery-id> <expected-version> --action <stop-and-restart|retry> [--adapter <id>] [--json]`,
+    usage: `bun run codeestra task revision delivery resolve <task-id> <delivery-id> <expected-version> --action <stop-and-restart|retry> [--adapter <id>] [--json]`,
     detail: `# exit 0 only when the delivery ended satisfied; 1 when it stays unconfirmed`,
     runtime: [
       "task.revision.delivery.resolve",
@@ -1360,7 +1364,7 @@ was refused.`,
   "task.revision.list": {
     kind: "COMMAND",
     summary: "列出某 Task 的修订历史",
-    usage: `bun run codeestra task revision list <project-id> <task-id> [--json]`,
+    usage: `bun run codeestra task revision list <task-id> [--json]`,
     runtime: [
       "task.revision.list",
     ],
@@ -1368,7 +1372,7 @@ was refused.`,
   "task.run": {
     kind: "COMMAND",
     summary: "显式请求启动一次执行；与自动调度走同一道门（依赖/冲突/容量）",
-    usage: `bun run codeestra task run <project-id> <task-id> <expected-version> [--adapter <pi|codex|claude>] [--base-ref <refs/heads/...>] [--allow-unknown] [--json]`,
+    usage: `bun run codeestra task run <task-id> <expected-version> [--adapter <pi|codex|claude>] [--base-ref <refs/heads/...>] [--allow-unknown] [--json]`,
     detail: `Adapters: pi (default), codex, claude. Every run is bound to one Agent; changing --adapter starts a
 new Execution rather than switching the Agent inside one. This is the explicit start request of
 the same gate the automatic scheduler applies, so it exits 3 when the Task is *waiting* (the
@@ -1401,7 +1405,7 @@ BLOCKED means an unmet dependency only), and 1 when it is BLOCKED or not schedul
   "task.schedule.clear-unknown": {
     kind: "COMMAND",
     summary: "记录一次对 UNKNOWN 判定的显式单次放行（不改写已记录的判定）",
-    usage: `bun run codeestra task schedule clear-unknown <project-id> <task-id> [--json]`,
+    usage: `bun run codeestra task schedule clear-unknown <task-id> [--json]`,
     detail: `task schedule clear-unknown records the explicit single-shot release of an UNKNOWN assessment
 (ADR-0030 D05): it is bound to the assessed revision, baseline and analyzer/policy versions, it is
 written to the audit ledger, it is consumed by exactly one start, and it does *not* change the
@@ -1414,7 +1418,7 @@ nothing changes. A CONFLICTING assessment is a proven overlap and is never relea
   "task.schedule.explain": {
     kind: "COMMAND",
     summary: "解释某 Task 现在为什么没在跑（依赖判定、冲突判定、容量）",
-    usage: `bun run codeestra task schedule explain <project-id> <task-id> [--adapter <id>] [--json]`,
+    usage: `bun run codeestra task schedule explain <task-id> [--adapter <id>] [--json]`,
     runtime: [
       "task.schedule.explain",
     ],
@@ -1446,7 +1450,7 @@ nothing changes. A CONFLICTING assessment is a proven overlap and is never relea
   "task.status": {
     kind: "COMMAND",
     summary: "读回一个 Task 的完整投影（含 Execution、Session 与等待原因）",
-    usage: `bun run codeestra task status <project-id> <task-id> [--json]`,
+    usage: `bun run codeestra task status <task-id> [--json]`,
     detail: `# every Execution's Agent completion is printed with its note; a code such as
 # PROSE_QUESTION_NO_TOOL_USE marks a completion the Runtime annotated instead of
 # leaving an unexplained SUCCESS (heuristic: no tool call in the run and the last
@@ -1459,7 +1463,7 @@ nothing changes. A CONFLICTING assessment is a proven overlap and is never relea
   "task.submit": {
     kind: "COMMAND",
     summary: "把 DRAFT Task 提交为 READY，进入调度",
-    usage: `bun run codeestra task submit <project-id> <task-id> <expected-version>`,
+    usage: `bun run codeestra task submit <task-id> <expected-version>`,
     runtime: [
       "task.submit",
     ],
@@ -1472,7 +1476,7 @@ nothing changes. A CONFLICTING assessment is a proven overlap and is never relea
   "task.tests.history": {
     kind: "COMMAND",
     summary: "列出该计划的 append-only 历史",
-    usage: `bun run codeestra task tests history <project-id> <task-id> [--limit <n>] [--json]`,
+    usage: `bun run codeestra task tests history <task-id> [--limit <n>] [--json]`,
     runtime: [
       "task.tests.history",
     ],
@@ -1480,7 +1484,7 @@ nothing changes. A CONFLICTING assessment is a proven overlap and is never relea
   "task.tests.record": {
     kind: "COMMAND",
     summary: "把当前 tests.json 快照成绑定 (task, revision, commit, digest) 的记录",
-    usage: `bun run codeestra task tests record <project-id> <task-id> [--commit <full-sha>] [--expected-plan-digest <sha256>] [--json]`,
+    usage: `bun run codeestra task tests record <task-id> [--commit <full-sha>] [--expected-plan-digest <sha256>] [--json]`,
     runtime: [
       "task.tests.record",
     ],
@@ -1488,7 +1492,7 @@ nothing changes. A CONFLICTING assessment is a proven overlap and is never relea
   "task.tests.show": {
     kind: "COMMAND",
     summary: "读回当前生效的定向测试计划",
-    usage: `bun run codeestra task tests show <project-id> <task-id> [--json]`,
+    usage: `bun run codeestra task tests show <task-id> [--json]`,
     runtime: [
       "task.tests.show",
     ],
@@ -1496,7 +1500,7 @@ nothing changes. A CONFLICTING assessment is a proven overlap and is never relea
   "task.transcript": {
     kind: "COMMAND",
     summary: "只读展示某个 Task 执行过程的 provider 转写（不入库、不是 attach）",
-    usage: `bun run codeestra task transcript <project-id> <task-id> [--execution <id>] [--after <entry-id>] [--limit <n>] [--reverse] [--json]`,
+    usage: `bun run codeestra task transcript <task-id> [--execution <id>] [--after <entry-id>] [--limit <n>] [--reverse] [--json]`,
     runtime: [
       "task.status",
       "session.transcript",
@@ -1505,7 +1509,7 @@ nothing changes. A CONFLICTING assessment is a proven overlap and is never relea
   "task.unarchive": {
     kind: "COMMAND",
     summary: "取消归档",
-    usage: `bun run codeestra task unarchive <project-id> <task-id> <expected-version>`,
+    usage: `bun run codeestra task unarchive <task-id> <expected-version>`,
     runtime: [
       "task.unarchive",
     ],
@@ -1517,7 +1521,7 @@ nothing changes. A CONFLICTING assessment is a proven overlap and is never relea
   "task.verification.list": {
     kind: "COMMAND",
     summary: "列出某 Task 的验证记录（含绑定 revision/commit/policy digest）",
-    usage: `bun run codeestra task verification list <project-id> <task-id>`,
+    usage: `bun run codeestra task verification list <task-id>`,
     runtime: [
       "task.verification.list",
     ],
@@ -1525,7 +1529,7 @@ nothing changes. A CONFLICTING assessment is a proven overlap and is never relea
   "task.verify": {
     kind: "COMMAND",
     summary: "在固定 commit 的隔离副本上运行验证策略，并记录绑定 revision/commit 的证据",
-    usage: `bun run codeestra task verify <project-id> <task-id> [execution-id] [--background] [--policy <auto|targeted|project>]`,
+    usage: `bun run codeestra task verify <task-id> [execution-id] [--background] [--policy <auto|targeted|project>]`,
     detail: `task verify --background returns a durable Operation handle instead of waiting for the policy to
 finish; follow it with task operation list and stop it with task operation cancel. Exit code 0 there
 means "the Operation was recorded and started", not "the verification passed".

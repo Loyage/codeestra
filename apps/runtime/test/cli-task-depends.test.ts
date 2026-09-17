@@ -156,10 +156,9 @@ interface TaskStatusPayload {
 
 async function status(
   environment: Record<string, string>,
-  projectId: string,
   taskId: string,
 ): Promise<TaskStatusPayload> {
-  const listed = await cli(['task', 'status', projectId, taskId], environment);
+  const listed = await cli(['task', 'status', taskId], environment);
   expect(listed.exitCode).toBe(0);
   return JSON.parse(listed.stdout) as TaskStatusPayload;
 }
@@ -169,7 +168,7 @@ async function createTask(
   projectId: string,
   specification: string,
 ): Promise<string> {
-  const created = await cli(['task', 'create', projectId, specification,
+  const created = await cli(['task', 'create', '--project', projectId, specification,
     '--title', 'fixture task', '--name', 'fixture-task'], environment);
   expect(created.exitCode).toBe(0);
   return (JSON.parse(created.stdout) as { readonly id: string }).id;
@@ -180,8 +179,9 @@ async function dependsList(
   projectId: string,
   taskId?: string,
 ): Promise<DependencyListPayload> {
-  const listed = await cli(['task', 'depends', 'list', projectId,
-    ...(taskId === undefined ? [] : [taskId]), '--json'], environment);
+  const listed = taskId === undefined
+    ? await cli(['task', 'depends', 'list', '--project', projectId, '--json'], environment)
+    : await cli(['task', 'depends', 'list', taskId, '--json'], environment);
   expect(listed.exitCode).toBe(0);
   return JSON.parse(listed.stdout) as DependencyListPayload;
 }
@@ -194,19 +194,19 @@ describe('codeestra task depends', () => {
     const stranger = await createTask(environment, projectId, 'Unrelated work');
 
     // A dependency on a Task that does not exist is refused and nothing is written.
-    const unknown = await cli(['task', 'depends', 'add', projectId, downstream, '0',
+    const unknown = await cli(['task', 'depends', 'add', downstream, '0',
       crypto.randomUUID()], environment);
     expect(unknown.exitCode).toBe(1);
     expect(unknown.stderr).toContain('NOT_FOUND');
     expect((await dependsList(environment, projectId, downstream)).edges).toEqual([]);
     // A Task cannot depend on itself; the schema and the command face both refuse it.
-    const self = await cli(['task', 'depends', 'add', projectId, downstream, '0', downstream],
+    const self = await cli(['task', 'depends', 'add', downstream, '0', downstream],
       environment);
     expect(self.exitCode).toBe(1);
     expect(self.stderr).toContain('SELF_DEPENDENCY');
     expect((await dependsList(environment, projectId, downstream)).edges).toEqual([]);
 
-    const added = await cli(['task', 'depends', 'add', projectId, downstream, '0', upstream],
+    const added = await cli(['task', 'depends', 'add', downstream, '0', upstream],
       environment);
     expect(added.exitCode).toBe(0);
     const addedPayload = JSON.parse(added.stdout) as {
@@ -221,13 +221,13 @@ describe('codeestra task depends', () => {
     });
 
     // The same edge again is reported as already present instead of a duplicate row or a version bump.
-    const duplicate = await cli(['task', 'depends', 'add', projectId, downstream, '1', upstream],
+    const duplicate = await cli(['task', 'depends', 'add', downstream, '1', upstream],
       environment);
     expect(duplicate.exitCode).toBe(0);
     expect(JSON.parse(duplicate.stdout)).toMatchObject({ added: false, taskVersion: 1 });
 
     // upstream -> downstream would close downstream -> upstream, so it is refused as a cycle.
-    const cycle = await cli(['task', 'depends', 'add', projectId, upstream, '0', downstream],
+    const cycle = await cli(['task', 'depends', 'add', upstream, '0', downstream],
       environment);
     expect(cycle.exitCode).toBe(1);
     expect(cycle.stderr).toContain('DEPENDENCY_CYCLE');
@@ -242,18 +242,18 @@ describe('codeestra task depends', () => {
     expect((await dependsList(environment, projectId, upstream)).dependents).toEqual([downstream]);
 
     // Removing an edge that does not exist is a failure, not a silent success.
-    const missing = await cli(['task', 'depends', 'remove', projectId, downstream, '1', stranger],
+    const missing = await cli(['task', 'depends', 'remove', downstream, '1', stranger],
       environment);
     expect(missing.exitCode).toBe(1);
     expect(missing.stderr).toContain('NOT_FOUND');
 
-    const removed = await cli(['task', 'depends', 'remove', projectId, downstream, '1', upstream],
+    const removed = await cli(['task', 'depends', 'remove', downstream, '1', upstream],
       environment);
     expect(removed.exitCode).toBe(0);
     expect(JSON.parse(removed.stdout)).toMatchObject({ removed: true, taskVersion: 2 });
     expect((await dependsList(environment, projectId, downstream)).edges).toEqual([]);
 
-    const unknownProject = await cli(['task', 'depends', 'list', crypto.randomUUID(), '--json'],
+    const unknownProject = await cli(['task', 'depends', 'list', '--project', crypto.randomUUID(), '--json'],
       environment);
     expect(unknownProject.exitCode).toBe(1);
     expect(unknownProject.stderr).toContain('NOT_FOUND');
@@ -265,14 +265,14 @@ describe('codeestra task depends', () => {
     const upstream = await createTask(environment, projectId, 'Produce the upstream result');
     const downstream = await createTask(environment, projectId, 'Consume the upstream result');
 
-    const added = await cli(['task', 'depends', 'add', projectId, downstream, '0', upstream],
+    const added = await cli(['task', 'depends', 'add', downstream, '0', upstream],
       environment);
     expect(added.exitCode).toBe(0);
 
     // Submitting the downstream Task records the specification-valid transition (DRAFT -> READY) and
     // is gated immediately afterwards, so the two recorded facts leave the Task BLOCKED: the upstream
     // revision is not in dev yet, and the response already reports the state the user will observe.
-    const submitted = await cli(['task', 'submit', projectId, downstream, '1'], environment);
+    const submitted = await cli(['task', 'submit', downstream, '1'], environment);
     expect(submitted.exitCode).toBe(0);
     const submittedPayload = JSON.parse(submitted.stdout) as {
       readonly state: string; readonly version: number;
@@ -283,32 +283,32 @@ describe('codeestra task depends', () => {
     expect(submittedPayload.dependencyState.changed).toBe(true);
     expect(submittedPayload.dependencyState.blockedReasons.map((reason) => reason.code))
       .toEqual(['UPSTREAM_RESULT_MISSING']);
-    const blockedVersion = (await status(environment, projectId, downstream)).task.version;
+    const blockedVersion = (await status(environment, downstream)).task.version;
     expect(submittedPayload.version).toBe(blockedVersion);
 
     // Running a blocked Task fails with a stable code and reserves nothing: no Execution is created
     // and no worktree appears in the Runtime data directory.
-    const ran = await cli(['task', 'run', projectId, downstream, String(blockedVersion)], environment);
+    const ran = await cli(['task', 'run', downstream, String(blockedVersion)], environment);
     expect(ran.exitCode).toBe(1);
     expect(ran.stderr).toContain('DEPENDENCIES_UNMET');
-    expect((await status(environment, projectId, downstream)).executions).toEqual([]);
+    expect((await status(environment, downstream)).executions).toEqual([]);
     expect(existsSync(join(realpathSync(home), 'worktrees', projectId, downstream))).toBe(false);
 
     // Drive the upstream to a verified result commit.
     // The undeclared upstream is SAFE under ADR-0059, so submission starts it immediately.
-    expect((await cli(['task', 'submit', projectId, upstream, '0'], environment)).exitCode).toBe(0);
+    expect((await cli(['task', 'submit', upstream, '0'], environment)).exitCode).toBe(0);
     const deadline = Date.now() + 30_000;
     let exited = false;
     while (Date.now() < deadline) {
-      const current = await status(environment, projectId, upstream);
+      const current = await status(environment, upstream);
       if (current.executions[0]?.session?.state === 'EXITED') { exited = true; break; }
       await Bun.sleep(100);
     }
     expect(exited).toBe(true);
-    const captured = await cli(['task', 'result', 'capture', projectId, upstream], environment);
+    const captured = await cli(['task', 'result', 'capture', upstream], environment);
     expect(captured.exitCode).toBe(0);
     const resultCommit = (JSON.parse(captured.stdout) as { readonly resultCommit: string }).resultCommit;
-    expect((await cli(['task', 'verify', projectId, upstream], environment)).exitCode).toBe(0);
+    expect((await cli(['task', 'verify', upstream], environment)).exitCode).toBe(0);
 
     // ADR-0070 D07 / S8 (ADR-0074): the edge is satisfied by the upstream result becoming reachable
     // from the Project Service's managed integration ref — the fact `project integration run`
@@ -328,12 +328,12 @@ describe('codeestra task depends', () => {
     expect(view.edges[0]).toMatchObject({ satisfied: true, resultCommit: resultCommit,
       reason: null });
     expect(view.taskState).toBe('RUNNING');
-    expect((await status(environment, projectId, downstream)).task.state).toBe('RUNNING');
+    expect((await status(environment, downstream)).task.state).toBe('RUNNING');
 
     // A running Task keeps the dependency set it was scheduled with, so the edit is refused with a
     // stable code instead of silently reshaping what the running Agent was started against.
-    const downstreamVersion = (await status(environment, projectId, downstream)).task.version;
-    const refused = await cli(['task', 'depends', 'remove', projectId, downstream,
+    const downstreamVersion = (await status(environment, downstream)).task.version;
+    const refused = await cli(['task', 'depends', 'remove', downstream,
       String(downstreamVersion), upstream], environment);
     expect(refused.exitCode).toBe(1);
     expect(refused.stderr).toContain('INVALID_STATE');

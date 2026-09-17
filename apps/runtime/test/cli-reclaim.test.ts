@@ -128,7 +128,7 @@ async function seededExecutedTask(
   fixture: ReclaimFixture,
   specification = 'Produce one artifact',
 ): Promise<SeededTask> {
-  const created = JSON.parse((await cli(['task', 'create', fixture.projectId, specification,
+  const created = JSON.parse((await cli(['task', 'create', '--project', fixture.projectId, specification,
     '--title', 'fixture task', '--name', 'fixture-task'],
     fixture.environment)).stdout) as { readonly id: string };
   await cli(['stop'], fixture.environment);
@@ -318,7 +318,7 @@ describe('codeestra reclaim command face', () => {
   test('refuses to reclaim a workspace whose Execution still holds it', async () => {
     const fixture = await openedProject();
     try {
-      const created = JSON.parse((await cli(['task', 'create', fixture.projectId, 'Active work',
+      const created = JSON.parse((await cli(['task', 'create', '--project', fixture.projectId, 'Active work',
         '--title', 'Active work', '--name', 'active-work'],
         fixture.environment)).stdout) as { readonly id: string };
       await cli(['stop'], fixture.environment);

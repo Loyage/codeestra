@@ -1,11 +1,12 @@
 # 常见任务的做法（recipes）
 
-> **适用版本** `dev@6c7de03`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> **适用版本** `dev@6c7de03`（2026-09-17） · **schema** v38 · **最后校对** 2026-09-17
 > 版本会前进：`dev@6c7de03` 只是本目录最后一次校对的基线；当前适用版本以
 > **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
 > 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
 > **本次修订（ADR-0074 / schema v38）**：Task 基线改为项目受管的 integration ref（`refs/codeestra/integration`）；成果经 `project integration request|run` 进入该 ref，**发布到你的日常分支仍没有命令**。命令面见 [cli/managed-integration.md](cli/managed-integration.md)。
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> **本次修订（ADR-0076）**：`task` 组不再以 `<project-id>` 开头：Task id 全局唯一，它自己就是地址，**project 是 Task 的字段**（`task create` 用 `--project`，`task list` 默认为本 Runtime 全部项目、`--project` 过滤；`task schedule status|plan|run` 仍收 `<project-id>`）。旧写法不再接受。
 > recipe 1/2/3 的创建命令与 §「我想改一个 bug」后的修订示例由 **ADR-0065** 改写
 > （必填 `--title`/`--name`；`--constraint`/`--kind` 已删除，限制写进详情）。
 > 权限模式的命令拼写由 FOUNDATION-098 同步为 `settings permission get|set`（ADR-0064：顶层 `permission` 已移除；§19 另新增 `settings list` 总览）。
@@ -33,8 +34,8 @@
 
 ```sh
 bun run codeestra status                      # Runtime 在不在、什么权限模式
-bun run codeestra task list $PROJECT          # 手上有哪些任务
-bun run codeestra task status $PROJECT $TASK  # 这个任务现在到底是什么状态
+bun run codeestra task list --project $PROJECT # 手上有哪些任务
+bun run codeestra task status $TASK  # 这个任务现在到底是什么状态
 ```
 
 **记住退出码的三分法**：`0` 成功（某些命令是「已受理」）、`1` 拒绝或失败、`2` 用法错误、
@@ -50,28 +51,28 @@ bun run codeestra task status $PROJECT $TASK  # 这个任务现在到底是什�
 # 1) 描述得具体一点：现象、期望、边界、验收方式。过去写作约束的限制直接写进正文。
 #    （详情是一整段文本，双引号里直接写；需要多行时用 shell 的 $'…' 或 heredoc。）
 #    另两个字段：--title 是任务列表显示的一句话；--name 是分支/目录名（小写短横线 slug）。
-bun run codeestra task create $PROJECT \
+bun run codeestra task create --project $PROJECT \
   "修复 CRLF 输入被 parser 吞掉的缺陷：现象是含 CRLF 的输入末尾多出一个 token，期望与 LF 输入结果一致，验收方式是新增一个覆盖 CRLF 的用例；不得改动公开 API" \
   --title "修复 CRLF 输入被 parser 吞掉" --name "fix-parser-crlf"
 
 # 2) 提交（这一步会顺手核对依赖并跑一次调度 pass）
-bun run codeestra task submit $PROJECT $TASK <version>
+bun run codeestra task submit $TASK <version>
 
 # 3) 看它为什么还没跑（如果确实没跑）
-bun run codeestra task schedule explain $PROJECT $TASK --json
+bun run codeestra task schedule explain $TASK --json
 
 # 4) 启动（如果调度还没轮到，也可以手动请求一次；退出码 3 = 在等）
-bun run codeestra task run $PROJECT $TASK <version>
+bun run codeestra task run $TASK <version>
 
 # 5) 盯着看（会话、日志、事件）
-bun run codeestra task status $PROJECT $TASK
-bun run codeestra task transcript $PROJECT $TASK
+bun run codeestra task status $TASK
+bun run codeestra task transcript $TASK
 
 # 6) Agent 退出后提交成果
-bun run codeestra task result capture $PROJECT $TASK
+bun run codeestra task result capture $TASK
 
 # 7) 验证 → 合入 dev
-bun run codeestra task verify $PROJECT $TASK
+bun run codeestra task verify $TASK
 bun run codeestra task integrate $PROJECT $TASK <version>
 ```
 
@@ -87,7 +88,7 @@ bun run codeestra task integrate $PROJECT $TASK <version>
 **目标**：加一个不大但完整的能力，并控制它的影响范围。
 
 ```sh
-bun run codeestra task create $PROJECT \
+bun run codeestra task create --project $PROJECT \
   "为 status 输出增加 adapters 列表：目标是 runtime.ping 已返回 adapters、CLI status 也打印它，范围只改 apps/cli 的输出，不改 packages/contracts 与 apps/runtime，验收是 status 输出里能看到三个 adapter id" \
   --title "status 输出增加 adapters 列表" --name "status-adapters-list"
 ```
@@ -109,8 +110,8 @@ bun run codeestra project impact explain  $PROJECT $TASK --json    # 和已声�
 如果这个任务要开一个新的 `task/*`、`lane/*` 或 feature 分支，**在建分支时就**写下它自己的小测试计划：
 
 ```sh
-bun run codeestra task tests record $PROJECT $TASK
-bun run codeestra task tests show   $PROJECT $TASK
+bun run codeestra task tests record $TASK
+bun run codeestra task tests show $TASK
 ```
 
 `.codeestra/tests.json` 是「一个 scope 说明 + 1–16 条带 `covers` 的 argv 命令」。
@@ -124,20 +125,20 @@ bun run codeestra task tests show   $PROJECT $TASK
 
 ```sh
 # 1) 两个任务都建好、都提交（提交就会在容量允许时自动开始）
-bun run codeestra task create $PROJECT "把 A 模块的错误码补全；只改 A 模块" \
+bun run codeestra task create --project $PROJECT "把 A 模块的错误码补全；只改 A 模块" \
   --title "A 模块错误码补全" --name "module-a-error-codes"
-bun run codeestra task submit $PROJECT $TASK_A <version-a>
-bun run codeestra task create $PROJECT "把 B 模块的文档补全；只改 B 模块" \
+bun run codeestra task submit $TASK_A <version-a>
+bun run codeestra task create --project $PROJECT "把 B 模块的文档补全；只改 B 模块" \
   --title "B 模块文档补全" --name "module-b-docs"
-bun run codeestra task submit $PROJECT $TASK_B <version-b>
+bun run codeestra task submit $TASK_B <version-b>
 
 # 2) 需要确认时再问一句「它们现在到底跑不跑」
 bun run codeestra project impact explain $PROJECT $TASK_A --json   # 退出码 0 仅当 SAFE_TO_PARALLELIZE
 bun run codeestra project impact explain $PROJECT $TASK_B --json
 
 # 3) 没启动就显式请求一次（容量上限默认是 2）
-bun run codeestra task run $PROJECT $TASK_A <version-a>
-bun run codeestra task run $PROJECT $TASK_B <version-b>
+bun run codeestra task run $TASK_A <version-a>
+bun run codeestra task run $TASK_B <version-b>
 
 # 4) 看谁占着槽位、谁在跑（容量是整个 Runtime 的，不按项目分）
 bun run codeestra scheduler capacity get      --json
@@ -170,7 +171,7 @@ bun run codeestra task schedule status        $PROJECT
 
 ```sh
 # 1) 先问「它为什么不跑」
-bun run codeestra task schedule explain $PROJECT $TASK --json
+bun run codeestra task schedule explain $TASK --json
 bun run codeestra project impact explain $PROJECT $TASK --json
 ```
 
@@ -192,14 +193,14 @@ bun run codeestra project impact explain $PROJECT $TASK --json
 bun run codeestra task schedule run $PROJECT      # 手动请求一次调度（不会改变判定规则）
 
 # 路 B：显式单次放行（风险由你承担）
-bun run codeestra task schedule clear-unknown $PROJECT $TASK
+bun run codeestra task schedule clear-unknown $TASK
 #   或者直接在启动时放行：
-bun run codeestra task run $PROJECT $TASK <version> --allow-unknown
+bun run codeestra task run $TASK <version> --allow-unknown
 
 # 路 C：把功能声明理清楚（声明不相干的功能，或给对方腾出空间）
 #   声明写在 revision 上，用 task revision create --feature 改写；
 #   id 必须是 main ref 上 .codeestra/impact.json 的 modules[].id
-bun run codeestra task revision create $PROJECT $TASK <version> --feature <module-id> --reason "把声明拆开"
+bun run codeestra task revision create $TASK <version> --feature <module-id> --reason "把声明拆开"
 bun run codeestra project impact validate /path/to/repo --json
 ```
 
@@ -220,9 +221,9 @@ bun run codeestra project impact validate /path/to/repo --json
 
 ```sh
 # 方式 A：启动/继续/重试时指定（一次执行绑定一个 Agent）
-bun run codeestra task run    $PROJECT $TASK <version>  --adapter claude
-bun run codeestra task resume $PROJECT $TASK <version>  --adapter codex
-bun run codeestra task retry  $PROJECT $TASK <version>  --adapter pi
+bun run codeestra task run $TASK <version>  --adapter claude
+bun run codeestra task resume $TASK <version>  --adapter codex
+bun run codeestra task retry $TASK <version>  --adapter pi
 
 # 方式 B：在界面上选（任务详情里的「Agent」下拉框）
 # 方式 C：重试时换 Agent（任务详情 →「更多操作」→ 重试块的「这次使用的 Adapter」下拉框）
@@ -286,13 +287,13 @@ Codex 与 Claude 当前如实报告 `pluginSelection: UNSUPPORTED`。
 
 ```sh
 # 继续一个已暂停的任务
-bun run codeestra task resume $PROJECT $TASK <version>
+bun run codeestra task resume $TASK <version>
 
 # 重试一个失败的任务（默认沿用上次的 adapter）
-bun run codeestra task retry  $PROJECT $TASK <version>
+bun run codeestra task retry $TASK <version>
 
 # 先暂停再继续
-bun run codeestra task pause  $PROJECT $TASK <version> && bun run codeestra task resume $PROJECT $TASK <version>
+bun run codeestra task pause $TASK <version> && bun run codeestra task resume $TASK <version>
 ```
 
 重试在界面上是任务详情 →「更多操作」→`重试（task retry）`。它显示当前版本（作为 CAS 的
@@ -304,16 +305,16 @@ bun run codeestra task pause  $PROJECT $TASK <version> && bun run codeestra task
 **如果还要改任务详情**，用 revision（append-only，不被覆盖），而不是改文字：
 
 ```sh
-bun run codeestra task revision create $PROJECT $TASK <version> \
+bun run codeestra task revision create $TASK <version> \
   --specification "新的一句话要求" --reason "因为 …"
-bun run codeestra task revision list   $PROJECT $TASK
+bun run codeestra task revision list $TASK
 ```
 
 修订进入**正在运行的**执行是一个独立过程（Revision Delivery），台账在：
 
 ```sh
-bun run codeestra task revision delivery list $PROJECT $TASK
-bun run codeestra task revision delivery resolve $PROJECT $TASK <delivery-id> <version> \
+bun run codeestra task revision delivery list $TASK
+bun run codeestra task revision delivery resolve $TASK <delivery-id> <version> \
   --action stop-and-restart --adapter pi
 ```
 
@@ -361,7 +362,7 @@ bun run codeestra attention list $PROJECT
 症状：任务停在 `WAITING_FOR_USER`，但**没有任何 Agent 在跑**。
 
 ```sh
-bun run codeestra task status $PROJECT $TASK     # stderr 会打印 [waiting] … 与 Agent 的问题原文
+bun run codeestra task status $TASK     # stderr 会打印 [waiting] … 与 Agent 的问题原文
 bun run codeestra attention list $PROJECT        # 找到 prompt.kind = codeestra.prose-question 的那条
 
 # 两个退出方式，必须恰好给一个
@@ -394,18 +395,18 @@ bun run codeestra settings prose-question-attention auto          # 回到默认
 
 ```sh
 # 0) 先确认前置条件都成立
-bun run codeestra task status $PROJECT $TASK       # 状态应为 EXECUTED，且有一次 PASSED 的验证
-bun run codeestra task verification list $PROJECT $TASK
+bun run codeestra task status $TASK       # 状态应为 EXECUTED，且有一次 PASSED 的验证
+bun run codeestra task verification list $TASK
 
 # 1) 没验证就先验证
-bun run codeestra task verify $PROJECT $TASK
+bun run codeestra task verify $TASK
 
 # 2) 合入
 bun run codeestra task integrate $PROJECT $TASK <version>
 
 # 3) 看结果
 bun run codeestra task integration list $PROJECT $TASK
-bun run codeestra task status $PROJECT $TASK
+bun run codeestra task status $TASK
 ```
 
 `task integrate` 内部是三步：在 detached integration worktree 里合并（能 ff 就 ff，否则 `--no-ff`）
@@ -538,8 +539,8 @@ bun run codeestra reclaim records --project $PROJECT          # 审计账本
 
 ```sh
 bun run codeestra events tail                                        # 先把事实流抓下来
-bun run codeestra task status $PROJECT $TASK > /tmp/task-status.json # 存一份状态投影
-bun run codeestra task operation list $PROJECT $TASK                 # 长命令的步骤与结果
+bun run codeestra task status $TASK > /tmp/task-status.json # 存一份状态投影
+bun run codeestra task operation list $TASK                 # 长命令的步骤与结果
 ```
 
 **看到 `RECOVERY_REQUIRED` 时**：它是「有事实无法被证明，需要一次带审计的对账」，
@@ -548,7 +549,7 @@ bun run codeestra task operation list $PROJECT $TASK                 # 长命令
 Task/Execution 的 `RECOVERY_REQUIRED` 有**专门的命令**（ADR-0055）：
 
 ```sh
-bun run codeestra task recover $PROJECT $TASK <expected-version> [--reason "…"]
+bun run codeestra task recover $TASK <expected-version> [--reason "…"]
 ```
 
 它只读事实（记录的 provider 进程身份按真实进程表核对、记录的后代快照、workspace 是否还在磁盘）：
@@ -614,10 +615,10 @@ bun run codeestra project trust /path/to/your-repo # FULL 零确认；STRICT 可
 bun run codeestra project list                     # 取得 PROJECT id
 bun run codeestra settings permission get          # 确认权限模式
 
-bun run codeestra task create $PROJECT "一项具体的改动" \
+bun run codeestra task create --project $PROJECT "一项具体的改动" \
   --title "一项具体的改动" --name "a-concrete-change"
-bun run codeestra task submit $PROJECT $TASK <version>
-bun run codeestra task run    $PROJECT $TASK <version>
+bun run codeestra task submit $TASK <version>
+bun run codeestra task run $TASK <version>
 ```
 
 然后：
@@ -639,7 +640,7 @@ bun run codeestra task run    $PROJECT $TASK <version>
 
 ```sh
 # 1. 确认它真的在跑（RUNNING），并拿到当前 version
-bun run codeestra task status $PROJECT $TASK
+bun run codeestra task status $TASK
 
 # 2. 给一句话。它交给运行中的 provider 通道（Pi 的 RPC steer）
 bun run codeestra session guide $PROJECT $TASK --message "先用仓库的 .codeestra/instructions 里的约定，不要自创风格"

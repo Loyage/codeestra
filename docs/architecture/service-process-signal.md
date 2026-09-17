@@ -285,7 +285,7 @@ UI/CLI 可以把组合投影成“等待开始、执行中、等待指示、等�
 **S7 当前实现边界（ADR-0073）**：Task Service 行与 `tasks` 行由同一事务写入，Service 的 id 就是 Task id，
 `parent_service_id` 是该项目的 Project Service；`task create` 是唯一创建入口
 （`apps/runtime/src/task-service.ts` → `Phase1Database.createTask` → `packages/storage/src/service-write-store.ts`），
-所以 `service get <task-id>` 与 `task status <project> <task-id>` 是同一行的两次读取，lifecycle 与 version 不可能分叉。
+所以 `service get <task-id>` 与 `task status <task-id>`（ADR-0076 之后 Task 命令不再点名项目）是同一行的两次读取，lifecycle 与 version 不可能分叉。
 上面三个正交维度仍是**目标**：`service get` 只投影 `tasks.state`（lifecycle）与 `tasks.version`，verification 没有进入 core state；
 **integration 维度已由 S8 落下**（`task_integration` 投影 + `task integration show`，ADR-0074），但它是从队列 item 派生的独立表，
 不是 `tasks` 上的字段，也不与 lifecycle 压成一个枚举。写路径方面只有**创建**（S7）与**集成**（S8）切到 Service；

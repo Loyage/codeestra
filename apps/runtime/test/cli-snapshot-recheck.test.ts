@@ -165,7 +165,7 @@ async function conflictHeldTask(fixtureState: Fixture, specification: string): P
     home: fixtureState.environment.CODEESTRA_HOME as string,
     environment: fixtureState.environment, projectId: fixtureState.projectId, specification,
   });
-  const status = await cli(['task', 'status', fixtureState.projectId, ready.taskId],
+  const status = await cli(['task', 'status', ready.taskId],
     fixtureState.environment);
   expect(status.exitCode).toBe(0);
   const payload = JSON.parse(status.stdout) as {
@@ -188,15 +188,15 @@ async function submittedTask(
   specification: string,
 ): Promise<{ readonly task: TaskRef; readonly submit: { readonly started: readonly unknown[];
   readonly waiting: readonly { readonly code: string }[] } }> {
-  const created = await cli(['task', 'create', fixtureState.projectId, specification,
+  const created = await cli(['task', 'create', '--project', fixtureState.projectId, specification,
     '--title', 'fixture task', '--name', 'fixture-task'],
     fixtureState.environment);
   expect(created.exitCode).toBe(0);
   const taskId = (JSON.parse(created.stdout) as { readonly id: string }).id;
-  const submitted = await cli(['task', 'submit', fixtureState.projectId, taskId, '0'],
+  const submitted = await cli(['task', 'submit', taskId, '0'],
     fixtureState.environment);
   expect(submitted.exitCode).toBe(0);
-  const status = await cli(['task', 'status', fixtureState.projectId, taskId],
+  const status = await cli(['task', 'status', taskId],
     fixtureState.environment);
   expect(status.exitCode).toBe(0);
   const payload = JSON.parse(status.stdout) as {
@@ -425,7 +425,7 @@ describe('scheduler reservations acquire --snapshot', () => {
     const { task, submit } = await submittedTask(fixtureState, 'Engine start');
     expect(submit.started).toHaveLength(1);
     expect(submit.waiting).toHaveLength(0);
-    const status = await cli(['task', 'status', fixtureState.projectId, task.id],
+    const status = await cli(['task', 'status', task.id],
       fixtureState.environment);
     const payload = JSON.parse(status.stdout) as { readonly task: { readonly state: string } };
     expect(payload.task.state).not.toBe('READY');

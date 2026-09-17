@@ -1,11 +1,12 @@
 # CLI 参考 · 依赖 DAG、调度与回收
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v36 · **最后校对** 2026-09-16
+> **适用版本** `dev@de03448`（2026-09-16） · **schema** v38 · **最后校对** 2026-09-16
 > 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> **本次修订（ADR-0076）**：`task` 组不再以 `<project-id>` 开头：Task id 全局唯一，它自己就是地址，**project 是 Task 的字段**（`task create` 用 `--project`，`task list` 默认为本 Runtime 全部项目、`--project` 过滤；`task schedule status|plan|run` 仍收 `<project-id>`）。旧写法不再接受。
 > 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一（ADR-0066 之后为八篇），
 > **内容自 `cli-reference.md @ dev@de03448` 搬移，一句未改写；本次未重新核对源码**，最后校对日期因此不变。
-> 本文件覆盖 §11–§14 与 §16（§15 在 [promotion.md](./promotion.md)）；章节号沿用拆分前的编号，因此可能不连续。正文里提到本文件没有的号（例如 §14、§17）时，到 [README.md](./README.md) 的索引表查它在哪一篇。
+> 本文件覆盖 §11–§14 与 §16（§15 随 ADR-0066 删除，见 [README.md](./README.md) 的索引表）；章节号沿用拆分前的编号，因此可能不连续。正文里提到本文件没有的号（例如 §14、§17）时，到 [README.md](./README.md) 的索引表查它在哪一篇。
 > §14 新增 `scheduler control` 一节，并把 §0.2 的退出码与「等待码」表补上 `SCHEDULER_GLOBALLY_PAUSED`（FOUNDATION-097 / ADR-0061 D08/D09）；
 > §14 的 `scheduler capacity` 一节由 **FOUNDATION-096** 重写（ADR-0061 D02：破坏性变更——命令去掉 project/adapter 参数，
 > 旧 `get|set|clear <project-id>` 形态被移除）；§14 的 `scheduler control` 一节由 **FOUNDATION-097** 新增
@@ -33,12 +34,15 @@ integration ref（`refs/codeestra/integration`，ADR-0074）；**是否把它发
 ## 12. `task depends`（DAG）
 
 ```sh
-bun run codeestra task depends add    <project-id> <task-id> <expected-version> <prerequisite-task-id> [--revision <revision-id>] [--json]
-bun run codeestra task depends remove <project-id> <task-id> <expected-version> <prerequisite-task-id> [--json]
-bun run codeestra task depends list   <project-id> [task-id] [--json]
+bun run codeestra task depends add    <task-id> <expected-version> <prerequisite-task-id> [--revision <revision-id>] [--json]
+bun run codeestra task depends remove <task-id> <expected-version> <prerequisite-task-id> [--json]
+bun run codeestra task depends list   [<task-id> | --project <project-id>] [--json]
 ```
 
 - flag 可以出现在**任意位置**（解析器按顺序走 token），但 `--revision` 只对 `add` 有意义。
+- `add`/`remove` 只收 `<task-id>`，不点名项目（ADR-0076）；`list` 二者必居其一：给 `<task-id>` 读该 Task 的边与闭包，
+  给 `--project <project-id>` 读该项目全部边。该投影绑定在**一个项目**的基线 ref 上（`baseRef`/`baseCommit` 是单数），
+  所以两个都不给是用法错误（退出码 2，指向 `task depends help`），而不是「列出所有项目」。
 - 依赖图必须是 **DAG**；加环以 `DEPENDENCY_CYCLE` 拒绝，且**不部分应用**。自依赖是 `SELF_DEPENDENCY`。
 - **满足条件**：上游**指定修订自己的结果 commit** 必须对下游的 **Task 基线 ref** 可达
   （ADR-0066）。**仅 Task verification 成功不释放依赖**：验证通过不等于那个 commit 已经进了基线。
@@ -62,9 +66,9 @@ bun run codeestra task depends list   <project-id> [task-id] [--json]
 ```sh
 bun run codeestra task schedule status <project-id> [--adapter <id>] [--json]
 bun run codeestra task schedule plan   <project-id> [--adapter <id>] [--json]
-bun run codeestra task schedule explain<project-id> <task-id> [--adapter <id>] [--json]
+bun run codeestra task schedule explain<task-id> [--adapter <id>] [--json]
 bun run codeestra task schedule run    <project-id> [--adapter <id>] [--json]
-bun run codeestra task schedule clear-unknown <project-id> <task-id> [--json]
+bun run codeestra task schedule clear-unknown <task-id> [--json]
 ```
 
 - Runtime **自己会调度**：相关事件（submit、停止、revision 投递、槽位释放、容量变化）触发一次 pass，

@@ -1,8 +1,9 @@
 # CLI 参考 · 修订投递、会话记录与终端接管
 
-> **适用版本** `dev@06bcf97` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> **适用版本** `dev@06bcf97` + 本格分支 `Loyage/task_auto`（2026-09-17） · **schema** v38 · **最后校对** 2026-09-17
 > 版本会前进：`dev@06bcf97` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> **本次修订（ADR-0076）**：`task` 组不再以 `<project-id>` 开头：Task id 全局唯一，它自己就是地址，**project 是 Task 的字段**（`task create` 用 `--project`，`task list` 默认为本 Runtime 全部项目、`--project` 过滤；`task schedule status|plan|run` 仍收 `<project-id>`）。旧写法不再接受。
 > 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一，
 > **内容自 `cli-reference.md` 搬移，除下面列出的几节外一句未改写**。
 > §5 的 `task revision create` 由本分支按 **ADR-0065** 更新：`--constraint` 已删除，
@@ -16,13 +17,13 @@
 ## 5. `task revision` 与投递
 
 ```sh
-bun run codeestra task revision create <project-id> <task-id> <expected-version>
+bun run codeestra task revision create <task-id> <expected-version>
   [--specification <text>] [--feature <module-id>]… [--reason <text>] [--json]
-bun run codeestra task revision list <project-id> <task-id> [--json]
+bun run codeestra task revision list <task-id> [--json]
 
-bun run codeestra task revision delivery list <project-id> <task-id> [--json]
-bun run codeestra task revision delivery get  <project-id> <delivery-id> [--json]
-bun run codeestra task revision delivery resolve <project-id> <task-id> <delivery-id> <expected-version>
+bun run codeestra task revision delivery list <task-id> [--json]
+bun run codeestra task revision delivery get  <delivery-id> [--json]
+bun run codeestra task revision delivery resolve <task-id> <delivery-id> <expected-version>
   --action <stop-and-restart|retry> [--adapter <id>] [--json]
 ```
 
@@ -44,7 +45,7 @@ bun run codeestra task revision delivery resolve <project-id> <task-id> <deliver
 ## 6. `task transcript` / `session transcript`
 
 ```sh
-bun run codeestra task transcript <project-id> <task-id>
+bun run codeestra task transcript <task-id>
   [--execution <id>] [--after <entry-id>] [--limit <n>] [--reverse] [--json]
 bun run codeestra session transcript <session-id>
   [--after <entry-id>] [--limit <n>] [--reverse] [--json]

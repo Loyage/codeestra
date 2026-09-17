@@ -258,10 +258,10 @@ async function createAndSubmit(
   projectId: string,
   specification: string,
 ): Promise<TaskPayload> {
-  const created = JSON.parse((await cli(['task', 'create', projectId, specification,
+  const created = JSON.parse((await cli(['task', 'create', '--project', projectId, specification,
     '--title', 'fixture task', '--name', 'fixture-task'],
     environment)).stdout) as TaskPayload;
-  const submitted = await cli(['task', 'submit', projectId, created.id, '0'], environment);
+  const submitted = await cli(['task', 'submit', created.id, '0'], environment);
   expect(submitted.exitCode).toBe(0);
   return { ...created, state: 'READY', version: 1 };
 }
@@ -571,11 +571,11 @@ describe('project knowledge', () => {
 
     // The Task cannot be started: the refusal happens before the Execution row exists (ADR-0041 D04).
     const task = await createAndSubmit(environment, projectId, 'Change something');
-    const refused = await cli(['task', 'run', projectId, task.id, String(task.version), '--json'],
+    const refused = await cli(['task', 'run', task.id, String(task.version), '--json'],
       environment);
     expect(refused.exitCode).not.toBe(0);
     expect(`${refused.stdout}${refused.stderr}`).toContain('KNOWLEDGE_LAYER_INVALID');
-    const status = JSON.parse((await cli(['task', 'status', projectId, task.id],
+    const status = JSON.parse((await cli(['task', 'status', task.id],
       environment)).stdout) as { readonly executions: readonly unknown[] };
     expect(status.executions).toEqual([]);
     const resolve = await cli(['project', 'knowledge', 'resolve', projectId, task.id, '--json'],

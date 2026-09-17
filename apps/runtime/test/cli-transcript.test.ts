@@ -180,19 +180,19 @@ async function runOneTask(): Promise<{
     readonly { id: string }[];
   const projectId = projects[0]?.id as string;
 
-  const created = JSON.parse((await cli(['task', 'create', projectId,
+  const created = JSON.parse((await cli(['task', 'create', '--project', projectId,
     'Create greeting.txt and stop', '--title', 'Create greeting.txt and stop',
     '--name', 'create-greeting'], environment)).stdout) as { readonly id: string };
   const taskId = created.id;
   // Submission starts this undeclared Task immediately under ADR-0059.
-  const submitted = await cli(['task', 'submit', projectId, taskId, '0'], environment);
+  const submitted = await cli(['task', 'submit', taskId, '0'], environment);
   expect(submitted.exitCode).toBe(0);
 
   const deadline = Date.now() + 30_000;
   let sessionState = '';
   let sessionId = '';
   while (Date.now() < deadline) {
-    const status = JSON.parse((await cli(['task', 'status', projectId, taskId],
+    const status = JSON.parse((await cli(['task', 'status', taskId],
       environment)).stdout) as {
       readonly executions: readonly { readonly state: string;
         readonly session: { readonly sessionId: string; readonly state: string } | null }[];
@@ -209,9 +209,9 @@ async function runOneTask(): Promise<{
 
 describe('codeestra transcript', () => {
   test('shows the Agent process step by step from the CLI and the Runtime command face', async () => {
-    const { environment, projectId, taskId, sessionId } = await runOneTask();
+    const { environment, taskId, sessionId } = await runOneTask();
     try {
-      const view = JSON.parse((await cli(['task', 'transcript', projectId, taskId, '--json'],
+      const view = JSON.parse((await cli(['task', 'transcript', taskId, '--json'],
         environment)).stdout) as TranscriptPayload;
       expect(view).toMatchObject({
         sessionId, taskDisplayNumber: 1, fileAvailable: true, note: null,
@@ -234,7 +234,7 @@ describe('codeestra transcript', () => {
       expect(toolResult?.parts[0]?.text).toContain('Successfully wrote');
 
       // The human rendering names the tool and prints its output, not just JSON.
-      const readable = await cli(['task', 'transcript', projectId, taskId], environment);
+      const readable = await cli(['task', 'transcript', taskId], environment);
       expect(readable.exitCode).toBe(0);
       expect(readable.stdout).toContain('TOOL_CALL write');
       expect(readable.stdout).toContain('Successfully wrote 13 bytes to greeting.txt');
@@ -265,11 +265,11 @@ describe('codeestra transcript', () => {
 
   test('prints the newest entry first with --reverse and reads as many pages as that needs',
     async () => {
-      const { environment, projectId, taskId, sessionId } = await runOneTask();
+      const { environment, taskId, sessionId } = await runOneTask();
       try {
         const fileOrder = ['stub-model', 'stub-user', 'stub-assistant', 'stub-tool-result',
           'stub-final', 'stub-compaction'];
-        const reverse = await cli(['task', 'transcript', projectId, taskId, '--reverse'],
+        const reverse = await cli(['task', 'transcript', taskId, '--reverse'],
           environment);
         expect(reverse.exitCode).toBe(0);
         expect(reverse.stderr).toContain('倒序：最新在前');
@@ -292,7 +292,7 @@ describe('codeestra transcript', () => {
 
         // --reverse is a rendering choice for the human view: with --json it is refused instead of
         // being accepted and silently ignored.
-        const refused = await cli(['task', 'transcript', projectId, taskId, '--reverse', '--json'],
+        const refused = await cli(['task', 'transcript', taskId, '--reverse', '--json'],
           environment);
         expect(refused.exitCode).toBe(2);
         expect(refused.stdout).toBe('');
@@ -302,7 +302,7 @@ describe('codeestra transcript', () => {
     }, 120_000);
 
   test('refuses a recorded session file outside the Runtime session directory', async () => {
-    const { home, environment, projectId, taskId, sessionId } = await runOneTask();
+    const { home, environment, taskId, sessionId } = await runOneTask();
     // The Runtime is stopped first so the tampered row is what a fresh Runtime reads.
     await cli(['stop'], environment);
     const outside = temporaryDirectory('codeestra-transcript-outside-');
@@ -315,7 +315,7 @@ describe('codeestra transcript', () => {
     } finally {
       database.close();
     }
-    const refused = await cli(['task', 'transcript', projectId, taskId, '--json'], environment);
+    const refused = await cli(['task', 'transcript', taskId, '--json'], environment);
     expect(refused.exitCode).toBe(1);
     expect(refused.stderr).toContain('SESSION_FILE_NOT_OWNED');
     expect(refused.stdout).toBe('');

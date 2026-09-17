@@ -1,12 +1,13 @@
 # 常见故障与稳定码表
 
-> **适用版本** ADR-0067（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> **适用版本** ADR-0067（2026-09-17） · **schema** v38 · **最后校对** 2026-09-17
 > **本次修订**：删除已暂停 HTTP/UI 的现行排障步骤与稳定码，只保留 CLI/Unix socket 路径。
 > 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
 > **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
 > 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
 > **本次修订（ADR-0074 / schema v38）**：Task 基线改为项目受管的 integration ref（`refs/codeestra/integration`）；成果经 `project integration request|run` 进入该 ref，**发布到你的日常分支仍没有命令**。命令面见 [cli/managed-integration.md](cli/managed-integration.md)。
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> **本次修订（ADR-0076）**：`task` 组不再以 `<project-id>` 开头：Task id 全局唯一，它自己就是地址，**project 是 Task 的字段**（`task create` 用 `--project`，`task list` 默认为本 Runtime 全部项目、`--project` 过滤；`task schedule status|plan|run` 仍收 `<project-id>`）。旧写法不再接受。
 > 第 15 条（ADR-0065 的未验证项）由**本分支**新增；`task create` 的 `--constraint`/`--kind` 已删除，不再是稳定码来源。
 > 权限模式的命令拼写由 FOUNDATION-098 同步为 `settings permission get|set`（ADR-0064：顶层 `permission` 已移除；§19 另新增 `settings list` 总览）。
 > 「全局暂停」一节的稳定码由 FOUNDATION-097 新增（ADR-0061 D08/D09）；`task purge` 的拒绝码一节由 FOUNDATION-090 新增（ADR-0058）；冲突判定与 `--feature` 的拒绝码由
@@ -29,7 +30,7 @@
 ```sh
 bun run codeestra status        # Runtime 是否可用、权限模式、ownership 结论
 bun run codeestra events tail   # 事实流：事件比文案更接近真相
-bun run codeestra task status $PROJECT <task-id>     # executions / verifications / session 注记
+bun run codeestra task status <task-id>     # executions / verifications / session 注记
 ```
 
 记住退出码的三分法：`1` = 拒绝或失败，`2` = 用法错误，`3` = 等待 / 没什么可做。
@@ -130,15 +131,15 @@ CODEESTRA_HOME=/tmp/codeestra-dev bun run codeestra status
 怎么办（按占用者的状态）：
 
 ```sh
-bun run codeestra task schedule explain $PROJECT $TASK --json   # 看 occupiers[] 里到底是谁、什么码
-bun run codeestra task status    $PROJECT $OCCUPIER            # 看它的 state 与 version
+bun run codeestra task schedule explain $TASK --json   # 看 occupiers[] 里到底是谁、什么码
+bun run codeestra task status $OCCUPIER            # 看它的 state 与 version
 
 # RECOVERY_REQUIRED 的占用者：对账（只读事实；只有能证明 provider 已消失才收口）
-bun run codeestra task recover $PROJECT $OCCUPIER <expected-version>
+bun run codeestra task recover $OCCUPIER <expected-version>
 
 # PAUSED 的占用者：继续它或作废它
-bun run codeestra task resume   $PROJECT $OCCUPIER <expected-version>
-bun run codeestra task cancel   $PROJECT $OCCUPIER <expected-version>
+bun run codeestra task resume $OCCUPIER <expected-version>
+bun run codeestra task cancel $OCCUPIER <expected-version>
 ```
 
 只有把占用者自己的故障处理完（对账、或修好它的工作树），它才可能重新产出可观察的成果。
@@ -218,7 +219,7 @@ bun run codeestra scheduler reservations release $PROJECT <reservation-id> --rea
 `PROSE_QUESTION_NO_TOOL_USE`）。provider 进程**已经退出**，所以没有 dialog 可以写。
 
 ```sh
-bun run codeestra task status $PROJECT <task-id>        # stderr 会打印 [waiting] … 与问题原文
+bun run codeestra task status <task-id>        # stderr 会打印 [waiting] … 与问题原文
 bun run codeestra attention list $PROJECT
 bun run codeestra attention resolve $PROJECT <attention-id> --answer "…"    # 或 --dismiss
 ```
@@ -274,7 +275,7 @@ bun run codeestra settings prose-question-attention record-only   # 只标注，
 `task verify --background` 的退出码 `0` 只表示**已受理并开始**：
 
 ```sh
-bun run codeestra task operation list $PROJECT <task-id>
+bun run codeestra task operation list <task-id>
 ```
 
 进度事件（`OperationProgressed` / `OperationSettled`）只是进度，**永不携带判定**；
