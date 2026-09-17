@@ -4,7 +4,7 @@
 >
 > **只读与当前任务相关的部分**：本篇回答「Task / Execution / 内核对象」；Session 与接管、修订投递在 [`state-machines-sessions.md`](./state-machines-sessions.md)；Runtime 生命周期、全局负载控制与 Self Evolution 在 [`state-machines-runtime.md`](./state-machines-runtime.md)。
 
-状态：记录当前 schema v37。ADR-0068 的 Service/Signal/Process FSM 已由 S1–S4 实现，受管 integration 与 S5–S10 仍是目标。**未列出的迁移一律拒绝**；所有迁移需 expected version、actor、reason，并记录事实事件；恢复操作不绕过 guard。
+状态：记录当前 schema v37。ADR-0070 的 Service/Signal/Process FSM 已由 S1–S4 实现，受管 integration 与 S5–S10 仍是目标。**未列出的迁移一律拒绝**；所有迁移需 expected version、actor、reason，并记录事实事件；恢复操作不绕过 guard。
 
 ## 读取路由与章节号对照
 
@@ -12,11 +12,11 @@
 
 | 你要找的 | 在哪 |
 |---|---|
-| §0 ADR-0068 内核 FSM、§1 Task lifecycle、§2 Execution、§8 不改变状态集合的持久事实 | 本篇 |
+| §0 ADR-0070 内核 FSM、§1 Task lifecycle、§2 Execution、§8 不改变状态集合的持久事实 | 本篇 |
 | §3 AgentSession / Takeover（含 §3.1 incarnation 与单 writer lease、§3.2 Session Guidance）、§7 Revision 投递 FSM | [`state-machines-sessions.md`](./state-machines-sessions.md) |
 | §4 已删除的集成/提升状态机、§5 Self Evolution、§6 Runtime 生命周期（含 §6.1 全局负载控制） | [`state-machines-runtime.md`](./state-machines-runtime.md) |
 
-## 0. ADR-0068 新状态机（S1–S4 内核已实现）
+## 0. ADR-0070 新状态机（S1–S4 内核已实现）
 
 ```text
 Service: ACTIVE ↔ PAUSED → RETIRED

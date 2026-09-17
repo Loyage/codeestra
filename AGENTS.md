@@ -14,15 +14,16 @@
 - 新增权限门禁、审批层、信任流程或沙箱属于重大决策：默认不新增；提出时必须给出效率成本评估（常态路径增加多少步/多少等待），并记录为 ADR。
 - 规格、设计和实现不一致时先明确变更，不静默重新解释规格。
 
-## 第一原则（优先级最高，见 PROJECT_SPEC §1.1 / ADR-0008/0011）
+## 第一原则（优先级最高，见 PROJECT_SPEC §1.1 / ADR-0008/0011/0068）
 
 - **效率至上**：Runtime 默认 `FULL` 主机级全权限；项目接入、Agent 工具、成果 commit、验证策略变化、未来 managed integration 与 Self Promotion 的常态确认为 **0 步 0 等待**；CLI 可无确认切换 `STRICT`。ref/ownership/静止证据/幂等等正确性核对继续有效，但不得包装成审批。
 - **服务形态与 CLI 完备**：独立本地 Runtime 是 0 号根 Service 与持久 Actor 内核的宿主。新能力先问“CLI 能否完整完成并脚本化驱动（`--json`、稳定退出码）”，只做 UI 不做 CLI 视为缺陷。UI/桌面是同一命令面的前端，不新增业务语义、不绕过门禁、不直接访问 SQLite。
+- **CLI 每一层自描述且同源**：任何一层的命令清单都必须由分发 argv 的**同一份命令树**生成（`help`），不得列出不存在的命令、也不得漏掉存在的命令；新增/改名命令必须同时改命令树与分发分支（编译期与定向测试都会拦）。「只有源码里有、CLI 进不去」的命令面是缺陷。
 - **测试边界**：自动化测试与验收只用 CLI 命令与 Runtime 命令面（含其 HTTP/SSE 传输）驱动断言；禁止 computer-use、OS 级键鼠/窗口自动化与真实桌面会话。
 
 ## 架构边界
 
-- **内核 Service-first、调度 Task-first（ADR-0068）**：Service/Process/Signal 是内核一等概念，Task Service 仍是 Scheduler 的业务主实体；Agent、Terminal、Conversation、Worktree 均不是调度主实体。
+- **内核 Service-first、调度 Task-first（ADR-0070）**：Service/Process/Signal 是内核一等概念，Task Service 仍是 Scheduler 的业务主实体；Agent、Terminal、Conversation、Worktree 均不是调度主实体。
 - Service 是 Runtime 内持久 Actor，不是 OS 进程/busy-loop；Process 只监督 Agent，普通程序由 Service API + Operation 执行；Service 不直接拥有 Agent。
 - Signal 分 `SIG_A`/`SIG_P`，持久至少一次投递并以目标 Service + idempotency key 收敛；不得宣称跨 SQLite/Git/Provider exactly-once。
 - Domain 不导入 Bun、数据库驱动、Tauri、具体 Agent SDK。
@@ -44,11 +45,11 @@
 **执行任何提升、重启 main 稳定服务或运行 dev 实例之前，先读 `docs/agents/runbook.md`**：命令序列、本机检出布局（ADR-0048）、dev 实例与「重启 main 稳定服务」规程的全文都在那里（原先写在本文件同名小节的规程已移入该文件）。本节只写不变量。
 
 - 项目必须长期保留 `main` 与 `dev` 两个分支，不得删除、重命名或用临时 integration branch 取代；两者在 GitHub 上都必须存在（`origin/main`、`origin/dev`）。`main` 是用户日常运行的稳定实例，不得在其上开发新功能。
-- 该双分支模型**只属于 Codeestra 自身**。当前 ADR-0066 / schema v36 没有任何产品集成/提升命令；ADR-0068 的目标 managed integration ref 也不是本仓库 `dev`，不得拿未来产品能力替代这里的人工四步。
-- `dev` 是新功能实验与集成分支：功能 Task/worktree 的基线是**项目文件夹（本机即 dev clone）建 workspace 时当前检出的分支**（`workspaces.base_ref`），在本机就是 `dev`；功能完成、Task verification 通过后，由**人**把成果合回 `dev`（`git merge`），不得直接进入 `main`。当前 v36 产品不做合并；未来 ADR-0068 managed integration 也不得用于本仓库自身发布。
+- 该双分支模型**只属于 Codeestra 自身**。当前 ADR-0066 / schema v37 没有任何产品集成/提升命令；ADR-0070 的目标 managed integration ref 也不是本仓库 `dev`，不得拿未来产品能力替代这里的人工四步。
+- `dev` 是新功能实验与集成分支：功能 Task/worktree 的基线是**项目文件夹（本机即 dev clone）建 workspace 时当前检出的分支**（`workspaces.base_ref`），在本机就是 `dev`；功能完成、Task verification 通过后，由**人**把成果合回 `dev`（`git merge`），不得直接进入 `main`。当前 v37 产品不做合并；未来 ADR-0070 managed integration 也不得用于本仓库自身发布。
 - `dev → main` 是唯一稳定提升路径，且**必须经 GitHub 中转**（沿用 ADR-0047 的口径，现在是人工步骤而非产品命令）：只 push 固定 dev 候选这一个 ref 并读回核对，main clone 以 fast-forward-only 拉取，重启核对通过后才推回 `origin/main`。不 `--force`、不覆盖远端已有提交、不对已检出的 `main` 用 `update-ref`；断网、SSH 认证失败或远端不可达时不推进任何 ref，也不得把本地等价当作提升成功。
 - 每批固定 dev SHA、预期 main SHA 与验证证据；提升前必须在精确 `dev` 候选 SHA 上跑完全量测试（在 dev clone 发起），候选、测试配置或锁文件变化即证据失效并重跑。FULL 下不批准，STRICT 下保留用户批准且 ref/证据变化使批准失效。
-- 产品 `promotion *` 已由 ADR-0066 删除；ADR-0068 也不恢复它。本仓库自身的提升一律走 runbook 人工四步，并在交付记录里写明执行到哪一步。
+- 产品 `promotion *` 已由 ADR-0066 删除；ADR-0070 也不恢复它。本仓库自身的提升一律走 runbook 人工四步，并在交付记录里写明执行到哪一步。
 - `main` 成功更新后必须立即在 main clone `stop` 再 `status` 重启并检查 Runtime：该后置步骤不增加第二次确认，Runtime 恢复响应前不得报告提升完成；失败时立即报告，不擅自回滚。提升只有在「候选已到 `origin/dev`、main 已 ff 到该候选、Runtime 已恢复、已推回 `origin/main`」四件事实都核对后才算完成（推回放在最后，重启未成功就不推回）。
 - 当前没有后台监控用户在系统外手动更新 `main` 的能力，不要声称已覆盖该场景；也不要声称 GitHub 侧已配置分支保护、必经评审或 CI 门禁。
 

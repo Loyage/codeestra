@@ -1,16 +1,16 @@
 # Codeestra 用户指南
 
-> **适用版本** ADR-0068 S1–S4 实现分支（2026-09-17） · **schema** v37 · **最后校对** 2026-09-17
+> **适用版本** ADR-0070 S1–S4 实现分支（2026-09-17） · **schema** v37 · **最后校对** 2026-09-17
 > 版本会前进：`dev@036cf68` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > 权限模式的命令拼写由 FOUNDATION-098 同步为 `settings permission get|set`（ADR-0064：顶层 `permission` 已移除；§19 另新增 `settings list` 总览）。
-> **ADR-0068 S1–S4 实现修订**：新增 Service Kernel 命令参考；其余分篇保留各自最后校对基线。
+> **ADR-0070 S1–S4 实现修订**：新增 Service Kernel 命令参考；其余分篇保留各自最后校对基线。
 
 本目录是**面向使用者**的中文指南：怎么装、怎么用、软件具备哪些能力、每条命令怎么敲、出错了怎么办。
 
 Codeestra 的长期目标是 **AI 的操作系统**：内核 Service-first、Scheduler Task-first，以 Service / Process / Agent / Signal 管理 AI 工作。软件本体是独立本地 Runtime；ADR-0067 起当前只启用 CLI/Unix socket 命令面，Web UI 已暂停。
 
-> **当前实现边界**：本目录只描述 schema v37 **真实具备**的能力。ADR-0068 S1–S4 的 `service/process/signal/intent` 通用命令已写入 [Service Kernel 命令参考](./cli/kernel.md)；原生 Process Agent、intention 解释与受管 integration 尚未实现，不会提前写成可用能力。目标设计见 [Service Kernel 架构](../architecture/service-process-signal.md)。每条现有命令、参数、退出码与错误码都从仓库源码核对得到
+> **当前实现边界**：本目录只描述 schema v37 **真实具备**的能力。ADR-0070 S1–S4 的 `service/process/signal/intent` 通用命令已写入 [Service Kernel 命令参考](./cli/kernel.md)；原生 Process Agent、intention 解释与受管 integration 尚未实现，不会提前写成可用能力。目标设计见 [Service Kernel 架构](../architecture/service-process-signal.md)。每条现有命令、参数、退出码与错误码都从仓库源码核对得到
 > （核对方法与结果见 `docs/tasks/README.md` 的 FOUNDATION-070 一节）。文档与实现不一致的地方在本目录
 > 各文中如实标注，不替用户裁决。
 

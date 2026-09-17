@@ -1,6 +1,6 @@
 # 端到端流程走查
 
-> **适用版本** ADR-0068 S1–S4 实现分支（2026-09-17） · **schema** v37 · **最后校对** 2026-09-17
+> **适用版本** ADR-0070 S1–S4 实现分支（2026-09-17） · **schema** v37 · **最后校对** 2026-09-17
 > 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > §1 的创建任务与 §4.4 的修订示例由本分支按 **ADR-0065** 改写（必填 `--title`/`--name`；`--constraint`/`--kind` 已删除）。
@@ -8,7 +8,7 @@
 > §10 的依赖满足语义由 FOUNDATION-093 第三轮同步（ADR-0060 修订）；其余内容沿用 FOUNDATION-091 的校对基线。
 > **本次修订（ADR-0066 / schema v36）**：§7「合入 `dev`」与 §8「稳定提升」整节删除，改为成果去向与
 > 本仓库自身的人工四步；§9 去掉自动回收；§3.3 的依赖语义按「上游结果 commit 对当前基线可达」改写。
-> **ADR-0068 S1–S4 实现修订**：总流程加入已实现的持久 Signal 与兼容投影；managed integration 等 S5–S9 能力仍不提前声称。
+> **ADR-0070 S1–S4 实现修订**：总流程加入已实现的持久 Signal 与兼容投影；managed integration 等 S5–S9 能力仍不提前声称。
 
 本文按真实顺序走一遍：**建任务 → 提交 → 运行 → 回答 Agent → 提交成果 → 验证 → 把成果交给你 → 资源回收**。
 每一步给出可以照抄的命令和**预期输出形状**。
@@ -21,7 +21,7 @@ User Intent → Task / Task DAG → Dependency / Conflict → Scheduler
 → Result Commit → Task Verification → 成果停在 task branch → 用户自行合并
 ```
 
-ADR-0068 S1–S4 已加入持久 `SIG_A`/`SIG_P`、Service 树与 Process 投影。你可以用
+ADR-0070 S1–S4 已加入持久 `SIG_A`/`SIG_P`、Service 树与 Process 投影。你可以用
 `intent send <text…>` 把 intention 可靠送到 root/Project/Task Service；它当前只创建 `CREATED` Process 并返回
 `PENDING_S6`，因此本走查仍用既有 Task 命令完成实际工作。Project Service managed integration、自然语言解释与原生
 Process Agent 控制属于后续 S5–S8，不把“受理”误写成“执行完成”。

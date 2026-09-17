@@ -1,6 +1,6 @@
 # Service Kernel 命令
 
-> **适用版本** ADR-0068 S1–S4 实现分支（2026-09-17） · **schema** v37 · **最后校对** 2026-09-17
+> **适用版本** ADR-0070 S1–S4 实现分支（2026-09-17） · **schema** v37 · **最后校对** 2026-09-17
 > 当前只实现内核、持久 Signal 与兼容 facade；Process 原生控制与 intention 解释仍分别属于 S5/S6。
 
 ## Service

@@ -4,9 +4,9 @@
 >
 > 章节号沿用拆分前的编号；§7 保留为「预留/reconcile 原语」的记录，§8 是当前的全局负载控制（**已实现**）。
 
-状态：调度引擎与 Service Kernel S1–S4 已实现到 schema v37。ADR-0068 的「内核 Service-first、调度 Task-first」已落地基础对象，但 **S9 的 eligibility 解耦尚未落地**：当前 `schedule-service.ts` 仍是权威实现，它自己读依赖、冲突与容量。
+状态：调度引擎与 Service Kernel S1–S4 已实现到 schema v37。ADR-0070 的「内核 Service-first、调度 Task-first」已落地基础对象，但 **S9 的 eligibility 解耦尚未落地**：当前 `schedule-service.ts` 仍是权威实现，它自己读依赖、冲突与容量。
 
-## 0. ADR-0068 目标边界（S9，尚未实现）
+## 0. ADR-0070 目标边界（S9，尚未实现）
 
 Scheduler 仍只调度 Task Service，不调度任意 Service 或 Signal。目标形态里，依赖、revision、冲突与基线可达性由 Task/Project 领域服务计算为带版本证据的 `TaskEligibility`；Scheduler 只负责：
 
@@ -120,7 +120,7 @@ ADR-0059 之后当前规则不再产生 `UNKNOWN`，所以这条路径平时走�
 ## 6. 明确不做（用户已否决，不是遗漏）
 
 - **非 Git 共享资源的 resource claim（端口、数据库、dev server）**：不引入。不同文件不能证明这些资源可共享，而 ADR-0059 之后已没有「`complete=false` → UNKNOWN」这个兜底，所以这类冲突**根本不被启动前门禁覆盖**：它们只在真实运行时暴露，由使用方用功能声明表达互斥意愿。`impact.json` 的 `globalResources` 只覆盖 Git 可见影响，且现在只是证据。
-- **集成组批**：旧多成员 IntegrationBatch 曾实现，已由 ADR-0066 / schema v36 删除。ADR-0068 的 S8 目标是 Project Service 的持久 merge queue（同项目串行、跨项目并行）；Scheduler 不负责自动组批或执行 merge。
+- **集成组批**：旧多成员 IntegrationBatch 曾实现，已由 ADR-0066 / schema v36 删除。ADR-0070 的 S8 目标是 Project Service 的持久 merge queue（同项目串行、跨项目并行）；Scheduler 不负责自动组批或执行 merge。
 - **饥饿公平策略（aging）**：不加。界面只显示等待时长，公平策略作为独立产品决策留后续。
 - **按主机 CPU/内存自动推导并发容量**、**LLM 辅助的 ImpactSnapshot 预测**、**`UNKNOWN` 上除 `--allow-unknown` 之外的任何门禁/审批/信任流程**：都不做。ADR-0061 的全局上限是显式配置，不是资源探测器。
 

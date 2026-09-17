@@ -2,9 +2,9 @@
 
 > 层级：L1 · 体量 ≈ 9k 字符 · **何时读**：弄清楚某个领域对象归谁、持有哪些事实、边界在哪 · 权威来源：`packages/domain/src/**`（纯领域）与各表 DDL（[`sqlite-schema.md`](./sqlite-schema.md)）。状态迁移见 [`state-machines.md`](./state-machines.md)。
 
-状态：既有 Task/Execution 模型的实现说明 + ADR-0068 目标映射。当前 schema v37 仍以 Project/Task/Execution 表为 core 权威；Service/Process/Signal 的 S1–S4 内核与兼容投影已实现，S5–S10 尚未完成（[`service-process-signal.md`](./service-process-signal.md)）。
+状态：既有 Task/Execution 模型的实现说明 + ADR-0070 目标映射。当前 schema v37 仍以 Project/Task/Execution 表为 core 权威；Service/Process/Signal 的 S1–S4 内核与兼容投影已实现，S5–S10 尚未完成（[`service-process-signal.md`](./service-process-signal.md)）。
 
-## 0. ADR-0068 目标聚合
+## 0. ADR-0070 目标聚合
 
 - `CodeestraService`：每个 Runtime home 唯一的 0 号根 Service。
 - `Service`：持久 Actor 聚合，core state + namespaced metadata + versioned contract + inbox；Service 树无环。
@@ -39,7 +39,7 @@ Specification 是人类可读文本。机器解释必须保存来源，不能丢
 
 当前 Project 保存 canonical repo root、Git common directory、mainRef、显示名、创建时间与策略版本。启动先核对 Git 仓库身份，目录搬迁不能悄悄关联到另一仓库。
 
-ADR-0068 目标中，每个 Project 一一对应 ProjectService，并增加由 Runtime 独占管理的 integration ref/worktree 与 merge queue。该 ref 不等于用户已检出的 main/dev 分支；目标 migration 完成前，这些字段不存在，当前 v37 的兼容 Task 路径仍按项目文件夹当前分支建 Task。
+ADR-0070 目标中，每个 Project 一一对应 ProjectService，并增加由 Runtime 独占管理的 integration ref/worktree 与 merge queue。该 ref 不等于用户已检出的 main/dev 分支；目标 migration 完成前，这些字段不存在，当前 v37 的兼容 Task 路径仍按项目文件夹当前分支建 Task。
 
 ### UserIntent / IntentTarget
 
@@ -72,7 +72,7 @@ id、taskId、number、previousRevisionId、specification、**features**、inten
 
 **待用户确认的后续语义**：上游在依赖满足前又修订时，是否自动移动 requiredRevision。安全默认不是替用户选版本，而是使该边 NEEDS_REVIEW、阻止下游启动，并要求明确选择版本后再激活；Phase 1 不实现 DAG 编辑，因此不阻塞 Phase 0/1。
 
-当前 v37 兼容路径的满足条件是：指定上游 revision 的 result commit 对项目当前 Task 基线 ref 可达。ADR-0068 目标改为：上游 merge queue item 已成功推进 ProjectService 的 integration ref，且结果 commit 对下游固定 integration 基线可达；integration ref 外部移动或证据失效时重新阻塞。Task Verification 单独通过仍不释放依赖。
+当前 v37 兼容路径的满足条件是：指定上游 revision 的 result commit 对项目当前 Task 基线 ref 可达。ADR-0070 目标改为：上游 merge queue item 已成功推进 ProjectService 的 integration ref，且结果 commit 对下游固定 integration 基线可达；integration ref 外部移动或证据失效时重新阻塞。Task Verification 单独通过仍不释放依赖。
 
 ### ExecutionSlotReservation / 全局容量
 
@@ -123,7 +123,7 @@ scope=TASK/INTEGRATION；subject execution/batch 二选一；revision（Task sco
 
 Phase 1 只实现 TASK scope：subject 固定 `executionId` + `revisionId`，且必须匹配 Task 当前 revision 与已捕获的 `result_commit`。命令来自 main ref 上的人工维护策略（ADR-0006）：FULL 下直接执行，STRICT 下在 trust 时一次性确认；Task branch 上的策略文件不参与判定。state 为 `QUEUED → RUNNING → PASSED | FAILED | ERROR`，新 commit 或新 policy digest 使旧 `PASSED` 变为 `STALE`（保留原结论与失效原因，不改写）。`outcomeCode` 区分 `PASSED`、`COMMAND_FAILED`、`COMMAND_TIMEOUT`、`TREE_MUTATED`、`WORKTREE_FAILED`、`RUNTIME_RESTARTED`。evidence 只含 exit code、时长、字节数、摘要、路径列表与副本处理结果，不含原始命令输出。验证证据不等于集成或发布事实。
 
-### ManagedIntegration / MergeQueueItem / IntegrationProcess（ADR-0068 目标）
+### ManagedIntegration / MergeQueueItem / IntegrationProcess（ADR-0070 目标）
 
 当前 v37 没有产品侧 integration 表或命令。目标模型不复活旧 IntegrationBatch/StablePromotion 原样结构，而由 ProjectService 持有：
 

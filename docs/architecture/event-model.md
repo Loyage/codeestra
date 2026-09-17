@@ -64,7 +64,7 @@ type CommandEnvelope<T extends string, P> = {
 | `VerificationCompleted` | `VerificationRun` | verificationId, testedCommit, testedTree, policyVersion/Digest, mainCommit, state, outcomeCode |
 | `VerificationInvalidated` | `Task` | taskId, reason, verificationIds, testedCommit, policyDigest |
 
-**Service Kernel（schema v37 / ADR-0068 S2–S4）**
+**Service Kernel（schema v37 / ADR-0070 S2–S4）**
 
 | Event | aggregate | payload 要点 |
 |---|---|---|

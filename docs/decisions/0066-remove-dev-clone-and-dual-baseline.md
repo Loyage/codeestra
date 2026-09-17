@@ -1,6 +1,6 @@
 # ADR-0066：删除 dev clone、双基线、dev 集成与稳定提升；Task 基线只有一种
 
-Status：Accepted（用户 2026-09-16 决策）。**已实现**（schema v36 引入，当前 schema **v37** 的兼容 Task 路径仍是运行事实）；**目标语义由 ADR-0068 supersede，S1–S4 已实现但 S7/S8 写路径与 managed integration 尚未实现**。后续 Project Service 将管理独立 integration ref/worktree，但不原样恢复旧 dev clone / promotion 模型。**本 ADR 在 S7/S8 完成前仍准确描述业务 CLI。**
+Status：Accepted（用户 2026-09-16 决策）。**已实现**（schema v36 引入，当前 schema **v37** 的兼容 Task 路径仍是运行事实）；**目标语义由 ADR-0070 supersede，S1–S4 已实现但 S7/S8 写路径与 managed integration 尚未实现**。后续 Project Service 将管理独立 integration ref/worktree，但不原样恢复旧 dev clone / promotion 模型。**本 ADR 在 S7/S8 完成前仍准确描述业务 CLI。**
 
 本 ADR 原先 **Supersedes / Amends**
 ADR-0009（双分支与提升）、ADR-0018（集成进 dev）、ADR-0022（提升为产品能力）、ADR-0038/0039

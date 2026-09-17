@@ -1,6 +1,6 @@
 # Codeestra 用户说明书
 
-> **适用版本** ADR-0068 S1–S4 实现分支（2026-09-17） · **schema** v37 · **最后校对** 2026-09-17
+> **适用版本** ADR-0070 S1–S4 实现分支（2026-09-17） · **schema** v37 · **最后校对** 2026-09-17
 > 版本会前进：`dev@6c7de03` 只是本目录最后一次校对的基线；当前适用版本以
 > **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
 > 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
@@ -19,7 +19,7 @@
 > §10.3 新增 `WAIT_CONTROL` 一行并由 **FOUNDATION-097** 新增 §10.5「全局暂停」。
 > §「任务」永久删除一条与 §13.5 `RECOVERY_REQUIRED` 的 purge 行为由用户任务 `task/930f5325` 同步（ADR-0058 D02 修订，2026-09-16）。
 > 其余内容沿用 FOUNDATION-091 的校对基线。
-> **ADR-0068 S1–S4 实现修订**：§1 与 §1.1 描述 schema v37 的 Service/Process/Signal 内核命令；S5 之后能力仍不提前声称。
+> **ADR-0070 S1–S4 实现修订**：§1 与 §1.1 描述 schema v37 的 Service/Process/Signal 内核命令；S5 之后能力仍不提前声称。
 > §6 末尾的「Agent 运行结果卡片与最后的输出」一段与 `04-task-detail.png` 的图说由用户任务 `Loyage/simplize_task_ui`
 > （2026-09-16）同步（无新命令；卡片是只读投影，截图未重拍）。
 
@@ -55,7 +55,7 @@
 
 Codeestra 的长期目标是 **AI 的操作系统**：以长期 Service、短期 Process、Agent 与 Signal 统一管理 AI 工作；内核 Service-first，Scheduler 仍 Task-first。
 
-**这本手册描述当前 schema v37**：Service / Process / Signal 内核与 `service/process/signal/intent` CLI 已可用；Project / Task / Execution / Session 仍是现有业务写路径的权威事实，并由兼容 facade 投影进新内核。Project Service 自动集成、原生 Process 控制和 intention 解释仍未实现（S5–S8），成果仍由你自己合并。目标架构与后续计划见 [ADR-0068](../decisions/0068-service-process-signal-kernel.md) 和 [roadmap](../roadmap/mvp.md)。
+**这本手册描述当前 schema v37**：Service / Process / Signal 内核与 `service/process/signal/intent` CLI 已可用；Project / Task / Execution / Session 仍是现有业务写路径的权威事实，并由兼容 facade 投影进新内核。Project Service 自动集成、原生 Process 控制和 intention 解释仍未实现（S5–S8），成果仍由你自己合并。目标架构与后续计划见 [ADR-0070](../decisions/0070-service-process-signal-kernel.md) 和 [roadmap](../roadmap/mvp.md)。
 
 ### 三条必须先知道的第一原则
 
@@ -1032,8 +1032,11 @@ bun run codeestra task status $PROJECT <task-id>     # 执行 / 验证 / 会话�
 |---|---|
 | `0` | 成功。**注意**：某些命令的成功是「已受理」而不是「已完成」 |
 | `1` | 拒绝或失败（含 `RECOVERY_REQUIRED` 这类需要人处理的状态） |
-| `2` | **用法错误**：参数个数/取值不合法、未知 flag、缺少必填 flag |
+| `2` | **用法错误**：未知命令、缺少子命令、参数个数/取值不合法、未知 flag、缺少必填 flag。stderr 只有**一行**，并提示对应层的 `help`（ADR-0068） |
 | `3` | **等待**（冲突/容量等待、draining）或**没什么可做**（reclaim 没有可回收项） |
+
+**不知道某一层有哪些命令，就问那一层**：`codeestra help`、`codeestra task help`、`codeestra task revision help`
+（`codeestra task revision --help` 等价）。这份清单由命令树生成，不会与实际命令不一致，也不需要 Runtime（ADR-0068）。
 
 **`3` 从不表示 `BLOCKED`**——`BLOCKED` 只表示依赖未满足，属于「需要处理」而不是「等一等」。
 看到一个 `1` 时，**先读错误码，不要读文案**：文案可能会变，码不会。
@@ -1044,6 +1047,7 @@ bun run codeestra task status $PROJECT <task-id>     # 执行 / 验证 / 会话�
 |---|---|
 | `ui` / `open` 返回用法错误 | Web UI 已按 ADR-0067 暂停；改用 `project trust` 与其它 CLI 命令 |
 | 命令打到了「另一个」Runtime | 检查 `CODEESTRA_HOME`；一个 home 只跑一个 Runtime |
+| 想知道 CLI 到底有哪些命令 | `codeestra help`（或任意层的 `<命令路径> help`）；`codeestra runtime commands` 列出 Runtime 侧接受的每一条 versioned 命令 |
 
 ### 13.4 任务一直不跑
 

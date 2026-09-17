@@ -2288,7 +2288,7 @@ CREATE INDEX tasks_project_archived ON tasks(project_id,archived_at);
 `;
 
 /**
- * Schema v37 (ADR-0068 / S2): additive Service, Signal and Process kernel storage.
+ * Schema v37 (ADR-0070 / S2): additive Service, Signal and Process kernel storage.
  *
  * Existing Project/Task/Execution rows remain the only writable authority for their core lifecycle.
  * Their Service/Process rows are identity projections: Project and Task Service IDs deliberately

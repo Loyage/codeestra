@@ -1,6 +1,6 @@
 # Service Kernel 改造 Roadmap
 
-状态：**ADR-0068 S1–S4 已由 FOUNDATION-099 实现，S5–S10 待完成**。当前可运行基线是 schema v37：既有业务 CLI 与通用 `service` / `process` / `signal` / `intent` CLI 并存；Project/Task/Execution 仍是 core 写权威，产品侧受管 integration 尚未实现。
+状态：**ADR-0070 S1–S4 已由 FOUNDATION-099 实现，S5–S10 待完成**。当前可运行基线是 schema v37：既有业务 CLI 与通用 `service` / `process` / `signal` / `intent` CLI 并存；Project/Task/Execution 仍是 core 写权威，产品侧受管 integration 尚未实现。
 
 本文件是接下来多 Agent 改造的权威分波计划。历史实现记录不在这里重复，见 [`docs/tasks/README.md`](../tasks/README.md)；旧 ADR 保留原样，不因 roadmap 改写而失去审计价值。
 
@@ -59,7 +59,7 @@ S0 文档与契约冻结（本次）
 
 交付：
 
-- ADR-0068；
+- ADR-0070；
 - `docs/architecture/service-process-signal.md`；
 - `PROJECT_SPEC.md`、架构索引、领域/调度文档的目标语义；
 - 本 roadmap 与多 Agent 分工；
@@ -203,7 +203,7 @@ intent send
 
 ### S8 — v38 受管 integration 与 Project merge queue
 
-**必须在独立波次、由唯一 migration owner 执行。** 不复制旧 ADR-0018/0053 表，先按 ADR-0068 重新设计。
+**必须在独立波次、由唯一 migration owner 执行。** 不复制旧 ADR-0018/0053 表，先按 ADR-0070 重新设计。
 
 交付：
 

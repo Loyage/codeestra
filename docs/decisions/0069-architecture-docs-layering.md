@@ -58,4 +58,4 @@
 - [`docs/architecture/README.md`](../architecture/README.md)
 - [ADR-0050](0050-user-manual-and-doc-sync-discipline.md)、[ADR-0063](0063-split-cli-reference-by-command-group.md)（用户文档与命令面参考的同类拆分先例；本次不涉及 `docs/guides/**`）
 - [ADR-0035](0035-event-name-and-handoff-faces.md)（事件命名规则的权威记录）
-- [ADR-0066](0066-remove-dev-clone-and-dual-baseline.md)、[ADR-0068](0068-service-process-signal-kernel.md)（被删除内容所对应的能力变更）
+- [ADR-0066](0066-remove-dev-clone-and-dual-baseline.md)、[ADR-0070](0070-service-process-signal-kernel.md)（被删除内容所对应的能力变更）

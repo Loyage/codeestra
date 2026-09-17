@@ -29,7 +29,7 @@ payload：`taskId`、`executionId`、`sessionId`、`workspaceId`、`workspacePat
 
 `CANCELLED` **不是新事件类型**，它是 `VerificationCompleted.state` 的一个取值，此时 `outcomeCode='CANCELLED_BY_USER'`，且同事务发布对应的 `OperationSettled`（Operation 置 `FAILED`）。`verification_runs` 的 CHECK 让 `CANCELLED` 与其它终态一样必须带 `ended_at` 与 `outcome_code`，因此「未确认进程组静止」仍写不成终态。
 
-`integration_verification_runs`（v36 已随集成一起删除）当时刻意没有 `CANCELLED`：集成验证有独立 Operation kind。ADR-0068 S8 重新引入集成验证时该口径要重新决定。
+`integration_verification_runs`（v36 已随集成一起删除）当时刻意没有 `CANCELLED`：集成验证有独立 Operation kind。ADR-0070 S8 重新引入集成验证时该口径要重新决定。
 
 ## 5. 修订投递（ADR-0028）
 

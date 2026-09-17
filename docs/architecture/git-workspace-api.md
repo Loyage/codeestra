@@ -57,7 +57,7 @@ interface ChangeSet {
 
 ## 2. Task Workspace
 
-> 当前基线来源见下文；ADR-0068 S8 完成后，新 Task 默认改从 Project Service managed integration ref 的当时 OID 建立。两种时期都必须固定 base ref/commit，既有 workspace 不回写。
+> 当前基线来源见下文；ADR-0070 S8 完成后，新 Task 默认改从 Project Service managed integration ref 的当时 OID 建立。两种时期都必须固定 base ref/commit，既有 workspace 不回写。
 
 - prepare 以**项目基线**的固定 SHA 为基线，创建独立 `refs/heads/task/<task-id>` 与 Runtime 数据目录 owned worktree（ADR-0005）。ref/path 只使用校验后的安全段，不把未经规范化的用户文本当 ref/path，也不在用户仓库根目录创建 worktree。
 - **基线只有一种来源**（ADR-0066）：在**项目文件夹**（`projects.repo_root`）里取**建 workspace 时当前检出的分支**，把 ref 与 commit 一起固定进 `workspaces.base_ref`/`base_commit`（此后切分支不会移动已建 Task 的基线）；`task run --base-ref <refs/heads/…>` 可以显式选一条本地分支。`HEAD` detached 时以 `TASK_BASE_REF_UNRESOLVED` 拒绝，不猜一条分支。同一目录同时拥有仓库身份与 `main` ref（判定策略、影响映射的读取来源）。**哪个根指向哪个仓库**见下表：
@@ -114,7 +114,7 @@ DROP 了 `integration_batches(_items)`、`integration_verification_runs`、`stab
 - **本仓库自身**仍以 `main`/`dev` 两个 clone 开发并把 `dev` 提升到 `main`：那是**仓库约定**
   （`AGENTS.md` 的人工四步、`docs/agents/runbook.md` 的命令序列），当前产品不提供命令、不记账、不校验它。
 
-### 3.2 ADR-0068 目标：Project managed integration
+### 3.2 ADR-0070 目标：Project managed integration
 
 Project Service 将独占一个 integration ref/worktree。Task Verification 通过后发送 merge-request Signal；同一项目的持久队列严格串行，由 Integration Process 通过类型化 Git API 生成候选，独立 Integration Verification 通过且 expected OID 未移动时才 CAS 推进 ref。它不直接修改用户 worktree，也不恢复旧 `promotion *`。准确 Git port 与错误码在 S8 冻结。
 

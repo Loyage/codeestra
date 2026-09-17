@@ -13,7 +13,7 @@
 | Session、incarnation/lease、接管与终端、指导、修订投递、启动收敛 | [`sqlite-schema-sessions.md`](./sqlite-schema-sessions.md) | ≈19k |
 | 影响/冲突、验证与定向测试计划、资源回收账本 | [`sqlite-schema-pipeline.md`](./sqlite-schema-pipeline.md) | ≈13k |
 | Operation、domain event、outbox、幂等回执、容量、槽位预留、全局暂停 | [`sqlite-schema-runtime.md`](./sqlite-schema-runtime.md) | ≈12k |
-| Service / Process / Signal 内核表（ADR-0068 S2） | [`sqlite-schema-kernel.md`](./sqlite-schema-kernel.md) | ≈10k |
+| Service / Process / Signal 内核表（ADR-0070 S2） | [`sqlite-schema-kernel.md`](./sqlite-schema-kernel.md) | ≈10k |
 | 状态取值与合法迁移 | [`state-machines.md`](./state-machines.md)（+ sessions/runtime 两篇） | ≈9k + 8k + 5k |
 
 当前共 **56 张表**。表名一律 snake_case 复数；没有 UI 专用表、没有第二套事件源。
@@ -81,9 +81,9 @@
 | 34 | Runtime 全局容量 + Provider 冻结 | `runtime_capacity_settings`、退役两张旧容量表、`runtime_command_receipts`、`domain_events.project_id` 可空；`runtime_pause_control`/`runtime_pause_targets`（ADR-0061） | 现行 |
 | 35 | 任务输入字段 | `tasks` 两个标题、删 `kind` 与 `constraints_json`（ADR-0065） | 现行 |
 | 36 | 删除 dev clone / 双基线 / 集成 / 提升 | 回填 `workspaces.base_ref`、重建 `projects`、DROP 集成与提升各表（ADR-0066） | 现行（不可逆） |
-| 37 | Service Kernel additive storage | `services`、`service_metadata`、`processes`、`process_execution_links`、`signals`、`signal_attempts`、`signal_receipts`（ADR-0068 S2） | 现行 |
+| 37 | Service Kernel additive storage | `services`、`service_metadata`、`processes`、`process_execution_links`、`signals`、`signal_attempts`、`signal_receipts`（ADR-0070 S2） | 现行 |
 
-后续版本号留给 ADR-0068 的受管 integration（S8）与 Self Evolution，且只有真正实现后才写进上表。**v36 的删除是不可逆的**：集成批次、集成验证与提升记录已不存在，Task/revision/execution/任务级验证/workspace/回收账本不受影响。
+后续版本号留给 ADR-0070 的受管 integration（S8）与 Self Evolution，且只有真正实现后才写进上表。**v36 的删除是不可逆的**：集成批次、集成验证与提升记录已不存在，Task/revision/execution/任务级验证/workspace/回收账本不受影响。
 
 ## 4. 旧章节号对照（历史引用仍可解析）
 

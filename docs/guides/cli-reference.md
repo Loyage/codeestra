@@ -1,12 +1,14 @@
 # CLI 命令参考（索引）
 
-> **适用版本** ADR-0068 S1–S4（2026-09-17） · **schema** v37 · **最后校对** 2026-09-17
+> **适用版本** ADR-0070 S1–S4（2026-09-17） · **schema** v37 · **最后校对** 2026-09-17
 > 当前适用版本以 [docs/tasks/README.md](../tasks/README.md) 的最新记录为准。
 > 权限模式的命令拼写由 FOUNDATION-098 同步为 `settings permission get|set`（ADR-0064：顶层 `permission` 已移除；§19 另新增 `settings list` 总览）。
 > **本次修订（ADR-0067）**：索引标明 `ui` / `open` 已删除；正文以 [`cli/runtime.md`](./cli/runtime.md) 为准。
+> **本次修订（ADR-0068）**：新增 §22 `help` 与 `runtime commands`（命令树自描述）与 §2 的 `agent plugins` 一节；
+> 用法错误的输出从整份 `usage()` 清单改为一行（旧长文本完整搬进命令树，仍由 `help` 打印）。
 > **本次修订（ADR-0066 / schema v36）**：`promotion` 一篇（§15）与 `task integrate`/`task integration`（§11）随集成与
 > 提升一起删除，因此拆分后的篇数由九篇变为**八篇**。
-> 拆分说明（ADR-0063）：原来这一篇 1322 行的参考按功能拆分；ADR-0068 S4 新增 Service Kernel 参考，现在 [`cli/`](./cli/README.md) 下共九篇。
+> 拆分说明（ADR-0063）：原来这一篇 1322 行的参考按功能拆分；ADR-0070 S4 新增 Service Kernel 参考，现在 [`cli/`](./cli/README.md) 下共九篇。
 > 正文逐行搬移、一句未改；本次**未重新核对源码**，所以最后校对日期不变，逐节的校对注随各节搬到对应文件。
 
 本文件不再是命令参考正文，而是**唯一保留的对照表**：给出「旧 §N → 现在在哪一篇」。
@@ -21,8 +23,8 @@
 |---|---|
 | §0 通用约定（连接 / 自动启动 / 退出码 / 环境变量） | [cli/README.md](./cli/README.md) |
 | §1 Runtime 生命周期（`status`/`stop`；`ui`/`open` 已由 ADR-0067 删除；权限模式已移入 §19） | [cli/runtime.md](./cli/runtime.md) |
-| §2 `agent config` | [cli/runtime.md](./cli/runtime.md) |
-| ADR-0068 S4 `service` / `process` / `signal` / `intent`（无旧 §N） | [cli/kernel.md](./cli/kernel.md) |
+| §2 `agent config`、`agent plugins` | [cli/runtime.md](./cli/runtime.md) |
+| ADR-0070 S4 `service` / `process` / `signal` / `intent`（无旧 §N） | [cli/kernel.md](./cli/kernel.md) |
 | §3 `project`（含 `project impact *`、`project knowledge *`） | [cli/project.md](./cli/project.md) |
 | §4 `task`：生命周期（`create` 到 `purge`/`status`）与 `--feature` | [cli/task-lifecycle.md](./cli/task-lifecycle.md) |
 | §5 `task revision` 与投递 | [cli/task-revision-session.md](./cli/task-revision-session.md) |
@@ -39,6 +41,7 @@
 | §15 `promotion`（稳定提升） | **ADR-0066 已删除**（原 `cli/promotion.md` 一并删除） |
 | §16 `reclaim`（资源回收） | [cli/integration-dag-scheduler.md](./cli/integration-dag-scheduler.md) |
 | §17 `events`（订阅） | [cli/interface.md](./cli/interface.md) |
+| §22 `help` / `runtime commands`（自描述，ADR-0068；拆分后新增的章节号） | [cli/runtime.md](./cli/runtime.md) |
 | §18 `attention` | [cli/interface.md](./cli/interface.md) |
 | §19 `settings`（含 `settings permission`、`settings list`） | [cli/runtime.md](./cli/runtime.md) |
 | §20 HTTP / SSE 面（Web UI 用） | [cli/interface.md](./cli/interface.md) |

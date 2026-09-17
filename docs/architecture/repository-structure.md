@@ -24,7 +24,7 @@ packages/
 
 ServiceRegistry、SignalDispatcher、Scheduler、ProcessCoordinator 与 IntegrationCoordinator 都是同一 Runtime 内的模块，不拆成微服务，也不让每个 Service 启一个 OS 进程。领域代码不导入 Bun、SQLite、Tauri、React 或具体 Agent SDK。基础设施通过 port 注入；客户端不直接写 SQLite 或执行 Git。
 
-服务形态与入口分层（ADR-0008/0068）：`apps/runtime` 是 0 号 Service 与持久 Actor 内核的宿主；`apps/cli` 是**完备、可脚本化**的权威命令面。目标新增 `service/process/signal/intent` 内核 facade，同时保留现有业务命令。`apps/ui` / 未来 `apps/desktop` 只能是同一 versioned command/query/event 面的便利前端，不新增业务语义。
+服务形态与入口分层（ADR-0008/0070）：`apps/runtime` 是 0 号 Service 与持久 Actor 内核的宿主；`apps/cli` 是**完备、可脚本化**的权威命令面。目标新增 `service/process/signal/intent` 内核 facade，同时保留现有业务命令。`apps/ui` / 未来 `apps/desktop` 只能是同一 versioned command/query/event 面的便利前端，不新增业务语义。
 
 独立 Runtime 的本地 IPC 传输与认证在 Phase 1 技术验证后选型；默认不监听公网，不提前引入 HTTP 服务。用户批准的是独立 Runtime 生命周期，不是开放远程 API。
 

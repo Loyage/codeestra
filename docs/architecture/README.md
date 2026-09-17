@@ -2,7 +2,7 @@
 
 > 层级：**L0 索引** · 体量 ≈ 6k 字符 · **先读这一篇**：它只做路由，不重复任何细节。细节在其所指的 L1/L2 文档与源码里，**不要整篇读**。
 
-状态：Runtime 已实现到 **schema v37**。ADR-0068 的 Service / Process / Signal 内核 S1–S4 已实现（纯领域、additive storage、registry/dispatcher、`service/process/signal/intent` CLI）；**S5–S10 仍是目标**，不得把受管 integration、原生 Process Agent、自然语言意图路由当成当前能力。当前 v37 的 Project/Task/Execution 旧表仍是 core 写权威。
+状态：Runtime 已实现到 **schema v37**。ADR-0070 的 Service / Process / Signal 内核 S1–S4 已实现（纯领域、additive storage、registry/dispatcher、`service/process/signal/intent` CLI）；**S5–S10 仍是目标**，不得把受管 integration、原生 Process Agent、自然语言意图路由当成当前能力。当前 v37 的 Project/Task/Execution 旧表仍是 core 写权威。
 
 ## 1. 读取协议（省上下文的用法）
 
@@ -60,7 +60,7 @@ Self Evolution：Candidate / bootstrap（后续阶段）
 
 ## 4. 当前事实与目标的分界（一句话版）
 
-| 领域 | 当前 v37 | 目标（ADR-0068） |
+| 领域 | 当前 v37 | 目标（ADR-0070） |
 |---|---|---|
 | 内核对象 | Service/Process/Signal 表与 CLI 已存在；Project/Task/Execution 旧表仍写权威 | S5–S7 把写路径与 Agent 控制迁到 Service/Process |
 | 分支与集成 | 成果停在 `refs/heads/task/<task-id>`，由用户自己合并；产品无集成/提升命令 | S8 Project Service 独占 integration ref/worktree + 串行 merge queue + 独立 Integration Verification |
@@ -75,7 +75,7 @@ Self Evolution：Candidate / bootstrap（后续阶段）
 - 效率至上；默认 `FULL` 主机级全权限且常态零确认，可无确认切换 `STRICT`（ADR-0011）。→ `PROJECT_SPEC.md` §1.1
 - 软件本体是服务，CLI 必须完备且可脚本化；UI/桌面只是便利层（ADR-0008/0011/0067）。
 - 自动化测试与验收只用 CLI/命令面驱动，不获取电脑控制权（ADR-0008）。
-- 内核 Service-first、调度 Task-first；Service 只拥有 Process，Process 只监督 Agent；Signal 持久至少一次并按幂等键收敛（ADR-0068）。
+- 内核 Service-first、调度 Task-first；Service 只拥有 Process，Process 只监督 Agent；Signal 持久至少一次并按幂等键收敛（ADR-0070）。
 - 冲突判定只看「两侧声明同一功能且对方未完成」，默认 `SAFE_TO_PARALLELIZE`；`--allow-unknown` 永不放宽 `CONFLICTING`（ADR-0059）。
 - 验证分层：Task Verification 与 Integration Verification 是不同事实，证据绑定 revision/commit/policy digest（ADR-0006/0039）。
 - Agent 能力按实测如实声明，不伪造 resume/attach/interrupt（ADR-0029/0040/0051/0054/0057/0061）。
@@ -99,4 +99,4 @@ Self Evolution：Candidate / bootstrap（后续阶段）
 
 ## 7. 设计成熟度
 
-产品语义不可能一次锁死：ADR-0068 的 Service kernel 按 S1–S10 分阶段准入，S1–S4 已完成并各有独立退出条件。API 是 Runtime port 合约，不是供应商能力承诺；实测能力矩阵记录在 [`agent-adapter-providers.md`](./agent-adapter-providers.md)，证据在 [`../spikes/`](../spikes/)。
+产品语义不可能一次锁死：ADR-0070 的 Service kernel 按 S1–S10 分阶段准入，S1–S4 已完成并各有独立退出条件。API 是 Runtime port 合约，不是供应商能力承诺；实测能力矩阵记录在 [`agent-adapter-providers.md`](./agent-adapter-providers.md)，证据在 [`../spikes/`](../spikes/)。

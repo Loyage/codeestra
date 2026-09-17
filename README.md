@@ -2,7 +2,7 @@
 
 **目标：AI 的操作系统。** Codeestra 在宿主系统之上统一管理长期 Service、短期 Process、Agent、Signal、用户意图、Attention、调度与软件工程资源。内核 Service-first，Scheduler 仍 Task-first。
 
-> **实现边界**：ADR-0068 S1–S4 已实现于 schema v37：通用 `service/process/signal/intent` CLI、持久 Signal 与兼容投影可用；原生 Process Agent、intention 解释、Project/Task 写路径切换与 Project Service 受管 integration 尚未实现。改造计划见 [Service Kernel Roadmap](docs/roadmap/mvp.md)。
+> **实现边界**：ADR-0070 S1–S4 已实现于 schema v37：通用 `service/process/signal/intent` CLI、持久 Signal 与兼容投影可用；原生 Process Agent、intention 解释、Project/Task 写路径切换与 Project Service 受管 integration 尚未实现。改造计划见 [Service Kernel Roadmap](docs/roadmap/mvp.md)。
 
 ## 第一原则（优先级最高）
 
@@ -10,9 +10,9 @@
 2. **软件本体是服务，CLI 是完备命令面**：独立本地 Runtime 是 0 号根 Service 与持久 Actor 内核的宿主；每个能力都能只靠 CLI 完成并可脚本化驱动。ADR-0067 起 Web UI 暂停，当前只启用 CLI/Unix socket 命令面。
 3. **测试仅限 CLI/命令面**：自动化测试与验收只用 CLI 命令与 Runtime 命令面断言；不使用 computer-use / 桌面或键鼠自动化，不获取用户电脑控制权。产品内 Agent 也不新增屏幕/桌面控制工具。
 
-完整表述见 [PROJECT_SPEC.md §1.1](PROJECT_SPEC.md)、[ADR-0008](docs/decisions/0008-efficiency-first-service-form.md)、[ADR-0011](docs/decisions/0011-default-full-permission-mode.md) 与 [ADR-0068](docs/decisions/0068-service-process-signal-kernel.md)。内核设计见 [Service / Process / Signal](docs/architecture/service-process-signal.md)。
+完整表述见 [PROJECT_SPEC.md §1.1](PROJECT_SPEC.md)、[ADR-0008](docs/decisions/0008-efficiency-first-service-form.md)、[ADR-0011](docs/decisions/0011-default-full-permission-mode.md) 与 [ADR-0070](docs/decisions/0070-service-process-signal-kernel.md)。内核设计见 [Service / Process / Signal](docs/architecture/service-process-signal.md)。
 
-**当前 schema v37 不提供产品集成与稳定提升**（[ADR-0066](docs/decisions/0066-remove-dev-clone-and-dual-baseline.md)）：Task 从项目文件夹当前分支建基线，成果留在 task branch，由你自己合并。**目标架构将按 ADR-0068 增量加入 Project Service 独占的 integration ref/worktree 与串行 merge queue；这尚未实现，也不恢复旧 `promotion *`。**下面的 `main`/`dev` 流程仍只是本仓库自身约定。
+**当前 schema v37 不提供产品集成与稳定提升**（[ADR-0066](docs/decisions/0066-remove-dev-clone-and-dual-baseline.md)）：Task 从项目文件夹当前分支建基线，成果留在 task branch，由你自己合并。**目标架构将按 ADR-0070 增量加入 Project Service 独占的 integration ref/worktree 与串行 merge queue；这尚未实现，也不恢复旧 `promotion *`。**下面的 `main`/`dev` 流程仍只是本仓库自身约定。
 
 ## 分支与运行规则
 
@@ -77,7 +77,7 @@ Phase 7 Self Evolution。**Session Guidance 已实现**（FOUNDATION-088 / ADR-0
 - **[真实 provider 验收 runbook](docs/notes/real-provider-acceptance-runbook.md)**：只能在真实 provider 在场时执行的功能验收操作手册（并发、暂停/恢复、修订投递、知识消费、插件与 gate、散文提问、原生终端、真实提升），附可复现脚手架 `scripts/real-provider-acceptance.sh`（默认 dry-run）。
 - [PROJECT_SPEC.md](PROJECT_SPEC.md)：长期规格。
 - [AGENTS.md](AGENTS.md)：协作与开发规则。
-- [Architecture](docs/architecture/README.md)：领域、状态机、SQLite、事件、API、调度与模块设计；[Service Kernel](docs/architecture/service-process-signal.md) 是 ADR-0068 的目标内核说明。
+- [Architecture](docs/architecture/README.md)：领域、状态机、SQLite、事件、API、调度与模块设计；[Service Kernel](docs/architecture/service-process-signal.md) 是 ADR-0070 的目标内核说明。
 - [Decisions](docs/decisions/README.md)：已接受 ADR 与分阶段待决项。
 - [Roadmap](docs/roadmap/mvp.md) / [当前任务](docs/tasks/README.md)。
 
@@ -199,4 +199,4 @@ Domain 不依赖 Bun、SQLite、Tauri 或 Agent SDK。函数只计算不可变�
 
 ## 下一步
 
-当前开发集中在 CLI/Runtime 命令面；Web UI 继续暂停。下一主线已切换为 ADR-0068 的 Service Kernel 增量改造：S1 纯领域 contract → S2 additive storage → S3 Signal dispatcher → S4 内核 CLI，之后再接 Process、intention、Project/Task 写路径与受管 integration。权威依赖图、Agent 分工与验收见 [docs/roadmap/mvp.md](docs/roadmap/mvp.md)；既有真实 provider 验收缺口继续保留，但不应抢先破坏新内核 contract。
+当前开发集中在 CLI/Runtime 命令面；Web UI 继续暂停。下一主线已切换为 ADR-0070 的 Service Kernel 增量改造：S1 纯领域 contract → S2 additive storage → S3 Signal dispatcher → S4 内核 CLI，之后再接 Process、intention、Project/Task 写路径与受管 integration。权威依赖图、Agent 分工与验收见 [docs/roadmap/mvp.md](docs/roadmap/mvp.md)；既有真实 provider 验收缺口继续保留，但不应抢先破坏新内核 contract。

@@ -12,7 +12,7 @@ export type DomainErrorCode =
   // mapping that cannot be derived from, is a rejected input rather than a weaker verdict.
   | 'INVALID_IMPACT_SCOPE'
   | 'INVALID_IMPACT_MAPPING'
-  // Service kernel (ADR-0068 / S1). These errors are pure domain refusals: callers may map them to
+  // Service kernel (ADR-0070 / S1). These errors are pure domain refusals: callers may map them to
   // CLI stable codes, but the domain never imports a transport, database, or Agent SDK.
   | 'DUPLICATE_SERVICE'
   | 'INVALID_SERVICE_TREE'

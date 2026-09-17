@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { impactPolicyPath, runtimeRequestSchema,
   processViewSchema, serviceViewSchema, signalViewSchema,
+  runtimeCommandSummaries,
   validateQuestionnaireAnswer,
   questionnairePromptSchema,
   type RuntimePauseStateView, type RuntimeRequest, type RuntimeResponse,
@@ -745,6 +746,18 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         activeSessions: coordinator.activeSessionIds(),
         eventSubscribers: subscriptions.subscriberCount(),
       });
+    case 'runtime.commands': {
+      // The discovery answer of this face (ADR-0068). The list comes from `runtimeRequestSchema`
+      // itself, so it can never name a command this switch does not have; the descriptions are a
+      // `Record` over the same union, so a new command without one does not compile.
+      const commands = runtimeRequestSchema.options
+        .map((option) => (option as { shape: { command: { value: RuntimeRequest['command'] } } })
+          .shape.command.value)
+        .map((name) => runtimeCommandSummaries[name])
+        .sort((left, right) => left.group.localeCompare(right.group)
+          || left.command.localeCompare(right.command));
+      return success(request.requestId, { schemaVersion: 1 as const, commands });
+    }
     case 'runtime.stop':
       // The response reports which process was asked to stop, never that it stopped: only the
       // caller can observe the exit, and `codeestra stop` waits for it and reports the fact.

@@ -11,7 +11,7 @@
 - [ADR-0005](0005-task-entry-and-worktree-location.md)：Task CLI 用 Project ID、新建为 DRAFT；owned worktree 位于 Runtime 数据目录。**Amended by ADR-0009**（固定基线改为 `dev`；managed 项目的基线来源见 ADR-0060）。
 - [ADR-0006](0006-task-verification-policy.md)：验证命令来自 main ref 的人工策略，在固定 commit 的隔离副本上运行。**Amended by ADR-0011/0038/0039**。
 - [ADR-0007](0007-local-web-ui-entry.md)：本地 Web UI 与 CLI 复用同一 Runtime 命令面（127.0.0.1 + 内存 token + SSE）。**Amended by ADR-0008/0011，入口由 ADR-0067 暂停**：实现源码保留，但 UI/HTTP 入口、测试与默认构建已移除。
-- [ADR-0008](0008-efficiency-first-service-form.md)：效率至上、CLI 是完备命令面、测试仅限命令面。**Amended by ADR-0011**（默认 FULL 零确认）与 **ADR-0068**（0 号 Service + 持久 Service/Process/Signal 内核）。
+- [ADR-0008](0008-efficiency-first-service-form.md)：效率至上、CLI 是完备命令面、测试仅限命令面。**Amended by ADR-0011**（默认 FULL 零确认）、**ADR-0068**（CLI 每一层自描述）与 **ADR-0070**（0 号 Service + 持久 Service/Process/Signal 内核）。
 - [ADR-0009](0009-main-dev-promotion-and-restart.md)：固定 `main`/`dev` 双分支与提升后立即重启。**Amended by ADR-0011**（FULL 不批准）、**ADR-0038/0039**（提升前必须有精确 dev SHA 的全量证据）、**ADR-0047**（提升改经 GitHub 中转；重启序列不变）。
 - [ADR-0010](0010-live-agent-terminal-takeover.md)：运行中 Agent 支持原生终端完全接管；Pi 在结构化安全点做 RPC↔TUI/PTY 交接，单 writer lease，不新增确认。**Amended by ADR-0011**（FULL 下工具不确认）与 **ADR-0023**（接管与 lease 的实现契约；PTY 落地见 ADR-0026）。
 - [ADR-0011](0011-default-full-permission-mode.md)：默认 `FULL` 主机级全权限，现有与未来常态确认归零；可无确认切到显式 opt-in 的 `STRICT`。**CLI 拼写由 ADR-0064 移入 `settings permission get|set`（顶层 `permission` 已移除）；语义、Runtime 命令与存储文件未变**。
@@ -68,23 +68,25 @@
 - [ADR-0063](0063-split-cli-reference-by-command-group.md)：CLI 命令参考按功能拆为 [`docs/guides/cli/`](../guides/cli/README.md) 九篇；各篇**沿用拆分前的章节号**，`cli-reference.md` 保留为索引 + 旧 §N 对照表（历史记录里的 §N 引用仍可解析）；正文逐行搬移、不重新核对、逐节校对注随节搬迁。**Amends ADR-0050** 的文件集合（D02）与 D03 的映射目标。**无代码、无 schema、无命令面变化**。
 - [ADR-0064](0064-settings-list-and-permission-as-a-setting.md)：`settings` 成为设置的唯一入口 —— 新增 Runtime 命令 `settings.list` 与 CLI `settings list [--json]`（当时枚举九项 Runtime 级设置）；权限模式的 CLI 拼写移入 `settings permission get|set` 并**移除顶层 `permission`**。**Amended by ADR-0067**：UI settings 命令面暂停后，当前闭合集合缩为三项启用设置。无 schema 变更。
 - [ADR-0065](0065-task-input-fields.md)：任务输入字段 —— 三个必填字段（显示标题 `displayTitle`、命名标题 `namingTitle`、任务详情），两个标题是 Task 级且不可修订，命名标题驱动分支与 worktree 目录（`task/<编号>-<slug>`，schema v35）；**删除**约束与任务类型（含 `--constraint`/`--kind`、`ADD_CONSTRAINT` 写入路径与三个 Adapter 的 Constraints 提示词段）；`intents.kind` 的历史值不重写，知识 `scope` 保持解析。**Amends ADR-0005 的「分支用内部稳定 ID」（只对新任务）与 ADR-0017 的停靠条形态字段**。**「任务模板」本轮明确不实现**。
-- [ADR-0066](0066-remove-dev-clone-and-dual-baseline.md)：**schema v36 引入、当前 v37 兼容业务路径仍有效的事实**——删除 dev clone、双基线、dev 集成与稳定提升；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支）。**目标语义由 ADR-0068 supersede**：未来恢复为 Project Service 管理的独立 integration ref/worktree，但不原样恢复旧 dev clone / promotion 模型。
+- [ADR-0066](0066-remove-dev-clone-and-dual-baseline.md)：**schema v36 引入、当前 v37 兼容业务路径仍有效的事实**——删除 dev clone、双基线、dev 集成与稳定提升；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支）。**目标语义由 ADR-0070 supersede**：未来恢复为 Project Service 管理的独立 integration ref/worktree，但不原样恢复旧 dev clone / promotion 模型。
 - [ADR-0067](0067-pause-web-ui-and-cli-focus.md)：**暂停 Web UI、集中开发 CLI**。删除 `ui`/`open`、`runtime.ui`、`settings ui *`、`uiRunning`，删除 UI/HTTP 专用测试并把 UI 移出默认检查、构建、重启与提升；`apps/ui`、HTTP 与 UI settings 实现源码静态保留但不可达。无 schema 变更。
-- [ADR-0068](0068-service-process-signal-kernel.md)：**目标架构：AI 的操作系统内核**。内核 Service-first、调度 Task-first；Service 是 Runtime 内持久 Actor，Process 只监督 Agent，Signal 为持久 `SIG_A`/`SIG_P`；保留现有 CLI facade 并增量新增内核命令；Project Service 未来管理独立 integration ref/worktree 与串行 merge queue。**Accepted；S1–S4 已由 FOUNDATION-099 / schema v37 实现，S5–S10 待完成。**
+- [ADR-0068](0068-self-describing-cli-command-tree.md)：**CLI 每一层自描述且清单与实际命令同源**（`help` 从命令树生成，分发按树 id 且 `assertNever` 穷尽；`runtime commands` 从请求 union 派生）。**Amends ADR-0008**（§1.1 由三条第一原则变为四条）；修掉 ADR-0055 / FOUNDATION-086 记录中「`task recover` 命令面缺失」的真实缺陷；按 ADR-0050 D03 同步 `docs/guides/cli/`。
 - [ADR-0069](0069-architecture-docs-layering.md)：**架构文档分层、按需读入与低价值内容删除**。新增 L0 路由入口与每篇「层级/体量/何时读/权威来源」头；`sqlite-schema` / `event-model` / `agent-adapter-api` 按领域拆出 L2 子文档（逐域 DDL 由 v37 库导出）；逐版本 migration 叙述、已删除能力的完整描述、设计稿 DDL、设计名对照表与 doc-sync 记账被删除，靠 git + ADR + 源码追溯；旧章节号保留并提供对照表。**无代码、无 schema、无命令面变化。**
+- [ADR-0070](0070-service-process-signal-kernel.md)：**目标架构：AI 的操作系统内核**。内核 Service-first、调度 Task-first；Service 是 Runtime 内持久 Actor，Process 只监督 Agent，Signal 为持久 `SIG_A`/`SIG_P`；保留现有 CLI facade 并增量新增内核命令；Project Service 未来管理独立 integration ref/worktree 与串行 merge queue。**Accepted；S1–S4 已由 FOUNDATION-099 / schema v37 实现，S5–S10 待完成。**
 
 ## 当前有效语义（与旧 ADR 冲突时按此执行）
 
-- **目标与实现边界**：ADR-0068 S1–S4 已实现：schema v37、Service/Process/Signal 持久内核、dispatcher/registry 与 `service/process/signal/intent` CLI。Project/Task/Execution 的旧表仍是 core 权威；原生 Agent-supervising Process、intention/Attention 路由、Project/Task 单一写路径、managed integration 与 eligibility 解耦仍是 S5–S9，当前不得声称自动集成或自然语言已执行。
+- **目标与实现边界**：ADR-0070 S1–S4 已实现：schema v37、Service/Process/Signal 持久内核、dispatcher/registry 与 `service/process/signal/intent` CLI。Project/Task/Execution 的旧表仍是 core 权威；原生 Agent-supervising Process、intention/Attention 路由、Project/Task 单一写路径、managed integration 与 eligibility 解耦仍是 S5–S9，当前不得声称自动集成或自然语言已执行。
 - **权限**：ADR-0011 —— 默认 `FULL` 零确认；`STRICT` 是显式 opt-in，只恢复旧门禁；FULL 下不得新增任何确认步骤。CLI 读写拼写是 `settings permission get|set`（ADR-0064；顶层 `permission` 已移除），Runtime 命令与存储文件未变。
 - **设置面**：ADR-0064/0067 —— 一个 Runtime home 的全部**启用中**设置由 `settings list` 枚举（只读、零确认）；当前只有权限模式、散文问题处理与全局并发上限。UI settings 命令已暂停，源码与已有文件不等于启用设置。每项的值与「是否显式设置」来自它自己那条命令的同一次读取，不得引入第二状态源；新增或重新启用设置必须同时进 `settingKeys`。
 - **Task 输入字段**：ADR-0065 —— `task create` 三个必填字段（显示标题 / 命名标题 / 任务详情）；两个标题是 Task 级、创建后不可修订；命名标题决定分支与 worktree 目录（`task/<编号>-<slug>`，旧任务仍用内部 ID）；约束与任务类型已彻底删除。
 - **测试范围与时机**：ADR-0038/0039 —— task/lane/feature/Self candidate 分支只跑建分支时选定的定向测试；全量只在精确 `dev` 候选上、作为提升前必备证据。**注（ADR-0066）**：产品侧的「提升前全量证据」随提升一起删除；本条作为本仓库自身的开发/发布纪律仍在 `AGENTS.md` 生效。
-- **集成与发布**：当前 v37 仍无产品集成/提升命令（ADR-0066）。ADR-0068 的目标是重新提供 Project Service managed integration ref + merge queue + Integration Verification，**不**恢复旧 `promotion *`；integration ref 如何发布到用户 main/release 仍未定义。本仓库自身的 `dev → main` 继续走 `AGENTS.md` 人工四步。
+- **集成与发布**：当前 v37 仍无产品集成/提升命令（ADR-0066）。ADR-0070 的目标是重新提供 Project Service managed integration ref + merge queue + Integration Verification，**不**恢复旧 `promotion *`；integration ref 如何发布到用户 main/release 仍未定义。本仓库自身的 `dev → main` 继续走 `AGENTS.md` 人工四步。
 - **分支职责与重启**：ADR-0009（**由 ADR-0066 收窄为仓库约定**）—— 本仓库自身长期保留 `main`/`dev`；`main` 更新后立即 `stop` + `status`。产品不再建模这两个分支。
 - **本机布局与客户端**：ADR-0048（**产品语义部分由 ADR-0066 删除**）—— 两个独立 clone 的拆分只服务 Codeestra 自身的开发。ADR-0067 起 Web UI 暂停：没有启用的 UI 构建产物、HTTP 入口或 UI 启动步骤；源码静态保留。
-- **Task 基线**：当前 v37 的兼容 Task 路径仍按 ADR-0066 取项目文件夹当前检出分支；ADR-0068 S8 目标改为 Project Service 当前 managed integration commit。切换前后都必须固定 base ref/commit，既有 workspace 不回写；迁移波次完成前以当前实现为准。
+- **Task 基线**：当前 v37 的兼容 Task 路径仍按 ADR-0066 取项目文件夹当前检出分支；ADR-0070 S8 目标改为 Project Service 当前 managed integration commit。切换前后都必须固定 base ref/commit，既有 workspace 不回写；迁移波次完成前以当前实现为准。
 - **CLI 优先 / Web UI 暂停**：ADR-0067 —— 当前产品只启用 CLI/Unix socket 命令面；`ui`/`open`/`runtime.ui`/`settings ui *` 与 `uiRunning` 已删除，UI/HTTP 专用测试和默认构建已移除。保留源码不得描述成可用功能。
+- **CLI 自描述**：ADR-0068 —— 每一层的命令清单由**命令树**（`apps/cli/src/command-tree.ts`）生成，argv 由它解析，分发分支按 tree id 且编译期穷尽；用法错误一行（`2`）并指向 `help`，`UNHANDLED_COMMAND`（`70`）表示树与分发不一致的缺陷；`runtime commands` 按请求 union 列出 Runtime 命令面。文档覆盖由定向测试核对，**过时**仍属人工纪律（ADR-0050 不变）。
 - **用户文档纪律**：ADR-0050 —— 功能变更同步 `docs/guides/` 对应段落，交付说明写明改了哪一篇的哪一节；**ADR-0063** —— 命令面变更的落点具体是 [`docs/guides/cli/`](../guides/cli/README.md) 里覆盖该命令的那一篇，旧 §N 对照表在 `docs/guides/cli-reference.md`。
 - **Project Knowledge**：ADR-0041/0051 —— 每个 provider 用自己的通道注入；`applyRevision` 三者 `UNSUPPORTED`。
 - **终端与交接**：ADR-0054 —— PTY resize 合约（POSIX 范围）；并行工具批次安全点规则与 ADR-0010 相同；跨交接权限矩阵仍 `PARTIAL`。
@@ -102,7 +104,7 @@
 
 | 阶段 | 尚需确认/验证 | 当前处理 |
 |---|---|---|
-| S8 | managed integration ref 的精确命名、初始化与发布出口 | 已决定独立 owned ref/worktree、单项目串行 merge queue 与 CAS；发布到用户 main/release 不在 ADR-0068，未决前不恢复 `promotion *` |
+| S8 | managed integration ref 的精确命名、初始化与发布出口 | 已决定独立 owned ref/worktree、单项目串行 merge queue 与 CAS；发布到用户 main/release 不在 ADR-0070，未决前不恢复 `promotion *` |
 | Phase 1 | Pi 真实暂停/终止与取消超时的静止性 | 暂停/终止的进程释放只被脚本 Adapter 与真实 `releaseSession` 覆盖；取消超时、禁止工具的静止性、gate 拒绝路径与孤儿进程 reconcile 仍需真实 provider 复验 |
 | Phase 1 | Task verification 隔离副本的长时命令 | 副本内 argv 直接 spawn、按进程组超时与 tracked 改动失败已实现；真实命令集与长时任务未实测 |
 | Phase 1 | 本地 IPC 订阅的游标与重连 | 订阅不持久化游标、无自动重连、无按 project 鉴权，客户端重连需自带 cursor |

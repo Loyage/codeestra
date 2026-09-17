@@ -262,4 +262,4 @@ CREATE INDEX reclamation_records_by_task ON reclamation_records(project_id,task_
 - `self_test_runs(id, candidate_id, isolated_data_ref, tested_artifact_hash, state, evidence_ref, started_at, ended_at)`
 - `promotion_records(id, candidate_id, old_version, new_version, approved_artifact_hash, actor, state, backup_ref, health_evidence_ref, created_at, completed_at)`
 
-Stable 版本指针由 bootstrap 独立管理；Runtime 数据库不是唯一恢复依据。迁移/备份兼容策略未确认前不虚构最终 DDL（ADR-0068 Self Evolution 阶段）。
+Stable 版本指针由 bootstrap 独立管理；Runtime 数据库不是唯一恢复依据。迁移/备份兼容策略未确认前不虚构最终 DDL（ADR-0070 Self Evolution 阶段）。

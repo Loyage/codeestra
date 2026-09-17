@@ -1,4 +1,4 @@
-# ADR-0068：Service / Process / Agent / Signal 内核与受管项目集成
+# ADR-0070：Service / Process / Agent / Signal 内核与受管项目集成
 
 Status：Accepted（本次用户设计与后续选择题确认）；**S1–S4 已由 FOUNDATION-099 / schema v37 实现，S5–S10 待完成**。本 ADR 同时定义后续目标，不把尚未完成的原生 Process、intention 路由或 managed integration 误报为已有能力。
 

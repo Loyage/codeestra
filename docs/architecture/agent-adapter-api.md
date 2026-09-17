@@ -2,7 +2,7 @@
 
 > 层级：L1 · 体量 ≈ 9k 字符 · **何时读**：改 Adapter 合约/能力位、判断某条控制路径是否真的存在、写新 Adapter · **权威来源**：`packages/contracts/src/index.ts`（端口与 `AdapterCapabilities`）、`packages/agent-adapters/src/**`（实现）。逐 provider 的实测能力矩阵与证据见 [`agent-adapter-providers.md`](./agent-adapter-providers.md)；终端交接与 PTY 见 [`terminal-and-handoff.md`](./terminal-and-handoff.md)。
 
-状态：Runtime port 设计，不是任何 Provider SDK 的复述。ADR-0068 目标中 Adapter 永远由 Process 调用，Service 不直接拥有 Agent；S5 会把现有 Execution/Session 控制投影为 Process，但**不改写「按实测声明能力」的原则**。
+状态：Runtime port 设计，不是任何 Provider SDK 的复述。ADR-0070 目标中 Adapter 永远由 Process 调用，Service 不直接拥有 Agent；S5 会把现有 Execution/Session 控制投影为 Process，但**不改写「按实测声明能力」的原则**。
 
 ## 1. 实现层端口（导出的就是这些）
 

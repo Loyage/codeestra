@@ -4,7 +4,7 @@
 
 状态：S1–S4 已实现（纯领域 contract、additive storage、持久 Signal dispatcher 与 registry、`service/process/signal/intent` CLI 与兼容 facade）。**S5–S10 仍是目标**；本文区分「目标语义」与「S4 当前的实现边界」，不把后续能力写成已交付。
 
-状态：**S1–S4 已实现，S5–S10 待完成**。决策依据为 [ADR-0068](../decisions/0068-service-process-signal-kernel.md)。当前产品为 schema v37：领域内核、持久 Service/Process/Signal、dispatcher/registry 与 CLI 已可用；Project/Task/Execution 仍由既有表提供 core 权威，原生 Process 控制、intention 解释、写路径切换与 managed integration 不提前声称。当前命令见 [`docs/guides/cli/kernel.md`](../guides/cli/kernel.md)。
+状态：**S1–S4 已实现，S5–S10 待完成**。决策依据为 [ADR-0070](../decisions/0070-service-process-signal-kernel.md)。当前产品为 schema v37：领域内核、持久 Service/Process/Signal、dispatcher/registry 与 CLI 已可用；Project/Task/Execution 仍由既有表提供 core 权威，原生 Process 控制、intention 解释、写路径切换与 managed integration 不提前声称。当前命令见 [`docs/guides/cli/kernel.md`](../guides/cli/kernel.md)。
 
 ## 1. 为什么需要这层内核
 

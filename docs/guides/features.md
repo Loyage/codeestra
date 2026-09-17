@@ -1,6 +1,6 @@
 # 功能清单：「这软件能做什么」
 
-> **适用版本** ADR-0068 S1–S4 实现分支（2026-09-17） · **schema** v37 · **最后校对** 2026-09-17
+> **适用版本** ADR-0070 S1–S4 实现分支（2026-09-17） · **schema** v37 · **最后校对** 2026-09-17
 > 版本会前进：`dev@6c7de03` 只是本目录最后一次校对的基线；当前适用版本以
 > **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
 > 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
@@ -21,7 +21,7 @@
 > 「设置」表的并发上限设置一行同轮新增（同一个值也可从设置面实时调整）；
 > 「永久删除」一行的 `RECOVERY_REQUIRED` 对账由用户任务 `task/930f5325` 同步（ADR-0058 D02 修订，2026-09-16）；
 > 其余行沿用 FOUNDATION-091 的校对基线。
-> **FOUNDATION-099 / ADR-0068 S1–S4**：新增「Service Kernel」表；S5–S10 仍列为未实现边界。
+> **FOUNDATION-099 / ADR-0070 S1–S4**：新增「Service Kernel」表；S5–S10 仍列为未实现边界。
 
 一行一个能力。列的含义：
 
@@ -38,10 +38,10 @@
 
 | 能力 | 能做什么 | CLI 入口 | UI 位置 | ADR |
 |---|---|---|---|---|
-| Service 查询与 metadata | 查询稳定 root/system/Project/Task Service 树与 core 投影；通过 metadata CAS 写 namespaced JSON，不绕过 core state | `service list/get/tree/state get/state set` | —（CLI-only） | [0068](../decisions/0068-service-process-signal-kernel.md) |
-| Process 兼容 facade | 把既有 Execution 投影为同 ID Development Process；input/pause/resume/terminate 复用 Task/Session handler | `process list/get/input/pause/resume/terminate` | —（CLI-only） | [0068](../decisions/0068-service-process-signal-kernel.md) |
-| 持久 Signal | contract 校验、enqueue/claim/ACK/retry/dead-letter/reconcile；target + idempotency key 收敛 | `signal send/list/get/retry` | —（CLI-only） | [0068](../decisions/0068-service-process-signal-kernel.md) |
-| Intention 受理 | 发 `SIG_P` 并创建 `CREATED` Intention Process；当前明确返回 `PENDING_S6`，不解释、不启动 Agent | `intent send` | —（CLI-only） | [0068](../decisions/0068-service-process-signal-kernel.md) |
+| Service 查询与 metadata | 查询稳定 root/system/Project/Task Service 树与 core 投影；通过 metadata CAS 写 namespaced JSON，不绕过 core state | `service list/get/tree/state get/state set` | —（CLI-only） | [0070](../decisions/0070-service-process-signal-kernel.md) |
+| Process 兼容 facade | 把既有 Execution 投影为同 ID Development Process；input/pause/resume/terminate 复用 Task/Session handler | `process list/get/input/pause/resume/terminate` | —（CLI-only） | [0070](../decisions/0070-service-process-signal-kernel.md) |
+| 持久 Signal | contract 校验、enqueue/claim/ACK/retry/dead-letter/reconcile；target + idempotency key 收敛 | `signal send/list/get/retry` | —（CLI-only） | [0070](../decisions/0070-service-process-signal-kernel.md) |
+| Intention 受理 | 发 `SIG_P` 并创建 `CREATED` Intention Process；当前明确返回 `PENDING_S6`，不解释、不启动 Agent | `intent send` | —（CLI-only） | [0070](../decisions/0070-service-process-signal-kernel.md) |
 
 ## 接入与项目
 
@@ -84,6 +84,7 @@
 | 设置总览 | 一条只读命令列出全部三项启用的 Runtime 级设置（权限模式 / 散文开关 / 并发上限），每项给出生效值、产品默认、取值、是否显式设置与存储位置 | `settings list [--json]` | —（CLI-only） | [0064](../decisions/0064-settings-list-and-permission-as-a-setting.md)、[0067](../decisions/0067-pause-web-ui-and-cli-focus.md) |
 | 权限模式 | 默认 FULL 零确认；可无确认切 STRICT 恢复旧门禁（工具逐次审批、两步成果 commit、提升批准） | `settings permission get`、`settings permission set <full\|strict>` | 界面显示当前模式；STRICT 下出现 TRUST 输入与二次确认 | [0011](../decisions/0011-default-full-permission-mode.md)、[0023](../decisions/0023-strict-permission-attention-and-session-writer-lease.md)、[0064](../decisions/0064-settings-list-and-permission-as-a-setting.md) |
 | Agent 配置 | 持久化 provider/model/thinking，分全局默认与每项目覆盖；逐字段按 `环境变量 > 项目 > 全局 > Adapter 默认` 解析；只影响新 Session | `agent config get/set/clear [--project <id>] [--adapter <id>] [--provider/--model/--thinking/--unset]` | Agent 设置标签页（`当前生效值` 表与 `编辑并保存`） | [0012](../decisions/0012-agent-configuration-scopes.md) |
+| CLI 自描述 | 命令树是 CLI 的唯一命令清单：每一层都能自报有哪些子命令及其大致功能范围，argv 由同一份树解析，测试再核对 `docs/guides/cli` 与 Runtime 命令面的覆盖 | `help`、`<命令路径> help`、`--help`/`-h`、`runtime commands [--json]` | —（命令面自身，不是 UI 能力） | [0068](../decisions/0068-self-describing-cli-command-tree.md) |
 | Agent 插件选择 | 选 Pi 的四类资源（extensions / skills / prompt templates / themes）；选择是**一个整体字段**（项目整份替换全局，不逐项合并）；生效值连同来源层与第三方扩展风险写进 Execution | `agent plugins list`、`agent plugins select [--extension/--skill/--prompt-template/--theme <path>]… [--clear]` | Agent 设置标签页（`插件候选` 与 `清除选择`） | [0044](../decisions/0044-agent-plugin-selection-and-detection.md) |
 | 多 Adapter | 注册 `pi`（默认）、`codex`、`claude`；每次运行绑定一个 Agent，换 Adapter 是新建 Execution | `task run/resume/retry --adapter <id>` | 任务详情 → 启动 Agent / 继续（`Agent` 下拉框，在 `READY` 与 `PAUSED` 时出现）；重试入口另有自己的 Adapter 下拉框，默认「沿用该任务上一次运行的 Adapter」，选项来自 `runtime.ping` 的已注册列表 | [0029](../decisions/0029-codex-adapter-transport-and-capabilities.md)、[0040](../decisions/0040-claude-code-adapter-transport-and-capabilities.md) |
 | Session Guidance | 对**运行中的会话**给一条指导：不产生 TaskRevision、不动 revision、不使验证失效；记录后每个新 Execution 启动时随启动参数交给 provider（不随进程消失）；**“已投递” = provider 通道接收（入队），≠ 模型已读**（`modelAcknowledgement` 恒为 `UNSUPPORTED`）；无通道即 `CHANNEL_UNSUPPORTED` 且退出码 1 | `session guide <project> <task> --message <text>`、`session guidance list/get` | —（CLI-only；无 UI 投影） | [0010](../decisions/0010-live-agent-terminal-takeover.md)、[0057](../decisions/0057-session-guidance-channel-and-fact-layering.md) |
