@@ -137,6 +137,27 @@ SIG_P → Service creates Process → Process starts Agent
 
 因此程序与 Agent 统一在“都只能通过 Service contract 影响系统”，而不是强行统一成同一种运行实体。
 
+### 4.1 S5 当前实现边界（Execution → Process 与控制面）
+
+`processes` 的写路径现在是类型化的：`transitionProcess`（CAS `processes.version`、校验 domain FSM、写
+`ProcessStateChanged` 审计事件）与 `completeProcess`（消费已 CLAIMED 的 `PROCESS_COMPLETED` `SIG_A`，
+同事务写 receipt 与 ACK）。两者都**零部分应用**：先校验状态源、版本与迁移合法性，再做 CAS 更新；
+被拒绝时数据库里没有新行、新事件或新版本（决策与原因见 [ADR-0071](../decisions/0071-process-completion-write-path.md)）。
+
+- **单一 writer**：`status_source='EXECUTION'` 的 Process（今天所有 `DEVELOPMENT` Process 都由 Execution
+  投影而来）拒绝类型化写与完成，以 `PROCESS_STATUS_SOURCE_READONLY` 拒绝；它的状态与 `version` 由
+  Execution 权威提供（`version` 即 `executions.version`）。
+- **终态不可复活**：`SUCCEEDED|FAILED|CANCELLED` 由 domain 的 `PROCESS_TERMINAL` 拒绝；后继只能由新
+  Execution 投影成新 Process（`id = execution.id`，`SUPERSEDED` 投影为终态）。
+- **同一 Task 至多一个非终态 Process**：由 `one_held_execution` 唯一索引提供，并在每次 reconcile 后用
+  domain 的 `assertProcessSuccession` 校验投影没有破坏它，否则以 `PROCESS_PREDECESSOR_ACTIVE` 失败。
+- **`process get|list` 只读进度**：`progress.lastProgressAt` 是该 Process 最近被记录的事实时间；
+  `budgetKnown` 表示 `processes.budget_json` 是否已记录（v37 下恒为 `false`）；`tokenUsage`、`costUsd`、
+  `toolCallCount` 在 v37 没有对应列，**恒为 `null`（UNAVAILABLE）**，不由 session、消息数或时钟推算。
+- **原生 Process 仍需 Execution 才能被控制**：`process input|pause|resume|terminate` 对没有 Execution 的
+  Process 继续以 `PROCESS_CONTROL_UNAVAILABLE` 拒绝；原生 Process 的控制 API 仍属后续波次。
+- S5 **不**启动 Agent runner、不新增 CLI 命令、不改 schema（仍是 v37）。
+
 ## 5. Signal：可靠路由信封
 
 ### 5.1 类型
@@ -156,7 +177,11 @@ INTEGRATION_SLOT_AVAILABLE
 ATTENTION_RESOLVED
 ```
 
-`SIG_A` / `SIG_P` 是传递语义，不替代具体 subtype。
+`SIG_A` / `SIG_P` 是传递语义，不替代具体 subtype。`PROCESS_COMPLETED` 是第一个由 Process 完成事实定义的
+`SIG_A` subtype（S5）：payload 为 `{processId, outcome, expectedVersion, summary}`，只被 ROOT / PROJECT /
+TASK 接受（Process 的 parent Service 必为三者之一）。`(targetServiceId, idempotencyKey)` 幂等；重发返回同一
+receipt 且不二次改状态。版本过期、parent 不匹配、状态源只读与终态都是**永久失败**：以
+`retryable=false` 立即 dead-letter 并保留稳定码，而不是自动重试五次——payload 不会因为等待而变合法。
 
 ### 5.2 信封与链路
 

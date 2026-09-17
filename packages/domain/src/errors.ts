@@ -23,6 +23,7 @@ export type DomainErrorCode =
   | 'INVALID_SIGNAL_TRANSITION'
   | 'INVALID_PROCESS_TRANSITION'
   | 'PROCESS_TERMINAL'
+  | 'PROCESS_PREDECESSOR_ACTIVE'
   | 'PROCESS_AGENT_CARDINALITY';
 
 export class DomainError extends Error {

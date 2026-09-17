@@ -1,6 +1,23 @@
 import type { Database } from 'bun:sqlite';
-import type { ProcessKind, ProcessState, ServiceKind, ServiceLifecycle, SignalKind, SignalState }
-  from '@codeestra/domain';
+import type { ProcessProgressView } from '@codeestra/contracts';
+import {
+  DomainError,
+  assertProcessSuccession,
+  claimsProcessSlot,
+  isTerminalProcessState,
+  processCompletionOutcomes,
+  processCompletionState,
+  requireText,
+  transitionProcess as transitionProcessState,
+  type ProcessCompletionOutcome,
+  type ProcessFact,
+  type ProcessKind,
+  type ProcessState,
+  type ServiceKind,
+  type ServiceLifecycle,
+  type SignalKind,
+  type SignalState,
+} from '@codeestra/domain';
 import { rootServiceId, schedulerServiceId, attentionServiceId } from './migration.js';
 import type { Phase1Database } from './database.js';
 
@@ -40,6 +57,8 @@ export interface ProcessView {
   readonly projectId: string | null;
   readonly taskId: string | null;
   readonly executionId: string | null;
+  /** Read-only progress facts. `null` is UNAVAILABLE in v37, never an estimate. */
+  readonly progress: ProcessProgressView;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
@@ -91,9 +110,10 @@ interface ServiceRow {
 interface ProcessRow {
   id: string; kind: ProcessKind; parent_service_id: string; status_source: 'PROCESS' | 'EXECUTION';
   status: ProcessState | null; version: number; objective: string; adapter_id: string | null;
-  created_at: number; updated_at: number; execution_id: string | null; execution_state: string | null;
-  execution_version: number | null; execution_adapter_id: string | null; task_id: string | null;
-  task_version: number | null; project_id: string | null; effective_updated_at: number;
+  budget_json: string | null; created_at: number; updated_at: number; execution_id: string | null;
+  execution_state: string | null; execution_version: number | null; execution_adapter_id: string | null;
+  task_id: string | null; task_version: number | null; project_id: string | null;
+  effective_updated_at: number; last_progress_at: number | null;
 }
 interface SignalRow {
   id: string; kind: SignalKind; subtype: string; source_service_id: string | null;
@@ -147,6 +167,7 @@ export class ServiceKernelStore {
       this.sqlite.query(`UPDATE services SET lifecycle='RETIRED',updated_at=?1
         WHERE kind IN ('PROJECT','TASK') AND project_id IS NULL AND task_id IS NULL
           AND lifecycle<>'RETIRED'`).run(now);
+      this.assertSuccessionHolds();
     })();
   }
 
@@ -195,9 +216,90 @@ export class ServiceKernelStore {
 
   getProcess(processId: string): ProcessView {
     this.reconcileProjections(Date.now());
-    const row = this.processRows('WHERE process.id=?1', processId)[0];
-    if (row === undefined) throw new KernelStorageError('PROCESS_NOT_FOUND', 'Process was not found');
-    return mapProcess(row);
+    return mapProcess(this.processById(processId));
+  }
+
+  /**
+   * Typed Process state write (ADR-0070 §4). Only a Process whose own record is authoritative can be
+   * moved here: an Execution-backed Process reads its state from its Execution, so writing it in
+   * addition would give one fact two writers. Validation happens before the CAS update, so an
+   * illegal transition applies nothing.
+   */
+  transitionProcess(input: {
+    readonly processId: string;
+    readonly expectedVersion: number;
+    readonly next: ProcessState;
+    readonly actor: string;
+    readonly reason: string;
+    readonly now: number;
+    readonly eventId: string;
+  }): ProcessView {
+    return this.sqlite.transaction(() => {
+      const row = this.processById(input.processId);
+      requireText(input.actor, 'Process actor');
+      requireText(input.reason, 'Process transition reason');
+      this.assertProcessSourceWritable(row);
+      const from = this.expectedProcessState(row, input.expectedVersion);
+      const next = domain(() => transitionProcessState(from, input.next));
+      this.writeProcessState({ row, from, next, actor: input.actor, reason: input.reason,
+        now: input.now, eventId: input.eventId, correlationId: row.id, causationId: null });
+      return mapProcess(this.processById(input.processId));
+    })();
+  }
+
+  /**
+   * The one way a Process records its completion fact. The durable `PROCESS_COMPLETED` `SIG_A` is the
+   * authority for the outcome and the version it observed, the receipt makes a redelivery a no-op,
+   * and the state transition itself is the domain's decision (never the caller's).
+   */
+  completeProcess(input: {
+    readonly signalId: string;
+    readonly processId: string;
+    readonly outcome: ProcessCompletionOutcome;
+    readonly expectedVersion: number;
+    readonly summary: string;
+    readonly now: number;
+    readonly eventIds: readonly [string, string];
+  }): { readonly process: ProcessView; readonly applied: boolean } {
+    return this.sqlite.transaction(() => {
+      const { signal, receipt } = this.claimedSignalOrReceipt(input.signalId);
+      if (receipt !== null) {
+        const effect = JSON.parse(receipt.effect_json) as { readonly processId?: unknown };
+        const receipted = typeof effect.processId === 'string' ? effect.processId : input.processId;
+        return { process: mapProcess(this.processById(receipted)), applied: false };
+      }
+      requireText(input.summary, 'Process completion summary');
+      if (signal.kind !== 'SIG_A') {
+        throw new KernelStorageError('INVALID_SIGNAL_PAYLOAD',
+          `A Process completes through SIG_A, not ${signal.kind}`);
+      }
+      const payload = parseCompletionPayload(signal.payload_json);
+      const declared = signal.source_process_id ?? payload.processId;
+      if (declared !== input.processId) {
+        throw new KernelStorageError('PROCESS_COMPLETION_MISMATCH',
+          `The Signal names Process ${declared}, not ${input.processId}`);
+      }
+      if (payload.outcome !== input.outcome || payload.expectedVersion !== input.expectedVersion) {
+        throw new KernelStorageError('INVALID_SIGNAL_PAYLOAD',
+          'The completion does not match the recorded Signal payload');
+      }
+      const row = this.processById(input.processId);
+      if (row.parent_service_id !== signal.target_service_id) {
+        throw new KernelStorageError('PROCESS_PARENT_MISMATCH',
+          `Process ${row.id} is not a child of the Signal target Service`);
+      }
+      this.assertProcessSourceWritable(row);
+      const from = this.expectedProcessState(row, input.expectedVersion);
+      const next = domain(() => transitionProcessState(from, processCompletionState(input.outcome)));
+      this.writeProcessState({ row, from, next, actor: 'signal-dispatcher', reason: input.summary,
+        now: input.now, eventId: input.eventIds[0], correlationId: signal.correlation_id,
+        causationId: signal.id });
+      const effect = { type: 'PROCESS_COMPLETED', processId: row.id, outcome: input.outcome,
+        state: next, version: row.version + 1 };
+      this.recordReceiptAndAck(signal, effect, input.now);
+      this.insertSignalAckEvent(signal, input.eventIds[1], input.now, effect);
+      return { process: mapProcess(this.processById(row.id)), applied: true };
+    })();
   }
 
   enqueueSignal(input: {
@@ -450,7 +552,10 @@ export class ServiceKernelStore {
     const sql = `SELECT process.*,link.execution_id,execution.state AS execution_state,
       execution.version AS execution_version,execution.adapter_id AS execution_adapter_id,
       execution.task_id,task.version AS task_version,task.project_id,
-      COALESCE(execution.ended_at,execution.started_at,process.updated_at) AS effective_updated_at
+      COALESCE(execution.ended_at,execution.started_at,process.updated_at) AS effective_updated_at,
+      MAX(COALESCE(execution.ended_at,execution.started_at,process.updated_at),
+        COALESCE((SELECT MAX(event.occurred_at) FROM domain_events event
+          WHERE event.aggregate_type='Process' AND event.aggregate_id=process.id),0)) AS last_progress_at
       FROM processes process
       LEFT JOIN process_execution_links link ON link.process_id=process.id
       LEFT JOIN executions execution ON execution.id=link.execution_id
@@ -460,6 +565,89 @@ export class ServiceKernelStore {
     return id === undefined
       ? this.sqlite.query<ProcessRow, []>(sql).all()
       : this.sqlite.query<ProcessRow, [string]>(sql).all(id);
+  }
+
+  /** Reads one Process without re-running reconciliation, so it is safe inside a write transaction. */
+  private processById(processId: string): ProcessRow {
+    const row = this.processRows('WHERE process.id=?1', processId)[0];
+    if (row === undefined) throw new KernelStorageError('PROCESS_NOT_FOUND', 'Process was not found');
+    return row;
+  }
+
+  private assertProcessSourceWritable(row: ProcessRow): void {
+    if (row.status_source !== 'PROCESS') {
+      throw new KernelStorageError('PROCESS_STATUS_SOURCE_READONLY',
+        `Process ${row.id} state is projected from its Execution and is not written directly`);
+    }
+  }
+
+  private expectedProcessState(row: ProcessRow, expectedVersion: number): ProcessState {
+    if (row.version !== expectedVersion) {
+      throw new KernelStorageError('PROCESS_VERSION_CONFLICT',
+        `Process ${row.id} is at version ${row.version}, not ${expectedVersion}`);
+    }
+    if (row.status === null) throw new KernelStorageError('PROCESS_STATE_UNAVAILABLE',
+      `Process ${row.id} has no Process-owned state`);
+    return row.status;
+  }
+
+  private writeProcessState(input: {
+    readonly row: ProcessRow;
+    readonly from: ProcessState;
+    readonly next: ProcessState;
+    readonly actor: string;
+    readonly reason: string;
+    readonly now: number;
+    readonly eventId: string;
+    readonly correlationId: string;
+    readonly causationId: string | null;
+  }): void {
+    const changed = this.sqlite.query(`UPDATE processes SET status=?3,version=version+1,updated_at=?4
+      WHERE id=?1 AND version=?2 AND status_source='PROCESS'`)
+      .run(input.row.id, input.row.version, input.next, input.now);
+    if (changed.changes !== 1) {
+      throw new KernelStorageError('PROCESS_VERSION_CONFLICT',
+        `Process ${input.row.id} changed while the transition was being applied`);
+    }
+    this.insertEvent({ eventId: input.eventId,
+      projectId: this.projectIdForService(input.row.parent_service_id),
+      eventType: 'ProcessStateChanged', aggregateType: 'Process', aggregateId: input.row.id,
+      aggregateVersion: input.row.version + 1, correlationId: input.correlationId,
+      causationId: input.causationId, occurredAt: input.now,
+      payload: { processId: input.row.id, from: input.from, to: input.next,
+        actor: input.actor, reason: input.reason } });
+  }
+
+  /**
+   * One Task runs at most one Development/Integration Process at a time (ADR-0070 §4). The
+   * `one_held_execution` index already enforces this for the Execution an Execution-backed Process
+   * projects; this checks the projection preserves the invariant instead of assuming it, using the
+   * same domain rule a future Process writer must satisfy.
+   */
+  private assertSuccessionHolds(): void {
+    const rows = this.sqlite.query<{ task_id: string; kind: ProcessKind; execution_state: string;
+      process_id: string }, []>(`SELECT execution.task_id,process.kind,execution.state AS execution_state,
+      process.id AS process_id
+      FROM processes process
+      JOIN process_execution_links link ON link.process_id=process.id
+      JOIN executions execution ON execution.id=link.execution_id
+      WHERE process.status_source='EXECUTION'
+      ORDER BY execution.task_id,execution.attempt_number,process.id`).all();
+    const byTask = new Map<string, (ProcessFact & { readonly processId: string })[]>();
+    for (const row of rows) {
+      if (!claimsProcessSlot(row.kind)) continue;
+      const facts = byTask.get(row.task_id) ?? [];
+      facts.push({ kind: row.kind, processId: row.process_id,
+        state: projectedExecutionStates[row.execution_state] ?? 'RECOVERY_REQUIRED' });
+      byTask.set(row.task_id, facts);
+    }
+    for (const facts of byTask.values()) {
+      let previous: ProcessFact | null = null;
+      for (const fact of facts) {
+        domain(() => assertProcessSuccession(previous, fact));
+        if (!isTerminalProcessState(fact.state)) previous = fact;
+      }
+    }
   }
 
   private serviceRow(serviceId: string): ServiceRow {
@@ -566,7 +754,57 @@ function mapProcess(row: ProcessRow): ProcessView {
     controlVersion: row.task_version, objective: row.objective,
     adapterId: row.status_source === 'EXECUTION' ? row.execution_adapter_id : row.adapter_id,
     projectId: row.project_id, taskId: row.task_id, executionId: row.execution_id,
+    progress: processProgress(row),
     createdAt: row.created_at, updatedAt: row.effective_updated_at };
+}
+
+/**
+ * Read-only progress. `lastProgressAt` is the latest recorded Process fact (an Execution timestamp or
+ * a Process kernel event). The v37 schema stores no per-Agent token accounting, cost or tool-call
+ * counter, so those three stay `null` — UNAVAILABLE, not zero — and are never derived from a session,
+ * a message count or a clock.
+ */
+function processProgress(row: ProcessRow): ProcessProgressView {
+  return { budgetKnown: row.budget_json !== null, lastProgressAt: row.last_progress_at,
+    tokenUsage: null, costUsd: null, toolCallCount: null };
+}
+
+/** Runs one pure domain rule, surfacing its refusal as the stable kernel code of the same name. */
+function domain<T>(run: () => T): T {
+  try {
+    return run();
+  } catch (error) {
+    if (error instanceof DomainError) throw new KernelStorageError(error.code, error.message, false);
+    throw error;
+  }
+}
+
+function parseCompletionPayload(encoded: string): { readonly processId: string;
+  readonly outcome: ProcessCompletionOutcome; readonly expectedVersion: number } {
+  let value: unknown;
+  try {
+    value = JSON.parse(encoded);
+  } catch {
+    throw new KernelStorageError('INVALID_SIGNAL_PAYLOAD', 'The completion payload is not JSON');
+  }
+  if (typeof value !== 'object' || value === null) {
+    throw new KernelStorageError('INVALID_SIGNAL_PAYLOAD', 'The completion payload must be an object');
+  }
+  const payload = value as Record<string, unknown>;
+  if (typeof payload.processId !== 'string' || payload.processId.length === 0) {
+    throw new KernelStorageError('INVALID_SIGNAL_PAYLOAD', 'The completion payload requires a processId');
+  }
+  if (!processCompletionOutcomes.includes(payload.outcome as ProcessCompletionOutcome)) {
+    throw new KernelStorageError('INVALID_SIGNAL_PAYLOAD',
+      `Unknown Process completion outcome ${String(payload.outcome)}`);
+  }
+  if (typeof payload.expectedVersion !== 'number' || !Number.isSafeInteger(payload.expectedVersion)
+    || payload.expectedVersion < 0) {
+    throw new KernelStorageError('INVALID_SIGNAL_PAYLOAD',
+      'The completion payload requires a non-negative expectedVersion');
+  }
+  return { processId: payload.processId, outcome: payload.outcome as ProcessCompletionOutcome,
+    expectedVersion: payload.expectedVersion };
 }
 
 function json(value: unknown): string {

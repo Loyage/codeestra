@@ -19,7 +19,9 @@ export * from './prose-question.js';
 export * from './settings.js';
 export * from './agent-plugins.js';
 export * from './runtime-commands.js';
+export * from './service-kernel-signals.js';
 import type { RuntimeCommandInfo } from './runtime-commands.js';
+import { processProgressViewSchema } from './service-kernel-signals.js';
 
 export const repositoryIdentitySchema = z.strictObject({
   repoRoot: z.string().min(1),
@@ -1276,6 +1278,7 @@ export const processViewSchema = z.strictObject({
   state: processStateSchema, version: z.number().int().nonnegative(),
   controlVersion: z.number().int().nonnegative().nullable(),
   objective: z.string().min(1), adapterId: nonBlankString.nullable(),
+  progress: processProgressViewSchema,
   createdAt: z.number().int().nonnegative(), updatedAt: z.number().int().nonnegative(),
 }).superRefine((process, context) => {
   if (process.kind === 'DEVELOPMENT'
