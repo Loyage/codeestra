@@ -18,6 +18,7 @@ export * from './targeted-test-plan.js';
 export * from './prose-question.js';
 export * from './settings.js';
 export * from './agent-plugins.js';
+export * from './intention.js';
 export * from './runtime-commands.js';
 import type { RuntimeCommandInfo } from './runtime-commands.js';
 

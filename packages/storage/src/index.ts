@@ -92,5 +92,10 @@ export type { IntentKind } from './migration.js';
 export { KernelStorageError, ServiceKernelStore, systemServiceIds } from './service-kernel-store.js';
 export type { ProcessView, ServiceView, SignalAttemptView, SignalView }
   from './service-kernel-store.js';
+export { IntentionStore } from './intention-store.js';
+export type { IntentionApplication, IntentionApplicationResult, IntentionAuditFact,
+  IntentionClarificationRecord, IntentionProcessRecord, IntentionServiceRecord, IntentionTaskScope,
+  IntentionTransitionRequest }
+  from './intention-store.js';
 export { agentThinkingLevelSchema, agentThinkingLevels, storedAgentConfigurationSchema }
   from './database.js';

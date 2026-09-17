@@ -23,7 +23,19 @@ export type DomainErrorCode =
   | 'INVALID_SIGNAL_TRANSITION'
   | 'INVALID_PROCESS_TRANSITION'
   | 'PROCESS_TERMINAL'
-  | 'PROCESS_AGENT_CARDINALITY';
+  | 'PROCESS_AGENT_CARDINALITY'
+  // Intention routing (ADR-0070 §8 / S6 lane contract §3). A structured outcome that cannot be
+  // routed is refused with its own code: none of these is an approval, a permission decision or a
+  // weakened judgement, and the domain that raises them imports no transport or database.
+  | 'INTENTION_PROCESS_NOT_RESOLVABLE'
+  | 'INTENTION_TARGET_NOT_VISIBLE'
+  | 'INVALID_INTENTION_OUTCOME'
+  | 'INTENTION_CREATE_TASK_UNSUPPORTED'
+  | 'INTENTION_CLARIFICATION_OPEN'
+  | 'INTENTION_CLARIFICATION_NOT_FOUND'
+  | 'INTENTION_CLARIFICATION_MISMATCH'
+  | 'INTENTION_GUIDANCE_UNAVAILABLE'
+  | 'INTENTION_GUIDANCE_CHANNEL_UNAVAILABLE';
 
 export class DomainError extends Error {
   constructor(readonly code: DomainErrorCode, message: string) {
