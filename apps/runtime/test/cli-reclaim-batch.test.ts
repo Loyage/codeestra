@@ -166,7 +166,7 @@ async function seededExecutedTask(
   projectId: string,
   specification: string,
 ): Promise<SeededTask> {
-  const created = JSON.parse((await cli(['task', 'create', projectId, specification,
+  const created = JSON.parse((await cli(['task', 'create', '--project', projectId, specification,
     '--title', 'fixture task', '--name', 'fixture-task'],
     fixture.environment)).stdout) as { readonly id: string };
   await cli(['stop'], fixture.environment);
@@ -221,7 +221,7 @@ async function reservedTaskWorkspace(
     home: fixture.home, environment: fixture.environment, projectId,
     specification: 'Reserved work',
   });
-  const status = JSON.parse((await cli(['task', 'status', projectId, ready.taskId],
+  const status = JSON.parse((await cli(['task', 'status', ready.taskId],
     fixture.environment)).stdout) as {
     readonly task: { readonly version: number; readonly currentRevision: { readonly id: string } };
   };
@@ -238,13 +238,13 @@ async function reservedTaskWorkspace(
     .workspace;
   expect(existsSync(workspace.path)).toBe(true);
   if (options.cancel === true) {
-    const current = JSON.parse((await cli(['task', 'status', projectId, ready.taskId],
+    const current = JSON.parse((await cli(['task', 'status', ready.taskId],
       fixture.environment)).stdout) as { readonly task: { readonly state: string;
         readonly version: number } };
-    const cancelled = await cli(['task', 'cancel', projectId, ready.taskId,
+    const cancelled = await cli(['task', 'cancel', ready.taskId,
       String(current.task.version)], fixture.environment);
     expect(cancelled.exitCode).toBe(0);
-    const after = JSON.parse((await cli(['task', 'status', projectId, ready.taskId],
+    const after = JSON.parse((await cli(['task', 'status', ready.taskId],
       fixture.environment)).stdout) as { readonly task: { readonly state: string } };
     expect(after.task.state).toBe('CANCELLED');
   }

@@ -195,13 +195,13 @@ async function startHandoffTask(mode: 'permission' | 'fence'): Promise<{
   readonly reportPath: string;
 }> {
   const fixture = await handoffFixture(mode);
-  const created = JSON.parse((await cli(['task', 'create', fixture.projectId,
+  const created = JSON.parse((await cli(['task', 'create', '--project', fixture.projectId,
     'Hand off one Agent session', '--title', 'Hand off one Agent session',
     '--name', 'hand-off-one-session'], fixture.environment)).stdout) as { readonly id: string };
   const taskId = created.id;
   // ADR-0059: submitting an undeclared Task starts it in the same command (the automatic pass
   // judges it SAFE), so the Agent Session this file drives exists without a second `task run`.
-  expect((await cli(['task', 'submit', fixture.projectId, taskId, '0'], fixture.environment)).exitCode)
+  expect((await cli(['task', 'submit', taskId, '0'], fixture.environment)).exitCode)
     .toBe(0);
   return { environment: fixture.environment, projectId: fixture.projectId,
     reportPath: fixture.reportPath };
@@ -263,11 +263,11 @@ async function currentSessionId(
   const deadline = Date.now() + 30_000;
   let last = '';
   while (Date.now() < deadline) {
-    const listed = JSON.parse((await cli(['task', 'list', projectId], environment)).stdout) as
+    const listed = JSON.parse((await cli(['task', 'list', '--project', projectId], environment)).stdout) as
       readonly { readonly id: string }[];
     const taskId = listed[0]?.id;
     if (taskId !== undefined) {
-      const result = await cli(['task', 'status', projectId, taskId], environment);
+      const result = await cli(['task', 'status', taskId], environment);
       last = result.stdout;
       const status = JSON.parse(result.stdout) as { readonly executions: readonly {
         readonly session: { readonly sessionId: string } | null }[] };

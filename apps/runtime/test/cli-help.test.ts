@@ -126,7 +126,8 @@ describe('codeestra help', () => {
       ['task', 'revision', 'nope'],
       ['task'],
       [],
-      ['task', 'list'],
+      // `task list` has no project argument any more (ADR-0076): with no arguments it lists every
+      // trusted project, so it is not a usage error — a flag the command does not take still is.
       ['task', 'list', 'a', 'b', '--bogus'],
       // A command that takes nothing still refuses an extra token (the tree consumes the path, so
       // the check has to live in the branch).

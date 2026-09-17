@@ -173,15 +173,14 @@ async function createReadyTask(
   const ready = await createFixtureTaskForExplicitStart({
     home: environment.CODEESTRA_HOME as string, environment, projectId, specification,
   });
-  return await taskRef(environment, projectId, ready.taskId);
+  return await taskRef(environment, ready.taskId);
 }
 
 async function taskRef(
   environment: Record<string, string>,
-  projectId: string,
   taskId: string,
 ): Promise<TaskRef> {
-  const status = await cli(['task', 'status', projectId, taskId], environment);
+  const status = await cli(['task', 'status', taskId], environment);
   expect(status.exitCode).toBe(0);
   const payload = JSON.parse(status.stdout) as {
     readonly task: { readonly id: string; readonly version: number; readonly displayNumber: number;

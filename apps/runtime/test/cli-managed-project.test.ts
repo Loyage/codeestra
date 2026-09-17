@@ -148,12 +148,12 @@ describe('codeestra runs Tasks in the project folder itself (ADR-0064)', () => {
         readonly { readonly id: string }[];
       const projectId = projects[0]?.id as string;
 
-      const created = JSON.parse((await cli(['task', 'create', projectId, 'Write one file',
+      const created = JSON.parse((await cli(['task', 'create', '--project', projectId, 'Write one file',
         '--title', 'Write one file', '--name', 'write-one-file'],
         environment)).stdout) as { readonly id: string; readonly version: number };
       // Submitting is where the defect reported itself: the dependency verdict refused the command
       // with `DEV_REPO_REQUIRED` before the Task could ever be scheduled.
-      const submitted = await cli(['task', 'submit', projectId, created.id, String(created.version)],
+      const submitted = await cli(['task', 'submit', created.id, String(created.version)],
         environment);
       expect(submitted.exitCode).toBe(0);
 
@@ -171,7 +171,7 @@ describe('codeestra runs Tasks in the project folder itself (ADR-0064)', () => {
       // The dependency projection reads that same baseline ref and names it plainly. Since ADR-0070
       // D07 / S8 that baseline is the Project Service's managed integration ref, materialized by
       // `project trust` from the commit this folder had checked out.
-      const dependencies = JSON.parse((await cli(['task', 'depends', 'list', projectId, created.id,
+      const dependencies = JSON.parse((await cli(['task', 'depends', 'list', created.id,
         '--json'], environment)).stdout) as {
         readonly baseRef: string; readonly baseCommit: string | null; readonly blocked: boolean;
       };
@@ -183,16 +183,16 @@ describe('codeestra runs Tasks in the project folder itself (ADR-0064)', () => {
       // FULL mode captures the result commit in one step. The Runtime proves quiescence from its own
       // observation of the settled provider, so the command is retried until that evidence exists —
       // the same wait a person would do, never a claim that it already holds.
-      const captured = await waitForCapturedResult(projectId, created.id, environment);
+      const captured = await waitForCapturedResult(created.id, environment);
       expect(await git(main.repository, ['cat-file', '-t', captured.resultCommit])).toBe('commit');
 
-      const verified = JSON.parse((await cli(['task', 'verify', projectId, created.id], environment))
+      const verified = JSON.parse((await cli(['task', 'verify', created.id], environment))
         .stdout) as { readonly state: string; readonly testedCommit: string };
       expect(verified.state).toBe('PASSED');
       expect(verified.testedCommit).toBe(captured.resultCommit);
 
       // The Task is a first-class finished Task: its own tree, its own commit, nothing in a dev clone.
-      const status = JSON.parse((await cli(['task', 'status', projectId, created.id], environment))
+      const status = JSON.parse((await cli(['task', 'status', created.id], environment))
         .stdout) as { readonly task: { readonly state: string } };
       expect(status.task.state).toBe('EXECUTED');
 
@@ -202,14 +202,13 @@ describe('codeestra runs Tasks in the project folder itself (ADR-0064)', () => {
 
 /** The captured result commit, once the Runtime has observed the provider settle. */
 async function waitForCapturedResult(
-  projectId: string,
   taskId: string,
   environment: Record<string, string>,
 ): Promise<{ readonly resultCommit: string }> {
   const deadline = Date.now() + 60_000;
   let last = '';
   while (Date.now() < deadline) {
-    const capture = await cli(['task', 'result', 'capture', projectId, taskId], environment);
+    const capture = await cli(['task', 'result', 'capture', taskId], environment);
     if (capture.exitCode === 0) {
       return JSON.parse(capture.stdout) as { readonly resultCommit: string };
     }

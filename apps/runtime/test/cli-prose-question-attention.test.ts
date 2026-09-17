@@ -170,14 +170,14 @@ async function executedTask(
   value: { readonly environment: Record<string, string>; readonly projectId: string },
 ): Promise<string> {
   const { environment, projectId } = value;
-  const created = JSON.parse((await cli(['task', 'create', projectId, 'Ask the user something',
+  const created = JSON.parse((await cli(['task', 'create', '--project', projectId, 'Ask the user something',
     '--title', 'Ask the user something', '--name', 'ask-the-user'],
     environment)).stdout) as { readonly id: string };
   const taskId = created.id;
   // ADR-0059 makes an undeclared Task SAFE, so submit itself starts the Session.
-  expect((await cli(['task', 'submit', projectId, taskId, '0'], environment)).exitCode).toBe(0);
+  expect((await cli(['task', 'submit', taskId, '0'], environment)).exitCode).toBe(0);
   await waitFor(async () => {
-    const status = JSON.parse((await cli(['task', 'status', projectId, taskId, '--json'],
+    const status = JSON.parse((await cli(['task', 'status', taskId, '--json'],
       environment)).stdout) as TaskStatusPayload;
     return status.executions[0]?.session?.state === 'EXITED';
   }, 'the Agent Session to exit');
@@ -188,7 +188,7 @@ async function taskStatus(
   value: { readonly environment: Record<string, string>; readonly projectId: string },
   taskId: string,
 ) {
-  const listed = await cli(['task', 'status', value.projectId, taskId, '--json'], value.environment);
+  const listed = await cli(['task', 'status', taskId, '--json'], value.environment);
   expect(listed.exitCode).toBe(0);
   return { status: JSON.parse(listed.stdout) as TaskStatusPayload, stderr: listed.stderr };
 }
@@ -269,7 +269,7 @@ describe('codeestra prose question waits', () => {
         resolution: 'ANSWERED', answerText: 'Use bun, and keep it in devDependencies.',
         deliveredToProvider: false });
       // The revision history is untouched: an answer is not an amendment.
-      const revisions = await cli(['task', 'revision', 'list', projectId, taskId], environment);
+      const revisions = await cli(['task', 'revision', 'list', taskId], environment);
       expect(revisions.exitCode).toBe(0);
       expect((JSON.parse(revisions.stdout) as { readonly revisions: readonly unknown[] }).revisions)
         .toHaveLength(1);

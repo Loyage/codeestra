@@ -73,7 +73,7 @@ Service lifecycle 不替代 Task lifecycle；Process 先投影现有 Execution�
 | DRAFT / BLOCKED / READY / EXECUTED / FAILED | cancel | 没有活动写入的竞争操作→CANCELLED |
 | RUNNING / PAUSING / PAUSED / WAITING_FOR_USER | cancel | →CANCELLING，协作中断 |
 | CANCELLING | confirmed stopped | →CANCELLED，保留 workspace |
-| RECOVERY_REQUIRED | reconcile | 依据真实事实回到已证实状态；必须审计，不能直接释放资源。命令面是 `task recover <project> <task> <expected-version>`（ADR-0055）：只读事实（记录的 provider 身份按真实进程表 + start token + 后代核对、记录的后代快照、workspace 路径是否仍在磁盘），**只有能证明 provider 已消失**才收口为 `FAILED`（同时 `Execution → FAILED`、`resource_held=0`、Session `→ EXITED`、workspace `→ RETAINED`）；存活 / 后代存活 / 无法核验 / 无身份一律**拒绝并保持占用**（退出码 1、零行变化）。收口**不主张工作树静止**（`quiescenceProven:false`、`signalsSent:0`），不发信号、不删工作树 |
+| RECOVERY_REQUIRED | reconcile | 依据真实事实回到已证实状态；必须审计，不能直接释放资源。命令面是 `task recover <task> <expected-version>`（ADR-0055；ADR-0076 之后 Task 命令只收 task-id）：只读事实（记录的 provider 身份按真实进程表 + start token + 后代核对、记录的后代快照、workspace 路径是否仍在磁盘），**只有能证明 provider 已消失**才收口为 `FAILED`（同时 `Execution → FAILED`、`resource_held=0`、Session `→ EXITED`、workspace `→ RETAINED`）；存活 / 后代存活 / 无法核验 / 无身份一律**拒绝并保持占用**（退出码 1、零行变化）。收口**不主张工作树静止**（`quiescenceProven:false`、`signalsSent:0`），不发信号、不删工作树 |
 
 READY 的等待原因单独派生为 CONFLICT / CAPACITY / DRAINING / REVISION_REVIEW / CONTROL 等，**不误用 BLOCKED**。ADR-0061 的两半都已实现（schema v34）：容量是唯一的跨 Project Runtime 上限（FOUNDATION-096），全局负载屏障以 `SCHEDULER_GLOBALLY_PAUSED` 表达（仍是等待、退出码 3，不是 Task 状态；FOUNDATION-097，见 [`state-machines-runtime.md`](./state-machines-runtime.md) §6.1）。依赖未满足是 BLOCKED 唯一含义；SUCCEEDED/CANCELLED 不自动重开。
 

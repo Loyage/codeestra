@@ -233,7 +233,7 @@ describe('codeestra intent resolution', () => {
 
   test('records Session Guidance through the existing ledger for a TYPED_COMMAND', async () => {
     const { environment, projectId } = await trustedProject();
-    const created = await cli(['task', 'create', projectId, 'Reuse', 'the', 'existing', 'helper',
+    const created = await cli(['task', 'create', '--project', projectId, 'Reuse', 'the', 'existing', 'helper',
       '--title', '复用现有 helper', '--name', 'reuse-helper'], environment);
     expect(created.exitCode).toBe(0);
     const taskId = (JSON.parse(created.stdout) as { readonly id: string }).id;

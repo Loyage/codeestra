@@ -263,20 +263,20 @@ interface TaskStatus {
 }
 
 async function status(environment: Record<string, string>,
-  projectId: string, taskId: string): Promise<TaskStatus> {
-  const listed = await cli(['task', 'status', projectId, taskId], environment);
+  taskId: string): Promise<TaskStatus> {
+  const listed = await cli(['task', 'status', taskId], environment);
   expect(listed.exitCode).toBe(0);
   return JSON.parse(listed.stdout) as TaskStatus;
 }
 
 async function waitForSessionExit(environment: Record<string, string>,
-  projectId: string, taskId: string, timeoutMs = 30_000): Promise<TaskStatus> {
+  taskId: string, timeoutMs = 30_000): Promise<TaskStatus> {
   const deadline = Date.now() + timeoutMs;
-  let current = await status(environment, projectId, taskId);
+  let current = await status(environment, taskId);
   while (Date.now() < deadline) {
     if (current.executions.some((execution) => execution.session?.state === 'EXITED')) return current;
     await Bun.sleep(100);
-    current = await status(environment, projectId, taskId);
+    current = await status(environment, taskId);
   }
   throw new Error(`The Codex Session never exited; last status was ${JSON.stringify(current.task)}`);
 }
@@ -312,7 +312,7 @@ describe('codeestra task run --adapter codex', () => {
       // FULL would launch Codex with `approvalPolicy: never`; STRICT must ask.
       expect((await cli(['settings', 'permission', 'get'], environment)).stdout)
         .toContain('"mode": "STRICT"');
-      const ran = await cli(['task', 'run', projectId, taskId, String(taskVersion), '--adapter', 'codex'],
+      const ran = await cli(['task', 'run', taskId, String(taskVersion), '--adapter', 'codex'],
         environment);
       expect(ran.exitCode).toBe(0);
       expect(JSON.parse(ran.stdout)).toMatchObject({ adapterId: 'codex' });
@@ -328,7 +328,7 @@ describe('codeestra task run --adapter codex', () => {
       expect(answered.exitCode).toBe(0);
       expect(JSON.parse(answered.stdout)).toMatchObject({ status: 'DELIVERED' });
 
-      const exited = await waitForSessionExit(environment, projectId, taskId);
+      const exited = await waitForSessionExit(environment, taskId);
       // A denial is not a failed turn: Codex continues without the tool and the Session ends.
       expect(exited.executions[0]?.session?.state).toBe('EXITED');
       const report = codexReport(codexReportPath);
@@ -340,10 +340,10 @@ describe('codeestra task run --adapter codex', () => {
 
   test('runs without any approval in FULL mode and never asks for confirmation', async () => {
     const { environment, projectId, taskId, taskVersion, codexReportPath } = await fixture();
-    const ran = await cli(['task', 'run', projectId, taskId, String(taskVersion), '--adapter', 'codex'],
+    const ran = await cli(['task', 'run', taskId, String(taskVersion), '--adapter', 'codex'],
       environment);
     expect(ran.exitCode).toBe(0);
-    const exited = await waitForSessionExit(environment, projectId, taskId);
+    const exited = await waitForSessionExit(environment, taskId);
     expect(exited.executions[0]?.session?.state).toBe('EXITED');
     const attentions = JSON.parse((await cli(['attention', 'list', projectId], environment)).stdout) as
       readonly unknown[];
@@ -355,27 +355,27 @@ describe('codeestra task run --adapter codex', () => {
   test('replaces a failed run attempt with a new run on a different adapter', async () => {
     // The Codex executable is missing, so this attempt fails during the version probe, before any
     // Execution or worktree is reserved. The Task stays runnable and a different Agent can run it.
-    const { environment, projectId, taskId, taskVersion } = await fixture({ codexExecutable: 'missing' });
-    const failed = await cli(['task', 'run', projectId, taskId, String(taskVersion), '--adapter', 'codex'],
+    const { environment, taskId, taskVersion } = await fixture({ codexExecutable: 'missing' });
+    const failed = await cli(['task', 'run', taskId, String(taskVersion), '--adapter', 'codex'],
       environment);
     expect(failed.exitCode).toBe(1);
     expect(failed.stderr).toContain('PROVIDER_VERSION_UNAVAILABLE');
-    const afterFailure = await status(environment, projectId, taskId);
+    const afterFailure = await status(environment, taskId);
     expect(afterFailure.task.state).toBe('READY');
     expect(afterFailure.executions).toEqual([]);
 
-    const replaced = await cli(['task', 'run', projectId, taskId,
+    const replaced = await cli(['task', 'run', taskId,
       String(afterFailure.task.version), '--adapter', 'pi'], environment);
     expect(replaced.exitCode).toBe(0);
     expect(JSON.parse(replaced.stdout)).toMatchObject({ adapterId: 'pi' });
-    const exited = await waitForSessionExit(environment, projectId, taskId);
+    const exited = await waitForSessionExit(environment, taskId);
     expect(exited.executions).toHaveLength(1);
     expect(exited.executions[0]?.session?.state).toBe('EXITED');
     await cli(['stop'], environment);
   }, 120_000);
 
   test('applies the per-adapter Agent configuration to the Codex launch only', async () => {
-    const { environment, projectId, taskId, taskVersion, codexReportPath } = await fixture();
+    const { environment, taskId, taskVersion, codexReportPath } = await fixture();
     const configured = await cli(['agent', 'config', 'set', '--adapter', 'codex',
       '--provider', 'openai', '--model', 'cli-stub-model', '--thinking', 'high'], environment);
     expect(configured.exitCode).toBe(0);
@@ -389,9 +389,9 @@ describe('codeestra task run --adapter codex', () => {
     // Unset fields are reported as null on the command face, and the Pi scope has no model.
     expect(pi.effective.model).toBeNull();
 
-    expect((await cli(['task', 'run', projectId, taskId, String(taskVersion), '--adapter', 'codex'],
+    expect((await cli(['task', 'run', taskId, String(taskVersion), '--adapter', 'codex'],
       environment)).exitCode).toBe(0);
-    await waitForSessionExit(environment, projectId, taskId);
+    await waitForSessionExit(environment, taskId);
     const report = codexReport(codexReportPath);
     expect(report.argv).toEqual(['app-server', '--stdio', '-c', 'model_reasoning_effort=high']);
     expect(report.threadModel).toBe('cli-stub-model');
@@ -400,28 +400,28 @@ describe('codeestra task run --adapter codex', () => {
   }, 120_000);
 
   test('resumes a paused Codex Task on Codex and refuses a cross-provider resume', async () => {
-    const { environment, projectId, taskId, taskVersion, codexReportPath } = await fixture();
-    expect((await cli(['task', 'run', projectId, taskId, String(taskVersion), '--adapter', 'codex'],
+    const { environment, taskId, taskVersion, codexReportPath } = await fixture();
+    expect((await cli(['task', 'run', taskId, String(taskVersion), '--adapter', 'codex'],
       environment)).exitCode).toBe(0);
-    await waitForSessionExit(environment, projectId, taskId);
+    await waitForSessionExit(environment, taskId);
 
-    const version = (await status(environment, projectId, taskId)).task.version;
-    const paused = await cli(['task', 'pause', projectId, taskId, String(version)], environment);
+    const version = (await status(environment, taskId)).task.version;
+    const paused = await cli(['task', 'pause', taskId, String(version)], environment);
     expect(paused.exitCode).toBe(0);
-    const pausedVersion = (await status(environment, projectId, taskId)).task.version;
-    const resumed = await cli(['task', 'resume', projectId, taskId, String(pausedVersion),
+    const pausedVersion = (await status(environment, taskId)).task.version;
+    const resumed = await cli(['task', 'resume', taskId, String(pausedVersion),
       '--adapter', 'codex'], environment);
     expect(resumed.exitCode).toBe(0);
     expect(JSON.parse(resumed.stdout)).toMatchObject({ state: 'RUNNING' });
-    await waitForSessionExit(environment, projectId, taskId);
+    await waitForSessionExit(environment, taskId);
     // The provider reopened the recorded thread instead of starting a fresh conversation.
     expect(codexReport(codexReportPath).resumed).toBe(1);
 
-    const secondPause = (await status(environment, projectId, taskId)).task.version;
-    expect((await cli(['task', 'pause', projectId, taskId, String(secondPause)],
+    const secondPause = (await status(environment, taskId)).task.version;
+    expect((await cli(['task', 'pause', taskId, String(secondPause)],
       environment)).exitCode).toBe(0);
-    const beforeRefusal = (await status(environment, projectId, taskId)).task.version;
-    const refused = await cli(['task', 'resume', projectId, taskId, String(beforeRefusal),
+    const beforeRefusal = (await status(environment, taskId)).task.version;
+    const refused = await cli(['task', 'resume', taskId, String(beforeRefusal),
       '--adapter', 'pi'], environment);
     // A Codex conversation cannot be handed to the Pi adapter, and the Runtime says so instead of
     // silently starting a conversation the Task never had.

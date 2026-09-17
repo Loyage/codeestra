@@ -224,10 +224,10 @@ async function createAndSubmit(
   projectId: string,
   specification: string,
 ): Promise<TaskPayload> {
-  const created = JSON.parse((await cli(['task', 'create', projectId, specification,
+  const created = JSON.parse((await cli(['task', 'create', '--project', projectId, specification,
     '--title', 'fixture task', '--name', 'fixture-task'],
     environment)).stdout) as TaskPayload;
-  const submitted = await cli(['task', 'submit', projectId, created.id, '0'], environment);
+  const submitted = await cli(['task', 'submit', created.id, '0'], environment);
   expect(submitted.exitCode).toBe(0);
   return { ...created, state: 'READY', version: 1 };
 }
@@ -239,17 +239,16 @@ async function createAndSubmit(
  * the command face promises — the Task is cancelled — instead of racing the scheduler.
  */
 async function cancelWithCurrentVersion(
-  projectId: string,
   taskId: string,
   environment: Record<string, string>,
 ): Promise<Awaited<ReturnType<typeof cli>>> {
   let last: Awaited<ReturnType<typeof cli>> | null = null;
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    const status = await cli(['task', 'status', projectId, taskId], environment);
+    const status = await cli(['task', 'status', taskId], environment);
     expect(status.exitCode).toBe(0);
     const version = (JSON.parse(status.stdout) as { readonly task: { readonly version: number } })
       .task.version;
-    last = await cli(['task', 'cancel', projectId, taskId, String(version)], environment);
+    last = await cli(['task', 'cancel', taskId, String(version)], environment);
     if (last.exitCode === 0 || !last.stderr.includes('CONCURRENT_MODIFICATION')) return last;
     await Bun.sleep(250);
   }
@@ -348,9 +347,9 @@ describe('project impact', () => {
     // Declaring the same feature on both revisions is what makes them conflict, and the reason code
     // names the declaration rather than any path.
     for (const task of [first, second]) {
-      const status = JSON.parse((await cli(['task', 'status', projectId, task.id],
+      const status = JSON.parse((await cli(['task', 'status', task.id],
         environment)).stdout) as { readonly task: { readonly version: number } };
-      const declared = await cli(['task', 'revision', 'create', projectId, task.id,
+      const declared = await cli(['task', 'revision', 'create', task.id,
         String(status.task.version), '--feature', 'core-module', '--reason', 'declare the feature',
         '--json'], environment);
       expect(declared.exitCode).toBe(0);
@@ -369,9 +368,9 @@ describe('project impact', () => {
 
     // Amending the Task revision makes the stored snapshot stale: a new one is recorded for the new
     // revision instead of the old prediction being reused.
-    const secondStatus = JSON.parse((await cli(['task', 'status', projectId, second.id],
+    const secondStatus = JSON.parse((await cli(['task', 'status', second.id],
       environment)).stdout) as { readonly task: { readonly version: number } };
-    const amended = await cli(['task', 'revision', 'create', projectId, second.id,
+    const amended = await cli(['task', 'revision', 'create', second.id,
       String(secondStatus.task.version), '--specification', 'Change the second area, narrowed',
       '--reason', 'narrow the scope', '--json'], environment);
     expect(amended.exitCode).toBe(0);
@@ -407,7 +406,7 @@ describe('project impact', () => {
       bareEnvironment);
     expect(bareValidated.exitCode).toBe(1);
     expect(JSON.parse(bareValidated.stdout)).toMatchObject({ code: 'POLICY_ABSENT' });
-    const refusedFeature = await cli(['task', 'create', bareProjectId, 'Change something',
+    const refusedFeature = await cli(['task', 'create', '--project', bareProjectId, 'Change something',
       '--title', 'Change something', '--name', 'change-something', '--feature', 'core-module'], bareEnvironment);
     expect(refusedFeature.exitCode).toBe(1);
     expect(refusedFeature.stderr).toContain('IMPACT_POLICY_ABSENT');
@@ -445,7 +444,7 @@ describe('project impact', () => {
     expect((JSON.parse(invalidExplain.stdout) as ExplainReport).assessment
       .reasonCodes).toEqual(['SAME_UNFINISHED_FEATURE']);
     // A *new* declaration, on the other hand, is refused while the mapping cannot be read.
-    const declareOnInvalid = await cli(['task', 'create', projectId, 'A brand new Task',
+    const declareOnInvalid = await cli(['task', 'create', '--project', projectId, 'A brand new Task',
       '--title', 'A brand new Task', '--name', 'a-brand-new-task', '--feature', 'core-module'], environment);
     expect(declareOnInvalid.exitCode).toBe(1);
     expect(declareOnInvalid.stderr).toContain('INVALID_IMPACT_POLICY');
@@ -454,7 +453,7 @@ describe('project impact', () => {
     // The Task version is re-read instead of assumed: the scheduling engine's recovery pass can
     // pause a Task whose impact prediction was revoked, which moves the version, and a hard-coded
     // `2` turned that legitimate transition into a false CONCURRENT_MODIFICATION.
-    const cancelled = await cancelWithCurrentVersion(projectId, first.id, environment);
+    const cancelled = await cancelWithCurrentVersion(first.id, environment);
     expect(cancelled.exitCode).toBe(0);
     const stopped = await cli(['stop'], environment);
     expect(stopped.exitCode).toBe(0);

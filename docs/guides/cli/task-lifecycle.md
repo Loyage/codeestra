@@ -1,8 +1,9 @@
 # CLI 参考 · task 生命周期
 
-> **适用版本** ADR-0070 S7 实现分支（2026-09-17） · **schema** v37 · **最后校对** 2026-09-17
+> **适用版本** ADR-0070 S7 实现分支（2026-09-17） · **schema** v38 · **最后校对** 2026-09-17
 > 版本会前进：`dev@06bcf97` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> **本次修订（ADR-0076）**：`task` 组不再以 `<project-id>` 开头：Task id 全局唯一，它自己就是地址，**project 是 Task 的字段**（`task create` 用 `--project`，`task list` 默认为本 Runtime 全部项目、`--project` 过滤；`task schedule status|plan|run` 仍收 `<project-id>`）。旧写法不再接受。
 > 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一，
 > **内容自 `cli-reference.md` 搬移，除下面列出的几节外一句未改写**。
 > §4 的 `task create` 一节由本分支按 **ADR-0065** 重写：三个必填字段（`--title`/`--name`/任务详情），
@@ -11,7 +12,7 @@
 > 只读可见性说明（`service get <task-id>` / `service tree` 与 `task status` 读同一行）；无新命令、无新 flag、
 > 无退出码变化，`task create` 回答的形状与 ADR-0065 那一版相同。
 > **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
-> **本次修订（ADR-0074 / schema v38）**：Task 基线改为项目受管的 integration ref；成果经 `project integration request|run` 进入该 ref，**发布到你的分支仍没有命令**。命令面见 [cli/managed-integration.md](cli/managed-integration.md)。
+> **本次修订（ADR-0074 / schema v38）**：Task 基线改为项目受管的 integration ref；成果经 `project integration request|run` 进入该 ref，**发布到你的分支仍没有命令**。命令面见 [managed-integration.md](managed-integration.md)。
 > 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
 > 本文件覆盖 §4；章节号沿用拆分前的编号，因此可能不连续。正文里提到本文件没有的号（例如 §14、§17）时，到 [README.md](./README.md) 的索引表查它在哪一篇。
 > §3 的 `project impact *` 与 §4 的 `task submit`/`task resume`/`--feature` 由 FOUNDATION-091 新增/改写（ADR-0059）；
@@ -21,10 +22,21 @@
 > **本次修订（ADR-0066 / schema v36）**：`--base-ref` 与基线语义按「只有一种基线」改写；删除 dev clone / 集成相关的表述。
 > §4 `task purge` 的 `RECOVERY_REQUIRED` 行为由用户任务 `task/930f5325` 修订（ADR-0058 D02 修订，2026-09-16）：purge 先按观察对账，只有证明 provider 已退出才继续删除。
 > §4 `task purge` 新增 `--force` 与其代价一节由 `lane/purge-force` 同步（ADR-0058 D09，2026-09-16）：`--force` 是同一条命令的放宽（不是第二道确认），先终止记录过的 provider 身份，再越过 D02/D06/D05 三类拒绝；跳过了什么写在 `forced` 与 stderr 里。
+> **本次修订（ADR-0076）**：`task` 组不再以 `<project-id>` 开头，`<task-id>` 自己就是地址（project 是 Task 的字段）；
+> `task create` 改为 `--project <project-id>`，`task list` 默认为本 Runtime 全部项目、`--project` 过滤。旧写法**不再接受**（第一个参数会被当成 task-id）。
 
 ## 4. `task`：生命周期
 
-### `task create <project-id> <任务详情…> --title <显示标题> --name <命名标题> [--feature <module-id>]…`
+本节所有命令都只收一个 **`<task-id>`**：Task id 全局唯一，它就是地址，**project 是 Task 自己的一个字段**（ADR-0076）。
+`task status` / `task list` / 各 Task 命令的输出里都带 `projectId`，所以脚本不需要先查一次项目。两点例外，都不是「对一个 Task 的操作」：
+
+- **`task create`** 用 `--project <project-id>`：创建时 Task 还不存在，没有可以从 Task 推出的项目；
+- **`task schedule status|plan|run`** 仍然收 `<project-id>`（一趟调度 pass 是每项目的），而 `task schedule explain|clear-unknown` 只收 `<task-id>`。
+
+旧的 `<project-id> <task-id>` 写法**已经不受支持**：那多出来的 token 会被当作 Task id 或未知 flag，命令以用法错误（退出码 2）退出并指向对应层的 `help`，不会静默忽略。
+如果一个客户端仍然在 Runtime 命令里同时给出 projectId 与 taskId，而两者**不属于同一个项目**，Runtime 以 `TASK_PROJECT_MISMATCH`（退出码 1）拒绝——不会让其中一个默默胜出。
+
+### `task create --project <project-id> <任务详情…> --title <显示标题> --name <命名标题> [--feature <module-id>]…`
 
 原子创建：原始意图 + 首 revision + 事实事件 + 幂等回执在同一事务。
 
@@ -49,7 +61,7 @@
 `TASK` Service 行与两个事实事件在同一事务里写入；Service 的 id 就是 Task id，它的 parent 是这个项目的
 `PROJECT` Service（`project trust` 注册时一并写入，parent 是 root Service）。于是同一行现在有两个可读的面：
 
-- `codeestra task status <project-id> <task-id>` 的 `task.state` / `task.version`；
+- `codeestra task status <task-id>` 的 `task.state` / `task.version`；
 - `codeestra service get <task-id> --json` 的 `coreState.lifecycleState` / `coreVersion`（以及 `service tree` 里的
   `<root> → <project-id> → <task-id>`）。
 
@@ -58,7 +70,10 @@
 若 `project trust` 注册 `PROJECT` Service 时发现 root Service 不存在或不是 `ROOT`（把 `services` 表改坏的数据库才会这样），
 它整体拒绝（`SERVICE_NOT_FOUND` / `INVALID_SERVICE_PARENT`，退出码 1）并且**不写任何行**：项目行与 Service 行是同一事务。
 
-### `task list <project-id> [--all]`
+### `task list [--project <project-id>] [--all]`
+
+不给 `--project` 就列出**本 Runtime 每个已信任项目的 Task**（ADR-0076 D03）：列表不是对一个 Task 的操作，项目在这里是过滤条件。
+每行自带 `projectId`，所以「这些 Task 属于哪些项目」不需要第二次读。给了 `--project <project-id>` 就只列该项目；该 id 不受信任或不存在时报 `NOT_FOUND`（退出码 1），不会静默回退成「全部」。
 
 默认隐藏归档；`--all` 含归档。其他参数是用法错误。
 
@@ -72,7 +87,7 @@
 - 它存在的理由是不必为了知道「Agent 是否已经退出」而逐行再读一次 `task status`：工作台列表行用它区分
   「Agent 正在跑」与「Agent 已退出待提交成果」（见 [ui.md](../ui.md) §2.2）。`task status` 返回的 `task` 是同一个投影。
 
-### `task submit <project-id> <task-id> <expected-version>`
+### `task submit <task-id> <expected-version>`
 
 用 expected version 把 `DRAFT` 转 `READY`，并**在同一命令里**核对依赖 + 跑一次调度 pass。
 返回里除提交结果外还有 `state` / `version` / `dependencyState` 与 `schedule`。
@@ -80,7 +95,7 @@ ADR-0059 之后**未声明功能的 Task 会在容量允许时就在这个命令
 想让它等，就声明一个已被别的未完成任务声明的功能（`--feature`），或用已满的容量。
 版本不符 → 乐观冲突拒绝（`VERSION_CONFLICT` / `CONCURRENT_MODIFICATION`）。
 
-### `task run <project-id> <task-id> <expected-version> [--adapter <pi|codex|claude>] [--base-ref <refs/heads/…>] [--allow-unknown] [--json]`
+### `task run <task-id> <expected-version> [--adapter <pi|codex|claude>] [--base-ref <refs/heads/…>] [--allow-unknown] [--json]`
 
 显式启动请求，走与自动调度**同一个门禁**。`--adapter` 默认 `pi`。
 
@@ -108,7 +123,7 @@ submit/run/depends 判定/result commit/verify 都照常，**不会**有「缺�
 `CAPACITY_ADAPTER_SLOT_LIMIT_REACHED` 是**历史码**（ADR-0061 删除了 Adapter 级上限）：历史事件与历史命令结果
 仍按原名可读，但新实现不再产生它。
 
-### `task recover <project-id> <task-id> <expected-version> [--reason <text>] [--json]`
+### `task recover <task-id> <expected-version> [--reason <text>] [--json]`
 
 `RECOVERY_REQUIRED` 的**对账**（ADR-0055）：`docs/architecture/state-machines.md` 承诺的那一步，在它之前**没有命令面实现**——
 `task cancel`/`retry`/`resume` 与 `task operation cancel` 都以 `RECONCILE_REQUIRED` 拒绝，`reclaim` 因 Task 属活跃集合而拒绝，
@@ -135,12 +150,12 @@ submit/run/depends 判定/result commit/verify 都照常，**不会**有「缺�
 workspace 变成 `RETAINED` 后 `reclaim` 才能考虑它。`--reason <text>` 是你自己的陈述，**原文进审计，不参与判定**。
 同一 `commandId` 重放走到自己的回执（与 `promotion prepare` 同一规则）；同一 command id 配不同 payload 是 `COMMAND_CONFLICT`。
 
-### `task pause <project-id> <task-id> <expected-version>`
+### `task pause <task-id> <expected-version>`
 
 协作停止：先 `PAUSING`，确认 provider 进程退出后才 `PAUSED`；workspace 与会话证据保留。
 如果停止**无法被证明**，结果里 `stop: "UNCERTAIN"`，**退出码 1**。
 
-### `task resume <project-id> <task-id> <expected-version> [--adapter <…>] [--allow-unknown]`
+### `task resume <task-id> <expected-version> [--adapter <…>] [--allow-unknown]`
 
 恢复是「继续**同一条** provider conversation」，所以 adapter 是请求的一部分；`--adapter` 默认 `pi`。
 它同时是**启动路径**，因此走与 `task run` 相同的冲突门禁：与某个**未完成且声明了同一功能**的 Task 冲突时保持 paused；
@@ -148,7 +163,7 @@ workspace 变成 `RETAINED` 后 `reclaim` 才能考虑它。`--reason <text>` �
 
 > 恢复 ≠ 重试：重试是重新入队一个 `FAILED` Task 然后新建 Execution。
 
-### `task retry <project-id> <task-id> <expected-version> [--adapter <…>] [--json]`
+### `task retry <task-id> <expected-version> [--adapter <…>] [--json]`
 
 只对 `FAILED` 生效，且**没有任何自动行为**：只有这条命令会重新入队。
 不带 `--adapter` 时复用**这个 Task 上一次运行的 Adapter**。
@@ -164,7 +179,7 @@ workspace 变成 `RETAINED` 后 `reclaim` 才能考虑它。`--reason <text>` �
 拒绝码（领域层）：`TASK_NOT_FAILED`、`TASK_CANCELLED`、`TASK_STILL_RUNNING`、`TASK_PAUSED`、
 `RECONCILE_REQUIRED`、`TASK_ARCHIVED`、`WORKSPACE_RECLAIMED`（后者会走「从 Task 分支重建 worktree」的路径）。
 
-### `task cancel` / `task archive` / `task unarchive <project-id> <task-id> <expected-version>`
+### `task cancel` / `task archive` / `task unarchive <task-id> <expected-version>`
 
 - `cancel` 是**终态**，不自动重开；结果 `stop: "UNCERTAIN"` 时退出码 `1`。
 - `archive` 是**软删除**：只写 `archived_at`，不删行、不回收 worktree/branch。
@@ -182,7 +197,7 @@ workspace 变成 `RETAINED` 后 `reclaim` 才能考虑它。`--reason <text>` �
 - 未声明任何功能的任务**永远不参与功能冲突**，因此提交后会在容量允许时立即开始——这是与 ADR-0031 时代相反的默认行为。
 - `task status` / `task list` 的 JSON 里，`currentRevision.features` 就是声明的内容。
 
-### `task purge <project-id> <task-id> <expected-version> --yes [--force] [--reason <text>] [--json]`
+### `task purge <task-id> <expected-version> --yes [--force] [--reason <text>] [--json]`
 
 **本命令不可撤销。** 它删掉这个任务**拥有的一切**：全部 revision、Execution、AgentSession、终端/guidance/Attention 记录、验证运行、
 impact 快照与它的配对判定、槽位预留、回收记录、依赖边、`intents` 的 target，以及**它自己的 worktree、验证副本与 `task/<id>` 分支**，
@@ -218,7 +233,7 @@ impact 快照与它的配对判定、槽位预留、回收记录、依赖边、`
 - **会连带删掉指向它的依赖边**（条数在 `dependencyEdgesRemoved` 里），下游任务会因此重新判定；也会删掉**另一方**与它配对的那条 impact 判定。
 - 本命令**不使用退出码 3**。
 
-### `task status <project-id> <task-id> [--json]`
+### `task status <task-id> [--json]`
 
 - 输出是 JSON（`--json` 是**默认**，可用脚本声明意图）；任何其他 flag 是用法错误。
 - 每个 Execution 的 **Agent 完成注记**会以 `[note] <execution> (<session>) ended <outcome> with <code>: <message>`

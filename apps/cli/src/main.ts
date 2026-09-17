@@ -388,7 +388,6 @@ interface TaskStatusExecutionListing {
  * what to run about it.
  */
 function printOccupierDiagnostics(
-  projectId: string,
   assessment: ScheduleAssessmentView | null,
   activeTaskIds: readonly string[],
 ): void {
@@ -398,7 +397,7 @@ function printOccupierDiagnostics(
     if (occupier.code === 'OBSERVABLE') continue;
     reported.add(occupier.taskId);
     const remedy = occupier.taskState === 'RECOVERY_REQUIRED'
-      ? `reconcile it from facts with \`task recover ${projectId} ${occupier.taskId}`
+      ? `reconcile it from facts with \`task recover ${occupier.taskId}`
         + ' <expected-version>\` (the version is in `task status`)'
       : occupier.taskState === 'PAUSED'
         ? `resume it with \`task resume\` or retire it with \`task cancel\``
@@ -418,11 +417,10 @@ function printOccupierDiagnostics(
 
 /** One line per candidate: which of its occupiers cannot be observed, and what to do about it. */
 function printOccupierDiagnosticsForCandidates(
-  projectId: string,
   candidates: readonly ScheduleCandidateView[],
 ): void {
   for (const candidate of candidates) {
-    printOccupierDiagnostics(projectId, candidate.assessment, candidate.assessment?.activeTaskIds ?? []);
+    printOccupierDiagnostics(candidate.assessment, candidate.assessment?.activeTaskIds ?? []);
   }
 }
 
@@ -453,13 +451,18 @@ function printCompletionNotes(view: unknown): void {
  * The list is only fetched for a Task that is actually waiting, so the common path pays nothing.
  */
 async function printProseQuestionWaits(input: {
-  readonly projectId: string;
   readonly view: unknown;
   readonly call: (request: ClientRequest) => Promise<unknown>;
 }): Promise<void> {
-  const task = (input.view as { readonly task?: { readonly state?: unknown } } | null)?.task;
+  const task = (input.view as {
+    readonly task?: { readonly state?: unknown; readonly projectId?: unknown };
+  } | null)?.task;
   if (task?.state !== 'WAITING_FOR_USER') return;
-  const listed = await input.call({ command: 'attention.list', projectId: input.projectId });
+  // The project comes from the Task detail itself (ADR-0076): the command that asked for this view
+  // never named one. A view without it is not something this client invents a value for.
+  const projectId = task.projectId;
+  if (typeof projectId !== 'string') return;
+  const listed = await input.call({ command: 'attention.list', projectId });
   if (!Array.isArray(listed)) return;
   for (const candidate of listed as readonly {
     readonly id?: unknown; readonly status?: unknown; readonly executionId?: unknown;
@@ -702,24 +705,37 @@ interface TaskCreateInput {
   readonly specification: string;
   /** Declared feature ids (`--feature <id>`, repeatable); validated by the Runtime. */
   readonly features: string[];
+  /**
+   * The project the new Task belongs to (ADR-0076 D02). The parser reports `undefined` rather than
+   * refusing, so the caller can make "you did not name a project" a usage error of the whole command;
+   * it is the one Task command whose subject does not exist yet, so it cannot be derived.
+   */
+  readonly projectId: string | undefined;
 }
 
 /**
- * `task create` takes the Task detail as its positional text, so only the two titles and the
- * declared features are read as flags. Both titles are required (ADR-0065 D01): the display title is
+ * `task create --project <id> <任务详情…> --title <…> --name <…>` reads `--project`, the two titles
+ * and the declared features as flags and everything else as the Task detail, which is why the detail
+ * can be passed first or quoted. Both titles are required (ADR-0065 D01): the display title is
  * what the task list shows, the naming title is what the branch and worktree directory are called,
  * and neither is derived from the other. The naming shape is checked here too, so a script gets the
- * usage error (exit 2) instead of a contract refusal.
+ * usage error (exit 2) instead of a contract refusal. `--project` is required as well (ADR-0076 D02),
+ * for the one Task command whose subject does not exist yet.
  */
 function parseTaskCreateFlags(tokens: readonly string[]): TaskCreateInput {
   const specification: string[] = [];
   const features: string[] = [];
   let displayTitle: string | undefined;
   let namingTitle: string | undefined;
+  let projectId: string | undefined;
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index] as string;
     const value = tokens[index + 1];
-    if (token === '--feature') {
+    if (token === '--project') {
+      if (value === undefined || value.trim().length === 0) usage();
+      projectId = value.trim();
+      index += 1;
+    } else if (token === '--feature') {
       // The id is validated against the project's declared mapping by the Runtime, not here: which
       // features exist is a property of the repository (ADR-0059).
       if (value === undefined || value.trim().length === 0) usage();
@@ -742,7 +758,7 @@ function parseTaskCreateFlags(tokens: readonly string[]): TaskCreateInput {
     }
   }
   if (specification.length === 0 || displayTitle === undefined || namingTitle === undefined) usage();
-  return { displayTitle, namingTitle, specification: specification.join(' '), features };
+  return { projectId, displayTitle, namingTitle, specification: specification.join(' '), features };
 }
 
 /**
@@ -809,11 +825,10 @@ interface TaskStatusExecutions {
  * `session.transcript`.
  */
 async function transcriptForTask(
-  projectId: string,
   taskId: string,
   flags: TranscriptFlags,
 ): Promise<void> {
-  const status = await call({ command: 'task.status', projectId, taskId }) as TaskStatusExecutions;
+  const status = await call({ command: 'task.status', taskId }) as TaskStatusExecutions;
   const requested = flags.executionId === undefined ? null : flags.executionId;
   const candidates = status.executions.filter((execution) => execution.session !== null);
   const execution = requested === null
@@ -2257,12 +2272,11 @@ try {
     if (child === null) usage();
     if (child !== 'task.integration.show') unhandledNode(child);
     const { positionals, bare } = splitFlagTokens(remainingArguments, [], ['--json']);
-    if (positionals.length !== 2) usage();
-    const projectId = positionals[0] as string;
-    const taskId = positionals[1] as string;
+    if (positionals.length !== 1) usage();
+    const taskId = positionals[0] as string;
     const json = bare.has('--json');
     const view = (await call({ command: 'task.integration.show',
-      projectId, taskId })) as TaskIntegrationView;
+      taskId })) as TaskIntegrationView;
     if (json) print(view);
     else {
       console.log(`task ${view.taskId}  integration ${view.state}`
@@ -2278,26 +2292,46 @@ try {
       if (view.items.length === 0) console.log('  (no merge request was ever queued for this Task)');
     }
   } else if (commandId === 'task.create') {
-    if (firstArgument === undefined || remainingArguments.length === 0) usage();
-    const input = parseTaskCreateFlags(remainingArguments);
+    // `task create` is the one Task command that names a project (ADR-0076 D02): the Task does not
+    // exist yet, so there is nothing to derive it from. The flag spelling keeps every command in the
+    // `task` group from starting with a project positional.
+    // The first token is `--project` (or another flag), so the whole argv tail is one token list.
+    const tokens = [firstArgument, ...remainingArguments]
+      .filter((token): token is string => token !== undefined);
+    if (tokens.length === 0) usage();
+    const input = parseTaskCreateFlags(tokens);
+    if (input.projectId === undefined) usage();
     print(await call({
       command: 'task.create',
       commandId: crypto.randomUUID(),
-      projectId: firstArgument,
+      projectId: input.projectId,
       displayTitle: input.displayTitle,
       namingTitle: input.namingTitle,
       specification: input.specification,
       features: input.features,
     }));
   } else if (commandId === 'task.list') {
-    const includeArchived = remainingArguments.length === 1 && remainingArguments[0] === '--all';
-    if (firstArgument === undefined
-      || (remainingArguments.length !== 0 && !includeArchived)) usage();
-    print(await call({ command: 'task.list', projectId: firstArgument, includeArchived }));
+    // The listing is project-free by default (ADR-0076 D03).
+    const tokens = [firstArgument, ...remainingArguments]
+      .filter((token): token is string => token !== undefined);
+    let projectId: string | undefined;
+    let includeArchived = false;
+    for (let index = 0; index < tokens.length; index += 1) {
+      const token = tokens[index] as string;
+      const value = tokens[index + 1];
+      if (token === '--all') { includeArchived = true; continue; }
+      if (token === '--project' && value !== undefined) { projectId = value; index += 1; continue; }
+      usage();
+    }
+    print(await call({
+      command: 'task.list',
+      ...(projectId === undefined ? {} : { projectId }),
+      includeArchived,
+    }));
   } else if (commandId === 'task.purge') {
-    const [taskId, versionText, ...flags] = remainingArguments;
+    const [versionText, ...flags] = remainingArguments;
     const expectedVersion = Number(versionText);
-    if (firstArgument === undefined || taskId === undefined || versionText === undefined
+    if (firstArgument === undefined || versionText === undefined
       || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
     const split = splitFlagTokens(flags, ['--reason'], ['--yes', '--json', '--force']);
     if (split.positionals.length !== 0) usage();
@@ -2316,8 +2350,7 @@ try {
     const result = await call({
       command: 'task.purge',
       commandId: crypto.randomUUID(),
-      projectId: firstArgument,
-      taskId,
+      taskId: firstArgument,
       expectedVersion,
       confirmed: true,
       force,
@@ -2339,9 +2372,9 @@ try {
     // The reconcile of a RECOVERY_REQUIRED Task (ADR-0055): the step the state machine promised and
     // no command face had. Facts only — it changes something only when the provider is provably gone,
     // and it never signals a process, moves a worktree, or claims quiescence.
-    const [taskId, versionText, ...flags] = remainingArguments;
+    const [versionText, ...flags] = remainingArguments;
     const expectedVersion = Number(versionText);
-    if (firstArgument === undefined || taskId === undefined || versionText === undefined
+    if (firstArgument === undefined || versionText === undefined
       || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
     const split = splitFlagTokens(flags, ['--reason'], ['--json']);
     if (split.positionals.length !== 0) usage();
@@ -2349,8 +2382,7 @@ try {
     const view = await call({
       command: 'task.recover',
       commandId: crypto.randomUUID(),
-      projectId: firstArgument,
-      taskId,
+      taskId: firstArgument,
       expectedVersion,
       ...(reason === undefined ? {} : { reason }),
     }) as TaskRecoveryView;
@@ -2370,9 +2402,9 @@ try {
     }
   } else if (commandId === 'task.pause' || commandId === 'task.cancel'
     || commandId === 'task.archive' || commandId === 'task.unarchive') {
-    const [taskId, versionText, ...extra] = remainingArguments;
+    const [versionText, ...extra] = remainingArguments;
     const expectedVersion = Number(versionText);
-    if (firstArgument === undefined || taskId === undefined || versionText === undefined
+    if (firstArgument === undefined || versionText === undefined
       || extra.length !== 0 || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
     const command = commandId === 'task.pause' ? 'task.pause' as const
       : commandId === 'task.cancel' ? 'task.cancel' as const
@@ -2381,17 +2413,16 @@ try {
     const result = await call({
       command,
       commandId: crypto.randomUUID(),
-      projectId: firstArgument,
-      taskId,
+      taskId: firstArgument,
       expectedVersion,
     }) as { state: string; stop?: string };
     print(result);
     // A stop the Runtime could not prove is a real failure for scripts, not a success.
     if (result.stop === 'UNCERTAIN') process.exit(1);
   } else if (commandId === 'task.resume') {
-    const [taskId, versionText, ...extra] = remainingArguments;
+    const [versionText, ...extra] = remainingArguments;
     const expectedVersion = Number(versionText);
-    if (firstArgument === undefined || taskId === undefined || versionText === undefined
+    if (firstArgument === undefined || versionText === undefined
       || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
     // Resuming reopens the predecessor's provider conversation, so the adapter is part of the
     // request: a different Agent must be asked for explicitly instead of silently resuming with
@@ -2405,8 +2436,7 @@ try {
       print(await call({
         command: 'task.resume',
         commandId: crypto.randomUUID(),
-        projectId: firstArgument,
-        taskId,
+        taskId: firstArgument,
         expectedVersion,
         adapterId: split.flags.get('--adapter') ?? 'pi',
         allowUnknown: split.bare.has('--allow-unknown'),
@@ -2422,9 +2452,9 @@ try {
       throw error;
     }
   } else if (commandId === 'task.retry') {
-    const [taskId, versionText, ...flags] = remainingArguments;
+    const [versionText, ...flags] = remainingArguments;
     const expectedVersion = Number(versionText);
-    if (firstArgument === undefined || taskId === undefined || versionText === undefined
+    if (firstArgument === undefined || versionText === undefined
       || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
     const split = splitFlagTokens(flags, ['--adapter'], ['--json']);
     if (split.positionals.length !== 0) usage();
@@ -2435,8 +2465,7 @@ try {
     const result = await call({
       command: 'task.retry',
       commandId: crypto.randomUUID(),
-      projectId: firstArgument,
-      taskId,
+      taskId: firstArgument,
       expectedVersion,
       ...(adapterId === undefined ? {} : { adapterId }),
     }) as TaskRetryOutcomeView;
@@ -2454,21 +2483,23 @@ try {
       process.exit(1);
     }
   } else if (commandId === 'task.status') {
-    const [taskId, ...flags] = remainingArguments;
-    if (firstArgument === undefined || taskId === undefined) usage();
+    // The project is not an argument any more (ADR-0076); the one place that needs it below reads it
+    // from the Task detail the Runtime returned, not from argv.
+    if (firstArgument === undefined) usage();
     // The JSON view is this command's only output; `--json` is accepted so a script can say what it
     // expects, and anything else stays a usage error instead of being silently ignored.
-    for (const flag of flags) if (flag !== '--json') usage();
-    const view = await call({ command: 'task.status', projectId: firstArgument, taskId });
+    for (const flag of remainingArguments) if (flag !== '--json') usage();
+    const view = await call({ command: 'task.status', taskId: firstArgument });
     printCompletionNotes(view);
-    await printProseQuestionWaits({ projectId: firstArgument, view, call });
+    await printProseQuestionWaits({ view, call });
     print(view);
   } else if (commandId === 'task.transcript') {
-    const [taskId, ...flags] = remainingArguments;
-    if (firstArgument === undefined || taskId === undefined) usage();
-    const parsed = parseTranscriptFlags(flags);
+    // `task transcript <task-id> [--execution <id>] …`: the Task is the first argument and every
+    // remaining token is a flag (`parseTranscriptFlags` refuses anything else).
+    if (firstArgument === undefined) usage();
+    const parsed = parseTranscriptFlags(remainingArguments);
     if (parsed.reverse && parsed.json) usage();
-    await transcriptForTask(firstArgument, taskId, parsed);
+    await transcriptForTask(firstArgument, parsed);
   } else if (commandId === 'session.transcript' || commandId === 'session.transcript.part') {
     // `session transcript part <session-id> <entry-id> <part-index>` is a four-level path; the tree
     // already told us which of the two forms this is, so `part` can never be read as a session id.
@@ -2743,9 +2774,9 @@ try {
       unhandledNode(child);
     }
   } else if (commandId === 'task.run') {
-    const [taskId, versionText, ...flags] = remainingArguments;
+    const [versionText, ...flags] = remainingArguments;
     const expectedTaskVersion = Number(versionText);
-    if (firstArgument === undefined || taskId === undefined || versionText === undefined
+    if (firstArgument === undefined || versionText === undefined
       || !Number.isSafeInteger(expectedTaskVersion) || expectedTaskVersion < 0) usage();
     const split = splitFlagTokens(flags, ['--adapter', '--base-ref'], ['--allow-unknown', '--json']);
     if (split.positionals.length !== 0) usage();
@@ -2756,8 +2787,7 @@ try {
     const result = await call({
       command: 'task.run',
       commandId: crypto.randomUUID(),
-      projectId: firstArgument,
-      taskId,
+      taskId: firstArgument,
       expectedTaskVersion,
       adapterId: split.flags.get('--adapter') ?? 'pi',
       allowUnknown: split.bare.has('--allow-unknown'),
@@ -2769,7 +2799,7 @@ try {
     if (result.outcome === 'WAIT') {
       console.error(`[scheduler] ${result.wait?.kind ?? 'WAIT'} wait: `
         + `${result.wait?.code ?? result.code ?? 'unknown'} — ${result.detail}`);
-      printOccupierDiagnostics(firstArgument, result.assessment, result.assessment?.activeTaskIds ?? []);
+      printOccupierDiagnostics(result.assessment, result.assessment?.activeTaskIds ?? []);
       process.exit(3);
     }
     if (result.outcome === 'REFUSED') {
@@ -2777,16 +2807,17 @@ try {
       process.exit(1);
     }
   } else if (commandId === 'task.verify') {
-    const [taskId, ...rest] = remainingArguments;
-    if (firstArgument === undefined || taskId === undefined) usage();
+    // `task verify <task-id> [execution-id] [flags…]`: every token that is not a flag is the optional
+    // execution id, and the Task itself is the command's only positional.
+    if (firstArgument === undefined) usage();
     let background = false;
     let policySource: 'AUTO' | 'PROJECT_POLICY' | 'TARGETED_TEST_PLAN' = 'AUTO';
     const positionals: string[] = [];
-    for (let index = 0; index < rest.length; index += 1) {
-      const token = rest[index] as string;
+    for (let index = 0; index < remainingArguments.length; index += 1) {
+      const token = remainingArguments[index] as string;
       if (token === '--background') background = true;
       else if (token === '--policy') {
-        const value = rest[index + 1];
+        const value = remainingArguments[index + 1];
         if (value === 'targeted') policySource = 'TARGETED_TEST_PLAN';
         else if (value === 'project') policySource = 'PROJECT_POLICY';
         else if (value === 'auto') policySource = 'AUTO';
@@ -2805,8 +2836,7 @@ try {
     const report = await call({
       command: 'task.verify',
       commandId: crypto.randomUUID(),
-      projectId: firstArgument,
-      taskId,
+      taskId: firstArgument,
       background,
       policySource,
       ...(executionId === undefined ? {} : { executionId }),
@@ -2831,14 +2861,13 @@ try {
     if (child === 'task.tests.record') {
       const split = splitFlagTokens(remainingArguments,
         ['--commit', '--expected-plan-digest'], ['--json']);
-      const [projectId, taskId, ...extra] = split.positionals;
-      if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
+      const [taskId, ...extra] = split.positionals;
+      if (taskId === undefined || extra.length !== 0) usage();
       const commit = split.flags.get('--commit');
       const expectedPlanDigest = split.flags.get('--expected-plan-digest');
       const recorded = await call({
         command: 'task.tests.record',
         commandId: crypto.randomUUID(),
-        projectId,
         taskId,
         ...(commit === undefined ? {} : { commit }),
         ...(expectedPlanDigest === undefined ? {} : { expectedPlanDigest }),
@@ -2853,58 +2882,56 @@ try {
         console.error('已追加新的定向测试计划记录；旧记录保留为审计，本次范围变化不是静默生效。');
       }
     } else if (child === 'task.tests.show') {
-      const [projectId, taskId, ...flags] = remainingArguments;
-      if (projectId === undefined || taskId === undefined) usage();
+      const [taskId, ...flags] = remainingArguments;
+      if (taskId === undefined) usage();
       jsonOnlyFlag(flags);
-      const plan = await call({ command: 'task.tests.show', projectId, taskId });
+      const plan = await call({ command: 'task.tests.show', taskId });
       print(plan);
       if (plan === null) {
         console.error(`该 Task 没有已记录的定向测试计划；\`task verify\` 会用固定项目策略。`);
       }
     } else if (child === 'task.tests.history') {
       const split = splitFlagTokens(remainingArguments, ['--limit'], ['--json']);
-      const [projectId, taskId, ...extra] = split.positionals;
-      if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
+      const [taskId, ...extra] = split.positionals;
+      if (taskId === undefined || extra.length !== 0) usage();
       const limit = split.flags.get('--limit');
       print(await call({
         command: 'task.tests.history',
-        projectId,
         taskId,
         limit: limit === undefined ? 50 : Number(limit),
       }));
     } else unhandledNode(child);
   } else if (commandId === 'task.verification.list') {
-    // `task verification <subcommand> …` lands the subcommand in firstArgument.
-    const [projectId, taskId, ...extra] = remainingArguments;
-    if (firstArgument !== 'list' || projectId === undefined || taskId === undefined
+    // `task verification list <task-id>`.
+    const [taskId, ...extra] = remainingArguments;
+    if (firstArgument !== 'list' || taskId === undefined
       || extra.length !== 0) usage();
-    print(await call({ command: 'task.verification.list', projectId, taskId }));
+    print(await call({ command: 'task.verification.list', taskId }));
   } else if (commandId === 'task.operation') {
     // `task operation <subcommand> …` is a three-level command, so the subcommand lands in
-    // firstArgument and the project ID is the first remaining argument.
+    // firstArgument and the Task (or the Operation, which names its own Task) is next.
     const subcommand = firstArgument;
     const child = childIdOf('task.operation', subcommand);
     if (child === null) usage();
     if (child === 'task.operation.list') {
-      const [projectId, taskId, ...flags] = remainingArguments;
-      if (projectId === undefined || taskId === undefined) usage();
+      const [taskId, ...flags] = remainingArguments;
+      if (taskId === undefined) usage();
       const json = jsonOnlyFlag(flags);
-      const listed = await call({ command: 'task.operation.list', projectId, taskId });
+      const listed = await call({ command: 'task.operation.list', taskId });
       printOperations(listed as OperationView[], json);
     } else if (child === 'task.operation.get') {
-      const [projectId, operationId, ...flags] = remainingArguments;
-      if (projectId === undefined || operationId === undefined) usage();
+      const [operationId, ...flags] = remainingArguments;
+      if (operationId === undefined) usage();
       const json = jsonOnlyFlag(flags);
-      const read = await call({ command: 'task.operation.get', projectId, operationId });
+      const read = await call({ command: 'task.operation.get', operationId });
       if (json) print(read); else printOperation(read as OperationView);
     } else if (child === 'task.operation.cancel') {
-      const [projectId, taskId, operationId, ...flags] = remainingArguments;
-      if (projectId === undefined || taskId === undefined || operationId === undefined) usage();
+      const [taskId, operationId, ...flags] = remainingArguments;
+      if (taskId === undefined || operationId === undefined) usage();
       const json = jsonOnlyFlag(flags);
       const outcome = await call({
         command: 'task.operation.cancel',
         commandId: crypto.randomUUID(),
-        projectId,
         taskId,
         operationId,
       }) as { stop: string; state: string; kind: string; detail: string };
@@ -2944,15 +2971,14 @@ try {
         if (token.startsWith('--')) usage();
         positionals.push(token);
       }
-      const [projectId, taskId, versionText, prerequisiteTaskId, ...extra] = positionals;
+      const [taskId, versionText, prerequisiteTaskId, ...extra] = positionals;
       const expectedVersion = Number(versionText);
-      if (projectId === undefined || taskId === undefined || versionText === undefined
+      if (taskId === undefined || versionText === undefined
         || prerequisiteTaskId === undefined || extra.length !== 0
         || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
       const result = await call({
         command: child === 'task.depends.add' ? 'task.depends.add' as const : 'task.depends.remove' as const,
         commandId: crypto.randomUUID(),
-        projectId,
         taskId,
         prerequisiteTaskId,
         expectedVersion,
@@ -2960,17 +2986,30 @@ try {
       });
       print(result);
     } else if (child === 'task.depends.list') {
+      // One subject, given one way or the other (ADR-0076 D04). The flag walk is explicit so
+      // `--project` can never be mistaken for a Task id.
       const positionals: string[] = [];
+      let projectId: string | undefined;
       let json = false;
-      for (const token of remainingArguments) {
+      for (let index = 0; index < remainingArguments.length; index += 1) {
+        const token = remainingArguments[index] as string;
         if (token === '--json') { json = true; continue; }
+        if (token === '--project') {
+          const value = remainingArguments[index + 1];
+          if (value === undefined || value.startsWith('--')) usage();
+          projectId = value;
+          index += 1;
+          continue;
+        }
         if (token.startsWith('--')) usage();
         positionals.push(token);
       }
-      const [projectId, taskId, ...extra] = positionals;
-      if (projectId === undefined || extra.length !== 0) usage();
-      const view = await call({ command: 'task.depends.list', projectId,
-        ...(taskId === undefined ? {} : { taskId }) }) as TaskDependencyView;
+      const [taskId, ...extra] = positionals;
+      if (extra.length !== 0) usage();
+      if (taskId === undefined && projectId === undefined) usage();
+      const view = await call({ command: 'task.depends.list',
+        ...(taskId === undefined ? {} : { taskId }),
+        ...(projectId === undefined ? {} : { projectId }) }) as TaskDependencyView;
       if (json) {
         print(view);
       } else {
@@ -2998,38 +3037,35 @@ try {
     }
   } else if (commandId === 'task.result') {
     // `task result <subcommand> …` is a three-level command, so the subcommand lands in
-    // firstArgument and the project ID is the first remaining argument.
+    // firstArgument and the Task is the first remaining argument.
     const subcommand = firstArgument;
     const child = childIdOf('task.result', subcommand);
     if (child === null) usage();
     if (child === 'task.result.capture') {
-      const [projectId, taskId, executionId, ...extra] = remainingArguments;
-      if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
+      const [taskId, executionId, ...extra] = remainingArguments;
+      if (taskId === undefined || extra.length !== 0) usage();
       print(await call({
         command: 'task.result.capture',
         commandId: crypto.randomUUID(),
-        projectId,
         taskId,
         ...(executionId === undefined ? {} : { executionId }),
       }));
     } else if (child === 'task.result.prepare') {
-      const [projectId, taskId, executionId, ...extra] = remainingArguments;
-      if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
+      const [taskId, executionId, ...extra] = remainingArguments;
+      if (taskId === undefined || extra.length !== 0) usage();
       print(await call({
         command: 'task.result.prepare',
         commandId: crypto.randomUUID(),
-        projectId,
         taskId,
         ...(executionId === undefined ? {} : { executionId }),
       }));
     } else if (child === 'task.result.commit') {
-      const [projectId, taskId, authorizationId, ...extra] = remainingArguments;
-      if (projectId === undefined || taskId === undefined || authorizationId === undefined) usage();
+      const [taskId, authorizationId, ...extra] = remainingArguments;
+      if (taskId === undefined || authorizationId === undefined) usage();
       if (!extra.includes('--confirm') || extra.some((argument) => argument !== '--confirm')) usage();
       print(await call({
         command: 'task.result.commit',
         commandId: crypto.randomUUID(),
-        projectId,
         taskId,
         authorizationId,
         confirm: true,
@@ -3206,15 +3242,14 @@ try {
     const child = childIdOf('task.revision', subcommand);
     if (child === null) usage();
     if (child === 'task.revision.create') {
-      const [projectId, taskId, versionText, ...flagTokens] = remainingArguments;
+      const [taskId, versionText, ...flagTokens] = remainingArguments;
       const expectedVersion = Number(versionText);
-      if (projectId === undefined || taskId === undefined || versionText === undefined
+      if (taskId === undefined || versionText === undefined
         || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
       const input = parseRevisionFlags(flagTokens);
       print(await call({
         command: 'task.revision.create',
         commandId: crypto.randomUUID(),
-        projectId,
         taskId,
         expectedVersion,
         ...(input.specification === undefined ? {} : { specification: input.specification }),
@@ -3222,23 +3257,23 @@ try {
         reason: input.reason,
       }));
     } else if (child === 'task.revision.list') {
-      const [projectId, taskId, ...extra] = remainingArguments;
-      if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
-      print(await call({ command: 'task.revision.list', projectId, taskId }));
+      const [taskId, ...extra] = remainingArguments;
+      if (taskId === undefined || extra.length !== 0) usage();
+      print(await call({ command: 'task.revision.list', taskId }));
     } else if (child === 'task.revision.delivery') {
       const deliveryAction = remainingArguments[0];
       if (deliveryAction === 'list') {
-        const [projectId, taskId, ...extra] = remainingArguments.slice(1);
-        if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
-        print(await call({ command: 'task.revision.delivery.list', projectId, taskId }));
+        const [taskId, ...extra] = remainingArguments.slice(1);
+        if (taskId === undefined || extra.length !== 0) usage();
+        print(await call({ command: 'task.revision.delivery.list', taskId }));
       } else if (deliveryAction === 'get') {
-        const [projectId, deliveryId, ...extra] = remainingArguments.slice(1);
-        if (projectId === undefined || deliveryId === undefined || extra.length !== 0) usage();
-        print(await call({ command: 'task.revision.delivery.get', projectId, deliveryId }));
+        const [deliveryId, ...extra] = remainingArguments.slice(1);
+        if (deliveryId === undefined || extra.length !== 0) usage();
+        print(await call({ command: 'task.revision.delivery.get', deliveryId }));
       } else if (deliveryAction === 'resolve') {
-        const [projectId, taskId, deliveryId, versionText, ...tokens] = remainingArguments.slice(1);
+        const [taskId, deliveryId, versionText, ...tokens] = remainingArguments.slice(1);
         const expectedVersion = Number(versionText);
-        if (projectId === undefined || taskId === undefined || deliveryId === undefined
+        if (taskId === undefined || deliveryId === undefined
           || versionText === undefined || !Number.isSafeInteger(expectedVersion)
           || expectedVersion < 0) usage();
         let action: 'STOP_AND_RESTART' | 'RETRY' | undefined;
@@ -3256,7 +3291,6 @@ try {
         const resolved = await call({
           command: 'task.revision.delivery.resolve',
           commandId: crypto.randomUUID(),
-          projectId,
           taskId,
           deliveryId,
           action,
@@ -3277,15 +3311,14 @@ try {
       unhandledNode(child);
     }
   } else if (commandId === 'task.submit') {
-    const [taskId, versionText, ...extra] = remainingArguments;
+    const [versionText, ...extra] = remainingArguments;
     const expectedVersion = Number(versionText);
-    if (firstArgument === undefined || taskId === undefined || versionText === undefined
+    if (firstArgument === undefined || versionText === undefined
       || extra.length !== 0 || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) usage();
     print(await call({
       command: 'task.submit',
       commandId: crypto.randomUUID(),
-      projectId: firstArgument,
-      taskId,
+      taskId: firstArgument,
       expectedVersion,
     }));
   } else if (commandId === 'reclaim') {
@@ -3426,6 +3459,8 @@ try {
     const child = childIdOf('task.schedule', subcommand);
     if (child === null) usage();
     if (child === 'task.schedule.status' || child === 'task.schedule.plan' || child === 'task.schedule.run') {
+      // A scheduling pass is per project, not per Task: these three keep their project argument
+      // (ADR-0076 D05).
       const split = splitFlagTokens(remainingArguments, ['--adapter'], ['--json']);
       const [projectId, ...extra] = split.positionals;
       if (projectId === undefined || extra.length !== 0) usage();
@@ -3435,13 +3470,13 @@ try {
         const view = await call({ command: 'task.schedule.status', projectId, ...adapter }) as
           ScheduleOverviewView;
         print(view);
-        printOccupierDiagnosticsForCandidates(projectId, view.candidates);
+        printOccupierDiagnosticsForCandidates(view.candidates);
       } else if (child === 'task.schedule.plan') {
         // `plan` is the dry run of `status`, so it answers with the same overview shape (dryRun: true).
         const overview = await call({ command: 'task.schedule.plan', projectId, ...adapter }) as
           ScheduleOverviewView;
         print(overview);
-        printOccupierDiagnosticsForCandidates(projectId, overview.candidates);
+        printOccupierDiagnosticsForCandidates(overview.candidates);
       } else {
         const report = await call({
           command: 'task.schedule.run',
@@ -3457,23 +3492,22 @@ try {
             console.error(`[scheduler] ${candidate.disposition} ${candidate.taskId}`
               + `: ${candidate.detail}`);
           }
-          printOccupierDiagnosticsForCandidates(projectId, project.candidates);
+          printOccupierDiagnosticsForCandidates(project.candidates);
         }
       }
     } else if (child === 'task.schedule.explain') {
       const split = splitFlagTokens(remainingArguments, ['--adapter'], ['--json']);
-      const [projectId, taskId, ...extra] = split.positionals;
-      if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
+      const [taskId, ...extra] = split.positionals;
+      if (taskId === undefined || extra.length !== 0) usage();
       const adapterId = split.flags.get('--adapter');
       const view = await call({
         command: 'task.schedule.explain',
-        projectId,
         taskId,
         ...(adapterId === undefined ? {} : { adapterId }),
       }) as ScheduleExplanationView;
       print(view);
       console.error(`[scheduler] ${view.decision}: ${view.detail}`);
-      printOccupierDiagnostics(view.projectId, view.assessment, view.activeTaskIds);
+      printOccupierDiagnostics(view.assessment, view.activeTaskIds);
       // 0 = it is running or would start now, 3 = it is waiting (conflict or capacity — a wait is not
       // BLOCKED), 1 = it will not start for a reason that needs attention (unmet dependencies, or a
       // state that is not schedulable at all).
@@ -3481,12 +3515,11 @@ try {
       if (view.decision === 'BLOCKED' || view.decision === 'NOT_A_CANDIDATE') process.exit(1);
     } else if (child === 'task.schedule.clear-unknown') {
       const split = splitFlagTokens(remainingArguments, [], ['--json']);
-      const [projectId, taskId, ...extra] = split.positionals;
-      if (projectId === undefined || taskId === undefined || extra.length !== 0) usage();
+      const [taskId, ...extra] = split.positionals;
+      if (taskId === undefined || extra.length !== 0) usage();
       const released = await call({
         command: 'task.schedule.clearUnknown',
         commandId: crypto.randomUUID(),
-        projectId,
         taskId,
       }) as ScheduleUnknownReleaseView;
       print(released);

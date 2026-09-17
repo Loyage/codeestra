@@ -162,19 +162,19 @@ async function capturedTask(input: {
     projectId: input.projectId, specification: 'Write a file', startable: true,
   });
   const taskId = ready.taskId;
-  expect((await cli(['task', 'run', input.projectId, taskId, String(ready.expectedVersion)],
+  expect((await cli(['task', 'run', taskId, String(ready.expectedVersion)],
     input.environment)).exitCode).toBe(0);
   const deadline = Date.now() + 30_000;
   let exited = false;
   while (Date.now() < deadline) {
-    const status = JSON.parse((await cli(['task', 'status', input.projectId, taskId],
+    const status = JSON.parse((await cli(['task', 'status', taskId],
       input.environment)).stdout) as {
         readonly executions: readonly { readonly session: { readonly state: string } | null }[] };
     if (status.executions[0]?.session?.state === 'EXITED') { exited = true; break; }
     await Bun.sleep(100);
   }
   expect(exited).toBe(true);
-  const captured = await cli(['task', 'result', 'capture', input.projectId, taskId],
+  const captured = await cli(['task', 'result', 'capture', taskId],
     input.environment);
   expect(captured.exitCode).toBe(0);
   return { taskId,
@@ -208,18 +208,18 @@ describe('branch-targeted test plans (ADR-0038 / ADR-0039)', () => {
       const { taskId, resultCommit } = await capturedTask({ environment, projectId });
 
       // Nothing is recorded yet: the file may exist in the commit, but the Runtime has no plan.
-      const before = await cli(['task', 'tests', 'show', projectId, taskId], environment);
+      const before = await cli(['task', 'tests', 'show', taskId], environment);
       expect(before.exitCode).toBe(0);
       expect(JSON.parse(before.stdout)).toBeNull();
-      const refused = await cli(['task', 'verify', projectId, taskId, '--policy', 'targeted'],
+      const refused = await cli(['task', 'verify', taskId, '--policy', 'targeted'],
         environment);
       expect(refused.exitCode).toBe(1);
       expect(refused.stderr).toContain('TARGETED_TEST_PLAN_NOT_RECORDED');
       // The refusal wrote no verification run.
-      const empty = await cli(['task', 'verification', 'list', projectId, taskId], environment);
+      const empty = await cli(['task', 'verification', 'list', taskId], environment);
       expect(JSON.parse(empty.stdout)).toEqual([]);
 
-      const recorded = await cli(['task', 'tests', 'record', projectId, taskId], environment);
+      const recorded = await cli(['task', 'tests', 'record', taskId], environment);
       expect(recorded.exitCode).toBe(0);
       const plan = JSON.parse(recorded.stdout) as PlanView;
       expect(plan).toMatchObject({ created: true, testedCommit: resultCommit,
@@ -229,20 +229,20 @@ describe('branch-targeted test plans (ADR-0038 / ADR-0039)', () => {
       expect(plan.planLabel).toBe(`targeted-test-plan-v1#${plan.planDigest.slice(0, 12)}`);
 
       // The identical plan replays instead of appending a second record.
-      const replayed = await cli(['task', 'tests', 'record', projectId, taskId], environment);
+      const replayed = await cli(['task', 'tests', 'record', taskId], environment);
       expect(replayed.exitCode).toBe(0);
       expect(JSON.parse(replayed.stdout)).toMatchObject({ created: false, planId: plan.planId });
-      const history = await cli(['task', 'tests', 'history', projectId, taskId], environment);
+      const history = await cli(['task', 'tests', 'history', taskId], environment);
       expect(JSON.parse(history.stdout)).toHaveLength(1);
 
       // A scope change on top of a record the caller never saw is refused (append-only + CAS).
-      const stale = await cli(['task', 'tests', 'record', projectId, taskId,
+      const stale = await cli(['task', 'tests', 'record', taskId,
         '--expected-plan-digest', 'f'.repeat(64)], environment);
       expect(stale.exitCode).toBe(1);
       expect(stale.stderr).toContain('TARGETED_TEST_PLAN_DIGEST_MISMATCH');
 
       // AUTO uses the recorded plan; the project policy would have failed.
-      const verified = await cli(['task', 'verify', projectId, taskId], environment);
+      const verified = await cli(['task', 'verify', taskId], environment);
       expect(verified.exitCode).toBe(0);
       const report = JSON.parse(verified.stdout) as VerificationRunView & {
         readonly state: string; readonly policySource: string };
@@ -252,7 +252,7 @@ describe('branch-targeted test plans (ADR-0038 / ADR-0039)', () => {
 
       // The same Task judged by the fixed project policy really does fail, which is what makes the
       // PASSED targeted run meaningful rather than a label.
-      const policyRun = await cli(['task', 'verify', projectId, taskId, '--policy', 'project'],
+      const policyRun = await cli(['task', 'verify', taskId, '--policy', 'project'],
         environment);
       expect(policyRun.exitCode).toBe(1);
       const policyReport = JSON.parse(policyRun.stdout) as VerificationRunView;
@@ -260,7 +260,7 @@ describe('branch-targeted test plans (ADR-0038 / ADR-0039)', () => {
         planId: null });
 
       // Both runs are readable as recorded facts, with their source spelled out.
-      const runs = JSON.parse((await cli(['task', 'verification', 'list', projectId, taskId],
+      const runs = JSON.parse((await cli(['task', 'verification', 'list', taskId],
         environment)).stdout) as readonly VerificationRunView[];
       expect(runs.map((run) => [run.policySource, run.state]))
         .toEqual([['PROJECT_POLICY', 'FAILED'], ['TARGETED_TEST_PLAN', 'STALE']]);
@@ -277,20 +277,20 @@ describe('branch-targeted test plans (ADR-0038 / ADR-0039)', () => {
       const mainTip = await git(repository, ['rev-parse', 'refs/heads/main']);
       // The commit before the Task branch carries no plan file at all: that is reported as an
       // absent plan, never as an empty one that would run nothing and pass.
-      const absent = await cli(['task', 'tests', 'record', projectId, taskId,
+      const absent = await cli(['task', 'tests', 'record', taskId,
         '--commit', mainTip], environment);
       expect(absent.exitCode).toBe(1);
       expect(absent.stderr).toContain('TARGETED_TEST_PLAN_ABSENT');
       // An abbreviated commit is refused: the plan binds one exact commit.
-      const abbreviated = await cli(['task', 'tests', 'record', projectId, taskId,
+      const abbreviated = await cli(['task', 'tests', 'record', taskId,
         '--commit', mainTip.slice(0, 8)], environment);
       expect(abbreviated.exitCode).toBe(1);
       expect(abbreviated.stderr).toContain('INVALID_COMMIT_ID');
 
-      const summary = await cli(['task', 'tests', 'show', projectId, taskId], environment);
+      const summary = await cli(['task', 'tests', 'show', taskId], environment);
       expect(JSON.parse(summary.stdout)).toBeNull();
       // Both refusals left no record behind and did not touch the repository.
-      const history = await cli(['task', 'tests', 'history', projectId, taskId], environment);
+      const history = await cli(['task', 'tests', 'history', taskId], environment);
       expect(JSON.parse(history.stdout)).toEqual([]);
       expect(await git(repository, ['status', '--porcelain'])).toBe('');
     } finally {

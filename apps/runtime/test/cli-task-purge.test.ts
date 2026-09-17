@@ -96,7 +96,7 @@ async function seededExecutedTask(
   fixture: PurgeFixture,
   specification = 'Produce one artifact',
 ): Promise<SeededTask> {
-  const created = JSON.parse((await cli(['task', 'create', fixture.projectId, specification,
+  const created = JSON.parse((await cli(['task', 'create', '--project', fixture.projectId, specification,
     '--title', 'fixture task', '--name', 'fixture-task'],
     fixture.environment)).stdout) as { readonly id: string };
   await cli(['stop'], fixture.environment);
@@ -177,7 +177,7 @@ describe('codeestra task purge command face', () => {
         { kind: 'DEVELOPMENT', parentServiceId: task.taskId, controlVersion: task.taskVersion },
       ]);
 
-      const purged = await cli(['task', 'purge', fixture.projectId, task.taskId,
+      const purged = await cli(['task', 'purge', task.taskId,
         String(task.taskVersion), '--yes', '--reason', 'no longer wanted'], fixture.environment);
       expect(purged.exitCode).toBe(0);
       const view = JSON.parse(purged.stdout) as PurgeView;
@@ -200,10 +200,10 @@ describe('codeestra task purge command face', () => {
       // from every read face rather than merely hidden.
       expect(existsSync(task.workspacePath)).toBe(false);
       expect(await refExists(fixture.repo, task.branchRef)).toBe(false);
-      const listed = JSON.parse((await cli(['task', 'list', fixture.projectId, '--all'],
+      const listed = JSON.parse((await cli(['task', 'list', '--project', fixture.projectId, '--all'],
         fixture.environment)).stdout) as readonly { id: string }[];
       expect(listed.map((entry) => entry.id)).not.toContain(task.taskId);
-      const status = await cli(['task', 'status', fixture.projectId, task.taskId],
+      const status = await cli(['task', 'status', task.taskId],
         fixture.environment);
       expect(status.exitCode).toBe(1);
       expect(status.stderr).toContain('NOT_FOUND');
@@ -251,14 +251,14 @@ describe('codeestra task purge command face', () => {
     const fixture = await openedProject();
     try {
       const task = await seededExecutedTask(fixture);
-      const refused = await cli(['task', 'purge', fixture.projectId, task.taskId,
+      const refused = await cli(['task', 'purge', task.taskId,
         String(task.taskVersion)], fixture.environment);
       expect(refused.exitCode).toBe(2);
       expect(refused.stderr).toContain('--yes');
       expect(existsSync(task.workspacePath)).toBe(true);
       expect(await refExists(fixture.repo, task.branchRef)).toBe(true);
 
-      const status = JSON.parse((await cli(['task', 'status', fixture.projectId, task.taskId],
+      const status = JSON.parse((await cli(['task', 'status', task.taskId],
         fixture.environment)).stdout) as { readonly task: { readonly state: string } };
       expect(status.task.state).toBe('EXECUTED');
     } finally {

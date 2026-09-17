@@ -273,16 +273,16 @@ async function startTask(options: { readonly permissionMode?: 'FULL' | 'STRICT' 
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { id: string }[];
   const projectId = projects[0]?.id as string;
-  const created = JSON.parse((await cli(['task', 'create', projectId,
+  const created = JSON.parse((await cli(['task', 'create', '--project', projectId,
     'Attach one native terminal', '--title', 'Attach one native terminal',
     '--name', 'attach-native-terminal'], environment)).stdout) as { readonly id: string };
   // ADR-0059: submitting an undeclared Task starts it in the same command (the automatic pass judges
   // it SAFE), so the Session this file drives exists without a second `task run`.
-  expect((await cli(['task', 'submit', projectId, created.id, '0'], environment)).exitCode).toBe(0);
+  expect((await cli(['task', 'submit', created.id, '0'], environment)).exitCode).toBe(0);
   // The Session is read from the same command face a client has.
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
-    const status = await cli(['task', 'status', projectId, created.id], environment);
+    const status = await cli(['task', 'status', created.id], environment);
     const parsed = JSON.parse(status.stdout) as { readonly executions: readonly {
       readonly session: { readonly sessionId: string } | null }[] };
     const sessionId = parsed.executions[0]?.session?.sessionId;

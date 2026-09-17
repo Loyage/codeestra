@@ -178,7 +178,7 @@ export async function createFixtureTaskForExplicitStart(input: {
 
   if (input.startable === true) {
     const archived = await runCli(
-      ['task', 'archive', input.projectId, blockerId, '0'],
+      ['task', 'archive', blockerId, '0'],
       input.environment,
       { entry: cliEntry },
     );

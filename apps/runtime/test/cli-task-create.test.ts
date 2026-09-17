@@ -81,7 +81,7 @@ async function trustedProject(): Promise<{ environment: Record<string, string>; 
 describe('codeestra task create', () => {
   test('stores the two required titles and the detail on the first revision (ADR-0065)', async () => {
     const { environment, projectId } = await trustedProject();
-    const created = await cli(['task', 'create', projectId, 'Fix', 'the', 'parser',
+    const created = await cli(['task', 'create', '--project', projectId, 'Fix', 'the', 'parser',
       '--title', '修复 parser 的 CRLF 输入', '--name', 'fix-parser-crlf'],
     environment);
     expect(created.exitCode).toBe(0);
@@ -92,7 +92,7 @@ describe('codeestra task create', () => {
     expect(view.currentRevision.specification).toBe('Fix the parser');
 
     // The three fields are stored facts, not just an echo of the command.
-    const listed = JSON.parse((await cli(['task', 'list', projectId], environment)).stdout) as
+    const listed = JSON.parse((await cli(['task', 'list', '--project', projectId], environment)).stdout) as
       readonly TaskCreateView[];
     expect(listed[0]).toMatchObject({
       displayTitle: '修复 parser 的 CRLF 输入',
@@ -103,34 +103,34 @@ describe('codeestra task create', () => {
 
   test('requires both titles and refuses the removed flags without creating anything', async () => {
     const { environment, projectId } = await trustedProject();
-    const titleOnly = await cli(['task', 'create', projectId, 'Detail', '--title', 'A title'],
+    const titleOnly = await cli(['task', 'create', '--project', projectId, 'Detail', '--title', 'A title'],
       environment);
     expect(titleOnly.exitCode).toBe(2);
-    const nameOnly = await cli(['task', 'create', projectId, 'Detail', '--name', 'a-name'],
+    const nameOnly = await cli(['task', 'create', '--project', projectId, 'Detail', '--name', 'a-name'],
       environment);
     expect(nameOnly.exitCode).toBe(2);
-    const noDetail = await cli(['task', 'create', projectId, '--title', 'A title',
+    const noDetail = await cli(['task', 'create', '--project', projectId, '--title', 'A title',
       '--name', 'a-name'], environment);
     expect(noDetail.exitCode).toBe(2);
     // ADR-0065 D04: `--constraint` and `--kind` are gone, so they are unknown flags now.
     for (const removed of [['--constraint', 'x'], ['--kind', 'DEVELOPMENT']]) {
-      const refused = await cli(['task', 'create', projectId, 'Detail', '--title', 'A title',
+      const refused = await cli(['task', 'create', '--project', projectId, 'Detail', '--title', 'A title',
         '--name', 'a-name', ...removed], environment);
       expect(refused.exitCode).toBe(2);
     }
-    expect(JSON.parse((await cli(['task', 'list', projectId], environment)).stdout)).toEqual([]);
+    expect(JSON.parse((await cli(['task', 'list', '--project', projectId], environment)).stdout)).toEqual([]);
   });
 
   test('refuses a naming title that is not a lowercase slug, and an unknown flag', async () => {
     const { environment, projectId } = await trustedProject();
     for (const namingTitle of ['Has Spaces', 'Upper', 'trailing-', 'double--dash', '1-leading']) {
-      const refused = await cli(['task', 'create', projectId, 'Detail', '--title', 'A title',
+      const refused = await cli(['task', 'create', '--project', projectId, 'Detail', '--title', 'A title',
         '--name', namingTitle], environment);
       expect(refused.exitCode).toBe(2);
     }
-    const unknown = await cli(['task', 'create', projectId, 'Spec', '--title', 'A title',
+    const unknown = await cli(['task', 'create', '--project', projectId, 'Spec', '--title', 'A title',
       '--name', 'a-name', '--nope'], environment);
     expect(unknown.exitCode).toBe(2);
-    expect(JSON.parse((await cli(['task', 'list', projectId], environment)).stdout)).toEqual([]);
+    expect(JSON.parse((await cli(['task', 'list', '--project', projectId], environment)).stdout)).toEqual([]);
   });
 });

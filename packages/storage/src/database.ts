@@ -114,6 +114,13 @@ export class StorageError extends Error {
       // Prose-question waits carry their own stable codes (FOUNDATION-069), so a refusal names
       // exactly which part of the wait was wrong instead of a generic state error.
       | ProseQuestionResolutionCode | 'PROSE_QUESTION_RESOLUTION_REQUIRED'
+      // Task-scoped commands resolve the owning project from the Task itself (ADR-0076 D01). A
+      // caller that states a *different* project is refused with this code instead of having one of
+      // the two silently win.
+      | 'TASK_PROJECT_MISMATCH'
+      // `task.depends.list` is bound to one project's baseline ref, so a read with neither a Task
+      // nor a project has no subject to answer about (ADR-0076 D04).
+      | 'TASK_SCOPE_REQUIRED'
       // The `intents.kind` CHECK was narrowed in schema v28 (ADR-0046), so a removed kind is a
       // boundary refusal with its own code rather than a raw SQLite constraint error.
       | 'UNSUPPORTED_INTENT_KIND'
@@ -2134,13 +2141,97 @@ export class Phase1Database {
   }
 
   listTasks(projectId: string, options?: { readonly includeArchived?: boolean }): readonly TaskSummary[] {
-    const project = this.sqlite.query<{ id: string }, [string]>(`
-      SELECT p.id FROM projects p JOIN project_trusts t
-        ON t.project_id=p.id AND t.status='ACTIVE' WHERE p.id=?1
-    `).get(projectId);
-    if (project === null) throw new StorageError('NOT_FOUND', 'Trusted project was not found');
+    return this.listTasksWhere(`AND t.project_id=?1`, [projectId], options,
+      { requireTrustedProject: projectId });
+  }
+
+  /**
+   * Every Task of every trusted project, in the same projection `listTasks` returns (ADR-0076 D03).
+   * A listing is not an operation on one Task, so no project has to be named; each row carries the
+   * `projectId` it belongs to. Ordering is by project, then by the project-local display number, so
+   * the same read twice returns the same list.
+   */
+  listAllTasks(options?: { readonly includeArchived?: boolean }): readonly TaskSummary[] {
+    return this.listTasksWhere('', [], options, { requireTrustedProject: null });
+  }
+
+  /**
+   * The project one Task belongs to, for a caller that knows only the Task (ADR-0076 D01). Task ids
+   * are globally unique (`tasks.id` is the primary key), so the project is a column of the Task, not
+   * part of how it is addressed. An untrusted project reads exactly like a missing Task: the caller
+   * gets no way to address rows of a project this Runtime does not manage.
+   */
+  resolveTaskProject(taskId: string, declaredProjectId?: string): string {
+    const row = this.sqlite.query<{ project_id: string }, [string]>(`
+      SELECT t.project_id FROM tasks t JOIN project_trusts trust
+        ON trust.project_id=t.project_id AND trust.status='ACTIVE'
+      WHERE t.id=?1
+    `).get(taskId);
+    if (row === null) throw new StorageError('NOT_FOUND', 'Task was not found');
+    return this.assertDeclaredProject('Task', row.project_id, declaredProjectId);
+  }
+
+  /**
+   * The project one long-command Operation belongs to. `task operation get` addresses an Operation by
+   * its own id, and an Operation row already records its project, so the client does not repeat it.
+   */
+  resolveOperationProject(operationId: string, declaredProjectId?: string): string {
+    const row = this.sqlite.query<{ project_id: string }, [string]>(`
+      SELECT operation.project_id FROM operations operation
+      JOIN project_trusts trust ON trust.project_id=operation.project_id AND trust.status='ACTIVE'
+      WHERE operation.id=?1
+    `).get(operationId);
+    if (row === null) throw new StorageError('NOT_FOUND', 'Operation was not found');
+    return this.assertDeclaredProject('Operation', row.project_id, declaredProjectId);
+  }
+
+  /** The project one Task revision delivery belongs to (same rule as the two lookups above). */
+  resolveRevisionDeliveryProject(deliveryId: string, declaredProjectId?: string): string {
+    const row = this.sqlite.query<{ project_id: string }, [string]>(`
+      SELECT delivery.project_id FROM task_revision_deliveries delivery
+      JOIN project_trusts trust ON trust.project_id=delivery.project_id AND trust.status='ACTIVE'
+      WHERE delivery.id=?1
+    `).get(deliveryId);
+    if (row === null) throw new StorageError('NOT_FOUND', 'Revision delivery was not found');
+    return this.assertDeclaredProject('Revision delivery', row.project_id, declaredProjectId);
+  }
+
+  /**
+   * A caller that names a project as well as a Task is stating a fact about the Task. Two different
+   * owners is a refusal with its own code, never a silent preference: which of the two the Runtime
+   * ignored would otherwise be invisible (ADR-0076 D01).
+   */
+  private assertDeclaredProject(
+    subject: string,
+    projectId: string,
+    declaredProjectId: string | undefined,
+  ): string {
+    if (declaredProjectId !== undefined && declaredProjectId !== projectId) {
+      throw new StorageError('TASK_PROJECT_MISMATCH',
+        `The ${subject} belongs to project ${projectId}, not to the declared ${declaredProjectId}`);
+    }
+    return projectId;
+  }
+
+  /**
+   * The shared read behind `listTasks`/`listAllTasks`: one projection, one archive rule, and the
+   * trust check that keeps an untrusted project's Tasks unreadable.
+   */
+  private listTasksWhere(
+    filter: string,
+    parameters: readonly string[],
+    options: { readonly includeArchived?: boolean } | undefined,
+    scope: { readonly requireTrustedProject: string | null },
+  ): readonly TaskSummary[] {
+    if (scope.requireTrustedProject !== null) {
+      const project = this.sqlite.query<{ id: string }, [string]>(`
+        SELECT p.id FROM projects p JOIN project_trusts t
+          ON t.project_id=p.id AND t.status='ACTIVE' WHERE p.id=?1
+      `).get(scope.requireTrustedProject);
+      if (project === null) throw new StorageError('NOT_FOUND', 'Trusted project was not found');
+    }
     const archivedClause = options?.includeArchived === true ? '' : 'AND t.archived_at IS NULL';
-    return this.sqlite.query<TaskSummaryRow, [string]>(`
+    return this.sqlite.query<TaskSummaryRow, string[]>(`
       SELECT t.id,t.project_id,t.display_number,t.display_title,t.naming_title,t.state,t.priority,
         t.version,r.id AS revision_id,r.number AS revision_number,r.specification,
         r.features_json,
@@ -2150,11 +2241,13 @@ export class Phase1Database {
         latest_session.state AS latest_session_state,
         latest_session.exit_json AS latest_session_exit_json
       FROM tasks t JOIN task_revisions r ON r.task_id=t.id AND r.id=t.current_revision_id
+      JOIN project_trusts trust ON trust.project_id=t.project_id AND trust.status='ACTIVE'
       LEFT JOIN executions latest ON latest.id=(
         SELECT e.id FROM executions e WHERE e.task_id=t.id ORDER BY e.attempt_number DESC LIMIT 1)
       LEFT JOIN agent_sessions latest_session ON latest_session.execution_id=latest.id
-      WHERE t.project_id=?1 ${archivedClause} ORDER BY t.display_number
-    `).all(projectId).map((row) => this.mapTaskSummary(row));
+      WHERE 1=1 ${filter} ${archivedClause}
+      ORDER BY t.project_id,t.display_number
+    `).all(...parameters).map((row) => this.mapTaskSummary(row));
   }
 
   /** One Task by ID regardless of archive state; `task status` must still read an archived Task. */

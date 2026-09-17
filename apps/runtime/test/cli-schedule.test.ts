@@ -194,7 +194,7 @@ async function createTask(
   /** Extra flags after the specification, e.g. `--feature <module-id>` (ADR-0059). */
   flags: readonly string[] = [],
 ): Promise<string> {
-  const created = JSON.parse((await cli(['task', 'create', projectId, specification, ...flags,
+  const created = JSON.parse((await cli(['task', 'create', '--project', projectId, specification, ...flags,
     '--title', 'fixture task', '--name', 'fixture-task'],
     environment)).stdout) as { readonly id: string };
   return created.id;
@@ -202,10 +202,9 @@ async function createTask(
 
 async function taskRef(
   environment: Record<string, string>,
-  projectId: string,
   taskId: string,
 ): Promise<TaskRef> {
-  const status = JSON.parse((await cli(['task', 'status', projectId, taskId],
+  const status = JSON.parse((await cli(['task', 'status', taskId],
     environment)).stdout) as {
     readonly task: { readonly version: number };
     readonly executions: readonly { readonly state: string;
@@ -217,7 +216,6 @@ async function taskRef(
 /** Submits a Task and returns the scheduling answer the submit reported. */
 async function submit(
   environment: Record<string, string>,
-  projectId: string,
   taskId: string,
   version = 0,
 ): Promise<{
@@ -229,17 +227,16 @@ async function submit(
     readonly blocked: readonly string[];
   };
 }> {
-  const submitted = await cli(['task', 'submit', projectId, taskId, String(version)], environment);
+  const submitted = await cli(['task', 'submit', taskId, String(version)], environment);
   expect(submitted.exitCode).toBe(0);
   return JSON.parse(submitted.stdout) as never;
 }
 
 async function executions(
   environment: Record<string, string>,
-  projectId: string,
   taskId: string,
 ): Promise<readonly { readonly state: string; readonly session: { readonly state: string } | null }[]> {
-  const status = JSON.parse((await cli(['task', 'status', projectId, taskId],
+  const status = JSON.parse((await cli(['task', 'status', taskId],
     environment)).stdout) as {
     readonly executions: readonly { readonly state: string;
       readonly session: { readonly state: string } | null }[];
@@ -270,11 +267,11 @@ describe('codeestra task schedule', () => {
     const third = await createTask(value.environment, value.projectId, 'Third disjoint area');
 
     // Submitting enters scheduling in the same command: nothing else has to be pushed.
-    const firstSubmit = await submit(value.environment, value.projectId, first);
+    const firstSubmit = await submit(value.environment, first);
     expect(firstSubmit.schedule.started.map((entry) => entry.taskId)).toEqual([first]);
-    const secondSubmit = await submit(value.environment, value.projectId, second);
+    const secondSubmit = await submit(value.environment, second);
     expect(secondSubmit.schedule.started.map((entry) => entry.taskId)).toEqual([second]);
-    const thirdSubmit = await submit(value.environment, value.projectId, third);
+    const thirdSubmit = await submit(value.environment, third);
     expect(thirdSubmit.schedule.started).toEqual([]);
     expect(thirdSubmit.schedule.waiting).toEqual([
       { taskId: third, kind: 'CAPACITY', code: 'CAPACITY_GLOBAL_LIMIT_REACHED' },
@@ -282,10 +279,10 @@ describe('codeestra task schedule', () => {
 
     // Both really are RUNNING at the same time, each with its own Execution and worktree.
     for (const taskId of [first, second]) {
-      const status = JSON.parse((await cli(['task', 'status', value.projectId, taskId],
+      const status = JSON.parse((await cli(['task', 'status', taskId],
         value.environment)).stdout) as { readonly task: { readonly state: string } };
       expect(status.task.state).toBe('RUNNING');
-      const list = await executions(value.environment, value.projectId, taskId);
+      const list = await executions(value.environment, taskId);
       expect(list).toHaveLength(1);
       expect(list[0]?.state).toBe('RUNNING');
     }
@@ -332,8 +329,8 @@ describe('codeestra task schedule', () => {
       .toEqual([first, second].sort());
 
     // The third Task's explicit request is a *wait*, not a `BLOCKED` and not a failure.
-    const thirdRef = await taskRef(value.environment, value.projectId, third);
-    const ran = await cli(['task', 'run', value.projectId, third, String(thirdRef.version), '--json'],
+    const thirdRef = await taskRef(value.environment, third);
+    const ran = await cli(['task', 'run', third, String(thirdRef.version), '--json'],
       value.environment);
     expect(ran.exitCode).toBe(3);
     const outcome = JSON.parse(ran.stdout) as {
@@ -346,7 +343,7 @@ describe('codeestra task schedule', () => {
     expect(outcome.assessment?.verdict).toBe('SAFE_TO_PARALLELIZE');
     expect(ran.stderr).toContain('CAPACITY_GLOBAL_LIMIT_REACHED');
     expect(ran.stderr).not.toContain('BLOCKED');
-    expect((await executions(value.environment, value.projectId, third))).toHaveLength(0);
+    expect((await executions(value.environment, third))).toHaveLength(0);
   }, 120_000);
 
   test('a shared declared feature keeps a paused Task paused with the feature reason code', async () => {
@@ -355,14 +352,14 @@ describe('codeestra task schedule', () => {
     // what stops a resume is a shared declaration, which is added below (ADR-0059).
     const first = await createTask(value.environment, value.projectId, 'write:core/shared.ts');
     const second = await createTask(value.environment, value.projectId, 'write:core/shared.ts');
-    expect((await submit(value.environment, value.projectId, first)).schedule.started).toHaveLength(1);
-    expect((await submit(value.environment, value.projectId, second)).schedule.started).toHaveLength(1);
+    expect((await submit(value.environment, first)).schedule.started).toHaveLength(1);
+    expect((await submit(value.environment, second)).schedule.started).toHaveLength(1);
     for (const taskId of [first, second]) {
       await waitFor(() => Bun.file(join(recordedWorkspacePath(value.home, taskId),
         'core', 'shared.ts')).size > 0);
     }
-    const secondRef = await taskRef(value.environment, value.projectId, second);
-    const paused = await cli(['task', 'pause', value.projectId, second, String(secondRef.version)],
+    const secondRef = await taskRef(value.environment, second);
+    const paused = await cli(['task', 'pause', second, String(secondRef.version)],
       value.environment);
     expect(paused.exitCode).toBe(0);
     expect(JSON.parse(paused.stdout)).toMatchObject({ state: 'PAUSED', stop: 'RELEASED' });
@@ -370,15 +367,15 @@ describe('codeestra task schedule', () => {
     // Declaring the same feature on both revisions is what makes the pair conflict — and a revision
     // that only changes the declaration is a legitimate revision.
     for (const taskId of [first, second]) {
-      const ref = await taskRef(value.environment, value.projectId, taskId);
-      const declared = await cli(['task', 'revision', 'create', value.projectId, taskId,
+      const ref = await taskRef(value.environment, taskId);
+      const declared = await cli(['task', 'revision', 'create', taskId,
         String(ref.version), '--feature', 'core-module', '--reason', 'declare the feature', '--json'],
         value.environment);
       expect(declared.exitCode).toBe(0);
     }
 
     // `explain` answers why it is not running, naming the shared declaration and the Task it hits.
-    const explained = await cli(['task', 'schedule', 'explain', value.projectId, second, '--json'],
+    const explained = await cli(['task', 'schedule', 'explain', second, '--json'],
       value.environment);
     expect(explained.exitCode).toBe(3);
     const view = JSON.parse(explained.stdout) as {
@@ -397,19 +394,19 @@ describe('codeestra task schedule', () => {
 
     // Resuming is a start path, so it is refused and the Task stays paused. A *proven* overlap is a
     // refusal (exit 1) rather than a wait (exit 3), exactly as `task run` reports it.
-    const resumed = await cli(['task', 'resume', value.projectId, second, String(secondRef.version)],
+    const resumed = await cli(['task', 'resume', second, String(secondRef.version)],
       value.environment);
     expect(resumed.exitCode).toBe(1);
     expect(resumed.stderr).toContain('CONFLICTING');
-    expect(JSON.parse((await cli(['task', 'status', value.projectId, second],
+    expect(JSON.parse((await cli(['task', 'status', second],
       value.environment)).stdout)).toMatchObject({ task: { state: 'PAUSED' } });
     // A shared declaration is never released: `--allow-unknown` widens the gate for an *unproven*
     // verdict only, and `clear-unknown` says so instead of pretending it worked.
-    const releasedResume = await cli(['task', 'resume', value.projectId, second,
+    const releasedResume = await cli(['task', 'resume', second,
       String(secondRef.version), '--allow-unknown'], value.environment);
     expect(releasedResume.exitCode).toBe(1);
     expect(releasedResume.stderr).toContain('CONFLICTING');
-    const cleared = await cli(['task', 'schedule', 'clear-unknown', value.projectId, second, '--json'],
+    const cleared = await cli(['task', 'schedule', 'clear-unknown', second, '--json'],
       value.environment);
     expect(cleared.exitCode).toBe(1);
     const clearedView = JSON.parse(cleared.stdout) as {
@@ -418,7 +415,7 @@ describe('codeestra task schedule', () => {
     expect(clearedView.recorded).toBe(false);
     expect(clearedView.state).toBe('CONFLICTING');
     expect(clearedView.reasonCodes).toContain('SAME_UNFINISHED_FEATURE');
-    expect(JSON.parse((await cli(['task', 'status', value.projectId, second],
+    expect(JSON.parse((await cli(['task', 'status', second],
       value.environment)).stdout)).toMatchObject({ task: { state: 'PAUSED' } });
   }, 120_000);
 
@@ -428,11 +425,11 @@ describe('codeestra task schedule', () => {
     // declaring the same feature never start together, whichever one the user writes first.
     const first = await createTask(value.environment, value.projectId, 'Improve the core module',
       ['--feature', 'core-module']);
-    const firstSubmit = await submit(value.environment, value.projectId, first);
+    const firstSubmit = await submit(value.environment, first);
     expect(firstSubmit.schedule.started.map((entry) => entry.taskId)).toEqual([first]);
     const second = await createTask(value.environment, value.projectId, 'Improve it differently',
       ['--feature', 'core-module']);
-    const secondSubmit = await submit(value.environment, value.projectId, second);
+    const secondSubmit = await submit(value.environment, second);
     expect(secondSubmit.schedule.started).toEqual([]);
     expect(secondSubmit.schedule.waiting).toEqual([
       { taskId: second, kind: 'CONFLICT', code: 'SAME_UNFINISHED_FEATURE' },
@@ -440,31 +437,31 @@ describe('codeestra task schedule', () => {
 
     // The explicit request waits with the same reason, and the release does not widen it: this is a
     // *proven* declaration overlap, not an unprovable verdict.
-    const secondRef = await taskRef(value.environment, value.projectId, second);
-    const waited = await cli(['task', 'run', value.projectId, second, String(secondRef.version),
+    const secondRef = await taskRef(value.environment, second);
+    const waited = await cli(['task', 'run', second, String(secondRef.version),
       '--json'], value.environment);
     expect(waited.exitCode).toBe(3);
     expect(JSON.parse(waited.stdout)).toMatchObject({
       outcome: 'WAIT',
       wait: { kind: 'CONFLICT', code: 'SAME_UNFINISHED_FEATURE', blocking: [first] },
     });
-    const released = await cli(['task', 'run', value.projectId, second, String(secondRef.version),
+    const released = await cli(['task', 'run', second, String(secondRef.version),
       '--allow-unknown', '--json'], value.environment);
     expect(released.exitCode).toBe(3);
     expect(JSON.parse(released.stdout)).toMatchObject({
       outcome: 'WAIT', clearedUnknownBy: null,
     });
-    const cleared = await cli(['task', 'schedule', 'clear-unknown', value.projectId, second, '--json'],
+    const cleared = await cli(['task', 'schedule', 'clear-unknown', second, '--json'],
       value.environment);
     expect(cleared.exitCode).toBe(1);
     expect(JSON.parse(cleared.stdout)).toMatchObject({
       recorded: false, state: 'CONFLICTING',
     });
-    expect((await executions(value.environment, value.projectId, second))).toHaveLength(0);
+    expect((await executions(value.environment, second))).toHaveLength(0);
     // The peer is still unfinished, so the wait is the correct answer and stays it: the Task has no
     // Execution and no release. (That a *finished* peer stops blocking is covered by the
     // schedule-service test, where the peer's state can be moved deterministically.)
-    expect(JSON.parse((await cli(['task', 'status', value.projectId, second],
+    expect(JSON.parse((await cli(['task', 'status', second],
       value.environment)).stdout)).toMatchObject({ task: { state: 'READY' } });
   }, 120_000);
 
@@ -473,14 +470,14 @@ describe('codeestra task schedule', () => {
     const task = await createTask(value.environment, value.projectId, 'Exactly once');
     // The Task starts on submit (a missing mapping is no longer a reason to wait), so every later
     // pass and every concurrent request must decide the same thing: exactly one Execution.
-    expect((await submit(value.environment, value.projectId, task)).schedule.started
+    expect((await submit(value.environment, task)).schedule.started
       .map((entry) => entry.taskId)).toEqual([task]);
     for (const _pass of [1, 2]) {
       const tick = await cli(['task', 'schedule', 'run', value.projectId, '--json'], value.environment);
       expect(tick.exitCode).toBe(0);
     }
-    expect(await executions(value.environment, value.projectId, task)).toHaveLength(1);
-    expect(JSON.parse((await cli(['task', 'status', value.projectId, task],
+    expect(await executions(value.environment, task)).toHaveLength(1);
+    expect(JSON.parse((await cli(['task', 'status', task],
       value.environment)).stdout)).toMatchObject({ task: { state: 'RUNNING' } });
 
     // A query command never starts anything: with the Task already RUNNING there is no candidate, so
@@ -495,21 +492,21 @@ describe('codeestra task schedule', () => {
       };
       expect(parsed.dryRun).toBe(read[2] === 'plan');
       expect(parsed.candidates).toEqual([]);
-      expect(await executions(value.environment, value.projectId, task)).toHaveLength(1);
-      expect(JSON.parse((await cli(['task', 'status', value.projectId, task],
+      expect(await executions(value.environment, task)).toHaveLength(1);
+      expect(JSON.parse((await cli(['task', 'status', task],
         value.environment)).stdout)).toMatchObject({ task: { state: 'RUNNING' } });
     }
 
     // Two concurrent explicit start requests for the same already-running Task: neither may start a
     // second Execution, and both are refused for the same reason.
-    const ref = await taskRef(value.environment, value.projectId, task);
+    const ref = await taskRef(value.environment, task);
     const [left, right] = await Promise.all([
-      cli(['task', 'run', value.projectId, task, String(ref.version), '--json'], value.environment),
-      cli(['task', 'run', value.projectId, task, String(ref.version), '--json'], value.environment),
+      cli(['task', 'run', task, String(ref.version), '--json'], value.environment),
+      cli(['task', 'run', task, String(ref.version), '--json'], value.environment),
     ]);
     expect([left.exitCode, right.exitCode]).toEqual([1, 1]);
     for (const attempt of [left, right]) expect(attempt.stderr).toContain('TASK_NOT_STARTABLE');
-    expect(await executions(value.environment, value.projectId, task)).toHaveLength(1);
+    expect(await executions(value.environment, task)).toHaveLength(1);
     // One Agent process in total: the stub logs one start line per workspace (ADR-0065 D03), so the
     // recorded workspace name is what identifies this Task's line.
     const log = await Bun.file(value.stubLog).text();
@@ -525,8 +522,8 @@ describe('codeestra task schedule', () => {
     const first = await createTask(value.environment, value.projectId, 'write:core/first.ts');
     const second = await createTask(value.environment, value.projectId, 'write:core/second.ts');
     // Both start on empty predictions, which is the residual risk §4 exists for.
-    expect((await submit(value.environment, value.projectId, first)).schedule.started).toHaveLength(1);
-    expect((await submit(value.environment, value.projectId, second)).schedule.started).toHaveLength(1);
+    expect((await submit(value.environment, first)).schedule.started).toHaveLength(1);
+    expect((await submit(value.environment, second)).schedule.started).toHaveLength(1);
     await waitFor(() => Bun.file(join(recordedWorkspacePath(value.home, first),
       'core', 'first.ts')).size > 0);
     await waitFor(() => Bun.file(join(recordedWorkspacePath(value.home, second),
@@ -554,7 +551,7 @@ describe('codeestra task schedule', () => {
     // Both Tasks keep running: a change set is not a declaration, so no pause is requested and none
     // is recorded.
     const states = await Promise.all([first, second].map(async (taskId) => {
-      const status = JSON.parse((await cli(['task', 'status', value.projectId, taskId],
+      const status = JSON.parse((await cli(['task', 'status', taskId],
         value.environment)).stdout) as { readonly task: { readonly state: string } };
       return status.task.state;
     }));
@@ -567,12 +564,12 @@ describe('codeestra task schedule', () => {
     // a new generation cannot observe and must converge from the recorded facts.
     const task = await createTask(value.environment, value.projectId,
       'write:src/agent/crash.ts hold');
-    expect((await submit(value.environment, value.projectId, task)).schedule.started).toHaveLength(1);
+    expect((await submit(value.environment, task)).schedule.started).toHaveLength(1);
     // Wait for the fact the crash must interrupt: an ACTIVE provider Session this generation holds.
     let sessionState = '';
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
-      const list = await executions(value.environment, value.projectId, task);
+      const list = await executions(value.environment, task);
       sessionState = list[0]?.session?.state ?? '';
       if (sessionState === 'ACTIVE') break;
       await Bun.sleep(20);
@@ -588,7 +585,7 @@ describe('codeestra task schedule', () => {
     // The next command starts a new Runtime generation. Its reconciles judge the facts that are
     // really there: the Execution it cannot observe is never reported as running, and the startup
     // scheduling pass does not start a second Execution for a Task that holds its resource.
-    const after = JSON.parse((await cli(['task', 'status', value.projectId, task],
+    const after = JSON.parse((await cli(['task', 'status', task],
       value.environment)).stdout) as {
       readonly task: { readonly state: string };
       readonly executions: readonly { readonly state: string }[];

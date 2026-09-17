@@ -15,6 +15,7 @@ import {
 } from '@codeestra/domain';
 import { Phase1Database, ServiceKernelStore, StorageError, systemServiceIds,
   type AgentAnswerPlan } from '@codeestra/storage';
+import { resolveTaskScope } from './task-scope.js';
 import {
   createAdapterRegistry,
   piControlledLaunch,
@@ -773,7 +774,12 @@ function firstUnusablePluginPath(
   return null;
 }
 
-async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
+async function dispatch(incoming: RuntimeRequest): Promise<RuntimeResponse> {
+  // Task-scoped commands name the Task, not its project (ADR-0076): the project is resolved from the
+  // Task row once, here, so every handler below sees a `projectId` whether or not the caller named
+  // one. A caller that names a different project is refused with its own code instead of having one
+  // of the two silently win.
+  const request = resolveTaskScope(incoming, storage);
   switch (request.command) {
     case 'runtime.ping':
       return success(request.requestId, {
@@ -1233,9 +1239,11 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       // dispatcher; reaching here would mean the request was routed incorrectly.
       throw new Error('events.subscribe must be handled as a streaming connection');
     case 'task.list':
-      return success(request.requestId, storage.listTasks(request.projectId, {
-        includeArchived: request.includeArchived,
-      }));
+      // The listing is the one Task read that does not need a project: without one it reports every
+      // trusted project's Tasks, each row carrying the `projectId` it belongs to (ADR-0076 D03).
+      return success(request.requestId, request.projectId === undefined
+        ? storage.listAllTasks({ includeArchived: request.includeArchived })
+        : storage.listTasks(request.projectId, { includeArchived: request.includeArchived }));
     case 'task.status': {
       const task = storage.getTask(request.projectId, request.taskId);
       if (task === null) throw new StorageError('NOT_FOUND', 'Task was not found');

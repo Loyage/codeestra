@@ -1,8 +1,9 @@
 # 端到端流程走查
 
-> **适用版本** ADR-0070 S1–S4 实现分支（2026-09-17） · **schema** v37 · **最后校对** 2026-09-17
+> **适用版本** ADR-0070 S1–S4 实现分支（2026-09-17） · **schema** v38 · **最后校对** 2026-09-17
 > 版本会前进：`dev@7425556` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> **本次修订（ADR-0076）**：`task` 组不再以 `<project-id>` 开头：Task id 全局唯一，它自己就是地址，**project 是 Task 的字段**（`task create` 用 `--project`，`task list` 默认为本 Runtime 全部项目、`--project` 过滤；`task schedule status|plan|run` 仍收 `<project-id>`）。旧写法不再接受。
 > §1 的创建任务与 §4.4 的修订示例由本分支按 **ADR-0065** 改写（必填 `--title`/`--name`；`--constraint`/`--kind` 已删除）。
 > §3.1 的 `task run` 门禁由 FOUNDATION-091 按 ADR-0059 改写。
 > §10 的依赖满足语义由 FOUNDATION-093 第三轮同步（ADR-0060 修订）；其余内容沿用 FOUNDATION-091 的校对基线。
@@ -47,7 +48,7 @@ bun run codeestra project list              # 取得 project id
 ## 1. 创建任务（DRAFT）
 
 ```sh
-bun run codeestra task create $PROJECT "为 parser 增加一个 CRLF 输入用例" \
+bun run codeestra task create --project $PROJECT "为 parser 增加一个 CRLF 输入用例" \
   --title "给 parser 补一个 CRLF 输入用例" --name "parser-crlf-case"
 ```
 
@@ -56,6 +57,8 @@ bun run codeestra task create $PROJECT "为 parser 增加一个 CRLF 输入用�
 - `--name <命名标题>`：小写英文短横线 slug（`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`，≤ 50 字符）；
   分支与 worktree 目录叫 `task/<编号>-<name>` 与 `<编号>-<name>`。
 - 三个字段都必填；`--constraint` 与 `--kind` 已删除（ADR-0065），传入即用法错误（退出码 2）。
+- `--project <project-id>` **只在创建时**给（ADR-0076）：Task 还不存在，没有可从 Task 推出的项目。
+  创建之后每条 `task …` 命令都只收 `<task-id>`，project 是它自己的一个字段（`--project` 在 `task list` 里是过滤条件）。
 
 **预期形状**：打印 Task 的摘要 JSON，包含 `taskId`、`displayNumber`（人读编号，如 `#3`）、
 `state: "DRAFT"`、`revisionId`（第一条 revision）、`version`。原始意图、首 revision、事实事件与幂等回执
@@ -64,8 +67,8 @@ bun run codeestra task create $PROJECT "为 parser 增加一个 CRLF 输入用�
 列出来看：
 
 ```sh
-bun run codeestra task list $PROJECT          # 默认不含归档
-bun run codeestra task list $PROJECT --all    # 含归档
+bun run codeestra task list [--project $PROJECT]          # 默认不含归档
+bun run codeestra task list [--project $PROJECT] --all    # 含归档
 ```
 
 ---
@@ -73,7 +76,7 @@ bun run codeestra task list $PROJECT --all    # 含归档
 ## 2. 提交任务（DRAFT → READY）
 
 ```sh
-bun run codeestra task submit $PROJECT <task-id> <expected-version>
+bun run codeestra task submit <task-id> <expected-version>
 ```
 
 `<expected-version>` 是乐观版本号（上面输出里的 `version`）。版本不符会以 `VERSION_CONFLICT` 类拒绝，
@@ -91,7 +94,7 @@ bun run codeestra task submit $PROJECT <task-id> <expected-version>
 ### 3.1 显式启动一个 Task
 
 ```sh
-bun run codeestra task run $PROJECT <task-id> <expected-version> [--adapter pi|codex|claude] [--allow-unknown] [--json]
+bun run codeestra task run <task-id> <expected-version> [--adapter pi|codex|claude] [--allow-unknown] [--json]
 ```
 
 `task run` 是**与自动调度同一个门禁的显式启动请求**：依赖判定 → 对**未完成且声明了功能**的 Task 的冲突判定 → 容量。
@@ -137,7 +140,7 @@ Runtime **自己会调度**：一次相关事件（submit、合入 dev、停止�
 ```sh
 bun run codeestra task schedule status  $PROJECT [--adapter <id>] [--json]
 bun run codeestra task schedule plan    $PROJECT [--adapter <id>] [--json]   # 有序 dry run，不预留、不启动
-bun run codeestra task schedule explain $PROJECT <task-id> [--adapter <id>] [--json]
+bun run codeestra task schedule explain <task-id> [--adapter <id>] [--json]
 bun run codeestra task schedule run     $PROJECT [--adapter <id>] [--json]
 ```
 
@@ -150,9 +153,9 @@ bun run codeestra task schedule run     $PROJECT [--adapter <id>] [--json]
 ### 3.3 依赖（DAG）
 
 ```sh
-bun run codeestra task depends add    $PROJECT <task-id> <expected-version> <prerequisite-task-id> [--revision <revision-id>] [--json]
-bun run codeestra task depends remove $PROJECT <task-id> <expected-version> <prerequisite-task-id> [--json]
-bun run codeestra task depends list   $PROJECT [task-id] [--json]
+bun run codeestra task depends add <task-id> <expected-version> <prerequisite-task-id> [--revision <revision-id>] [--json]
+bun run codeestra task depends remove <task-id> <expected-version> <prerequisite-task-id> [--json]
+bun run codeestra task depends list   [<task-id> | --project $PROJECT] [--json]
 ```
 
 依赖图必须是 **DAG**；加环会以 `DEPENDENCY_CYCLE` / `DEPENDENCY_GRAPH_INVALID` 拒绝且不部分应用。
@@ -203,7 +206,7 @@ bun run codeestra attention answer $PROJECT <attention-id> --cancel
 没有 dialog 可以写。所以：
 
 ```sh
-bun run codeestra task status $PROJECT <task-id>     # 会在 stderr 打印 [waiting] … 与 Agent 的问题正文
+bun run codeestra task status <task-id>     # 会在 stderr 打印 [waiting] … 与 Agent 的问题正文
 bun run codeestra attention resolve $PROJECT <attention-id> --answer "这是我的回答" [--note …] [--json]
 bun run codeestra attention resolve $PROJECT <attention-id> --dismiss [--note …] [--json]
 ```
@@ -225,13 +228,13 @@ bun run codeestra settings prose-question-attention off        # 什么都不记
 ### 4.4 运行中的修订
 
 ```sh
-bun run codeestra task revision create $PROJECT <task-id> <expected-version> \
+bun run codeestra task revision create <task-id> <expected-version> \
   [--specification <text>] [--feature <module-id>]… [--reason <text>] [--json]
-bun run codeestra task revision list $PROJECT <task-id> [--json]
+bun run codeestra task revision list <task-id> [--json]
 
-bun run codeestra task revision delivery list   $PROJECT <task-id> [--json]
-bun run codeestra task revision delivery get    $PROJECT <delivery-id> [--json]
-bun run codeestra task revision delivery resolve $PROJECT <task-id> <delivery-id> <expected-version> \
+bun run codeestra task revision delivery list <task-id> [--json]
+bun run codeestra task revision delivery get <delivery-id> [--json]
+bun run codeestra task revision delivery resolve <task-id> <delivery-id> <expected-version> \
   --action stop-and-restart|retry [--adapter <id>] [--json]
 ```
 
@@ -247,15 +250,15 @@ delivery 状态包含 `PENDING / IN_FLIGHT / ACKNOWLEDGED / UNACKNOWLEDGED / CHA
 ### FULL（默认）：一步
 
 ```sh
-bun run codeestra task result capture $PROJECT <task-id> [execution-id]
+bun run codeestra task result capture <task-id> [execution-id]
 ```
 
 ### STRICT：两步
 
 ```sh
-bun run codeestra task result prepare $PROJECT <task-id> [execution-id]
+bun run codeestra task result prepare <task-id> [execution-id]
 # → 输出 authorizationId
-bun run codeestra task result commit $PROJECT <task-id> <authorization-id> --confirm
+bun run codeestra task result commit <task-id> <authorization-id> --confirm
 ```
 
 **前提与影响**（源码核对，两条路径都适用）：
@@ -278,8 +281,8 @@ bun run codeestra task result commit $PROJECT <task-id> <authorization-id> --con
 ## 6. 任务验证
 
 ```sh
-bun run codeestra task verify $PROJECT <task-id> [execution-id] [--policy auto|targeted|project] [--background]
-bun run codeestra task verification list $PROJECT <task-id>
+bun run codeestra task verify <task-id> [execution-id] [--policy auto|targeted|project] [--background]
+bun run codeestra task verification list <task-id>
 ```
 
 - 命令来自**项目 `main` ref** 上人工维护的 `.codeestra/policies/verification.json`；
@@ -295,9 +298,9 @@ bun run codeestra task verification list $PROJECT <task-id>
 加 `--background` 时 `0` 表示「已受理并开始」——**不代表验证通过**：
 
 ```sh
-bun run codeestra task operation list   $PROJECT <task-id> [--json]
-bun run codeestra task operation get    $PROJECT <operation-id> [--json]
-bun run codeestra task operation cancel $PROJECT <task-id> <operation-id> [--json]
+bun run codeestra task operation list <task-id> [--json]
+bun run codeestra task operation get <operation-id> [--json]
+bun run codeestra task operation cancel <task-id> <operation-id> [--json]
 ```
 
 ### 按分支职责分层的测试证据（ADR-0038）
@@ -319,9 +322,9 @@ bun run codeestra task operation cancel $PROJECT <task-id> <operation-id> [--jso
 - 记录它是一个**显式、可审计的追加**：
 
 ```sh
-bun run codeestra task tests record $PROJECT <task-id> [--commit <full-sha>] [--expected-plan-digest <sha256>] [--json]
-bun run codeestra task tests show    $PROJECT <task-id> [--json]
-bun run codeestra task tests history $PROJECT <task-id> [--limit <n>] [--json]
+bun run codeestra task tests record <task-id> [--commit <full-sha>] [--expected-plan-digest <sha256>] [--json]
+bun run codeestra task tests show <task-id> [--json]
+bun run codeestra task tests history <task-id> [--limit <n>] [--json]
 ```
 
 - `task verify` 运行的是**已记录的计划**，**不是文件本身**；所以事后改文件不会悄悄改变判定命令。
@@ -336,7 +339,7 @@ bun run codeestra task tests history $PROJECT <task-id> [--limit <n>] [--json]
 **一条命令**（ADR-0074）：
 
 ```sh
-bun run codeestra task status $PROJECT $TASK --json                  # 读 resultCommit
+bun run codeestra task status $TASK --json                  # 读 resultCommit
 bun run codeestra project integration request $PROJECT $TASK         # 入队（幂等）
 bun run codeestra project integration run $PROJECT                   # merge → 独立验证 → CAS 推进 ref
 bun run codeestra project integration status $PROJECT --json         # 读 ref/worktree/队列事实
@@ -410,12 +413,12 @@ bun run codeestra events list [--project $PROJECT] [--since <sequence>] [--limit
 bun run codeestra events tail [--project $PROJECT] [--since <sequence>]
 
 # Agent 执行过程（只读，读 provider 自己的会话文件）
-bun run codeestra task transcript    $PROJECT <task-id> [--execution <id>] [--after <entry-id>] [--limit <n>] [--reverse] [--json]
+bun run codeestra task transcript <task-id> [--execution <id>] [--after <entry-id>] [--limit <n>] [--reverse] [--json]
 bun run codeestra session transcript <session-id> [--after <entry-id>] [--limit <n>] [--reverse] [--json]
 bun run codeestra session transcript part <session-id> <entry-id> <part-index>
 
 # 执行/会话总览
-bun run codeestra task status $PROJECT <task-id>
+bun run codeestra task status <task-id>
 ```
 
 `events tail` 的游标是**排他**的：

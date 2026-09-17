@@ -258,7 +258,7 @@ async function createTask(
   projectId: string,
   specification: string,
 ): Promise<string> {
-  const created = JSON.parse((await cli(['task', 'create', projectId, specification,
+  const created = JSON.parse((await cli(['task', 'create', '--project', projectId, specification,
     '--title', 'fixture task', '--name', 'fixture-task'],
     environment)).stdout) as { readonly id: string };
   return created.id;
@@ -276,19 +276,17 @@ interface TaskStatus {
 
 async function status(
   environment: Record<string, string>,
-  projectId: string,
   taskId: string,
 ): Promise<TaskStatus> {
-  return JSON.parse((await cli(['task', 'status', projectId, taskId], environment)).stdout) as TaskStatus;
+  return JSON.parse((await cli(['task', 'status', taskId], environment)).stdout) as TaskStatus;
 }
 
 async function submit(
   environment: Record<string, string>,
-  projectId: string,
   taskId: string,
   version: number,
 ): Promise<void> {
-  const submitted = await cli(['task', 'submit', projectId, taskId, String(version)], environment);
+  const submitted = await cli(['task', 'submit', taskId, String(version)], environment);
   expect(submitted.exitCode).toBe(0);
 }
 
@@ -299,20 +297,19 @@ async function startTask(
   specification: string,
 ): Promise<string> {
   const taskId = await createTask(environment, projectId, specification);
-  await submit(environment, projectId, taskId, 0);
+  await submit(environment, taskId, 0);
   return taskId;
 }
 
 async function waitForState(
   environment: Record<string, string>,
-  projectId: string,
   taskId: string,
   expected: string,
 ): Promise<TaskStatus> {
   let observed: TaskStatus | null = null;
   await waitFor(() => {
-    const read = Bun.spawnSync({ cmd: [process.execPath, 'run', cliEntry, 'task', 'status', projectId,
-      taskId], env: { ...process.env, ...environment } as Record<string, string>, stdout: 'pipe',
+    const read = Bun.spawnSync({ cmd: [process.execPath, 'run', cliEntry, 'task', 'status', taskId],
+      env: { ...process.env, ...environment } as Record<string, string>, stdout: 'pipe',
       stderr: 'ignore' });
     if (read.exitCode !== 0) return false;
     try {
@@ -344,12 +341,11 @@ interface RetryView {
 
 async function retry(
   environment: Record<string, string>,
-  projectId: string,
   taskId: string,
   version: number,
   flags: readonly string[] = [],
 ): Promise<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }> {
-  return await cli(['task', 'retry', projectId, taskId, String(version), '--json', ...flags],
+  return await cli(['task', 'retry', taskId, String(version), '--json', ...flags],
     environment);
 }
 
@@ -357,7 +353,7 @@ describe('codeestra task retry', () => {
   test('retries a failed Task: a new Execution follows in the same worktree, audited', async () => {
     const value = await fixture();
     const taskId = await startTask(value.environment, value.projectId, 'Retry me (fail-once)');
-    const failed = await waitForState(value.environment, value.projectId, taskId, 'FAILED');
+    const failed = await waitForState(value.environment, taskId, 'FAILED');
     expect(failed.executions).toHaveLength(1);
     const firstExecution = failed.executions[0];
     expect(firstExecution?.state).toBe('FAILED');
@@ -369,7 +365,7 @@ describe('codeestra task retry', () => {
     // The first attempt left work in its worktree, and that work is what a retry must not throw away.
     expect(readFileSync(join(worktree, `runs-${ws}.log`), 'utf8')).toBe(`start ${ws}\n`);
 
-    const retried = await retry(value.environment, value.projectId, taskId, failed.task.version);
+    const retried = await retry(value.environment, taskId, failed.task.version);
     expect(retried.exitCode).toBe(0);
     const view = JSON.parse(retried.stdout) as RetryView;
     expect(view).toMatchObject({
@@ -387,7 +383,7 @@ describe('codeestra task retry', () => {
     expect(view.workspace.detail).toContain('keeps its own worktree');
 
     // The new Execution is a fresh conversation that names the failure it follows — not a resume.
-    const after = await status(value.environment, value.projectId, taskId);
+    const after = await status(value.environment, taskId);
     expect(after.executions).toHaveLength(2);
     expect(after.executions[0]).toMatchObject({
       attemptNumber: 2, adapterId: 'pi', retryFromExecutionId: firstExecution?.executionId,
@@ -422,54 +418,54 @@ describe('codeestra task retry', () => {
     // A DRAFT Task has not run at all: there is nothing to retry, and it says so without changing
     // anything. (A submitted Task would be started by the scheduling pass right away.)
     const draft = await createTask(value.environment, value.projectId, 'Never ran');
-    const draftRetry = await retry(value.environment, value.projectId, draft, 0);
+    const draftRetry = await retry(value.environment, draft, 0);
     expect(draftRetry.exitCode).toBe(1);
     expect(draftRetry.stderr).toContain('TASK_NOT_FAILED');
-    const draftAfter = await status(value.environment, value.projectId, draft);
+    const draftAfter = await status(value.environment, draft);
     expect(draftAfter.task.state).toBe('DRAFT');
     expect(draftAfter.task.version).toBe(0);
     expect(draftAfter.executions).toHaveLength(0);
 
     // A running Task holds a writer, so a retry would be a second one.
     const running = await startTask(value.environment, value.projectId, 'Hold this (hold)');
-    const runningStatus = await status(value.environment, value.projectId, running);
+    const runningStatus = await status(value.environment, running);
     // A stale version is refused before the state verdict, exactly like submit/pause/resume, so the
     // caller is told to re-read the Task instead of acting on a state it may have already left.
-    const stale = await retry(value.environment, value.projectId, running,
+    const stale = await retry(value.environment, running,
       runningStatus.task.version - 1);
     expect(stale.exitCode).toBe(1);
     expect(stale.stderr).toContain('CONCURRENT_MODIFICATION');
-    const runningRetry = await retry(value.environment, value.projectId, running,
+    const runningRetry = await retry(value.environment, running,
       runningStatus.task.version);
     expect(runningRetry.exitCode).toBe(1);
     expect(runningRetry.stderr).toContain('TASK_STILL_RUNNING');
     // Nothing was started for it: the refusal wrote no Execution.
-    expect((await status(value.environment, value.projectId, running)).executions).toHaveLength(1);
+    expect((await status(value.environment, running)).executions).toHaveLength(1);
 
     // CANCELLED is terminal and is never reopened.
     const cancelled = await startTask(value.environment, value.projectId, 'Cancel me (hold)');
-    const cancelledStatus = await status(value.environment, value.projectId, cancelled);
-    const cancel = await cli(['task', 'cancel', value.projectId, cancelled,
+    const cancelledStatus = await status(value.environment, cancelled);
+    const cancel = await cli(['task', 'cancel', cancelled,
       String(cancelledStatus.task.version)], value.environment);
     expect(cancel.exitCode).toBe(0);
-    const cancelledAfterCancel = await status(value.environment, value.projectId, cancelled);
+    const cancelledAfterCancel = await status(value.environment, cancelled);
     expect(cancelledAfterCancel.task.state).toBe('CANCELLED');
-    const cancelledRetry = await retry(value.environment, value.projectId, cancelled,
+    const cancelledRetry = await retry(value.environment, cancelled,
       cancelledAfterCancel.task.version);
     expect(cancelledRetry.exitCode).toBe(1);
     expect(cancelledRetry.stderr).toContain('TASK_CANCELLED');
-    const cancelledAfter = await status(value.environment, value.projectId, cancelled);
+    const cancelledAfter = await status(value.environment, cancelled);
     expect(cancelledAfter.task.state).toBe('CANCELLED');
     // The refusal is a value, not a state change: the terminal Task did not move.
     expect(cancelledAfter.task.version).toBe(cancelledAfterCancel.task.version);
     expect(cancelledAfter.executions).toHaveLength(1);
     // An archived Task is refused for its own reason rather than started behind the user's back.
     const archived = await startTask(value.environment, value.projectId, 'Archive me (fail-once)');
-    const archivedFailed = await waitForState(value.environment, value.projectId, archived, 'FAILED');
-    const archive = await cli(['task', 'archive', value.projectId, archived,
+    const archivedFailed = await waitForState(value.environment, archived, 'FAILED');
+    const archive = await cli(['task', 'archive', archived,
       String(archivedFailed.task.version)], value.environment);
     expect(archive.exitCode).toBe(0);
-    const archivedRetry = await retry(value.environment, value.projectId, archived,
+    const archivedRetry = await retry(value.environment, archived,
       archivedFailed.task.version + 1);
     expect(archivedRetry.exitCode).toBe(1);
     expect(archivedRetry.stderr).toContain('TASK_ARCHIVED');
@@ -479,9 +475,9 @@ describe('codeestra task retry', () => {
   test('--adapter changes the Agent of the new Execution, and the change is audited', async () => {
     const value = await fixture();
     const taskId = await startTask(value.environment, value.projectId, 'Switch Agent (fail-once)');
-    const failed = await waitForState(value.environment, value.projectId, taskId, 'FAILED');
+    const failed = await waitForState(value.environment, taskId, 'FAILED');
 
-    const retried = await retry(value.environment, value.projectId, taskId, failed.task.version,
+    const retried = await retry(value.environment, taskId, failed.task.version,
       ['--adapter', 'codex']);
     expect(retried.exitCode).toBe(0);
     const view = JSON.parse(retried.stdout) as RetryView;
@@ -495,7 +491,7 @@ describe('codeestra task retry', () => {
       { readonly turns: number; readonly prompts: readonly string[] };
     expect(report.turns).toBeGreaterThanOrEqual(1);
     expect(report.prompts.join('\n')).toContain('Switch Agent');
-    const after = await status(value.environment, value.projectId, taskId);
+    const after = await status(value.environment, taskId);
     expect(after.executions[0]).toMatchObject({
       adapterId: 'codex', retryFromExecutionId: failed.executions[0]?.executionId,
     });
@@ -515,12 +511,12 @@ describe('codeestra task retry', () => {
     expect(capacity.exitCode).toBe(0);
 
     const failedTask = await startTask(value.environment, value.projectId, 'Queue me (fail-once)');
-    const failed = await waitForState(value.environment, value.projectId, failedTask, 'FAILED');
+    const failed = await waitForState(value.environment, failedTask, 'FAILED');
     // The failure released the slot, so the holder below is the Task the retry must queue behind.
     const holder = await startTask(value.environment, value.projectId, 'Hold the slot (hold)');
-    await waitForState(value.environment, value.projectId, holder, 'RUNNING');
+    await waitForState(value.environment, holder, 'RUNNING');
 
-    const queued = await retry(value.environment, value.projectId, failedTask, failed.task.version);
+    const queued = await retry(value.environment, failedTask, failed.task.version);
     expect(queued.exitCode).toBe(3);
     const view = JSON.parse(queued.stdout) as RetryView;
     expect(view).toMatchObject({
@@ -529,16 +525,16 @@ describe('codeestra task retry', () => {
         wait: { kind: 'CAPACITY', code: 'CAPACITY_GLOBAL_LIMIT_REACHED' } },
     });
     // Requenced, not started: the retry is recorded and the Task waits its turn.
-    const waiting = await status(value.environment, value.projectId, failedTask);
+    const waiting = await status(value.environment, failedTask);
     expect(waiting.task.state).toBe('READY');
     expect(waiting.executions).toHaveLength(1);
 
     // Freeing the slot lets the requeued Task run — with its second Execution.
-    const holderStatus = await status(value.environment, value.projectId, holder);
-    const cancelled = await cli(['task', 'cancel', value.projectId, holder,
+    const holderStatus = await status(value.environment, holder);
+    const cancelled = await cli(['task', 'cancel', holder,
       String(holderStatus.task.version)], value.environment);
     expect(cancelled.exitCode).toBe(0);
-    const resumed = await status(value.environment, value.projectId, failedTask);
+    const resumed = await status(value.environment, failedTask);
     expect(resumed.executions.length).toBeGreaterThanOrEqual(2);
     expect(resumed.executions[0]?.attemptNumber).toBe(2);
     expect(resumed.task.state).toBe('RUNNING');
@@ -548,7 +544,7 @@ describe('codeestra task retry', () => {
   test('rebuilds a reclaimed worktree from its surviving branch and starts the new Execution', async () => {
     const value = await fixture();
     const taskId = await startTask(value.environment, value.projectId, 'Reclaim me (fail-once)');
-    const failed = await waitForState(value.environment, value.projectId, taskId, 'FAILED');
+    const failed = await waitForState(value.environment, taskId, 'FAILED');
     // ADR-0065 D03: the recorded workspace directory is `<displayNumber>-<namingTitle>`, which is also
     // the name the stub provider writes its files under.
     const reclaimWs = recordedWorkspaceName(value.home, taskId);
@@ -568,7 +564,7 @@ describe('codeestra task retry', () => {
     expect(await git(value.repository, ['branch', '--list', `task/${reclaimWs}`]))
       .toContain(`task/${reclaimWs}`);
 
-    const retried = await retry(value.environment, value.projectId, taskId, failed.task.version);
+    const retried = await retry(value.environment, taskId, failed.task.version);
     expect(retried.exitCode).toBe(0);
     const view = JSON.parse(retried.stdout) as RetryView;
     expect(view).toMatchObject({
@@ -613,7 +609,7 @@ describe('codeestra task retry', () => {
       rebuild: { outcome: 'REBUILT', reasonCode: 'REBUILT_FROM_TASK_BRANCH', headCommit: branchCommit },
     });
     // A repeated retry is refused by the version check before it can create anything at all.
-    const repeated = await retry(value.environment, value.projectId, taskId, failed.task.version);
+    const repeated = await retry(value.environment, taskId, failed.task.version);
     expect(repeated.exitCode).toBe(1);
     expect(repeated.stderr).toContain('CONCURRENT_MODIFICATION');
     expect((await git(value.repository, ['worktree', 'list', '--porcelain']))
@@ -624,7 +620,7 @@ describe('codeestra task retry', () => {
   test('starts a fresh worktree when a reclaimed worktree and its branch are both gone', async () => {
     const value = await fixture();
     const taskId = await startTask(value.environment, value.projectId, 'Branch gone (fail-once)');
-    const failed = await waitForState(value.environment, value.projectId, taskId, 'FAILED');
+    const failed = await waitForState(value.environment, taskId, 'FAILED');
     const goneWs = recordedWorkspaceName(value.home, taskId);
     const worktree = recordedWorkspacePath(value.home, taskId);
     await waitFor(() => existsSync(join(worktree, `runs-${goneWs}.log`)));
@@ -640,7 +636,7 @@ describe('codeestra task retry', () => {
     expect(await git(value.repository, ['branch', '--list', `task/${goneWs}`])).toBe('');
     const devCommit = await git(value.repository, ['rev-parse', 'refs/heads/dev']);
 
-    const retried = await retry(value.environment, value.projectId, taskId, failed.task.version);
+    const retried = await retry(value.environment, taskId, failed.task.version);
     expect(retried.exitCode).toBe(0);
     const view = JSON.parse(retried.stdout) as RetryView;
     expect(view).toMatchObject({
@@ -680,7 +676,7 @@ describe('codeestra task retry', () => {
     // (1) The branch exists but is unrelated to the baseline the workspace row recorded: an orphan
     // commit with no relation to dev, built with plumbing so the fixture's own checkout is untouched.
     const diverged = await startTask(value.environment, value.projectId, 'Diverged (fail-once)');
-    const divergedFailed = await waitForState(value.environment, value.projectId, diverged, 'FAILED');
+    const divergedFailed = await waitForState(value.environment, diverged, 'FAILED');
     const divergedWs = recordedWorkspaceName(value.home, diverged);
     const divergedWorktree = recordedWorkspacePath(value.home, diverged);
     await waitFor(() => existsSync(divergedWorktree));
@@ -691,11 +687,11 @@ describe('codeestra task retry', () => {
     const unrelated = await git(value.repository, ['commit-tree', tree, '-m', 'unrelated root']);
     await git(value.repository, ['update-ref', `refs/heads/task/${divergedWs}`, unrelated]);
 
-    const refused = await retry(value.environment, value.projectId, diverged,
+    const refused = await retry(value.environment, diverged,
       divergedFailed.task.version);
     expect(refused.exitCode).toBe(1);
     expect(refused.stderr).toContain('WORKSPACE_RECLAIMED');
-    const afterDiverged = await status(value.environment, value.projectId, diverged);
+    const afterDiverged = await status(value.environment, diverged);
     expect(afterDiverged.task.state).toBe('FAILED');
     expect(afterDiverged.task.version).toBe(divergedFailed.task.version);
     expect(afterDiverged.executions).toHaveLength(1);
@@ -706,7 +702,7 @@ describe('codeestra task retry', () => {
     // (2) The recorded path is occupied by a directory Git does not register: never deleted to make
     // room, because that is an explicit reclamation decision.
     const occupied = await startTask(value.environment, value.projectId, 'Occupied (fail-once)');
-    const occupiedFailed = await waitForState(value.environment, value.projectId, occupied, 'FAILED');
+    const occupiedFailed = await waitForState(value.environment, occupied, 'FAILED');
     const occupiedWorktree = recordedWorkspacePath(value.home, occupied);
     await waitFor(() => existsSync(occupiedWorktree));
     await cli(['reclaim', 'apply', '--project', value.projectId, '--task', occupied,
@@ -714,11 +710,11 @@ describe('codeestra task retry', () => {
     mkdirSync(occupiedWorktree, { recursive: true });
     writeFileSync(join(occupiedWorktree, 'leftover.txt'), 'keep me\n');
 
-    const refusedOccupied = await retry(value.environment, value.projectId, occupied,
+    const refusedOccupied = await retry(value.environment, occupied,
       occupiedFailed.task.version);
     expect(refusedOccupied.exitCode).toBe(1);
     expect(refusedOccupied.stderr).toContain('WORKSPACE_RECLAIMED');
-    const afterOccupied = await status(value.environment, value.projectId, occupied);
+    const afterOccupied = await status(value.environment, occupied);
     expect(afterOccupied.task.state).toBe('FAILED');
     expect(afterOccupied.task.version).toBe(occupiedFailed.task.version);
     expect(afterOccupied.executions).toHaveLength(1);
@@ -740,25 +736,25 @@ describe('codeestra task retry', () => {
     const value = await fixture();
     const upstream = await startTask(value.environment, value.projectId, 'Upstream (hold)');
     const dependent = await startTask(value.environment, value.projectId, 'Dependent (fail-once)');
-    const failed = await waitForState(value.environment, value.projectId, dependent, 'FAILED');
+    const failed = await waitForState(value.environment, dependent, 'FAILED');
 
     // A dependency edit is allowed while the Task is FAILED, so the retry has to re-derive the
     // verdict: the upstream has not reached `dev`, so the requeue target is BLOCKED.
-    const added = await cli(['task', 'depends', 'add', value.projectId, dependent,
+    const added = await cli(['task', 'depends', 'add', dependent,
       String(failed.task.version), upstream], value.environment);
     expect(added.exitCode).toBe(0);
-    const afterAdd = await status(value.environment, value.projectId, dependent);
+    const afterAdd = await status(value.environment, dependent);
     // Editing the edge appends a command receipt but does not move the Task out of FAILED.
     expect(afterAdd.task.state).toBe('FAILED');
 
-    const refused = await retry(value.environment, value.projectId, dependent,
+    const refused = await retry(value.environment, dependent,
       afterAdd.task.version);
     // The requeue itself succeeded; no Execution started, so the exit code says so.
     expect(refused.exitCode).toBe(1);
     const view = JSON.parse(refused.stdout) as RetryView;
     expect(view.state).toBe('BLOCKED');
     expect(view.start).toMatchObject({ outcome: 'REFUSED', code: 'DEPENDENCIES_UNMET' });
-    const after = await status(value.environment, value.projectId, dependent);
+    const after = await status(value.environment, dependent);
     expect(after.task.state).toBe('BLOCKED');
     expect(after.executions).toHaveLength(1);
     const events = JSON.parse((await cli(['events', 'list', '--project', value.projectId,

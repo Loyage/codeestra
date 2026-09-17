@@ -1,8 +1,9 @@
 # CLI 参考 · 成果 commit、验证与长命令
 
-> **适用版本** `dev@de03448`（2026-09-16） · **schema** v36 · **最后校对** 2026-09-16
+> **适用版本** `dev@de03448`（2026-09-16） · **schema** v38 · **最后校对** 2026-09-16
 > 版本会前进：`dev@de03448` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../../tasks/README.md) 的最新 FOUNDATION 记录为准。
+> **本次修订（ADR-0076）**：`task` 组不再以 `<project-id>` 开头：Task id 全局唯一，它自己就是地址，**project 是 Task 的字段**（`task create` 用 `--project`，`task list` 默认为本 Runtime 全部项目、`--project` 过滤；`task schedule status|plan|run` 仍收 `<project-id>`）。旧写法不再接受。
 > 拆分说明（ADR-0063）：本文件是 [`cli-reference.md`](../cli-reference.md) 按功能拆出的九篇之一（ADR-0066 之后为八篇），
 > **内容自 `cli-reference.md @ dev@de03448` 搬移，一句未改写；本次未重新核对源码**，最后校对日期因此不变。
 > **本次修订（ADR-0074 / schema v38）**：Task 基线改为项目受管的 integration ref（`refs/codeestra/integration`）；Task verification 通过后由 `project integration request` / `run` 合进该 ref，**发布到你的分支仍没有命令**；命令面见 [managed-integration.md](./managed-integration.md)。
@@ -11,9 +12,9 @@
 ## 8. `task result`（成果 commit）
 
 ```sh
-bun run codeestra task result capture <project-id> <task-id> [execution-id]
-bun run codeestra task result prepare <project-id> <task-id> [execution-id]   # STRICT
-bun run codeestra task result commit  <project-id> <task-id> <authorization-id> --confirm
+bun run codeestra task result capture <task-id> [execution-id]
+bun run codeestra task result prepare <task-id> [execution-id]   # STRICT
+bun run codeestra task result commit  <task-id> <authorization-id> --confirm
 ```
 
 - **`capture` 只在 FULL 模式可用**。STRICT 下会被以 `FULL_PERMISSION_REQUIRED` 拒绝。
@@ -35,7 +36,7 @@ STRICT 下额外拒绝敏感路径；**FULL 下不做敏感路径拒绝**。
 
 ## 9. `task verify` / `task verification` / `task tests`
 
-### `task verify <project-id> <task-id> [execution-id] [--background] [--policy <auto|targeted|project>]`
+### `task verify <task-id> [execution-id] [--background] [--policy <auto|targeted|project>]`
 
 - `--policy` 取值：
   - `auto`（默认）：该 Task 有**已记录**且与本次 revision/commit 匹配的定向计划就用它，否则用固定项目策略；
@@ -55,16 +56,16 @@ STRICT 下额外拒绝敏感路径；**FULL 下不做敏感路径拒绝**。
 `TARGETED_TEST_PLAN_UNREADABLE`、`TARGETED_TEST_PLAN_REVISION_MISMATCH`、`TARGETED_TEST_PLAN_COMMIT_MISMATCH`、
 `TARGETED_TEST_PLAN_DIGEST_MISMATCH`、`INVALID_TARGETED_TEST_PLAN`。
 
-### `task verification list <project-id> <task-id>`
+### `task verification list <task-id>`
 
 列出该 Task 的验证记录（`state`、`outcomeCode` 等）。
 
 ### `task tests record|show|history`
 
 ```sh
-bun run codeestra task tests record <project-id> <task-id> [--commit <full-sha>] [--expected-plan-digest <sha256>] [--json]
-bun run codeestra task tests show   <project-id> <task-id> [--json]
-bun run codeestra task tests history<project-id> <task-id> [--limit <n>] [--json]
+bun run codeestra task tests record <task-id> [--commit <full-sha>] [--expected-plan-digest <sha256>] [--json]
+bun run codeestra task tests show   <task-id> [--json]
+bun run codeestra task tests history<task-id> [--limit <n>] [--json]
 ```
 
 - `record` 读取该分支的 `.codeestra/tests.json`（含 `scope` 与 1–16 条命令，每条带 `covers`），
@@ -84,9 +85,9 @@ bun run codeestra task tests history<project-id> <task-id> [--limit <n>] [--json
 ## 10. `task operation`（长命令）
 
 ```sh
-bun run codeestra task operation list   <project-id> <task-id> [--json]
-bun run codeestra task operation get    <project-id> <operation-id> [--json]
-bun run codeestra task operation cancel <project-id> <task-id> <operation-id> [--json]
+bun run codeestra task operation list   <task-id> [--json]
+bun run codeestra task operation get    <operation-id> [--json]
+bun run codeestra task operation cancel <task-id> <operation-id> [--json]
 ```
 
 - `list` / `get` 的默认输出是**人读**视图（`--json` 打印 Runtime 原文）：每个 Operation 一行摘要，

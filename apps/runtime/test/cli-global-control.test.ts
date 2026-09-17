@@ -129,12 +129,12 @@ describe('scheduler control on the CLI command face', () => {
     });
     expect((await cli(['scheduler', 'control', 'pause', '--json'], environment)).exitCode).toBe(0);
 
-    const run = await cli(['task', 'run', projectId, task.taskId, String(task.expectedVersion)],
+    const run = await cli(['task', 'run', task.taskId, String(task.expectedVersion)],
       environment);
     expect(run.exitCode).toBe(3);
     expect(run.stderr).toContain('SCHEDULER_GLOBALLY_PAUSED');
     // It is a *wait*: the Task keeps its own state instead of being reported as blocked.
-    const statusAfter = await cli(['task', 'status', projectId, task.taskId], environment);
+    const statusAfter = await cli(['task', 'status', task.taskId], environment);
     expect(statusAfter.exitCode).toBe(0);
     const taskView = JSON.parse(statusAfter.stdout) as {
       readonly task: { readonly state: string; readonly version: number;

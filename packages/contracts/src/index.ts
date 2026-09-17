@@ -217,6 +217,16 @@ const requestBase = {
 const nonBlankString = z.string().min(1).refine((value) => value.trim().length > 0, 'Must not be blank');
 
 /**
+ * The project a **Task-scoped** command belongs to (ADR-0076). It is optional because the Task itself
+ * names the subject: Task ids are globally unique, so the Runtime derives the owning project from the
+ * Task row. A client that still states a project is checked against the resolved one and a different
+ * one is refused (`TASK_PROJECT_MISMATCH`) instead of being silently preferred. Only the commands the
+ * CLI spells as `codeestra task …` use this: `project.integration.request` and the `session.guidance`
+ * commands keep naming their project, and `task.create` names one because the Task does not exist yet.
+ */
+const taskProjectIdSchema = z.string().uuid().optional();
+
+/**
  * The two Task-level titles (ADR-0065).
  *
  * `displayTitle` is the one line the task list and the task detail render, so it is bounded and
@@ -1441,7 +1451,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
   }),
   z.strictObject({
     ...requestBase, command: z.literal('task.integration.show'),
-    projectId: z.string().uuid(), taskId: z.string().uuid(),
+    projectId: taskProjectIdSchema, taskId: z.string().uuid(),
   }),
   // Service kernel queries and metadata command (ADR-0070 S4). `service.state.set` is translated to
   // the registered SERVICE_METADATA_SET SIG_A contract; it cannot write a core lifecycle field.
@@ -1533,6 +1543,11 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.create'),
     commandId: z.string().uuid(),
+    /**
+     * Required: this is the one Task-scoped command that cannot derive the project, because the Task
+     * it is about does not exist yet (ADR-0076 D02). The CLI spells it `--project <project-id>` so no
+     * command in the `task` group starts with a project.
+     */
     projectId: z.string().uuid(),
     /** The one-line summary the task list shows (ADR-0065). Required; there is no derived default. */
     displayTitle: taskDisplayTitleSchema,
@@ -1551,7 +1566,12 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
   z.strictObject({
     ...requestBase,
     command: z.literal('task.list'),
-    projectId: z.string().uuid(),
+    /**
+     * Omitted means **every trusted project of this Runtime** (ADR-0076 D03): a listing is not an
+     * operation on one Task, so the project is a filter here, not a required subject. Every row
+     * carries its own `projectId` either way.
+     */
+    projectId: taskProjectIdSchema,
     /** Archived Tasks are hidden unless a client explicitly asks for the full history. */
     includeArchived: z.boolean().default(false),
   }),
@@ -1559,7 +1579,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.submit'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
     expectedVersion: z.number().int().nonnegative(),
   }),
@@ -1574,7 +1594,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.run'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
     expectedTaskVersion: z.number().int().nonnegative(),
     adapterId: nonBlankString.default('pi'),
@@ -1594,7 +1614,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
   z.strictObject({
     ...requestBase,
     command: z.literal('task.status'),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
   }),
   /** Cooperatively stops the running Agent and leaves the Task resumable in its workspace. */
@@ -1602,7 +1622,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.pause'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
     expectedVersion: z.number().int().nonnegative(),
   }),
@@ -1617,7 +1637,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.resume'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
     expectedVersion: z.number().int().nonnegative(),
     adapterId: nonBlankString.default('pi'),
@@ -1635,7 +1655,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.retry'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
     expectedVersion: z.number().int().nonnegative(),
     adapterId: nonBlankString.optional(),
@@ -1655,7 +1675,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.recover'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
     expectedVersion: z.number().int().nonnegative(),
     /** The user's own statement about the reconcile; recorded verbatim in the audit, not judged. */
@@ -1666,7 +1686,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.cancel'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
     expectedVersion: z.number().int().nonnegative(),
   }),
@@ -1675,7 +1695,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.archive'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
     expectedVersion: z.number().int().nonnegative(),
   }),
@@ -1683,7 +1703,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.unarchive'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
     expectedVersion: z.number().int().nonnegative(),
   }),
@@ -1701,7 +1721,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.purge'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
     expectedVersion: z.number().int().nonnegative(),
     confirmed: z.boolean(),
@@ -1720,7 +1740,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.result.prepare'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
     executionId: z.string().uuid().optional(),
   }),
@@ -1729,7 +1749,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.result.capture'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
     executionId: z.string().uuid().optional(),
   }),
@@ -1738,7 +1758,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.result.commit'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
     authorizationId: z.string().uuid(),
     confirm: z.literal(true),
@@ -1747,7 +1767,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.verify'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
     executionId: z.string().uuid().optional(),
     /** Return a durable Operation handle instead of blocking until the policy has run (ADR-0019). */
@@ -1769,7 +1789,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.tests.record'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
     executionId: z.string().uuid().optional(),
     /** A full object ID to bind instead of the Task's captured result commit. */
@@ -1781,21 +1801,21 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
   z.strictObject({
     ...requestBase,
     command: z.literal('task.tests.show'),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
   }),
   /** Every recorded plan of one Task, newest first: the append-only audit of its test scope. */
   z.strictObject({
     ...requestBase,
     command: z.literal('task.tests.history'),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
     limit: z.number().int().min(1).max(500).default(50),
   }),
   z.strictObject({
     ...requestBase,
     command: z.literal('task.verification.list'),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
   }),
   /**
@@ -1805,13 +1825,13 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
   z.strictObject({
     ...requestBase,
     command: z.literal('task.operation.list'),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
   }),
   z.strictObject({
     ...requestBase,
     command: z.literal('task.operation.get'),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     operationId: z.string().uuid(),
   }),
   /**
@@ -1822,7 +1842,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.operation.cancel'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
     operationId: z.string().uuid(),
   }),
@@ -1966,7 +1986,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.depends.add'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
     prerequisiteTaskId: z.string().uuid(),
     /** Pins this upstream revision; absent means the upstream's current revision. */
@@ -1977,7 +1997,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.depends.remove'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
     prerequisiteTaskId: z.string().uuid(),
     expectedVersion: z.number().int().nonnegative(),
@@ -1992,7 +2012,13 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
   z.strictObject({
     ...requestBase,
     command: z.literal('task.depends.list'),
-    projectId: z.string().uuid(),
+    /**
+     * One of `projectId` and `taskId` must be given (ADR-0076 D04): the projection is bound to the
+     * baseline of exactly one project, so "every project at once" would have no single `baseRef` to
+     * report. With `taskId` the Runtime resolves the project from the Task; the contract cannot say
+     * "exactly one of" without losing `shape`, so the Runtime refuses an empty scope instead.
+     */
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid().optional(),
   }),
   /**
@@ -2154,7 +2180,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.revision.create'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
     expectedVersion: z.number().int().nonnegative(),
     /** Absent means "keep the current detail and only change the feature declaration" (ADR-0065). */
@@ -2171,19 +2197,19 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
   z.strictObject({
     ...requestBase,
     command: z.literal('task.revision.list'),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
   }),
   z.strictObject({
     ...requestBase,
     command: z.literal('task.revision.delivery.list'),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
   }),
   z.strictObject({
     ...requestBase,
     command: z.literal('task.revision.delivery.get'),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     deliveryId: z.string().uuid(),
   }),
   /**
@@ -2197,7 +2223,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.revision.delivery.resolve'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
     deliveryId: z.string().uuid(),
     action: z.enum(['STOP_AND_RESTART', 'RETRY']),
@@ -2405,7 +2431,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
   z.strictObject({
     ...requestBase,
     command: z.literal('task.schedule.explain'),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
     adapterId: nonBlankString.optional(),
   }),
@@ -2426,7 +2452,7 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     ...requestBase,
     command: z.literal('task.schedule.clearUnknown'),
     commandId: z.string().uuid(),
-    projectId: z.string().uuid(),
+    projectId: taskProjectIdSchema,
     taskId: z.string().uuid(),
   }),
   /**

@@ -8907,3 +8907,76 @@ writer」，因此改为严格委托 `ServiceKernelStore.transitionProcess`，�
 2. **第二台机器尚未接入**：ADR-0075 的约定没有双机实测（没有两台机器同时开发的证据），只核对了单机事实与命令面必然失败的路径。
 3. **Runtime 状态不跨机**：Task/Session/Execution/verification/worktree 仍然只在本机有效，在一台机器建的 Task 不能在另一台继续——这不是缺陷而是当前边界，已写入 runbook §2 与 ADR Consequence。
 4. **开发机若自行跑 `project integration run`**：其 integration ref 仍是该机器本地事实，不等于成果已进 `dev`；这一点在 ADR-0075 D05/决定 7 中写明，但没有命令层面的阻止（按 D04 A 不新增门禁）。
+
+## 用户任务（`Loyage/task_cli`）— `task` 命令以 Task id 为地址，project 是 Task 的字段（ADR-**0076**，无 schema 变更）
+
+状态：已实现、已在工作区验证；**未 commit、未 push、未合入 `dev`、未跑全量测试**（本分支按 ADR-0038 只跑定向测试）。
+
+用户原话：「改进 task 的 cli 接口，task 应该是直接由 codeestra task 搜寻到的，project 只是它的字段信息，
+列出 task 和对 task 进行操作的时候不需要指定 project。」四道选择题的答复（本 ADR 的 Decision 直接来自它们）：
+
+1. **范围** = 只限 `task *` 组（`session guide/list`、`project impact *`、`project.integration.request`、
+   `reclaim --task`、`scheduler reservations *` 的拼写**未动**）。
+2. **解析位置** = Runtime 自行解析（`projectId` 在这些 Runtime 请求里变为可选，CLI 不再发送）。
+3. **`task create`** = 改用 `--project <id>`（创建时 Task 尚不存在）。
+4. **旧写法** = 硬切换，不接受 `<project-id> <task-id>`（多出来的 token 是 task id 或未知 flag → 用法错误，退出码 2）。
+
+### 改了什么
+
+- **契约（`packages/contracts/src/index.ts`）**：新增 `taskProjectIdSchema`（`z.string().uuid().optional()`）并用于
+  `task` 组的 32 条请求；`task.create` 的 `projectId` **保持必填**；`task.list` / `task.depends.list` 的项目是可选的过滤/主体。
+- **Storage（`packages/storage/src/database.ts`）**：新增 `resolveTaskProject` / `resolveOperationProject` /
+  `resolveRevisionDeliveryProject`（按行解析归属、已信任项目才可见、声明不同项目即 `TASK_PROJECT_MISMATCH`，新增稳定码）、
+  `listAllTasks`，并把 `listTasks` 与它收敛到同一个 `listTasksWhere` 投影；新增稳定码 `TASK_SCOPE_REQUIRED`。
+- **Runtime（`apps/runtime/src/task-scope.ts` 新增 + `main.ts`）**：`dispatch` 之前一处把 `projectId` 解析好，
+  handler 完全不用改；`task.list` 不带项目时走 `listAllTasks`；`task.depends.list` 两个主体都不给时以 `TASK_SCOPE_REQUIRED` 拒绝。
+- **CLI 命令树与分发（`apps/cli/src/command-tree.ts` / `main.ts`）**：36 条 usage 改为只收 `<task-id>`（或 `--project` 过滤），
+  `task create` 解析 `--project`，`task list` / `task depends list` 按新形态解析；`task schedule status|plan|run` 保持 `<project-id>`。
+  诊断文案里的 `task recover <project> <task>` 建议改为只给 task id；`task status` 的散文提问后续读用**任务详情自带的 `projectId`**。
+- **测试**：新增 `apps/runtime/test/cli-task-scope.test.ts`（4 项：跨项目列表与 `--project` 过滤、只凭 id 读一个 Task、
+  **Runtime 命令面**给出不一致 projectId 时的 `TASK_PROJECT_MISMATCH`、依赖读的两种主体与「都不给」的用法错误）；
+  33 个既有测试文件（216 处调用）与 `test/support/runtime-reclamation.ts` 按新拼写改写；`cli-help.test.ts` 的
+  「`task list` 是用例错误」一例按新语义移除（`task list` 现在合法，`--bogus` 仍是用例错误）。
+
+### 实际验证（只跑这些；未跑 `bun run check` / `just check` / `just verify`）
+
+- `bun run typecheck`（`tsc --noEmit`）：通过。
+- 定向测试 37 个文件、**230 项**全部通过：`cli-command-surface`、`cli-help`、`cli-task-scope`(新)、`cli-task-control`、
+  `cli-task-create`、`cli-task-depends`、`cli-task-purge`、`cli-task-recover`、`cli-task-retry`、`cli-task-run-progress`、
+  `cli-task-service`、`cli-schedule`、`cli-targeted-tests`、`cli-transcript`、`cli-impact`、`cli-managed-project`、
+  `cli-managed-integration`、`revision-delivery`、`cli-snapshot-recheck`、`cli-attention`、`cli-capacity-slots`、
+  `cli-claude-adapter`、`cli-codex-adapter`、`cli-global-control`、`cli-intention`、`cli-knowledge`、`cli-prose-question`、
+  `cli-prose-question-attention`、`cli-reclaim`、`cli-reclaim-batch`、`cli-session-attach`、`cli-session-guidance`、
+  `cli-session-handoff`、`runtime-lifecycle`，以及 `packages/contracts/test`（46 项）与 `packages/storage/test`（190 项）。
+- 手工端到端（临时 `CODEESTRA_HOME` + 临时仓库，未触碰真实 home）：`project trust` → `task create --project <id>` →
+  **只给 task id** 的 `task status`（返回里 `projectId` 正确）→ `task list`（不带项目，1 行且带 `projectId`）→
+  旧写法 `task status <project> <task>` 以用法错误退出码 2 结束并指向 `task status help`；随后 `stop` 收掉 Runtime。
+- 未验证：真实 provider 的完整链路（`run`/`verify` 只由既有 stub/脚本 Adapter 与测试夹具覆盖）；STRICT 下的同一命令面
+  （本次未新增任何确认步骤，FULL/STRICT 分支代码未改）。
+
+### 用户文档同步（ADR-0050 D01 / D03，落点按 ADR-0063）
+
+- `docs/guides/cli/task-lifecycle.md` §4：新增「本节命令只收 `<task-id>`」的寻址说明（含 `task create` 与
+  `task schedule status|plan|run` 两个例外、`TASK_PROJECT_MISMATCH`、旧写法用法错误），并改写 §4 全部 usage；
+  `task list` 一节补「默认列出本 Runtime 全部已信任项目、`--project` 过滤、未信任即 `NOT_FOUND`」。
+- `docs/guides/cli/task-result-verify.md`、`docs/guides/cli/task-revision-session.md`：`task result * / tests * / verification list /
+  operation * / verify` 与 `task revision * / revision delivery * / transcript` 的 usage 去项目。
+- `docs/guides/cli/integration-dag-scheduler.md` §12：依赖命令用法去项目，并新增「`list` 二者必居其一」的理由
+  （`baseRef` 是单数，绑定一个项目的基线）。
+- `docs/guides/manual.md` §4（含新的寻址说明）、`docs/guides/workflow.md` §1、`docs/guides/recipes.md`、
+  `docs/guides/features.md`、`docs/guides/troubleshooting.md`：命令示例与「功能清单」表格改为新拼写。
+- 五篇以上的版本头按 D02 更新（`schema` v38、最后校对 2026-09-17），并各加一条 ADR-0076 修订说明。
+- `docs/architecture/service-process-signal.md`、`docs/architecture/state-machines.md`、
+  `docs/notes/real-provider-acceptance-runbook.md`：引用旧拼写的句子与验收命令同步。
+- `docs/decisions/README.md`：索引新增 ADR-0076，「当前有效语义」的 Task 输入字段之后新增一条 Task 寻址条目。
+
+### 剩余问题（未做 / 不得当成已完成）
+
+1. **未 commit / 未 push / 未合入 `dev`**：按仓库纪律由人执行；本 Agent 未动任何 Git 状态。
+2. **只改了 `task *` 组**：`session guidance`、`project impact`、`project.integration.request`、`reclaim --task`、
+   `scheduler reservations *` 仍要求 `project-id`；要不要统一是**下一个决策**，本轮用户明确选了「只限 `task *`」。
+3. **`task depends list` 没有「全部项目」形态**：`baseRef` 是单数、绑定一个项目，所以两个主体都不给是用法错误；
+   要支持多项目投影需要改读模型，未做。
+4. **`docs/guides/cli/integration-dag-scheduler.md` §11 与 `recipes.md` 里仍有已删除命令的历史用法**
+   （`task integrate` / `task integration *`，ADR-0066 删除）：本次未改写它们的示例，只保证现状描述不含错误承诺。
+5. **`task list` 无过滤时会遍历所有已信任项目**：项目/任务多时输出更大，无分页（既有投影本来就没有分页）。

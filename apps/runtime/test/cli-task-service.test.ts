@@ -119,7 +119,7 @@ describe('Project/Task Service are the single write path (S7, ADR-0070)', () => 
       expect(projectService).toMatchObject({ id: projectId, parentServiceId: rootServiceId,
         projectId, taskId: null, lifecycle: 'ACTIVE' });
 
-      const created = await cli(['task', 'create', projectId, 'Do the thing',
+      const created = await cli(['task', 'create', '--project', projectId, 'Do the thing',
         '--title', 'Do the thing', '--name', 'do-the-thing', '--feature', 'core-module'], environment);
       expect(created.exitCode).toBe(0);
       const task = JSON.parse(created.stdout) as TaskJson;
@@ -132,7 +132,7 @@ describe('Project/Task Service are the single write path (S7, ADR-0070)', () => 
 
       // `task status` and `service get <taskServiceId>` are two readings of one row: the same
       // lifecycle and the same version, not a second state machine that can drift.
-      const status = JSON.parse((await cli(['task', 'status', projectId, task.id], environment)).stdout) as
+      const status = JSON.parse((await cli(['task', 'status', task.id], environment)).stdout) as
         { readonly task: TaskJson };
       expect(status.task).toMatchObject({ state: 'DRAFT', version: 0 });
       const readTaskService = await serviceGet(environment, task.id);
@@ -189,12 +189,12 @@ describe('Project/Task Service are the single write path (S7, ADR-0070)', () => 
 
   test('a refused task create leaves no TASK Service behind', async () => {
     const { environment, projectId } = await trustedProject();
-    const refused = await cli(['task', 'create', projectId, 'Declare nothing',
+    const refused = await cli(['task', 'create', '--project', projectId, 'Declare nothing',
       '--title', 'Declare nothing', '--name', 'declare-nothing', '--feature', 'not-declared'],
     environment);
     expect(refused.exitCode).toBe(1);
     expect(refused.stderr).toContain('UNKNOWN_FEATURE');
-    expect(JSON.parse((await cli(['task', 'list', projectId], environment)).stdout)).toEqual([]);
+    expect(JSON.parse((await cli(['task', 'list', '--project', projectId], environment)).stdout)).toEqual([]);
     // No Task row, no revision, and no orphan TASK Service: the Service row is written by the same
     // transaction as the Task it projects, so a refused declaration cannot leave half of it.
     expect(JSON.parse((await cli(['service', 'list', '--kind', 'TASK', '--json'],

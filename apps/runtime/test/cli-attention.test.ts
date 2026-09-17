@@ -151,12 +151,12 @@ async function startQuestionnaireTask(title: string): Promise<{
   const projects = JSON.parse((await cli(['project', 'list'], environment)).stdout) as
     readonly { id: string }[];
   const projectId = projects[0]?.id as string;
-  const created = JSON.parse((await cli(['task', 'create', projectId,
+  const created = JSON.parse((await cli(['task', 'create', '--project', projectId,
     'Ask before choosing a package manager', '--title', 'Ask before choosing a package manager',
     '--name', 'ask-package-manager'], environment)).stdout) as { readonly id: string };
   const taskId = created.id;
   // Submission starts this undeclared Task immediately under ADR-0059.
-  expect((await cli(['task', 'submit', projectId, taskId, '0'], environment)).exitCode).toBe(0);
+  expect((await cli(['task', 'submit', taskId, '0'], environment)).exitCode).toBe(0);
   return { environment, projectId, taskId, reportPath };
 }
 
@@ -220,7 +220,7 @@ describe('codeestra attention answer', () => {
         { type: 'CHOICES', questionIndex: 1, choiceIndexes: [0, 1] },
       ] });
 
-      const status = JSON.parse((await cli(['task', 'status', projectId, taskId],
+      const status = JSON.parse((await cli(['task', 'status', taskId],
         environment)).stdout) as { readonly taskState: string;
           readonly executions: readonly { readonly state: string;
             readonly session: { readonly state: string } | null }[] };
@@ -252,7 +252,7 @@ describe('codeestra attention answer', () => {
       const deadline = Date.now() + 5_000;
       let state = '';
       while (Date.now() < deadline) {
-        const current = JSON.parse((await cli(['task', 'status', projectId, taskId],
+        const current = JSON.parse((await cli(['task', 'status', taskId],
           environment)).stdout) as { readonly executions: readonly {
             readonly session: { readonly state: string } | null }[] };
         state = current.executions[0]?.session?.state ?? '';
