@@ -17,7 +17,7 @@
 
 **人工层只从项目 `main` ref 读取**，读法与验证策略、影响映射完全一致：`git rev-parse --verify <ref>^{commit}` → `git ls-tree -r -z` 列举 → `git cat-file blob <commit>:<path>` 逐条读取，用 `TextDecoder({fatal:true})` 解码。因此 Task 分支（及其 worktree）上的同名文件不参与判定。
 
-**机器生成层与物化上下文都是 Runtime 数据，项目树里一个字节都不写。** 这不是风格选择：worktree 里未被 ignore 的未跟踪文件会进入该 Task 的 Git change set（`git ls-files --others --exclude-standard`、`git add --all`），于是任意两个并发 Task 都会因同一个路径被判 `SAME_FILE`/`CONFLICTING`，而且它会被成果 commit 提交并随 IntegrationBatch 进入 `dev`。放在 Runtime 数据目录让「机器生成不进提交」成为结构事实，而不依赖 ignore 规则。项目中 `.gitignore` 的 `.codeestra/generated/` 只是守卫规则（防止用户仓库里残留同名目录被提交），**不是**存放位置。
+**机器生成层与物化上下文都是 Runtime 数据，项目树里一个字节都不写。** 这不是风格选择：worktree 里未被 ignore 的未跟踪文件会进入 Task change set（`git ls-files --others --exclude-standard`、`git add --all`），并被成果 commit 提交；ADR-0068 目标下还会进入 Project managed integration ref。放在 Runtime 数据目录让“机器生成不进提交”成为结构事实，而不依赖 ignore 规则。项目中 `.gitignore` 的 `.codeestra/generated/` 只是守卫规则，不是存放位置。
 
 ## 2. 条目、层序与无覆盖语义
 

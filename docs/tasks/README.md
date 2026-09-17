@@ -8314,9 +8314,57 @@ ADR-0062 标 Superseded by ADR-0066。
 
 边界：没有运行、构建或验证保留的 Web UI 源码；这正是 ADR-0067 的范围，不能据此声称 UI 仍可运行。已有 `$CODEESTRA_HOME/ui-settings.json` 不删除、不迁移，当前 Runtime 忽略它。重新启用 Web UI 必须另立 ADR 并恢复契约、安全边界、文档与测试。
 
-## NEXT — 最小可用纵向切片
+## 用户任务 — AI 操作系统定位与 Service Kernel 改造规划（ADR-0068）
 
-本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），
+状态：**文档与方案已完成；实现尚未开始。**
+
+用户提出 Codeestra 的长期定位与 Service / Process / Agent / Signal 设计，并经两轮选择确认：内核 Service-first、调度 Task-first；Service 是 Runtime 内持久 Actor；Process 只监督 Agent；Signal 使用持久 inbox/outbox；恢复 Project Service 受管 integration ref/worktree；兼容现有 CLI 并新增内核面；Service 状态使用类型化核心 + namespaced metadata；后续增量迁移。
+
+本格交付：
+
+- 新增 ADR-0068 与 `docs/architecture/service-process-signal.md`；
+- 改写 `PROJECT_SPEC.md` 的定位、主流水线、核心不变量、证据与阶段；
+- 重写 `docs/roadmap/mvp.md` 为 S0–S10 依赖图、8 个 Agent ownership lane 与逐波验收；
+- 同步架构索引、domain/scheduler/state-machine/repository 文档、ADR 索引、根 README、用户指南入口/概念/手册与 `AGENTS.md`；
+- 明确当前 schema v36 与目标设计的边界：没有新增命令、schema 或 Runtime 行为，不把目标误报为已实现。
+
+验证：纯文档格只执行链接/术语/`git diff --check` 等定向检查；未运行代码测试或全量检查。
+
+## NEXT — Service Kernel 增量改造（ADR-0068）
+
+> **优先级更新**：本节顶部的新主线取代下方历史“最小可用纵向切片”作为后续多 Agent 改造顺序。下方既有 1–14 项继续保留为真实缺口与历史记录，但除非会改变内核 contract，不应抢在 S1–S4 之前修改公共接口。
+
+用户已确认的目标：Codeestra 是 AI 的操作系统；内核 Service-first、Scheduler Task-first；Service 是 Runtime 内持久 Actor；Process 只监督 Agent；Signal 使用持久 inbox/outbox；保留现有 CLI 并新增内核面；Service state 为类型化核心 + namespaced metadata；增量迁移；Project Service 恢复产品侧受管 integration ref/worktree 与串行 merge queue。
+
+### 新主线
+
+| 顺序 | 任务 | 依赖 | 关键退出条件 |
+|---|---|---|---|
+| S0 | 文档、ADR-0068、目标架构与 roadmap | — | 本次文档格完成；明确目标≠当前 v36 |
+| S1 | 纯领域 Service / Signal / Process / Eligibility contract | S0 | 无 Bun/SQLite/SDK；非法树边、Signal 幂等、Process 终态有定向测试 |
+| S2 | v37 additive storage + Project/Task/Execution 只读投影 | S1 | 单一 migration owner；v36→v37 保留数据、root singleton、FK clean |
+| S3 | Service registry + 持久 Signal dispatcher/reconcile | S2 | claim/handler/ack 各崩溃点不丢 Signal、不双副作用 |
+| S4 | `service/process/signal/intent` CLI + 现有 facade 兼容 | S3 contract | `--json`、稳定退出码；新旧查询同一事实 |
+| S5 | Execution/Session → Process 控制面 | S2/S3 | 不支持能力诚实拒绝；无双 writer |
+| S6 | root/project/task intention + Attention 路由 | S3/S5 | 目标不明建 Attention；guidance/revision 不混淆 |
+| S7 | Project/Task Service 单一写路径 | S3，S4 可并行 | 一条 command 只有一个权威 handler，无双写漂移 |
+| S8 | v38 managed integration ref/worktree + merge queue | S7 | 同项目串行、跨项目并行、CAS、独立验证、失败现场保留 |
+| S9 | Scheduler eligibility 解耦 | S1/S7 | Scheduler 只做排序/容量/准入，事务内重验 eligibility version |
+| S10 | 升级演练、真实验收、文档与兼容层收口 | S4–S9 | v36→v37→v38、crash matrix、CLI 文档完整 |
+
+完整依赖图、lane ownership、定向测试要求与非目标见 [`docs/roadmap/mvp.md`](../roadmap/mvp.md)。
+
+### 多 Agent 协作约束
+
+- `packages/storage/src/migration.ts` 与 schema version 只能由 Storage lane 单一 owner 修改；其他 Agent 不占 migration 号。
+- `PROJECT_SPEC.md`、ADR 索引、roadmap 与本节由协调者统一收口，不让多个 Agent并行改同一文档。
+- 先冻结跨 lane contract，再并行 CLI / Process / Intention；managed integration 必须等 Project/Task 单一写路径成立。
+- 开发分支只跑任务书列出的定向测试；全量只在所有候选合入长期 `dev` 后的精确 SHA 上执行。
+- 当前 v36 没有新内核命令与产品自动集成；任何格都不得把目标表述成已实现。
+
+### 历史剩余项（继续保留）
+
+本节以下的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），
 不依据任何任务记录里的说法。原 0–7 的编号保留在下面的对照表里；从剩余列表中移出的条目在文末单列。
 
 **2026-09-15 更新（FOUNDATION-075）**：原第 11 条（J1 第 7、10 条的两处待用户裁决不一致）已经用户裁决并由 FOUNDATION-075 收口，

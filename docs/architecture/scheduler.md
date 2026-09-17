@@ -1,6 +1,18 @@
 # Conservative Scheduler
 
-状态：§1–§6 是 Phase 2 设计（ADR-0030）；§7 记录**当前已实现的原语**（ADR-0032，schema v21）。**调度引擎本体已由 ADR-0033 / FOUNDATION-055 实现**（`apps/runtime/src/schedule-service.ts` + `CODEESTRA_SCHEDULE_TICK_MS`，默认 5000ms），因此 §1.2 的触发模型与 §7.6 不再是「未实现」：它们已经是实现事实（保留原文的措辞只在下面显式标注更正，不重写历史）。**ADR-0059 把冲突判定从「证明不相交」改为「两侧声明同一功能且对方未完成」（FOUNDATION-091），§1 的活跃集合与 §2 的判定流程下面各有一节显式更正。ADR-0061 的两半都已实现（schema v34）：唯一跨项目 Runtime 上限是 FOUNDATION-096，持久全局 Provider 冻结是 FOUNDATION-097，因此 §8.1–§8.3 都是实现事实。**
+状态：当前调度引擎已实现到 schema v36；ADR-0068 接受了“内核 Service-first、调度 Task-first”与 eligibility 解耦目标，但尚未落地。下文 §1–§8 主要记录当前实现与历史演进；本节先声明目标边界。
+
+## 0. ADR-0068 目标边界（S9，尚未实现）
+
+Scheduler 仍只调度 Task Service，不调度任意 Service 或 Signal。依赖、revision、冲突与基线可达性由 Task/Project 领域服务计算为带版本证据的 `TaskEligibility`；Scheduler 只负责：
+
+1. 过滤 eligible Task；
+2. priority desc → createdAt asc → id asc；
+3. 检查 Runtime 全局暂停与唯一容量；
+4. 原子预留并在事务内重验 eligibility version；
+5. 请求 Task Service 创建 Development Process。
+
+因此“Scheduler 不分析依赖”表示依赖求值从调度循环解耦，不表示系统忽略 DAG。`BLOCKED` 仍专指依赖未满足；冲突、容量和控制等待保持独立原因。现有 `schedule-service.ts` 在 S9 完成前仍是当前权威实现。
 
 ## 1. 调度输入和顺序
 
@@ -149,7 +161,7 @@ on relevant committed event or periodic recovery tick:
   之后已经没有「`complete=false` → UNKNOWN」这个兜底（判定不再读映射与快照），所以这类冲突**根本不被启动前门禁覆盖**：
   它们只在真实运行时暴露（或两个 Agent 真的撞上），由使用方自己用功能声明表达互斥意愿。要用声明字段假装安全仍然不做。
   （全局共享资源清单仍由 `.codeestra/impact.json` 的 `globalResources` 表达，那只覆盖 Git 可见影响，且现在只是证据。）
-- **多成员 IntegrationBatch 的自动组批**：**CLI 显式组批已实现**（FOUNDATION-081 / ADR-0053：`task integration create` 组成多成员批次，一次覆盖整批的独立验证，`PASSED` 才推进 `dev`；见 `state-machines.md` §4）。**调度器仍然不会自动组批**：一次调度 tick 的候选仍各自独立成一个批次，「哪些 Task 合成一批」继续由人显式决定，属后续。
+- **集成组批**：旧多成员 IntegrationBatch 曾实现，已由 ADR-0066/schema v36 删除。ADR-0068 的 S8 目标是 Project Service 持久 merge queue，同项目串行、跨项目并行；Scheduler 不负责自动组批或执行 merge。
 - **饥饿公平策略（aging）**：不加 aging。持续高优先级输入可能饿死低优先级任务，UI 只显示等待时长；公平策略作为独立产品决策留后续。
 
 同样明确不做：按主机 CPU/内存自动推导并发容量；LLM 辅助的 ImpactSnapshot 预测；在 `UNKNOWN` 上新增除 `--allow-unknown` 之外的任何门禁、审批或信任流程。ADR-0061 的全局上限仍是显式配置，不是资源探测器。

@@ -10,15 +10,16 @@
 > §「调度三态」末尾新增「全局暂停」一段、§「运行边界」补充控制状态的持久性（FOUNDATION-097 / ADR-0061 D04/D08）。
 > **本次修订（ADR-0066 / schema v36）**：删除 IntegrationBatch / Integration verification / Promotion
 > 三节与 dev clone、dev 基线、自动回收的表述，Task 基线改为「项目文件夹建 workspace 时检出的分支」这一种。
+> **ADR-0068 文档修订**：首节改为“Service-first 内核、Task-first 调度”，并明确这些是尚未实现的目标术语；其余实体仍按当前 v36 解释。
 
 这份文档解释 Codeestra 里的名词到底指什么、哪些东西**不是**调度主实体、以及几条会影响你日常判断的硬边界。
 规格原文见 [PROJECT_SPEC.md](../../PROJECT_SPEC.md) §2「核心不变量」；这里是面向使用者的说明。
 
 ---
 
-## Task-first
+## Service-first 内核，Task-first 调度
 
-Codeestra 是 **Task-first** 的：**Task 是业务主实体**。
+长期目标（ADR-0068）是：**Service / Process / Signal 是内核一等抽象，Task Service 仍是 Scheduler 的业务主实体**。当前 schema v36 尚未提供通用 Service/Process/Signal 命令；下面 Project / Task / Execution / Session 的说明仍按当前实现书写。
 
 - **Agent、Terminal、Conversation、Worktree 都不是调度的业务主实体。**
   它们是 Task 执行过程中用到的资源与观察面：Agent 是一次执行绑定的一方，Terminal 是某个 Session 的
@@ -26,7 +27,9 @@ Codeestra 是 **Task-first** 的：**Task 是业务主实体**。
   调度、冲突判定、依赖、验证都围绕 **Task** 组织，而不是围绕「哪个 Agent」或「哪个终端」。
 - 你能在界面上看到「执行过程」「终端」「会话」这些视图，但它们**不参与**调度决策的排序与门禁。
 
-好处是：换 Agent 不会变成一个新产品语义（只是新 Execution），关掉界面不会停止任何 Task。
+好处是：换 Agent 不会变成一个新 Task；目标架构里它会形成 successor Process/Execution。关闭客户端不会停止任何 Service、Task 或 Agent 执行。
+
+目标术语：Service 是 Runtime 内持久 Actor，不是 OS 进程；Process 是只监督 Agent 的短期单元；明确 API 走 `SIG_A`，自然语言 intention 走 `SIG_P`。详见 [架构说明](../architecture/service-process-signal.md)。
 
 ---
 

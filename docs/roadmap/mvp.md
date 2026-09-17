@@ -1,166 +1,315 @@
-# MVP Roadmap
+# Service Kernel 改造 Roadmap
 
-状态：**各阶段完成度已由 FOUNDATION-074（Wave K / K1 文档校准）按已合入 `dev` 的实现逐条回填**；本文件不再是「阶段草案」。
-每个 Phase 下面都有一节「当前状态（截至本格）」，写明已完成、仍在做与**未验证**的部分；未验证的能力继续标为未验证，不因为
-功能已实现就当成已验收。
+状态：**ADR-0068 已接受，目标架构尚未实现**。当前可运行基线仍是 schema v36 / ADR-0066/0067：只有现有 `project` / `task` / `session` / `attention` / `scheduler` CLI，没有通用 `service` / `process` / `signal` / `intent` 命令，也没有产品侧受管 integration。
 
-## 排序原则（ADR-0008）
+本文件是接下来多 Agent 改造的权威分波计划。历史实现记录不在这里重复，见 [`docs/tasks/README.md`](../tasks/README.md)；旧 ADR 保留原样，不因 roadmap 改写而失去审计价值。
 
-- 效率至上是最高优化目标：阶段内任务优先选择能直接减少用户等待时间与操作步数的项（例如已完成的 Task cancel、长命令后台化与进度事件、revision 投递确认，以及仍剩余的调度/提升类能力）——这份清单不是承诺，只说明排序依据。
-- 安全/隔离类工作不单独占阶段排期，也不再新增门禁；已实现门禁维持在既有条款。
-- 权限管理（多用户、租户、密钥托管、路径沙箱、网络策略，以及相应的沙箱/联邦）不属于当前 roadmap，不预留专项阶段。
-- 每个阶段的新能力以 CLI 完备为前提。ADR-0067 起暂停 Web UI 开发，当前 roadmap 不安排 UI 投影；检查方式是 CLI 是否有 versioned command、`--json` 与稳定退出码。
-- 验收与自动化测试只用 CLI/命令面断言，不获取电脑控制权（不引入桌面/键鼠自动化）。
+## 1. 目标与硬边界
 
-## Phase 0 — Architecture Foundation
+目标：把现有 Task Runtime 增量演进为“AI 的操作系统”内核：
 
-交付：规格、AGENTS、ADR、模块边界、领域/状态机/SQLite/事件/API 设计；随后建立最小 Bun workspace、TypeScript 严格配置与 Vitest 测试入口。
+```text
+Codeestra Service #0
+  ├─ Scheduler Service
+  ├─ Attention Service
+  └─ Project Services
+       ├─ Task Services
+       │    └─ Development Processes → Agents
+       └─ Integration Processes → Agents
 
-按小步准入：Phase 0 纯领域函数与测试骨架可先开始（关键语义已确认，不涉及外部副作用）；storage/真实 Runtime 编码前关闭影响 Phase 1 产品行为、schema 与 Git 安全的待决项，并验证 Pi 的实际支持范围。不得把纯领域验收等同整个 Phase 0/1 已完成。
+SIG_A：明确 API → Service handler / Operation
+SIG_P：自然语言意图 → Process → Agent → Service APIs
+```
 
-验收：全新环境可运行已声明检查；领域非法迁移测试、数据库约束测试和 fake adapter 合约测试通过。Fake 不替代真实集成验收。
+硬边界：
 
-### 当前状态（截至 FOUNDATION-074）
+1. 内核 Service-first，Scheduler 仍 Task-first；不把任意 Service 都变成调度任务。
+2. Service 是 Runtime 内持久 Actor，不是 OS 进程或 busy-loop。
+3. Process 只监督 Agent；Git/验证等确定性程序继续由 Operation 表达。
+4. Signal 至少一次交付 + 幂等，不宣称跨 Git/进程/SQLite exactly-once。
+5. 默认 FULL 零确认；不新增审批、RBAC、沙箱或信任层。
+6. CLI/Unix socket 先行，所有能力有 `--json`、稳定退出码；Web UI 继续暂停。
+7. 自动化验收只走 CLI/Runtime 命令面和临时仓库。
+8. 增量 migration，不覆盖旧数据、不一次性重写、不并行抢 migration 号。
+9. 当前用户改动、失败现场、现有 branch/worktree 不被清理或重置。
+10. 产品受管 integration 与本仓库自身的人工 `dev → main` 发布规程是两件事；后者仍按 `docs/agents/runbook.md`。
 
-**已完成**。规格、`AGENTS.md`、44 份 ADR（`docs/decisions/`）、`docs/` 下的架构/指南/路线图/任务目录、模块边界与领域/状态机/SQLite/事件/API 设计已建立
-（FOUNDATION-001）；Bun workspace、TypeScript strict、Vitest 与 `Justfile` 已建立，纯领域工程（SpecificationHistory / TaskRevision /
-Execution FSM）已实现并有大面积非法迁移测试（FOUNDATION-002）。
+## 2. 总依赖图
 
-仍在进行的是**架构文档与实现的持续同步**：第 8 节式的逐版本 migration 记录、事件目录与状态机只有在相应实现落地后才权威。
-本格（FOUNDATION-074）刚做过一次全面校准；这不代表未来不会再次漂移。
+```text
+S0 文档与契约冻结（本次）
+ ├─ S1 纯领域内核
+ │   ├─ S2 v37 持久化与只读投影
+ │   │   ├─ S3 Signal dispatcher / Service registry
+ │   │   │   ├─ S4 内核 CLI + 兼容 facade
+ │   │   │   ├─ S5 Execution→Process 与控制面
+ │   │   │   └─ S6 Intention / Attention 路由
+ │   │   └─ S7 Task/Project Service 写路径切换
+ │   │       └─ S8 v38 受管 integration
+ │   └─ S9 Scheduler eligibility 解耦
+ └───────────────────────────────┬───────────────
+                                 └─ S10 收口、迁移演练与文档
+```
 
-## Phase 1 — Single Task Runtime
+`S4`、`S5`、`S6` 可在 S3 contract 稳定后并行；`S8` 必须等 S7 确认 Project/Task Service 已有单一事实源。`S9` 可与 S5–S7 并行开发，但最终接线依赖 S7。
 
-交付：一个项目、一个活动任务、意图/规格持久化、修订历史、独立 branch/worktree、一个真实 Adapter、执行记录、任务验证、失败/取消与重启状态核对。
+## 3. 波次与验收
 
-验收：临时真实 Git 仓库中，从固定 dev commit 创建 Task 到获得固定 revision/commit 的验证结果；不修改 dev/main；重复命令不产生重复执行；保留失败现场；无法恢复真实 Agent 时诚实记录而非伪造 RUNNING。
+### S0 — 规格、ADR 与术语冻结（本次文档格）
 
-Phase 1 不提供 Phase 3 的完整 attach UI。若 Agent 需要交互，必须显式报告，不允许无期限静默挂起或假装成功。具体最小交互入口由 Adapter 决策确定。
+交付：
 
-### 当前状态（截至 FOUNDATION-074）
+- ADR-0068；
+- `docs/architecture/service-process-signal.md`；
+- `PROJECT_SPEC.md`、架构索引、领域/调度文档的目标语义；
+- 本 roadmap 与多 Agent 分工；
+- 当前实现与目标设计明确分层，不伪造已实现命令。
 
-**交付项已实现**：intent/规格持久化与不可变修订历史（FOUNDATION-005/007）、owned branch/worktree 且基线是 `project.devRef`
-（ADR-0009/ADR-0018）、Execution/Session 生命周期与失败分类（FOUNDATION-008/009/010/013/014）、成果 commit（ADR-0003）、
-Task verification（ADR-0006）、Task 暂停/取消/归档（ADR-0016/FOUNDATION-033）、失败后 `FAILED → READY`（ADR-0036/FOUNDATION-061）、
-重启状态核对（ADR-0025/FOUNDATION-045、ADR-0028/FOUNDATION-048）。验收里的「临时仓库里从固定 dev commit 建 Task 到拿到
-验证结果」「不修改 dev/main」「重复命令不产生重复执行」「保留失败现场」「无法恢复时诚实记录而非伪造 RUNNING」都有测试覆盖。
+验收：本地链接成立；全文检索不再把“产品永远不集成”当长期目标；当前用户指南仍明确 v36 不具备新命令。
 
-**未验证**：真实模型下的暂停/恢复组合（ADR-0016 的编排由脚本 Adapter 覆盖，真实 provider 未复验）；真实 provider 的取消超时。
+### S1 — 纯领域内核（无 schema、无副作用）
 
-**交付边界**：Phase 1 的「一个真实 Adapter」已扩展为三个（见 Phase 5）。
+负责模块：`packages/domain`、必要的 `packages/contracts` 纯类型。
 
-## Phase 2 — Task DAG + Scheduler + Parallel Worktrees
+交付：
 
-交付：DAG 校验、依赖满足策略、影响分析、冲突分析、资源预留和多 worktree 调度；负载控制最终形态为每个 Runtime 一个跨项目并行上限，并支持持久的全局 Provider 冻结/继续（ADR-0061）。
+- `ServiceId` / `ServiceKind` / `ServiceTree`；
+- parent/child 合法性、树无环、Task 只能直属 Project；
+- core state version / metadata key/value 与 CAS reducer；
+- `SignalEnvelope`、状态机、claim/ack/nack/retry/dead-letter 判定；
+- `Process` 生命周期与 `Execution` 映射约束；
+- `TaskEligibility` 值对象；
+- 事件名先冻结，不实现 transport。
 
-验收：SAFE 的独立任务并行；UNKNOWN/CONFLICTING 不并行；循环依赖拒绝；下游 dev 基线含所需上游代码。ADR-0009 要求上游先进入 dev 才满足依赖；Phase 4 前允许下游继续 BLOCKED，不提前偷做完整集成。
+定向测试：
 
-### 当前状态（截至 FOUNDATION-074）
+- 非法树边、环、Process 当父节点全部拒绝且零部分应用；
+- metadata 不能修改 core state；
+- 重复 signal idempotency key 收敛；
+- Process 终态不复活、一个活动 Process 一个主 Agent；
+- eligibility version 变化使旧准入失效。
 
-**交付项已实现**：DAG 校验与 `BLOCKED` 语义（ADR-0024/FOUNDATION-044，含环校验）、影响分析与确定性 Conflict Analyzer
-（ADR-0031/FOUNDATION-053，`SAFE|UNKNOWN|CONFLICTING` + 稳定 reason code）、容量原语（ADR-0032/FOUNDATION-054，reservation/release/崩溃 reconcile；
-**上限自 FOUNDATION-096 起是每个 `CODEESTRA_HOME` 唯一的跨项目值**，见下）、调度引擎本体（ADR-0033/FOUNDATION-055，自动 tick、候选顺序、等待语义、
-`--allow-unknown`）与其 UI 投影（FOUNDATION-059）。
+退出条件：领域对象不导入 Bun/SQLite/Agent SDK；没有空 port 冒充能力。
 
-**未验证（因此本 Phase 的验收矩阵尚未成立）**：验收第一项「两个 SAFE 任务真的同时跑」只在调度器/命令面与测试夹具下验证过，
-**真实 provider 的并发运行没有完成受控验收**（`docs/guides/troubleshooting.md` §4 第 1 条）。调度器本身有门禁这一事实不能替代该验收。
+### S2 — v37 additive storage 与只读投影
 
-**ADR-0061 的进度（schema v34，两半都已交付）**：容量上半是 FOUNDATION-096——每个 `CODEESTRA_HOME` 只有一个跨项目上限（默认 2，旧显式值取最小值迁移），命令面为 `scheduler capacity get|set|reset`，占用跨项目按 Task 统计。暂停下半是 FOUNDATION-097——`scheduler control status|pause|resume|reconcile`、持久启动屏障与可核验的 Provider 主进程冻结，只有 Pi 经过真实进程实测（`SUPPORTED`），Codex 与 Claude Code 仍是 `REQUIRES_VALIDATION`，遇到它们的目标会 fail closed 到 `RECOVERY_REQUIRED`（`GLOBAL_PAUSE_UNSUPPORTED`）——**这不构成「全部 Adapter 都能全局冻结」的验收**。
+**migration 唯一 owner：一个 Agent。其他 Agent 不修改 migration/version。**
 
-## Phase 3 — Interactive Agent Sessions
+建议表（最终 DDL 由该格 ADR/设计确认）：
 
-交付：真实 session 接入、Attention Inbox、WAITING_FOR_USER、回答路由、断连与恢复、运行中修订的通知与确认；增加 Session Guidance 与原生终端接管。Pi 按 ADR-0010 在当前工具结束后的结构化安全点执行 RPC→原生 TUI/PTY 交接，detach 后保持 TUI 运行，显式 release 再交接回 RPC；CLI 提供 request/attach/status/release 与可脚本化 guidance。Web UI 投影已按 ADR-0067 暂停。
+- `services`、`service_metadata`、`service_links` 或等价父关系；
+- `signals`、`signal_attempts`、`signal_receipts`；
+- `processes`、`process_execution_links`；
+- root singleton 与 service contract version；
+- append-only trigger / partial unique index / FK。
 
-实现顺序：先以真实 Pi spike 验证 session-file 双向恢复、权限模式 side channel（FULL 零确认 / STRICT gate）和 PTY 生命周期；再实现 handoff Operation / Session incarnation / 单 writer lease；最后接 CLI attach 与 UI 终端。任一步都不得让两个 Provider 进程同时写同一 conversation/worktree。
+迁移策略：
 
-验收：一个 Task 等待用户时其他 Task 可继续；回答不会路由到错误会话；修订投递状态可审计；工具运行中请求接管不 abort 工具，安全点后能进入真实 Pi TUI；detach/reattach 不停止 Agent；交还后 RPC 从同一 conversation 继续；Session Guidance 不改变 TaskRevision，而 `task amend` 仍使旧验证失效；writer 竞争稳定失败；故障注入不双开进程。全部通过 CLI/Runtime/PTY framing 的 headless 命令面测试完成。
+- 启动时为每个 home 建稳定 root Service、Scheduler Service、Attention Service；
+- 现有 Project/Task 先建立一一 projection link；Project/Task 表仍是 core state 权威源；
+- 现有 Execution 建 Process projection link；不复制 lifecycle 字段的写权威；
+- migration 可重复打开、旧库升级保留全部行，失败保留原库。
 
-### 当前状态（截至 FOUNDATION-074）
+定向测试：v36→v37 真实文件升级、root singleton、树约束、幂等回执、FK check、故障注入与重新打开。
 
-**已实现**：结构化 Attention（typed answer、`WAITING_FOR_USER`、回答路由与投递台账）、运行中修订与投递确认
-（ADR-0028/FOUNDATION-048）、Session incarnation 与单 writer lease（ADR-0023/FOUNDATION-043）、handoff fence/safe point 与 PTY
-原生 TUI 接管（ADR-0026/FOUNDATION-046，含 attach/detach/release/admit 与 `terminal read|write`）、只读 transcript 视图
-（ADR-0013）。
+### S3 — Service registry 与持久 Signal dispatcher
 
-**已实现（FOUNDATION-088 / ADR-0057 / schema v31）**：**Session Guidance**——`session guide`（`session.guidance.record`）
-把一条指导交给运行中的会话并记录它产生的事实，`session guidance list|get` 读台账；`guide` 端口在 Pi 上实现
-（RPC `steer` + provider 自己的 `queue_update`），Codex 报 `REQUIRES_VALIDATION`、Claude Code 报 `UNSUPPORTED`；
-记录后每个新 Execution 启动时随启动参数交给 provider（`--append-system-prompt` / `developerInstructions`），
-artifact 在 Runtime 数据目录且**不写 Task worktree**。它**不产生 TaskRevision、不动 revision、不使验证失效**，
-而 `task amend` 仍然使旧验证失效。**「已投递」= provider 通道接收（入队），≠ 模型已读**（`modelAcknowledgement` 恒为 `UNSUPPORTED`）。
-`event-model.md` §2.3 已把 `SessionGuidanceRecorded`/`SessionGuidanceDelivered` 从「未实现」改为已实现。
+负责模块：`apps/runtime`，复用 storage/outbox/Operation 原语。
 
-**未验证**：跨交接权限模式完整矩阵、并行工具批次的安全点、PTY resize（如实声明 `UNSUPPORTED`）、真实模型在 TUI 中键入后
-交还自动化的复验；Session Guidance 的**模型侧**（真实模型是否读了 guidance、真实 Pi 在忙碌轮次里是否接受 `steer`）
-；Web UI 投影已从当前方向移除（ADR-0067）。
+交付：
 
-## Phase 4 — Integration Pipeline
+- Runtime bootstrap 恢复 root/system/project/task Service registry；
+- per-kind contract registry；
+- enqueue / claim lease / dispatch / ack / retry / reconcile；
+- `SIG_A` 严格 payload 校验；`SIG_P` 只记录并交给 Process factory，不直接在 Service 上挂 Agent；
+- 事件驱动唤醒 + 周期 reconcile，无每 Service busy-loop；
+- dead-letter / recovery facts 与 Attention 升级 hook；
+- Runtime stop/draining 与全局暂停屏障接入。
 
-交付：IntegrationBatch、Task 结果集成到长期 dev、独立验证、固定 dev/main SHA 后提升 main（FULL 无需批准，STRICT 需批准）、main 更新后的 CLI stop/status 重启与响应检查，以及冲突/失败/ref 移动处理。
+故障矩阵：
 
-验收：失败候选不改变 dev/main；所有完成功能先进入 dev；提升的 commit 与被验证 dev commit 一致；dev/main 任一移动使 STRICT 批准失效；main 更新后必须重启 Runtime，恢复响应前不报告成功；批次成员 revision 可追溯。
+1. enqueue 前失败；
+2. enqueue 已提交、未 claim；
+3. claim 后 handler 前崩溃；
+4. Operation 已发起、Signal 未 ack；
+5. handler 成功、ack 回写前崩溃；
+6. 重复 signal / 重复 boot reconcile。
 
-### 当前状态（截至 FOUNDATION-074）
+退出条件：每格都通过真实 SQLite + 临时 Runtime 测试证明“零丢失、不双副作用、不谎报 exactly-once”。
 
-**已实现**：单成员 `task.integrate` + 独立集成验证（ADR-0018/FOUNDATION-038，`integration_batches`/
-`integration_batch_items`/`integration_verification_runs`）、`promotion prepare/approve/promote/abandon`（ADR-0022/FOUNDATION-042，
-FULL 无批准、STRICT 保留批准且 ref/证据移动产生 `STALE`）、main 更新后的 CLI stop/status 重启序列、分层验证证据与
-`promotion full-suite run`（ADR-0038/ADR-0039/FOUNDATION-065，schema v25 的 `dev_full_suite_evidence` 绑定候选 commit +
-main ref 的 policy digest + 该 commit 的 lockfile digest）、启动 reconcile 与崩溃恢复。
+### S4 — 内核 CLI 与兼容 facade
 
-**未实现**：多成员批次、批级 `STALE`、批级 `CANCELLED`、任务集合级集成（`state-machines.md` §4 的「未实现（不得声称）」）。
-`task.integrate` 每次只集成一个 Task。
+负责模块：`packages/contracts`、`apps/cli`、Runtime dispatch；不得改 migration。
 
-**未验证**：三次真实的 `dev → main` 提升走的都是 `AGENTS.md` 规定的人工路径（在已检出的 main 工作树里 `git merge --ff-only`），
-**没有任何一次产生领域 `PromotionRecord` 行**——产品 `promotion prepare` 需要 IntegrationBatch 的集成验证证据，而那些候选是
-协调者手工解冲突合入 `dev` 的，没有 IntegrationBatch。第三次提升确实跑通了 `promotion full-suite run` 的产品路径（这是
-ADR-0039 落地后第一次），但产品提升路径本身仍未在这些候选上成立。
+目标命令（本格冻结准确拼写）：
 
-## Phase 5 — Multiple Agent Adapters
+```text
+service list|get|tree|state get|state set
+process list|get|input|pause|resume|terminate
+signal send|list|get|retry
+intent send
+```
 
-交付：Pi、Codex、Claude Code 接入；能力矩阵和一致性测试；失败后新 Execution 可更换 Agent。
+要求：
 
-验收：Core 无供应商类型依赖；不支持的交互/恢复能力明确反馈。
+- 所有 query/command 有严格 Zod、`--json`、退出码 0/1/2/3；
+- `service state set` 只写 metadata；核心迁移必须走类型化命令；
+- `signal send` 必须通过目标 contract，不能发送任意未注册 API；
+- 现有 `project/task/session/attention/scheduler` 命令保持可用；
+- 同一事实从新旧命令读出的 ID/state/version 一致；
+- usage 与 `docs/guides/cli/` 同格更新。
 
-### 当前状态（截至 FOUNDATION-074）
+### S5 — Execution → Process 与 Agent 控制面
 
-**已完成**：Pi（FOUNDATION-013/ADR-0026）、Codex（ADR-0029/FOUNDATION-049）、Claude Code（ADR-0040/FOUNDATION-066）三个真实
-Adapter 已接入；能力矩阵按实测逐维度如实声明，`UNSUPPORTED` 不被掩饰（例如 Codex 的 `pauseWithQuiescence`/
-`revisionAcknowledgement`/`attach`/`reconnectToLiveSession`/`controlledConfiguration`）；`AdapterRegistry` 按 ID 保持唯一实例，未注册
-Adapter 在任何副作用前拒绝；Agent 类型不出现在 domain/storage 里。
+负责模块：domain/runtime/agent adapters；不改变 Service/Signal schema。
 
-**部分实现**：插件/资源选择能力 `pluginSelection` 只有 Pi 支持（ADR-0044/schema v27）；Codex 与 Claude 如实为 `UNSUPPORTED`。
+交付：
 
-**未验证**：真实模型是否真的使用所选 skill/theme；真实 provider 的并发与取消超时。
+- 每个新 Execution 同事务关联一个 Process；旧 Execution 懒迁移/投影；
+- Process 固定 parent Task/Project Service、任务书、Agent config、预算与 status；
+- `process input/pause/resume/terminate` 复用现有 Session Guidance、Task pause/resume/cancel 与 provider capability；
+- token/cost/tool count/last progress 只读投影；
+- successor Agent 创建 successor Process 或明确 incarnation 关系，不双 writer；
+- Process 终态向 parent 发 Signal，重复 completion 幂等。
 
-## Phase 6 — Project Knowledge
+关键验收：Pi/Codex/Claude 不支持的能力继续如实拒绝；“已入队”不写成“模型已读”；进程身份不只看 PID。
 
-交付：人工与机器知识分层、加载和来源、更新审计。
+### S6 — Intention 与 Attention 路由
 
-验收：机器生成不能覆盖人工知识；Execution 能追溯实际使用的知识版本。
+交付：
 
-### 当前状态（截至 FOUNDATION-074）
+- root/project/task/service 级 `intent send`；
+- `SIG_P` 创建意图分析 Process；
+- Process 上下文只包含目标 Service contract、可见子节点摘要和必要知识快照；
+- 结构化输出只能是 route / typed command / create task / request clarification；
+- 目标不明确时建立 Attention；回答按 correlation/causation 路由回原 Process；
+- root Attention list 支持跨项目，现有 project filter 保持兼容；
+- 原始用户输入、分类与路由审计保留。
 
-**第一小步已完成**（ADR-0041/FOUNDATION-067，schema v26）：分层加载（人工 `instructions`/`skills` 只从项目 `main` ref 读、机器层
-在 Runtime 数据目录）、无覆盖语义（重复 id/path fail-closed，任一条被拒则整层不出快照）、`knowledge_snapshots` 与
-`execution_knowledge_snapshots` 两张 append-only 表把快照绑定到 Execution、`project knowledge validate/list/show/resolve` 命令面。
-「机器生成不能覆盖人工知识」与「Execution 能追溯所用知识版本」这两个验收项已有结构事实与测试支撑。
+非目标：本格不让模型自由生成 SQL/CLI 字符串，不自动把 task guidance 当 TaskRevision。
 
-**未验证**：Provider 是否真的读取 Runtime 物化的 `knowledge-context.md`——Adapter 尚不消费 `knowledgeSnapshotRefs`。
+### S7 — Project / Task Service 成为单一写路径
 
-## Phase 7 — Self Evolution
+交付：
 
-交付：Self Task、Candidate、自托管测试、PROMOTABLE、用户 Promotion、独立 bootstrap 和恢复演练。
+- `project trust` 创建/恢复 Project Service；
+- `task create` 创建 Task Service，Project/Task 表变为该 Service kind 的类型化 core projection；
+- Task 创建、submit、revision、执行、验证、取消、归档统一经 Service handler；
+- Service tree/query 与旧 CLI 无双写漂移；
+- Scheduler 请求 Task Service 创建 Development Process，不直接拼装 Agent start；
+- 兼容期事件名不重命名，新 Signal 事实与旧 domain event 的职责分开。
 
-验收：Stable 不被开发过程覆盖；失败 Candidate 不污染 Stable 数据；切换与回滚经过兼容性检查；bootstrap 在 Runtime 无法启动时仍可使用。
+切换条件：必须有 migration rollback/forward 演练与“一条 command 只有一个权威 handler”的静态/测试证据。
 
-### 当前状态（截至 FOUNDATION-074）
+### S8 — v38 受管 integration 与 Project merge queue
 
-**未开始**。`state-machines.md` §5 的 Candidate/Promotion 状态机仍是设计合约；`event-model.md` §2.3 把
-`CandidateBuilt`/`SelfTestCompleted`/`StablePromoted`/`StableRollbackCompleted` 登记为「未实现」。`AGENTS.md` 已规定 Self Task
-的操作边界（独立 worktree、不覆盖 Stable、不绕过 bootstrap 恢复边界），但没有任何 Self Task / Candidate / bootstrap 能力落地。
-不可逆 migration 与 bootstrap 自身更新的策略仍是本 Phase 的阻塞决策。
+**必须在独立波次、由唯一 migration owner 执行。** 不复制旧 ADR-0018/0053 表，先按 ADR-0068 重新设计。
 
-## 非目标
+交付：
 
-本轮不做完整产品 UI、全部阶段实现、云端调度、多租户、远端控制、分布式基础设施、自动无审批自我升级、**权限管理（RBAC/密钥托管/沙箱）**，也不做桌面/键鼠自动化测试。产品发布版本、工期和发布承诺在首个真实 Adapter 技术验证前不预估；工程 package 的 0.0.0 仅为未发布占位。
+- Project Service 的 `integration_ref`、owned integration worktree 与 ownership token；
+- Task 默认从 current integration commit 建固定 base；
+- merge-request Signal、持久队列、单项目唯一活动 integration；
+- Integration Process（Agent supervisor）与受控 Project Git API；
+- task verification 与 integration verification 分离；
+- expected integration OID + CAS 推进；
+- conflict / failed verification / crash / stale ref 保留现场；
+- 成功 Signal 更新 Task integration projection并触发下一项；
+- CLI 类型化 facade（准确命名在该格 ADR 冻结），不恢复旧 `promotion *`。
+
+验收：
+
+- 两项目可同时集成，同项目严格串行；
+- 用户主工作树始终 clean、HEAD/ref 不被直接操作；
+- Task A 合入后，新 Task B 基线可达 A；
+- ref 外部移动产生 STALE，不 force；
+- merge 冲突只阻塞该项目 queue 的推进，不阻塞 root/其它项目/Attention；
+- 集成成功后回收遵守 ownership，失败现场保留。
+
+### S9 — Scheduler eligibility 解耦
+
+交付：
+
+- Task/Project 服务产出版本化 `TaskEligibility`；
+- DAG、revision、冲突与基线可达性在领域服务求值；
+- Scheduler 只做排序、全局控制、容量与 reservation；
+- reserve 事务内重验 eligibility version；
+- submit/Signal/依赖变化/集成成功触发 eligibility refresh；
+- `BLOCKED` 仍只表示依赖，不把容量/全局暂停混进去。
+
+验收：旧 scheduler CLI 的 explain 输出能指向 eligibility evidence；真实两个 SAFE Task 并发仍需真实 provider 验收，fake 不替代。
+
+### S10 — 收口、演练、文档与兼容层清理
+
+交付：
+
+- v36→v37→v38 升级演练、备份与失败注入；
+- Runtime crash/restart、signal reclaim、process reconcile、integration stale 全矩阵；
+- current user guides 全面切换到新命令；
+- 删除临时双读/投影代码前，证明旧 CLI 与新 CLI 使用同一权威 handler；
+- 标注废弃但不突然删除兼容命令；删除需要独立 ADR；
+- 真实 provider 验收清单更新；
+- `docs/tasks/README.md` 逐格记录实际检查，不把未跑测试写成通过。
+
+## 4. 多 Agent 分工建议
+
+建议 8 个 ownership lane；同一文件只分给一个 lane，避免大量冲突：
+
+| Lane | 主要所有权 | 首个任务 | 依赖 |
+|---|---|---|---|
+| A Contract | `packages/domain`、内核 contract 设计 | S1 | S0 |
+| B Storage | `packages/storage`、migration | S2，之后 S8 migration | S1；唯一 migration owner |
+| C Runtime Kernel | Service registry、Signal dispatcher | S3 | S1/S2 |
+| D CLI | `apps/cli`、request schemas、CLI guides | S4 | S3 contract |
+| E Process | Execution/Session/Adapter 映射 | S5 | S2/S3 |
+| F Intent | intention、Attention 路由 | S6 | S3/S5 factory |
+| G Project/Task | typed handlers、兼容 facade、eligibility | S7/S9 | S3，部分可并行 |
+| H Integration | Git integration workspace、queue、verification | S8 | S7 + B migration |
+
+协调者职责：
+
+1. 先冻结跨 lane interface 与文件 ownership；
+2. B lane 独占 migration 号和 `migration.ts`；
+3. 每个 lane 只运行定向测试，范围扩大时更新 `.codeestra/tests.json`；
+4. 每个合并点做 contract/schema/event 名审查；
+5. 最终在长期 `dev` 的精确候选 SHA 上才运行全量检查；
+6. 不让多个 Agent 同时改 `PROJECT_SPEC.md`、ADR 索引、roadmap；文档收口由协调者统一完成。
+
+## 5. 每格交付模板
+
+每个 Agent 的任务书必须包含：
+
+- 本格目标与明确非目标；
+- 可修改文件清单和禁止修改文件；
+- 输入 contract 版本 / schema 版本；
+- 3–8 条不变量；
+- 具体定向测试文件/命令；
+- 稳定错误码与退出码；
+- crash/retry/idempotency 预期；
+- 文档落点；
+- 未验证能力的诚实声明。
+
+完成定义：代码、定向测试、CLI contract、migration（如有）、对应架构/用户文档和 `docs/tasks/README.md` 记录同格交付。只写代码不写命令面或文档，不算完成。
+
+## 6. 保留但不阻塞内核改造的既有缺口
+
+这些缺口仍然真实，但不抢在 S1–S4 前破坏新内核接口：
+
+- 真实 provider 的并发、暂停/恢复、revision ACK 与取消超时复验；
+- PTY 跨交接权限矩阵与真实模型完整复验；
+- Project Knowledge 的模型侧消费验证；
+- Codex 散文问题事实层；
+- Phase 7 Self Evolution / bootstrap；
+- Web UI 继续暂停。
+
+若某缺口会改变 Service/Process/Signal 公共 contract，应先升级为当前波次的阻塞项；否则独立并行处理。
+
+## 7. 非目标
+
+- 云端分布式 Service、跨机器 Signal、Kafka/RabbitMQ；
+- 每 Service 一个进程、容器或线程；
+- 多用户/RBAC/租户/密钥托管；
+- 自动发布 integration ref 到用户 main/release；
+- 恢复 Web UI；
+- 桌面/键鼠自动化测试；
+- 一次性 schema reset 或删除历史审计。

@@ -1,0 +1,315 @@
+# Service / Process / Agent / Signal 内核
+
+状态：**目标架构，尚未实现**。决策依据为 [ADR-0068](../decisions/0068-service-process-signal-kernel.md)。当前产品仍是 schema v36；当前可用命令以 `docs/guides/cli/` 为准。
+
+## 1. 为什么需要这层内核
+
+Codeestra 的目标是 AI 的操作系统。它不替代宿主操作系统，而是在宿主之上管理 AI 软件里的四类事实：
+
+- 谁长期提供服务、保存状态并随时响应；
+- 谁为一个有限目标监督 Agent，何时开始、阻塞、恢复和结束；
+- Agent 通过什么受控接口读取状态、执行程序并把结果交回；
+- 用户、程序与 Agent 的输入如何可靠路由，不因 Runtime 重启丢失。
+
+对应的最小内核抽象是 Service、Process、Agent、Signal。Task 仍然是 Scheduler 的工作单元；“Service-first 内核”不等于“调度所有 Service”。
+
+## 2. 拓扑
+
+```text
+CodeestraService #0
+├── SchedulerService                  # 系统 Service
+├── AttentionService                  # 系统 Service
+└── ProjectService P1                 # 业务 Service
+    ├── TaskService T1                # Scheduler 调度单元
+    │   ├── DevelopmentProcess D1     # Agent supervisor
+    │   │   └── AgentSession / incarnation
+    │   └── ...历史 Process
+    ├── TaskService T2
+    └── IntegrationProcess I1         # 复杂合并时的 Agent supervisor
+```
+
+约束：
+
+1. Service 组成有根树；每个非 root Service 恰有一个 parent Service。
+2. Task Service 只能是 Project Service 的直接子 Service，Task 之间不嵌套。
+3. Process 挂在一个 Service 下，但不能有子 Service。
+4. Service 不直接拥有 Agent；AgentSession 必须属于一个 Process。
+5. Worktree、branch、verification copy 是资源，不是 Service。
+6. DAG dependency 是 Task 间关系，不用 Service 树表达。
+
+## 3. Service：持久 Actor，而非 OS 进程
+
+Service 的“持续运行”表示：它在 Runtime 存活期间始终可被寻址，Runtime 重启后可从持久状态恢复。它不是一条永久 busy-loop，也不是一个专属线程。
+
+最小记录：
+
+```ts
+type ServiceRecord = {
+  id: string;
+  kind: "ROOT" | "SCHEDULER" | "ATTENTION" | "PROJECT" | "TASK";
+  parentServiceId: string | null;
+  lifecycle: "ACTIVE" | "PAUSED" | "RECOVERY_REQUIRED" | "RETIRED";
+  stateVersion: number;
+  contractVersion: number;
+  coreStateRef: string;
+  inboxCursor: number;
+  createdAt: number;
+  updatedAt: number;
+};
+```
+
+这只是方向性类型，不是已经冻结的 TypeScript API。实现波次必须把 Project/Task 的现有事实映射进来，而不是复制第二套权威状态。
+
+### 3.1 状态
+
+- core state：每个 kind 有自己的 schema 与 reducer；状态变化要求 expected version、actor、reason。
+- metadata：`namespace/key` → JSON，适合标签、Agent 辅助信息与未来扩展；有大小和类型上限。
+- metadata 不参与核心 guard。若某键开始决定调度、Git ref 或权限，它必须升级为 core 字段并立 ADR/migration。
+- 所有写入产生审计事实；查询可以统一，修改必须受 contract 约束。
+
+### 3.2 Contract
+
+每个 Service kind 发布：
+
+- commands：会改变状态或触发副作用；
+- queries：只读；
+- acceptedSignals：允许的 Signal kind 与 payload schema；
+- emittedSignals：可能发出的事实；
+- childKinds：允许创建的子 Service / Process 类型；
+- agentContext：交给 Process 的 API 摘要与最小上下文。
+
+CLI 是 contract 的稳定映射，不从数据库内容动态生成任意命令。
+
+## 4. Process：只监督 Agent
+
+Process 不是普通程序的同义词。它是一个短期、目标有界、允许阻塞的 Agent supervisor。
+
+```text
+CREATED → STARTING → RUNNING ↔ WAITING_FOR_USER
+                       ↓
+             PAUSING → PAUSED → RUNNING
+                       ↓
+        SUCCEEDED | FAILED | CANCELLED | RECOVERY_REQUIRED
+```
+
+职责：
+
+- 固定任务书、parent Service、Agent 配置、上下文快照与预算；
+- 启动并观察 AgentSession；
+- 统计 token、成本、轮次、工具活动与最后进度；
+- 暂停、终止、追加输入或建立 successor；
+- 把结构化提问转给 Attention Service；
+- 以 Signal 向 parent Service 报告完成、失败、等待或恢复要求。
+
+现有对象的迁移关系：
+
+| 现有对象 | 目标关系 |
+|---|---|
+| Execution | Process 的权威执行事实来源；迁移期一一投影 |
+| AgentSession | Process 的 provider conversation / 当前会话 |
+| Session incarnation | Agent 的 OS 进程代与 writer 身份 |
+| Operation | Service API 的确定性副作用记录，不等于 Process |
+| AttentionRequest | Process 或 Service 发出的用户输入请求 |
+
+普通程序的执行路径：
+
+```text
+SIG_A → Service handler → Operation → Git / verification / filesystem program
+```
+
+Agent 的执行路径：
+
+```text
+SIG_P → Service creates Process → Process starts Agent
+     → Agent calls Service APIs → SIG_A / Operation
+```
+
+因此程序与 Agent 统一在“都只能通过 Service contract 影响系统”，而不是强行统一成同一种运行实体。
+
+## 5. Signal：可靠路由信封
+
+### 5.1 类型
+
+- `SIG_A`：调用明确 API。payload 是版本化结构数据；不需要 LLM 理解。
+- `SIG_P`：表达意图。payload 引用用户原文；目标 Service 创建 Process 让 Agent 解释并调用 API。
+
+业务 subtype 仍需命名，例如：
+
+```text
+TASK_CREATE_REQUESTED
+TASK_EXECUTION_COMPLETED
+TASK_MERGE_REQUESTED
+PROCESS_WAITING_FOR_USER
+PROCESS_COMPLETED
+INTEGRATION_SLOT_AVAILABLE
+ATTENTION_RESOLVED
+```
+
+`SIG_A` / `SIG_P` 是传递语义，不替代具体 subtype。
+
+### 5.2 信封与链路
+
+```ts
+type SignalEnvelope = {
+  id: string;
+  kind: "SIG_A" | "SIG_P";
+  subtype: string;
+  sourceServiceId?: string;
+  sourceProcessId?: string;
+  targetServiceId: string;
+  contractVersion: number;
+  idempotencyKey: string;
+  correlationId: string;
+  causationId?: string;
+  priority: number;
+  payloadRef: string;
+  createdAt: number;
+};
+```
+
+`correlationId` 串起一次用户意图到多个子动作；`causationId` 指向直接诱因。Signal 正文可单独存储并受大小/保密规则约束，event 只保存必要摘要和 ref。
+
+### 5.3 可靠性
+
+```text
+PENDING → CLAIMED → ACKED
+              ├──→ RETRYABLE
+              ├──→ DEAD_LETTER
+              └──→ RECOVERY_REQUIRED
+```
+
+- enqueue 与发送方业务写入同事务；
+- claim 用租约、Runtime boot identity 与 deadline；
+- handler 先查幂等回执，再执行；
+- 外部副作用前写 Operation，之后按真实事实收口；
+- Runtime 崩溃后过期 claim 回到 reconcile，不直接重放不确定副作用；
+- dead-letter 只表示自动消费停止，不能丢历史；必要时建立 Attention。
+
+## 6. 三类关键 Service
+
+### 6.1 Root / Codeestra Service
+
+持有全局配置引用、Service registry、Scheduler、Attention、Process 索引与项目目录。接收全局 intention 后创建意图分析 Process。该 Process 可以：
+
+- 路由到 Project / Task Service；
+- 调用全局设置 API；
+- 在目标不明确时建立 Attention；
+- 拆分为多个 Task，但必须遵守 Minimum Useful Decomposition。
+
+### 6.2 Project Service
+
+持有项目身份、受管 integration ref/worktree、项目知识引用、Task 子节点与 merge queue。
+
+收到 `TASK_MERGE_REQUESTED`：
+
+1. 校验 Task result / revision / verification；
+2. 持久入队；
+3. 若项目没有活动集成，固定 expected integration OID 并创建 Integration Process；
+4. Process 的 Agent 通过 Project Git API 在独立 integration workspace 工作；
+5. 运行 Integration Verification；
+6. expected OID 仍一致时 CAS 推进 ref；
+7. 发 `TASK_MERGED`，再唤醒下一项。
+
+同一项目串行，项目之间可并行。冲突或失败保留 integration workspace，不阻塞 Project Service 接收其它查询和 intention。
+
+### 6.3 Task Service
+
+持有用户可见任务事实。建议继续把状态拆为多个正交维度：
+
+- lifecycle：DRAFT / BLOCKED / READY / RUNNING / WAITING_FOR_USER / EXECUTED / FAILED / CANCELLED / RECOVERY_REQUIRED；
+- verification：NOT_RUN / RUNNING / PASSED / FAILED / STALE；
+- integration：NOT_REQUESTED / QUEUED / MERGING / VERIFYING / MERGED / CONFLICTED / FAILED。
+
+UI/CLI 可以把组合投影成“等待开始、执行中、等待指示、等待合并、合并中、合并完成”，但底层不压成一个易撒谎的枚举。
+
+## 7. Scheduler 边界
+
+Scheduler 管准入与计算资源，不负责理解意图，也不把 DAG 逻辑埋在排序循环里。
+
+输入：
+
+```ts
+type TaskEligibility = {
+  taskServiceId: string;
+  revisionId: string;
+  eligible: boolean;
+  reasons: Array<"DEPENDENCY" | "CONFLICT" | "REVISION" | "CONTROL">;
+  evidenceVersion: number;
+};
+```
+
+Task/Project 领域服务计算 eligibility；Scheduler 只做：
+
+1. 过滤 eligible；
+2. priority desc → createdAt asc → id asc；
+3. 检查 Runtime 全局容量与暂停屏障；
+4. 原子预留；
+5. 请求 Task Service 创建 Development Process。
+
+提交前在同一事务重验 eligibility version，避免检查后条件变化。
+
+## 8. Intention 与 Attention
+
+用户也是系统中的智能体，但不需要理解底层 Signal：
+
+```text
+codeestra intent send "把支付模块的错误处理统一掉"
+codeestra intent send --project P "把测试也补上"
+codeestra intent send --task T "不要新增依赖，沿用现有 helper"
+```
+
+这是目标命令示意，不是当前已实现命令。
+
+- root intention：创建路由 Process；
+- project intention：在该项目上下文解释，可创建/修订 Task；
+- task intention：默认作为 guidance 还是 revision 必须由类型化结果明确，不能仅靠自然语言静默改验收标准；
+- 任意 Service 的结构化问题进入 Attention Service 的全局索引；回答后 Signal 路由回原 Service/Process；
+- 一个 Task 等用户时，其它 Task 和 Service 继续运行。
+
+## 9. CLI 目标面与当前兼容面
+
+目标内核命令：
+
+```text
+service list|get|tree|state get|state set
+process list|get|input|pause|resume|terminate
+signal send|list|get|retry
+intent send
+```
+
+现有命令继续保留并映射：
+
+| 现有命令 | 目标内核 |
+|---|---|
+| `project *` | Project Service facade |
+| `task *` | Task Service facade |
+| `session *` | Process 下的 AgentSession facade |
+| `attention *` | Attention Service facade |
+| `scheduler *` | Scheduler Service facade |
+
+通用命令不绕过类型化 facade：例如 `service state set` 不能直接推进 Task lifecycle，`signal send SIG_A` 也必须通过目标 contract 验证。
+
+## 10. 增量落地顺序
+
+1. 纯 domain contract 与 ADR 术语；
+2. additive schema 与只读 projection；
+3. Signal dispatcher / Service registry；
+4. 内核 CLI；
+5. Project/Task facade 接入同一事实；
+6. Execution → Process projection 与控制；
+7. intention / Attention 路由；
+8. 受管 integration；
+9. 切换权威写路径、删除临时兼容层。
+
+详细任务、依赖和验收见 [MVP Roadmap](../roadmap/mvp.md)。
+
+## 11. 明确不做
+
+- 不把每个 Service 做成 OS 进程或线程；
+- 不以消息中间件、微服务、Kubernetes 实现本机 Actor；
+- 不承诺跨 SQLite/Git/Provider exactly-once；
+- 不让 arbitrary metadata 绕过状态机；
+- 不让 Agent 直接写 SQLite 或未经 Project Service API 修改受管 ref；
+- 不恢复旧 `promotion *` 全套语义；integration ref 如何发布到 release/main 另议；
+- 不新增 RBAC、沙箱或确认门禁；
+- 不恢复 Web UI，也不使用桌面自动化验收。

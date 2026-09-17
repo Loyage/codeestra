@@ -1,6 +1,28 @@
 # 状态机与迁移规则
 
-状态：§1–§7 除显式标注外是已实现的状态机与迁移规则（第 8 节登记 Wave I/J 的持久事实与命令面）；**§6.1 的 ADR-0061 Runtime 全局负载控制是已接受、待实现的目标状态机，不是当前代码事实。**未列出的迁移拒绝；所有迁移需 expected aggregateVersion、actor、reason，并在事务中记录事实事件。恢复操作不绕过 guard。Self Evolution（§5）仍是后续阶段合约。
+状态：§1–§8 记录当前 schema v36 及历史状态机；ADR-0068 的 Service/Signal/Process 与受管 integration 是已接受但尚未实现的目标。未列出的迁移拒绝；所有迁移需 expected version、actor、reason，并记录事实事件。恢复操作不绕过 guard。
+
+## 0. ADR-0068 新状态机（目标）
+
+```text
+Service: ACTIVE ↔ PAUSED → RETIRED
+              └→ RECOVERY_REQUIRED
+
+Signal: PENDING → CLAIMED → ACKED
+                    ├→ RETRYABLE → CLAIMED
+                    ├→ DEAD_LETTER
+                    └→ RECOVERY_REQUIRED
+
+Process: CREATED → STARTING → RUNNING ↔ WAITING_FOR_USER
+                                  ├→ PAUSING → PAUSED → RUNNING
+                                  └→ SUCCEEDED | FAILED | CANCELLED | RECOVERY_REQUIRED
+
+Task integration: NOT_REQUESTED → QUEUED → MERGING → VERIFYING → MERGED
+                                      ├→ CONFLICTED
+                                      └→ FAILED | STALE | RECOVERY_REQUIRED
+```
+
+Service lifecycle 不替代 Task lifecycle；Process 先投影现有 Execution；Signal 至少一次交付，ACK 只代表目标 handler 已持久收口，不代表跨 Git/Provider exactly-once。Task execution 与 integration 是正交状态，不能压成一个“完成”。完整 guard 见 `service-process-signal.md`，实现波次见 roadmap。
 
 ## 1. Task lifecycle
 

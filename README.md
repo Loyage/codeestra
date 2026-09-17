@@ -1,16 +1,18 @@
 # Codeestra
 
-Task-first、local-first 的 AI Development Runtime。用户管理产品意图，Codeestra 管理软件工程。
+**目标：AI 的操作系统。** Codeestra 在宿主系统之上统一管理长期 Service、短期 Process、Agent、Signal、用户意图、Attention、调度与软件工程资源。内核 Service-first，Scheduler 仍 Task-first。
+
+> **实现边界**：ADR-0068 已接受上述目标架构，但当前可运行版本仍是 schema v36 的 Task Runtime；尚无通用 `service/process/signal/intent` CLI，也尚无 Project Service 受管 integration。改造计划见 [Service Kernel Roadmap](docs/roadmap/mvp.md)。
 
 ## 第一原则（优先级最高）
 
 1. **效率至上**：默认开启 `FULL` 主机级全权限模式；项目接入、Agent 工具、成果 commit 与验证策略变化均不确认。可用 CLI 无确认切换 `STRICT` 恢复旧门禁（ADR-0011）。
-2. **软件本体是服务，CLI 是完备命令面**：独立本地 Runtime 是本体；每个能力都能只靠 CLI 完成并可脚本化驱动。ADR-0067 起 Web UI 暂停，当前只启用 CLI/Unix socket 命令面；保留的 UI 源码不是可用功能。
+2. **软件本体是服务，CLI 是完备命令面**：独立本地 Runtime 是 0 号根 Service 与持久 Actor 内核的宿主；每个能力都能只靠 CLI 完成并可脚本化驱动。ADR-0067 起 Web UI 暂停，当前只启用 CLI/Unix socket 命令面。
 3. **测试仅限 CLI/命令面**：自动化测试与验收只用 CLI 命令与 Runtime 命令面断言；不使用 computer-use / 桌面或键鼠自动化，不获取用户电脑控制权。产品内 Agent 也不新增屏幕/桌面控制工具。
 
-完整表述见 [PROJECT_SPEC.md §1.1](PROJECT_SPEC.md)、[ADR-0008](docs/decisions/0008-efficiency-first-service-form.md) 与 [ADR-0011](docs/decisions/0011-default-full-permission-mode.md)。分支测试分层见 [ADR-0038](docs/decisions/0038-branch-targeted-tests-and-dev-full-suite.md)；运行中 Agent 的原生终端接管设计见 [ADR-0010](docs/decisions/0010-live-agent-terminal-takeover.md)。
+完整表述见 [PROJECT_SPEC.md §1.1](PROJECT_SPEC.md)、[ADR-0008](docs/decisions/0008-efficiency-first-service-form.md)、[ADR-0011](docs/decisions/0011-default-full-permission-mode.md) 与 [ADR-0068](docs/decisions/0068-service-process-signal-kernel.md)。内核设计见 [Service / Process / Signal](docs/architecture/service-process-signal.md)。
 
-**产品不再有 dev clone、集成与稳定提升**（[ADR-0066](docs/decisions/0066-remove-dev-clone-and-dual-baseline.md)，schema v36）：Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。下面描述的 `main`/`dev` 双分支与人工提升流程是**本仓库自身的约定**，不是产品能力。
+**当前 schema v36 不提供产品集成与稳定提升**（[ADR-0066](docs/decisions/0066-remove-dev-clone-and-dual-baseline.md)）：Task 从项目文件夹当前分支建基线，成果留在 task branch，由你自己合并。**目标架构将按 ADR-0068 增量加入 Project Service 独占的 integration ref/worktree 与串行 merge queue；这尚未实现，也不恢复旧 `promotion *`。**下面的 `main`/`dev` 流程仍只是本仓库自身约定。
 
 ## 分支与运行规则
 
@@ -67,6 +69,7 @@ Phase 7 Self Evolution。**Session Guidance 已实现**（FOUNDATION-088 / ADR-0
 
 ## 文档
 
+- **[AI 的操作系统愿景](docs/vision/ai-operating-system.md)**：从 Chat/Agent 到分时 Service Kernel 的产品直觉，以及程序与 Agent 的统一边界。
 - **[新开发者项目导览（HTML）](docs/project-introduction.html)**：可离线打开的中文介绍，涵盖愿景、原理、架构、进展与协作上手；基于 FOUNDATION-076 的文档快照，明确标注未实现 / 未验收边界。
 
 - **[用户指南](docs/guides/README.md)**：面向使用者的中文指南——安装与第一次运行、领域概念、端到端流程、功能清单、完整 CLI 命令参考、常见故障与稳定码表。历史 UI 说明标记为暂停功能。
@@ -74,7 +77,7 @@ Phase 7 Self Evolution。**Session Guidance 已实现**（FOUNDATION-088 / ADR-0
 - **[真实 provider 验收 runbook](docs/notes/real-provider-acceptance-runbook.md)**：只能在真实 provider 在场时执行的功能验收操作手册（并发、暂停/恢复、修订投递、知识消费、插件与 gate、散文提问、原生终端、真实提升），附可复现脚手架 `scripts/real-provider-acceptance.sh`（默认 dry-run）。
 - [PROJECT_SPEC.md](PROJECT_SPEC.md)：长期规格。
 - [AGENTS.md](AGENTS.md)：协作与开发规则。
-- [Architecture](docs/architecture/README.md)：领域、状态机、SQLite、事件、API、调度、冲突与模块设计。
+- [Architecture](docs/architecture/README.md)：领域、状态机、SQLite、事件、API、调度与模块设计；[Service Kernel](docs/architecture/service-process-signal.md) 是 ADR-0068 的目标内核说明。
 - [Decisions](docs/decisions/README.md)：已接受 ADR 与分阶段待决项。
 - [Roadmap](docs/roadmap/mvp.md) / [当前任务](docs/tasks/README.md)。
 
@@ -196,4 +199,4 @@ Domain 不依赖 Bun、SQLite、Tauri 或 Agent SDK。函数只计算不可变�
 
 ## 下一步
 
-当前开发集中在 CLI/Runtime 命令面；Web UI 已按 ADR-0067 暂停。当前下一批的真正剩余项已经**不是** Task cancel、长命令后台化或 revision 投递确认（这三项都已实现）：权威清单在 [docs/tasks/README.md](docs/tasks/README.md) 的 `## NEXT`，逐 Phase 的完成度与未验证项在 [docs/roadmap/mvp.md](docs/roadmap/mvp.md)。当前最紧要的几项是：真实 provider 的并发/revision ACK/暂停恢复验收、Session Guidance 的**模型侧**验收（命令面与启动交付已实现），以及 Phase 7 Self Evolution。
+当前开发集中在 CLI/Runtime 命令面；Web UI 继续暂停。下一主线已切换为 ADR-0068 的 Service Kernel 增量改造：S1 纯领域 contract → S2 additive storage → S3 Signal dispatcher → S4 内核 CLI，之后再接 Process、intention、Project/Task 写路径与受管 integration。权威依赖图、Agent 分工与验收见 [docs/roadmap/mvp.md](docs/roadmap/mvp.md)；既有真实 provider 验收缺口继续保留，但不应抢先破坏新内核 contract。

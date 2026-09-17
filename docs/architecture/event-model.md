@@ -2,7 +2,9 @@
 
 ## 1. 边界与信封
 
-UI 发 command（期望行为），Runtime 写 domain event（已发生事实）；Adapter event（外部观察）先经身份、顺序、状态校验，再转换为领域事实。数据库是权威状态，事件支持审计和订阅，不以终端日志重建业务状态。
+客户端发 command（期望行为），Runtime 写 domain event（已发生事实）；Adapter event（外部观察）先经身份、顺序、状态校验，再转换为领域事实。数据库是权威状态，事件支持审计和订阅，不以终端日志重建业务状态。
+
+ADR-0068 新增的 **Signal 不等于 domain event**：Signal 是有目标 Service、可 claim/ack/retry 的工作信封；domain event 是已经发生且 append-only 的事实。handler 可以因一个 Signal 产生多个 event，也可以幂等命中而不产生新 event。Signal 的准确表与事件名在 S1/S2 冻结，当前 v36 尚无该命令面。
 
 ```ts
 type EventEnvelope<T extends string, P> = {

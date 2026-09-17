@@ -19,6 +19,7 @@
 > §10.3 新增 `WAIT_CONTROL` 一行并由 **FOUNDATION-097** 新增 §10.5「全局暂停」。
 > §「任务」永久删除一条与 §13.5 `RECOVERY_REQUIRED` 的 purge 行为由用户任务 `task/930f5325` 同步（ADR-0058 D02 修订，2026-09-16）。
 > 其余内容沿用 FOUNDATION-091 的校对基线。
+> **ADR-0068 文档修订**：§1 增加“AI 的操作系统”目标与 Service/Process/Signal 目标术语；命令正文仍只描述当前 v36，不新增未实现命令。
 > §6 末尾的「Agent 运行结果卡片与最后的输出」一段与 `04-task-detail.png` 的图说由用户任务 `Loyage/simplize_task_ui`
 > （2026-09-16）同步（无新命令；卡片是只读投影，截图未重拍）。
 
@@ -52,12 +53,9 @@
 
 ## 1. 这是什么
 
-Codeestra 是 **Task-first、local-first 的 AI Development Runtime**：**你管理产品意图，Codeestra 管理软件工程**
-（分支、工作树、执行、验证）。
+Codeestra 的长期目标是 **AI 的操作系统**：以长期 Service、短期 Process、Agent 与 Signal 统一管理 AI 工作；内核 Service-first，Scheduler 仍 Task-first。
 
-它不是聊天助手，也不是多 Agent UI。你描述「要完成的一项改动」，Codeestra 负责：给它一个独立的工作目录与
-分支、让一个 Coding Agent 去干、把成果固定成一个 commit、独立验证，然后把成果交给
-稳定分支并重启服务。
+**这本手册描述当前 schema v36**：它仍以 Project / Task / Execution / Session 命令为主，没有通用 `service/process/signal/intent` CLI，也没有 Project Service 自动集成。当前你描述一项改动，Codeestra 给它独立工作目录与分支、运行 Coding Agent、固定成果 commit 并独立验证；成果仍由你自己合并。目标架构与改造计划见 [ADR-0068](../decisions/0068-service-process-signal-kernel.md) 和 [roadmap](../roadmap/mvp.md)。
 
 ### 三条必须先知道的第一原则
 
@@ -65,7 +63,7 @@ Codeestra 是 **Task-first、local-first 的 AI Development Runtime**：**你管
    验证策略变化，默认零确认、零等待。** 你随时可以用 CLI 无确认地切到 `STRICT`，恢复旧门禁
    （`bun run codeestra settings permission set strict`）。
    正确性核对（revision/ref/归属/进程身份、静止证据、幂等与崩溃恢复）**一直有效**，但那些是核对，不是审批。
-2. **软件本体是服务，CLI 必须完备。** 独立本地 Runtime 是软件本体。ADR-0067 起 Web UI 暂停，当前只启用 CLI/Unix socket 命令面。
+2. **软件本体是服务，CLI 必须完备。** 独立本地 Runtime 是软件本体，也是目标 0 号 Service 与持久 Actor 内核的宿主。ADR-0067 起 Web UI 暂停，当前只启用 CLI/Unix socket 命令面。
    每个能力都能只靠 CLI 完成并脚本化驱动（`--json`、稳定退出码）。
 3. **测试只走 CLI / 命令面。** 自动化验收不依赖桌面、键鼠或浏览器自动化。
 

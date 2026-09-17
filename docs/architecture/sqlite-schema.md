@@ -1,8 +1,10 @@
 # SQLite Schema
 
 状态：逻辑 SQL 设计基线 + 已实现 migration 记录。第 2–6 节是逻辑关系设计（其中若干节已被后续 ADR 修订，见第 8 节各版本的说明）；第 8 节逐版本记录 `packages/storage/src/migration.ts` 中**实际存在**的 migration，当前最新实现为 schema **v36**（ADR-0066 删除 dev clone / 双基线 / 集成 / 稳定提升；v35 是 ADR-0065 的任务输入字段重建；v34 是 ADR-0061 的两半：容量上半 FOUNDATION-096，暂停下半 FOUNDATION-097；v16 永久未使用、v22 未占用）。**schema version 16 永久未使用**，原因见第 8 节。本文不是对外发布 migration，未来字段与表不提前创建。后续 Drizzle schema 必须与第 2–6 节的约束等价，并以第 8 节的实现记录为准。
-> **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` /
+> **当前实现（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` /
 > `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支）。
+>
+> **ADR-0068 目标，尚未迁移**：roadmap 预留下一个可用版本给 `services` / `signals` / `processes` 与既有 Project/Task/Execution 的 projection link，后继版本再加入 Project managed integration。准确 DDL 由单一 Storage lane 冻结；在 migration 实际合入前，本文件不得把 v37/v38 写成已执行。
 
 ## 1. 约定
 

@@ -55,7 +55,9 @@ interface ChangeSet {
 
 ## 2. Task Workspace
 
-- prepare 以**项目基线**的固定 SHA 为基线（ADR-0009 / ADR-0060），独立 `refs/heads/task/<task-id>` 与 Runtime 数据目录 `worktrees/<project-id>/<task-id>/`（ADR-0005）。ref/path 只使用校验后的内部 UUID，不把用户文本当 ref/path，也不在用户仓库根目录创建 worktree。
+> 当前 v36 的基线来源见下文；ADR-0068 S8 完成后，新 Task 默认改从 Project Service managed integration ref 的当时 OID 建立。两种时期都必须固定 base ref/commit，既有 workspace 不回写。
+
+- prepare 以**项目基线**的固定 SHA 为基线，创建独立 `refs/heads/task/<task-id>` 与 Runtime 数据目录 owned worktree（ADR-0005）。ref/path 只使用校验后的安全段，不把未经规范化的用户文本当 ref/path，也不在用户仓库根目录创建 worktree。
 - **基线只有一种来源**（ADR-0066）：在**项目文件夹**（`projects.repo_root`）里取**建 workspace 时当前检出的分支**，把 ref 与 commit 一起固定进 `workspaces.base_ref`/`base_commit`（此后切分支不会移动已建 Task 的基线）；`task run --base-ref <refs/heads/…>` 可以显式选一条本地分支。`HEAD` detached 时以 `TASK_BASE_REF_UNRESOLVED` 拒绝，不猜一条分支。同一目录同时拥有仓库身份与 `main` ref（判定策略、影响映射的读取来源）。**哪个根指向哪个仓库**见下表：
 
 | 根字段 / 事实 | 代表哪个仓库 | 谁消费它 |
@@ -83,9 +85,11 @@ interface ChangeSet {
 - 副本删除用 `git worktree remove --force` + `git worktree prune`，并再次核对路径位于 copies root 内；Runtime 重启对未完成 run 保留副本路径而不是在可能有孤儿进程组时删除现场。
 - release 只处理确认归属且已静止、无未保存改动的 worktree；取消/失败不自动调用。保留 branch/证据，不自动 prune 用户资源。
 
-## 3. 成果去向：停在 task 分支（ADR-0066）
+## 3. 成果去向
 
-产品不再建模 dev clone、长期 `dev` 集成分支或 `dev → main` 提升：`task integrate`、
+### 3.1 当前 v36：停在 task 分支（ADR-0066）
+
+当前产品不建模 dev clone、长期 `dev` 集成分支或 `dev → main` 提升：`task integrate`、
 `task integration *`、`promotion *`、`promotion full-suite run` 全部从命令面删除，schema **v35** 也
 DROP 了 `integration_batches(_items)`、`integration_verification_runs`、`stable_promotions(_members)`
 与 `dev_full_suite_evidence`。`packages/git` 侧的 `IntegrationGitPort` / `promotion.ts` 随之删除，
@@ -106,7 +110,11 @@ DROP 了 `integration_batches(_items)`、`integration_verification_runs`、`stab
   因此下游状态最多滞后一个 tick（默认 5s，或一次显式 `task schedule run`）——这不改变「读不到基线按
   未满足阻塞」的口径，只是把「谁去看」从集成命令移到了调度 pass。
 - **本仓库自身**仍以 `main`/`dev` 两个 clone 开发并把 `dev` 提升到 `main`：那是**仓库约定**
-  （`AGENTS.md` 的人工四步、`docs/agents/runbook.md` 的命令序列），产品不提供命令、不记账、不校验它。
+  （`AGENTS.md` 的人工四步、`docs/agents/runbook.md` 的命令序列），当前产品不提供命令、不记账、不校验它。
+
+### 3.2 ADR-0068 目标：Project managed integration
+
+Project Service 将独占一个 integration ref/worktree。Task Verification 通过后发送 merge-request Signal；同一项目的持久队列严格串行，由 Integration Process 通过类型化 Git API 生成候选，独立 Integration Verification 通过且 expected OID 未移动时才 CAS 推进 ref。它不直接修改用户 worktree，也不恢复旧 `promotion *`。准确 Git port 与错误码在 S8 冻结。
 
 ## 4. 崩溃恢复与测试
 

@@ -8,18 +8,20 @@
 > §10 的依赖满足语义由 FOUNDATION-093 第三轮同步（ADR-0060 修订）；其余内容沿用 FOUNDATION-091 的校对基线。
 > **本次修订（ADR-0066 / schema v36）**：§7「合入 `dev`」与 §8「稳定提升」整节删除，改为成果去向与
 > 本仓库自身的人工四步；§9 去掉自动回收；§3.3 的依赖语义按「上游结果 commit 对当前基线可达」改写。
+> **ADR-0068 文档修订**：总流程图纠正为当前 v36，并单列尚未实现的 Service Kernel / managed integration 目标。
 
 本文按真实顺序走一遍：**建任务 → 提交 → 运行 → 回答 Agent → 提交成果 → 验证 → 把成果交给你 → 资源回收**。
 每一步给出可以照抄的命令和**预期输出形状**。
 
-总流水线（[PROJECT_SPEC.md](../../PROJECT_SPEC.md) §1）：
+当前 v36 流水线：
 
 ```text
-User Intent → Task / Task DAG → Dependency Analysis → Conflict Analysis
-→ Scheduler → Git Worktree（基于 dev）→ Coding Agent → Task Verification
-→ Dev Integration → Integration Verification → Dev
-→ 用户批准固定 dev/main SHA → Main → 立即重启 Runtime
+User Intent → Task / Task DAG → Dependency / Conflict → Scheduler
+→ Git Worktree（项目文件夹当前分支的固定基线）→ Coding Agent
+→ Result Commit → Task Verification → 成果停在 task branch → 用户自行合并
 ```
+
+ADR-0068 的目标会在后续波次加入 `SIG_P → Service → Process` 与 Project Service managed integration；尚未实现，不在本走查中使用。
 
 准备（详见 [getting-started.md](./getting-started.md)）：
 

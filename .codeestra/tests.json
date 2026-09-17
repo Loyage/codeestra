@@ -1,34 +1,20 @@
 {
   "version": 1,
-  "scope": "暂停 Web UI 开发并默认禁用全部 Web UI 入口：删除 ui/open、runtime.ui 与 UI 设置命令面；保留实现源码但移出默认检查、构建、重启和提升流程；删除 UI 与专用 HTTP/SSE 测试，现有 CLI 测试改用 project trust。",
+  "scope": "ADR-0068 文档与改造规划：确立 AI 操作系统定位、Service/Process/Agent/Signal 目标内核、managed integration 方向与 S0-S10 多 Agent 路线图；本格不修改 Runtime、CLI 或 schema。",
   "commands": [
     {
-      "id": "typecheck-cli-runtime",
-      "argv": ["bun", "run", "typecheck"],
+      "id": "documentation-diff-check",
+      "argv": ["git", "diff", "--check"],
       "cwd": ".",
-      "timeoutSeconds": 180,
-      "covers": "CLI/Runtime/contracts 在移除 Web UI 命令与 Runtime 启动路径后仍保持严格类型一致；apps/ui 按 ADR-0067 不进入默认检查"
+      "timeoutSeconds": 30,
+      "covers": "所有文档与协作规范改动没有空白错误或冲突标记"
     },
     {
-      "id": "contracts-boundary",
-      "argv": ["bun", "test", "packages/contracts/test/request.test.ts"],
+      "id": "documentation-local-links",
+      "argv": ["node", "-e", "const fs=require('fs'),path=require('path');const files=['PROJECT_SPEC.md','README.md','AGENTS.md','docs/architecture/README.md','docs/architecture/service-process-signal.md','docs/decisions/README.md','docs/decisions/0068-service-process-signal-kernel.md','docs/roadmap/mvp.md','docs/guides/README.md','docs/guides/concepts.md','docs/guides/manual.md','docs/guides/workflow.md','docs/vision/ai-operating-system.md'];let bad=[];for(const f of files){const s=fs.readFileSync(f,'utf8');for(const m of s.matchAll(/\\[[^\\]]*\\]\\(([^)]+)\\)/g)){const u=m[1].split('#')[0];if(!u||/^(https?:|mailto:)/.test(u))continue;const p=path.resolve(path.dirname(f),decodeURIComponent(u));if(!fs.existsSync(p))bad.push(f+': '+m[1]);}}if(bad.length){console.error(bad.join('\\n'));process.exit(1)}"],
       "cwd": ".",
-      "timeoutSeconds": 120,
-      "covers": "移除 Web UI request variants 后，剩余 versioned Runtime 请求 union 仍通过其现有边界用例"
-    },
-    {
-      "id": "runtime-settings-cli",
-      "argv": ["bun", "test", "apps/runtime/test/cli-settings.test.ts"],
-      "cwd": ".",
-      "timeoutSeconds": 180,
-      "covers": "settings list 只枚举仍启用的 CLI/Runtime 设置，权限、散文提问和全局容量命令保持可用"
-    },
-    {
-      "id": "runtime-cli-smoke",
-      "argv": ["bun", "test", "apps/runtime/test/cli-task-create.test.ts", "apps/runtime/test/cli-attention.test.ts", "apps/runtime/test/operation-progress-events.test.ts"],
-      "cwd": ".",
-      "timeoutSeconds": 360,
-      "covers": "共享测试改用 project trust 后，Task 创建、结构化回答与 Operation 进度仍只经 CLI/socket 命令面工作"
+      "timeoutSeconds": 30,
+      "covers": "本格新增或重写的规格、ADR、架构、roadmap、指南与愿景文档的本地 Markdown 链接均存在"
     }
   ]
 }

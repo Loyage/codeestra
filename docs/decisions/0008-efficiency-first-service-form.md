@@ -1,6 +1,6 @@
 # ADR-0008：效率优先、服务形态（CLI 完备命令面）与测试边界
 
-Status：Accepted；**Amended by ADR-0011**：以默认 FULL 零确认替代“保留现有门禁”，CLI 完备与测试边界不变。
+Status：Accepted；**Amended by ADR-0011**：以默认 FULL 零确认替代“保留现有门禁”；**Amended by ADR-0068**：把笼统的“Runtime 是服务”细化为 0 号根 Service + Runtime 内持久 Service/Process/Signal 内核。CLI 完备与测试边界不变。
 
 ## Context
 

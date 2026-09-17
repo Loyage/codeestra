@@ -1,31 +1,30 @@
 # Codeestra Architecture
 
-状态：架构设计基线已建立；已确认决策见 ADR-0001/0002。Phase 0 纯领域工程可开始；Phase 1 真实 Runtime 仍有技术/授权准入门禁，不代表全部架构已最终冻结。
+状态：既有 Runtime 架构已实现到 schema v36；ADR-0068 已接受 Service / Process / Agent / Signal 目标内核，但尚未实现。本文同时标注“当前事实”与“目标架构”，不得把目标命令当成当前能力。
 
 ## 总体架构
 
 ```text
-Desktop / 最小本地客户端（可断开与重连）
-                 │ commands / queries / events
-独立本地 Runtime │
-  Intent Intake → Task Service → DAG / Impact / Conflict
-                                      ↓
-                       Runtime Global Load Control
-                    （唯一并行上限 + 全局 Provider 冻结，ADR-0061 待实现）
-                                      ↓
-                                  Scheduler
-                                      ↓
-  Execution Coordinator → Git Workspace Port → Git CLI
-          ↓
-  Agent Adapter Port → Pi（首个）/ Codex / Claude Code
-          ↕ Session Guidance / 原生 TUI-PTY 接管（安全点进程交接）
-  Task Verification → （成果留在 task 分支，由用户自己合并；ADR-0066）
+CLI（当前唯一客户端；可断开与重连）
+        │ versioned commands / queries / events
+独立本地 Runtime（宿主 OS 进程）
+        └── Codeestra Service #0（持久根 Actor）
+             ├── Scheduler Service（Task-first 准入与资源）
+             ├── Attention Service（全局待办索引）
+             └── Project Service*
+                  ├── Task Service* → Development Process → Agent
+                  └── Integration Process → Agent
 
-SQLite + Outbox + Operations + Audit + Recovery（基础设施）
-Knowledge Service（Phase 6）
-Self Task → Candidate → 自托管测试 → 用户 Promotion → 排空 → Stable（Phase 7）
-独立 codeestra-bootstrap：版本选择、健康检查、回滚与恢复
+SIG_A：明确 API → Service handler → Operation → Git / verification / filesystem
+SIG_P：intention → Service → Process → Agent → typed Service APIs
+
+SQLite：Service state + Signal inbox/outbox + Operations + Audit + Recovery
+Agent Adapter：Pi / Codex / Claude Code
+Knowledge：按 Execution/Process 绑定
+Self Evolution：Candidate / bootstrap（后续阶段）
 ```
+
+当前 v36 尚未落地 Service 树、通用 Signal/Process 命令与受管 integration；现有 Task/Execution/Session/outbox 是增量迁移的事实基础。
 
 这是模块分层，不是微服务。Domain 不依赖具体运行时、数据库、UI 或 Agent。Git worktree 隔离工作目录，不提供 OS 权限沙箱。
 
@@ -33,6 +32,8 @@ Self Task → Candidate → 自托管测试 → 用户 Promotion → 排空 → 
 
 ## 设计导航
 
+- [AI 的操作系统愿景](../vision/ai-operating-system.md)
+- **[Service / Process / Agent / Signal 内核](service-process-signal.md)**（ADR-0068 目标架构）
 - [Domain Model](domain-model.md)
 - [Task / Execution / AgentSession / Integration / Self 状态机](state-machines.md)
 - [SQLite Schema](sqlite-schema.md)
@@ -52,18 +53,19 @@ Self Task → Candidate → 自托管测试 → 用户 Promotion → 排空 → 
 - 软件本体是服务，CLI 必须完备且可脚本化；UI/桌面是便利层。
 - 自动化测试与验收仅通过 CLI/命令面驱动，不获取电脑控制权。
 - 活动修订先暂停，确认新规格后恢复；无法可靠暂停/确认时保留现场并重新执行。
-- 固定基线的 Task worktree：**只有一种基线** —— 项目文件夹建 workspace 时当前检出的分支（ADR-0066）。
-- 依赖结果对**项目当前 Task 基线 ref** 可达才能释放下游（ADR-0066）。
-- dev→main 固定 SHA 与证据；FULL 无需批准，STRICT 保留批准；main 更新后立即以 CLI stop/status 重启并检查 Runtime。
+- 内核 Service-first、调度 Task-first；Service 是 Runtime 内持久 Actor，Process 只监督 Agent（ADR-0068）。
+- Signal 分 `SIG_A` / `SIG_P`，持久至少一次投递并以幂等键收敛；Service 不直接拥有 Agent。
+- 目标分支模型是 Project Service 独占的 integration ref/worktree + merge queue + 独立 Integration Verification；当前 v36 仍按 ADR-0066 把成果留在 task branch，由用户自己合并。
+- Codeestra 自身仓库的 `dev→main` 人工发布继续固定 SHA 与证据，main 更新后立即以 CLI stop/status 重启；它不是产品 integration ref。
 - Runtime 独立于窗口，关闭客户端不结束任务。
 - 首个真实 Adapter 用 Pi；FULL 自动允许全部已注册工具，STRICT 保留原生审批与未知工具拒绝。
 - Agent 配置按 Adapter 持久化，分全局默认与每项目覆盖，逐字段 环境变量 > 项目 > 全局 > 适配器默认；仅新 Session 生效，生效值随 Execution 记录（ADR-0012）。
 - Agent 实际执行过程以**只读视图**呈现：`session.transcript` 直接读 Provider 自己的会话文件，不入库、不是 domain event、不是 attach、不新增确认；文件路径不离开 Runtime，仅限 Runtime 自己的 session 目录（ADR-0013）。Claude Code 的 Session 上该命令以 `SESSION_FILE_NOT_OWNED` 明确失败，不显示执行过程。
-- Agent 可加载的插件/资源按作用域持久化（`agent plugins list|select`、`agent.config.set --pluginSelection`，schema v27），只有声明 `pluginSelection: SUPPORTED` 的 Adapter 能应用；其余以稳定码拒绝而不假装写入（ADR-0044）。界面效果设置（`settings ui *`）是设置不是门禁，不驱动任何领域状态迁移（ADR-0045）。
+- Agent 可加载的插件/资源按作用域持久化（`agent plugins list|select`、`agent.config.set --pluginSelection`，schema v27），只有声明 `pluginSelection: SUPPORTED` 的 Adapter 能应用；其余以稳定码拒绝而不假装写入（ADR-0044）。Web UI 与 `settings ui *` 当前按 ADR-0067 暂停。
 - 用户可从 Task 入口接管真实 Agent：Pi 在安全点从 RPC 交接到原生 TUI/PTY，普通输入是 Session Guidance，规格变化仍走 TaskRevision；任意时刻只有一个 Provider writer。
 - 取消协作停止，超时需人工处理；提高优先级不抢占。
 - ADR-0061 已实现（schema v34，两半）：一个 Runtime 只保留一个跨项目并行上限；全局暂停先建立持久启动屏障，再可核验地冻结 Provider 主进程，不向已运行工具子进程发停止信号，重启后也不自动继续。它不替代单 Task pause。
-- Stable Promotion 排空活动任务后切换，不迁移活动 Session。
+- Stable Promotion / Self Evolution 排空活动 Process 后切换，不迁移活动 AgentSession。
 
 ## 最大风险与建议
 
@@ -71,16 +73,17 @@ Self Task → Candidate → 自托管测试 → 用户 Promotion → 排空 → 
 |---|---|
 | Pi 是否真的具备所需交互、暂停与 attach 能力 | Pi RPC 不能原地附着原生 TUI；按 ADR-0010 做安全点 RPC↔TUI 进程交接 spike，核对 session file、PTY、权限模式 side channel 与单 writer；能力不足回报阻塞，不用 fake 冒充验收 |
 | 修订后仍交付旧代码/证据 | revision、applied revision、commit、验证全链路固定引用；暂停和 ACK 分开 |
-| 依赖满足但上游代码不在下游 | dev 基线祖先可达性检查；仅执行成功不满足依赖 |
-| 预测不完整造成误并行 | UNKNOWN 不并行；实际 diff 越界撤销 SAFE，暂停并报告 |
-| SQLite、Git 与进程非原子 | Operation + outbox + 幂等键 + 外部身份核对；不能盲目重试 start/promote |
+| 依赖满足但上游代码不在下游 | 目标模型中以 Project integration ref 的祖先可达性与 merge 事实核对；仅执行成功不满足依赖 |
+| 功能声明不完整造成误并行 | ADR-0059 只按同一功能声明判冲突；这是已接受的残余风险，实际越界时暂停并报告 |
+| Signal 被误解为 exactly-once | 持久 inbox/outbox 只保证至少一次；handler 幂等，外部副作用继续用 Operation + 身份/ref 核对 |
+| SQLite、Git 与进程非原子 | Operation + Signal receipt + 幂等键 + 外部身份核对；不能盲目重试 start/merge |
 | 全局暂停误把“发过信号”当成“已冻结” | pause epoch 固定目标；按 pid + start token + incarnation 复读 stopped 事实；部分成功进入全局 `RECOVERY_REQUIRED` 并保持屏障；Provider 进程归属未经 spike 不声明 SUPPORTED |
-| 已 checkout main 被直接 update-ref | dev→main 提升时拒绝使用户 index/worktree 不一致的更新；具体安全交接策略 Phase 4 前确认；成功更新后必须重启 Runtime |
+| integration ref 影响用户 checkout | Project Service 使用独立 owned integration ref/worktree；不直接推进用户已检出 branch，推进前 expected OID CAS |
 | 宿主权限、hooks、日志秘密 | worktree 不是沙箱；FULL 明确允许当前用户主机级副作用与敏感路径提交，终端输出仍不可信；需要旧门禁时显式切换 STRICT（ADR-0011） |
 | 自我升级数据不可逆 | Candidate 数据隔离；迁移/备份/bootstrap 更新策略 Phase 7 前明确批准 |
 
 ## 设计成熟度
 
-完整产品的语义不可能用一次草案全部锁死。这里采用按阶段准入：Phase 0 的领域纯函数不涉及外部副作用；Phase 1 必须验证 Pi 协议并确认 Git 成果提交策略；Phase 2/4/7 的待决项只阻塞对应阶段，不被当作已批准默认值。
+完整产品的语义不可能用一次草案全部锁死。当前成熟事实到 schema v36；ADR-0068 的 Service kernel 按 S1–S10 分阶段准入。纯领域、additive storage、Signal dispatcher、兼容 CLI、Process 投影与受管 integration 各自有独立退出条件，后续阶段不得被当作已经批准实现细节。
 
-SQLite 文档第 2–6 节为关系设计（含明确标注的待细化约束），第 8 节逐版本记录**已执行**的 migration（当前最新实现为 schema v33，ADR-0060；v16 永久未使用、v22 未占用）。ADR-0061 计划的 v34 仍是设计，不是已执行 migration。API 为 Runtime port 合约草案，不是供应商能力承诺；`agent-adapter-api.md` 已记录 Pi、Codex 与 Claude Code 的实测能力矩阵。
+SQLite 文档第 8 节记录**已执行**的 migration；当前最新实现为 schema v36。roadmap 预留 v37 给 Service/Signal/Process 内核、后继版本给受管 integration，但只有实际实现格能把它们写成已执行 migration。API 为 Runtime port 合约，不是供应商能力承诺；`agent-adapter-api.md` 记录 Pi、Codex 与 Claude Code 的实测能力矩阵。

@@ -9,9 +9,9 @@ apps/
   ui/                  # 暂停的 React/Vite 源码；默认不构建、不测试、不发布（ADR-0067）
   desktop/             # Tauri 客户端（尚未创建）；关闭不影响 Runtime
 packages/
-  domain/              # 纯 TypeScript：值对象、revision、状态迁移、不变量
-  contracts/           # Zod commands/events/ports；无供应商 SDK 类型
-  storage/             # SQLite/Drizzle、migration、事务/outbox
+  domain/              # 纯 TypeScript：Service/Signal/Process、Task revision、状态迁移、不变量
+  contracts/           # Zod commands/events/Service contracts/ports；无供应商 SDK 类型
+  storage/             # SQLite/Drizzle、migration、Service state、Signal inbox/outbox、事务
   git/                 # Git CLI、workspace 与 integration 基础操作
   agent-adapters/      # fake / Pi，Phase 5 扩展
   verification/        # 验证执行、结果与证据
@@ -20,9 +20,9 @@ packages/
   bootstrap/           # Phase 7，独立最小恢复程序
 ```
 
-Scheduler、ExecutionCoordinator、IntegrationCoordinator 是 runtime 内不同模块，不拆成微服务。领域代码不导入 Bun、SQLite、Tauri、React 或具体 Agent SDK。基础设施通过 port 注入；Desktop 不直接写 SQLite 或执行 Git。
+ServiceRegistry、SignalDispatcher、Scheduler、ProcessCoordinator 与 IntegrationCoordinator 都是同一 Runtime 内的模块，不拆成微服务，也不让每个 Service 启一个 OS 进程。领域代码不导入 Bun、SQLite、Tauri、React 或具体 Agent SDK。基础设施通过 port 注入；客户端不直接写 SQLite 或执行 Git。
 
-服务形态与入口分层（ADR-0008）：`apps/runtime` 是软件本体（服务）；`apps/cli` 是**完备、可脚本化**的权威命令面，必须能独立完成全部能力；`apps/ui` / 未来 `apps/desktop` 只是同一 versioned command/query/event 面的便利前端，不新增业务语义、不绕过任何确认。新增能力先问“CLI 是否完备”，UI 变化不得领先于 CLI 能力。
+服务形态与入口分层（ADR-0008/0068）：`apps/runtime` 是 0 号 Service 与持久 Actor 内核的宿主；`apps/cli` 是**完备、可脚本化**的权威命令面。目标新增 `service/process/signal/intent` 内核 facade，同时保留现有业务命令。`apps/ui` / 未来 `apps/desktop` 只能是同一 versioned command/query/event 面的便利前端，不新增业务语义。
 
 独立 Runtime 的本地 IPC 传输与认证在 Phase 1 技术验证后选型；默认不监听公网，不提前引入 HTTP 服务。用户批准的是独立 Runtime 生命周期，不是开放远程 API。
 
