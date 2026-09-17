@@ -178,6 +178,80 @@ dialog to write to.`,
     # 三种拼写等价：\`codeestra help [<路径…>]\`、\`codeestra <路径…> help\`、\`codeestra <路径…> --help|-h\`。
     # 退出码 0；用法错误（未知命令、缺少子命令、多余参数）退 2 并只打印一行，提示对应层的 help。`,
   },
+  "intent": {
+    kind: "GROUP",
+    summary: "把自然语言意图发给某个 Service（ADR-0070）",
+  },
+  "intent.send": {
+    kind: "COMMAND",
+    summary: "发一条 SIG_P 意图；目标 Service 创建一个 Intention Process（当前诚实返回 PENDING_S6）",
+    usage: `bun run codeestra intent send <text…> [--service <id>|--project <id>|--task <id>] [--adapter <id>] [--json]`,
+    detail: `# 目标是 root、Project 或 Task Service；--service/--project/--task 只能给一个。
+# 这一次调用只负责持久入队并创建一个 CREATED 的 Intention Process：解释意图、路由到
+# 类型化命令、目标不明时建立 Attention 属于 S6，尚未实现，返回值里的 interpretation 因此是
+# PENDING_S6（不谎报已解释）。
+# 退出码 0 表示 Signal 已被 ACK；3 表示仍在重试（PENDING/CLAIMED/RETRYABLE）；1 表示终态失败。`,
+    runtime: [
+      "intent.send",
+    ],
+  },
+  "process": {
+    kind: "GROUP",
+    summary: "Agent supervisor 的 Process：查询与原生控制（ADR-0070）",
+  },
+  "process.get": {
+    kind: "COMMAND",
+    summary: "按 id 读一个 Process 的 kind/状态/parent Service 与关联 Execution",
+    usage: `bun run codeestra process get <process-id> [--json]`,
+    runtime: [
+      "process.get",
+    ],
+  },
+  "process.input": {
+    kind: "COMMAND",
+    summary: "向运行中的 Process 追加输入（复用 Session Guidance 通道）",
+    usage: `bun run codeestra process input <process-id> --message <text> [--json]`,
+    detail: `# 追加输入进的是真实 provider conversation，不是 TaskRevision，也不改变验收规格（ADR-0057）。
+# “已入队”不等于“模型已读”；没有该通道的 Adapter 以 CHANNEL_UNSUPPORTED 拒绝。
+# 没有关联 Execution 的原生 Process（例如尚未接线的 Intention Process）以 PROCESS_CONTROL_UNAVAILABLE 拒绝。`,
+    runtime: [
+      "process.input",
+    ],
+  },
+  "process.list": {
+    kind: "COMMAND",
+    summary: "列出 Process（可按 parent Service 与状态过滤）",
+    usage: `bun run codeestra process list [--service <service-id>] [--state <state>] [--json]`,
+    runtime: [
+      "process.list",
+    ],
+  },
+  "process.pause": {
+    kind: "COMMAND",
+    summary: "暂停一个 Development Process（复用 Task 协作停止，核对 control version）",
+    usage: `bun run codeestra process pause <process-id> <expected-control-version> [--json]`,
+    runtime: [
+      "process.pause",
+    ],
+  },
+  "process.resume": {
+    kind: "COMMAND",
+    summary: "恢复已暂停的 Process（新建 Execution 并以 provider conversation 续接）",
+    usage: `bun run codeestra process resume <process-id> <expected-control-version> [--adapter <id>] [--allow-unknown] [--json]`,
+    detail: `# 恢复不是原地继续：旧 Execution 记为 SUPERSEDED，同一 worktree 上新建 Execution（ADR-0016）。
+# 等待类拒绝（冲突等待、Runtime 全局暂停）退 3，其余失败退 1。`,
+    runtime: [
+      "process.resume",
+    ],
+  },
+  "process.terminate": {
+    kind: "COMMAND",
+    summary: "终止一个 Process（终态，不自动重开）",
+    usage: `bun run codeestra process terminate <process-id> <expected-control-version> [--json]`,
+    runtime: [
+      "process.terminate",
+    ],
+  },
   "project": {
     kind: "GROUP",
     summary: "项目：身份、信任、验证策略、影响映射与项目知识",
@@ -229,6 +303,104 @@ whose change set cannot be observed — that is the point: nothing is called saf
     usage: `bun run codeestra project inspect [path]`,
     runtime: [
       "project.inspect",
+    ],
+  },
+  "project.integration": {
+    kind: "GROUP",
+    summary: "受管 integration：Project Service 独占的 integration ref/worktree 与持久 merge queue（ADR-0070 D07 / S8）",
+    unit: true,
+    detail: `project integration is the command face of the managed integration ref (ADR-0074). It is
+# deliberately not a promotion command: nothing here publishes the ref to main, a release branch, or
+# any other branch a user has checked out. The ref is refs/codeestra/integration, a private namespace
+# that git branch never lists and that no default push refspec can carry.
+#
+# The queue is durable and strictly serial per project. request only records a merge request whose
+# Task revision is current and whose Task verification PASSED for that exact commit; run merges the
+# head of the queue in an owned detached worktree, runs independent Integration Verification on the
+# candidate, and only then advances the ref with git update-ref <new> <expected>. A conflict keeps the
+# conflicted worktree, a failed verification keeps the candidate ref and its copy, and a ref that moved
+# while verifying is reported rather than forced. Two projects integrate in parallel; one project never
+# has two active integrations.`,
+  },
+  "project.integration.cancel": {
+    kind: "COMMAND",
+    summary: "取消一条还在 QUEUED 的 merge 请求",
+    usage: `bun run codeestra project integration cancel <project-id> <item-id> [--reason <text>] [--json]`,
+    runtime: [
+      "project.integration.cancel",
+    ],
+  },
+  "project.integration.init": {
+    kind: "COMMAND",
+    summary: "创建/读取该项目独占的受管 integration ref",
+    usage: `bun run codeestra project integration init <project-id> [--json]`,
+    detail: `# Idempotent. A project trusted on schema v38 already has the ref: trust materializes it from
+# the branch the project folder has checked out at that moment. This command is the explicit form for a
+# project that was trusted before that (its ref is created from whatever the folder has checked out
+# now), and the read-back form when you want to see the exact OID without reading Git yourself.`,
+    runtime: [
+      "project.integration.init",
+    ],
+  },
+  "project.integration.queue": {
+    kind: "COMMAND",
+    summary: "读项目的持久 merge queue",
+    usage: `bun run codeestra project integration queue <project-id> [--limit <n>] [--json]`,
+    runtime: [
+      "project.integration.queue",
+    ],
+  },
+  "project.integration.request": {
+    kind: "COMMAND",
+    summary: "把一条已通过 Task 验证的结果排进 merge queue",
+    usage: `bun run codeestra project integration request <project-id> <task-id> [--revision <id>] [--result-commit <sha>] [--verification <run-id>] [--priority <n>] [--json]`,
+    detail: `# The preconditions are the ones ADR-0070 D07 names: the named revision is the Task's current
+# one, the result commit was captured for it, and a Task verification run PASSED for that exact
+# revision and commit. A request that does not satisfy them is refused by name and nothing is queued.
+# Repeating the command (or a Task Service re-sending its merge-request Signal) converges on the item
+# that already exists: the queue is idempotent per task revision, and a request for a newer revision
+# retires an older queued one as STALE instead of merging a revision the Task no longer claims.`,
+    runtime: [
+      "project.integration.request",
+    ],
+  },
+  "project.integration.retry": {
+    kind: "COMMAND",
+    summary: "把 CONFLICTED/FAILED 的 queue item 重新排队",
+    usage: `bun run codeestra project integration retry <project-id> <item-id> [--json]`,
+    detail: `# Retry is what resolves the scene rather than destroying it. The owned integration worktree is
+# aborted back to the integration ref and the temporary candidate ref is dropped, then the item goes
+# back to QUEUED with its attempt counter advanced. Only a CONFLICTED or FAILED item can be retried;
+# a MERGED item is a settled fact and an active item must be observed, not guessed about.`,
+    runtime: [
+      "project.integration.retry",
+    ],
+  },
+  "project.integration.run": {
+    kind: "COMMAND",
+    summary: "整合队首候选：merge → 独立 Integration Verification → CAS 推进 ref",
+    usage: `bun run codeestra project integration run <project-id> [<item-id>] [--json]`,
+    detail: `# One invocation advances at most one queue item, and it must be the head of this project's
+# queue: the order is the project's (priority desc, then request time, then id), not the caller's. The
+# command is not a daemon: the durable queue stays in the database, and the next item is left queued so
+# an explicit run (or a script) decides when to continue. A merge conflict, a failed integration
+# verification, or an integration ref that moved while the candidate was being verified all settle the
+# item with a stable outcome code and keep their evidence.`,
+    runtime: [
+      "project.integration.run",
+    ],
+  },
+  "project.integration.status": {
+    kind: "COMMAND",
+    summary: "读 integration ref/worktree 与队列现状",
+    usage: `bun run codeestra project integration status <project-id> [--json]`,
+    detail: `# currentOid is what Git says right now; recordedOid is what this Runtime last advanced the ref
+# to. They are reported side by side and never silently reconciled: a disagreement is a fact the caller
+# has to see. worktree.state is OWNED / MISSING / FOREIGN / UNCERTAIN and carries the evidence string
+# it was derived from. needsAttention is true when a queue item is CONFLICTED or RECOVERY_REQUIRED, or
+# when the worktree is FOREIGN/UNCERTAIN.`,
+    runtime: [
+      "project.integration.status",
     ],
   },
   "project.knowledge": {
@@ -522,6 +694,58 @@ keeps the slot (RECOVERY_REQUIRED) — no process is signalled and no resource i
       "scheduler.reservations.release",
     ],
   },
+  "service": {
+    kind: "GROUP",
+    summary: "Service 树与类型化 core 投影 / namespaced metadata（ADR-0070）",
+  },
+  "service.get": {
+    kind: "COMMAND",
+    summary: "按 id 读一个 Service 的 kind/lifecycle/core 投影与 metadata",
+    usage: `bun run codeestra service get <service-id> [--json]`,
+    runtime: [
+      "service.get",
+    ],
+  },
+  "service.list": {
+    kind: "COMMAND",
+    summary: "列出 Service（可按 kind 与 parent 过滤；--all 含 RETIRED）",
+    usage: `bun run codeestra service list [--kind <ROOT|SCHEDULER|ATTENTION|PROJECT|TASK>] [--parent <service-id>] [--all] [--json]`,
+    runtime: [
+      "service.list",
+    ],
+  },
+  "service.state": {
+    kind: "GROUP",
+    unit: true,
+    summary: "读 core 投影；metadata 只能经 CAS 写入，不能借此推进 core 状态机",
+  },
+  "service.state.get": {
+    kind: "COMMAND",
+    summary: "读一个 Service 的 core 投影、metadata 与 state/core version",
+    usage: `bun run codeestra service state get <service-id> [--json]`,
+    runtime: [
+      "service.state.get",
+    ],
+  },
+  "service.state.set": {
+    kind: "COMMAND",
+    summary: "以 expected version CAS 写一条 namespaced metadata（类型化核心状态不在此路径）",
+    usage: `bun run codeestra service state set <service-id> --namespace <name> --key <name> --value-json <json> --expected-version <n> [--json]`,
+    detail: `# 这是一条 SIG_A：它经目标 Service 的 contract 校验后才落盘，并与 Signal 回执同事务收敛。
+# 它只能写 namespaced metadata；core 状态机（例如 Task lifecycle）必须走类型化命令，
+# 版本不匹配以 SERVICE_VERSION_CONFLICT 拒绝（退 1），不做部分应用。`,
+    runtime: [
+      "service.state.set",
+    ],
+  },
+  "service.tree": {
+    kind: "COMMAND",
+    summary: "打印以某个 Service 为根的子树（默认 root Service）",
+    usage: `bun run codeestra service tree [service-id] [--json]`,
+    runtime: [
+      "service.tree",
+    ],
+  },
   "session": {
     kind: "GROUP",
     summary: "会话：只读转写、Session Guidance、原生终端交接",
@@ -795,6 +1019,48 @@ needs no confirmation and never rewrites a wait that was already recorded.`,
       "settings.proseQuestionAttention.set",
     ],
   },
+  "signal": {
+    kind: "GROUP",
+    summary: "持久 Signal：类型化 SIG_A / 意图 SIG_P 的投递、回执与重试（ADR-0070）",
+  },
+  "signal.get": {
+    kind: "COMMAND",
+    summary: "按 id 读一条 Signal 及其 attempts 与幂等回执",
+    usage: `bun run codeestra signal get <signal-id> [--json]`,
+    runtime: [
+      "signal.get",
+    ],
+  },
+  "signal.list": {
+    kind: "COMMAND",
+    summary: "列出 Signal（可按目标 Service、state、kind 过滤）",
+    usage: `bun run codeestra signal list [--service <id>] [--state <state>] [--kind <SIG_A|SIG_P>] [--limit <n>] [--json]`,
+    runtime: [
+      "signal.list",
+    ],
+  },
+  "signal.retry": {
+    kind: "COMMAND",
+    summary: "显式重试一条 RETRYABLE/DEAD_LETTER/RECOVERY_REQUIRED 的 Signal",
+    usage: `bun run codeestra signal retry <signal-id> [--json]`,
+    detail: `# 重试只把回合数归零并重新排队；它不声称跨 SQLite/Git/Provider exactly-once，
+# 副作用仍靠 Operation 与事实核对收敛（ADR-0070）。`,
+    runtime: [
+      "signal.retry",
+    ],
+  },
+  "signal.send": {
+    kind: "COMMAND",
+    summary: "向某个 Service 发一条 Signal；payload 必须通过该 Service 的 contract 校验",
+    usage: `bun run codeestra signal send <target-service-id> --kind <SIG_A|SIG_P> --subtype <name> --payload-json <json> --idempotency-key <key> [--contract-version <n>] [--source-service <id>] [--source-process <id>] [--correlation <id>] [--causation <id>] [--priority <n>] [--json]`,
+    detail: `# 不能发未注册的 API：($kind,$subtype) 与 payload schema 都由目标 Service 的 contract 决定，
+# 未知组合以 SIGNAL_NOT_ACCEPTED / INVALID_SIGNAL_PAYLOAD 拒绝（退 1）。
+# 同一目标 + idempotency key 收敛为同一条 Signal；同 key 不同 payload 以 SIGNAL_IDEMPOTENCY_CONFLICT 拒绝。
+# 退出码 0 表示已被 ACK；3 表示仍在重试；1 表示终态失败（含 DEAD_LETTER）。`,
+    runtime: [
+      "signal.send",
+    ],
+  },
   "status": {
     kind: "COMMAND",
     summary: "报告本 Runtime 的状态与所有权证据（必要时先拉起 Runtime）",
@@ -883,6 +1149,23 @@ socket. It never starts a Runtime to stop it and never signals a process it cann
     usage: `bun run codeestra task depends remove <project-id> <task-id> <expected-version> <prerequisite-task-id> [--json]`,
     runtime: [
       "task.depends.remove",
+    ],
+  },
+  "task.integration": {
+    kind: "GROUP",
+    summary: "Task 的 integration 投影（与 lifecycle、verification 正交）",
+    unit: true,
+  },
+  "task.integration.show": {
+    kind: "COMMAND",
+    summary: "读一个 Task 的 integration 投影与它的 queue item 历史",
+    usage: `bun run codeestra task integration show <project-id> <task-id> [--json]`,
+    detail: `# The projection is derived from the newest merge queue item, never from the Task lifecycle, so
+# "the Agent finished", "the Task verification passed" and "the result is in the integration ref" stay
+# three different facts. A Task with no queue item reads as NOT_REQUESTED; a CANCELLED request reads as
+# NOT_REQUESTED again, while a MERGED one carries the integration OID its result landed at.`,
+    runtime: [
+      "task.integration.show",
     ],
   },
   "task.list": {

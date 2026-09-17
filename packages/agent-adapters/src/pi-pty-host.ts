@@ -36,8 +36,8 @@ import { closeSync, openSync, readSync, writeSync, constants as fsConstants } fr
  * plan and this helper echoes it back in `ready`, so a stale helper paired with a newer Runtime (or
  * the reverse) is a stated refusal instead of a silently mis-read frame. `1` is the protocol that
  * carries `resize` on top of input/output/release/signal; the number lives in both halves of the
- * wire and is edited together with the frame table in `docs/architecture/agent-adapter-api.md`
- * (§ TerminalTransport).
+ * wire and is edited together with the frame table in `docs/architecture/terminal-and-handoff.md`
+ * (§5 TerminalTransport).
  */
 export const supportedTransportProtocol = 1;
 

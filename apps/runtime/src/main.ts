@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { impactPolicyPath, runtimeRequestSchema,
+  processViewSchema, serviceViewSchema, signalViewSchema,
   runtimeCommandSummaries,
   validateQuestionnaireAnswer,
   questionnairePromptSchema,
@@ -12,7 +13,8 @@ import {
   defaultProseQuestionAttentionMode,
   type ProseQuestionAttentionMode,
 } from '@codeestra/domain';
-import { Phase1Database, StorageError, type AgentAnswerPlan } from '@codeestra/storage';
+import { Phase1Database, ServiceKernelStore, StorageError, systemServiceIds,
+  type AgentAnswerPlan } from '@codeestra/storage';
 import {
   createAdapterRegistry,
   piControlledLaunch,
@@ -65,7 +67,8 @@ import { ScheduleService } from './schedule-service.js';
 import { SlotReservationService } from './slot-reservation-service.js';
 import { prepareReservedWorkspace } from './workspace-service.js';
 import { LongOperationService } from './operation-service.js';
-import { runtimeHome, runtimeSocketPath } from './paths.js';
+import { integrationWorktreesRoot, runtimeHome, runtimeSocketPath,
+  verificationCopiesRoot as verificationCopiesRootFor } from './paths.js';
 import { SessionHandoffService } from './session-handoff-service.js';
 import { TerminalService } from './terminal-service.js';
 import { inspectSettings } from './settings-view.js';
@@ -98,6 +101,7 @@ import {
   readSessionTranscript,
   readSessionTranscriptPart,
 } from './session-transcript-service.js';
+import { ManagedIntegrationService } from './managed-integration-service.js';
 import {
   reconcileInterruptedAgentAnswers,
   reconcileInterruptedAgentStarts,
@@ -111,6 +115,10 @@ import {
 } from './recovery-service.js';
 import { RevisionDeliveryService } from './revision-delivery-service.js';
 import { SessionGuidanceService } from './session-guidance-service.js';
+import { ServiceContractRegistry, SignalDispatcher, intentionSignalSubtype,
+  serviceMetadataSignalSubtype, taskMergeSettledSubtype } from './service-kernel.js';
+/** S7 (ADR-0070): the one entry point that creates a Task; `task.create` is its first caller. */
+import { TaskService } from './task-service.js';
 import {
   VerificationRunner,
   inspectVerificationPolicy,
@@ -212,6 +220,59 @@ const proseQuestionAttentionSettings = () => ({
   appliesTo: 'Agent completions observed after this change; an already recorded wait is unchanged',
 });
 const storage = new Phase1Database(join(home, 'runtime.sqlite'));
+// S2/S3 kernel bootstrap: projections are repaired from the still-authoritative Project/Task/
+// Execution rows, then expired Signal claims are reconciled before any command can enqueue more.
+const kernelStore = new ServiceKernelStore(storage);
+kernelStore.reconcileProjections(Date.now());
+// The Task creation handler (S7). It owns the declared-feature check and the command identity; the
+// `tasks` row, its first revision and the TASK Service are one transaction inside storage
+// (`ServiceWriteStore`), and project registration does the same for the PROJECT Service.
+const taskService = new TaskService({ storage });
+// S8 (ADR-0070 D07 / ADR-0074): the Project-managed integration service. It owns the integration
+// ref/worktree, the durable merge queue and Integration Verification; the Signal dispatcher only
+// routes a merge request into it. Constructed before the dispatcher because the dispatcher needs the
+// handler, and the runner/copies root it shares with Task verification are created here so there is
+// exactly one process-group registry for every long verification command.
+const verificationRunner = new VerificationRunner();
+const verificationCopiesRoot = verificationCopiesRootFor(home);
+const integrationService = new ManagedIntegrationService({
+  storage,
+  integrationRoot: integrationWorktreesRoot(home),
+  copiesRoot: verificationCopiesRoot,
+  runner: verificationRunner,
+  permissionMode: () => permissionMode,
+  notifySettled: (input) => {
+    // The notification is a Signal, not a direct write: it converges on the Task Service's own
+    // receipt path and can be retried, and a failure to enqueue it never undoes the merge.
+    signalDispatcher.send({ signalId: crypto.randomUUID(), kind: 'SIG_A',
+      subtype: taskMergeSettledSubtype, sourceServiceId: null, sourceProcessId: null,
+      targetServiceId: input.targetServiceId, contractVersion: 1, payload: input.payload,
+      idempotencyKey: input.idempotencyKey, correlationId: input.correlationId,
+      causationId: input.causationId, priority: 0 });
+    signalDispatcher.dispatchAvailable();
+  },
+  logger: (message, detail) => console.error(`[runtime] ${message}`, detail ?? ''),
+});
+// A merge that was in flight when this Runtime's predecessor stopped is not re-run: the facts it
+// would need (did the ref move? did the copy survive?) are kept, and the item is marked for an
+// explicit reconcile instead of being guessed at.
+const integrationReconcile = integrationService.reconcileOnBoot();
+for (const itemId of integrationReconcile.recovered) {
+  console.error(`[runtime] merge queue item ${itemId} was interrupted by a restart and is`
+    + ' RECOVERY_REQUIRED; the integration worktree, candidate ref and verification copy are kept');
+}
+const serviceContracts = new ServiceContractRegistry();
+const signalDispatcher = new SignalDispatcher({ store: kernelStore, contracts: serviceContracts,
+  bootId, integration: integrationService });
+signalDispatcher.dispatchAvailable();
+// Event wake-ups call the same bounded dispatcher immediately. This periodic pass is only recovery;
+// it is one Runtime timer, never one busy-loop per Service.
+const signalReconcileTimer = setInterval(() => {
+  try { signalDispatcher.dispatchAvailable(); }
+  catch (error) {
+    console.error('[runtime] Signal reconcile failed', error instanceof Error ? error.message : String(error));
+  }
+}, 1_000);
 const registry = createAdapterRegistry({ runtimeHome: home, environment: Bun.env });
 /**
  * The Runtime global control plane (FOUNDATION-097 / ADR-0061). It is created before anything that
@@ -493,9 +554,8 @@ for (const terminal of terminalReconcile.maybeStillRunning) {
   console.error('[runtime] a previous terminal generation was not signalled; its recorded processes'
     + ' may still exist', terminal);
 }
-const verificationRunner = new VerificationRunner();
-/** Verification copies live inside the Runtime data directory, never in the user's repo. */
-const verificationCopiesRoot = join(home, 'verifications');
+// The verification runner and copies root were created above, before the integration service, so
+// Task verification and Integration Verification share one process-group registry.
 // Long commands (task.run / task.verify) are durable Operations: their progress is recorded as
 // facts, a cancel stops the owned process group and confirms it, and a restart reconciles them.
 const longOperations = new LongOperationService({
@@ -932,6 +992,55 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         storage, home, projectId: request.projectId, taskId: request.taskId,
       }));
     }
+    // Project-managed integration (ADR-0070 D07 / S8, ADR-0074). `status`/`init` are reads plus an
+    // idempotent ref creation; `request`/`queue` are database-only; `run`/`retry` are the only
+    // commands that touch Git, and they go through the Project Service's own Git port — never a
+    // user checkout. None of them publishes the ref anywhere.
+    case 'project.integration.status':
+      return success(request.requestId, await integrationService.status({ projectId: request.projectId }));
+    case 'project.integration.init':
+      return success(request.requestId, await integrationService.initialize({ projectId: request.projectId }));
+    case 'project.integration.request':
+      return success(request.requestId, integrationService.request({
+        projectId: request.projectId,
+        taskId: request.taskId,
+        commandId: request.commandId,
+        priority: request.priority,
+        ...(request.revisionId === undefined ? {} : { revisionId: request.revisionId }),
+        ...(request.resultCommit === undefined ? {} : { resultCommit: request.resultCommit }),
+        ...(request.taskVerificationRunId === undefined
+          ? {} : { taskVerificationRunId: request.taskVerificationRunId }),
+      }));
+    case 'project.integration.queue':
+      return success(request.requestId, integrationService.queue({
+        projectId: request.projectId, limit: request.limit,
+      }));
+    case 'project.integration.run': {
+      const report = await integrationService.runNext({
+        projectId: request.projectId,
+        ...(request.itemId === undefined ? {} : { itemId: request.itemId }),
+        actor: 'local-user',
+      });
+      // The merge may have changed the ref, so the scheduling picture is re-judged exactly as it is
+      // after a result commit or a revision delivery; the queue's next item is not auto-started.
+      return success(request.requestId, {
+        ...report,
+        schedule: await scheduleTick('INTEGRATION', request.projectId),
+      });
+    }
+    case 'project.integration.retry':
+      return success(request.requestId, await integrationService.retry({
+        projectId: request.projectId, itemId: request.itemId, actor: 'local-user',
+      }));
+    case 'project.integration.cancel':
+      return success(request.requestId, integrationService.cancel({
+        projectId: request.projectId, itemId: request.itemId, actor: 'local-user',
+        reason: request.reason,
+      }));
+    case 'task.integration.show':
+      return success(request.requestId, integrationService.taskIntegration({
+        projectId: request.projectId, taskId: request.taskId,
+      }));
     case 'project.list':
       // `confirmedPolicy` is the active ADR-0006 confirmation, so a client can tell whether the
       // policy at the main ref still matches what a human confirmed without re-confirming blindly.
@@ -941,6 +1050,171 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         confirmedPolicy: storage.getConfirmedVerificationPolicy(project.id),
         confirmedImpactPolicy: storage.getConfirmedImpactPolicy(project.id),
       })));
+    case 'service.list':
+      return success(request.requestId, serviceViewSchema.array().parse(kernelStore.listServices({
+        ...(request.kind === undefined ? {} : { kind: request.kind }),
+        ...(request.parentServiceId === undefined ? {} : { parentServiceId: request.parentServiceId }),
+        includeRetired: request.includeRetired,
+      })));
+    case 'service.get':
+    case 'service.state.get':
+      return success(request.requestId, serviceViewSchema.parse(kernelStore.getService(request.serviceId)));
+    case 'service.tree':
+      return success(request.requestId, serviceViewSchema.array().parse(
+        kernelStore.serviceTree(request.serviceId)));
+    case 'service.state.set': {
+      signalDispatcher.send({ signalId: request.commandId, kind: 'SIG_A',
+        subtype: serviceMetadataSignalSubtype, sourceServiceId: null, sourceProcessId: null,
+        targetServiceId: request.serviceId, contractVersion: 1,
+        payload: { namespace: request.namespace, key: request.key, value: request.value,
+          expectedVersion: request.expectedVersion },
+        idempotencyKey: request.commandId, correlationId: request.commandId,
+        causationId: request.commandId, priority: 0 });
+      signalDispatcher.dispatchAvailable();
+      const signal = kernelStore.getSignal(request.commandId);
+      if (signal.state !== 'ACKED') {
+        throw new RuntimeCommandError(signal.lastErrorCode ?? 'SIGNAL_NOT_ACKNOWLEDGED',
+          signal.lastErrorMessage ?? `Signal ended in ${signal.state}`);
+      }
+      return success(request.requestId, { service: serviceViewSchema.parse(
+        kernelStore.getService(request.serviceId)), signal: signalViewSchema.parse(signal) });
+    }
+    case 'process.list':
+      return success(request.requestId, processViewSchema.array().parse(kernelStore.listProcesses({
+        ...(request.parentServiceId === undefined ? {} : { parentServiceId: request.parentServiceId }),
+        ...(request.state === undefined ? {} : { state: request.state }),
+      })));
+    case 'process.get':
+      return success(request.requestId, processViewSchema.parse(kernelStore.getProcess(request.processId)));
+    case 'process.input': {
+      const process = kernelStore.getProcess(request.processId);
+      if (process.executionId === null || process.projectId === null || process.taskId === null) {
+        throw new RuntimeCommandError('PROCESS_CONTROL_UNAVAILABLE',
+          'This Process has no projected Agent conversation; intention interpretation starts in S6');
+      }
+      const result = await sessionGuidance.record({ projectId: process.projectId,
+        taskId: process.taskId, commandId: request.commandId, message: request.message,
+        actor: 'local-user' });
+      return success(request.requestId, { process: kernelStore.getProcess(request.processId), input: result });
+    }
+    case 'process.pause': {
+      const process = kernelStore.getProcess(request.processId);
+      if (process.projectId === null || process.taskId === null || process.executionId === null) {
+        throw new RuntimeCommandError('PROCESS_CONTROL_UNAVAILABLE',
+          'Only an Execution-backed Development Process can be paused in S4');
+      }
+      if (process.controlVersion !== request.expectedControlVersion) {
+        throw new RuntimeCommandError('VERSION_CONFLICT', 'Process control version did not match');
+      }
+      const result = await pauseOrCancelTask({ storage, coordinator, kind: 'PAUSE',
+        projectId: process.projectId, taskId: process.taskId,
+        expectedVersion: request.expectedControlVersion, commandId: request.commandId,
+        actor: 'local-user' });
+      kernelStore.reconcileProjections(Date.now());
+      return success(request.requestId, { process: kernelStore.getProcess(request.processId), result,
+        schedule: await scheduleTick('PROCESS_PAUSED', process.projectId) });
+    }
+    case 'process.terminate': {
+      const process = kernelStore.getProcess(request.processId);
+      if (process.projectId === null || process.taskId === null || process.executionId === null) {
+        throw new RuntimeCommandError('PROCESS_CONTROL_UNAVAILABLE',
+          'Only an Execution-backed Development Process can be terminated in S4');
+      }
+      if (process.controlVersion !== request.expectedControlVersion) {
+        throw new RuntimeCommandError('VERSION_CONFLICT', 'Process control version did not match');
+      }
+      const result = await pauseOrCancelTask({ storage, coordinator, kind: 'CANCEL',
+        projectId: process.projectId, taskId: process.taskId,
+        expectedVersion: request.expectedControlVersion, commandId: request.commandId,
+        actor: 'local-user' });
+      return success(request.requestId, { process: kernelStore.getProcess(request.processId), result,
+        schedule: await scheduleTick('PROCESS_TERMINATED', process.projectId) });
+    }
+    case 'process.resume': {
+      const process = kernelStore.getProcess(request.processId);
+      if (process.projectId === null || process.taskId === null || process.executionId === null) {
+        throw new RuntimeCommandError('PROCESS_CONTROL_UNAVAILABLE',
+          'Only an Execution-backed Development Process can be resumed in S4');
+      }
+      if (process.controlVersion !== request.expectedControlVersion) {
+        throw new RuntimeCommandError('VERSION_CONFLICT', 'Process control version did not match');
+      }
+      await assertDependenciesSatisfied({ storage, projectId: process.projectId, taskId: process.taskId });
+      const adapterId = request.adapterId ?? process.adapterId ?? 'pi';
+      const gate = await schedule.assertResumeAllowed({ projectId: process.projectId,
+        taskId: process.taskId, adapterId, commandId: request.commandId,
+        allowUnknown: request.allowUnknown, actor: 'local-user' });
+      if (gate.outcome !== 'ALLOWED') {
+        throw new RuntimeCommandError(gate.outcome === 'WAIT' ? 'CONFLICT_WAIT' : 'CONFLICTING',
+          `The Process stays paused: ${gate.detail}`);
+      }
+      const result = await resumePausedTask({ storage, coordinator, projectId: process.projectId,
+        taskId: process.taskId, expectedVersion: request.expectedControlVersion,
+        commandId: request.commandId, adapterId });
+      if (result.sessionId !== null) await handoff.recordAutomationIncarnation({ sessionId: result.sessionId });
+      kernelStore.reconcileProjections(Date.now());
+      const successors = kernelStore.listProcesses({ parentServiceId: process.parentServiceId });
+      return success(request.requestId, { predecessor: kernelStore.getProcess(request.processId),
+        successor: successors.at(-1) ?? null, result, conflictGate: gate });
+    }
+    case 'signal.send': {
+      const sent = signalDispatcher.send({ signalId: request.commandId, kind: request.kind,
+        subtype: request.subtype, sourceServiceId: request.sourceServiceId ?? null,
+        sourceProcessId: request.sourceProcessId ?? null, targetServiceId: request.targetServiceId,
+        contractVersion: request.contractVersion, payload: request.payload,
+        idempotencyKey: request.idempotencyKey,
+        correlationId: request.correlationId ?? request.commandId,
+        causationId: request.causationId ?? null, priority: request.priority });
+      signalDispatcher.dispatchAvailable();
+      return success(request.requestId, { created: sent.created,
+        signal: signalViewSchema.parse(kernelStore.getSignal(sent.signal.id)) });
+    }
+    case 'signal.list':
+      return success(request.requestId, signalViewSchema.array().parse(kernelStore.listSignals({
+        ...(request.targetServiceId === undefined ? {} : { targetServiceId: request.targetServiceId }),
+        ...(request.state === undefined ? {} : { state: request.state }),
+        ...(request.kind === undefined ? {} : { kind: request.kind }), limit: request.limit,
+      })));
+    case 'signal.get':
+      return success(request.requestId, signalViewSchema.parse(kernelStore.getSignal(request.signalId)));
+    case 'signal.retry': {
+      kernelStore.retrySignal({ signalId: request.signalId, now: Date.now(),
+        eventId: crypto.randomUUID() });
+      signalDispatcher.dispatchAvailable();
+      return success(request.requestId, signalViewSchema.parse(kernelStore.getSignal(request.signalId)));
+    }
+    case 'intent.send': {
+      const targets = [request.serviceId, request.projectId, request.taskId]
+        .filter((value): value is string => value !== undefined);
+      if (targets.length > 1) {
+        throw new RuntimeCommandError('INTENT_TARGET_AMBIGUOUS',
+          'Choose only one of service, project, or task as the intention target');
+      }
+      const targetServiceId = targets[0] ?? systemServiceIds.root;
+      const service = kernelStore.getService(targetServiceId);
+      if ((request.projectId !== undefined && service.kind !== 'PROJECT')
+        || (request.taskId !== undefined && service.kind !== 'TASK')) {
+        throw new RuntimeCommandError('INTENT_TARGET_KIND_MISMATCH',
+          `Target ${targetServiceId} is ${service.kind}`);
+      }
+      const sent = signalDispatcher.send({ signalId: request.commandId, kind: 'SIG_P',
+        subtype: intentionSignalSubtype, sourceServiceId: null, sourceProcessId: null,
+        targetServiceId, contractVersion: 1,
+        payload: { text: request.text, adapterId: request.adapterId },
+        idempotencyKey: request.commandId, correlationId: request.commandId,
+        causationId: request.commandId, priority: 0 });
+      signalDispatcher.dispatchAvailable();
+      const signal = kernelStore.getSignal(sent.signal.id);
+      if (signal.state !== 'ACKED') {
+        throw new RuntimeCommandError(signal.lastErrorCode ?? 'INTENT_NOT_ACCEPTED',
+          signal.lastErrorMessage ?? `Intention Signal ended in ${signal.state}`);
+      }
+      const processId = (signal.receipt?.effect as { processId?: unknown } | null)?.processId;
+      return success(request.requestId, { signal: signalViewSchema.parse(signal),
+        process: typeof processId === 'string'
+          ? processViewSchema.parse(kernelStore.getProcess(processId)) : null,
+        interpretation: 'PENDING_S6' });
+    }
     case 'events.list': {
       const events = storage.listEventsAfter({
         sinceSequence: request.sinceSequence,
@@ -1895,34 +2169,16 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       });
     }
     case 'task.create': {
-      // Declared features are validated before anything is written (ADR-0059 D03): an id that the
-      // project's mapping does not declare is a refusal with its own code, not a stored string that a
-      // later judgment would have to guess about.
-      const features = await resolveDeclaredFeatures({
-        storage, projectId: request.projectId, features: request.features,
-      });
-      const payloadHash = createHash('sha256').update(JSON.stringify({
-        projectId: request.projectId,
-        displayTitle: request.displayTitle,
-        namingTitle: request.namingTitle,
-        specification: request.specification,
-        features,
-      })).digest('hex');
-      return success(request.requestId, storage.createTask({
-        projectId: request.projectId,
+      // The whole command — feature validation, command identity, the `tasks` row and the TASK
+      // Service that projects it — belongs to `TaskService.create` (S7): the Runtime branch must not
+      // be a second writer of the same fact.
+      return success(request.requestId, await taskService.create({
         commandId: request.commandId,
-        payloadHash,
-        intentId: crypto.randomUUID(),
-        taskId: crypto.randomUUID(),
-        revisionId: crypto.randomUUID(),
-        intentEventId: crypto.randomUUID(),
-        taskEventId: crypto.randomUUID(),
+        projectId: request.projectId,
         displayTitle: request.displayTitle,
         namingTitle: request.namingTitle,
-        specification: request.specification,
-        features,
-        actor: 'local-user',
-        createdAt: Date.now(),
+        detail: request.specification,
+        features: request.features,
       }));
     }
     case 'project.trust': {
@@ -1986,12 +2242,23 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
         trustedAt: now,
         actor: permissionMode === 'FULL' ? 'runtime-full-permission' : 'local-user',
       });
+      // S8: trust is also what materializes the project's managed integration ref, from the commit
+      // the folder has checked out right now. It is one extra ref write inside a Git inspection the
+      // user just asked for, so the FULL-mode step count is still zero.
+      const trustedProjectId = storage.listTrustedProjects()
+        .find((candidate) => candidate.repoRoot === actual.repoRoot)?.id;
+      if (trustedProjectId === undefined) {
+        return failure(request.requestId, 'INVALID_STATE',
+          'The project that was just trusted could not be read back');
+      }
+      const integration = await integrationService.initialize({ projectId: trustedProjectId });
       return success(request.requestId, {
         trusted: true,
         permissionMode,
         repository: identity,
         verificationPolicy: policy,
         impactPolicy: impactPolicyReport({ inspection: impactPolicy, confirmation: null }),
+        integration,
       });
     }
   }
@@ -2122,6 +2389,7 @@ async function shutdown(): Promise<void> {
   // was already in flight, and a reservation must not be granted by a Runtime that is stopping.
   drain.begin('RUNTIME_SHUTDOWN');
   schedule.stopPeriodicTicks();
+  clearInterval(signalReconcileTimer);
   listener.stop(true);
   subscriptions.close();
   // Terminals this Runtime owns are ended first, while the database is still open: the recorded

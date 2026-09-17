@@ -174,11 +174,12 @@ async function seededExecutedTask(
 }
 
 /**
- * Makes the captured result reachable from the project's checked out branch, the way the user merges
- * it themselves (ADR-0064).
+ * Makes the captured result reachable from the project's Task baseline. Since ADR-0070 D07 / S8 that
+ * baseline is the managed integration ref (ADR-0074), so this is the fact the Project Service would
+ * have produced by advancing that ref after a verified merge — not a merge into the user's branch.
  */
 async function mergeResultIntoBaseline(fixture: ReclaimFixture, resultCommit: string): Promise<void> {
-  await git(fixture.repo, ['merge', '--ff-only', '-q', resultCommit]);
+  await git(fixture.repo, ['update-ref', 'refs/codeestra/integration', resultCommit]);
 }
 
 interface ReclaimReportShape {

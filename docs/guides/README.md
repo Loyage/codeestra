@@ -1,16 +1,16 @@
 # Codeestra 用户指南
 
-> **适用版本** `dev@de03448` + 本格分支 `Loyage/glc-pause-ui`（2026-09-16） · **schema** v36（本格暂停半边） · **最后校对** 2026-09-16
+> **适用版本** ADR-0070 S1–S4 实现分支（2026-09-17） · **schema** v37 · **最后校对** 2026-09-17
 > 版本会前进：`dev@036cf68` 只是本目录最后一次校对的基线；当前适用版本以
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > 权限模式的命令拼写由 FOUNDATION-098 同步为 `settings permission get|set`（ADR-0064：顶层 `permission` 已移除；§19 另新增 `settings list` 总览）。
+> **ADR-0070 S1–S4 实现修订**：新增 Service Kernel 命令参考；其余分篇保留各自最后校对基线。
 
 本目录是**面向使用者**的中文指南：怎么装、怎么用、软件具备哪些能力、每条命令怎么敲、出错了怎么办。
 
-Codeestra 是 Task-first、local-first 的 AI Development Runtime：你管理产品意图，Codeestra 管理软件工程
-（分支、工作树、执行、验证）。软件本体是一个**独立本地 Runtime**；ADR-0067 起当前只启用 CLI/Unix socket 命令面，Web UI 已暂停。
+Codeestra 的长期目标是 **AI 的操作系统**：内核 Service-first、Scheduler Task-first，以 Service / Process / Agent / Signal 管理 AI 工作。软件本体是独立本地 Runtime；ADR-0067 起当前只启用 CLI/Unix socket 命令面，Web UI 已暂停。
 
-> 本文档只描述**当前实现真实具备**的能力。每条命令、参数、退出码与错误码都从仓库源码核对得到
+> **当前实现边界**：本目录只描述 schema v38 **真实具备**的能力。ADR-0070 S1–S4 的 `service/process/signal/intent` 通用命令已写入 [Service Kernel 命令参考](./cli/kernel.md)，S8 的受管 integration 写入 [受管 integration 命令参考](./cli/managed-integration.md)；原生 Process Agent、intention 解释、Integration Process/Agent 与 integration ref 的发布出口尚未实现，不会提前写成可用能力。目标设计见 [Service Kernel 架构](../architecture/service-process-signal.md)。每条现有命令、参数、退出码与错误码都从仓库源码核对得到
 > （核对方法与结果见 `docs/tasks/README.md` 的 FOUNDATION-070 一节）。文档与实现不一致的地方在本目录
 > 各文中如实标注，不替用户裁决。
 
@@ -21,9 +21,10 @@ Codeestra 是 Task-first、local-first 的 AI Development Runtime：你管理产
 | **不知道该从哪读、想要一份从头读到尾的说明书** | **[manual.md](./manual.md)** |
 | 第一次把 Codeestra 跑起来 | [getting-started.md](./getting-started.md) |
 | 先搞懂 Project / Task / Execution 这些词是什么意思 | [concepts.md](./concepts.md) |
-| 走一遍「从建任务到合入 dev 再到稳定提升」的完整流程 | [workflow.md](./workflow.md) |
+| 走一遍当前「建任务 → 执行 → 验证 → 集成到受管 ref」流程 | [workflow.md](./workflow.md) |
 | 查「这软件到底有哪些功能」 | [features.md](./features.md) |
-| 查「这条命令怎么用、参数是什么、退出码是什么」 | [cli/README.md](./cli/README.md)（八篇索引 + §0 通用约定） |
+| 把成果合进项目（受管 integration ref） | [cli/managed-integration.md](./cli/managed-integration.md) |
+| 查「这条命令怎么用、参数是什么、退出码是什么」 | [cli/README.md](./cli/README.md)（十篇索引 + §0 通用约定） |
 | 查看 Web UI 为什么不可用、未来怎样恢复 | [ui.md](./ui.md)（暂停说明） |
 | 想做某件具体的事（改 bug / 并行 / 换 Agent / **暂停全部** / 发布…） | [recipes.md](./recipes.md) |
 | 查看 UI 人工验收状态 | [acceptance-checklist.md](./acceptance-checklist.md)（当前暂停） |
@@ -43,6 +44,7 @@ Codeestra 是 Task-first、local-first 的 AI Development Runtime：你管理产
 
 ## 相关文档（不是用户指南）
 
+- [AI 的操作系统愿景](../vision/ai-operating-system.md)：长期产品直觉与历史类比。
 - [PROJECT_SPEC.md](../../PROJECT_SPEC.md)：长期规格（人类维护，只读）。
 - [Architecture](../architecture/README.md)：领域、状态机、SQLite、事件、调度、冲突分析、模块设计。
 - [Decisions](../decisions/README.md)：已接受的 ADR 与待决项。

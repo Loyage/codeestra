@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
   DependencyGraphError,
@@ -53,6 +53,7 @@ import {
   intentKindShrinkMigration,
   intentKinds,
   knowledgeLayerMigration,
+  managedIntegrationMigration,
   operationProgressMigration,
   phase1Migration,
   phase1SchemaVersion,
@@ -66,6 +67,7 @@ import {
   taskBaselineRefMigration,
   taskInputFieldsMigration,
   taskRevisionFeaturesMigration,
+  serviceKernelMigration,
   sessionHandoffMigration,
   sessionTerminalMigration,
   stablePromotionMigration,
@@ -76,9 +78,12 @@ import {
   unregisteredReclamationMigration,
   verificationLayeringMigration,
   verificationProgressMigration,
+  rootServiceId,
   workspaceRetryMigration,
 } from './migration.js';
 import type { IntentKind } from './migration.js';
+import { ServiceWriteStore } from './service-write-store.js';
+import { ManagedIntegrationStore } from './integration-store.js';
 
 /**
  * The `intents.kind` values this build accepts (ADR-0046). The database CHECK is the last line of
@@ -1454,6 +1459,8 @@ function parsePluginSelection(json: string | null): AgentPluginSelection | null 
 
 export class Phase1Database {
   readonly sqlite: Database;
+  #serviceWriteStore: ServiceWriteStore | null = null;
+  #integrationStore: ManagedIntegrationStore | null = null;
 
   constructor(filename = ':memory:') {
     this.sqlite = new Database(filename, { create: true, strict: true });
@@ -1465,6 +1472,26 @@ export class Phase1Database {
       this.sqlite.close();
       throw error;
     }
+  }
+
+  /**
+   * S7 (ADR-0070): Project/Task Service creation has exactly one writer. The store is created on
+   * first use because most reads never create anything, and because it must not be built before the
+   * connection exists.
+   */
+  private get serviceWriteStore(): ServiceWriteStore {
+    this.#serviceWriteStore ??= new ServiceWriteStore(this);
+    return this.#serviceWriteStore;
+  }
+
+  /**
+   * S8 (ADR-0070 D07 / ADR-0074): the write path for the Project-managed integration ref, its
+   * durable merge queue, Integration Verification runs and the Task integration projection. Like the
+   * S7 store it is built on first use, after the connection and the migration exist.
+   */
+  get managedIntegration(): ManagedIntegrationStore {
+    this.#integrationStore ??= new ManagedIntegrationStore(this);
+    return this.#integrationStore;
   }
 
   close(): void {
@@ -1631,15 +1658,40 @@ export class Phase1Database {
               + ' after); the upgrade was rolled back and nothing was changed');
           }
         }
-        this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
-      })();
-      if (rebuildsTable) {
+        // v37 is additive. Project/Task/Execution remain the writable core authority; this step
+        // installs stable Service/Process identity projections and the durable Signal inbox. Bun's
+        // multi-statement exec can swallow a step error, so all three projection cardinalities are
+        // checked before the schema version is advanced.
+        if (version < 37) {
+          const expectedServices = 3 + this.countTableRows('projects') + this.countTableRows('tasks');
+          const expectedProcesses = this.countTableRows('executions');
+          this.sqlite.exec(serviceKernelMigration);
+          const services = this.countTableRows('services');
+          const processes = this.countTableRows('processes');
+          const links = this.countTableRows('process_execution_links');
+          if (services !== expectedServices || processes !== expectedProcesses
+            || links !== expectedProcesses) {
+            throw new StorageError('INVALID_STATE',
+              `Schema v37 projection mismatch: services ${services}/${expectedServices}, processes `
+              + `${processes}/${expectedProcesses}, links ${links}/${expectedProcesses}; the upgrade `
+              + 'was rolled back and nothing was changed');
+          }
+        }
+        // v38 is additive as well (ADR-0070 / S8, ADR-0074): Project-managed integration adds
+        // `project_integration`, `merge_queue_items`, `integration_runs` and the `task_integration`
+        // projection. No existing table is rebuilt, so the only guard needed is that the whole
+        // schema still passes `foreign_key_check` below before `user_version` moves.
+        if (version < 38) this.sqlite.exec(managedIntegrationMigration);
+        // Check before committing and before advancing user_version. This is required even for the
+        // additive v36→v37 path: a failed projection or a pre-existing broken reference must leave
+        // the exact v36 file intact rather than throw only after the migration transaction committed.
         const violations = this.sqlite.query<Record<string, unknown>, []>('PRAGMA foreign_key_check').all();
         if (violations.length > 0) {
           throw new StorageError('INVALID_STATE',
             `Schema migration left ${violations.length} foreign key violation(s)`);
         }
-      }
+        this.sqlite.exec(`PRAGMA user_version=${phase1SchemaVersion}`);
+      })();
     } finally {
       if (rebuildsTable) this.sqlite.exec('PRAGMA foreign_keys=ON;');
     }
@@ -1836,26 +1888,16 @@ export class Phase1Database {
     readonly impactPolicy?: ImpactPolicyConfirmationInput;
   }): void {
     this.sqlite.transaction(() => {
-      const existing = this.sqlite.query<{
-        id: string; repo_root: string; git_common_dir: string; main_ref: string;
-        object_format: 'sha1' | 'sha256';
-      }, [string]>(`
-        SELECT id,repo_root,git_common_dir,main_ref,object_format FROM projects WHERE repo_root=?1
-      `).get(input.repoRoot);
-      let projectId = input.id;
-      if (existing === null) {
-        this.sqlite.query(`
-          INSERT INTO projects(id,name,repo_root,git_common_dir,main_ref,
-            object_format,policy_version,created_at)
-          VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
-        `).run(input.id, input.name, input.repoRoot, input.gitCommonDir, input.mainRef,
-          input.objectFormat, input.policyVersion, input.trustedAt);
-      } else {
-        if (existing.repo_root !== input.repoRoot || existing.git_common_dir !== input.gitCommonDir
-          || existing.object_format !== input.objectFormat) {
-          throw new StorageError('INVALID_STATE', 'Repository identity does not match the trusted project');
-        }
-        projectId = existing.id;
+      // S7 (ADR-0070): the `projects` row and the PROJECT Service that projects it have one writer
+      // and one transaction. The project row comes first because `services.project_id` references it,
+      // and the Service row follows in the same transaction, so a trust that cannot place the project
+      // in the Service tree (no root Service) rolls back the project row too instead of leaving a
+      // project that no Service addresses.
+      const project = this.serviceWriteStore.ensureProjectRow({ project: input });
+      const projectId = project.projectId;
+      this.serviceWriteStore.ensureProjectService({ projectId, rootServiceId,
+        now: input.trustedAt, eventId: randomUUID() });
+      if (!project.created) {
         // The project row carries no per-project branch: every Task baseline is read from the
         // project folder's checked out branch at preparation time (ADR-0062).
         this.sqlite.query(`
@@ -2034,41 +2076,36 @@ export class Phase1Database {
           SELECT COALESCE(MAX(display_number),0)+1 AS display_number FROM tasks WHERE project_id=?1
         `).get(input.projectId);
         if (next === null) throw new Error('Could not allocate a Task display number');
+        const projectService = this.serviceWriteStore.ensureProjectService({
+          projectId: input.projectId, rootServiceId, now: input.createdAt, eventId: randomUUID(),
+        });
 
         this.insertIntent(database, {
           id: input.intentId, projectId: input.projectId, idempotencyKey: input.commandId,
           rawText: input.specification, kind: 'CREATE_TASK', status: 'APPLIED',
           actor: input.actor, createdAt: input.createdAt,
         });
-        database.query(`
-          INSERT INTO tasks(id,project_id,display_number,display_title,naming_title,
-            current_revision_id,state,priority,version,created_at,updated_at)
-          VALUES (?1,?2,?3,?4,?5,?6,'DRAFT',0,0,?7,?7)
-        `).run(input.taskId, input.projectId, next.display_number, input.displayTitle,
-          input.namingTitle, input.revisionId, input.createdAt);
-        database.query(`
-          INSERT INTO task_revisions(id,task_id,number,previous_revision_id,specification,
-            features_json,source_intent_id,actor,reason,created_at)
-          VALUES (?1,?2,1,NULL,?3,?4,?5,?6,'initial task creation',?7)
-        `).run(input.revisionId, input.taskId, input.specification,
-          JSON.stringify(input.features ?? []), input.intentId, input.actor, input.createdAt);
+        // S7 (ADR-0070): the `tasks` row, its first revision, the TASK Service that projects it and
+        // the two events this command records are one write path (`ServiceWriteStore`), not four
+        // INSERTs here. This method keeps what the store deliberately does not own: the command
+        // receipt, the `intents` row and the display-number allocation.
+        this.serviceWriteStore.createTaskService({
+          projectId: input.projectId,
+          projectServiceId: projectService.id,
+          taskId: input.taskId,
+          displayNumber: next.display_number,
+          displayTitle: input.displayTitle,
+          namingTitle: input.namingTitle,
+          revisionId: input.revisionId,
+          specification: input.specification,
+          feature: (input.features ?? [])[0] ?? null,
+          features: input.features ?? [],
+          now: input.createdAt,
+          eventIds: [input.intentEventId, input.taskEventId],
+          command: { intentId: input.intentId, commandId: input.commandId, actor: input.actor },
+        });
         database.query('INSERT INTO intent_targets(intent_id,task_id) VALUES (?1,?2)')
           .run(input.intentId, input.taskId);
-        database.query(`
-          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-          VALUES (?1,?2,'IntentRecorded',1,'Intent',?3,0,?4,?4,?5,?6)
-        `).run(input.intentEventId, input.projectId, input.intentId, input.commandId, input.createdAt,
-          JSON.stringify({ intentId: input.intentId, kind: 'CREATE_TASK' }));
-        database.query(`
-          INSERT INTO domain_events(event_id,project_id,event_type,schema_version,aggregate_type,
-            aggregate_id,aggregate_version,correlation_id,causation_id,occurred_at,payload_json)
-          VALUES (?1,?2,'TaskCreated',1,'Task',?3,0,?4,?5,?6,?7)
-        `).run(input.taskEventId, input.projectId, input.taskId, input.commandId,
-          input.intentEventId, input.createdAt,
-          JSON.stringify({ taskId: input.taskId, revisionId: input.revisionId,
-        displayTitle: input.displayTitle, namingTitle: input.namingTitle,
-        features: input.features ?? [] }));
         return {
           id: input.taskId,
           projectId: input.projectId,
@@ -5062,9 +5099,12 @@ export class Phase1Database {
     }
     this.restoreAppendOnlyTriggers(database, suspended);
 
-    const removed = database.query(
-      'DELETE FROM tasks WHERE id=?1 AND project_id=?2').run(input.taskId, input.projectId);
-    if (removed.changes !== 1) {
+    // RETURNING checks the direct row rather than driver `changes`: deleting a Task now also invokes
+    // the v37 Service projection's ON DELETE SET NULL action, and auxiliary FK updates must not make
+    // a successful direct delete look like a zero-row CAS.
+    const removed = database.query<{ id: string }, [string, string]>(
+      'DELETE FROM tasks WHERE id=?1 AND project_id=?2 RETURNING id').get(input.taskId, input.projectId);
+    if (removed === null) {
       throw new StorageError('CONCURRENT_MODIFICATION', 'Task changed during purge');
     }
     rowsDeleted['tasks'] = 1;
@@ -13361,6 +13401,11 @@ function taskPurgeDeletions(): readonly (readonly [string, string])[] {
     ['task_dependencies',
       'DELETE FROM task_dependencies WHERE prerequisite_task_id=?1 OR dependent_task_id=?1'],
     ['intent_targets', 'DELETE FROM intent_targets WHERE task_id=?1'],
+    // S2 Process rows are read-only projections of these Executions. Delete the projection first;
+    // Signals that named it keep their history because source_process_id is ON DELETE SET NULL.
+    ['processes', `DELETE FROM processes WHERE id IN (
+      SELECT process_id FROM process_execution_links WHERE execution_id IN (${executions})
+    )`],
     ['executions', 'DELETE FROM executions WHERE task_id=?1'],
     ['task_revisions', 'DELETE FROM task_revisions WHERE task_id=?1'],
     ['workspaces', 'DELETE FROM workspaces WHERE task_id=?1'],

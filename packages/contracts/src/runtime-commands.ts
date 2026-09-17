@@ -58,6 +58,11 @@ export const runtimeCommandSummaries = {
     group: "events",
     summary: "持续跟随领域事件流",
   },
+  "intent.send": {
+    command: "intent.send",
+    group: "intent",
+    summary: "把自然语言意图发给某个 Service；创建一个 Intention Process（解释属 S6）",
+  },
   "permission.get": {
     command: "permission.get",
     group: "settings",
@@ -67,6 +72,36 @@ export const runtimeCommandSummaries = {
     command: "permission.set",
     group: "settings",
     summary: "切换权限模式（无确认）",
+  },
+  "process.get": {
+    command: "process.get",
+    group: "process",
+    summary: "按 id 读一个 Process 的 kind/状态/parent Service 与关联 Execution",
+  },
+  "process.input": {
+    command: "process.input",
+    group: "process",
+    summary: "向运行中的 Process 追加输入（复用 Session Guidance 通道）",
+  },
+  "process.list": {
+    command: "process.list",
+    group: "process",
+    summary: "列出 Process（可按 parent Service 与状态过滤）",
+  },
+  "process.pause": {
+    command: "process.pause",
+    group: "process",
+    summary: "暂停一个 Development Process（复用 Task 协作停止）",
+  },
+  "process.resume": {
+    command: "process.resume",
+    group: "process",
+    summary: "恢复已暂停的 Process（新建 Execution 并以 provider conversation 续接）",
+  },
+  "process.terminate": {
+    command: "process.terminate",
+    group: "process",
+    summary: "终止一个 Process（终态，不自动重开）",
   },
   "project.impact.explain": {
     command: "project.impact.explain",
@@ -107,6 +142,41 @@ export const runtimeCommandSummaries = {
     command: "project.knowledge.validate",
     group: "project",
     summary: "逐条报告知识层被拒的条目（有拒条目时整层不出快照）",
+  },
+  "project.integration.cancel": {
+    command: "project.integration.cancel",
+    group: "project",
+    summary: "取消一条还在 QUEUED 的 merge 请求（不删除已发生的集成事实）",
+  },
+  "project.integration.init": {
+    command: "project.integration.init",
+    group: "project",
+    summary: "创建/读取项目独占的受管 integration ref（缺失时按当前检出分支补建）",
+  },
+  "project.integration.queue": {
+    command: "project.integration.queue",
+    group: "project",
+    summary: "读项目的持久 merge queue（严格串行，按 priority/时间/id 排序）",
+  },
+  "project.integration.request": {
+    command: "project.integration.request",
+    group: "project",
+    summary: "把一条已通过 Task 验证的结果排进项目 merge queue（幂等）",
+  },
+  "project.integration.retry": {
+    command: "project.integration.retry",
+    group: "project",
+    summary: "把 CONFLICTED/FAILED 的 queue item 重新排队，并把 owned worktree 复位",
+  },
+  "project.integration.run": {
+    command: "project.integration.run",
+    group: "project",
+    summary: "合并队首候选、跑独立 Integration Verification、再 CAS 推进 integration ref",
+  },
+  "project.integration.status": {
+    command: "project.integration.status",
+    group: "project",
+    summary: "读受管 integration ref/worktree 与队列现状（Git 事实与记录并列）",
   },
   "project.list": {
     command: "project.list",
@@ -218,6 +288,31 @@ export const runtimeCommandSummaries = {
     group: "scheduler",
     summary: "为一条预留准备并绑定 Task 工作树",
   },
+  "service.get": {
+    command: "service.get",
+    group: "service",
+    summary: "按 id 读一个 Service 的 kind/lifecycle/core 投影与 metadata",
+  },
+  "service.list": {
+    command: "service.list",
+    group: "service",
+    summary: "列出 Service（可按 kind 与 parent 过滤；--all 含 RETIRED）",
+  },
+  "service.state.get": {
+    command: "service.state.get",
+    group: "service",
+    summary: "读一个 Service 的 core 投影、metadata 与 state/core version",
+  },
+  "service.state.set": {
+    command: "service.state.set",
+    group: "service",
+    summary: "以 expected version CAS 写一条 namespaced metadata",
+  },
+  "service.tree": {
+    command: "service.tree",
+    group: "service",
+    summary: "打印以某个 Service 为根的子树（默认 root Service）",
+  },
   "session.guidance.get": {
     command: "session.guidance.get",
     group: "session",
@@ -318,6 +413,26 @@ export const runtimeCommandSummaries = {
     group: "settings",
     summary: "散文提问是否升级为等待：auto（默认）/ record-only / off",
   },
+  "signal.get": {
+    command: "signal.get",
+    group: "signal",
+    summary: "按 id 读一条 Signal 及其 attempts 与幂等回执",
+  },
+  "signal.list": {
+    command: "signal.list",
+    group: "signal",
+    summary: "列出 Signal（可按目标 Service、state、kind 过滤）",
+  },
+  "signal.retry": {
+    command: "signal.retry",
+    group: "signal",
+    summary: "显式重试一条 RETRYABLE/DEAD_LETTER/RECOVERY_REQUIRED 的 Signal",
+  },
+  "signal.send": {
+    command: "signal.send",
+    group: "signal",
+    summary: "向某个 Service 发一条 Signal；payload 通过该 Service 的 contract 校验",
+  },
   "task.archive": {
     command: "task.archive",
     group: "task",
@@ -347,6 +462,11 @@ export const runtimeCommandSummaries = {
     command: "task.depends.remove",
     group: "task",
     summary: "删除一条依赖",
+  },
+  "task.integration.show": {
+    command: "task.integration.show",
+    group: "task",
+    summary: "读一个 Task 的 integration 投影（与 lifecycle/verification 正交）",
   },
   "task.list": {
     command: "task.list",

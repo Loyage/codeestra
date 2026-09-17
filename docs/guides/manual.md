@@ -1,9 +1,10 @@
 # Codeestra 用户说明书
 
-> **适用版本** `dev@6c7de03`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> **适用版本** ADR-0070 S1–S4 实现分支（2026-09-17） · **schema** v37 · **最后校对** 2026-09-17
 > 版本会前进：`dev@6c7de03` 只是本目录最后一次校对的基线；当前适用版本以
 > **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
 > 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
+> **本次修订（ADR-0074 / schema v38）**：Task 基线改为项目受管的 integration ref（`refs/codeestra/integration`）；成果经 `project integration request|run` 进入该 ref，**发布到你的日常分支仍没有命令**。命令面见 [cli/managed-integration.md](cli/managed-integration.md)。
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > §4.1（创建任务）、§4.6 的任务详情描述与末尾术语表的 Task 一行由本分支按 **ADR-0065** 改写（三个必填字段；约束与任务类型已删除）。
 > §10.5 的「全局暂停」由 FOUNDATION-097 新增（ADR-0061 D04–D10）；§「任务」的永久删除一条由 FOUNDATION-090 新增（ADR-0058）；§3.1、§4.2、§4.3、§4.5、§10.1、§10.3 与
@@ -19,6 +20,7 @@
 > §10.3 新增 `WAIT_CONTROL` 一行并由 **FOUNDATION-097** 新增 §10.5「全局暂停」。
 > §「任务」永久删除一条与 §13.5 `RECOVERY_REQUIRED` 的 purge 行为由用户任务 `task/930f5325` 同步（ADR-0058 D02 修订，2026-09-16）。
 > 其余内容沿用 FOUNDATION-091 的校对基线。
+> **ADR-0070 S1–S4 实现修订**：§1 与 §1.1 描述 schema v37 的 Service/Process/Signal 内核命令；S5 之后能力仍不提前声称。
 > §6 末尾的「Agent 运行结果卡片与最后的输出」一段与 `04-task-detail.png` 的图说由用户任务 `Loyage/simplize_task_ui`
 > （2026-09-16）同步（无新命令；卡片是只读投影，截图未重拍）。
 
@@ -52,12 +54,9 @@
 
 ## 1. 这是什么
 
-Codeestra 是 **Task-first、local-first 的 AI Development Runtime**：**你管理产品意图，Codeestra 管理软件工程**
-（分支、工作树、执行、验证）。
+Codeestra 的长期目标是 **AI 的操作系统**：以长期 Service、短期 Process、Agent 与 Signal 统一管理 AI 工作；内核 Service-first，Scheduler 仍 Task-first。
 
-它不是聊天助手，也不是多 Agent UI。你描述「要完成的一项改动」，Codeestra 负责：给它一个独立的工作目录与
-分支、让一个 Coding Agent 去干、把成果固定成一个 commit、独立验证，然后把成果交给
-稳定分支并重启服务。
+**这本手册描述当前 schema v38**：Service / Process / Signal 内核与 `service/process/signal/intent` CLI 已可用；**受管 integration 已可用**（`project integration status|init|queue|request|run|retry|cancel` 与 `task integration show`，ADR-0074）：成果经持久 merge queue、独立 Integration Verification 与 CAS 进入项目受管的 integration ref。Project / Task / Execution / Session 仍是现有业务写路径的权威事实，并由兼容 facade 投影进新内核。**仍未实现**：Integration Process/Agent（冲突只报告不自动解决）、把 integration ref 发布到你的分支、原生 Process 控制与 intention 解释。目标架构与后续计划见 [ADR-0070](../decisions/0070-service-process-signal-kernel.md)、[ADR-0074](../decisions/0074-managed-integration-ref-and-merge-queue.md) 和 [roadmap](../roadmap/mvp.md)。
 
 ### 三条必须先知道的第一原则
 
@@ -65,7 +64,7 @@ Codeestra 是 **Task-first、local-first 的 AI Development Runtime**：**你管
    验证策略变化，默认零确认、零等待。** 你随时可以用 CLI 无确认地切到 `STRICT`，恢复旧门禁
    （`bun run codeestra settings permission set strict`）。
    正确性核对（revision/ref/归属/进程身份、静止证据、幂等与崩溃恢复）**一直有效**，但那些是核对，不是审批。
-2. **软件本体是服务，CLI 必须完备。** 独立本地 Runtime 是软件本体。ADR-0067 起 Web UI 暂停，当前只启用 CLI/Unix socket 命令面。
+2. **软件本体是服务，CLI 必须完备。** 独立本地 Runtime 是软件本体，也是目标 0 号 Service 与持久 Actor 内核的宿主。ADR-0067 起 Web UI 暂停，当前只启用 CLI/Unix socket 命令面。
    每个能力都能只靠 CLI 完成并脚本化驱动（`--json`、稳定退出码）。
 3. **测试只走 CLI / 命令面。** 自动化验收不依赖桌面、键鼠或浏览器自动化。
 
@@ -90,6 +89,16 @@ Codeestra 的每一步都**只报事实，不报乐观猜测**。所以你会反
 - 名词的准确定义与硬边界：[concepts.md](./concepts.md)
 - 「这软件到底有哪些功能」：[features.md](./features.md)
 - 三条第一原则的规格原文：[PROJECT_SPEC.md](../../PROJECT_SPEC.md) §1.1
+
+### 1.1 Service Kernel 的当前用法
+
+- `service list|get|tree|state get|state set`：查看稳定 root/system/Project/Task Service；`state set` 只经 `SIG_A` 写 namespaced metadata。
+- `process list|get|input|pause|resume|terminate`：既有 Execution 是只读 Development Process 投影；控制复用旧 Task/Session handler。
+- `signal send|list|get|retry`：持久、可 claim/retry/dead-letter 的 Service inbox；结构化值使用 `--payload-json`。
+- `intent send`：持久化 `SIG_P` 并创建 `CREATED` Intention Process；返回 `PENDING_S6`，当前不解释也不运行 Agent。
+
+完整参数、幂等、退避与退出码见 [Service Kernel 命令参考](./cli/kernel.md)。所有命令支持 `--json`；
+Signal 等待重试退 3，用法错误退 2，拒绝/dead-letter 退 1。
 
 ---
 
@@ -214,7 +223,7 @@ bun run codeestra project inspect /path/to/repo
 
 关键是这几项：`repoRoot`（工作树根）、`mainRef` / `objectFormat`（主分支 ref 与对象格式）、`headCommit`。
 
-**Task 基线只有一种**（ADR-0066）：**这个文件夹建 workspace 时当前检出的分支**。ref 与 commit 会一起
+**Task 基线只有一种**（ADR-0074）：**这个项目受管的 integration ref**（`refs/codeestra/integration`，`project trust` 用本文件夹当时检出的分支建立）。ref 与 commit 会一起
 固定进这条 Task 的记录，所以你之后切分支**不会**移动已建 Task 的基线。产品不再有 dev clone、长期 `dev`
 集成分支或 `dev → main` 提升——因此 `project inspect` 也不再返回 `devRef` / `devCommit` / `devRepoPath` /
 `devRefRetirement`。
@@ -237,7 +246,8 @@ bun run codeestra project trust /path/to/repo --dev-repo /path/to/dev-clone --ye
 ```
 
 **没有 `--dev-repo`**：ADR-0066 之后产品不再有 dev clone，trust 记录的是仓库身份与两份已提交策略的确认。
-Task 基线就是**项目文件夹建 workspace 时当前检出的分支**，成果停在 task 分支由你自己合（§8）。
+Task 基线就是**项目受管的 integration ref**，成果先停在 task 分支，再由 `project integration run` 合进那条 ref（§8）。
+把它发布到你自己的分支仍然没有命令、也仍然是你的决定。
 如果这个文件夹处于 detached HEAD，建 Task 时会被 `TASK_BASE_REF_UNRESOLVED` 拒绝——切到一条分支即可。
 
 而如果 trust 被拒，**什么都还没写**：项目不会被登记，补救命令就在错误消息里。
@@ -669,7 +679,8 @@ git -C <项目文件夹> merge --ff-only <result-commit>
 
 - 产品**没有** `task integrate`、`task integration *`、`promotion *` 这些命令：它们随 ADR-0066 一起删除，
   连同 IntegrationBatch、独立集成验证与 `dev → main` 提升。执行它们只会得到用法错误。
-- 为什么不自动合：合并是把代码放进你日常使用分支的动作，冲突与取舍属于你的产品判断；Codeestra 不替你做，
+- 为什么合进 integration ref 与"发布到你的分支"要分开：前者是 Codeestra 管理的私有事实（`refs/codeestra/integration`），
+  后者是把代码放进你日常使用分支的动作，冲突与产品取舍属于你的判断；Codeestra 不替你做，
   也就不会替你记账。
 - **回收**是分开的一件事：`reclaim plan/apply` 只删归属校验通过、且成果**已经进入该 workspace 记录的
   `base_ref`** 的 worktree；没有自动路径（见 §12.3）。
@@ -745,7 +756,8 @@ bun run codeestra task depends list   $PROJECT [task-id] [--json]
 - 依赖图必须是 **DAG**；加环会以 `DEPENDENCY_CYCLE` / `DEPENDENCY_GRAPH_INVALID` 拒绝，**且不部分应用**。
 - **关键语义**（ADR-0066）：上游**指定修订自己的结果 commit** 必须对下游的 **Task 基线 ref** 可达。
   **仅 Task 验证成功不释放依赖**——你要把上游的成果合并进自己的分支，下游才会解锁。
-- 基线来源：项目文件夹**建 workspace 时当前检出的分支**（只有这一种）；读不到基线就按未满足阻塞
+- 基线来源：项目受管的 integration ref `refs/codeestra/integration`（只有这一种，由 `project trust` 物化、缺失时首次需要补建）；
+  读不到基线（ref 与文件夹分支都不可得）就按未满足阻塞
   （`BASE_REF_MISSING`），**不会**因此拒绝整条命令。上游没有结果 commit 是 `UPSTREAM_RESULT_MISSING`，
   结果 commit 不在基线里是 `NOT_REACHABLE_FROM_BASE`。
 - **重判发生在每一趟调度**（默认 5 秒一次，或你显式 `task schedule run`）：`task depends list` 是只读的，
@@ -1066,7 +1078,7 @@ Task/Execution 的 `RECOVERY_REQUIRED` 用 **`task recover <project-id> <task-id
 
 **本文不复制错误码表。** 稳定码、每条的触发条件与处理方式都在
 [troubleshooting.md](./troubleshooting.md) 的 §1（按症状）与 §2（按领域速查表）里；
-每条命令的参数、退出码与码位在 [cli/README.md](./cli/README.md) 索引下的八篇里。
+每条命令的参数、退出码与码位在 [cli/README.md](./cli/README.md) 索引下的十篇里（含 §23 受管 integration）。
 
 ### 想深入看哪篇
 
@@ -1126,7 +1138,7 @@ Task/Execution 的 `RECOVERY_REQUIRED` 用 **`task recover <project-id> <task-id
 - [workflow.md](./workflow.md)：端到端流程走查（含可照抄命令）
 - [features.md](./features.md)：功能清单（一行一个能力）
 - [ui.md](./ui.md)：Web UI 暂停状态与未来恢复条件
-- [cli/](./cli/README.md)：CLI 命令参考（八篇）
+- [cli/](./cli/README.md)：CLI 命令参考（十篇，含 §23 受管 integration）
 - [recipes.md](./recipes.md)：常见任务的做法
 - [acceptance-checklist.md](./acceptance-checklist.md)：人工观感核对清单
 - [troubleshooting.md](./troubleshooting.md)：常见故障与稳定码表

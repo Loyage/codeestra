@@ -298,8 +298,9 @@ describe('codeestra reclaim: cross-project batch', () => {
     const [first, second] = fixture.projectIds as [string, string];
     try {
       const reclaimable = await seededExecutedTask(fixture, first, 'Produce one artifact');
-      await git(fixture.repositories[0] as string, ['merge', '--ff-only', '-q',
-        reclaimable.resultCommit]);
+      // "Already merged" is measured against the managed integration ref (ADR-0070 D07 / S8).
+      await git(fixture.repositories[0] as string,
+        ['update-ref', 'refs/codeestra/integration', reclaimable.resultCommit]);
       // The second project keeps a workspace a live reservation still holds: a refusal, not a skip.
       const reserved = await reservedTaskWorkspace(fixture, second, { cancel: true });
 
@@ -568,7 +569,10 @@ describe('codeestra reclaim: unregistered directories', () => {
     const [projectId] = fixture.projectIds as [string];
     try {
       const task = await seededExecutedTask(fixture, projectId, 'Produce one artifact');
-      await git(fixture.repositories[0] as string, ['merge', '--ff-only', '-q', task.resultCommit]);
+      // The Task baseline is the managed integration ref (ADR-0070 D07 / S8, ADR-0074), so making
+      // the result "already merged" means advancing that ref — not merging into a user branch.
+      await git(fixture.repositories[0] as string,
+        ['update-ref', 'refs/codeestra/integration', task.resultCommit]);
       const planned = await cli(['reclaim', 'plan', '--all-projects', '--unregistered', '--json'],
         fixture.environment);
       const plan = JSON.parse(planned.stdout) as BatchPlanView;
@@ -672,7 +676,10 @@ describe('codeestra reclaim: unregistered directories', () => {
     const [projectId] = fixture.projectIds as [string];
     try {
       const task = await seededExecutedTask(fixture, projectId, 'Produce one artifact');
-      await git(fixture.repositories[0] as string, ['merge', '--ff-only', '-q', task.resultCommit]);
+      // The Task baseline is the managed integration ref (ADR-0070 D07 / S8, ADR-0074), so making
+      // the result "already merged" means advancing that ref — not merging into a user branch.
+      await git(fixture.repositories[0] as string,
+        ['update-ref', 'refs/codeestra/integration', task.resultCommit]);
       const applied = await cli(['reclaim', 'apply', '--project', projectId, '--json'],
         fixture.environment);
       expect(applied.exitCode).toBe(0);

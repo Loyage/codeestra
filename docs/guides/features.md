@@ -1,9 +1,10 @@
 # 功能清单：「这软件能做什么」
 
-> **适用版本** `dev@6c7de03`（2026-09-17） · **schema** v36 · **最后校对** 2026-09-17
+> **适用版本** ADR-0070 S1–S4 实现分支（2026-09-17） · **schema** v37 · **最后校对** 2026-09-17
 > 版本会前进：`dev@6c7de03` 只是本目录最后一次校对的基线；当前适用版本以
 > **本次修订（ADR-0066 / schema v36）**：删除 dev clone、长期 `dev` 集成分支、`task integrate` / `task integration *` / `promotion *` 与 dev 构建通道；Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），
 > 成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
+> **本次修订（ADR-0074 / schema v38）**：Task 基线改为项目受管的 integration ref（`refs/codeestra/integration`）；成果经 `project integration request|run` 的合并、独立 Integration Verification 与 CAS 进入该 ref，**没有任何命令把它发布到你的分支**。命令面见 [cli/managed-integration.md](cli/managed-integration.md)。
 > [docs/tasks/README.md](../tasks/README.md) 的最新 FOUNDATION 记录为准。
 > 「创建任务」与「规格修订」两行由本分支按 **ADR-0065** 改写（三个必填字段；约束与任务类型已删除）。
 > 「调度、容量与冲突」一节新增「全局暂停」一行，并由 FOUNDATION-097 标明容量行的目标语义（ADR-0061 D01–D03）；
@@ -21,6 +22,7 @@
 > 「设置」表的并发上限设置一行同轮新增（同一个值也可从设置面实时调整）；
 > 「永久删除」一行的 `RECOVERY_REQUIRED` 对账由用户任务 `task/930f5325` 同步（ADR-0058 D02 修订，2026-09-16）；
 > 其余行沿用 FOUNDATION-091 的校对基线。
+> **FOUNDATION-099 / ADR-0070 S1–S4**：新增「Service Kernel」表；S5–S10 仍列为未实现边界。
 
 一行一个能力。列的含义：
 
@@ -33,6 +35,15 @@
 
 ---
 
+## Service Kernel
+
+| 能力 | 能做什么 | CLI 入口 | UI 位置 | ADR |
+|---|---|---|---|---|
+| Service 查询与 metadata | 查询稳定 root/system/Project/Task Service 树与 core 投影；通过 metadata CAS 写 namespaced JSON，不绕过 core state | `service list/get/tree/state get/state set` | —（CLI-only） | [0070](../decisions/0070-service-process-signal-kernel.md) |
+| Process 兼容 facade | 把既有 Execution 投影为同 ID Development Process；input/pause/resume/terminate 复用 Task/Session handler | `process list/get/input/pause/resume/terminate` | —（CLI-only） | [0070](../decisions/0070-service-process-signal-kernel.md) |
+| 持久 Signal | contract 校验、enqueue/claim/ACK/retry/dead-letter/reconcile；target + idempotency key 收敛 | `signal send/list/get/retry` | —（CLI-only） | [0070](../decisions/0070-service-process-signal-kernel.md) |
+| Intention 受理 | 发 `SIG_P` 并创建 `CREATED` Intention Process；当前明确返回 `PENDING_S6`，不解释、不启动 Agent | `intent send` | —（CLI-only） | [0070](../decisions/0070-service-process-signal-kernel.md) |
+
 ## 接入与项目
 
 | 能力 | 能做什么 | CLI 入口 | UI 位置 | ADR |
@@ -40,7 +51,8 @@
 | 项目识别 | 读仓库身份：工作树根、`main` ref、对象格式、HEAD（ADR-0066 删除了 dev clone 与 `dev` 基线字段） | `project inspect [path]` | 项目 → 添加本地项目 | [0064](../decisions/0066-remove-dev-clone-and-dual-baseline.md) |
 | 验证策略展示 | 打印 `main` ref 上 `.codeestra/policies/verification.json` 的状态、digest 与逐条命令 | `project policy [path]` | 项目 → 验证策略 | [0006](../decisions/0006-task-verification-policy.md) |
 | 项目接入（trust） | 注册项目；把「你刚看到的身份 + 验证策略 digest + 影响映射 digest」一起确认；FULL 零确认 / STRICT 输 `TRUST` | `project trust [path] [--yes]` | 项目 → 添加/信任此项目（被拒绝时显示稳定码 + 本地解释） | [0011](../decisions/0011-default-full-permission-mode.md)、[0031](../decisions/0031-impact-snapshot-and-deterministic-conflict-analyzer.md)、[0064](../decisions/0066-remove-dev-clone-and-dual-baseline.md) |
-| Task 基线 | **只有一种**（ADR-0066）：从**项目文件夹建 workspace 时当前检出的分支**建基线，把 ref 与 commit 一起固定（`workspaces.base_ref`/`base_commit`）；detached HEAD 以 `TASK_BASE_REF_UNRESOLVED` 拒绝，因为它没有分支可名。`task run --base-ref <refs/heads/…>` 可单次覆盖 | `task run`（准备 workspace 时） | —（同一命令面） | [0005](../decisions/0005-task-entry-and-worktree-location.md)、[0064](../decisions/0066-remove-dev-clone-and-dual-baseline.md) |
+| Task 基线 | **只有一种**（ADR-0074 取代 ADR-0066 的规则）：从**项目受管 integration ref**（`refs/codeestra/integration`，由 `project trust` 创建、缺失时首次需要补建）当时的 commit 建基线，把 ref 与 commit 一起固定（`workspaces.base_ref`/`base_commit`）；ref 与文件夹分支都不可得时以 `TASK_BASE_REF_UNRESOLVED` 拒绝。`task run --base-ref <refs/heads/…>` 可单次覆盖 | `task run`（准备 workspace 时） | —（同一命令面） | [0005](../decisions/0005-task-entry-and-worktree-location.md)、[0074](../decisions/0074-managed-integration-ref-and-merge-queue.md) |
+| 受管 integration | `project integration status\|init\|queue\|request\|run\|retry\|cancel` 与 `task integration show`：持久 merge queue（同项目串行、跨项目并行）、独立 Integration Verification、`git update-ref` CAS 推进 ref；冲突/验证失败/ref 移动/重启保留现场且不 force。**不发布到用户分支**，也不创建 Integration Process/Agent | `project integration run` | —（同一命令面） | [0074](../decisions/0074-managed-integration-ref-and-merge-queue.md)、[0070](../decisions/0070-service-process-signal-kernel.md) |
 | Web UI 接入快捷命令（已删除） | ADR-0067 起不再提供接入并打开界面的复合命令；使用 `project inspect|policy|trust|list` | — | —（UI 已暂停） | [0067](../decisions/0067-pause-web-ui-and-cli-focus.md) |
 | 项目列表 | 列出已信任项目及其确认策略 | `project list` | 顶部项目选择器 | — |
 | 影响映射校验 | 报告 `main` ref 上的 `.codeestra/impact.json` 是否存在且是已确认的那一份 | `project impact validate [path] [--json]` | **调度 → 影响映射 · impact.json** | [0031](../decisions/0031-impact-snapshot-and-deterministic-conflict-analyzer.md) |
@@ -145,14 +157,15 @@ ff-only 拉取 → 重启核对 → 推回远端 `main`），但那是仓库约�
 
 以下内容**当前不成立**，不要按「已有」使用：
 
-1. **真实 provider 的并发运行**未验收：多 Task 并行的调度语义有实现与容量/槽位门禁，但真实模型的并行执行没有完成受控验收。
-2. **真实模型下的暂停 / 恢复复验**未完成：ADR-0016 的暂停/恢复编排由脚本 Adapter 覆盖；真实 provider 进程的暂停/恢复与取消超时仍未复验。
+1. **Service Kernel S9–S10 与 S5–S8 的其余内容**未实现：Intention Process 尚不解释/运行 Agent；原生 Process 控制与 eligibility 解耦仍是后续阶段。S8 的受管 integration 已交付（见上表），但 **Integration Process/Agent 与把 ref 发布到用户分支都没有实现**。S4 的 `PENDING_S6` 只表示持久受理。
+2. **真实 provider 的并发运行**未验收：多 Task 并行的调度语义有实现与容量/槽位门禁，但真实模型的并行执行没有完成受控验收。
+3. **真实模型下的暂停 / 恢复复验**未完成：ADR-0016 的暂停/恢复编排由脚本 Adapter 覆盖；真实 provider 进程的暂停/恢复与取消超时仍未复验。
    **区分**：ADR-0061 的**全局** Provider 冻结已对 **Pi** 做过真实进程测量（`docs/spikes/pi-0.84.4.md`），
    而 **Codex 与 Claude Code 的 `providerProcessSuspension` 仍是 `REQUIRES_VALIDATION`**——
    全局 `pause` 遇到它们的目标会 fail closed 到 `RECOVERY_REQUIRED`（`GLOBAL_PAUSE_UNSUPPORTED`），**不会**假装已冻结。
-3. **Provider 是否真的读取 Project Knowledge 物化文件**未验证：本轮 Agent Adapter 不消费 `knowledgeSnapshotRefs`。
-4. **token 级实时流**（需要新事件与存储）未实现；transcript 是**按需读取 + 轮询**，不是逐 token 推送。
-5. **Codeestra 自升级 / Self Promotion 的完整切换**未实现（Phase 7）。
-6. **Session Guidance 的模型侧未验证**：命令面、台账与启动交付已实现（ADR-0057），但「真实模型是否真的读了 guidance」与「真实 Pi 在**忙碌轮次**里是否接受 `steer`」都没有验收（ADR-0051 的 `steer` 实测是在空闲 session 上做的）；Codex 的 `turn/steer` 记为 `REQUIRES_VALIDATION`，Claude Code 的活会话通道为 `UNSUPPORTED`。**不要把 `DELIVERED` 读成「模型已经照做」。**
-7. 文档与实现不一致的地方在 [troubleshooting.md](./troubleshooting.md) §3 里**如实列出**（现为 FOUNDATION-074/075 的校准结果 + FOUNDATION-078 的逐屏走查校准），
+4. **Provider 是否真的读取 Project Knowledge 物化文件**未验证：本轮 Agent Adapter 不消费 `knowledgeSnapshotRefs`。
+5. **token 级实时流**（需要新事件与存储）未实现；transcript 是**按需读取 + 轮询**，不是逐 token 推送。
+6. **Codeestra 自升级 / Self Promotion 的完整切换**未实现（Phase 7）。
+7. **Session Guidance 的模型侧未验证**：命令面、台账与启动交付已实现（ADR-0057），但「真实模型是否真的读了 guidance」与「真实 Pi 在**忙碌轮次**里是否接受 `steer`」都没有验收（ADR-0051 的 `steer` 实测是在空闲 session 上做的）；Codex 的 `turn/steer` 记为 `REQUIRES_VALIDATION`，Claude Code 的活会话通道为 `UNSUPPORTED`。**不要把 `DELIVERED` 读成「模型已经照做」。**
+8. 文档与实现不一致的地方在 [troubleshooting.md](./troubleshooting.md) §3 里**如实列出**（现为 FOUNDATION-074/075 的校准结果 + FOUNDATION-078 的逐屏走查校准），
    未做静默改写。

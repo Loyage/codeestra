@@ -9,3 +9,12 @@ export function runtimeHome(environment: Readonly<Record<string, string | undefi
 export function runtimeSocketPath(home = runtimeHome()): string {
   return join(home, 'runtime.sock');
 }
+
+/** Verification copies and integration worktrees are both Runtime data, never inside a project. */
+export function verificationCopiesRoot(home = runtimeHome()): string {
+  return join(home, 'verifications');
+}
+
+export function integrationWorktreesRoot(home = runtimeHome()): string {
+  return join(home, 'integration');
+}

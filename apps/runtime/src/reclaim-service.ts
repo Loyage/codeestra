@@ -7,7 +7,7 @@ import {
   inspectOwnedWorktreeRegistration,
   inspectWorktreeState,
   isAncestor,
-  readLocalRefCommit,
+  readRefCommit,
   removeOwnedWorktree,
   type OwnedWorktreeRemoval,
 } from '@codeestra/git';
@@ -1096,13 +1096,15 @@ async function buildPlan(input: ReclaimPlanInput): Promise<BuiltPlan> {
       const state = registration.registered && registration.pathExists
         ? await inspectWorktreeState({ path: workspace.path })
         : null;
-      // ADR-0062: "already merged" is measured against the very ref this workspace was based on.
-      // A result that is not reachable from that ref is *not* merged, so the worktree is retained; a
-      // workspace with no readable base ref is retained too (unknown is never treated as merged).
+      // ADR-0070 D07 / S8: "already merged" is measured against the very ref this workspace was
+      // based on — today that is the Project Service's managed integration ref, which is not a local
+      // branch. A result that is not reachable from that ref is *not* merged, so the worktree is
+      // retained; a workspace with no readable base ref is retained too (unknown is never treated as
+      // merged).
       let merged: boolean | null = null;
       const mergeTargetRef = workspace.baseRef;
       if (task.resultCommit !== null && mergeTargetRef !== null) {
-        const mergeTarget = await readLocalRefCommit({
+        const mergeTarget = await readRefCommit({
           repositoryRoot, ref: mergeTargetRef,
         }).catch(() => null);
         if (mergeTarget !== null) {

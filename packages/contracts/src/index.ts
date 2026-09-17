@@ -18,8 +18,12 @@ export * from './targeted-test-plan.js';
 export * from './prose-question.js';
 export * from './settings.js';
 export * from './agent-plugins.js';
+export * from './intention.js';
 export * from './runtime-commands.js';
+export * from './service-kernel-signals.js';
+export * from './managed-integration.js';
 import type { RuntimeCommandInfo } from './runtime-commands.js';
+import { processProgressViewSchema } from './service-kernel-signals.js';
 
 export const repositoryIdentitySchema = z.strictObject({
   repoRoot: z.string().min(1),
@@ -1213,6 +1217,107 @@ export type SchedulerGlobalEventType = (typeof schedulerGlobalEventTypes)[number
 /** Every global control event has this aggregate; its id is the singleton control row. */
 export const schedulerGlobalAggregateType = 'RuntimeSchedulerControl';
 
+/** ADR-0070 S1-S4 kernel command vocabulary. */
+export const serviceKindSchema = z.enum(['ROOT', 'SCHEDULER', 'ATTENTION', 'PROJECT', 'TASK']);
+export const serviceLifecycleSchema = z.enum(['ACTIVE', 'PAUSED', 'RECOVERY_REQUIRED', 'RETIRED']);
+export const processStateSchema = z.enum(['CREATED', 'STARTING', 'RUNNING', 'WAITING_FOR_USER',
+  'PAUSING', 'PAUSED', 'SUCCEEDED', 'FAILED', 'CANCELLED', 'RECOVERY_REQUIRED']);
+export const signalKindSchema = z.enum(['SIG_A', 'SIG_P']);
+export const signalStateSchema = z.enum(['PENDING', 'CLAIMED', 'RETRYABLE', 'ACKED',
+  'DEAD_LETTER', 'RECOVERY_REQUIRED']);
+export const maxKernelJsonBytes = 65_536;
+export const maxIntentChars = 16_000;
+const metadataSegmentSchema = z.string().regex(/^[a-z][a-z0-9_.-]{0,62}$/);
+const boundedKernelJsonSchema = z.unknown().superRefine((value, context) => {
+  let encoded: string | undefined;
+  try { encoded = JSON.stringify(value); } catch { encoded = undefined; }
+  if (encoded === undefined || Buffer.byteLength(encoded, 'utf8') > maxKernelJsonBytes) {
+    context.addIssue({ code: 'custom', message: `JSON value must be at most ${maxKernelJsonBytes} bytes` });
+  }
+});
+
+export const serviceMetadataSetPayloadSchema = z.strictObject({
+  namespace: metadataSegmentSchema.refine((value) => value !== 'core' && value !== 'codeestra',
+    'Reserved metadata namespace'),
+  key: metadataSegmentSchema,
+  value: boundedKernelJsonSchema,
+  expectedVersion: z.number().int().nonnegative(),
+});
+export const intentionSignalPayloadSchema = z.strictObject({
+  text: z.string().min(1).max(maxIntentChars).refine((value) => value.trim().length > 0,
+    'Intention must not be blank'),
+  adapterId: nonBlankString.default('pi'),
+});
+
+/** Stable S4 response contracts. Unknown JSON is bounded before crossing the command boundary. */
+export const serviceViewSchema = z.strictObject({
+  id: z.string().uuid(), kind: serviceKindSchema, parentServiceId: z.string().uuid().nullable(),
+  projectId: z.string().uuid().nullable(), taskId: z.string().uuid().nullable(),
+  lifecycle: serviceLifecycleSchema, contractVersion: z.number().int().positive(),
+  stateVersion: z.number().int().nonnegative(), coreVersion: z.number().int().nonnegative(),
+  coreState: boundedKernelJsonSchema, metadata: z.record(z.string(), boundedKernelJsonSchema),
+  inboxCursor: z.number().int().nonnegative(), createdAt: z.number().int().nonnegative(),
+  updatedAt: z.number().int().nonnegative(),
+}).superRefine((service, context) => {
+  if (service.kind === 'PROJECT' && (service.taskId !== null
+    || (service.lifecycle !== 'RETIRED' && service.projectId === null))) {
+    context.addIssue({ code: 'custom', message: 'Active Project Service requires projectId only' });
+  }
+  if (service.kind === 'TASK' && (service.projectId !== null
+    || (service.lifecycle !== 'RETIRED' && service.taskId === null))) {
+    context.addIssue({ code: 'custom', message: 'Active Task Service requires taskId only' });
+  }
+  if (!['PROJECT', 'TASK'].includes(service.kind)
+    && (service.projectId !== null || service.taskId !== null)) {
+    context.addIssue({ code: 'custom', message: 'System Service cannot project a legacy aggregate' });
+  }
+});
+
+export const processViewSchema = z.strictObject({
+  id: z.string().uuid(), kind: z.enum(['DEVELOPMENT', 'INTENTION', 'INTEGRATION']),
+  parentServiceId: z.string().uuid(), projectId: z.string().uuid().nullable(),
+  taskId: z.string().uuid().nullable(), executionId: z.string().uuid().nullable(),
+  state: processStateSchema, version: z.number().int().nonnegative(),
+  controlVersion: z.number().int().nonnegative().nullable(),
+  objective: z.string().min(1), adapterId: nonBlankString.nullable(),
+  progress: processProgressViewSchema,
+  createdAt: z.number().int().nonnegative(), updatedAt: z.number().int().nonnegative(),
+}).superRefine((process, context) => {
+  if (process.kind === 'DEVELOPMENT'
+    && (process.projectId === null || process.taskId === null || process.executionId === null
+      || process.controlVersion === null)) {
+    context.addIssue({ code: 'custom', message: 'Development Process requires legacy projection links' });
+  }
+});
+
+export const signalAttemptViewSchema = z.strictObject({
+  attemptNumber: z.number().int().positive(), bootId: nonBlankString,
+  claimedAt: z.number().int().nonnegative(), settledAt: z.number().int().nonnegative().nullable(),
+  state: z.enum(['CLAIMED', 'ACKED', 'RETRYABLE', 'DEAD_LETTER', 'RECOVERY_REQUIRED']),
+  errorCode: z.string().nullable(), errorMessage: z.string().nullable(),
+});
+export const signalReceiptViewSchema = z.strictObject({
+  acknowledgedAt: z.number().int().nonnegative(), effect: boundedKernelJsonSchema });
+export const signalViewSchema = z.strictObject({
+  id: z.string().uuid(), kind: signalKindSchema, subtype: nonBlankString,
+  sourceServiceId: z.string().uuid().nullable(), sourceProcessId: z.string().uuid().nullable(),
+  targetServiceId: z.string().uuid(), contractVersion: z.number().int().positive(),
+  payload: boundedKernelJsonSchema, idempotencyKey: nonBlankString, correlationId: nonBlankString,
+  causationId: z.string().nullable(), priority: z.number().int(), state: signalStateSchema,
+  attemptCount: z.number().int().nonnegative(), automaticAttempts: z.number().int().nonnegative(),
+  nextAttemptAt: z.number().int().nonnegative().nullable(), claimBootId: z.string().nullable(),
+  claimDeadlineAt: z.number().int().nonnegative().nullable(),
+  acknowledgedAt: z.number().int().nonnegative().nullable(),
+  deadLetteredAt: z.number().int().nonnegative().nullable(), lastErrorCode: z.string().nullable(),
+  lastErrorMessage: z.string().nullable(), createdAt: z.number().int().nonnegative(),
+  updatedAt: z.number().int().nonnegative(), attempts: z.array(signalAttemptViewSchema),
+  receipt: signalReceiptViewSchema.nullable(),
+}).superRefine((signal, context) => {
+  if (signal.state === 'ACKED' && (signal.acknowledgedAt === null || signal.receipt === null)) {
+    context.addIssue({ code: 'custom', message: 'ACKED Signal requires acknowledgement and receipt' });
+  }
+});
+
 export const runtimeRequestSchema = z.discriminatedUnion('command', [
   z.strictObject({ ...requestBase, command: z.literal('runtime.ping') }),
   z.strictObject({ ...requestBase, command: z.literal('runtime.stop') }),
@@ -1300,6 +1405,112 @@ export const runtimeRequestSchema = z.discriminatedUnion('command', [
     expectedImpactPolicy: impactPolicyConfirmationSchema.optional(),
   }),
   z.strictObject({ ...requestBase, command: z.literal('project.list') }),
+  // Project-managed integration (ADR-0070 D07 / S8, ADR-0074). `init`/`status` read and create the
+  // owned integration ref; `request`/`queue`/`run`/`retry`/`cancel` drive the durable merge queue.
+  // None of these publishes the ref to a user branch.
+  z.strictObject({ ...requestBase, command: z.literal('project.integration.status'),
+    projectId: z.string().uuid() }),
+  z.strictObject({ ...requestBase, command: z.literal('project.integration.init'),
+    projectId: z.string().uuid() }),
+  z.strictObject({
+    ...requestBase, command: z.literal('project.integration.request'),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    commandId: z.string().min(1),
+    revisionId: z.string().min(1).optional(),
+    resultCommit: z.string().min(1).optional(),
+    taskVerificationRunId: z.string().min(1).optional(),
+    priority: z.number().int().min(-1_000).max(1_000).default(0),
+  }),
+  z.strictObject({ ...requestBase, command: z.literal('project.integration.queue'),
+    projectId: z.string().uuid(), limit: z.number().int().min(1).max(500).default(100) }),
+  z.strictObject({
+    ...requestBase, command: z.literal('project.integration.run'),
+    projectId: z.string().uuid(),
+    /** Optional: the item must be the head of this project's queue, never another one. */
+    itemId: z.string().min(1).optional(),
+  }),
+  z.strictObject({
+    ...requestBase, command: z.literal('project.integration.retry'),
+    projectId: z.string().uuid(), itemId: z.string().min(1),
+  }),
+  z.strictObject({
+    ...requestBase, command: z.literal('project.integration.cancel'),
+    projectId: z.string().uuid(), itemId: z.string().min(1),
+    reason: z.string().min(1).max(4096).default('cancelled from the CLI'),
+  }),
+  z.strictObject({
+    ...requestBase, command: z.literal('task.integration.show'),
+    projectId: z.string().uuid(), taskId: z.string().uuid(),
+  }),
+  // Service kernel queries and metadata command (ADR-0070 S4). `service.state.set` is translated to
+  // the registered SERVICE_METADATA_SET SIG_A contract; it cannot write a core lifecycle field.
+  z.strictObject({
+    ...requestBase, command: z.literal('service.list'),
+    kind: serviceKindSchema.optional(),
+    parentServiceId: z.string().uuid().optional(),
+    includeRetired: z.boolean().default(false),
+  }),
+  z.strictObject({ ...requestBase, command: z.literal('service.get'),
+    serviceId: z.string().uuid() }),
+  z.strictObject({ ...requestBase, command: z.literal('service.tree'),
+    serviceId: z.string().uuid().optional() }),
+  z.strictObject({ ...requestBase, command: z.literal('service.state.get'),
+    serviceId: z.string().uuid() }),
+  z.strictObject({
+    ...requestBase, command: z.literal('service.state.set'), commandId: z.string().uuid(),
+    serviceId: z.string().uuid(), namespace: metadataSegmentSchema,
+    key: metadataSegmentSchema, value: boundedKernelJsonSchema,
+    expectedVersion: z.number().int().nonnegative(),
+  }),
+  // Process query plus the S4 compatibility bridge. A projected Development Process delegates to
+  // the existing Task/Session command path; native Intention Processes stay CREATED until S6.
+  z.strictObject({
+    ...requestBase, command: z.literal('process.list'),
+    parentServiceId: z.string().uuid().optional(), state: processStateSchema.optional(),
+  }),
+  z.strictObject({ ...requestBase, command: z.literal('process.get'),
+    processId: z.string().uuid() }),
+  z.strictObject({ ...requestBase, command: z.literal('process.input'),
+    commandId: z.string().uuid(), processId: z.string().uuid(),
+    message: z.string().min(1).max(maxIntentChars).refine((value) => value.trim().length > 0) }),
+  z.strictObject({ ...requestBase, command: z.literal('process.pause'),
+    commandId: z.string().uuid(), processId: z.string().uuid(),
+    expectedControlVersion: z.number().int().nonnegative() }),
+  z.strictObject({ ...requestBase, command: z.literal('process.resume'),
+    commandId: z.string().uuid(), processId: z.string().uuid(),
+    expectedControlVersion: z.number().int().nonnegative(), adapterId: nonBlankString.optional(),
+    allowUnknown: z.boolean().default(false) }),
+  z.strictObject({ ...requestBase, command: z.literal('process.terminate'),
+    commandId: z.string().uuid(), processId: z.string().uuid(),
+    expectedControlVersion: z.number().int().nonnegative() }),
+  // Generic Signal ingress is contract-gated by the target Service at Runtime dispatch. The schema
+  // bounds the envelope; the per-subtype Zod schema is selected only after the target is known.
+  z.strictObject({
+    ...requestBase, command: z.literal('signal.send'), commandId: z.string().uuid(),
+    kind: signalKindSchema, subtype: nonBlankString, targetServiceId: z.string().uuid(),
+    sourceServiceId: z.string().uuid().optional(), sourceProcessId: z.string().uuid().optional(),
+    contractVersion: z.number().int().positive().default(1), payload: boundedKernelJsonSchema,
+    idempotencyKey: nonBlankString, correlationId: nonBlankString.optional(),
+    causationId: nonBlankString.optional(), priority: z.number().int().min(-1000).max(1000).default(0),
+  }),
+  z.strictObject({
+    ...requestBase, command: z.literal('signal.list'),
+    targetServiceId: z.string().uuid().optional(), state: signalStateSchema.optional(),
+    kind: signalKindSchema.optional(), limit: z.number().int().min(1).max(500).default(100),
+  }),
+  z.strictObject({ ...requestBase, command: z.literal('signal.get'),
+    signalId: z.string().uuid() }),
+  z.strictObject({ ...requestBase, command: z.literal('signal.retry'),
+    commandId: z.string().uuid(), signalId: z.string().uuid() }),
+  // Convenience facade for SIG_P. Exactly one target flag may be supplied; no flag means root.
+  z.strictObject({
+    ...requestBase, command: z.literal('intent.send'), commandId: z.string().uuid(),
+    serviceId: z.string().uuid().optional(), projectId: z.string().uuid().optional(),
+    taskId: z.string().uuid().optional(), text: z.string().min(1).max(maxIntentChars)
+      .refine((value) => value.trim().length > 0, 'Intention must not be blank'),
+    adapterId: nonBlankString.default('pi'),
+  }),
   z.strictObject({
     ...requestBase,
     command: z.literal('events.list'),

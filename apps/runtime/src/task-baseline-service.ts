@@ -1,15 +1,25 @@
-import { GitInspectionError, inspectBaseRef, inspectRepository, readHeadCommitOrNull } from '@codeestra/git';
+import {
+  GitInspectionError,
+  ensureManagedIntegrationRef,
+  inspectBaseRef,
+  managedIntegrationRefName,
+} from '@codeestra/git';
 
 /**
- * The Task baseline (ADR-0062).
+ * The Task baseline (ADR-0070 D07 / S8, ADR-0074).
  *
- * There is exactly one rule: **a Task worktree is based on the branch the project folder has checked
- * out right now**. The ref and its commit are fixed together with the workspace record, so switching
- * branches in that folder later never moves an existing Task's baseline.
+ * There is exactly one rule: **a Task worktree is based on its Project's managed integration ref**
+ * (`refs/codeestra/integration`), fixed to the commit that ref pointed at when the Task was
+ * prepared. The ref and the commit are recorded together, so a later merge into the integration ref
+ * never moves an existing Task's baseline, and Task N+1 really does start from what Task N produced.
  *
- * A detached HEAD has no branch to name, so it is refused with its own code instead of being
- * resolved to a commit nobody asked for. `--base-ref` overrides the ref for one Task only, and must
- * still be a local branch of the project folder.
+ * `--base-ref` still overrides the ref for one Task, and must still be a local branch of the project
+ * folder: an explicit baseline is a deliberate choice, so it is not silently replaced by the managed
+ * one. A ref that is neither a local branch nor the managed integration ref is refused by name.
+ *
+ * This module used to read "the branch the project folder has checked out right now" (ADR-0066). That
+ * is what a project has *before* its integration ref exists; `project trust` materializes the ref
+ * from that commit, and `project integration init` does the same for a project trusted earlier.
  */
 export type TaskBaselineCode = 'TASK_BASE_REF_UNRESOLVED' | 'TASK_BASE_REF_MISSING'
   | 'TASK_BASE_REF_NOT_A_BRANCH' | 'TASK_BASE_REF_ALREADY_FIXED';
@@ -35,8 +45,9 @@ export interface TaskBaselineRepository {
 }
 
 /**
- * Resolves the Task baseline of one trusted project. Read-only: the project folder is inspected, and
- * no other clone is consulted (there is none — ADR-0062 removed the dev clone).
+ * Resolves the Task baseline of one trusted project. Read-only: it reads the managed integration ref
+ * (or the explicit override) and never writes, moves, or creates a ref. Initialization is
+ * `project trust` / `project integration init`, which is where a missing ref is created.
  */
 export async function resolveTaskBaselineRepository(project: {
   readonly repoRoot: string;
@@ -45,48 +56,38 @@ export async function resolveTaskBaselineRepository(project: {
   readonly objectFormat: 'sha1' | 'sha256';
 }, options: { readonly baseRef?: string | null } = {}): Promise<TaskBaselineRepository> {
   const override = options.baseRef ?? null;
-  if (override !== null) {
-    return {
-      repositoryRoot: project.repoRoot,
-      gitCommonDir: project.gitCommonDir,
-      mainRepositoryRoot: project.repoRoot,
-      mainRef: project.mainRef,
-      baseRef: override,
-      baseCommit: await readBaselineRef(project.repoRoot, override),
-      objectFormat: project.objectFormat,
-    };
-  }
-  // `inspectRepository` refuses a checkout with no symbolic HEAD, which is also how it refuses a
-  // path that is not a repository. A resolvable `HEAD` tells the two apart: the first is a baseline
-  // fact the user can fix by checking out a branch, the second is a broken trust.
-  let inspected;
-  try {
-    inspected = await inspectRepository(project.repoRoot);
-  } catch (error) {
-    if (await readHeadCommitOrNull(project.repoRoot).catch(() => null) !== null) {
-      throw new TaskBaselineError('TASK_BASE_REF_UNRESOLVED',
-        `${project.repoRoot} has a detached HEAD, so there is no checked out branch to use as the`
-        + ' Task baseline; check out a branch there (or pass an explicit base ref) and try again');
-    }
-    throw error;
-  }
+  const baseRef = override ?? managedIntegrationRefName;
+  const baseCommit = await readBaselineRef(project.repoRoot, baseRef);
   return {
-    repositoryRoot: inspected.repoRoot,
-    gitCommonDir: inspected.gitCommonDir,
+    repositoryRoot: project.repoRoot,
+    gitCommonDir: project.gitCommonDir,
     mainRepositoryRoot: project.repoRoot,
     mainRef: project.mainRef,
-    baseRef: inspected.mainRef,
-    baseCommit: inspected.headCommit,
-    objectFormat: inspected.objectFormat,
+    baseRef,
+    baseCommit,
+    objectFormat: project.objectFormat,
   };
 }
 
-/** Reads one local branch as the baseline commit, or refuses with the fact that is missing. */
+/** Reads one baseline ref's commit, or refuses with the fact that is missing. */
 async function readBaselineRef(repositoryRoot: string, baseRef: string): Promise<string> {
+  if (baseRef === managedIntegrationRefName) {
+    // Materialized on first need (ADR-0074): a project trusted before this schema existed gets its
+    // ref here, from the branch its folder has checked out now. An existing ref is never moved.
+    try {
+      return (await ensureManagedIntegrationRef({ repositoryRoot })).commit;
+    } catch (error) {
+      if (error instanceof GitInspectionError) {
+        throw new TaskBaselineError('TASK_BASE_REF_UNRESOLVED', error.message);
+      }
+      throw error;
+    }
+  }
   if (!baseRef.startsWith('refs/heads/')) {
     throw new TaskBaselineError('TASK_BASE_REF_NOT_A_BRANCH',
-      `An explicit Task baseline must be a local branch (refs/heads/...), not ${baseRef}; a tag or a`
-      + ' remote-tracking ref is not a baseline a Task worktree can be based on');
+      `An explicit Task baseline must be a local branch (refs/heads/...) or the managed integration`
+      + ` ref, not ${baseRef}; a tag or a remote-tracking ref is not a baseline a Task worktree can be`
+      + ' based on');
   }
   try {
     const inspected = await inspectBaseRef(repositoryRoot, baseRef);
@@ -102,8 +103,8 @@ async function readBaselineRef(repositoryRoot: string, baseRef: string): Promise
 
 /**
  * The repository that owns this project's Task worktrees, Task branches and result commits: the
- * project folder itself (ADR-0062). It is a function rather than a direct field read so every caller
- * asks the same question, and so a future change has one place to land.
+ * project folder itself. It is a function rather than a direct field read so every caller asks the
+ * same question, and so a future change has one place to land.
  */
 export function taskWorkspaceRepositoryRoot(project: { readonly repoRoot: string }): string {
   return project.repoRoot;

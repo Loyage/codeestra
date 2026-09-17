@@ -1,6 +1,19 @@
 # Domain Model
 
-状态：Phase 0/1 设计基线。依据 ADR-0001、ADR-0002。Phase 4/7 的对象提前定义，但不提前实现运行流程。
+> 层级：L1 · 体量 ≈ 9k 字符 · **何时读**：弄清楚某个领域对象归谁、持有哪些事实、边界在哪 · 权威来源：`packages/domain/src/**`（纯领域）与各表 DDL（[`sqlite-schema.md`](./sqlite-schema.md)）。状态迁移见 [`state-machines.md`](./state-machines.md)。
+
+状态：既有 Task/Execution 模型的实现说明 + ADR-0070 目标映射。当前 schema v37 仍以 Project/Task/Execution 表为 core 权威；Service/Process/Signal 的 S1–S4 内核与兼容投影已实现，S5–S10 尚未完成（[`service-process-signal.md`](./service-process-signal.md)）。
+
+## 0. ADR-0070 目标聚合
+
+- `CodeestraService`：每个 Runtime home 唯一的 0 号根 Service。
+- `Service`：持久 Actor 聚合，core state + namespaced metadata + versioned contract + inbox；Service 树无环。
+- `ProjectService`：Project 的类型化 Service；拥有 Task 子 Service、受管 integration ref/worktree 与 merge queue。
+- `TaskService`：Task 的类型化 Service；仍是 Scheduler 的业务调度单元，Task 之间不嵌套。
+- `Process`：只监督 Agent 的短期聚合；现有 Execution 是迁移期权威事实源，AgentSession/incarnation 继续表达 provider conversation 与 OS 进程身份。
+- `Signal`：`SIG_A | SIG_P` 持久信封，至少一次交付，以 target Service + idempotency key 去重；外部副作用仍由 Operation 恢复。
+
+增量迁移期间不得让 `services.core_state` 与 `tasks/executions` 同时成为可写权威。先建立一一 projection link，再由独立 migration 切换写路径。
 
 ## 1. 通用约定
 
@@ -10,7 +23,7 @@ Specification 是人类可读文本。机器解释必须保存来源，不能丢
 
 ## 2. 聚合与归属
 
-### RuntimeSchedulerControl（ADR-0061，已接受、待实现）
+### RuntimeSchedulerControl（ADR-0061，**已实现**：FOUNDATION-096/097，schema v34）
 
 每个 `CODEESTRA_HOME` 只有一个 Runtime 负载控制聚合，不属于任何 Project：
 
@@ -22,15 +35,17 @@ Specification 是人类可读文本。机器解释必须保存来源，不能丢
 
 这是 Runtime 控制聚合，不是调度业务主实体的替代品：Task 仍是业务主实体，reservation 仍归属 Task/Project。
 
-### Project
+### Project / ProjectService
 
-保存 canonical repo root、Git common directory、mainRef、显示名、创建时间与策略版本。启动先核对 Git 仓库身份，目录搬迁不能悄悄关联到另一仓库。不自动把现有任意分支改名为 main；实际目标分支由项目配置指定。
+当前 Project 保存 canonical repo root、Git common directory、mainRef、显示名、创建时间与策略版本。启动先核对 Git 仓库身份，目录搬迁不能悄悄关联到另一仓库。
+
+ADR-0070 目标中，每个 Project 一一对应 ProjectService，并增加由 Runtime 独占管理的 integration ref/worktree 与 merge queue。该 ref 不等于用户已检出的 main/dev 分支；目标 migration 完成前，这些字段不存在，当前 v37 的兼容 Task 路径仍按项目文件夹当前分支建 Task。
 
 ### UserIntent / IntentTarget
 
 保存 rawText、分类、clarificationStatus、来源、幂等键、目标 Task/AttentionRequest。Phase 1 从结构化命令/明确任务目标起步，不提前自动实现所有自然语言路由；长期分类集合保持规格中七类。
 
-### Task（聚合根）
+### Task / TaskService（聚合根）
 
 - identity：id、projectId、displayNumber、**显示标题 displayTitle 与命名标题 namingTitle**（ADR-0065；Task 级、创建后不可修订，命名标题用于分支与 worktree 目录）。
 - currentRevisionId、aggregateVersion、priority（整数越大越优先，默认 0）。
@@ -57,35 +72,35 @@ id、taskId、number、previousRevisionId、specification、**features**、inten
 
 **待用户确认的后续语义**：上游在依赖满足前又修订时，是否自动移动 requiredRevision。安全默认不是替用户选版本，而是使该边 NEEDS_REVIEW、阻止下游启动，并要求明确选择版本后再激活；Phase 1 不实现 DAG 编辑，因此不阻塞 Phase 0/1。
 
-满足条件：指定上游 revision 有成功进入 `dev` 的 IntegrationBatch 记录，且结果 commit 在下游选定 dev 基线的祖先链中。dev 被外部重写导致不可达时重新阻塞。无法自动判断外部 revert 的语义，必须暴露此限制。进入 dev 只满足开发依赖，不代表已提升到稳定 main（FULL 下提升不需批准，STRICT 下需要）。
+当前 v37 兼容路径的满足条件是：指定上游 revision 的 result commit 对项目当前 Task 基线 ref 可达。ADR-0070 目标改为：上游 merge queue item 已成功推进 ProjectService 的 integration ref，且结果 commit 对下游固定 integration 基线可达；integration ref 外部移动或证据失效时重新阻塞。Task Verification 单独通过仍不释放依赖。
 
 ### ExecutionSlotReservation / 全局容量
 
 现有 reservation 仍绑定 project/task/revision/adapter/workspace 与 holder identity；ADR-0061 只改变**计数域**与配置来源：容量查询把整个 Runtime 的活跃 reservation 与 `resource_held=1` Execution 按 Task 去重，不再按 Project 筛选，也不再读取 Adapter 覆写。降低 `globalLimit` 不改任何已有 reservation/Execution。
 
-### Execution / RevisionDelivery
+### Process / Execution / RevisionDelivery
 
-Execution 记录 attemptNumber、primaryAdapterId、initialRevisionId、appliedRevisionId、workspaceId、baseCommit、resultCommit、state、stopReason、timestamps、error。
+目标 Process 是 Agent supervisor；当前 Execution 记录它的权威执行事实：attemptNumber、primaryAdapterId、initialRevisionId、appliedRevisionId、workspaceId、baseCommit、resultCommit、state、stopReason、timestamps、error。S2/S5 先建立一一 projection link，再逐步把通用查询/控制映射为 Process；不能复制一套独立可写状态。
 
-同一 Execution 可在已可靠暂停/确认后应用新 revision，因此保存 initial 与 applied revision，并通过 RevisionDelivery 保留全部变更。Delivery 保存 revisionId、deliveryKey、status（PENDING/SENT/ACKNOWLEDGED/REJECTED/SUPERSEDED）、证据和时间。终端输出看似赞同不能自动当结构化 ACK。
+同一 Execution 可在已可靠暂停/确认后应用新 revision，因此保存 initial 与 applied revision，并通过 RevisionDelivery 保留全部变更（**投递 FSM 与 `satisfied` 口径见 [`state-machines-sessions.md`](./state-machines-sessions.md) §7**）。**终端输出看似赞同不能自动当结构化 ACK。**
 
-当 Adapter 不支持可靠确认：停止旧 Execution，确认进程不再写入后建立新 Execution，其完整启动输入包含新 revision。旧分支/现场保留且记录继承来源。协作停止超时阻止新尝试。
+当 Adapter 不支持可靠确认（当前三个 provider 都是）：停止旧 Execution，确认进程不再写入后建立新 Execution，其完整启动输入包含新 revision。旧分支/现场保留且记录继承来源。协作停止超时阻止新尝试。
 
 ### AgentSession / SessionGuidance / TakeoverRequest / AttentionRequest
 
-Session 保存 adapterId、mode（`AUTOMATED_RPC | HUMAN_TUI`）、providerSessionId、processIdentity、capabilities snapshot、transport locator、session storage reference、state、退出信息与可选 predecessorSessionId。PID 单独不足以证明身份；需要启动 token/时间及进程控制记录。Session 持久化不等于 OS 进程永不退出。
+Session 保存 adapterId、mode（`AUTOMATED_RPC | HUMAN_TUI`）、providerSessionId、processIdentity、capabilities snapshot、transport locator、session storage reference、state、退出信息与 `current_incarnation_id`。PID 单独不足以证明身份；需要启动 token/时间与进程控制记录。Session 持久化不等于 OS 进程永不退出。
 
-一个 Execution 在任意时刻只有一个主活动 Session，但 ADR-0010 的 RPC↔TUI 进程交接会形成有序 Session incarnation 历史：前一进程确认退出后才创建 successor；provider conversation ID/file 可以连续，Codeestra session ID 与 OS process identity 必须更新，不能把新进程伪装成旧进程。一个 Session 内可有多轮交互。
+一个 Execution 在任意时刻只有一个主活动 Session，但 RPC↔TUI 进程交接会形成有序 **incarnation** 历史：前一进程确认退出后才创建 successor；provider conversation ID/file 可以连续，Codeestra session ID 与 OS process identity 必须更新，不能把新进程伪装成旧进程。**逐状态、逐 guard 的完整口径见 [`state-machines-sessions.md`](./state-machines-sessions.md) §3，接管的传输与安全点见 [`terminal-and-handoff.md`](./terminal-and-handoff.md)。**
 
-SessionGuidance 表达不改变验收规格的人工指导，绑定 source（COMMAND/TUI）、execution/session/provider conversation entry、actor、hash/长度与投递状态；`task guide` 的正文需耐久保存到投递完成，TUI 已落 provider conversation 的正文只保存 entry 引用而不重复复制，二者正文都不进入 domain event。它不改变 `appliedRevisionId`、不生成 TaskRevision、不使验证自动失效。改变规格/约束必须走明确的 TaskRevision 命令；Pi 仍按不支持 revision ACK 的 fallback 新建 Execution。
+SessionGuidance 表达不改变验收规格的人工指导，绑定 source（COMMAND/TUI）、execution/session/provider entry、actor、hash/长度与投递状态；`task guide` 的正文需耐久保存到投递完成，TUI 已落 provider conversation 的正文只保存 entry 引用而不重复复制，二者正文都不进入 domain event。它不改变 `appliedRevisionId`、不生成 TaskRevision、不使验证自动失效。改变规格/约束必须走明确的 TaskRevision 命令。
 
-TakeoverRequest 是 Execution 的控制记录，不是新的调度主实体。保存 requested Session/process/cursor、状态（`REQUESTED | WAITING_FOR_ATTENTION | WAITING_FOR_SAFE_POINT | STOPPING_SOURCE | STARTING_TARGET | ACTIVE | RETURN_REQUESTED | COMPLETED | FAILED | RECOVERY_REQUIRED`）、目标 mode、writer lease 与交接 Operation。接管请求先于 settled 事实提交时，settled 作为交接安全点而非 completion；反之请求拒绝为 Execution 已非活动。attach/detach 只管理 TerminalAttachment，release 才触发 TUI→RPC 交接。
+TakeoverRequest 是 Execution 的控制记录，不是新的调度主实体：保存 requested Session/process/cursor、状态、目标 mode、writer lease 与交接 Operation。接管请求先于 settled 事实提交时，settled 作为交接安全点而非 completion；反之请求被拒为 Execution 已非活动。attach/detach 只管理 TerminalAttachment，release 才触发 TUI→RPC 交接。
 
-AttentionRequest 保存类型（PERMISSION/QUESTION/RECOVERY）、responseType（CONFIRM/VALUE）、providerRequestId、提示和状态；typed answer 另存回答者与投递 Operation。回答已写 DB 不代表 Agent 已恢复，confirmed=false 与 cancel 都是有效但语义不同的回答。TUI gate side channel 同样建立 Attention 与 answer 事实；原生 TUI 和其他客户端竞争回答时只接受第一份合法决议。
+AttentionRequest 保存类型（PERMISSION/QUESTION/RECOVERY）、responseType（CONFIRM/VALUE）、providerRequestId、提示和状态；typed answer 另存回答者与投递 Operation。**回答已写 DB 不代表 Agent 已恢复**；`confirmed=false` 与 `cancel` 都是有效但语义不同的回答。TUI gate side channel 同样建立 Attention 与 answer 事实；原生 TUI 和其他客户端竞争回答时只接受第一份合法决议。
 
-Session 身份分三层持久化：Codeestra sessionId、provider session ID/file、provider process identity（pid、executable、start token、argv hash、采集时间）。缺少 start token 时拒绝启动，因为 PID 可被复用。Runtime 丢失 RPC/PTY 控制连接后不重接 live process：记录 DISCONNECTED，并让 Execution/workspace 保持占用并进入 RECOVERY_REQUIRED，直到 reconcile 取得真实事实。
+Session 身份分三层持久化：Codeestra sessionId、provider session ID/file、provider process identity（pid、executable、start token、argv hash、采集时间）。**缺少 start token 时拒绝启动**，因为 PID 可被复用。Runtime 丢失 RPC/PTY 控制连接后不重接 live process：记 DISCONNECTED，并让 Execution/workspace 保持占用且进入 RECOVERY_REQUIRED，直到 reconcile 取得真实事实。
 
-TerminalAttachment 是瞬时客户端连接与单 writer lease 的记录；多个只读 attachment 可并存。PTY bytes/resize/input 走独立有界 transport，不作为领域事实，不从 ANSI 文本推断完成、审批或静止。首版只保留 Runtime 内存中的有界重连缓冲；detach 不停止 HUMAN_TUI Session。
+TerminalAttachment 是瞬时客户端连接与单 writer lease 的记录；多个只读 attachment 可并存。PTY bytes/resize/input 走独立有界 transport，不作为领域事实，也不从 ANSI 文本推断完成、审批或静止。首版只保留 Runtime 内存中的有界重连缓冲；detach 不停止 `HUMAN_TUI` Session。
 
 ### Workspace
 
@@ -108,13 +123,19 @@ scope=TASK/INTEGRATION；subject execution/batch 二选一；revision（Task sco
 
 Phase 1 只实现 TASK scope：subject 固定 `executionId` + `revisionId`，且必须匹配 Task 当前 revision 与已捕获的 `result_commit`。命令来自 main ref 上的人工维护策略（ADR-0006）：FULL 下直接执行，STRICT 下在 trust 时一次性确认；Task branch 上的策略文件不参与判定。state 为 `QUEUED → RUNNING → PASSED | FAILED | ERROR`，新 commit 或新 policy digest 使旧 `PASSED` 变为 `STALE`（保留原结论与失效原因，不改写）。`outcomeCode` 区分 `PASSED`、`COMMAND_FAILED`、`COMMAND_TIMEOUT`、`TREE_MUTATED`、`WORKTREE_FAILED`、`RUNTIME_RESTARTED`。evidence 只含 exit code、时长、字节数、摘要、路径列表与副本处理结果，不含原始命令输出。验证证据不等于集成或发布事实。
 
-### IntegrationBatch / Item / StableBranchPromotion / Approval
+### ManagedIntegration / MergeQueueItem / IntegrationProcess（ADR-0070 D07 / S8，ADR-0074）
 
-IntegrationBatch 固定 project、expectedDevCommit、integrationRef、candidateCommit、state；Item 固定 executionId、revisionId、sourceCommit。Batch 经独立验证后以 expected old OID 保护更新长期 `dev`，不直接触碰 `main`。
+**已实现于 schema v38**（除 IntegrationProcess 外）。模型不复活旧 IntegrationBatch/StablePromotion 原样结构，由 ProjectService 持有：
 
-StableBranchPromotion 固定 verifiedDevCommit、expectedMainCommit、verificationRunId、state 与 restart evidence。Approval 固定 dev SHA、expected main SHA、验证记录及用户身份；dev/main 变化或验证失效即失效。main 更新后 Promotion 必须进入 RESTARTING，只有 CLI stop/status 后 Runtime 恢复响应才成功。
+- managed integration ref/worktree 与 ownership token（**已实现**：`refs/codeestra/integration`、`<CODEESTRA_HOME>/integration/<project-id>/`（detached）、`project_integration.ownership_token`（确定性 UUID））；
+- `MergeQueueItem`（**已实现**：`merge_queue_items`）：task/revision/result commit/task verification/queue priority/correlation + 双幂等键 + 终态 `settled_at`；
+- 单项目唯一活动 integration（**已实现**：`state IN ('MERGING','VERIFYING')` 上的部分唯一索引，不是内存锁）；
+- `IntegrationProcess`：Agent supervisor，复杂合并只能经 Project Service Git API——**未实现**（ADR-0074 D05 选 A：本轮只做确定性合并，冲突如实报告并保留现场）；
+- `IntegrationVerification`（**已实现**：`integration_runs`）：绑定 candidate commit、policy digest、main commit 与 expected integration OID，命令在候选 commit 的独立副本上执行；
+- CAS advance / conflict / failure / recovery evidence（**已实现**：`git update-ref <new> <expected>`；ref 外部移动记为 `INTEGRATION_REF_MOVED`，不 force）；
+- `task_integration`：Task 的 integration 投影，与 lifecycle/verification 正交（没有行 = `NOT_REQUESTED`）。
 
-MVP 批次采用不部分集成的安全流程：任意步骤失败先停留并报告，不自行排除任务后合入剩余任务。自动拆批策略留 Phase 4 产品决策。
+发布 integration ref 到用户 main/release 分支不属于本对象，也不恢复旧 `promotion *`（**仍未定义**）。Codeestra 自身仓库的人工 `dev → main` 发布仍由 `AGENTS.md` 约束。
 
 ### CandidateVersion / PromotionRecord
 

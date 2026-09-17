@@ -25,10 +25,10 @@ bun run codeestra task integrate <project-id> <task-id> <expected-version>
 bun run codeestra task integration create|integrate|list|get|cancel …
 ```
 
-成果 commit 停在 `refs/heads/task/<task-id>`，是否合并由你自己决定（`git merge --ff-only <result-commit>`
-在你的分支上），Codeestra 不自动合、不自动推、不记账。完整语义见
-[git-workspace-api.md §3](../../architecture/git-workspace-api.md) 与
-[ADR-0066](../../decisions/0066-remove-dev-clone-and-dual-baseline.md)。
+成果 commit 先停在 `refs/heads/task/<task-id>`，再由 §23 的 `project integration request` / `run` 合进项目受管的
+integration ref（`refs/codeestra/integration`，ADR-0074）；**是否把它发布到你自己的分支仍由你决定**，Codeestra 不自动推、不记账。
+完整语义见 [git-workspace-api.md §3](../../architecture/git-workspace-api.md) 与
+[ADR-0074](../../decisions/0074-managed-integration-ref-and-merge-queue.md)。
 
 ## 12. `task depends`（DAG）
 

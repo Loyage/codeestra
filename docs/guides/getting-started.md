@@ -180,12 +180,14 @@ bun run codeestra settings permission set strict
 bun run codeestra project trust /path/to/repo --yes
 ```
 
-**前提**：仓库是合法 Git 仓库；`main` ref 可读；并且**不要停在 detached HEAD**（那没有分支可命名，建 Task 时
-会被 `TASK_BASE_REF_UNRESOLVED` 拒绝）。
+**前提**：仓库是合法 Git 仓库；`main` ref 可读；并且**不要停在 detached HEAD**（`project trust` 要在这里读检出分支来建立
+integration ref；那之后建 Task 只需要这条 ref，缺了它才以 `TASK_BASE_REF_UNRESOLVED` 拒绝）。
 
-**Task 基线只有一种**（ADR-0066）：这个文件夹**建 workspace 时当前检出的分支**；ref 与 commit 会一起固定，
-之后切分支不会移动已建 Task 的基线。产品不再有 dev clone、长期 `dev` 集成分支或 `dev → main` 提升，
-所以 trust **没有 `--dev-repo`**、也不会返回 `DEV_REPO_*`。成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。
+**Task 基线只有一种**（ADR-0074）：**这个项目受管的 integration ref**（`refs/codeestra/integration`）当时的 commit。
+`project trust` 用本文件夹当时检出的分支把它建出来；ref 与 commit 会一起固定，之后你切分支或集成推进都不会移动已建
+Task 的基线。产品不再有 dev clone、长期 `dev` 集成分支或 `dev → main` 提升，所以 trust **没有 `--dev-repo`**、
+也不会返回 `DEV_REPO_*`。成果先停在 `refs/heads/task/<task-id>`，再经 `project integration request` / `run`
+进入 integration ref；**推到你自己的分支仍没有命令**。
 
 **影响**：一旦 trust，Agent 工具、验证命令与 Git hooks 会**以你的用户权限**运行。STRICT 下文本明确写着：
 这**不**授权 commit、更新 main、push 或使用未知工具。

@@ -1,23 +1,25 @@
 # Codeestra
 
-Task-first、local-first 的 AI Development Runtime。用户管理产品意图，Codeestra 管理软件工程。
+**目标：AI 的操作系统。** Codeestra 在宿主系统之上统一管理长期 Service、短期 Process、Agent、Signal、用户意图、Attention、调度与软件工程资源。内核 Service-first，Scheduler 仍 Task-first。
+
+> **实现边界**：ADR-0070 S1–S4 已实现于 schema v37：通用 `service/process/signal/intent` CLI、持久 Signal 与兼容投影可用；原生 Process Agent、intention 解释、Project/Task 写路径切换与 Project Service 受管 integration 尚未实现。改造计划见 [Service Kernel Roadmap](docs/roadmap/mvp.md)。
 
 ## 第一原则（优先级最高）
 
 1. **效率至上**：默认开启 `FULL` 主机级全权限模式；项目接入、Agent 工具、成果 commit 与验证策略变化均不确认。可用 CLI 无确认切换 `STRICT` 恢复旧门禁（ADR-0011）。
-2. **软件本体是服务，CLI 是完备命令面**：独立本地 Runtime 是本体；每个能力都能只靠 CLI 完成并可脚本化驱动。ADR-0067 起 Web UI 暂停，当前只启用 CLI/Unix socket 命令面；保留的 UI 源码不是可用功能。
+2. **软件本体是服务，CLI 是完备命令面**：独立本地 Runtime 是 0 号根 Service 与持久 Actor 内核的宿主；每个能力都能只靠 CLI 完成并可脚本化驱动。ADR-0067 起 Web UI 暂停，当前只启用 CLI/Unix socket 命令面。
 3. **测试仅限 CLI/命令面**：自动化测试与验收只用 CLI 命令与 Runtime 命令面断言；不使用 computer-use / 桌面或键鼠自动化，不获取用户电脑控制权。产品内 Agent 也不新增屏幕/桌面控制工具。
 
-完整表述见 [PROJECT_SPEC.md §1.1](PROJECT_SPEC.md)、[ADR-0008](docs/decisions/0008-efficiency-first-service-form.md) 与 [ADR-0011](docs/decisions/0011-default-full-permission-mode.md)。分支测试分层见 [ADR-0038](docs/decisions/0038-branch-targeted-tests-and-dev-full-suite.md)；运行中 Agent 的原生终端接管设计见 [ADR-0010](docs/decisions/0010-live-agent-terminal-takeover.md)。
+完整表述见 [PROJECT_SPEC.md §1.1](PROJECT_SPEC.md)、[ADR-0008](docs/decisions/0008-efficiency-first-service-form.md)、[ADR-0011](docs/decisions/0011-default-full-permission-mode.md) 与 [ADR-0070](docs/decisions/0070-service-process-signal-kernel.md)。内核设计见 [Service / Process / Signal](docs/architecture/service-process-signal.md)。
 
-**产品不再有 dev clone、集成与稳定提升**（[ADR-0066](docs/decisions/0066-remove-dev-clone-and-dual-baseline.md)，schema v36）：Task 基线只有一种（项目文件夹建 workspace 时当前检出的分支），成果停在 `refs/heads/task/<task-id>`，合并由你自己完成。下面描述的 `main`/`dev` 双分支与人工提升流程是**本仓库自身的约定**，不是产品能力。
+**schema v38 提供受管 integration，但不提供发布与稳定提升**（[ADR-0074](docs/decisions/0074-managed-integration-ref-and-merge-queue.md)）：新 Task 以项目受管的 integration ref（`refs/codeestra/integration`）当时的 commit 为基线，成果经 `project integration request` / `run` 的合并、独立 Integration Verification 与 CAS 进入该 ref。**把它发布到你的 `main`/`release` 分支没有任何命令**，也不恢复旧 `promotion *`；Integration Process/Agent 仍未实现（冲突只报告、保留现场）。下面的 `main`/`dev` 流程仍只是本仓库自身约定。
 
 ## 分支与运行规则
 
 本项目（Codeestra 自己）长期保留两个分支（**仓库约定**，产品不建模它）：
 
 - `main`：可运行稳定实例的稳定分支（用户日常运行的就是它）。
-- `dev`：新功能实验与集成分支。在 dev 工作树里建的 Task 以它当前检出的分支（即 `dev`）为基线。“集成”在本仓库指人工把成果合回 `dev`。
+- `dev`：新功能实验与集成分支。在 dev 工作树里建的 Task 以该任务所在项目受管的 integration ref 为基线（见 [ADR-0074](docs/decisions/0074-managed-integration-ref-and-merge-queue.md)）。“集成”在本仓库指人工把成果合回 `dev`。
 
 `task/*`、`lane/*`、feature 与 Self Task candidate 分支在创建时按开发方向选定少量具体测试，只运行这些定向测试，不运行 `bun run check`、`just check`、`just verify` 或等价全仓检查。所有候选进入 `dev` 后，必须在准备 `dev → main` 前对精确 dev SHA 跑一次全量测试；候选变化后重跑。详见 ADR-0038。
 
@@ -42,10 +44,10 @@ CODEESTRA_HOME=/tmp/codeestra-dev bun run codeestra status
 
 ## 当前状态
 
-截至 schema **v36**（ADR-0066）：架构基线、Phase 0 领域基础、SQLite storage、CLI/独立 Runtime，以及
-**Task → 成果 commit → Task verification** 的纵向流水线都已落地。产品侧的 IntegrationBatch → `dev` →
-`main` 提升与 dev clone **已按用户决策删除**（ADR-0066）：Task 基线只有一种（项目文件夹建 workspace 时
-当前检出的分支），成果停在 `refs/heads/task/<task-id>`，合并由用户自己完成。当前能力面：默认 FULL、项目接入与常态路径零确认；Task 从项目文件夹当前检出的分支建 owned worktree（ADR-0066），显式或自动调度（`task schedule *`，Runtime 全局并发上限默认 2）；长命令后台化与进度事件（`OperationProgressed`/`OperationSettled`、`task verify --background`、`task operation cancel`）；Task 暂停/取消/归档（ADR-0016）与失败后显式 `task retry`（可换 Agent，ADR-0036）；revision 投递台账与 `resolve`（ADR-0028）；三个真实 Adapter（Pi / Codex / Claude Code，ADR-0029/0040）；Project Knowledge 第一小步（ADR-0041）。**仍未实现**：Phase 7 Self Evolution。**Session Guidance 已实现**（FOUNDATION-088 / ADR-0057 / schema v31：`session guide` 与 `session guidance list|get`；记录后每个新 Execution 启动时带上它，且不产生 TaskRevision、不使验证失效；`DELIVERED` 只表示 provider 通道接收（入队），不等于模型已读）。**仍未验证**：真实 provider 的并发运行与 revision ACK、真实模型下的暂停/恢复、Claude Code 的模型层（本机无凭据）、themes 的显式路径加载。详见 [Roadmap](docs/roadmap/mvp.md) 与 [当前任务](docs/tasks/README.md) 的 `## NEXT`。
+截至 schema **v38**（ADR-0074）：架构基线、Phase 0 领域基础、SQLite storage、CLI/独立 Runtime，以及
+**Task → 成果 commit → Task verification → merge queue → 独立 Integration Verification → 受管 integration ref**
+的纵向流水线都已落地。产品侧的 IntegrationBatch → `dev` → `main` 提升与 dev clone **已按用户决策删除**
+（ADR-0066），并未由 S8 恢复：受管集成的出口是项目私有的 `refs/codeestra/integration`，**发布到用户分支仍没有命令**。当前能力面：默认 FULL、项目接入与常态路径零确认；Task 从项目文件夹当前检出的分支建 owned worktree（ADR-0066），显式或自动调度（`task schedule *`，Runtime 全局并发上限默认 2）；长命令后台化与进度事件（`OperationProgressed`/`OperationSettled`、`task verify --background`、`task operation cancel`）；Task 暂停/取消/归档（ADR-0016）与失败后显式 `task retry`（可换 Agent，ADR-0036）；revision 投递台账与 `resolve`（ADR-0028）；三个真实 Adapter（Pi / Codex / Claude Code，ADR-0029/0040）；Project Knowledge 第一小步（ADR-0041）。**仍未实现**：Phase 7 Self Evolution。**Session Guidance 已实现**（FOUNDATION-088 / ADR-0057 / schema v31：`session guide` 与 `session guidance list|get`；记录后每个新 Execution 启动时带上它，且不产生 TaskRevision、不使验证失效；`DELIVERED` 只表示 provider 通道接收（入队），不等于模型已读）。**仍未验证**：真实 provider 的并发运行与 revision ACK、真实模型下的暂停/恢复、Claude Code 的模型层（本机无凭据）、themes 的显式路径加载。详见 [Roadmap](docs/roadmap/mvp.md) 与 [当前任务](docs/tasks/README.md) 的 `## NEXT`。
 
 最小闭环的细节：默认 FULL——CLI 自动启动 Runtime、无确认注册项目，并按 Project ID 创建/列出/提交/运行 Task，成果 commit 可单步 capture；STRICT 保留旧的 trust 与两步 commit。Task 创建会原子保存原始 Intent、首 Revision、事实事件与幂等回执；submit 使用 expected version 将 DRAFT 转为 READY；`task run` 串起 owned worktree、Execution 预留、Adapter start 与事件 pump；`task status` 可查看 Execution/Session 投影；`task result prepare`/`task result commit --confirm` 按 ADR-0003 在核验 HEAD/ChangeSet/静止证据后创建成果 commit（FULL 下是单步 `task result capture`）。
 
@@ -55,8 +57,9 @@ Agent 执行过程可见（ADR-0013）已实现：`task transcript` / `session t
 
 Agent 结构化提问（ADR-0014）已实现：受控启动额外加载 Codeestra 自己的 question 扩展，Agent 可用 `ask_user_question` 一次提 1–4 个带描述可选项的问题（可多选、可用自己的话回答）。**一份问卷 = 一个 provider dialog = 一条 `QUESTION` Attention = 一次 answer Operation**，回答以结构化 `QUESTIONNAIRE` 投递；Runtime 在记录前按被问的那份问卷校验，越界/重复/单选多选不符都返回 `INVALID_QUESTIONNAIRE_ANSWER:*` 并保持请求 OPEN，**绝不降级为“用户拒绝”或静默作废已答内容**（这正是第三方 TUI 问卷在 RPC 下的失败模式）。CLI 用 `attention answer … --choose/--text`。**“Agent 不用工具、在正文里提问并结束轮次”的形态已不再被无声记为 `SUCCESS`**：FOUNDATION-056 用稳定码 `PROSE_QUESTION_NO_TOOL_USE` 显式记录（启发式，宁可漏报），且已由 ADR-0043/FOUNDATION-069 默认升级为一等 `QUESTION` Attention + `WAITING_FOR_USER`，只由 `attention resolve --dismiss|--answer` 解除（回答**不投递**给 provider）；可用 `codeestra settings prose-question-attention record-only|off` 降级。**未验证**：真实 provider 下这一组合的行为，Codex 侧的事实层尚未实现（只漏报、不谎报）。
 
-纵向流水线现在是：Task 从**项目文件夹当前检出的分支**建基线 → 成果 commit → Task verification → 成果停在
-`refs/heads/task/<task-id>`，**合并由用户自己完成**（ADR-0066）。本仓库自身的 `dev → main` 仍按
+纵向流水线现在是：Task 从**项目受管的 integration ref** 建基线 → 成果 commit → Task verification → 入 merge queue →
+独立 Integration Verification → CAS 推进该 ref（`project integration run`，ADR-0074）；**发布到你的分支仍由你决定，
+产品没有命令**。本仓库自身的 `dev → main` 仍按
 [`docs/agents/runbook.md`](docs/agents/runbook.md) 的人工四步执行过三次，那是仓库约定而不是产品能力。Pi 有 LF-only RPC framing、受控启动参数、fail-closed gate extension 与自有子进程的 `PiRpcAdapter`（身份采集、attention/completion/disconnect 映射、typed answer 写入），Runtime 已接入 adapter registry、`task.run` 运行循环、事件 pump 与 answer 自动投递；Codex 与 Claude Code 也已接入并如实声明能力（例如 Claude Code 模型层全部 `REQUIRES_VALIDATION`）。Task verification（ADR-0006/0011）与 ADR-0038/0039 的分支定向测试计划都已实现（「提升前全量证据」随
 ADR-0066 一起删除；本仓库自身的全量测试纪律仍在 `AGENTS.md`）。`events list`/`events tail` 提供只读事件订阅长连接；`task run`/`task verify` 仍同步占用连接（可用 `--background` 与 `task operation *` 脱离），长命令进度事件已实现。
 
@@ -67,6 +70,7 @@ Phase 7 Self Evolution。**Session Guidance 已实现**（FOUNDATION-088 / ADR-0
 
 ## 文档
 
+- **[AI 的操作系统愿景](docs/vision/ai-operating-system.md)**：从 Chat/Agent 到分时 Service Kernel 的产品直觉，以及程序与 Agent 的统一边界。
 - **[新开发者项目导览（HTML）](docs/project-introduction.html)**：可离线打开的中文介绍，涵盖愿景、原理、架构、进展与协作上手；基于 FOUNDATION-076 的文档快照，明确标注未实现 / 未验收边界。
 
 - **[用户指南](docs/guides/README.md)**：面向使用者的中文指南——安装与第一次运行、领域概念、端到端流程、功能清单、完整 CLI 命令参考、常见故障与稳定码表。历史 UI 说明标记为暂停功能。
@@ -74,7 +78,7 @@ Phase 7 Self Evolution。**Session Guidance 已实现**（FOUNDATION-088 / ADR-0
 - **[真实 provider 验收 runbook](docs/notes/real-provider-acceptance-runbook.md)**：只能在真实 provider 在场时执行的功能验收操作手册（并发、暂停/恢复、修订投递、知识消费、插件与 gate、散文提问、原生终端、真实提升），附可复现脚手架 `scripts/real-provider-acceptance.sh`（默认 dry-run）。
 - [PROJECT_SPEC.md](PROJECT_SPEC.md)：长期规格。
 - [AGENTS.md](AGENTS.md)：协作与开发规则。
-- [Architecture](docs/architecture/README.md)：领域、状态机、SQLite、事件、API、调度、冲突与模块设计。
+- [Architecture](docs/architecture/README.md)：领域、状态机、SQLite、事件、API、调度与模块设计；[Service Kernel](docs/architecture/service-process-signal.md) 是 ADR-0070 的目标内核说明。
 - [Decisions](docs/decisions/README.md)：已接受 ADR 与分阶段待决项。
 - [Roadmap](docs/roadmap/mvp.md) / [当前任务](docs/tasks/README.md)。
 
@@ -196,4 +200,4 @@ Domain 不依赖 Bun、SQLite、Tauri 或 Agent SDK。函数只计算不可变�
 
 ## 下一步
 
-当前开发集中在 CLI/Runtime 命令面；Web UI 已按 ADR-0067 暂停。当前下一批的真正剩余项已经**不是** Task cancel、长命令后台化或 revision 投递确认（这三项都已实现）：权威清单在 [docs/tasks/README.md](docs/tasks/README.md) 的 `## NEXT`，逐 Phase 的完成度与未验证项在 [docs/roadmap/mvp.md](docs/roadmap/mvp.md)。当前最紧要的几项是：真实 provider 的并发/revision ACK/暂停恢复验收、Session Guidance 的**模型侧**验收（命令面与启动交付已实现），以及 Phase 7 Self Evolution。
+当前开发集中在 CLI/Runtime 命令面；Web UI 继续暂停。下一主线已切换为 ADR-0070 的 Service Kernel 增量改造：S1 纯领域 contract → S2 additive storage → S3 Signal dispatcher → S4 内核 CLI，之后再接 Process、intention、Project/Task 写路径与受管 integration。权威依赖图、Agent 分工与验收见 [docs/roadmap/mvp.md](docs/roadmap/mvp.md)；既有真实 provider 验收缺口继续保留，但不应抢先破坏新内核 contract。

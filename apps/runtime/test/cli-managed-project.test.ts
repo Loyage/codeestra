@@ -168,13 +168,16 @@ describe('codeestra runs Tasks in the project folder itself (ADR-0064)', () => {
       expect(await git(main.repository, ['rev-parse', `refs/heads/task/${workspaceName}`]))
         .toBe(mainCommit);
 
-      // The dependency projection reads that same branch and names it plainly.
+      // The dependency projection reads that same baseline ref and names it plainly. Since ADR-0070
+      // D07 / S8 that baseline is the Project Service's managed integration ref, materialized by
+      // `project trust` from the commit this folder had checked out.
       const dependencies = JSON.parse((await cli(['task', 'depends', 'list', projectId, created.id,
         '--json'], environment)).stdout) as {
         readonly baseRef: string; readonly baseCommit: string | null; readonly blocked: boolean;
       };
-      expect(dependencies.baseRef).toBe('refs/heads/main');
+      expect(dependencies.baseRef).toBe('refs/codeestra/integration');
       expect(dependencies.baseCommit).toBe(mainCommit);
+      expect(await git(main.repository, ['rev-parse', 'refs/codeestra/integration'])).toBe(mainCommit);
       expect(dependencies.blocked).toBe(false);
 
       // FULL mode captures the result commit in one step. The Runtime proves quiescence from its own

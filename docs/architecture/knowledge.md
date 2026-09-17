@@ -1,8 +1,8 @@
 # Project Knowledge
 
-状态：Phase 6 第一小步已实现（FOUNDATION-067 / ADR-0041，schema v26）。Provider 侧消费**未验证**。
+> 层级：L1 · 体量 ≈ 5k 字符 · **何时读**：改知识层、front-matter、快照/绑定或注入通道 · 权威来源：`packages/storage/src/database.ts`（两张表）、`apps/runtime/src/knowledge-service.ts`、`apps/runtime/src/guidance-context.ts`。Provider 侧交付通道见 [`agent-adapter-providers.md`](./agent-adapter-providers.md) §5。
 
-本文描述已落地的知识分层、只读来源、适用面与 Execution 绑定。语义裁决见 [ADR-0041](../decisions/0041-project-knowledge-layers-and-execution-binding.md)，规格见 `PROJECT_SPEC.md` §4 与 §2 不变量 15。
+状态：Phase 6 第一小步已实现（FOUNDATION-067 / ADR-0041，schema v26）；**Provider 侧是否真的读了知识仍未验证**。语义裁决见 [ADR-0041](../decisions/0041-project-knowledge-layers-and-execution-binding.md)，规格见 `PROJECT_SPEC.md` §4 与 §2 不变量 15。
 
 ## 1. 三个层与它们的位置
 
@@ -17,7 +17,7 @@
 
 **人工层只从项目 `main` ref 读取**，读法与验证策略、影响映射完全一致：`git rev-parse --verify <ref>^{commit}` → `git ls-tree -r -z` 列举 → `git cat-file blob <commit>:<path>` 逐条读取，用 `TextDecoder({fatal:true})` 解码。因此 Task 分支（及其 worktree）上的同名文件不参与判定。
 
-**机器生成层与物化上下文都是 Runtime 数据，项目树里一个字节都不写。** 这不是风格选择：worktree 里未被 ignore 的未跟踪文件会进入该 Task 的 Git change set（`git ls-files --others --exclude-standard`、`git add --all`），于是任意两个并发 Task 都会因同一个路径被判 `SAME_FILE`/`CONFLICTING`，而且它会被成果 commit 提交并随 IntegrationBatch 进入 `dev`。放在 Runtime 数据目录让「机器生成不进提交」成为结构事实，而不依赖 ignore 规则。项目中 `.gitignore` 的 `.codeestra/generated/` 只是守卫规则（防止用户仓库里残留同名目录被提交），**不是**存放位置。
+**机器生成层与物化上下文都是 Runtime 数据，项目树里一个字节都不写。** 这不是风格选择：worktree 里未被 ignore 的未跟踪文件会进入 Task change set（`git ls-files --others --exclude-standard`、`git add --all`），并被成果 commit 提交；ADR-0070 目标下还会进入 Project managed integration ref。放在 Runtime 数据目录让“机器生成不进提交”成为结构事实，而不依赖 ignore 规则。项目中 `.gitignore` 的 `.codeestra/generated/` 只是守卫规则，不是存放位置。
 
 ## 2. 条目、层序与无覆盖语义
 
@@ -70,18 +70,11 @@ bun run codeestra project knowledge resolve <project-id> <task-id> [--json]
 
 ## 6. schema
 
-v26 只新增两张 append-only 表，**不重建 `executions`**：
-
-- `knowledge_snapshots(project_id, main_commit, snapshot_digest, policy_version, human_digest, generated_digest, entry_count, …, entries_json, created_by, created_at)`，`UNIQUE(project_id, main_commit, snapshot_digest)`，`no_update`/`no_delete` 触发器；
-- `execution_knowledge_snapshots(execution_id PK, project_id, task_id, snapshot_id, snapshot_digest, context_path, context_digest, context_bytes, entry_count, refs_json, command_id, created_at)`，`no_update`/`no_delete` 触发器。
-
-`phase1SchemaVersion` 24 → 26，只追加 `if (version < 26)`；v25 属并行 lane，v16 永久未使用。测试断言用迁移常量或 `>= 26`，禁止写死 `== 26`。
+v26 只新增两张 append-only 表，**不重建 `executions`**：`knowledge_snapshots`（按 `(project_id, main_commit, snapshot_digest)` 去重）与 `execution_knowledge_snapshots`（`execution_id` 为主键）。两边都有 `no_update`/`no_delete` 触发器。DDL 与列语义见 [`sqlite-schema-task.md`](./sqlite-schema-task.md)；测试应断言 `>= 26` 而不是写死 `== 26`。
 
 ## 7. 已知边界（不得声称已完成）
 
-- **Provider 侧未验证**：Agent Adapter 目前不消费 `knowledgeSnapshotRefs`，本格也不含 `packages/agent-adapters/**`。因此只有「解析、物化、绑定、可追溯与拒绝路径」成立，**不**成立「Agent 真的读到了知识」。
+- **Provider 侧未验证**：只有「解析、物化、绑定、可追溯与拒绝路径」成立；**不**成立「Agent 真的读到了知识」（启动参数携带了路径/文本，但三个 provider 都没有可核验的「读了」通道）。
 - 机器生成层的其它写入者尚未实现（`generated/` 的读取、provenance 校验与拒绝路径已实现并有测试）。
 - 不做向量检索 / embedding / LLM 摘要。
-- 没有 UI 投影（`apps/ui/**` 不在本格领地）。
 - 上限（每层 256 条、单条 64 KiB、整快照 1 MiB、front-matter 32 行）是常量，不是项目配置。
-- 未明确的语义：把知识注入 Provider prompt / 原生指令文件的方式与时机，属后续格。

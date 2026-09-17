@@ -292,17 +292,18 @@ async function activeReservations(fixtureState: Fixture) {
     readonly impactSnapshotId: string | null }[] };
 }
 
-/** Moves `dev` forward without touching the checked-out `main` worktree. */
 /**
- * Advances the Task baseline (ADR-0064): the project folder's checked out branch IS the baseline, so a
- * real fast-forward of that checkout is what moves it.
+ * Advances the Task baseline (ADR-0070 D07 / S8, ADR-0074): the baseline is the Project Service's
+ * managed integration ref, so moving that ref — which is what a verified integration does — is what
+ * moves the baseline. The user's checked-out branch is deliberately left alone.
  */
 async function advanceBaseline(fixtureState: Fixture): Promise<string> {
   const tree = await git(fixtureState.repository, ['rev-parse', 'HEAD^{tree}']);
-  const previous = await git(fixtureState.repository, ['rev-parse', 'HEAD']);
+  const previous = await git(fixtureState.repository,
+    ['rev-parse', 'refs/codeestra/integration']);
   const moved = await git(fixtureState.repository,
     ['commit-tree', tree, '-p', previous, '-m', 'baseline moves']);
-  await git(fixtureState.repository, ['merge', '--ff-only', '-q', moved]);
+  await git(fixtureState.repository, ['update-ref', 'refs/codeestra/integration', moved]);
   return moved;
 }
 
@@ -361,17 +362,18 @@ describe('scheduler reservations acquire --snapshot', () => {
 
       // The mapping is read from the project `main` ref, so committing one moves the policy version
       // of every generation derived from now on and leaves the cached one describing no mapping.
+      //
+      // Since ADR-0070 D07 / S8 the Task baseline is the *managed integration ref* (ADR-0074), which
+      // this commit does not move: the mapping and the baseline are now two separate facts, and only
+      // the policy reason is produced. `advanceBaseline` covers the baseline half in the test above.
       await Bun.write(join(fixtureState.repository, '.codeestra', 'impact.json'),
         `${JSON.stringify(impactMapping, null, 2)}\n`);
       await git(fixtureState.repository, ['add', '.codeestra/impact.json']);
       await git(fixtureState.repository, ['commit', '-q', '-m', 'declare an impact mapping']);
       const refused = await acquire(fixtureState, task, generation.snapshotId);
       expect(refused.exitCode).toBe(1);
-      // The mapping lives on the branch that is also the Task baseline (ADR-0064), so this commit
-      // moves both facts and both reasons are reported.
       expect(refused.payload).toMatchObject({ outcome: 'REFUSED', code: 'SNAPSHOT_STALE',
-        detail: { differing: ['baseCommit', 'policyVersion'],
-          reasonCodes: ['STALE_BASE', 'STALE_POLICY'] } });
+        detail: { differing: ['policyVersion'], reasonCodes: ['STALE_POLICY'] } });
       expect(refused.payload?.detail?.assessed?.['policyVersion']).toBe('impact-policy-v1#absent');
       expect(String(refused.payload?.detail?.observed?.['policyVersion']))
         .toMatch(/^impact-policy-v1#[0-9a-f]{12}$/);

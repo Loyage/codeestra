@@ -11,7 +11,41 @@ export type DomainErrorCode =
   // Impact analysis (ADR-0031). A scope that is not a set of repository-relative paths, or a
   // mapping that cannot be derived from, is a rejected input rather than a weaker verdict.
   | 'INVALID_IMPACT_SCOPE'
-  | 'INVALID_IMPACT_MAPPING';
+  | 'INVALID_IMPACT_MAPPING'
+  // Service kernel (ADR-0070 / S1). These errors are pure domain refusals: callers may map them to
+  // CLI stable codes, but the domain never imports a transport, database, or Agent SDK.
+  | 'DUPLICATE_SERVICE'
+  | 'INVALID_SERVICE_TREE'
+  | 'INVALID_SERVICE_PARENT'
+  | 'SERVICE_TREE_CYCLE'
+  | 'INVALID_METADATA_KEY'
+  | 'INVALID_METADATA_VALUE'
+  | 'INVALID_SIGNAL_TRANSITION'
+  | 'INVALID_PROCESS_TRANSITION'
+  | 'PROCESS_TERMINAL'
+  | 'PROCESS_PREDECESSOR_ACTIVE'
+  | 'PROCESS_AGENT_CARDINALITY'
+  // Intention routing (ADR-0070 §8 / S6 lane contract §3). A structured outcome that cannot be
+  // routed is refused with its own code: none of these is an approval, a permission decision or a
+  // weakened judgement, and the domain that raises them imports no transport or database.
+  | 'INTENTION_PROCESS_NOT_RESOLVABLE'
+  | 'INTENTION_TARGET_NOT_VISIBLE'
+  | 'INVALID_INTENTION_OUTCOME'
+  | 'INTENTION_CREATE_TASK_UNSUPPORTED'
+  | 'INTENTION_CLARIFICATION_OPEN'
+  | 'INTENTION_CLARIFICATION_NOT_FOUND'
+  | 'INTENTION_CLARIFICATION_MISMATCH'
+  | 'INTENTION_GUIDANCE_UNAVAILABLE'
+  | 'INTENTION_GUIDANCE_CHANNEL_UNAVAILABLE'
+  // Managed integration (ADR-0070 D07 / S8, ADR-0074). A queue item that cannot move, a candidate
+  // that may not advance the ref, and a baseline ref that is not a baseline are distinct refusals;
+  // none of them is an approval step.
+  | 'INVALID_MERGE_QUEUE_ITEM'
+  | 'MERGE_QUEUE_ITEM_TERMINAL'
+  | 'INVALID_MERGE_QUEUE_TRANSITION'
+  | 'INVALID_TASK_INTEGRATION_TRANSITION'
+  | 'INTEGRATION_REF_MISSING'
+  | 'INTEGRATION_REF_MOVED';
 
 export class DomainError extends Error {
   constructor(readonly code: DomainErrorCode, message: string) {

@@ -8314,12 +8314,14 @@ ADR-0062 标 Superseded by ADR-0066。
 
 边界：没有运行、构建或验证保留的 Web UI 源码；这正是 ADR-0067 的范围，不能据此声称 UI 仍可运行。已有 `$CODEESTRA_HOME/ui-settings.json` 不删除、不迁移，当前 Runtime 忽略它。重新启用 Web UI 必须另立 ADR 并恢复契约、安全边界、文档与测试。
 
+
 提升记录（dev → main，人工四步，ADR-0047）：
 
 - 候选 SHA：`3f5c2b45f3970c8b10cc7f30a0444b9b723ad649`（`feat!: 暂停 Web UI…`），提升前在 dev clone 对该精确 SHA 跑完 `bun run check`（退出码 0，817 pass / 0 fail）。
 - ① 只 push 该候选：`7425556..3f5c2b4 → origin/dev`，读回核对 `origin/dev == 候选 SHA`。
 - ② main clone（`~/Documents/codeestra`）检出干净、在 `main`，`git merge --ff-only` 成功，`main HEAD = 3f5c2b4`。
 - ③ 重启稳定 Runtime：`bun install --frozen-lockfile` → `codeestra stop` → `codeestra status`，`status: READY` 核对通过。
+
 - ④ 推回 `origin/main`（`7425556..3f5c2b4`）并读回核对，`origin/main == 3f5c2b4`；提升完成。
 - 复核新代码确实在跑：`codeestra status` 不再返回 `uiRunning`；`codeestra ui` 退 2 并打印 usage。
 - 路径说明：本次走的是本仓库人工四步（`just promote-main <SHA>` 封装 ②③④）；未使用产品 `promotion *`（已由 ADR-0066 删除，且本仓库自身提升不得使用它）。
@@ -8408,9 +8410,85 @@ ADR-0055 与 FOUNDATION-086 声称命令面已实现，Runtime 的 `case 'task.r
 5. **未合入 `dev`、未提交、未提升**：本格只在 `Loyage/cli_list` 工作树上完成并验证。合入 `dev` 是人工 Git 动作；
    合入后按 ADR-0038 在精确 dev 候选上跑全量，再按 `AGENTS.md` 的人工四步走 `dev → main`。
 
-## NEXT — 最小可用纵向切片
+## 用户任务 — AI 操作系统定位与 Service Kernel 改造规划（ADR-0070）
 
-本节的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），
+状态：**文档与方案已完成；S1–S4 已由 FOUNDATION-099 实现，S5–S10 待推进。**
+
+用户提出 Codeestra 的长期定位与 Service / Process / Agent / Signal 设计，并经两轮选择确认：内核 Service-first、调度 Task-first；Service 是 Runtime 内持久 Actor；Process 只监督 Agent；Signal 使用持久 inbox/outbox；恢复 Project Service 受管 integration ref/worktree；兼容现有 CLI 并新增内核面；Service 状态使用类型化核心 + namespaced metadata；后续增量迁移。
+
+本格交付：
+
+- 新增 ADR-0070 与 `docs/architecture/service-process-signal.md`；
+- 改写 `PROJECT_SPEC.md` 的定位、主流水线、核心不变量、证据与阶段；
+- 重写 `docs/roadmap/mvp.md` 为 S0–S10 依赖图、8 个 Agent ownership lane 与逐波验收；
+- 同步架构索引、domain/scheduler/state-machine/repository 文档、ADR 索引、根 README、用户指南入口/概念/手册与 `AGENTS.md`；
+- 明确当前 schema v36 与目标设计的边界：没有新增命令、schema 或 Runtime 行为，不把目标误报为已实现。
+
+验证：纯文档格只执行链接/术语/`git diff --check` 等定向检查；未运行代码测试或全量检查。
+
+## FOUNDATION-099 — Service Kernel S1–S4（ADR-0070，schema v37）
+
+状态：S1–S4 代码、定向测试、CLI 与文档已完成；S5–S10 未提前实施。
+
+已实现：
+
+- S1：`packages/domain/src/service-kernel.ts` 的 Service 树、core/metadata CAS、Signal/Process FSM、单 primary Agent 与 eligibility version；无 Bun/SQLite/SDK 导入。
+- S2：additive schema v37 的七张内核表、稳定 root/system ID、Project/Task/Execution 唯一投影、基数/FK 升级守卫；旧表继续是 core lifecycle 权威。
+- S3：静态 per-kind contract registry、30 秒 claim lease、1/5/30/120/300 秒五次自动重试、第六次失败 dead-letter、显式 retry、启动/周期 reconcile；ACK/receipt 与 handler 状态同事务收敛。
+- S4：`service` / `process` / `signal` / `intent` 全部目标命令、strict Zod request/response schema、`--value-json` / `--payload-json`、稳定退出码；Development Process 控制复用 Task/Session handler；`intent send` 只创建 `CREATED` Process 并诚实返回 `PENDING_S6`。
+
+定向验证（开发分支未运行禁止的全量 `bun run check` / `just check` / `just verify`）：
+
+- `bun run typecheck`：通过（本格横跨 domain/storage/contracts/runtime/cli，因此执行跨包类型检查）。
+- `bun test packages/domain/test/service-kernel.test.ts`：11 pass / 0 fail。
+- `bun test packages/storage/test/service-kernel-migration.test.ts`：5 pass / 0 fail。
+- `bun test packages/storage/test/database.test.ts`：51 pass / 0 fail（既有 migration/storage 回归）。
+- `bun test apps/runtime/test/service-kernel.test.ts`：7 pass / 0 fail。
+- `bun test packages/contracts/test/service-kernel.test.ts`：3 pass / 0 fail。
+- `bun test packages/contracts/test/request.test.ts`：22 pass / 0 fail（既有 strict request 回归）。
+- `bun test apps/runtime/test/cli-service-kernel.test.ts`：3 pass / 0 fail。
+- `bun test apps/runtime/test/cli-task-purge.test.ts`：2 pass / 0 fail（v37 Process/Service projection 与 purge 兼容）。
+
+诚实边界：mock/临时 Runtime 证明协议、SQLite 与 CLI 编排，不证明真实 provider；S4 Intention Process 没有 Agent，
+Process 原生控制/路由属于 S5/S6；跨 SQLite/Git/Provider 不宣称 exactly-once；尚未在长期 `dev` 精确候选 SHA 上跑提升前全量测试。
+用户文档同步：`docs/guides/cli/kernel.md` 新增完整命令参考；`guides/README.md` 实现边界、`cli/README.md` §索引/退出码、
+`cli-reference.md` 索引、`manual.md` §1.1、`concepts.md` §Service-first、`features.md` §Service Kernel、`workflow.md` 顶部流程均切到 schema v37。
+
+## NEXT — Service Kernel 增量改造（ADR-0070）
+
+> **优先级更新**：本节顶部的新主线取代下方历史“最小可用纵向切片”作为后续多 Agent 改造顺序。下方既有 1–14 项继续保留为真实缺口与历史记录，但除非会改变内核 contract，不应抢在 S1–S4 之前修改公共接口。
+
+用户已确认的目标：Codeestra 是 AI 的操作系统；内核 Service-first、Scheduler Task-first；Service 是 Runtime 内持久 Actor；Process 只监督 Agent；Signal 使用持久 inbox/outbox；保留现有 CLI 并新增内核面；Service state 为类型化核心 + namespaced metadata；增量迁移；Project Service 恢复产品侧受管 integration ref/worktree 与串行 merge queue。
+
+### 新主线
+
+| 顺序 | 任务 | 依赖 | 关键退出条件 |
+|---|---|---|---|
+| S0 | 文档、ADR-0070、目标架构与 roadmap | — | 文档格完成；当时明确目标≠v36，现由 S1–S4 推进到 v37 |
+| S1 | **已完成**：纯领域 Service / Signal / Process / Eligibility contract | S0 | FOUNDATION-099：无 Bun/SQLite/SDK；非法树边、Signal 幂等、Process 终态有定向测试 |
+| S2 | **已完成**：v37 additive storage + Project/Task/Execution 只读投影 | S1 | FOUNDATION-099：v36→v37 保留数据、root singleton、FK clean |
+| S3 | **已完成**：Service registry + 持久 Signal dispatcher/reconcile | S2 | FOUNDATION-099：lease/retry/reclaim/receipt 定向测试 |
+| S4 | **已完成**：`service/process/signal/intent` CLI + 现有 facade 兼容 | S3 contract | FOUNDATION-099：`--json`、稳定退出码；新旧查询同一事实 |
+| S5 | Execution/Session → Process 控制面 | S2/S3 | 不支持能力诚实拒绝；无双 writer |
+| S6 | root/project/task intention + Attention 路由 | S3/S5 | 目标不明建 Attention；guidance/revision 不混淆 |
+| S7 | Project/Task Service 单一写路径 | S3，S4 可并行 | 一条 command 只有一个权威 handler，无双写漂移 |
+| S8 | v38 managed integration ref/worktree + merge queue | S7 | 同项目串行、跨项目并行、CAS、独立验证、失败现场保留 |
+| S9 | Scheduler eligibility 解耦 | S1/S7 | Scheduler 只做排序/容量/准入，事务内重验 eligibility version |
+| S10 | 升级演练、真实验收、文档与兼容层收口 | S4–S9 | v36→v37→v38、crash matrix、CLI 文档完整 |
+
+完整依赖图、lane ownership、定向测试要求与非目标见 [`docs/roadmap/mvp.md`](../roadmap/mvp.md)。
+
+### 多 Agent 协作约束
+
+- `packages/storage/src/migration.ts` 与 schema version 只能由 Storage lane 单一 owner 修改；其他 Agent 不占 migration 号。
+- `PROJECT_SPEC.md`、ADR 索引、roadmap 与本节由协调者统一收口，不让多个 Agent并行改同一文档。
+- 先冻结跨 lane contract，再并行 CLI / Process / Intention；managed integration 必须等 Project/Task 单一写路径成立。
+- 开发分支只跑任务书列出的定向测试；全量只在所有候选合入长期 `dev` 后的精确 SHA 上执行。
+- 当前 v37 已有 S1–S4 内核命令，但没有产品自动集成、原生 Process Agent 控制或 intention 解释；任何格都不得把 S5–S10 表述成已实现。
+
+### 历史剩余项（继续保留）
+
+本节以下的「已完成」只依据**已合入 `dev` 的代码/命令面/事件/表结构**（核对命令与结果见 FOUNDATION-074 的「状态声明 → 依据」表），
 不依据任何任务记录里的说法。原 0–7 的编号保留在下面的对照表里；从剩余列表中移出的条目在文末单列。
 
 **2026-09-15 更新（FOUNDATION-075）**：原第 11 条（J1 第 7、10 条的两处待用户裁决不一致）已经用户裁决并由 FOUNDATION-075 收口，
@@ -8570,3 +8648,212 @@ ADR-0055 与 FOUNDATION-086 声称命令面已实现，Runtime 的 `case 'task.r
 - **被管理项目的分支/基线形态**（FOUNDATION-092 → FOUNDATION-093）：**用户 2026-09-16 已选定形态**（基线=项目文件夹
   当前检出分支、成果自己合、不加模式字段），ADR-0060 与本格主路径已落地，剩余子项见上面第 14 条，**不需要新的用户裁决**。
 
+## FOUNDATION-100 — 架构文档分层、按需读入与低价值内容删除（ADR-0069，纯文档）
+
+**背景（用户报告）**：每次 Agent 读 `docs/architecture/**` 都耗费巨量上下文，尤其几篇超 30k 的大文档；希望删除作用不大的内容，并通过多层架构与按需读入减少浪费。
+
+**用户本轮确认（三个选择题，2026-09-16）**：
+1. 低价值内容处理：**直接删除**，靠 git + ADR + 源码追溯（不建 archive 目录）。
+2. 范围：`docs/architecture/**` 全部 + 新的分层 README 入口（`docs/tasks/README.md` 与 `docs/decisions/README.md` 的结构不在本轮范围）。
+3. 形式：**L0 索引 + 每篇「体量/何时读」头 + 拆出按需子文档**，旧章节号保留并附对照表。
+
+**改动**
+
+| 文件 | 动作 |
+|---|---|
+| `docs/architecture/README.md` | 重写为 L0 入口：读取协议（按节读、L2 默认不读、权威来源是源码）、问题→文档节→体量→权威来源路由表、拓扑、当前/目标分界表、风险门禁、成熟度 |
+| `docs/architecture/sqlite-schema.md` | 79.8k → 7.7k：只留跨表约定、**迁移工程规则**（升序判定、v16 未使用、`Bun.exec()` 吞错 → 行数比对 + 结束态断言 + `foreign_key_check`、重建表时显式重建索引与 append-only 触发器、历史行不重写）、v1–v37 一行一版本台账、旧 §1–§8 对照表 |
+| `sqlite-schema-{task,execution,sessions,pipeline,runtime,kernel}.md` | 新增 6 篇 L2 域文档（11k/8k/19k/13k/12k/10k）：每篇先写「表与事实 + 关键不变量」，其下逐表 DDL **由当前 v37 库的 `sqlite_master` 导出后按表拼接**（56 张表，无手抄） |
+| `docs/architecture/event-model.md` | 27.3k → 10.8k：信封、事件目录（核心 + 内核 + 其余域一行式）、命名规则、一致性/投递、订阅、终端边界、只读 transcript、测试；删除设计名对照表与已删除能力的完整事件表 |
+| `event-model-payloads.md` | 新增 L2（9.6k）：`TaskPurged`/`TaskRecoveryReconciled`/进度/验证/修订投递/容量调度/交接/guidance/重试与散文提问/回收的逐事件 payload 与事实边界 |
+| `docs/architecture/agent-adapter-api.md` | 25.8k → 5.6k：实现层端口表（`AgentStartAdapter`/`AgentObserveAdapter`/`AgentAnswerAdapter`/可选 `AgentProcessRelease`）、四个新增能力位的语义、目标端口清单（未导出即未实现）、语义条目 |
+| `agent-adapter-providers.md` | 新增 L2（8.1k）：15 个能力位的三 provider 矩阵、冻结能力的实测依据、Codex/Claude 边界、知识交付通道、插件选择、Pi spike 门禁 |
+| `terminal-and-handoff.md` | 新增 L2（4.1k）：沿用旧 §5–§7（PTY 帧表与 resize 合约、并行工具批次安全点、跨交接权限矩阵及不成立的那一格） |
+| `docs/architecture/state-machines.md` | 22.1k → 8.5k：拆为三篇并保留旧章节号（L1 本篇：§0 内核 FSM、§1 Task lifecycle、§2 Execution、§8 补充事实 + 路由/对照表）；§8 由 doc-sync 记账压成四条「不改变状态集合的持久事实」；修正「全局暂停尚未实现」这一过时陈述（FOUNDATION-097 已实现）；§2 的成果 commit 补上 FULL 单步口径 |
+| `state-machines-sessions.md` / `state-machines-runtime.md` | 新增 L2（8.2k / 5.5k）：沿用旧 §3/§3.1/§3.2/§7（Session、接管、incarnation/lease、Guidance、修订投递）与 §4/§5/§6/§6.1（已删除的集成状态机压为三条后果、Self Evolution、Runtime 生命周期与全局负载控制） |
+| `docs/architecture/scheduler.md` | 15.9k → 10.8k：§2 合并「设计流程 + 更正块」为当前算法；§7 历史命令面删除、只留预留/reconcile 原语；§4.1 压缩为「日常不可达但语义保留」；§5 删掉与 ADR-0059 冲突的验收行 |
+| `docs/architecture/conflict-analyzer.md` | 9.7k → 4.3k：§1–§5 压成「ADR-0031 历史 + 仍有效的失效键/解释/测试」，§6 保留实现事实，§8 当前判定规则 |
+| `docs/architecture/domain-model.md` | 加元信息头；`RuntimeSchedulerControl` 由「待实现」改为「已实现 FOUNDATION-096/097、schema v34」；Session/接管段改为指针 + 保留事实 |
+| `docs/architecture/repository-structure.md` | 4.3k → 4.3k：§2 按实际目录与 40+ Runtime 服务模块重写（删除「尚无自动 Scheduler」「SSE 供 UI 使用」等过时陈述），列明已实现/未实现/没有的入口 |
+| `docs/architecture/{service-process-signal,knowledge,git-workspace-api}.md` | 各加元信息头；`git-workspace-api` 的 `schema v35` 口误改为 v36；`knowledge` 的 schema 节改为指针 |
+| `docs/decisions/0069-architecture-docs-layering.md` | 新增 ADR（背景/选项/决定/后果/验证/关联）+ `docs/decisions/README.md` 索引一行 |
+| `packages/agent-adapters/src/pi-pty-host.ts` | 唯一代码改动：注释里的帧表指针由 `agent-adapter-api.md` 改为 `terminal-and-handoff.md`（§5） |
+
+**删除清单（可追溯）**：逐版本 migration DDL 叙述与验收记录（旧 `sqlite-schema.md` §8 约 55k 字符）、v36 已删除能力的表/事件/命令面完整描述、已被实现取代的 Phase 0 设计稿 DDL、事件设计名对照表、doc-sync 与「更正（FOUNDATION-0xx）」补记、已暂停 `settings ui *` 的说明。追溯路径：`git log docs/architecture/`、对应 ADR 正文、`packages/storage/src/migration.ts` 与真实 `sqlite_master`。
+
+**ADR-0050 用户文档同步检查**：本次**无命令面变化**（命令/子命令/flag/退出码/稳定错误码）、**无 UI 行为变化**、**无设置键增删改**、**无权限语义变化**，因此 `docs/guides/**` **不需要修改**（不是「没提到」）。唯一涉及用户可见承诺的调整是把已暂停的 `settings ui *` 描述从架构文档删除——这在 `docs/guides/features.md` 与 `cli/interface.md` 中早已按 ADR-0067 标注为暂停，口径一致。
+
+**实际验证**：
+- 逐域 DDL 由脚本从**真实迁移库**（`new Phase1Database(file)` + `sqlite_master`，`user_version=37`，56 张表）导出后按表拼进文档，非手抄。
+- `docs/architecture/**` 相对链接人工核对全部解析；新文件与旧章节号对照表覆盖代码注释/ADR 实际引用到的号（`scheduler.md` §1–§4、`conflict-analyzer.md` §2–§4/§8、`state-machines.md` §1–§4/§6.1/§7、`event-model.md` §2.x/§3.1/§4、`sqlite-schema.md` §5/§8）。
+- 运行 `bunx vitest run packages/agent-adapters/test/pi-pty.test.ts`（唯一被触及的源码文件是注释）：**通过**。
+- **未运行**全量测试与 `check:fast`：本次是纯文档改动（唯一代码改动为注释），按 ADR-0038 开发分支只跑定向测试，全量只在精确 `dev` 候选上执行。
+- 体量：`docs/architecture/**` 合计约 222k → 200k 字符；默认路径由「整篇 26–80k」变为「L0 6k + 一到两篇 4–11k」，拆分后最大的 L1 文档为 9k（`state-machines.md`）。
+
+**剩余问题 / 未做**：
+- `docs/tasks/README.md`（1MB，且是 `AGENTS.md` 的必读项）与 `docs/decisions/README.md`（30k，「当前有效语义」与 `PROJECT_SPEC` 有重复）**未重排**——本轮范围由用户限定在 `docs/architecture/**`；它们才是下一个更大的上下文瓶颈。
+- `docs/guides/**`（`manual.md` 71k、`troubleshooting.md` 54k、`recipes.md` 37k）未动；受 ADR-0050 的版本/校对头规则约束，需单独一轮。
+- 本仓库自身 `dev → main` 的提升与精简后的文档尚未合入 `dev`；本次交付停留在工作分支，合入 `dev` 与提升前全量测试按 `AGENTS.md` 的人工流程进行。
+
+## 协调者任务 — Service Kernel S5 / S6 / S7 三路并行推进（ADR-0071/0072/0073，schema 仍为 v37）
+
+用户 2026-09-17 的三项选择：**(1)** 先把 `dev` 合入本 lane 再开三条 lane；**(2)** Orca 三路 worker + 独立 worktree；
+**(3)** 每格只交付「一个端到端最小纵向切片 + 冻结的跨 lane 接口」。
+
+### 阶段 0：把 `dev` 合入 lane（合并提交 `84e4aa5`）
+
+事实（不是推断）：本 lane 的基线停在 `main@3f5c2b4` + S1–S4（`a1596ec`）+ ADR-0069；`dev` 已前进到 `79337e1`，
+含 **CLI 命令树重构** `f2257ec`（`apps/cli/src/command-tree.ts` + 重写的 `main.ts`），而 S1–S4 **尚未**进 `dev`。
+`git merge-tree` 预演显示 9 个冲突文件。冲突逐项解成：
+
+| 文件 | 解法 |
+|---|---|
+| `apps/cli/src/main.ts`、`apps/cli/src/command-tree.ts` | 保留 dev 的命令树分发；S4 的 `service/process/signal/intent` 分支由 `group/action` 改写为 tree id（`commandId === 'service.state'` 等）；旧 405 行 `usage()` 文本删除、由命令树承担；内核命令作为 16 个节点进入命令树 |
+| `packages/contracts/src/runtime-commands.ts` | 补齐 16 条内核 Runtime 命令的 group/summary（`Record<RuntimeRequest['command']>` 缺一条即编译失败） |
+| `apps/runtime/src/main.ts` | 同时保留 `runtimeCommandSummaries` 与内核 view schema 导入 |
+| `.codeestra/tests.json` | 两格定向测试取并集（内核 + CLI 自描述/命令面回归） |
+| `AGENTS.md` / `PROJECT_SPEC.md` | 第一原则合并为四条（内核 Service-first + CLI 自描述），§1.1 编号修正为 1/2/3/4 |
+| ADR 号冲突 | dev 已 push 的 `0068-self-describing-cli-command-tree.md` 保留 0068；本格 Service Kernel ADR 让号为 **0070**（全部引用同步），ADR-0069 文档分层不变 |
+| `docs/decisions/README.md`、`docs/guides/cli-reference.md`、`docs/guides/cli/README.md`、`docs/tasks/README.md` | 索引、退出码表（2 = 一行用法错误、3 = 等待/无候选）与两格记录顺序 |
+
+验证（实际运行）：`bun run typecheck` 通过；`cli-help`+`cli-command-surface` 11 pass；内核 5 文件 48 pass；
+`cli-service-kernel` 3 pass；**CLI 命令面回归 28 文件 112 pass / 0 fail（252s）**；
+`packages/storage/test/database.test.ts`+`cli-task-recover` 53 pass；`git diff --check` 退出码 0。
+
+### 阶段 1：冻结跨 lane 契约（`eac6d3a`）
+
+新增 `docs/roadmap/lane-contracts-s5-s7.md`：硬约束（不占 migration、不新增 CLI 命令、共享文档只读、ADR-0038
+只跑定向测试、不谎报）、**文件所有权表**（同一文件只归一个 lane）、冻结的跨 lane 接口
+（`ServiceKernelStore.transitionProcess`/`completeProcess`、`PROCESS_COMPLETED` 与 `INTENTION_RESOLVED` 两个
+`SIG_A` subtype 与 payload schema、`ServiceWriteStore`/`TaskService.create`）、合并顺序 E→G→F 与预期冲突面。
+
+### 阶段 2：三路 worker（Orca 受监督编排）
+
+- 建 Run `run_b556708cf44d`，三格各建 Task 与 **top-level worktree**（基线 `eac6d3a`）：
+  `ce-s5-process`、`ce-s7-project-task`、`ce-s6-intent`。
+- **真实事故（如实记录）**：第一轮用 `--agent codex`，三路都在启动阶段撞上 ChatGPT 周配额上限
+  （`orca account list` 显示 codex weekly `usedPercent: 100`，重置时间 周六；会话里是
+  "You've hit your usage limit"）。三格**未产生任何文件改动**，已 `worker-stop` 并以
+  `--agent pi` 在同一 worktree 重新 dispatch（任务号与 worktree 复用，未重做 setup）。
+- 协调者两次决策（都在 worker 的 `question` 上给出，并落进 ADR）：
+  1. **F 的 Attention 阻塞**：v37 的 `attention_requests.session_id` 是 `NOT NULL REFERENCES agent_sessions(id)`，
+     而 `agent_sessions.execution_id` 又是 `NOT NULL REFERENCES executions(id)`，所以「无 provider 会话的
+     Attention」在 v37 **不可表达**。三选项 A（本轮只落内核事实）/B（挂到别的 Task 会话，违反 ADR-0014）/C
+     （打开 v38 migration，属重大项目决策且 v38 预留给 S8）→ **选 A**（ADR-0072 D01）。
+  2. **F 的三个口径**：session guidance 沿用 ADR-0057 的「durable 记录 + 真实 outcome」；`CREATE_TASK` 用具名
+     schema 立即 dead-letter（可读的稳定码，而不是 `INVALID_SIGNAL_PAYLOAD`）；`TYPED_COMMAND` 故意不套用
+     `ROUTE` 的子树可见性（白名单里唯一命令是会话级事实）。
+- 协调者对 G 的三处确认：加法字段（保住可重复 `--feature` 与 commandId 幂等）、项目注册事实用
+  `service_metadata('kernel/registered')` 标记而不新增 domain event（权威事实仍是 `services` 行）、文档收口由协调者做。
+
+### 阶段 3：合并与集成修正
+
+| 顺序 | lane 提交 | 合并提交 |
+|---|---|---|
+| S5 | `3359644`（worker 完成后未提交，协调者在 lane worktree 代为提交） | `0edb423` |
+| S7 | `e87f1a4`（同上） | `1cb0236` |
+| S6 | `427c363`（同上；lane 报告 `docs/tasks/S6-lane-f-intent.md` 不入库，内容并入本节） | `8313dd8` |
+
+F 的合并有 4 处冲突：`apps/runtime/src/service-kernel.ts`（两个 SIG_A 注册与 handler 分支都保留）、
+`packages/domain/src/errors.ts`、`packages/storage/src/index.ts`（导出取并集）、`docs/guides/cli/kernel.md`
+（头部版本行合并为「S1–S6 实现分支」）。
+
+**协调者集成修正**：`packages/storage/src/intention-store.ts` 原本在 S5 `transitionProcess` 缺席时用**本地 CAS
+复制了一份 Process 写路径**（lane 的临时验证手段）。合并后该分支恒不可达，且违反冻结契约「Process 状态只有一个
+writer」，因此改为严格委托 `ServiceKernelStore.transitionProcess`，拿不到委托以 `PROCESS_STATE_UNAVAILABLE`
+大声失败，本地 CAS 删除（ADR-0072 的 Consequences 已记这条修正）。
+
+### 定向验证（协调者，集成分支，实际运行；ADR-0038 未跑全量）
+
+| 命令 | 结果 |
+|---|---|
+| `bun run typecheck` | 0 错 |
+| S5：`service-kernel.test.ts`(domain/storage/runtime)、新增 `service-kernel-process.test.ts`、`cli-service-kernel.test.ts` | 41 pass / 0 fail |
+| S7：`cli-task-service`(新)、`cli-task-create`、`cli-managed-project`、`service-kernel-migration`、`database`、`event-subscription-ipc`、`cli-service-kernel` | 74 pass / 0 fail |
+| 合并后内核全量定向：17 个文件（含 `intention-routing` 33、`intention-service` 17、`cli-intention` 4） | **192 pass / 0 fail** |
+| CLI 命令面回归 29 文件（含 `cli-task-recover`） | **114 pass / 0 fail（225s）** |
+| `git diff --check` | 退出码 0 |
+
+### 本轮真正交付了什么
+
+- **S5（ADR-0071）**：`PROCESS_COMPLETED` `SIG_A`（ROOT/PROJECT/TASK 接受）+ `transitionProcess`/`completeProcess`
+  写路径（`processes.version` CAS、既有 receipt 幂等、终态不复活、parent 校验、零部分应用）+ 只读 `progress` 投影
+  + 同一 Task 至多一个非终态 slot holder 的 succession 守卫。
+- **S6（ADR-0072）**：`INTENTION_RESOLVED` 结构化 outcome（`ROUTE` / `TYPED_COMMAND=SESSION_GUIDANCE_RECORD` /
+  `REQUEST_CLARIFICATION`）+ 澄清内核事实与按 `causationId` 匹配的回答 + `CREATE_TASK` 具名拒绝 + 幂等收敛。
+- **S7（ADR-0073）**：`ServiceWriteStore.ensureProjectService`/`createTaskService` 与 `TaskService.create` 成为
+  `projects`/`tasks` 行的唯一 writer；`task.create` 与 `project trust` 经它们调用（响应、错误码、退出码不变）；
+  定向测试用源码扫描给出「一条 command 只有一个权威 handler」的证据。
+
+### 诚实边界（未做 / 不得当成已完成）
+
+1. **原生 Process Agent 控制仍未实现**：没有 Execution 的 Process 上 `process input/pause/resume/terminate` 继续
+   `PROCESS_CONTROL_UNAVAILABLE`；Agent runner、successor Process 的启动仍属后续波次。
+2. **没有真实模型在解释意图**：`intent send` 仍返回 `interpretation: PENDING_S6`；outcome 由调用方（今天的 CLI）
+   给出。`docs/decisions/README.md` 与 `PROJECT_SPEC.md` 已按此更新。
+3. **kernel 级澄清不在 `attention list`**：`REQUEST_CLARIFICATION` 只落 Process `WAITING_FOR_USER` + append-only
+   审计 + Signal receipt（`attentionIndex: "NOT_CONNECTED"`）。接通需要一次新 migration，需用户明确决策
+   （ADR-0072 D01 已记为未决项）。
+4. **S7 只切了创建路径**：`task submit`/revision/验证/取消/归档仍走既有路径；Scheduler 仍不请求 Task Service
+   创建 Development Process。
+5. **token/cost/tool 计数事实在 v37 不存在**：`progress` 的这三项恒为 `null`（UNAVAILABLE），不是 0、不是估算。
+6. **F 的 guidance 通道**在目标 Task 正被 Execution 持有时以 `INTENTION_GUIDANCE_CHANNEL_UNAVAILABLE` 拒绝并
+   指向 `session guide`；ADR-0072 D02 记录了「第二个 `Phase1Database` 门面」这一 lane 边界产物，接线可改时应删除。
+7. **codex 配额事故**：三格第一轮 codex worker 未产出任何代码；本轮成果全部由 `--agent pi` 的 worker 完成。
+8. 内核相关文档的「S5–S10 待完成」状态行已由协调者改为「S1–S4 已实现；S5–S7 各完成一个最小纵向切片」，
+   依据是本轮合并进 `Loyage/service_level` 的代码、CLI 命令面、测试与 ADR，不是 lane 的自述。
+
+### 未做（流程）
+
+- **未合入 `dev`**（本仓库的合入是人工 Git 动作）、**未 push `origin/dev`**、**未提升 `main`**、**未重启任何
+  Runtime**；稳定 clone 与稳定 Runtime 未被触碰。
+- 未运行任何全量聚合检查（`bun run check`/`just check`/`just verify`/`check:fast`）——ADR-0038 要求它只在精确
+  `dev` 候选上运行一次。三格合并后的 `Loyage/service_level` 需要先由人合入 `dev`，再在 `dev` 候选上跑全量。
+- `.codeestra/tests.json` 由协调者加入 5 条新定向命令（3 个 lane 的新测试文件）；lane 本身不改该文件。
+
+## FOUNDATION-100 — S8 受管 integration ref、持久 merge queue 与 Task 基线切换（ADR-0074，schema **v38**）
+
+状态：代码、schema、CLI 命令面、定向测试与文档已完成；发布出口与 Integration Process/Agent **未实现**，本记录不把它们写成已有能力。
+
+已实现（唯一 migration owner：本格；v38 号只被本格占用）：
+
+- **schema v38（additive）**：`project_integration`（Project Service 独占的 ref/worktree/ownership token/最后记录 OID/`ACTIVE|RECOVERY_REQUIRED`）、`merge_queue_items`（durable queue、`(project,idempotencyKey)` 与 `(task,revision)` 双幂等、`MERGING`/`VERIFYING` 上部分唯一索引 `one_active_integration_per_project`、`settled_at` 与终态 CHECK）、`integration_runs`（绑定候选 commit + policy digest + expected OID 的独立证据，自建 `INTEGRATE_TASK` 持久 Operation，随 run 收口为 `SUCCEEDED`/`FAILED`，重启时记 `RECONCILE_REQUIRED`）、`task_integration`（Task 的正交 integration 投影）。不重建任何既有表；`bun test packages/storage/test/managed-integration-migration.test.ts` 用真实 v37 文件升级证明不丢行。
+- **领域与 Git port**：`packages/domain/src/managed-integration.ts`（ref 名/候选 ref、queue FSM、单项目槽、投影派生、队列排序、CAS 判据）；`packages/git/src/managed-integration.ts`（`readRefCommit`、`createRefIfAbsent`、`ensureManagedIntegrationRef`、`compareAndSwapRef`、`ensureIntegrationWorktree`、`mergeCandidateIntoIntegration`、`inspectMergeState`、`resetIntegrationWorktree`）。ref 为 `refs/codeestra/integration`：`git branch` 列不出、默认 push 带不走、checkout 不可能停在它上面。
+- **Runtime 服务**：`apps/runtime/src/managed-integration-service.ts` —— `initialize`（trust 时物化，幂等）、`status`、`request`（前置条件具名拒绝 + 双幂等）、`runNext`（claim → 固定 expected OID → owned worktree `--no-ff` 合并 → 候选 ref → 独立 Integration Verification → `git update-ref` CAS → `MERGED` + 投影 + `TASK_MERGE_SETTLED`）、`retry`（复位现场后重排）、`cancel`（只在 `QUEUED`）、`reconcileOnBoot`（`RECOVERY_REQUIRED`，不自动重跑）。
+- **Signal**：`TASK_MERGE_REQUESTED` 只被 PROJECT 接受（与 CLI 同一条前置检查与幂等键）；`TASK_MERGE_SETTLED` 只被 TASK 接受，handler 在 `ServiceKernelStore.acknowledgeKernelSignal` 里核对投影版本，不一致以 `SIGNAL_EFFECT_CONFLICT` 拒绝。
+- **Task 基线切换（ADR-0074 D04）**：`resolveTaskBaselineRepository` 默认返回 integration ref 与当时 commit；`--base-ref` 仍只接受本地分支或该 ref；`prepareWorkspace` 允许该 ref 并核验 commit 未移动；依赖释放（`scheduler.ts`）与回收的「已合并」判定（`reclaim-service.ts`）改读同一条 ref；既有 workspace 不回写。
+- **CLI**：`project integration status|init|queue|request|run|retry|cancel` + `task integration show`，全部 `--json`；`run` 在 `CONFLICTED`/`FAILED` 退 1、队列空退 0、用法错误退 2（一行并指向 `project integration help`）。
+
+定向验证（开发分支未运行禁止的全量 `bun run check`/`just check`/`just verify`；本格触及 domain/storage/git/runtime/cli/contracts 与既有测试，因此按 `.codeestra/tests.json` 的完整定向集合逐条执行）：
+
+- `cross-package-typecheck`（`bun run typecheck`）：通过。
+- `managed-integration-domain`：8 pass / 0 fail。
+- `managed-integration-storage`：9 pass / 0 fail（含真实 v37→v38 文件升级、部分唯一索引、零部分应用、run 一次性终态、记录不可删除）。
+- `managed-integration-service`：9 pass / 0 fail（真实临时仓库：合入推进 ref 且 merge commit 首父为 expected OID；冲突保留现场、阻塞队列、`retry` 复位；验证期间 ref 被移动则 `INTEGRATION_REF_MOVED` 且不 force；验证失败不回退 ref；无策略拒绝；重启 `RECOVERY_REQUIRED`；`cancel` 只在 `QUEUED`）。
+- `cli-managed-integration`：3 pass / 0 fail（真实 CLI + Runtime + 临时仓库：trust 物化 ref、`status/queue/run` 的 JSON 与退出码、已验证结果入队并合入、`task integration show` 投影 `MERGED`、第二个 Task 的 result commit 以 integration commit 为祖先而该 commit 不是用户 `main` 的祖先、用户工作树 clean 且仍在 `main`、用法错误一行）。
+- 其余定向格（既有 kernel/S5/S6/S7 与全量 CLI 命令面回归 `cli-command-face-regression` 共 114 项）全部通过；其中因基线切换而必须同步的测试已按 ADR-0074 改写：
+  `apps/runtime/test/cli-managed-project.test.ts`（依赖投影的 `baseRef`）、`scheduler.test.ts`（依赖释放改读 integration ref；缺基线用例改为 ref 与分支都不可得）、
+  `cli-task-depends.test.ts`、`cli-snapshot-recheck.test.ts`（baseline 移动改为移动 integration ref；映射变更只产生 `STALE_POLICY`）、
+  `cli-reclaim.test.ts` / `cli-reclaim-batch.test.ts`（「已合并」改读 integration ref）、
+  `packages/storage/test/service-kernel-migration.test.ts`（v36 形状要同时丢掉 v38 表）、`apps/runtime/test/support/agent-fixture.ts`（fixture 像 trust 一样物化 ref）。
+
+诚实边界（未做 / 不得当成已完成）：
+
+1. **Integration Process/Agent 未实现**（ADR-0074 D05 选 A）：冲突只报告并保留现场，不自动解决，也不创建 Integration Process。
+2. **没有发布出口**：没有任何命令把 integration ref 推到用户 main/release；不恢复旧 `promotion *`。
+3. **内核级冲突不产生 Attention 行**：v38 的 `attention_requests.session_id` 是指向 Agent 会话的非空外键（与 ADR-0072 D01 同一边界），冲突以 queue item、Task 投影、领域事件与 `status.needsAttention` 表达。
+4. **「触发下一项」不是自动的**：`run` 一次只推进队首一条，下一条保持 `QUEUED`，由显式命令或脚本继续。
+5. **跨项目并发集成的真实压力测试未做**：串行由数据库唯一索引与定向测试证明，但没有两项目同时跑长验证的实测。
+6. **集成验证跑的是项目策略**，不是真实模型；「Agent 解决冲突」没有任何实测。
+
+用户文档同步（ADR-0050 D01 / ADR-0063）：
+
+- **[`docs/guides/cli/managed-integration.md`](../guides/cli/managed-integration.md) 新增（§23）**：ref/worktree 语义、合并与验证流程、失败与恢复矩阵、七条 `project integration` 与 `task integration show` 的参数/退出码/稳定码、Signal 面、不做什么、与 Task 基线的关系。
+- **[`docs/guides/cli/README.md`](../guides/cli/README.md)**：九篇 → 十篇索引、落点表与本次修订说明。
+- **[`docs/guides/cli/project.md`](../guides/cli/project.md)**、**[`docs/guides/cli/task-lifecycle.md`](../guides/cli/task-lifecycle.md)**、**[`docs/guides/cli/task-result-verify.md`](../guides/cli/task-result-verify.md)**：基线来源与「成果之后怎么办」按 ADR-0074 改写（受管 ref 取代「项目文件夹当前分支」）。
+- **[`docs/guides/manual.md`](../guides/manual.md)**、**[`docs/guides/concepts.md`](../guides/concepts.md)**、**[`docs/guides/features.md`](../guides/features.md)**、**[`docs/guides/workflow.md`](../guides/workflow.md)**、**[`docs/guides/getting-started.md`](../guides/getting-started.md)**、**[`docs/guides/troubleshooting.md`](../guides/troubleshooting.md)**：Task 基线、集成阶段与「完成 ≠ 已发布」的表述同步。
+- **`README.md`**：能力清单加入受管 integration，并保留「不发布」的边界。
+- **架构文档**：`service-process-signal.md`（§6.2/§6.3 实现边界）、`git-workspace-api.md`（§3.2 由目标变实现）、`state-machines.md`（integration FSM 标注实现状态）、`domain-model.md`、`sqlite-schema.md`（v38 行与表清单）。
+- **决策记录**：新增 ADR-0074；`docs/decisions/README.md` 索引、当前有效语义（目标与实现边界、集成与发布、Task 基线）与待决项同步。
+
+流程说明：**未 commit、未合入 `dev`、未 push、未提升 `main`、未重启任何 Runtime**；稳定 clone 与稳定 Runtime 未被触碰。任何合入仍是人工 Git 动作（`AGENTS.md`）。

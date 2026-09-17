@@ -1,5 +1,7 @@
 # Git Workspace API 与安全边界
 
+> 层级：L1 · 体量 ≈ 8k 字符 · **何时读**：改 worktree 归属/路径、基线解析、成果 commit 或验证副本 · 权威来源：`packages/git/src/**`、`apps/runtime/src/workspace-service.ts`、`apps/runtime/src/task-baseline-service.ts`。基线语义见 ADR-0066，验证语义见 [`state-machines.md`](./state-machines.md) §1。
+
 ## 1. 合约
 
 ```ts
@@ -55,8 +57,15 @@ interface ChangeSet {
 
 ## 2. Task Workspace
 
-- prepare 以**项目基线**的固定 SHA 为基线（ADR-0009 / ADR-0060），独立 `refs/heads/task/<task-id>` 与 Runtime 数据目录 `worktrees/<project-id>/<task-id>/`（ADR-0005）。ref/path 只使用校验后的内部 UUID，不把用户文本当 ref/path，也不在用户仓库根目录创建 worktree。
-- **基线只有一种来源**（ADR-0066）：在**项目文件夹**（`projects.repo_root`）里取**建 workspace 时当前检出的分支**，把 ref 与 commit 一起固定进 `workspaces.base_ref`/`base_commit`（此后切分支不会移动已建 Task 的基线）；`task run --base-ref <refs/heads/…>` 可以显式选一条本地分支。`HEAD` detached 时以 `TASK_BASE_REF_UNRESOLVED` 拒绝，不猜一条分支。同一目录同时拥有仓库身份与 `main` ref（判定策略、影响映射的读取来源）。**哪个根指向哪个仓库**见下表：
+> **ADR-0074 起基线来源已切换**：新 Task 默认从 Project Service 受管 integration ref（`refs/codeestra/integration`）的当时 OID 建立，
+> 把 ref 与 commit 一起固定；`--base-ref` 仍可显式选一条本地分支。既有 workspace 不回写（它们的 `base_ref` 保持当时记录的值）。
+
+- prepare 以**项目基线**的固定 SHA 为基线，创建独立 `refs/heads/task/<task-id>` 与 Runtime 数据目录 owned worktree（ADR-0005）。ref/path 只使用校验后的安全段，不把未经规范化的用户文本当 ref/path，也不在用户仓库根目录创建 worktree。
+- **基线只有一种来源**（ADR-0066 的原规则由 **ADR-0074 D04** 取代）：默认是**项目文件夹**（`projects.repo_root`）里那条
+  `refs/codeestra/integration` 的当时 commit，把 ref 与 commit 一起固定进 `workspaces.base_ref`/`base_commit`（此后 ref 前进不会移动已建
+  Task 的基线）。`--base-ref <refs/heads/…|refs/codeestra/integration>` 可以显式选一条基线。该 ref 在 `project trust` 时由项目文件夹当时
+  检出的分支物化；老项目首次需要时同样补建；**ref 与文件夹分支都不可得**（detached HEAD 且 ref 缺失）时以 `TASK_BASE_REF_UNRESOLVED` 拒绝，不猜一条分支。
+  同一目录同时拥有仓库身份与 `main` ref（判定策略、影响映射的读取来源）。**哪个根指向哪个仓库**见下表：
 
 | 根字段 / 事实 | 代表哪个仓库 | 谁消费它 |
 |---|---|---|
@@ -83,10 +92,12 @@ interface ChangeSet {
 - 副本删除用 `git worktree remove --force` + `git worktree prune`，并再次核对路径位于 copies root 内；Runtime 重启对未完成 run 保留副本路径而不是在可能有孤儿进程组时删除现场。
 - release 只处理确认归属且已静止、无未保存改动的 worktree；取消/失败不自动调用。保留 branch/证据，不自动 prune 用户资源。
 
-## 3. 成果去向：停在 task 分支（ADR-0066）
+## 3. 成果去向
 
-产品不再建模 dev clone、长期 `dev` 集成分支或 `dev → main` 提升：`task integrate`、
-`task integration *`、`promotion *`、`promotion full-suite run` 全部从命令面删除，schema **v35** 也
+### 3.1 当前：成果停在 task 分支（ADR-0066）
+
+当前产品不建模 dev clone、长期 `dev` 集成分支或 `dev → main` 提升：`task integrate`、
+`task integration *`、`promotion *`、`promotion full-suite run` 全部从命令面删除，schema **v36** 也
 DROP 了 `integration_batches(_items)`、`integration_verification_runs`、`stable_promotions(_members)`
 与 `dev_full_suite_evidence`。`packages/git` 侧的 `IntegrationGitPort` / `promotion.ts` 随之删除，
 只保留 `refs.ts` 的 `readLocalRefCommit` / `isAncestor` / `listCheckedOutRefs`。
@@ -106,7 +117,11 @@ DROP 了 `integration_batches(_items)`、`integration_verification_runs`、`stab
   因此下游状态最多滞后一个 tick（默认 5s，或一次显式 `task schedule run`）——这不改变「读不到基线按
   未满足阻塞」的口径，只是把「谁去看」从集成命令移到了调度 pass。
 - **本仓库自身**仍以 `main`/`dev` 两个 clone 开发并把 `dev` 提升到 `main`：那是**仓库约定**
-  （`AGENTS.md` 的人工四步、`docs/agents/runbook.md` 的命令序列），产品不提供命令、不记账、不校验它。
+  （`AGENTS.md` 的人工四步、`docs/agents/runbook.md` 的命令序列），当前产品不提供命令、不记账、不校验它。
+
+### 3.2 Project managed integration（ADR-0074，已实现）
+
+Project Service 独占 `refs/codeestra/integration` 与 `<CODEESTRA_HOME>/integration/<project-id>/`（detached worktree）。Task Verification 通过后 `project integration request`（或 `TASK_MERGE_REQUESTED` Signal）入持久队列；同项目严格串行，`project integration run` 在 owned worktree 里 `git merge --no-ff` 生成候选，独立 Integration Verification 通过且 expected OID 未移动时才用 `git update-ref <new> <expected>` CAS 推进。它不直接修改用户 worktree，也不恢复旧 `promotion *`。**Integration Process/Agent 未实现**：冲突只报告并保留现场（候选 ref + 冲突中的 worktree + 验证副本），由 `retry`/`cancel` 收口；`project integration status` 把 Git 的 `currentOid` 与 Runtime 记录的 `recordedOid` 并列报出，不自动对账。Git port 见 `packages/git/src/managed-integration.ts`，语义见 [ADR-0074](../decisions/0074-managed-integration-ref-and-merge-queue.md)。
 
 ## 4. 崩溃恢复与测试
 
